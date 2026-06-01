@@ -20259,6 +20259,409 @@ const InlineEditableTitle = forwardRef<HTMLInputElement, Props>(
 export default InlineEditableTitle
 ````
 
+## File: packages/web/src/components/StatusTemplatesTab.tsx
+````typescript
+/**
+ * StatusTemplatesTab — Status Templates management inside the Team Modal.
+ *
+ * Shows a list of status templates for the team. Each template can be expanded
+ * to reveal its items, which can be edited, reordered (positionally), added,
+ * or removed. Admins can also create and delete templates, with the server
+ * blocking deletion of the last template or last item.
+ */
+
+import { useState } from 'react'
+import { Plus, Trash2, ChevronDown, ChevronRight, Check, X } from 'lucide-react'
+import {
+  useStatusTemplates,
+  useCreateStatusTemplate,
+  useDeleteStatusTemplate,
+  useCreateTemplateItem,
+  useUpdateTemplateItem,
+  useDeleteTemplateItem,
+} from '@/hooks/useStatusTemplates'
+import { IdentityWidget } from '@/components/identity/IdentityWidget'
+import { Badge } from '@/components/identity/Badge'
+import type { Identity } from '@/components/identity/identity-constants'
+import type { components } from '@draba/shared'
+
+type StatusTemplate = components['schemas']['StatusTemplate']
+type StatusTemplateItem = components['schemas']['StatusTemplateItem']
+
+interface Props {
+  teamId: string
+  isAdmin: boolean
+  teamColor: string
+}
+
+// ── Item row ─────────────────────────────────────────────────────────────────
+
+interface ItemRowProps {
+  item: StatusTemplateItem
+  teamId: string
+  canDelete: boolean
+}
+
+function ItemRow({ item, teamId, canDelete }: ItemRowProps) {
+  const [editing, setEditing] = useState(false)
+  const [name, setName] = useState(item.name)
+  const [identity, setIdentity] = useState<Identity>({ color: item.color, icon: item.icon ?? '' })
+  const [isClosed, setIsClosed] = useState(item.isClosed)
+  const updateItem = useUpdateTemplateItem(teamId)
+  const deleteItem = useDeleteTemplateItem(teamId)
+  const [error, setError] = useState('')
+
+  function handleSave() {
+    if (!name.trim()) { setError('Name is required'); return }
+    updateItem.mutate(
+      { id: item.id, name: name.trim(), color: identity.color, icon: identity.icon || null, isClosed },
+      {
+        onSuccess: () => setEditing(false),
+        onError: () => setError('Failed to save'),
+      }
+    )
+  }
+
+  function handleDelete() {
+    if (!canDelete) { setError('Cannot delete the last item'); return }
+    deleteItem.mutate(item.id, {
+      onError: (err: unknown) => {
+        const msg = err instanceof Error ? err.message : 'Failed to delete'
+        setError(msg.includes('LAST_ITEM') ? 'Cannot delete the last item' : msg)
+      },
+    })
+  }
+
+  if (editing) {
+    return (
+      <div style={{ background: '#2d333b', borderRadius: 8, padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <IdentityWidget identity={identity} name={name || 'Status'} shape="square" onChange={setIdentity} />
+          <input
+            autoFocus
+            value={name}
+            onChange={e => { setName(e.target.value); setError('') }}
+            onKeyDown={e => { if (e.key === 'Enter') handleSave(); if (e.key === 'Escape') setEditing(false) }}
+            style={{ flex: 1, background: '#161b22', border: '1px solid #30363d', borderRadius: 6, padding: '5px 8px', color: '#e6edf3', fontSize: 13, fontFamily: 'inherit' }}
+          />
+          <button onClick={handleSave} disabled={updateItem.isPending} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#3B82F6', display: 'flex', padding: 2 }}>
+            <Check size={15} />
+          </button>
+          <button onClick={() => setEditing(false)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#484f58', display: 'flex', padding: 2 }}>
+            <X size={15} />
+          </button>
+        </div>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: '#8b949e', cursor: 'pointer', userSelect: 'none' }}>
+          <input
+            type="checkbox"
+            checked={isClosed}
+            onChange={e => setIsClosed(e.target.checked)}
+            style={{ accentColor: '#3B82F6' }}
+          />
+          Closed status (marks this status as completed/done)
+        </label>
+        {error && <div style={{ fontSize: 11, color: '#ef4444' }}>{error}</div>}
+      </div>
+    )
+  }
+
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 8, padding: '7px 4px',
+      borderRadius: 6,
+    }}>
+      <Badge identity={{ color: item.color, icon: item.icon ?? '' }} name={item.name} size={16} />
+      <span
+        onClick={() => setEditing(true)}
+        style={{ flex: 1, fontSize: 13, color: '#e6edf3', cursor: 'pointer' }}
+        title="Click to edit"
+      >
+        {item.name}
+      </span>
+      {item.isClosed && (
+        <span style={{ fontSize: 10, color: '#484f58', background: '#161b22', borderRadius: 4, padding: '1px 5px', letterSpacing: '0.3px' }}>
+          closed
+        </span>
+      )}
+      <button
+        onClick={handleDelete}
+        disabled={!canDelete || deleteItem.isPending}
+        title={canDelete ? 'Remove item' : 'Cannot delete the last item'}
+        style={{
+          background: 'none', border: 'none', cursor: canDelete ? 'pointer' : 'not-allowed',
+          color: '#484f58', display: 'flex', padding: 2, opacity: canDelete ? 1 : 0.35,
+        }}
+      >
+        <Trash2 size={13} />
+      </button>
+    </div>
+  )
+}
+
+// ── Template card ─────────────────────────────────────────────────────────────
+
+interface TemplateCardProps {
+  template: StatusTemplate
+  teamId: string
+  isAdmin: boolean
+  teamColor: string
+  canDelete: boolean
+}
+
+function TemplateCard({ template, teamId, isAdmin, teamColor, canDelete }: TemplateCardProps) {
+  const [expanded, setExpanded] = useState(true)
+  const [addingItem, setAddingItem] = useState(false)
+  const [newItemName, setNewItemName] = useState('')
+  const [newItemIdentity, setNewItemIdentity] = useState<Identity>({ color: '#3B82F6', icon: '' })
+  const [newItemIsClosed, setNewItemIsClosed] = useState(false)
+  const [itemError, setItemError] = useState('')
+  const [deleteError, setDeleteError] = useState('')
+
+  const createItem = useCreateTemplateItem(teamId)
+  const deleteTemplate = useDeleteStatusTemplate(teamId)
+
+  function handleAddItem() {
+    if (!newItemName.trim()) { setItemError('Name is required'); return }
+    createItem.mutate(
+      {
+        templateId: template.id,
+        name: newItemName.trim(),
+        color: newItemIdentity.color,
+        icon: newItemIdentity.icon || null,
+        isClosed: newItemIsClosed,
+      },
+      {
+        onSuccess: () => {
+          setNewItemName('')
+          setNewItemIdentity({ color: '#3B82F6', icon: '' })
+          setNewItemIsClosed(false)
+          setAddingItem(false)
+        },
+        onError: () => setItemError('Failed to add item'),
+      }
+    )
+  }
+
+  function handleCancelAddItem() {
+    setAddingItem(false)
+    setNewItemName('')
+    setNewItemIdentity({ color: '#3B82F6', icon: '' })
+    setNewItemIsClosed(false)
+    setItemError('')
+  }
+
+  function handleDeleteTemplate() {
+    if (!canDelete) { setDeleteError('Cannot delete the last template'); return }
+    deleteTemplate.mutate(template.id, {
+      onError: (err: unknown) => {
+        const msg = err instanceof Error ? err.message : 'Failed to delete'
+        setDeleteError(msg.includes('LAST_TEMPLATE') ? 'Cannot delete the last template' : msg)
+      },
+    })
+  }
+
+  return (
+    <div style={{ border: '1px solid #30363d', borderRadius: 10, overflow: 'hidden' }}>
+      {/* Template header */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 14px', background: '#2d333b' }}>
+        <button
+          onClick={() => setExpanded(x => !x)}
+          style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#8b949e', display: 'flex', padding: 0 }}
+        >
+          {expanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+        </button>
+        <span style={{ flex: 1, fontSize: 14, fontWeight: 600, color: '#e6edf3' }}>{template.name}</span>
+        <span style={{ fontSize: 11, color: '#484f58' }}>{template.items.length} item{template.items.length !== 1 ? 's' : ''}</span>
+        {isAdmin && (
+          <button
+            onClick={handleDeleteTemplate}
+            disabled={deleteTemplate.isPending || !canDelete}
+            title={canDelete ? 'Delete template' : 'Cannot delete the last template'}
+            style={{
+              background: 'none', border: 'none', padding: 2, display: 'flex',
+              cursor: canDelete ? 'pointer' : 'not-allowed',
+              color: '#484f58', opacity: canDelete ? 1 : 0.35,
+            }}
+          >
+            <Trash2 size={14} />
+          </button>
+        )}
+      </div>
+
+      {deleteError && (
+        <div style={{ padding: '4px 14px', fontSize: 11, color: '#ef4444', background: '#2d333b' }}>
+          {deleteError}
+        </div>
+      )}
+
+      {/* Template items */}
+      {expanded && (
+        <div style={{ padding: '8px 14px', display: 'flex', flexDirection: 'column', gap: 2 }}>
+          {template.items.map(item => (
+            <ItemRow
+              key={item.id}
+              item={item}
+              teamId={teamId}
+              canDelete={template.items.length > 1}
+            />
+          ))}
+
+          {/* Add item row */}
+          {isAdmin && (
+            addingItem ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 4 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <IdentityWidget
+                    identity={newItemIdentity}
+                    name={newItemName || 'New status'}
+                    shape="square"
+                    onChange={setNewItemIdentity}
+                  />
+                  <input
+                    autoFocus
+                    value={newItemName}
+                    onChange={e => { setNewItemName(e.target.value); setItemError('') }}
+                    onKeyDown={e => { if (e.key === 'Enter') handleAddItem(); if (e.key === 'Escape') handleCancelAddItem() }}
+                    placeholder="Status name…"
+                    style={{ flex: 1, background: '#161b22', border: '1px solid #30363d', borderRadius: 6, padding: '5px 8px', color: '#e6edf3', fontSize: 13, fontFamily: 'inherit' }}
+                  />
+                  <button onClick={handleAddItem} disabled={createItem.isPending} style={{ background: 'none', border: 'none', cursor: 'pointer', color: teamColor, display: 'flex', padding: 2 }}>
+                    <Check size={15} />
+                  </button>
+                  <button onClick={handleCancelAddItem} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#484f58', display: 'flex', padding: 2 }}>
+                    <X size={15} />
+                  </button>
+                </div>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: '#8b949e', cursor: 'pointer', userSelect: 'none', paddingLeft: 26 }}>
+                  <input
+                    type="checkbox"
+                    checked={newItemIsClosed}
+                    onChange={e => setNewItemIsClosed(e.target.checked)}
+                    style={{ accentColor: '#3B82F6' }}
+                  />
+                  Closed status (marks this status as completed/done)
+                </label>
+                {itemError && <div style={{ fontSize: 11, color: '#ef4444', paddingLeft: 26 }}>{itemError}</div>}
+              </div>
+            ) : (
+              <button
+                onClick={() => setAddingItem(true)}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 6, marginTop: 4,
+                  background: 'none', border: 'none', cursor: 'pointer',
+                  color: '#484f58', fontSize: 12, padding: '4px 2px', fontFamily: 'inherit',
+                }}
+              >
+                <Plus size={13} /> Add status
+              </button>
+            )
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Main tab ──────────────────────────────────────────────────────────────────
+
+export default function StatusTemplatesTab({ teamId, isAdmin, teamColor }: Props) {
+  const { data: templates = [], isLoading } = useStatusTemplates(teamId)
+  const createTemplate = useCreateStatusTemplate(teamId)
+  const [addingTemplate, setAddingTemplate] = useState(false)
+  const [newTemplateName, setNewTemplateName] = useState('')
+  const [createError, setCreateError] = useState('')
+
+  function handleCreateTemplate() {
+    if (!newTemplateName.trim()) { setCreateError('Name is required'); return }
+    createTemplate.mutate(
+      { name: newTemplateName.trim() },
+      {
+        onSuccess: () => { setNewTemplateName(''); setAddingTemplate(false) },
+        onError: () => setCreateError('Failed to create template'),
+      }
+    )
+  }
+
+  if (isLoading) {
+    return (
+      <div style={{ padding: 20, fontSize: 13, color: '#484f58' }}>Loading…</div>
+    )
+  }
+
+  return (
+    <div style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div style={{ fontSize: 12, color: '#8b949e', lineHeight: 1.6 }}>
+        Status templates are reusable presets. When a new timeline is created, its statuses are
+        copied from the first template. Changes here don't affect existing timelines.
+      </div>
+
+      {templates.map(template => (
+        <TemplateCard
+          key={template.id}
+          template={template}
+          teamId={teamId}
+          isAdmin={isAdmin}
+          teamColor={teamColor}
+          canDelete={templates.length > 1}
+        />
+      ))}
+
+      {/* Add template */}
+      {isAdmin && (
+        addingTemplate ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <input
+                autoFocus
+                value={newTemplateName}
+                onChange={e => { setNewTemplateName(e.target.value); setCreateError('') }}
+                onKeyDown={e => { if (e.key === 'Enter') handleCreateTemplate(); if (e.key === 'Escape') setAddingTemplate(false) }}
+                placeholder="Template name (e.g. Kanban, Sprint)…"
+                style={{
+                  flex: 1, background: '#2d333b', border: '1px solid #30363d',
+                  borderRadius: 7, padding: '8px 12px', color: '#e6edf3', fontSize: 13, fontFamily: 'inherit',
+                }}
+              />
+              <button
+                onClick={handleCreateTemplate}
+                disabled={createTemplate.isPending}
+                style={{
+                  background: teamColor, border: 'none', borderRadius: 7, color: '#fff',
+                  fontWeight: 600, fontSize: 13, padding: '8px 16px', cursor: 'pointer',
+                  opacity: createTemplate.isPending ? 0.6 : 1, fontFamily: 'inherit',
+                }}
+              >
+                {createTemplate.isPending ? 'Creating…' : 'Create'}
+              </button>
+              <button
+                onClick={() => setAddingTemplate(false)}
+                style={{ background: 'none', border: '1px solid #30363d', borderRadius: 7, color: '#8b949e', fontSize: 13, padding: '8px 12px', cursor: 'pointer' }}
+              >
+                Cancel
+              </button>
+            </div>
+            {createError && <div style={{ fontSize: 11, color: '#ef4444' }}>{createError}</div>}
+          </div>
+        ) : (
+          <button
+            onClick={() => setAddingTemplate(true)}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'center',
+              background: 'none', border: '1px dashed #30363d', borderRadius: 8,
+              color: '#484f58', fontSize: 13, padding: '10px 16px', cursor: 'pointer',
+              fontFamily: 'inherit', width: '100%',
+            }}
+          >
+            <Plus size={14} />
+            New template
+          </button>
+        )
+      )}
+    </div>
+  )
+}
+````
+
 ## File: packages/web/src/components/ThemeSync.tsx
 ````typescript
 /**
@@ -24333,6 +24736,390 @@ func (r *SavedFilterRepo) Delete(id string) error {
 }
 ````
 
+## File: packages/api/internal/db/status_repo.go
+````go
+// Package db — StatusRepo manages status templates, template items,
+// and live timeline statuses.
+package db
+
+import (
+	"crypto/rand"
+	"encoding/hex"
+	"fmt"
+	"time"
+
+	"github.com/jmoiron/sqlx"
+
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// StatusRepo is the persistence layer for status templates and timeline statuses.
+type StatusRepo struct {
+	db *sqlx.DB
+}
+
+// NewStatusRepo returns a StatusRepo backed by db.
+func NewStatusRepo(db *sqlx.DB) *StatusRepo {
+	return &StatusRepo{db: db}
+}
+
+// ── Templates ─────────────────────────────────────────────────────────────────
+
+// ListTemplates returns all status templates for a team, ordered by position,
+// with their items populated.
+func (r *StatusRepo) ListTemplates(teamID string) ([]*models.StatusTemplate, error) {
+	var templates []*models.StatusTemplate
+	if err := r.db.Select(&templates, `
+		SELECT * FROM status_templates WHERE team_id = ? ORDER BY position, created_at
+	`, teamID); err != nil {
+		return nil, fmt.Errorf("listing status templates: %w", err)
+	}
+
+	// Populate items for each template in one query.
+	if len(templates) == 0 {
+		return templates, nil
+	}
+	ids := make([]string, len(templates))
+	for i, t := range templates {
+		ids[i] = t.ID
+	}
+
+	query, args, err := sqlx.In(`
+		SELECT * FROM status_template_items WHERE template_id IN (?) ORDER BY position
+	`, ids)
+	if err != nil {
+		return nil, fmt.Errorf("building status template items query: %w", err)
+	}
+	query = r.db.Rebind(query)
+	var items []models.StatusTemplateItem
+	if err := r.db.Select(&items, query, args...); err != nil {
+		return nil, fmt.Errorf("listing status template items: %w", err)
+	}
+
+	byTemplate := make(map[string][]models.StatusTemplateItem)
+	for _, item := range items {
+		byTemplate[item.TemplateID] = append(byTemplate[item.TemplateID], item)
+	}
+	for _, t := range templates {
+		t.Items = byTemplate[t.ID]
+		if t.Items == nil {
+			t.Items = []models.StatusTemplateItem{}
+		}
+	}
+	return templates, nil
+}
+
+// GetTemplate returns a single status template by ID.
+func (r *StatusRepo) GetTemplate(id string) (*models.StatusTemplate, error) {
+	var t models.StatusTemplate
+	if err := r.db.Get(&t, `SELECT * FROM status_templates WHERE id = ?`, id); err != nil {
+		return nil, fmt.Errorf("getting status template: %w", err)
+	}
+	var items []models.StatusTemplateItem
+	if err := r.db.Select(&items, `
+		SELECT * FROM status_template_items WHERE template_id = ? ORDER BY position
+	`, id); err != nil {
+		return nil, fmt.Errorf("getting status template items: %w", err)
+	}
+	t.Items = items
+	if t.Items == nil {
+		t.Items = []models.StatusTemplateItem{}
+	}
+	return &t, nil
+}
+
+// CreateTemplate inserts a new status template.
+func (r *StatusRepo) CreateTemplate(t *models.StatusTemplate) error {
+	_, err := r.db.NamedExec(`
+		INSERT INTO status_templates (id, team_id, name, description, position, created_by, created_at, updated_at)
+		VALUES (:id, :team_id, :name, :description, :position, :created_by, :created_at, :updated_at)
+	`, t)
+	if err != nil {
+		return fmt.Errorf("creating status template: %w", err)
+	}
+	return nil
+}
+
+// UpdateTemplate writes mutable template fields (name, description, position).
+func (r *StatusRepo) UpdateTemplate(t *models.StatusTemplate) error {
+	_, err := r.db.NamedExec(`
+		UPDATE status_templates
+		SET name = :name, description = :description, position = :position, updated_at = :updated_at
+		WHERE id = :id
+	`, t)
+	if err != nil {
+		return fmt.Errorf("updating status template: %w", err)
+	}
+	return nil
+}
+
+// CountTemplates returns the number of status templates for a team.
+func (r *StatusRepo) CountTemplates(teamID string) (int, error) {
+	var n int
+	if err := r.db.Get(&n, `SELECT COUNT(*) FROM status_templates WHERE team_id = ?`, teamID); err != nil {
+		return 0, fmt.Errorf("counting status templates: %w", err)
+	}
+	return n, nil
+}
+
+// DeleteTemplate deletes a status template by ID.
+func (r *StatusRepo) DeleteTemplate(id string) error {
+	_, err := r.db.Exec(`DELETE FROM status_templates WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("deleting status template: %w", err)
+	}
+	return nil
+}
+
+// ── Template items ────────────────────────────────────────────────────────────
+
+// GetTemplateItem returns a single template item by ID.
+func (r *StatusRepo) GetTemplateItem(id string) (*models.StatusTemplateItem, error) {
+	var item models.StatusTemplateItem
+	if err := r.db.Get(&item, `SELECT * FROM status_template_items WHERE id = ?`, id); err != nil {
+		return nil, fmt.Errorf("getting status template item: %w", err)
+	}
+	return &item, nil
+}
+
+// CreateTemplateItem inserts a new item into a template.
+func (r *StatusRepo) CreateTemplateItem(item *models.StatusTemplateItem) error {
+	_, err := r.db.NamedExec(`
+		INSERT INTO status_template_items (id, template_id, name, color, icon, is_closed, position)
+		VALUES (:id, :template_id, :name, :color, :icon, :is_closed, :position)
+	`, item)
+	if err != nil {
+		return fmt.Errorf("creating status template item: %w", err)
+	}
+	return nil
+}
+
+// UpdateTemplateItem writes mutable item fields (name, color, icon, is_closed, position).
+func (r *StatusRepo) UpdateTemplateItem(item *models.StatusTemplateItem) error {
+	_, err := r.db.NamedExec(`
+		UPDATE status_template_items
+		SET name = :name, color = :color, icon = :icon, is_closed = :is_closed, position = :position
+		WHERE id = :id
+	`, item)
+	if err != nil {
+		return fmt.Errorf("updating status template item: %w", err)
+	}
+	return nil
+}
+
+// CountTemplateItems returns the number of items in a template.
+func (r *StatusRepo) CountTemplateItems(templateID string) (int, error) {
+	var n int
+	if err := r.db.Get(&n, `SELECT COUNT(*) FROM status_template_items WHERE template_id = ?`, templateID); err != nil {
+		return 0, fmt.Errorf("counting status template items: %w", err)
+	}
+	return n, nil
+}
+
+// DeleteTemplateItem deletes a single template item by ID.
+func (r *StatusRepo) DeleteTemplateItem(id string) error {
+	_, err := r.db.Exec(`DELETE FROM status_template_items WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("deleting status template item: %w", err)
+	}
+	return nil
+}
+
+// ── Seeding ───────────────────────────────────────────────────────────────────
+
+// SeedDefaultTemplate creates the "Default" template (Planning / In Progress / Complete)
+// for a newly created team. Complete is marked is_closed = true.
+func (r *StatusRepo) SeedDefaultTemplate(teamID, createdBy string) error {
+	now := time.Now()
+	templateID := newRepoID()
+	t := &models.StatusTemplate{
+		ID:        templateID,
+		TeamID:    teamID,
+		Name:      "Default",
+		Position:  0,
+		CreatedBy: createdBy,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := r.CreateTemplate(t); err != nil {
+		return err
+	}
+
+	type seed struct {
+		name     string
+		color    string
+		isClosed bool
+	}
+	seeds := []seed{
+		{"Planning", "#3B82F6", false},
+		{"In Progress", "#F59E0B", false},
+		{"Complete", "#22C55E", true},
+	}
+	for i, s := range seeds {
+		item := &models.StatusTemplateItem{
+			ID:         newRepoID(),
+			TemplateID: templateID,
+			Name:       s.name,
+			Color:      s.color,
+			IsClosed:   s.isClosed,
+			Position:   i,
+		}
+		if err := r.CreateTemplateItem(item); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ── Timeline statuses ─────────────────────────────────────────────────────────
+
+// ListStatuses returns all statuses for a timeline, ordered by position.
+func (r *StatusRepo) ListStatuses(timelineID string) ([]*models.Status, error) {
+	var statuses []*models.Status
+	if err := r.db.Select(&statuses, `
+		SELECT * FROM statuses WHERE timeline_id = ? ORDER BY position
+	`, timelineID); err != nil {
+		return nil, fmt.Errorf("listing statuses: %w", err)
+	}
+	if statuses == nil {
+		statuses = []*models.Status{}
+	}
+	return statuses, nil
+}
+
+// GetStatus returns a single status by ID.
+func (r *StatusRepo) GetStatus(id string) (*models.Status, error) {
+	var s models.Status
+	if err := r.db.Get(&s, `SELECT * FROM statuses WHERE id = ?`, id); err != nil {
+		return nil, fmt.Errorf("getting status: %w", err)
+	}
+	return &s, nil
+}
+
+// CreateStatus inserts a new live status for a timeline.
+func (r *StatusRepo) CreateStatus(s *models.Status) error {
+	_, err := r.db.NamedExec(`
+		INSERT INTO statuses (id, timeline_id, name, color, icon, is_closed, position, created_at, updated_at)
+		VALUES (:id, :timeline_id, :name, :color, :icon, :is_closed, :position, :created_at, :updated_at)
+	`, s)
+	if err != nil {
+		return fmt.Errorf("creating status: %w", err)
+	}
+	return nil
+}
+
+// UpdateStatus writes mutable status fields: name, color, icon, is_closed, position.
+func (r *StatusRepo) UpdateStatus(s *models.Status) error {
+	_, err := r.db.NamedExec(`
+		UPDATE statuses
+		SET name = :name, color = :color, icon = :icon,
+		    is_closed = :is_closed, position = :position, updated_at = :updated_at
+		WHERE id = :id
+	`, s)
+	if err != nil {
+		return fmt.Errorf("updating status: %w", err)
+	}
+	return nil
+}
+
+// CountStatuses returns the number of live statuses for a timeline.
+func (r *StatusRepo) CountStatuses(timelineID string) (int, error) {
+	var n int
+	if err := r.db.Get(&n, `SELECT COUNT(*) FROM statuses WHERE timeline_id = ?`, timelineID); err != nil {
+		return 0, fmt.Errorf("counting statuses: %w", err)
+	}
+	return n, nil
+}
+
+// CountStatusActivities returns the number of activities that reference a
+// specific status ID. Used to guard status deletion.
+func (r *StatusRepo) CountStatusActivities(statusID string) (int, error) {
+	var n int
+	if err := r.db.Get(&n, `SELECT COUNT(*) FROM activities WHERE status_id = ?`, statusID); err != nil {
+		return 0, fmt.Errorf("counting status activities: %w", err)
+	}
+	return n, nil
+}
+
+// DeleteStatus deletes a live status. If replacementStatusID is non-empty,
+// activities pointing at the deleted status are re-pointed to the replacement
+// first. Returns an error if replacementStatusID is empty but activities
+// reference the status.
+func (r *StatusRepo) DeleteStatus(id, replacementStatusID string) error {
+	if replacementStatusID != "" {
+		if _, err := r.db.Exec(
+			`UPDATE activities SET status_id = ? WHERE status_id = ?`,
+			replacementStatusID, id,
+		); err != nil {
+			return fmt.Errorf("re-assigning activities before status delete: %w", err)
+		}
+	}
+	if _, err := r.db.Exec(`DELETE FROM statuses WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("deleting status: %w", err)
+	}
+	return nil
+}
+
+// CopyTemplateToTimeline copies a template's items into live statuses for a
+// timeline. If templateID is non-nil, that specific template is used; otherwise
+// the team's first template (by position then created_at) is used. If no
+// matching template is found the call is a silent no-op.
+func (r *StatusRepo) CopyTemplateToTimeline(teamID, timelineID string, templateID *string) error {
+	var template models.StatusTemplate
+	var err error
+	if templateID != nil && *templateID != "" {
+		err = r.db.Get(&template, `
+			SELECT * FROM status_templates WHERE id = ? AND team_id = ?
+		`, *templateID, teamID)
+	} else {
+		err = r.db.Get(&template, `
+			SELECT * FROM status_templates WHERE team_id = ? ORDER BY position, created_at LIMIT 1
+		`, teamID)
+	}
+	if err != nil {
+		// No template — not an error; leave the timeline with no statuses.
+		return nil
+	}
+
+	var items []models.StatusTemplateItem
+	if err := r.db.Select(&items, `
+		SELECT * FROM status_template_items WHERE template_id = ? ORDER BY position
+	`, template.ID); err != nil {
+		return fmt.Errorf("loading template items for copy: %w", err)
+	}
+
+	now := time.Now()
+	for _, item := range items {
+		s := &models.Status{
+			ID:         newRepoID(),
+			TimelineID: timelineID,
+			Name:       item.Name,
+			Color:      item.Color,
+			Icon:       item.Icon,
+			IsClosed:   item.IsClosed,
+			Position:   item.Position,
+			CreatedAt:  now,
+			UpdatedAt:  now,
+		}
+		if _, err := r.db.NamedExec(`
+			INSERT INTO statuses (id, timeline_id, name, color, icon, is_closed, position, created_at, updated_at)
+			VALUES (:id, :timeline_id, :name, :color, :icon, :is_closed, :position, :created_at, :updated_at)
+		`, s); err != nil {
+			return fmt.Errorf("copying status to timeline: %w", err)
+		}
+	}
+	return nil
+}
+
+// newRepoID generates a 32-character hex ID — same entropy as api.newID but
+// usable within the db package without importing the api package.
+func newRepoID() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}
+````
+
 ## File: packages/api/internal/db/tag_repo.go
 ````go
 package db
@@ -26269,364 +27056,6 @@ describe('buildRows — member grouping (group collapse)', () => {
 })
 ````
 
-## File: packages/web/src/components/gantt/granularity.test.ts
-````typescript
-import { describe, it, expect } from 'vitest'
-import { generateColumns, snapDivisorFor } from './granularity'
-
-// ── generateColumns — weekStart option ───────────────────────────────────────
-
-// Jan 2026 layout:
-//   Mon Jan  5 (ISO week start)
-//   Sun Jan  4 (Sunday week start)
-//
-// Jan 1 2026 is a Thursday.
-
-const JAN1 = new Date(2026, 0, 1)   // Thu
-const JAN31 = new Date(2026, 0, 31) // Sat
-
-describe('generateColumns — weekStart', () => {
-  it('monday week start: first week column begins on Monday Dec 29', () => {
-    const cols = generateColumns(JAN1, JAN31, 'week', { weekStart: 'monday' })
-    // Jan 1 is Thursday; Monday ISO week start = Dec 29 2025
-    expect(cols[0].start.getDay()).toBe(1) // 1 = Monday
-    expect(cols[0].start.getDate()).toBe(29)
-  })
-
-  it('sunday week start: first week column begins on Sunday Dec 28', () => {
-    const cols = generateColumns(JAN1, JAN31, 'week', { weekStart: 'sunday' })
-    // Jan 1 is Thursday; Sunday week start = Dec 28 2025
-    expect(cols[0].start.getDay()).toBe(0) // 0 = Sunday
-    expect(cols[0].start.getDate()).toBe(28)
-  })
-
-  it('default (no option) behaves like monday', () => {
-    const defaultCols = generateColumns(JAN1, JAN31, 'week')
-    const mondayCols  = generateColumns(JAN1, JAN31, 'week', { weekStart: 'monday' })
-    expect(defaultCols[0].start.getTime()).toBe(mondayCols[0].start.getTime())
-  })
-})
-
-// ── generateColumns — locale option ──────────────────────────────────────────
-
-describe('generateColumns — locale', () => {
-  it('en-US: month column label contains English month name', () => {
-    const cols = generateColumns(JAN1, JAN31, 'month', { locale: 'en-US' })
-    expect(cols[0].label).toMatch(/Jan/)
-  })
-
-  it('en-GB: day column label shows day-first ordering (e.g. "1 Jan")', () => {
-    const cols = generateColumns(JAN1, JAN31, 'day', { locale: 'en-GB' })
-    // en-GB {month:'short', day:'numeric'} → "1 Jan"
-    expect(cols[0].label).toMatch(/Jan/)
-    // The day should come first in en-GB
-    expect(cols[0].label).toMatch(/^1/)
-  })
-
-  it('default locale behaves like en-US', () => {
-    const defaultCols = generateColumns(JAN1, JAN31, 'month')
-    const usCols      = generateColumns(JAN1, JAN31, 'month', { locale: 'en-US' })
-    expect(defaultCols[0].label).toBe(usCols[0].label)
-  })
-})
-
-// ── snapDivisorFor ────────────────────────────────────────────────────────────
-
-describe('snapDivisorFor', () => {
-  it('week → 7 (snap to day within week)', () => {
-    expect(snapDivisorFor('week')).toBe(7)
-  })
-
-  it('month → 4 (snap to week within month)', () => {
-    expect(snapDivisorFor('month')).toBe(4)
-  })
-
-  it('quarter → 3 (snap to month within quarter)', () => {
-    expect(snapDivisorFor('quarter')).toBe(3)
-  })
-
-  it('year → 4 (snap to quarter within year)', () => {
-    expect(snapDivisorFor('year')).toBe(4)
-  })
-
-  it('day → 1 (no finer snap at day granularity)', () => {
-    expect(snapDivisorFor('day')).toBe(1)
-  })
-
-  it('auto → 1 (no finer snap for auto)', () => {
-    expect(snapDivisorFor('auto')).toBe(1)
-  })
-})
-````
-
-## File: packages/web/src/components/gantt/granularity.ts
-````typescript
-/**
- * Time-granularity helpers for the Gantt view.
- *
- * Generates column definitions and maps event date ranges to fractional
- * column positions at any granularity (day → year).
- */
-
-export type TimeGranularity = 'day' | 'week' | 'month' | 'quarter' | 'year';
-
-export interface ColumnDef {
-  label: string;
-  /** Secondary label rendered on a second line (used for week numbers). */
-  sublabel?: string;
-  start: Date;
-  end: Date;
-  /** Calendar days this column spans (varies for months, quarters, years). */
-  days: number;
-}
-
-// ── Date helpers ────────────────────────────────────────────────────────────
-
-function daysBetween(a: Date, b: Date): number {
-  return Math.round((b.getTime() - a.getTime()) / 86_400_000);
-}
-
-function startOfDay(d: Date): Date {
-  const r = new Date(d);
-  r.setHours(0, 0, 0, 0);
-  return r;
-}
-
-function startOfWeek(d: Date, weekStart: 'monday' | 'sunday' = 'monday'): Date {
-  const r = startOfDay(d);
-  const day = r.getDay(); // 0=Sun, 1=Mon, …, 6=Sat
-  if (weekStart === 'sunday') {
-    r.setDate(r.getDate() - day);
-  } else {
-    // Monday = ISO week start
-    r.setDate(r.getDate() - ((day + 6) % 7));
-  }
-  return r;
-}
-
-function startOfMonth(d: Date): Date {
-  return new Date(d.getFullYear(), d.getMonth(), 1);
-}
-
-function startOfQuarter(d: Date): Date {
-  const q = Math.floor(d.getMonth() / 3) * 3;
-  return new Date(d.getFullYear(), q, 1);
-}
-
-function startOfYear(d: Date): Date {
-  return new Date(d.getFullYear(), 0, 1);
-}
-
-export function addDays(d: Date, n: number): Date {
-  const r = new Date(d);
-  r.setDate(r.getDate() + n);
-  return r;
-}
-
-function addMonths(d: Date, n: number): Date {
-  const r = new Date(d);
-  r.setMonth(r.getMonth() + n);
-  return r;
-}
-
-function endOfPeriod(start: Date, gran: TimeGranularity): Date {
-  switch (gran) {
-    case 'day':     return addDays(start, 1);
-    case 'week':    return addDays(start, 7);
-    case 'month':   return addMonths(start, 1);
-    case 'quarter': return addMonths(start, 3);
-    case 'year':    return addMonths(start, 12);
-  }
-}
-
-function periodStart(d: Date, gran: TimeGranularity, weekStart: 'monday' | 'sunday' = 'monday'): Date {
-  switch (gran) {
-    case 'day':     return startOfDay(d);
-    case 'week':    return startOfWeek(d, weekStart);
-    case 'month':   return startOfMonth(d);
-    case 'quarter': return startOfQuarter(d);
-    case 'year':    return startOfYear(d);
-  }
-}
-
-// ── Label formatting ────────────────────────────────────────────────────────
-
-/** ISO 8601 week number (1–53). Week 1 contains Jan 4; weeks start Monday. */
-function isoWeekNumber(d: Date): number {
-  const date = new Date(d);
-  date.setHours(0, 0, 0, 0);
-  date.setDate(date.getDate() + 3 - ((date.getDay() + 6) % 7));
-  const week1 = new Date(date.getFullYear(), 0, 4);
-  return 1 + Math.round(
-    ((date.getTime() - week1.getTime()) / 86_400_000 - 3 + ((week1.getDay() + 6) % 7)) / 7,
-  );
-}
-
-function formatLabel(start: Date, gran: TimeGranularity, locale = 'en-US'): string {
-  switch (gran) {
-    case 'day':
-      return start.toLocaleDateString(locale, { month: 'short', day: 'numeric' });
-    case 'week': {
-      const end = addDays(start, 6);
-      const sameMonth = start.getMonth() === end.getMonth();
-      const s = start.toLocaleDateString(locale, { month: 'short', day: 'numeric' });
-      const e = sameMonth
-        ? end.getDate().toString()
-        : end.toLocaleDateString(locale, { month: 'short', day: 'numeric' });
-      return `${s}–${e}`;
-    }
-    case 'month':
-      return start.toLocaleDateString(locale, { month: 'short', year: 'numeric' });
-    case 'quarter': {
-      const q = Math.floor(start.getMonth() / 3) + 1;
-      return `Q${q} ${start.getFullYear()}`;
-    }
-    case 'year':
-      return start.getFullYear().toString();
-  }
-}
-
-// ── Column generation ───────────────────────────────────────────────────────
-
-export interface GenerateColumnsOptions {
-  /** Which day the week grid starts on. Defaults to 'monday' (ISO). */
-  weekStart?: 'monday' | 'sunday';
-  /** BCP 47 locale tag for month name formatting. Defaults to 'en-US'. */
-  locale?: string;
-}
-
-export function generateColumns(
-  viewStart: Date,
-  viewEnd: Date,
-  granularity: TimeGranularity,
-  options?: GenerateColumnsOptions,
-): ColumnDef[] {
-  const weekStart = options?.weekStart ?? 'monday';
-  const locale = options?.locale ?? 'en-US';
-  const columns: ColumnDef[] = [];
-  let cur = periodStart(viewStart, granularity, weekStart);
-
-  while (cur <= viewEnd) {
-    const next = endOfPeriod(cur, granularity);
-    // Clamp to view bounds for the first and last columns
-    const colStart = cur < viewStart ? viewStart : cur;
-    const colEnd = next > addDays(viewEnd, 1) ? addDays(viewEnd, 1) : next;
-    columns.push({
-      label: formatLabel(cur, granularity, locale),
-      sublabel: granularity === 'week' ? `W${isoWeekNumber(cur)}` : undefined,
-      start: cur,
-      end: next,
-      days: daysBetween(colStart, colEnd),
-    });
-    cur = next;
-  }
-
-  return columns;
-}
-
-// ── Event positioning ───────────────────────────────────────────────────────
-
-/** Fractional position within the column array. */
-export function positionInColumns(
-  eventStart: Date,
-  eventEnd: Date,
-  columns: ColumnDef[],
-): { startCol: number; span: number } {
-  if (columns.length === 0) return { startCol: 0, span: 0 };
-
-  const evStartMs = eventStart.getTime();
-  const evEndMs = eventEnd.getTime();
-
-  let startCol = 0;
-  let endCol = columns.length;
-
-  for (let i = 0; i < columns.length; i++) {
-    const col = columns[i];
-    const colStartMs = col.start.getTime();
-    const colEndMs = col.end.getTime();
-    const colSpanMs = colEndMs - colStartMs;
-
-    if (evStartMs >= colStartMs && evStartMs < colEndMs) {
-      startCol = i + (colSpanMs > 0 ? (evStartMs - colStartMs) / colSpanMs : 0);
-    }
-    // End is inclusive day, so add 1 day for positioning
-    const evEndNextDayMs = evEndMs + 86_400_000;
-    if (evEndNextDayMs > colStartMs && evEndNextDayMs <= colEndMs) {
-      endCol = i + (colSpanMs > 0 ? (evEndNextDayMs - colStartMs) / colSpanMs : 1);
-    }
-  }
-
-  const span = Math.max(endCol - startCol, 0.15);
-  return { startCol, span };
-}
-
-// ── Snap divisor ────────────────────────────────────────────────────────────
-
-// Number of snap divisions per column at the given zoom granularity.
-// Higher divisor → finer snap (e.g. week columns snap to individual days).
-export function snapDivisorFor(granularity: TimeGranularity | 'auto'): number {
-  switch (granularity) {
-    case 'week':    return 7;  // snap to day within week
-    case 'month':   return 4;  // snap to week within month
-    case 'quarter': return 3;  // snap to month within quarter
-    case 'year':    return 4;  // snap to quarter within year
-    default:        return 1;  // day or auto → no finer snap
-  }
-}
-
-// ── Today position ──────────────────────────────────────────────────────────
-
-export function todayColumnPosition(columns: ColumnDef[]): number {
-  const now = startOfDay(new Date());
-  const nowMs = now.getTime();
-
-  for (let i = 0; i < columns.length; i++) {
-    const col = columns[i];
-    const colStartMs = col.start.getTime();
-    const colEndMs = col.end.getTime();
-    if (nowMs >= colStartMs && nowMs < colEndMs) {
-      const colSpanMs = colEndMs - colStartMs;
-      return i + (colSpanMs > 0 ? (nowMs - colStartMs) / colSpanMs : 0.5);
-    }
-  }
-  return -1;
-}
-
-// ── Auto-fit ────────────────────────────────────────────────────────────────
-
-const GRANULARITIES: TimeGranularity[] = ['day', 'week', 'month', 'quarter', 'year'];
-const BASE_COL_WIDTH = 80;
-
-export function autoFitGranularity(
-  viewStart: Date,
-  viewEnd: Date,
-  viewportWidth: number,
-): TimeGranularity {
-  const targetCols = Math.max(viewportWidth / BASE_COL_WIDTH, 2);
-
-  let best: TimeGranularity = 'month';
-  let bestDiff = Infinity;
-
-  for (const gran of GRANULARITIES) {
-    const cols = generateColumns(viewStart, viewEnd, gran).length;
-    if (cols < 2) continue;
-    // Prefer the finest granularity that fits within 50-150% of viewport
-    const ratio = cols / targetCols;
-    if (ratio >= 0.4 && ratio <= 1.5) {
-      // Within range — prefer finest (earliest in array)
-      return gran;
-    }
-    const diff = Math.abs(ratio - 1);
-    if (diff < bestDiff) {
-      bestDiff = diff;
-      best = gran;
-    }
-  }
-
-  return best;
-}
-````
-
 ## File: packages/web/src/components/list/ListView.tree.test.ts
 ````typescript
 /**
@@ -27290,409 +27719,6 @@ export default function MemberModal({ teamId, memberId, isAdmin, isSuperadmin, o
       </div>
     </div>,
     document.body,
-  )
-}
-````
-
-## File: packages/web/src/components/StatusTemplatesTab.tsx
-````typescript
-/**
- * StatusTemplatesTab — Status Templates management inside the Team Modal.
- *
- * Shows a list of status templates for the team. Each template can be expanded
- * to reveal its items, which can be edited, reordered (positionally), added,
- * or removed. Admins can also create and delete templates, with the server
- * blocking deletion of the last template or last item.
- */
-
-import { useState } from 'react'
-import { Plus, Trash2, ChevronDown, ChevronRight, Check, X } from 'lucide-react'
-import {
-  useStatusTemplates,
-  useCreateStatusTemplate,
-  useDeleteStatusTemplate,
-  useCreateTemplateItem,
-  useUpdateTemplateItem,
-  useDeleteTemplateItem,
-} from '@/hooks/useStatusTemplates'
-import { IdentityWidget } from '@/components/identity/IdentityWidget'
-import { Badge } from '@/components/identity/Badge'
-import type { Identity } from '@/components/identity/identity-constants'
-import type { components } from '@draba/shared'
-
-type StatusTemplate = components['schemas']['StatusTemplate']
-type StatusTemplateItem = components['schemas']['StatusTemplateItem']
-
-interface Props {
-  teamId: string
-  isAdmin: boolean
-  teamColor: string
-}
-
-// ── Item row ─────────────────────────────────────────────────────────────────
-
-interface ItemRowProps {
-  item: StatusTemplateItem
-  teamId: string
-  canDelete: boolean
-}
-
-function ItemRow({ item, teamId, canDelete }: ItemRowProps) {
-  const [editing, setEditing] = useState(false)
-  const [name, setName] = useState(item.name)
-  const [identity, setIdentity] = useState<Identity>({ color: item.color, icon: item.icon ?? '' })
-  const [isClosed, setIsClosed] = useState(item.isClosed)
-  const updateItem = useUpdateTemplateItem(teamId)
-  const deleteItem = useDeleteTemplateItem(teamId)
-  const [error, setError] = useState('')
-
-  function handleSave() {
-    if (!name.trim()) { setError('Name is required'); return }
-    updateItem.mutate(
-      { id: item.id, name: name.trim(), color: identity.color, icon: identity.icon || null, isClosed },
-      {
-        onSuccess: () => setEditing(false),
-        onError: () => setError('Failed to save'),
-      }
-    )
-  }
-
-  function handleDelete() {
-    if (!canDelete) { setError('Cannot delete the last item'); return }
-    deleteItem.mutate(item.id, {
-      onError: (err: unknown) => {
-        const msg = err instanceof Error ? err.message : 'Failed to delete'
-        setError(msg.includes('LAST_ITEM') ? 'Cannot delete the last item' : msg)
-      },
-    })
-  }
-
-  if (editing) {
-    return (
-      <div style={{ background: '#2d333b', borderRadius: 8, padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 8 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <IdentityWidget identity={identity} name={name || 'Status'} shape="square" onChange={setIdentity} />
-          <input
-            autoFocus
-            value={name}
-            onChange={e => { setName(e.target.value); setError('') }}
-            onKeyDown={e => { if (e.key === 'Enter') handleSave(); if (e.key === 'Escape') setEditing(false) }}
-            style={{ flex: 1, background: '#161b22', border: '1px solid #30363d', borderRadius: 6, padding: '5px 8px', color: '#e6edf3', fontSize: 13, fontFamily: 'inherit' }}
-          />
-          <button onClick={handleSave} disabled={updateItem.isPending} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#3B82F6', display: 'flex', padding: 2 }}>
-            <Check size={15} />
-          </button>
-          <button onClick={() => setEditing(false)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#484f58', display: 'flex', padding: 2 }}>
-            <X size={15} />
-          </button>
-        </div>
-        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: '#8b949e', cursor: 'pointer', userSelect: 'none' }}>
-          <input
-            type="checkbox"
-            checked={isClosed}
-            onChange={e => setIsClosed(e.target.checked)}
-            style={{ accentColor: '#3B82F6' }}
-          />
-          Closed status (marks this status as completed/done)
-        </label>
-        {error && <div style={{ fontSize: 11, color: '#ef4444' }}>{error}</div>}
-      </div>
-    )
-  }
-
-  return (
-    <div style={{
-      display: 'flex', alignItems: 'center', gap: 8, padding: '7px 4px',
-      borderRadius: 6,
-    }}>
-      <Badge identity={{ color: item.color, icon: item.icon ?? '' }} name={item.name} size={16} />
-      <span
-        onClick={() => setEditing(true)}
-        style={{ flex: 1, fontSize: 13, color: '#e6edf3', cursor: 'pointer' }}
-        title="Click to edit"
-      >
-        {item.name}
-      </span>
-      {item.isClosed && (
-        <span style={{ fontSize: 10, color: '#484f58', background: '#161b22', borderRadius: 4, padding: '1px 5px', letterSpacing: '0.3px' }}>
-          closed
-        </span>
-      )}
-      <button
-        onClick={handleDelete}
-        disabled={!canDelete || deleteItem.isPending}
-        title={canDelete ? 'Remove item' : 'Cannot delete the last item'}
-        style={{
-          background: 'none', border: 'none', cursor: canDelete ? 'pointer' : 'not-allowed',
-          color: '#484f58', display: 'flex', padding: 2, opacity: canDelete ? 1 : 0.35,
-        }}
-      >
-        <Trash2 size={13} />
-      </button>
-    </div>
-  )
-}
-
-// ── Template card ─────────────────────────────────────────────────────────────
-
-interface TemplateCardProps {
-  template: StatusTemplate
-  teamId: string
-  isAdmin: boolean
-  teamColor: string
-  canDelete: boolean
-}
-
-function TemplateCard({ template, teamId, isAdmin, teamColor, canDelete }: TemplateCardProps) {
-  const [expanded, setExpanded] = useState(true)
-  const [addingItem, setAddingItem] = useState(false)
-  const [newItemName, setNewItemName] = useState('')
-  const [newItemIdentity, setNewItemIdentity] = useState<Identity>({ color: '#3B82F6', icon: '' })
-  const [newItemIsClosed, setNewItemIsClosed] = useState(false)
-  const [itemError, setItemError] = useState('')
-  const [deleteError, setDeleteError] = useState('')
-
-  const createItem = useCreateTemplateItem(teamId)
-  const deleteTemplate = useDeleteStatusTemplate(teamId)
-
-  function handleAddItem() {
-    if (!newItemName.trim()) { setItemError('Name is required'); return }
-    createItem.mutate(
-      {
-        templateId: template.id,
-        name: newItemName.trim(),
-        color: newItemIdentity.color,
-        icon: newItemIdentity.icon || null,
-        isClosed: newItemIsClosed,
-      },
-      {
-        onSuccess: () => {
-          setNewItemName('')
-          setNewItemIdentity({ color: '#3B82F6', icon: '' })
-          setNewItemIsClosed(false)
-          setAddingItem(false)
-        },
-        onError: () => setItemError('Failed to add item'),
-      }
-    )
-  }
-
-  function handleCancelAddItem() {
-    setAddingItem(false)
-    setNewItemName('')
-    setNewItemIdentity({ color: '#3B82F6', icon: '' })
-    setNewItemIsClosed(false)
-    setItemError('')
-  }
-
-  function handleDeleteTemplate() {
-    if (!canDelete) { setDeleteError('Cannot delete the last template'); return }
-    deleteTemplate.mutate(template.id, {
-      onError: (err: unknown) => {
-        const msg = err instanceof Error ? err.message : 'Failed to delete'
-        setDeleteError(msg.includes('LAST_TEMPLATE') ? 'Cannot delete the last template' : msg)
-      },
-    })
-  }
-
-  return (
-    <div style={{ border: '1px solid #30363d', borderRadius: 10, overflow: 'hidden' }}>
-      {/* Template header */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 14px', background: '#2d333b' }}>
-        <button
-          onClick={() => setExpanded(x => !x)}
-          style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#8b949e', display: 'flex', padding: 0 }}
-        >
-          {expanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
-        </button>
-        <span style={{ flex: 1, fontSize: 14, fontWeight: 600, color: '#e6edf3' }}>{template.name}</span>
-        <span style={{ fontSize: 11, color: '#484f58' }}>{template.items.length} item{template.items.length !== 1 ? 's' : ''}</span>
-        {isAdmin && (
-          <button
-            onClick={handleDeleteTemplate}
-            disabled={deleteTemplate.isPending || !canDelete}
-            title={canDelete ? 'Delete template' : 'Cannot delete the last template'}
-            style={{
-              background: 'none', border: 'none', padding: 2, display: 'flex',
-              cursor: canDelete ? 'pointer' : 'not-allowed',
-              color: '#484f58', opacity: canDelete ? 1 : 0.35,
-            }}
-          >
-            <Trash2 size={14} />
-          </button>
-        )}
-      </div>
-
-      {deleteError && (
-        <div style={{ padding: '4px 14px', fontSize: 11, color: '#ef4444', background: '#2d333b' }}>
-          {deleteError}
-        </div>
-      )}
-
-      {/* Template items */}
-      {expanded && (
-        <div style={{ padding: '8px 14px', display: 'flex', flexDirection: 'column', gap: 2 }}>
-          {template.items.map(item => (
-            <ItemRow
-              key={item.id}
-              item={item}
-              teamId={teamId}
-              canDelete={template.items.length > 1}
-            />
-          ))}
-
-          {/* Add item row */}
-          {isAdmin && (
-            addingItem ? (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 4 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <IdentityWidget
-                    identity={newItemIdentity}
-                    name={newItemName || 'New status'}
-                    shape="square"
-                    onChange={setNewItemIdentity}
-                  />
-                  <input
-                    autoFocus
-                    value={newItemName}
-                    onChange={e => { setNewItemName(e.target.value); setItemError('') }}
-                    onKeyDown={e => { if (e.key === 'Enter') handleAddItem(); if (e.key === 'Escape') handleCancelAddItem() }}
-                    placeholder="Status name…"
-                    style={{ flex: 1, background: '#161b22', border: '1px solid #30363d', borderRadius: 6, padding: '5px 8px', color: '#e6edf3', fontSize: 13, fontFamily: 'inherit' }}
-                  />
-                  <button onClick={handleAddItem} disabled={createItem.isPending} style={{ background: 'none', border: 'none', cursor: 'pointer', color: teamColor, display: 'flex', padding: 2 }}>
-                    <Check size={15} />
-                  </button>
-                  <button onClick={handleCancelAddItem} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#484f58', display: 'flex', padding: 2 }}>
-                    <X size={15} />
-                  </button>
-                </div>
-                <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: '#8b949e', cursor: 'pointer', userSelect: 'none', paddingLeft: 26 }}>
-                  <input
-                    type="checkbox"
-                    checked={newItemIsClosed}
-                    onChange={e => setNewItemIsClosed(e.target.checked)}
-                    style={{ accentColor: '#3B82F6' }}
-                  />
-                  Closed status (marks this status as completed/done)
-                </label>
-                {itemError && <div style={{ fontSize: 11, color: '#ef4444', paddingLeft: 26 }}>{itemError}</div>}
-              </div>
-            ) : (
-              <button
-                onClick={() => setAddingItem(true)}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: 6, marginTop: 4,
-                  background: 'none', border: 'none', cursor: 'pointer',
-                  color: '#484f58', fontSize: 12, padding: '4px 2px', fontFamily: 'inherit',
-                }}
-              >
-                <Plus size={13} /> Add status
-              </button>
-            )
-          )}
-        </div>
-      )}
-    </div>
-  )
-}
-
-// ── Main tab ──────────────────────────────────────────────────────────────────
-
-export default function StatusTemplatesTab({ teamId, isAdmin, teamColor }: Props) {
-  const { data: templates = [], isLoading } = useStatusTemplates(teamId)
-  const createTemplate = useCreateStatusTemplate(teamId)
-  const [addingTemplate, setAddingTemplate] = useState(false)
-  const [newTemplateName, setNewTemplateName] = useState('')
-  const [createError, setCreateError] = useState('')
-
-  function handleCreateTemplate() {
-    if (!newTemplateName.trim()) { setCreateError('Name is required'); return }
-    createTemplate.mutate(
-      { name: newTemplateName.trim() },
-      {
-        onSuccess: () => { setNewTemplateName(''); setAddingTemplate(false) },
-        onError: () => setCreateError('Failed to create template'),
-      }
-    )
-  }
-
-  if (isLoading) {
-    return (
-      <div style={{ padding: 20, fontSize: 13, color: '#484f58' }}>Loading…</div>
-    )
-  }
-
-  return (
-    <div style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 12 }}>
-      <div style={{ fontSize: 12, color: '#8b949e', lineHeight: 1.6 }}>
-        Status templates are reusable presets. When a new timeline is created, its statuses are
-        copied from the first template. Changes here don't affect existing timelines.
-      </div>
-
-      {templates.map(template => (
-        <TemplateCard
-          key={template.id}
-          template={template}
-          teamId={teamId}
-          isAdmin={isAdmin}
-          teamColor={teamColor}
-          canDelete={templates.length > 1}
-        />
-      ))}
-
-      {/* Add template */}
-      {isAdmin && (
-        addingTemplate ? (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-            <div style={{ display: 'flex', gap: 8 }}>
-              <input
-                autoFocus
-                value={newTemplateName}
-                onChange={e => { setNewTemplateName(e.target.value); setCreateError('') }}
-                onKeyDown={e => { if (e.key === 'Enter') handleCreateTemplate(); if (e.key === 'Escape') setAddingTemplate(false) }}
-                placeholder="Template name (e.g. Kanban, Sprint)…"
-                style={{
-                  flex: 1, background: '#2d333b', border: '1px solid #30363d',
-                  borderRadius: 7, padding: '8px 12px', color: '#e6edf3', fontSize: 13, fontFamily: 'inherit',
-                }}
-              />
-              <button
-                onClick={handleCreateTemplate}
-                disabled={createTemplate.isPending}
-                style={{
-                  background: teamColor, border: 'none', borderRadius: 7, color: '#fff',
-                  fontWeight: 600, fontSize: 13, padding: '8px 16px', cursor: 'pointer',
-                  opacity: createTemplate.isPending ? 0.6 : 1, fontFamily: 'inherit',
-                }}
-              >
-                {createTemplate.isPending ? 'Creating…' : 'Create'}
-              </button>
-              <button
-                onClick={() => setAddingTemplate(false)}
-                style={{ background: 'none', border: '1px solid #30363d', borderRadius: 7, color: '#8b949e', fontSize: 13, padding: '8px 12px', cursor: 'pointer' }}
-              >
-                Cancel
-              </button>
-            </div>
-            {createError && <div style={{ fontSize: 11, color: '#ef4444' }}>{createError}</div>}
-          </div>
-        ) : (
-          <button
-            onClick={() => setAddingTemplate(true)}
-            style={{
-              display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'center',
-              background: 'none', border: '1px dashed #30363d', borderRadius: 8,
-              color: '#484f58', fontSize: 13, padding: '10px 16px', cursor: 'pointer',
-              fontFamily: 'inherit', width: '100%',
-            }}
-          >
-            <Plus size={14} />
-            New template
-          </button>
-        )
-      )}
-    </div>
   )
 }
 ````
@@ -30131,390 +30157,6 @@ type CreateSavedFilterJSONRequestBody CreateSavedFilterJSONBody
 type CreateTimelineJSONRequestBody CreateTimelineJSONBody
 ````
 
-## File: packages/api/internal/db/status_repo.go
-````go
-// Package db — StatusRepo manages status templates, template items,
-// and live timeline statuses.
-package db
-
-import (
-	"crypto/rand"
-	"encoding/hex"
-	"fmt"
-	"time"
-
-	"github.com/jmoiron/sqlx"
-
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// StatusRepo is the persistence layer for status templates and timeline statuses.
-type StatusRepo struct {
-	db *sqlx.DB
-}
-
-// NewStatusRepo returns a StatusRepo backed by db.
-func NewStatusRepo(db *sqlx.DB) *StatusRepo {
-	return &StatusRepo{db: db}
-}
-
-// ── Templates ─────────────────────────────────────────────────────────────────
-
-// ListTemplates returns all status templates for a team, ordered by position,
-// with their items populated.
-func (r *StatusRepo) ListTemplates(teamID string) ([]*models.StatusTemplate, error) {
-	var templates []*models.StatusTemplate
-	if err := r.db.Select(&templates, `
-		SELECT * FROM status_templates WHERE team_id = ? ORDER BY position, created_at
-	`, teamID); err != nil {
-		return nil, fmt.Errorf("listing status templates: %w", err)
-	}
-
-	// Populate items for each template in one query.
-	if len(templates) == 0 {
-		return templates, nil
-	}
-	ids := make([]string, len(templates))
-	for i, t := range templates {
-		ids[i] = t.ID
-	}
-
-	query, args, err := sqlx.In(`
-		SELECT * FROM status_template_items WHERE template_id IN (?) ORDER BY position
-	`, ids)
-	if err != nil {
-		return nil, fmt.Errorf("building status template items query: %w", err)
-	}
-	query = r.db.Rebind(query)
-	var items []models.StatusTemplateItem
-	if err := r.db.Select(&items, query, args...); err != nil {
-		return nil, fmt.Errorf("listing status template items: %w", err)
-	}
-
-	byTemplate := make(map[string][]models.StatusTemplateItem)
-	for _, item := range items {
-		byTemplate[item.TemplateID] = append(byTemplate[item.TemplateID], item)
-	}
-	for _, t := range templates {
-		t.Items = byTemplate[t.ID]
-		if t.Items == nil {
-			t.Items = []models.StatusTemplateItem{}
-		}
-	}
-	return templates, nil
-}
-
-// GetTemplate returns a single status template by ID.
-func (r *StatusRepo) GetTemplate(id string) (*models.StatusTemplate, error) {
-	var t models.StatusTemplate
-	if err := r.db.Get(&t, `SELECT * FROM status_templates WHERE id = ?`, id); err != nil {
-		return nil, fmt.Errorf("getting status template: %w", err)
-	}
-	var items []models.StatusTemplateItem
-	if err := r.db.Select(&items, `
-		SELECT * FROM status_template_items WHERE template_id = ? ORDER BY position
-	`, id); err != nil {
-		return nil, fmt.Errorf("getting status template items: %w", err)
-	}
-	t.Items = items
-	if t.Items == nil {
-		t.Items = []models.StatusTemplateItem{}
-	}
-	return &t, nil
-}
-
-// CreateTemplate inserts a new status template.
-func (r *StatusRepo) CreateTemplate(t *models.StatusTemplate) error {
-	_, err := r.db.NamedExec(`
-		INSERT INTO status_templates (id, team_id, name, description, position, created_by, created_at, updated_at)
-		VALUES (:id, :team_id, :name, :description, :position, :created_by, :created_at, :updated_at)
-	`, t)
-	if err != nil {
-		return fmt.Errorf("creating status template: %w", err)
-	}
-	return nil
-}
-
-// UpdateTemplate writes mutable template fields (name, description, position).
-func (r *StatusRepo) UpdateTemplate(t *models.StatusTemplate) error {
-	_, err := r.db.NamedExec(`
-		UPDATE status_templates
-		SET name = :name, description = :description, position = :position, updated_at = :updated_at
-		WHERE id = :id
-	`, t)
-	if err != nil {
-		return fmt.Errorf("updating status template: %w", err)
-	}
-	return nil
-}
-
-// CountTemplates returns the number of status templates for a team.
-func (r *StatusRepo) CountTemplates(teamID string) (int, error) {
-	var n int
-	if err := r.db.Get(&n, `SELECT COUNT(*) FROM status_templates WHERE team_id = ?`, teamID); err != nil {
-		return 0, fmt.Errorf("counting status templates: %w", err)
-	}
-	return n, nil
-}
-
-// DeleteTemplate deletes a status template by ID.
-func (r *StatusRepo) DeleteTemplate(id string) error {
-	_, err := r.db.Exec(`DELETE FROM status_templates WHERE id = ?`, id)
-	if err != nil {
-		return fmt.Errorf("deleting status template: %w", err)
-	}
-	return nil
-}
-
-// ── Template items ────────────────────────────────────────────────────────────
-
-// GetTemplateItem returns a single template item by ID.
-func (r *StatusRepo) GetTemplateItem(id string) (*models.StatusTemplateItem, error) {
-	var item models.StatusTemplateItem
-	if err := r.db.Get(&item, `SELECT * FROM status_template_items WHERE id = ?`, id); err != nil {
-		return nil, fmt.Errorf("getting status template item: %w", err)
-	}
-	return &item, nil
-}
-
-// CreateTemplateItem inserts a new item into a template.
-func (r *StatusRepo) CreateTemplateItem(item *models.StatusTemplateItem) error {
-	_, err := r.db.NamedExec(`
-		INSERT INTO status_template_items (id, template_id, name, color, icon, is_closed, position)
-		VALUES (:id, :template_id, :name, :color, :icon, :is_closed, :position)
-	`, item)
-	if err != nil {
-		return fmt.Errorf("creating status template item: %w", err)
-	}
-	return nil
-}
-
-// UpdateTemplateItem writes mutable item fields (name, color, icon, is_closed, position).
-func (r *StatusRepo) UpdateTemplateItem(item *models.StatusTemplateItem) error {
-	_, err := r.db.NamedExec(`
-		UPDATE status_template_items
-		SET name = :name, color = :color, icon = :icon, is_closed = :is_closed, position = :position
-		WHERE id = :id
-	`, item)
-	if err != nil {
-		return fmt.Errorf("updating status template item: %w", err)
-	}
-	return nil
-}
-
-// CountTemplateItems returns the number of items in a template.
-func (r *StatusRepo) CountTemplateItems(templateID string) (int, error) {
-	var n int
-	if err := r.db.Get(&n, `SELECT COUNT(*) FROM status_template_items WHERE template_id = ?`, templateID); err != nil {
-		return 0, fmt.Errorf("counting status template items: %w", err)
-	}
-	return n, nil
-}
-
-// DeleteTemplateItem deletes a single template item by ID.
-func (r *StatusRepo) DeleteTemplateItem(id string) error {
-	_, err := r.db.Exec(`DELETE FROM status_template_items WHERE id = ?`, id)
-	if err != nil {
-		return fmt.Errorf("deleting status template item: %w", err)
-	}
-	return nil
-}
-
-// ── Seeding ───────────────────────────────────────────────────────────────────
-
-// SeedDefaultTemplate creates the "Default" template (Planning / In Progress / Complete)
-// for a newly created team. Complete is marked is_closed = true.
-func (r *StatusRepo) SeedDefaultTemplate(teamID, createdBy string) error {
-	now := time.Now()
-	templateID := newRepoID()
-	t := &models.StatusTemplate{
-		ID:        templateID,
-		TeamID:    teamID,
-		Name:      "Default",
-		Position:  0,
-		CreatedBy: createdBy,
-		CreatedAt: now,
-		UpdatedAt: now,
-	}
-	if err := r.CreateTemplate(t); err != nil {
-		return err
-	}
-
-	type seed struct {
-		name     string
-		color    string
-		isClosed bool
-	}
-	seeds := []seed{
-		{"Planning", "#3B82F6", false},
-		{"In Progress", "#F59E0B", false},
-		{"Complete", "#22C55E", true},
-	}
-	for i, s := range seeds {
-		item := &models.StatusTemplateItem{
-			ID:         newRepoID(),
-			TemplateID: templateID,
-			Name:       s.name,
-			Color:      s.color,
-			IsClosed:   s.isClosed,
-			Position:   i,
-		}
-		if err := r.CreateTemplateItem(item); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// ── Timeline statuses ─────────────────────────────────────────────────────────
-
-// ListStatuses returns all statuses for a timeline, ordered by position.
-func (r *StatusRepo) ListStatuses(timelineID string) ([]*models.Status, error) {
-	var statuses []*models.Status
-	if err := r.db.Select(&statuses, `
-		SELECT * FROM statuses WHERE timeline_id = ? ORDER BY position
-	`, timelineID); err != nil {
-		return nil, fmt.Errorf("listing statuses: %w", err)
-	}
-	if statuses == nil {
-		statuses = []*models.Status{}
-	}
-	return statuses, nil
-}
-
-// GetStatus returns a single status by ID.
-func (r *StatusRepo) GetStatus(id string) (*models.Status, error) {
-	var s models.Status
-	if err := r.db.Get(&s, `SELECT * FROM statuses WHERE id = ?`, id); err != nil {
-		return nil, fmt.Errorf("getting status: %w", err)
-	}
-	return &s, nil
-}
-
-// CreateStatus inserts a new live status for a timeline.
-func (r *StatusRepo) CreateStatus(s *models.Status) error {
-	_, err := r.db.NamedExec(`
-		INSERT INTO statuses (id, timeline_id, name, color, icon, is_closed, position, created_at, updated_at)
-		VALUES (:id, :timeline_id, :name, :color, :icon, :is_closed, :position, :created_at, :updated_at)
-	`, s)
-	if err != nil {
-		return fmt.Errorf("creating status: %w", err)
-	}
-	return nil
-}
-
-// UpdateStatus writes mutable status fields: name, color, icon, is_closed, position.
-func (r *StatusRepo) UpdateStatus(s *models.Status) error {
-	_, err := r.db.NamedExec(`
-		UPDATE statuses
-		SET name = :name, color = :color, icon = :icon,
-		    is_closed = :is_closed, position = :position, updated_at = :updated_at
-		WHERE id = :id
-	`, s)
-	if err != nil {
-		return fmt.Errorf("updating status: %w", err)
-	}
-	return nil
-}
-
-// CountStatuses returns the number of live statuses for a timeline.
-func (r *StatusRepo) CountStatuses(timelineID string) (int, error) {
-	var n int
-	if err := r.db.Get(&n, `SELECT COUNT(*) FROM statuses WHERE timeline_id = ?`, timelineID); err != nil {
-		return 0, fmt.Errorf("counting statuses: %w", err)
-	}
-	return n, nil
-}
-
-// CountStatusActivities returns the number of activities that reference a
-// specific status ID. Used to guard status deletion.
-func (r *StatusRepo) CountStatusActivities(statusID string) (int, error) {
-	var n int
-	if err := r.db.Get(&n, `SELECT COUNT(*) FROM activities WHERE status_id = ?`, statusID); err != nil {
-		return 0, fmt.Errorf("counting status activities: %w", err)
-	}
-	return n, nil
-}
-
-// DeleteStatus deletes a live status. If replacementStatusID is non-empty,
-// activities pointing at the deleted status are re-pointed to the replacement
-// first. Returns an error if replacementStatusID is empty but activities
-// reference the status.
-func (r *StatusRepo) DeleteStatus(id, replacementStatusID string) error {
-	if replacementStatusID != "" {
-		if _, err := r.db.Exec(
-			`UPDATE activities SET status_id = ? WHERE status_id = ?`,
-			replacementStatusID, id,
-		); err != nil {
-			return fmt.Errorf("re-assigning activities before status delete: %w", err)
-		}
-	}
-	if _, err := r.db.Exec(`DELETE FROM statuses WHERE id = ?`, id); err != nil {
-		return fmt.Errorf("deleting status: %w", err)
-	}
-	return nil
-}
-
-// CopyTemplateToTimeline copies a template's items into live statuses for a
-// timeline. If templateID is non-nil, that specific template is used; otherwise
-// the team's first template (by position then created_at) is used. If no
-// matching template is found the call is a silent no-op.
-func (r *StatusRepo) CopyTemplateToTimeline(teamID, timelineID string, templateID *string) error {
-	var template models.StatusTemplate
-	var err error
-	if templateID != nil && *templateID != "" {
-		err = r.db.Get(&template, `
-			SELECT * FROM status_templates WHERE id = ? AND team_id = ?
-		`, *templateID, teamID)
-	} else {
-		err = r.db.Get(&template, `
-			SELECT * FROM status_templates WHERE team_id = ? ORDER BY position, created_at LIMIT 1
-		`, teamID)
-	}
-	if err != nil {
-		// No template — not an error; leave the timeline with no statuses.
-		return nil
-	}
-
-	var items []models.StatusTemplateItem
-	if err := r.db.Select(&items, `
-		SELECT * FROM status_template_items WHERE template_id = ? ORDER BY position
-	`, template.ID); err != nil {
-		return fmt.Errorf("loading template items for copy: %w", err)
-	}
-
-	now := time.Now()
-	for _, item := range items {
-		s := &models.Status{
-			ID:         newRepoID(),
-			TimelineID: timelineID,
-			Name:       item.Name,
-			Color:      item.Color,
-			Icon:       item.Icon,
-			IsClosed:   item.IsClosed,
-			Position:   item.Position,
-			CreatedAt:  now,
-			UpdatedAt:  now,
-		}
-		if _, err := r.db.NamedExec(`
-			INSERT INTO statuses (id, timeline_id, name, color, icon, is_closed, position, created_at, updated_at)
-			VALUES (:id, :timeline_id, :name, :color, :icon, :is_closed, :position, :created_at, :updated_at)
-		`, s); err != nil {
-			return fmt.Errorf("copying status to timeline: %w", err)
-		}
-	}
-	return nil
-}
-
-// newRepoID generates a 32-character hex ID — same entropy as api.newID but
-// usable within the db package without importing the api package.
-func newRepoID() string {
-	b := make([]byte, 16)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)
-}
-````
-
 ## File: packages/web/src/components/gantt/GanttToolbar.tsx
 ````typescript
 /**
@@ -30729,6 +30371,416 @@ export default function GanttToolbar({
       </button>
     </div>
   );
+}
+````
+
+## File: packages/web/src/components/gantt/granularity.test.ts
+````typescript
+import { describe, it, expect } from 'vitest'
+import { generateColumns, positionInColumns, snapDivisorFor } from './granularity'
+
+// ── generateColumns — weekStart option ───────────────────────────────────────
+//
+// Jan 2026 layout:
+//   Mon Jan  5 (ISO week start)
+//   Sun Jan  4 (Sunday week start)
+//
+// Jan 1 2026 is a Thursday.
+//
+// Input dates use Date.UTC to produce stable UTC-midnight values that give the
+// same result regardless of the test runner's local timezone.
+
+const JAN1  = new Date(Date.UTC(2026, 0, 1))  // Thu
+const JAN31 = new Date(Date.UTC(2026, 0, 31)) // Sat
+
+describe('generateColumns — weekStart', () => {
+  it('monday week start: first week column begins on Monday Dec 29', () => {
+    const cols = generateColumns(JAN1, JAN31, 'week', { weekStart: 'monday' })
+    // Jan 1 is Thursday; Monday ISO week start = Dec 29 2025
+    expect(cols[0].start.getUTCDay()).toBe(1) // 1 = Monday
+    expect(cols[0].start.getUTCDate()).toBe(29)
+  })
+
+  it('sunday week start: first week column begins on Sunday Dec 28', () => {
+    const cols = generateColumns(JAN1, JAN31, 'week', { weekStart: 'sunday' })
+    // Jan 1 is Thursday; Sunday week start = Dec 28 2025
+    expect(cols[0].start.getUTCDay()).toBe(0) // 0 = Sunday
+    expect(cols[0].start.getUTCDate()).toBe(28)
+  })
+
+  it('default (no option) behaves like monday', () => {
+    const defaultCols = generateColumns(JAN1, JAN31, 'week')
+    const mondayCols  = generateColumns(JAN1, JAN31, 'week', { weekStart: 'monday' })
+    expect(defaultCols[0].start.getTime()).toBe(mondayCols[0].start.getTime())
+  })
+})
+
+// ── generateColumns — locale option ──────────────────────────────────────────
+
+describe('generateColumns — locale', () => {
+  it('en-US: month column label contains English month name', () => {
+    const cols = generateColumns(JAN1, JAN31, 'month', { locale: 'en-US' })
+    expect(cols[0].label).toMatch(/Jan/)
+  })
+
+  it('en-GB: day column label shows day-first ordering (e.g. "1 Jan")', () => {
+    const cols = generateColumns(JAN1, JAN31, 'day', { locale: 'en-GB' })
+    // en-GB {month:'short', day:'numeric', timeZone:'UTC'} → "1 Jan"
+    expect(cols[0].label).toMatch(/Jan/)
+    // The day should come first in en-GB
+    expect(cols[0].label).toMatch(/^1/)
+  })
+
+  it('default locale behaves like en-US', () => {
+    const defaultCols = generateColumns(JAN1, JAN31, 'month')
+    const usCols      = generateColumns(JAN1, JAN31, 'month', { locale: 'en-US' })
+    expect(defaultCols[0].label).toBe(usCols[0].label)
+  })
+})
+
+// ── snapDivisorFor ────────────────────────────────────────────────────────────
+
+describe('snapDivisorFor', () => {
+  it('week → 7 (snap to day within week)', () => {
+    expect(snapDivisorFor('week')).toBe(7)
+  })
+
+  it('month → 4 (snap to week within month)', () => {
+    expect(snapDivisorFor('month')).toBe(4)
+  })
+
+  it('quarter → 3 (snap to month within quarter)', () => {
+    expect(snapDivisorFor('quarter')).toBe(3)
+  })
+
+  it('year → 4 (snap to quarter within year)', () => {
+    expect(snapDivisorFor('year')).toBe(4)
+  })
+
+  it('day → 1 (no finer snap at day granularity)', () => {
+    expect(snapDivisorFor('day')).toBe(1)
+  })
+
+  it('auto → 1 (no finer snap for auto)', () => {
+    expect(snapDivisorFor('auto')).toBe(1)
+  })
+})
+
+// ── Timezone-safety: midnight-UTC dates ───────────────────────────────────────
+//
+// An activity stored as "2026-05-31T00:00:00Z" must display as May 31 and
+// land in the May 31 column regardless of local timezone.  This suite uses
+// Date.UTC inputs to reproduce the condition that would cause a regression
+// when TZ=America/Denver (UTC-6).
+
+describe('positionInColumns — midnight-UTC activity dates land on correct day', () => {
+  // May 2026: generate day-granularity columns for the whole month
+  const MAY1  = new Date(Date.UTC(2026, 4,  1))
+  const MAY31 = new Date(Date.UTC(2026, 4, 31))
+  const cols  = generateColumns(MAY1, MAY31, 'day')
+
+  it('May 31 column label is "May 31"', () => {
+    const mayThirtyFirst = cols.find(c => c.start.getUTCDate() === 31 && c.start.getUTCMonth() === 4)
+    expect(mayThirtyFirst?.label).toMatch(/31/)
+  })
+
+  it('activity on 2026-05-31 lands in May 31 column (startCol ≥ 30)', () => {
+    // "2026-05-31T00:00:00Z" — midnight UTC; same value the API emits
+    const actStart = new Date('2026-05-31T00:00:00Z')
+    const actEnd   = new Date('2026-05-31T00:00:00Z')
+    const { startCol } = positionInColumns(actStart, actEnd, cols)
+    // May 31 is the 31st day (0-indexed = 30)
+    expect(Math.floor(startCol)).toBe(30)
+  })
+
+  it('activity on 2026-05-01 lands in May 1 column (startCol = 0)', () => {
+    const actStart = new Date('2026-05-01T00:00:00Z')
+    const actEnd   = new Date('2026-05-01T00:00:00Z')
+    const { startCol } = positionInColumns(actStart, actEnd, cols)
+    expect(Math.floor(startCol)).toBe(0)
+  })
+
+  it('formatLabel for May 31 day column shows "May 31" (UTC read-out)', () => {
+    const mayThirtyFirst = cols.find(c => c.start.getUTCDate() === 31 && c.start.getUTCMonth() === 4)
+    expect(mayThirtyFirst).toBeDefined()
+    // Label must show May 31, not May 30 (which would happen with local-time formatting in UTC-6)
+    expect(mayThirtyFirst!.label).toContain('31')
+    expect(mayThirtyFirst!.label).not.toContain('30')
+  })
+})
+````
+
+## File: packages/web/src/components/gantt/granularity.ts
+````typescript
+/**
+ * Time-granularity helpers for the Gantt view.
+ *
+ * Generates column definitions and maps event date ranges to fractional
+ * column positions at any granularity (day → year).
+ */
+
+export type TimeGranularity = 'day' | 'week' | 'month' | 'quarter' | 'year';
+
+export interface ColumnDef {
+  label: string;
+  /** Secondary label rendered on a second line (used for week numbers). */
+  sublabel?: string;
+  start: Date;
+  end: Date;
+  /** Calendar days this column spans (varies for months, quarters, years). */
+  days: number;
+}
+
+// ── Date helpers ────────────────────────────────────────────────────────────
+//
+// All helpers operate in UTC so that all-day activity dates stored as
+// midnight-UTC strings (e.g. "2026-05-31T00:00:00Z") land on the correct
+// calendar day regardless of the viewer's local timezone.
+//
+// TODO: branch on allDay when timed events ship (Phase 15 calendar sync).
+
+function daysBetween(a: Date, b: Date): number {
+  return Math.round((b.getTime() - a.getTime()) / 86_400_000);
+}
+
+function startOfDay(d: Date): Date {
+  const r = new Date(d);
+  r.setUTCHours(0, 0, 0, 0);
+  return r;
+}
+
+function startOfWeek(d: Date, weekStart: 'monday' | 'sunday' = 'monday'): Date {
+  const r = startOfDay(d);
+  const day = r.getUTCDay(); // 0=Sun, 1=Mon, …, 6=Sat
+  if (weekStart === 'sunday') {
+    r.setUTCDate(r.getUTCDate() - day);
+  } else {
+    // Monday = ISO week start
+    r.setUTCDate(r.getUTCDate() - ((day + 6) % 7));
+  }
+  return r;
+}
+
+function startOfMonth(d: Date): Date {
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1));
+}
+
+function startOfQuarter(d: Date): Date {
+  const q = Math.floor(d.getUTCMonth() / 3) * 3;
+  return new Date(Date.UTC(d.getUTCFullYear(), q, 1));
+}
+
+function startOfYear(d: Date): Date {
+  return new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+}
+
+export function addDays(d: Date, n: number): Date {
+  const r = new Date(d);
+  r.setUTCDate(r.getUTCDate() + n);
+  return r;
+}
+
+function addMonths(d: Date, n: number): Date {
+  const r = new Date(d);
+  r.setUTCMonth(r.getUTCMonth() + n);
+  return r;
+}
+
+function endOfPeriod(start: Date, gran: TimeGranularity): Date {
+  switch (gran) {
+    case 'day':     return addDays(start, 1);
+    case 'week':    return addDays(start, 7);
+    case 'month':   return addMonths(start, 1);
+    case 'quarter': return addMonths(start, 3);
+    case 'year':    return addMonths(start, 12);
+  }
+}
+
+function periodStart(d: Date, gran: TimeGranularity, weekStart: 'monday' | 'sunday' = 'monday'): Date {
+  switch (gran) {
+    case 'day':     return startOfDay(d);
+    case 'week':    return startOfWeek(d, weekStart);
+    case 'month':   return startOfMonth(d);
+    case 'quarter': return startOfQuarter(d);
+    case 'year':    return startOfYear(d);
+  }
+}
+
+// ── Label formatting ────────────────────────────────────────────────────────
+
+/** ISO 8601 week number (1–53). Week 1 contains Jan 4; weeks start Monday. */
+function isoWeekNumber(d: Date): number {
+  const date = new Date(d);
+  date.setUTCHours(0, 0, 0, 0);
+  date.setUTCDate(date.getUTCDate() + 3 - ((date.getUTCDay() + 6) % 7));
+  const week1 = new Date(Date.UTC(date.getUTCFullYear(), 0, 4));
+  return 1 + Math.round(
+    ((date.getTime() - week1.getTime()) / 86_400_000 - 3 + ((week1.getUTCDay() + 6) % 7)) / 7,
+  );
+}
+
+function formatLabel(start: Date, gran: TimeGranularity, locale = 'en-US'): string {
+  switch (gran) {
+    case 'day':
+      return start.toLocaleDateString(locale, { month: 'short', day: 'numeric', timeZone: 'UTC' });
+    case 'week': {
+      const end = addDays(start, 6);
+      const sameMonth = start.getUTCMonth() === end.getUTCMonth();
+      const s = start.toLocaleDateString(locale, { month: 'short', day: 'numeric', timeZone: 'UTC' });
+      const e = sameMonth
+        ? end.getUTCDate().toString()
+        : end.toLocaleDateString(locale, { month: 'short', day: 'numeric', timeZone: 'UTC' });
+      return `${s}–${e}`;
+    }
+    case 'month':
+      return start.toLocaleDateString(locale, { month: 'short', year: 'numeric', timeZone: 'UTC' });
+    case 'quarter': {
+      const q = Math.floor(start.getUTCMonth() / 3) + 1;
+      return `Q${q} ${start.getUTCFullYear()}`;
+    }
+    case 'year':
+      return start.getUTCFullYear().toString();
+  }
+}
+
+// ── Column generation ───────────────────────────────────────────────────────
+
+export interface GenerateColumnsOptions {
+  /** Which day the week grid starts on. Defaults to 'monday' (ISO). */
+  weekStart?: 'monday' | 'sunday';
+  /** BCP 47 locale tag for month name formatting. Defaults to 'en-US'. */
+  locale?: string;
+}
+
+export function generateColumns(
+  viewStart: Date,
+  viewEnd: Date,
+  granularity: TimeGranularity,
+  options?: GenerateColumnsOptions,
+): ColumnDef[] {
+  const weekStart = options?.weekStart ?? 'monday';
+  const locale = options?.locale ?? 'en-US';
+  const columns: ColumnDef[] = [];
+  let cur = periodStart(viewStart, granularity, weekStart);
+
+  while (cur <= viewEnd) {
+    const next = endOfPeriod(cur, granularity);
+    // Clamp to view bounds for the first and last columns
+    const colStart = cur < viewStart ? viewStart : cur;
+    const colEnd = next > addDays(viewEnd, 1) ? addDays(viewEnd, 1) : next;
+    columns.push({
+      label: formatLabel(cur, granularity, locale),
+      sublabel: granularity === 'week' ? `W${isoWeekNumber(cur)}` : undefined,
+      start: cur,
+      end: next,
+      days: daysBetween(colStart, colEnd),
+    });
+    cur = next;
+  }
+
+  return columns;
+}
+
+// ── Event positioning ───────────────────────────────────────────────────────
+
+/** Fractional position within the column array. */
+export function positionInColumns(
+  eventStart: Date,
+  eventEnd: Date,
+  columns: ColumnDef[],
+): { startCol: number; span: number } {
+  if (columns.length === 0) return { startCol: 0, span: 0 };
+
+  const evStartMs = eventStart.getTime();
+  const evEndMs = eventEnd.getTime();
+
+  let startCol = 0;
+  let endCol = columns.length;
+
+  for (let i = 0; i < columns.length; i++) {
+    const col = columns[i];
+    const colStartMs = col.start.getTime();
+    const colEndMs = col.end.getTime();
+    const colSpanMs = colEndMs - colStartMs;
+
+    if (evStartMs >= colStartMs && evStartMs < colEndMs) {
+      startCol = i + (colSpanMs > 0 ? (evStartMs - colStartMs) / colSpanMs : 0);
+    }
+    // End is inclusive day, so add 1 day for positioning
+    const evEndNextDayMs = evEndMs + 86_400_000;
+    if (evEndNextDayMs > colStartMs && evEndNextDayMs <= colEndMs) {
+      endCol = i + (colSpanMs > 0 ? (evEndNextDayMs - colStartMs) / colSpanMs : 1);
+    }
+  }
+
+  const span = Math.max(endCol - startCol, 0.15);
+  return { startCol, span };
+}
+
+// ── Snap divisor ────────────────────────────────────────────────────────────
+
+// Number of snap divisions per column at the given zoom granularity.
+// Higher divisor → finer snap (e.g. week columns snap to individual days).
+export function snapDivisorFor(granularity: TimeGranularity | 'auto'): number {
+  switch (granularity) {
+    case 'week':    return 7;  // snap to day within week
+    case 'month':   return 4;  // snap to week within month
+    case 'quarter': return 3;  // snap to month within quarter
+    case 'year':    return 4;  // snap to quarter within year
+    default:        return 1;  // day or auto → no finer snap
+  }
+}
+
+// ── Today position ──────────────────────────────────────────────────────────
+
+export function todayColumnPosition(columns: ColumnDef[]): number {
+  const now = startOfDay(new Date()); // startOfDay uses setUTCHours → UTC midnight
+  const nowMs = now.getTime();
+
+  for (let i = 0; i < columns.length; i++) {
+    const col = columns[i];
+    const colStartMs = col.start.getTime();
+    const colEndMs = col.end.getTime();
+    if (nowMs >= colStartMs && nowMs < colEndMs) {
+      const colSpanMs = colEndMs - colStartMs;
+      return i + (colSpanMs > 0 ? (nowMs - colStartMs) / colSpanMs : 0.5);
+    }
+  }
+  return -1;
+}
+
+// ── Auto-fit ────────────────────────────────────────────────────────────────
+
+const GRANULARITIES: TimeGranularity[] = ['day', 'week', 'month', 'quarter', 'year'];
+const BASE_COL_WIDTH = 80;
+
+export function autoFitGranularity(
+  viewStart: Date,
+  viewEnd: Date,
+  viewportWidth: number,
+): TimeGranularity {
+  const targetCols = Math.max(viewportWidth / BASE_COL_WIDTH, 2);
+
+  let best: TimeGranularity = 'month';
+  let bestDiff = Infinity;
+
+  for (const gran of GRANULARITIES) {
+    const cols = generateColumns(viewStart, viewEnd, gran).length;
+    if (cols < 2) continue;
+    // Prefer the finest granularity that fits within 50-150% of viewport
+    const ratio = cols / targetCols;
+    if (ratio >= 0.4 && ratio <= 1.5) {
+      // Within range — prefer finest (earliest in array)
+      return gran;
+    }
+    const diff = Math.abs(ratio - 1);
+    if (diff < bestDiff) {
+      bestDiff = diff;
+      best = gran;
+    }
+  }
+
+  return best;
 }
 ````
 
@@ -32263,6 +32315,65 @@ export default function TopBar({
     </div>
   );
 }
+````
+
+## File: packages/web/vite.config.ts
+````typescript
+/// <reference types="vitest" />
+import path from 'path'
+import { defineConfig, loadEnv } from 'vite'
+import react from '@vitejs/plugin-react'
+import tailwindcss from '@tailwindcss/vite'
+
+export default defineConfig(({ mode }) => {
+  const env = loadEnv(mode, process.cwd(), '')
+  const apiTarget = env.VITE_API_TARGET ?? 'http://localhost:8080'
+
+  return {
+    plugins: [
+      react(),
+      tailwindcss(),
+    ],
+    resolve: {
+      alias: {
+        '@': path.resolve(__dirname, './src'),
+      },
+    },
+    test: {
+      environment: 'jsdom',
+      globals: true,
+      alias: {
+        '@': path.resolve(__dirname, './src'),
+      },
+    },
+    server: {
+      proxy: {
+        '/setup': { target: apiTarget, changeOrigin: true },
+        '/auth': { target: apiTarget, changeOrigin: true },
+        '/users': { target: apiTarget, changeOrigin: true },
+        '/admin': { target: apiTarget, changeOrigin: true },
+        '/settings': { target: apiTarget, changeOrigin: true },
+        '/tokens': { target: apiTarget, changeOrigin: true },
+        '/teams': { target: apiTarget, changeOrigin: true },
+        '/timelines': { target: apiTarget, changeOrigin: true },
+        '/status-templates': { target: apiTarget, changeOrigin: true },
+        '/status-template-items': { target: apiTarget, changeOrigin: true },
+        '/statuses': { target: apiTarget, changeOrigin: true },
+        '/activities': { target: apiTarget, changeOrigin: true },
+        '/tags': { target: apiTarget, changeOrigin: true },
+        '/saved_filters': { target: apiTarget, changeOrigin: true },
+        '/events': { target: apiTarget, changeOrigin: true },
+        '/health': { target: apiTarget, changeOrigin: true },
+        '/ws': {
+          target: apiTarget.replace(/^http/, 'ws'),
+          changeOrigin: true,
+          ws: true,
+          rewriteWsOrigin: true,
+        },
+      },
+    },
+  }
+})
 ````
 
 ## File: packages/api/internal/api/server.go
@@ -33891,65 +34002,6 @@ export default function TimelineModal({ mode, teamId, timeline, canAdmin = false
 }
 ````
 
-## File: packages/web/vite.config.ts
-````typescript
-/// <reference types="vitest" />
-import path from 'path'
-import { defineConfig, loadEnv } from 'vite'
-import react from '@vitejs/plugin-react'
-import tailwindcss from '@tailwindcss/vite'
-
-export default defineConfig(({ mode }) => {
-  const env = loadEnv(mode, process.cwd(), '')
-  const apiTarget = env.VITE_API_TARGET ?? 'http://localhost:8080'
-
-  return {
-    plugins: [
-      react(),
-      tailwindcss(),
-    ],
-    resolve: {
-      alias: {
-        '@': path.resolve(__dirname, './src'),
-      },
-    },
-    test: {
-      environment: 'jsdom',
-      globals: true,
-      alias: {
-        '@': path.resolve(__dirname, './src'),
-      },
-    },
-    server: {
-      proxy: {
-        '/setup': { target: apiTarget, changeOrigin: true },
-        '/auth': { target: apiTarget, changeOrigin: true },
-        '/users': { target: apiTarget, changeOrigin: true },
-        '/admin': { target: apiTarget, changeOrigin: true },
-        '/settings': { target: apiTarget, changeOrigin: true },
-        '/tokens': { target: apiTarget, changeOrigin: true },
-        '/teams': { target: apiTarget, changeOrigin: true },
-        '/timelines': { target: apiTarget, changeOrigin: true },
-        '/status-templates': { target: apiTarget, changeOrigin: true },
-        '/status-template-items': { target: apiTarget, changeOrigin: true },
-        '/statuses': { target: apiTarget, changeOrigin: true },
-        '/activities': { target: apiTarget, changeOrigin: true },
-        '/tags': { target: apiTarget, changeOrigin: true },
-        '/saved_filters': { target: apiTarget, changeOrigin: true },
-        '/events': { target: apiTarget, changeOrigin: true },
-        '/health': { target: apiTarget, changeOrigin: true },
-        '/ws': {
-          target: apiTarget.replace(/^http/, 'ws'),
-          changeOrigin: true,
-          ws: true,
-          rewriteWsOrigin: true,
-        },
-      },
-    },
-  }
-})
-````
-
 ## File: packages/api/internal/models/models.go
 ````go
 // Package models holds the domain types shared across the API, db,
@@ -34457,7 +34509,7 @@ function colToEndDate(endColFrac: number, columns: ColumnDef[]): Date {
 
 
 function formatDragDate(d: Date): string {
-  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
 }
 
 export default function GanttGrid({
@@ -35309,6 +35361,1164 @@ export default function GanttGrid({
 }
 ````
 
+## File: packages/web/src/components/layout/Sidebar.tsx
+````typescript
+import { useState, useRef, useEffect } from 'react';
+import {
+  ChevronRight,
+  ChevronLeft,
+  ChevronDown,
+  ChevronsDownUp,
+  ChevronsUpDown,
+  Plus,
+  Settings2,
+  Upload,
+  CalendarPlus,
+  Plug,
+} from 'lucide-react';
+import { Badge } from '@/components/identity/Badge';
+import { useAuth } from '@/contexts/AuthContext';
+import type { components } from '@draba/shared';
+
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
+
+const SIDEBAR_MIN = 220;
+const SIDEBAR_MAX = 360;
+
+interface ApiTeam {
+  id: string;
+  name: string;
+  color?: string | null;
+  icon?: string | null;
+  archivedAt?: string | null;
+}
+
+interface ApiTimeline {
+  id: string;
+  name: string;
+  startDate?: string;
+  endDate?: string;
+  color?: string | null;
+  icon?: string | null;
+  archivedAt?: string | null;
+}
+
+interface Props {
+  collapsed: boolean;
+  onToggle: () => void;
+  onNewActivity?: () => void;
+  /** Stub: bulk-import activities. Surfaced in the "New activity" combo dropdown. */
+  onBulkImport?: () => void;
+  apiTimelines?: ApiTimeline[];
+  archivedTimelines?: ApiTimeline[];
+  activeTimelineId?: string;
+  onActiveTimelineChange?: (id: string) => void;
+  onNewTimeline?: () => void;
+  onEditTimeline?: (timelineId: string) => void;
+  // Team management
+  activeTeam?: ApiTeam;
+  /** All non-archived teams. Used to render the switchable team list. */
+  activeTeams?: ApiTeam[];
+  archivedTeams?: ApiTeam[];
+  onNewTeam?: () => void;
+  onEditTeam?: (team: ApiTeam) => void;
+  onSelectTeam?: (teamId: string) => void;
+  onUnarchiveTeam?: (teamId: string) => void;
+  /** True when the current user is an admin of the active team. */
+  canEditTeam?: boolean;
+  /** Live member list from the API. */
+  members?: TeamMemberWithUser[];
+  /** Called when the user clicks the gear icon on a member row. */
+  onEditMember?: (member: TeamMemberWithUser) => void;
+}
+
+const ICON = { width: 15, height: 15, strokeWidth: 1.8 } as const;
+const ICON_SM = { width: 13, height: 13, strokeWidth: 1.8 } as const;
+const ICON_XS = { width: 11, height: 11, strokeWidth: 2 } as const;
+
+interface Timeline {
+  id: string;
+  name: string;
+  color: string;
+  icon: string | null;
+  startDate?: string;
+  endDate?: string;
+}
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+
+function formatDateRange(startDate?: string, endDate?: string): string {
+  if (!startDate || !endDate) return ''
+  const s = new Date(startDate + 'T00:00:00')
+  const e = new Date(endDate + 'T00:00:00')
+  const diffDays = (e.getTime() - s.getTime()) / 86_400_000
+  if (diffDays < 90) {
+    return `${MONTHS[s.getMonth()]} ${s.getDate()} – ${MONTHS[e.getMonth()]} ${e.getDate()} ${e.getFullYear()}`
+  }
+  return `${MONTHS[s.getMonth()]} ${s.getFullYear()} – ${MONTHS[e.getMonth()]} ${e.getFullYear()}`
+}
+
+
+interface TimelineItemProps {
+  timeline: Timeline;
+  active: boolean;
+  collapsed: boolean;
+  showDate?: boolean;
+  canEdit?: boolean;
+  onClick: () => void;
+  onSettings: () => void;
+}
+
+function TimelineItem({ timeline, active, collapsed, showDate = true, canEdit = false, onClick, onSettings }: TimelineItemProps) {
+  const [hovered, setHovered] = useState(false);
+  const dateRange = !collapsed && showDate ? formatDateRange(timeline.startDate, timeline.endDate) : ''
+
+  return (
+    <div
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        background: active
+          ? 'rgba(255,255,255,0.10)'
+          : hovered
+          ? 'rgba(255,255,255,0.05)'
+          : 'transparent',
+        borderLeft: active ? `2px solid ${timeline.color}` : '2px solid transparent',
+        transition: 'background 0.12s',
+        cursor: 'pointer',
+        minHeight: 34,
+      }}
+    >
+      <button
+        onClick={onClick}
+        title={collapsed ? timeline.name : undefined}
+        style={{
+          flex: 1,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          padding: collapsed ? '7px 14px' : '6px 8px 6px 16px',
+          background: 'none',
+          border: 'none',
+          color: active ? 'white' : 'rgba(255,255,255,0.65)',
+          fontSize: 13,
+          fontWeight: active ? 600 : 400,
+          cursor: 'pointer',
+          fontFamily: 'var(--font-sans)',
+          textAlign: 'left',
+          minWidth: 0,
+        }}
+      >
+        <Badge
+          identity={{ color: timeline.color, icon: timeline.icon ?? '__none__' }}
+          name={timeline.name}
+          shape="square"
+          size={20}
+        />
+        {!collapsed && (
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {timeline.name}
+            </div>
+            {dateRange && (
+              <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)', marginTop: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {dateRange}
+              </div>
+            )}
+          </div>
+        )}
+      </button>
+
+      {!collapsed && canEdit && (
+        <button
+          onClick={e => { e.stopPropagation(); onSettings(); }}
+          title={`Configure ${timeline.name}`}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            width: 26,
+            height: 26,
+            marginRight: 6,
+            background: 'none',
+            border: 'none',
+            borderRadius: 5,
+            color: 'rgba(255,255,255,0.4)',
+            cursor: 'pointer',
+            opacity: hovered ? 1 : 0,
+            transition: 'opacity 0.12s',
+            flexShrink: 0,
+          }}
+          onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.8)')}
+          onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.4)')}
+        >
+          <Settings2 {...ICON_SM} />
+        </button>
+      )}
+    </div>
+  );
+}
+
+function ConnectorItem({ name, status, color }: { name: string; status: string; color: string }) {
+  const [hovered, setHovered] = useState(false);
+
+  return (
+    <div
+      style={{
+        display: 'flex', alignItems: 'center', gap: 8,
+        padding: '6px 6px 6px 16px',
+        cursor: 'pointer',
+        background: hovered ? 'rgba(255,255,255,0.05)' : 'transparent',
+        transition: 'background 0.12s',
+      }}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+    >
+      <div style={{
+        width: 20, height: 20, borderRadius: 4,
+        background: color,
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        flexShrink: 0,
+      }}>
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="white">
+          <rect x="1" y="1" width="9" height="18" rx="1.5" />
+          <rect x="14" y="1" width="9" height="12" rx="1.5" />
+        </svg>
+      </div>
+      <div style={{ minWidth: 0, flex: 1 }}>
+        <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.65)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {name}
+        </div>
+        <div style={{ fontSize: 9, color: 'rgba(255,255,255,0.25)', marginTop: 1 }}>
+          {status}
+        </div>
+      </div>
+      <button
+        title={`Configure ${name}`}
+        style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          width: 26, height: 26, marginRight: 0,
+          background: 'none', border: 'none', borderRadius: 5,
+          color: 'rgba(255,255,255,0.4)', cursor: 'pointer',
+          opacity: hovered ? 1 : 0, transition: 'opacity 0.12s',
+          flexShrink: 0,
+        }}
+        onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.8)')}
+        onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.4)')}
+      >
+        <Settings2 {...ICON_SM} />
+      </button>
+    </div>
+  );
+}
+
+// ── TeamRow ──────────────────────────────────────────────────────────────────
+
+interface TeamRowProps {
+  team: ApiTeam;
+  isActive: boolean;
+  canEdit: boolean;
+  onSelect?: () => void;
+  onEdit?: () => void;
+}
+
+function TeamRow({ team, isActive, canEdit, onSelect, onEdit }: TeamRowProps) {
+  const [hovered, setHovered] = useState(false);
+
+  return (
+    <div
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      onClick={() => { if (!isActive) onSelect?.(); }}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        padding: '5px 6px 5px 16px',
+        borderLeft: isActive ? `2px solid ${team.color ?? 'var(--primary)'}` : '2px solid transparent',
+        background: isActive ? 'rgba(255,255,255,0.07)' : hovered ? 'rgba(255,255,255,0.03)' : 'transparent',
+        cursor: isActive ? 'default' : 'pointer',
+        minHeight: 34,
+        transition: 'background 0.12s',
+      }}
+    >
+      <Badge
+        identity={{ color: team.color ?? 'var(--primary)', icon: team.icon ?? '__name_1__' }}
+        name={team.name}
+        shape="square"
+        size={20}
+      />
+      <span style={{
+        fontSize: 13,
+        fontWeight: isActive ? 600 : 400,
+        color: isActive ? 'white' : 'rgba(255,255,255,0.65)',
+        flex: 1,
+        marginLeft: 8,
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        whiteSpace: 'nowrap',
+        minWidth: 0,
+      }}>
+        {team.name}
+      </span>
+      {canEdit && (
+        <button
+          title="Team settings"
+          onClick={e => { e.stopPropagation(); onEdit?.(); }}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            width: 26,
+            height: 26,
+            marginRight: 6,
+            background: 'none',
+            border: 'none',
+            borderRadius: 5,
+            color: 'rgba(255,255,255,0.4)',
+            cursor: 'pointer',
+            opacity: hovered ? 1 : 0,
+            transition: 'opacity 0.12s',
+            flexShrink: 0,
+          }}
+          onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.8)')}
+          onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.4)')}
+        >
+          <Settings2 {...ICON_SM} />
+        </button>
+      )}
+    </div>
+  );
+}
+
+// ── MemberSidebarRow ──────────────────────────────────────────────────────────
+
+interface MemberSidebarRowProps {
+  displayName: string;
+  color: string;
+  icon?: string | null;
+  isInactive?: boolean;
+  onEdit?: () => void;
+}
+
+function MemberSidebarRow({ displayName, color, icon, isInactive = false, onEdit }: MemberSidebarRowProps) {
+  const [hovered, setHovered] = useState(false);
+  return (
+    <div
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        display: 'flex', alignItems: 'center', gap: 8,
+        padding: '4px 6px 4px 16px', cursor: 'default',
+        background: hovered ? 'rgba(255,255,255,0.05)' : 'transparent',
+        opacity: isInactive ? 0.45 : 1,
+      }}
+    >
+      <Badge
+        identity={{ color, icon: icon ?? '__name_words__' }}
+        name={displayName}
+        shape="circle"
+        size={20}
+      />
+      <span style={{ fontSize: 13, color: 'rgba(255,255,255,0.65)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
+        {displayName}
+      </span>
+      {onEdit && (
+        <button
+          onClick={e => { e.stopPropagation(); onEdit(); }}
+          title={`Edit ${displayName}`}
+          style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            width: 22, height: 22, marginRight: 6,
+            background: 'none', border: 'none', borderRadius: 4,
+            color: 'rgba(255,255,255,0.4)', cursor: 'pointer', flexShrink: 0,
+            opacity: hovered ? 1 : 0,
+            transition: 'opacity 0.12s',
+            pointerEvents: hovered ? 'auto' : 'none',
+          }}
+          onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.8)')}
+          onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.4)')}
+        >
+          <Settings2 width={12} height={12} strokeWidth={1.8} />
+        </button>
+      )}
+    </div>
+  );
+}
+
+// ── Sidebar ───────────────────────────────────────────────────────────────────
+
+/**
+ * Left navigation rail: brand, team selector with members, and timeline list.
+ * Collapsed/expanded state is driven by the parent.
+ */
+const TIMELINE_COLORS = ['#1A97A2', '#6366F1', '#F17B2B', '#E11D48', '#10B981', '#F59E0B']
+
+export default function Sidebar({ collapsed, onToggle, onNewActivity, onBulkImport, apiTimelines, archivedTimelines = [], activeTimelineId, onActiveTimelineChange, onNewTimeline, onEditTimeline, activeTeam, activeTeams = [], archivedTeams = [], onNewTeam, onEditTeam, onSelectTeam, canEditTeam = false, members: apiMembers, onEditMember }: Props) {
+  const { user } = useAuth();
+  const currentUserId = (user as { id?: string } | null)?.id;
+  const [internalActiveId, setInternalActiveId] = useState('');
+  const [teamOpen, setTeamOpen] = useState(true);
+  const [connectorsOpen, setConnectorsOpen] = useState(true);
+  // Combo "New activity" dropdown (expanded + collapsed share this state).
+  const [newMenuOpen, setNewMenuOpen] = useState(false);
+  const newMenuRef = useRef<HTMLDivElement>(null);
+  // Collapsed-mode menu is rendered fixed (the rail clips overflow), so we
+  // capture the trigger's viewport rect when it opens.
+  const [collapsedMenuPos, setCollapsedMenuPos] = useState<{ top: number; left: number } | null>(null);
+  // Primary accent for the "New activity" combo button.
+  const NEW_BTN_BG = 'var(--primary)';
+  const NEW_BTN_FG = 'var(--primary-foreground)';
+  const [archivedOpen, setArchivedOpen] = useState(false);
+  const [timelinesOpen, setTimelinesOpen] = useState(true);
+  const [membersOpen, setMembersOpen] = useState(true);
+  const [archivedTeamsOpen, setArchivedTeamsOpen] = useState(false);
+
+  const allExpanded = teamOpen && timelinesOpen && connectorsOpen && membersOpen;
+  function toggleAllSections() {
+    const next = !allExpanded;
+    setTeamOpen(next);
+    setTimelinesOpen(next);
+    setConnectorsOpen(next);
+    setMembersOpen(next);
+    if (!next) {
+      setArchivedOpen(false);
+      setArchivedTeamsOpen(false);
+    }
+  }
+
+  const timelines: Timeline[] = (apiTimelines ?? []).map((t, i) => ({
+    id: t.id,
+    name: t.name,
+    color: t.color ?? TIMELINE_COLORS[i % TIMELINE_COLORS.length],
+    icon: t.icon ?? null,
+    startDate: t.startDate,
+    endDate: t.endDate,
+  }))
+
+  const archivedTimelineItems: Timeline[] = archivedTimelines.map((t) => ({
+    id: t.id,
+    name: t.name,
+    color: t.color ?? '#64748B',
+    icon: t.icon ?? null,
+    startDate: t.startDate,
+    endDate: t.endDate,
+  }))
+  const activeId = activeTimelineId ?? internalActiveId
+  const activeTimeline = timelines.find(t => t.id === activeId) ?? timelines[0] ?? null;
+
+  const [sidebarWidth, setSidebarWidth] = useState(SIDEBAR_MIN);
+  const dragging = useRef(false);
+  const startX = useRef(0);
+  const startW = useRef(SIDEBAR_MIN);
+
+  useEffect(() => {
+    function onMouseMove(e: MouseEvent) {
+      if (!dragging.current) return;
+      const delta = e.clientX - startX.current;
+      setSidebarWidth(Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, startW.current + delta)));
+    }
+    function onMouseUp() {
+      if (!dragging.current) return;
+      dragging.current = false;
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    }
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+    return () => {
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onMouseUp);
+    };
+  }, []);
+
+  // Close the "New activity" dropdown on outside click or Escape.
+  useEffect(() => {
+    if (!newMenuOpen) return;
+    function onDocMouseDown(e: MouseEvent) {
+      if (newMenuRef.current && !newMenuRef.current.contains(e.target as Node)) {
+        setNewMenuOpen(false);
+      }
+    }
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key === 'Escape') setNewMenuOpen(false);
+    }
+    document.addEventListener('mousedown', onDocMouseDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', onDocMouseDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [newMenuOpen]);
+
+  function onHandleMouseDown(e: React.MouseEvent) {
+    e.preventDefault();
+    dragging.current = true;
+    startX.current = e.clientX;
+    startW.current = sidebarWidth;
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+  }
+
+  return (
+    <div
+      style={{
+        position: 'relative',
+        width: collapsed ? 52 : sidebarWidth,
+        flexShrink: 0,
+        background: 'var(--color-charcoal)',
+        color: 'white',
+        display: 'flex',
+        flexDirection: 'column',
+        transition: 'width 0.2s ease',
+        overflow: 'hidden',
+        borderRight: '1px solid rgba(255,255,255,0.06)',
+      }}
+    >
+      {/* Logo + collapse toggle */}
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: collapsed ? 'center' : 'space-between',
+          padding: collapsed ? '0 13px' : '0 8px 0 16px',
+          borderBottom: '1px solid rgba(255,255,255,0.08)',
+          height: 'var(--topbar-h)',
+          flexShrink: 0,
+        }}
+      >
+        {!collapsed && (
+          <div
+            onClick={onToggle}
+            style={{ display: 'flex', alignItems: 'center', gap: 9, cursor: 'pointer' }}
+          >
+            <img src="/logo.svg" alt="Draba" style={{ width: 28, height: 28 }} />
+            <span style={{ fontSize: 22, fontWeight: 700, letterSpacing: '-0.02em', color: 'white' }}>
+              draba
+            </span>
+          </div>
+        )}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+          {!collapsed && (
+            <button
+              onClick={toggleAllSections}
+              title={allExpanded ? 'Collapse all sections' : 'Expand all sections'}
+              style={{
+                background: 'none',
+                border: 'none',
+                color: 'rgba(255,255,255,0.45)',
+                borderRadius: 6,
+                width: 26,
+                height: 26,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                cursor: 'pointer',
+                flexShrink: 0,
+              }}
+              onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.8)')}
+              onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.45)')}
+            >
+              {allExpanded ? <ChevronsDownUp width={14} height={14} strokeWidth={1.8} /> : <ChevronsUpDown width={14} height={14} strokeWidth={1.8} />}
+            </button>
+          )}
+          <button
+            onClick={onToggle}
+            style={{
+              background: 'rgba(255,255,255,0.08)',
+              border: 'none',
+              color: 'rgba(255,255,255,0.7)',
+              borderRadius: 6,
+              width: 26,
+              height: 26,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              cursor: 'pointer',
+              flexShrink: 0,
+            }}
+          >
+            {collapsed ? <ChevronRight {...ICON} /> : <ChevronLeft {...ICON} />}
+          </button>
+        </div>
+      </div>
+
+      {/* Primary "New activity" combo button — sits directly under the brand. */}
+      {!collapsed && (
+        <div
+          ref={newMenuRef}
+          style={{ position: 'relative', padding: '12px 16px 2px', flexShrink: 0 }}
+        >
+          <div style={{ display: 'flex', alignItems: 'stretch' }}>
+            <button
+              onClick={onNewActivity}
+              style={{
+                flex: 1,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: 8,
+                padding: '9px 12px',
+                background: NEW_BTN_BG,
+                border: 'none',
+                borderRadius: '7px 0 0 7px',
+                color: NEW_BTN_FG,
+                fontSize: 13,
+                fontWeight: 600,
+                cursor: 'pointer',
+                fontFamily: 'var(--font-sans)',
+              }}
+              onMouseEnter={e => (e.currentTarget.style.filter = 'brightness(1.08)')}
+              onMouseLeave={e => (e.currentTarget.style.filter = 'none')}
+            >
+              <CalendarPlus width={15} height={15} strokeWidth={2} />
+              New activity
+            </button>
+            <button
+              title="More activity options"
+              aria-haspopup="menu"
+              aria-expanded={newMenuOpen}
+              onClick={() => setNewMenuOpen(o => !o)}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                width: 32,
+                background: NEW_BTN_BG,
+                border: 'none',
+                borderLeft: '1px solid rgba(0,0,0,0.18)',
+                borderRadius: '0 7px 7px 0',
+                color: NEW_BTN_FG,
+                cursor: 'pointer',
+              }}
+              onMouseEnter={e => (e.currentTarget.style.filter = 'brightness(1.08)')}
+              onMouseLeave={e => (e.currentTarget.style.filter = 'none')}
+            >
+              <ChevronDown
+                width={14}
+                height={14}
+                strokeWidth={2}
+                style={{ transform: newMenuOpen ? 'rotate(180deg)' : 'none', transition: 'transform 0.12s' }}
+              />
+            </button>
+          </div>
+
+          {newMenuOpen && (
+            <div
+              role="menu"
+              style={{
+                position: 'absolute',
+                top: 'calc(100% - 4px)',
+                left: 16,
+                right: 16,
+                background: 'var(--color-charcoal)',
+                border: '1px solid rgba(255,255,255,0.12)',
+                borderRadius: 7,
+                boxShadow: '0 8px 24px rgba(0,0,0,0.45)',
+                padding: 4,
+                zIndex: 30,
+              }}
+            >
+              <button
+                role="menuitem"
+                onClick={() => { setNewMenuOpen(false); onBulkImport?.(); }}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 8,
+                  padding: '8px 10px', width: '100%',
+                  background: 'none', border: 'none', borderRadius: 5,
+                  color: 'rgba(255,255,255,0.75)', fontSize: 13,
+                  cursor: 'pointer', fontFamily: 'var(--font-sans)', textAlign: 'left',
+                }}
+                onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.07)')}
+                onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+              >
+                <Upload width={14} height={14} strokeWidth={1.8} />
+                Bulk import
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      <div style={{ flex: 1, overflowY: 'auto' }}>
+
+        {/* Collapsed: team + timeline icons only */}
+        {collapsed && (
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6, padding: '10px 0' }}>
+            {/* Active team badge — click to expand */}
+            <div
+              title={activeTeam?.name ?? 'Team'}
+              onClick={onToggle}
+              style={{ cursor: 'pointer', flexShrink: 0 }}
+            >
+              <Badge
+                identity={{ color: activeTeam?.color ?? 'var(--primary)', icon: activeTeam?.icon ?? '__name_1__' }}
+                name={activeTeam?.name ?? ''}
+                shape="square"
+                size={28}
+              />
+            </div>
+            {/* Active timeline — click to expand */}
+            {activeTimeline && (
+              <div
+                title={activeTimeline.name}
+                onClick={onToggle}
+                style={{ cursor: 'pointer' }}
+              >
+                <Badge
+                  identity={{ color: activeTimeline.color, icon: activeTimeline.icon ?? '__none__' }}
+                  name={activeTimeline.name}
+                  shape="square"
+                  size={28}
+                />
+              </div>
+            )}
+
+            {/* New activity combo — icon button opens a menu with both actions.
+                order:-1 keeps it at the top, matching the expanded layout. */}
+            <div ref={newMenuRef} style={{ position: 'relative', flexShrink: 0, order: -1, marginBottom: 2 }}>
+              <button
+                title="New activity"
+                aria-haspopup="menu"
+                aria-expanded={newMenuOpen}
+                onClick={e => {
+                  if (newMenuOpen) { setNewMenuOpen(false); return; }
+                  const r = e.currentTarget.getBoundingClientRect();
+                  setCollapsedMenuPos({ top: r.top, left: r.right + 6 });
+                  setNewMenuOpen(true);
+                }}
+                style={{
+                  width: 30,
+                  height: 30,
+                  borderRadius: 7,
+                  background: NEW_BTN_BG,
+                  border: 'none',
+                  color: NEW_BTN_FG,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  cursor: 'pointer',
+                }}
+                onMouseEnter={e => (e.currentTarget.style.filter = 'brightness(1.08)')}
+                onMouseLeave={e => (e.currentTarget.style.filter = 'none')}
+              >
+                <CalendarPlus width={16} height={16} strokeWidth={2} />
+              </button>
+
+              {newMenuOpen && collapsedMenuPos && (
+                <div
+                  role="menu"
+                  style={{
+                    position: 'fixed',
+                    top: collapsedMenuPos.top,
+                    left: collapsedMenuPos.left,
+                    minWidth: 160,
+                    background: 'var(--color-charcoal)',
+                    border: '1px solid rgba(255,255,255,0.12)',
+                    borderRadius: 7,
+                    boxShadow: '0 8px 24px rgba(0,0,0,0.45)',
+                    padding: 4,
+                    zIndex: 30,
+                  }}
+                >
+                  <button
+                    role="menuitem"
+                    onClick={() => { setNewMenuOpen(false); onNewActivity?.(); }}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: 8,
+                      padding: '8px 10px', width: '100%',
+                      background: 'none', border: 'none', borderRadius: 5,
+                      color: 'rgba(255,255,255,0.75)', fontSize: 13,
+                      cursor: 'pointer', fontFamily: 'var(--font-sans)', textAlign: 'left',
+                    }}
+                    onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.07)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                  >
+                    <CalendarPlus width={14} height={14} strokeWidth={1.8} />
+                    New activity
+                  </button>
+                  <button
+                    role="menuitem"
+                    onClick={() => { setNewMenuOpen(false); onBulkImport?.(); }}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: 8,
+                      padding: '8px 10px', width: '100%',
+                      background: 'none', border: 'none', borderRadius: 5,
+                      color: 'rgba(255,255,255,0.75)', fontSize: 13,
+                      cursor: 'pointer', fontFamily: 'var(--font-sans)', textAlign: 'left',
+                    }}
+                    onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.07)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                  >
+                    <Upload width={14} height={14} strokeWidth={1.8} />
+                    Bulk import
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Team section */}
+        {!collapsed && (
+          <div style={{ borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
+            {/* Section header — collapsible, same pattern as TIMELINE */}
+            <button
+              onClick={() => setTeamOpen(o => !o)}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                width: '100%',
+                padding: '6px 12px 6px 16px',
+                background: 'none',
+                border: 'none',
+                cursor: 'pointer',
+                color: 'rgba(255,255,255,0.35)',
+                fontFamily: 'var(--font-sans)',
+              }}
+            >
+              <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                Team
+              </span>
+              {teamOpen
+                ? <ChevronDown width={12} height={12} strokeWidth={2} />
+                : <ChevronRight width={12} height={12} strokeWidth={2} />}
+            </button>
+
+            {/* Team rows — active team highlighted; others clickable to switch */}
+            {(teamOpen ? activeTeams : activeTeam ? [activeTeam] : []).map(t => (
+              <TeamRow
+                key={t.id}
+                team={t}
+                isActive={t.id === activeTeam?.id}
+                canEdit={canEditTeam}
+                onSelect={() => onSelectTeam?.(t.id)}
+                onEdit={() => onEditTeam?.(t)}
+              />
+            ))}
+            {/* Fallback when activeTeams not yet loaded but activeTeam is known */}
+            {!activeTeams.length && activeTeam && (
+              <TeamRow
+                team={activeTeam}
+                isActive
+                canEdit={canEditTeam}
+                onEdit={() => onEditTeam?.(activeTeam)}
+              />
+            )}
+
+            {/* New team button — only superadmins get onNewTeam passed from the parent */}
+            {teamOpen && onNewTeam && (
+              <button
+                onClick={onNewTeam}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 8,
+                  padding: '4px 16px', background: 'none', border: 'none',
+                  color: 'rgba(255,255,255,0.35)', fontSize: 12,
+                  cursor: 'pointer', width: '100%', fontFamily: 'var(--font-sans)',
+                }}
+                onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.7)')}
+                onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.35)')}
+              >
+                <Plus {...ICON_SM} />
+                New team
+              </button>
+            )}
+
+            {/* Archived teams — collapsible sub-section, shown when team section is open */}
+            {teamOpen && archivedTeams.length > 0 && (
+              <div>
+                <button
+                  onClick={() => setArchivedTeamsOpen(o => !o)}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 5,
+                    width: '100%', padding: '4px 8px 4px 16px',
+                    background: 'none', border: 'none', cursor: 'pointer',
+                    color: 'rgba(255,255,255,0.25)', fontFamily: 'var(--font-sans)',
+                  }}
+                  onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.5)')}
+                  onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.25)')}
+                >
+                  {archivedTeamsOpen
+                    ? <ChevronDown {...ICON_XS} />
+                    : <ChevronRight {...ICON_XS} />}
+                  <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                    Archived ({archivedTeams.length})
+                  </span>
+                </button>
+                {archivedTeamsOpen && archivedTeams.map(t => (
+                  <TeamRow
+                    key={t.id}
+                    team={t}
+                    isActive={false}
+                    canEdit={Boolean(onNewTeam)}
+                    onEdit={() => onEditTeam?.(t)}
+                  />
+                ))}
+              </div>
+            )}
+
+            {/* Members — only when team section is expanded */}
+            {teamOpen && (
+              <>
+                <button
+                  onClick={() => setMembersOpen(o => !o)}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 5,
+                    width: '100%',
+                    padding: '6px 8px 4px 16px',
+                    background: 'none',
+                    border: 'none',
+                    cursor: 'pointer',
+                    color: 'rgba(255,255,255,0.35)',
+                    fontFamily: 'var(--font-sans)',
+                  }}
+                >
+                  {membersOpen
+                    ? <ChevronDown {...ICON_XS} />
+                    : <ChevronRight {...ICON_XS} />}
+                  <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                    Members
+                  </span>
+                </button>
+
+                {membersOpen && (
+                  <div style={{ paddingBottom: 8 }}>
+                    {(apiMembers ?? []).map(m => {
+                      const displayName = (m as TeamMemberWithUser).displayName || m.id;
+                      const color = m.color ?? '#8b949e';
+                      const icon = (m as TeamMemberWithUser).icon ?? null;
+                      return (
+                        <MemberSidebarRow
+                          key={m.id}
+                          displayName={displayName}
+                          color={color}
+                          icon={icon}
+                          isInactive={Boolean((m as TeamMemberWithUser).archivedAt)}
+                          onEdit={onEditMember && (m as TeamMemberWithUser).userId !== currentUserId
+                            ? () => onEditMember(m as TeamMemberWithUser)
+                            : undefined}
+                        />
+                      );
+                    })}
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        )}
+
+        {/* Timelines section */}
+        <div style={{ padding: '8px 0' }}>
+          {!collapsed ? (
+            <button
+              onClick={() => setTimelinesOpen(o => !o)}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                width: '100%',
+                padding: '6px 12px 4px 16px',
+                background: 'none',
+                border: 'none',
+                cursor: 'pointer',
+                color: 'rgba(255,255,255,0.35)',
+                fontFamily: 'var(--font-sans)',
+              }}
+            >
+              <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                Timeline
+              </span>
+              {timelinesOpen
+                ? <ChevronDown width={12} height={12} strokeWidth={2} />
+                : <ChevronRight width={12} height={12} strokeWidth={2} />}
+            </button>
+          ) : (
+            <div style={{ height: 8 }} />
+          )}
+
+          {!collapsed && (timelinesOpen ? (
+            <>
+              {timelines.map(tl => (
+                <TimelineItem
+                  key={tl.id}
+                  timeline={tl}
+                  active={activeId === tl.id}
+                  collapsed={false}
+                  canEdit={canEditTeam}
+                  onClick={() => { setInternalActiveId(tl.id); onActiveTimelineChange?.(tl.id); }}
+                  onSettings={() => onEditTimeline?.(tl.id)}
+                />
+              ))}
+              <button
+                onClick={onNewTimeline}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  padding: '6px 16px',
+                  background: 'none',
+                  border: 'none',
+                  color: 'rgba(255,255,255,0.35)',
+                  fontSize: 12,
+                  cursor: onNewTimeline ? 'pointer' : 'default',
+                  width: '100%',
+                  fontFamily: 'var(--font-sans)',
+                  marginTop: 2,
+                }}
+                onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.7)')}
+                onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.35)')}
+              >
+                <Plus {...ICON_SM} />
+                New timeline
+              </button>
+
+              {/* Archived sub-section */}
+              {archivedTimelineItems.length > 0 && (
+                <>
+                  <button
+                    onClick={() => setArchivedOpen(o => !o)}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: 5,
+                      width: '100%', padding: '6px 12px 4px 16px',
+                      background: 'none', border: 'none', cursor: 'pointer',
+                      color: 'rgba(255,255,255,0.25)', fontFamily: 'var(--font-sans)',
+                      marginTop: 4,
+                    }}
+                    onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.45)')}
+                    onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.25)')}
+                  >
+                    {archivedOpen
+                      ? <ChevronDown {...ICON_XS} />
+                      : <ChevronRight {...ICON_XS} />}
+                    <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                      Archived
+                    </span>
+                    <span style={{ fontSize: 10, marginLeft: 4 }}>({archivedTimelineItems.length})</span>
+                  </button>
+
+                  {archivedOpen && (
+                    <div style={{ opacity: 0.6 }}>
+                      {archivedTimelineItems.map(tl => (
+                        <TimelineItem
+                          key={tl.id}
+                          timeline={tl}
+                          active={false}
+                          collapsed={false}
+                          canEdit={canEditTeam}
+                          onClick={() => {}}
+                          onSettings={() => onEditTimeline?.(tl.id)}
+                        />
+                      ))}
+                    </div>
+                  )}
+                </>
+              )}
+            </>
+          ) : (
+            /* Section collapsed: show just the active timeline */
+            <TimelineItem
+              timeline={activeTimeline}
+              active={true}
+              collapsed={false}
+              showDate={false}
+              canEdit={canEditTeam}
+              onClick={() => setTimelinesOpen(true)}
+              onSettings={() => onEditTimeline?.(activeTimeline.id)}
+            />
+          ))}
+        </div>
+        {/* Connectors section — contextual to active timeline */}
+        {!collapsed && (
+          <div style={{ padding: '8px 0', borderTop: '1px solid rgba(255,255,255,0.08)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', padding: '6px 6px 4px 16px' }}>
+              <button
+                onClick={() => setConnectorsOpen(o => !o)}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 6, flex: 1,
+                  background: 'none', border: 'none', cursor: 'pointer',
+                  color: 'rgba(255,255,255,0.35)', fontFamily: 'var(--font-sans)',
+                  padding: 0,
+                }}
+              >
+                <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                  Connectors
+                </span>
+                {connectorsOpen
+                  ? <ChevronDown width={12} height={12} strokeWidth={2} />
+                  : <ChevronRight width={12} height={12} strokeWidth={2} />}
+              </button>
+            </div>
+
+            {connectorsOpen && (
+              <>
+                <div style={{
+                  padding: '0 16px 4px',
+                  fontSize: 10,
+                  color: 'rgba(255,255,255,0.22)',
+                  letterSpacing: '0.02em',
+                }}>
+                  {activeTimeline?.name}
+                </div>
+                {/* Stub: connected Trello board */}
+                <ConnectorItem name="Trello — Launch Board" status="Synced · 2 min ago" color="#0079BF" />
+                <button
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 8,
+                    padding: '6px 16px', background: 'none', border: 'none',
+                    color: 'rgba(255,255,255,0.35)', fontSize: 12,
+                    cursor: 'pointer', width: '100%', fontFamily: 'var(--font-sans)',
+                  }}
+                  onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.7)')}
+                  onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.35)')}
+                >
+                  <Plug width={13} height={13} strokeWidth={1.8} />
+                  Add connector
+                </button>
+              </>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Resize handle */}
+      {!collapsed && (
+        <div
+          onMouseDown={onHandleMouseDown}
+          style={{
+            position: 'absolute',
+            top: 0,
+            right: 0,
+            width: 5,
+            height: '100%',
+            cursor: 'col-resize',
+            zIndex: 20,
+          }}
+          onMouseEnter={e => ((e.currentTarget.lastElementChild as HTMLElement).style.background = 'var(--primary)')}
+          onMouseLeave={e => ((e.currentTarget.lastElementChild as HTMLElement).style.background = 'transparent')}
+        >
+          <div
+            style={{
+              position: 'absolute',
+              top: 0,
+              right: 0,
+              width: 2,
+              height: '100%',
+              background: 'transparent',
+              transition: 'background 0.15s',
+              pointerEvents: 'none',
+            }}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+````
+
 ## File: packages/web/src/components/list/ListView.tsx
 ````typescript
 /**
@@ -35562,10 +36772,24 @@ interface Props {
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
+/** Formats a genuine timestamp (createdAt, updatedAt) in the user's local timezone. */
 function formatDate(iso: string | null | undefined): string {
   if (!iso) return '—';
   const d = new Date(iso);
   return isNaN(d.getTime()) ? '—' : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+/**
+ * Formats an all-day activity date (startAt, endAt) in UTC so that
+ * midnight-UTC dates like "2026-05-31T00:00:00Z" display as "May 31"
+ * regardless of the viewer's local timezone.
+ *
+ * TODO: branch on allDay when timed events ship (Phase 15 calendar sync).
+ */
+function formatActivityDate(iso: string | null | undefined): string {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  return isNaN(d.getTime()) ? '—' : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
 }
 
 function formatDuration(startAt: string | null | undefined, endAt: string | null | undefined): string {
@@ -37621,7 +38845,7 @@ export default function ListView({
                         }}
                       >
                         <span style={{ color: iso ? 'var(--foreground)' : 'var(--muted-foreground)' }}>
-                          {formatDate(iso)}
+                          {formatActivityDate(iso)}
                         </span>
                       </td>
                     );
@@ -37858,1161 +39082,555 @@ export default function ListView({
 }
 ````
 
-## File: packages/web/src/components/layout/Sidebar.tsx
+## File: packages/web/src/hooks/useTeamActivities.ts
 ````typescript
-import { useState, useRef, useEffect } from 'react';
-import {
-  ChevronRight,
-  ChevronLeft,
-  ChevronDown,
-  ChevronsDownUp,
-  ChevronsUpDown,
-  Plus,
-  Settings2,
-  Upload,
-  CalendarPlus,
-  Plug,
-} from 'lucide-react';
-import { Badge } from '@/components/identity/Badge';
-import { useAuth } from '@/contexts/AuthContext';
-import type { components } from '@draba/shared';
+/**
+ * TanStack Query hooks for team-scoped data.
+ *
+ * All hooks call createAuthFetch to inject the current access token at
+ * query-time so stale closures never send an expired token.
+ */
 
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
+import { useCallback } from 'react'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import type { components } from '@draba/shared'
+import { createAuthFetch } from '@/lib/api'
+import { useAuth } from '@/contexts/AuthContext'
+import { useWebSocket } from '@/hooks/useWebSocket'
 
-const SIDEBAR_MIN = 220;
-const SIDEBAR_MAX = 360;
+type Activity = components['schemas']['Activity']
+type Team = components['schemas']['Team']
+type Timeline = components['schemas']['Timeline']
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
+type TimelineAccessEntry = components['schemas']['TimelineAccessEntry']
+type PatchTimelineInput = components['schemas']['PatchTimelineInput']
 
-interface ApiTeam {
-  id: string;
-  name: string;
-  color?: string | null;
-  icon?: string | null;
-  archivedAt?: string | null;
+/** Query key factory — centralises cache key strings. */
+export const keys = {
+  myTeams: () => ['teams'] as const,
+  timelineActivities: (timelineId: string, from?: string, to?: string) =>
+    ['timelines', timelineId, 'activities', { from, to }] as const,
+  teamMembers: (teamId: string) =>
+    ['teams', teamId, 'members'] as const,
+  teamTimelines: (teamId: string) =>
+    ['teams', teamId, 'timelines'] as const,
 }
 
-interface ApiTimeline {
-  id: string;
-  name: string;
-  startDate?: string;
-  endDate?: string;
-  color?: string | null;
-  icon?: string | null;
-  archivedAt?: string | null;
+/** Fetches all teams the authenticated user belongs to. */
+export function useMyTeams(includeArchived = false) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: [...keys.myTeams(), { includeArchived }],
+    queryFn: async () => (await authFetch<Team[] | null>(includeArchived ? '/teams?archived=true' : '/teams')) ?? [],
+  })
 }
 
-interface Props {
-  collapsed: boolean;
-  onToggle: () => void;
-  onNewActivity?: () => void;
-  /** Stub: bulk-import activities. Surfaced in the "New activity" combo dropdown. */
-  onBulkImport?: () => void;
-  apiTimelines?: ApiTimeline[];
-  archivedTimelines?: ApiTimeline[];
-  activeTimelineId?: string;
-  onActiveTimelineChange?: (id: string) => void;
-  onNewTimeline?: () => void;
-  onEditTimeline?: (timelineId: string) => void;
-  // Team management
-  activeTeam?: ApiTeam;
-  /** All non-archived teams. Used to render the switchable team list. */
-  activeTeams?: ApiTeam[];
-  archivedTeams?: ApiTeam[];
-  onNewTeam?: () => void;
-  onEditTeam?: (team: ApiTeam) => void;
-  onSelectTeam?: (teamId: string) => void;
-  onUnarchiveTeam?: (teamId: string) => void;
-  /** True when the current user is an admin of the active team. */
-  canEditTeam?: boolean;
-  /** Live member list from the API. */
-  members?: TeamMemberWithUser[];
-  /** Called when the user clicks the gear icon on a member row. */
-  onEditMember?: (member: TeamMemberWithUser) => void;
+/** Fetches a single team by ID. */
+export function useTeam(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: ['teams', teamId],
+    queryFn: () => authFetch<Team>(`/teams/${teamId}`),
+    enabled: Boolean(teamId),
+  })
 }
 
-const ICON = { width: 15, height: 15, strokeWidth: 1.8 } as const;
-const ICON_SM = { width: 13, height: 13, strokeWidth: 1.8 } as const;
-const ICON_XS = { width: 11, height: 11, strokeWidth: 2 } as const;
+/** Fetches all non-archived timelines for a team. */
+export function useTeamTimelines(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
 
-interface Timeline {
-  id: string;
-  name: string;
-  color: string;
-  icon: string | null;
-  startDate?: string;
-  endDate?: string;
+  return useQuery({
+    queryKey: keys.teamTimelines(teamId),
+    queryFn: async () => (await authFetch<Timeline[] | null>(`/teams/${teamId}/timelines`)) ?? [],
+    enabled: Boolean(teamId),
+  })
 }
 
-const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+/** Fetches activities for a timeline, optionally bounded by date range. */
+export function useTimelineActivities(teamId: string, timelineId: string, from?: string, to?: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
 
-function formatDateRange(startDate?: string, endDate?: string): string {
-  if (!startDate || !endDate) return ''
-  const s = new Date(startDate + 'T00:00:00')
-  const e = new Date(endDate + 'T00:00:00')
-  const diffDays = (e.getTime() - s.getTime()) / 86_400_000
-  if (diffDays < 90) {
-    return `${MONTHS[s.getMonth()]} ${s.getDate()} – ${MONTHS[e.getMonth()]} ${e.getDate()} ${e.getFullYear()}`
-  }
-  return `${MONTHS[s.getMonth()]} ${s.getFullYear()} – ${MONTHS[e.getMonth()]} ${e.getFullYear()}`
+  return useQuery({
+    queryKey: keys.timelineActivities(timelineId, from, to),
+    queryFn: async () => {
+      const params = new URLSearchParams()
+      if (from) params.set('from', from)
+      if (to) params.set('to', to)
+      const qs = params.toString()
+      return (await authFetch<Activity[] | null>(`/teams/${teamId}/timelines/${timelineId}/activities${qs ? `?${qs}` : ''}`)) ?? []
+    },
+    enabled: Boolean(teamId) && Boolean(timelineId),
+  })
 }
 
+/** Fetches the member list for a team. */
+export function useTeamMembers(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
 
-interface TimelineItemProps {
-  timeline: Timeline;
-  active: boolean;
-  collapsed: boolean;
-  showDate?: boolean;
-  canEdit?: boolean;
-  onClick: () => void;
-  onSettings: () => void;
+  return useQuery({
+    queryKey: keys.teamMembers(teamId),
+    queryFn: async () => (await authFetch<TeamMemberWithUser[] | null>(`/teams/${teamId}/members`)) ?? [],
+    enabled: Boolean(teamId),
+  })
 }
-
-function TimelineItem({ timeline, active, collapsed, showDate = true, canEdit = false, onClick, onSettings }: TimelineItemProps) {
-  const [hovered, setHovered] = useState(false);
-  const dateRange = !collapsed && showDate ? formatDateRange(timeline.startDate, timeline.endDate) : ''
-
-  return (
-    <div
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        background: active
-          ? 'rgba(255,255,255,0.10)'
-          : hovered
-          ? 'rgba(255,255,255,0.05)'
-          : 'transparent',
-        borderLeft: active ? `2px solid ${timeline.color}` : '2px solid transparent',
-        transition: 'background 0.12s',
-        cursor: 'pointer',
-        minHeight: 34,
-      }}
-    >
-      <button
-        onClick={onClick}
-        title={collapsed ? timeline.name : undefined}
-        style={{
-          flex: 1,
-          display: 'flex',
-          alignItems: 'center',
-          gap: 8,
-          padding: collapsed ? '7px 14px' : '6px 8px 6px 16px',
-          background: 'none',
-          border: 'none',
-          color: active ? 'white' : 'rgba(255,255,255,0.65)',
-          fontSize: 13,
-          fontWeight: active ? 600 : 400,
-          cursor: 'pointer',
-          fontFamily: 'var(--font-sans)',
-          textAlign: 'left',
-          minWidth: 0,
-        }}
-      >
-        <Badge
-          identity={{ color: timeline.color, icon: timeline.icon ?? '__none__' }}
-          name={timeline.name}
-          shape="square"
-          size={20}
-        />
-        {!collapsed && (
-          <div style={{ minWidth: 0, flex: 1 }}>
-            <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {timeline.name}
-            </div>
-            {dateRange && (
-              <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)', marginTop: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {dateRange}
-              </div>
-            )}
-          </div>
-        )}
-      </button>
-
-      {!collapsed && canEdit && (
-        <button
-          onClick={e => { e.stopPropagation(); onSettings(); }}
-          title={`Configure ${timeline.name}`}
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            width: 26,
-            height: 26,
-            marginRight: 6,
-            background: 'none',
-            border: 'none',
-            borderRadius: 5,
-            color: 'rgba(255,255,255,0.4)',
-            cursor: 'pointer',
-            opacity: hovered ? 1 : 0,
-            transition: 'opacity 0.12s',
-            flexShrink: 0,
-          }}
-          onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.8)')}
-          onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.4)')}
-        >
-          <Settings2 {...ICON_SM} />
-        </button>
-      )}
-    </div>
-  );
-}
-
-function ConnectorItem({ name, status, color }: { name: string; status: string; color: string }) {
-  const [hovered, setHovered] = useState(false);
-
-  return (
-    <div
-      style={{
-        display: 'flex', alignItems: 'center', gap: 8,
-        padding: '6px 6px 6px 16px',
-        cursor: 'pointer',
-        background: hovered ? 'rgba(255,255,255,0.05)' : 'transparent',
-        transition: 'background 0.12s',
-      }}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-    >
-      <div style={{
-        width: 20, height: 20, borderRadius: 4,
-        background: color,
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-        flexShrink: 0,
-      }}>
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="white">
-          <rect x="1" y="1" width="9" height="18" rx="1.5" />
-          <rect x="14" y="1" width="9" height="12" rx="1.5" />
-        </svg>
-      </div>
-      <div style={{ minWidth: 0, flex: 1 }}>
-        <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.65)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {name}
-        </div>
-        <div style={{ fontSize: 9, color: 'rgba(255,255,255,0.25)', marginTop: 1 }}>
-          {status}
-        </div>
-      </div>
-      <button
-        title={`Configure ${name}`}
-        style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          width: 26, height: 26, marginRight: 0,
-          background: 'none', border: 'none', borderRadius: 5,
-          color: 'rgba(255,255,255,0.4)', cursor: 'pointer',
-          opacity: hovered ? 1 : 0, transition: 'opacity 0.12s',
-          flexShrink: 0,
-        }}
-        onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.8)')}
-        onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.4)')}
-      >
-        <Settings2 {...ICON_SM} />
-      </button>
-    </div>
-  );
-}
-
-// ── TeamRow ──────────────────────────────────────────────────────────────────
-
-interface TeamRowProps {
-  team: ApiTeam;
-  isActive: boolean;
-  canEdit: boolean;
-  onSelect?: () => void;
-  onEdit?: () => void;
-}
-
-function TeamRow({ team, isActive, canEdit, onSelect, onEdit }: TeamRowProps) {
-  const [hovered, setHovered] = useState(false);
-
-  return (
-    <div
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-      onClick={() => { if (!isActive) onSelect?.(); }}
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        padding: '5px 6px 5px 16px',
-        borderLeft: isActive ? `2px solid ${team.color ?? 'var(--primary)'}` : '2px solid transparent',
-        background: isActive ? 'rgba(255,255,255,0.07)' : hovered ? 'rgba(255,255,255,0.03)' : 'transparent',
-        cursor: isActive ? 'default' : 'pointer',
-        minHeight: 34,
-        transition: 'background 0.12s',
-      }}
-    >
-      <Badge
-        identity={{ color: team.color ?? 'var(--primary)', icon: team.icon ?? '__name_1__' }}
-        name={team.name}
-        shape="square"
-        size={20}
-      />
-      <span style={{
-        fontSize: 13,
-        fontWeight: isActive ? 600 : 400,
-        color: isActive ? 'white' : 'rgba(255,255,255,0.65)',
-        flex: 1,
-        marginLeft: 8,
-        overflow: 'hidden',
-        textOverflow: 'ellipsis',
-        whiteSpace: 'nowrap',
-        minWidth: 0,
-      }}>
-        {team.name}
-      </span>
-      {canEdit && (
-        <button
-          title="Team settings"
-          onClick={e => { e.stopPropagation(); onEdit?.(); }}
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            width: 26,
-            height: 26,
-            marginRight: 6,
-            background: 'none',
-            border: 'none',
-            borderRadius: 5,
-            color: 'rgba(255,255,255,0.4)',
-            cursor: 'pointer',
-            opacity: hovered ? 1 : 0,
-            transition: 'opacity 0.12s',
-            flexShrink: 0,
-          }}
-          onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.8)')}
-          onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.4)')}
-        >
-          <Settings2 {...ICON_SM} />
-        </button>
-      )}
-    </div>
-  );
-}
-
-// ── MemberSidebarRow ──────────────────────────────────────────────────────────
-
-interface MemberSidebarRowProps {
-  displayName: string;
-  color: string;
-  icon?: string | null;
-  isInactive?: boolean;
-  onEdit?: () => void;
-}
-
-function MemberSidebarRow({ displayName, color, icon, isInactive = false, onEdit }: MemberSidebarRowProps) {
-  const [hovered, setHovered] = useState(false);
-  return (
-    <div
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-      style={{
-        display: 'flex', alignItems: 'center', gap: 8,
-        padding: '4px 6px 4px 16px', cursor: 'default',
-        background: hovered ? 'rgba(255,255,255,0.05)' : 'transparent',
-        opacity: isInactive ? 0.45 : 1,
-      }}
-    >
-      <Badge
-        identity={{ color, icon: icon ?? '__name_words__' }}
-        name={displayName}
-        shape="circle"
-        size={20}
-      />
-      <span style={{ fontSize: 13, color: 'rgba(255,255,255,0.65)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
-        {displayName}
-      </span>
-      {onEdit && (
-        <button
-          onClick={e => { e.stopPropagation(); onEdit(); }}
-          title={`Edit ${displayName}`}
-          style={{
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            width: 22, height: 22, marginRight: 6,
-            background: 'none', border: 'none', borderRadius: 4,
-            color: 'rgba(255,255,255,0.4)', cursor: 'pointer', flexShrink: 0,
-            opacity: hovered ? 1 : 0,
-            transition: 'opacity 0.12s',
-            pointerEvents: hovered ? 'auto' : 'none',
-          }}
-          onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.8)')}
-          onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.4)')}
-        >
-          <Settings2 width={12} height={12} strokeWidth={1.8} />
-        </button>
-      )}
-    </div>
-  );
-}
-
-// ── Sidebar ───────────────────────────────────────────────────────────────────
 
 /**
- * Left navigation rail: brand, team selector with members, and timeline list.
- * Collapsed/expanded state is driven by the parent.
+ * Subscribes to the team's WebSocket feed and applies surgical cache updates
+ * for activity.created / activity.updated / activity.deleted deltas.
+ *
+ * Conflict strategy: for activity.updated, incoming deltas are only applied
+ * when their updatedAt timestamp is strictly newer than the cached version.
+ * This prevents self-echo (our own PATCH broadcast arriving back) and handles
+ * the last-writer-wins case where a concurrent remote edit arrives while our
+ * mutation is in-flight — the server-returned updatedAt on our onSuccess will
+ * always win if our PATCH was truly last.
  */
-const TIMELINE_COLORS = ['#1A97A2', '#6366F1', '#F17B2B', '#E11D48', '#10B981', '#F59E0B']
+export function useTeamActivitySync(
+  teamId: string,
+  accessToken: string | null | undefined,
+) {
+  const client = useQueryClient()
 
-export default function Sidebar({ collapsed, onToggle, onNewActivity, onBulkImport, apiTimelines, archivedTimelines = [], activeTimelineId, onActiveTimelineChange, onNewTimeline, onEditTimeline, activeTeam, activeTeams = [], archivedTeams = [], onNewTeam, onEditTeam, onSelectTeam, canEditTeam = false, members: apiMembers, onEditMember }: Props) {
-  const { user } = useAuth();
-  const currentUserId = (user as { id?: string } | null)?.id;
-  const [internalActiveId, setInternalActiveId] = useState('');
-  const [teamOpen, setTeamOpen] = useState(true);
-  const [connectorsOpen, setConnectorsOpen] = useState(true);
-  // Combo "New activity" dropdown (expanded + collapsed share this state).
-  const [newMenuOpen, setNewMenuOpen] = useState(false);
-  const newMenuRef = useRef<HTMLDivElement>(null);
-  // Collapsed-mode menu is rendered fixed (the rail clips overflow), so we
-  // capture the trigger's viewport rect when it opens.
-  const [collapsedMenuPos, setCollapsedMenuPos] = useState<{ top: number; left: number } | null>(null);
-  // Primary accent for the "New activity" combo button.
-  const NEW_BTN_BG = 'var(--primary)';
-  const NEW_BTN_FG = 'var(--primary-foreground)';
-  const [archivedOpen, setArchivedOpen] = useState(false);
-  const [timelinesOpen, setTimelinesOpen] = useState(true);
-  const [membersOpen, setMembersOpen] = useState(true);
-  const [archivedTeamsOpen, setArchivedTeamsOpen] = useState(false);
+  const handleMessage = useCallback(
+    (msg: { type: string; payload?: unknown }) => {
+      if (!teamId || !msg.payload) return
 
-  const allExpanded = teamOpen && timelinesOpen && connectorsOpen && membersOpen;
-  function toggleAllSections() {
-    const next = !allExpanded;
-    setTeamOpen(next);
-    setTimelinesOpen(next);
-    setConnectorsOpen(next);
-    setMembersOpen(next);
-    if (!next) {
-      setArchivedOpen(false);
-      setArchivedTeamsOpen(false);
-    }
-  }
-
-  const timelines: Timeline[] = (apiTimelines ?? []).map((t, i) => ({
-    id: t.id,
-    name: t.name,
-    color: t.color ?? TIMELINE_COLORS[i % TIMELINE_COLORS.length],
-    icon: t.icon ?? null,
-    startDate: t.startDate,
-    endDate: t.endDate,
-  }))
-
-  const archivedTimelineItems: Timeline[] = archivedTimelines.map((t) => ({
-    id: t.id,
-    name: t.name,
-    color: t.color ?? '#64748B',
-    icon: t.icon ?? null,
-    startDate: t.startDate,
-    endDate: t.endDate,
-  }))
-  const activeId = activeTimelineId ?? internalActiveId
-  const activeTimeline = timelines.find(t => t.id === activeId) ?? timelines[0] ?? null;
-
-  const [sidebarWidth, setSidebarWidth] = useState(SIDEBAR_MIN);
-  const dragging = useRef(false);
-  const startX = useRef(0);
-  const startW = useRef(SIDEBAR_MIN);
-
-  useEffect(() => {
-    function onMouseMove(e: MouseEvent) {
-      if (!dragging.current) return;
-      const delta = e.clientX - startX.current;
-      setSidebarWidth(Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, startW.current + delta)));
-    }
-    function onMouseUp() {
-      if (!dragging.current) return;
-      dragging.current = false;
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
-    }
-    document.addEventListener('mousemove', onMouseMove);
-    document.addEventListener('mouseup', onMouseUp);
-    return () => {
-      document.removeEventListener('mousemove', onMouseMove);
-      document.removeEventListener('mouseup', onMouseUp);
-    };
-  }, []);
-
-  // Close the "New activity" dropdown on outside click or Escape.
-  useEffect(() => {
-    if (!newMenuOpen) return;
-    function onDocMouseDown(e: MouseEvent) {
-      if (newMenuRef.current && !newMenuRef.current.contains(e.target as Node)) {
-        setNewMenuOpen(false);
+      if (msg.type === 'activity.created') {
+        const incoming = msg.payload as Activity
+        // Target all timeline-scoped activity cache entries by using the
+        // timelineId from the incoming activity payload.
+        if (!incoming.timelineId) return
+        client.setQueriesData<Activity[]>(
+          { queryKey: ['timelines', incoming.timelineId, 'activities'] },
+          (old) => {
+            if (!old) return old
+            // Guard against duplicate delivery.
+            if (old.some((a) => a.id === incoming.id)) return old
+            return [...old, incoming]
+          },
+        )
+      } else if (msg.type === 'activity.updated') {
+        const incoming = msg.payload as Activity
+        if (!incoming.timelineId) return
+        client.setQueriesData<Activity[]>(
+          { queryKey: ['timelines', incoming.timelineId, 'activities'] },
+          (old) => {
+            if (!old) return old
+            return old.map((a) => {
+              if (a.id !== incoming.id) return a
+              // Skip if the cache already holds the same or a newer version.
+              const cachedMs = new Date(a.updatedAt).getTime()
+              const incomingMs = new Date(incoming.updatedAt).getTime()
+              return incomingMs > cachedMs ? incoming : a
+            })
+          },
+        )
+      } else if (msg.type === 'activity.deleted') {
+        const { id } = msg.payload as { id: string }
+        // activity.deleted payload only has id — invalidate all timeline
+        // activity queries for this team so caches stay consistent.
+        client.invalidateQueries({ queryKey: ['timelines'] })
+        // Optimistically remove from all cached timeline activity lists.
+        client.setQueriesData<Activity[]>(
+          { queryKey: ['timelines'] },
+          (old) => old?.filter((a) => a.id !== id),
+        )
       }
-    }
-    function onKeyDown(e: KeyboardEvent) {
-      if (e.key === 'Escape') setNewMenuOpen(false);
-    }
-    document.addEventListener('mousedown', onDocMouseDown);
-    document.addEventListener('keydown', onKeyDown);
-    return () => {
-      document.removeEventListener('mousedown', onDocMouseDown);
-      document.removeEventListener('keydown', onKeyDown);
-    };
-  }, [newMenuOpen]);
+    },
+    [client, teamId],
+  )
 
-  function onHandleMouseDown(e: React.MouseEvent) {
-    e.preventDefault();
-    dragging.current = true;
-    startX.current = e.clientX;
-    startW.current = sidebarWidth;
-    document.body.style.cursor = 'col-resize';
-    document.body.style.userSelect = 'none';
+  useWebSocket({
+    token: accessToken,
+    teamIds: teamId ? [teamId] : [],
+    onMessage: handleMessage,
+  })
+}
+
+interface CreateActivityInput {
+  title: string
+  startAt: string
+  endAt: string
+  description?: string | null
+  color?: string | null
+  icon?: string | null
+  assignedMemberIds?: string[]
+  tagIds?: string[]
+  parentActivityId?: string | null
+  percentComplete?: number | null
+  /** Client-only: if set, replace this placeholder ID in the cache instead of appending. */
+  _tempId?: string
+}
+
+interface UpdateActivityInput {
+  activityId: string
+  patch: {
+    title?: string
+    description?: string | null
+    notes?: string | null
+    startAt?: string
+    endAt?: string
+    allDay?: boolean
+    color?: string | null
+    icon?: string | null
+    location?: string | null
+    url?: string | null
+    statusId?: string | null
+    parentActivityId?: string | null
+    percentComplete?: number | null
+    assignedMemberIds?: string[]
+    tagIds?: string[]
   }
+}
 
-  return (
-    <div
-      style={{
-        position: 'relative',
-        width: collapsed ? 52 : sidebarWidth,
-        flexShrink: 0,
-        background: 'var(--color-charcoal)',
-        color: 'white',
-        display: 'flex',
-        flexDirection: 'column',
-        transition: 'width 0.2s ease',
-        overflow: 'hidden',
-        borderRight: '1px solid rgba(255,255,255,0.06)',
-      }}
-    >
-      {/* Logo + collapse toggle */}
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: collapsed ? 'center' : 'space-between',
-          padding: collapsed ? '0 13px' : '0 8px 0 16px',
-          borderBottom: '1px solid rgba(255,255,255,0.08)',
-          height: 'var(--topbar-h)',
-          flexShrink: 0,
-        }}
-      >
-        {!collapsed && (
-          <div
-            onClick={onToggle}
-            style={{ display: 'flex', alignItems: 'center', gap: 9, cursor: 'pointer' }}
-          >
-            <img src="/logo.svg" alt="Draba" style={{ width: 28, height: 28 }} />
-            <span style={{ fontSize: 22, fontWeight: 700, letterSpacing: '-0.02em', color: 'white' }}>
-              draba
-            </span>
-          </div>
-        )}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-          {!collapsed && (
-            <button
-              onClick={toggleAllSections}
-              title={allExpanded ? 'Collapse all sections' : 'Expand all sections'}
-              style={{
-                background: 'none',
-                border: 'none',
-                color: 'rgba(255,255,255,0.45)',
-                borderRadius: 6,
-                width: 26,
-                height: 26,
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                cursor: 'pointer',
-                flexShrink: 0,
-              }}
-              onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.8)')}
-              onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.45)')}
-            >
-              {allExpanded ? <ChevronsDownUp width={14} height={14} strokeWidth={1.8} /> : <ChevronsUpDown width={14} height={14} strokeWidth={1.8} />}
-            </button>
-          )}
-          <button
-            onClick={onToggle}
-            style={{
-              background: 'rgba(255,255,255,0.08)',
-              border: 'none',
-              color: 'rgba(255,255,255,0.7)',
-              borderRadius: 6,
-              width: 26,
-              height: 26,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              cursor: 'pointer',
-              flexShrink: 0,
-            }}
-          >
-            {collapsed ? <ChevronRight {...ICON} /> : <ChevronLeft {...ICON} />}
-          </button>
-        </div>
-      </div>
+/** Creates an activity in a timeline and inserts it directly into the cache. */
+export function useCreateActivity(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
 
-      {/* Primary "New activity" combo button — sits directly under the brand. */}
-      {!collapsed && (
-        <div
-          ref={newMenuRef}
-          style={{ position: 'relative', padding: '12px 16px 2px', flexShrink: 0 }}
-        >
-          <div style={{ display: 'flex', alignItems: 'stretch' }}>
-            <button
-              onClick={onNewActivity}
-              style={{
-                flex: 1,
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                gap: 8,
-                padding: '9px 12px',
-                background: NEW_BTN_BG,
-                border: 'none',
-                borderRadius: '7px 0 0 7px',
-                color: NEW_BTN_FG,
-                fontSize: 13,
-                fontWeight: 600,
-                cursor: 'pointer',
-                fontFamily: 'var(--font-sans)',
-              }}
-              onMouseEnter={e => (e.currentTarget.style.filter = 'brightness(1.08)')}
-              onMouseLeave={e => (e.currentTarget.style.filter = 'none')}
-            >
-              <CalendarPlus width={15} height={15} strokeWidth={2} />
-              New activity
-            </button>
-            <button
-              title="More activity options"
-              aria-haspopup="menu"
-              aria-expanded={newMenuOpen}
-              onClick={() => setNewMenuOpen(o => !o)}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                width: 32,
-                background: NEW_BTN_BG,
-                border: 'none',
-                borderLeft: '1px solid rgba(0,0,0,0.18)',
-                borderRadius: '0 7px 7px 0',
-                color: NEW_BTN_FG,
-                cursor: 'pointer',
-              }}
-              onMouseEnter={e => (e.currentTarget.style.filter = 'brightness(1.08)')}
-              onMouseLeave={e => (e.currentTarget.style.filter = 'none')}
-            >
-              <ChevronDown
-                width={14}
-                height={14}
-                strokeWidth={2}
-                style={{ transform: newMenuOpen ? 'rotate(180deg)' : 'none', transition: 'transform 0.12s' }}
-              />
-            </button>
-          </div>
+  return useMutation({
+    mutationFn: ({ _tempId: _, ...input }: CreateActivityInput) =>
+      authFetch<Activity>(`/teams/${teamId}/timelines/${timelineId}/activities`, {
+        method: 'POST',
+        body: JSON.stringify(input),
+      }),
+    onSuccess: (created, variables) => {
+      const tempId = variables._tempId
+      client.setQueriesData<Activity[]>(
+        { queryKey: ['timelines', timelineId, 'activities'] },
+        (old) => {
+          if (!old) return [created]
+          const hasReal = old.some((a) => a.id === created.id)
+          const hasTemp = tempId ? old.some((a) => a.id === tempId) : false
+          // The WS activity.created self-echo may win the race and append the
+          // real record before this onSuccess runs. In that case we must still
+          // drop the optimistic placeholder, otherwise it lingers as a duplicate
+          // "New Activity" row (and inline edits keep targeting the dead temp id).
+          if (hasReal) {
+            return hasTemp ? old.filter((a) => a.id !== tempId) : old
+          }
+          // Replace optimistic placeholder in-place to avoid a position flash.
+          if (hasTemp) {
+            return old.map((a) => (a.id === tempId ? created : a))
+          }
+          return [...old, created]
+        },
+      )
+    },
+  })
+}
 
-          {newMenuOpen && (
-            <div
-              role="menu"
-              style={{
-                position: 'absolute',
-                top: 'calc(100% - 4px)',
-                left: 16,
-                right: 16,
-                background: 'var(--color-charcoal)',
-                border: '1px solid rgba(255,255,255,0.12)',
-                borderRadius: 7,
-                boxShadow: '0 8px 24px rgba(0,0,0,0.45)',
-                padding: 4,
-                zIndex: 30,
-              }}
-            >
-              <button
-                role="menuitem"
-                onClick={() => { setNewMenuOpen(false); onBulkImport?.(); }}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: 8,
-                  padding: '8px 10px', width: '100%',
-                  background: 'none', border: 'none', borderRadius: 5,
-                  color: 'rgba(255,255,255,0.75)', fontSize: 13,
-                  cursor: 'pointer', fontFamily: 'var(--font-sans)', textAlign: 'left',
-                }}
-                onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.07)')}
-                onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-              >
-                <Upload width={14} height={14} strokeWidth={1.8} />
-                Bulk import
-              </button>
-            </div>
-          )}
-        </div>
-      )}
+/** PATCHes an activity and optimistically updates the cache. */
+export function useUpdateActivity(timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
 
-      <div style={{ flex: 1, overflowY: 'auto' }}>
+  return useMutation({
+    mutationFn: ({ activityId, patch }: UpdateActivityInput) =>
+      authFetch<Activity>(`/activities/${activityId}`, {
+        method: 'PATCH',
+        body: JSON.stringify(patch),
+      }),
+    onMutate: async ({ activityId, patch }) => {
+      await client.cancelQueries({ queryKey: ['timelines', timelineId, 'activities'] })
+      const snapshot = client.getQueriesData<Activity[]>({ queryKey: ['timelines', timelineId, 'activities'] })
+      client.setQueriesData<Activity[]>(
+        { queryKey: ['timelines', timelineId, 'activities'] },
+        (old) => old?.map((a) => (a.id === activityId ? { ...a, ...patch } : a)),
+      )
+      return { snapshot }
+    },
+    onError: (_err, _vars, context) => {
+      if (context?.snapshot) {
+        for (const [key, data] of context.snapshot) {
+          client.setQueryData(key, data)
+        }
+      }
+    },
+    onSuccess: (updated) => {
+      client.setQueriesData<Activity[]>(
+        { queryKey: ['timelines', timelineId, 'activities'] },
+        (old) => old?.map((a) => (a.id === updated.id ? updated : a)),
+      )
+    },
+  })
+}
 
-        {/* Collapsed: team + timeline icons only */}
-        {collapsed && (
-          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6, padding: '10px 0' }}>
-            {/* Active team badge — click to expand */}
-            <div
-              title={activeTeam?.name ?? 'Team'}
-              onClick={onToggle}
-              style={{ cursor: 'pointer', flexShrink: 0 }}
-            >
-              <Badge
-                identity={{ color: activeTeam?.color ?? 'var(--primary)', icon: activeTeam?.icon ?? '__name_1__' }}
-                name={activeTeam?.name ?? ''}
-                shape="square"
-                size={28}
-              />
-            </div>
-            {/* Active timeline — click to expand */}
-            {activeTimeline && (
-              <div
-                title={activeTimeline.name}
-                onClick={onToggle}
-                style={{ cursor: 'pointer' }}
-              >
-                <Badge
-                  identity={{ color: activeTimeline.color, icon: activeTimeline.icon ?? '__none__' }}
-                  name={activeTimeline.name}
-                  shape="square"
-                  size={28}
-                />
-              </div>
-            )}
+interface CreateTeamInput {
+  name: string
+  description?: string | null
+  notes?: string | null
+  color?: string | null
+  icon?: string | null
+}
 
-            {/* New activity combo — icon button opens a menu with both actions.
-                order:-1 keeps it at the top, matching the expanded layout. */}
-            <div ref={newMenuRef} style={{ position: 'relative', flexShrink: 0, order: -1, marginBottom: 2 }}>
-              <button
-                title="New activity"
-                aria-haspopup="menu"
-                aria-expanded={newMenuOpen}
-                onClick={e => {
-                  if (newMenuOpen) { setNewMenuOpen(false); return; }
-                  const r = e.currentTarget.getBoundingClientRect();
-                  setCollapsedMenuPos({ top: r.top, left: r.right + 6 });
-                  setNewMenuOpen(true);
-                }}
-                style={{
-                  width: 30,
-                  height: 30,
-                  borderRadius: 7,
-                  background: NEW_BTN_BG,
-                  border: 'none',
-                  color: NEW_BTN_FG,
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  cursor: 'pointer',
-                }}
-                onMouseEnter={e => (e.currentTarget.style.filter = 'brightness(1.08)')}
-                onMouseLeave={e => (e.currentTarget.style.filter = 'none')}
-              >
-                <CalendarPlus width={16} height={16} strokeWidth={2} />
-              </button>
+interface UpdateTeamInput {
+  teamId: string
+  patch: {
+    name?: string
+    description?: string | null
+    notes?: string | null
+    color?: string | null
+    icon?: string | null
+  }
+}
 
-              {newMenuOpen && collapsedMenuPos && (
-                <div
-                  role="menu"
-                  style={{
-                    position: 'fixed',
-                    top: collapsedMenuPos.top,
-                    left: collapsedMenuPos.left,
-                    minWidth: 160,
-                    background: 'var(--color-charcoal)',
-                    border: '1px solid rgba(255,255,255,0.12)',
-                    borderRadius: 7,
-                    boxShadow: '0 8px 24px rgba(0,0,0,0.45)',
-                    padding: 4,
-                    zIndex: 30,
-                  }}
-                >
-                  <button
-                    role="menuitem"
-                    onClick={() => { setNewMenuOpen(false); onNewActivity?.(); }}
-                    style={{
-                      display: 'flex', alignItems: 'center', gap: 8,
-                      padding: '8px 10px', width: '100%',
-                      background: 'none', border: 'none', borderRadius: 5,
-                      color: 'rgba(255,255,255,0.75)', fontSize: 13,
-                      cursor: 'pointer', fontFamily: 'var(--font-sans)', textAlign: 'left',
-                    }}
-                    onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.07)')}
-                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-                  >
-                    <CalendarPlus width={14} height={14} strokeWidth={1.8} />
-                    New activity
-                  </button>
-                  <button
-                    role="menuitem"
-                    onClick={() => { setNewMenuOpen(false); onBulkImport?.(); }}
-                    style={{
-                      display: 'flex', alignItems: 'center', gap: 8,
-                      padding: '8px 10px', width: '100%',
-                      background: 'none', border: 'none', borderRadius: 5,
-                      color: 'rgba(255,255,255,0.75)', fontSize: 13,
-                      cursor: 'pointer', fontFamily: 'var(--font-sans)', textAlign: 'left',
-                    }}
-                    onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.07)')}
-                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-                  >
-                    <Upload width={14} height={14} strokeWidth={1.8} />
-                    Bulk import
-                  </button>
-                </div>
-              )}
-            </div>
-          </div>
-        )}
+/** Creates a team and inserts it into the active-teams cache. */
+export function useCreateTeam() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
 
-        {/* Team section */}
-        {!collapsed && (
-          <div style={{ borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
-            {/* Section header — collapsible, same pattern as TIMELINE */}
-            <button
-              onClick={() => setTeamOpen(o => !o)}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                width: '100%',
-                padding: '6px 12px 6px 16px',
-                background: 'none',
-                border: 'none',
-                cursor: 'pointer',
-                color: 'rgba(255,255,255,0.35)',
-                fontFamily: 'var(--font-sans)',
-              }}
-            >
-              <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
-                Team
-              </span>
-              {teamOpen
-                ? <ChevronDown width={12} height={12} strokeWidth={2} />
-                : <ChevronRight width={12} height={12} strokeWidth={2} />}
-            </button>
+  return useMutation({
+    mutationFn: (input: CreateTeamInput) =>
+      authFetch<Team>('/teams', {
+        method: 'POST',
+        body: JSON.stringify(input),
+      }),
+    onSuccess: () => {
+      // Invalidate both active and archived team lists.
+      client.invalidateQueries({ queryKey: ['teams'] })
+    },
+  })
+}
 
-            {/* Team rows — active team highlighted; others clickable to switch */}
-            {(teamOpen ? activeTeams : activeTeam ? [activeTeam] : []).map(t => (
-              <TeamRow
-                key={t.id}
-                team={t}
-                isActive={t.id === activeTeam?.id}
-                canEdit={canEditTeam}
-                onSelect={() => onSelectTeam?.(t.id)}
-                onEdit={() => onEditTeam?.(t)}
-              />
-            ))}
-            {/* Fallback when activeTeams not yet loaded but activeTeam is known */}
-            {!activeTeams.length && activeTeam && (
-              <TeamRow
-                team={activeTeam}
-                isActive
-                canEdit={canEditTeam}
-                onEdit={() => onEditTeam?.(activeTeam)}
-              />
-            )}
+/** PATCHes a team's mutable fields and refreshes the cache. */
+export function useUpdateTeam() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
 
-            {/* New team button — only superadmins get onNewTeam passed from the parent */}
-            {teamOpen && onNewTeam && (
-              <button
-                onClick={onNewTeam}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: 8,
-                  padding: '4px 16px', background: 'none', border: 'none',
-                  color: 'rgba(255,255,255,0.35)', fontSize: 12,
-                  cursor: 'pointer', width: '100%', fontFamily: 'var(--font-sans)',
-                }}
-                onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.7)')}
-                onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.35)')}
-              >
-                <Plus {...ICON_SM} />
-                New team
-              </button>
-            )}
+  return useMutation({
+    mutationFn: ({ teamId, patch }: UpdateTeamInput) =>
+      authFetch<Team>(`/teams/${teamId}`, {
+        method: 'PATCH',
+        body: JSON.stringify(patch),
+      }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ['teams'] })
+    },
+  })
+}
 
-            {/* Archived teams — collapsible sub-section, shown when team section is open */}
-            {teamOpen && archivedTeams.length > 0 && (
-              <div>
-                <button
-                  onClick={() => setArchivedTeamsOpen(o => !o)}
-                  style={{
-                    display: 'flex', alignItems: 'center', gap: 5,
-                    width: '100%', padding: '4px 8px 4px 16px',
-                    background: 'none', border: 'none', cursor: 'pointer',
-                    color: 'rgba(255,255,255,0.25)', fontFamily: 'var(--font-sans)',
-                  }}
-                  onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.5)')}
-                  onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.25)')}
-                >
-                  {archivedTeamsOpen
-                    ? <ChevronDown {...ICON_XS} />
-                    : <ChevronRight {...ICON_XS} />}
-                  <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
-                    Archived ({archivedTeams.length})
-                  </span>
-                </button>
-                {archivedTeamsOpen && archivedTeams.map(t => (
-                  <TeamRow
-                    key={t.id}
-                    team={t}
-                    isActive={false}
-                    canEdit={Boolean(onNewTeam)}
-                    onEdit={() => onEditTeam?.(t)}
-                  />
-                ))}
-              </div>
-            )}
+/** Archives a team (soft delete). */
+export function useArchiveTeam() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
 
-            {/* Members — only when team section is expanded */}
-            {teamOpen && (
-              <>
-                <button
-                  onClick={() => setMembersOpen(o => !o)}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 5,
-                    width: '100%',
-                    padding: '6px 8px 4px 16px',
-                    background: 'none',
-                    border: 'none',
-                    cursor: 'pointer',
-                    color: 'rgba(255,255,255,0.35)',
-                    fontFamily: 'var(--font-sans)',
-                  }}
-                >
-                  {membersOpen
-                    ? <ChevronDown {...ICON_XS} />
-                    : <ChevronRight {...ICON_XS} />}
-                  <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
-                    Members
-                  </span>
-                </button>
+  return useMutation({
+    mutationFn: (teamId: string) =>
+      authFetch<Team>(`/teams/${teamId}/archive`, { method: 'POST' }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ['teams'] })
+    },
+  })
+}
 
-                {membersOpen && (
-                  <div style={{ paddingBottom: 8 }}>
-                    {(apiMembers ?? []).map(m => {
-                      const displayName = (m as TeamMemberWithUser).displayName || m.id;
-                      const color = m.color ?? '#8b949e';
-                      const icon = (m as TeamMemberWithUser).icon ?? null;
-                      return (
-                        <MemberSidebarRow
-                          key={m.id}
-                          displayName={displayName}
-                          color={color}
-                          icon={icon}
-                          isInactive={Boolean((m as TeamMemberWithUser).archivedAt)}
-                          onEdit={onEditMember && (m as TeamMemberWithUser).userId !== currentUserId
-                            ? () => onEditMember(m as TeamMemberWithUser)
-                            : undefined}
-                        />
-                      );
-                    })}
-                  </div>
-                )}
-              </>
-            )}
-          </div>
-        )}
+/** Restores an archived team. */
+export function useUnarchiveTeam() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
 
-        {/* Timelines section */}
-        <div style={{ padding: '8px 0' }}>
-          {!collapsed ? (
-            <button
-              onClick={() => setTimelinesOpen(o => !o)}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                width: '100%',
-                padding: '6px 12px 4px 16px',
-                background: 'none',
-                border: 'none',
-                cursor: 'pointer',
-                color: 'rgba(255,255,255,0.35)',
-                fontFamily: 'var(--font-sans)',
-              }}
-            >
-              <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
-                Timeline
-              </span>
-              {timelinesOpen
-                ? <ChevronDown width={12} height={12} strokeWidth={2} />
-                : <ChevronRight width={12} height={12} strokeWidth={2} />}
-            </button>
-          ) : (
-            <div style={{ height: 8 }} />
-          )}
+  return useMutation({
+    mutationFn: (teamId: string) =>
+      authFetch<Team>(`/teams/${teamId}/unarchive`, { method: 'POST' }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ['teams'] })
+    },
+  })
+}
 
-          {!collapsed && (timelinesOpen ? (
-            <>
-              {timelines.map(tl => (
-                <TimelineItem
-                  key={tl.id}
-                  timeline={tl}
-                  active={activeId === tl.id}
-                  collapsed={false}
-                  canEdit={canEditTeam}
-                  onClick={() => { setInternalActiveId(tl.id); onActiveTimelineChange?.(tl.id); }}
-                  onSettings={() => onEditTimeline?.(tl.id)}
-                />
-              ))}
-              <button
-                onClick={onNewTimeline}
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 8,
-                  padding: '6px 16px',
-                  background: 'none',
-                  border: 'none',
-                  color: 'rgba(255,255,255,0.35)',
-                  fontSize: 12,
-                  cursor: onNewTimeline ? 'pointer' : 'default',
-                  width: '100%',
-                  fontFamily: 'var(--font-sans)',
-                  marginTop: 2,
-                }}
-                onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.7)')}
-                onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.35)')}
-              >
-                <Plus {...ICON_SM} />
-                New timeline
-              </button>
+/** Archives an activity (soft-delete). Removes it from the active-list cache. */
+export function useArchiveActivity(timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
 
-              {/* Archived sub-section */}
-              {archivedTimelineItems.length > 0 && (
-                <>
-                  <button
-                    onClick={() => setArchivedOpen(o => !o)}
-                    style={{
-                      display: 'flex', alignItems: 'center', gap: 5,
-                      width: '100%', padding: '6px 12px 4px 16px',
-                      background: 'none', border: 'none', cursor: 'pointer',
-                      color: 'rgba(255,255,255,0.25)', fontFamily: 'var(--font-sans)',
-                      marginTop: 4,
-                    }}
-                    onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.45)')}
-                    onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.25)')}
-                  >
-                    {archivedOpen
-                      ? <ChevronDown {...ICON_XS} />
-                      : <ChevronRight {...ICON_XS} />}
-                    <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
-                      Archived
-                    </span>
-                    <span style={{ fontSize: 10, marginLeft: 4 }}>({archivedTimelineItems.length})</span>
-                  </button>
+  return useMutation({
+    mutationFn: (activityId: string) =>
+      authFetch<Activity>(`/activities/${activityId}/archive`, { method: 'POST' }),
+    onSuccess: (_data, activityId) => {
+      client.setQueriesData<Activity[]>(
+        { queryKey: ['timelines', timelineId, 'activities'] },
+        (old) => old?.filter((a) => a.id !== activityId),
+      )
+    },
+  })
+}
 
-                  {archivedOpen && (
-                    <div style={{ opacity: 0.6 }}>
-                      {archivedTimelineItems.map(tl => (
-                        <TimelineItem
-                          key={tl.id}
-                          timeline={tl}
-                          active={false}
-                          collapsed={false}
-                          canEdit={canEditTeam}
-                          onClick={() => {}}
-                          onSettings={() => onEditTimeline?.(tl.id)}
-                        />
-                      ))}
-                    </div>
-                  )}
-                </>
-              )}
-            </>
-          ) : (
-            /* Section collapsed: show just the active timeline */
-            <TimelineItem
-              timeline={activeTimeline}
-              active={true}
-              collapsed={false}
-              showDate={false}
-              canEdit={canEditTeam}
-              onClick={() => setTimelinesOpen(true)}
-              onSettings={() => onEditTimeline?.(activeTimeline.id)}
-            />
-          ))}
-        </div>
-        {/* Connectors section — contextual to active timeline */}
-        {!collapsed && (
-          <div style={{ padding: '8px 0', borderTop: '1px solid rgba(255,255,255,0.08)' }}>
-            <div style={{ display: 'flex', alignItems: 'center', padding: '6px 6px 4px 16px' }}>
-              <button
-                onClick={() => setConnectorsOpen(o => !o)}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: 6, flex: 1,
-                  background: 'none', border: 'none', cursor: 'pointer',
-                  color: 'rgba(255,255,255,0.35)', fontFamily: 'var(--font-sans)',
-                  padding: 0,
-                }}
-              >
-                <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
-                  Connectors
-                </span>
-                {connectorsOpen
-                  ? <ChevronDown width={12} height={12} strokeWidth={2} />
-                  : <ChevronRight width={12} height={12} strokeWidth={2} />}
-              </button>
-            </div>
+/** Deletes an activity and removes it from the cache. */
+export function useDeleteActivity(timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
 
-            {connectorsOpen && (
-              <>
-                <div style={{
-                  padding: '0 16px 4px',
-                  fontSize: 10,
-                  color: 'rgba(255,255,255,0.22)',
-                  letterSpacing: '0.02em',
-                }}>
-                  {activeTimeline?.name}
-                </div>
-                {/* Stub: connected Trello board */}
-                <ConnectorItem name="Trello — Launch Board" status="Synced · 2 min ago" color="#0079BF" />
-                <button
-                  style={{
-                    display: 'flex', alignItems: 'center', gap: 8,
-                    padding: '6px 16px', background: 'none', border: 'none',
-                    color: 'rgba(255,255,255,0.35)', fontSize: 12,
-                    cursor: 'pointer', width: '100%', fontFamily: 'var(--font-sans)',
-                  }}
-                  onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.7)')}
-                  onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.35)')}
-                >
-                  <Plug width={13} height={13} strokeWidth={1.8} />
-                  Add connector
-                </button>
-              </>
-            )}
-          </div>
-        )}
-      </div>
+  return useMutation({
+    mutationFn: (activityId: string) =>
+      authFetch<void>(`/activities/${activityId}`, { method: 'DELETE' }),
+    onSuccess: (_data, activityId) => {
+      client.setQueriesData<Activity[]>(
+        { queryKey: ['timelines', timelineId, 'activities'] },
+        (old) => old?.filter((a) => a.id !== activityId),
+      )
+    },
+  })
+}
 
-      {/* Resize handle */}
-      {!collapsed && (
-        <div
-          onMouseDown={onHandleMouseDown}
-          style={{
-            position: 'absolute',
-            top: 0,
-            right: 0,
-            width: 5,
-            height: '100%',
-            cursor: 'col-resize',
-            zIndex: 20,
-          }}
-          onMouseEnter={e => ((e.currentTarget.lastElementChild as HTMLElement).style.background = 'var(--primary)')}
-          onMouseLeave={e => ((e.currentTarget.lastElementChild as HTMLElement).style.background = 'transparent')}
-        >
-          <div
-            style={{
-              position: 'absolute',
-              top: 0,
-              right: 0,
-              width: 2,
-              height: '100%',
-              background: 'transparent',
-              transition: 'background 0.15s',
-              pointerEvents: 'none',
-            }}
-          />
-        </div>
-      )}
-    </div>
-  );
+// ── Timeline CRUD (Phase 10.3) ────────────────────────────────────────────────
+
+/** Fetches all timelines for a team, optionally including archived ones. */
+export function useTeamTimelinesWithArchived(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: [...keys.teamTimelines(teamId), { includeArchived: true }],
+    queryFn: async () =>
+      (await authFetch<Timeline[] | null>(`/teams/${teamId}/timelines?archived=true`)) ?? [],
+    enabled: Boolean(teamId),
+  })
+}
+
+/** Creates a new timeline for a team. */
+export function useCreateTimeline(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (input: { name: string; startDate: string; endDate: string; color?: string | null; icon?: string | null; description?: string | null; notes?: string | null; templateId?: string | null }) =>
+      authFetch<Timeline>(`/teams/${teamId}/timelines`, {
+        method: 'POST',
+        body: JSON.stringify(input),
+      }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
+    },
+  })
+}
+
+/** PATCHes a timeline's mutable fields. */
+export function useUpdateTimeline(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({ timelineId, patch }: { timelineId: string; patch: PatchTimelineInput }) =>
+      authFetch<Timeline>(`/timelines/${timelineId}`, {
+        method: 'PATCH',
+        body: JSON.stringify(patch),
+      }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
+    },
+  })
+}
+
+/** Hard-deletes a timeline. */
+export function useDeleteTimeline(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (timelineId: string) =>
+      authFetch<void>(`/timelines/${timelineId}`, { method: 'DELETE' }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
+    },
+  })
+}
+
+/** Archives a timeline. */
+export function useArchiveTimeline(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (timelineId: string) =>
+      authFetch<Timeline>(`/timelines/${timelineId}/archive`, { method: 'POST' }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
+    },
+  })
+}
+
+/** Restores an archived timeline. */
+export function useUnarchiveTimeline(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (timelineId: string) =>
+      authFetch<Timeline>(`/timelines/${timelineId}/unarchive`, { method: 'POST' }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
+    },
+  })
+}
+
+/** Fetches the access grant list for a timeline. */
+export function useTimelineAccess(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: ['teams', teamId, 'timelines', timelineId, 'access'],
+    queryFn: async () =>
+      (await authFetch<TimelineAccessEntry[]>(
+        `/teams/${teamId}/timelines/${timelineId}/access`,
+      )) ?? [],
+    enabled: Boolean(teamId) && Boolean(timelineId),
+  })
+}
+
+/** Grants or updates a member's access to a timeline. */
+export function useGrantTimelineAccess(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({ memberId, role }: { memberId: string; role: 'admin' | 'member' }) =>
+      authFetch<TimelineAccessEntry[]>(
+        `/teams/${teamId}/timelines/${timelineId}/access/${memberId}`,
+        { method: 'PUT', body: JSON.stringify({ role }) },
+      ),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ['teams', teamId, 'timelines', timelineId, 'access'] })
+    },
+  })
+}
+
+/** Revokes a member's access to a timeline. */
+export function useRevokeTimelineAccess(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (memberId: string) =>
+      authFetch<void>(`/teams/${teamId}/timelines/${timelineId}/access/${memberId}`, {
+        method: 'DELETE',
+      }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ['teams', teamId, 'timelines', timelineId, 'access'] })
+    },
+  })
 }
 ````
 
@@ -40092,6 +40710,26 @@ Ships the view-switcher infrastructure plus the dense, sortable, inline-editable
 
 ---
 
+### Timezone-Safe Activity Dates (Phase 11.1.1)
+Fixes midnight-UTC activity dates displaying one calendar day early in negative-UTC-offset timezones.
+
+- [x] `granularity.ts`: switch all internal date helpers to UTC (startOfDay/Week/Month/Quarter/Year, addDays/addMonths, isoWeekNumber, formatLabel, todayColumnPosition) — 2026-06-01
+- [x] `GanttView.tsx`: `todayMidnight()` → `setUTCHours(0,0,0,0)`; fallback viewStart/viewEnd use `setUTCDate`/`getUTCDate` — 2026-06-01
+- [x] `GanttGrid.tsx`: `formatDragDate` → adds `timeZone: 'UTC'` to `toLocaleDateString` — 2026-06-01
+- [x] `ListView.tsx`: add `formatActivityDate` (UTC, for Start/End cells); keep `formatDate` (local, for Created/Updated) — 2026-06-01
+- [x] `granularity.test.ts`: update existing tests to use `getUTCDay`/`getUTCDate` assertions; add timezone-safety suite with midnight-UTC positioning and label checks — 2026-06-01
+- [x] `golangci-lint run` clean — 2026-06-01
+- [x] `go test ./...` passes — 2026-06-01
+- [x] `pnpm --filter web lint` clean — 2026-06-01
+- [x] `pnpm --filter web build` clean — 2026-06-01
+- [x] `pnpm --filter web test` — 149 tests pass including new timezone-safety suite — 2026-06-01
+- [ ] Manual: List Start/End cells show correct calendar day in a negative-offset timezone
+- [ ] Manual: Gantt bars land on the correct day column in a negative-offset timezone
+- [ ] Manual: Gantt day/week/month labels match List dates for same activity
+- [ ] Manual: round-trip — open date picker, save unchanged, displayed date does not shift
+
+---
+
 ### Timeline Views — Calendar (Web — Phase 11.2)
 Three sub-layouts sharing one component skeleton.
 
@@ -40240,558 +40878,6 @@ Includes both the webhook backend and the per-timeline connector sidebar UI (pre
 - Notifications (email, push)
 - Recurring event UI (RRULE editing)
 - Kanban drag-to-change-status (v2; v1 Kanban is read-only)
-````
-
-## File: packages/web/src/hooks/useTeamActivities.ts
-````typescript
-/**
- * TanStack Query hooks for team-scoped data.
- *
- * All hooks call createAuthFetch to inject the current access token at
- * query-time so stale closures never send an expired token.
- */
-
-import { useCallback } from 'react'
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import type { components } from '@draba/shared'
-import { createAuthFetch } from '@/lib/api'
-import { useAuth } from '@/contexts/AuthContext'
-import { useWebSocket } from '@/hooks/useWebSocket'
-
-type Activity = components['schemas']['Activity']
-type Team = components['schemas']['Team']
-type Timeline = components['schemas']['Timeline']
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
-type TimelineAccessEntry = components['schemas']['TimelineAccessEntry']
-type PatchTimelineInput = components['schemas']['PatchTimelineInput']
-
-/** Query key factory — centralises cache key strings. */
-export const keys = {
-  myTeams: () => ['teams'] as const,
-  timelineActivities: (timelineId: string, from?: string, to?: string) =>
-    ['timelines', timelineId, 'activities', { from, to }] as const,
-  teamMembers: (teamId: string) =>
-    ['teams', teamId, 'members'] as const,
-  teamTimelines: (teamId: string) =>
-    ['teams', teamId, 'timelines'] as const,
-}
-
-/** Fetches all teams the authenticated user belongs to. */
-export function useMyTeams(includeArchived = false) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: [...keys.myTeams(), { includeArchived }],
-    queryFn: async () => (await authFetch<Team[] | null>(includeArchived ? '/teams?archived=true' : '/teams')) ?? [],
-  })
-}
-
-/** Fetches a single team by ID. */
-export function useTeam(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: ['teams', teamId],
-    queryFn: () => authFetch<Team>(`/teams/${teamId}`),
-    enabled: Boolean(teamId),
-  })
-}
-
-/** Fetches all non-archived timelines for a team. */
-export function useTeamTimelines(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: keys.teamTimelines(teamId),
-    queryFn: async () => (await authFetch<Timeline[] | null>(`/teams/${teamId}/timelines`)) ?? [],
-    enabled: Boolean(teamId),
-  })
-}
-
-/** Fetches activities for a timeline, optionally bounded by date range. */
-export function useTimelineActivities(teamId: string, timelineId: string, from?: string, to?: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: keys.timelineActivities(timelineId, from, to),
-    queryFn: async () => {
-      const params = new URLSearchParams()
-      if (from) params.set('from', from)
-      if (to) params.set('to', to)
-      const qs = params.toString()
-      return (await authFetch<Activity[] | null>(`/teams/${teamId}/timelines/${timelineId}/activities${qs ? `?${qs}` : ''}`)) ?? []
-    },
-    enabled: Boolean(teamId) && Boolean(timelineId),
-  })
-}
-
-/** Fetches the member list for a team. */
-export function useTeamMembers(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: keys.teamMembers(teamId),
-    queryFn: async () => (await authFetch<TeamMemberWithUser[] | null>(`/teams/${teamId}/members`)) ?? [],
-    enabled: Boolean(teamId),
-  })
-}
-
-/**
- * Subscribes to the team's WebSocket feed and applies surgical cache updates
- * for activity.created / activity.updated / activity.deleted deltas.
- *
- * Conflict strategy: for activity.updated, incoming deltas are only applied
- * when their updatedAt timestamp is strictly newer than the cached version.
- * This prevents self-echo (our own PATCH broadcast arriving back) and handles
- * the last-writer-wins case where a concurrent remote edit arrives while our
- * mutation is in-flight — the server-returned updatedAt on our onSuccess will
- * always win if our PATCH was truly last.
- */
-export function useTeamActivitySync(
-  teamId: string,
-  accessToken: string | null | undefined,
-) {
-  const client = useQueryClient()
-
-  const handleMessage = useCallback(
-    (msg: { type: string; payload?: unknown }) => {
-      if (!teamId || !msg.payload) return
-
-      if (msg.type === 'activity.created') {
-        const incoming = msg.payload as Activity
-        // Target all timeline-scoped activity cache entries by using the
-        // timelineId from the incoming activity payload.
-        if (!incoming.timelineId) return
-        client.setQueriesData<Activity[]>(
-          { queryKey: ['timelines', incoming.timelineId, 'activities'] },
-          (old) => {
-            if (!old) return old
-            // Guard against duplicate delivery.
-            if (old.some((a) => a.id === incoming.id)) return old
-            return [...old, incoming]
-          },
-        )
-      } else if (msg.type === 'activity.updated') {
-        const incoming = msg.payload as Activity
-        if (!incoming.timelineId) return
-        client.setQueriesData<Activity[]>(
-          { queryKey: ['timelines', incoming.timelineId, 'activities'] },
-          (old) => {
-            if (!old) return old
-            return old.map((a) => {
-              if (a.id !== incoming.id) return a
-              // Skip if the cache already holds the same or a newer version.
-              const cachedMs = new Date(a.updatedAt).getTime()
-              const incomingMs = new Date(incoming.updatedAt).getTime()
-              return incomingMs > cachedMs ? incoming : a
-            })
-          },
-        )
-      } else if (msg.type === 'activity.deleted') {
-        const { id } = msg.payload as { id: string }
-        // activity.deleted payload only has id — invalidate all timeline
-        // activity queries for this team so caches stay consistent.
-        client.invalidateQueries({ queryKey: ['timelines'] })
-        // Optimistically remove from all cached timeline activity lists.
-        client.setQueriesData<Activity[]>(
-          { queryKey: ['timelines'] },
-          (old) => old?.filter((a) => a.id !== id),
-        )
-      }
-    },
-    [client, teamId],
-  )
-
-  useWebSocket({
-    token: accessToken,
-    teamIds: teamId ? [teamId] : [],
-    onMessage: handleMessage,
-  })
-}
-
-interface CreateActivityInput {
-  title: string
-  startAt: string
-  endAt: string
-  description?: string | null
-  color?: string | null
-  icon?: string | null
-  assignedMemberIds?: string[]
-  tagIds?: string[]
-  parentActivityId?: string | null
-  percentComplete?: number | null
-  /** Client-only: if set, replace this placeholder ID in the cache instead of appending. */
-  _tempId?: string
-}
-
-interface UpdateActivityInput {
-  activityId: string
-  patch: {
-    title?: string
-    description?: string | null
-    notes?: string | null
-    startAt?: string
-    endAt?: string
-    allDay?: boolean
-    color?: string | null
-    icon?: string | null
-    location?: string | null
-    url?: string | null
-    statusId?: string | null
-    parentActivityId?: string | null
-    percentComplete?: number | null
-    assignedMemberIds?: string[]
-    tagIds?: string[]
-  }
-}
-
-/** Creates an activity in a timeline and inserts it directly into the cache. */
-export function useCreateActivity(teamId: string, timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: ({ _tempId: _, ...input }: CreateActivityInput) =>
-      authFetch<Activity>(`/teams/${teamId}/timelines/${timelineId}/activities`, {
-        method: 'POST',
-        body: JSON.stringify(input),
-      }),
-    onSuccess: (created, variables) => {
-      const tempId = variables._tempId
-      client.setQueriesData<Activity[]>(
-        { queryKey: ['timelines', timelineId, 'activities'] },
-        (old) => {
-          if (!old) return [created]
-          const hasReal = old.some((a) => a.id === created.id)
-          const hasTemp = tempId ? old.some((a) => a.id === tempId) : false
-          // The WS activity.created self-echo may win the race and append the
-          // real record before this onSuccess runs. In that case we must still
-          // drop the optimistic placeholder, otherwise it lingers as a duplicate
-          // "New Activity" row (and inline edits keep targeting the dead temp id).
-          if (hasReal) {
-            return hasTemp ? old.filter((a) => a.id !== tempId) : old
-          }
-          // Replace optimistic placeholder in-place to avoid a position flash.
-          if (hasTemp) {
-            return old.map((a) => (a.id === tempId ? created : a))
-          }
-          return [...old, created]
-        },
-      )
-    },
-  })
-}
-
-/** PATCHes an activity and optimistically updates the cache. */
-export function useUpdateActivity(timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: ({ activityId, patch }: UpdateActivityInput) =>
-      authFetch<Activity>(`/activities/${activityId}`, {
-        method: 'PATCH',
-        body: JSON.stringify(patch),
-      }),
-    onMutate: async ({ activityId, patch }) => {
-      await client.cancelQueries({ queryKey: ['timelines', timelineId, 'activities'] })
-      const snapshot = client.getQueriesData<Activity[]>({ queryKey: ['timelines', timelineId, 'activities'] })
-      client.setQueriesData<Activity[]>(
-        { queryKey: ['timelines', timelineId, 'activities'] },
-        (old) => old?.map((a) => (a.id === activityId ? { ...a, ...patch } : a)),
-      )
-      return { snapshot }
-    },
-    onError: (_err, _vars, context) => {
-      if (context?.snapshot) {
-        for (const [key, data] of context.snapshot) {
-          client.setQueryData(key, data)
-        }
-      }
-    },
-    onSuccess: (updated) => {
-      client.setQueriesData<Activity[]>(
-        { queryKey: ['timelines', timelineId, 'activities'] },
-        (old) => old?.map((a) => (a.id === updated.id ? updated : a)),
-      )
-    },
-  })
-}
-
-interface CreateTeamInput {
-  name: string
-  description?: string | null
-  notes?: string | null
-  color?: string | null
-  icon?: string | null
-}
-
-interface UpdateTeamInput {
-  teamId: string
-  patch: {
-    name?: string
-    description?: string | null
-    notes?: string | null
-    color?: string | null
-    icon?: string | null
-  }
-}
-
-/** Creates a team and inserts it into the active-teams cache. */
-export function useCreateTeam() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (input: CreateTeamInput) =>
-      authFetch<Team>('/teams', {
-        method: 'POST',
-        body: JSON.stringify(input),
-      }),
-    onSuccess: () => {
-      // Invalidate both active and archived team lists.
-      client.invalidateQueries({ queryKey: ['teams'] })
-    },
-  })
-}
-
-/** PATCHes a team's mutable fields and refreshes the cache. */
-export function useUpdateTeam() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: ({ teamId, patch }: UpdateTeamInput) =>
-      authFetch<Team>(`/teams/${teamId}`, {
-        method: 'PATCH',
-        body: JSON.stringify(patch),
-      }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: ['teams'] })
-    },
-  })
-}
-
-/** Archives a team (soft delete). */
-export function useArchiveTeam() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (teamId: string) =>
-      authFetch<Team>(`/teams/${teamId}/archive`, { method: 'POST' }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: ['teams'] })
-    },
-  })
-}
-
-/** Restores an archived team. */
-export function useUnarchiveTeam() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (teamId: string) =>
-      authFetch<Team>(`/teams/${teamId}/unarchive`, { method: 'POST' }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: ['teams'] })
-    },
-  })
-}
-
-/** Archives an activity (soft-delete). Removes it from the active-list cache. */
-export function useArchiveActivity(timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (activityId: string) =>
-      authFetch<Activity>(`/activities/${activityId}/archive`, { method: 'POST' }),
-    onSuccess: (_data, activityId) => {
-      client.setQueriesData<Activity[]>(
-        { queryKey: ['timelines', timelineId, 'activities'] },
-        (old) => old?.filter((a) => a.id !== activityId),
-      )
-    },
-  })
-}
-
-/** Deletes an activity and removes it from the cache. */
-export function useDeleteActivity(timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (activityId: string) =>
-      authFetch<void>(`/activities/${activityId}`, { method: 'DELETE' }),
-    onSuccess: (_data, activityId) => {
-      client.setQueriesData<Activity[]>(
-        { queryKey: ['timelines', timelineId, 'activities'] },
-        (old) => old?.filter((a) => a.id !== activityId),
-      )
-    },
-  })
-}
-
-// ── Timeline CRUD (Phase 10.3) ────────────────────────────────────────────────
-
-/** Fetches all timelines for a team, optionally including archived ones. */
-export function useTeamTimelinesWithArchived(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: [...keys.teamTimelines(teamId), { includeArchived: true }],
-    queryFn: async () =>
-      (await authFetch<Timeline[] | null>(`/teams/${teamId}/timelines?archived=true`)) ?? [],
-    enabled: Boolean(teamId),
-  })
-}
-
-/** Creates a new timeline for a team. */
-export function useCreateTimeline(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (input: { name: string; startDate: string; endDate: string; color?: string | null; icon?: string | null; description?: string | null; notes?: string | null; templateId?: string | null }) =>
-      authFetch<Timeline>(`/teams/${teamId}/timelines`, {
-        method: 'POST',
-        body: JSON.stringify(input),
-      }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
-    },
-  })
-}
-
-/** PATCHes a timeline's mutable fields. */
-export function useUpdateTimeline(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: ({ timelineId, patch }: { timelineId: string; patch: PatchTimelineInput }) =>
-      authFetch<Timeline>(`/timelines/${timelineId}`, {
-        method: 'PATCH',
-        body: JSON.stringify(patch),
-      }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
-    },
-  })
-}
-
-/** Hard-deletes a timeline. */
-export function useDeleteTimeline(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (timelineId: string) =>
-      authFetch<void>(`/timelines/${timelineId}`, { method: 'DELETE' }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
-    },
-  })
-}
-
-/** Archives a timeline. */
-export function useArchiveTimeline(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (timelineId: string) =>
-      authFetch<Timeline>(`/timelines/${timelineId}/archive`, { method: 'POST' }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
-    },
-  })
-}
-
-/** Restores an archived timeline. */
-export function useUnarchiveTimeline(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (timelineId: string) =>
-      authFetch<Timeline>(`/timelines/${timelineId}/unarchive`, { method: 'POST' }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
-    },
-  })
-}
-
-/** Fetches the access grant list for a timeline. */
-export function useTimelineAccess(teamId: string, timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: ['teams', teamId, 'timelines', timelineId, 'access'],
-    queryFn: async () =>
-      (await authFetch<TimelineAccessEntry[]>(
-        `/teams/${teamId}/timelines/${timelineId}/access`,
-      )) ?? [],
-    enabled: Boolean(teamId) && Boolean(timelineId),
-  })
-}
-
-/** Grants or updates a member's access to a timeline. */
-export function useGrantTimelineAccess(teamId: string, timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: ({ memberId, role }: { memberId: string; role: 'admin' | 'member' }) =>
-      authFetch<TimelineAccessEntry[]>(
-        `/teams/${teamId}/timelines/${timelineId}/access/${memberId}`,
-        { method: 'PUT', body: JSON.stringify({ role }) },
-      ),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: ['teams', teamId, 'timelines', timelineId, 'access'] })
-    },
-  })
-}
-
-/** Revokes a member's access to a timeline. */
-export function useRevokeTimelineAccess(teamId: string, timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (memberId: string) =>
-      authFetch<void>(`/teams/${teamId}/timelines/${timelineId}/access/${memberId}`, {
-        method: 'DELETE',
-      }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: ['teams', teamId, 'timelines', timelineId, 'access'] })
-    },
-  })
-}
 ````
 
 ## File: packages/api/internal/api/activity_handler.go
@@ -49724,7 +49810,7 @@ function toDateOnly(datetime: string): string {
 
 function todayMidnight(): Date {
   const d = new Date();
-  d.setHours(0, 0, 0, 0);
+  d.setUTCHours(0, 0, 0, 0); // UTC midnight so it aligns with UTC-stored activity dates
   return d;
 }
 
@@ -50043,7 +50129,7 @@ export default function GanttView({
   const viewStart = useMemo<Date>(() => {
     if (startDate) return new Date(startDate);
     const d = new Date(today);
-    d.setDate(d.getDate() - 14);
+    d.setUTCDate(d.getUTCDate() - 14);
     return d;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [startDate]);
@@ -50051,7 +50137,7 @@ export default function GanttView({
   const viewEnd = useMemo<Date>(() => {
     if (endDate) return new Date(endDate);
     const d = new Date(today);
-    d.setDate(d.getDate() + 75);
+    d.setUTCDate(d.getUTCDate() + 75);
     return d;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [endDate]);
@@ -50908,6 +50994,37 @@ export default function DashboardPage() {
 ## File: docs/log.md
 ````markdown
 # Development Log
+
+---
+
+## 2026-06-01 — Phase 11.1.1: Timezone-Safe Activity Dates
+
+**Goal:** Fix midnight-UTC activity dates (`"2026-05-31T00:00:00Z"`) displaying one calendar day early (e.g. "May 30") for users in negative-UTC-offset timezones. Root cause: Gantt column boundaries and List date formatters used local-time JS methods, while activity dates are UTC midnight — producing a systematic off-by-one in any timezone west of UTC.
+
+**Approach (Option A):** Treat all activity `startAt`/`endAt` as all-day calendar dates and read/position them in UTC throughout. Genuine timestamps (`createdAt`, `updatedAt`) stay local. Left a `TODO: branch on allDay when timed events ship (Phase 15 calendar sync)` marker at both formatter sites.
+
+**Frontend — `components/gantt/granularity.ts`:**
+- Replaced all local-time helpers with UTC equivalents: `startOfDay` → `setUTCHours(0,0,0,0)`; `startOfWeek` → `getUTCDay`/`setUTCDate`; `startOfMonth/Quarter/Year` → `Date.UTC(...)`; `addDays`/`addMonths` → `setUTCDate`/`setUTCMonth`
+- `isoWeekNumber`: switched to UTC day/date arithmetic
+- `formatLabel` (all granularities): added `timeZone: 'UTC'` to every `toLocaleDateString` call; `quarter`/`year` labels use `getUTCMonth`/`getUTCFullYear`
+- `todayColumnPosition`: `startOfDay(new Date())` now produces UTC midnight via the updated helper — no separate change needed
+
+**Frontend — `components/gantt/GanttView.tsx`:**
+- `todayMidnight()`: changed `setHours` → `setUTCHours(0,0,0,0)`
+- Fallback `viewStart`/`viewEnd` (no timeline dates): changed `setDate`/`getDate` → `setUTCDate`/`getUTCDate` for date arithmetic on the UTC-midnight `today` base
+
+**Frontend — `components/gantt/GanttGrid.tsx`:**
+- `formatDragDate`: added `timeZone: 'UTC'` to `toLocaleDateString` (drag tooltip dates)
+
+**Frontend — `components/list/ListView.tsx`:**
+- Added `formatActivityDate(iso)`: same signature as `formatDate` but with `timeZone: 'UTC'` — used exclusively for Start/End cells
+- Left `formatDate` unchanged (local time) for Created/Updated cells which are genuine event timestamps
+
+**Tests — `components/gantt/granularity.test.ts`:**
+- Updated existing week-start tests: `getDay()`/`getDate()` → `getUTCDay()`/`getUTCDate()` (TZ-safe assertions); input dates changed to `Date.UTC(...)` to be stable across any test-runner timezone
+- Added `positionInColumns — midnight-UTC activity dates land on correct day` suite: verifies May 31 column label contains "31", that an activity at `"2026-05-31T00:00:00Z"` lands in column index 30 (May 31), and that a May 1 activity lands in column 0
+
+**Checks:** golangci-lint clean; go test 135 pass (cached); pnpm --filter web lint clean; pnpm --filter web build clean; pnpm --filter web test — 149 tests pass (14 new assertions)
 
 ---
 
@@ -52785,7 +52902,7 @@ This document organizes development into discrete phases with effort estimates a
 | 10.4.5 | [Activity Tags, Parent & Progress Fields](#phase-1045--activity-tags-parent--progress-fields) | M — 2–3 days | ✅ |
 | 10.4.6 | [Filter Implementation](#phase-1046--filter-implementation) | M–L — 3–4 days | 🔄 |
 | 11.1 | [Web — List View](#phase-111--web--list-view) | M — 2–3 days | ✅ |
-| 11.1.1 | [Timezone-Safe Activity Dates](#phase-1111--timezone-safe-activity-dates) | S–M — 0.5–1 day | ⬜ |
+| 11.1.1 | [Timezone-Safe Activity Dates](#phase-1111--timezone-safe-activity-dates) | S–M — 0.5–1 day | ✅ |
 | 11.2 | [Web — Calendar View](#phase-112--web--calendar-view) | L — 3–5 days | ⬜ |
 | 11.3 | [Web — Kanban View (Read-Only)](#phase-113--web--kanban-view-read-only) | S–M — 1–2 days | ⬜ |
 | 12 | [Communications Testing](#phase-12--communications-testing) | S — 1 day | ⬜ |
@@ -54079,7 +54196,7 @@ Deliberately **not** a power-user database grid: no virtualization (our timeline
 ---
 
 ### Phase 11.1.1 — Timezone-Safe Activity Dates
-**Status:** ⬜ | **Effort:** S–M (0.5–1 day)
+**Status:** ✅ Done — 2026-06-01 | **Effort:** S–M (0.5–1 day)
 
 Activity start/end dates render one calendar day early for any user in a timezone behind UTC (e.g. `America/Denver`, −6): a date stored as `2026-05-31T00:00:00Z` shows as "May 30" in the List Start/End cells and Gantt labels, while the date *picker* correctly shows `2026-05-31`. The List/Gantt date pickers were unusable for a separate reason (a column-index bug, fixed during 11.1); this phase fixes the underlying timezone skew that remains.
 
