@@ -2,6 +2,37 @@
 
 ---
 
+## 2026-06-01 — Phase 11.1.1: Timezone-Safe Activity Dates
+
+**Goal:** Fix midnight-UTC activity dates (`"2026-05-31T00:00:00Z"`) displaying one calendar day early (e.g. "May 30") for users in negative-UTC-offset timezones. Root cause: Gantt column boundaries and List date formatters used local-time JS methods, while activity dates are UTC midnight — producing a systematic off-by-one in any timezone west of UTC.
+
+**Approach (Option A):** Treat all activity `startAt`/`endAt` as all-day calendar dates and read/position them in UTC throughout. Genuine timestamps (`createdAt`, `updatedAt`) stay local. Left a `TODO: branch on allDay when timed events ship (Phase 15 calendar sync)` marker at both formatter sites.
+
+**Frontend — `components/gantt/granularity.ts`:**
+- Replaced all local-time helpers with UTC equivalents: `startOfDay` → `setUTCHours(0,0,0,0)`; `startOfWeek` → `getUTCDay`/`setUTCDate`; `startOfMonth/Quarter/Year` → `Date.UTC(...)`; `addDays`/`addMonths` → `setUTCDate`/`setUTCMonth`
+- `isoWeekNumber`: switched to UTC day/date arithmetic
+- `formatLabel` (all granularities): added `timeZone: 'UTC'` to every `toLocaleDateString` call; `quarter`/`year` labels use `getUTCMonth`/`getUTCFullYear`
+- `todayColumnPosition`: `startOfDay(new Date())` now produces UTC midnight via the updated helper — no separate change needed
+
+**Frontend — `components/gantt/GanttView.tsx`:**
+- `todayMidnight()`: changed `setHours` → `setUTCHours(0,0,0,0)`
+- Fallback `viewStart`/`viewEnd` (no timeline dates): changed `setDate`/`getDate` → `setUTCDate`/`getUTCDate` for date arithmetic on the UTC-midnight `today` base
+
+**Frontend — `components/gantt/GanttGrid.tsx`:**
+- `formatDragDate`: added `timeZone: 'UTC'` to `toLocaleDateString` (drag tooltip dates)
+
+**Frontend — `components/list/ListView.tsx`:**
+- Added `formatActivityDate(iso)`: same signature as `formatDate` but with `timeZone: 'UTC'` — used exclusively for Start/End cells
+- Left `formatDate` unchanged (local time) for Created/Updated cells which are genuine event timestamps
+
+**Tests — `components/gantt/granularity.test.ts`:**
+- Updated existing week-start tests: `getDay()`/`getDate()` → `getUTCDay()`/`getUTCDate()` (TZ-safe assertions); input dates changed to `Date.UTC(...)` to be stable across any test-runner timezone
+- Added `positionInColumns — midnight-UTC activity dates land on correct day` suite: verifies May 31 column label contains "31", that an activity at `"2026-05-31T00:00:00Z"` lands in column index 30 (May 31), and that a May 1 activity lands in column 0
+
+**Checks:** golangci-lint clean; go test 135 pass (cached); pnpm --filter web lint clean; pnpm --filter web build clean; pnpm --filter web test — 149 tests pass (14 new assertions)
+
+---
+
 ## 2026-06-01 — /test-phase 11.1
 
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e

@@ -249,10 +249,24 @@ interface Props {
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
+/** Formats a genuine timestamp (createdAt, updatedAt) in the user's local timezone. */
 function formatDate(iso: string | null | undefined): string {
   if (!iso) return '—';
   const d = new Date(iso);
   return isNaN(d.getTime()) ? '—' : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+/**
+ * Formats an all-day activity date (startAt, endAt) in UTC so that
+ * midnight-UTC dates like "2026-05-31T00:00:00Z" display as "May 31"
+ * regardless of the viewer's local timezone.
+ *
+ * TODO: branch on allDay when timed events ship (Phase 15 calendar sync).
+ */
+function formatActivityDate(iso: string | null | undefined): string {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  return isNaN(d.getTime()) ? '—' : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
 }
 
 function formatDuration(startAt: string | null | undefined, endAt: string | null | undefined): string {
@@ -2308,7 +2322,7 @@ export default function ListView({
                         }}
                       >
                         <span style={{ color: iso ? 'var(--foreground)' : 'var(--muted-foreground)' }}>
-                          {formatDate(iso)}
+                          {formatActivityDate(iso)}
                         </span>
                       </td>
                     );

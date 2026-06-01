@@ -2,20 +2,20 @@
 
 _Updated after each significant work session. Read this first to orient — it is intentionally short. Per-phase implementation detail lives in [docs/log.md](../log.md); this file is a current-state snapshot only._
 
-**Last updated:** 2026-05-31 (Phase 11.1 List View: full curated table with inline editing, column management, group-by/color-by, Find/filter integration; all automated checks pass; Docker verification pending)
+**Last updated:** 2026-06-01 (Phase 11.1.1 Timezone-Safe Activity Dates: UTC-based Gantt positioning and List date display; all automated checks pass; Docker verification pending)
 
 ---
 
 ## Phase Status
 
-**All phases through 10.4.6 are complete and automated-checks-pass.** That covers Identity (9.6), Teams/Members/Settings (10.1.x), Status Templates (10.2), Timelines CRUD (10.3), 10.4.1–10.4.5 polish, and 10.4.6 Filter Implementation. Phases through 10.4.5 are Docker-verified; 10.4.6 and 11.1 are awaiting Docker verification.
+**All phases through 10.4.6 are complete and automated-checks-pass.** That covers Identity (9.6), Teams/Members/Settings (10.1.x), Status Templates (10.2), Timelines CRUD (10.3), 10.4.1–10.4.5 polish, and 10.4.6 Filter Implementation. Phases through 10.4.5 are Docker-verified; 10.4.6, 11.1, and 11.1.1 are awaiting Docker verification.
 
-**Phase 11.1 — List View:** complete and checked (2026-05-31). Ships:
-- `components/list/ListToolbar.tsx` — Columns menu, Density, Group by, Sort by, Color by
-- `components/list/ListView.tsx` — TanStack Table v8 + @dnd-kit; column management, keyboard editing, inline edit (Title/Start/End/Status/text fields), Find/filter integration, Group-by, Color-by, persistence
-- DashboardPage: view mode + list toolbar state persisted per-timeline; List toolbar + ListView wired; shared detail/create panels
-- New deps: `@tanstack/react-table`, `@dnd-kit/core`, `@dnd-kit/sortable`, `@dnd-kit/utilities`
-- All automated checks pass (golangci-lint, go test 135 pass, pnpm lint, pnpm build)
+**Phase 11.1.1 — Timezone-Safe Activity Dates:** complete and checked (2026-06-01). Ships:
+- `granularity.ts`: all internal date helpers (startOfDay/Week/Month/Quarter/Year, addDays/addMonths, isoWeekNumber, formatLabel, todayColumnPosition) converted to UTC
+- `GanttView.tsx`: `todayMidnight()` and fallback view bounds use UTC
+- `GanttGrid.tsx`: `formatDragDate` adds `timeZone: 'UTC'`
+- `ListView.tsx`: `formatActivityDate` (UTC, for Start/End cells) separate from `formatDate` (local, for Created/Updated)
+- `granularity.test.ts`: existing tests updated to UTC assertions; new timezone-safety suite (149 total tests pass)
 
 | Next phase | Scope | Plan |
 |------------|-------|------|
@@ -25,7 +25,7 @@ _Updated after each significant work session. Read this first to orient — it i
 
 ## Open Issues
 
-None surfaced. Manual verification items for 10.4.6 and 11.1 tracked in TASKS.md.
+None surfaced. Manual verification items for 10.4.6, 11.1, and 11.1.1 tracked in TASKS.md.
 
 ---
 

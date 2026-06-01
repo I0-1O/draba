@@ -1072,6 +1072,26 @@ Ships the view-switcher infrastructure plus the dense, sortable, inline-editable
 
 ---
 
+### Timezone-Safe Activity Dates (Phase 11.1.1)
+Fixes midnight-UTC activity dates displaying one calendar day early in negative-UTC-offset timezones.
+
+- [x] `granularity.ts`: switch all internal date helpers to UTC (startOfDay/Week/Month/Quarter/Year, addDays/addMonths, isoWeekNumber, formatLabel, todayColumnPosition) — 2026-06-01
+- [x] `GanttView.tsx`: `todayMidnight()` → `setUTCHours(0,0,0,0)`; fallback viewStart/viewEnd use `setUTCDate`/`getUTCDate` — 2026-06-01
+- [x] `GanttGrid.tsx`: `formatDragDate` → adds `timeZone: 'UTC'` to `toLocaleDateString` — 2026-06-01
+- [x] `ListView.tsx`: add `formatActivityDate` (UTC, for Start/End cells); keep `formatDate` (local, for Created/Updated) — 2026-06-01
+- [x] `granularity.test.ts`: update existing tests to use `getUTCDay`/`getUTCDate` assertions; add timezone-safety suite with midnight-UTC positioning and label checks — 2026-06-01
+- [x] `golangci-lint run` clean — 2026-06-01
+- [x] `go test ./...` passes — 2026-06-01
+- [x] `pnpm --filter web lint` clean — 2026-06-01
+- [x] `pnpm --filter web build` clean — 2026-06-01
+- [x] `pnpm --filter web test` — 149 tests pass including new timezone-safety suite — 2026-06-01
+- [ ] Manual: List Start/End cells show correct calendar day in a negative-offset timezone
+- [ ] Manual: Gantt bars land on the correct day column in a negative-offset timezone
+- [ ] Manual: Gantt day/week/month labels match List dates for same activity
+- [ ] Manual: round-trip — open date picker, save unchanged, displayed date does not shift
+
+---
+
 ### Timeline Views — Calendar (Web — Phase 11.2)
 Three sub-layouts sharing one component skeleton.
 

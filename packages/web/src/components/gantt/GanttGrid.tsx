@@ -181,7 +181,7 @@ function colToEndDate(endColFrac: number, columns: ColumnDef[]): Date {
 
 
 function formatDragDate(d: Date): string {
-  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
 }
 
 export default function GanttGrid({

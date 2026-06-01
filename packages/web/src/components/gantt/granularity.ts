@@ -18,6 +18,12 @@ export interface ColumnDef {
 }
 
 // ── Date helpers ────────────────────────────────────────────────────────────
+//
+// All helpers operate in UTC so that all-day activity dates stored as
+// midnight-UTC strings (e.g. "2026-05-31T00:00:00Z") land on the correct
+// calendar day regardless of the viewer's local timezone.
+//
+// TODO: branch on allDay when timed events ship (Phase 15 calendar sync).
 
 function daysBetween(a: Date, b: Date): number {
   return Math.round((b.getTime() - a.getTime()) / 86_400_000);
@@ -25,44 +31,44 @@ function daysBetween(a: Date, b: Date): number {
 
 function startOfDay(d: Date): Date {
   const r = new Date(d);
-  r.setHours(0, 0, 0, 0);
+  r.setUTCHours(0, 0, 0, 0);
   return r;
 }
 
 function startOfWeek(d: Date, weekStart: 'monday' | 'sunday' = 'monday'): Date {
   const r = startOfDay(d);
-  const day = r.getDay(); // 0=Sun, 1=Mon, …, 6=Sat
+  const day = r.getUTCDay(); // 0=Sun, 1=Mon, …, 6=Sat
   if (weekStart === 'sunday') {
-    r.setDate(r.getDate() - day);
+    r.setUTCDate(r.getUTCDate() - day);
   } else {
     // Monday = ISO week start
-    r.setDate(r.getDate() - ((day + 6) % 7));
+    r.setUTCDate(r.getUTCDate() - ((day + 6) % 7));
   }
   return r;
 }
 
 function startOfMonth(d: Date): Date {
-  return new Date(d.getFullYear(), d.getMonth(), 1);
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1));
 }
 
 function startOfQuarter(d: Date): Date {
-  const q = Math.floor(d.getMonth() / 3) * 3;
-  return new Date(d.getFullYear(), q, 1);
+  const q = Math.floor(d.getUTCMonth() / 3) * 3;
+  return new Date(Date.UTC(d.getUTCFullYear(), q, 1));
 }
 
 function startOfYear(d: Date): Date {
-  return new Date(d.getFullYear(), 0, 1);
+  return new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
 }
 
 export function addDays(d: Date, n: number): Date {
   const r = new Date(d);
-  r.setDate(r.getDate() + n);
+  r.setUTCDate(r.getUTCDate() + n);
   return r;
 }
 
 function addMonths(d: Date, n: number): Date {
   const r = new Date(d);
-  r.setMonth(r.getMonth() + n);
+  r.setUTCMonth(r.getUTCMonth() + n);
   return r;
 }
 
@@ -91,35 +97,35 @@ function periodStart(d: Date, gran: TimeGranularity, weekStart: 'monday' | 'sund
 /** ISO 8601 week number (1–53). Week 1 contains Jan 4; weeks start Monday. */
 function isoWeekNumber(d: Date): number {
   const date = new Date(d);
-  date.setHours(0, 0, 0, 0);
-  date.setDate(date.getDate() + 3 - ((date.getDay() + 6) % 7));
-  const week1 = new Date(date.getFullYear(), 0, 4);
+  date.setUTCHours(0, 0, 0, 0);
+  date.setUTCDate(date.getUTCDate() + 3 - ((date.getUTCDay() + 6) % 7));
+  const week1 = new Date(Date.UTC(date.getUTCFullYear(), 0, 4));
   return 1 + Math.round(
-    ((date.getTime() - week1.getTime()) / 86_400_000 - 3 + ((week1.getDay() + 6) % 7)) / 7,
+    ((date.getTime() - week1.getTime()) / 86_400_000 - 3 + ((week1.getUTCDay() + 6) % 7)) / 7,
   );
 }
 
 function formatLabel(start: Date, gran: TimeGranularity, locale = 'en-US'): string {
   switch (gran) {
     case 'day':
-      return start.toLocaleDateString(locale, { month: 'short', day: 'numeric' });
+      return start.toLocaleDateString(locale, { month: 'short', day: 'numeric', timeZone: 'UTC' });
     case 'week': {
       const end = addDays(start, 6);
-      const sameMonth = start.getMonth() === end.getMonth();
-      const s = start.toLocaleDateString(locale, { month: 'short', day: 'numeric' });
+      const sameMonth = start.getUTCMonth() === end.getUTCMonth();
+      const s = start.toLocaleDateString(locale, { month: 'short', day: 'numeric', timeZone: 'UTC' });
       const e = sameMonth
-        ? end.getDate().toString()
-        : end.toLocaleDateString(locale, { month: 'short', day: 'numeric' });
+        ? end.getUTCDate().toString()
+        : end.toLocaleDateString(locale, { month: 'short', day: 'numeric', timeZone: 'UTC' });
       return `${s}–${e}`;
     }
     case 'month':
-      return start.toLocaleDateString(locale, { month: 'short', year: 'numeric' });
+      return start.toLocaleDateString(locale, { month: 'short', year: 'numeric', timeZone: 'UTC' });
     case 'quarter': {
-      const q = Math.floor(start.getMonth() / 3) + 1;
-      return `Q${q} ${start.getFullYear()}`;
+      const q = Math.floor(start.getUTCMonth() / 3) + 1;
+      return `Q${q} ${start.getUTCFullYear()}`;
     }
     case 'year':
-      return start.getFullYear().toString();
+      return start.getUTCFullYear().toString();
   }
 }
 
@@ -214,7 +220,7 @@ export function snapDivisorFor(granularity: TimeGranularity | 'auto'): number {
 // ── Today position ──────────────────────────────────────────────────────────
 
 export function todayColumnPosition(columns: ColumnDef[]): number {
-  const now = startOfDay(new Date());
+  const now = startOfDay(new Date()); // startOfDay uses setUTCHours → UTC midnight
   const nowMs = now.getTime();
 
   for (let i = 0; i < columns.length; i++) {

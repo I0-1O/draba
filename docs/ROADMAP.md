@@ -47,7 +47,7 @@ This document organizes development into discrete phases with effort estimates a
 | 10.4.5 | [Activity Tags, Parent & Progress Fields](#phase-1045--activity-tags-parent--progress-fields) | M — 2–3 days | ✅ |
 | 10.4.6 | [Filter Implementation](#phase-1046--filter-implementation) | M–L — 3–4 days | 🔄 |
 | 11.1 | [Web — List View](#phase-111--web--list-view) | M — 2–3 days | ✅ |
-| 11.1.1 | [Timezone-Safe Activity Dates](#phase-1111--timezone-safe-activity-dates) | S–M — 0.5–1 day | ⬜ |
+| 11.1.1 | [Timezone-Safe Activity Dates](#phase-1111--timezone-safe-activity-dates) | S–M — 0.5–1 day | ✅ |
 | 11.2 | [Web — Calendar View](#phase-112--web--calendar-view) | L — 3–5 days | ⬜ |
 | 11.3 | [Web — Kanban View (Read-Only)](#phase-113--web--kanban-view-read-only) | S–M — 1–2 days | ⬜ |
 | 12 | [Communications Testing](#phase-12--communications-testing) | S — 1 day | ⬜ |
@@ -1341,7 +1341,7 @@ Deliberately **not** a power-user database grid: no virtualization (our timeline
 ---
 
 ### Phase 11.1.1 — Timezone-Safe Activity Dates
-**Status:** ⬜ | **Effort:** S–M (0.5–1 day)
+**Status:** ✅ Done — 2026-06-01 | **Effort:** S–M (0.5–1 day)
 
 Activity start/end dates render one calendar day early for any user in a timezone behind UTC (e.g. `America/Denver`, −6): a date stored as `2026-05-31T00:00:00Z` shows as "May 30" in the List Start/End cells and Gantt labels, while the date *picker* correctly shows `2026-05-31`. The List/Gantt date pickers were unusable for a separate reason (a column-index bug, fixed during 11.1); this phase fixes the underlying timezone skew that remains.
 

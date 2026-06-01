@@ -86,7 +86,7 @@ function toDateOnly(datetime: string): string {
 
 function todayMidnight(): Date {
   const d = new Date();
-  d.setHours(0, 0, 0, 0);
+  d.setUTCHours(0, 0, 0, 0); // UTC midnight so it aligns with UTC-stored activity dates
   return d;
 }
 
@@ -405,7 +405,7 @@ export default function GanttView({
   const viewStart = useMemo<Date>(() => {
     if (startDate) return new Date(startDate);
     const d = new Date(today);
-    d.setDate(d.getDate() - 14);
+    d.setUTCDate(d.getUTCDate() - 14);
     return d;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [startDate]);
@@ -413,7 +413,7 @@ export default function GanttView({
   const viewEnd = useMemo<Date>(() => {
     if (endDate) return new Date(endDate);
     const d = new Date(today);
-    d.setDate(d.getDate() + 75);
+    d.setUTCDate(d.getUTCDate() + 75);
     return d;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [endDate]);
