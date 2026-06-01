@@ -1657,8 +1657,6 @@ export default function ListView({
             const actRowIdx = activityRows.indexOf(row);
             const isSelected = actRowIdx === selectedRowIdx;
             const isDetailOpen = activity.id === selectedActivityId;
-            const accentColor = getRowAccentColor(activity);
-
             const isMatch = debouncedQuery && matchedIds.includes(activity.id);
             const isActiveMatch = activity.id === activeMatchId;
             const isDimmed = debouncedQuery && matchedIds.length > 0 && !isMatch;
