@@ -61,7 +61,8 @@ import type { Identity } from '@/components/identity/identity-constants';
 import TagInput from '@/components/TagInput';
 import type { components } from '@draba/shared';
 import type { Member } from '@/types';
-import type { ListGroupBy, ListSortBy, ListColorBy, ColumnConfig } from './ListToolbar';
+import type { ListGroupBy, ListSortBy, ListColorBy, ListDensity, ColumnConfig } from './ListToolbar';
+import { useAuth } from '@/contexts/AuthContext';
 
 type ApiActivity = components['schemas']['Activity'];
 type Status = components['schemas']['Status'];
@@ -110,6 +111,119 @@ const DEFAULT_WIDTHS: ColumnSizingState = Object.fromEntries(
   COL_CATALOG.map(c => [c.id, c.defaultWidth]),
 );
 
+// ── Group-by row builder (exported for unit tests) ─────────────────────────────
+
+export type ListDisplayRow =
+  | { kind: 'group'; key: string; label: string; count: number }
+  | { kind: 'activity'; activity: ApiActivity; depth: number; hasChildren: boolean; groupKey: string };
+
+/** Converts a pre-sorted flat activity list into display rows for the given group-by mode. */
+export function buildListRows(
+  sortedActivities: ApiActivity[],
+  groupBy: ListGroupBy,
+  memberById: Map<string, { displayName: string }>,
+  statusById: Map<string, { name: string }>,
+  timelineStatuses: Status[],
+  collapsedGroups: Set<string>,
+): ListDisplayRow[] {
+  const emptyRow = (a: ApiActivity): ListDisplayRow => ({
+    kind: 'activity', activity: a, depth: 0, hasChildren: false, groupKey: '',
+  });
+
+  if (groupBy === 'none') return sortedActivities.map(emptyRow);
+
+  if (groupBy === 'member') {
+    const groups = new Map<string, { label: string; activities: ApiActivity[] }>();
+    for (const activity of sortedActivities) {
+      const ids = activity.assignedMemberIds ?? [];
+      const key = ids.length === 0 ? '__unassigned__' : ids[0];
+      const label = ids.length === 0 ? 'Unassigned' : (memberById.get(ids[0])?.displayName ?? 'Unknown');
+      const group = groups.get(key) ?? { label, activities: [] };
+      group.activities.push(activity);
+      groups.set(key, group);
+    }
+    const rows: ListDisplayRow[] = [];
+    for (const [key, { label, activities }] of groups) {
+      rows.push({ kind: 'group', key, label, count: activities.length });
+      if (!collapsedGroups.has(key)) {
+        for (const a of activities) rows.push({ kind: 'activity', activity: a, depth: 0, hasChildren: false, groupKey: key });
+      }
+    }
+    return rows;
+  }
+
+  if (groupBy === 'status') {
+    const groups = new Map<string, { label: string; activities: ApiActivity[] }>();
+    for (const activity of sortedActivities) {
+      const key = activity.statusId ?? '__no_status__';
+      const label = activity.statusId ? (statusById.get(activity.statusId)?.name ?? 'Unknown') : 'No status';
+      const group = groups.get(key) ?? { label, activities: [] };
+      group.activities.push(activity);
+      groups.set(key, group);
+    }
+    const rows: ListDisplayRow[] = [];
+    for (const s of timelineStatuses) {
+      const group = groups.get(s.id);
+      if (!group?.activities.length) continue;
+      rows.push({ kind: 'group', key: s.id, label: s.name, count: group.activities.length });
+      if (!collapsedGroups.has(s.id)) {
+        for (const a of group.activities) rows.push({ kind: 'activity', activity: a, depth: 0, hasChildren: false, groupKey: s.id });
+      }
+    }
+    const noStatus = groups.get('__no_status__');
+    if (noStatus?.activities.length) {
+      rows.push({ kind: 'group', key: '__no_status__', label: 'No status', count: noStatus.activities.length });
+      if (!collapsedGroups.has('__no_status__')) {
+        for (const a of noStatus.activities) rows.push({ kind: 'activity', activity: a, depth: 0, hasChildren: false, groupKey: '__no_status__' });
+      }
+    }
+    return rows;
+  }
+
+  if (groupBy === 'parent') {
+    // Tree nesting mirrors Gantt: parent rows are collapsible, children are indented.
+    // Activities whose parent is not in this view render as roots (orphan-safe).
+    const byId = new Map(sortedActivities.map(a => [a.id, a]));
+    const childrenByParent = new Map<string, ApiActivity[]>();
+    const roots: ApiActivity[] = [];
+    for (const a of sortedActivities) {
+      if (a.parentActivityId && byId.has(a.parentActivityId)) {
+        const list = childrenByParent.get(a.parentActivityId) ?? [];
+        list.push(a);
+        childrenByParent.set(a.parentActivityId, list);
+      } else {
+        roots.push(a);
+      }
+    }
+    const rows: ListDisplayRow[] = [];
+    const seen = new Set<string>();
+    const hidden = new Set<string>();
+    const markHidden = (a: ApiActivity) => {
+      if (hidden.has(a.id)) return;
+      hidden.add(a.id);
+      for (const k of childrenByParent.get(a.id) ?? []) markHidden(k);
+    };
+    const visit = (a: ApiActivity, depth: number) => {
+      if (seen.has(a.id)) return;
+      seen.add(a.id);
+      const kids = childrenByParent.get(a.id) ?? [];
+      const hasChildren = kids.length > 0;
+      rows.push({ kind: 'activity', activity: a, depth, hasChildren, groupKey: a.id });
+      if (!hasChildren) return;
+      if (collapsedGroups.has(a.id)) for (const k of kids) markHidden(k);
+      else for (const k of kids) visit(k, depth + 1);
+    };
+    for (const r of roots) visit(r, 0);
+    // Cycle-safe: any activity not yet visited (parent loop) renders at root depth
+    for (const a of sortedActivities) {
+      if (!seen.has(a.id) && !hidden.has(a.id)) visit(a, 0);
+    }
+    return rows;
+  }
+
+  return sortedActivities.map(emptyRow);
+}
+
 // ── Props ──────────────────────────────────────────────────────────────────────
 
 interface Props {
@@ -118,7 +232,7 @@ interface Props {
   groupBy: ListGroupBy;
   sortBy: ListSortBy;
   colorBy: ListColorBy;
-  density?: string; // kept for compat; ignored — always comfortable
+  density?: ListDensity;
   timelineStatuses?: Status[];
   savedFilters?: SavedFilter[];
   tags?: Tag[];
@@ -680,6 +794,7 @@ export default function ListView({
   groupBy,
   sortBy,
   colorBy,
+  density,
   timelineStatuses = [],
   savedFilters = [],
   tags = [],
@@ -690,6 +805,7 @@ export default function ListView({
   onMembersLoaded,
   triggerNewRow,
 }: Props) {
+  const { user } = useAuth();
   const { activeFilter } = useFilter();
   const { debouncedQuery, registerMatches, matchedIds, activeMatchId } = useFind();
 
@@ -985,119 +1101,14 @@ export default function ListView({
     [rawActivities],
   );
 
-  type DisplayRow =
-    | { kind: 'group'; key: string; label: string; count: number }
-    | { kind: 'activity'; activity: ApiActivity; depth: number; hasChildren: boolean; groupKey: string };
-
-  const displayRows = useMemo<DisplayRow[]>(() => {
-    const emptyRow = (a: ApiActivity): DisplayRow => ({
-      kind: 'activity', activity: a, depth: 0, hasChildren: false, groupKey: '',
-    });
-
-    if (groupBy === 'none') {
-      return sortedActivities.map(emptyRow);
-    }
-
-    if (groupBy === 'member') {
-      const groups = new Map<string, { label: string; activities: ApiActivity[] }>();
-      for (const activity of sortedActivities) {
-        const ids = activity.assignedMemberIds ?? [];
-        const key = ids.length === 0 ? '__unassigned__' : ids[0];
-        const label = ids.length === 0 ? 'Unassigned' : (memberById.get(ids[0])?.displayName ?? 'Unknown');
-        const group = groups.get(key) ?? { label, activities: [] };
-        group.activities.push(activity);
-        groups.set(key, group);
-      }
-      const rows: DisplayRow[] = [];
-      for (const [key, { label, activities }] of groups) {
-        rows.push({ kind: 'group', key, label, count: activities.length });
-        if (!collapsedGroups.has(key)) {
-          for (const a of activities) rows.push({ kind: 'activity', activity: a, depth: 0, hasChildren: false, groupKey: key });
-        }
-      }
-      return rows;
-    }
-
-    if (groupBy === 'status') {
-      const groups = new Map<string, { label: string; activities: ApiActivity[] }>();
-      for (const activity of sortedActivities) {
-        const key = activity.statusId ?? '__no_status__';
-        const label = activity.statusId ? (statusById.get(activity.statusId)?.name ?? 'Unknown') : 'No status';
-        const group = groups.get(key) ?? { label, activities: [] };
-        group.activities.push(activity);
-        groups.set(key, group);
-      }
-      // Emit statuses in order, then no-status
-      const rows: DisplayRow[] = [];
-      for (const s of timelineStatuses) {
-        const group = groups.get(s.id);
-        if (!group?.activities.length) continue;
-        rows.push({ kind: 'group', key: s.id, label: s.name, count: group.activities.length });
-        if (!collapsedGroups.has(s.id)) {
-          for (const a of group.activities) rows.push({ kind: 'activity', activity: a, depth: 0, hasChildren: false, groupKey: s.id });
-        }
-      }
-      const noStatus = groups.get('__no_status__');
-      if (noStatus?.activities.length) {
-        rows.push({ kind: 'group', key: '__no_status__', label: 'No status', count: noStatus.activities.length });
-        if (!collapsedGroups.has('__no_status__')) {
-          for (const a of noStatus.activities) rows.push({ kind: 'activity', activity: a, depth: 0, hasChildren: false, groupKey: '__no_status__' });
-        }
-      }
-      return rows;
-    }
-
-    if (groupBy === 'parent') {
-      // Build tree like Gantt: parent activity rows are collapsible, children are indented
-      const byId = new Map(sortedActivities.map(a => [a.id, a]));
-      const childrenByParent = new Map<string, ApiActivity[]>();
-      const roots: ApiActivity[] = [];
-
-      for (const a of sortedActivities) {
-        if (a.parentActivityId && byId.has(a.parentActivityId)) {
-          const list = childrenByParent.get(a.parentActivityId) ?? [];
-          list.push(a);
-          childrenByParent.set(a.parentActivityId, list);
-        } else {
-          roots.push(a);
-        }
-      }
-
-      const rows: DisplayRow[] = [];
-      const seen = new Set<string>();
-      const hidden = new Set<string>();
-
-      const markHidden = (a: ApiActivity) => {
-        if (hidden.has(a.id)) return;
-        hidden.add(a.id);
-        for (const k of childrenByParent.get(a.id) ?? []) markHidden(k);
-      };
-
-      const visit = (a: ApiActivity, depth: number) => {
-        if (seen.has(a.id)) return;
-        seen.add(a.id);
-        const kids = childrenByParent.get(a.id) ?? [];
-        const hasChildren = kids.length > 0;
-        const isCollapsed = collapsedGroups.has(a.id);
-        rows.push({ kind: 'activity', activity: a, depth, hasChildren, groupKey: a.id });
-        if (!hasChildren) return;
-        if (isCollapsed) for (const k of kids) markHidden(k);
-        else for (const k of kids) visit(k, depth + 1);
-      };
-
-      for (const r of roots) visit(r, 0);
-      for (const a of sortedActivities) {
-        if (!seen.has(a.id) && !hidden.has(a.id)) visit(a, 0);
-      }
-      return rows;
-    }
-
-    return sortedActivities.map(emptyRow);
-  }, [sortedActivities, groupBy, memberById, statusById, activityById, timelineStatuses, collapsedGroups]);
+  const displayRows = useMemo(
+    () => buildListRows(sortedActivities, groupBy, memberById, statusById, timelineStatuses, collapsedGroups),
+    [sortedActivities, groupBy, memberById, statusById, timelineStatuses, collapsedGroups],
+  );
 
   // Flat list of activity rows (for keyboard navigation indices)
   const activityRows = useMemo(
-    () => displayRows.filter((r): r is Extract<DisplayRow, { kind: 'activity' }> => r.kind === 'activity'),
+    () => displayRows.filter((r): r is Extract<ListDisplayRow, { kind: 'activity' }> => r.kind === 'activity'),
     [displayRows],
   );
 
@@ -1403,7 +1414,7 @@ export default function ListView({
       startAt,
       endAt: startAt,
       allDay: false,
-      createdBy: '',
+      createdBy: user?.id ?? '',
       createdAt: now,
       updatedAt: now,
       description: null,
@@ -1603,7 +1614,7 @@ export default function ListView({
 
   // ── Render ─────────────────────────────────────────────────────────────────
 
-  const rowH = 48; // always comfortable
+  const rowH = density === 'compact' ? 32 : 48;
 
   const visibleHeaders = table.getHeaderGroups()[0]?.headers ?? [];
 

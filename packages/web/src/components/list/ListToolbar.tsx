@@ -8,7 +8,7 @@
  */
 
 import { useState, useRef, useEffect } from 'react';
-import { Columns2, ChevronDown, Download, Share2 } from 'lucide-react';
+import { Columns2, ChevronDown, Download, Share2, AlignJustify } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 export type ListGroupBy = 'none' | 'member' | 'parent' | 'status';
@@ -45,16 +45,14 @@ const select   = 'h-[26px] px-1.5 border border-border rounded-md bg-card text-f
 export default function ListToolbar({
   columns,
   onColumnVisibilityChange,
-  density: _density,
-  onDensityChange: _onDensityChange,
+  density,
+  onDensityChange,
   groupBy,
   onGroupByChange,
   sortBy: _sortBy,
   onSortByChange: _onSortByChange,
   colorBy,
   onColorByChange,
-  onExport,
-  onShare,
 }: Props) {
   const [colMenuOpen, setColMenuOpen] = useState(false);
   const colMenuRef = useRef<HTMLDivElement>(null);
@@ -155,14 +153,34 @@ export default function ListToolbar({
         <option value="status">Status</option>
       </select>
 
+      <div className={divider} />
+
+      {/* Density toggle */}
+      <button
+        onClick={() => onDensityChange(density === 'comfortable' ? 'compact' : 'comfortable')}
+        className={ctrlBtn}
+        title={density === 'comfortable' ? 'Switch to compact rows' : 'Switch to comfortable rows'}
+      >
+        <AlignJustify size={13} strokeWidth={1.8} />
+        {density === 'comfortable' ? 'Comfortable' : 'Compact'}
+      </button>
+
       <div className="flex-1" />
 
-      <button className={ctrlBtn} onClick={onExport} title="Export (coming soon)">
+      <button
+        className={cn(ctrlBtn, 'opacity-40 cursor-not-allowed')}
+        disabled
+        title="Coming soon"
+      >
         <Download size={13} strokeWidth={1.8} />
         Export
       </button>
 
-      <button className={ctrlBtn} onClick={onShare} title="Share (coming soon)">
+      <button
+        className={cn(ctrlBtn, 'opacity-40 cursor-not-allowed')}
+        disabled
+        title="Coming soon"
+      >
         <Share2 size={13} strokeWidth={1.8} />
         Share
       </button>

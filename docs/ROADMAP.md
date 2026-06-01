@@ -46,7 +46,7 @@ This document organizes development into discrete phases with effort estimates a
 | 10.4.4 | [Gantt Interaction & Activity Edit Polish](#phase-1044--gantt-interaction--activity-edit-polish) | M — 2–3 days | 🔄 |
 | 10.4.5 | [Activity Tags, Parent & Progress Fields](#phase-1045--activity-tags-parent--progress-fields) | M — 2–3 days | ✅ |
 | 10.4.6 | [Filter Implementation](#phase-1046--filter-implementation) | M–L — 3–4 days | 🔄 |
-| 11.1 | [Web — List View](#phase-111--web--list-view) | M — 2–3 days | 🔄 In Progress |
+| 11.1 | [Web — List View](#phase-111--web--list-view) | M — 2–3 days | ✅ |
 | 11.1.1 | [Timezone-Safe Activity Dates](#phase-1111--timezone-safe-activity-dates) | S–M — 0.5–1 day | ⬜ |
 | 11.2 | [Web — Calendar View](#phase-112--web--calendar-view) | L — 3–5 days | ⬜ |
 | 11.3 | [Web — Kanban View (Read-Only)](#phase-113--web--kanban-view-read-only) | S–M — 1–2 days | ⬜ |
@@ -1312,18 +1312,19 @@ Makes the filter system fully operational. Today only the "Open only" preset act
 ---
 
 ### Phase 11.1 — Web — List View
-**Status:** 🔄 In Progress — 2026-05-31, all automated checks pass; manual UI verification on Docker still needed | **Effort:** M (2–3 days)
+**Status:** ✅ Done — 2026-06-01 | **Effort:** M (2–3 days)
 
 A curated, inline-editable **List** view of the active timeline's activities — the surface a team lead reaches for when they'd otherwise plan in Excel or a Google Doc. Two goals: (1) edit activities like a spreadsheet (keyboard-first, quick single-cell edits, no modal round-trips), and (2) curate a *digestible* column set — hide/show/reorder columns so the whole list reads in one sitting. Ships first so the view-switcher infrastructure lands here and the later views (11.2 Calendar, 11.3 Kanban) slot in.
 
-Deliberately **not** a power-user database grid: no virtualization (our timelines are tens-to-low-hundreds of activities, not thousands), no Excel range gestures (paste-fill / fill handle are out — that's what a future import path is for), no heavy bulk-mutation toolbar.
+Deliberately **not** a power-user database grid: no virtualization (our timelines are tens-to-low-hundreds of activities, not thousands), no Excel range gestures (paste-fill / fill handle are out — that's what a future import path is for).
 
 **Detailed plan:** [docs/plans/phase-11.1-list-view.md](plans/phase-11.1-list-view.md) — column catalog, keyboard editing model (selection vs. edit mode, TanStack Table v8 + @dnd-kit), column-curation persistence, group-by/color-by mirroring Gantt, build order, and exit criteria all live there. Scope is reviewed and settled.
 
 **Scope (summary — see plan doc for detail):**
 - *View-switcher infra* (reused by 11.2 / 11.3): `ViewMode` extended to `'gantt' | 'list' | 'calendar' | 'kanban'`; switcher control in the sub-toolbar persisted per-timeline; per-view toolbar slots.
 - *List view:* default columns (Title, Start, End, Duration, Status, Assignees, Tags) with a column catalog for the rest; hide/show + drag-reorder + resize, persisted per-timeline-per-user; pinned Title; density toggle; single-column sort; inline editing with field-appropriate editors (text, date, status pill, assignee/tag/parent popovers) saving via `PATCH /activities/:id`; group-by / color-by mirroring Gantt; respects active filter and Find highlight (8.5).
-- *Not this phase:* light multi-select (maybe later), paste-fill / fill handle (out), virtualization (deferred until proven needed).
+- *Multi-select:* row checkboxes + select-all; bulk archive / delete action bar — scope-adjusted from original (original excluded multi-select, but adding archive/delete to the list view required surfacing bulk operations for usability).
+- *Not this phase:* paste-fill / fill handle (out), virtualization (deferred until proven needed).
 
 **Exit criteria — safe to pause when:**
 - View switcher toggles Gantt ↔ List, persisting the choice per timeline

@@ -15,6 +15,7 @@ const mockMutate = vi.fn()
 vi.mock('@/hooks/useTeamActivities', () => ({
   useUpdateActivity: () => ({ mutate: mockMutate, isPending: false }),
   useDeleteActivity: () => ({ mutate: vi.fn(), isPending: false }),
+  useArchiveActivity: () => ({ mutate: vi.fn(), isPending: false }),
   useTimelineActivities: () => ({ data: [] }),
 }))
 

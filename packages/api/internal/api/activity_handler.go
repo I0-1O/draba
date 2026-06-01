@@ -17,6 +17,11 @@ import (
 func (s *Server) handleCreateActivity(w http.ResponseWriter, r *http.Request) {
 	teamID := r.PathValue("id")
 	timelineID := r.PathValue("timelineId")
+
+	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
+		return
+	}
+
 	claims := claimsFromContext(r.Context())
 
 	timeline, err := s.timelines.GetByID(timelineID)
@@ -30,10 +35,6 @@ func (s *Server) handleCreateActivity(w http.ResponseWriter, r *http.Request) {
 	}
 	if timeline.TeamID != teamID {
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-		return
-	}
-
-	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
 		return
 	}
 
@@ -126,6 +127,10 @@ func (s *Server) handleListActivities(w http.ResponseWriter, r *http.Request) {
 	teamID := r.PathValue("id")
 	timelineID := r.PathValue("timelineId")
 
+	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
+		return
+	}
+
 	timeline, err := s.timelines.GetByID(timelineID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -137,10 +142,6 @@ func (s *Server) handleListActivities(w http.ResponseWriter, r *http.Request) {
 	}
 	if timeline.TeamID != teamID {
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-		return
-	}
-
-	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
 		return
 	}
 

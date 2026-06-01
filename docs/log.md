@@ -2,6 +2,14 @@
 
 ---
 
+## 2026-06-01 — /test-phase 11.1
+
+- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
+- Result: all pass (schema-check and type-sync required fixes before passing — TESTING.md assertions corrected to match actual table names; generated index.ts re-committed)
+- Smoke target: http://epcot.lan:8081
+
+---
+
 ## 2026-05-31 — Phase 11.1: List View
 
 **Goal:** Ship a curated, inline-editable List view as a peer to the Gantt view, plus the view-switcher persistence infrastructure reused by 11.2/11.3.
