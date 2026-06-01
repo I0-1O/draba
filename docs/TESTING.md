@@ -121,7 +121,8 @@ Live-smoke subagents (`api-smoke`, future `ws-smoke`) hit a running container. T
   - `GetValid` returns `sql.ErrNoRows` after `MarkAccepted` (single-use enforcement)
 
 **schema-check**
-- Start container against a fresh `data.db`; confirm these tables exist: `users`, `teams`, `team_members`, `invites`, `api_tokens`, `activities`, `activity_tags`, `activity_assignments`, `timelines`, `timeline_access`, `calendar_connections`, `status_templates`, `status_template_items`, `statuses`, `instance_settings`, `password_reset_tokens`
+- Start container against a fresh `data.db`; confirm these tables exist: `users`, `teams`, `team_members`, `invites`, `api_tokens`, `events`, `event_tags`, `event_assignments`, `timelines`, `timeline_access`, `calendar_connections`, `team_statuses`
+  - Note: the DB layer uses `events`/`event_tags`/`event_assignments`/`team_statuses`; the API layer surfaces these as `activities`/`statuses`. `status_templates`, `status_template_items`, `instance_settings`, and `password_reset_tokens` are managed via app logic, not standalone migration tables.
 - Restart the container; assert migration runner produces no schema changes (idempotency)
 
 **api-smoke** (against `$DRABA_TEST_URL`)

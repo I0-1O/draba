@@ -3215,7 +3215,7 @@ export interface operations {
                 "application/json": {
                     name?: string;
                     definition?: string;
-                    /** @description When true, visible to all team members (admin-only to set true). */
+                    /** @description Promotes or demotes team visibility. Admin-only — both setting true and reverting to false require admin role. */
                     isTeamFilter?: boolean;
                 };
             };
