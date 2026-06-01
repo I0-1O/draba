@@ -49,7 +49,7 @@ function act(
 }
 
 function status(id: string, name: string): Status {
-  return { id, name, color: '#000', teamId: 'team1', sortOrder: 0, createdAt: '', updatedAt: '' }
+  return { id, name, color: '#000', timelineId: 'tl1', isClosed: false, position: 0, createdAt: '', updatedAt: '' }
 }
 
 function actRows(rows: ListDisplayRow[]) {
