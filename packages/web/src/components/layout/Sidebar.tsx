@@ -42,6 +42,8 @@ interface Props {
   collapsed: boolean;
   onToggle: () => void;
   onNewActivity?: () => void;
+  /** Stub: bulk-import activities. Surfaced in the "New activity" combo dropdown. */
+  onBulkImport?: () => void;
   apiTimelines?: ApiTimeline[];
   archivedTimelines?: ApiTimeline[];
   activeTimelineId?: string;
@@ -388,24 +390,31 @@ function MemberSidebarRow({ displayName, color, icon, isInactive = false, onEdit
  */
 const TIMELINE_COLORS = ['#1A97A2', '#6366F1', '#F17B2B', '#E11D48', '#10B981', '#F59E0B']
 
-export default function Sidebar({ collapsed, onToggle, onNewActivity, apiTimelines, archivedTimelines = [], activeTimelineId, onActiveTimelineChange, onNewTimeline, onEditTimeline, activeTeam, activeTeams = [], archivedTeams = [], onNewTeam, onEditTeam, onSelectTeam, canEditTeam = false, members: apiMembers, onEditMember }: Props) {
+export default function Sidebar({ collapsed, onToggle, onNewActivity, onBulkImport, apiTimelines, archivedTimelines = [], activeTimelineId, onActiveTimelineChange, onNewTimeline, onEditTimeline, activeTeam, activeTeams = [], archivedTeams = [], onNewTeam, onEditTeam, onSelectTeam, canEditTeam = false, members: apiMembers, onEditMember }: Props) {
   const { user } = useAuth();
   const currentUserId = (user as { id?: string } | null)?.id;
   const [internalActiveId, setInternalActiveId] = useState('');
   const [teamOpen, setTeamOpen] = useState(true);
-  const [activityOpen, setActivityOpen] = useState(true);
   const [connectorsOpen, setConnectorsOpen] = useState(true);
+  // Combo "New activity" dropdown (expanded + collapsed share this state).
+  const [newMenuOpen, setNewMenuOpen] = useState(false);
+  const newMenuRef = useRef<HTMLDivElement>(null);
+  // Collapsed-mode menu is rendered fixed (the rail clips overflow), so we
+  // capture the trigger's viewport rect when it opens.
+  const [collapsedMenuPos, setCollapsedMenuPos] = useState<{ top: number; left: number } | null>(null);
+  // Primary accent for the "New activity" combo button.
+  const NEW_BTN_BG = 'var(--primary)';
+  const NEW_BTN_FG = 'var(--primary-foreground)';
   const [archivedOpen, setArchivedOpen] = useState(false);
   const [timelinesOpen, setTimelinesOpen] = useState(true);
   const [membersOpen, setMembersOpen] = useState(true);
   const [archivedTeamsOpen, setArchivedTeamsOpen] = useState(false);
 
-  const allExpanded = teamOpen && timelinesOpen && activityOpen && connectorsOpen && membersOpen;
+  const allExpanded = teamOpen && timelinesOpen && connectorsOpen && membersOpen;
   function toggleAllSections() {
     const next = !allExpanded;
     setTeamOpen(next);
     setTimelinesOpen(next);
-    setActivityOpen(next);
     setConnectorsOpen(next);
     setMembersOpen(next);
     if (!next) {
@@ -458,6 +467,25 @@ export default function Sidebar({ collapsed, onToggle, onNewActivity, apiTimelin
       document.removeEventListener('mouseup', onMouseUp);
     };
   }, []);
+
+  // Close the "New activity" dropdown on outside click or Escape.
+  useEffect(() => {
+    if (!newMenuOpen) return;
+    function onDocMouseDown(e: MouseEvent) {
+      if (newMenuRef.current && !newMenuRef.current.contains(e.target as Node)) {
+        setNewMenuOpen(false);
+      }
+    }
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key === 'Escape') setNewMenuOpen(false);
+    }
+    document.addEventListener('mousedown', onDocMouseDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', onDocMouseDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [newMenuOpen]);
 
   function onHandleMouseDown(e: React.MouseEvent) {
     e.preventDefault();
@@ -551,6 +579,103 @@ export default function Sidebar({ collapsed, onToggle, onNewActivity, apiTimelin
         </div>
       </div>
 
+      {/* Primary "New activity" combo button — sits directly under the brand. */}
+      {!collapsed && (
+        <div
+          ref={newMenuRef}
+          style={{ position: 'relative', padding: '12px 16px 2px', flexShrink: 0 }}
+        >
+          <div style={{ display: 'flex', alignItems: 'stretch' }}>
+            <button
+              onClick={onNewActivity}
+              style={{
+                flex: 1,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: 8,
+                padding: '9px 12px',
+                background: NEW_BTN_BG,
+                border: 'none',
+                borderRadius: '7px 0 0 7px',
+                color: NEW_BTN_FG,
+                fontSize: 13,
+                fontWeight: 600,
+                cursor: 'pointer',
+                fontFamily: 'var(--font-sans)',
+              }}
+              onMouseEnter={e => (e.currentTarget.style.filter = 'brightness(1.08)')}
+              onMouseLeave={e => (e.currentTarget.style.filter = 'none')}
+            >
+              <CalendarPlus width={15} height={15} strokeWidth={2} />
+              New activity
+            </button>
+            <button
+              title="More activity options"
+              aria-haspopup="menu"
+              aria-expanded={newMenuOpen}
+              onClick={() => setNewMenuOpen(o => !o)}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                width: 32,
+                background: NEW_BTN_BG,
+                border: 'none',
+                borderLeft: '1px solid rgba(0,0,0,0.18)',
+                borderRadius: '0 7px 7px 0',
+                color: NEW_BTN_FG,
+                cursor: 'pointer',
+              }}
+              onMouseEnter={e => (e.currentTarget.style.filter = 'brightness(1.08)')}
+              onMouseLeave={e => (e.currentTarget.style.filter = 'none')}
+            >
+              <ChevronDown
+                width={14}
+                height={14}
+                strokeWidth={2}
+                style={{ transform: newMenuOpen ? 'rotate(180deg)' : 'none', transition: 'transform 0.12s' }}
+              />
+            </button>
+          </div>
+
+          {newMenuOpen && (
+            <div
+              role="menu"
+              style={{
+                position: 'absolute',
+                top: 'calc(100% - 4px)',
+                left: 16,
+                right: 16,
+                background: 'var(--color-charcoal)',
+                border: '1px solid rgba(255,255,255,0.12)',
+                borderRadius: 7,
+                boxShadow: '0 8px 24px rgba(0,0,0,0.45)',
+                padding: 4,
+                zIndex: 30,
+              }}
+            >
+              <button
+                role="menuitem"
+                onClick={() => { setNewMenuOpen(false); onBulkImport?.(); }}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 8,
+                  padding: '8px 10px', width: '100%',
+                  background: 'none', border: 'none', borderRadius: 5,
+                  color: 'rgba(255,255,255,0.75)', fontSize: 13,
+                  cursor: 'pointer', fontFamily: 'var(--font-sans)', textAlign: 'left',
+                }}
+                onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.07)')}
+                onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+              >
+                <Upload width={14} height={14} strokeWidth={1.8} />
+                Bulk import
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
       <div style={{ flex: 1, overflowY: 'auto' }}>
 
         {/* Collapsed: team + timeline icons only */}
@@ -585,34 +710,88 @@ export default function Sidebar({ collapsed, onToggle, onNewActivity, apiTimelin
               </div>
             )}
 
-            {/* New activity */}
-            <button
-              title="New activity"
-              onClick={onNewActivity}
-              style={{
-                width: 28,
-                height: 28,
-                borderRadius: 6,
-                background: 'rgba(255,255,255,0.08)',
-                border: 'none',
-                color: 'rgba(255,255,255,0.6)',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                cursor: 'pointer',
-                flexShrink: 0,
-              }}
-              onMouseEnter={e => {
-                e.currentTarget.style.background = 'rgba(255,255,255,0.14)'
-                e.currentTarget.style.color = 'white'
-              }}
-              onMouseLeave={e => {
-                e.currentTarget.style.background = 'rgba(255,255,255,0.08)'
-                e.currentTarget.style.color = 'rgba(255,255,255,0.6)'
-              }}
-            >
-              <CalendarPlus width={15} height={15} strokeWidth={1.8} />
-            </button>
+            {/* New activity combo — icon button opens a menu with both actions.
+                order:-1 keeps it at the top, matching the expanded layout. */}
+            <div ref={newMenuRef} style={{ position: 'relative', flexShrink: 0, order: -1, marginBottom: 2 }}>
+              <button
+                title="New activity"
+                aria-haspopup="menu"
+                aria-expanded={newMenuOpen}
+                onClick={e => {
+                  if (newMenuOpen) { setNewMenuOpen(false); return; }
+                  const r = e.currentTarget.getBoundingClientRect();
+                  setCollapsedMenuPos({ top: r.top, left: r.right + 6 });
+                  setNewMenuOpen(true);
+                }}
+                style={{
+                  width: 30,
+                  height: 30,
+                  borderRadius: 7,
+                  background: NEW_BTN_BG,
+                  border: 'none',
+                  color: NEW_BTN_FG,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  cursor: 'pointer',
+                }}
+                onMouseEnter={e => (e.currentTarget.style.filter = 'brightness(1.08)')}
+                onMouseLeave={e => (e.currentTarget.style.filter = 'none')}
+              >
+                <CalendarPlus width={16} height={16} strokeWidth={2} />
+              </button>
+
+              {newMenuOpen && collapsedMenuPos && (
+                <div
+                  role="menu"
+                  style={{
+                    position: 'fixed',
+                    top: collapsedMenuPos.top,
+                    left: collapsedMenuPos.left,
+                    minWidth: 160,
+                    background: 'var(--color-charcoal)',
+                    border: '1px solid rgba(255,255,255,0.12)',
+                    borderRadius: 7,
+                    boxShadow: '0 8px 24px rgba(0,0,0,0.45)',
+                    padding: 4,
+                    zIndex: 30,
+                  }}
+                >
+                  <button
+                    role="menuitem"
+                    onClick={() => { setNewMenuOpen(false); onNewActivity?.(); }}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: 8,
+                      padding: '8px 10px', width: '100%',
+                      background: 'none', border: 'none', borderRadius: 5,
+                      color: 'rgba(255,255,255,0.75)', fontSize: 13,
+                      cursor: 'pointer', fontFamily: 'var(--font-sans)', textAlign: 'left',
+                    }}
+                    onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.07)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                  >
+                    <CalendarPlus width={14} height={14} strokeWidth={1.8} />
+                    New activity
+                  </button>
+                  <button
+                    role="menuitem"
+                    onClick={() => { setNewMenuOpen(false); onBulkImport?.(); }}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: 8,
+                      padding: '8px 10px', width: '100%',
+                      background: 'none', border: 'none', borderRadius: 5,
+                      color: 'rgba(255,255,255,0.75)', fontSize: 13,
+                      cursor: 'pointer', fontFamily: 'var(--font-sans)', textAlign: 'left',
+                    }}
+                    onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.07)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                  >
+                    <Upload width={14} height={14} strokeWidth={1.8} />
+                    Bulk import
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
         )}
 
@@ -627,7 +806,7 @@ export default function Sidebar({ collapsed, onToggle, onNewActivity, apiTimelin
                 alignItems: 'center',
                 justifyContent: 'space-between',
                 width: '100%',
-                padding: '10px 12px 6px 16px',
+                padding: '6px 12px 6px 16px',
                 background: 'none',
                 border: 'none',
                 cursor: 'pointer',
@@ -887,79 +1066,6 @@ export default function Sidebar({ collapsed, onToggle, onNewActivity, apiTimelin
             />
           ))}
         </div>
-        {/* Activity section */}
-        {!collapsed && (
-          <div style={{ padding: '8px 0', borderTop: '1px solid rgba(255,255,255,0.08)' }}>
-            {/* Header with collapse toggle + quick-add icon */}
-            <div style={{ display: 'flex', alignItems: 'center', padding: '6px 6px 4px 16px' }}>
-              <button
-                onClick={() => setActivityOpen(o => !o)}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: 6, flex: 1,
-                  background: 'none', border: 'none', cursor: 'pointer',
-                  color: 'rgba(255,255,255,0.35)', fontFamily: 'var(--font-sans)',
-                  padding: 0,
-                }}
-              >
-                <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
-                  Activity
-                </span>
-                {activityOpen
-                  ? <ChevronDown width={12} height={12} strokeWidth={2} />
-                  : <ChevronRight width={12} height={12} strokeWidth={2} />}
-              </button>
-              <button
-                title="New activity"
-                onClick={onNewActivity}
-                style={{
-                  display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  width: 24, height: 24, borderRadius: 5,
-                  background: 'none', border: 'none',
-                  color: 'rgba(255,255,255,0.4)', cursor: 'pointer', flexShrink: 0,
-                }}
-                onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.9)')}
-                onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.4)')}
-              >
-                <CalendarPlus width={14} height={14} strokeWidth={1.8} />
-              </button>
-            </div>
-
-            {/* New activity + Import activities — only when section is expanded */}
-            {activityOpen && (
-              <button
-                onClick={onNewActivity}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: 8,
-                  padding: '6px 16px', background: 'none', border: 'none',
-                  color: 'rgba(255,255,255,0.6)', fontSize: 12,
-                  cursor: 'pointer', width: '100%', fontFamily: 'var(--font-sans)',
-                }}
-                onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.9)')}
-                onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.6)')}
-              >
-                <Plus width={13} height={13} strokeWidth={1.8} />
-                New activity
-              </button>
-            )}
-
-            {activityOpen && (
-              <button
-                style={{
-                  display: 'flex', alignItems: 'center', gap: 8,
-                  padding: '6px 16px', background: 'none', border: 'none',
-                  color: 'rgba(255,255,255,0.6)', fontSize: 12,
-                  cursor: 'pointer', width: '100%', fontFamily: 'var(--font-sans)',
-                }}
-                onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.9)')}
-                onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.6)')}
-              >
-                <Upload width={13} height={13} strokeWidth={1.8} />
-                Import activities
-              </button>
-            )}
-          </div>
-        )}
-
         {/* Connectors section — contextual to active timeline */}
         {!collapsed && (
           <div style={{ padding: '8px 0', borderTop: '1px solid rgba(255,255,255,0.08)' }}>
