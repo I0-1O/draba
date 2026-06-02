@@ -12700,6 +12700,409 @@ export default function RoleDropdown({ value, onChange, disabled = false, hidePa
 }
 ````
 
+## File: packages/web/src/components/StatusTemplatesTab.tsx
+````typescript
+/**
+ * StatusTemplatesTab — Status Templates management inside the Team Modal.
+ *
+ * Shows a list of status templates for the team. Each template can be expanded
+ * to reveal its items, which can be edited, reordered (positionally), added,
+ * or removed. Admins can also create and delete templates, with the server
+ * blocking deletion of the last template or last item.
+ */
+
+import { useState } from 'react'
+import { Plus, Trash2, ChevronDown, ChevronRight, Check, X } from 'lucide-react'
+import {
+  useStatusTemplates,
+  useCreateStatusTemplate,
+  useDeleteStatusTemplate,
+  useCreateTemplateItem,
+  useUpdateTemplateItem,
+  useDeleteTemplateItem,
+} from '@/hooks/useStatusTemplates'
+import { IdentityWidget } from '@/components/identity/IdentityWidget'
+import { Badge } from '@/components/identity/Badge'
+import type { Identity } from '@/components/identity/identity-constants'
+import type { components } from '@draba/shared'
+
+type StatusTemplate = components['schemas']['StatusTemplate']
+type StatusTemplateItem = components['schemas']['StatusTemplateItem']
+
+interface Props {
+  teamId: string
+  isAdmin: boolean
+  teamColor: string
+}
+
+// ── Item row ─────────────────────────────────────────────────────────────────
+
+interface ItemRowProps {
+  item: StatusTemplateItem
+  teamId: string
+  canDelete: boolean
+}
+
+function ItemRow({ item, teamId, canDelete }: ItemRowProps) {
+  const [editing, setEditing] = useState(false)
+  const [name, setName] = useState(item.name)
+  const [identity, setIdentity] = useState<Identity>({ color: item.color, icon: item.icon ?? '' })
+  const [isClosed, setIsClosed] = useState(item.isClosed)
+  const updateItem = useUpdateTemplateItem(teamId)
+  const deleteItem = useDeleteTemplateItem(teamId)
+  const [error, setError] = useState('')
+
+  function handleSave() {
+    if (!name.trim()) { setError('Name is required'); return }
+    updateItem.mutate(
+      { id: item.id, name: name.trim(), color: identity.color, icon: identity.icon || null, isClosed },
+      {
+        onSuccess: () => setEditing(false),
+        onError: () => setError('Failed to save'),
+      }
+    )
+  }
+
+  function handleDelete() {
+    if (!canDelete) { setError('Cannot delete the last item'); return }
+    deleteItem.mutate(item.id, {
+      onError: (err: unknown) => {
+        const msg = err instanceof Error ? err.message : 'Failed to delete'
+        setError(msg.includes('LAST_ITEM') ? 'Cannot delete the last item' : msg)
+      },
+    })
+  }
+
+  if (editing) {
+    return (
+      <div style={{ background: '#2d333b', borderRadius: 8, padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <IdentityWidget identity={identity} name={name || 'Status'} shape="square" onChange={setIdentity} />
+          <input
+            autoFocus
+            value={name}
+            onChange={e => { setName(e.target.value); setError('') }}
+            onKeyDown={e => { if (e.key === 'Enter') handleSave(); if (e.key === 'Escape') setEditing(false) }}
+            style={{ flex: 1, background: '#161b22', border: '1px solid #30363d', borderRadius: 6, padding: '5px 8px', color: '#e6edf3', fontSize: 13, fontFamily: 'inherit' }}
+          />
+          <button onClick={handleSave} disabled={updateItem.isPending} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#3B82F6', display: 'flex', padding: 2 }}>
+            <Check size={15} />
+          </button>
+          <button onClick={() => setEditing(false)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#484f58', display: 'flex', padding: 2 }}>
+            <X size={15} />
+          </button>
+        </div>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: '#8b949e', cursor: 'pointer', userSelect: 'none' }}>
+          <input
+            type="checkbox"
+            checked={isClosed}
+            onChange={e => setIsClosed(e.target.checked)}
+            style={{ accentColor: '#3B82F6' }}
+          />
+          Closed status (marks this status as completed/done)
+        </label>
+        {error && <div style={{ fontSize: 11, color: '#ef4444' }}>{error}</div>}
+      </div>
+    )
+  }
+
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 8, padding: '7px 4px',
+      borderRadius: 6,
+    }}>
+      <Badge identity={{ color: item.color, icon: item.icon ?? '' }} name={item.name} size={16} />
+      <span
+        onClick={() => setEditing(true)}
+        style={{ flex: 1, fontSize: 13, color: '#e6edf3', cursor: 'pointer' }}
+        title="Click to edit"
+      >
+        {item.name}
+      </span>
+      {item.isClosed && (
+        <span style={{ fontSize: 10, color: '#484f58', background: '#161b22', borderRadius: 4, padding: '1px 5px', letterSpacing: '0.3px' }}>
+          closed
+        </span>
+      )}
+      <button
+        onClick={handleDelete}
+        disabled={!canDelete || deleteItem.isPending}
+        title={canDelete ? 'Remove item' : 'Cannot delete the last item'}
+        style={{
+          background: 'none', border: 'none', cursor: canDelete ? 'pointer' : 'not-allowed',
+          color: '#484f58', display: 'flex', padding: 2, opacity: canDelete ? 1 : 0.35,
+        }}
+      >
+        <Trash2 size={13} />
+      </button>
+    </div>
+  )
+}
+
+// ── Template card ─────────────────────────────────────────────────────────────
+
+interface TemplateCardProps {
+  template: StatusTemplate
+  teamId: string
+  isAdmin: boolean
+  teamColor: string
+  canDelete: boolean
+}
+
+function TemplateCard({ template, teamId, isAdmin, teamColor, canDelete }: TemplateCardProps) {
+  const [expanded, setExpanded] = useState(true)
+  const [addingItem, setAddingItem] = useState(false)
+  const [newItemName, setNewItemName] = useState('')
+  const [newItemIdentity, setNewItemIdentity] = useState<Identity>({ color: '#3B82F6', icon: '' })
+  const [newItemIsClosed, setNewItemIsClosed] = useState(false)
+  const [itemError, setItemError] = useState('')
+  const [deleteError, setDeleteError] = useState('')
+
+  const createItem = useCreateTemplateItem(teamId)
+  const deleteTemplate = useDeleteStatusTemplate(teamId)
+
+  function handleAddItem() {
+    if (!newItemName.trim()) { setItemError('Name is required'); return }
+    createItem.mutate(
+      {
+        templateId: template.id,
+        name: newItemName.trim(),
+        color: newItemIdentity.color,
+        icon: newItemIdentity.icon || null,
+        isClosed: newItemIsClosed,
+      },
+      {
+        onSuccess: () => {
+          setNewItemName('')
+          setNewItemIdentity({ color: '#3B82F6', icon: '' })
+          setNewItemIsClosed(false)
+          setAddingItem(false)
+        },
+        onError: () => setItemError('Failed to add item'),
+      }
+    )
+  }
+
+  function handleCancelAddItem() {
+    setAddingItem(false)
+    setNewItemName('')
+    setNewItemIdentity({ color: '#3B82F6', icon: '' })
+    setNewItemIsClosed(false)
+    setItemError('')
+  }
+
+  function handleDeleteTemplate() {
+    if (!canDelete) { setDeleteError('Cannot delete the last template'); return }
+    deleteTemplate.mutate(template.id, {
+      onError: (err: unknown) => {
+        const msg = err instanceof Error ? err.message : 'Failed to delete'
+        setDeleteError(msg.includes('LAST_TEMPLATE') ? 'Cannot delete the last template' : msg)
+      },
+    })
+  }
+
+  return (
+    <div style={{ border: '1px solid #30363d', borderRadius: 10, overflow: 'hidden' }}>
+      {/* Template header */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 14px', background: '#2d333b' }}>
+        <button
+          onClick={() => setExpanded(x => !x)}
+          style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#8b949e', display: 'flex', padding: 0 }}
+        >
+          {expanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+        </button>
+        <span style={{ flex: 1, fontSize: 14, fontWeight: 600, color: '#e6edf3' }}>{template.name}</span>
+        <span style={{ fontSize: 11, color: '#484f58' }}>{template.items.length} item{template.items.length !== 1 ? 's' : ''}</span>
+        {isAdmin && (
+          <button
+            onClick={handleDeleteTemplate}
+            disabled={deleteTemplate.isPending || !canDelete}
+            title={canDelete ? 'Delete template' : 'Cannot delete the last template'}
+            style={{
+              background: 'none', border: 'none', padding: 2, display: 'flex',
+              cursor: canDelete ? 'pointer' : 'not-allowed',
+              color: '#484f58', opacity: canDelete ? 1 : 0.35,
+            }}
+          >
+            <Trash2 size={14} />
+          </button>
+        )}
+      </div>
+
+      {deleteError && (
+        <div style={{ padding: '4px 14px', fontSize: 11, color: '#ef4444', background: '#2d333b' }}>
+          {deleteError}
+        </div>
+      )}
+
+      {/* Template items */}
+      {expanded && (
+        <div style={{ padding: '8px 14px', display: 'flex', flexDirection: 'column', gap: 2 }}>
+          {template.items.map(item => (
+            <ItemRow
+              key={item.id}
+              item={item}
+              teamId={teamId}
+              canDelete={template.items.length > 1}
+            />
+          ))}
+
+          {/* Add item row */}
+          {isAdmin && (
+            addingItem ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 4 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <IdentityWidget
+                    identity={newItemIdentity}
+                    name={newItemName || 'New status'}
+                    shape="square"
+                    onChange={setNewItemIdentity}
+                  />
+                  <input
+                    autoFocus
+                    value={newItemName}
+                    onChange={e => { setNewItemName(e.target.value); setItemError('') }}
+                    onKeyDown={e => { if (e.key === 'Enter') handleAddItem(); if (e.key === 'Escape') handleCancelAddItem() }}
+                    placeholder="Status name…"
+                    style={{ flex: 1, background: '#161b22', border: '1px solid #30363d', borderRadius: 6, padding: '5px 8px', color: '#e6edf3', fontSize: 13, fontFamily: 'inherit' }}
+                  />
+                  <button onClick={handleAddItem} disabled={createItem.isPending} style={{ background: 'none', border: 'none', cursor: 'pointer', color: teamColor, display: 'flex', padding: 2 }}>
+                    <Check size={15} />
+                  </button>
+                  <button onClick={handleCancelAddItem} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#484f58', display: 'flex', padding: 2 }}>
+                    <X size={15} />
+                  </button>
+                </div>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: '#8b949e', cursor: 'pointer', userSelect: 'none', paddingLeft: 26 }}>
+                  <input
+                    type="checkbox"
+                    checked={newItemIsClosed}
+                    onChange={e => setNewItemIsClosed(e.target.checked)}
+                    style={{ accentColor: '#3B82F6' }}
+                  />
+                  Closed status (marks this status as completed/done)
+                </label>
+                {itemError && <div style={{ fontSize: 11, color: '#ef4444', paddingLeft: 26 }}>{itemError}</div>}
+              </div>
+            ) : (
+              <button
+                onClick={() => setAddingItem(true)}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 6, marginTop: 4,
+                  background: 'none', border: 'none', cursor: 'pointer',
+                  color: '#484f58', fontSize: 12, padding: '4px 2px', fontFamily: 'inherit',
+                }}
+              >
+                <Plus size={13} /> Add status
+              </button>
+            )
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Main tab ──────────────────────────────────────────────────────────────────
+
+export default function StatusTemplatesTab({ teamId, isAdmin, teamColor }: Props) {
+  const { data: templates = [], isLoading } = useStatusTemplates(teamId)
+  const createTemplate = useCreateStatusTemplate(teamId)
+  const [addingTemplate, setAddingTemplate] = useState(false)
+  const [newTemplateName, setNewTemplateName] = useState('')
+  const [createError, setCreateError] = useState('')
+
+  function handleCreateTemplate() {
+    if (!newTemplateName.trim()) { setCreateError('Name is required'); return }
+    createTemplate.mutate(
+      { name: newTemplateName.trim() },
+      {
+        onSuccess: () => { setNewTemplateName(''); setAddingTemplate(false) },
+        onError: () => setCreateError('Failed to create template'),
+      }
+    )
+  }
+
+  if (isLoading) {
+    return (
+      <div style={{ padding: 20, fontSize: 13, color: '#484f58' }}>Loading…</div>
+    )
+  }
+
+  return (
+    <div style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div style={{ fontSize: 12, color: '#8b949e', lineHeight: 1.6 }}>
+        Status templates are reusable presets. When a new timeline is created, its statuses are
+        copied from the first template. Changes here don't affect existing timelines.
+      </div>
+
+      {templates.map(template => (
+        <TemplateCard
+          key={template.id}
+          template={template}
+          teamId={teamId}
+          isAdmin={isAdmin}
+          teamColor={teamColor}
+          canDelete={templates.length > 1}
+        />
+      ))}
+
+      {/* Add template */}
+      {isAdmin && (
+        addingTemplate ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <input
+                autoFocus
+                value={newTemplateName}
+                onChange={e => { setNewTemplateName(e.target.value); setCreateError('') }}
+                onKeyDown={e => { if (e.key === 'Enter') handleCreateTemplate(); if (e.key === 'Escape') setAddingTemplate(false) }}
+                placeholder="Template name (e.g. Kanban, Sprint)…"
+                style={{
+                  flex: 1, background: '#2d333b', border: '1px solid #30363d',
+                  borderRadius: 7, padding: '8px 12px', color: '#e6edf3', fontSize: 13, fontFamily: 'inherit',
+                }}
+              />
+              <button
+                onClick={handleCreateTemplate}
+                disabled={createTemplate.isPending}
+                style={{
+                  background: teamColor, border: 'none', borderRadius: 7, color: '#fff',
+                  fontWeight: 600, fontSize: 13, padding: '8px 16px', cursor: 'pointer',
+                  opacity: createTemplate.isPending ? 0.6 : 1, fontFamily: 'inherit',
+                }}
+              >
+                {createTemplate.isPending ? 'Creating…' : 'Create'}
+              </button>
+              <button
+                onClick={() => setAddingTemplate(false)}
+                style={{ background: 'none', border: '1px solid #30363d', borderRadius: 7, color: '#8b949e', fontSize: 13, padding: '8px 12px', cursor: 'pointer' }}
+              >
+                Cancel
+              </button>
+            </div>
+            {createError && <div style={{ fontSize: 11, color: '#ef4444' }}>{createError}</div>}
+          </div>
+        ) : (
+          <button
+            onClick={() => setAddingTemplate(true)}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'center',
+              background: 'none', border: '1px dashed #30363d', borderRadius: 8,
+              color: '#484f58', fontSize: 13, padding: '10px 16px', cursor: 'pointer',
+              fontFamily: 'inherit', width: '100%',
+            }}
+          >
+            <Plus size={14} />
+            New template
+          </button>
+        )
+      )}
+    </div>
+  )
+}
+````
+
 ## File: packages/web/src/contexts/FindContext.tsx
 ````typescript
 /**
@@ -20257,409 +20660,6 @@ const InlineEditableTitle = forwardRef<HTMLInputElement, Props>(
 )
 
 export default InlineEditableTitle
-````
-
-## File: packages/web/src/components/StatusTemplatesTab.tsx
-````typescript
-/**
- * StatusTemplatesTab — Status Templates management inside the Team Modal.
- *
- * Shows a list of status templates for the team. Each template can be expanded
- * to reveal its items, which can be edited, reordered (positionally), added,
- * or removed. Admins can also create and delete templates, with the server
- * blocking deletion of the last template or last item.
- */
-
-import { useState } from 'react'
-import { Plus, Trash2, ChevronDown, ChevronRight, Check, X } from 'lucide-react'
-import {
-  useStatusTemplates,
-  useCreateStatusTemplate,
-  useDeleteStatusTemplate,
-  useCreateTemplateItem,
-  useUpdateTemplateItem,
-  useDeleteTemplateItem,
-} from '@/hooks/useStatusTemplates'
-import { IdentityWidget } from '@/components/identity/IdentityWidget'
-import { Badge } from '@/components/identity/Badge'
-import type { Identity } from '@/components/identity/identity-constants'
-import type { components } from '@draba/shared'
-
-type StatusTemplate = components['schemas']['StatusTemplate']
-type StatusTemplateItem = components['schemas']['StatusTemplateItem']
-
-interface Props {
-  teamId: string
-  isAdmin: boolean
-  teamColor: string
-}
-
-// ── Item row ─────────────────────────────────────────────────────────────────
-
-interface ItemRowProps {
-  item: StatusTemplateItem
-  teamId: string
-  canDelete: boolean
-}
-
-function ItemRow({ item, teamId, canDelete }: ItemRowProps) {
-  const [editing, setEditing] = useState(false)
-  const [name, setName] = useState(item.name)
-  const [identity, setIdentity] = useState<Identity>({ color: item.color, icon: item.icon ?? '' })
-  const [isClosed, setIsClosed] = useState(item.isClosed)
-  const updateItem = useUpdateTemplateItem(teamId)
-  const deleteItem = useDeleteTemplateItem(teamId)
-  const [error, setError] = useState('')
-
-  function handleSave() {
-    if (!name.trim()) { setError('Name is required'); return }
-    updateItem.mutate(
-      { id: item.id, name: name.trim(), color: identity.color, icon: identity.icon || null, isClosed },
-      {
-        onSuccess: () => setEditing(false),
-        onError: () => setError('Failed to save'),
-      }
-    )
-  }
-
-  function handleDelete() {
-    if (!canDelete) { setError('Cannot delete the last item'); return }
-    deleteItem.mutate(item.id, {
-      onError: (err: unknown) => {
-        const msg = err instanceof Error ? err.message : 'Failed to delete'
-        setError(msg.includes('LAST_ITEM') ? 'Cannot delete the last item' : msg)
-      },
-    })
-  }
-
-  if (editing) {
-    return (
-      <div style={{ background: '#2d333b', borderRadius: 8, padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 8 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <IdentityWidget identity={identity} name={name || 'Status'} shape="square" onChange={setIdentity} />
-          <input
-            autoFocus
-            value={name}
-            onChange={e => { setName(e.target.value); setError('') }}
-            onKeyDown={e => { if (e.key === 'Enter') handleSave(); if (e.key === 'Escape') setEditing(false) }}
-            style={{ flex: 1, background: '#161b22', border: '1px solid #30363d', borderRadius: 6, padding: '5px 8px', color: '#e6edf3', fontSize: 13, fontFamily: 'inherit' }}
-          />
-          <button onClick={handleSave} disabled={updateItem.isPending} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#3B82F6', display: 'flex', padding: 2 }}>
-            <Check size={15} />
-          </button>
-          <button onClick={() => setEditing(false)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#484f58', display: 'flex', padding: 2 }}>
-            <X size={15} />
-          </button>
-        </div>
-        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: '#8b949e', cursor: 'pointer', userSelect: 'none' }}>
-          <input
-            type="checkbox"
-            checked={isClosed}
-            onChange={e => setIsClosed(e.target.checked)}
-            style={{ accentColor: '#3B82F6' }}
-          />
-          Closed status (marks this status as completed/done)
-        </label>
-        {error && <div style={{ fontSize: 11, color: '#ef4444' }}>{error}</div>}
-      </div>
-    )
-  }
-
-  return (
-    <div style={{
-      display: 'flex', alignItems: 'center', gap: 8, padding: '7px 4px',
-      borderRadius: 6,
-    }}>
-      <Badge identity={{ color: item.color, icon: item.icon ?? '' }} name={item.name} size={16} />
-      <span
-        onClick={() => setEditing(true)}
-        style={{ flex: 1, fontSize: 13, color: '#e6edf3', cursor: 'pointer' }}
-        title="Click to edit"
-      >
-        {item.name}
-      </span>
-      {item.isClosed && (
-        <span style={{ fontSize: 10, color: '#484f58', background: '#161b22', borderRadius: 4, padding: '1px 5px', letterSpacing: '0.3px' }}>
-          closed
-        </span>
-      )}
-      <button
-        onClick={handleDelete}
-        disabled={!canDelete || deleteItem.isPending}
-        title={canDelete ? 'Remove item' : 'Cannot delete the last item'}
-        style={{
-          background: 'none', border: 'none', cursor: canDelete ? 'pointer' : 'not-allowed',
-          color: '#484f58', display: 'flex', padding: 2, opacity: canDelete ? 1 : 0.35,
-        }}
-      >
-        <Trash2 size={13} />
-      </button>
-    </div>
-  )
-}
-
-// ── Template card ─────────────────────────────────────────────────────────────
-
-interface TemplateCardProps {
-  template: StatusTemplate
-  teamId: string
-  isAdmin: boolean
-  teamColor: string
-  canDelete: boolean
-}
-
-function TemplateCard({ template, teamId, isAdmin, teamColor, canDelete }: TemplateCardProps) {
-  const [expanded, setExpanded] = useState(true)
-  const [addingItem, setAddingItem] = useState(false)
-  const [newItemName, setNewItemName] = useState('')
-  const [newItemIdentity, setNewItemIdentity] = useState<Identity>({ color: '#3B82F6', icon: '' })
-  const [newItemIsClosed, setNewItemIsClosed] = useState(false)
-  const [itemError, setItemError] = useState('')
-  const [deleteError, setDeleteError] = useState('')
-
-  const createItem = useCreateTemplateItem(teamId)
-  const deleteTemplate = useDeleteStatusTemplate(teamId)
-
-  function handleAddItem() {
-    if (!newItemName.trim()) { setItemError('Name is required'); return }
-    createItem.mutate(
-      {
-        templateId: template.id,
-        name: newItemName.trim(),
-        color: newItemIdentity.color,
-        icon: newItemIdentity.icon || null,
-        isClosed: newItemIsClosed,
-      },
-      {
-        onSuccess: () => {
-          setNewItemName('')
-          setNewItemIdentity({ color: '#3B82F6', icon: '' })
-          setNewItemIsClosed(false)
-          setAddingItem(false)
-        },
-        onError: () => setItemError('Failed to add item'),
-      }
-    )
-  }
-
-  function handleCancelAddItem() {
-    setAddingItem(false)
-    setNewItemName('')
-    setNewItemIdentity({ color: '#3B82F6', icon: '' })
-    setNewItemIsClosed(false)
-    setItemError('')
-  }
-
-  function handleDeleteTemplate() {
-    if (!canDelete) { setDeleteError('Cannot delete the last template'); return }
-    deleteTemplate.mutate(template.id, {
-      onError: (err: unknown) => {
-        const msg = err instanceof Error ? err.message : 'Failed to delete'
-        setDeleteError(msg.includes('LAST_TEMPLATE') ? 'Cannot delete the last template' : msg)
-      },
-    })
-  }
-
-  return (
-    <div style={{ border: '1px solid #30363d', borderRadius: 10, overflow: 'hidden' }}>
-      {/* Template header */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 14px', background: '#2d333b' }}>
-        <button
-          onClick={() => setExpanded(x => !x)}
-          style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#8b949e', display: 'flex', padding: 0 }}
-        >
-          {expanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
-        </button>
-        <span style={{ flex: 1, fontSize: 14, fontWeight: 600, color: '#e6edf3' }}>{template.name}</span>
-        <span style={{ fontSize: 11, color: '#484f58' }}>{template.items.length} item{template.items.length !== 1 ? 's' : ''}</span>
-        {isAdmin && (
-          <button
-            onClick={handleDeleteTemplate}
-            disabled={deleteTemplate.isPending || !canDelete}
-            title={canDelete ? 'Delete template' : 'Cannot delete the last template'}
-            style={{
-              background: 'none', border: 'none', padding: 2, display: 'flex',
-              cursor: canDelete ? 'pointer' : 'not-allowed',
-              color: '#484f58', opacity: canDelete ? 1 : 0.35,
-            }}
-          >
-            <Trash2 size={14} />
-          </button>
-        )}
-      </div>
-
-      {deleteError && (
-        <div style={{ padding: '4px 14px', fontSize: 11, color: '#ef4444', background: '#2d333b' }}>
-          {deleteError}
-        </div>
-      )}
-
-      {/* Template items */}
-      {expanded && (
-        <div style={{ padding: '8px 14px', display: 'flex', flexDirection: 'column', gap: 2 }}>
-          {template.items.map(item => (
-            <ItemRow
-              key={item.id}
-              item={item}
-              teamId={teamId}
-              canDelete={template.items.length > 1}
-            />
-          ))}
-
-          {/* Add item row */}
-          {isAdmin && (
-            addingItem ? (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 4 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <IdentityWidget
-                    identity={newItemIdentity}
-                    name={newItemName || 'New status'}
-                    shape="square"
-                    onChange={setNewItemIdentity}
-                  />
-                  <input
-                    autoFocus
-                    value={newItemName}
-                    onChange={e => { setNewItemName(e.target.value); setItemError('') }}
-                    onKeyDown={e => { if (e.key === 'Enter') handleAddItem(); if (e.key === 'Escape') handleCancelAddItem() }}
-                    placeholder="Status name…"
-                    style={{ flex: 1, background: '#161b22', border: '1px solid #30363d', borderRadius: 6, padding: '5px 8px', color: '#e6edf3', fontSize: 13, fontFamily: 'inherit' }}
-                  />
-                  <button onClick={handleAddItem} disabled={createItem.isPending} style={{ background: 'none', border: 'none', cursor: 'pointer', color: teamColor, display: 'flex', padding: 2 }}>
-                    <Check size={15} />
-                  </button>
-                  <button onClick={handleCancelAddItem} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#484f58', display: 'flex', padding: 2 }}>
-                    <X size={15} />
-                  </button>
-                </div>
-                <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: '#8b949e', cursor: 'pointer', userSelect: 'none', paddingLeft: 26 }}>
-                  <input
-                    type="checkbox"
-                    checked={newItemIsClosed}
-                    onChange={e => setNewItemIsClosed(e.target.checked)}
-                    style={{ accentColor: '#3B82F6' }}
-                  />
-                  Closed status (marks this status as completed/done)
-                </label>
-                {itemError && <div style={{ fontSize: 11, color: '#ef4444', paddingLeft: 26 }}>{itemError}</div>}
-              </div>
-            ) : (
-              <button
-                onClick={() => setAddingItem(true)}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: 6, marginTop: 4,
-                  background: 'none', border: 'none', cursor: 'pointer',
-                  color: '#484f58', fontSize: 12, padding: '4px 2px', fontFamily: 'inherit',
-                }}
-              >
-                <Plus size={13} /> Add status
-              </button>
-            )
-          )}
-        </div>
-      )}
-    </div>
-  )
-}
-
-// ── Main tab ──────────────────────────────────────────────────────────────────
-
-export default function StatusTemplatesTab({ teamId, isAdmin, teamColor }: Props) {
-  const { data: templates = [], isLoading } = useStatusTemplates(teamId)
-  const createTemplate = useCreateStatusTemplate(teamId)
-  const [addingTemplate, setAddingTemplate] = useState(false)
-  const [newTemplateName, setNewTemplateName] = useState('')
-  const [createError, setCreateError] = useState('')
-
-  function handleCreateTemplate() {
-    if (!newTemplateName.trim()) { setCreateError('Name is required'); return }
-    createTemplate.mutate(
-      { name: newTemplateName.trim() },
-      {
-        onSuccess: () => { setNewTemplateName(''); setAddingTemplate(false) },
-        onError: () => setCreateError('Failed to create template'),
-      }
-    )
-  }
-
-  if (isLoading) {
-    return (
-      <div style={{ padding: 20, fontSize: 13, color: '#484f58' }}>Loading…</div>
-    )
-  }
-
-  return (
-    <div style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 12 }}>
-      <div style={{ fontSize: 12, color: '#8b949e', lineHeight: 1.6 }}>
-        Status templates are reusable presets. When a new timeline is created, its statuses are
-        copied from the first template. Changes here don't affect existing timelines.
-      </div>
-
-      {templates.map(template => (
-        <TemplateCard
-          key={template.id}
-          template={template}
-          teamId={teamId}
-          isAdmin={isAdmin}
-          teamColor={teamColor}
-          canDelete={templates.length > 1}
-        />
-      ))}
-
-      {/* Add template */}
-      {isAdmin && (
-        addingTemplate ? (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-            <div style={{ display: 'flex', gap: 8 }}>
-              <input
-                autoFocus
-                value={newTemplateName}
-                onChange={e => { setNewTemplateName(e.target.value); setCreateError('') }}
-                onKeyDown={e => { if (e.key === 'Enter') handleCreateTemplate(); if (e.key === 'Escape') setAddingTemplate(false) }}
-                placeholder="Template name (e.g. Kanban, Sprint)…"
-                style={{
-                  flex: 1, background: '#2d333b', border: '1px solid #30363d',
-                  borderRadius: 7, padding: '8px 12px', color: '#e6edf3', fontSize: 13, fontFamily: 'inherit',
-                }}
-              />
-              <button
-                onClick={handleCreateTemplate}
-                disabled={createTemplate.isPending}
-                style={{
-                  background: teamColor, border: 'none', borderRadius: 7, color: '#fff',
-                  fontWeight: 600, fontSize: 13, padding: '8px 16px', cursor: 'pointer',
-                  opacity: createTemplate.isPending ? 0.6 : 1, fontFamily: 'inherit',
-                }}
-              >
-                {createTemplate.isPending ? 'Creating…' : 'Create'}
-              </button>
-              <button
-                onClick={() => setAddingTemplate(false)}
-                style={{ background: 'none', border: '1px solid #30363d', borderRadius: 7, color: '#8b949e', fontSize: 13, padding: '8px 12px', cursor: 'pointer' }}
-              >
-                Cancel
-              </button>
-            </div>
-            {createError && <div style={{ fontSize: 11, color: '#ef4444' }}>{createError}</div>}
-          </div>
-        ) : (
-          <button
-            onClick={() => setAddingTemplate(true)}
-            style={{
-              display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'center',
-              background: 'none', border: '1px dashed #30363d', borderRadius: 8,
-              color: '#484f58', fontSize: 13, padding: '10px 16px', cursor: 'pointer',
-              fontFamily: 'inherit', width: '100%',
-            }}
-          >
-            <Plus size={14} />
-            New template
-          </button>
-        )
-      )}
-    </div>
-  )
-}
 ````
 
 ## File: packages/web/src/components/ThemeSync.tsx
@@ -29416,232 +29416,6 @@ export default function PreferencesPage() {
 }
 ````
 
-## File: docs/TESTING.md
-````markdown
-# Testing & Review Procedures
-
-This document is the source of truth for what we test and how. It is consumed by the `/test-phase` and `/review-phase` slash commands, which fan work out to subagents that run in parallel. The framework grows phase-by-phase: every new ROADMAP phase adds a section here, and the subagents pick it up automatically.
-
-For the human-review checklist used on diffs, see [REVIEW.md](REVIEW.md).
-
----
-
-## Test environment setup (manual, do once per host)
-
-These steps set up the docker host so `/test-phase` can run end-to-end. Do them **in this order** — later steps assume earlier ones are done.
-
-### Step 1 — One-time host prep (manual)
-On the docker host, as the `draba-test` user (created in the SSH setup steps below):
-
-1. Copy `scripts/reset-test-env.sh` to `~/scripts/reset-test-env.sh` and `chmod +x` it.
-2. Create `~/.draba-test.env` (chmod 600) with:
-   ```
-   DRABA_TEST_INVITE_TOKEN=<pick a long random string>
-   DRABA_TEST_ADMIN_EMAIL=test-admin@local
-   DRABA_TEST_INVITE_EMAIL=invitee@local
-   DRABA_DB_DIR=/portainer/Files/AppData/Config/draba/data
-   DRABA_CONTAINER=draba
-   ```
-   `DRABA_TEST_INVITE_EMAIL` is the email the api-smoke subagent registers as — it must match the email the invite was seeded for. Default `invitee@local` is fine.
-   The script auto-sources this file at startup. No sudo, no `/etc/`, no compose dir — the script uses `docker stop/start` directly and runs file ops inside throwaway containers, so the host user only needs `docker` group membership.
-
-### Step 2 — Per-run reset (manual or SSH-driven)
-Before each `/test-phase` run that needs a clean DB, run on the docker host:
-```bash
-./scripts/reset-test-env.sh
-```
-This stops the container, wipes the SQLite file, restarts, waits for migrations, and seeds a bootstrap team + a known invite token. After it completes, the container is in a known state with `DRABA_TEST_INVITE_TOKEN` valid for `POST /auth/register`.
-
-### Step 3 — Tell Claude how to reach it (one-time, on the dev box)
-On the machine where you run Claude (this Windows box):
-- The test URL should be stored in the `reference_test_docker.md` memory entry (not committed to the repo).
-- Set `DRABA_TEST_INVITE_TOKEN` in your shell or in a memory entry so subagents can pass it through. **Do not commit it.**
-- Configure key-based SSH from this box to the docker host so `/test-phase` can run the reset itself. Recommended setup: a dedicated `draba-test` user on the docker host, an ed25519 keypair with a passphrase loaded in `ssh-agent`, and the public key pinned in `authorized_keys` with `command="/usr/local/bin/draba-reset"` plus `no-pty,no-port-forwarding,no-X11-forwarding,no-agent-forwarding` so the key can only run the reset script. Add an SSH config alias `Host draba-test` so the call is just `ssh draba-test`.
-
-### What's manual vs automated, at a glance
-
-| Step | Where it runs | Who does it |
-|---|---|---|
-| Host prep (Step 1) | Docker host | **You, once** |
-| Reset before a test run (Step 2) | Docker host | **You manually** *(or SSH-driven if configured — Claude can trigger)* |
-| Static checks, unit tests, schema check, security review | Dev box (this machine) | Claude |
-| API smoke against live container | Dev box → live container | Claude |
-| Logging the run to `docs/log.md` | Dev box | Claude |
-
----
-
-## Global procedures
-
-These run regardless of phase.
-
-### Static checks
-- `cd packages/api && golangci-lint run`
-- `cd packages/api && go vet ./...`
-- `pnpm --filter web lint`
-- `pnpm --filter web build`
-
-### Unit & integration
-- `cd packages/api && go test -count=1 ./...`
-- Race detector (`-race`) requires CGO/GCC — not available on the Windows dev box. It runs in CI (GitHub Actions, Linux runner) on every push. Do not mark a local run as failed for omitting `-race`.
-
-### Live smoke target
-Live-smoke subagents (`api-smoke`, future `ws-smoke`) hit a running container. The URL is **not** stored in the repo — it's resolved at runtime in this priority order:
-1. `DRABA_TEST_URL` environment variable, if set.
-2. The `reference_test_docker.md` memory entry (Brian's local LAN host).
-3. If neither is available, the subagent reports **skipped**, not failed.
-
-### Review checklist (always)
-- CONVENTIONS.md compliance
-- No scope creep beyond the phase's ROADMAP entry
-- Errors handled at boundaries (HTTP, DB, external APIs); internal calls trust contracts
-- No secrets, no `.env` files, no host-specific values committed
-- Migrations idempotent (re-run produces no diff)
-- `docs/log.md` updated with a dated entry
-
----
-
-## Subagent map
-
-| Subagent | Scope | Active from |
-|---|---|---|
-| `static-check` | lint + vet + web typecheck/build | Phase 1 |
-| `unit-test` | `go test -race -count=1 ./...` | Phase 2 |
-| `schema-check` | run migrations on fresh SQLite, re-run, assert no diff | Phase 2 |
-| `api-smoke` | hit live container, run phase exit-criteria flows via curl | Phase 2 |
-| `security-review` | scan diff for secrets, missing auth, SQL concat, JWT misuse | Phase 2 |
-| `type-sync` | regen OpenAPI types, assert no diff | Phase 4 |
-| `ws-smoke` | WebSocket: team-scoped broadcast within 500ms, heartbeat | Phase 5 |
-| `web-e2e` | Chrome MCP — login, render timeline, drag-create | Phase 7 |
-
----
-
-## Per-phase procedures
-
-### Phase 1 — Project Infrastructure
-
-**static-check**
-- `go build ./...` from `packages/api/` succeeds with no errors
-- `pnpm build` from `packages/web/` succeeds
-- `golangci-lint run` is clean
-- `docker compose config` parses without error — skip if Docker is not installed on the dev box (verified by CI)
-
-### Phase 2 — API Foundation (DB & Auth)
-
-**unit-test**
-- All `*_test.go` under `packages/api/internal/` pass with `-race -count=1`
-- `internal/auth` package — unit tests needed (currently no test file; tracked gap):
-  - `IssueAccessToken` / `IssueRefreshToken` / `Validate` roundtrip returns correct claims
-  - `Validate` rejects a token signed with a different secret (tampered signature)
-  - `Validate` rejects an expired token
-  - `Validate` returns error when token type mismatches (`"refresh"` presented as `"access"` and vice versa)
-  - `Validate` rejects `alg=none` / non-HMAC algorithm (algorithm-confusion guard)
-  - `HashPassword` / `CheckPassword` roundtrip succeeds; wrong password returns error
-- `internal/db` — `invite_repo` unit tests needed (currently no test file; tracked gap):
-  - `GetValid` returns `sql.ErrNoRows` for an expired invite
-  - `GetValid` returns `sql.ErrNoRows` after `MarkAccepted` (single-use enforcement)
-
-**schema-check**
-- Start container against a fresh `data.db`; confirm these tables exist: `users`, `teams`, `team_members`, `invites`, `api_tokens`, `events`, `event_tags`, `event_assignments`, `timelines`, `timeline_access`, `calendar_connections`, `team_statuses`
-  - Note: the DB layer uses `events`/`event_tags`/`event_assignments`/`team_statuses`; the API layer surfaces these as `activities`/`statuses`. `status_templates`, `status_template_items`, `instance_settings`, and `password_reset_tokens` are managed via app logic, not standalone migration tables.
-- Restart the container; assert migration runner produces no schema changes (idempotency)
-
-**api-smoke** (against `$DRABA_TEST_URL`)
-- `POST /auth/register` with a valid invite token → 200/201, returns user + JWT
-- `POST /auth/register` with an invalid/missing invite token → 4xx
-- `POST /auth/register` with the **same** invite token a second time → 4xx (single-use)
-- `POST /auth/login` with the registered credentials → 200, returns JWT
-- `POST /auth/login` with a non-existent email → 401
-- `POST /auth/login` with bad credentials → 401
-- `POST /auth/refresh` with a valid refresh token → 200, returns new JWT
-- `POST /auth/refresh` with an access token (wrong type) → 401
-- `POST /auth/refresh` with a token signed by a different secret → 401
-- A subsequent authenticated request with the issued JWT → 200 (validates signing)
-
-**security-review**
-- No password fields stored in plaintext (grep migrations + handlers)
-- JWT secret loaded from env/config, not hardcoded
-- Invite tokens single-use (consumed on register) — also asserted behaviorally in api-smoke above
-- No SQL string concatenation in queries
-
-### Phase 3 — Core API (Events & Teams)
-
-**api-smoke**
-- `POST /teams` → returns team (201 Created)
-- `GET /teams/:id` with member token → 200 OK, returns team
-- `GET /teams/:id` with non-member token → 403 Forbidden
-- `POST /teams/:id/invites` → returns invite token (201 Created)
-- Register via that token → user appears in `GET /teams/:id/members` (200 OK)
-- `POST /teams/:id/activities` (body: `name`, `startAt`, `endAt` as RFC3339), then `GET /teams/:id/activities?from=<RFC3339>&to=<RFC3339>` returns it (200 OK) — params must be full RFC3339 (e.g. `2026-01-01T00:00:00Z`), bare dates return 400
-- `PATCH /activities/:id` updates fields (200 OK); `DELETE /activities/:id` removes it (204 No Content / 200 OK), subsequent GET excludes it
-- Auth: every endpoint rejects requests without a valid JWT (401 Unauthorized)
-- Authz: a user not on the team cannot read or mutate that team's activities (403 Forbidden)
-- Tier Limits: exceeding the plan limits for a team returns appropriate HTTP errors (e.g., 402 Payment Required or 403 Forbidden)
-
-**security-review**
-- Every new route requires auth middleware
-- Team membership enforced on every team-scoped endpoint
-
-### Phase 4 — OpenAPI Spec & Type Generation
-
-**type-sync**
-- `pnpm generate` succeeds with no errors
-- `git diff` after generate is empty (committed types match spec)
-- All Phase 2–3 endpoints present in `packages/shared/openapi.yaml`
-
-### Phase 5 — Real-Time (WebSocket)
-
-**unit-test**
-- `TestHub_Heartbeat_PingReceived` — server sends a `{"type":"ping"}` JSON message within one heartbeat interval
-- `TestHub_Heartbeat_MissedPingDisconnects` — server closes the connection after `readTimeout` elapses with no pong
-- Both tests use `testSetupFast` (50ms heartbeat / 200ms readTimeout) so they run in milliseconds
-
-**ws-smoke**
-- Two clients on team A both receive a delta within 500ms of an event mutation
-- A client on team B does not receive team A's events
-- Heartbeat: connect, subscribe, respond to every `{"type":"ping"}` with `{"type":"pong"}`, assert connection stays open for at least 3 ping cycles (use a 30s real-interval container; verify no disconnect over ~100s)
-  - Note: this is a slow manual check; unit tests (`TestHub_Heartbeat_*`) cover the behavior at speed
-
-### Phase 6 — Timelines
-
-**unit-test**
-- `timeline_repo.RevokeAccess` — unit tests needed (currently no coverage; tracked gap):
-  - Grant access then revoke; `HasAccess` returns false after revoke
-  - Revoking access that was never granted is a no-op (no error)
-- `timeline_repo.ListByTeam` — unit test needed:
-  - Returns all non-archived timelines for a team in descending creation order
-  - Returns empty slice (not error) when team has no timelines
-
-**api-smoke**
-- `POST /teams/:id/timelines` with JWT → 201 Created
-- `GET /timelines/:id` with JWT (user on access list) → 200 OK
-- `GET /timelines/:id` with JWT (user not on access list) → 403 Forbidden
-- `GET /timelines/share/:token` → 200 OK without requiring auth
-
-### Phase 7 — Web — Scaffold
-
-**web-e2e**
-- Navigating to protected routes unauthenticated redirects to `/login`
-- Successful login redirects to the main app view and stores the token
-- TanStack Query successfully fetches team/event data from the API
-- WebSocket client successfully connects and maintains a heartbeat
-
-**Known gap — frontend component unit tests**
-No Vitest / Testing Library setup exists yet. Components (`TimelineGrid`, `EventPanel`, `Sidebar`, `MemberAvatar`) have zero unit-level coverage. This is intentional for early phases — the Chrome MCP e2e tests cover the golden path. When the web layer stabilises, add a `web-unit` subagent that runs `pnpm --filter web test` and assert render output for key components. Track as a Phase 8+ task.
-
-### Phase 8+ — Web
-
-*Stubs.* Detailed assertions added when each phase begins.
-
----
-
-## Adding tests for a new phase
-
-1. Find the phase's section in this file (or add one if missing).
-2. Under the relevant subagent heading, list concrete, runnable assertions tied to the ROADMAP exit criteria.
-3. If a new subagent is needed, add it to the subagent map with an "active from" phase.
-4. That's it — `/test-phase` will pick it up on the next run.
-````
-
 ## File: packages/api/internal/api/api_types.gen.go
 ````go
 // Package api provides primitives to interact with the openapi HTTP API.
@@ -31210,6 +30984,232 @@ describe("filter kind 'saved'", () => {
     expect(result).toHaveLength(2)
   })
 })
+````
+
+## File: docs/TESTING.md
+````markdown
+# Testing & Review Procedures
+
+This document is the source of truth for what we test and how. It is consumed by the `/test-phase` and `/review-phase` slash commands, which fan work out to subagents that run in parallel. The framework grows phase-by-phase: every new ROADMAP phase adds a section here, and the subagents pick it up automatically.
+
+For the human-review checklist used on diffs, see [REVIEW.md](REVIEW.md).
+
+---
+
+## Test environment setup (manual, do once per host)
+
+These steps set up the docker host so `/test-phase` can run end-to-end. Do them **in this order** — later steps assume earlier ones are done.
+
+### Step 1 — One-time host prep (manual)
+On the docker host, as the `draba-test` user (created in the SSH setup steps below):
+
+1. Copy `scripts/reset-test-env.sh` to `~/scripts/reset-test-env.sh` and `chmod +x` it.
+2. Create `~/.draba-test.env` (chmod 600) with:
+   ```
+   DRABA_TEST_INVITE_TOKEN=<pick a long random string>
+   DRABA_TEST_ADMIN_EMAIL=test-admin@local
+   DRABA_TEST_INVITE_EMAIL=invitee@local
+   DRABA_DB_DIR=/portainer/Files/AppData/Config/draba/data
+   DRABA_CONTAINER=draba
+   ```
+   `DRABA_TEST_INVITE_EMAIL` is the email the api-smoke subagent registers as — it must match the email the invite was seeded for. Default `invitee@local` is fine.
+   The script auto-sources this file at startup. No sudo, no `/etc/`, no compose dir — the script uses `docker stop/start` directly and runs file ops inside throwaway containers, so the host user only needs `docker` group membership.
+
+### Step 2 — Per-run reset (manual or SSH-driven)
+Before each `/test-phase` run that needs a clean DB, run on the docker host:
+```bash
+./scripts/reset-test-env.sh
+```
+This stops the container, wipes the SQLite file, restarts, waits for migrations, and seeds a bootstrap team + a known invite token. After it completes, the container is in a known state with `DRABA_TEST_INVITE_TOKEN` valid for `POST /auth/register`.
+
+### Step 3 — Tell Claude how to reach it (one-time, on the dev box)
+On the machine where you run Claude (this Windows box):
+- The test URL should be stored in the `reference_test_docker.md` memory entry (not committed to the repo).
+- Set `DRABA_TEST_INVITE_TOKEN` in your shell or in a memory entry so subagents can pass it through. **Do not commit it.**
+- Configure key-based SSH from this box to the docker host so `/test-phase` can run the reset itself. Recommended setup: a dedicated `draba-test` user on the docker host, an ed25519 keypair with a passphrase loaded in `ssh-agent`, and the public key pinned in `authorized_keys` with `command="/usr/local/bin/draba-reset"` plus `no-pty,no-port-forwarding,no-X11-forwarding,no-agent-forwarding` so the key can only run the reset script. Add an SSH config alias `Host draba-test` so the call is just `ssh draba-test`.
+
+### What's manual vs automated, at a glance
+
+| Step | Where it runs | Who does it |
+|---|---|---|
+| Host prep (Step 1) | Docker host | **You, once** |
+| Reset before a test run (Step 2) | Docker host | **You manually** *(or SSH-driven if configured — Claude can trigger)* |
+| Static checks, unit tests, schema check, security review | Dev box (this machine) | Claude |
+| API smoke against live container | Dev box → live container | Claude |
+| Logging the run to `docs/log.md` | Dev box | Claude |
+
+---
+
+## Global procedures
+
+These run regardless of phase.
+
+### Static checks
+- `cd packages/api && golangci-lint run`
+- `cd packages/api && go vet ./...`
+- `pnpm --filter web lint`
+- `pnpm --filter web build`
+
+### Unit & integration
+- `cd packages/api && go test -count=1 ./...`
+- Race detector (`-race`) requires CGO/GCC — not available on the Windows dev box. It runs in CI (GitHub Actions, Linux runner) on every push. Do not mark a local run as failed for omitting `-race`.
+
+### Live smoke target
+Live-smoke subagents (`api-smoke`, future `ws-smoke`) hit a running container. The URL is **not** stored in the repo — it's resolved at runtime in this priority order:
+1. `DRABA_TEST_URL` environment variable, if set.
+2. The `reference_test_docker.md` memory entry (Brian's local LAN host).
+3. If neither is available, the subagent reports **skipped**, not failed.
+
+### Review checklist (always)
+- CONVENTIONS.md compliance
+- No scope creep beyond the phase's ROADMAP entry
+- Errors handled at boundaries (HTTP, DB, external APIs); internal calls trust contracts
+- No secrets, no `.env` files, no host-specific values committed
+- Migrations idempotent (re-run produces no diff)
+- `docs/log.md` updated with a dated entry
+
+---
+
+## Subagent map
+
+| Subagent | Scope | Active from |
+|---|---|---|
+| `static-check` | lint + vet + web typecheck/build | Phase 1 |
+| `unit-test` | `go test -race -count=1 ./...` | Phase 2 |
+| `schema-check` | run migrations on fresh SQLite, re-run, assert no diff | Phase 2 |
+| `api-smoke` | hit live container, run phase exit-criteria flows via curl | Phase 2 |
+| `security-review` | scan diff for secrets, missing auth, SQL concat, JWT misuse | Phase 2 |
+| `type-sync` | regen OpenAPI types, assert no diff | Phase 4 |
+| `ws-smoke` | WebSocket: team-scoped broadcast within 500ms, heartbeat | Phase 5 |
+| `web-e2e` | Chrome MCP — login, render timeline, drag-create | Phase 7 |
+
+---
+
+## Per-phase procedures
+
+### Phase 1 — Project Infrastructure
+
+**static-check**
+- `go build ./...` from `packages/api/` succeeds with no errors
+- `pnpm build` from `packages/web/` succeeds
+- `golangci-lint run` is clean
+- `docker compose config` parses without error — skip if Docker is not installed on the dev box (verified by CI)
+
+### Phase 2 — API Foundation (DB & Auth)
+
+**unit-test**
+- All `*_test.go` under `packages/api/internal/` pass with `-race -count=1`
+- `internal/auth` package — unit tests needed (currently no test file; tracked gap):
+  - `IssueAccessToken` / `IssueRefreshToken` / `Validate` roundtrip returns correct claims
+  - `Validate` rejects a token signed with a different secret (tampered signature)
+  - `Validate` rejects an expired token
+  - `Validate` returns error when token type mismatches (`"refresh"` presented as `"access"` and vice versa)
+  - `Validate` rejects `alg=none` / non-HMAC algorithm (algorithm-confusion guard)
+  - `HashPassword` / `CheckPassword` roundtrip succeeds; wrong password returns error
+- `internal/db` — `invite_repo` unit tests needed (currently no test file; tracked gap):
+  - `GetValid` returns `sql.ErrNoRows` for an expired invite
+  - `GetValid` returns `sql.ErrNoRows` after `MarkAccepted` (single-use enforcement)
+
+**schema-check**
+- Start container against a fresh `data.db`; confirm these tables exist: `users`, `teams`, `team_members`, `invites`, `api_tokens`, `activities`, `activity_tags`, `activity_assignments`, `timelines`, `timeline_access`, `calendar_connections`, `statuses`
+  - Note: `status_templates`, `status_template_items`, `instance_settings`, and `password_reset_tokens` are managed via app logic, not standalone migration tables.
+- Restart the container; assert migration runner produces no schema changes (idempotency)
+
+**api-smoke** (against `$DRABA_TEST_URL`)
+- `POST /auth/register` with a valid invite token → 200/201, returns user + JWT
+- `POST /auth/register` with an invalid/missing invite token → 4xx
+- `POST /auth/register` with the **same** invite token a second time → 4xx (single-use)
+- `POST /auth/login` with the registered credentials → 200, returns JWT
+- `POST /auth/login` with a non-existent email → 401
+- `POST /auth/login` with bad credentials → 401
+- `POST /auth/refresh` with a valid refresh token → 200, returns new JWT
+- `POST /auth/refresh` with an access token (wrong type) → 401
+- `POST /auth/refresh` with a token signed by a different secret → 401
+- A subsequent authenticated request with the issued JWT → 200 (validates signing)
+
+**security-review**
+- No password fields stored in plaintext (grep migrations + handlers)
+- JWT secret loaded from env/config, not hardcoded
+- Invite tokens single-use (consumed on register) — also asserted behaviorally in api-smoke above
+- No SQL string concatenation in queries
+
+### Phase 3 — Core API (Events & Teams)
+
+**api-smoke**
+- `POST /teams` → returns team (201 Created)
+- `GET /teams/:id` with member token → 200 OK, returns team
+- `GET /teams/:id` with non-member token → 403 Forbidden
+- `POST /teams/:id/invites` → returns invite token (201 Created)
+- Register via that token → user appears in `GET /teams/:id/members` (200 OK)
+- `POST /teams/:id/timelines/:timelineId/activities` (body: `title`, `startAt`, `endAt` as RFC3339) → 201 Created, then `GET /teams/:id/timelines/:timelineId/activities?from=<RFC3339>&to=<RFC3339>` returns it (200 OK) — params must be full RFC3339 (e.g. `2026-01-01T00:00:00Z`), bare dates return 400
+- `PATCH /activities/:id` updates fields (200 OK); `DELETE /activities/:id` removes it (204 No Content / 200 OK), subsequent GET excludes it
+- Auth: every endpoint rejects requests without a valid JWT (401 Unauthorized)
+- Authz: a user not on the team cannot read or mutate that team's activities (403 Forbidden)
+- Tier Limits: exceeding the plan limits for a team returns appropriate HTTP errors (e.g., 402 Payment Required or 403 Forbidden)
+
+**security-review**
+- Every new route requires auth middleware
+- Team membership enforced on every team-scoped endpoint
+
+### Phase 4 — OpenAPI Spec & Type Generation
+
+**type-sync**
+- `pnpm generate` succeeds with no errors
+- `git diff` after generate is empty (committed types match spec)
+- All Phase 2–3 endpoints present in `packages/shared/openapi.yaml`
+
+### Phase 5 — Real-Time (WebSocket)
+
+**unit-test**
+- `TestHub_Heartbeat_PingReceived` — server sends a `{"type":"ping"}` JSON message within one heartbeat interval
+- `TestHub_Heartbeat_MissedPingDisconnects` — server closes the connection after `readTimeout` elapses with no pong
+- Both tests use `testSetupFast` (50ms heartbeat / 200ms readTimeout) so they run in milliseconds
+
+**ws-smoke**
+- Two clients on team A both receive a delta within 500ms of an event mutation
+- A client on team B does not receive team A's events
+- Heartbeat: connect, subscribe, respond to every `{"type":"ping"}` with `{"type":"pong"}`, assert connection stays open for at least 3 ping cycles (use a 30s real-interval container; verify no disconnect over ~100s)
+  - Note: this is a slow manual check; unit tests (`TestHub_Heartbeat_*`) cover the behavior at speed
+
+### Phase 6 — Timelines
+
+**unit-test**
+- `timeline_repo.RevokeAccess` — unit tests needed (currently no coverage; tracked gap):
+  - Grant access then revoke; `HasAccess` returns false after revoke
+  - Revoking access that was never granted is a no-op (no error)
+- `timeline_repo.ListByTeam` — unit test needed:
+  - Returns all non-archived timelines for a team in descending creation order
+  - Returns empty slice (not error) when team has no timelines
+
+**api-smoke**
+- `POST /teams/:id/timelines` with JWT → 201 Created
+- `GET /timelines/:id` with JWT (user on access list) → 200 OK
+- `GET /timelines/:id` with JWT (user not on access list) → 403 Forbidden
+- `GET /timelines/share/:token` → 200 OK without requiring auth
+
+### Phase 7 — Web — Scaffold
+
+**web-e2e**
+- Navigating to protected routes unauthenticated redirects to `/login`
+- Successful login redirects to the main app view and stores the token
+- TanStack Query successfully fetches team/event data from the API
+- WebSocket client successfully connects and maintains a heartbeat
+
+**Known gap — frontend component unit tests**
+No Vitest / Testing Library setup exists yet. Components (`TimelineGrid`, `EventPanel`, `Sidebar`, `MemberAvatar`) have zero unit-level coverage. This is intentional for early phases — the Chrome MCP e2e tests cover the golden path. When the web layer stabilises, add a `web-unit` subagent that runs `pnpm --filter web test` and assert render output for key components. Track as a Phase 8+ task.
+
+### Phase 8+ — Web
+
+*Stubs.* Detailed assertions added when each phase begins.
+
+---
+
+## Adding tests for a new phase
+
+1. Find the phase's section in this file (or add one if missing).
+2. Under the relevant subagent heading, list concrete, runnable assertions tied to the ROADMAP exit criteria.
+3. If a new subagent is needed, add it to the subagent map with an "active from" phase.
+4. That's it — `/test-phase` will pick it up on the next run.
 ````
 
 ## File: packages/api/internal/api/saved_filter_handler.go
@@ -52841,6 +52841,14 @@ GitHub Actions warned that `actions/checkout`, `setup-go`, `setup-node`, etc. ru
 **Port conflict in homelab**
 Port 8080 was already in use on the host.
 → Mapped container port 8080 to host port 8081 in Portainer. No code changes needed.
+
+---
+
+## 2026-06-01 — /test-phase 11.1.1
+- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
+- Result: all pass
+- Smoke target: http://epcot.lan:8081
+- Note: api-smoke surfaced spec mismatch — TESTING.md says `POST /teams/:id/activities` but actual route is `POST /teams/:id/timelines/:timelineId/activities`; functionality correct, spec needs updating. Schema-check noted table renames (activities/activity_tags/activity_assignments/statuses vs legacy event_* names in TESTING.md).
 
 ---
 
