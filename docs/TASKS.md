@@ -1114,29 +1114,30 @@ Multi-assignee activities now appear under their exact assignee-set group in bot
 ---
 
 ### Timeline Views — Calendar (Web — Phase 11.2)
-Three sub-layouts sharing one component skeleton.
+**Month / Week** all-day-bar layouts sharing one skeleton. No Day view, no time grid (every activity is all-day). Detailed plan: `docs/plans/phase-11.2-calendar-view.md`.
 
 **Shared:**
-- [ ] Sub-layout switcher (Month / Week / Day) in the view's toolbar slot
+- [ ] Layout switcher (Month / Week) in the view's toolbar slot
 - [ ] Today / prev / next navigation; jump-to-date picker
-- [ ] Click empty cell → Event create form prefilled with that date
-- [ ] Click event → `EventDetailPanel`
-- [ ] Drag event between cells → PATCH new start/end preserving duration (Week / Day only for v1)
+- [ ] Color-by (activity / member / status) carried over via shared `lib/activityColor.ts`
+- [ ] Click empty cell → `ActivityCreatePanel` prefilled with that date
+- [ ] Click bar → existing `ActivityDetailPanel`
+- [ ] Drag bar body → move (duration-preserving, whole-day snap, week-wrap aware) → PATCH; drag edge → resize; live sidebar preview via shared `useActivityDrag`
+- [ ] Respects active filter, Find highlight, `week_start` / `date_format` prefs
+
+**Lane packing (`lib/calendarLanes.ts`, pure + unit-tested):**
+- [ ] Per-week-row greedy lane assignment for concurrent multi-day bars
+- [ ] Cross-week activities split into one segment per week row with "continues" edges
 
 **Month layout:**
-- [ ] 6-week grid; multi-day events render as continuous bars across cells
-- [ ] "+N more" overflow affordance per cell
+- [ ] 6-week grid; multi-day activities render as continuous bars across cells
 
 **Week layout:**
-- [ ] 7 day columns, 24-hour vertical time grid, configurable working-hours zoom
-- [ ] All-day strip above the time grid for events without time components
-- [ ] Overlapping-event lane algorithm: side-by-side columns within a day
+- [ ] 7 day columns, taller cells (higher default visible-lane cap)
 
-**Day layout:**
-- [ ] Single-day variant of Week; same time grid and lane algorithm
-
-**Open question to resolve at start of phase:**
-- [ ] Decide handling for date-only events in time-grid layouts (default 9am vs. all-day strip)
+**Density / overflow:**
+- [ ] Per-day "+N more" chip → day popover listing every activity that day → row click opens sidebar
+- [ ] Manual per-week row-height drag handle raises/lowers visible-lane cap; persists per-timeline-per-user
 
 ---
 
@@ -1205,7 +1206,7 @@ First-class Share entity. One timeline can host many shares, each frozen to a sp
 - [ ] Kanban → PDF: columns side-by-side, paginated when too wide
 - [ ] Kanban → PNG: single-page
 - [ ] List → Markdown (GitHub-flavored table) and PDF (styled table)
-- [ ] Calendar → PDF: one page per month / week / day depending on active sub-layout
+- [ ] Calendar → PDF: one page per month / week depending on active layout
 - [ ] Header strip on every visual export: team name, timeline name, generated-at timestamp, applied filter description
 - [ ] All visual exports respect active filter / sort / group at time of export
 

@@ -160,7 +160,7 @@ Two flavors: **tabular** (data round-trips — CSV / xlsx in and out) and **visu
 - [ ] Gantt → PDF (landscape, paginated by date range) and PNG (single page)
 - [ ] Kanban → PDF (columns side-by-side, paginated when too wide for one page) and PNG
 - [ ] List → CSV, xlsx, Markdown table, and PDF
-- [ ] Calendar → PDF, one page per month / week / day depending on active sub-layout
+- [ ] Calendar → PDF, one page per month / week depending on active layout
 - [ ] All visual exports include a header strip: team name, timeline name, generated-at timestamp, applied filter description
 - [ ] All visual exports respect the active filter / sort / group at time of export — the deliverable is "what's on the screen right now"
 

@@ -1405,41 +1405,26 @@ Format and position all activity `startAt`/`endAt` in **UTC** (no local conversi
 ### Phase 11.2 — Web — Calendar View
 **Status:** ⬜ | **Effort:** L (3–5 days)
 
-Three calendar sub-layouts (Month / Week / Day) sharing one component skeleton. Week / Day need an overlapping-event lane algorithm; Month is the cheaper grid.
+A familiar **Month / Week** calendar surface that answers "what is the team working on this week / this month?" — not a Gantt replacement. **Re-engineered 2026-06-02** from the original "Month / Week / Day + 24-hour time grid" plan: because every activity is all-day, **Day view, the time grid, and the time-overlap lane algorithm are all cut**. Both layouts are pure all-day-bar surfaces; the only layout problem left is vertical stacking of concurrent multi-day bars.
 
-**Design rationale:**
-A familiar surface for users coming from Google Calendar / Outlook. Not a Gantt replacement — it answers "what's happening this week?" rather than "how does this project unfold?". Multi-day events render as continuous bars across cells (Month) or pinned to an all-day strip above the time grid (Week / Day).
+**Detailed plan:** [docs/plans/phase-11.2-calendar-view.md](plans/phase-11.2-calendar-view.md) — reused-infrastructure table, lane-packing algorithm, overflow/row-resize model, drag geometry, build order, decisions, and exit criteria all live there. Scope is reviewed and settled.
 
-**Scope:**
-
-*Shared:*
-- Sub-layout switcher (Month / Week / Day) inside the view's toolbar slot
-- Today / prev / next navigation; "jump to date" picker
-- Click empty cell → open Event create form, prefilled with that date
-- Click event → open `EventDetailPanel`
-- Drag event between cells → PATCH new start/end (preserving duration); only valid on Week / Day for v1
-
-*Month layout:*
-- 6-week grid; multi-day events render as continuous bars spanning cells; overflow handled with a "+N more" affordance per cell
-
-*Week layout:*
-- 7 day columns, 24-hour vertical time grid, configurable working-hours zoom
-- All-day strip at the top for events without time components
-- Overlapping-event lane algorithm: side-by-side columns within a day
-
-*Day layout:*
-- Single-day variant of Week; same time grid and lane algorithm
-
-**Open question (resolve early in phase):**
-- Events without time components (date-only) — do they all live in the all-day strip, or do they get a default block at e.g. 9am? Affects sync compatibility with Phase 15 (Calendar Sync).
+**Scope (summary — see plan doc for detail):**
+- *Layouts:* **Month** (6-week grid, continuous multi-day bars, week-row lane packing) and **Week** (7 columns, taller cells). One shared skeleton + one `lib/calendarLanes.ts` packing core. **No Day view, no time grid.**
+- *Color-by* (activity / member / status) carried over from Gantt/List via a shared `lib/activityColor.ts` helper — the primary density signal.
+- *Dense-day handling (classic grid + color, not swimlanes):* color-by + the existing filter engine + a **"+N more" day popover paired with a manual per-week row-height resize handle** — uniform compact rows by default, drag a row's bottom edge to reveal more lanes inline; popover lists the full day for anything still hidden. Cap persists per-timeline-per-user.
+- *Click behaviors:* bar → existing `ActivityDetailPanel`; empty cell → existing `ActivityCreatePanel` prefilled to that day. No new sidebar UI.
+- *Drag:* move (duration-preserving) + edge-resize, whole-day snapping, geometric hit-testing (handles week-wrap), live sidebar preview, sharing Gantt's optimistic commit path via a new `useActivityDrag` hook. In v1 for **both** Month and Week.
+- *Parity:* respects active filter, Find highlight, `week_start` / `date_format` prefs.
 
 **Exit criteria — safe to pause when:**
-- Switching to Calendar from List/Gantt renders the current month with all events in correct cells
-- Month / Week / Day sub-toggles each render correctly with no data discrepancy
-- A multi-day event renders as a continuous bar in Month and pinned to the all-day strip in Week / Day
-- Two overlapping events in Week view render side-by-side without occlusion
-- Dragging an event to a different day in Week view updates start/end via PATCH
-- Find highlights matching events in all three sub-layouts
+- View switcher toggles Gantt ↔ List ↔ Calendar, persisting per timeline; Calendar renders the active timeline's activities in correct cells honoring the active filter
+- Month and Week render with no data discrepancy vs. each other or Gantt/List; a multi-day activity renders as a continuous bar with correct "continues" affordance across week boundaries
+- Color-by recolors bars and matches Gantt/List for the same activity
+- A day over the visible cap shows a correct "+N more" chip; the popover lists every activity that day; each row opens the edit sidebar
+- Dragging a week row's bottom edge raises/lowers visible lanes and survives a reload
+- Bar click opens the edit sidebar; empty-cell click opens create prefilled; bar drag moves/resizes via PATCH with live sidebar dates mid-drag
+- Find highlights matching bars in both layouts; `calendarLanes`/`activityColor` unit-tested; `pnpm --filter web lint` + `test` pass
 
 ---
 
@@ -1650,7 +1635,7 @@ PDFs are generated server-side using **gofpdf** (pure-Go, no Chrome dependency i
 - **Gantt → PDF:** landscape, paginated by date range; columns scale to fit a printable width per page; legend strip with member colors; export current filter/sort/group state. Gantt → PNG as a single-page variant.
 - **Kanban → PDF:** columns laid out side-by-side; if more columns than fit a printable width, paginate across pages with a column-overflow indicator. Kanban → PNG single-page.
 - **List → CSV, xlsx, Markdown, PDF.** Markdown export uses a GitHub-flavored table; PDF is a styled table with the same columns shown in the UI.
-- **Calendar → PDF:** Month layout → one page per month in range; Week layout → one page per week; Day layout → one page per day.
+- **Calendar → PDF:** Month layout → one page per month in range; Week layout → one page per week.
 - All visual exports include a header strip: team name, timeline name, generated-at timestamp, applied filter description.
 
 *Wiring:*
