@@ -528,7 +528,7 @@ export default function Sidebar({ collapsed, onToggle, onNewActivity, onBulkImpo
             onClick={onToggle}
             style={{ display: 'flex', alignItems: 'center', gap: 9, cursor: 'pointer' }}
           >
-            <img src="/logo-orange-white.svg" alt="Draba" style={{ width: 28, height: 28 }} />
+            <img src="/logo-orange-white.svg" alt="Draba" style={{ width: 28, height: 28, marginTop: 3 }} />
             <span style={{ fontSize: 22, fontWeight: 700, letterSpacing: '-0.02em', color: 'white' }}>
               draba
             </span>
