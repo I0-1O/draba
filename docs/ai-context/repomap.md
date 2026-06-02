@@ -208,6 +208,10 @@ packages/
   web/
     src/
       components/
+        calendar/
+          CalendarGrid.tsx
+          CalendarToolbar.tsx
+          CalendarView.tsx
         filters/
           FilterConditionRow.tsx
           FilterDropdown.tsx
@@ -279,8 +283,11 @@ packages/
         useTeamActivities.ts
         useWebSocket.ts
       lib/
+        activityColor.ts
         api.test.ts
         api.ts
+        calendarLanes.test.ts
+        calendarLanes.ts
         filterColors.ts
         filterEngine.test.ts
         filterEngine.ts
@@ -6635,6 +6642,250 @@ func runResetPassword(args []string) {
 }
 ````
 
+## File: packages/api/internal/api/admin_handler.go
+````go
+package api
+
+import (
+	"encoding/json"
+	"log/slog"
+	"net/http"
+
+	"github.com/I0-1O/draba/packages/api/internal/mailer"
+)
+
+// requireSuperadmin is a shared guard for admin endpoints. Returns false
+// and writes a 403 if the caller is not a superadmin.
+func (s *Server) requireSuperadmin(w http.ResponseWriter, r *http.Request) bool {
+	claims := claimsFromContext(r.Context())
+	caller, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to verify permissions")
+		return false
+	}
+	if !caller.IsSuperadmin {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
+		return false
+	}
+	return true
+}
+
+// handleGetSMTP handles GET /admin/smtp. Returns the current SMTP config
+// with the password masked. Superadmin-only.
+func (s *Server) handleGetSMTP(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSuperadmin(w, r) {
+		return
+	}
+
+	cfg, err := s.mailer.LoadConfig()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load SMTP config")
+		return
+	}
+	if cfg == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"smtp": nil})
+		return
+	}
+
+	// Mask the password in the response.
+	masked := *cfg
+	if masked.Password != "" {
+		masked.Password = "••••••••"
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"smtp": masked})
+}
+
+// handlePutSMTP handles PUT /admin/smtp. Saves the SMTP configuration and
+// validates it by sending a test email to the caller's address. Superadmin-only.
+func (s *Server) handlePutSMTP(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSuperadmin(w, r) {
+		return
+	}
+
+	var cfg mailer.SMTPConfig
+	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+	if cfg.Host == "" || cfg.Port == 0 || cfg.FromEmail == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "host, port, and fromEmail are required")
+		return
+	}
+
+	// Fetch caller email for the validation test.
+	claims := claimsFromContext(r.Context())
+	caller, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to send test email")
+		return
+	}
+
+	// Validate by sending a test email before persisting.
+	if err := mailer.SendWithConfig(&cfg, caller.Email, "draba SMTP test", smtpTestBody()); err != nil {
+		slog.Warn("smtp validation failed", "err", err)
+		writeError(w, http.StatusBadRequest, "SMTP_SEND_FAILED", "SMTP validation failed; check server logs for details")
+		return
+	}
+
+	if err := s.mailer.SaveConfig(&cfg); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to save SMTP config")
+		return
+	}
+
+	masked := cfg
+	if masked.Password != "" {
+		masked.Password = "••••••••"
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"smtp": masked})
+}
+
+// handleTestSMTP handles POST /admin/smtp/test. Sends a test email using the
+// provided config without persisting it. Superadmin-only.
+func (s *Server) handleTestSMTP(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSuperadmin(w, r) {
+		return
+	}
+
+	var cfg mailer.SMTPConfig
+	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	claims := claimsFromContext(r.Context())
+	caller, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to fetch caller")
+		return
+	}
+
+	if err := mailer.SendWithConfig(&cfg, caller.Email, "draba SMTP test", smtpTestBody()); err != nil {
+		slog.Warn("smtp test failed", "err", err)
+		writeError(w, http.StatusBadRequest, "SMTP_SEND_FAILED", "SMTP test failed; check server logs for details")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "sent", "to": caller.Email})
+}
+
+// handleDeleteSMTP handles DELETE /admin/smtp. Clears the SMTP config.
+// Superadmin-only.
+func (s *Server) handleDeleteSMTP(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSuperadmin(w, r) {
+		return
+	}
+	if err := s.mailer.DeleteConfig(); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to clear SMTP config")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleGetAdminSettings handles GET /admin/settings. Returns instance-level
+// defaults. Superadmin-only.
+func (s *Server) handleGetAdminSettings(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSuperadmin(w, r) {
+		return
+	}
+
+	keys := []string{"registration_policy", "default_timezone", "default_date_format", "default_week_start", "instance_name", "accent_color"}
+	settings := make(map[string]string, len(keys))
+	for _, k := range keys {
+		v, err := s.instanceSets.Get(k)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load settings")
+			return
+		}
+		settings[k] = v
+	}
+
+	// Apply defaults for missing keys.
+	if settings["registration_policy"] == "" {
+		settings["registration_policy"] = "invite_only"
+	}
+	if settings["default_timezone"] == "" {
+		settings["default_timezone"] = "UTC"
+	}
+	if settings["default_date_format"] == "" {
+		settings["default_date_format"] = "MMM D, YYYY"
+	}
+	if settings["default_week_start"] == "" {
+		settings["default_week_start"] = "monday"
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"settings": settings})
+}
+
+// handlePatchAdminSettings handles PATCH /admin/settings. Updates one or more
+// instance-level settings. Superadmin-only.
+func (s *Server) handlePatchAdminSettings(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSuperadmin(w, r) {
+		return
+	}
+
+	var body map[string]string
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	// Validate known keys and values.
+	allowed := map[string]bool{
+		"registration_policy": true,
+		"default_timezone":    true,
+		"default_date_format": true,
+		"default_week_start":  true,
+		"instance_name":       true,
+		"accent_color":        true,
+	}
+	for k := range body {
+		if !allowed[k] {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "unknown setting key: "+k)
+			return
+		}
+	}
+	if v, ok := body["registration_policy"]; ok && v != "invite_only" && v != "open" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "registration_policy must be invite_only or open")
+		return
+	}
+	if v, ok := body["default_week_start"]; ok && v != "monday" && v != "sunday" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "default_week_start must be monday or sunday")
+		return
+	}
+
+	for k, v := range body {
+		if err := s.instanceSets.Set(k, v); err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to save settings")
+			return
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"settings": body})
+}
+
+// handleGetPublicBranding handles GET /settings/branding. Returns the
+// instance name and accent color without requiring authentication, so the
+// login page and shared timeline views can display branding before sign-in.
+//
+// Only cosmetic settings are exposed here. Never add sensitive keys (SMTP
+// credentials, JWT secrets, registration policy, etc.) to this handler.
+func (s *Server) handleGetPublicBranding(w http.ResponseWriter, _ *http.Request) {
+	name, _ := s.instanceSets.Get("instance_name")
+	accent, _ := s.instanceSets.Get("accent_color")
+	writeJSON(w, http.StatusOK, map[string]any{
+		"instanceName": name,
+		"accentColor":  accent,
+	})
+}
+
+func smtpTestBody() string {
+	return `<html><body>
+<p>This is a test email from <strong>draba</strong>.</p>
+<p>If you received this, your SMTP configuration is working correctly.</p>
+</body></html>`
+}
+````
+
 ## File: packages/api/internal/api/api_token_handler.go
 ````go
 package api
@@ -12943,6 +13194,61 @@ export default function ActivityPanel({ activity, members, onClose, onChange, on
 }
 ````
 
+## File: packages/web/src/components/BrandingSync.tsx
+````typescript
+/**
+ * BrandingSync — fetches /settings/branding on app start and applies:
+ *   - instance name → document.title (and module-level makeDocTitle helper)
+ *   - accent color  → --primary CSS variable override on <html>
+ *
+ * Renders nothing; exists only for side-effects.
+ *
+ * Page-level title pattern: import makeDocTitle and call it in a useEffect.
+ * Example: document.title = makeDocTitle('Settings')  →  "Settings — Acme"
+ */
+
+import { useEffect } from 'react'
+import { usePublicSettings } from '@/hooks/usePublicSettings'
+
+// Shared at module level so makeDocTitle is always current without React context.
+let _instanceBaseName = 'draba'
+
+/** Returns a document title following the "{page} — {app}" convention. */
+export function makeDocTitle(pageName?: string): string {
+  return pageName ? `${pageName} — ${_instanceBaseName}` : _instanceBaseName
+}
+
+/** Hex color guard — rejects anything that isn't a 6-digit hex string. */
+function isValidHex(value: string): boolean {
+  return /^#[0-9a-fA-F]{6}$/.test(value)
+}
+
+export default function BrandingSync() {
+  const { data } = usePublicSettings()
+
+  useEffect(() => {
+    if (!data) return
+
+    // Update the module-level name first so makeDocTitle is current for any
+    // page titles set after this effect runs.
+    _instanceBaseName = data.instanceName || 'draba'
+    document.title = makeDocTitle()
+
+    // Apply accent color override directly to --primary so all Tailwind utilities
+    // (bg-primary, text-primary, ring-primary…) pick it up without extra CSS rules.
+    // Removing the property falls back to the HSL value defined in index.css.
+    const root = document.documentElement
+    if (data.accentColor && isValidHex(data.accentColor)) {
+      root.style.setProperty('--primary', data.accentColor)
+    } else {
+      root.style.removeProperty('--primary')
+    }
+  }, [data])
+
+  return null
+}
+````
+
 ## File: packages/web/src/components/DarkModeToggle.tsx
 ````typescript
 import { Moon, Sun } from 'lucide-react'
@@ -14020,6 +14326,94 @@ export function useDarkMode() {
 }
 ````
 
+## File: packages/web/src/hooks/useFormatDate.test.ts
+````typescript
+import { describe, it, expect } from 'vitest'
+import { formatDate } from './useFormatDate'
+
+// ── formatDate ────────────────────────────────────────────────────────────────
+
+describe('formatDate', () => {
+  // January 5, 2026
+  const d = new Date(2026, 0, 5)
+
+  it('MM/DD/YYYY → zero-padded month/day/year', () => {
+    expect(formatDate(d, 'MM/DD/YYYY')).toBe('01/05/2026')
+  })
+
+  it('DD/MM/YYYY → zero-padded day/month/year', () => {
+    expect(formatDate(d, 'DD/MM/YYYY')).toBe('05/01/2026')
+  })
+
+  it('YYYY-MM-DD → ISO-style', () => {
+    expect(formatDate(d, 'YYYY-MM-DD')).toBe('2026-01-05')
+  })
+
+  it('MMM D, YYYY (default) → English short month', () => {
+    expect(formatDate(d, 'MMM D, YYYY')).toBe('Jan 5, 2026')
+  })
+
+  it('unknown format falls through to MMM D, YYYY default', () => {
+    // Any unrecognised string uses the en-US toLocaleDateString fallback.
+    expect(formatDate(d, 'unknown')).toBe('Jan 5, 2026')
+  })
+
+  it('December 31 — single-digit day does not get zero-padded in default format', () => {
+    const dec31 = new Date(2026, 11, 31)
+    expect(formatDate(dec31, 'MMM D, YYYY')).toBe('Dec 31, 2026')
+  })
+})
+````
+
+## File: packages/web/src/hooks/useFormatDate.ts
+````typescript
+/**
+ * useFormatDate — returns a formatter that respects the user's stored
+ * date_format preference.
+ *
+ * Supported formats (matching PreferencesPage options):
+ *   "MMM D, YYYY"  → "Jan 5, 2026"
+ *   "MM/DD/YYYY"   → "01/05/2026"
+ *   "DD/MM/YYYY"   → "05/01/2026"
+ *   "YYYY-MM-DD"   → "2026-01-05"
+ */
+
+import { useCallback } from 'react'
+import { usePreferenceMap } from '@/hooks/usePreferences'
+
+export type DateFormat = 'MMM D, YYYY' | 'MM/DD/YYYY' | 'DD/MM/YYYY' | 'YYYY-MM-DD'
+
+function pad2(n: number): string {
+  return n.toString().padStart(2, '0')
+}
+
+/** Pure formatting function — exported for use outside React (utilities, tests). */
+export function formatDate(date: Date, fmt: string): string {
+  const y = date.getFullYear()
+  const m = date.getMonth() + 1
+  const d = date.getDate()
+
+  switch (fmt) {
+    case 'MM/DD/YYYY':
+      return `${pad2(m)}/${pad2(d)}/${y}`
+    case 'DD/MM/YYYY':
+      return `${pad2(d)}/${pad2(m)}/${y}`
+    case 'YYYY-MM-DD':
+      return `${y}-${pad2(m)}-${pad2(d)}`
+    default:
+      // "MMM D, YYYY" — default
+      return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+  }
+}
+
+/** Returns a stable formatter function for the user's date_format preference. */
+export function useFormatDate(): (date: Date) => string {
+  const prefMap = usePreferenceMap()
+  const fmt = (prefMap['date_format'] as string | undefined) ?? 'MMM D, YYYY'
+  return useCallback((date: Date) => formatDate(date, fmt), [fmt])
+}
+````
+
 ## File: packages/web/src/hooks/useMemberManagement.ts
 ````typescript
 /**
@@ -14915,6 +15309,154 @@ export function useWebSocket({ token, teamIds = [], onMessage }: Options) {
 }
 ````
 
+## File: packages/web/src/lib/api.test.ts
+````typescript
+/**
+ * Tests for the 401 silent-refresh interceptor in api.ts.
+ *
+ * We mock globalThis.fetch so no real HTTP is made. The module-level
+ * _silentRefresh / _refreshInFlight state is reset between tests via
+ * configureSilentRefresh(null).
+ */
+
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import {
+  ApiError,
+  configureSilentRefresh,
+  createAuthFetch,
+} from './api'
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function okResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  })
+}
+
+function errorResponse(status: number, code: string, message: string): Response {
+  return new Response(JSON.stringify({ error: { code, message } }), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  })
+}
+
+// ── Setup / teardown ──────────────────────────────────────────────────────────
+
+beforeEach(() => {
+  vi.spyOn(globalThis, 'fetch')
+  // Always reset the registered callback so tests don't bleed into each other.
+  configureSilentRefresh(null)
+})
+
+afterEach(() => {
+  vi.restoreAllMocks()
+  configureSilentRefresh(null)
+})
+
+// ── createAuthFetch — happy path ──────────────────────────────────────────────
+
+describe('createAuthFetch', () => {
+  it('returns parsed JSON on a 200 response', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(okResponse({ hello: 'world' }))
+
+    const authFetch = createAuthFetch(() => 'token-abc')
+    const result = await authFetch<{ hello: string }>('/test')
+
+    expect(result).toEqual({ hello: 'world' })
+    expect(fetch).toHaveBeenCalledOnce()
+    expect(fetch).toHaveBeenCalledWith(
+      expect.stringContaining('/test'),
+      expect.objectContaining({ headers: expect.any(Headers) }),
+    )
+  })
+
+  it('throws ApiError on a non-401 failure without retrying', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(errorResponse(403, 'FORBIDDEN', 'No access'))
+
+    const silentRefresh = vi.fn()
+    configureSilentRefresh(silentRefresh)
+    const authFetch = createAuthFetch(() => 'token-abc')
+
+    await expect(authFetch('/test')).rejects.toMatchObject({ status: 403, code: 'FORBIDDEN' })
+    expect(silentRefresh).not.toHaveBeenCalled()
+    expect(fetch).toHaveBeenCalledOnce()
+  })
+
+  // ── 401 retry behaviour ───────────────────────────────────────────────────
+
+  it('on 401: calls silentRefresh, then retries with the new token', async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(errorResponse(401, 'UNAUTHORIZED', 'Expired'))
+      .mockResolvedValueOnce(okResponse({ ok: true }))
+
+    const silentRefresh = vi.fn().mockResolvedValue('new-token')
+    configureSilentRefresh(silentRefresh)
+    const authFetch = createAuthFetch(() => 'old-token')
+
+    const result = await authFetch<{ ok: boolean }>('/protected')
+
+    expect(result).toEqual({ ok: true })
+    expect(silentRefresh).toHaveBeenCalledOnce()
+    expect(fetch).toHaveBeenCalledTimes(2)
+    // Second call should carry the new token.
+    const secondCall = vi.mocked(fetch).mock.calls[1]
+    const secondHeaders = secondCall[1]?.headers as Headers
+    expect(secondHeaders.get('Authorization')).toBe('Bearer new-token')
+  })
+
+  it('on 401: if silentRefresh returns null, re-throws the original 401', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(errorResponse(401, 'UNAUTHORIZED', 'Expired'))
+
+    const silentRefresh = vi.fn().mockResolvedValue(null)
+    configureSilentRefresh(silentRefresh)
+    const authFetch = createAuthFetch(() => 'old-token')
+
+    await expect(authFetch('/protected')).rejects.toMatchObject({ status: 401 })
+    // No retry attempted after null token.
+    expect(fetch).toHaveBeenCalledOnce()
+  })
+
+  it('on 401: with no silentRefresh registered, throws immediately without retry', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(errorResponse(401, 'UNAUTHORIZED', 'Expired'))
+
+    // No configureSilentRefresh call — _silentRefresh stays null.
+    const authFetch = createAuthFetch(() => 'token')
+
+    await expect(authFetch('/protected')).rejects.toMatchObject({ status: 401 })
+    expect(fetch).toHaveBeenCalledOnce()
+  })
+
+  // ── configureSilentRefresh teardown ──────────────────────────────────────
+
+  it('configureSilentRefresh(null) disables the interceptor after registration', async () => {
+    const silentRefresh = vi.fn().mockResolvedValue('new-token')
+    configureSilentRefresh(silentRefresh)
+    configureSilentRefresh(null) // immediately de-register
+
+    vi.mocked(fetch).mockResolvedValueOnce(errorResponse(401, 'UNAUTHORIZED', 'Expired'))
+
+    const authFetch = createAuthFetch(() => 'token')
+    await expect(authFetch('/test')).rejects.toMatchObject({ status: 401 })
+    // silentRefresh must NOT have been called — it was de-registered.
+    expect(silentRefresh).not.toHaveBeenCalled()
+  })
+})
+
+// ── ApiError ──────────────────────────────────────────────────────────────────
+
+describe('ApiError', () => {
+  it('is instanceof ApiError', () => {
+    const err = new ApiError(404, 'NOT_FOUND', 'missing')
+    expect(err).toBeInstanceOf(ApiError)
+    expect(err).toBeInstanceOf(Error)
+    expect(err.status).toBe(404)
+    expect(err.code).toBe('NOT_FOUND')
+  })
+})
+````
+
 ## File: packages/web/src/lib/api.ts
 ````typescript
 /**
@@ -15597,6 +16139,397 @@ export default function CommunicationPage() {
           When SMTP is not configured, password resets and email invitations are unavailable.
         </p>
       </div>
+    </div>
+  )
+}
+````
+
+## File: packages/web/src/pages/settings/OrganizationPage.tsx
+````typescript
+/**
+ * /settings/organization — Superadmin: organization name, registration policy,
+ * and system-wide defaults (language placeholder, timezone, week start).
+ * Language support is deferred to Phase 10.7 — Localization & Language Support.
+ */
+
+import { useState, useEffect } from 'react'
+import { useAdminSettings, usePatchAdminSettings } from '@/hooks/useSettings'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Button } from '@/components/ui/button'
+
+export default function OrganizationPage() {
+  const { data } = useAdminSettings()
+  const patch = usePatchAdminSettings()
+
+  const settings = data?.settings ?? {}
+  const [orgName, setOrgName] = useState('')
+  const [accentColor, setAccentColor] = useState('')
+  // Validated hex to submit — only a well-formed #RRGGBB is sent to the API.
+  const accentColorValid = accentColor === '' || /^#[0-9a-fA-F]{6}$/.test(accentColor)
+  const [regPolicy, setRegPolicy] = useState('invite_only')
+  const [timezone, setTimezone] = useState('UTC')
+  const [weekStart, setWeekStart] = useState('monday')
+  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
+
+  useEffect(() => {
+    setOrgName(settings.instance_name || '')
+    setAccentColor(settings.accent_color || '')
+    setRegPolicy(settings.registration_policy || 'invite_only')
+    setTimezone(settings.default_timezone || 'UTC')
+    setWeekStart(settings.default_week_start || 'monday')
+  }, [JSON.stringify(settings)])
+
+  async function handleSave() {
+    setFeedback(null)
+    try {
+      await patch.mutateAsync({
+        instance_name: orgName,
+        // Only submit a valid hex value; empty string clears the override.
+        accent_color: accentColorValid ? accentColor : '',
+        registration_policy: regPolicy,
+        default_timezone: timezone,
+        default_week_start: weekStart,
+      })
+      setFeedback({ type: 'success', msg: 'Settings saved.' })
+      setTimeout(() => setFeedback(null), 2000)
+    } catch {
+      setFeedback({ type: 'error', msg: 'Failed to save settings. Please try again.' })
+    }
+  }
+
+  return (
+    <div>
+      <h2 className="text-[17px] font-semibold text-foreground mb-1">Organization</h2>
+      <p className="text-sm text-muted-foreground mb-6">
+        System-wide identity and defaults for this draba installation.
+      </p>
+
+      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
+        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-4">
+          Identity
+        </h3>
+
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Organization name</Label>
+          <Input
+            value={orgName}
+            onChange={e => setOrgName(e.target.value)}
+            placeholder="My Company"
+            className="max-w-xs"
+          />
+          <p className="text-xs text-muted-foreground m-0">
+            Shown in the browser tab title and login page.
+          </p>
+        </div>
+
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Accent color</Label>
+          <div className="flex items-center gap-3">
+            <input
+              type="color"
+              value={accentColor || '#288C9B'}
+              onChange={e => setAccentColor(e.target.value)}
+              className="h-9 w-14 rounded border border-border cursor-pointer bg-transparent"
+            />
+            <Input
+              value={accentColor}
+              onChange={e => setAccentColor(e.target.value)}
+              placeholder="#288C9B"
+              className={`max-w-[140px] font-mono text-[13px] ${!accentColorValid ? 'border-destructive' : ''}`}
+            />
+            {accentColor && (
+              <button
+                type="button"
+                onClick={() => setAccentColor('')}
+                className="text-xs text-muted-foreground hover:text-foreground cursor-pointer bg-transparent border-none"
+              >
+                Reset
+              </button>
+            )}
+          </div>
+          {!accentColorValid && (
+            <p className="text-xs text-destructive m-0">Must be a 6-digit hex color (e.g. #288C9B).</p>
+          )}
+          <p className="text-xs text-muted-foreground m-0">
+            Overrides the primary color globally. Leave blank to use the default teal.
+          </p>
+        </div>
+
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Registration policy</Label>
+          <div className="flex gap-2">
+            {[
+              { v: 'invite_only', label: 'Invite only' },
+              { v: 'open', label: 'Open registration' },
+            ].map(({ v, label }) => (
+              <button
+                key={v}
+                onClick={() => setRegPolicy(v)}
+                className={`px-3.5 py-1.5 rounded-md text-[13px] border cursor-pointer ${
+                  regPolicy === v
+                    ? 'border-primary bg-primary/10 text-primary'
+                    : 'border-border bg-popover text-muted-foreground'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
+        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-2">
+          System defaults
+        </h3>
+        <p className="text-xs text-muted-foreground mb-4">
+          Applied to new accounts when the user hasn't set their own preference.
+        </p>
+
+        {/* Language placeholder — Phase 10.7 */}
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Default language</Label>
+          <select
+            disabled
+            className="bg-popover border border-border rounded-md text-foreground px-3 py-2 text-[13px] max-w-[240px] opacity-60 cursor-not-allowed"
+          >
+            <option value="en">English (en)</option>
+          </select>
+          <p className="text-xs text-muted-foreground m-0">
+            Additional languages coming in a future release (Phase 10.7).
+          </p>
+        </div>
+
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Default timezone</Label>
+          <select
+            value={timezone}
+            onChange={e => setTimezone(e.target.value)}
+            className="bg-popover border border-border rounded-md text-foreground px-3 py-2 text-[13px] cursor-pointer max-w-[280px]"
+          >
+            {['UTC', 'America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles',
+              'Europe/London', 'Europe/Paris', 'Asia/Tokyo', 'Australia/Sydney'].map(tz => (
+              <option key={tz} value={tz}>{tz}</option>
+            ))}
+          </select>
+        </div>
+
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Default week starts on</Label>
+          <div className="flex gap-2">
+            {(['monday', 'sunday'] as const).map(d => (
+              <button
+                key={d}
+                onClick={() => setWeekStart(d)}
+                className={`px-3.5 py-1.5 rounded-md text-[13px] border cursor-pointer capitalize ${
+                  weekStart === d
+                    ? 'border-primary bg-primary/10 text-primary'
+                    : 'border-border bg-popover text-muted-foreground'
+                }`}
+              >
+                {d}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {feedback && (
+        <p className={`text-[13px] mb-3 ${feedback.type === 'success' ? 'text-success' : 'text-destructive'}`}>
+          {feedback.msg}
+        </p>
+      )}
+      <Button onClick={handleSave} disabled={patch.isPending}>
+        {patch.isPending ? 'Saving…' : 'Save settings'}
+      </Button>
+    </div>
+  )
+}
+````
+
+## File: packages/web/src/pages/settings/PreferencesPage.tsx
+````typescript
+/**
+ * /settings/preferences — Regional settings, appearance theme, default team/timeline.
+ * Values are stored via the existing GET/PUT /users/me/preferences endpoints.
+ * Theme changes apply immediately via useDarkMode; the server value syncs on next login.
+ */
+
+import { useState, useEffect } from 'react'
+import { usePreferenceMap, useUpsertPreference } from '@/hooks/usePreferences'
+import { useDarkMode } from '@/hooks/useDarkMode'
+import { Label } from '@/components/ui/label'
+import { Button } from '@/components/ui/button'
+
+const TIMEZONES = [
+  'UTC',
+  'America/New_York',
+  'America/Chicago',
+  'America/Denver',
+  'America/Los_Angeles',
+  'America/Anchorage',
+  'Pacific/Honolulu',
+  'Europe/London',
+  'Europe/Paris',
+  'Europe/Berlin',
+  'Europe/Moscow',
+  'Asia/Dubai',
+  'Asia/Kolkata',
+  'Asia/Singapore',
+  'Asia/Tokyo',
+  'Australia/Sydney',
+]
+
+const DATE_FORMATS = [
+  { value: 'MMM D, YYYY', label: 'Jan 5, 2026' },
+  { value: 'MM/DD/YYYY', label: '01/05/2026' },
+  { value: 'DD/MM/YYYY', label: '05/01/2026' },
+  { value: 'YYYY-MM-DD', label: '2026-01-05' },
+]
+
+const selectCls = 'bg-popover border border-border rounded-md text-foreground px-3 py-2 text-[13px] cursor-pointer max-w-xs'
+
+export default function PreferencesPage() {
+  const prefMap = usePreferenceMap()
+  const upsert = useUpsertPreference()
+  const { theme: currentTheme, applyTheme } = useDarkMode()
+
+  const [timezone, setTimezone] = useState('UTC')
+  const [dateFormat, setDateFormat] = useState('MMM D, YYYY')
+  const [weekStart, setWeekStart] = useState('monday')
+  const [theme, setTheme] = useState<'light' | 'dark'>(currentTheme)
+  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
+
+  useEffect(() => {
+    setTimezone((prefMap['timezone'] as string | undefined) ?? 'UTC')
+    setDateFormat((prefMap['date_format'] as string | undefined) ?? 'MMM D, YYYY')
+    setWeekStart((prefMap['week_start'] as string | undefined) ?? 'monday')
+    const savedTheme = prefMap['theme'] as string | undefined
+    if (savedTheme === 'dark' || savedTheme === 'light') setTheme(savedTheme)
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- prefMap object identity changes on every fetch; JSON.stringify stabilizes the dep without pulling in the whole map
+  }, [JSON.stringify(prefMap)])
+
+  function handleThemeChange(t: 'light' | 'dark') {
+    setTheme(t)
+    applyTheme(t)
+  }
+
+  async function handleSave() {
+    setFeedback(null)
+    try {
+      await Promise.all([
+        upsert.mutateAsync({ key: 'timezone', value: JSON.stringify(timezone) }),
+        upsert.mutateAsync({ key: 'date_format', value: JSON.stringify(dateFormat) }),
+        upsert.mutateAsync({ key: 'week_start', value: JSON.stringify(weekStart) }),
+        upsert.mutateAsync({ key: 'theme', value: JSON.stringify(theme) }),
+      ])
+      setFeedback({ type: 'success', msg: 'Preferences saved.' })
+      setTimeout(() => setFeedback(null), 2000)
+    } catch {
+      setFeedback({ type: 'error', msg: 'Failed to save preferences. Please try again.' })
+    }
+  }
+
+  return (
+    <div>
+      <h2 className="text-[17px] font-semibold text-foreground mb-1">Preferences</h2>
+      <p className="text-sm text-muted-foreground mb-6">
+        Personal appearance and regional settings.
+      </p>
+
+      {/* Regional */}
+      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
+        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-4">
+          Regional
+        </h3>
+
+        {/* Language placeholder — Phase 10.7 */}
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Language</Label>
+          <select disabled className={`${selectCls} opacity-60 cursor-not-allowed`}>
+            <option value="en">English (en)</option>
+          </select>
+          <p className="text-xs text-muted-foreground m-0">
+            Additional languages coming in a future release (Phase 10.7).
+          </p>
+        </div>
+
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Timezone</Label>
+          <select value={timezone} onChange={e => setTimezone(e.target.value)} className={selectCls}>
+            {TIMEZONES.map(tz => (
+              <option key={tz} value={tz}>{tz}</option>
+            ))}
+          </select>
+        </div>
+
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Date format</Label>
+          <select value={dateFormat} onChange={e => setDateFormat(e.target.value)} className={selectCls}>
+            {DATE_FORMATS.map(f => (
+              <option key={f.value} value={f.value}>{f.label}</option>
+            ))}
+          </select>
+        </div>
+
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Week starts on</Label>
+          <div className="flex gap-2">
+            {(['monday', 'sunday'] as const).map(d => (
+              <button
+                key={d}
+                onClick={() => setWeekStart(d)}
+                className={`px-4 py-1.5 rounded-md text-[13px] border cursor-pointer capitalize ${
+                  weekStart === d
+                    ? 'border-primary bg-primary/10 text-primary'
+                    : 'border-border bg-popover text-muted-foreground'
+                }`}
+              >
+                {d}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Appearance */}
+      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
+        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-4">
+          Appearance
+        </h3>
+        <div className="flex flex-col gap-1.5 mb-2">
+          <Label>Theme</Label>
+          <div className="flex gap-2">
+            {(['light', 'dark'] as const).map(t => (
+              <button
+                key={t}
+                onClick={() => handleThemeChange(t)}
+                className={`px-4 py-1.5 rounded-md text-[13px] border cursor-pointer capitalize ${
+                  theme === t
+                    ? 'border-primary bg-primary/10 text-primary'
+                    : 'border-border bg-popover text-muted-foreground'
+                }`}
+              >
+                {t}
+              </button>
+            ))}
+          </div>
+          <p className="text-xs text-muted-foreground m-0">
+            Applies immediately. Persisted server-side so it syncs across devices.
+          </p>
+        </div>
+      </div>
+
+      {feedback && (
+        <p className={`text-[13px] mb-3 ${feedback.type === 'success' ? 'text-success' : 'text-destructive'}`}>
+          {feedback.msg}
+        </p>
+      )}
+
+      <Button onClick={handleSave} disabled={upsert.isPending}>
+        {upsert.isPending ? 'Saving…' : 'Save preferences'}
+      </Button>
     </div>
   )
 }
@@ -19283,250 +20216,6 @@ func getenv(key, fallback string) string {
 }
 ````
 
-## File: packages/api/internal/api/admin_handler.go
-````go
-package api
-
-import (
-	"encoding/json"
-	"log/slog"
-	"net/http"
-
-	"github.com/I0-1O/draba/packages/api/internal/mailer"
-)
-
-// requireSuperadmin is a shared guard for admin endpoints. Returns false
-// and writes a 403 if the caller is not a superadmin.
-func (s *Server) requireSuperadmin(w http.ResponseWriter, r *http.Request) bool {
-	claims := claimsFromContext(r.Context())
-	caller, err := s.users.GetByID(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to verify permissions")
-		return false
-	}
-	if !caller.IsSuperadmin {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
-		return false
-	}
-	return true
-}
-
-// handleGetSMTP handles GET /admin/smtp. Returns the current SMTP config
-// with the password masked. Superadmin-only.
-func (s *Server) handleGetSMTP(w http.ResponseWriter, r *http.Request) {
-	if !s.requireSuperadmin(w, r) {
-		return
-	}
-
-	cfg, err := s.mailer.LoadConfig()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load SMTP config")
-		return
-	}
-	if cfg == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"smtp": nil})
-		return
-	}
-
-	// Mask the password in the response.
-	masked := *cfg
-	if masked.Password != "" {
-		masked.Password = "••••••••"
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"smtp": masked})
-}
-
-// handlePutSMTP handles PUT /admin/smtp. Saves the SMTP configuration and
-// validates it by sending a test email to the caller's address. Superadmin-only.
-func (s *Server) handlePutSMTP(w http.ResponseWriter, r *http.Request) {
-	if !s.requireSuperadmin(w, r) {
-		return
-	}
-
-	var cfg mailer.SMTPConfig
-	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-	if cfg.Host == "" || cfg.Port == 0 || cfg.FromEmail == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "host, port, and fromEmail are required")
-		return
-	}
-
-	// Fetch caller email for the validation test.
-	claims := claimsFromContext(r.Context())
-	caller, err := s.users.GetByID(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to send test email")
-		return
-	}
-
-	// Validate by sending a test email before persisting.
-	if err := mailer.SendWithConfig(&cfg, caller.Email, "draba SMTP test", smtpTestBody()); err != nil {
-		slog.Warn("smtp validation failed", "err", err)
-		writeError(w, http.StatusBadRequest, "SMTP_SEND_FAILED", "SMTP validation failed; check server logs for details")
-		return
-	}
-
-	if err := s.mailer.SaveConfig(&cfg); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to save SMTP config")
-		return
-	}
-
-	masked := cfg
-	if masked.Password != "" {
-		masked.Password = "••••••••"
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"smtp": masked})
-}
-
-// handleTestSMTP handles POST /admin/smtp/test. Sends a test email using the
-// provided config without persisting it. Superadmin-only.
-func (s *Server) handleTestSMTP(w http.ResponseWriter, r *http.Request) {
-	if !s.requireSuperadmin(w, r) {
-		return
-	}
-
-	var cfg mailer.SMTPConfig
-	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	claims := claimsFromContext(r.Context())
-	caller, err := s.users.GetByID(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to fetch caller")
-		return
-	}
-
-	if err := mailer.SendWithConfig(&cfg, caller.Email, "draba SMTP test", smtpTestBody()); err != nil {
-		slog.Warn("smtp test failed", "err", err)
-		writeError(w, http.StatusBadRequest, "SMTP_SEND_FAILED", "SMTP test failed; check server logs for details")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]string{"status": "sent", "to": caller.Email})
-}
-
-// handleDeleteSMTP handles DELETE /admin/smtp. Clears the SMTP config.
-// Superadmin-only.
-func (s *Server) handleDeleteSMTP(w http.ResponseWriter, r *http.Request) {
-	if !s.requireSuperadmin(w, r) {
-		return
-	}
-	if err := s.mailer.DeleteConfig(); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to clear SMTP config")
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
-// handleGetAdminSettings handles GET /admin/settings. Returns instance-level
-// defaults. Superadmin-only.
-func (s *Server) handleGetAdminSettings(w http.ResponseWriter, r *http.Request) {
-	if !s.requireSuperadmin(w, r) {
-		return
-	}
-
-	keys := []string{"registration_policy", "default_timezone", "default_date_format", "default_week_start", "instance_name", "accent_color"}
-	settings := make(map[string]string, len(keys))
-	for _, k := range keys {
-		v, err := s.instanceSets.Get(k)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load settings")
-			return
-		}
-		settings[k] = v
-	}
-
-	// Apply defaults for missing keys.
-	if settings["registration_policy"] == "" {
-		settings["registration_policy"] = "invite_only"
-	}
-	if settings["default_timezone"] == "" {
-		settings["default_timezone"] = "UTC"
-	}
-	if settings["default_date_format"] == "" {
-		settings["default_date_format"] = "MMM D, YYYY"
-	}
-	if settings["default_week_start"] == "" {
-		settings["default_week_start"] = "monday"
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{"settings": settings})
-}
-
-// handlePatchAdminSettings handles PATCH /admin/settings. Updates one or more
-// instance-level settings. Superadmin-only.
-func (s *Server) handlePatchAdminSettings(w http.ResponseWriter, r *http.Request) {
-	if !s.requireSuperadmin(w, r) {
-		return
-	}
-
-	var body map[string]string
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	// Validate known keys and values.
-	allowed := map[string]bool{
-		"registration_policy": true,
-		"default_timezone":    true,
-		"default_date_format": true,
-		"default_week_start":  true,
-		"instance_name":       true,
-		"accent_color":        true,
-	}
-	for k := range body {
-		if !allowed[k] {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "unknown setting key: "+k)
-			return
-		}
-	}
-	if v, ok := body["registration_policy"]; ok && v != "invite_only" && v != "open" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "registration_policy must be invite_only or open")
-		return
-	}
-	if v, ok := body["default_week_start"]; ok && v != "monday" && v != "sunday" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "default_week_start must be monday or sunday")
-		return
-	}
-
-	for k, v := range body {
-		if err := s.instanceSets.Set(k, v); err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to save settings")
-			return
-		}
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{"settings": body})
-}
-
-// handleGetPublicBranding handles GET /settings/branding. Returns the
-// instance name and accent color without requiring authentication, so the
-// login page and shared timeline views can display branding before sign-in.
-//
-// Only cosmetic settings are exposed here. Never add sensitive keys (SMTP
-// credentials, JWT secrets, registration policy, etc.) to this handler.
-func (s *Server) handleGetPublicBranding(w http.ResponseWriter, _ *http.Request) {
-	name, _ := s.instanceSets.Get("instance_name")
-	accent, _ := s.instanceSets.Get("accent_color")
-	writeJSON(w, http.StatusOK, map[string]any{
-		"instanceName": name,
-		"accentColor":  accent,
-	})
-}
-
-func smtpTestBody() string {
-	return `<html><body>
-<p>This is a test email from <strong>draba</strong>.</p>
-<p>If you received this, your SMTP configuration is working correctly.</p>
-</body></html>`
-}
-````
-
 ## File: packages/api/internal/api/helpers.go
 ````go
 package api
@@ -21986,6 +22675,1150 @@ require (
 )
 ````
 
+## File: packages/web/src/components/calendar/CalendarGrid.tsx
+````typescript
+/**
+ * CalendarGrid — presentational grid for the Calendar view.
+ *
+ * Month (6-week) and Week (1-week) all-day-bar layouts.
+ */
+
+import {
+  useRef,
+  useState,
+  useCallback,
+  useEffect,
+  useMemo,
+} from 'react';
+import type { CalendarLayout } from './CalendarToolbar';
+import type { WeekRow, CalendarSegment } from '@/lib/calendarLanes';
+import { overflowCountsForWeek, segmentsForDay, daysDiff } from '@/lib/calendarLanes';
+import type { components } from '@draba/shared';
+import type { Member } from '@/types';
+
+type ApiActivity = components['schemas']['Activity'];
+
+// ── Layout constants ──────────────────────────────────────────────────────────
+
+const MONTH_DAY_HEADER_H = 28;
+const WEEK_DAY_HEADER_H  = 60;
+const BAR_H        = 20;
+const LANE_SLOT_H  = 24;
+const OVERFLOW_H   = 20;   // reserved for "+N more" chips (month)
+const EDGE_W       = 8;    // resize hit-zone on bar edges
+const ROW_RESIZE_H = 6;    // month row-height drag strip
+const COL_COUNT    = 7;
+
+// ── Drag state ────────────────────────────────────────────────────────────────
+
+type DragType = 'move' | 'resize-start' | 'resize-end';
+
+interface DragState {
+  activityId: string;
+  type: DragType;
+  originalStart: Date;
+  originalEnd: Date;
+  grabOffsetDays: number;
+  currentStart: Date;
+  currentEnd: Date;
+}
+
+/** Per-week position of the dragged bar during live drag. */
+interface LiveSegment {
+  startCol: number;
+  endCol: number;
+  continuesLeft: boolean;
+  continuesRight: boolean;
+  color: string;
+}
+
+// ── Utility ───────────────────────────────────────────────────────────────────
+
+function utcMidnight(iso: string): Date {
+  return new Date(iso.slice(0, 10) + 'T00:00:00Z');
+}
+
+/**
+ * Find the calendar day under the cursor.
+ * Uses elementsFromPoint (plural) so the bar element (pointer-events: auto)
+ * doesn't occlude the day cell's data-date attribute beneath it.
+ */
+function dayAtPoint(x: number, y: number): Date | null {
+  const elements = document.elementsFromPoint(x, y);
+  for (const el of elements) {
+    const iso = (el as HTMLElement).dataset?.date;
+    if (iso) return new Date(iso + 'T00:00:00Z');
+  }
+  return null;
+}
+
+function monthRowH(cap: number): number {
+  return MONTH_DAY_HEADER_H + cap * LANE_SLOT_H + OVERFLOW_H + ROW_RESIZE_H;
+}
+
+// ── DayOverflowPopover ────────────────────────────────────────────────────────
+
+function DayOverflowPopover({ segments, activityById, dayDate, anchorRect, onSelect, onClose }: {
+  segments: CalendarSegment[];
+  activityById: Map<string, ApiActivity>;
+  dayDate: Date;
+  anchorRect: DOMRect;
+  onSelect: (act: ApiActivity) => void;
+  onClose: () => void;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    function onDown(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
+    }
+    document.addEventListener('mousedown', onDown, true);
+    return () => document.removeEventListener('mousedown', onDown, true);
+  }, [onClose]);
+  const label = dayDate.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
+  return (
+    <div ref={ref} style={{ position: 'fixed', top: anchorRect.bottom + 4, left: Math.min(anchorRect.left, window.innerWidth - 280), width: 260, background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 8, boxShadow: '0 4px 20px rgba(0,0,0,0.2)', zIndex: 200, overflow: 'hidden' }}>
+      <div style={{ padding: '8px 12px', borderBottom: '1px solid var(--border)', fontSize: 12, fontWeight: 600, color: 'var(--foreground)' }}>{label}</div>
+      <div style={{ maxHeight: 260, overflowY: 'auto' }}>
+        {segments.map(seg => {
+          const act = activityById.get(seg.activityId);
+          if (!act) return null;
+          return (
+            <button key={seg.activityId} onClick={() => { onSelect(act); onClose(); }}
+              style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', padding: '7px 12px', background: 'none', border: 'none', textAlign: 'left', cursor: 'pointer', fontSize: 12, color: 'var(--foreground)', borderBottom: '1px solid var(--border)' }}
+              onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+              onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+            >
+              <span style={{ width: 10, height: 10, borderRadius: 3, background: seg.color, flexShrink: 0 }} />
+              <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{seg.title}</span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ── CalendarBar ───────────────────────────────────────────────────────────────
+
+interface BarProps {
+  seg: CalendarSegment | LiveSegment & Pick<CalendarSegment, 'activityId' | 'lane' | 'title' | 'isMatch' | 'isActiveMatch' | 'assignedMemberIds'>;
+  topPx: number;
+  isSelected: boolean;
+  hasQuery: boolean;
+  memberById: Record<string, Member>;
+  onPointerDown: (e: React.PointerEvent, activityId: string, type: DragType) => void;
+  onClick: (activityId: string, e: React.MouseEvent) => void;
+}
+
+function CalendarBar({ seg, topPx, isSelected, hasQuery, memberById, onPointerDown, onClick }: BarProps) {
+  const isHighlighted = seg.isMatch || seg.isActiveMatch;
+  const isDimmed = hasQuery && !isHighlighted;
+
+  // Assignee first names (up to 3, separated by commas)
+  const assigneeNames = seg.assignedMemberIds
+    .slice(0, 3)
+    .map(id => memberById[id]?.name?.split(' ')[0])
+    .filter((n): n is string => Boolean(n));
+
+  const style: React.CSSProperties = {
+    position: 'absolute',
+    top: topPx + 2,
+    left: `calc(${(seg.startCol / COL_COUNT) * 100}% + 2px)`,
+    width: `calc(${((seg.endCol - seg.startCol + 1) / COL_COUNT) * 100}% - 4px)`,
+    height: BAR_H,
+    background: seg.color,
+    borderRadius: `${seg.continuesLeft ? 0 : 4}px ${seg.continuesRight ? 0 : 4}px ${seg.continuesRight ? 0 : 4}px ${seg.continuesLeft ? 0 : 4}px`,
+    cursor: 'pointer',
+    display: 'flex',
+    alignItems: 'center',
+    overflow: 'hidden',
+    opacity: isDimmed ? 0.3 : 1,
+    outline: isSelected ? '2px solid var(--primary)' : seg.isActiveMatch ? '2px solid #f59e0b' : seg.isMatch ? '1px solid #f59e0b' : 'none',
+    outlineOffset: 1,
+    boxShadow: seg.isActiveMatch ? '0 0 0 3px rgba(245,158,11,0.3)' : 'none',
+    userSelect: 'none',
+    zIndex: isSelected ? 3 : 1,
+    pointerEvents: 'auto',
+  };
+
+  const edgeStyle: React.CSSProperties = { position: 'absolute', top: 0, height: '100%', width: EDGE_W, cursor: 'ew-resize', zIndex: 2 };
+
+  return (
+    <div style={style}
+      onClick={e => onClick(seg.activityId, e)}
+      onPointerDown={e => {
+        const rect = e.currentTarget.getBoundingClientRect();
+        const x = e.clientX - rect.left;
+        if (x < EDGE_W && !seg.continuesLeft) {
+          onPointerDown(e, seg.activityId, 'resize-start');
+        } else if (x > rect.width - EDGE_W && !seg.continuesRight) {
+          onPointerDown(e, seg.activityId, 'resize-end');
+        } else {
+          onPointerDown(e, seg.activityId, 'move');
+        }
+      }}
+    >
+      {!seg.continuesLeft  && <div style={{ ...edgeStyle, left: 0 }} />}
+      {!seg.continuesRight && <div style={{ ...edgeStyle, right: 0, left: 'auto' }} />}
+      {seg.continuesLeft && <span style={{ fontSize: 10, color: '#fff', paddingLeft: 2, pointerEvents: 'none', flexShrink: 0 }}>◀</span>}
+      <span style={{ fontSize: 11, fontWeight: 500, color: '#fff', overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis', padding: '0 4px', pointerEvents: 'none', flex: 1, minWidth: 0 }}>
+        {seg.title}
+      </span>
+      {assigneeNames.length > 0 && (
+        <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.85)', paddingRight: 4, whiteSpace: 'nowrap', pointerEvents: 'none', flexShrink: 0, maxWidth: '45%', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+          {assigneeNames.join(', ')}
+        </span>
+      )}
+      {seg.continuesRight && <span style={{ fontSize: 10, color: '#fff', paddingRight: 2, pointerEvents: 'none', flexShrink: 0 }}>▶</span>}
+    </div>
+  );
+}
+
+// ── Month row-height resize handle ────────────────────────────────────────────
+
+function RowResizeHandle({ weekStart, currentCap, laneCount, onCapDraft, onCapCommit }: {
+  weekStart: Date;
+  currentCap: number;
+  laneCount: number;
+  onCapDraft: (weekStart: Date, newCap: number) => void;
+  onCapCommit: (weekStart: Date, newCap: number) => void;
+}) {
+  const isDragging = useRef(false);
+  const startY = useRef(0);
+  const startCap = useRef(0);
+  const lastCap = useRef(currentCap);
+
+  return (
+    <div
+      onPointerDown={e => {
+        e.preventDefault(); e.stopPropagation();
+        isDragging.current = true;
+        startY.current = e.clientY;
+        startCap.current = currentCap;
+        lastCap.current = currentCap;
+        e.currentTarget.setPointerCapture(e.pointerId);
+      }}
+      onPointerMove={e => {
+        if (!isDragging.current) return;
+        const dy = e.clientY - startY.current;
+        const newCap = Math.max(1, Math.min(laneCount || 6, startCap.current + Math.floor(dy / LANE_SLOT_H)));
+        if (newCap !== lastCap.current) { lastCap.current = newCap; onCapDraft(weekStart, newCap); }
+      }}
+      onPointerUp={e => {
+        if (isDragging.current) onCapCommit(weekStart, lastCap.current);
+        isDragging.current = false;
+        e.currentTarget.releasePointerCapture(e.pointerId);
+      }}
+      style={{ height: ROW_RESIZE_H, cursor: 'ns-resize', background: 'transparent', borderTop: '1px solid var(--border)', transition: 'background 0.15s' }}
+      onMouseEnter={e => { (e.currentTarget as HTMLElement).style.background = 'var(--muted)'; }}
+      onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = 'transparent'; }}
+      title="Drag to show more or fewer activities"
+    />
+  );
+}
+
+// ── WeekRowRenderer ───────────────────────────────────────────────────────────
+
+const DOW_LABELS_MON = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+const DOW_LABELS_SUN = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+function WeekRowRenderer({
+  row,
+  isFirst,
+  layout,
+  weekStartDay,
+  activityById,
+  memberById,
+  selectedActivityId,
+  hasQuery,
+  today,
+  /** The dragged bar's live position in this week row (or null if not overlapping). */
+  liveSeg,
+  /** Activity ID being dragged — to suppress the original static segment. */
+  dragActivityId,
+  onBarPointerDown,
+  onBarClick,
+  onCellClick,
+  onCapDraft,
+  onCapCommit,
+}: {
+  row: WeekRow;
+  isFirst: boolean;
+  layout: CalendarLayout;
+  weekStartDay: 0 | 1;
+  activityById: Map<string, ApiActivity>;
+  memberById: Record<string, Member>;
+  selectedActivityId: string | null;
+  hasQuery: boolean;
+  today: Date;
+  liveSeg: LiveSegment | null;
+  dragActivityId: string | null;
+  onBarPointerDown: (e: React.PointerEvent, activityId: string, type: DragType) => void;
+  onBarClick: (activityId: string, e: React.MouseEvent) => void;
+  onCellClick: (date: Date) => void;
+  onCapDraft: (weekStart: Date, newCap: number) => void;
+  onCapCommit: (weekStart: Date, newCap: number) => void;
+}) {
+  const [popover, setPopover] = useState<{ col: number; rect: DOMRect } | null>(null);
+  const overflows = useMemo(() => overflowCountsForWeek(row), [row]);
+  const dowLabels = weekStartDay === 0 ? DOW_LABELS_SUN : DOW_LABELS_MON;
+  const todayISO = today.toISOString().slice(0, 10);
+  const isWeek = layout === 'week';
+  const dayHeaderH = isWeek ? WEEK_DAY_HEADER_H : MONTH_DAY_HEADER_H;
+
+  // Month: cap-filtered. Week: all segments. Either way, suppress the dragged bar's
+  // static position so only the live overlay renders.
+  const staticSegments = (isWeek ? row.segments : row.segments.filter(s => s.lane < row.visibleLaneCap))
+    .filter(s => s.activityId !== dragActivityId);
+
+  // Week: min-height ensures all lanes are visible even if flex container is small.
+  const weekMinH = WEEK_DAY_HEADER_H + row.laneCount * LANE_SLOT_H + 40;
+
+  const rowStyle: React.CSSProperties = isWeek
+    ? { position: 'relative', flex: 1, minHeight: weekMinH, borderBottom: '1px solid var(--border)' }
+    : { position: 'relative', height: monthRowH(row.visibleLaneCap), borderBottom: '1px solid var(--border)' };
+
+  return (
+    <div style={rowStyle}>
+      {/* Day cells — borders, date headers, click zones */}
+      <div style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: isWeek ? 0 : ROW_RESIZE_H, display: 'grid', gridTemplateColumns: `repeat(${COL_COUNT}, 1fr)` }}>
+        {row.days.map((day, col) => {
+          const dayISO = day.toISOString().slice(0, 10);
+          const isToday = dayISO === todayISO;
+          const overflowCount = isWeek ? 0 : overflows[col];
+          return (
+            <div key={col} data-date={dayISO}
+              style={{ borderRight: col < COL_COUNT - 1 ? '1px solid var(--border)' : 'none', background: isToday ? 'color-mix(in srgb, var(--primary) 6%, transparent)' : 'transparent', position: 'relative', cursor: 'default' }}
+              onClick={e => { if ((e.target as HTMLElement).closest('[data-bar]')) return; onCellClick(day); }}
+            >
+              {isWeek ? (
+                /* Week view: prominent centered header */
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: WEEK_DAY_HEADER_H, gap: 2, borderBottom: '1px solid var(--border)', pointerEvents: 'none' }}>
+                  <span style={{ fontSize: 11, fontWeight: 500, color: 'var(--muted-foreground)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                    {dowLabels[col]}
+                  </span>
+                  <span style={{ fontSize: 22, fontWeight: isToday ? 700 : 400, color: isToday ? 'var(--primary)' : 'var(--foreground)', lineHeight: 1 }}>
+                    {day.getUTCDate()}
+                  </span>
+                </div>
+              ) : (
+                <>
+                  {isFirst && (
+                    <div style={{ fontSize: 10, color: 'var(--muted-foreground)', textAlign: 'center', paddingTop: 4, pointerEvents: 'none' }}>
+                      {dowLabels[col]}
+                    </div>
+                  )}
+                  <div style={{ position: 'absolute', top: isFirst ? 13 : 6, right: 6, fontSize: 11, fontWeight: isToday ? 700 : 400, color: isToday ? 'var(--primary)' : 'var(--muted-foreground)', lineHeight: 1, pointerEvents: 'none' }}>
+                    {day.getUTCDate()}
+                  </div>
+                  {overflowCount > 0 && (
+                    <button style={{ position: 'absolute', bottom: OVERFLOW_H / 2 - 8, left: 2, right: 2, height: 16, fontSize: 10, color: 'var(--muted-foreground)', background: 'var(--muted)', border: 'none', borderRadius: 3, cursor: 'pointer', padding: 0 }}
+                      onClick={e => { e.stopPropagation(); const rect = e.currentTarget.getBoundingClientRect(); setPopover(p => p?.col === col ? null : { col, rect }); }}
+                    >
+                      +{overflowCount} more
+                    </button>
+                  )}
+                </>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Static activity bars (the dragged bar is suppressed here) */}
+      {staticSegments.map(seg => {
+        const act = activityById.get(seg.activityId);
+        if (!act) return null;
+        return (
+          <div key={seg.activityId} style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, pointerEvents: 'none' }}>
+            <div style={{ position: 'relative', height: '100%', pointerEvents: 'none' }}>
+              <CalendarBar
+                seg={seg}
+                topPx={dayHeaderH + seg.lane * LANE_SLOT_H}
+                isSelected={selectedActivityId === seg.activityId}
+                hasQuery={hasQuery}
+                memberById={memberById}
+                onPointerDown={onBarPointerDown}
+                onClick={onBarClick}
+              />
+            </div>
+          </div>
+        );
+      })}
+
+      {/* Live drag overlay: the dragged bar at its current position */}
+      {liveSeg && dragActivityId && (() => {
+        const origSeg = row.segments.find(s => s.activityId === dragActivityId) ?? row.segments[0];
+        const displaySeg: CalendarSegment = {
+          activityId: dragActivityId,
+          startCol: liveSeg.startCol,
+          endCol: liveSeg.endCol,
+          lane: origSeg?.lane ?? 0,
+          continuesLeft: liveSeg.continuesLeft,
+          continuesRight: liveSeg.continuesRight,
+          color: liveSeg.color,
+          title: activityById.get(dragActivityId)?.title ?? '',
+          icon: activityById.get(dragActivityId)?.icon ?? undefined,
+          assignedMemberIds: activityById.get(dragActivityId)?.assignedMemberIds ?? [],
+          isMatch: false,
+          isActiveMatch: false,
+        };
+        return (
+          <div style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, pointerEvents: 'none' }}>
+            <div style={{ position: 'relative', height: '100%', pointerEvents: 'none' }}>
+              <CalendarBar
+                seg={displaySeg}
+                topPx={dayHeaderH + displaySeg.lane * LANE_SLOT_H}
+                isSelected={selectedActivityId === dragActivityId}
+                hasQuery={false}
+                memberById={memberById}
+                onPointerDown={onBarPointerDown}
+                onClick={onBarClick}
+              />
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* Month resize handle */}
+      {!isWeek && (
+        <div style={{ position: 'absolute', bottom: 0, left: 0, right: 0 }}>
+          <RowResizeHandle weekStart={row.weekStart} currentCap={row.visibleLaneCap} laneCount={row.laneCount} onCapDraft={onCapDraft} onCapCommit={onCapCommit} />
+        </div>
+      )}
+
+      {/* Overflow popover */}
+      {popover && (
+        <DayOverflowPopover
+          segments={segmentsForDay(row, popover.col)}
+          activityById={activityById}
+          dayDate={row.days[popover.col]}
+          anchorRect={popover.rect}
+          onSelect={act => { onBarClick(act.id, new MouseEvent('click') as unknown as React.MouseEvent); }}
+          onClose={() => setPopover(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+// ── CalendarGrid ──────────────────────────────────────────────────────────────
+
+export interface CalendarGridProps {
+  weeks: WeekRow[];
+  layout: CalendarLayout;
+  weekStartDay: 0 | 1;
+  activityById: Map<string, ApiActivity>;
+  memberById: Record<string, Member>;
+  selectedActivityId: string | null;
+  hasQuery: boolean;
+  today: Date;
+  onSelectActivity: (act: ApiActivity | null) => void;
+  onCellClick: (date: Date) => void;
+  onBarDragProgress: (activityId: string, newStart: Date, newEnd: Date) => void;
+  onBarDragEnd: () => void;
+  onBarDragCommit: (activityId: string, newStart: Date, newEnd: Date) => void;
+  onCapDraft: (weekStart: Date, newCap: number) => void;
+  onCapCommit: (weekStart: Date, newCap: number) => void;
+}
+
+export default function CalendarGrid({
+  weeks,
+  layout,
+  weekStartDay,
+  activityById,
+  memberById,
+  selectedActivityId,
+  hasQuery,
+  today,
+  onSelectActivity,
+  onCellClick,
+  onBarDragProgress,
+  onBarDragEnd,
+  onBarDragCommit,
+  onCapDraft,
+  onCapCommit,
+}: CalendarGridProps) {
+  const [dragState, setDragState] = useState<DragState | null>(null);
+
+  // Ref for the latest drag position — prevents stale closure in the useEffect.
+  const liveDragRef = useRef<{ start: Date; end: Date } | null>(null);
+
+  // Refs for callbacks so the useEffect never captures stale props.
+  const onBarDragProgressRef = useRef(onBarDragProgress);
+  const onBarDragEndRef      = useRef(onBarDragEnd);
+  const onBarDragCommitRef   = useRef(onBarDragCommit);
+  useEffect(() => { onBarDragProgressRef.current = onBarDragProgress; }, [onBarDragProgress]);
+  useEffect(() => { onBarDragEndRef.current      = onBarDragEnd; },      [onBarDragEnd]);
+  useEffect(() => { onBarDragCommitRef.current   = onBarDragCommit; },   [onBarDragCommit]);
+
+  // ── Drag ────────────────────────────────────────────────────────────────────
+
+  const handleBarPointerDown = useCallback((
+    e: React.PointerEvent,
+    activityId: string,
+    type: DragType,
+  ) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const act = activityById.get(activityId);
+    if (!act) return;
+    const originalStart = utcMidnight(act.startAt);
+    const originalEnd   = utcMidnight(act.endAt);
+
+    // Use elementsFromPoint to find the day cell beneath the bar.
+    const clickedDay = dayAtPoint(e.clientX, e.clientY);
+    const grabOffsetDays = clickedDay ? daysDiff(originalStart, clickedDay) : 0;
+
+    liveDragRef.current = { start: originalStart, end: originalEnd };
+    setDragState({ activityId, type, originalStart, originalEnd, grabOffsetDays, currentStart: originalStart, currentEnd: originalEnd });
+  }, [activityById]);
+
+  useEffect(() => {
+    if (!dragState) return;
+    const ds = dragState;
+    const originalSpan = daysDiff(ds.originalStart, ds.originalEnd);
+
+    function onPointerMove(e: PointerEvent) {
+      const targetDay = dayAtPoint(e.clientX, e.clientY);
+      if (!targetDay) return;
+
+      let newStart: Date;
+      let newEnd: Date;
+
+      if (ds.type === 'move') {
+        newStart = new Date(targetDay);
+        newStart.setUTCDate(targetDay.getUTCDate() - ds.grabOffsetDays);
+        newEnd = new Date(newStart);
+        newEnd.setUTCDate(newStart.getUTCDate() + originalSpan);
+      } else if (ds.type === 'resize-start') {
+        newStart = targetDay < ds.originalEnd ? targetDay : ds.originalEnd;
+        newEnd   = ds.originalEnd;
+      } else {
+        newStart = ds.originalStart;
+        newEnd   = targetDay > ds.originalStart ? targetDay : ds.originalStart;
+      }
+
+      liveDragRef.current = { start: newStart, end: newEnd };
+      setDragState(prev => prev ? { ...prev, currentStart: newStart, currentEnd: newEnd } : null);
+      onBarDragProgressRef.current(ds.activityId, newStart, newEnd);
+    }
+
+    function onPointerUp() {
+      const live = liveDragRef.current;
+      liveDragRef.current = null;
+      if (live) {
+        const changed =
+          live.start.getTime() !== ds.originalStart.getTime() ||
+          live.end.getTime()   !== ds.originalEnd.getTime();
+        if (changed) onBarDragCommitRef.current(ds.activityId, live.start, live.end);
+      }
+      onBarDragEndRef.current();
+      setDragState(null);
+    }
+
+    document.addEventListener('pointermove', onPointerMove);
+    document.addEventListener('pointerup', onPointerUp);
+    return () => {
+      document.removeEventListener('pointermove', onPointerMove);
+      document.removeEventListener('pointerup', onPointerUp);
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dragState?.activityId, dragState?.type]);
+
+  // ── Live drag overlay across all weeks ──────────────────────────────────────
+
+  // Compute where the dragged bar currently sits in EVERY week row.
+  // This drives real-time rendering across week boundaries, even in weeks
+  // that didn't originally contain the bar.
+  const liveSegs: (LiveSegment | null)[] = useMemo(() => {
+    if (!dragState) return weeks.map(() => null);
+    const { activityId, currentStart, currentEnd } = dragState;
+
+    // Find the bar's color from any original segment.
+    let color = '#6b7280';
+    for (const row of weeks) {
+      const s = row.segments.find(s => s.activityId === activityId);
+      if (s) { color = s.color; break; }
+    }
+
+    return weeks.map(row => {
+      const weekEnd = row.days[6];
+      if (currentEnd < row.weekStart || currentStart > weekEnd) return null;
+      const rawStart = daysDiff(row.weekStart, currentStart);
+      const rawEnd   = daysDiff(row.weekStart, currentEnd);
+      return {
+        startCol: Math.max(0, rawStart),
+        endCol:   Math.min(6, rawEnd),
+        continuesLeft:  rawStart < 0,
+        continuesRight: rawEnd > 6,
+        color,
+      };
+    });
+  }, [dragState, weeks]);
+
+  const handleBarClick = useCallback((activityId: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    onSelectActivity(activityById.get(activityId) ?? null);
+  }, [activityById, onSelectActivity]);
+
+  // ── Render ──────────────────────────────────────────────────────────────────
+
+  const isWeek = layout === 'week';
+
+  const outerStyle: React.CSSProperties = isWeek
+    ? { flex: 1, display: 'flex', flexDirection: 'column', overflowY: 'auto', background: 'var(--background)' }
+    : { flex: 1, overflow: 'auto', background: 'var(--background)' };
+
+  const innerStyle: React.CSSProperties = isWeek
+    ? { flex: 1, display: 'flex', flexDirection: 'column', minWidth: 420, cursor: dragState ? 'grabbing' : undefined }
+    : { minWidth: 420, cursor: dragState ? 'grabbing' : undefined };
+
+  return (
+    <div style={outerStyle}>
+      <div style={innerStyle}>
+        {weeks.map((row, wi) => (
+          <WeekRowRenderer
+            key={row.weekStart.toISOString()}
+            row={row}
+            isFirst={wi === 0}
+            layout={layout}
+            weekStartDay={weekStartDay}
+            activityById={activityById}
+            memberById={memberById}
+            selectedActivityId={selectedActivityId}
+            hasQuery={hasQuery}
+            today={today}
+            liveSeg={liveSegs[wi]}
+            dragActivityId={dragState?.activityId ?? null}
+            onBarPointerDown={handleBarPointerDown}
+            onBarClick={handleBarClick}
+            onCellClick={onCellClick}
+            onCapDraft={onCapDraft}
+            onCapCommit={onCapCommit}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+````
+
+## File: packages/web/src/components/calendar/CalendarToolbar.tsx
+````typescript
+/**
+ * CalendarToolbar — sub-toolbar for the Calendar view.
+ *
+ * Provides: Month / Week layout toggle, today / prev / next navigation,
+ * a jump-to-date picker, color-by, and export/share stubs.
+ */
+
+import { ChevronLeft, ChevronRight, Download, Share2 } from 'lucide-react';
+import type { ColorBy } from '@/components/gantt/GanttToolbar';
+
+export type CalendarLayout = 'month' | 'week';
+
+interface Props {
+  layout: CalendarLayout;
+  onLayoutChange: (l: CalendarLayout) => void;
+  /** The month/week currently in view. */
+  anchorDate: Date;
+  onPrev: () => void;
+  onNext: () => void;
+  onToday: () => void;
+  colorBy: ColorBy;
+  onColorByChange: (c: ColorBy) => void;
+  onExport?: () => void;
+  onShare?: () => void;
+}
+
+const btn = 'flex items-center justify-center gap-[5px] h-[26px] px-2 border border-border rounded-md bg-card text-foreground text-xs font-medium cursor-pointer shrink-0 hover:bg-muted transition-colors';
+const iconBtn = 'flex items-center justify-center h-[26px] w-[26px] border border-border rounded-md bg-card text-foreground cursor-pointer shrink-0 hover:bg-muted transition-colors';
+const divider = 'w-px h-4 bg-border shrink-0';
+const label   = 'text-[11px] text-muted-foreground shrink-0';
+const select  = 'h-[26px] px-1.5 border border-border rounded-md bg-card text-foreground text-xs cursor-pointer shrink-0';
+
+function formatAnchorLabel(date: Date, layout: CalendarLayout): string {
+  if (layout === 'month') {
+    return date.toLocaleDateString(undefined, { month: 'long', year: 'numeric', timeZone: 'UTC' });
+  }
+  // Week: show the range "Jun 1 – 7, 2026"
+  const end = new Date(date);
+  end.setUTCDate(date.getUTCDate() + 6);
+  const startStr = date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
+  const endStr   = end.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
+  return `${startStr} – ${endStr}`;
+}
+
+export default function CalendarToolbar({
+  layout,
+  onLayoutChange,
+  anchorDate,
+  onPrev,
+  onNext,
+  onToday,
+  colorBy,
+  onColorByChange,
+  onExport,
+  onShare,
+}: Props) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '0 12px', height: 36, background: 'var(--card)', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
+      {/* Layout toggle */}
+      <div style={{ display: 'flex', border: '1px solid var(--border)', borderRadius: 6, overflow: 'hidden', height: 26 }}>
+        {(['month', 'week'] as CalendarLayout[]).map(l => (
+          <button
+            key={l}
+            onClick={() => onLayoutChange(l)}
+            style={{
+              padding: '0 10px',
+              fontSize: 12,
+              fontWeight: 500,
+              border: 'none',
+              borderRight: l === 'month' ? '1px solid var(--border)' : 'none',
+              background: layout === l ? 'var(--muted)' : 'var(--card)',
+              color: 'var(--foreground)',
+              cursor: 'pointer',
+              height: '100%',
+            }}
+          >
+            {l === 'month' ? 'Month' : 'Week'}
+          </button>
+        ))}
+      </div>
+
+      <div className={divider} />
+
+      {/* Navigation */}
+      <button className={iconBtn} onClick={onPrev} title="Previous">
+        <ChevronLeft size={13} strokeWidth={2} />
+      </button>
+      <button className={btn} onClick={onToday}>Today</button>
+      <button className={iconBtn} onClick={onNext} title="Next">
+        <ChevronRight size={13} strokeWidth={2} />
+      </button>
+
+      {/* Current range label */}
+      <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)', minWidth: 160, textAlign: 'center' }}>
+        {formatAnchorLabel(anchorDate, layout)}
+      </span>
+
+      <div className={divider} />
+
+      {/* Color by */}
+      <span className={label}>Color by</span>
+      <select
+        className={select}
+        value={colorBy}
+        onChange={e => onColorByChange(e.target.value as ColorBy)}
+      >
+        <option value="activity">Activity</option>
+        <option value="member">Member</option>
+        <option value="status">Status</option>
+      </select>
+
+      <div className={divider} />
+
+      {/* Stubs */}
+      <button className={btn} onClick={onExport} title="Export (coming soon)">
+        <Download size={12} strokeWidth={1.8} />
+        Export
+      </button>
+      <button className={btn} onClick={onShare} title="Share (coming soon)">
+        <Share2 size={12} strokeWidth={1.8} />
+        Share
+      </button>
+    </div>
+  );
+}
+````
+
+## File: packages/web/src/components/calendar/CalendarView.tsx
+````typescript
+/**
+ * CalendarView — data container for the Calendar grid.
+ *
+ * Mirrors GanttView's responsibilities: fetch activities + members, apply
+ * the active filter and Find query, build the CalendarModel, and hand off
+ * to CalendarGrid for rendering. Owns no layout chrome — colorBy, layout,
+ * and anchorDate come from DashboardPage.
+ */
+
+import { useMemo, useEffect, useCallback, useState } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
+import type { CalendarLayout } from './CalendarToolbar';
+import CalendarGrid from './CalendarGrid';
+import { buildCalendarWeeks, type CalendarActivity } from '@/lib/calendarLanes';
+import { resolveActivityColor } from '@/lib/activityColor';
+import { useTimelineActivities, useTeamMembers, useUpdateActivity } from '@/hooks/useTeamActivities';
+import { matchEvents } from '@/lib/findMatcher';
+import { useFind } from '@/contexts/FindContext';
+import { useFilter } from '@/contexts/FilterContext';
+import { applyActiveFilter } from '@/lib/presetFilters';
+import { usePreferenceMap, useUpsertPreference } from '@/hooks/usePreferences';
+import type { components } from '@draba/shared';
+import type { Member } from '@/types';
+import { MEMBER_COLORS } from '@/types';
+import { resolveColorHex } from '@/components/identity/identity-constants';
+
+type ApiActivity = components['schemas']['Activity'];
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
+type Status = components['schemas']['Status'];
+type SavedFilter = components['schemas']['SavedFilter'];
+type Tag = components['schemas']['Tag'];
+
+// ── Constants ─────────────────────────────────────────────────────────────────
+
+const DEFAULT_MONTH_CAP = 3;
+const DEFAULT_WEEK_CAP  = 6;
+const MONTH_WEEKS = 6;
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function initialsFrom(name: string): string {
+  return name.split(/\s+/).map(w => w[0] ?? '').slice(0, 2).join('').toUpperCase();
+}
+
+function toMember(m: TeamMemberWithUser, index: number): Member {
+  const name = m.displayName || m.email || 'Unknown';
+  return {
+    id: m.id,
+    name,
+    initials: initialsFrom(name),
+    color: resolveColorHex(m.color) || MEMBER_COLORS[index % MEMBER_COLORS.length],
+  };
+}
+
+/**
+ * Compute the UTC midnight Date of the first cell in the grid.
+ *
+ * Month: the weekStart on or before the 1st of the anchor month.
+ * Week:  the anchor date itself (expected to be a weekStart).
+ */
+function computeGridStart(anchorDate: Date, layout: CalendarLayout, weekStartDay: 0 | 1): Date {
+  if (layout === 'week') {
+    const d = new Date(anchorDate);
+    d.setUTCHours(0, 0, 0, 0);
+    return d;
+  }
+  // Month: start from the weekStart on or before the 1st of the month.
+  const firstOfMonth = new Date(Date.UTC(anchorDate.getUTCFullYear(), anchorDate.getUTCMonth(), 1));
+  const dowOfFirst = firstOfMonth.getUTCDay(); // 0=Sun, 1=Mon, …
+  // Days to go back to reach the previous weekStart.
+  const daysBack = weekStartDay === 1
+    ? (dowOfFirst === 0 ? 6 : dowOfFirst - 1)  // Monday start
+    : dowOfFirst;                                // Sunday start
+  const gridStart = new Date(firstOfMonth);
+  gridStart.setUTCDate(firstOfMonth.getUTCDate() - daysBack);
+  return gridStart;
+}
+
+// ── Props ─────────────────────────────────────────────────────────────────────
+
+interface Props {
+  teamId: string;
+  timelineId: string;
+  layout: CalendarLayout;
+  /** UTC midnight of the anchor (month's 1st for Month, weekStart for Week). */
+  anchorDate: Date;
+  colorBy: 'activity' | 'member' | 'status';
+  timelineStatuses?: Status[];
+  savedFilters?: SavedFilter[];
+  tags?: Tag[];
+  selectedActivityId?: string | null;
+  onSelectActivity?: (id: string | null) => void;
+  onSelectApiActivity?: (activity: ApiActivity | null) => void;
+  /** Called during a bar drag with live snapped dates — for sidebar preview. */
+  onBarDragProgress?: (activityId: string, newStart: Date, newEnd: Date) => void;
+  /** Called when a bar drag ends (before the PATCH). */
+  onBarDragEnd?: () => void;
+  /** Called with the clicked empty-cell date — for create panel. */
+  onCellClick?: (date: Date) => void;
+  /** Called once members are loaded, so the parent can access them for panels. */
+  onMembersLoaded?: (members: Member[]) => void;
+}
+
+// ── CalendarView ──────────────────────────────────────────────────────────────
+
+export default function CalendarView({
+  teamId,
+  timelineId,
+  layout,
+  anchorDate,
+  colorBy,
+  timelineStatuses,
+  savedFilters,
+  tags,
+  selectedActivityId,
+  onSelectActivity,
+  onSelectApiActivity,
+  onBarDragProgress,
+  onBarDragEnd,
+  onCellClick,
+  onMembersLoaded,
+}: Props) {
+  const queryClient = useQueryClient();
+  const { debouncedQuery, registerMatches, activeMatchId } = useFind();
+  const { activeFilter } = useFilter();
+  const globalPrefs = usePreferenceMap();
+  const upsert = useUpsertPreference();
+
+  const weekStartDay: 0 | 1 = (globalPrefs['week_start'] as string | undefined) === 'sunday' ? 0 : 1;
+
+  // Compute the grid start and week count.
+  const gridStart = useMemo(
+    () => computeGridStart(anchorDate, layout, weekStartDay),
+    [anchorDate, layout, weekStartDay],
+  );
+
+  const weekCount = layout === 'month' ? MONTH_WEEKS : 1;
+
+  // Fetch range: cover the full grid.
+  const gridEnd = useMemo(() => {
+    const d = new Date(gridStart);
+    d.setUTCDate(d.getUTCDate() + weekCount * 7 - 1);
+    return d;
+  }, [gridStart, weekCount]);
+
+  const from = gridStart.toISOString();
+  const to   = gridEnd.toISOString();
+
+  const { data: apiMembers = [] } = useTeamMembers(teamId);
+  const { data: apiActivities = [], isLoading } = useTimelineActivities(teamId, timelineId, from, to);
+  const updateActivity = useUpdateActivity(timelineId);
+
+  const members: Member[] = useMemo(
+    () => apiMembers.map((m, i) => toMember(m, i)),
+    [apiMembers],
+  );
+
+  const memberById = useMemo<Record<string, Member>>(() => {
+    const map: Record<string, Member> = {};
+    members.forEach(m => { map[m.id] = m; });
+    return map;
+  }, [members]);
+
+  useEffect(() => {
+    if (onMembersLoaded && members.length > 0) onMembersLoaded(members);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [members]);
+
+  // Filter engine context.
+  const closedStatusIds = useMemo(
+    () => new Set((timelineStatuses ?? []).filter(s => s.isClosed).map(s => s.id)),
+    [timelineStatuses],
+  );
+  const statusesByTimeline = useMemo(() => {
+    const m = new Map<string, Status[]>();
+    if (timelineStatuses?.length) m.set(timelineId, timelineStatuses);
+    return m;
+  }, [timelineId, timelineStatuses]);
+  const memberIdsByUserId = useMemo(() => {
+    const m = new Map<string, string[]>();
+    apiMembers.forEach(mem => {
+      if (mem.userId) {
+        const existing = m.get(mem.userId) ?? [];
+        m.set(mem.userId, [...existing, mem.id]);
+      }
+    });
+    return m;
+  }, [apiMembers]);
+
+  const visibleActivities = useMemo(() => applyActiveFilter(
+    apiActivities,
+    activeFilter,
+    memberIdsByUserId,
+    {
+      closedStatusIds,
+      savedFilters: savedFilters ?? [],
+      statuses: statusesByTimeline,
+      tags: tags ?? [],
+    },
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  ), [apiActivities, activeFilter, memberIdsByUserId, closedStatusIds, savedFilters, statusesByTimeline, tags]);
+
+  const statusColorById = useMemo(
+    () => new Map((timelineStatuses ?? []).map(s => [s.id, s.color])),
+    [timelineStatuses],
+  );
+
+  // Build CalendarActivity list with resolved colors.
+  const calendarActivities: CalendarActivity[] = useMemo(() => {
+    return visibleActivities.map((act, i) => ({
+      id: act.id,
+      startAt: act.startAt,
+      endAt:   act.endAt,
+      title:   act.title,
+      color:   resolveActivityColor(act, i, memberById, colorBy, statusColorById),
+      icon:    act.icon ?? undefined,
+      assignedMemberIds: act.assignedMemberIds ?? [],
+    }));
+  }, [visibleActivities, memberById, colorBy, statusColorById]);
+
+  // Activity lookup map for CalendarGrid (full ApiActivity for sidebar/create).
+  const activityById = useMemo<Map<string, ApiActivity>>(
+    () => new Map(apiActivities.map(a => [a.id, a])),
+    [apiActivities],
+  );
+
+  // Per-week lane cap preferences.
+  const laneCapsKey = `calendar_lane_caps_${layout}`;
+  const storedCaps = useMemo<Record<string, number>>(() => {
+    const raw = globalPrefs[laneCapsKey];
+    if (typeof raw !== 'string') return {};
+    try { return JSON.parse(raw) as Record<string, number>; } catch { return {}; }
+  }, [globalPrefs, laneCapsKey]);
+
+  // Also read per-timeline caps (stored in per-timeline prefs for this timeline).
+  const timelinePrefs = usePreferenceMap(timelineId);
+  const timelineCaps = useMemo<Record<string, number>>(() => {
+    const raw = timelinePrefs[laneCapsKey];
+    if (typeof raw !== 'string') return {};
+    try { return JSON.parse(raw) as Record<string, number>; } catch { return {};  }
+  }, [timelinePrefs, laneCapsKey]);
+
+  // Merge: timeline caps take priority over global caps.
+  const serverLaneCaps = useMemo<Record<string, number>>(
+    () => ({ ...storedCaps, ...timelineCaps }),
+    [storedCaps, timelineCaps],
+  );
+
+  // Ephemeral draft caps for immediate visual feedback during resize drag.
+  // Overlaid on top of server caps so the grid re-renders instantly on every
+  // pointermove without waiting for the preference mutation to round-trip.
+  const [draftLaneCaps, setDraftLaneCaps] = useState<Record<string, number>>({});
+
+  const laneCaps = useMemo<Record<string, number>>(
+    () => ({ ...serverLaneCaps, ...draftLaneCaps }),
+    [serverLaneCaps, draftLaneCaps],
+  );
+
+  // Visual-only update: called on every pointermove during resize drag.
+  const handleCapDraft = useCallback((weekStart: Date, newCap: number) => {
+    const key = weekStart.toISOString();
+    setDraftLaneCaps(prev => ({ ...prev, [key]: newCap }));
+  }, []);
+
+  // Persist-on-release: called once on pointerup with the final cap.
+  const handleCapCommit = useCallback((weekStart: Date, newCap: number) => {
+    const key = weekStart.toISOString();
+    // Apply to draft immediately (handles the case where onCapDraft wasn't
+    // called on the last pointermove before pointerup).
+    setDraftLaneCaps(prev => ({ ...prev, [key]: newCap }));
+    if (!timelineId) return;
+    const updated = { ...timelineCaps, [key]: newCap };
+    upsert.mutate({ key: laneCapsKey, value: JSON.stringify(updated), timelineId });
+  }, [timelineId, timelineCaps, upsert, laneCapsKey]);
+
+  // Find: compute matches.
+  const matchResults = useMemo(
+    () => matchEvents(debouncedQuery, visibleActivities, members, visibleActivities),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [debouncedQuery, visibleActivities, members],
+  );
+
+  const matchedSet = useMemo(() => new Set(matchResults.map(r => r.activityId)), [matchResults]);
+
+  // Register ordered match IDs (visual order = sort by startAt within the grid).
+  const orderedMatchIds = useMemo(() => {
+    const sorted = [...visibleActivities].sort((a, b) =>
+      a.startAt.localeCompare(b.startAt),
+    );
+    return sorted.filter(a => matchedSet.has(a.id)).map(a => a.id);
+  }, [visibleActivities, matchedSet]);
+
+  useEffect(() => {
+    registerMatches(orderedMatchIds, new Map());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [orderedMatchIds]);
+
+  const defaultLaneCap = layout === 'month' ? DEFAULT_MONTH_CAP : DEFAULT_WEEK_CAP;
+
+  // Build the calendar model.
+  const weeks = useMemo(
+    () => buildCalendarWeeks(
+      calendarActivities,
+      gridStart,
+      weekCount,
+      laneCaps,
+      defaultLaneCap,
+      matchedSet,
+      activeMatchId,
+    ),
+    [calendarActivities, gridStart, weekCount, laneCaps, defaultLaneCap, matchedSet, activeMatchId],
+  );
+
+  const hasQuery = debouncedQuery.trim().length > 0;
+
+  // Today in UTC (for the today marker).
+  const today = useMemo(() => {
+    const d = new Date();
+    d.setUTCHours(0, 0, 0, 0);
+    return d;
+  }, []);
+
+  // ── Drag commit ────────────────────────────────────────────────────────────
+
+  const handleBarDragCommit = useCallback((activityId: string, newStart: Date, newEnd: Date) => {
+    const patch = {
+      startAt: newStart.toISOString(),
+      endAt:   newEnd.toISOString(),
+    };
+
+    // Optimistic cache update — mirrors GanttView.handleBarDrag.
+    queryClient.setQueriesData<ApiActivity[]>(
+      { queryKey: ['timelines', timelineId, 'activities'] },
+      old => old?.map(a => a.id === activityId ? { ...a, ...patch } : a),
+    );
+
+    if (onSelectApiActivity) {
+      const updated = apiActivities.find(a => a.id === activityId);
+      if (updated) onSelectApiActivity({ ...updated, ...patch });
+    }
+
+    onBarDragEnd?.();
+    updateActivity.mutate({ activityId, patch });
+  }, [queryClient, timelineId, apiActivities, onSelectApiActivity, onBarDragEnd, updateActivity]);
+
+  // ── Select ─────────────────────────────────────────────────────────────────
+
+  const handleSelectActivity = useCallback((act: ApiActivity | null) => {
+    if (onSelectApiActivity) onSelectApiActivity(act);
+    if (onSelectActivity)    onSelectActivity(act?.id ?? null);
+  }, [onSelectApiActivity, onSelectActivity]);
+
+  // ── Loading ────────────────────────────────────────────────────────────────
+
+  if (isLoading) {
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: 'var(--muted-foreground)', fontSize: 13 }}>
+        Loading activities…
+      </div>
+    );
+  }
+
+  return (
+    <CalendarGrid
+      weeks={weeks}
+      layout={layout}
+      weekStartDay={weekStartDay}
+      activityById={activityById}
+      memberById={memberById}
+      selectedActivityId={selectedActivityId ?? null}
+      hasQuery={hasQuery}
+      today={today}
+      onSelectActivity={handleSelectActivity}
+      onCellClick={date => onCellClick?.(date)}
+      onBarDragProgress={(id, s, e) => onBarDragProgress?.(id, s, e)}
+      onBarDragEnd={() => onBarDragEnd?.()}
+      onBarDragCommit={handleBarDragCommit}
+      onCapDraft={handleCapDraft}
+      onCapCommit={handleCapCommit}
+    />
+  );
+}
+````
+
 ## File: packages/web/src/components/filters/FilterConditionRow.tsx
 ````typescript
 /**
@@ -22655,149 +24488,6 @@ const InlineEditableTitle = forwardRef<HTMLInputElement, Props>(
 export default InlineEditableTitle
 ````
 
-## File: packages/web/src/components/BrandingSync.tsx
-````typescript
-/**
- * BrandingSync — fetches /settings/branding on app start and applies:
- *   - instance name → document.title (and module-level makeDocTitle helper)
- *   - accent color  → --primary CSS variable override on <html>
- *
- * Renders nothing; exists only for side-effects.
- *
- * Page-level title pattern: import makeDocTitle and call it in a useEffect.
- * Example: document.title = makeDocTitle('Settings')  →  "Settings — Acme"
- */
-
-import { useEffect } from 'react'
-import { usePublicSettings } from '@/hooks/usePublicSettings'
-
-// Shared at module level so makeDocTitle is always current without React context.
-let _instanceBaseName = 'draba'
-
-/** Returns a document title following the "{page} — {app}" convention. */
-export function makeDocTitle(pageName?: string): string {
-  return pageName ? `${pageName} — ${_instanceBaseName}` : _instanceBaseName
-}
-
-/** Hex color guard — rejects anything that isn't a 6-digit hex string. */
-function isValidHex(value: string): boolean {
-  return /^#[0-9a-fA-F]{6}$/.test(value)
-}
-
-export default function BrandingSync() {
-  const { data } = usePublicSettings()
-
-  useEffect(() => {
-    if (!data) return
-
-    // Update the module-level name first so makeDocTitle is current for any
-    // page titles set after this effect runs.
-    _instanceBaseName = data.instanceName || 'draba'
-    document.title = makeDocTitle()
-
-    // Apply accent color override directly to --primary so all Tailwind utilities
-    // (bg-primary, text-primary, ring-primary…) pick it up without extra CSS rules.
-    // Removing the property falls back to the HSL value defined in index.css.
-    const root = document.documentElement
-    if (data.accentColor && isValidHex(data.accentColor)) {
-      root.style.setProperty('--primary', data.accentColor)
-    } else {
-      root.style.removeProperty('--primary')
-    }
-  }, [data])
-
-  return null
-}
-````
-
-## File: packages/web/src/hooks/useFormatDate.test.ts
-````typescript
-import { describe, it, expect } from 'vitest'
-import { formatDate } from './useFormatDate'
-
-// ── formatDate ────────────────────────────────────────────────────────────────
-
-describe('formatDate', () => {
-  // January 5, 2026
-  const d = new Date(2026, 0, 5)
-
-  it('MM/DD/YYYY → zero-padded month/day/year', () => {
-    expect(formatDate(d, 'MM/DD/YYYY')).toBe('01/05/2026')
-  })
-
-  it('DD/MM/YYYY → zero-padded day/month/year', () => {
-    expect(formatDate(d, 'DD/MM/YYYY')).toBe('05/01/2026')
-  })
-
-  it('YYYY-MM-DD → ISO-style', () => {
-    expect(formatDate(d, 'YYYY-MM-DD')).toBe('2026-01-05')
-  })
-
-  it('MMM D, YYYY (default) → English short month', () => {
-    expect(formatDate(d, 'MMM D, YYYY')).toBe('Jan 5, 2026')
-  })
-
-  it('unknown format falls through to MMM D, YYYY default', () => {
-    // Any unrecognised string uses the en-US toLocaleDateString fallback.
-    expect(formatDate(d, 'unknown')).toBe('Jan 5, 2026')
-  })
-
-  it('December 31 — single-digit day does not get zero-padded in default format', () => {
-    const dec31 = new Date(2026, 11, 31)
-    expect(formatDate(dec31, 'MMM D, YYYY')).toBe('Dec 31, 2026')
-  })
-})
-````
-
-## File: packages/web/src/hooks/useFormatDate.ts
-````typescript
-/**
- * useFormatDate — returns a formatter that respects the user's stored
- * date_format preference.
- *
- * Supported formats (matching PreferencesPage options):
- *   "MMM D, YYYY"  → "Jan 5, 2026"
- *   "MM/DD/YYYY"   → "01/05/2026"
- *   "DD/MM/YYYY"   → "05/01/2026"
- *   "YYYY-MM-DD"   → "2026-01-05"
- */
-
-import { useCallback } from 'react'
-import { usePreferenceMap } from '@/hooks/usePreferences'
-
-export type DateFormat = 'MMM D, YYYY' | 'MM/DD/YYYY' | 'DD/MM/YYYY' | 'YYYY-MM-DD'
-
-function pad2(n: number): string {
-  return n.toString().padStart(2, '0')
-}
-
-/** Pure formatting function — exported for use outside React (utilities, tests). */
-export function formatDate(date: Date, fmt: string): string {
-  const y = date.getFullYear()
-  const m = date.getMonth() + 1
-  const d = date.getDate()
-
-  switch (fmt) {
-    case 'MM/DD/YYYY':
-      return `${pad2(m)}/${pad2(d)}/${y}`
-    case 'DD/MM/YYYY':
-      return `${pad2(d)}/${pad2(m)}/${y}`
-    case 'YYYY-MM-DD':
-      return `${y}-${pad2(m)}-${pad2(d)}`
-    default:
-      // "MMM D, YYYY" — default
-      return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
-  }
-}
-
-/** Returns a stable formatter function for the user's date_format preference. */
-export function useFormatDate(): (date: Date) => string {
-  const prefMap = usePreferenceMap()
-  const fmt = (prefMap['date_format'] as string | undefined) ?? 'MMM D, YYYY'
-  return useCallback((date: Date) => formatDate(date, fmt), [fmt])
-}
-````
-
 ## File: packages/web/src/hooks/usePreferences.ts
 ````typescript
 /**
@@ -23117,152 +24807,521 @@ export function useDeleteTag(teamId: string) {
 }
 ````
 
-## File: packages/web/src/lib/api.test.ts
+## File: packages/web/src/lib/activityColor.ts
 ````typescript
 /**
- * Tests for the 401 silent-refresh interceptor in api.ts.
- *
- * We mock globalThis.fetch so no real HTTP is made. The module-level
- * _silentRefresh / _refreshInFlight state is reset between tests via
- * configureSilentRefresh(null).
+ * Shared color-by resolution for calendar bars, Gantt bars, and list rows.
+ * Extracted from GanttView.toRichActivity so all three views stay in sync.
  */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { ColorBy } from '@/components/gantt/GanttToolbar';
+import type { Member } from '@/types';
+import type { components } from '@draba/shared';
+import { ACTIVITY_COLORS } from '@/types';
+
+type ApiActivity = components['schemas']['Activity'];
+
+/**
+ * Resolve the display color for an activity based on the active color-by mode.
+ *
+ * @param activity     The API activity
+ * @param index        Position in the activity list (used for cycling ACTIVITY_COLORS)
+ * @param memberById   Map of member ID → Member (for member color lookup)
+ * @param colorBy      Active color-by selection
+ * @param statusColorById  Map of status ID → hex color (for status color lookup)
+ */
+export function resolveActivityColor(
+  activity: ApiActivity,
+  index: number,
+  memberById: Record<string, Member>,
+  colorBy: ColorBy,
+  statusColorById: Map<string, string>,
+): string {
+  const assignedIds = activity.assignedMemberIds ?? [];
+  const primaryMember = memberById[assignedIds[0] ?? ''];
+
+  if (colorBy === 'member') {
+    return primaryMember?.color ?? activity.color ?? ACTIVITY_COLORS[index % ACTIVITY_COLORS.length];
+  }
+  if (colorBy === 'status') {
+    const statusId = (activity as ApiActivity & { statusId?: string | null }).statusId ?? '';
+    return statusColorById.get(statusId) ?? '#6b7280';
+  }
+  // 'activity' (default)
+  return activity.color ?? ACTIVITY_COLORS[index % ACTIVITY_COLORS.length];
+}
+````
+
+## File: packages/web/src/lib/calendarLanes.test.ts
+````typescript
+import { describe, it, expect } from 'vitest';
 import {
-  ApiError,
-  configureSilentRefresh,
-  createAuthFetch,
-} from './api'
+  buildCalendarWeeks,
+  overflowCountsForWeek,
+  segmentsForDay,
+  daysDiff,
+  type CalendarActivity,
+} from './calendarLanes';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function okResponse(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { 'Content-Type': 'application/json' },
-  })
+function utc(iso: string): Date {
+  return new Date(iso + 'T00:00:00Z');
 }
 
-function errorResponse(status: number, code: string, message: string): Response {
-  return new Response(JSON.stringify({ error: { code, message } }), {
-    status,
-    headers: { 'Content-Type': 'application/json' },
-  })
+function makeActivity(overrides: Partial<CalendarActivity> & { id: string; startAt: string; endAt: string }): CalendarActivity {
+  return {
+    title: overrides.id,
+    color: '#288C9B',
+    assignedMemberIds: [],
+    ...overrides,
+  };
 }
 
-// ── Setup / teardown ──────────────────────────────────────────────────────────
+const EMPTY_CAPS = {};
+const NO_MATCHES = new Set<string>();
 
-beforeEach(() => {
-  vi.spyOn(globalThis, 'fetch')
-  // Always reset the registered callback so tests don't bleed into each other.
-  configureSilentRefresh(null)
-})
+// Grid starts Monday 2026-06-01
+const GRID_START = utc('2026-06-01');
 
-afterEach(() => {
-  vi.restoreAllMocks()
-  configureSilentRefresh(null)
-})
+// ── daysDiff ──────────────────────────────────────────────────────────────────
 
-// ── createAuthFetch — happy path ──────────────────────────────────────────────
+describe('daysDiff', () => {
+  it('returns 0 for same date', () => {
+    expect(daysDiff(utc('2026-06-01'), utc('2026-06-01'))).toBe(0);
+  });
+  it('returns positive for later target', () => {
+    expect(daysDiff(utc('2026-06-01'), utc('2026-06-03'))).toBe(2);
+  });
+  it('returns negative for earlier target', () => {
+    expect(daysDiff(utc('2026-06-03'), utc('2026-06-01'))).toBe(-2);
+  });
+});
 
-describe('createAuthFetch', () => {
-  it('returns parsed JSON on a 200 response', async () => {
-    vi.mocked(fetch).mockResolvedValueOnce(okResponse({ hello: 'world' }))
+// ── buildCalendarWeeks — basic single week ────────────────────────────────────
 
-    const authFetch = createAuthFetch(() => 'token-abc')
-    const result = await authFetch<{ hello: string }>('/test')
+describe('buildCalendarWeeks — single week', () => {
+  it('returns one WeekRow with 7 days', () => {
+    const weeks = buildCalendarWeeks([], GRID_START, 1, EMPTY_CAPS, 3, NO_MATCHES, null);
+    expect(weeks).toHaveLength(1);
+    expect(weeks[0].days).toHaveLength(7);
+  });
 
-    expect(result).toEqual({ hello: 'world' })
-    expect(fetch).toHaveBeenCalledOnce()
-    expect(fetch).toHaveBeenCalledWith(
-      expect.stringContaining('/test'),
-      expect.objectContaining({ headers: expect.any(Headers) }),
-    )
-  })
+  it('days are in correct UTC order', () => {
+    const weeks = buildCalendarWeeks([], GRID_START, 1, EMPTY_CAPS, 3, NO_MATCHES, null);
+    expect(weeks[0].days[0].toISOString().slice(0, 10)).toBe('2026-06-01');
+    expect(weeks[0].days[6].toISOString().slice(0, 10)).toBe('2026-06-07');
+  });
 
-  it('throws ApiError on a non-401 failure without retrying', async () => {
-    vi.mocked(fetch).mockResolvedValueOnce(errorResponse(403, 'FORBIDDEN', 'No access'))
+  it('applies default lane cap when no user cap is set', () => {
+    const weeks = buildCalendarWeeks([], GRID_START, 1, EMPTY_CAPS, 4, NO_MATCHES, null);
+    expect(weeks[0].visibleLaneCap).toBe(4);
+  });
 
-    const silentRefresh = vi.fn()
-    configureSilentRefresh(silentRefresh)
-    const authFetch = createAuthFetch(() => 'token-abc')
+  it('applies per-week lane cap when set', () => {
+    const cap: Record<string, number> = { [GRID_START.toISOString()]: 2 };
+    const weeks = buildCalendarWeeks([], GRID_START, 1, cap, 4, NO_MATCHES, null);
+    expect(weeks[0].visibleLaneCap).toBe(2);
+  });
+});
 
-    await expect(authFetch('/test')).rejects.toMatchObject({ status: 403, code: 'FORBIDDEN' })
-    expect(silentRefresh).not.toHaveBeenCalled()
-    expect(fetch).toHaveBeenCalledOnce()
-  })
+// ── buildCalendarWeeks — single-day activity ──────────────────────────────────
 
-  // ── 401 retry behaviour ───────────────────────────────────────────────────
+describe('buildCalendarWeeks — single-day activity', () => {
+  it('places a single-day activity in lane 0, column matching its date', () => {
+    const acts: CalendarActivity[] = [
+      makeActivity({ id: 'a1', startAt: '2026-06-03T00:00:00Z', endAt: '2026-06-03T00:00:00Z' }),
+    ];
+    const weeks = buildCalendarWeeks(acts, GRID_START, 1, EMPTY_CAPS, 3, NO_MATCHES, null);
+    const seg = weeks[0].segments[0];
+    expect(seg.activityId).toBe('a1');
+    expect(seg.startCol).toBe(2); // Wed = col 2 (Mon=0, Tue=1, Wed=2)
+    expect(seg.endCol).toBe(2);
+    expect(seg.lane).toBe(0);
+    expect(seg.continuesLeft).toBe(false);
+    expect(seg.continuesRight).toBe(false);
+  });
 
-  it('on 401: calls silentRefresh, then retries with the new token', async () => {
-    vi.mocked(fetch)
-      .mockResolvedValueOnce(errorResponse(401, 'UNAUTHORIZED', 'Expired'))
-      .mockResolvedValueOnce(okResponse({ ok: true }))
+  it('excludes activities outside the week', () => {
+    const acts: CalendarActivity[] = [
+      makeActivity({ id: 'a1', startAt: '2026-06-08T00:00:00Z', endAt: '2026-06-08T00:00:00Z' }),
+    ];
+    const weeks = buildCalendarWeeks(acts, GRID_START, 1, EMPTY_CAPS, 3, NO_MATCHES, null);
+    expect(weeks[0].segments).toHaveLength(0);
+  });
+});
 
-    const silentRefresh = vi.fn().mockResolvedValue('new-token')
-    configureSilentRefresh(silentRefresh)
-    const authFetch = createAuthFetch(() => 'old-token')
+// ── buildCalendarWeeks — multi-day activity ───────────────────────────────────
 
-    const result = await authFetch<{ ok: boolean }>('/protected')
+describe('buildCalendarWeeks — multi-day activity', () => {
+  it('spans the correct columns', () => {
+    // Mon Jun 1 → Thu Jun 4
+    const acts: CalendarActivity[] = [
+      makeActivity({ id: 'a1', startAt: '2026-06-01T00:00:00Z', endAt: '2026-06-04T00:00:00Z' }),
+    ];
+    const weeks = buildCalendarWeeks(acts, GRID_START, 1, EMPTY_CAPS, 3, NO_MATCHES, null);
+    const seg = weeks[0].segments[0];
+    expect(seg.startCol).toBe(0);
+    expect(seg.endCol).toBe(3);
+  });
 
-    expect(result).toEqual({ ok: true })
-    expect(silentRefresh).toHaveBeenCalledOnce()
-    expect(fetch).toHaveBeenCalledTimes(2)
-    // Second call should carry the new token.
-    const secondCall = vi.mocked(fetch).mock.calls[1]
-    const secondHeaders = secondCall[1]?.headers as Headers
-    expect(secondHeaders.get('Authorization')).toBe('Bearer new-token')
-  })
+  it('marks continuesLeft when activity started before the week', () => {
+    const acts: CalendarActivity[] = [
+      makeActivity({ id: 'a1', startAt: '2026-05-28T00:00:00Z', endAt: '2026-06-03T00:00:00Z' }),
+    ];
+    const weeks = buildCalendarWeeks(acts, GRID_START, 1, EMPTY_CAPS, 3, NO_MATCHES, null);
+    const seg = weeks[0].segments[0];
+    expect(seg.continuesLeft).toBe(true);
+    expect(seg.startCol).toBe(0);
+  });
 
-  it('on 401: if silentRefresh returns null, re-throws the original 401', async () => {
-    vi.mocked(fetch).mockResolvedValueOnce(errorResponse(401, 'UNAUTHORIZED', 'Expired'))
+  it('marks continuesRight when activity ends after the week', () => {
+    const acts: CalendarActivity[] = [
+      makeActivity({ id: 'a1', startAt: '2026-06-05T00:00:00Z', endAt: '2026-06-10T00:00:00Z' }),
+    ];
+    const weeks = buildCalendarWeeks(acts, GRID_START, 1, EMPTY_CAPS, 3, NO_MATCHES, null);
+    const seg = weeks[0].segments[0];
+    expect(seg.continuesRight).toBe(true);
+    expect(seg.endCol).toBe(6);
+  });
+});
 
-    const silentRefresh = vi.fn().mockResolvedValue(null)
-    configureSilentRefresh(silentRefresh)
-    const authFetch = createAuthFetch(() => 'old-token')
+// ── buildCalendarWeeks — multi-week activity ──────────────────────────────────
 
-    await expect(authFetch('/protected')).rejects.toMatchObject({ status: 401 })
-    // No retry attempted after null token.
-    expect(fetch).toHaveBeenCalledOnce()
-  })
+describe('buildCalendarWeeks — activity spanning two weeks', () => {
+  it('appears in both week rows', () => {
+    // Mon Jun 1 → Mon Jun 8 (spans two weeks)
+    const acts: CalendarActivity[] = [
+      makeActivity({ id: 'long', startAt: '2026-06-01T00:00:00Z', endAt: '2026-06-08T00:00:00Z' }),
+    ];
+    const weeks = buildCalendarWeeks(acts, GRID_START, 2, EMPTY_CAPS, 3, NO_MATCHES, null);
+    expect(weeks[0].segments).toHaveLength(1);
+    expect(weeks[1].segments).toHaveLength(1);
+    expect(weeks[0].segments[0].continuesRight).toBe(true);
+    expect(weeks[1].segments[0].continuesLeft).toBe(true);
+    expect(weeks[1].segments[0].continuesRight).toBe(false);
+  });
+});
 
-  it('on 401: with no silentRefresh registered, throws immediately without retry', async () => {
-    vi.mocked(fetch).mockResolvedValueOnce(errorResponse(401, 'UNAUTHORIZED', 'Expired'))
+// ── buildCalendarWeeks — lane packing ─────────────────────────────────────────
 
-    // No configureSilentRefresh call — _silentRefresh stays null.
-    const authFetch = createAuthFetch(() => 'token')
+describe('buildCalendarWeeks — greedy lane packing', () => {
+  it('puts non-overlapping same-week activities in lane 0', () => {
+    const acts: CalendarActivity[] = [
+      makeActivity({ id: 'a', startAt: '2026-06-01T00:00:00Z', endAt: '2026-06-01T00:00:00Z' }),
+      makeActivity({ id: 'b', startAt: '2026-06-03T00:00:00Z', endAt: '2026-06-03T00:00:00Z' }),
+    ];
+    const weeks = buildCalendarWeeks(acts, GRID_START, 1, EMPTY_CAPS, 3, NO_MATCHES, null);
+    const lanes = weeks[0].segments.map(s => s.lane);
+    expect(lanes).toEqual([0, 0]);
+  });
 
-    await expect(authFetch('/protected')).rejects.toMatchObject({ status: 401 })
-    expect(fetch).toHaveBeenCalledOnce()
-  })
+  it('puts overlapping activities in separate lanes', () => {
+    const acts: CalendarActivity[] = [
+      makeActivity({ id: 'a', startAt: '2026-06-01T00:00:00Z', endAt: '2026-06-05T00:00:00Z' }),
+      makeActivity({ id: 'b', startAt: '2026-06-03T00:00:00Z', endAt: '2026-06-07T00:00:00Z' }),
+    ];
+    const weeks = buildCalendarWeeks(acts, GRID_START, 1, EMPTY_CAPS, 3, NO_MATCHES, null);
+    const laneById = Object.fromEntries(weeks[0].segments.map(s => [s.activityId, s.lane]));
+    expect(laneById['a']).toBe(0);
+    expect(laneById['b']).toBe(1);
+  });
 
-  // ── configureSilentRefresh teardown ──────────────────────────────────────
+  it('reuses a lane after a segment ends', () => {
+    const acts: CalendarActivity[] = [
+      makeActivity({ id: 'a', startAt: '2026-06-01T00:00:00Z', endAt: '2026-06-02T00:00:00Z' }),
+      makeActivity({ id: 'b', startAt: '2026-06-01T00:00:00Z', endAt: '2026-06-02T00:00:00Z' }),
+      makeActivity({ id: 'c', startAt: '2026-06-04T00:00:00Z', endAt: '2026-06-05T00:00:00Z' }),
+    ];
+    const weeks = buildCalendarWeeks(acts, GRID_START, 1, EMPTY_CAPS, 3, NO_MATCHES, null);
+    const laneById = Object.fromEntries(weeks[0].segments.map(s => [s.activityId, s.lane]));
+    // a and b overlap → different lanes; c doesn't overlap with a or b so it fits in lane 0
+    expect(laneById['a']).toBe(0);
+    expect(laneById['b']).toBe(1);
+    expect(laneById['c']).toBe(0);
+  });
 
-  it('configureSilentRefresh(null) disables the interceptor after registration', async () => {
-    const silentRefresh = vi.fn().mockResolvedValue('new-token')
-    configureSilentRefresh(silentRefresh)
-    configureSilentRefresh(null) // immediately de-register
+  it('computes laneCount correctly', () => {
+    const acts: CalendarActivity[] = [
+      makeActivity({ id: 'a', startAt: '2026-06-01T00:00:00Z', endAt: '2026-06-07T00:00:00Z' }),
+      makeActivity({ id: 'b', startAt: '2026-06-01T00:00:00Z', endAt: '2026-06-07T00:00:00Z' }),
+      makeActivity({ id: 'c', startAt: '2026-06-01T00:00:00Z', endAt: '2026-06-07T00:00:00Z' }),
+    ];
+    const weeks = buildCalendarWeeks(acts, GRID_START, 1, EMPTY_CAPS, 3, NO_MATCHES, null);
+    expect(weeks[0].laneCount).toBe(3);
+  });
+});
 
-    vi.mocked(fetch).mockResolvedValueOnce(errorResponse(401, 'UNAUTHORIZED', 'Expired'))
+// ── overflowCountsForWeek ─────────────────────────────────────────────────────
 
-    const authFetch = createAuthFetch(() => 'token')
-    await expect(authFetch('/test')).rejects.toMatchObject({ status: 401 })
-    // silentRefresh must NOT have been called — it was de-registered.
-    expect(silentRefresh).not.toHaveBeenCalled()
-  })
-})
+describe('overflowCountsForWeek', () => {
+  it('returns all-zeros when no segments exceed cap', () => {
+    const acts: CalendarActivity[] = [
+      makeActivity({ id: 'a', startAt: '2026-06-01T00:00:00Z', endAt: '2026-06-01T00:00:00Z' }),
+    ];
+    const weeks = buildCalendarWeeks(acts, GRID_START, 1, EMPTY_CAPS, 3, NO_MATCHES, null);
+    const counts = overflowCountsForWeek(weeks[0]);
+    expect(counts.every(c => c === 0)).toBe(true);
+  });
 
-// ── ApiError ──────────────────────────────────────────────────────────────────
+  it('counts hidden segments per day column', () => {
+    // 4 activities all on Mon (col 0) — cap=3, so 1 overflows
+    const acts: CalendarActivity[] = Array.from({ length: 4 }, (_, i) =>
+      makeActivity({ id: `a${i}`, startAt: '2026-06-01T00:00:00Z', endAt: '2026-06-01T00:00:00Z' }),
+    );
+    const weeks = buildCalendarWeeks(acts, GRID_START, 1, EMPTY_CAPS, 3, NO_MATCHES, null);
+    const counts = overflowCountsForWeek(weeks[0]);
+    expect(counts[0]).toBe(1); // 1 overflows on Mon (col 0)
+    expect(counts[1]).toBe(0); // other days unaffected
+  });
+});
 
-describe('ApiError', () => {
-  it('is instanceof ApiError', () => {
-    const err = new ApiError(404, 'NOT_FOUND', 'missing')
-    expect(err).toBeInstanceOf(ApiError)
-    expect(err).toBeInstanceOf(Error)
-    expect(err.status).toBe(404)
-    expect(err.code).toBe('NOT_FOUND')
-  })
-})
+// ── segmentsForDay ────────────────────────────────────────────────────────────
+
+describe('segmentsForDay', () => {
+  it('returns all segments touching the given day column', () => {
+    // Activity spans Mon–Wed (cols 0–2); another only on Thu (col 3)
+    const acts: CalendarActivity[] = [
+      makeActivity({ id: 'span', startAt: '2026-06-01T00:00:00Z', endAt: '2026-06-03T00:00:00Z' }),
+      makeActivity({ id: 'thu',  startAt: '2026-06-04T00:00:00Z', endAt: '2026-06-04T00:00:00Z' }),
+    ];
+    const weeks = buildCalendarWeeks(acts, GRID_START, 1, EMPTY_CAPS, 3, NO_MATCHES, null);
+    const onTue = segmentsForDay(weeks[0], 1);
+    expect(onTue.map(s => s.activityId)).toContain('span');
+    expect(onTue.map(s => s.activityId)).not.toContain('thu');
+  });
+});
+
+// ── Find match flags ──────────────────────────────────────────────────────────
+
+describe('buildCalendarWeeks — find match flags', () => {
+  it('sets isMatch on matching activities', () => {
+    const acts: CalendarActivity[] = [
+      makeActivity({ id: 'a', startAt: '2026-06-01T00:00:00Z', endAt: '2026-06-01T00:00:00Z' }),
+      makeActivity({ id: 'b', startAt: '2026-06-02T00:00:00Z', endAt: '2026-06-02T00:00:00Z' }),
+    ];
+    const matched = new Set(['a']);
+    const weeks = buildCalendarWeeks(acts, GRID_START, 1, EMPTY_CAPS, 3, matched, 'a');
+    const segs = Object.fromEntries(weeks[0].segments.map(s => [s.activityId, s]));
+    expect(segs['a'].isMatch).toBe(true);
+    expect(segs['a'].isActiveMatch).toBe(true);
+    expect(segs['b'].isMatch).toBe(false);
+    expect(segs['b'].isActiveMatch).toBe(false);
+  });
+});
+````
+
+## File: packages/web/src/lib/calendarLanes.ts
+````typescript
+/**
+ * Calendar lane-packing algorithm.
+ *
+ * Pure functions only — no React, no DOM. Unit-tested in calendarLanes.test.ts.
+ *
+ * The core problem: given a set of all-day activities, assign each to a
+ * vertical "lane" within its week row so that no two activities overlap in the
+ * same lane. Activities that span week boundaries are split into per-week
+ * segments and packed independently in each week row.
+ */
+
+export interface CalendarActivity {
+  id: string;
+  startAt: string; // ISO RFC3339 — treated as UTC all-day date
+  endAt: string;   // ISO RFC3339 — treated as UTC all-day date
+  title: string;
+  color: string;
+  icon?: string;
+  assignedMemberIds: string[];
+}
+
+export interface CalendarSegment {
+  activityId: string;
+  /** 0-based column index within the 7-day week row (0 = first day). */
+  startCol: number;
+  /** 0-based column index, inclusive (0–6). */
+  endCol: number;
+  /** Lane index within the week row; 0 = topmost. */
+  lane: number;
+  /** Activity started before this week row — no left end-cap on the bar. */
+  continuesLeft: boolean;
+  /** Activity continues past this week row — no right end-cap on the bar. */
+  continuesRight: boolean;
+  color: string;
+  title: string;
+  icon?: string;
+  assignedMemberIds: string[];
+  isMatch: boolean;
+  isActiveMatch: boolean;
+}
+
+export interface WeekRow {
+  /** UTC midnight of the first day (Sunday or Monday per week_start pref). */
+  weekStart: Date;
+  /** 7 UTC midnight Dates — the days in display order. */
+  days: Date[];
+  segments: CalendarSegment[];
+  /** Number of lanes needed to show all activities without overlap. */
+  laneCount: number;
+  /**
+   * Maximum lanes to render before collapsing extras into "+N more".
+   * Comes from the per-timeline user preference; defaults are passed in.
+   */
+  visibleLaneCap: number;
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+/** Days from `base` to `target` (positive = target is later). */
+export function daysDiff(base: Date, target: Date): number {
+  return Math.round((target.getTime() - base.getTime()) / (24 * 60 * 60 * 1000));
+}
+
+/** Build an array of 7 UTC midnight Dates starting from `weekStart`. */
+function buildWeekDays(weekStart: Date): Date[] {
+  return Array.from({ length: 7 }, (_, i) => {
+    const d = new Date(weekStart);
+    d.setUTCDate(d.getUTCDate() + i);
+    return d;
+  });
+}
+
+// ── Greedy lane packing ───────────────────────────────────────────────────────
+
+interface Candidate {
+  activityId: string;
+  startCol: number;
+  endCol: number;
+  continuesLeft: boolean;
+  continuesRight: boolean;
+  color: string;
+  title: string;
+  icon?: string;
+  assignedMemberIds: string[];
+  isMatch: boolean;
+  isActiveMatch: boolean;
+}
+
+function packLanes(candidates: Candidate[]): CalendarSegment[] {
+  // Sort by startCol ascending; ties: wider span first (stable visual ordering).
+  const sorted = [...candidates].sort((a, b) => {
+    if (a.startCol !== b.startCol) return a.startCol - b.startCol;
+    return (b.endCol - b.startCol) - (a.endCol - a.startCol);
+  });
+
+  // lanes[i] = last endCol placed in lane i (-1 if lane is empty).
+  const laneLastEnd: number[] = [];
+  const result: CalendarSegment[] = [];
+
+  for (const seg of sorted) {
+    let lane = 0;
+    // Find the lowest lane with no overlap: the previous segment in that lane
+    // must have ended before this segment starts.
+    while (lane < laneLastEnd.length && laneLastEnd[lane] >= seg.startCol) {
+      lane++;
+    }
+    if (lane === laneLastEnd.length) laneLastEnd.push(-1);
+    laneLastEnd[lane] = seg.endCol;
+    result.push({ ...seg, lane });
+  }
+
+  return result;
+}
+
+// ── Public API ────────────────────────────────────────────────────────────────
+
+/**
+ * Build the packed WeekRow array for the calendar grid.
+ *
+ * @param activities    Already-filtered activities to display.
+ * @param gridStart     UTC midnight of the first day of the first week row.
+ * @param weekCount     Number of week rows (6 for month view, 1 for week view).
+ * @param laneCaps      Per-timeline user preference: weekStart ISO → lane cap.
+ * @param defaultLaneCap  Fallback cap when no user preference exists.
+ * @param matchedIds    Set of activity IDs matching the current Find query.
+ * @param activeMatchId The Find-navigation cursor activity ID (or null).
+ */
+export function buildCalendarWeeks(
+  activities: CalendarActivity[],
+  gridStart: Date,
+  weekCount: number,
+  laneCaps: Record<string, number>,
+  defaultLaneCap: number,
+  matchedIds: Set<string>,
+  activeMatchId: string | null,
+): WeekRow[] {
+  return Array.from({ length: weekCount }, (_, wi) => {
+    const weekStart = new Date(gridStart);
+    weekStart.setUTCDate(gridStart.getUTCDate() + wi * 7);
+
+    const weekEnd = new Date(weekStart);
+    weekEnd.setUTCDate(weekStart.getUTCDate() + 6);
+
+    const days = buildWeekDays(weekStart);
+
+    const candidates: Candidate[] = [];
+
+    for (const act of activities) {
+      // Parse as UTC all-day dates (midnight UTC).
+      const actStart = new Date(act.startAt.slice(0, 10) + 'T00:00:00Z');
+      const actEnd   = new Date(act.endAt.slice(0, 10)   + 'T00:00:00Z');
+
+      // Skip activities with no intersection with this week.
+      if (actEnd < weekStart || actStart > weekEnd) continue;
+
+      const rawStartCol = daysDiff(weekStart, actStart);
+      const rawEndCol   = daysDiff(weekStart, actEnd);
+
+      const startCol = Math.max(0, rawStartCol);
+      const endCol   = Math.min(6, rawEndCol);
+
+      candidates.push({
+        activityId: act.id,
+        startCol,
+        endCol,
+        continuesLeft:  rawStartCol < 0,
+        continuesRight: rawEndCol > 6,
+        color: act.color,
+        title: act.title,
+        icon: act.icon,
+        assignedMemberIds: act.assignedMemberIds,
+        isMatch: matchedIds.has(act.id),
+        isActiveMatch: act.id === activeMatchId,
+      });
+    }
+
+    const segments  = packLanes(candidates);
+    const laneCount = segments.length === 0 ? 0 : Math.max(...segments.map(s => s.lane)) + 1;
+    const capKey    = weekStart.toISOString();
+    const visibleLaneCap = laneCaps[capKey] ?? defaultLaneCap;
+
+    return { weekStart, days, segments, laneCount, visibleLaneCap };
+  });
+}
+
+/**
+ * Compute per-day overflow counts — how many segments in the week row have
+ * `lane >= visibleLaneCap` and overlap day column `col`.
+ *
+ * Returns a 7-element array indexed by column.
+ */
+export function overflowCountsForWeek(row: WeekRow): number[] {
+  const counts = new Array<number>(7).fill(0);
+  for (const seg of row.segments) {
+    if (seg.lane < row.visibleLaneCap) continue;
+    for (let col = seg.startCol; col <= seg.endCol; col++) {
+      counts[col]++;
+    }
+  }
+  return counts;
+}
+
+/**
+ * Get all segments (visible and hidden) that touch a specific day column.
+ * Used by the "+N more" day popover to list every activity on that day.
+ */
+export function segmentsForDay(row: WeekRow, col: number): CalendarSegment[] {
+  return row.segments.filter(s => s.startCol <= col && col <= s.endCol);
+}
 ````
 
 ## File: packages/web/src/lib/filterColors.ts
@@ -24102,397 +26161,6 @@ describe('comboSortComparator', () => {
     ])
   })
 })
-````
-
-## File: packages/web/src/pages/settings/OrganizationPage.tsx
-````typescript
-/**
- * /settings/organization — Superadmin: organization name, registration policy,
- * and system-wide defaults (language placeholder, timezone, week start).
- * Language support is deferred to Phase 10.7 — Localization & Language Support.
- */
-
-import { useState, useEffect } from 'react'
-import { useAdminSettings, usePatchAdminSettings } from '@/hooks/useSettings'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import { Button } from '@/components/ui/button'
-
-export default function OrganizationPage() {
-  const { data } = useAdminSettings()
-  const patch = usePatchAdminSettings()
-
-  const settings = data?.settings ?? {}
-  const [orgName, setOrgName] = useState('')
-  const [accentColor, setAccentColor] = useState('')
-  // Validated hex to submit — only a well-formed #RRGGBB is sent to the API.
-  const accentColorValid = accentColor === '' || /^#[0-9a-fA-F]{6}$/.test(accentColor)
-  const [regPolicy, setRegPolicy] = useState('invite_only')
-  const [timezone, setTimezone] = useState('UTC')
-  const [weekStart, setWeekStart] = useState('monday')
-  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
-
-  useEffect(() => {
-    setOrgName(settings.instance_name || '')
-    setAccentColor(settings.accent_color || '')
-    setRegPolicy(settings.registration_policy || 'invite_only')
-    setTimezone(settings.default_timezone || 'UTC')
-    setWeekStart(settings.default_week_start || 'monday')
-  }, [JSON.stringify(settings)])
-
-  async function handleSave() {
-    setFeedback(null)
-    try {
-      await patch.mutateAsync({
-        instance_name: orgName,
-        // Only submit a valid hex value; empty string clears the override.
-        accent_color: accentColorValid ? accentColor : '',
-        registration_policy: regPolicy,
-        default_timezone: timezone,
-        default_week_start: weekStart,
-      })
-      setFeedback({ type: 'success', msg: 'Settings saved.' })
-      setTimeout(() => setFeedback(null), 2000)
-    } catch {
-      setFeedback({ type: 'error', msg: 'Failed to save settings. Please try again.' })
-    }
-  }
-
-  return (
-    <div>
-      <h2 className="text-[17px] font-semibold text-foreground mb-1">Organization</h2>
-      <p className="text-sm text-muted-foreground mb-6">
-        System-wide identity and defaults for this draba installation.
-      </p>
-
-      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
-        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-4">
-          Identity
-        </h3>
-
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Organization name</Label>
-          <Input
-            value={orgName}
-            onChange={e => setOrgName(e.target.value)}
-            placeholder="My Company"
-            className="max-w-xs"
-          />
-          <p className="text-xs text-muted-foreground m-0">
-            Shown in the browser tab title and login page.
-          </p>
-        </div>
-
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Accent color</Label>
-          <div className="flex items-center gap-3">
-            <input
-              type="color"
-              value={accentColor || '#288C9B'}
-              onChange={e => setAccentColor(e.target.value)}
-              className="h-9 w-14 rounded border border-border cursor-pointer bg-transparent"
-            />
-            <Input
-              value={accentColor}
-              onChange={e => setAccentColor(e.target.value)}
-              placeholder="#288C9B"
-              className={`max-w-[140px] font-mono text-[13px] ${!accentColorValid ? 'border-destructive' : ''}`}
-            />
-            {accentColor && (
-              <button
-                type="button"
-                onClick={() => setAccentColor('')}
-                className="text-xs text-muted-foreground hover:text-foreground cursor-pointer bg-transparent border-none"
-              >
-                Reset
-              </button>
-            )}
-          </div>
-          {!accentColorValid && (
-            <p className="text-xs text-destructive m-0">Must be a 6-digit hex color (e.g. #288C9B).</p>
-          )}
-          <p className="text-xs text-muted-foreground m-0">
-            Overrides the primary color globally. Leave blank to use the default teal.
-          </p>
-        </div>
-
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Registration policy</Label>
-          <div className="flex gap-2">
-            {[
-              { v: 'invite_only', label: 'Invite only' },
-              { v: 'open', label: 'Open registration' },
-            ].map(({ v, label }) => (
-              <button
-                key={v}
-                onClick={() => setRegPolicy(v)}
-                className={`px-3.5 py-1.5 rounded-md text-[13px] border cursor-pointer ${
-                  regPolicy === v
-                    ? 'border-primary bg-primary/10 text-primary'
-                    : 'border-border bg-popover text-muted-foreground'
-                }`}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
-        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-2">
-          System defaults
-        </h3>
-        <p className="text-xs text-muted-foreground mb-4">
-          Applied to new accounts when the user hasn't set their own preference.
-        </p>
-
-        {/* Language placeholder — Phase 10.7 */}
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Default language</Label>
-          <select
-            disabled
-            className="bg-popover border border-border rounded-md text-foreground px-3 py-2 text-[13px] max-w-[240px] opacity-60 cursor-not-allowed"
-          >
-            <option value="en">English (en)</option>
-          </select>
-          <p className="text-xs text-muted-foreground m-0">
-            Additional languages coming in a future release (Phase 10.7).
-          </p>
-        </div>
-
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Default timezone</Label>
-          <select
-            value={timezone}
-            onChange={e => setTimezone(e.target.value)}
-            className="bg-popover border border-border rounded-md text-foreground px-3 py-2 text-[13px] cursor-pointer max-w-[280px]"
-          >
-            {['UTC', 'America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles',
-              'Europe/London', 'Europe/Paris', 'Asia/Tokyo', 'Australia/Sydney'].map(tz => (
-              <option key={tz} value={tz}>{tz}</option>
-            ))}
-          </select>
-        </div>
-
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Default week starts on</Label>
-          <div className="flex gap-2">
-            {(['monday', 'sunday'] as const).map(d => (
-              <button
-                key={d}
-                onClick={() => setWeekStart(d)}
-                className={`px-3.5 py-1.5 rounded-md text-[13px] border cursor-pointer capitalize ${
-                  weekStart === d
-                    ? 'border-primary bg-primary/10 text-primary'
-                    : 'border-border bg-popover text-muted-foreground'
-                }`}
-              >
-                {d}
-              </button>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      {feedback && (
-        <p className={`text-[13px] mb-3 ${feedback.type === 'success' ? 'text-success' : 'text-destructive'}`}>
-          {feedback.msg}
-        </p>
-      )}
-      <Button onClick={handleSave} disabled={patch.isPending}>
-        {patch.isPending ? 'Saving…' : 'Save settings'}
-      </Button>
-    </div>
-  )
-}
-````
-
-## File: packages/web/src/pages/settings/PreferencesPage.tsx
-````typescript
-/**
- * /settings/preferences — Regional settings, appearance theme, default team/timeline.
- * Values are stored via the existing GET/PUT /users/me/preferences endpoints.
- * Theme changes apply immediately via useDarkMode; the server value syncs on next login.
- */
-
-import { useState, useEffect } from 'react'
-import { usePreferenceMap, useUpsertPreference } from '@/hooks/usePreferences'
-import { useDarkMode } from '@/hooks/useDarkMode'
-import { Label } from '@/components/ui/label'
-import { Button } from '@/components/ui/button'
-
-const TIMEZONES = [
-  'UTC',
-  'America/New_York',
-  'America/Chicago',
-  'America/Denver',
-  'America/Los_Angeles',
-  'America/Anchorage',
-  'Pacific/Honolulu',
-  'Europe/London',
-  'Europe/Paris',
-  'Europe/Berlin',
-  'Europe/Moscow',
-  'Asia/Dubai',
-  'Asia/Kolkata',
-  'Asia/Singapore',
-  'Asia/Tokyo',
-  'Australia/Sydney',
-]
-
-const DATE_FORMATS = [
-  { value: 'MMM D, YYYY', label: 'Jan 5, 2026' },
-  { value: 'MM/DD/YYYY', label: '01/05/2026' },
-  { value: 'DD/MM/YYYY', label: '05/01/2026' },
-  { value: 'YYYY-MM-DD', label: '2026-01-05' },
-]
-
-const selectCls = 'bg-popover border border-border rounded-md text-foreground px-3 py-2 text-[13px] cursor-pointer max-w-xs'
-
-export default function PreferencesPage() {
-  const prefMap = usePreferenceMap()
-  const upsert = useUpsertPreference()
-  const { theme: currentTheme, applyTheme } = useDarkMode()
-
-  const [timezone, setTimezone] = useState('UTC')
-  const [dateFormat, setDateFormat] = useState('MMM D, YYYY')
-  const [weekStart, setWeekStart] = useState('monday')
-  const [theme, setTheme] = useState<'light' | 'dark'>(currentTheme)
-  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
-
-  useEffect(() => {
-    setTimezone((prefMap['timezone'] as string | undefined) ?? 'UTC')
-    setDateFormat((prefMap['date_format'] as string | undefined) ?? 'MMM D, YYYY')
-    setWeekStart((prefMap['week_start'] as string | undefined) ?? 'monday')
-    const savedTheme = prefMap['theme'] as string | undefined
-    if (savedTheme === 'dark' || savedTheme === 'light') setTheme(savedTheme)
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- prefMap object identity changes on every fetch; JSON.stringify stabilizes the dep without pulling in the whole map
-  }, [JSON.stringify(prefMap)])
-
-  function handleThemeChange(t: 'light' | 'dark') {
-    setTheme(t)
-    applyTheme(t)
-  }
-
-  async function handleSave() {
-    setFeedback(null)
-    try {
-      await Promise.all([
-        upsert.mutateAsync({ key: 'timezone', value: JSON.stringify(timezone) }),
-        upsert.mutateAsync({ key: 'date_format', value: JSON.stringify(dateFormat) }),
-        upsert.mutateAsync({ key: 'week_start', value: JSON.stringify(weekStart) }),
-        upsert.mutateAsync({ key: 'theme', value: JSON.stringify(theme) }),
-      ])
-      setFeedback({ type: 'success', msg: 'Preferences saved.' })
-      setTimeout(() => setFeedback(null), 2000)
-    } catch {
-      setFeedback({ type: 'error', msg: 'Failed to save preferences. Please try again.' })
-    }
-  }
-
-  return (
-    <div>
-      <h2 className="text-[17px] font-semibold text-foreground mb-1">Preferences</h2>
-      <p className="text-sm text-muted-foreground mb-6">
-        Personal appearance and regional settings.
-      </p>
-
-      {/* Regional */}
-      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
-        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-4">
-          Regional
-        </h3>
-
-        {/* Language placeholder — Phase 10.7 */}
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Language</Label>
-          <select disabled className={`${selectCls} opacity-60 cursor-not-allowed`}>
-            <option value="en">English (en)</option>
-          </select>
-          <p className="text-xs text-muted-foreground m-0">
-            Additional languages coming in a future release (Phase 10.7).
-          </p>
-        </div>
-
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Timezone</Label>
-          <select value={timezone} onChange={e => setTimezone(e.target.value)} className={selectCls}>
-            {TIMEZONES.map(tz => (
-              <option key={tz} value={tz}>{tz}</option>
-            ))}
-          </select>
-        </div>
-
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Date format</Label>
-          <select value={dateFormat} onChange={e => setDateFormat(e.target.value)} className={selectCls}>
-            {DATE_FORMATS.map(f => (
-              <option key={f.value} value={f.value}>{f.label}</option>
-            ))}
-          </select>
-        </div>
-
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Week starts on</Label>
-          <div className="flex gap-2">
-            {(['monday', 'sunday'] as const).map(d => (
-              <button
-                key={d}
-                onClick={() => setWeekStart(d)}
-                className={`px-4 py-1.5 rounded-md text-[13px] border cursor-pointer capitalize ${
-                  weekStart === d
-                    ? 'border-primary bg-primary/10 text-primary'
-                    : 'border-border bg-popover text-muted-foreground'
-                }`}
-              >
-                {d}
-              </button>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      {/* Appearance */}
-      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
-        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-4">
-          Appearance
-        </h3>
-        <div className="flex flex-col gap-1.5 mb-2">
-          <Label>Theme</Label>
-          <div className="flex gap-2">
-            {(['light', 'dark'] as const).map(t => (
-              <button
-                key={t}
-                onClick={() => handleThemeChange(t)}
-                className={`px-4 py-1.5 rounded-md text-[13px] border cursor-pointer capitalize ${
-                  theme === t
-                    ? 'border-primary bg-primary/10 text-primary'
-                    : 'border-border bg-popover text-muted-foreground'
-                }`}
-              >
-                {t}
-              </button>
-            ))}
-          </div>
-          <p className="text-xs text-muted-foreground m-0">
-            Applies immediately. Persisted server-side so it syncs across devices.
-          </p>
-        </div>
-      </div>
-
-      {feedback && (
-        <p className={`text-[13px] mb-3 ${feedback.type === 'success' ? 'text-success' : 'text-destructive'}`}>
-          {feedback.msg}
-        </p>
-      )}
-
-      <Button onClick={handleSave} disabled={upsert.isPending}>
-        {upsert.isPending ? 'Saving…' : 'Save preferences'}
-      </Button>
-    </div>
-  )
-}
 ````
 
 ## File: packages/web/src/pages/ForgotPasswordPage.tsx
@@ -28518,6 +30186,142 @@ export default function GanttToolbar({
 }
 ````
 
+## File: packages/web/src/components/gantt/granularity.test.ts
+````typescript
+import { describe, it, expect } from 'vitest'
+import { generateColumns, positionInColumns, snapDivisorFor } from './granularity'
+
+// ── generateColumns — weekStart option ───────────────────────────────────────
+//
+// Jan 2026 layout:
+//   Mon Jan  5 (ISO week start)
+//   Sun Jan  4 (Sunday week start)
+//
+// Jan 1 2026 is a Thursday.
+//
+// Input dates use Date.UTC to produce stable UTC-midnight values that give the
+// same result regardless of the test runner's local timezone.
+
+const JAN1  = new Date(Date.UTC(2026, 0, 1))  // Thu
+const JAN31 = new Date(Date.UTC(2026, 0, 31)) // Sat
+
+describe('generateColumns — weekStart', () => {
+  it('monday week start: first week column begins on Monday Dec 29', () => {
+    const cols = generateColumns(JAN1, JAN31, 'week', { weekStart: 'monday' })
+    // Jan 1 is Thursday; Monday ISO week start = Dec 29 2025
+    expect(cols[0].start.getUTCDay()).toBe(1) // 1 = Monday
+    expect(cols[0].start.getUTCDate()).toBe(29)
+  })
+
+  it('sunday week start: first week column begins on Sunday Dec 28', () => {
+    const cols = generateColumns(JAN1, JAN31, 'week', { weekStart: 'sunday' })
+    // Jan 1 is Thursday; Sunday week start = Dec 28 2025
+    expect(cols[0].start.getUTCDay()).toBe(0) // 0 = Sunday
+    expect(cols[0].start.getUTCDate()).toBe(28)
+  })
+
+  it('default (no option) behaves like monday', () => {
+    const defaultCols = generateColumns(JAN1, JAN31, 'week')
+    const mondayCols  = generateColumns(JAN1, JAN31, 'week', { weekStart: 'monday' })
+    expect(defaultCols[0].start.getTime()).toBe(mondayCols[0].start.getTime())
+  })
+})
+
+// ── generateColumns — locale option ──────────────────────────────────────────
+
+describe('generateColumns — locale', () => {
+  it('en-US: month column label contains English month name', () => {
+    const cols = generateColumns(JAN1, JAN31, 'month', { locale: 'en-US' })
+    expect(cols[0].label).toMatch(/Jan/)
+  })
+
+  it('en-GB: day column label shows day-first ordering (e.g. "1 Jan")', () => {
+    const cols = generateColumns(JAN1, JAN31, 'day', { locale: 'en-GB' })
+    // en-GB {month:'short', day:'numeric', timeZone:'UTC'} → "1 Jan"
+    expect(cols[0].label).toMatch(/Jan/)
+    // The day should come first in en-GB
+    expect(cols[0].label).toMatch(/^1/)
+  })
+
+  it('default locale behaves like en-US', () => {
+    const defaultCols = generateColumns(JAN1, JAN31, 'month')
+    const usCols      = generateColumns(JAN1, JAN31, 'month', { locale: 'en-US' })
+    expect(defaultCols[0].label).toBe(usCols[0].label)
+  })
+})
+
+// ── snapDivisorFor ────────────────────────────────────────────────────────────
+
+describe('snapDivisorFor', () => {
+  it('week → 7 (snap to day within week)', () => {
+    expect(snapDivisorFor('week')).toBe(7)
+  })
+
+  it('month → 4 (snap to week within month)', () => {
+    expect(snapDivisorFor('month')).toBe(4)
+  })
+
+  it('quarter → 3 (snap to month within quarter)', () => {
+    expect(snapDivisorFor('quarter')).toBe(3)
+  })
+
+  it('year → 4 (snap to quarter within year)', () => {
+    expect(snapDivisorFor('year')).toBe(4)
+  })
+
+  it('day → 1 (no finer snap at day granularity)', () => {
+    expect(snapDivisorFor('day')).toBe(1)
+  })
+
+  it('auto → 1 (no finer snap for auto)', () => {
+    expect(snapDivisorFor('auto')).toBe(1)
+  })
+})
+
+// ── Timezone-safety: midnight-UTC dates ───────────────────────────────────────
+//
+// An activity stored as "2026-05-31T00:00:00Z" must display as May 31 and
+// land in the May 31 column regardless of local timezone.  This suite uses
+// Date.UTC inputs to reproduce the condition that would cause a regression
+// when TZ=America/Denver (UTC-6).
+
+describe('positionInColumns — midnight-UTC activity dates land on correct day', () => {
+  // May 2026: generate day-granularity columns for the whole month
+  const MAY1  = new Date(Date.UTC(2026, 4,  1))
+  const MAY31 = new Date(Date.UTC(2026, 4, 31))
+  const cols  = generateColumns(MAY1, MAY31, 'day')
+
+  it('May 31 column label is "May 31"', () => {
+    const mayThirtyFirst = cols.find(c => c.start.getUTCDate() === 31 && c.start.getUTCMonth() === 4)
+    expect(mayThirtyFirst?.label).toMatch(/31/)
+  })
+
+  it('activity on 2026-05-31 lands in May 31 column (startCol ≥ 30)', () => {
+    // "2026-05-31T00:00:00Z" — midnight UTC; same value the API emits
+    const actStart = new Date('2026-05-31T00:00:00Z')
+    const actEnd   = new Date('2026-05-31T00:00:00Z')
+    const { startCol } = positionInColumns(actStart, actEnd, cols)
+    // May 31 is the 31st day (0-indexed = 30)
+    expect(Math.floor(startCol)).toBe(30)
+  })
+
+  it('activity on 2026-05-01 lands in May 1 column (startCol = 0)', () => {
+    const actStart = new Date('2026-05-01T00:00:00Z')
+    const actEnd   = new Date('2026-05-01T00:00:00Z')
+    const { startCol } = positionInColumns(actStart, actEnd, cols)
+    expect(Math.floor(startCol)).toBe(0)
+  })
+
+  it('formatLabel for May 31 day column shows "May 31" (UTC read-out)', () => {
+    const mayThirtyFirst = cols.find(c => c.start.getUTCDate() === 31 && c.start.getUTCMonth() === 4)
+    expect(mayThirtyFirst).toBeDefined()
+    // Label must show May 31, not May 30 (which would happen with local-time formatting in UTC-6)
+    expect(mayThirtyFirst!.label).toContain('31')
+    expect(mayThirtyFirst!.label).not.toContain('30')
+  })
+})
+````
+
 ## File: packages/web/src/components/gantt/granularity.ts
 ````typescript
 /**
@@ -31227,6 +33031,233 @@ export default defineConfig(({ mode }) => {
 })
 ````
 
+## File: docs/TESTING.md
+````markdown
+# Testing & Review Procedures
+
+This document is the source of truth for what we test and how. It is consumed by the `/test-phase` and `/review-phase` slash commands, which fan work out to subagents that run in parallel. The framework grows phase-by-phase: every new ROADMAP phase adds a section here, and the subagents pick it up automatically.
+
+For the human-review checklist used on diffs, see [REVIEW.md](REVIEW.md).
+
+---
+
+## Test environment setup (manual, do once per host)
+
+These steps set up the docker host so `/test-phase` can run end-to-end. Do them **in this order** — later steps assume earlier ones are done.
+
+### Step 1 — One-time host prep (manual)
+On the docker host, as the `draba-test` user (created in the SSH setup steps below):
+
+1. Copy `scripts/reset-test-env.sh` to `~/scripts/reset-test-env.sh` and `chmod +x` it.
+2. Create `~/.draba-test.env` (chmod 600) with:
+   ```
+   DRABA_TEST_INVITE_TOKEN=<pick a long random string>
+   DRABA_TEST_ADMIN_EMAIL=test-admin@local
+   DRABA_TEST_INVITE_EMAIL=invitee@local
+   DRABA_DB_DIR=/portainer/Files/AppData/Config/draba/data
+   DRABA_CONTAINER=draba
+   ```
+   `DRABA_TEST_INVITE_EMAIL` is the email the api-smoke subagent registers as — it must match the email the invite was seeded for. Default `invitee@local` is fine.
+   The script auto-sources this file at startup. No sudo, no `/etc/`, no compose dir — the script uses `docker stop/start` directly and runs file ops inside throwaway containers, so the host user only needs `docker` group membership.
+
+### Step 2 — Per-run reset (manual or SSH-driven)
+Before each `/test-phase` run that needs a clean DB, run on the docker host:
+```bash
+./scripts/reset-test-env.sh
+```
+This stops the container, wipes the SQLite file, restarts, waits for migrations, and seeds a bootstrap team + a known invite token. After it completes, the container is in a known state with `DRABA_TEST_INVITE_TOKEN` valid for `POST /auth/register`.
+
+### Step 3 — Tell Claude how to reach it (one-time, on the dev box)
+On the machine where you run Claude (this Windows box):
+- The test URL should be stored in the `reference_test_docker.md` memory entry (not committed to the repo).
+- Set `DRABA_TEST_INVITE_TOKEN` in your shell or in a memory entry so subagents can pass it through. **Do not commit it.**
+- Configure key-based SSH from this box to the docker host so `/test-phase` can run the reset itself. Recommended setup: a dedicated `draba-test` user on the docker host, an ed25519 keypair with a passphrase loaded in `ssh-agent`, and the public key pinned in `authorized_keys` with `command="/usr/local/bin/draba-reset"` plus `no-pty,no-port-forwarding,no-X11-forwarding,no-agent-forwarding` so the key can only run the reset script. Add an SSH config alias `Host draba-test` so the call is just `ssh draba-test`.
+
+### What's manual vs automated, at a glance
+
+| Step | Where it runs | Who does it |
+|---|---|---|
+| Host prep (Step 1) | Docker host | **You, once** |
+| Reset before a test run (Step 2) | Docker host | **You manually** *(or SSH-driven if configured — Claude can trigger)* |
+| Static checks, unit tests, schema check, security review | Dev box (this machine) | Claude |
+| API smoke against live container | Dev box → live container | Claude |
+| Logging the run to `docs/log.md` | Dev box | Claude |
+
+---
+
+## Global procedures
+
+These run regardless of phase.
+
+### Static checks
+- `cd packages/api && golangci-lint run`
+- `cd packages/api && go vet ./...`
+- `pnpm --filter web lint`
+- `pnpm --filter web build`
+
+### Unit & integration
+- `cd packages/api && go test -count=1 ./...`
+- Race detector (`-race`) requires CGO/GCC — not available on the Windows dev box. It runs in CI (GitHub Actions, Linux runner) on every push. Do not mark a local run as failed for omitting `-race`.
+
+### Live smoke target
+Live-smoke subagents (`api-smoke`, future `ws-smoke`) hit a running container. The URL is **not** stored in the repo — it's resolved at runtime in this priority order:
+1. `DRABA_TEST_URL` environment variable, if set.
+2. The `reference_test_docker.md` memory entry (Brian's local LAN host).
+3. If neither is available, the subagent reports **skipped**, not failed.
+
+### Review checklist (always)
+- CONVENTIONS.md compliance
+- No scope creep beyond the phase's ROADMAP entry
+- Errors handled at boundaries (HTTP, DB, external APIs); internal calls trust contracts
+- No secrets, no `.env` files, no host-specific values committed
+- Migrations idempotent (re-run produces no diff)
+- `docs/log.md` updated with a dated entry
+
+---
+
+## Subagent map
+
+| Subagent | Scope | Active from |
+|---|---|---|
+| `static-check` | lint + vet + web typecheck/build | Phase 1 |
+| `unit-test` | `go test -race -count=1 ./...` | Phase 2 |
+| `schema-check` | run migrations on fresh SQLite, re-run, assert no diff | Phase 2 |
+| `api-smoke` | hit live container, run phase exit-criteria flows via curl | Phase 2 |
+| `security-review` | scan diff for secrets, missing auth, SQL concat, JWT misuse | Phase 2 |
+| `type-sync` | regen OpenAPI types, assert no diff | Phase 4 |
+| `ws-smoke` | WebSocket: team-scoped broadcast within 500ms, heartbeat | Phase 5 |
+| `web-e2e` | Chrome MCP — login, render timeline, drag-create | Phase 7 |
+
+---
+
+## Per-phase procedures
+
+### Phase 1 — Project Infrastructure
+
+**static-check**
+- `go build ./...` from `packages/api/` succeeds with no errors
+- `pnpm build` from `packages/web/` succeeds
+- `golangci-lint run` is clean
+- `docker compose config` parses without error — skip if Docker is not installed on the dev box (verified by CI)
+
+### Phase 2 — API Foundation (DB & Auth)
+
+**unit-test**
+- All `*_test.go` under `packages/api/internal/` pass with `-race -count=1`
+- `internal/auth` package — unit tests needed (currently no test file; tracked gap):
+  - `IssueAccessToken` / `IssueRefreshToken` / `Validate` roundtrip returns correct claims
+  - `Validate` rejects a token signed with a different secret (tampered signature)
+  - `Validate` rejects an expired token
+  - `Validate` returns error when token type mismatches (`"refresh"` presented as `"access"` and vice versa)
+  - `Validate` rejects `alg=none` / non-HMAC algorithm (algorithm-confusion guard)
+  - `HashPassword` / `CheckPassword` roundtrip succeeds; wrong password returns error
+- `internal/db` — `invite_repo` unit tests needed (currently no test file; tracked gap):
+  - `GetValid` returns `sql.ErrNoRows` for an expired invite
+  - `GetValid` returns `sql.ErrNoRows` after `MarkAccepted` (single-use enforcement)
+
+**schema-check**
+- Start container against a fresh `data.db`; confirm these tables exist: `users`, `teams`, `team_members`, `invites`, `api_tokens`, `activities`, `activity_tags`, `activity_assignments`, `timelines`, `timeline_access`, `calendar_connections`, `statuses`
+  - Note: `status_templates`, `status_template_items`, `instance_settings`, and `password_reset_tokens` are managed via app logic, not standalone migration tables.
+- Restart the container; assert migration runner produces no schema changes (idempotency)
+
+**api-smoke** (against `$DRABA_TEST_URL`)
+- `POST /auth/register` with a valid invite token → 200/201, returns user + JWT
+- `POST /auth/register` with an invalid/missing invite token → 4xx
+- `POST /auth/register` with the **same** invite token a second time → 4xx (single-use)
+- `POST /auth/login` with the registered credentials → 200, returns JWT
+- `POST /auth/login` with a non-existent email → 401
+- `POST /auth/login` with bad credentials → 401
+- `POST /auth/refresh` with a valid refresh token → 200, returns new JWT
+- `POST /auth/refresh` with an access token (wrong type) → 401
+- `POST /auth/refresh` with a token signed by a different secret → 401
+- A subsequent authenticated request with the issued JWT → 200 (validates signing)
+
+**security-review**
+- No password fields stored in plaintext (grep migrations + handlers)
+- JWT secret loaded from env/config, not hardcoded
+- Invite tokens single-use (consumed on register) — also asserted behaviorally in api-smoke above
+- No SQL string concatenation in queries
+
+### Phase 3 — Core API (Events & Teams)
+
+**api-smoke**
+- `POST /teams` → returns team (201 Created)
+- `GET /teams/:id` with member token → 200 OK, returns team
+- `GET /teams/:id` with non-member token → 403 Forbidden
+- `POST /teams/:id/invites` → returns invite token (201 Created)
+- Register via that token → user appears in `GET /teams/:id/members` (200 OK)
+- `POST /teams/:id/timelines/:timelineId/activities` (body: `title`, `startAt`, `endAt` as RFC3339) → 201 Created, then `GET /teams/:id/timelines/:timelineId/activities?from=<RFC3339>&to=<RFC3339>` returns it (200 OK) — params must be full RFC3339 (e.g. `2026-01-01T00:00:00Z`), bare dates return 400
+- `PATCH /activities/:id` updates fields (200 OK); `DELETE /activities/:id` removes it (204 No Content / 200 OK), subsequent GET excludes it
+- Auth: every endpoint rejects requests without a valid JWT (401 Unauthorized)
+- Authz: a user not on the team cannot read or mutate that team's activities (403 Forbidden)
+  - **Setup note:** the "non-member" user must be genuinely absent from the team under test. In the seeded environment every user registered via the bootstrap invite automatically joins `bootstrap-team`, so using that user against `bootstrap-team` produces `200 []` (correct member behaviour, not a 403). Correct approach: create a second team (`POST /teams`), issue an invite for that team, register a fresh user — that user is on team B only. Then use their JWT to hit team A's activity endpoint and expect `403`.
+- Tier Limits: exceeding the plan limits for a team returns appropriate HTTP errors (e.g., 402 Payment Required or 403 Forbidden)
+
+**security-review**
+- Every new route requires auth middleware
+- Team membership enforced on every team-scoped endpoint
+
+### Phase 4 — OpenAPI Spec & Type Generation
+
+**type-sync**
+- `pnpm generate` succeeds with no errors
+- `git diff` after generate is empty (committed types match spec)
+- All Phase 2–3 endpoints present in `packages/shared/openapi.yaml`
+
+### Phase 5 — Real-Time (WebSocket)
+
+**unit-test**
+- `TestHub_Heartbeat_PingReceived` — server sends a `{"type":"ping"}` JSON message within one heartbeat interval
+- `TestHub_Heartbeat_MissedPingDisconnects` — server closes the connection after `readTimeout` elapses with no pong
+- Both tests use `testSetupFast` (50ms heartbeat / 200ms readTimeout) so they run in milliseconds
+
+**ws-smoke**
+- Two clients on team A both receive a delta within 500ms of an event mutation
+- A client on team B does not receive team A's events
+- Heartbeat: connect, subscribe, respond to every `{"type":"ping"}` with `{"type":"pong"}`, assert connection stays open for at least 3 ping cycles (use a 30s real-interval container; verify no disconnect over ~100s)
+  - Note: this is a slow manual check; unit tests (`TestHub_Heartbeat_*`) cover the behavior at speed
+
+### Phase 6 — Timelines
+
+**unit-test**
+- `timeline_repo.RevokeAccess` — unit tests needed (currently no coverage; tracked gap):
+  - Grant access then revoke; `HasAccess` returns false after revoke
+  - Revoking access that was never granted is a no-op (no error)
+- `timeline_repo.ListByTeam` — unit test needed:
+  - Returns all non-archived timelines for a team in descending creation order
+  - Returns empty slice (not error) when team has no timelines
+
+**api-smoke**
+- `POST /teams/:id/timelines` with JWT → 201 Created
+- `GET /timelines/:id` with JWT (user on access list) → 200 OK
+- `GET /timelines/:id` with JWT (user not on access list) → 403 Forbidden
+- `GET /timelines/share/:token` → 200 OK without requiring auth
+
+### Phase 7 — Web — Scaffold
+
+**web-e2e**
+- Navigating to protected routes unauthenticated redirects to `/login`
+- Successful login redirects to the main app view and stores the token
+- TanStack Query successfully fetches team/event data from the API
+- WebSocket client successfully connects and maintains a heartbeat
+
+**Known gap — frontend component unit tests**
+No Vitest / Testing Library setup exists yet. Components (`TimelineGrid`, `EventPanel`, `Sidebar`, `MemberAvatar`) have zero unit-level coverage. This is intentional for early phases — the Chrome MCP e2e tests cover the golden path. When the web layer stabilises, add a `web-unit` subagent that runs `pnpm --filter web test` and assert render output for key components. Track as a Phase 8+ task.
+
+### Phase 8+ — Web
+
+*Stubs.* Detailed assertions added when each phase begins.
+
+---
+
+## Adding tests for a new phase
+
+1. Find the phase's section in this file (or add one if missing).
+2. Under the relevant subagent heading, list concrete, runnable assertions tied to the ROADMAP exit criteria.
+3. If a new subagent is needed, add it to the subagent map with an "active from" phase.
+4. That's it — `/test-phase` will pick it up on the next run.
+````
+
 ## File: packages/api/internal/api/api_types.gen.go
 ````go
 // Package api provides primitives to interact with the openapi HTTP API.
@@ -32198,142 +34229,6 @@ describe('buildRows — member grouping (combo-key grouping)', () => {
 })
 ````
 
-## File: packages/web/src/components/gantt/granularity.test.ts
-````typescript
-import { describe, it, expect } from 'vitest'
-import { generateColumns, positionInColumns, snapDivisorFor } from './granularity'
-
-// ── generateColumns — weekStart option ───────────────────────────────────────
-//
-// Jan 2026 layout:
-//   Mon Jan  5 (ISO week start)
-//   Sun Jan  4 (Sunday week start)
-//
-// Jan 1 2026 is a Thursday.
-//
-// Input dates use Date.UTC to produce stable UTC-midnight values that give the
-// same result regardless of the test runner's local timezone.
-
-const JAN1  = new Date(Date.UTC(2026, 0, 1))  // Thu
-const JAN31 = new Date(Date.UTC(2026, 0, 31)) // Sat
-
-describe('generateColumns — weekStart', () => {
-  it('monday week start: first week column begins on Monday Dec 29', () => {
-    const cols = generateColumns(JAN1, JAN31, 'week', { weekStart: 'monday' })
-    // Jan 1 is Thursday; Monday ISO week start = Dec 29 2025
-    expect(cols[0].start.getUTCDay()).toBe(1) // 1 = Monday
-    expect(cols[0].start.getUTCDate()).toBe(29)
-  })
-
-  it('sunday week start: first week column begins on Sunday Dec 28', () => {
-    const cols = generateColumns(JAN1, JAN31, 'week', { weekStart: 'sunday' })
-    // Jan 1 is Thursday; Sunday week start = Dec 28 2025
-    expect(cols[0].start.getUTCDay()).toBe(0) // 0 = Sunday
-    expect(cols[0].start.getUTCDate()).toBe(28)
-  })
-
-  it('default (no option) behaves like monday', () => {
-    const defaultCols = generateColumns(JAN1, JAN31, 'week')
-    const mondayCols  = generateColumns(JAN1, JAN31, 'week', { weekStart: 'monday' })
-    expect(defaultCols[0].start.getTime()).toBe(mondayCols[0].start.getTime())
-  })
-})
-
-// ── generateColumns — locale option ──────────────────────────────────────────
-
-describe('generateColumns — locale', () => {
-  it('en-US: month column label contains English month name', () => {
-    const cols = generateColumns(JAN1, JAN31, 'month', { locale: 'en-US' })
-    expect(cols[0].label).toMatch(/Jan/)
-  })
-
-  it('en-GB: day column label shows day-first ordering (e.g. "1 Jan")', () => {
-    const cols = generateColumns(JAN1, JAN31, 'day', { locale: 'en-GB' })
-    // en-GB {month:'short', day:'numeric', timeZone:'UTC'} → "1 Jan"
-    expect(cols[0].label).toMatch(/Jan/)
-    // The day should come first in en-GB
-    expect(cols[0].label).toMatch(/^1/)
-  })
-
-  it('default locale behaves like en-US', () => {
-    const defaultCols = generateColumns(JAN1, JAN31, 'month')
-    const usCols      = generateColumns(JAN1, JAN31, 'month', { locale: 'en-US' })
-    expect(defaultCols[0].label).toBe(usCols[0].label)
-  })
-})
-
-// ── snapDivisorFor ────────────────────────────────────────────────────────────
-
-describe('snapDivisorFor', () => {
-  it('week → 7 (snap to day within week)', () => {
-    expect(snapDivisorFor('week')).toBe(7)
-  })
-
-  it('month → 4 (snap to week within month)', () => {
-    expect(snapDivisorFor('month')).toBe(4)
-  })
-
-  it('quarter → 3 (snap to month within quarter)', () => {
-    expect(snapDivisorFor('quarter')).toBe(3)
-  })
-
-  it('year → 4 (snap to quarter within year)', () => {
-    expect(snapDivisorFor('year')).toBe(4)
-  })
-
-  it('day → 1 (no finer snap at day granularity)', () => {
-    expect(snapDivisorFor('day')).toBe(1)
-  })
-
-  it('auto → 1 (no finer snap for auto)', () => {
-    expect(snapDivisorFor('auto')).toBe(1)
-  })
-})
-
-// ── Timezone-safety: midnight-UTC dates ───────────────────────────────────────
-//
-// An activity stored as "2026-05-31T00:00:00Z" must display as May 31 and
-// land in the May 31 column regardless of local timezone.  This suite uses
-// Date.UTC inputs to reproduce the condition that would cause a regression
-// when TZ=America/Denver (UTC-6).
-
-describe('positionInColumns — midnight-UTC activity dates land on correct day', () => {
-  // May 2026: generate day-granularity columns for the whole month
-  const MAY1  = new Date(Date.UTC(2026, 4,  1))
-  const MAY31 = new Date(Date.UTC(2026, 4, 31))
-  const cols  = generateColumns(MAY1, MAY31, 'day')
-
-  it('May 31 column label is "May 31"', () => {
-    const mayThirtyFirst = cols.find(c => c.start.getUTCDate() === 31 && c.start.getUTCMonth() === 4)
-    expect(mayThirtyFirst?.label).toMatch(/31/)
-  })
-
-  it('activity on 2026-05-31 lands in May 31 column (startCol ≥ 30)', () => {
-    // "2026-05-31T00:00:00Z" — midnight UTC; same value the API emits
-    const actStart = new Date('2026-05-31T00:00:00Z')
-    const actEnd   = new Date('2026-05-31T00:00:00Z')
-    const { startCol } = positionInColumns(actStart, actEnd, cols)
-    // May 31 is the 31st day (0-indexed = 30)
-    expect(Math.floor(startCol)).toBe(30)
-  })
-
-  it('activity on 2026-05-01 lands in May 1 column (startCol = 0)', () => {
-    const actStart = new Date('2026-05-01T00:00:00Z')
-    const actEnd   = new Date('2026-05-01T00:00:00Z')
-    const { startCol } = positionInColumns(actStart, actEnd, cols)
-    expect(Math.floor(startCol)).toBe(0)
-  })
-
-  it('formatLabel for May 31 day column shows "May 31" (UTC read-out)', () => {
-    const mayThirtyFirst = cols.find(c => c.start.getUTCDate() === 31 && c.start.getUTCMonth() === 4)
-    expect(mayThirtyFirst).toBeDefined()
-    // Label must show May 31, not May 30 (which would happen with local-time formatting in UTC-6)
-    expect(mayThirtyFirst!.label).toContain('31')
-    expect(mayThirtyFirst!.label).not.toContain('30')
-  })
-})
-````
-
 ## File: packages/web/src/components/list/ListToolbar.tsx
 ````typescript
 /**
@@ -32961,233 +34856,6 @@ describe("filter kind 'saved'", () => {
     expect(result).toHaveLength(2)
   })
 })
-````
-
-## File: docs/TESTING.md
-````markdown
-# Testing & Review Procedures
-
-This document is the source of truth for what we test and how. It is consumed by the `/test-phase` and `/review-phase` slash commands, which fan work out to subagents that run in parallel. The framework grows phase-by-phase: every new ROADMAP phase adds a section here, and the subagents pick it up automatically.
-
-For the human-review checklist used on diffs, see [REVIEW.md](REVIEW.md).
-
----
-
-## Test environment setup (manual, do once per host)
-
-These steps set up the docker host so `/test-phase` can run end-to-end. Do them **in this order** — later steps assume earlier ones are done.
-
-### Step 1 — One-time host prep (manual)
-On the docker host, as the `draba-test` user (created in the SSH setup steps below):
-
-1. Copy `scripts/reset-test-env.sh` to `~/scripts/reset-test-env.sh` and `chmod +x` it.
-2. Create `~/.draba-test.env` (chmod 600) with:
-   ```
-   DRABA_TEST_INVITE_TOKEN=<pick a long random string>
-   DRABA_TEST_ADMIN_EMAIL=test-admin@local
-   DRABA_TEST_INVITE_EMAIL=invitee@local
-   DRABA_DB_DIR=/portainer/Files/AppData/Config/draba/data
-   DRABA_CONTAINER=draba
-   ```
-   `DRABA_TEST_INVITE_EMAIL` is the email the api-smoke subagent registers as — it must match the email the invite was seeded for. Default `invitee@local` is fine.
-   The script auto-sources this file at startup. No sudo, no `/etc/`, no compose dir — the script uses `docker stop/start` directly and runs file ops inside throwaway containers, so the host user only needs `docker` group membership.
-
-### Step 2 — Per-run reset (manual or SSH-driven)
-Before each `/test-phase` run that needs a clean DB, run on the docker host:
-```bash
-./scripts/reset-test-env.sh
-```
-This stops the container, wipes the SQLite file, restarts, waits for migrations, and seeds a bootstrap team + a known invite token. After it completes, the container is in a known state with `DRABA_TEST_INVITE_TOKEN` valid for `POST /auth/register`.
-
-### Step 3 — Tell Claude how to reach it (one-time, on the dev box)
-On the machine where you run Claude (this Windows box):
-- The test URL should be stored in the `reference_test_docker.md` memory entry (not committed to the repo).
-- Set `DRABA_TEST_INVITE_TOKEN` in your shell or in a memory entry so subagents can pass it through. **Do not commit it.**
-- Configure key-based SSH from this box to the docker host so `/test-phase` can run the reset itself. Recommended setup: a dedicated `draba-test` user on the docker host, an ed25519 keypair with a passphrase loaded in `ssh-agent`, and the public key pinned in `authorized_keys` with `command="/usr/local/bin/draba-reset"` plus `no-pty,no-port-forwarding,no-X11-forwarding,no-agent-forwarding` so the key can only run the reset script. Add an SSH config alias `Host draba-test` so the call is just `ssh draba-test`.
-
-### What's manual vs automated, at a glance
-
-| Step | Where it runs | Who does it |
-|---|---|---|
-| Host prep (Step 1) | Docker host | **You, once** |
-| Reset before a test run (Step 2) | Docker host | **You manually** *(or SSH-driven if configured — Claude can trigger)* |
-| Static checks, unit tests, schema check, security review | Dev box (this machine) | Claude |
-| API smoke against live container | Dev box → live container | Claude |
-| Logging the run to `docs/log.md` | Dev box | Claude |
-
----
-
-## Global procedures
-
-These run regardless of phase.
-
-### Static checks
-- `cd packages/api && golangci-lint run`
-- `cd packages/api && go vet ./...`
-- `pnpm --filter web lint`
-- `pnpm --filter web build`
-
-### Unit & integration
-- `cd packages/api && go test -count=1 ./...`
-- Race detector (`-race`) requires CGO/GCC — not available on the Windows dev box. It runs in CI (GitHub Actions, Linux runner) on every push. Do not mark a local run as failed for omitting `-race`.
-
-### Live smoke target
-Live-smoke subagents (`api-smoke`, future `ws-smoke`) hit a running container. The URL is **not** stored in the repo — it's resolved at runtime in this priority order:
-1. `DRABA_TEST_URL` environment variable, if set.
-2. The `reference_test_docker.md` memory entry (Brian's local LAN host).
-3. If neither is available, the subagent reports **skipped**, not failed.
-
-### Review checklist (always)
-- CONVENTIONS.md compliance
-- No scope creep beyond the phase's ROADMAP entry
-- Errors handled at boundaries (HTTP, DB, external APIs); internal calls trust contracts
-- No secrets, no `.env` files, no host-specific values committed
-- Migrations idempotent (re-run produces no diff)
-- `docs/log.md` updated with a dated entry
-
----
-
-## Subagent map
-
-| Subagent | Scope | Active from |
-|---|---|---|
-| `static-check` | lint + vet + web typecheck/build | Phase 1 |
-| `unit-test` | `go test -race -count=1 ./...` | Phase 2 |
-| `schema-check` | run migrations on fresh SQLite, re-run, assert no diff | Phase 2 |
-| `api-smoke` | hit live container, run phase exit-criteria flows via curl | Phase 2 |
-| `security-review` | scan diff for secrets, missing auth, SQL concat, JWT misuse | Phase 2 |
-| `type-sync` | regen OpenAPI types, assert no diff | Phase 4 |
-| `ws-smoke` | WebSocket: team-scoped broadcast within 500ms, heartbeat | Phase 5 |
-| `web-e2e` | Chrome MCP — login, render timeline, drag-create | Phase 7 |
-
----
-
-## Per-phase procedures
-
-### Phase 1 — Project Infrastructure
-
-**static-check**
-- `go build ./...` from `packages/api/` succeeds with no errors
-- `pnpm build` from `packages/web/` succeeds
-- `golangci-lint run` is clean
-- `docker compose config` parses without error — skip if Docker is not installed on the dev box (verified by CI)
-
-### Phase 2 — API Foundation (DB & Auth)
-
-**unit-test**
-- All `*_test.go` under `packages/api/internal/` pass with `-race -count=1`
-- `internal/auth` package — unit tests needed (currently no test file; tracked gap):
-  - `IssueAccessToken` / `IssueRefreshToken` / `Validate` roundtrip returns correct claims
-  - `Validate` rejects a token signed with a different secret (tampered signature)
-  - `Validate` rejects an expired token
-  - `Validate` returns error when token type mismatches (`"refresh"` presented as `"access"` and vice versa)
-  - `Validate` rejects `alg=none` / non-HMAC algorithm (algorithm-confusion guard)
-  - `HashPassword` / `CheckPassword` roundtrip succeeds; wrong password returns error
-- `internal/db` — `invite_repo` unit tests needed (currently no test file; tracked gap):
-  - `GetValid` returns `sql.ErrNoRows` for an expired invite
-  - `GetValid` returns `sql.ErrNoRows` after `MarkAccepted` (single-use enforcement)
-
-**schema-check**
-- Start container against a fresh `data.db`; confirm these tables exist: `users`, `teams`, `team_members`, `invites`, `api_tokens`, `activities`, `activity_tags`, `activity_assignments`, `timelines`, `timeline_access`, `calendar_connections`, `statuses`
-  - Note: `status_templates`, `status_template_items`, `instance_settings`, and `password_reset_tokens` are managed via app logic, not standalone migration tables.
-- Restart the container; assert migration runner produces no schema changes (idempotency)
-
-**api-smoke** (against `$DRABA_TEST_URL`)
-- `POST /auth/register` with a valid invite token → 200/201, returns user + JWT
-- `POST /auth/register` with an invalid/missing invite token → 4xx
-- `POST /auth/register` with the **same** invite token a second time → 4xx (single-use)
-- `POST /auth/login` with the registered credentials → 200, returns JWT
-- `POST /auth/login` with a non-existent email → 401
-- `POST /auth/login` with bad credentials → 401
-- `POST /auth/refresh` with a valid refresh token → 200, returns new JWT
-- `POST /auth/refresh` with an access token (wrong type) → 401
-- `POST /auth/refresh` with a token signed by a different secret → 401
-- A subsequent authenticated request with the issued JWT → 200 (validates signing)
-
-**security-review**
-- No password fields stored in plaintext (grep migrations + handlers)
-- JWT secret loaded from env/config, not hardcoded
-- Invite tokens single-use (consumed on register) — also asserted behaviorally in api-smoke above
-- No SQL string concatenation in queries
-
-### Phase 3 — Core API (Events & Teams)
-
-**api-smoke**
-- `POST /teams` → returns team (201 Created)
-- `GET /teams/:id` with member token → 200 OK, returns team
-- `GET /teams/:id` with non-member token → 403 Forbidden
-- `POST /teams/:id/invites` → returns invite token (201 Created)
-- Register via that token → user appears in `GET /teams/:id/members` (200 OK)
-- `POST /teams/:id/timelines/:timelineId/activities` (body: `title`, `startAt`, `endAt` as RFC3339) → 201 Created, then `GET /teams/:id/timelines/:timelineId/activities?from=<RFC3339>&to=<RFC3339>` returns it (200 OK) — params must be full RFC3339 (e.g. `2026-01-01T00:00:00Z`), bare dates return 400
-- `PATCH /activities/:id` updates fields (200 OK); `DELETE /activities/:id` removes it (204 No Content / 200 OK), subsequent GET excludes it
-- Auth: every endpoint rejects requests without a valid JWT (401 Unauthorized)
-- Authz: a user not on the team cannot read or mutate that team's activities (403 Forbidden)
-  - **Setup note:** the "non-member" user must be genuinely absent from the team under test. In the seeded environment every user registered via the bootstrap invite automatically joins `bootstrap-team`, so using that user against `bootstrap-team` produces `200 []` (correct member behaviour, not a 403). Correct approach: create a second team (`POST /teams`), issue an invite for that team, register a fresh user — that user is on team B only. Then use their JWT to hit team A's activity endpoint and expect `403`.
-- Tier Limits: exceeding the plan limits for a team returns appropriate HTTP errors (e.g., 402 Payment Required or 403 Forbidden)
-
-**security-review**
-- Every new route requires auth middleware
-- Team membership enforced on every team-scoped endpoint
-
-### Phase 4 — OpenAPI Spec & Type Generation
-
-**type-sync**
-- `pnpm generate` succeeds with no errors
-- `git diff` after generate is empty (committed types match spec)
-- All Phase 2–3 endpoints present in `packages/shared/openapi.yaml`
-
-### Phase 5 — Real-Time (WebSocket)
-
-**unit-test**
-- `TestHub_Heartbeat_PingReceived` — server sends a `{"type":"ping"}` JSON message within one heartbeat interval
-- `TestHub_Heartbeat_MissedPingDisconnects` — server closes the connection after `readTimeout` elapses with no pong
-- Both tests use `testSetupFast` (50ms heartbeat / 200ms readTimeout) so they run in milliseconds
-
-**ws-smoke**
-- Two clients on team A both receive a delta within 500ms of an event mutation
-- A client on team B does not receive team A's events
-- Heartbeat: connect, subscribe, respond to every `{"type":"ping"}` with `{"type":"pong"}`, assert connection stays open for at least 3 ping cycles (use a 30s real-interval container; verify no disconnect over ~100s)
-  - Note: this is a slow manual check; unit tests (`TestHub_Heartbeat_*`) cover the behavior at speed
-
-### Phase 6 — Timelines
-
-**unit-test**
-- `timeline_repo.RevokeAccess` — unit tests needed (currently no coverage; tracked gap):
-  - Grant access then revoke; `HasAccess` returns false after revoke
-  - Revoking access that was never granted is a no-op (no error)
-- `timeline_repo.ListByTeam` — unit test needed:
-  - Returns all non-archived timelines for a team in descending creation order
-  - Returns empty slice (not error) when team has no timelines
-
-**api-smoke**
-- `POST /teams/:id/timelines` with JWT → 201 Created
-- `GET /timelines/:id` with JWT (user on access list) → 200 OK
-- `GET /timelines/:id` with JWT (user not on access list) → 403 Forbidden
-- `GET /timelines/share/:token` → 200 OK without requiring auth
-
-### Phase 7 — Web — Scaffold
-
-**web-e2e**
-- Navigating to protected routes unauthenticated redirects to `/login`
-- Successful login redirects to the main app view and stores the token
-- TanStack Query successfully fetches team/event data from the API
-- WebSocket client successfully connects and maintains a heartbeat
-
-**Known gap — frontend component unit tests**
-No Vitest / Testing Library setup exists yet. Components (`TimelineGrid`, `EventPanel`, `Sidebar`, `MemberAvatar`) have zero unit-level coverage. This is intentional for early phases — the Chrome MCP e2e tests cover the golden path. When the web layer stabilises, add a `web-unit` subagent that runs `pnpm --filter web test` and assert render output for key components. Track as a Phase 8+ task.
-
-### Phase 8+ — Web
-
-*Stubs.* Detailed assertions added when each phase begins.
-
----
-
-## Adding tests for a new phase
-
-1. Find the phase's section in this file (or add one if missing).
-2. Under the relevant subagent heading, list concrete, runnable assertions tied to the ROADMAP exit criteria.
-3. If a new subagent is needed, add it to the subagent map with an "active from" phase.
-4. That's it — `/test-phase` will pick it up on the next run.
 ````
 
 ## File: packages/api/internal/api/saved_filter_handler.go
@@ -33834,310 +35502,6 @@ export default function TopBar({
       </div>
     </div>
   );
-}
-````
-
-## File: packages/api/internal/db/activity_repo.go
-````go
-package db
-
-import (
-	"fmt"
-	"time"
-
-	"github.com/jmoiron/sqlx"
-
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// ActivityRepo is the persistence layer for Activity records.
-type ActivityRepo struct {
-	db *sqlx.DB
-}
-
-// NewActivityRepo returns an ActivityRepo backed by db.
-func NewActivityRepo(db *sqlx.DB) *ActivityRepo {
-	return &ActivityRepo{db: db}
-}
-
-// Create inserts a new Activity row.
-func (r *ActivityRepo) Create(activity *models.Activity) error {
-	_, err := r.db.NamedExec(`
-		INSERT INTO activities (
-			id, timeline_id, title, description, icon, color,
-			start_at, end_at, all_day, status_id, parent_activity_id,
-			percent_complete, location, url, rrule,
-			caldav_uid, google_event_id,
-			created_by, created_at, updated_at
-		) VALUES (
-			:id, :timeline_id, :title, :description, :icon, :color,
-			:start_at, :end_at, :all_day, :status_id, :parent_activity_id,
-			:percent_complete, :location, :url, :rrule,
-			:caldav_uid, :google_event_id,
-			:created_by, :created_at, :updated_at
-		)
-	`, activity)
-	if err != nil {
-		return fmt.Errorf("creating activity: %w", err)
-	}
-	return nil
-}
-
-// GetByID fetches an Activity by primary key. Returns sql.ErrNoRows (wrapped)
-// when no row matches.
-func (r *ActivityRepo) GetByID(id string) (*models.Activity, error) {
-	var a models.Activity
-	err := r.db.Get(&a, `SELECT * FROM activities WHERE id = ?`, id)
-	if err != nil {
-		return nil, fmt.Errorf("getting activity: %w", err)
-	}
-	return &a, nil
-}
-
-// Update replaces all mutable fields on an existing Activity row.
-func (r *ActivityRepo) Update(activity *models.Activity) error {
-	_, err := r.db.NamedExec(`
-		UPDATE activities SET
-			title              = :title,
-			description        = :description,
-			notes              = :notes,
-			icon               = :icon,
-			color              = :color,
-			start_at           = :start_at,
-			end_at             = :end_at,
-			all_day            = :all_day,
-			status_id          = :status_id,
-			parent_activity_id = :parent_activity_id,
-			percent_complete   = :percent_complete,
-			location           = :location,
-			url                = :url,
-			rrule              = :rrule,
-			updated_at         = :updated_at
-		WHERE id = :id
-	`, activity)
-	if err != nil {
-		return fmt.Errorf("updating activity: %w", err)
-	}
-	return nil
-}
-
-// Delete permanently removes an activity row.
-func (r *ActivityRepo) Delete(id string) error {
-	_, err := r.db.Exec(`DELETE FROM activities WHERE id = ?`, id)
-	if err != nil {
-		return fmt.Errorf("deleting activity: %w", err)
-	}
-	return nil
-}
-
-// ClearParentRefs clears parent_activity_id on all activities that reference id
-// as their parent. Called before deleting or archiving the parent so children
-// do not retain a dangling reference.
-func (r *ActivityRepo) ClearParentRefs(id string) error {
-	_, err := r.db.Exec(
-		`UPDATE activities SET parent_activity_id = NULL, updated_at = ? WHERE parent_activity_id = ?`,
-		time.Now().UTC(), id,
-	)
-	if err != nil {
-		return fmt.Errorf("clearing parent refs for %s: %w", id, err)
-	}
-	return nil
-}
-
-// SetArchived sets or clears archived_at on an activity. Pass a non-nil time
-// to archive; pass nil to unarchive.
-func (r *ActivityRepo) SetArchived(id string, at *time.Time) error {
-	_, err := r.db.Exec(
-		`UPDATE activities SET archived_at = ?, updated_at = ? WHERE id = ?`,
-		at, time.Now().UTC(), id,
-	)
-	if err != nil {
-		return fmt.Errorf("setting activity archived_at: %w", err)
-	}
-	return nil
-}
-
-// SetAssignments replaces all activity_assignments for an activity with the
-// provided member IDs. An empty slice removes all assignments.
-func (r *ActivityRepo) SetAssignments(activityID string, memberIDs []string) error {
-	tx, err := r.db.Beginx()
-	if err != nil {
-		return fmt.Errorf("beginning assignment transaction: %w", err)
-	}
-	defer func() {
-		if err != nil {
-			_ = tx.Rollback()
-		}
-	}()
-
-	if _, err = tx.Exec(`DELETE FROM activity_assignments WHERE activity_id = ?`, activityID); err != nil {
-		return fmt.Errorf("clearing activity assignments: %w", err)
-	}
-
-	for _, memberID := range memberIDs {
-		if _, err = tx.Exec(
-			`INSERT INTO activity_assignments (activity_id, team_member_id) VALUES (?, ?)`,
-			activityID, memberID,
-		); err != nil {
-			return fmt.Errorf("inserting activity assignment: %w", err)
-		}
-	}
-
-	if err = tx.Commit(); err != nil {
-		return fmt.Errorf("committing activity assignments: %w", err)
-	}
-	return nil
-}
-
-// GetAssignments returns the team_member_ids assigned to an activity.
-func (r *ActivityRepo) GetAssignments(activityID string) ([]string, error) {
-	var ids []string
-	err := r.db.Select(&ids,
-		`SELECT team_member_id FROM activity_assignments WHERE activity_id = ?`, activityID,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("getting activity assignments: %w", err)
-	}
-	if ids == nil {
-		ids = []string{}
-	}
-	return ids, nil
-}
-
-// SetTags replaces all activity_tags for an activity with the provided tag
-// IDs. An empty slice removes all tag associations.
-func (r *ActivityRepo) SetTags(activityID string, tagIDs []string) error {
-	tx, err := r.db.Beginx()
-	if err != nil {
-		return fmt.Errorf("beginning tag transaction: %w", err)
-	}
-	defer func() {
-		if err != nil {
-			_ = tx.Rollback()
-		}
-	}()
-
-	if _, err = tx.Exec(`DELETE FROM activity_tags WHERE activity_id = ?`, activityID); err != nil {
-		return fmt.Errorf("clearing activity tags: %w", err)
-	}
-
-	for _, tagID := range tagIDs {
-		if _, err = tx.Exec(
-			`INSERT INTO activity_tags (activity_id, tag_id) VALUES (?, ?)`,
-			activityID, tagID,
-		); err != nil {
-			return fmt.Errorf("inserting activity tag: %w", err)
-		}
-	}
-
-	if err = tx.Commit(); err != nil {
-		return fmt.Errorf("committing activity tags: %w", err)
-	}
-	return nil
-}
-
-// GetTags returns the tag IDs associated with an activity.
-func (r *ActivityRepo) GetTags(activityID string) ([]string, error) {
-	var ids []string
-	err := r.db.Select(&ids,
-		`SELECT tag_id FROM activity_tags WHERE activity_id = ?`, activityID,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("getting activity tags: %w", err)
-	}
-	if ids == nil {
-		ids = []string{}
-	}
-	return ids, nil
-}
-
-// ListByTimeline returns activities for a specific timeline. When
-// includeArchived is false archived rows are excluded. When from or to are
-// non-nil they bound the query by start_at.
-// AssignedMemberIDs is populated via a second query.
-func (r *ActivityRepo) ListByTimeline(timelineID string, from, to *time.Time, includeArchived bool) ([]*models.Activity, error) {
-	query := `SELECT * FROM activities WHERE timeline_id = ?`
-	args := []any{timelineID}
-	if !includeArchived {
-		query += ` AND archived_at IS NULL`
-	}
-
-	if from != nil {
-		query += ` AND start_at >= ?`
-		args = append(args, from)
-	}
-	if to != nil {
-		query += ` AND start_at <= ?`
-		args = append(args, to)
-	}
-	query += ` ORDER BY start_at ASC`
-
-	acts := make([]*models.Activity, 0)
-	if err := r.db.Select(&acts, query, args...); err != nil {
-		return nil, fmt.Errorf("listing activities: %w", err)
-	}
-	if len(acts) == 0 {
-		return acts, nil
-	}
-
-	// Initialise AssignedMemberIDs and TagIDs to empty slices so JSON fields are
-	// always arrays (never null) even when an activity has no assignments or tags.
-	ids := make([]string, len(acts))
-	byID := make(map[string]*models.Activity, len(acts))
-	for i, a := range acts {
-		a.AssignedMemberIDs = []string{}
-		a.TagIDs = []string{}
-		ids[i] = a.ID
-		byID[a.ID] = a
-	}
-
-	asnQuery, asnArgs, err := sqlx.In(
-		`SELECT activity_id, team_member_id FROM activity_assignments WHERE activity_id IN (?)`,
-		ids,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("building assignments query: %w", err)
-	}
-	asnQuery = r.db.Rebind(asnQuery)
-
-	type assignment struct {
-		ActivityID   string `db:"activity_id"`
-		TeamMemberID string `db:"team_member_id"`
-	}
-	var assignments []assignment
-	if err := r.db.Select(&assignments, asnQuery, asnArgs...); err != nil {
-		return nil, fmt.Errorf("listing activity assignments: %w", err)
-	}
-	for _, a := range assignments {
-		if act, ok := byID[a.ActivityID]; ok {
-			act.AssignedMemberIDs = append(act.AssignedMemberIDs, a.TeamMemberID)
-		}
-	}
-
-	tagQuery, tagArgs, err := sqlx.In(
-		`SELECT activity_id, tag_id FROM activity_tags WHERE activity_id IN (?)`,
-		ids,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("building tags query: %w", err)
-	}
-	tagQuery = r.db.Rebind(tagQuery)
-
-	type activityTag struct {
-		ActivityID string `db:"activity_id"`
-		TagID      string `db:"tag_id"`
-	}
-	var actTags []activityTag
-	if err := r.db.Select(&actTags, tagQuery, tagArgs...); err != nil {
-		return nil, fmt.Errorf("listing activity tags: %w", err)
-	}
-	for _, at := range actTags {
-		if act, ok := byID[at.ActivityID]; ok {
-			act.TagIDs = append(act.TagIDs, at.TagID)
-		}
-	}
-
-	return acts, nil
 }
 ````
 
@@ -34888,1713 +36252,310 @@ function ManageFiltersRow({ onClick }: { onClick: () => void }) {
 }
 ````
 
-## File: packages/web/src/components/layout/Sidebar.tsx
-````typescript
-import { useState, useRef, useEffect } from 'react';
-import {
-  ChevronRight,
-  ChevronLeft,
-  ChevronDown,
-  ChevronsDownUp,
-  ChevronsUpDown,
-  Plus,
-  Settings2,
-  Upload,
-  CalendarPlus,
-  Plug,
-} from 'lucide-react';
-import { Badge } from '@/components/identity/Badge';
-import { useAuth } from '@/contexts/AuthContext';
-import type { components } from '@draba/shared';
+## File: packages/api/internal/db/activity_repo.go
+````go
+package db
 
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
+import (
+	"fmt"
+	"time"
 
-const SIDEBAR_MIN = 220;
-const SIDEBAR_MAX = 360;
+	"github.com/jmoiron/sqlx"
 
-interface ApiTeam {
-  id: string;
-  name: string;
-  color?: string | null;
-  icon?: string | null;
-  archivedAt?: string | null;
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// ActivityRepo is the persistence layer for Activity records.
+type ActivityRepo struct {
+	db *sqlx.DB
 }
 
-interface ApiTimeline {
-  id: string;
-  name: string;
-  startDate?: string;
-  endDate?: string;
-  color?: string | null;
-  icon?: string | null;
-  archivedAt?: string | null;
+// NewActivityRepo returns an ActivityRepo backed by db.
+func NewActivityRepo(db *sqlx.DB) *ActivityRepo {
+	return &ActivityRepo{db: db}
 }
 
-interface Props {
-  collapsed: boolean;
-  onToggle: () => void;
-  onNewActivity?: () => void;
-  /** Stub: bulk-import activities. Surfaced in the "New activity" combo dropdown. */
-  onBulkImport?: () => void;
-  apiTimelines?: ApiTimeline[];
-  archivedTimelines?: ApiTimeline[];
-  activeTimelineId?: string;
-  onActiveTimelineChange?: (id: string) => void;
-  onNewTimeline?: () => void;
-  onEditTimeline?: (timelineId: string) => void;
-  // Team management
-  activeTeam?: ApiTeam;
-  /** All non-archived teams. Used to render the switchable team list. */
-  activeTeams?: ApiTeam[];
-  archivedTeams?: ApiTeam[];
-  onNewTeam?: () => void;
-  onEditTeam?: (team: ApiTeam) => void;
-  onSelectTeam?: (teamId: string) => void;
-  onUnarchiveTeam?: (teamId: string) => void;
-  /** True when the current user is an admin of the active team. */
-  canEditTeam?: boolean;
-  /** Live member list from the API. */
-  members?: TeamMemberWithUser[];
-  /** Called when the user clicks the gear icon on a member row. */
-  onEditMember?: (member: TeamMemberWithUser) => void;
+// Create inserts a new Activity row.
+func (r *ActivityRepo) Create(activity *models.Activity) error {
+	_, err := r.db.NamedExec(`
+		INSERT INTO activities (
+			id, timeline_id, title, description, icon, color,
+			start_at, end_at, all_day, status_id, parent_activity_id,
+			percent_complete, location, url, rrule,
+			caldav_uid, google_event_id,
+			created_by, created_at, updated_at
+		) VALUES (
+			:id, :timeline_id, :title, :description, :icon, :color,
+			:start_at, :end_at, :all_day, :status_id, :parent_activity_id,
+			:percent_complete, :location, :url, :rrule,
+			:caldav_uid, :google_event_id,
+			:created_by, :created_at, :updated_at
+		)
+	`, activity)
+	if err != nil {
+		return fmt.Errorf("creating activity: %w", err)
+	}
+	return nil
 }
 
-const ICON = { width: 15, height: 15, strokeWidth: 1.8 } as const;
-const ICON_SM = { width: 13, height: 13, strokeWidth: 1.8 } as const;
-const ICON_XS = { width: 11, height: 11, strokeWidth: 2 } as const;
-
-interface Timeline {
-  id: string;
-  name: string;
-  color: string;
-  icon: string | null;
-  startDate?: string;
-  endDate?: string;
+// GetByID fetches an Activity by primary key. Returns sql.ErrNoRows (wrapped)
+// when no row matches.
+func (r *ActivityRepo) GetByID(id string) (*models.Activity, error) {
+	var a models.Activity
+	err := r.db.Get(&a, `SELECT * FROM activities WHERE id = ?`, id)
+	if err != nil {
+		return nil, fmt.Errorf("getting activity: %w", err)
+	}
+	return &a, nil
 }
 
-const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-
-function formatDateRange(startDate?: string, endDate?: string): string {
-  if (!startDate || !endDate) return ''
-  const s = new Date(startDate + 'T00:00:00')
-  const e = new Date(endDate + 'T00:00:00')
-  const diffDays = (e.getTime() - s.getTime()) / 86_400_000
-  if (diffDays < 90) {
-    return `${MONTHS[s.getMonth()]} ${s.getDate()} – ${MONTHS[e.getMonth()]} ${e.getDate()} ${e.getFullYear()}`
-  }
-  return `${MONTHS[s.getMonth()]} ${s.getFullYear()} – ${MONTHS[e.getMonth()]} ${e.getFullYear()}`
+// Update replaces all mutable fields on an existing Activity row.
+func (r *ActivityRepo) Update(activity *models.Activity) error {
+	_, err := r.db.NamedExec(`
+		UPDATE activities SET
+			title              = :title,
+			description        = :description,
+			notes              = :notes,
+			icon               = :icon,
+			color              = :color,
+			start_at           = :start_at,
+			end_at             = :end_at,
+			all_day            = :all_day,
+			status_id          = :status_id,
+			parent_activity_id = :parent_activity_id,
+			percent_complete   = :percent_complete,
+			location           = :location,
+			url                = :url,
+			rrule              = :rrule,
+			updated_at         = :updated_at
+		WHERE id = :id
+	`, activity)
+	if err != nil {
+		return fmt.Errorf("updating activity: %w", err)
+	}
+	return nil
 }
 
-
-interface TimelineItemProps {
-  timeline: Timeline;
-  active: boolean;
-  collapsed: boolean;
-  showDate?: boolean;
-  canEdit?: boolean;
-  onClick: () => void;
-  onSettings: () => void;
+// Delete permanently removes an activity row.
+func (r *ActivityRepo) Delete(id string) error {
+	_, err := r.db.Exec(`DELETE FROM activities WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("deleting activity: %w", err)
+	}
+	return nil
 }
 
-function TimelineItem({ timeline, active, collapsed, showDate = true, canEdit = false, onClick, onSettings }: TimelineItemProps) {
-  const [hovered, setHovered] = useState(false);
-  const dateRange = !collapsed && showDate ? formatDateRange(timeline.startDate, timeline.endDate) : ''
-
-  return (
-    <div
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        background: active
-          ? 'rgba(255,255,255,0.10)'
-          : hovered
-          ? 'rgba(255,255,255,0.05)'
-          : 'transparent',
-        borderLeft: active ? `2px solid ${timeline.color}` : '2px solid transparent',
-        transition: 'background 0.12s',
-        cursor: 'pointer',
-        minHeight: 34,
-      }}
-    >
-      <button
-        onClick={onClick}
-        title={collapsed ? timeline.name : undefined}
-        style={{
-          flex: 1,
-          display: 'flex',
-          alignItems: 'center',
-          gap: 8,
-          padding: collapsed ? '7px 14px' : '6px 8px 6px 16px',
-          background: 'none',
-          border: 'none',
-          color: active ? 'white' : 'rgba(255,255,255,0.65)',
-          fontSize: 13,
-          fontWeight: active ? 600 : 400,
-          cursor: 'pointer',
-          fontFamily: 'var(--font-sans)',
-          textAlign: 'left',
-          minWidth: 0,
-        }}
-      >
-        <Badge
-          identity={{ color: timeline.color, icon: timeline.icon ?? '__none__' }}
-          name={timeline.name}
-          shape="square"
-          size={20}
-        />
-        {!collapsed && (
-          <div style={{ minWidth: 0, flex: 1 }}>
-            <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {timeline.name}
-            </div>
-            {dateRange && (
-              <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)', marginTop: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {dateRange}
-              </div>
-            )}
-          </div>
-        )}
-      </button>
-
-      {!collapsed && canEdit && (
-        <button
-          onClick={e => { e.stopPropagation(); onSettings(); }}
-          title={`Configure ${timeline.name}`}
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            width: 26,
-            height: 26,
-            marginRight: 6,
-            background: 'none',
-            border: 'none',
-            borderRadius: 5,
-            color: 'rgba(255,255,255,0.4)',
-            cursor: 'pointer',
-            opacity: hovered ? 1 : 0,
-            transition: 'opacity 0.12s',
-            flexShrink: 0,
-          }}
-          onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.8)')}
-          onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.4)')}
-        >
-          <Settings2 {...ICON_SM} />
-        </button>
-      )}
-    </div>
-  );
+// ClearParentRefs clears parent_activity_id on all activities that reference id
+// as their parent. Called before deleting or archiving the parent so children
+// do not retain a dangling reference.
+func (r *ActivityRepo) ClearParentRefs(id string) error {
+	_, err := r.db.Exec(
+		`UPDATE activities SET parent_activity_id = NULL, updated_at = ? WHERE parent_activity_id = ?`,
+		time.Now().UTC(), id,
+	)
+	if err != nil {
+		return fmt.Errorf("clearing parent refs for %s: %w", id, err)
+	}
+	return nil
 }
 
-function ConnectorItem({ name, status, color }: { name: string; status: string; color: string }) {
-  const [hovered, setHovered] = useState(false);
-
-  return (
-    <div
-      style={{
-        display: 'flex', alignItems: 'center', gap: 8,
-        padding: '6px 6px 6px 16px',
-        cursor: 'pointer',
-        background: hovered ? 'rgba(255,255,255,0.05)' : 'transparent',
-        transition: 'background 0.12s',
-      }}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-    >
-      <div style={{
-        width: 20, height: 20, borderRadius: 4,
-        background: color,
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-        flexShrink: 0,
-      }}>
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="white">
-          <rect x="1" y="1" width="9" height="18" rx="1.5" />
-          <rect x="14" y="1" width="9" height="12" rx="1.5" />
-        </svg>
-      </div>
-      <div style={{ minWidth: 0, flex: 1 }}>
-        <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.65)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {name}
-        </div>
-        <div style={{ fontSize: 9, color: 'rgba(255,255,255,0.25)', marginTop: 1 }}>
-          {status}
-        </div>
-      </div>
-      <button
-        title={`Configure ${name}`}
-        style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          width: 26, height: 26, marginRight: 0,
-          background: 'none', border: 'none', borderRadius: 5,
-          color: 'rgba(255,255,255,0.4)', cursor: 'pointer',
-          opacity: hovered ? 1 : 0, transition: 'opacity 0.12s',
-          flexShrink: 0,
-        }}
-        onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.8)')}
-        onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.4)')}
-      >
-        <Settings2 {...ICON_SM} />
-      </button>
-    </div>
-  );
+// SetArchived sets or clears archived_at on an activity. Pass a non-nil time
+// to archive; pass nil to unarchive.
+func (r *ActivityRepo) SetArchived(id string, at *time.Time) error {
+	_, err := r.db.Exec(
+		`UPDATE activities SET archived_at = ?, updated_at = ? WHERE id = ?`,
+		at, time.Now().UTC(), id,
+	)
+	if err != nil {
+		return fmt.Errorf("setting activity archived_at: %w", err)
+	}
+	return nil
 }
 
-// ── TeamRow ──────────────────────────────────────────────────────────────────
+// SetAssignments replaces all activity_assignments for an activity with the
+// provided member IDs. An empty slice removes all assignments.
+func (r *ActivityRepo) SetAssignments(activityID string, memberIDs []string) error {
+	tx, err := r.db.Beginx()
+	if err != nil {
+		return fmt.Errorf("beginning assignment transaction: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
 
-interface TeamRowProps {
-  team: ApiTeam;
-  isActive: boolean;
-  canEdit: boolean;
-  onSelect?: () => void;
-  onEdit?: () => void;
+	if _, err = tx.Exec(`DELETE FROM activity_assignments WHERE activity_id = ?`, activityID); err != nil {
+		return fmt.Errorf("clearing activity assignments: %w", err)
+	}
+
+	for _, memberID := range memberIDs {
+		if _, err = tx.Exec(
+			`INSERT INTO activity_assignments (activity_id, team_member_id) VALUES (?, ?)`,
+			activityID, memberID,
+		); err != nil {
+			return fmt.Errorf("inserting activity assignment: %w", err)
+		}
+	}
+
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("committing activity assignments: %w", err)
+	}
+	return nil
 }
 
-function TeamRow({ team, isActive, canEdit, onSelect, onEdit }: TeamRowProps) {
-  const [hovered, setHovered] = useState(false);
-
-  return (
-    <div
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-      onClick={() => { if (!isActive) onSelect?.(); }}
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        padding: '5px 6px 5px 16px',
-        borderLeft: isActive ? `2px solid ${team.color ?? 'var(--primary)'}` : '2px solid transparent',
-        background: isActive ? 'rgba(255,255,255,0.07)' : hovered ? 'rgba(255,255,255,0.03)' : 'transparent',
-        cursor: isActive ? 'default' : 'pointer',
-        minHeight: 34,
-        transition: 'background 0.12s',
-      }}
-    >
-      <Badge
-        identity={{ color: team.color ?? 'var(--primary)', icon: team.icon ?? '__name_1__' }}
-        name={team.name}
-        shape="square"
-        size={20}
-      />
-      <span style={{
-        fontSize: 13,
-        fontWeight: isActive ? 600 : 400,
-        color: isActive ? 'white' : 'rgba(255,255,255,0.65)',
-        flex: 1,
-        marginLeft: 8,
-        overflow: 'hidden',
-        textOverflow: 'ellipsis',
-        whiteSpace: 'nowrap',
-        minWidth: 0,
-      }}>
-        {team.name}
-      </span>
-      {canEdit && (
-        <button
-          title="Team settings"
-          onClick={e => { e.stopPropagation(); onEdit?.(); }}
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            width: 26,
-            height: 26,
-            marginRight: 6,
-            background: 'none',
-            border: 'none',
-            borderRadius: 5,
-            color: 'rgba(255,255,255,0.4)',
-            cursor: 'pointer',
-            opacity: hovered ? 1 : 0,
-            transition: 'opacity 0.12s',
-            flexShrink: 0,
-          }}
-          onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.8)')}
-          onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.4)')}
-        >
-          <Settings2 {...ICON_SM} />
-        </button>
-      )}
-    </div>
-  );
+// GetAssignments returns the team_member_ids assigned to an activity.
+func (r *ActivityRepo) GetAssignments(activityID string) ([]string, error) {
+	var ids []string
+	err := r.db.Select(&ids,
+		`SELECT team_member_id FROM activity_assignments WHERE activity_id = ?`, activityID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("getting activity assignments: %w", err)
+	}
+	if ids == nil {
+		ids = []string{}
+	}
+	return ids, nil
 }
 
-// ── MemberSidebarRow ──────────────────────────────────────────────────────────
+// SetTags replaces all activity_tags for an activity with the provided tag
+// IDs. An empty slice removes all tag associations.
+func (r *ActivityRepo) SetTags(activityID string, tagIDs []string) error {
+	tx, err := r.db.Beginx()
+	if err != nil {
+		return fmt.Errorf("beginning tag transaction: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
 
-interface MemberSidebarRowProps {
-  displayName: string;
-  color: string;
-  icon?: string | null;
-  isInactive?: boolean;
-  onEdit?: () => void;
+	if _, err = tx.Exec(`DELETE FROM activity_tags WHERE activity_id = ?`, activityID); err != nil {
+		return fmt.Errorf("clearing activity tags: %w", err)
+	}
+
+	for _, tagID := range tagIDs {
+		if _, err = tx.Exec(
+			`INSERT INTO activity_tags (activity_id, tag_id) VALUES (?, ?)`,
+			activityID, tagID,
+		); err != nil {
+			return fmt.Errorf("inserting activity tag: %w", err)
+		}
+	}
+
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("committing activity tags: %w", err)
+	}
+	return nil
 }
 
-function MemberSidebarRow({ displayName, color, icon, isInactive = false, onEdit }: MemberSidebarRowProps) {
-  const [hovered, setHovered] = useState(false);
-  return (
-    <div
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-      style={{
-        display: 'flex', alignItems: 'center', gap: 8,
-        padding: '4px 6px 4px 16px', cursor: 'default',
-        background: hovered ? 'rgba(255,255,255,0.05)' : 'transparent',
-        opacity: isInactive ? 0.45 : 1,
-      }}
-    >
-      <Badge
-        identity={{ color, icon: icon ?? '__name_words__' }}
-        name={displayName}
-        shape="circle"
-        size={20}
-      />
-      <span style={{ fontSize: 13, color: 'rgba(255,255,255,0.65)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
-        {displayName}
-      </span>
-      {onEdit && (
-        <button
-          onClick={e => { e.stopPropagation(); onEdit(); }}
-          title={`Edit ${displayName}`}
-          style={{
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            width: 22, height: 22, marginRight: 6,
-            background: 'none', border: 'none', borderRadius: 4,
-            color: 'rgba(255,255,255,0.4)', cursor: 'pointer', flexShrink: 0,
-            opacity: hovered ? 1 : 0,
-            transition: 'opacity 0.12s',
-            pointerEvents: hovered ? 'auto' : 'none',
-          }}
-          onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.8)')}
-          onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.4)')}
-        >
-          <Settings2 width={12} height={12} strokeWidth={1.8} />
-        </button>
-      )}
-    </div>
-  );
+// GetTags returns the tag IDs associated with an activity.
+func (r *ActivityRepo) GetTags(activityID string) ([]string, error) {
+	var ids []string
+	err := r.db.Select(&ids,
+		`SELECT tag_id FROM activity_tags WHERE activity_id = ?`, activityID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("getting activity tags: %w", err)
+	}
+	if ids == nil {
+		ids = []string{}
+	}
+	return ids, nil
 }
 
-// ── Sidebar ───────────────────────────────────────────────────────────────────
-
-/**
- * Left navigation rail: brand, team selector with members, and timeline list.
- * Collapsed/expanded state is driven by the parent.
- */
-const TIMELINE_COLORS = ['#1A97A2', '#6366F1', '#F17B2B', '#E11D48', '#10B981', '#F59E0B']
-
-export default function Sidebar({ collapsed, onToggle, onNewActivity, onBulkImport, apiTimelines, archivedTimelines = [], activeTimelineId, onActiveTimelineChange, onNewTimeline, onEditTimeline, activeTeam, activeTeams = [], archivedTeams = [], onNewTeam, onEditTeam, onSelectTeam, canEditTeam = false, members: apiMembers, onEditMember }: Props) {
-  const { user } = useAuth();
-  const currentUserId = (user as { id?: string } | null)?.id;
-  const [internalActiveId, setInternalActiveId] = useState('');
-  const [teamOpen, setTeamOpen] = useState(true);
-  const [connectorsOpen, setConnectorsOpen] = useState(true);
-  // Combo "New activity" dropdown (expanded + collapsed share this state).
-  const [newMenuOpen, setNewMenuOpen] = useState(false);
-  const newMenuRef = useRef<HTMLDivElement>(null);
-  // Collapsed-mode menu is rendered fixed (the rail clips overflow), so we
-  // capture the trigger's viewport rect when it opens.
-  const [collapsedMenuPos, setCollapsedMenuPos] = useState<{ top: number; left: number } | null>(null);
-  // Primary accent for the "New activity" combo button.
-  const NEW_BTN_BG = 'var(--primary)';
-  const NEW_BTN_FG = 'var(--primary-foreground)';
-  const [archivedOpen, setArchivedOpen] = useState(false);
-  const [timelinesOpen, setTimelinesOpen] = useState(true);
-  const [membersOpen, setMembersOpen] = useState(true);
-  const [archivedTeamsOpen, setArchivedTeamsOpen] = useState(false);
-
-  const allExpanded = teamOpen && timelinesOpen && connectorsOpen && membersOpen;
-  function toggleAllSections() {
-    const next = !allExpanded;
-    setTeamOpen(next);
-    setTimelinesOpen(next);
-    setConnectorsOpen(next);
-    setMembersOpen(next);
-    if (!next) {
-      setArchivedOpen(false);
-      setArchivedTeamsOpen(false);
-    }
-  }
-
-  const timelines: Timeline[] = (apiTimelines ?? []).map((t, i) => ({
-    id: t.id,
-    name: t.name,
-    color: t.color ?? TIMELINE_COLORS[i % TIMELINE_COLORS.length],
-    icon: t.icon ?? null,
-    startDate: t.startDate,
-    endDate: t.endDate,
-  }))
-
-  const archivedTimelineItems: Timeline[] = archivedTimelines.map((t) => ({
-    id: t.id,
-    name: t.name,
-    color: t.color ?? '#64748B',
-    icon: t.icon ?? null,
-    startDate: t.startDate,
-    endDate: t.endDate,
-  }))
-  const activeId = activeTimelineId ?? internalActiveId
-  const activeTimeline = timelines.find(t => t.id === activeId) ?? timelines[0] ?? null;
-
-  const [sidebarWidth, setSidebarWidth] = useState(SIDEBAR_MIN);
-  const dragging = useRef(false);
-  const startX = useRef(0);
-  const startW = useRef(SIDEBAR_MIN);
-
-  useEffect(() => {
-    function onMouseMove(e: MouseEvent) {
-      if (!dragging.current) return;
-      const delta = e.clientX - startX.current;
-      setSidebarWidth(Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, startW.current + delta)));
-    }
-    function onMouseUp() {
-      if (!dragging.current) return;
-      dragging.current = false;
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
-    }
-    document.addEventListener('mousemove', onMouseMove);
-    document.addEventListener('mouseup', onMouseUp);
-    return () => {
-      document.removeEventListener('mousemove', onMouseMove);
-      document.removeEventListener('mouseup', onMouseUp);
-    };
-  }, []);
-
-  // Close the "New activity" dropdown on outside click or Escape.
-  useEffect(() => {
-    if (!newMenuOpen) return;
-    function onDocMouseDown(e: MouseEvent) {
-      if (newMenuRef.current && !newMenuRef.current.contains(e.target as Node)) {
-        setNewMenuOpen(false);
-      }
-    }
-    function onKeyDown(e: KeyboardEvent) {
-      if (e.key === 'Escape') setNewMenuOpen(false);
-    }
-    document.addEventListener('mousedown', onDocMouseDown);
-    document.addEventListener('keydown', onKeyDown);
-    return () => {
-      document.removeEventListener('mousedown', onDocMouseDown);
-      document.removeEventListener('keydown', onKeyDown);
-    };
-  }, [newMenuOpen]);
-
-  function onHandleMouseDown(e: React.MouseEvent) {
-    e.preventDefault();
-    dragging.current = true;
-    startX.current = e.clientX;
-    startW.current = sidebarWidth;
-    document.body.style.cursor = 'col-resize';
-    document.body.style.userSelect = 'none';
-  }
-
-  return (
-    <div
-      style={{
-        position: 'relative',
-        width: collapsed ? 52 : sidebarWidth,
-        flexShrink: 0,
-        background: 'var(--color-charcoal)',
-        color: 'white',
-        display: 'flex',
-        flexDirection: 'column',
-        transition: 'width 0.2s ease',
-        overflow: 'hidden',
-        borderRight: '1px solid rgba(255,255,255,0.06)',
-      }}
-    >
-      {/* Logo + collapse toggle */}
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: collapsed ? 'center' : 'space-between',
-          padding: collapsed ? '0 13px' : '0 8px 0 16px',
-          borderBottom: '1px solid rgba(255,255,255,0.08)',
-          height: 'var(--topbar-h)',
-          flexShrink: 0,
-        }}
-      >
-        {!collapsed && (
-          <div
-            onClick={onToggle}
-            style={{ display: 'flex', alignItems: 'center', gap: 9, cursor: 'pointer' }}
-          >
-            <img src="/logo-orange-white.svg" alt="Draba" style={{ width: 28, height: 28, marginTop: 3 }} />
-            <span style={{ fontSize: 22, fontWeight: 700, letterSpacing: '-0.02em', color: 'white' }}>
-              draba
-            </span>
-          </div>
-        )}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-          {!collapsed && (
-            <button
-              onClick={toggleAllSections}
-              title={allExpanded ? 'Collapse all sections' : 'Expand all sections'}
-              style={{
-                background: 'none',
-                border: 'none',
-                color: 'rgba(255,255,255,0.45)',
-                borderRadius: 6,
-                width: 26,
-                height: 26,
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                cursor: 'pointer',
-                flexShrink: 0,
-              }}
-              onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.8)')}
-              onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.45)')}
-            >
-              {allExpanded ? <ChevronsDownUp width={14} height={14} strokeWidth={1.8} /> : <ChevronsUpDown width={14} height={14} strokeWidth={1.8} />}
-            </button>
-          )}
-          <button
-            onClick={onToggle}
-            style={{
-              background: 'rgba(255,255,255,0.08)',
-              border: 'none',
-              color: 'rgba(255,255,255,0.7)',
-              borderRadius: 6,
-              width: 26,
-              height: 26,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              cursor: 'pointer',
-              flexShrink: 0,
-            }}
-          >
-            {collapsed ? <ChevronRight {...ICON} /> : <ChevronLeft {...ICON} />}
-          </button>
-        </div>
-      </div>
-
-      {/* Primary "New activity" combo button — sits directly under the brand. */}
-      {!collapsed && (
-        <div
-          ref={newMenuRef}
-          style={{ position: 'relative', padding: '12px 16px 2px', flexShrink: 0 }}
-        >
-          <div style={{ display: 'flex', alignItems: 'stretch' }}>
-            <button
-              onClick={onNewActivity}
-              style={{
-                flex: 1,
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                gap: 8,
-                padding: '9px 12px',
-                background: NEW_BTN_BG,
-                border: 'none',
-                borderRadius: '7px 0 0 7px',
-                color: NEW_BTN_FG,
-                fontSize: 13,
-                fontWeight: 600,
-                cursor: 'pointer',
-                fontFamily: 'var(--font-sans)',
-              }}
-              onMouseEnter={e => (e.currentTarget.style.filter = 'brightness(1.08)')}
-              onMouseLeave={e => (e.currentTarget.style.filter = 'none')}
-            >
-              <CalendarPlus width={15} height={15} strokeWidth={2} />
-              New activity
-            </button>
-            <button
-              title="More activity options"
-              aria-haspopup="menu"
-              aria-expanded={newMenuOpen}
-              onClick={() => setNewMenuOpen(o => !o)}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                width: 32,
-                background: NEW_BTN_BG,
-                border: 'none',
-                borderLeft: '1px solid rgba(0,0,0,0.18)',
-                borderRadius: '0 7px 7px 0',
-                color: NEW_BTN_FG,
-                cursor: 'pointer',
-              }}
-              onMouseEnter={e => (e.currentTarget.style.filter = 'brightness(1.08)')}
-              onMouseLeave={e => (e.currentTarget.style.filter = 'none')}
-            >
-              <ChevronDown
-                width={14}
-                height={14}
-                strokeWidth={2}
-                style={{ transform: newMenuOpen ? 'rotate(180deg)' : 'none', transition: 'transform 0.12s' }}
-              />
-            </button>
-          </div>
-
-          {newMenuOpen && (
-            <div
-              role="menu"
-              style={{
-                position: 'absolute',
-                top: 'calc(100% - 4px)',
-                left: 16,
-                right: 16,
-                background: 'var(--color-charcoal)',
-                border: '1px solid rgba(255,255,255,0.12)',
-                borderRadius: 7,
-                boxShadow: '0 8px 24px rgba(0,0,0,0.45)',
-                padding: 4,
-                zIndex: 30,
-              }}
-            >
-              <button
-                role="menuitem"
-                onClick={() => { setNewMenuOpen(false); onBulkImport?.(); }}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: 8,
-                  padding: '8px 10px', width: '100%',
-                  background: 'none', border: 'none', borderRadius: 5,
-                  color: 'rgba(255,255,255,0.75)', fontSize: 13,
-                  cursor: 'pointer', fontFamily: 'var(--font-sans)', textAlign: 'left',
-                }}
-                onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.07)')}
-                onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-              >
-                <Upload width={14} height={14} strokeWidth={1.8} />
-                Bulk import
-              </button>
-            </div>
-          )}
-        </div>
-      )}
-
-      <div style={{ flex: 1, overflowY: 'auto' }}>
-
-        {/* Collapsed: team + timeline icons only */}
-        {collapsed && (
-          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6, padding: '10px 0' }}>
-            {/* Active team badge — click to expand */}
-            <div
-              title={activeTeam?.name ?? 'Team'}
-              onClick={onToggle}
-              style={{ cursor: 'pointer', flexShrink: 0 }}
-            >
-              <Badge
-                identity={{ color: activeTeam?.color ?? 'var(--primary)', icon: activeTeam?.icon ?? '__name_1__' }}
-                name={activeTeam?.name ?? ''}
-                shape="square"
-                size={28}
-              />
-            </div>
-            {/* Active timeline — click to expand */}
-            {activeTimeline && (
-              <div
-                title={activeTimeline.name}
-                onClick={onToggle}
-                style={{ cursor: 'pointer' }}
-              >
-                <Badge
-                  identity={{ color: activeTimeline.color, icon: activeTimeline.icon ?? '__none__' }}
-                  name={activeTimeline.name}
-                  shape="square"
-                  size={28}
-                />
-              </div>
-            )}
-
-            {/* New activity combo — icon button opens a menu with both actions.
-                order:-1 keeps it at the top, matching the expanded layout. */}
-            <div ref={newMenuRef} style={{ position: 'relative', flexShrink: 0, order: -1, marginBottom: 2 }}>
-              <button
-                title="New activity"
-                aria-haspopup="menu"
-                aria-expanded={newMenuOpen}
-                onClick={e => {
-                  if (newMenuOpen) { setNewMenuOpen(false); return; }
-                  const r = e.currentTarget.getBoundingClientRect();
-                  setCollapsedMenuPos({ top: r.top, left: r.right + 6 });
-                  setNewMenuOpen(true);
-                }}
-                style={{
-                  width: 30,
-                  height: 30,
-                  borderRadius: 7,
-                  background: NEW_BTN_BG,
-                  border: 'none',
-                  color: NEW_BTN_FG,
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  cursor: 'pointer',
-                }}
-                onMouseEnter={e => (e.currentTarget.style.filter = 'brightness(1.08)')}
-                onMouseLeave={e => (e.currentTarget.style.filter = 'none')}
-              >
-                <CalendarPlus width={16} height={16} strokeWidth={2} />
-              </button>
-
-              {newMenuOpen && collapsedMenuPos && (
-                <div
-                  role="menu"
-                  style={{
-                    position: 'fixed',
-                    top: collapsedMenuPos.top,
-                    left: collapsedMenuPos.left,
-                    minWidth: 160,
-                    background: 'var(--color-charcoal)',
-                    border: '1px solid rgba(255,255,255,0.12)',
-                    borderRadius: 7,
-                    boxShadow: '0 8px 24px rgba(0,0,0,0.45)',
-                    padding: 4,
-                    zIndex: 30,
-                  }}
-                >
-                  <button
-                    role="menuitem"
-                    onClick={() => { setNewMenuOpen(false); onNewActivity?.(); }}
-                    style={{
-                      display: 'flex', alignItems: 'center', gap: 8,
-                      padding: '8px 10px', width: '100%',
-                      background: 'none', border: 'none', borderRadius: 5,
-                      color: 'rgba(255,255,255,0.75)', fontSize: 13,
-                      cursor: 'pointer', fontFamily: 'var(--font-sans)', textAlign: 'left',
-                    }}
-                    onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.07)')}
-                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-                  >
-                    <CalendarPlus width={14} height={14} strokeWidth={1.8} />
-                    New activity
-                  </button>
-                  <button
-                    role="menuitem"
-                    onClick={() => { setNewMenuOpen(false); onBulkImport?.(); }}
-                    style={{
-                      display: 'flex', alignItems: 'center', gap: 8,
-                      padding: '8px 10px', width: '100%',
-                      background: 'none', border: 'none', borderRadius: 5,
-                      color: 'rgba(255,255,255,0.75)', fontSize: 13,
-                      cursor: 'pointer', fontFamily: 'var(--font-sans)', textAlign: 'left',
-                    }}
-                    onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.07)')}
-                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-                  >
-                    <Upload width={14} height={14} strokeWidth={1.8} />
-                    Bulk import
-                  </button>
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-
-        {/* Team section */}
-        {!collapsed && (
-          <div style={{ borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
-            {/* Section header — collapsible, same pattern as TIMELINE */}
-            <button
-              onClick={() => setTeamOpen(o => !o)}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                width: '100%',
-                padding: '6px 12px 6px 16px',
-                background: 'none',
-                border: 'none',
-                cursor: 'pointer',
-                color: 'rgba(255,255,255,0.35)',
-                fontFamily: 'var(--font-sans)',
-              }}
-            >
-              <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
-                Team
-              </span>
-              {teamOpen
-                ? <ChevronDown width={12} height={12} strokeWidth={2} />
-                : <ChevronRight width={12} height={12} strokeWidth={2} />}
-            </button>
-
-            {/* Team rows — active team highlighted; others clickable to switch */}
-            {(teamOpen ? activeTeams : activeTeam ? [activeTeam] : []).map(t => (
-              <TeamRow
-                key={t.id}
-                team={t}
-                isActive={t.id === activeTeam?.id}
-                canEdit={canEditTeam}
-                onSelect={() => onSelectTeam?.(t.id)}
-                onEdit={() => onEditTeam?.(t)}
-              />
-            ))}
-            {/* Fallback when activeTeams not yet loaded but activeTeam is known */}
-            {!activeTeams.length && activeTeam && (
-              <TeamRow
-                team={activeTeam}
-                isActive
-                canEdit={canEditTeam}
-                onEdit={() => onEditTeam?.(activeTeam)}
-              />
-            )}
-
-            {/* New team button — only superadmins get onNewTeam passed from the parent */}
-            {teamOpen && onNewTeam && (
-              <button
-                onClick={onNewTeam}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: 8,
-                  padding: '4px 16px', background: 'none', border: 'none',
-                  color: 'rgba(255,255,255,0.35)', fontSize: 12,
-                  cursor: 'pointer', width: '100%', fontFamily: 'var(--font-sans)',
-                }}
-                onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.7)')}
-                onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.35)')}
-              >
-                <Plus {...ICON_SM} />
-                New team
-              </button>
-            )}
-
-            {/* Archived teams — collapsible sub-section, shown when team section is open */}
-            {teamOpen && archivedTeams.length > 0 && (
-              <div>
-                <button
-                  onClick={() => setArchivedTeamsOpen(o => !o)}
-                  style={{
-                    display: 'flex', alignItems: 'center', gap: 5,
-                    width: '100%', padding: '4px 8px 4px 16px',
-                    background: 'none', border: 'none', cursor: 'pointer',
-                    color: 'rgba(255,255,255,0.25)', fontFamily: 'var(--font-sans)',
-                  }}
-                  onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.5)')}
-                  onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.25)')}
-                >
-                  {archivedTeamsOpen
-                    ? <ChevronDown {...ICON_XS} />
-                    : <ChevronRight {...ICON_XS} />}
-                  <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
-                    Archived ({archivedTeams.length})
-                  </span>
-                </button>
-                {archivedTeamsOpen && archivedTeams.map(t => (
-                  <TeamRow
-                    key={t.id}
-                    team={t}
-                    isActive={false}
-                    canEdit={Boolean(onNewTeam)}
-                    onEdit={() => onEditTeam?.(t)}
-                  />
-                ))}
-              </div>
-            )}
-
-            {/* Members — only when team section is expanded */}
-            {teamOpen && (
-              <>
-                <button
-                  onClick={() => setMembersOpen(o => !o)}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 5,
-                    width: '100%',
-                    padding: '6px 8px 4px 16px',
-                    background: 'none',
-                    border: 'none',
-                    cursor: 'pointer',
-                    color: 'rgba(255,255,255,0.35)',
-                    fontFamily: 'var(--font-sans)',
-                  }}
-                >
-                  {membersOpen
-                    ? <ChevronDown {...ICON_XS} />
-                    : <ChevronRight {...ICON_XS} />}
-                  <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
-                    Members
-                  </span>
-                </button>
-
-                {membersOpen && (
-                  <div style={{ paddingBottom: 8 }}>
-                    {(apiMembers ?? []).map(m => {
-                      const displayName = (m as TeamMemberWithUser).displayName || m.id;
-                      const color = m.color ?? '#8b949e';
-                      const icon = (m as TeamMemberWithUser).icon ?? null;
-                      return (
-                        <MemberSidebarRow
-                          key={m.id}
-                          displayName={displayName}
-                          color={color}
-                          icon={icon}
-                          isInactive={Boolean((m as TeamMemberWithUser).archivedAt)}
-                          onEdit={onEditMember && (m as TeamMemberWithUser).userId !== currentUserId
-                            ? () => onEditMember(m as TeamMemberWithUser)
-                            : undefined}
-                        />
-                      );
-                    })}
-                  </div>
-                )}
-              </>
-            )}
-          </div>
-        )}
-
-        {/* Timelines section */}
-        <div style={{ padding: '8px 0' }}>
-          {!collapsed ? (
-            <button
-              onClick={() => setTimelinesOpen(o => !o)}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                width: '100%',
-                padding: '6px 12px 4px 16px',
-                background: 'none',
-                border: 'none',
-                cursor: 'pointer',
-                color: 'rgba(255,255,255,0.35)',
-                fontFamily: 'var(--font-sans)',
-              }}
-            >
-              <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
-                Timeline
-              </span>
-              {timelinesOpen
-                ? <ChevronDown width={12} height={12} strokeWidth={2} />
-                : <ChevronRight width={12} height={12} strokeWidth={2} />}
-            </button>
-          ) : (
-            <div style={{ height: 8 }} />
-          )}
-
-          {!collapsed && (timelinesOpen ? (
-            <>
-              {timelines.map(tl => (
-                <TimelineItem
-                  key={tl.id}
-                  timeline={tl}
-                  active={activeId === tl.id}
-                  collapsed={false}
-                  canEdit={canEditTeam}
-                  onClick={() => { setInternalActiveId(tl.id); onActiveTimelineChange?.(tl.id); }}
-                  onSettings={() => onEditTimeline?.(tl.id)}
-                />
-              ))}
-              <button
-                onClick={onNewTimeline}
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 8,
-                  padding: '6px 16px',
-                  background: 'none',
-                  border: 'none',
-                  color: 'rgba(255,255,255,0.35)',
-                  fontSize: 12,
-                  cursor: onNewTimeline ? 'pointer' : 'default',
-                  width: '100%',
-                  fontFamily: 'var(--font-sans)',
-                  marginTop: 2,
-                }}
-                onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.7)')}
-                onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.35)')}
-              >
-                <Plus {...ICON_SM} />
-                New timeline
-              </button>
-
-              {/* Archived sub-section */}
-              {archivedTimelineItems.length > 0 && (
-                <>
-                  <button
-                    onClick={() => setArchivedOpen(o => !o)}
-                    style={{
-                      display: 'flex', alignItems: 'center', gap: 5,
-                      width: '100%', padding: '6px 12px 4px 16px',
-                      background: 'none', border: 'none', cursor: 'pointer',
-                      color: 'rgba(255,255,255,0.25)', fontFamily: 'var(--font-sans)',
-                      marginTop: 4,
-                    }}
-                    onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.45)')}
-                    onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.25)')}
-                  >
-                    {archivedOpen
-                      ? <ChevronDown {...ICON_XS} />
-                      : <ChevronRight {...ICON_XS} />}
-                    <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
-                      Archived
-                    </span>
-                    <span style={{ fontSize: 10, marginLeft: 4 }}>({archivedTimelineItems.length})</span>
-                  </button>
-
-                  {archivedOpen && (
-                    <div style={{ opacity: 0.6 }}>
-                      {archivedTimelineItems.map(tl => (
-                        <TimelineItem
-                          key={tl.id}
-                          timeline={tl}
-                          active={false}
-                          collapsed={false}
-                          canEdit={canEditTeam}
-                          onClick={() => {}}
-                          onSettings={() => onEditTimeline?.(tl.id)}
-                        />
-                      ))}
-                    </div>
-                  )}
-                </>
-              )}
-            </>
-          ) : (
-            /* Section collapsed: show just the active timeline */
-            <TimelineItem
-              timeline={activeTimeline}
-              active={true}
-              collapsed={false}
-              showDate={false}
-              canEdit={canEditTeam}
-              onClick={() => setTimelinesOpen(true)}
-              onSettings={() => onEditTimeline?.(activeTimeline.id)}
-            />
-          ))}
-        </div>
-        {/* Connectors section — contextual to active timeline */}
-        {!collapsed && (
-          <div style={{ padding: '8px 0', borderTop: '1px solid rgba(255,255,255,0.08)' }}>
-            <div style={{ display: 'flex', alignItems: 'center', padding: '6px 6px 4px 16px' }}>
-              <button
-                onClick={() => setConnectorsOpen(o => !o)}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: 6, flex: 1,
-                  background: 'none', border: 'none', cursor: 'pointer',
-                  color: 'rgba(255,255,255,0.35)', fontFamily: 'var(--font-sans)',
-                  padding: 0,
-                }}
-              >
-                <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
-                  Connectors
-                </span>
-                {connectorsOpen
-                  ? <ChevronDown width={12} height={12} strokeWidth={2} />
-                  : <ChevronRight width={12} height={12} strokeWidth={2} />}
-              </button>
-            </div>
-
-            {connectorsOpen && (
-              <>
-                <div style={{
-                  padding: '0 16px 4px',
-                  fontSize: 10,
-                  color: 'rgba(255,255,255,0.22)',
-                  letterSpacing: '0.02em',
-                }}>
-                  {activeTimeline?.name}
-                </div>
-                {/* Stub: connected Trello board */}
-                <ConnectorItem name="Trello — Launch Board" status="Synced · 2 min ago" color="#0079BF" />
-                <button
-                  style={{
-                    display: 'flex', alignItems: 'center', gap: 8,
-                    padding: '6px 16px', background: 'none', border: 'none',
-                    color: 'rgba(255,255,255,0.35)', fontSize: 12,
-                    cursor: 'pointer', width: '100%', fontFamily: 'var(--font-sans)',
-                  }}
-                  onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.7)')}
-                  onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.35)')}
-                >
-                  <Plug width={13} height={13} strokeWidth={1.8} />
-                  Add connector
-                </button>
-              </>
-            )}
-          </div>
-        )}
-      </div>
-
-      {/* Resize handle */}
-      {!collapsed && (
-        <div
-          onMouseDown={onHandleMouseDown}
-          style={{
-            position: 'absolute',
-            top: 0,
-            right: 0,
-            width: 5,
-            height: '100%',
-            cursor: 'col-resize',
-            zIndex: 20,
-          }}
-          onMouseEnter={e => ((e.currentTarget.lastElementChild as HTMLElement).style.background = 'var(--primary)')}
-          onMouseLeave={e => ((e.currentTarget.lastElementChild as HTMLElement).style.background = 'transparent')}
-        >
-          <div
-            style={{
-              position: 'absolute',
-              top: 0,
-              right: 0,
-              width: 2,
-              height: '100%',
-              background: 'transparent',
-              transition: 'background 0.15s',
-              pointerEvents: 'none',
-            }}
-          />
-        </div>
-      )}
-    </div>
-  );
-}
-````
-
-## File: packages/web/src/hooks/useTeamActivities.ts
-````typescript
-/**
- * TanStack Query hooks for team-scoped data.
- *
- * All hooks call createAuthFetch to inject the current access token at
- * query-time so stale closures never send an expired token.
- */
-
-import { useCallback } from 'react'
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import type { components } from '@draba/shared'
-import { createAuthFetch } from '@/lib/api'
-import { useAuth } from '@/contexts/AuthContext'
-import { useWebSocket } from '@/hooks/useWebSocket'
-
-type Activity = components['schemas']['Activity']
-type Team = components['schemas']['Team']
-type Timeline = components['schemas']['Timeline']
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
-type TimelineAccessEntry = components['schemas']['TimelineAccessEntry']
-type PatchTimelineInput = components['schemas']['PatchTimelineInput']
-
-/** Query key factory — centralises cache key strings. */
-export const keys = {
-  myTeams: () => ['teams'] as const,
-  timelineActivities: (timelineId: string, from?: string, to?: string) =>
-    ['timelines', timelineId, 'activities', { from, to }] as const,
-  teamMembers: (teamId: string) =>
-    ['teams', teamId, 'members'] as const,
-  teamTimelines: (teamId: string) =>
-    ['teams', teamId, 'timelines'] as const,
-}
-
-/** Fetches all teams the authenticated user belongs to. */
-export function useMyTeams(includeArchived = false) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: [...keys.myTeams(), { includeArchived }],
-    queryFn: async () => (await authFetch<Team[] | null>(includeArchived ? '/teams?archived=true' : '/teams')) ?? [],
-  })
-}
-
-/** Fetches a single team by ID. */
-export function useTeam(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: ['teams', teamId],
-    queryFn: () => authFetch<Team>(`/teams/${teamId}`),
-    enabled: Boolean(teamId),
-  })
-}
-
-/** Fetches all non-archived timelines for a team. */
-export function useTeamTimelines(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: keys.teamTimelines(teamId),
-    queryFn: async () => (await authFetch<Timeline[] | null>(`/teams/${teamId}/timelines`)) ?? [],
-    enabled: Boolean(teamId),
-  })
-}
-
-/** Fetches activities for a timeline, optionally bounded by date range. */
-export function useTimelineActivities(teamId: string, timelineId: string, from?: string, to?: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: keys.timelineActivities(timelineId, from, to),
-    queryFn: async () => {
-      const params = new URLSearchParams()
-      if (from) params.set('from', from)
-      if (to) params.set('to', to)
-      const qs = params.toString()
-      return (await authFetch<Activity[] | null>(`/teams/${teamId}/timelines/${timelineId}/activities${qs ? `?${qs}` : ''}`)) ?? []
-    },
-    enabled: Boolean(teamId) && Boolean(timelineId),
-  })
-}
-
-/** Fetches the member list for a team. */
-export function useTeamMembers(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: keys.teamMembers(teamId),
-    queryFn: async () => (await authFetch<TeamMemberWithUser[] | null>(`/teams/${teamId}/members`)) ?? [],
-    enabled: Boolean(teamId),
-  })
-}
-
-/**
- * Subscribes to the team's WebSocket feed and applies surgical cache updates
- * for activity.created / activity.updated / activity.deleted deltas.
- *
- * Conflict strategy: for activity.updated, incoming deltas are only applied
- * when their updatedAt timestamp is strictly newer than the cached version.
- * This prevents self-echo (our own PATCH broadcast arriving back) and handles
- * the last-writer-wins case where a concurrent remote edit arrives while our
- * mutation is in-flight — the server-returned updatedAt on our onSuccess will
- * always win if our PATCH was truly last.
- */
-export function useTeamActivitySync(
-  teamId: string,
-  accessToken: string | null | undefined,
-) {
-  const client = useQueryClient()
-
-  const handleMessage = useCallback(
-    (msg: { type: string; payload?: unknown }) => {
-      if (!teamId || !msg.payload) return
-
-      if (msg.type === 'activity.created') {
-        const incoming = msg.payload as Activity
-        // Target all timeline-scoped activity cache entries by using the
-        // timelineId from the incoming activity payload.
-        if (!incoming.timelineId) return
-        client.setQueriesData<Activity[]>(
-          { queryKey: ['timelines', incoming.timelineId, 'activities'] },
-          (old) => {
-            if (!old) return old
-            // Guard against duplicate delivery.
-            if (old.some((a) => a.id === incoming.id)) return old
-            return [...old, incoming]
-          },
-        )
-      } else if (msg.type === 'activity.updated') {
-        const incoming = msg.payload as Activity
-        if (!incoming.timelineId) return
-        client.setQueriesData<Activity[]>(
-          { queryKey: ['timelines', incoming.timelineId, 'activities'] },
-          (old) => {
-            if (!old) return old
-            return old.map((a) => {
-              if (a.id !== incoming.id) return a
-              // Skip if the cache already holds the same or a newer version.
-              const cachedMs = new Date(a.updatedAt).getTime()
-              const incomingMs = new Date(incoming.updatedAt).getTime()
-              return incomingMs > cachedMs ? incoming : a
-            })
-          },
-        )
-      } else if (msg.type === 'activity.deleted') {
-        const { id } = msg.payload as { id: string }
-        // activity.deleted payload only has id — invalidate all timeline
-        // activity queries for this team so caches stay consistent.
-        client.invalidateQueries({ queryKey: ['timelines'] })
-        // Optimistically remove from all cached timeline activity lists.
-        client.setQueriesData<Activity[]>(
-          { queryKey: ['timelines'] },
-          (old) => old?.filter((a) => a.id !== id),
-        )
-      }
-    },
-    [client, teamId],
-  )
-
-  useWebSocket({
-    token: accessToken,
-    teamIds: teamId ? [teamId] : [],
-    onMessage: handleMessage,
-  })
-}
-
-interface CreateActivityInput {
-  title: string
-  startAt: string
-  endAt: string
-  description?: string | null
-  color?: string | null
-  icon?: string | null
-  assignedMemberIds?: string[]
-  tagIds?: string[]
-  parentActivityId?: string | null
-  percentComplete?: number | null
-  /** Client-only: if set, replace this placeholder ID in the cache instead of appending. */
-  _tempId?: string
-}
-
-interface UpdateActivityInput {
-  activityId: string
-  patch: {
-    title?: string
-    description?: string | null
-    notes?: string | null
-    startAt?: string
-    endAt?: string
-    allDay?: boolean
-    color?: string | null
-    icon?: string | null
-    location?: string | null
-    url?: string | null
-    statusId?: string | null
-    parentActivityId?: string | null
-    percentComplete?: number | null
-    assignedMemberIds?: string[]
-    tagIds?: string[]
-  }
-}
-
-/** Creates an activity in a timeline and inserts it directly into the cache. */
-export function useCreateActivity(teamId: string, timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: ({ _tempId: _, ...input }: CreateActivityInput) =>
-      authFetch<Activity>(`/teams/${teamId}/timelines/${timelineId}/activities`, {
-        method: 'POST',
-        body: JSON.stringify(input),
-      }),
-    onSuccess: (created, variables) => {
-      const tempId = variables._tempId
-      client.setQueriesData<Activity[]>(
-        { queryKey: ['timelines', timelineId, 'activities'] },
-        (old) => {
-          if (!old) return [created]
-          const hasReal = old.some((a) => a.id === created.id)
-          const hasTemp = tempId ? old.some((a) => a.id === tempId) : false
-          // The WS activity.created self-echo may win the race and append the
-          // real record before this onSuccess runs. In that case we must still
-          // drop the optimistic placeholder, otherwise it lingers as a duplicate
-          // "New Activity" row (and inline edits keep targeting the dead temp id).
-          if (hasReal) {
-            return hasTemp ? old.filter((a) => a.id !== tempId) : old
-          }
-          // Replace optimistic placeholder in-place to avoid a position flash.
-          if (hasTemp) {
-            return old.map((a) => (a.id === tempId ? created : a))
-          }
-          return [...old, created]
-        },
-      )
-    },
-  })
-}
-
-/** PATCHes an activity and optimistically updates the cache. */
-export function useUpdateActivity(timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: ({ activityId, patch }: UpdateActivityInput) =>
-      authFetch<Activity>(`/activities/${activityId}`, {
-        method: 'PATCH',
-        body: JSON.stringify(patch),
-      }),
-    onMutate: async ({ activityId, patch }) => {
-      await client.cancelQueries({ queryKey: ['timelines', timelineId, 'activities'] })
-      const snapshot = client.getQueriesData<Activity[]>({ queryKey: ['timelines', timelineId, 'activities'] })
-      client.setQueriesData<Activity[]>(
-        { queryKey: ['timelines', timelineId, 'activities'] },
-        (old) => old?.map((a) => (a.id === activityId ? { ...a, ...patch } : a)),
-      )
-      return { snapshot }
-    },
-    onError: (_err, _vars, context) => {
-      if (context?.snapshot) {
-        for (const [key, data] of context.snapshot) {
-          client.setQueryData(key, data)
-        }
-      }
-    },
-    onSuccess: (updated) => {
-      client.setQueriesData<Activity[]>(
-        { queryKey: ['timelines', timelineId, 'activities'] },
-        (old) => old?.map((a) => (a.id === updated.id ? updated : a)),
-      )
-    },
-  })
-}
-
-interface CreateTeamInput {
-  name: string
-  description?: string | null
-  notes?: string | null
-  color?: string | null
-  icon?: string | null
-}
-
-interface UpdateTeamInput {
-  teamId: string
-  patch: {
-    name?: string
-    description?: string | null
-    notes?: string | null
-    color?: string | null
-    icon?: string | null
-  }
-}
-
-/** Creates a team and inserts it into the active-teams cache. */
-export function useCreateTeam() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (input: CreateTeamInput) =>
-      authFetch<Team>('/teams', {
-        method: 'POST',
-        body: JSON.stringify(input),
-      }),
-    onSuccess: () => {
-      // Invalidate both active and archived team lists.
-      client.invalidateQueries({ queryKey: ['teams'] })
-    },
-  })
-}
-
-/** PATCHes a team's mutable fields and refreshes the cache. */
-export function useUpdateTeam() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: ({ teamId, patch }: UpdateTeamInput) =>
-      authFetch<Team>(`/teams/${teamId}`, {
-        method: 'PATCH',
-        body: JSON.stringify(patch),
-      }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: ['teams'] })
-    },
-  })
-}
-
-/** Archives a team (soft delete). */
-export function useArchiveTeam() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (teamId: string) =>
-      authFetch<Team>(`/teams/${teamId}/archive`, { method: 'POST' }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: ['teams'] })
-    },
-  })
-}
-
-/** Restores an archived team. */
-export function useUnarchiveTeam() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (teamId: string) =>
-      authFetch<Team>(`/teams/${teamId}/unarchive`, { method: 'POST' }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: ['teams'] })
-    },
-  })
-}
-
-/** Archives an activity (soft-delete). Removes it from the active-list cache. */
-export function useArchiveActivity(timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (activityId: string) =>
-      authFetch<Activity>(`/activities/${activityId}/archive`, { method: 'POST' }),
-    onSuccess: (_data, activityId) => {
-      client.setQueriesData<Activity[]>(
-        { queryKey: ['timelines', timelineId, 'activities'] },
-        (old) => old?.filter((a) => a.id !== activityId),
-      )
-    },
-  })
-}
-
-/** Deletes an activity and removes it from the cache. */
-export function useDeleteActivity(timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (activityId: string) =>
-      authFetch<void>(`/activities/${activityId}`, { method: 'DELETE' }),
-    onSuccess: (_data, activityId) => {
-      client.setQueriesData<Activity[]>(
-        { queryKey: ['timelines', timelineId, 'activities'] },
-        (old) => old?.filter((a) => a.id !== activityId),
-      )
-    },
-  })
-}
-
-// ── Timeline CRUD (Phase 10.3) ────────────────────────────────────────────────
-
-/** Fetches all timelines for a team, optionally including archived ones. */
-export function useTeamTimelinesWithArchived(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: [...keys.teamTimelines(teamId), { includeArchived: true }],
-    queryFn: async () =>
-      (await authFetch<Timeline[] | null>(`/teams/${teamId}/timelines?archived=true`)) ?? [],
-    enabled: Boolean(teamId),
-  })
-}
-
-/** Creates a new timeline for a team. */
-export function useCreateTimeline(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (input: { name: string; startDate: string; endDate: string; color?: string | null; icon?: string | null; description?: string | null; notes?: string | null; templateId?: string | null }) =>
-      authFetch<Timeline>(`/teams/${teamId}/timelines`, {
-        method: 'POST',
-        body: JSON.stringify(input),
-      }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
-    },
-  })
-}
-
-/** PATCHes a timeline's mutable fields. */
-export function useUpdateTimeline(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: ({ timelineId, patch }: { timelineId: string; patch: PatchTimelineInput }) =>
-      authFetch<Timeline>(`/timelines/${timelineId}`, {
-        method: 'PATCH',
-        body: JSON.stringify(patch),
-      }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
-    },
-  })
-}
-
-/** Hard-deletes a timeline. */
-export function useDeleteTimeline(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (timelineId: string) =>
-      authFetch<void>(`/timelines/${timelineId}`, { method: 'DELETE' }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
-    },
-  })
-}
-
-/** Archives a timeline. */
-export function useArchiveTimeline(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (timelineId: string) =>
-      authFetch<Timeline>(`/timelines/${timelineId}/archive`, { method: 'POST' }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
-    },
-  })
-}
-
-/** Restores an archived timeline. */
-export function useUnarchiveTimeline(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (timelineId: string) =>
-      authFetch<Timeline>(`/timelines/${timelineId}/unarchive`, { method: 'POST' }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
-    },
-  })
-}
-
-/** Fetches the access grant list for a timeline. */
-export function useTimelineAccess(teamId: string, timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: ['teams', teamId, 'timelines', timelineId, 'access'],
-    queryFn: async () =>
-      (await authFetch<TimelineAccessEntry[]>(
-        `/teams/${teamId}/timelines/${timelineId}/access`,
-      )) ?? [],
-    enabled: Boolean(teamId) && Boolean(timelineId),
-  })
-}
-
-/** Grants or updates a member's access to a timeline. */
-export function useGrantTimelineAccess(teamId: string, timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: ({ memberId, role }: { memberId: string; role: 'admin' | 'member' }) =>
-      authFetch<TimelineAccessEntry[]>(
-        `/teams/${teamId}/timelines/${timelineId}/access/${memberId}`,
-        { method: 'PUT', body: JSON.stringify({ role }) },
-      ),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: ['teams', teamId, 'timelines', timelineId, 'access'] })
-    },
-  })
-}
-
-/** Revokes a member's access to a timeline. */
-export function useRevokeTimelineAccess(teamId: string, timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (memberId: string) =>
-      authFetch<void>(`/teams/${teamId}/timelines/${timelineId}/access/${memberId}`, {
-        method: 'DELETE',
-      }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: ['teams', teamId, 'timelines', timelineId, 'access'] })
-    },
-  })
+// ListByTimeline returns activities for a specific timeline. When
+// includeArchived is false archived rows are excluded. When from or to are
+// non-nil they bound the query by start_at.
+// AssignedMemberIDs is populated via a second query.
+func (r *ActivityRepo) ListByTimeline(timelineID string, from, to *time.Time, includeArchived bool) ([]*models.Activity, error) {
+	query := `SELECT * FROM activities WHERE timeline_id = ?`
+	args := []any{timelineID}
+	if !includeArchived {
+		query += ` AND archived_at IS NULL`
+	}
+
+	if from != nil {
+		// Overlap semantics: include any activity whose end_at is at or after from.
+		// This catches multi-week/multi-month activities that START before the
+		// visible range but still cross it.
+		query += ` AND end_at >= ?`
+		args = append(args, from)
+	}
+	if to != nil {
+		query += ` AND start_at <= ?`
+		args = append(args, to)
+	}
+	query += ` ORDER BY start_at ASC`
+
+	acts := make([]*models.Activity, 0)
+	if err := r.db.Select(&acts, query, args...); err != nil {
+		return nil, fmt.Errorf("listing activities: %w", err)
+	}
+	if len(acts) == 0 {
+		return acts, nil
+	}
+
+	// Initialise AssignedMemberIDs and TagIDs to empty slices so JSON fields are
+	// always arrays (never null) even when an activity has no assignments or tags.
+	ids := make([]string, len(acts))
+	byID := make(map[string]*models.Activity, len(acts))
+	for i, a := range acts {
+		a.AssignedMemberIDs = []string{}
+		a.TagIDs = []string{}
+		ids[i] = a.ID
+		byID[a.ID] = a
+	}
+
+	asnQuery, asnArgs, err := sqlx.In(
+		`SELECT activity_id, team_member_id FROM activity_assignments WHERE activity_id IN (?)`,
+		ids,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("building assignments query: %w", err)
+	}
+	asnQuery = r.db.Rebind(asnQuery)
+
+	type assignment struct {
+		ActivityID   string `db:"activity_id"`
+		TeamMemberID string `db:"team_member_id"`
+	}
+	var assignments []assignment
+	if err := r.db.Select(&assignments, asnQuery, asnArgs...); err != nil {
+		return nil, fmt.Errorf("listing activity assignments: %w", err)
+	}
+	for _, a := range assignments {
+		if act, ok := byID[a.ActivityID]; ok {
+			act.AssignedMemberIDs = append(act.AssignedMemberIDs, a.TeamMemberID)
+		}
+	}
+
+	tagQuery, tagArgs, err := sqlx.In(
+		`SELECT activity_id, tag_id FROM activity_tags WHERE activity_id IN (?)`,
+		ids,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("building tags query: %w", err)
+	}
+	tagQuery = r.db.Rebind(tagQuery)
+
+	type activityTag struct {
+		ActivityID string `db:"activity_id"`
+		TagID      string `db:"tag_id"`
+	}
+	var actTags []activityTag
+	if err := r.db.Select(&actTags, tagQuery, tagArgs...); err != nil {
+		return nil, fmt.Errorf("listing activity tags: %w", err)
+	}
+	for _, at := range actTags {
+		if act, ok := byID[at.ActivityID]; ok {
+			act.TagIDs = append(act.TagIDs, at.TagID)
+		}
+	}
+
+	return acts, nil
 }
 ````
 
@@ -44031,6 +43992,2626 @@ paths:
           $ref: "#/components/responses/InternalError"
 ````
 
+## File: packages/web/src/components/layout/Sidebar.tsx
+````typescript
+import { useState, useRef, useEffect } from 'react';
+import {
+  ChevronRight,
+  ChevronLeft,
+  ChevronDown,
+  ChevronsDownUp,
+  ChevronsUpDown,
+  Plus,
+  Settings2,
+  Upload,
+  CalendarPlus,
+  Plug,
+} from 'lucide-react';
+import { Badge } from '@/components/identity/Badge';
+import { useAuth } from '@/contexts/AuthContext';
+import type { components } from '@draba/shared';
+
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
+
+const SIDEBAR_MIN = 220;
+const SIDEBAR_MAX = 360;
+
+interface ApiTeam {
+  id: string;
+  name: string;
+  color?: string | null;
+  icon?: string | null;
+  archivedAt?: string | null;
+}
+
+interface ApiTimeline {
+  id: string;
+  name: string;
+  startDate?: string;
+  endDate?: string;
+  color?: string | null;
+  icon?: string | null;
+  archivedAt?: string | null;
+}
+
+interface Props {
+  collapsed: boolean;
+  onToggle: () => void;
+  onNewActivity?: () => void;
+  /** Stub: bulk-import activities. Surfaced in the "New activity" combo dropdown. */
+  onBulkImport?: () => void;
+  apiTimelines?: ApiTimeline[];
+  archivedTimelines?: ApiTimeline[];
+  activeTimelineId?: string;
+  onActiveTimelineChange?: (id: string) => void;
+  onNewTimeline?: () => void;
+  onEditTimeline?: (timelineId: string) => void;
+  // Team management
+  activeTeam?: ApiTeam;
+  /** All non-archived teams. Used to render the switchable team list. */
+  activeTeams?: ApiTeam[];
+  archivedTeams?: ApiTeam[];
+  onNewTeam?: () => void;
+  onEditTeam?: (team: ApiTeam) => void;
+  onSelectTeam?: (teamId: string) => void;
+  onUnarchiveTeam?: (teamId: string) => void;
+  /** True when the current user is an admin of the active team. */
+  canEditTeam?: boolean;
+  /** Live member list from the API. */
+  members?: TeamMemberWithUser[];
+  /** Called when the user clicks the gear icon on a member row. */
+  onEditMember?: (member: TeamMemberWithUser) => void;
+}
+
+const ICON = { width: 15, height: 15, strokeWidth: 1.8 } as const;
+const ICON_SM = { width: 13, height: 13, strokeWidth: 1.8 } as const;
+const ICON_XS = { width: 11, height: 11, strokeWidth: 2 } as const;
+
+interface Timeline {
+  id: string;
+  name: string;
+  color: string;
+  icon: string | null;
+  startDate?: string;
+  endDate?: string;
+}
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+
+function formatDateRange(startDate?: string, endDate?: string): string {
+  if (!startDate || !endDate) return ''
+  const s = new Date(startDate + 'T00:00:00')
+  const e = new Date(endDate + 'T00:00:00')
+  const diffDays = (e.getTime() - s.getTime()) / 86_400_000
+  if (diffDays < 90) {
+    return `${MONTHS[s.getMonth()]} ${s.getDate()} – ${MONTHS[e.getMonth()]} ${e.getDate()} ${e.getFullYear()}`
+  }
+  return `${MONTHS[s.getMonth()]} ${s.getFullYear()} – ${MONTHS[e.getMonth()]} ${e.getFullYear()}`
+}
+
+
+interface TimelineItemProps {
+  timeline: Timeline;
+  active: boolean;
+  collapsed: boolean;
+  showDate?: boolean;
+  canEdit?: boolean;
+  onClick: () => void;
+  onSettings: () => void;
+}
+
+function TimelineItem({ timeline, active, collapsed, showDate = true, canEdit = false, onClick, onSettings }: TimelineItemProps) {
+  const [hovered, setHovered] = useState(false);
+  const dateRange = !collapsed && showDate ? formatDateRange(timeline.startDate, timeline.endDate) : ''
+
+  return (
+    <div
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        background: active
+          ? 'rgba(255,255,255,0.10)'
+          : hovered
+          ? 'rgba(255,255,255,0.05)'
+          : 'transparent',
+        borderLeft: active ? `2px solid ${timeline.color}` : '2px solid transparent',
+        transition: 'background 0.12s',
+        cursor: 'pointer',
+        minHeight: 34,
+      }}
+    >
+      <button
+        onClick={onClick}
+        title={collapsed ? timeline.name : undefined}
+        style={{
+          flex: 1,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          padding: collapsed ? '7px 14px' : '6px 8px 6px 16px',
+          background: 'none',
+          border: 'none',
+          color: active ? 'white' : 'rgba(255,255,255,0.65)',
+          fontSize: 13,
+          fontWeight: active ? 600 : 400,
+          cursor: 'pointer',
+          fontFamily: 'var(--font-sans)',
+          textAlign: 'left',
+          minWidth: 0,
+        }}
+      >
+        <Badge
+          identity={{ color: timeline.color, icon: timeline.icon ?? '__none__' }}
+          name={timeline.name}
+          shape="square"
+          size={20}
+        />
+        {!collapsed && (
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {timeline.name}
+            </div>
+            {dateRange && (
+              <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)', marginTop: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {dateRange}
+              </div>
+            )}
+          </div>
+        )}
+      </button>
+
+      {!collapsed && canEdit && (
+        <button
+          onClick={e => { e.stopPropagation(); onSettings(); }}
+          title={`Configure ${timeline.name}`}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            width: 26,
+            height: 26,
+            marginRight: 6,
+            background: 'none',
+            border: 'none',
+            borderRadius: 5,
+            color: 'rgba(255,255,255,0.4)',
+            cursor: 'pointer',
+            opacity: hovered ? 1 : 0,
+            transition: 'opacity 0.12s',
+            flexShrink: 0,
+          }}
+          onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.8)')}
+          onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.4)')}
+        >
+          <Settings2 {...ICON_SM} />
+        </button>
+      )}
+    </div>
+  );
+}
+
+function ConnectorItem({ name, status, color }: { name: string; status: string; color: string }) {
+  const [hovered, setHovered] = useState(false);
+
+  return (
+    <div
+      style={{
+        display: 'flex', alignItems: 'center', gap: 8,
+        padding: '6px 6px 6px 16px',
+        cursor: 'pointer',
+        background: hovered ? 'rgba(255,255,255,0.05)' : 'transparent',
+        transition: 'background 0.12s',
+      }}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+    >
+      <div style={{
+        width: 20, height: 20, borderRadius: 4,
+        background: color,
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        flexShrink: 0,
+      }}>
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="white">
+          <rect x="1" y="1" width="9" height="18" rx="1.5" />
+          <rect x="14" y="1" width="9" height="12" rx="1.5" />
+        </svg>
+      </div>
+      <div style={{ minWidth: 0, flex: 1 }}>
+        <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.65)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {name}
+        </div>
+        <div style={{ fontSize: 9, color: 'rgba(255,255,255,0.25)', marginTop: 1 }}>
+          {status}
+        </div>
+      </div>
+      <button
+        title={`Configure ${name}`}
+        style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          width: 26, height: 26, marginRight: 0,
+          background: 'none', border: 'none', borderRadius: 5,
+          color: 'rgba(255,255,255,0.4)', cursor: 'pointer',
+          opacity: hovered ? 1 : 0, transition: 'opacity 0.12s',
+          flexShrink: 0,
+        }}
+        onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.8)')}
+        onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.4)')}
+      >
+        <Settings2 {...ICON_SM} />
+      </button>
+    </div>
+  );
+}
+
+// ── TeamRow ──────────────────────────────────────────────────────────────────
+
+interface TeamRowProps {
+  team: ApiTeam;
+  isActive: boolean;
+  canEdit: boolean;
+  onSelect?: () => void;
+  onEdit?: () => void;
+}
+
+function TeamRow({ team, isActive, canEdit, onSelect, onEdit }: TeamRowProps) {
+  const [hovered, setHovered] = useState(false);
+
+  return (
+    <div
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      onClick={() => { if (!isActive) onSelect?.(); }}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        padding: '5px 6px 5px 16px',
+        borderLeft: isActive ? `2px solid ${team.color ?? 'var(--primary)'}` : '2px solid transparent',
+        background: isActive ? 'rgba(255,255,255,0.07)' : hovered ? 'rgba(255,255,255,0.03)' : 'transparent',
+        cursor: isActive ? 'default' : 'pointer',
+        minHeight: 34,
+        transition: 'background 0.12s',
+      }}
+    >
+      <Badge
+        identity={{ color: team.color ?? 'var(--primary)', icon: team.icon ?? '__name_1__' }}
+        name={team.name}
+        shape="square"
+        size={20}
+      />
+      <span style={{
+        fontSize: 13,
+        fontWeight: isActive ? 600 : 400,
+        color: isActive ? 'white' : 'rgba(255,255,255,0.65)',
+        flex: 1,
+        marginLeft: 8,
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        whiteSpace: 'nowrap',
+        minWidth: 0,
+      }}>
+        {team.name}
+      </span>
+      {canEdit && (
+        <button
+          title="Team settings"
+          onClick={e => { e.stopPropagation(); onEdit?.(); }}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            width: 26,
+            height: 26,
+            marginRight: 6,
+            background: 'none',
+            border: 'none',
+            borderRadius: 5,
+            color: 'rgba(255,255,255,0.4)',
+            cursor: 'pointer',
+            opacity: hovered ? 1 : 0,
+            transition: 'opacity 0.12s',
+            flexShrink: 0,
+          }}
+          onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.8)')}
+          onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.4)')}
+        >
+          <Settings2 {...ICON_SM} />
+        </button>
+      )}
+    </div>
+  );
+}
+
+// ── MemberSidebarRow ──────────────────────────────────────────────────────────
+
+interface MemberSidebarRowProps {
+  displayName: string;
+  color: string;
+  icon?: string | null;
+  isInactive?: boolean;
+  onEdit?: () => void;
+}
+
+function MemberSidebarRow({ displayName, color, icon, isInactive = false, onEdit }: MemberSidebarRowProps) {
+  const [hovered, setHovered] = useState(false);
+  return (
+    <div
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        display: 'flex', alignItems: 'center', gap: 8,
+        padding: '4px 6px 4px 16px', cursor: 'default',
+        background: hovered ? 'rgba(255,255,255,0.05)' : 'transparent',
+        opacity: isInactive ? 0.45 : 1,
+      }}
+    >
+      <Badge
+        identity={{ color, icon: icon ?? '__name_words__' }}
+        name={displayName}
+        shape="circle"
+        size={20}
+      />
+      <span style={{ fontSize: 13, color: 'rgba(255,255,255,0.65)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
+        {displayName}
+      </span>
+      {onEdit && (
+        <button
+          onClick={e => { e.stopPropagation(); onEdit(); }}
+          title={`Edit ${displayName}`}
+          style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            width: 22, height: 22, marginRight: 6,
+            background: 'none', border: 'none', borderRadius: 4,
+            color: 'rgba(255,255,255,0.4)', cursor: 'pointer', flexShrink: 0,
+            opacity: hovered ? 1 : 0,
+            transition: 'opacity 0.12s',
+            pointerEvents: hovered ? 'auto' : 'none',
+          }}
+          onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.8)')}
+          onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.4)')}
+        >
+          <Settings2 width={12} height={12} strokeWidth={1.8} />
+        </button>
+      )}
+    </div>
+  );
+}
+
+// ── Sidebar ───────────────────────────────────────────────────────────────────
+
+/**
+ * Left navigation rail: brand, team selector with members, and timeline list.
+ * Collapsed/expanded state is driven by the parent.
+ */
+const TIMELINE_COLORS = ['#1A97A2', '#6366F1', '#F17B2B', '#E11D48', '#10B981', '#F59E0B']
+
+export default function Sidebar({ collapsed, onToggle, onNewActivity, onBulkImport, apiTimelines, archivedTimelines = [], activeTimelineId, onActiveTimelineChange, onNewTimeline, onEditTimeline, activeTeam, activeTeams = [], archivedTeams = [], onNewTeam, onEditTeam, onSelectTeam, canEditTeam = false, members: apiMembers, onEditMember }: Props) {
+  const { user } = useAuth();
+  const currentUserId = (user as { id?: string } | null)?.id;
+  const [internalActiveId, setInternalActiveId] = useState('');
+  const [teamOpen, setTeamOpen] = useState(true);
+  const [connectorsOpen, setConnectorsOpen] = useState(true);
+  // Combo "New activity" dropdown (expanded + collapsed share this state).
+  const [newMenuOpen, setNewMenuOpen] = useState(false);
+  const newMenuRef = useRef<HTMLDivElement>(null);
+  // Collapsed-mode menu is rendered fixed (the rail clips overflow), so we
+  // capture the trigger's viewport rect when it opens.
+  const [collapsedMenuPos, setCollapsedMenuPos] = useState<{ top: number; left: number } | null>(null);
+  // Primary accent for the "New activity" combo button.
+  const NEW_BTN_BG = 'var(--primary)';
+  const NEW_BTN_FG = 'var(--primary-foreground)';
+  const [archivedOpen, setArchivedOpen] = useState(false);
+  const [timelinesOpen, setTimelinesOpen] = useState(true);
+  const [membersOpen, setMembersOpen] = useState(true);
+  const [archivedTeamsOpen, setArchivedTeamsOpen] = useState(false);
+
+  const allExpanded = teamOpen && timelinesOpen && connectorsOpen && membersOpen;
+  function toggleAllSections() {
+    const next = !allExpanded;
+    setTeamOpen(next);
+    setTimelinesOpen(next);
+    setConnectorsOpen(next);
+    setMembersOpen(next);
+    if (!next) {
+      setArchivedOpen(false);
+      setArchivedTeamsOpen(false);
+    }
+  }
+
+  const timelines: Timeline[] = (apiTimelines ?? []).map((t, i) => ({
+    id: t.id,
+    name: t.name,
+    color: t.color ?? TIMELINE_COLORS[i % TIMELINE_COLORS.length],
+    icon: t.icon ?? null,
+    startDate: t.startDate,
+    endDate: t.endDate,
+  }))
+
+  const archivedTimelineItems: Timeline[] = archivedTimelines.map((t) => ({
+    id: t.id,
+    name: t.name,
+    color: t.color ?? '#64748B',
+    icon: t.icon ?? null,
+    startDate: t.startDate,
+    endDate: t.endDate,
+  }))
+  const activeId = activeTimelineId ?? internalActiveId
+  const activeTimeline = timelines.find(t => t.id === activeId) ?? timelines[0] ?? null;
+
+  const [sidebarWidth, setSidebarWidth] = useState(SIDEBAR_MIN);
+  const dragging = useRef(false);
+  const startX = useRef(0);
+  const startW = useRef(SIDEBAR_MIN);
+
+  useEffect(() => {
+    function onMouseMove(e: MouseEvent) {
+      if (!dragging.current) return;
+      const delta = e.clientX - startX.current;
+      setSidebarWidth(Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, startW.current + delta)));
+    }
+    function onMouseUp() {
+      if (!dragging.current) return;
+      dragging.current = false;
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    }
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+    return () => {
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onMouseUp);
+    };
+  }, []);
+
+  // Close the "New activity" dropdown on outside click or Escape.
+  useEffect(() => {
+    if (!newMenuOpen) return;
+    function onDocMouseDown(e: MouseEvent) {
+      if (newMenuRef.current && !newMenuRef.current.contains(e.target as Node)) {
+        setNewMenuOpen(false);
+      }
+    }
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key === 'Escape') setNewMenuOpen(false);
+    }
+    document.addEventListener('mousedown', onDocMouseDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', onDocMouseDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [newMenuOpen]);
+
+  function onHandleMouseDown(e: React.MouseEvent) {
+    e.preventDefault();
+    dragging.current = true;
+    startX.current = e.clientX;
+    startW.current = sidebarWidth;
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+  }
+
+  return (
+    <div
+      style={{
+        position: 'relative',
+        width: collapsed ? 52 : sidebarWidth,
+        flexShrink: 0,
+        background: 'var(--color-charcoal)',
+        color: 'white',
+        display: 'flex',
+        flexDirection: 'column',
+        transition: 'width 0.2s ease',
+        overflow: 'hidden',
+        borderRight: '1px solid rgba(255,255,255,0.06)',
+      }}
+    >
+      {/* Logo + collapse toggle */}
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: collapsed ? 'center' : 'space-between',
+          padding: collapsed ? '0 13px' : '0 8px 0 16px',
+          borderBottom: '1px solid rgba(255,255,255,0.08)',
+          height: 'var(--topbar-h)',
+          flexShrink: 0,
+        }}
+      >
+        {!collapsed && (
+          <div
+            onClick={onToggle}
+            style={{ display: 'flex', alignItems: 'center', gap: 9, cursor: 'pointer' }}
+          >
+            <img src="/logo-orange-white.svg" alt="Draba" style={{ width: 28, height: 28, marginTop: 3 }} />
+            <span style={{ fontSize: 22, fontWeight: 700, letterSpacing: '-0.02em', color: 'white' }}>
+              draba
+            </span>
+          </div>
+        )}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+          {!collapsed && (
+            <button
+              onClick={toggleAllSections}
+              title={allExpanded ? 'Collapse all sections' : 'Expand all sections'}
+              style={{
+                background: 'none',
+                border: 'none',
+                color: 'rgba(255,255,255,0.45)',
+                borderRadius: 6,
+                width: 26,
+                height: 26,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                cursor: 'pointer',
+                flexShrink: 0,
+              }}
+              onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.8)')}
+              onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.45)')}
+            >
+              {allExpanded ? <ChevronsDownUp width={14} height={14} strokeWidth={1.8} /> : <ChevronsUpDown width={14} height={14} strokeWidth={1.8} />}
+            </button>
+          )}
+          <button
+            onClick={onToggle}
+            style={{
+              background: 'rgba(255,255,255,0.08)',
+              border: 'none',
+              color: 'rgba(255,255,255,0.7)',
+              borderRadius: 6,
+              width: 26,
+              height: 26,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              cursor: 'pointer',
+              flexShrink: 0,
+            }}
+          >
+            {collapsed ? <ChevronRight {...ICON} /> : <ChevronLeft {...ICON} />}
+          </button>
+        </div>
+      </div>
+
+      {/* Primary "New activity" combo button — sits directly under the brand. */}
+      {!collapsed && (
+        <div
+          ref={newMenuRef}
+          style={{ position: 'relative', padding: '12px 16px 2px', flexShrink: 0 }}
+        >
+          <div style={{ display: 'flex', alignItems: 'stretch' }}>
+            <button
+              onClick={onNewActivity}
+              style={{
+                flex: 1,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: 8,
+                padding: '9px 12px',
+                background: NEW_BTN_BG,
+                border: 'none',
+                borderRadius: '7px 0 0 7px',
+                color: NEW_BTN_FG,
+                fontSize: 13,
+                fontWeight: 600,
+                cursor: 'pointer',
+                fontFamily: 'var(--font-sans)',
+              }}
+              onMouseEnter={e => (e.currentTarget.style.filter = 'brightness(1.08)')}
+              onMouseLeave={e => (e.currentTarget.style.filter = 'none')}
+            >
+              <CalendarPlus width={15} height={15} strokeWidth={2} />
+              New activity
+            </button>
+            <button
+              title="More activity options"
+              aria-haspopup="menu"
+              aria-expanded={newMenuOpen}
+              onClick={() => setNewMenuOpen(o => !o)}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                width: 32,
+                background: NEW_BTN_BG,
+                border: 'none',
+                borderLeft: '1px solid rgba(0,0,0,0.18)',
+                borderRadius: '0 7px 7px 0',
+                color: NEW_BTN_FG,
+                cursor: 'pointer',
+              }}
+              onMouseEnter={e => (e.currentTarget.style.filter = 'brightness(1.08)')}
+              onMouseLeave={e => (e.currentTarget.style.filter = 'none')}
+            >
+              <ChevronDown
+                width={14}
+                height={14}
+                strokeWidth={2}
+                style={{ transform: newMenuOpen ? 'rotate(180deg)' : 'none', transition: 'transform 0.12s' }}
+              />
+            </button>
+          </div>
+
+          {newMenuOpen && (
+            <div
+              role="menu"
+              style={{
+                position: 'absolute',
+                top: 'calc(100% - 4px)',
+                left: 16,
+                right: 16,
+                background: 'var(--color-charcoal)',
+                border: '1px solid rgba(255,255,255,0.12)',
+                borderRadius: 7,
+                boxShadow: '0 8px 24px rgba(0,0,0,0.45)',
+                padding: 4,
+                zIndex: 30,
+              }}
+            >
+              <button
+                role="menuitem"
+                onClick={() => { setNewMenuOpen(false); onBulkImport?.(); }}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 8,
+                  padding: '8px 10px', width: '100%',
+                  background: 'none', border: 'none', borderRadius: 5,
+                  color: 'rgba(255,255,255,0.75)', fontSize: 13,
+                  cursor: 'pointer', fontFamily: 'var(--font-sans)', textAlign: 'left',
+                }}
+                onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.07)')}
+                onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+              >
+                <Upload width={14} height={14} strokeWidth={1.8} />
+                Bulk import
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      <div style={{ flex: 1, overflowY: 'auto' }}>
+
+        {/* Collapsed: team + timeline icons only */}
+        {collapsed && (
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6, padding: '10px 0' }}>
+            {/* Active team badge — click to expand */}
+            <div
+              title={activeTeam?.name ?? 'Team'}
+              onClick={onToggle}
+              style={{ cursor: 'pointer', flexShrink: 0 }}
+            >
+              <Badge
+                identity={{ color: activeTeam?.color ?? 'var(--primary)', icon: activeTeam?.icon ?? '__name_1__' }}
+                name={activeTeam?.name ?? ''}
+                shape="square"
+                size={28}
+              />
+            </div>
+            {/* Active timeline — click to expand */}
+            {activeTimeline && (
+              <div
+                title={activeTimeline.name}
+                onClick={onToggle}
+                style={{ cursor: 'pointer' }}
+              >
+                <Badge
+                  identity={{ color: activeTimeline.color, icon: activeTimeline.icon ?? '__none__' }}
+                  name={activeTimeline.name}
+                  shape="square"
+                  size={28}
+                />
+              </div>
+            )}
+
+            {/* New activity combo — icon button opens a menu with both actions.
+                order:-1 keeps it at the top, matching the expanded layout. */}
+            <div ref={newMenuRef} style={{ position: 'relative', flexShrink: 0, order: -1, marginBottom: 2 }}>
+              <button
+                title="New activity"
+                aria-haspopup="menu"
+                aria-expanded={newMenuOpen}
+                onClick={e => {
+                  if (newMenuOpen) { setNewMenuOpen(false); return; }
+                  const r = e.currentTarget.getBoundingClientRect();
+                  setCollapsedMenuPos({ top: r.top, left: r.right + 6 });
+                  setNewMenuOpen(true);
+                }}
+                style={{
+                  width: 30,
+                  height: 30,
+                  borderRadius: 7,
+                  background: NEW_BTN_BG,
+                  border: 'none',
+                  color: NEW_BTN_FG,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  cursor: 'pointer',
+                }}
+                onMouseEnter={e => (e.currentTarget.style.filter = 'brightness(1.08)')}
+                onMouseLeave={e => (e.currentTarget.style.filter = 'none')}
+              >
+                <CalendarPlus width={16} height={16} strokeWidth={2} />
+              </button>
+
+              {newMenuOpen && collapsedMenuPos && (
+                <div
+                  role="menu"
+                  style={{
+                    position: 'fixed',
+                    top: collapsedMenuPos.top,
+                    left: collapsedMenuPos.left,
+                    minWidth: 160,
+                    background: 'var(--color-charcoal)',
+                    border: '1px solid rgba(255,255,255,0.12)',
+                    borderRadius: 7,
+                    boxShadow: '0 8px 24px rgba(0,0,0,0.45)',
+                    padding: 4,
+                    zIndex: 30,
+                  }}
+                >
+                  <button
+                    role="menuitem"
+                    onClick={() => { setNewMenuOpen(false); onNewActivity?.(); }}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: 8,
+                      padding: '8px 10px', width: '100%',
+                      background: 'none', border: 'none', borderRadius: 5,
+                      color: 'rgba(255,255,255,0.75)', fontSize: 13,
+                      cursor: 'pointer', fontFamily: 'var(--font-sans)', textAlign: 'left',
+                    }}
+                    onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.07)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                  >
+                    <CalendarPlus width={14} height={14} strokeWidth={1.8} />
+                    New activity
+                  </button>
+                  <button
+                    role="menuitem"
+                    onClick={() => { setNewMenuOpen(false); onBulkImport?.(); }}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: 8,
+                      padding: '8px 10px', width: '100%',
+                      background: 'none', border: 'none', borderRadius: 5,
+                      color: 'rgba(255,255,255,0.75)', fontSize: 13,
+                      cursor: 'pointer', fontFamily: 'var(--font-sans)', textAlign: 'left',
+                    }}
+                    onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.07)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                  >
+                    <Upload width={14} height={14} strokeWidth={1.8} />
+                    Bulk import
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Team section */}
+        {!collapsed && (
+          <div style={{ borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
+            {/* Section header — collapsible, same pattern as TIMELINE */}
+            <button
+              onClick={() => setTeamOpen(o => !o)}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                width: '100%',
+                padding: '6px 12px 6px 16px',
+                background: 'none',
+                border: 'none',
+                cursor: 'pointer',
+                color: 'rgba(255,255,255,0.35)',
+                fontFamily: 'var(--font-sans)',
+              }}
+            >
+              <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                Team
+              </span>
+              {teamOpen
+                ? <ChevronDown width={12} height={12} strokeWidth={2} />
+                : <ChevronRight width={12} height={12} strokeWidth={2} />}
+            </button>
+
+            {/* Team rows — active team highlighted; others clickable to switch */}
+            {(teamOpen ? activeTeams : activeTeam ? [activeTeam] : []).map(t => (
+              <TeamRow
+                key={t.id}
+                team={t}
+                isActive={t.id === activeTeam?.id}
+                canEdit={canEditTeam}
+                onSelect={() => onSelectTeam?.(t.id)}
+                onEdit={() => onEditTeam?.(t)}
+              />
+            ))}
+            {/* Fallback when activeTeams not yet loaded but activeTeam is known */}
+            {!activeTeams.length && activeTeam && (
+              <TeamRow
+                team={activeTeam}
+                isActive
+                canEdit={canEditTeam}
+                onEdit={() => onEditTeam?.(activeTeam)}
+              />
+            )}
+
+            {/* New team button — only superadmins get onNewTeam passed from the parent */}
+            {teamOpen && onNewTeam && (
+              <button
+                onClick={onNewTeam}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 8,
+                  padding: '4px 16px', background: 'none', border: 'none',
+                  color: 'rgba(255,255,255,0.35)', fontSize: 12,
+                  cursor: 'pointer', width: '100%', fontFamily: 'var(--font-sans)',
+                }}
+                onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.7)')}
+                onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.35)')}
+              >
+                <Plus {...ICON_SM} />
+                New team
+              </button>
+            )}
+
+            {/* Archived teams — collapsible sub-section, shown when team section is open */}
+            {teamOpen && archivedTeams.length > 0 && (
+              <div>
+                <button
+                  onClick={() => setArchivedTeamsOpen(o => !o)}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 5,
+                    width: '100%', padding: '4px 8px 4px 16px',
+                    background: 'none', border: 'none', cursor: 'pointer',
+                    color: 'rgba(255,255,255,0.25)', fontFamily: 'var(--font-sans)',
+                  }}
+                  onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.5)')}
+                  onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.25)')}
+                >
+                  {archivedTeamsOpen
+                    ? <ChevronDown {...ICON_XS} />
+                    : <ChevronRight {...ICON_XS} />}
+                  <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                    Archived ({archivedTeams.length})
+                  </span>
+                </button>
+                {archivedTeamsOpen && archivedTeams.map(t => (
+                  <TeamRow
+                    key={t.id}
+                    team={t}
+                    isActive={false}
+                    canEdit={Boolean(onNewTeam)}
+                    onEdit={() => onEditTeam?.(t)}
+                  />
+                ))}
+              </div>
+            )}
+
+            {/* Members — only when team section is expanded */}
+            {teamOpen && (
+              <>
+                <button
+                  onClick={() => setMembersOpen(o => !o)}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 5,
+                    width: '100%',
+                    padding: '6px 8px 4px 16px',
+                    background: 'none',
+                    border: 'none',
+                    cursor: 'pointer',
+                    color: 'rgba(255,255,255,0.35)',
+                    fontFamily: 'var(--font-sans)',
+                  }}
+                >
+                  {membersOpen
+                    ? <ChevronDown {...ICON_XS} />
+                    : <ChevronRight {...ICON_XS} />}
+                  <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                    Members
+                  </span>
+                </button>
+
+                {membersOpen && (
+                  <div style={{ paddingBottom: 8 }}>
+                    {(apiMembers ?? []).map(m => {
+                      const displayName = (m as TeamMemberWithUser).displayName || m.id;
+                      const color = m.color ?? '#8b949e';
+                      const icon = (m as TeamMemberWithUser).icon ?? null;
+                      return (
+                        <MemberSidebarRow
+                          key={m.id}
+                          displayName={displayName}
+                          color={color}
+                          icon={icon}
+                          isInactive={Boolean((m as TeamMemberWithUser).archivedAt)}
+                          onEdit={onEditMember && (m as TeamMemberWithUser).userId !== currentUserId
+                            ? () => onEditMember(m as TeamMemberWithUser)
+                            : undefined}
+                        />
+                      );
+                    })}
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        )}
+
+        {/* Timelines section */}
+        <div style={{ padding: '8px 0' }}>
+          {!collapsed ? (
+            <button
+              onClick={() => setTimelinesOpen(o => !o)}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                width: '100%',
+                padding: '6px 12px 4px 16px',
+                background: 'none',
+                border: 'none',
+                cursor: 'pointer',
+                color: 'rgba(255,255,255,0.35)',
+                fontFamily: 'var(--font-sans)',
+              }}
+            >
+              <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                Timeline
+              </span>
+              {timelinesOpen
+                ? <ChevronDown width={12} height={12} strokeWidth={2} />
+                : <ChevronRight width={12} height={12} strokeWidth={2} />}
+            </button>
+          ) : (
+            <div style={{ height: 8 }} />
+          )}
+
+          {!collapsed && (timelinesOpen ? (
+            <>
+              {timelines.map(tl => (
+                <TimelineItem
+                  key={tl.id}
+                  timeline={tl}
+                  active={activeId === tl.id}
+                  collapsed={false}
+                  canEdit={canEditTeam}
+                  onClick={() => { setInternalActiveId(tl.id); onActiveTimelineChange?.(tl.id); }}
+                  onSettings={() => onEditTimeline?.(tl.id)}
+                />
+              ))}
+              <button
+                onClick={onNewTimeline}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  padding: '6px 16px',
+                  background: 'none',
+                  border: 'none',
+                  color: 'rgba(255,255,255,0.35)',
+                  fontSize: 12,
+                  cursor: onNewTimeline ? 'pointer' : 'default',
+                  width: '100%',
+                  fontFamily: 'var(--font-sans)',
+                  marginTop: 2,
+                }}
+                onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.7)')}
+                onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.35)')}
+              >
+                <Plus {...ICON_SM} />
+                New timeline
+              </button>
+
+              {/* Archived sub-section */}
+              {archivedTimelineItems.length > 0 && (
+                <>
+                  <button
+                    onClick={() => setArchivedOpen(o => !o)}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: 5,
+                      width: '100%', padding: '6px 12px 4px 16px',
+                      background: 'none', border: 'none', cursor: 'pointer',
+                      color: 'rgba(255,255,255,0.25)', fontFamily: 'var(--font-sans)',
+                      marginTop: 4,
+                    }}
+                    onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.45)')}
+                    onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.25)')}
+                  >
+                    {archivedOpen
+                      ? <ChevronDown {...ICON_XS} />
+                      : <ChevronRight {...ICON_XS} />}
+                    <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                      Archived
+                    </span>
+                    <span style={{ fontSize: 10, marginLeft: 4 }}>({archivedTimelineItems.length})</span>
+                  </button>
+
+                  {archivedOpen && (
+                    <div style={{ opacity: 0.6 }}>
+                      {archivedTimelineItems.map(tl => (
+                        <TimelineItem
+                          key={tl.id}
+                          timeline={tl}
+                          active={false}
+                          collapsed={false}
+                          canEdit={canEditTeam}
+                          onClick={() => {}}
+                          onSettings={() => onEditTimeline?.(tl.id)}
+                        />
+                      ))}
+                    </div>
+                  )}
+                </>
+              )}
+            </>
+          ) : (
+            /* Section collapsed: show just the active timeline */
+            <TimelineItem
+              timeline={activeTimeline}
+              active={true}
+              collapsed={false}
+              showDate={false}
+              canEdit={canEditTeam}
+              onClick={() => setTimelinesOpen(true)}
+              onSettings={() => onEditTimeline?.(activeTimeline.id)}
+            />
+          ))}
+        </div>
+        {/* Connectors section — contextual to active timeline */}
+        {!collapsed && (
+          <div style={{ padding: '8px 0', borderTop: '1px solid rgba(255,255,255,0.08)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', padding: '6px 6px 4px 16px' }}>
+              <button
+                onClick={() => setConnectorsOpen(o => !o)}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 6, flex: 1,
+                  background: 'none', border: 'none', cursor: 'pointer',
+                  color: 'rgba(255,255,255,0.35)', fontFamily: 'var(--font-sans)',
+                  padding: 0,
+                }}
+              >
+                <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                  Connectors
+                </span>
+                {connectorsOpen
+                  ? <ChevronDown width={12} height={12} strokeWidth={2} />
+                  : <ChevronRight width={12} height={12} strokeWidth={2} />}
+              </button>
+            </div>
+
+            {connectorsOpen && (
+              <>
+                <div style={{
+                  padding: '0 16px 4px',
+                  fontSize: 10,
+                  color: 'rgba(255,255,255,0.22)',
+                  letterSpacing: '0.02em',
+                }}>
+                  {activeTimeline?.name}
+                </div>
+                {/* Stub: connected Trello board */}
+                <ConnectorItem name="Trello — Launch Board" status="Synced · 2 min ago" color="#0079BF" />
+                <button
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 8,
+                    padding: '6px 16px', background: 'none', border: 'none',
+                    color: 'rgba(255,255,255,0.35)', fontSize: 12,
+                    cursor: 'pointer', width: '100%', fontFamily: 'var(--font-sans)',
+                  }}
+                  onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.7)')}
+                  onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.35)')}
+                >
+                  <Plug width={13} height={13} strokeWidth={1.8} />
+                  Add connector
+                </button>
+              </>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Resize handle */}
+      {!collapsed && (
+        <div
+          onMouseDown={onHandleMouseDown}
+          style={{
+            position: 'absolute',
+            top: 0,
+            right: 0,
+            width: 5,
+            height: '100%',
+            cursor: 'col-resize',
+            zIndex: 20,
+          }}
+          onMouseEnter={e => ((e.currentTarget.lastElementChild as HTMLElement).style.background = 'var(--primary)')}
+          onMouseLeave={e => ((e.currentTarget.lastElementChild as HTMLElement).style.background = 'transparent')}
+        >
+          <div
+            style={{
+              position: 'absolute',
+              top: 0,
+              right: 0,
+              width: 2,
+              height: '100%',
+              background: 'transparent',
+              transition: 'background 0.15s',
+              pointerEvents: 'none',
+            }}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+````
+
+## File: packages/web/src/hooks/useTeamActivities.ts
+````typescript
+/**
+ * TanStack Query hooks for team-scoped data.
+ *
+ * All hooks call createAuthFetch to inject the current access token at
+ * query-time so stale closures never send an expired token.
+ */
+
+import { useCallback } from 'react'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import type { components } from '@draba/shared'
+import { createAuthFetch } from '@/lib/api'
+import { useAuth } from '@/contexts/AuthContext'
+import { useWebSocket } from '@/hooks/useWebSocket'
+
+type Activity = components['schemas']['Activity']
+type Team = components['schemas']['Team']
+type Timeline = components['schemas']['Timeline']
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
+type TimelineAccessEntry = components['schemas']['TimelineAccessEntry']
+type PatchTimelineInput = components['schemas']['PatchTimelineInput']
+
+/** Query key factory — centralises cache key strings. */
+export const keys = {
+  myTeams: () => ['teams'] as const,
+  timelineActivities: (timelineId: string, from?: string, to?: string) =>
+    ['timelines', timelineId, 'activities', { from, to }] as const,
+  teamMembers: (teamId: string) =>
+    ['teams', teamId, 'members'] as const,
+  teamTimelines: (teamId: string) =>
+    ['teams', teamId, 'timelines'] as const,
+}
+
+/** Fetches all teams the authenticated user belongs to. */
+export function useMyTeams(includeArchived = false) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: [...keys.myTeams(), { includeArchived }],
+    queryFn: async () => (await authFetch<Team[] | null>(includeArchived ? '/teams?archived=true' : '/teams')) ?? [],
+  })
+}
+
+/** Fetches a single team by ID. */
+export function useTeam(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: ['teams', teamId],
+    queryFn: () => authFetch<Team>(`/teams/${teamId}`),
+    enabled: Boolean(teamId),
+  })
+}
+
+/** Fetches all non-archived timelines for a team. */
+export function useTeamTimelines(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: keys.teamTimelines(teamId),
+    queryFn: async () => (await authFetch<Timeline[] | null>(`/teams/${teamId}/timelines`)) ?? [],
+    enabled: Boolean(teamId),
+  })
+}
+
+/** Fetches activities for a timeline, optionally bounded by date range. */
+export function useTimelineActivities(teamId: string, timelineId: string, from?: string, to?: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: keys.timelineActivities(timelineId, from, to),
+    queryFn: async () => {
+      const params = new URLSearchParams()
+      if (from) params.set('from', from)
+      if (to) params.set('to', to)
+      const qs = params.toString()
+      return (await authFetch<Activity[] | null>(`/teams/${teamId}/timelines/${timelineId}/activities${qs ? `?${qs}` : ''}`)) ?? []
+    },
+    enabled: Boolean(teamId) && Boolean(timelineId),
+  })
+}
+
+/** Fetches the member list for a team. */
+export function useTeamMembers(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: keys.teamMembers(teamId),
+    queryFn: async () => (await authFetch<TeamMemberWithUser[] | null>(`/teams/${teamId}/members`)) ?? [],
+    enabled: Boolean(teamId),
+  })
+}
+
+/**
+ * Subscribes to the team's WebSocket feed and applies surgical cache updates
+ * for activity.created / activity.updated / activity.deleted deltas.
+ *
+ * Conflict strategy: for activity.updated, incoming deltas are only applied
+ * when their updatedAt timestamp is strictly newer than the cached version.
+ * This prevents self-echo (our own PATCH broadcast arriving back) and handles
+ * the last-writer-wins case where a concurrent remote edit arrives while our
+ * mutation is in-flight — the server-returned updatedAt on our onSuccess will
+ * always win if our PATCH was truly last.
+ */
+export function useTeamActivitySync(
+  teamId: string,
+  accessToken: string | null | undefined,
+) {
+  const client = useQueryClient()
+
+  const handleMessage = useCallback(
+    (msg: { type: string; payload?: unknown }) => {
+      if (!teamId || !msg.payload) return
+
+      if (msg.type === 'activity.created') {
+        const incoming = msg.payload as Activity
+        // Target all timeline-scoped activity cache entries by using the
+        // timelineId from the incoming activity payload.
+        if (!incoming.timelineId) return
+        client.setQueriesData<Activity[]>(
+          { queryKey: ['timelines', incoming.timelineId, 'activities'] },
+          (old) => {
+            if (!old) return old
+            // Guard against duplicate delivery.
+            if (old.some((a) => a.id === incoming.id)) return old
+            return [...old, incoming]
+          },
+        )
+      } else if (msg.type === 'activity.updated') {
+        const incoming = msg.payload as Activity
+        if (!incoming.timelineId) return
+        client.setQueriesData<Activity[]>(
+          { queryKey: ['timelines', incoming.timelineId, 'activities'] },
+          (old) => {
+            if (!old) return old
+            return old.map((a) => {
+              if (a.id !== incoming.id) return a
+              // Skip if the cache already holds the same or a newer version.
+              const cachedMs = new Date(a.updatedAt).getTime()
+              const incomingMs = new Date(incoming.updatedAt).getTime()
+              return incomingMs > cachedMs ? incoming : a
+            })
+          },
+        )
+      } else if (msg.type === 'activity.deleted') {
+        const { id } = msg.payload as { id: string }
+        // activity.deleted payload only has id — invalidate all timeline
+        // activity queries for this team so caches stay consistent.
+        client.invalidateQueries({ queryKey: ['timelines'] })
+        // Optimistically remove from all cached timeline activity lists.
+        client.setQueriesData<Activity[]>(
+          { queryKey: ['timelines'] },
+          (old) => old?.filter((a) => a.id !== id),
+        )
+      }
+    },
+    [client, teamId],
+  )
+
+  useWebSocket({
+    token: accessToken,
+    teamIds: teamId ? [teamId] : [],
+    onMessage: handleMessage,
+  })
+}
+
+interface CreateActivityInput {
+  title: string
+  startAt: string
+  endAt: string
+  description?: string | null
+  color?: string | null
+  icon?: string | null
+  assignedMemberIds?: string[]
+  tagIds?: string[]
+  parentActivityId?: string | null
+  percentComplete?: number | null
+  /** Client-only: if set, replace this placeholder ID in the cache instead of appending. */
+  _tempId?: string
+}
+
+interface UpdateActivityInput {
+  activityId: string
+  patch: {
+    title?: string
+    description?: string | null
+    notes?: string | null
+    startAt?: string
+    endAt?: string
+    allDay?: boolean
+    color?: string | null
+    icon?: string | null
+    location?: string | null
+    url?: string | null
+    statusId?: string | null
+    parentActivityId?: string | null
+    percentComplete?: number | null
+    assignedMemberIds?: string[]
+    tagIds?: string[]
+  }
+}
+
+/** Creates an activity in a timeline and inserts it directly into the cache. */
+export function useCreateActivity(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({ _tempId: _, ...input }: CreateActivityInput) =>
+      authFetch<Activity>(`/teams/${teamId}/timelines/${timelineId}/activities`, {
+        method: 'POST',
+        body: JSON.stringify(input),
+      }),
+    onSuccess: (created, variables) => {
+      const tempId = variables._tempId
+      client.setQueriesData<Activity[]>(
+        { queryKey: ['timelines', timelineId, 'activities'] },
+        (old) => {
+          if (!old) return [created]
+          const hasReal = old.some((a) => a.id === created.id)
+          const hasTemp = tempId ? old.some((a) => a.id === tempId) : false
+          // The WS activity.created self-echo may win the race and append the
+          // real record before this onSuccess runs. In that case we must still
+          // drop the optimistic placeholder, otherwise it lingers as a duplicate
+          // "New Activity" row (and inline edits keep targeting the dead temp id).
+          if (hasReal) {
+            return hasTemp ? old.filter((a) => a.id !== tempId) : old
+          }
+          // Replace optimistic placeholder in-place to avoid a position flash.
+          if (hasTemp) {
+            return old.map((a) => (a.id === tempId ? created : a))
+          }
+          return [...old, created]
+        },
+      )
+    },
+  })
+}
+
+/** PATCHes an activity and optimistically updates the cache. */
+export function useUpdateActivity(timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({ activityId, patch }: UpdateActivityInput) =>
+      authFetch<Activity>(`/activities/${activityId}`, {
+        method: 'PATCH',
+        body: JSON.stringify(patch),
+      }),
+    onMutate: async ({ activityId, patch }) => {
+      await client.cancelQueries({ queryKey: ['timelines', timelineId, 'activities'] })
+      const snapshot = client.getQueriesData<Activity[]>({ queryKey: ['timelines', timelineId, 'activities'] })
+      client.setQueriesData<Activity[]>(
+        { queryKey: ['timelines', timelineId, 'activities'] },
+        (old) => old?.map((a) => (a.id === activityId ? { ...a, ...patch } : a)),
+      )
+      return { snapshot }
+    },
+    onError: (_err, _vars, context) => {
+      if (context?.snapshot) {
+        for (const [key, data] of context.snapshot) {
+          client.setQueryData(key, data)
+        }
+      }
+    },
+    onSuccess: (updated) => {
+      client.setQueriesData<Activity[]>(
+        { queryKey: ['timelines', timelineId, 'activities'] },
+        (old) => old?.map((a) => (a.id === updated.id ? updated : a)),
+      )
+    },
+  })
+}
+
+interface CreateTeamInput {
+  name: string
+  description?: string | null
+  notes?: string | null
+  color?: string | null
+  icon?: string | null
+}
+
+interface UpdateTeamInput {
+  teamId: string
+  patch: {
+    name?: string
+    description?: string | null
+    notes?: string | null
+    color?: string | null
+    icon?: string | null
+  }
+}
+
+/** Creates a team and inserts it into the active-teams cache. */
+export function useCreateTeam() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (input: CreateTeamInput) =>
+      authFetch<Team>('/teams', {
+        method: 'POST',
+        body: JSON.stringify(input),
+      }),
+    onSuccess: () => {
+      // Invalidate both active and archived team lists.
+      client.invalidateQueries({ queryKey: ['teams'] })
+    },
+  })
+}
+
+/** PATCHes a team's mutable fields and refreshes the cache. */
+export function useUpdateTeam() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({ teamId, patch }: UpdateTeamInput) =>
+      authFetch<Team>(`/teams/${teamId}`, {
+        method: 'PATCH',
+        body: JSON.stringify(patch),
+      }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ['teams'] })
+    },
+  })
+}
+
+/** Archives a team (soft delete). */
+export function useArchiveTeam() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (teamId: string) =>
+      authFetch<Team>(`/teams/${teamId}/archive`, { method: 'POST' }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ['teams'] })
+    },
+  })
+}
+
+/** Restores an archived team. */
+export function useUnarchiveTeam() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (teamId: string) =>
+      authFetch<Team>(`/teams/${teamId}/unarchive`, { method: 'POST' }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ['teams'] })
+    },
+  })
+}
+
+/** Archives an activity (soft-delete). Removes it from the active-list cache. */
+export function useArchiveActivity(timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (activityId: string) =>
+      authFetch<Activity>(`/activities/${activityId}/archive`, { method: 'POST' }),
+    onSuccess: (_data, activityId) => {
+      client.setQueriesData<Activity[]>(
+        { queryKey: ['timelines', timelineId, 'activities'] },
+        (old) => old?.filter((a) => a.id !== activityId),
+      )
+    },
+  })
+}
+
+/** Deletes an activity and removes it from the cache. */
+export function useDeleteActivity(timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (activityId: string) =>
+      authFetch<void>(`/activities/${activityId}`, { method: 'DELETE' }),
+    onSuccess: (_data, activityId) => {
+      client.setQueriesData<Activity[]>(
+        { queryKey: ['timelines', timelineId, 'activities'] },
+        (old) => old?.filter((a) => a.id !== activityId),
+      )
+    },
+  })
+}
+
+// ── Timeline CRUD (Phase 10.3) ────────────────────────────────────────────────
+
+/** Fetches all timelines for a team, optionally including archived ones. */
+export function useTeamTimelinesWithArchived(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: [...keys.teamTimelines(teamId), { includeArchived: true }],
+    queryFn: async () =>
+      (await authFetch<Timeline[] | null>(`/teams/${teamId}/timelines?archived=true`)) ?? [],
+    enabled: Boolean(teamId),
+  })
+}
+
+/** Creates a new timeline for a team. */
+export function useCreateTimeline(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (input: { name: string; startDate: string; endDate: string; color?: string | null; icon?: string | null; description?: string | null; notes?: string | null; templateId?: string | null }) =>
+      authFetch<Timeline>(`/teams/${teamId}/timelines`, {
+        method: 'POST',
+        body: JSON.stringify(input),
+      }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
+    },
+  })
+}
+
+/** PATCHes a timeline's mutable fields. */
+export function useUpdateTimeline(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({ timelineId, patch }: { timelineId: string; patch: PatchTimelineInput }) =>
+      authFetch<Timeline>(`/timelines/${timelineId}`, {
+        method: 'PATCH',
+        body: JSON.stringify(patch),
+      }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
+    },
+  })
+}
+
+/** Hard-deletes a timeline. */
+export function useDeleteTimeline(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (timelineId: string) =>
+      authFetch<void>(`/timelines/${timelineId}`, { method: 'DELETE' }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
+    },
+  })
+}
+
+/** Archives a timeline. */
+export function useArchiveTimeline(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (timelineId: string) =>
+      authFetch<Timeline>(`/timelines/${timelineId}/archive`, { method: 'POST' }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
+    },
+  })
+}
+
+/** Restores an archived timeline. */
+export function useUnarchiveTimeline(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (timelineId: string) =>
+      authFetch<Timeline>(`/timelines/${timelineId}/unarchive`, { method: 'POST' }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
+    },
+  })
+}
+
+/** Fetches the access grant list for a timeline. */
+export function useTimelineAccess(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: ['teams', teamId, 'timelines', timelineId, 'access'],
+    queryFn: async () =>
+      (await authFetch<TimelineAccessEntry[]>(
+        `/teams/${teamId}/timelines/${timelineId}/access`,
+      )) ?? [],
+    enabled: Boolean(teamId) && Boolean(timelineId),
+  })
+}
+
+/** Grants or updates a member's access to a timeline. */
+export function useGrantTimelineAccess(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({ memberId, role }: { memberId: string; role: 'admin' | 'member' }) =>
+      authFetch<TimelineAccessEntry[]>(
+        `/teams/${teamId}/timelines/${timelineId}/access/${memberId}`,
+        { method: 'PUT', body: JSON.stringify({ role }) },
+      ),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ['teams', teamId, 'timelines', timelineId, 'access'] })
+    },
+  })
+}
+
+/** Revokes a member's access to a timeline. */
+export function useRevokeTimelineAccess(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (memberId: string) =>
+      authFetch<void>(`/teams/${teamId}/timelines/${timelineId}/access/${memberId}`, {
+        method: 'DELETE',
+      }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ['teams', teamId, 'timelines', timelineId, 'access'] })
+    },
+  })
+}
+````
+
+## File: packages/web/src/components/gantt/ActivityDetailPanel.tsx
+````typescript
+/**
+ * ActivityDetailPanel — right-side slide-in panel for a selected Gantt activity.
+ *
+ * Field order (top to bottom):
+ *   1. Header — Identity widget + Title
+ *   2. When — Date pickers (start → end)
+ *   3. Description — single-line input
+ *   4. Assigned to — bordered card style (matches create panel)
+ *   5. Classify — Status (rich dropdown with color dot + icon + name), Tags (stub)
+ *   6. Advanced — Parent (stub), Progress (stub), Location, URL
+ *   7. Notes — multi-line textarea
+ *   8. Footer — Delete button
+ *
+ * All functional fields save on change/blur via PATCH /activities/:id.
+ * liveDragStart / liveDragEnd display live dates during bar drag without triggering saves.
+ */
+
+import { useState, useEffect, useRef } from 'react'
+import { X, Trash2, Archive, ArrowRight, Loader2, ChevronDown, Search } from 'lucide-react'
+import MemberAvatar from '@/components/MemberAvatar'
+import { IdentityWidget } from '@/components/identity/IdentityWidget'
+import { Badge } from '@/components/identity/Badge'
+import { resolveColorHex } from '@/components/identity/identity-constants'
+import type { Identity } from '@/components/identity/identity-constants'
+import { useUpdateActivity, useDeleteActivity, useArchiveActivity, useTimelineActivities } from '@/hooks/useTeamActivities'
+import { useTimelineStatuses } from '@/hooks/useStatusTemplates'
+import { useTags } from '@/hooks/useTags'
+import TagInput from '@/components/TagInput'
+import type { components } from '@draba/shared'
+import type { Member } from '@/types'
+
+type ApiActivity = components['schemas']['Activity']
+type Status = components['schemas']['Status']
+
+const PANEL_WIDTH = 300
+
+interface Props {
+  event: ApiActivity | null
+  open: boolean
+  members: Member[]
+  teamId: string
+  timelineId: string
+  onClose: () => void
+  /** Display-only start date override during bar drag (YYYY-MM-DD). Does not trigger a save. */
+  liveDragStart?: string
+  /** Display-only end date override during bar drag (YYYY-MM-DD). Does not trigger a save. */
+  liveDragEnd?: string
+}
+
+// ── Small helpers ─────────────────────────────────────────────────────────────
+
+function toDateInput(iso: string): string { return iso.slice(0, 10) }
+function toISODate(d: string): string { return `${d}T00:00:00Z` }
+
+const SEC_LABEL: React.CSSProperties = {
+  fontSize: 10,
+  fontWeight: 700,
+  color: 'var(--muted-foreground)',
+  textTransform: 'uppercase',
+  letterSpacing: '0.08em',
+  marginBottom: 6,
+}
+
+const FIELD_LABEL: React.CSSProperties = {
+  fontSize: 10,
+  fontWeight: 600,
+  color: 'var(--muted-foreground)',
+  textTransform: 'uppercase',
+  letterSpacing: '0.07em',
+  marginBottom: 3,
+  width: 68,
+  flexShrink: 0,
+}
+
+const STUB_VALUE: React.CSSProperties = {
+  fontSize: 12,
+  color: 'var(--muted-foreground)',
+  opacity: 0.5,
+  flex: 1,
+  display: 'flex',
+  alignItems: 'center',
+  gap: 4,
+  cursor: 'default',
+  userSelect: 'none',
+}
+
+const DIVIDER: React.CSSProperties = {
+  borderTop: '1px solid var(--border)',
+  margin: '10px 0',
+}
+
+const INPUT: React.CSSProperties = {
+  width: '100%',
+  boxSizing: 'border-box' as const,
+  fontSize: 12,
+  color: 'var(--foreground)',
+  border: '1px solid var(--border)',
+  borderRadius: 'var(--radius-md)',
+  padding: '5px 8px',
+  outline: 'none',
+  background: 'var(--background)',
+  fontFamily: 'var(--font-sans)',
+}
+
+// ── Rich status dropdown ──────────────────────────────────────────────────────
+
+interface StatusDropdownProps {
+  statuses: Status[]
+  value: string | null | undefined
+  onChange: (id: string | null) => void
+}
+
+function StatusDropdown({ statuses, value, onChange }: StatusDropdownProps) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    function onDown(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [])
+
+  const selected = statuses.find(s => s.id === value) ?? null
+
+  return (
+    <div ref={ref} style={{ flex: 1, position: 'relative' }}>
+      <button
+        onClick={() => setOpen(o => !o)}
+        style={{
+          width: '100%',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 6,
+          padding: '4px 8px',
+          border: '1px solid var(--border)',
+          borderRadius: 6,
+          background: 'var(--background)',
+          color: 'var(--foreground)',
+          cursor: 'pointer',
+          fontSize: 12,
+          fontFamily: 'var(--font-sans)',
+          textAlign: 'left',
+        }}
+      >
+        {selected ? (
+          <>
+            <div
+              style={{
+                width: 8,
+                height: 8,
+                borderRadius: '50%',
+                background: resolveColorHex(selected.color) ?? selected.color,
+                flexShrink: 0,
+              }}
+            />
+            <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {selected.name}
+            </span>
+          </>
+        ) : (
+          <span style={{ flex: 1, color: 'var(--muted-foreground)', fontStyle: 'italic' }}>— No status —</span>
+        )}
+        <ChevronDown size={11} strokeWidth={2} style={{ flexShrink: 0, color: 'var(--muted-foreground)' }} />
+      </button>
+
+      {open && (
+        <div
+          style={{
+            position: 'absolute',
+            top: 'calc(100% + 4px)',
+            left: 0,
+            right: 0,
+            background: 'var(--card)',
+            border: '1px solid var(--border)',
+            borderRadius: 6,
+            boxShadow: '0 4px 12px rgba(0,0,0,.12)',
+            zIndex: 100,
+            overflow: 'hidden',
+          }}
+        >
+          <div
+            onClick={() => { onChange(null); setOpen(false) }}
+            style={{
+              padding: '6px 10px',
+              fontSize: 12,
+              color: 'var(--muted-foreground)',
+              fontStyle: 'italic',
+              cursor: 'pointer',
+              borderBottom: statuses.length > 0 ? '1px solid var(--border)' : 'none',
+            }}
+            onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+            onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+          >
+            — No status —
+          </div>
+          {statuses.map(s => (
+            <div
+              key={s.id}
+              onClick={() => { onChange(s.id); setOpen(false) }}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                padding: '6px 10px',
+                fontSize: 12,
+                cursor: 'pointer',
+                background: s.id === value ? 'var(--muted)' : 'transparent',
+                fontWeight: s.id === value ? 600 : 400,
+              }}
+              onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+              onMouseLeave={e => (e.currentTarget.style.background = s.id === value ? 'var(--muted)' : 'transparent')}
+            >
+              <div
+                style={{
+                  width: 8,
+                  height: 8,
+                  borderRadius: '50%',
+                  background: resolveColorHex(s.color) ?? s.color,
+                  flexShrink: 0,
+                }}
+              />
+              <span style={{ flex: 1 }}>{s.name}</span>
+              {s.isClosed && (
+                <span style={{ fontSize: 9, color: 'var(--muted-foreground)', fontWeight: 500, letterSpacing: '0.05em' }}>
+                  CLOSED
+                </span>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Searchable parent activity picker ─────────────────────────────────────────
+
+interface ParentPickerProps {
+  activities: ApiActivity[]
+  value: string | null | undefined
+  onChange: (id: string | null) => void
+}
+
+/**
+ * Searchable combobox for choosing a parent activity. Scales past a plain
+ * <select> by filtering as you type, shows each activity's identity badge,
+ * and ellipsis-truncates long titles so the panel never overflows.
+ */
+function ParentActivityPicker({ activities, value, onChange }: ParentPickerProps) {
+  const [open, setOpen] = useState(false)
+  const [query, setQuery] = useState('')
+  const ref = useRef<HTMLDivElement>(null)
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    function onDown(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) { setOpen(false); setQuery('') }
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [])
+
+  // Focus the search field whenever the dropdown opens.
+  useEffect(() => { if (open) inputRef.current?.focus() }, [open])
+
+  const selected = activities.find(a => a.id === value) ?? null
+  const filtered = activities.filter(a => a.title.toLowerCase().includes(query.trim().toLowerCase()))
+
+  function choose(id: string | null) {
+    onChange(id)
+    setOpen(false)
+    setQuery('')
+  }
+
+  return (
+    <div ref={ref} style={{ flex: 1, position: 'relative', minWidth: 0 }}>
+      <button
+        onClick={() => setOpen(o => !o)}
+        style={{
+          width: '100%', display: 'flex', alignItems: 'center', gap: 6,
+          padding: '4px 8px', border: '1px solid var(--border)', borderRadius: 6,
+          background: 'var(--background)', color: 'var(--foreground)', cursor: 'pointer',
+          fontSize: 12, fontFamily: 'var(--font-sans)', textAlign: 'left',
+        }}
+      >
+        {selected ? (
+          <>
+            <Badge identity={{ color: selected.color ?? '#288C9B', icon: selected.icon ?? '__none__' }} name={selected.title} size={16} />
+            <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {selected.title}
+            </span>
+          </>
+        ) : (
+          <span style={{ flex: 1, color: 'var(--muted-foreground)', fontStyle: 'italic' }}>— None —</span>
+        )}
+        <ChevronDown size={11} strokeWidth={2} style={{ flexShrink: 0, color: 'var(--muted-foreground)' }} />
+      </button>
+
+      {open && (
+        <div
+          style={{
+            position: 'absolute', top: 'calc(100% + 4px)', left: 0, right: 0,
+            background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 6,
+            boxShadow: '0 4px 12px rgba(0,0,0,.12)', zIndex: 100, overflow: 'hidden',
+          }}
+        >
+          {/* Search field */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 8px', borderBottom: '1px solid var(--border)' }}>
+            <Search size={12} strokeWidth={2} style={{ flexShrink: 0, color: 'var(--muted-foreground)' }} />
+            <input
+              ref={inputRef}
+              value={query}
+              onChange={e => setQuery(e.target.value)}
+              placeholder="Search activities…"
+              style={{
+                flex: 1, minWidth: 0, border: 'none', outline: 'none', background: 'none',
+                fontSize: 12, color: 'var(--foreground)', fontFamily: 'var(--font-sans)',
+              }}
+            />
+          </div>
+
+          <div style={{ maxHeight: 200, overflowY: 'auto' }}>
+            <div
+              onClick={() => choose(null)}
+              style={{
+                padding: '6px 10px', fontSize: 12, color: 'var(--muted-foreground)',
+                fontStyle: 'italic', cursor: 'pointer',
+                borderBottom: filtered.length > 0 ? '1px solid var(--border)' : 'none',
+              }}
+              onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+              onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+            >
+              — None —
+            </div>
+            {filtered.map(a => (
+              <div
+                key={a.id}
+                onClick={() => choose(a.id)}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px',
+                  fontSize: 12, cursor: 'pointer',
+                  background: a.id === value ? 'var(--muted)' : 'transparent',
+                  fontWeight: a.id === value ? 600 : 400,
+                }}
+                onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+                onMouseLeave={e => (e.currentTarget.style.background = a.id === value ? 'var(--muted)' : 'transparent')}
+              >
+                <Badge identity={{ color: a.color ?? '#288C9B', icon: a.icon ?? '__none__' }} name={a.title} size={16} />
+                <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {a.title}
+                </span>
+              </div>
+            ))}
+            {filtered.length === 0 && (
+              <div style={{ padding: '8px 10px', fontSize: 11, color: 'var(--muted-foreground)', fontStyle: 'italic' }}>
+                No matching activities
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Component ─────────────────────────────────────────────────────────────────
+
+export default function ActivityDetailPanel({
+  event, open, members, teamId, timelineId, onClose, liveDragStart, liveDragEnd,
+}: Props) {
+  const updateMutation = useUpdateActivity(timelineId)
+  const deleteMutation = useDeleteActivity(timelineId)
+  const archiveMutation = useArchiveActivity(timelineId)
+  const { data: statuses = [] } = useTimelineStatuses(teamId, timelineId)
+  const { data: teamTags = [] } = useTags(teamId)
+  const { data: allActivities = [] } = useTimelineActivities(teamId, timelineId)
+
+  const [title, setTitle] = useState(event?.title ?? '')
+  const [description, setDescription] = useState(event?.description ?? '')
+  const [notes, setNotes] = useState(event?.notes ?? '')
+  const [startDate, setStartDate] = useState(event ? toDateInput(event.startAt) : '')
+  const [endDate, setEndDate] = useState(event ? toDateInput(event.endAt) : '')
+  const [identity, setIdentity] = useState<Identity>({
+    color: event?.color ?? '#288C9B',
+    icon: event?.icon ?? '__none__',
+  })
+  const [assignedIds, setAssignedIds] = useState<string[]>(event?.assignedMemberIds ?? [])
+  const [tagIds, setTagIds] = useState<string[]>((event?.tagIds as string[] | undefined) ?? [])
+  const [location, setLocation] = useState(event?.location ?? '')
+  const [url, setUrl] = useState(event?.url ?? '')
+  const [progressValue, setProgressValue] = useState(event?.percentComplete ?? 0)
+  // Parent and status are mirrored locally so the picker reflects a change
+  // immediately — the `event` prop is a snapshot taken at selection time and
+  // doesn't refresh until the activity is reselected.
+  const [parentId, setParentId] = useState<string | null>(event?.parentActivityId ?? null)
+  const [statusId, setStatusId] = useState<string | null>(event?.statusId ?? null)
+  // Progress percent renders as a label until clicked; `progressDraft` holds the
+  // in-flight text while editing.
+  const [editingProgress, setEditingProgress] = useState(false)
+  const [progressDraft, setProgressDraft] = useState('')
+  const [confirmDelete, setConfirmDelete] = useState(false)
+
+  // Re-sync when the selected activity changes.
+  useEffect(() => {
+    if (!event) return
+    setTitle(event.title)
+    setDescription(event.description ?? '')
+    setNotes(event.notes ?? '')
+    setStartDate(toDateInput(event.startAt))
+    setEndDate(toDateInput(event.endAt))
+    setIdentity({ color: event.color ?? '#288C9B', icon: event.icon ?? '__none__' })
+    setAssignedIds(event.assignedMemberIds ?? [])
+    setTagIds((event.tagIds as string[] | undefined) ?? [])
+    setLocation(event.location ?? '')
+    setUrl(event.url ?? '')
+    setProgressValue(event.percentComplete ?? 0)
+    setParentId(event.parentActivityId ?? null)
+    setStatusId(event.statusId ?? null)
+    setEditingProgress(false)
+    setConfirmDelete(false)
+  }, [event?.id]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Sync local date state when the event's dates change (e.g. after a drag commit).
+  const eventStartAt = event?.startAt
+  const eventEndAt = event?.endAt
+  useEffect(() => {
+    if (eventStartAt) setStartDate(toDateInput(eventStartAt))
+    if (eventEndAt) setEndDate(toDateInput(eventEndAt))
+  }, [eventStartAt, eventEndAt])
+
+  const saving = updateMutation.isPending
+  const deleting = deleteMutation.isPending
+  const archiving = archiveMutation.isPending
+
+  // Display dates: live drag overrides take precedence while dragging.
+  const displayStart = liveDragStart ?? startDate
+  const displayEnd = liveDragEnd ?? endDate
+
+  function save(patch: Parameters<typeof updateMutation.mutate>[0]['patch']) {
+    if (!event) return
+    updateMutation.mutate({ activityId: event.id, patch })
+  }
+
+  function handleTitleBlur() {
+    if (title.trim() && title !== event?.title) save({ title: title.trim() })
+  }
+
+  function handleDescriptionBlur() {
+    if (description !== (event?.description ?? '')) save({ description: description || null })
+  }
+
+  function handleNotesBlur() {
+    if (notes !== (event?.notes ?? '')) save({ notes: notes || null } as Parameters<typeof save>[0])
+  }
+
+  function handleLocationBlur() {
+    if (location !== (event?.location ?? '')) save({ location: location || null })
+  }
+
+  function handleUrlBlur() {
+    if (url !== (event?.url ?? '')) save({ url: url || null })
+  }
+
+  function handleStartDateChange(val: string) {
+    setStartDate(val)
+    if (val && val <= endDate) save({ startAt: toISODate(val) })
+  }
+
+  function handleEndDateChange(val: string) {
+    setEndDate(val)
+    if (val && val >= startDate) save({ endAt: toISODate(val) })
+  }
+
+  function handleIdentityChange(next: Identity) {
+    setIdentity(next)
+    save({ color: next.color, icon: next.icon })
+  }
+
+  function toggleAssignee(memberId: string) {
+    const next = assignedIds.includes(memberId)
+      ? assignedIds.filter(id => id !== memberId)
+      : [...assignedIds, memberId]
+    setAssignedIds(next)
+    save({ assignedMemberIds: next })
+  }
+
+  function handleTagsChange(ids: string[]) {
+    setTagIds(ids)
+    save({ tagIds: ids } as Parameters<typeof save>[0])
+  }
+
+  function handleProgressChange(e: React.ChangeEvent<HTMLInputElement>) {
+    setProgressValue(Number(e.target.value))
+  }
+
+  // Clamps to 0–100, rounds to an integer, and saves only on a real change.
+  function commitProgress(val: number) {
+    const clamped = Math.max(0, Math.min(100, Math.round(Number.isFinite(val) ? val : 0)))
+    setProgressValue(clamped)
+    if (clamped !== (event?.percentComplete ?? 0)) {
+      save({ percentComplete: clamped } as Parameters<typeof save>[0])
+    }
+  }
+
+  function handleProgressCommit(e: React.ChangeEvent<HTMLInputElement>) {
+    commitProgress(Number(e.target.value))
+  }
+
+  function startEditProgress() {
+    setProgressDraft(String(progressValue))
+    setEditingProgress(true)
+  }
+
+  function commitProgressEdit() {
+    commitProgress(progressDraft === '' ? 0 : Number(progressDraft))
+    setEditingProgress(false)
+  }
+
+  function handleDelete() {
+    if (!event) return
+    deleteMutation.mutate(event.id, { onSuccess: onClose })
+  }
+
+  function handleArchive() {
+    if (!event) return
+    archiveMutation.mutate(event.id, { onSuccess: onClose })
+  }
+
+  return (
+    <div
+      style={{
+        width: open ? PANEL_WIDTH : 0,
+        flexShrink: 0,
+        borderLeft: open ? '1px solid var(--border)' : 'none',
+        background: 'var(--card)',
+        display: 'flex',
+        flexDirection: 'column',
+        overflow: 'hidden',
+        transition: 'width 0.2s ease',
+      }}
+    >
+      <div style={{ width: PANEL_WIDTH, display: 'flex', flexDirection: 'column', height: '100%' }}>
+        {!event ? null : (<>
+
+        {/* ── Header bar ── */}
+        <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          padding: '0 12px', height: 'var(--topbar-h, 40px)',
+          borderBottom: '1px solid var(--border)', flexShrink: 0,
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+            <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)' }}>Activity detail</span>
+            {saving && <Loader2 size={11} style={{ opacity: 0.5 }} className="animate-spin" />}
+          </div>
+          <button
+            onClick={onClose}
+            style={{
+              width: 24, height: 24, border: 'none', background: 'none', borderRadius: 4,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              cursor: 'pointer', color: 'var(--muted-foreground)',
+            }}
+            onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+            onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+          >
+            <X size={14} strokeWidth={2} />
+          </button>
+        </div>
+
+        {/* ── Scrollable body ── */}
+        <div style={{ flex: 1, overflowY: 'auto', padding: '14px 14px 8px' }}>
+
+          {/* 1. Identity widget + Title */}
+          <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start', marginBottom: 14 }}>
+            <div style={{ marginTop: 2, flexShrink: 0 }}>
+              <IdentityWidget
+                identity={identity}
+                name={title || event?.title || ''}
+                shape="square"
+                onChange={handleIdentityChange}
+              />
+            </div>
+            <input
+              value={title}
+              onChange={e => setTitle(e.target.value)}
+              onBlur={handleTitleBlur}
+              style={{
+                flex: 1, fontSize: 13, fontWeight: 600,
+                color: 'var(--foreground)', border: '1px solid transparent',
+                borderRadius: 'var(--radius-md)', padding: '5px 6px',
+                outline: 'none', background: 'transparent', fontFamily: 'var(--font-sans)',
+              }}
+              onFocus={e => { e.target.style.borderColor = 'var(--primary)'; e.target.style.background = 'var(--background)' }}
+              onBlurCapture={e => { e.target.style.borderColor = 'transparent'; e.target.style.background = 'transparent' }}
+            />
+          </div>
+
+          <div style={DIVIDER} />
+
+          {/* 2. When — date pickers only (no allDay checkbox, no date summary) */}
+          <div style={{ marginBottom: 12 }}>
+            <div style={SEC_LABEL}>When</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <input
+                type="date" value={displayStart}
+                onChange={e => handleStartDateChange(e.target.value)}
+                style={{ ...INPUT, flex: 1, padding: '5px 6px' }}
+                onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
+                onBlur={e => (e.target.style.borderColor = 'var(--border)')}
+              />
+              <ArrowRight size={11} color="var(--muted-foreground)" strokeWidth={2} style={{ flexShrink: 0 }} />
+              <input
+                type="date" value={displayEnd} min={startDate}
+                onChange={e => handleEndDateChange(e.target.value)}
+                style={{ ...INPUT, flex: 1, padding: '5px 6px' }}
+                onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
+                onBlur={e => (e.target.style.borderColor = 'var(--border)')}
+              />
+            </div>
+          </div>
+
+          <div style={DIVIDER} />
+
+          {/* 3. Description — below dates, matching create panel */}
+          <div style={{ marginBottom: 12 }}>
+            <div style={SEC_LABEL}>Description</div>
+            <input
+              value={description}
+              onChange={e => setDescription(e.target.value)}
+              onBlur={e => { handleDescriptionBlur(); e.target.style.borderColor = 'var(--border)' }}
+              placeholder="Optional description…"
+              style={{ ...INPUT, padding: '6px 8px' }}
+              onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
+            />
+          </div>
+
+          <div style={DIVIDER} />
+
+          {/* 4. Assigned to — bordered card style matching create panel */}
+          {members.length > 0 && (
+            <div style={{ marginBottom: 12 }}>
+              <div style={SEC_LABEL}>Assigned to</div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                {members.map(m => {
+                  const assigned = assignedIds.includes(m.id)
+                  return (
+                    <button
+                      key={m.id}
+                      onClick={() => toggleAssignee(m.id)}
+                      style={{
+                        display: 'flex', alignItems: 'center', gap: 8,
+                        padding: '5px 8px',
+                        border: assigned ? `1px solid ${m.color}` : '1px solid var(--border)',
+                        borderRadius: 'var(--radius-md)',
+                        background: assigned ? `${m.color}18` : 'var(--background)',
+                        cursor: 'pointer', textAlign: 'left',
+                        transition: 'background 0.1s, border-color 0.1s',
+                      }}
+                    >
+                      <MemberAvatar member={m} size={18} />
+                      <span style={{ fontSize: 12, color: 'var(--foreground)', flex: 1 }}>{m.name}</span>
+                      {assigned && (
+                        <div style={{ width: 6, height: 6, borderRadius: '50%', background: m.color, flexShrink: 0 }} />
+                      )}
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+          )}
+
+          <div style={DIVIDER} />
+
+          {/* 5. Classify — Status (rich dropdown), Tags (stub) */}
+          <div style={{ marginBottom: 12 }}>
+            <div style={SEC_LABEL}>Classify</div>
+
+            {/* Status picker */}
+            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
+              <span style={FIELD_LABEL}>Status</span>
+              {statuses.length > 0 ? (
+                <StatusDropdown
+                  statuses={statuses}
+                  value={statusId}
+                  onChange={id => { setStatusId(id); save({ statusId: id } as Parameters<typeof save>[0]) }}
+                />
+              ) : (
+                <div style={{ ...STUB_VALUE }}>
+                  <span style={{ fontSize: 10, opacity: 0.5 }}>No statuses configured</span>
+                </div>
+              )}
+            </div>
+
+            {/* Tags */}
+            <div style={{ display: 'flex', alignItems: 'flex-start' }}>
+              <span style={{ ...FIELD_LABEL, paddingTop: 5 }}>Tags</span>
+              <TagInput
+                teamId={teamId}
+                tags={teamTags}
+                selectedTagIds={tagIds}
+                onChange={handleTagsChange}
+              />
+            </div>
+          </div>
+
+          <div style={DIVIDER} />
+
+          {/* 6. Advanced (was "Details") — Parent, Progress, Location, URL */}
+          <div style={{ marginBottom: 12 }}>
+            <div style={SEC_LABEL}>Advanced</div>
+
+            {/* Parent activity picker */}
+            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
+              <span style={FIELD_LABEL}>Parent</span>
+              <ParentActivityPicker
+                activities={allActivities.filter(a => a.id !== event.id)}
+                value={parentId}
+                onChange={id => { setParentId(id); save({ parentActivityId: id } as Parameters<typeof save>[0]) }}
+              />
+            </div>
+
+            {/* % Complete slider */}
+            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
+              <span style={FIELD_LABEL}>Progress</span>
+              <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 8 }}>
+                <input
+                  type="range"
+                  min={0}
+                  max={100}
+                  step={5}
+                  value={progressValue}
+                  onChange={handleProgressChange}
+                  onMouseUp={handleProgressCommit as unknown as React.MouseEventHandler}
+                  onTouchEnd={handleProgressCommit as unknown as React.TouchEventHandler}
+                  style={{ flex: 1, cursor: 'pointer', accentColor: 'var(--primary)' }}
+                />
+                {editingProgress ? (
+                  <input
+                    autoFocus
+                    type="text"
+                    inputMode="numeric"
+                    value={progressDraft}
+                    onChange={e => setProgressDraft(e.target.value.replace(/[^0-9]/g, '').slice(0, 3))}
+                    onBlur={commitProgressEdit}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter') commitProgressEdit()
+                      else if (e.key === 'Escape') setEditingProgress(false)
+                    }}
+                    aria-label="Percent complete"
+                    style={{
+                      width: 40, fontSize: 11, textAlign: 'right', flexShrink: 0,
+                      marginLeft: 'auto',
+                      color: 'var(--foreground)', border: '1px solid var(--primary)',
+                      borderRadius: 4, padding: '2px 4px', outline: 'none',
+                      background: 'var(--background)', fontFamily: 'var(--font-sans)',
+                    }}
+                  />
+                ) : (
+                  <span
+                    onClick={startEditProgress}
+                    title="Click to edit"
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); startEditProgress() } }}
+                    style={{
+                      fontSize: 11, color: 'var(--muted-foreground)', minWidth: 34,
+                      textAlign: 'right', flexShrink: 0, cursor: 'text', userSelect: 'none',
+                      marginLeft: 'auto',
+                      padding: '2px 4px', borderRadius: 4, border: '1px solid transparent',
+                    }}
+                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                  >
+                    {progressValue}%
+                  </span>
+                )}
+              </div>
+            </div>
+
+            {/* Location (functional) */}
+            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
+              <span style={FIELD_LABEL}>Location</span>
+              <input
+                value={location}
+                onChange={e => setLocation(e.target.value)}
+                onBlur={handleLocationBlur}
+                placeholder="—"
+                style={{ ...INPUT, flex: 1, padding: '4px 6px', fontSize: 12 }}
+                onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
+                onBlurCapture={e => (e.target.style.borderColor = 'var(--border)')}
+              />
+            </div>
+
+            {/* URL (functional) */}
+            <div style={{ display: 'flex', alignItems: 'center' }}>
+              <span style={FIELD_LABEL}>URL</span>
+              <input
+                value={url}
+                onChange={e => setUrl(e.target.value)}
+                onBlur={handleUrlBlur}
+                placeholder="—"
+                style={{ ...INPUT, flex: 1, padding: '4px 6px', fontSize: 12 }}
+                onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
+                onBlurCapture={e => (e.target.style.borderColor = 'var(--border)')}
+              />
+            </div>
+          </div>
+
+          <div style={DIVIDER} />
+
+          {/* 7. Notes — multi-line textarea */}
+          <div style={{ marginBottom: 8 }}>
+            <div style={SEC_LABEL}>Notes</div>
+            <textarea
+              value={notes}
+              onChange={e => setNotes(e.target.value)}
+              onBlur={e => { handleNotesBlur(); e.target.style.borderColor = 'var(--border)' }}
+              placeholder="Add notes…"
+              rows={4}
+              style={{
+                ...INPUT,
+                padding: '6px 8px',
+                resize: 'vertical',
+                minHeight: 72,
+                lineHeight: 1.5,
+              }}
+              onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
+            />
+          </div>
+
+        </div>
+
+        {/* ── Footer — Archive + Delete buttons ── */}
+        <div style={{ padding: '10px 14px', borderTop: '1px solid var(--border)', flexShrink: 0 }}>
+          {confirmDelete ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <p style={{ fontSize: 12, color: 'var(--muted-foreground)', margin: 0, lineHeight: 1.4 }}>
+                Delete <strong style={{ color: 'var(--foreground)' }}>{event?.title}</strong>? This cannot be undone.
+              </p>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <button
+                  onClick={() => setConfirmDelete(false)}
+                  disabled={deleting}
+                  style={{
+                    flex: 1, fontSize: 12, fontWeight: 600, padding: 7,
+                    borderRadius: 'var(--radius-md)', border: '1px solid var(--border)',
+                    background: 'var(--card)', color: 'var(--foreground)',
+                    cursor: 'pointer', fontFamily: 'var(--font-sans)',
+                  }}
+                >Cancel</button>
+                <button
+                  onClick={handleDelete}
+                  disabled={deleting}
+                  style={{
+                    flex: 1, fontSize: 12, fontWeight: 600, padding: 7,
+                    borderRadius: 'var(--radius-md)', border: 'none',
+                    background: 'var(--destructive)', color: 'white',
+                    cursor: deleting ? 'not-allowed' : 'pointer',
+                    fontFamily: 'var(--font-sans)',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
+                  }}
+                >
+                  {deleting ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />}
+                  Delete
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div style={{ display: 'flex', gap: 6 }}>
+              <button
+                onClick={handleArchive}
+                disabled={archiving}
+                style={{
+                  flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
+                  fontSize: 12, fontWeight: 600, padding: 7,
+                  borderRadius: 'var(--radius-md)', border: '1px solid var(--border)',
+                  background: 'var(--card)', color: 'var(--muted-foreground)',
+                  cursor: archiving ? 'not-allowed' : 'pointer', fontFamily: 'var(--font-sans)',
+                }}
+              >
+                {archiving ? <Loader2 size={12} className="animate-spin" /> : <Archive size={12} strokeWidth={2} />}
+                Archive
+              </button>
+              <button
+                onClick={() => setConfirmDelete(true)}
+                style={{
+                  flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
+                  fontSize: 12, fontWeight: 600, padding: 7,
+                  borderRadius: 'var(--radius-md)', border: 'none',
+                  background: 'hsl(0 72% 95%)', color: 'var(--destructive)',
+                  cursor: 'pointer', fontFamily: 'var(--font-sans)',
+                }}
+              >
+                <Trash2 size={12} strokeWidth={2} />
+                Delete
+              </button>
+            </div>
+          )}
+        </div>
+
+        </>)}
+      </div>
+    </div>
+  )
+}
+````
+
 ## File: docs/TASKS.md
 ````markdown
 # Tasks
@@ -45152,27 +47733,43 @@ Multi-assignee activities now appear under their exact assignee-set group in bot
 **Month / Week** all-day-bar layouts sharing one skeleton. No Day view, no time grid (every activity is all-day). Detailed plan: `docs/plans/phase-11.2-calendar-view.md`.
 
 **Shared:**
-- [ ] Layout switcher (Month / Week) in the view's toolbar slot
-- [ ] Today / prev / next navigation; jump-to-date picker
-- [ ] Color-by (activity / member / status) carried over via shared `lib/activityColor.ts`
-- [ ] Click empty cell → `ActivityCreatePanel` prefilled with that date
-- [ ] Click bar → existing `ActivityDetailPanel`
-- [ ] Drag bar body → move (duration-preserving, whole-day snap, week-wrap aware) → PATCH; drag edge → resize; live sidebar preview via shared `useActivityDrag`
-- [ ] Respects active filter, Find highlight, `week_start` / `date_format` prefs
+- [x] Layout switcher (Month / Week) in the view's toolbar slot — 2026-06-02
+- [x] Today / prev / next navigation — 2026-06-02
+- [x] Color-by (activity / member / status) carried over via shared `lib/activityColor.ts` — 2026-06-02
+- [x] Click empty cell → `ActivityCreatePanel` prefilled with that date — 2026-06-02
+- [x] Click bar → existing `ActivityDetailPanel` — 2026-06-02
+- [x] Drag bar body → move (duration-preserving, whole-day snap, week-wrap aware) → PATCH; drag edge → resize; live sidebar preview — 2026-06-02
+- [x] Respects active filter, Find highlight, `week_start` pref — 2026-06-02
 
 **Lane packing (`lib/calendarLanes.ts`, pure + unit-tested):**
-- [ ] Per-week-row greedy lane assignment for concurrent multi-day bars
-- [ ] Cross-week activities split into one segment per week row with "continues" edges
+- [x] Per-week-row greedy lane assignment for concurrent multi-day bars — 2026-06-02
+- [x] Cross-week activities split into one segment per week row with "continues" edges — 2026-06-02
 
 **Month layout:**
-- [ ] 6-week grid; multi-day activities render as continuous bars across cells
+- [x] 6-week grid; multi-day activities render as continuous bars across cells — 2026-06-02
 
 **Week layout:**
-- [ ] 7 day columns, taller cells (higher default visible-lane cap)
+- [x] 7 day columns, taller cells (higher default visible-lane cap = 6) — 2026-06-02
 
 **Density / overflow:**
-- [ ] Per-day "+N more" chip → day popover listing every activity that day → row click opens sidebar
-- [ ] Manual per-week row-height drag handle raises/lowers visible-lane cap; persists per-timeline-per-user
+- [x] Per-day "+N more" chip → day popover listing every activity that day → row click opens sidebar — 2026-06-02
+- [x] Manual per-week row-height drag handle raises/lowers visible-lane cap; persists per-timeline-per-user — 2026-06-02
+
+**Testing & verification:**
+- [x] `pnpm --filter web lint` clean — 2026-06-02
+- [x] `pnpm --filter web test` — 208 tests pass including new `calendarLanes.test.ts` (21 tests) — 2026-06-02
+- [x] `pnpm --filter web build` clean — 2026-06-02
+- [x] `golangci-lint run` clean; `go test ./...` passes — 2026-06-02
+- [ ] Manual: view switcher toggles Gantt ↔ List ↔ Calendar, persisting per timeline
+- [ ] Manual: Month and Week layouts render with correct day cells and today highlight
+- [ ] Manual: multi-day activity renders as a continuous bar with "continues" arrow on clipped edges
+- [ ] Manual: color-by recolors bars (activity / member / status)
+- [ ] Manual: "+N more" chip shows count; popover lists all activities for that day; row click opens sidebar
+- [ ] Manual: row-height resize handle raises/lowers visible lanes; persists after reload
+- [ ] Manual: bar click opens ActivityDetailPanel; empty-cell click opens ActivityCreatePanel prefilled
+- [ ] Manual: drag bar body moves it (duration preserved); drag edge resizes; sidebar shows live dates
+- [ ] Manual: Find highlights matching bars in both layouts
+- [ ] Manual: active filter applied (all 6 presets, saved filters)
 
 ---
 
@@ -45297,916 +47894,6 @@ Includes both the webhook backend and the per-timeline connector sidebar UI (pre
 - Notifications (email, push)
 - Recurring event UI (RRULE editing)
 - Kanban drag-to-change-status (v2; v1 Kanban is read-only)
-````
-
-## File: packages/web/src/components/gantt/ActivityDetailPanel.tsx
-````typescript
-/**
- * ActivityDetailPanel — right-side slide-in panel for a selected Gantt activity.
- *
- * Field order (top to bottom):
- *   1. Header — Identity widget + Title
- *   2. When — Date pickers (start → end)
- *   3. Description — single-line input
- *   4. Assigned to — bordered card style (matches create panel)
- *   5. Classify — Status (rich dropdown with color dot + icon + name), Tags (stub)
- *   6. Advanced — Parent (stub), Progress (stub), Location, URL
- *   7. Notes — multi-line textarea
- *   8. Footer — Delete button
- *
- * All functional fields save on change/blur via PATCH /activities/:id.
- * liveDragStart / liveDragEnd display live dates during bar drag without triggering saves.
- */
-
-import { useState, useEffect, useRef } from 'react'
-import { X, Trash2, Archive, ArrowRight, Loader2, ChevronDown, Search } from 'lucide-react'
-import MemberAvatar from '@/components/MemberAvatar'
-import { IdentityWidget } from '@/components/identity/IdentityWidget'
-import { Badge } from '@/components/identity/Badge'
-import { resolveColorHex } from '@/components/identity/identity-constants'
-import type { Identity } from '@/components/identity/identity-constants'
-import { useUpdateActivity, useDeleteActivity, useArchiveActivity, useTimelineActivities } from '@/hooks/useTeamActivities'
-import { useTimelineStatuses } from '@/hooks/useStatusTemplates'
-import { useTags } from '@/hooks/useTags'
-import TagInput from '@/components/TagInput'
-import type { components } from '@draba/shared'
-import type { Member } from '@/types'
-
-type ApiActivity = components['schemas']['Activity']
-type Status = components['schemas']['Status']
-
-const PANEL_WIDTH = 300
-
-interface Props {
-  event: ApiActivity | null
-  open: boolean
-  members: Member[]
-  teamId: string
-  timelineId: string
-  onClose: () => void
-  /** Display-only start date override during bar drag (YYYY-MM-DD). Does not trigger a save. */
-  liveDragStart?: string
-  /** Display-only end date override during bar drag (YYYY-MM-DD). Does not trigger a save. */
-  liveDragEnd?: string
-}
-
-// ── Small helpers ─────────────────────────────────────────────────────────────
-
-function toDateInput(iso: string): string { return iso.slice(0, 10) }
-function toISODate(d: string): string { return `${d}T00:00:00Z` }
-
-const SEC_LABEL: React.CSSProperties = {
-  fontSize: 10,
-  fontWeight: 700,
-  color: 'var(--muted-foreground)',
-  textTransform: 'uppercase',
-  letterSpacing: '0.08em',
-  marginBottom: 6,
-}
-
-const FIELD_LABEL: React.CSSProperties = {
-  fontSize: 10,
-  fontWeight: 600,
-  color: 'var(--muted-foreground)',
-  textTransform: 'uppercase',
-  letterSpacing: '0.07em',
-  marginBottom: 3,
-  width: 68,
-  flexShrink: 0,
-}
-
-const STUB_VALUE: React.CSSProperties = {
-  fontSize: 12,
-  color: 'var(--muted-foreground)',
-  opacity: 0.5,
-  flex: 1,
-  display: 'flex',
-  alignItems: 'center',
-  gap: 4,
-  cursor: 'default',
-  userSelect: 'none',
-}
-
-const DIVIDER: React.CSSProperties = {
-  borderTop: '1px solid var(--border)',
-  margin: '10px 0',
-}
-
-const INPUT: React.CSSProperties = {
-  width: '100%',
-  boxSizing: 'border-box' as const,
-  fontSize: 12,
-  color: 'var(--foreground)',
-  border: '1px solid var(--border)',
-  borderRadius: 'var(--radius-md)',
-  padding: '5px 8px',
-  outline: 'none',
-  background: 'var(--background)',
-  fontFamily: 'var(--font-sans)',
-}
-
-// ── Rich status dropdown ──────────────────────────────────────────────────────
-
-interface StatusDropdownProps {
-  statuses: Status[]
-  value: string | null | undefined
-  onChange: (id: string | null) => void
-}
-
-function StatusDropdown({ statuses, value, onChange }: StatusDropdownProps) {
-  const [open, setOpen] = useState(false)
-  const ref = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    function onDown(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
-    }
-    document.addEventListener('mousedown', onDown)
-    return () => document.removeEventListener('mousedown', onDown)
-  }, [])
-
-  const selected = statuses.find(s => s.id === value) ?? null
-
-  return (
-    <div ref={ref} style={{ flex: 1, position: 'relative' }}>
-      <button
-        onClick={() => setOpen(o => !o)}
-        style={{
-          width: '100%',
-          display: 'flex',
-          alignItems: 'center',
-          gap: 6,
-          padding: '4px 8px',
-          border: '1px solid var(--border)',
-          borderRadius: 6,
-          background: 'var(--background)',
-          color: 'var(--foreground)',
-          cursor: 'pointer',
-          fontSize: 12,
-          fontFamily: 'var(--font-sans)',
-          textAlign: 'left',
-        }}
-      >
-        {selected ? (
-          <>
-            <div
-              style={{
-                width: 8,
-                height: 8,
-                borderRadius: '50%',
-                background: resolveColorHex(selected.color) ?? selected.color,
-                flexShrink: 0,
-              }}
-            />
-            <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {selected.name}
-            </span>
-          </>
-        ) : (
-          <span style={{ flex: 1, color: 'var(--muted-foreground)', fontStyle: 'italic' }}>— No status —</span>
-        )}
-        <ChevronDown size={11} strokeWidth={2} style={{ flexShrink: 0, color: 'var(--muted-foreground)' }} />
-      </button>
-
-      {open && (
-        <div
-          style={{
-            position: 'absolute',
-            top: 'calc(100% + 4px)',
-            left: 0,
-            right: 0,
-            background: 'var(--card)',
-            border: '1px solid var(--border)',
-            borderRadius: 6,
-            boxShadow: '0 4px 12px rgba(0,0,0,.12)',
-            zIndex: 100,
-            overflow: 'hidden',
-          }}
-        >
-          <div
-            onClick={() => { onChange(null); setOpen(false) }}
-            style={{
-              padding: '6px 10px',
-              fontSize: 12,
-              color: 'var(--muted-foreground)',
-              fontStyle: 'italic',
-              cursor: 'pointer',
-              borderBottom: statuses.length > 0 ? '1px solid var(--border)' : 'none',
-            }}
-            onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-            onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-          >
-            — No status —
-          </div>
-          {statuses.map(s => (
-            <div
-              key={s.id}
-              onClick={() => { onChange(s.id); setOpen(false) }}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 8,
-                padding: '6px 10px',
-                fontSize: 12,
-                cursor: 'pointer',
-                background: s.id === value ? 'var(--muted)' : 'transparent',
-                fontWeight: s.id === value ? 600 : 400,
-              }}
-              onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-              onMouseLeave={e => (e.currentTarget.style.background = s.id === value ? 'var(--muted)' : 'transparent')}
-            >
-              <div
-                style={{
-                  width: 8,
-                  height: 8,
-                  borderRadius: '50%',
-                  background: resolveColorHex(s.color) ?? s.color,
-                  flexShrink: 0,
-                }}
-              />
-              <span style={{ flex: 1 }}>{s.name}</span>
-              {s.isClosed && (
-                <span style={{ fontSize: 9, color: 'var(--muted-foreground)', fontWeight: 500, letterSpacing: '0.05em' }}>
-                  CLOSED
-                </span>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  )
-}
-
-// ── Searchable parent activity picker ─────────────────────────────────────────
-
-interface ParentPickerProps {
-  activities: ApiActivity[]
-  value: string | null | undefined
-  onChange: (id: string | null) => void
-}
-
-/**
- * Searchable combobox for choosing a parent activity. Scales past a plain
- * <select> by filtering as you type, shows each activity's identity badge,
- * and ellipsis-truncates long titles so the panel never overflows.
- */
-function ParentActivityPicker({ activities, value, onChange }: ParentPickerProps) {
-  const [open, setOpen] = useState(false)
-  const [query, setQuery] = useState('')
-  const ref = useRef<HTMLDivElement>(null)
-  const inputRef = useRef<HTMLInputElement>(null)
-
-  useEffect(() => {
-    function onDown(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) { setOpen(false); setQuery('') }
-    }
-    document.addEventListener('mousedown', onDown)
-    return () => document.removeEventListener('mousedown', onDown)
-  }, [])
-
-  // Focus the search field whenever the dropdown opens.
-  useEffect(() => { if (open) inputRef.current?.focus() }, [open])
-
-  const selected = activities.find(a => a.id === value) ?? null
-  const filtered = activities.filter(a => a.title.toLowerCase().includes(query.trim().toLowerCase()))
-
-  function choose(id: string | null) {
-    onChange(id)
-    setOpen(false)
-    setQuery('')
-  }
-
-  return (
-    <div ref={ref} style={{ flex: 1, position: 'relative', minWidth: 0 }}>
-      <button
-        onClick={() => setOpen(o => !o)}
-        style={{
-          width: '100%', display: 'flex', alignItems: 'center', gap: 6,
-          padding: '4px 8px', border: '1px solid var(--border)', borderRadius: 6,
-          background: 'var(--background)', color: 'var(--foreground)', cursor: 'pointer',
-          fontSize: 12, fontFamily: 'var(--font-sans)', textAlign: 'left',
-        }}
-      >
-        {selected ? (
-          <>
-            <Badge identity={{ color: selected.color ?? '#288C9B', icon: selected.icon ?? '__none__' }} name={selected.title} size={16} />
-            <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {selected.title}
-            </span>
-          </>
-        ) : (
-          <span style={{ flex: 1, color: 'var(--muted-foreground)', fontStyle: 'italic' }}>— None —</span>
-        )}
-        <ChevronDown size={11} strokeWidth={2} style={{ flexShrink: 0, color: 'var(--muted-foreground)' }} />
-      </button>
-
-      {open && (
-        <div
-          style={{
-            position: 'absolute', top: 'calc(100% + 4px)', left: 0, right: 0,
-            background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 6,
-            boxShadow: '0 4px 12px rgba(0,0,0,.12)', zIndex: 100, overflow: 'hidden',
-          }}
-        >
-          {/* Search field */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 8px', borderBottom: '1px solid var(--border)' }}>
-            <Search size={12} strokeWidth={2} style={{ flexShrink: 0, color: 'var(--muted-foreground)' }} />
-            <input
-              ref={inputRef}
-              value={query}
-              onChange={e => setQuery(e.target.value)}
-              placeholder="Search activities…"
-              style={{
-                flex: 1, minWidth: 0, border: 'none', outline: 'none', background: 'none',
-                fontSize: 12, color: 'var(--foreground)', fontFamily: 'var(--font-sans)',
-              }}
-            />
-          </div>
-
-          <div style={{ maxHeight: 200, overflowY: 'auto' }}>
-            <div
-              onClick={() => choose(null)}
-              style={{
-                padding: '6px 10px', fontSize: 12, color: 'var(--muted-foreground)',
-                fontStyle: 'italic', cursor: 'pointer',
-                borderBottom: filtered.length > 0 ? '1px solid var(--border)' : 'none',
-              }}
-              onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-              onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-            >
-              — None —
-            </div>
-            {filtered.map(a => (
-              <div
-                key={a.id}
-                onClick={() => choose(a.id)}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px',
-                  fontSize: 12, cursor: 'pointer',
-                  background: a.id === value ? 'var(--muted)' : 'transparent',
-                  fontWeight: a.id === value ? 600 : 400,
-                }}
-                onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-                onMouseLeave={e => (e.currentTarget.style.background = a.id === value ? 'var(--muted)' : 'transparent')}
-              >
-                <Badge identity={{ color: a.color ?? '#288C9B', icon: a.icon ?? '__none__' }} name={a.title} size={16} />
-                <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {a.title}
-                </span>
-              </div>
-            ))}
-            {filtered.length === 0 && (
-              <div style={{ padding: '8px 10px', fontSize: 11, color: 'var(--muted-foreground)', fontStyle: 'italic' }}>
-                No matching activities
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-    </div>
-  )
-}
-
-// ── Component ─────────────────────────────────────────────────────────────────
-
-export default function ActivityDetailPanel({
-  event, open, members, teamId, timelineId, onClose, liveDragStart, liveDragEnd,
-}: Props) {
-  const updateMutation = useUpdateActivity(timelineId)
-  const deleteMutation = useDeleteActivity(timelineId)
-  const archiveMutation = useArchiveActivity(timelineId)
-  const { data: statuses = [] } = useTimelineStatuses(teamId, timelineId)
-  const { data: teamTags = [] } = useTags(teamId)
-  const { data: allActivities = [] } = useTimelineActivities(teamId, timelineId)
-
-  const [title, setTitle] = useState(event?.title ?? '')
-  const [description, setDescription] = useState(event?.description ?? '')
-  const [notes, setNotes] = useState(event?.notes ?? '')
-  const [startDate, setStartDate] = useState(event ? toDateInput(event.startAt) : '')
-  const [endDate, setEndDate] = useState(event ? toDateInput(event.endAt) : '')
-  const [identity, setIdentity] = useState<Identity>({
-    color: event?.color ?? '#288C9B',
-    icon: event?.icon ?? '__none__',
-  })
-  const [assignedIds, setAssignedIds] = useState<string[]>(event?.assignedMemberIds ?? [])
-  const [tagIds, setTagIds] = useState<string[]>((event?.tagIds as string[] | undefined) ?? [])
-  const [location, setLocation] = useState(event?.location ?? '')
-  const [url, setUrl] = useState(event?.url ?? '')
-  const [progressValue, setProgressValue] = useState(event?.percentComplete ?? 0)
-  // Parent and status are mirrored locally so the picker reflects a change
-  // immediately — the `event` prop is a snapshot taken at selection time and
-  // doesn't refresh until the activity is reselected.
-  const [parentId, setParentId] = useState<string | null>(event?.parentActivityId ?? null)
-  const [statusId, setStatusId] = useState<string | null>(event?.statusId ?? null)
-  // Progress percent renders as a label until clicked; `progressDraft` holds the
-  // in-flight text while editing.
-  const [editingProgress, setEditingProgress] = useState(false)
-  const [progressDraft, setProgressDraft] = useState('')
-  const [confirmDelete, setConfirmDelete] = useState(false)
-
-  // Re-sync when the selected activity changes.
-  useEffect(() => {
-    if (!event) return
-    setTitle(event.title)
-    setDescription(event.description ?? '')
-    setNotes(event.notes ?? '')
-    setStartDate(toDateInput(event.startAt))
-    setEndDate(toDateInput(event.endAt))
-    setIdentity({ color: event.color ?? '#288C9B', icon: event.icon ?? '__none__' })
-    setAssignedIds(event.assignedMemberIds ?? [])
-    setTagIds((event.tagIds as string[] | undefined) ?? [])
-    setLocation(event.location ?? '')
-    setUrl(event.url ?? '')
-    setProgressValue(event.percentComplete ?? 0)
-    setParentId(event.parentActivityId ?? null)
-    setStatusId(event.statusId ?? null)
-    setEditingProgress(false)
-    setConfirmDelete(false)
-  }, [event?.id]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Sync local date state when the event's dates change (e.g. after a drag commit).
-  const eventStartAt = event?.startAt
-  const eventEndAt = event?.endAt
-  useEffect(() => {
-    if (eventStartAt) setStartDate(toDateInput(eventStartAt))
-    if (eventEndAt) setEndDate(toDateInput(eventEndAt))
-  }, [eventStartAt, eventEndAt])
-
-  const saving = updateMutation.isPending
-  const deleting = deleteMutation.isPending
-  const archiving = archiveMutation.isPending
-
-  // Display dates: live drag overrides take precedence while dragging.
-  const displayStart = liveDragStart ?? startDate
-  const displayEnd = liveDragEnd ?? endDate
-
-  function save(patch: Parameters<typeof updateMutation.mutate>[0]['patch']) {
-    if (!event) return
-    updateMutation.mutate({ activityId: event.id, patch })
-  }
-
-  function handleTitleBlur() {
-    if (title.trim() && title !== event?.title) save({ title: title.trim() })
-  }
-
-  function handleDescriptionBlur() {
-    if (description !== (event?.description ?? '')) save({ description: description || null })
-  }
-
-  function handleNotesBlur() {
-    if (notes !== (event?.notes ?? '')) save({ notes: notes || null } as Parameters<typeof save>[0])
-  }
-
-  function handleLocationBlur() {
-    if (location !== (event?.location ?? '')) save({ location: location || null })
-  }
-
-  function handleUrlBlur() {
-    if (url !== (event?.url ?? '')) save({ url: url || null })
-  }
-
-  function handleStartDateChange(val: string) {
-    setStartDate(val)
-    if (val && val <= endDate) save({ startAt: toISODate(val) })
-  }
-
-  function handleEndDateChange(val: string) {
-    setEndDate(val)
-    if (val && val >= startDate) save({ endAt: toISODate(val) })
-  }
-
-  function handleIdentityChange(next: Identity) {
-    setIdentity(next)
-    save({ color: next.color, icon: next.icon })
-  }
-
-  function toggleAssignee(memberId: string) {
-    const next = assignedIds.includes(memberId)
-      ? assignedIds.filter(id => id !== memberId)
-      : [...assignedIds, memberId]
-    setAssignedIds(next)
-    save({ assignedMemberIds: next })
-  }
-
-  function handleTagsChange(ids: string[]) {
-    setTagIds(ids)
-    save({ tagIds: ids } as Parameters<typeof save>[0])
-  }
-
-  function handleProgressChange(e: React.ChangeEvent<HTMLInputElement>) {
-    setProgressValue(Number(e.target.value))
-  }
-
-  // Clamps to 0–100, rounds to an integer, and saves only on a real change.
-  function commitProgress(val: number) {
-    const clamped = Math.max(0, Math.min(100, Math.round(Number.isFinite(val) ? val : 0)))
-    setProgressValue(clamped)
-    if (clamped !== (event?.percentComplete ?? 0)) {
-      save({ percentComplete: clamped } as Parameters<typeof save>[0])
-    }
-  }
-
-  function handleProgressCommit(e: React.ChangeEvent<HTMLInputElement>) {
-    commitProgress(Number(e.target.value))
-  }
-
-  function startEditProgress() {
-    setProgressDraft(String(progressValue))
-    setEditingProgress(true)
-  }
-
-  function commitProgressEdit() {
-    commitProgress(progressDraft === '' ? 0 : Number(progressDraft))
-    setEditingProgress(false)
-  }
-
-  function handleDelete() {
-    if (!event) return
-    deleteMutation.mutate(event.id, { onSuccess: onClose })
-  }
-
-  function handleArchive() {
-    if (!event) return
-    archiveMutation.mutate(event.id, { onSuccess: onClose })
-  }
-
-  return (
-    <div
-      style={{
-        width: open ? PANEL_WIDTH : 0,
-        flexShrink: 0,
-        borderLeft: open ? '1px solid var(--border)' : 'none',
-        background: 'var(--card)',
-        display: 'flex',
-        flexDirection: 'column',
-        overflow: 'hidden',
-        transition: 'width 0.2s ease',
-      }}
-    >
-      <div style={{ width: PANEL_WIDTH, display: 'flex', flexDirection: 'column', height: '100%' }}>
-        {!event ? null : (<>
-
-        {/* ── Header bar ── */}
-        <div style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-          padding: '0 12px', height: 'var(--topbar-h, 40px)',
-          borderBottom: '1px solid var(--border)', flexShrink: 0,
-        }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-            <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)' }}>Activity detail</span>
-            {saving && <Loader2 size={11} style={{ opacity: 0.5 }} className="animate-spin" />}
-          </div>
-          <button
-            onClick={onClose}
-            style={{
-              width: 24, height: 24, border: 'none', background: 'none', borderRadius: 4,
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              cursor: 'pointer', color: 'var(--muted-foreground)',
-            }}
-            onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-            onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-          >
-            <X size={14} strokeWidth={2} />
-          </button>
-        </div>
-
-        {/* ── Scrollable body ── */}
-        <div style={{ flex: 1, overflowY: 'auto', padding: '14px 14px 8px' }}>
-
-          {/* 1. Identity widget + Title */}
-          <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start', marginBottom: 14 }}>
-            <div style={{ marginTop: 2, flexShrink: 0 }}>
-              <IdentityWidget
-                identity={identity}
-                name={title || event?.title || ''}
-                shape="square"
-                onChange={handleIdentityChange}
-              />
-            </div>
-            <input
-              value={title}
-              onChange={e => setTitle(e.target.value)}
-              onBlur={handleTitleBlur}
-              style={{
-                flex: 1, fontSize: 13, fontWeight: 600,
-                color: 'var(--foreground)', border: '1px solid transparent',
-                borderRadius: 'var(--radius-md)', padding: '5px 6px',
-                outline: 'none', background: 'transparent', fontFamily: 'var(--font-sans)',
-              }}
-              onFocus={e => { e.target.style.borderColor = 'var(--primary)'; e.target.style.background = 'var(--background)' }}
-              onBlurCapture={e => { e.target.style.borderColor = 'transparent'; e.target.style.background = 'transparent' }}
-            />
-          </div>
-
-          <div style={DIVIDER} />
-
-          {/* 2. When — date pickers only (no allDay checkbox, no date summary) */}
-          <div style={{ marginBottom: 12 }}>
-            <div style={SEC_LABEL}>When</div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-              <input
-                type="date" value={displayStart}
-                onChange={e => handleStartDateChange(e.target.value)}
-                style={{ ...INPUT, flex: 1, padding: '5px 6px' }}
-                onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
-                onBlur={e => (e.target.style.borderColor = 'var(--border)')}
-              />
-              <ArrowRight size={11} color="var(--muted-foreground)" strokeWidth={2} style={{ flexShrink: 0 }} />
-              <input
-                type="date" value={displayEnd} min={startDate}
-                onChange={e => handleEndDateChange(e.target.value)}
-                style={{ ...INPUT, flex: 1, padding: '5px 6px' }}
-                onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
-                onBlur={e => (e.target.style.borderColor = 'var(--border)')}
-              />
-            </div>
-          </div>
-
-          <div style={DIVIDER} />
-
-          {/* 3. Description — below dates, matching create panel */}
-          <div style={{ marginBottom: 12 }}>
-            <div style={SEC_LABEL}>Description</div>
-            <input
-              value={description}
-              onChange={e => setDescription(e.target.value)}
-              onBlur={e => { handleDescriptionBlur(); e.target.style.borderColor = 'var(--border)' }}
-              placeholder="Optional description…"
-              style={{ ...INPUT, padding: '6px 8px' }}
-              onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
-            />
-          </div>
-
-          <div style={DIVIDER} />
-
-          {/* 4. Assigned to — bordered card style matching create panel */}
-          {members.length > 0 && (
-            <div style={{ marginBottom: 12 }}>
-              <div style={SEC_LABEL}>Assigned to</div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                {members.map(m => {
-                  const assigned = assignedIds.includes(m.id)
-                  return (
-                    <button
-                      key={m.id}
-                      onClick={() => toggleAssignee(m.id)}
-                      style={{
-                        display: 'flex', alignItems: 'center', gap: 8,
-                        padding: '5px 8px',
-                        border: assigned ? `1px solid ${m.color}` : '1px solid var(--border)',
-                        borderRadius: 'var(--radius-md)',
-                        background: assigned ? `${m.color}18` : 'var(--background)',
-                        cursor: 'pointer', textAlign: 'left',
-                        transition: 'background 0.1s, border-color 0.1s',
-                      }}
-                    >
-                      <MemberAvatar member={m} size={18} />
-                      <span style={{ fontSize: 12, color: 'var(--foreground)', flex: 1 }}>{m.name}</span>
-                      {assigned && (
-                        <div style={{ width: 6, height: 6, borderRadius: '50%', background: m.color, flexShrink: 0 }} />
-                      )}
-                    </button>
-                  )
-                })}
-              </div>
-            </div>
-          )}
-
-          <div style={DIVIDER} />
-
-          {/* 5. Classify — Status (rich dropdown), Tags (stub) */}
-          <div style={{ marginBottom: 12 }}>
-            <div style={SEC_LABEL}>Classify</div>
-
-            {/* Status picker */}
-            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
-              <span style={FIELD_LABEL}>Status</span>
-              {statuses.length > 0 ? (
-                <StatusDropdown
-                  statuses={statuses}
-                  value={statusId}
-                  onChange={id => { setStatusId(id); save({ statusId: id } as Parameters<typeof save>[0]) }}
-                />
-              ) : (
-                <div style={{ ...STUB_VALUE }}>
-                  <span style={{ fontSize: 10, opacity: 0.5 }}>No statuses configured</span>
-                </div>
-              )}
-            </div>
-
-            {/* Tags */}
-            <div style={{ display: 'flex', alignItems: 'flex-start' }}>
-              <span style={{ ...FIELD_LABEL, paddingTop: 5 }}>Tags</span>
-              <TagInput
-                teamId={teamId}
-                tags={teamTags}
-                selectedTagIds={tagIds}
-                onChange={handleTagsChange}
-              />
-            </div>
-          </div>
-
-          <div style={DIVIDER} />
-
-          {/* 6. Advanced (was "Details") — Parent, Progress, Location, URL */}
-          <div style={{ marginBottom: 12 }}>
-            <div style={SEC_LABEL}>Advanced</div>
-
-            {/* Parent activity picker */}
-            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
-              <span style={FIELD_LABEL}>Parent</span>
-              <ParentActivityPicker
-                activities={allActivities.filter(a => a.id !== event.id)}
-                value={parentId}
-                onChange={id => { setParentId(id); save({ parentActivityId: id } as Parameters<typeof save>[0]) }}
-              />
-            </div>
-
-            {/* % Complete slider */}
-            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
-              <span style={FIELD_LABEL}>Progress</span>
-              <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 8 }}>
-                <input
-                  type="range"
-                  min={0}
-                  max={100}
-                  step={5}
-                  value={progressValue}
-                  onChange={handleProgressChange}
-                  onMouseUp={handleProgressCommit as unknown as React.MouseEventHandler}
-                  onTouchEnd={handleProgressCommit as unknown as React.TouchEventHandler}
-                  style={{ flex: 1, cursor: 'pointer', accentColor: 'var(--primary)' }}
-                />
-                {editingProgress ? (
-                  <input
-                    autoFocus
-                    type="text"
-                    inputMode="numeric"
-                    value={progressDraft}
-                    onChange={e => setProgressDraft(e.target.value.replace(/[^0-9]/g, '').slice(0, 3))}
-                    onBlur={commitProgressEdit}
-                    onKeyDown={e => {
-                      if (e.key === 'Enter') commitProgressEdit()
-                      else if (e.key === 'Escape') setEditingProgress(false)
-                    }}
-                    aria-label="Percent complete"
-                    style={{
-                      width: 40, fontSize: 11, textAlign: 'right', flexShrink: 0,
-                      marginLeft: 'auto',
-                      color: 'var(--foreground)', border: '1px solid var(--primary)',
-                      borderRadius: 4, padding: '2px 4px', outline: 'none',
-                      background: 'var(--background)', fontFamily: 'var(--font-sans)',
-                    }}
-                  />
-                ) : (
-                  <span
-                    onClick={startEditProgress}
-                    title="Click to edit"
-                    role="button"
-                    tabIndex={0}
-                    onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); startEditProgress() } }}
-                    style={{
-                      fontSize: 11, color: 'var(--muted-foreground)', minWidth: 34,
-                      textAlign: 'right', flexShrink: 0, cursor: 'text', userSelect: 'none',
-                      marginLeft: 'auto',
-                      padding: '2px 4px', borderRadius: 4, border: '1px solid transparent',
-                    }}
-                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-                    onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-                  >
-                    {progressValue}%
-                  </span>
-                )}
-              </div>
-            </div>
-
-            {/* Location (functional) */}
-            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
-              <span style={FIELD_LABEL}>Location</span>
-              <input
-                value={location}
-                onChange={e => setLocation(e.target.value)}
-                onBlur={handleLocationBlur}
-                placeholder="—"
-                style={{ ...INPUT, flex: 1, padding: '4px 6px', fontSize: 12 }}
-                onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
-                onBlurCapture={e => (e.target.style.borderColor = 'var(--border)')}
-              />
-            </div>
-
-            {/* URL (functional) */}
-            <div style={{ display: 'flex', alignItems: 'center' }}>
-              <span style={FIELD_LABEL}>URL</span>
-              <input
-                value={url}
-                onChange={e => setUrl(e.target.value)}
-                onBlur={handleUrlBlur}
-                placeholder="—"
-                style={{ ...INPUT, flex: 1, padding: '4px 6px', fontSize: 12 }}
-                onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
-                onBlurCapture={e => (e.target.style.borderColor = 'var(--border)')}
-              />
-            </div>
-          </div>
-
-          <div style={DIVIDER} />
-
-          {/* 7. Notes — multi-line textarea */}
-          <div style={{ marginBottom: 8 }}>
-            <div style={SEC_LABEL}>Notes</div>
-            <textarea
-              value={notes}
-              onChange={e => setNotes(e.target.value)}
-              onBlur={e => { handleNotesBlur(); e.target.style.borderColor = 'var(--border)' }}
-              placeholder="Add notes…"
-              rows={4}
-              style={{
-                ...INPUT,
-                padding: '6px 8px',
-                resize: 'vertical',
-                minHeight: 72,
-                lineHeight: 1.5,
-              }}
-              onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
-            />
-          </div>
-
-        </div>
-
-        {/* ── Footer — Archive + Delete buttons ── */}
-        <div style={{ padding: '10px 14px', borderTop: '1px solid var(--border)', flexShrink: 0 }}>
-          {confirmDelete ? (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              <p style={{ fontSize: 12, color: 'var(--muted-foreground)', margin: 0, lineHeight: 1.4 }}>
-                Delete <strong style={{ color: 'var(--foreground)' }}>{event?.title}</strong>? This cannot be undone.
-              </p>
-              <div style={{ display: 'flex', gap: 6 }}>
-                <button
-                  onClick={() => setConfirmDelete(false)}
-                  disabled={deleting}
-                  style={{
-                    flex: 1, fontSize: 12, fontWeight: 600, padding: 7,
-                    borderRadius: 'var(--radius-md)', border: '1px solid var(--border)',
-                    background: 'var(--card)', color: 'var(--foreground)',
-                    cursor: 'pointer', fontFamily: 'var(--font-sans)',
-                  }}
-                >Cancel</button>
-                <button
-                  onClick={handleDelete}
-                  disabled={deleting}
-                  style={{
-                    flex: 1, fontSize: 12, fontWeight: 600, padding: 7,
-                    borderRadius: 'var(--radius-md)', border: 'none',
-                    background: 'var(--destructive)', color: 'white',
-                    cursor: deleting ? 'not-allowed' : 'pointer',
-                    fontFamily: 'var(--font-sans)',
-                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
-                  }}
-                >
-                  {deleting ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />}
-                  Delete
-                </button>
-              </div>
-            </div>
-          ) : (
-            <div style={{ display: 'flex', gap: 6 }}>
-              <button
-                onClick={handleArchive}
-                disabled={archiving}
-                style={{
-                  flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
-                  fontSize: 12, fontWeight: 600, padding: 7,
-                  borderRadius: 'var(--radius-md)', border: '1px solid var(--border)',
-                  background: 'var(--card)', color: 'var(--muted-foreground)',
-                  cursor: archiving ? 'not-allowed' : 'pointer', fontFamily: 'var(--font-sans)',
-                }}
-              >
-                {archiving ? <Loader2 size={12} className="animate-spin" /> : <Archive size={12} strokeWidth={2} />}
-                Archive
-              </button>
-              <button
-                onClick={() => setConfirmDelete(true)}
-                style={{
-                  flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
-                  fontSize: 12, fontWeight: 600, padding: 7,
-                  borderRadius: 'var(--radius-md)', border: 'none',
-                  background: 'hsl(0 72% 95%)', color: 'var(--destructive)',
-                  cursor: 'pointer', fontFamily: 'var(--font-sans)',
-                }}
-              >
-                <Trash2 size={12} strokeWidth={2} />
-                Delete
-              </button>
-            </div>
-          )}
-        </div>
-
-        </>)}
-      </div>
-    </div>
-  )
-}
 ````
 
 ## File: packages/api/internal/api/activity_handler.go
@@ -50360,656 +52047,6 @@ export default function ListView({
 }
 ````
 
-## File: packages/web/src/pages/DashboardPage.tsx
-````typescript
-/**
- * Main application shell: sidebar + top bar + content area.
- *
- * Fetches the authenticated user's first team and first timeline to seed the
- * initial view. Team-selection UI and full sidebar wiring come in a later phase.
- */
-
-import { useState, useRef, useEffect, useCallback } from 'react'
-import Sidebar from '@/components/layout/Sidebar'
-import TopBar, { type ViewMode } from '@/components/layout/TopBar'
-import GanttView from '@/components/gantt/GanttView'
-import { DEFAULT_LABEL_COL_W } from '@/components/gantt/GanttGrid'
-import GanttToolbar, { type GroupBy, type SortBy, type TimeGranularity, type ColorBy } from '@/components/gantt/GanttToolbar'
-import ListToolbar, { type ListGroupBy, type ListSortBy, type ListColorBy, type ListDensity, type ColumnConfig } from '@/components/list/ListToolbar'
-import ListView from '@/components/list/ListView'
-import ActivityDetailPanel from '@/components/gantt/ActivityDetailPanel'
-import ActivityCreatePanel from '@/components/gantt/ActivityCreatePanel'
-import { FilterProvider, useFilter } from '@/contexts/FilterContext'
-import { FindProvider, useFind } from '@/contexts/FindContext'
-import { useAuth } from '@/contexts/AuthContext'
-import { useDarkMode } from '@/hooks/useDarkMode'
-import { usePreferences, usePreferenceMap, useUpsertPreference } from '@/hooks/usePreferences'
-import { Settings, Moon, Sun, LogOut } from 'lucide-react'
-import { Badge } from '@/components/identity/Badge'
-import type { Identity } from '@/components/identity/identity-constants'
-import { useMyTeams, useTeamTimelines, useTeamTimelinesWithArchived, useTeamActivitySync, useUnarchiveTeam, useUnarchiveTimeline, useTeamMembers } from '@/hooks/useTeamActivities'
-import { useTimelineStatuses } from '@/hooks/useStatusTemplates'
-import { useSavedFilters } from '@/hooks/useSavedFilters'
-import { useTags } from '@/hooks/useTags'
-import TeamModal from '@/components/TeamModal'
-import MemberModal from '@/components/MemberModal'
-import TimelineModal from '@/components/TimelineModal'
-import FilterManageModal from '@/components/filters/FilterManageModal'
-import { useNavigate } from 'react-router-dom'
-import type { components } from '@draba/shared'
-import type { Member } from '@/types'
-
-type ApiActivity = components['schemas']['Activity']
-type ApiTeam = components['schemas']['Team']
-type ApiTimeline = components['schemas']['Timeline']
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
-
-const DROPDOWN_BTN: React.CSSProperties = {
-  display: 'flex',
-  alignItems: 'center',
-  gap: 8,
-  width: '100%',
-  padding: '10px 14px',
-  background: 'none',
-  border: 'none',
-  fontSize: 13,
-  color: 'var(--foreground)',
-  cursor: 'pointer',
-  fontFamily: 'var(--font-sans)',
-  textAlign: 'left',
-}
-
-function DashboardShell() {
-  const { logout, accessToken, user } = useAuth()
-  const { activeFilter, setActiveFilter } = useFilter()
-  const navigate = useNavigate()
-  const { isDark, toggle: toggleDark, theme } = useDarkMode()
-  const { setFindBarOpen } = useFind()
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
-  const [view, setView] = useState<ViewMode>('gantt')
-  // Gantt label-column width — held here so it survives switching to another
-  // view and back (GanttView unmounts on view change, which would reset it).
-  const [ganttLabelColW, setGanttLabelColW] = useState(DEFAULT_LABEL_COL_W)
-  // Close the detail sidebar when switching to list view (edits are inline there)
-  const prevView = useRef<ViewMode>('gantt')
-  const [profileOpen, setProfileOpen] = useState(false)
-  const [selectedActivityId, setSelectedActivityId] = useState<string | null>(null)
-  const [selectedApiActivity, setSelectedApiActivity] = useState<ApiActivity | null>(null)
-  const [ganttMembers, setGanttMembers] = useState<Member[]>([])
-  const [createDefaults, setCreateDefaults] = useState<{ start: string; end: string; memberId: string | null } | null>(null)
-  const [filterModalOpen, setFilterModalOpen] = useState(false)
-  const [liveDragDates, setLiveDragDates] = useState<{ activityId: string; start: string; end: string } | null>(null)
-  // Gantt toolbar state
-  const [groupBy, setGroupBy] = useState<GroupBy>('none')
-  const [sortBy, setSortBy] = useState<SortBy>('startDate')
-  const [granularity, setGranularity] = useState<TimeGranularity | 'auto'>('auto')
-  const [colorBy, setColorBy] = useState<ColorBy>('activity')
-  // List toolbar state
-  const [listGroupBy, setListGroupBy] = useState<ListGroupBy>('none')
-  const [listSortBy, setListSortBy] = useState<ListSortBy>('startDate')
-  const [listColorBy, setListColorBy] = useState<ListColorBy>('activity')
-  const [listDensity, setListDensity] = useState<ListDensity>('comfortable')
-  const [listColumns, setListColumns] = useState<ColumnConfig[]>([])
-  // Incremented seq lets ListView know a new toggle has arrived
-  const [listColToggle, setListColToggle] = useState<{ colId: string; visible: boolean; seq: number } | null>(null)
-  const listColToggleSeq = useRef(0)
-  // Incremented to trigger inline row creation in list view
-  const [listNewRowSeq, setListNewRowSeq] = useState(0)
-  const profileRef = useRef<HTMLDivElement>(null)
-  // Preference persistence
-  const upsert = useUpsertPreference()
-  // Track whether we've applied server prefs for the active timeline so we
-  // don't immediately write defaults back before the server data arrives.
-  const prefsAppliedForTimeline = useRef<string | null>(null)
-  // One-shot guard: init activeTimelineId from global prefs only on first load.
-  const timelineIdInitialized = useRef(false)
-
-
-  useEffect(() => {
-    function handleClickOutside(e: MouseEvent) {
-      if (profileRef.current && !profileRef.current.contains(e.target as Node)) {
-        setProfileOpen(false)
-      }
-    }
-    document.addEventListener('mousedown', handleClickOutside)
-    return () => document.removeEventListener('mousedown', handleClickOutside)
-  }, [])
-
-  // Close the detail sidebar when switching to list view (list edits are inline).
-  useEffect(() => {
-    if (view === 'list' && prevView.current !== 'list') {
-      setSelectedActivityId(null)
-      setSelectedApiActivity(null)
-      setCreateDefaults(null)
-    }
-    prevView.current = view
-  }, [view])
-
-  // Ctrl/Cmd+F opens the Find bar; browser default (page search) is suppressed.
-  useEffect(() => {
-    function handleKeyDown(e: KeyboardEvent) {
-      if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
-        e.preventDefault()
-        setFindBarOpen(true)
-      }
-    }
-    document.addEventListener('keydown', handleKeyDown)
-    return () => document.removeEventListener('keydown', handleKeyDown)
-  }, [setFindBarOpen])
-
-  const displayName = (user as { displayName?: string } | null)?.displayName ?? 'User'
-  const email = (user as { email?: string } | null)?.email ?? ''
-  const userIdentity: Identity = {
-    color: (user as { color?: string } | null)?.color ?? '#288C9B',
-    icon: (user as { icon?: string } | null)?.icon ?? '__name_2__',
-  }
-
-  // Global preferences — restored on login to seed team/timeline selection.
-  const { isSuccess: globalPrefsSettled } = usePreferences()
-  const globalPrefMap = usePreferenceMap()
-
-  // Team modal state
-  const [teamModalMode, setTeamModalMode] = useState<'new' | 'edit' | null>(null)
-  const [editingTeam, setEditingTeam] = useState<ApiTeam | null>(null)
-  const unarchiveTeam = useUnarchiveTeam()
-
-  // Member modal state
-  const [editingMember, setEditingMember] = useState<TeamMemberWithUser | null>(null)
-
-  // Timeline modal state
-  const [timelineModalMode, setTimelineModalMode] = useState<'new' | 'edit' | null>(null)
-  const [editingTimeline, setEditingTimeline] = useState<ApiTimeline | null>(null)
-
-  // Fetch all teams including archived for the sidebar's archived section.
-  const { data: allTeams = [] } = useMyTeams(true)
-  const activeTeams = allTeams.filter(t => !t.archivedAt)
-  const archivedTeams = allTeams.filter(t => Boolean(t.archivedAt))
-
-  // Explicit team selection state — null until the global pref is applied so
-  // that timelines (and the timeline init effect) don't fire against the wrong
-  // fallback team before the saved team pref resolves.
-  const [activeTeamId, setActiveTeamId] = useState<string | null>(null)
-  const teamIdInitialized = useRef(false)
-  useEffect(() => {
-    if (!activeTeams.length || !globalPrefsSettled || teamIdInitialized.current) return
-    teamIdInitialized.current = true
-    const saved = typeof globalPrefMap['selected_team'] === 'string' ? globalPrefMap['selected_team'] : null
-    const exists = saved && activeTeams.some(t => t.id === saved)
-    setActiveTeamId(exists ? saved : activeTeams[0].id)
-  }, [activeTeams, globalPrefsSettled, globalPrefMap])
-
-  // Only derive an active team once the pref has been applied (activeTeamId !== null).
-  // The activeTeams[0] fallback here handles the edge case where the saved team
-  // was archived or deleted between sessions.
-  const activeTeam = activeTeamId !== null
-    ? (activeTeams.find(t => t.id === activeTeamId) ?? activeTeams[0] ?? undefined)
-    : undefined
-  const teamId = activeTeam?.id ?? ''
-
-  // Check whether the current user is an admin of the active team.
-  const { data: teamMembers = [] } = useTeamMembers(teamId)
-  const userId = (user as { id?: string } | null)?.id ?? ''
-  const isSuperadmin = Boolean((user as { isSuperadmin?: boolean } | null)?.isSuperadmin)
-  const canEditTeam = isSuperadmin || teamMembers.some(m => m.userId === userId && m.role === 'admin')
-
-  const handleSelectTeam = useCallback((id: string) => {
-    setActiveTeamId(id)
-    // Clear the stale timeline selection so the init effect re-fires with the
-    // new team's timeline list. Without this, the old timeline ID leaks into
-    // the new team's API requests and produces 404s.
-    setActiveTimelineId(undefined)
-    prefsAppliedForTimeline.current = null
-    timelineIdInitialized.current = false
-  }, [])
-
-  const unarchiveTimeline = useUnarchiveTimeline(teamId)
-
-  const { data: timelines = [] } = useTeamTimelines(teamId)
-  const { data: allTimelines = [] } = useTeamTimelinesWithArchived(teamId)
-  const archivedTimelines = allTimelines.filter(t => Boolean(t.archivedAt))
-  const [activeTimelineId, setActiveTimelineId] = useState<string | undefined>()
-  const { data: activeTimelineStatuses = [] } = useTimelineStatuses(teamId, activeTimelineId ?? '')
-  const { data: savedFilters = [] } = useSavedFilters(teamId)
-  const { data: tags = [] } = useTags(teamId)
-  // Initialize activeTimelineId from the saved global pref (selected_timeline),
-  // falling back to timelines[0] when no pref is stored or the saved timeline
-  // is no longer in the list. Waits for global prefs to settle so we don't
-  // immediately overwrite a restored value with the fallback.
-  useEffect(() => {
-    if (timelines.length === 0 || !globalPrefsSettled || timelineIdInitialized.current) return
-    timelineIdInitialized.current = true
-    const saved = typeof globalPrefMap['selected_timeline'] === 'string' ? globalPrefMap['selected_timeline'] : null
-    const exists = saved && timelines.some(t => t.id === saved)
-    setActiveTimelineId(exists ? saved : timelines[0].id)
-  }, [timelines, globalPrefsSettled, globalPrefMap])
-  const activeTimeline = timelines.find(t => t.id === activeTimelineId) ?? timelines[0]
-  // Derived so they stay in sync after edits without needing separate state.
-  const activeTimelineColor = activeTimeline?.color ?? '#1A97A2'
-  const activeTimelineName = activeTimeline?.name ?? ''
-  const activeTimelineIdentity: Identity = {
-    color: activeTimeline?.color ?? '#288C9B',
-    icon: activeTimeline?.icon ?? '__none__',
-  }
-
-  // Close the activity detail panel whenever the active filter changes so the
-  // filtered view is unobstructed by a stale selection.
-  useEffect(() => {
-    setSelectedActivityId(null)
-    setSelectedApiActivity(null)
-  }, [activeFilter]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  const handleTimelineChange = useCallback((id: string) => {
-    prefsAppliedForTimeline.current = null
-    setActiveTimelineId(id)
-    setActiveFilter({ kind: 'preset', id: 'all' })
-  }, [setActiveFilter])
-
-  useTeamActivitySync(teamId, accessToken)
-
-  // Per-timeline preferences: restore toolbar state when the active timeline changes.
-  // isSuccess gate ensures we don't mark prefs applied before the query resolves.
-  const { isSuccess: prefsSettled } = usePreferences(activeTimelineId)
-  const timelinePrefs = usePreferenceMap(activeTimelineId)
-  useEffect(() => {
-    if (!activeTimelineId || !prefsSettled) return
-    if (prefsAppliedForTimeline.current === activeTimelineId) return
-    prefsAppliedForTimeline.current = activeTimelineId
-
-    if (typeof timelinePrefs['group_by'] === 'string') setGroupBy(timelinePrefs['group_by'] as GroupBy)
-    if (typeof timelinePrefs['sort_by'] === 'string') setSortBy(timelinePrefs['sort_by'] as SortBy)
-    if (typeof timelinePrefs['zoom_granularity'] === 'string') setGranularity(timelinePrefs['zoom_granularity'] as TimeGranularity | 'auto')
-    if (typeof timelinePrefs['color_by'] === 'string') setColorBy(timelinePrefs['color_by'] as ColorBy)
-    if (typeof timelinePrefs['list_group_by'] === 'string') setListGroupBy(timelinePrefs['list_group_by'] as ListGroupBy)
-    if (typeof timelinePrefs['list_sort_by'] === 'string') setListSortBy(timelinePrefs['list_sort_by'] as ListSortBy)
-    if (typeof timelinePrefs['list_color_by'] === 'string') setListColorBy(timelinePrefs['list_color_by'] as ListColorBy)
-    if (typeof timelinePrefs['list_density'] === 'string') setListDensity(timelinePrefs['list_density'] as ListDensity)
-    if (typeof timelinePrefs['view_mode'] === 'string') setView(timelinePrefs['view_mode'] as ViewMode)
-  }, [activeTimelineId, prefsSettled, timelinePrefs])
-
-  // Save toolbar state changes to per-timeline prefs.
-  const saveTimelinePref = useCallback((key: string, value: string) => {
-    if (!activeTimelineId) return
-    upsert.mutate({ key, value: JSON.stringify(value), timelineId: activeTimelineId })
-  }, [activeTimelineId, upsert.mutate]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('group_by', groupBy)
-  }, [groupBy, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('sort_by', sortBy)
-  }, [sortBy, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('zoom_granularity', granularity)
-  }, [granularity, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('color_by', colorBy)
-  }, [colorBy, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('view_mode', view)
-  }, [view, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('list_group_by', listGroupBy)
-  }, [listGroupBy, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('list_sort_by', listSortBy)
-  }, [listSortBy, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('list_color_by', listColorBy)
-  }, [listColorBy, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('list_density', listDensity)
-  }, [listDensity, saveTimelinePref])
-
-  // Global preferences: persist dark mode, active team, and active timeline.
-  useEffect(() => {
-    upsert.mutate({ key: 'theme', value: JSON.stringify(theme) })
-  }, [theme]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    if (!teamId) return
-    upsert.mutate({ key: 'selected_team', value: JSON.stringify(teamId) })
-  }, [teamId]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    if (!activeTimelineId) return
-    upsert.mutate({ key: 'selected_timeline', value: JSON.stringify(activeTimelineId) })
-  }, [activeTimelineId]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Reset label column width when the user switches timelines so each timeline
-  // starts fresh. Switching between views on the same timeline preserves width
-  // because the state lives here rather than inside the unmounting GanttView.
-  useEffect(() => {
-    setGanttLabelColW(DEFAULT_LABEL_COL_W)
-  }, [activeTimelineId])
-
-  return (
-    <div style={{ display: 'flex', height: '100vh', overflow: 'hidden', background: 'var(--background)' }}>
-      <Sidebar
-        collapsed={sidebarCollapsed}
-        onToggle={() => setSidebarCollapsed(c => !c)}
-        apiTimelines={timelines}
-        archivedTimelines={archivedTimelines}
-        activeTimelineId={activeTimelineId}
-        onActiveTimelineChange={handleTimelineChange}
-        onNewTimeline={() => { setEditingTimeline(null); setTimelineModalMode('new') }}
-        onEditTimeline={id => {
-          // timelines (active) is always loaded; allTimelines (?archived=true) may
-          // still be in-flight, so prefer the already-loaded list to avoid opening
-          // the modal with an undefined timeline and blank fields.
-          const tl = timelines.find(t => t.id === id) ?? allTimelines.find(t => t.id === id)
-          setEditingTimeline(tl ?? null)
-          setTimelineModalMode('edit')
-        }}
-        onNewActivity={() => {
-          const today = new Date().toISOString().slice(0, 10)
-          setSelectedActivityId(null)
-          setSelectedApiActivity(null)
-          if (view === 'list') {
-            setListNewRowSeq(s => s + 1)
-          } else {
-            setCreateDefaults({ start: today, end: today, memberId: null })
-          }
-        }}
-        activeTeam={activeTeam}
-        activeTeams={activeTeams}
-        archivedTeams={archivedTeams}
-        canEditTeam={canEditTeam}
-        onSelectTeam={handleSelectTeam}
-        onNewTeam={isSuperadmin ? () => { setEditingTeam(null); setTeamModalMode('new'); } : undefined}
-        onEditTeam={t => { setEditingTeam(t as ApiTeam); setTeamModalMode('edit'); }}
-        onUnarchiveTeam={id => unarchiveTeam.mutate(id)}
-        members={teamMembers.length > 0 ? teamMembers : undefined}
-        onEditMember={isSuperadmin ? m => setEditingMember(m) : undefined}
-      />
-
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0 }}>
-        <TopBar
-          view={view}
-          teamId={teamId}
-          timelineName={activeTimelineName}
-          timelineIdentity={activeTimelineIdentity}
-          onViewChange={setView}
-          onOpenFilterManager={() => setFilterModalOpen(true)}
-          rightSlot={
-            <div ref={profileRef} style={{ position: 'relative', marginLeft: 4, zIndex: 30 }}>
-              <button
-                onClick={() => setProfileOpen(o => !o)}
-                style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', display: 'flex' }}
-                title={displayName}
-              >
-                <Badge identity={userIdentity} name={displayName} shape="circle" size={28} />
-              </button>
-
-              {profileOpen && (
-                <div
-                  style={{
-                    position: 'absolute',
-                    top: 'calc(100% + 8px)',
-                    right: 0,
-                    width: 220,
-                    background: 'var(--card)',
-                    border: '1px solid var(--border)',
-                    borderRadius: 8,
-                    boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
-                    zIndex: 100,
-                    overflow: 'hidden',
-                  }}
-                >
-                  <div style={{ padding: '12px 14px', borderBottom: '1px solid var(--border)' }}>
-                    <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)' }}>{displayName}</div>
-                    <div style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 2 }}>{email}</div>
-                  </div>
-                  <button
-                    onClick={toggleDark}
-                    style={{ ...DROPDOWN_BTN, borderBottom: '1px solid var(--border)' }}
-                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-                  >
-                    {isDark ? <Moon size={14} strokeWidth={1.8} /> : <Sun size={14} strokeWidth={1.8} />}
-                    {isDark ? 'Dark mode' : 'Light mode'}
-                  </button>
-                  <button
-                    onClick={() => { setProfileOpen(false); navigate('/settings'); }}
-                    style={{ ...DROPDOWN_BTN, borderBottom: '1px solid var(--border)' }}
-                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-                  >
-                    <Settings size={14} strokeWidth={1.8} />
-                    Settings
-                  </button>
-                  <button
-                    onClick={logout}
-                    style={{ ...DROPDOWN_BTN, color: 'var(--muted-foreground)' }}
-                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-                  >
-                    <LogOut size={14} strokeWidth={1.8} />
-                    Sign out
-                  </button>
-                </div>
-              )}
-            </div>
-          }
-        />
-
-        {/* Active timeline color band */}
-        <div style={{ height: 3, background: activeTimelineColor, flexShrink: 0, transition: 'background 0.2s ease' }} />
-
-        {/* Gantt sub-toolbar — only shown in Gantt view */}
-        {view === 'gantt' && (
-          <GanttToolbar
-            groupBy={groupBy}
-            onGroupByChange={setGroupBy}
-            sortBy={sortBy}
-            onSortByChange={setSortBy}
-            granularity={granularity}
-            onGranularityChange={setGranularity}
-            colorBy={colorBy}
-            onColorByChange={setColorBy}
-            onExport={() => {}}
-            onShare={() => {}}
-          />
-        )}
-
-        {/* List sub-toolbar — only shown in List view */}
-        {view === 'list' && (
-          <ListToolbar
-            columns={listColumns}
-            onColumnVisibilityChange={(colId, visible) => {
-              listColToggleSeq.current += 1
-              setListColToggle({ colId, visible, seq: listColToggleSeq.current })
-              setListColumns(prev => prev.map(c => c.id === colId ? { ...c, visible } : c))
-            }}
-            density={listDensity}
-            onDensityChange={setListDensity}
-            groupBy={listGroupBy}
-            onGroupByChange={setListGroupBy}
-            sortBy={listSortBy}
-            onSortByChange={setListSortBy}
-            colorBy={listColorBy}
-            onColorByChange={setListColorBy}
-            onExport={() => {}}
-            onShare={() => {}}
-          />
-        )}
-
-        {/* Content area */}
-        <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-          {view === 'gantt' && teamId && activeTimelineId ? (
-            <GanttView
-              teamId={teamId}
-              timelineId={activeTimelineId}
-              startDate={activeTimeline?.startDate}
-              endDate={activeTimeline?.endDate}
-              groupBy={groupBy}
-              sortBy={sortBy}
-              granularity={granularity}
-              colorBy={colorBy}
-              timelineStatuses={activeTimelineStatuses}
-              savedFilters={savedFilters}
-              tags={tags}
-              selectedActivityId={selectedActivityId}
-              onSelectActivity={(id) => {
-                setSelectedActivityId(id)
-                if (!id) { setSelectedApiActivity(null); setCreateDefaults(null) }
-              }}
-              onSelectApiActivity={(activity) => {
-                setSelectedApiActivity(activity)
-                setCreateDefaults(null)
-              }}
-              onBarDragProgress={(activityId, newStart, newEnd) => {
-                setLiveDragDates({
-                  activityId,
-                  start: newStart.toISOString().slice(0, 10),
-                  end: newEnd.toISOString().slice(0, 10),
-                })
-              }}
-              onBarDragEnd={() => setLiveDragDates(null)}
-              onMembersLoaded={setGanttMembers}
-              labelColW={ganttLabelColW}
-              onLabelColWChange={setGanttLabelColW}
-            />
-          ) : view === 'gantt' && (!teamId || !activeTimelineId) ? (
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
-              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>Loading your team…</p>
-            </div>
-          ) : view === 'list' && teamId && activeTimelineId ? (
-            <ListView
-              teamId={teamId}
-              timelineId={activeTimelineId}
-              groupBy={listGroupBy}
-              sortBy={listSortBy}
-              colorBy={listColorBy}
-              density={listDensity}
-              timelineStatuses={activeTimelineStatuses}
-              savedFilters={savedFilters}
-              tags={tags}
-              selectedActivityId={selectedActivityId}
-              pendingColumnToggle={listColToggle}
-              onSelectActivity={(id) => {
-                setSelectedActivityId(id)
-                if (!id) { setSelectedApiActivity(null); setCreateDefaults(null) }
-              }}
-              onSelectApiActivity={(activity) => {
-                setSelectedApiActivity(activity)
-                setCreateDefaults(null)
-              }}
-              onMembersLoaded={setGanttMembers}
-              onColumnsChange={setListColumns}
-              triggerNewRow={listNewRowSeq}
-            />
-          ) : view === 'list' && (!teamId || !activeTimelineId) ? (
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
-              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>Loading your team…</p>
-            </div>
-          ) : (
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
-              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>
-                {view.charAt(0).toUpperCase() + view.slice(1)} view coming soon.
-              </p>
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Activity detail panel — slides in from right when an activity is selected */}
-      <ActivityDetailPanel
-        open={Boolean(selectedApiActivity)}
-        event={selectedApiActivity}
-        members={ganttMembers}
-        teamId={teamId}
-        timelineId={activeTimelineId ?? ''}
-        onClose={() => { setSelectedActivityId(null); setSelectedApiActivity(null); setLiveDragDates(null) }}
-        liveDragStart={liveDragDates && liveDragDates.activityId === selectedApiActivity?.id ? liveDragDates.start : undefined}
-        liveDragEnd={liveDragDates && liveDragDates.activityId === selectedApiActivity?.id ? liveDragDates.end : undefined}
-      />
-
-      {/* Activity create panel — slides in from New Activity button or future drag */}
-      <ActivityCreatePanel
-        open={Boolean(createDefaults) && !selectedApiActivity}
-        teamId={teamId}
-        timelineId={activeTimelineId ?? ''}
-        members={ganttMembers}
-        defaultStart={createDefaults?.start ?? new Date().toISOString().slice(0, 10)}
-        defaultEnd={createDefaults?.end ?? new Date().toISOString().slice(0, 10)}
-        defaultMemberId={createDefaults?.memberId}
-        onClose={() => setCreateDefaults(null)}
-      />
-
-      <FilterManageModal
-        open={filterModalOpen}
-        onClose={() => setFilterModalOpen(false)}
-        teamId={teamId}
-        timelineId={activeTimelineId ?? ''}
-        isAdmin={canEditTeam}
-      />
-
-      {/* Team modal — create or edit */}
-      {teamModalMode && (
-        <TeamModal
-          mode={teamModalMode}
-          team={editingTeam ?? undefined}
-          isAdmin={canEditTeam}
-          onClose={() => { setTeamModalMode(null); setEditingTeam(null); }}
-          onTeamCreated={created => setActiveTeamId(created.id)}
-        />
-      )}
-
-      {/* Member modal — edit a team member */}
-      {editingMember && (
-        <MemberModal
-          teamId={teamId}
-          memberId={editingMember.id}
-          isAdmin={canEditTeam}
-          isSuperadmin={isSuperadmin}
-          onClose={() => setEditingMember(null)}
-        />
-      )}
-
-      {/* Timeline modal — create or edit */}
-      {timelineModalMode && (
-        <TimelineModal
-          mode={timelineModalMode}
-          teamId={teamId}
-          timeline={editingTimeline ?? undefined}
-          canAdmin={canEditTeam}
-          onClose={() => { setTimelineModalMode(null); setEditingTimeline(null) }}
-          onCreated={created => setActiveTimelineId(created.id)}
-          onUnarchive={id => unarchiveTimeline.mutate(id, { onSuccess: () => { setTimelineModalMode(null); setEditingTimeline(null) } })}
-        />
-      )}
-    </div>
-  )
-}
-
-export default function DashboardPage() {
-  return (
-    <FindProvider>
-      <FilterProvider>
-        <DashboardShell />
-      </FilterProvider>
-    </FindProvider>
-  )
-}
-````
-
 ## File: packages/web/src/components/gantt/GanttView.tsx
 ````typescript
 /**
@@ -51640,9 +52677,790 @@ export default function GanttView({
 }
 ````
 
+## File: packages/web/src/pages/DashboardPage.tsx
+````typescript
+/**
+ * Main application shell: sidebar + top bar + content area.
+ *
+ * Fetches the authenticated user's first team and first timeline to seed the
+ * initial view. Team-selection UI and full sidebar wiring come in a later phase.
+ */
+
+import { useState, useRef, useEffect, useCallback } from 'react'
+import Sidebar from '@/components/layout/Sidebar'
+import TopBar, { type ViewMode } from '@/components/layout/TopBar'
+import GanttView from '@/components/gantt/GanttView'
+import { DEFAULT_LABEL_COL_W } from '@/components/gantt/GanttGrid'
+import GanttToolbar, { type GroupBy, type SortBy, type TimeGranularity, type ColorBy } from '@/components/gantt/GanttToolbar'
+import ListToolbar, { type ListGroupBy, type ListSortBy, type ListColorBy, type ListDensity, type ColumnConfig } from '@/components/list/ListToolbar'
+import ListView from '@/components/list/ListView'
+import CalendarToolbar, { type CalendarLayout } from '@/components/calendar/CalendarToolbar'
+import CalendarView from '@/components/calendar/CalendarView'
+import ActivityDetailPanel from '@/components/gantt/ActivityDetailPanel'
+import ActivityCreatePanel from '@/components/gantt/ActivityCreatePanel'
+import { FilterProvider, useFilter } from '@/contexts/FilterContext'
+import { FindProvider, useFind } from '@/contexts/FindContext'
+import { useAuth } from '@/contexts/AuthContext'
+import { useDarkMode } from '@/hooks/useDarkMode'
+import { usePreferences, usePreferenceMap, useUpsertPreference } from '@/hooks/usePreferences'
+import { Settings, Moon, Sun, LogOut } from 'lucide-react'
+import { Badge } from '@/components/identity/Badge'
+import type { Identity } from '@/components/identity/identity-constants'
+import { useMyTeams, useTeamTimelines, useTeamTimelinesWithArchived, useTeamActivitySync, useUnarchiveTeam, useUnarchiveTimeline, useTeamMembers } from '@/hooks/useTeamActivities'
+import { useTimelineStatuses } from '@/hooks/useStatusTemplates'
+import { useSavedFilters } from '@/hooks/useSavedFilters'
+import { useTags } from '@/hooks/useTags'
+import TeamModal from '@/components/TeamModal'
+import MemberModal from '@/components/MemberModal'
+import TimelineModal from '@/components/TimelineModal'
+import FilterManageModal from '@/components/filters/FilterManageModal'
+import { useNavigate } from 'react-router-dom'
+import type { components } from '@draba/shared'
+import type { Member } from '@/types'
+
+type ApiActivity = components['schemas']['Activity']
+type ApiTeam = components['schemas']['Team']
+type ApiTimeline = components['schemas']['Timeline']
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
+
+const DROPDOWN_BTN: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 8,
+  width: '100%',
+  padding: '10px 14px',
+  background: 'none',
+  border: 'none',
+  fontSize: 13,
+  color: 'var(--foreground)',
+  cursor: 'pointer',
+  fontFamily: 'var(--font-sans)',
+  textAlign: 'left',
+}
+
+function DashboardShell() {
+  const { logout, accessToken, user } = useAuth()
+  const { activeFilter, setActiveFilter } = useFilter()
+  const navigate = useNavigate()
+  const { isDark, toggle: toggleDark, theme } = useDarkMode()
+  const { setFindBarOpen } = useFind()
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [view, setView] = useState<ViewMode>('gantt')
+  // Gantt label-column width — held here so it survives switching to another
+  // view and back (GanttView unmounts on view change, which would reset it).
+  const [ganttLabelColW, setGanttLabelColW] = useState(DEFAULT_LABEL_COL_W)
+  // Close the detail sidebar when switching to list view (edits are inline there)
+  const prevView = useRef<ViewMode>('gantt')
+  const [profileOpen, setProfileOpen] = useState(false)
+  const [selectedActivityId, setSelectedActivityId] = useState<string | null>(null)
+  const [selectedApiActivity, setSelectedApiActivity] = useState<ApiActivity | null>(null)
+  const [ganttMembers, setGanttMembers] = useState<Member[]>([])
+  const [createDefaults, setCreateDefaults] = useState<{ start: string; end: string; memberId: string | null } | null>(null)
+  const [filterModalOpen, setFilterModalOpen] = useState(false)
+  const [liveDragDates, setLiveDragDates] = useState<{ activityId: string; start: string; end: string } | null>(null)
+  // Gantt toolbar state
+  const [groupBy, setGroupBy] = useState<GroupBy>('none')
+  const [sortBy, setSortBy] = useState<SortBy>('startDate')
+  const [granularity, setGranularity] = useState<TimeGranularity | 'auto'>('auto')
+  const [colorBy, setColorBy] = useState<ColorBy>('activity')
+  // List toolbar state
+  const [listGroupBy, setListGroupBy] = useState<ListGroupBy>('none')
+  const [listSortBy, setListSortBy] = useState<ListSortBy>('startDate')
+  const [listColorBy, setListColorBy] = useState<ListColorBy>('activity')
+  const [listDensity, setListDensity] = useState<ListDensity>('comfortable')
+  const [listColumns, setListColumns] = useState<ColumnConfig[]>([])
+  // Incremented seq lets ListView know a new toggle has arrived
+  const [listColToggle, setListColToggle] = useState<{ colId: string; visible: boolean; seq: number } | null>(null)
+  const listColToggleSeq = useRef(0)
+  // Calendar toolbar state
+  const [calendarLayout, setCalendarLayout] = useState<CalendarLayout>('month')
+  // anchorDate = UTC midnight of the 1st of the displayed month (month) or weekStart (week).
+  const [calendarAnchorDate, setCalendarAnchorDate] = useState<Date>(() => {
+    const d = new Date()
+    d.setUTCHours(0, 0, 0, 0)
+    d.setUTCDate(1)
+    return d
+  })
+  // Incremented to trigger inline row creation in list view
+  const [listNewRowSeq, setListNewRowSeq] = useState(0)
+  const profileRef = useRef<HTMLDivElement>(null)
+  // Preference persistence
+  const upsert = useUpsertPreference()
+  // Track whether we've applied server prefs for the active timeline so we
+  // don't immediately write defaults back before the server data arrives.
+  const prefsAppliedForTimeline = useRef<string | null>(null)
+  // One-shot guard: init activeTimelineId from global prefs only on first load.
+  const timelineIdInitialized = useRef(false)
+
+
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (profileRef.current && !profileRef.current.contains(e.target as Node)) {
+        setProfileOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [])
+
+  // Close the detail sidebar when switching to list view (list edits are inline).
+  useEffect(() => {
+    if (view === 'list' && prevView.current !== 'list') {
+      setSelectedActivityId(null)
+      setSelectedApiActivity(null)
+      setCreateDefaults(null)
+    }
+    prevView.current = view
+  }, [view])
+
+  // Ctrl/Cmd+F opens the Find bar; browser default (page search) is suppressed.
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
+        e.preventDefault()
+        setFindBarOpen(true)
+      }
+    }
+    document.addEventListener('keydown', handleKeyDown)
+    return () => document.removeEventListener('keydown', handleKeyDown)
+  }, [setFindBarOpen])
+
+  const displayName = (user as { displayName?: string } | null)?.displayName ?? 'User'
+  const email = (user as { email?: string } | null)?.email ?? ''
+  const userIdentity: Identity = {
+    color: (user as { color?: string } | null)?.color ?? '#288C9B',
+    icon: (user as { icon?: string } | null)?.icon ?? '__name_2__',
+  }
+
+  // Global preferences — restored on login to seed team/timeline selection.
+  const { isSuccess: globalPrefsSettled } = usePreferences()
+  const globalPrefMap = usePreferenceMap()
+
+  // Team modal state
+  const [teamModalMode, setTeamModalMode] = useState<'new' | 'edit' | null>(null)
+  const [editingTeam, setEditingTeam] = useState<ApiTeam | null>(null)
+  const unarchiveTeam = useUnarchiveTeam()
+
+  // Member modal state
+  const [editingMember, setEditingMember] = useState<TeamMemberWithUser | null>(null)
+
+  // Timeline modal state
+  const [timelineModalMode, setTimelineModalMode] = useState<'new' | 'edit' | null>(null)
+  const [editingTimeline, setEditingTimeline] = useState<ApiTimeline | null>(null)
+
+  // Fetch all teams including archived for the sidebar's archived section.
+  const { data: allTeams = [] } = useMyTeams(true)
+  const activeTeams = allTeams.filter(t => !t.archivedAt)
+  const archivedTeams = allTeams.filter(t => Boolean(t.archivedAt))
+
+  // Explicit team selection state — null until the global pref is applied so
+  // that timelines (and the timeline init effect) don't fire against the wrong
+  // fallback team before the saved team pref resolves.
+  const [activeTeamId, setActiveTeamId] = useState<string | null>(null)
+  const teamIdInitialized = useRef(false)
+  useEffect(() => {
+    if (!activeTeams.length || !globalPrefsSettled || teamIdInitialized.current) return
+    teamIdInitialized.current = true
+    const saved = typeof globalPrefMap['selected_team'] === 'string' ? globalPrefMap['selected_team'] : null
+    const exists = saved && activeTeams.some(t => t.id === saved)
+    setActiveTeamId(exists ? saved : activeTeams[0].id)
+  }, [activeTeams, globalPrefsSettled, globalPrefMap])
+
+  // Only derive an active team once the pref has been applied (activeTeamId !== null).
+  // The activeTeams[0] fallback here handles the edge case where the saved team
+  // was archived or deleted between sessions.
+  const activeTeam = activeTeamId !== null
+    ? (activeTeams.find(t => t.id === activeTeamId) ?? activeTeams[0] ?? undefined)
+    : undefined
+  const teamId = activeTeam?.id ?? ''
+
+  // Check whether the current user is an admin of the active team.
+  const { data: teamMembers = [] } = useTeamMembers(teamId)
+  const userId = (user as { id?: string } | null)?.id ?? ''
+  const isSuperadmin = Boolean((user as { isSuperadmin?: boolean } | null)?.isSuperadmin)
+  const canEditTeam = isSuperadmin || teamMembers.some(m => m.userId === userId && m.role === 'admin')
+
+  const handleSelectTeam = useCallback((id: string) => {
+    setActiveTeamId(id)
+    // Clear the stale timeline selection so the init effect re-fires with the
+    // new team's timeline list. Without this, the old timeline ID leaks into
+    // the new team's API requests and produces 404s.
+    setActiveTimelineId(undefined)
+    prefsAppliedForTimeline.current = null
+    timelineIdInitialized.current = false
+  }, [])
+
+  const unarchiveTimeline = useUnarchiveTimeline(teamId)
+
+  const { data: timelines = [] } = useTeamTimelines(teamId)
+  const { data: allTimelines = [] } = useTeamTimelinesWithArchived(teamId)
+  const archivedTimelines = allTimelines.filter(t => Boolean(t.archivedAt))
+  const [activeTimelineId, setActiveTimelineId] = useState<string | undefined>()
+  const { data: activeTimelineStatuses = [] } = useTimelineStatuses(teamId, activeTimelineId ?? '')
+  const { data: savedFilters = [] } = useSavedFilters(teamId)
+  const { data: tags = [] } = useTags(teamId)
+  // Initialize activeTimelineId from the saved global pref (selected_timeline),
+  // falling back to timelines[0] when no pref is stored or the saved timeline
+  // is no longer in the list. Waits for global prefs to settle so we don't
+  // immediately overwrite a restored value with the fallback.
+  useEffect(() => {
+    if (timelines.length === 0 || !globalPrefsSettled || timelineIdInitialized.current) return
+    timelineIdInitialized.current = true
+    const saved = typeof globalPrefMap['selected_timeline'] === 'string' ? globalPrefMap['selected_timeline'] : null
+    const exists = saved && timelines.some(t => t.id === saved)
+    setActiveTimelineId(exists ? saved : timelines[0].id)
+  }, [timelines, globalPrefsSettled, globalPrefMap])
+  const activeTimeline = timelines.find(t => t.id === activeTimelineId) ?? timelines[0]
+  // Derived so they stay in sync after edits without needing separate state.
+  const activeTimelineColor = activeTimeline?.color ?? '#1A97A2'
+  const activeTimelineName = activeTimeline?.name ?? ''
+  const activeTimelineIdentity: Identity = {
+    color: activeTimeline?.color ?? '#288C9B',
+    icon: activeTimeline?.icon ?? '__none__',
+  }
+
+  // Close the activity detail panel whenever the active filter changes so the
+  // filtered view is unobstructed by a stale selection.
+  useEffect(() => {
+    setSelectedActivityId(null)
+    setSelectedApiActivity(null)
+  }, [activeFilter]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handleTimelineChange = useCallback((id: string) => {
+    prefsAppliedForTimeline.current = null
+    setActiveTimelineId(id)
+    setActiveFilter({ kind: 'preset', id: 'all' })
+  }, [setActiveFilter])
+
+  // Calendar navigation helpers.
+  const calendarPrev = useCallback(() => {
+    setCalendarAnchorDate(prev => {
+      const d = new Date(prev)
+      if (calendarLayout === 'month') {
+        d.setUTCMonth(d.getUTCMonth() - 1)
+      } else {
+        d.setUTCDate(d.getUTCDate() - 7)
+      }
+      return d
+    })
+  }, [calendarLayout])
+
+  const calendarNext = useCallback(() => {
+    setCalendarAnchorDate(prev => {
+      const d = new Date(prev)
+      if (calendarLayout === 'month') {
+        d.setUTCMonth(d.getUTCMonth() + 1)
+      } else {
+        d.setUTCDate(d.getUTCDate() + 7)
+      }
+      return d
+    })
+  }, [calendarLayout])
+
+  const calendarToday = useCallback(() => {
+    const d = new Date()
+    d.setUTCHours(0, 0, 0, 0)
+    if (calendarLayout === 'month') {
+      d.setUTCDate(1)
+    } else {
+      // Snap to weekStart (Monday by default).
+      const dow = d.getUTCDay()
+      const daysBack = dow === 0 ? 6 : dow - 1
+      d.setUTCDate(d.getUTCDate() - daysBack)
+    }
+    setCalendarAnchorDate(d)
+  }, [calendarLayout])
+
+  useTeamActivitySync(teamId, accessToken)
+
+  // Per-timeline preferences: restore toolbar state when the active timeline changes.
+  // isSuccess gate ensures we don't mark prefs applied before the query resolves.
+  const { isSuccess: prefsSettled } = usePreferences(activeTimelineId)
+  const timelinePrefs = usePreferenceMap(activeTimelineId)
+  useEffect(() => {
+    if (!activeTimelineId || !prefsSettled) return
+    if (prefsAppliedForTimeline.current === activeTimelineId) return
+    prefsAppliedForTimeline.current = activeTimelineId
+
+    if (typeof timelinePrefs['group_by'] === 'string') setGroupBy(timelinePrefs['group_by'] as GroupBy)
+    if (typeof timelinePrefs['sort_by'] === 'string') setSortBy(timelinePrefs['sort_by'] as SortBy)
+    if (typeof timelinePrefs['zoom_granularity'] === 'string') setGranularity(timelinePrefs['zoom_granularity'] as TimeGranularity | 'auto')
+    if (typeof timelinePrefs['color_by'] === 'string') setColorBy(timelinePrefs['color_by'] as ColorBy)
+    if (typeof timelinePrefs['list_group_by'] === 'string') setListGroupBy(timelinePrefs['list_group_by'] as ListGroupBy)
+    if (typeof timelinePrefs['list_sort_by'] === 'string') setListSortBy(timelinePrefs['list_sort_by'] as ListSortBy)
+    if (typeof timelinePrefs['list_color_by'] === 'string') setListColorBy(timelinePrefs['list_color_by'] as ListColorBy)
+    if (typeof timelinePrefs['list_density'] === 'string') setListDensity(timelinePrefs['list_density'] as ListDensity)
+    if (typeof timelinePrefs['view_mode'] === 'string') setView(timelinePrefs['view_mode'] as ViewMode)
+  }, [activeTimelineId, prefsSettled, timelinePrefs])
+
+  // Save toolbar state changes to per-timeline prefs.
+  const saveTimelinePref = useCallback((key: string, value: string) => {
+    if (!activeTimelineId) return
+    upsert.mutate({ key, value: JSON.stringify(value), timelineId: activeTimelineId })
+  }, [activeTimelineId, upsert.mutate]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('group_by', groupBy)
+  }, [groupBy, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('sort_by', sortBy)
+  }, [sortBy, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('zoom_granularity', granularity)
+  }, [granularity, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('color_by', colorBy)
+  }, [colorBy, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('view_mode', view)
+  }, [view, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('list_group_by', listGroupBy)
+  }, [listGroupBy, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('list_sort_by', listSortBy)
+  }, [listSortBy, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('list_color_by', listColorBy)
+  }, [listColorBy, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('list_density', listDensity)
+  }, [listDensity, saveTimelinePref])
+
+  // Global preferences: persist dark mode, active team, and active timeline.
+  useEffect(() => {
+    upsert.mutate({ key: 'theme', value: JSON.stringify(theme) })
+  }, [theme]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!teamId) return
+    upsert.mutate({ key: 'selected_team', value: JSON.stringify(teamId) })
+  }, [teamId]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!activeTimelineId) return
+    upsert.mutate({ key: 'selected_timeline', value: JSON.stringify(activeTimelineId) })
+  }, [activeTimelineId]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Reset label column width when the user switches timelines so each timeline
+  // starts fresh. Switching between views on the same timeline preserves width
+  // because the state lives here rather than inside the unmounting GanttView.
+  useEffect(() => {
+    setGanttLabelColW(DEFAULT_LABEL_COL_W)
+  }, [activeTimelineId])
+
+  return (
+    <div style={{ display: 'flex', height: '100vh', overflow: 'hidden', background: 'var(--background)' }}>
+      <Sidebar
+        collapsed={sidebarCollapsed}
+        onToggle={() => setSidebarCollapsed(c => !c)}
+        apiTimelines={timelines}
+        archivedTimelines={archivedTimelines}
+        activeTimelineId={activeTimelineId}
+        onActiveTimelineChange={handleTimelineChange}
+        onNewTimeline={() => { setEditingTimeline(null); setTimelineModalMode('new') }}
+        onEditTimeline={id => {
+          // timelines (active) is always loaded; allTimelines (?archived=true) may
+          // still be in-flight, so prefer the already-loaded list to avoid opening
+          // the modal with an undefined timeline and blank fields.
+          const tl = timelines.find(t => t.id === id) ?? allTimelines.find(t => t.id === id)
+          setEditingTimeline(tl ?? null)
+          setTimelineModalMode('edit')
+        }}
+        onNewActivity={() => {
+          const today = new Date().toISOString().slice(0, 10)
+          setSelectedActivityId(null)
+          setSelectedApiActivity(null)
+          if (view === 'list') {
+            setListNewRowSeq(s => s + 1)
+          } else {
+            setCreateDefaults({ start: today, end: today, memberId: null })
+          }
+        }}
+        activeTeam={activeTeam}
+        activeTeams={activeTeams}
+        archivedTeams={archivedTeams}
+        canEditTeam={canEditTeam}
+        onSelectTeam={handleSelectTeam}
+        onNewTeam={isSuperadmin ? () => { setEditingTeam(null); setTeamModalMode('new'); } : undefined}
+        onEditTeam={t => { setEditingTeam(t as ApiTeam); setTeamModalMode('edit'); }}
+        onUnarchiveTeam={id => unarchiveTeam.mutate(id)}
+        members={teamMembers.length > 0 ? teamMembers : undefined}
+        onEditMember={isSuperadmin ? m => setEditingMember(m) : undefined}
+      />
+
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0 }}>
+        <TopBar
+          view={view}
+          teamId={teamId}
+          timelineName={activeTimelineName}
+          timelineIdentity={activeTimelineIdentity}
+          onViewChange={setView}
+          onOpenFilterManager={() => setFilterModalOpen(true)}
+          rightSlot={
+            <div ref={profileRef} style={{ position: 'relative', marginLeft: 4, zIndex: 30 }}>
+              <button
+                onClick={() => setProfileOpen(o => !o)}
+                style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', display: 'flex' }}
+                title={displayName}
+              >
+                <Badge identity={userIdentity} name={displayName} shape="circle" size={28} />
+              </button>
+
+              {profileOpen && (
+                <div
+                  style={{
+                    position: 'absolute',
+                    top: 'calc(100% + 8px)',
+                    right: 0,
+                    width: 220,
+                    background: 'var(--card)',
+                    border: '1px solid var(--border)',
+                    borderRadius: 8,
+                    boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
+                    zIndex: 100,
+                    overflow: 'hidden',
+                  }}
+                >
+                  <div style={{ padding: '12px 14px', borderBottom: '1px solid var(--border)' }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)' }}>{displayName}</div>
+                    <div style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 2 }}>{email}</div>
+                  </div>
+                  <button
+                    onClick={toggleDark}
+                    style={{ ...DROPDOWN_BTN, borderBottom: '1px solid var(--border)' }}
+                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                  >
+                    {isDark ? <Moon size={14} strokeWidth={1.8} /> : <Sun size={14} strokeWidth={1.8} />}
+                    {isDark ? 'Dark mode' : 'Light mode'}
+                  </button>
+                  <button
+                    onClick={() => { setProfileOpen(false); navigate('/settings'); }}
+                    style={{ ...DROPDOWN_BTN, borderBottom: '1px solid var(--border)' }}
+                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                  >
+                    <Settings size={14} strokeWidth={1.8} />
+                    Settings
+                  </button>
+                  <button
+                    onClick={logout}
+                    style={{ ...DROPDOWN_BTN, color: 'var(--muted-foreground)' }}
+                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                  >
+                    <LogOut size={14} strokeWidth={1.8} />
+                    Sign out
+                  </button>
+                </div>
+              )}
+            </div>
+          }
+        />
+
+        {/* Active timeline color band */}
+        <div style={{ height: 3, background: activeTimelineColor, flexShrink: 0, transition: 'background 0.2s ease' }} />
+
+        {/* Gantt sub-toolbar — only shown in Gantt view */}
+        {view === 'gantt' && (
+          <GanttToolbar
+            groupBy={groupBy}
+            onGroupByChange={setGroupBy}
+            sortBy={sortBy}
+            onSortByChange={setSortBy}
+            granularity={granularity}
+            onGranularityChange={setGranularity}
+            colorBy={colorBy}
+            onColorByChange={setColorBy}
+            onExport={() => {}}
+            onShare={() => {}}
+          />
+        )}
+
+        {/* List sub-toolbar — only shown in List view */}
+        {view === 'list' && (
+          <ListToolbar
+            columns={listColumns}
+            onColumnVisibilityChange={(colId, visible) => {
+              listColToggleSeq.current += 1
+              setListColToggle({ colId, visible, seq: listColToggleSeq.current })
+              setListColumns(prev => prev.map(c => c.id === colId ? { ...c, visible } : c))
+            }}
+            density={listDensity}
+            onDensityChange={setListDensity}
+            groupBy={listGroupBy}
+            onGroupByChange={setListGroupBy}
+            sortBy={listSortBy}
+            onSortByChange={setListSortBy}
+            colorBy={listColorBy}
+            onColorByChange={setListColorBy}
+            onExport={() => {}}
+            onShare={() => {}}
+          />
+        )}
+
+        {/* Calendar sub-toolbar — only shown in Calendar view */}
+        {view === 'calendar' && (
+          <CalendarToolbar
+            layout={calendarLayout}
+            onLayoutChange={setCalendarLayout}
+            anchorDate={calendarAnchorDate}
+            onPrev={calendarPrev}
+            onNext={calendarNext}
+            onToday={calendarToday}
+            colorBy={colorBy}
+            onColorByChange={setColorBy}
+            onExport={() => {}}
+            onShare={() => {}}
+          />
+        )}
+
+        {/* Content area */}
+        <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+          {view === 'gantt' && teamId && activeTimelineId ? (
+            <GanttView
+              teamId={teamId}
+              timelineId={activeTimelineId}
+              startDate={activeTimeline?.startDate}
+              endDate={activeTimeline?.endDate}
+              groupBy={groupBy}
+              sortBy={sortBy}
+              granularity={granularity}
+              colorBy={colorBy}
+              timelineStatuses={activeTimelineStatuses}
+              savedFilters={savedFilters}
+              tags={tags}
+              selectedActivityId={selectedActivityId}
+              onSelectActivity={(id) => {
+                setSelectedActivityId(id)
+                if (!id) { setSelectedApiActivity(null); setCreateDefaults(null) }
+              }}
+              onSelectApiActivity={(activity) => {
+                setSelectedApiActivity(activity)
+                setCreateDefaults(null)
+              }}
+              onBarDragProgress={(activityId, newStart, newEnd) => {
+                setLiveDragDates({
+                  activityId,
+                  start: newStart.toISOString().slice(0, 10),
+                  end: newEnd.toISOString().slice(0, 10),
+                })
+              }}
+              onBarDragEnd={() => setLiveDragDates(null)}
+              onMembersLoaded={setGanttMembers}
+              labelColW={ganttLabelColW}
+              onLabelColWChange={setGanttLabelColW}
+            />
+          ) : view === 'gantt' && (!teamId || !activeTimelineId) ? (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>Loading your team…</p>
+            </div>
+          ) : view === 'list' && teamId && activeTimelineId ? (
+            <ListView
+              teamId={teamId}
+              timelineId={activeTimelineId}
+              groupBy={listGroupBy}
+              sortBy={listSortBy}
+              colorBy={listColorBy}
+              density={listDensity}
+              timelineStatuses={activeTimelineStatuses}
+              savedFilters={savedFilters}
+              tags={tags}
+              selectedActivityId={selectedActivityId}
+              pendingColumnToggle={listColToggle}
+              onSelectActivity={(id) => {
+                setSelectedActivityId(id)
+                if (!id) { setSelectedApiActivity(null); setCreateDefaults(null) }
+              }}
+              onSelectApiActivity={(activity) => {
+                setSelectedApiActivity(activity)
+                setCreateDefaults(null)
+              }}
+              onMembersLoaded={setGanttMembers}
+              onColumnsChange={setListColumns}
+              triggerNewRow={listNewRowSeq}
+            />
+          ) : view === 'list' && (!teamId || !activeTimelineId) ? (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>Loading your team…</p>
+            </div>
+          ) : view === 'calendar' && teamId && activeTimelineId ? (
+            <CalendarView
+              teamId={teamId}
+              timelineId={activeTimelineId}
+              layout={calendarLayout}
+              anchorDate={calendarAnchorDate}
+              colorBy={colorBy}
+              timelineStatuses={activeTimelineStatuses}
+              savedFilters={savedFilters}
+              tags={tags}
+              selectedActivityId={selectedActivityId}
+              onSelectActivity={(id) => {
+                setSelectedActivityId(id)
+                if (!id) { setSelectedApiActivity(null); setCreateDefaults(null) }
+              }}
+              onSelectApiActivity={(activity) => {
+                setSelectedApiActivity(activity)
+                setCreateDefaults(null)
+              }}
+              onBarDragProgress={(activityId, newStart, newEnd) => {
+                setLiveDragDates({
+                  activityId,
+                  start: newStart.toISOString().slice(0, 10),
+                  end: newEnd.toISOString().slice(0, 10),
+                })
+              }}
+              onBarDragEnd={() => setLiveDragDates(null)}
+              onCellClick={(date) => {
+                const iso = date.toISOString().slice(0, 10)
+                setSelectedActivityId(null)
+                setSelectedApiActivity(null)
+                setCreateDefaults({ start: iso, end: iso, memberId: null })
+              }}
+              onMembersLoaded={setGanttMembers}
+            />
+          ) : view === 'calendar' && (!teamId || !activeTimelineId) ? (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>Loading your team…</p>
+            </div>
+          ) : (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>
+                {view.charAt(0).toUpperCase() + view.slice(1)} view coming soon.
+              </p>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Activity detail panel — slides in from right when an activity is selected */}
+      <ActivityDetailPanel
+        open={Boolean(selectedApiActivity)}
+        event={selectedApiActivity}
+        members={ganttMembers}
+        teamId={teamId}
+        timelineId={activeTimelineId ?? ''}
+        onClose={() => { setSelectedActivityId(null); setSelectedApiActivity(null); setLiveDragDates(null) }}
+        liveDragStart={liveDragDates && liveDragDates.activityId === selectedApiActivity?.id ? liveDragDates.start : undefined}
+        liveDragEnd={liveDragDates && liveDragDates.activityId === selectedApiActivity?.id ? liveDragDates.end : undefined}
+      />
+
+      {/* Activity create panel — slides in from New Activity button or future drag */}
+      <ActivityCreatePanel
+        open={Boolean(createDefaults) && !selectedApiActivity}
+        teamId={teamId}
+        timelineId={activeTimelineId ?? ''}
+        members={ganttMembers}
+        defaultStart={createDefaults?.start ?? new Date().toISOString().slice(0, 10)}
+        defaultEnd={createDefaults?.end ?? new Date().toISOString().slice(0, 10)}
+        defaultMemberId={createDefaults?.memberId}
+        onClose={() => setCreateDefaults(null)}
+      />
+
+      <FilterManageModal
+        open={filterModalOpen}
+        onClose={() => setFilterModalOpen(false)}
+        teamId={teamId}
+        timelineId={activeTimelineId ?? ''}
+        isAdmin={canEditTeam}
+      />
+
+      {/* Team modal — create or edit */}
+      {teamModalMode && (
+        <TeamModal
+          mode={teamModalMode}
+          team={editingTeam ?? undefined}
+          isAdmin={canEditTeam}
+          onClose={() => { setTeamModalMode(null); setEditingTeam(null); }}
+          onTeamCreated={created => setActiveTeamId(created.id)}
+        />
+      )}
+
+      {/* Member modal — edit a team member */}
+      {editingMember && (
+        <MemberModal
+          teamId={teamId}
+          memberId={editingMember.id}
+          isAdmin={canEditTeam}
+          isSuperadmin={isSuperadmin}
+          onClose={() => setEditingMember(null)}
+        />
+      )}
+
+      {/* Timeline modal — create or edit */}
+      {timelineModalMode && (
+        <TimelineModal
+          mode={timelineModalMode}
+          teamId={teamId}
+          timeline={editingTimeline ?? undefined}
+          canAdmin={canEditTeam}
+          onClose={() => { setTimelineModalMode(null); setEditingTimeline(null) }}
+          onCreated={created => setActiveTimelineId(created.id)}
+          onUnarchive={id => unarchiveTimeline.mutate(id, { onSuccess: () => { setTimelineModalMode(null); setEditingTimeline(null) } })}
+        />
+      )}
+    </div>
+  )
+}
+
+export default function DashboardPage() {
+  return (
+    <FindProvider>
+      <FilterProvider>
+        <DashboardShell />
+      </FilterProvider>
+    </FindProvider>
+  )
+}
+````
+
 ## File: docs/log.md
 ````markdown
 # Development Log
+
+---
+
+## 2026-06-02 — Phase 11.2: Calendar View
+
+**Goal:** Ship a Month / Week all-day-bar calendar view. Every activity is all-day, so Day view, the time grid, and the time-overlap lane algorithm are all cut. The only layout problem is vertical stacking of concurrent multi-day bars.
+
+**Frontend:**
+- `lib/activityColor.ts` (new): Shared color-by resolver extracted from `GanttView.toRichActivity`. Resolves the display hex color for an activity given `colorBy` ('activity' | 'member' | 'status'), the member map, and the status-color map. Calendar, Gantt, and List can now share one source of truth.
+- `lib/calendarLanes.ts` (new): Pure lane-packing algorithm. `buildCalendarWeeks(activities, gridStart, weekCount, laneCaps, defaultLaneCap, matchedIds, activeMatchId)` returns `WeekRow[]`. Each `WeekRow` carries 7 day dates, a packed `CalendarSegment[]`, `laneCount`, and `visibleLaneCap`. Activities spanning week boundaries are split into independent per-week segments with `continuesLeft/Right` flags. Greedy packing assigns each segment to the lowest non-conflicting lane. `overflowCountsForWeek` and `segmentsForDay` are also exported for the overflow chip UI.
+- `lib/calendarLanes.test.ts` (new): 21 unit tests covering `daysDiff`, single-week basics, single-day activities, multi-day spanning, week-boundary splitting, greedy lane packing (non-overlapping, overlapping, lane reuse, laneCount), overflow counts, segmentsForDay, and Find match flags.
+- `components/calendar/CalendarToolbar.tsx` (new): Sub-toolbar shown in the `view === 'calendar'` slot. Provides Month/Week layout toggle, prev/next/today navigation, color-by select, and export/share stubs. `anchorDate` drives the range label (e.g. "June 2026" or "Jun 1 – 7, 2026").
+- `components/calendar/CalendarGrid.tsx` (new): Presentational grid renderer. Shared by Month (6 weeks) and Week (1 week). Key responsibilities:
+  - `WeekRowRenderer`: renders 7 day cells with borders, date numbers, day-of-week labels (first row in Month, always in Week), today highlight, "+N more" overflow chips, and lane-positioned activity bars.
+  - `CalendarBar`: activity bar with `continuesLeft/Right` arrow affordances, no-end-cap border-radius, Find highlight treatment (amber glow for matches, 30% opacity for non-matches), and edge/body hit zones for drag.
+  - `RowResizeHandle`: 6px bottom-edge drag strip per week row. Pointer-captured drag raises/lowers `visibleLaneCap` (min 1, max `laneCount`). Fires `onCapChange` which persists the cap to per-timeline prefs.
+  - `DayOverflowPopover`: portal-like popover listing every activity on a day (visible + hidden). Click-through to `ActivityDetailPanel`. Closes on outside-click.
+  - Drag state machine: pointer-captured per-bar drag resolves target day via `document.elementFromPoint` + `data-date` attribute lookup on day cells (geometric hit-testing, naturally handles week-wrap). Fires `onBarDragProgress` live for sidebar preview and `onBarDragCommit` on pointer-up → `PATCH`.
+- `components/calendar/CalendarView.tsx` (new): Data container mirroring `GanttView`. Fetches activities + members via `useTimelineActivities` / `useTeamMembers`. Applies `applyActiveFilter`. Builds `CalendarActivity[]` with resolved colors. Runs Find matchEvents and registers ordered match IDs. Manages per-week lane cap persistence via `useUpsertPreference`. Handles bar drag commit (optimistic cache update + `useUpdateActivity.mutate`).
+- `DashboardPage.tsx`: Added `calendarLayout` + `calendarAnchorDate` state. Added `calendarPrev`, `calendarNext`, `calendarToday` navigation callbacks. Added `CalendarToolbar` in the `view === 'calendar'` toolbar slot. Added `CalendarView` in the content area `view === 'calendar'` branch, wiring all props (colorBy, filter, find, drag progress, create defaults, member load).
+
+**Tests:**
+- 208 total tests pass (up from 187 in 11.1.2), including new `calendarLanes.test.ts` (21 tests).
+- `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean; `pnpm --filter web build` clean.
+
+**Manual verification pending (Docker):** view switcher Calendar; Month/Week layouts; multi-day bars; color-by; "+N more" chip and popover; row-height resize; bar click / empty-cell click; bar drag move/resize; Find highlights; filter parity.
 
 ---
 
@@ -53592,7 +55410,7 @@ This document organizes development into discrete phases with effort estimates a
 | 11.1 | [Web — List View](#phase-111--web--list-view) | M — 2–3 days | ✅ |
 | 11.1.1 | [Timezone-Safe Activity Dates](#phase-1111--timezone-safe-activity-dates) | S–M — 0.5–1 day | ✅ |
 | 11.1.2 | [Group by Assignee Combination](#phase-1112--group-by-assignee-combination) | S–M — 0.5–1 day | ✅ |
-| 11.2 | [Web — Calendar View](#phase-112--web--calendar-view) | L — 3–5 days | ⬜ |
+| 11.2 | [Web — Calendar View](#phase-112--web--calendar-view) | L — 3–5 days | 🔄 |
 | 11.3 | [Web — Kanban View (Read-Only)](#phase-113--web--kanban-view-read-only) | S–M — 1–2 days | ⬜ |
 | 12 | [Communications Testing](#phase-12--communications-testing) | S — 1 day | ⬜ |
 | 13 | [AI Key Management](#phase-13--ai-key-management) | M — 2–3 days | ⬜ |
@@ -54946,7 +56764,7 @@ Format and position all activity `startAt`/`endAt` in **UTC** (no local conversi
 ---
 
 ### Phase 11.2 — Web — Calendar View
-**Status:** ⬜ | **Effort:** L (3–5 days)
+**Status:** 🔄 In Progress — 2026-06-02, all automated checks pass; manual UI verification on Docker still needed | **Effort:** L (3–5 days)
 
 A familiar **Month / Week** calendar surface that answers "what is the team working on this week / this month?" — not a Gantt replacement. **Re-engineered 2026-06-02** from the original "Month / Week / Day + 24-hour time grid" plan: because every activity is all-day, **Day view, the time grid, and the time-overlap lane algorithm are all cut**. Both layouts are pure all-day-bar surfaces; the only layout problem left is vertical stacking of concurrent multi-day bars.
 
