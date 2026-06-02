@@ -87,6 +87,7 @@ docs/
     phase-10.4.5.md
     phase-10.4.6.md
     phase-11.1-list-view.md
+    phase-11.2-calendar-view.md
   ARCHITECTURE.md
   CONVENTIONS.md
   GreatEventToActivity.md
@@ -6522,212 +6523,6 @@ ALTER TABLE activity_assignments RENAME TO event_assignments;
 ```
 
 **Take a DB backup before applying migration 005.** This is the one irreversible step if you don't have a backup.
-````
-
-## File: docs/REQUIREMENTS.md
-````markdown
-# Requirements
-
-## Product Summary
-draba is a lightweight team coordination and planning tool. It answers one question — **"Who is working on what, and when?"** — without the overhead of a full project management suite. The primary interface is a horizontal timeline grouped by person, where work appears as blocks across time. Teams adopt it in minutes, not weeks.
-
-**Target users:** Small teams of 5–20 people. Marketing, creative, and product teams who need visibility across people and time without tickets, sprints, or dependencies.
-
-**Positioning:** Not a calendar replacement. Not a project management tool. A shared team timeline.
-
----
-
-## Functional Requirements
-
-### Users and Auth
-- [ ] Admins can invite users to a team via email invite link
-- [ ] Invited users register by following the invite link and setting up an account (email + password)
-- [ ] Users have: display name, email, optional avatar
-- [ ] Four levels of participation:
-  - **Team Admins:** Manage the team overall. Can invite new people to the team and can create multiple teams.
-  - **Timeline Admins:** Scoped to specific timelines. Can configure those timelines and add/remove people (from the team) to their timelines.
-  - **Users:** Have a login. Can participate in timelines assigned to them.
-  - **Participants:** Do not have a login. Managed as team members (e.g. contractors) so they can be scheduled on timelines and assigned colors without needing account access.
-- [ ] Users can belong to multiple teams simultaneously
-- [ ] Password reset via email
-
-### API Access Tokens
-Programmatic access (CLI, webhooks, MCP) uses scoped API tokens rather than user passwords.
-
-- [ ] Admins and members can generate named API tokens for their account
-- [ ] Tokens have a configurable permission scope: read-only | add | edit/delete own | edit/delete all
-- [ ] Tokens can be revoked at any time
-- [ ] Token values are shown once at creation and never stored in plaintext (hashed at rest)
-- [ ] CLI, webhook consumers, and MCP integrations authenticate using these tokens
-
-### Teams
-- [ ] Admins can create teams with a name, description, notes, and identity (icon + color)
-- [ ] Admins can edit team name, description, notes, and identity
-- [ ] Admins can invite users to a team by email (one-time invite)
-- [ ] Admins can generate a reusable invite link for a team; anyone with the link can register and join
-- [ ] Admins can revoke or regenerate the reusable invite link
-- [ ] Admins can add existing registered users to a team
-- [ ] Admins can remove members from a team (cannot remove the last admin)
-- [ ] Admins can promote a member to team admin or demote to member
-- [ ] Admins can create participants (login-less team members) who can be assigned to activities but don't have draba accounts
-- [ ] Teams can be archived (hidden from active views, data preserved, restorable)
-- [ ] Teams have a name, description, notes, identity, and a list of members
-
-### Members
-- [ ] Each team member has a display name, identity (icon + color), and a role (admin, member, or participant)
-- [ ] Admins can edit any member's display name, identity, and role
-- [ ] Members can edit their own display name and identity
-- [ ] Members can be inactivated (access disabled, data preserved, reversible) — uses the same archive pattern as other entities but displayed as "Inactivate" in the UI
-- [ ] Inactivated members cannot log in; their activity assignments are preserved
-- [ ] Super admins can promote any non-participant member to super admin status
-- [ ] Super admins can inactivate or delete user accounts (delete only when no active activities and single team)
-- [ ] Each member has computed stats: timeline counts (active/archived), activity counts (past due, running, upcoming, unscheduled, archived) — date-relative, not status-relative
-
-### Activities
-Activities are the core data object — a block of time assigned to one or more people.
-
-- [ ] Activities have: title, start date/time, end date/time, description/notes, status, percent complete, tags, icon, color, assigned people (one or more)
-- [ ] Activities can have a parent activity (another event within the same team), enabling simple nesting (e.g., "Launch Week" contains "Design Review")
-- [ ] Activities store all standard CalDAV VEVENT fields natively (UID, DTSTART, DTEND, SUMMARY, DESCRIPTION, LOCATION, URL, RRULE, etc.) so no information is lost in sync
-- [ ] Activities support recurrence rules (RRULE) from CalDAV/Google
-- [ ] Activities are scoped to a team
-- [ ] Activities can be archived (hidden from active views but not deleted; recoverable)
-
-### Timelines
-Timelines are named viewing windows — a name and a date range — scoped to a team. They are not data containers; they are views over the team's activities.
-
-- [ ] Teams can create multiple timelines, including overlapping ones
-- [ ] Each timeline has: name, start date, end date
-- [ ] Team membership controls who can view a timeline by default; team admins implicitly access all timelines, members require an explicit access grant (see RBAC in Phase 8.0)
-- [ ] Timelines can be archived (removed from active list but preserved; recoverable)
-- [ ] External / public visibility is handled via the **Shares** model (below) — a timeline is not inherently "public" or "restricted"; it becomes externally visible only via a share link the team explicitly creates
-
-### Timeline Views
-The primary view is a Gantt chart. Additional views display the same underlying activities in different formats.
-
-- [ ] **Timeline / Gantt view** (primary) — horizontal Gantt chart; one row per activity, bars span their date range; see `docs/design/UX_PATTERNS.md`
-  - A **timeline sub-toolbar** sits between the top bar and the grid. It provides:
-    - **Zoom** — variable column width (day granularity, zoom in/out)
-    - **Group by** — controls how activity rows are organized:
-      - _None_ — flat list, sorted by the active sort key
-      - _Member_ — one labeled section per assigned team member; events with multiple assignees appear under their primary assignee
-      - _Parent activity_ — root activities shown first; child events (those with `parentActivityId` set) indented beneath their parent
-    - **Sort by** — Start date (default), End date, Title A–Z
-    - **Export** — triggers CSV/Excel export of the visible date range (wires in Phase 13)
-- [ ] **Calendar view** — weekly, daily, and monthly grid layouts (standard calendar format)
-- [ ] **List view** (also referred to as the "spreadsheet" view) — dense, sortable, inline-editable table of activities; columns are show/hide-able and resizable; supports bulk selection for archive/delete/status-change. The "power user" surface for scanning and editing many activities at once.
-- [ ] **Kanban view** — read-only; columns = statuses (in the team's configured status order); cards = activities, color-coded by assigned person(s); multiple assignees shown as stacked color indicators. This is a viewing mode only — dragging cards to change status is out of scope for v1.
-- [ ] View switcher in the timeline header to toggle between available views
-- [ ] Each view persists its own toolbar state per timeline (group / sort / zoom / column visibility / filter preset) via user preferences
-
-> **Note:** Kanban is intentionally read-only in v1; drag-to-change-status is a later addition once the status model is proven.
-
-### Team Configuration
-Admins can customize team-level settings that apply to all members and views.
-
-**Statuses**
-- [ ] Each team has a configurable list of statuses (name + color)
-- [ ] Default statuses created when a team is created: `Planned`, `In Progress`, `Done`
-- [ ] Admins can add, rename, reorder, and delete statuses
-- [ ] Statuses have a display order that controls column order in Kanban view and sort order in dropdowns
-- [ ] At least one status must always exist (cannot delete the last one)
-- [ ] Deleting a status requires choosing a replacement status for any events currently using it
-- [ ] Status color is used as the column header color in Kanban view
-
-**Member Colors**
-- [ ] Each team member has a display color, used to color-code their events in Kanban view and any other person-first views
-- [ ] Admin can set member colors; members can also set their own
-- [ ] Default color is auto-assigned from a preset palette on invite acceptance
-
-### Real-Time Collaboration
-- [ ] Multiple users can view and edit the same timeline simultaneously
-- [ ] Changes (event create, update, delete) appear in real-time for all connected users
-- [ ] No last-write-wins data loss — changes are applied and broadcast immediately
-
-### Calendar Sync
-- [ ] Users can connect a personal Google Calendar account (OAuth 2.0) for two-way sync of their assigned events
-- [ ] Users can connect a personal CalDAV account (iOS/macOS Calendar, Fastmail, Thunderbird, etc.) for two-way sync
-- [ ] draba implements a built-in CalDAV endpoint — Apple Calendar users point their app directly at the draba server
-- [ ] Outbound sync: when an event is created/updated/deleted in draba, changes push to all connected personal calendars for assigned users
-- [ ] Inbound sync: changes made in Google Calendar trigger a webhook that updates draba
-- [ ] **Team read-only feed:** each timeline exposes a subscribable iCal/CalDAV URL that any calendar app can subscribe to for a read-only view of all team events in that timeline
-- [ ] Public iCal/Google Calendar feeds include only basic event info (title, date range, assigned people) — notes and internal fields are stripped
-- [ ] Microsoft/Outlook sync is explicitly out of scope for v1
-
-### External Connectors (e.g. Asana, Aha!)
-- [ ] Draba supports a one-way, read-only inbound feed from external systems of record.
-- [ ] Teams can generate unique inbound Webhook URLs to paste into Asana, Jira, etc.
-- [ ] External events appear alongside hand-crafted Draba events in the timeline and Gantt views.
-- [ ] Events generated via connectors are marked as "read-only" in Draba — users cannot change dates or properties via the Draba UI (they must change them in Asana).
-- [ ] The event card links back to the original source URL.
-
-### Sharing and Public Access
-Sharing in draba is a first-class entity, not a property of a timeline. A **Share** is a frozen pairing of `{ timeline + view type + view configuration + optional password + optional expiry }`. One timeline can have many shares, each tuned for a different audience.
-
-- [ ] A Share captures: the source timeline, the view type (Gantt / List / Calendar / Kanban), and a snapshot of the view's configuration at creation time (filter, sort, group, zoom, column visibility, etc.)
-- [ ] The view-config snapshot is **frozen** at creation — later edits to the live view do not retroactively change existing shares
-- [ ] A Share can optionally require a password to view (stored hashed; not retrievable)
-- [ ] A Share can optionally expire on a given date; expired shares return a clear "this link has expired" page
-- [ ] A Share can be revoked at any time by the creator or a team admin; revoked links are immediately unusable
-- [ ] A single timeline can host many independent shares simultaneously (e.g., a public Gantt for stakeholders + a password-protected List for contractors)
-- [ ] Share viewers see the chosen view in read-only mode — no drag, no inline edit, no create
-- [ ] Share URLs are unguessable (URL-safe random tokens); password-protected shares additionally rate-limit unlock attempts
-- [ ] Team admins can list, edit, and revoke any share for their team; members can only manage shares they created
-- [ ] Each timeline also exposes a public iCal feed URL (separate from the Share model) containing sanitized event data for calendar app subscription — see Calendar Sync
-
-### Data Portability
-Two flavors: **tabular** (data round-trips — CSV / xlsx in and out) and **visual** (one-way view exports for sharing offline — PDF / PNG / Markdown).
-
-**Tabular (round-trip):**
-- [ ] Events can be exported to CSV and Excel (.xlsx) from any timeline view
-- [ ] Events can be imported from a CSV or Excel file
-- [ ] A downloadable template file is provided showing the expected import format
-- [ ] Import shows a preview and validation errors before committing
-
-**Visual (view-shaped, one-way out):**
-- [ ] Gantt → PDF (landscape, paginated by date range) and PNG (single page)
-- [ ] Kanban → PDF (columns side-by-side, paginated when too wide for one page) and PNG
-- [ ] List → CSV, xlsx, Markdown table, and PDF
-- [ ] Calendar → PDF, one page per month / week / day depending on active sub-layout
-- [ ] All visual exports include a header strip: team name, timeline name, generated-at timestamp, applied filter description
-- [ ] All visual exports respect the active filter / sort / group at time of export — the deliverable is "what's on the screen right now"
-
----
-
-## Non-Functional Requirements
-- [ ] API response time < 200ms for standard reads under normal load
-- [ ] Real-time updates delivered within 500ms of a change
-- [ ] Self-hosted: runs as a single Docker container with no external service dependencies
-- [ ] Direct binary install is also supported (for users who don't use Docker)
-- [ ] Database: SQLite by default; MySQL/MariaDB and Postgres are supported configuration options
-- [ ] Same Docker artifact deploys to self-hosted and any future cloud offering
-- [ ] All API endpoints are authenticated (except public timeline share links and public iCal feeds)
-- [ ] All secrets, calendar credentials, and API tokens stored encrypted/hashed at rest
-
----
-
-## Constraints
-- Must run as a single Docker container with zero required external services (SQLite path)
-- No paid third-party services required for self-hosting
-- Calendar sync credentials and API tokens must never be stored in plaintext
-- No server-side rendering required
-
----
-
-## Out of Scope (v1)
-- Microsoft / Outlook / Exchange calendar sync
-- Kanban drag-to-change-status (Kanban is in v1 as a read-only view; interactive status changes via drag are v2)
-- Gantt dependency arrows / critical-path visualization (parent–child grouping is in scope; visual dependency arrows are not)
-- Time tracking or billable hours
-- Task dependencies or critical path
-- Workload balancing or capacity planning
-- Billing or invoicing
-- Automation or rule-based triggers
-- Mobile native apps (web/PWA first)
-- Multi-tenant cloud hosting (self-hosted per-customer to start)
-- SSO / SAML / OAuth login (email + password only for v1)
-- MCP server integration (parking lot — token auth system is designed to support it when ready)
-- CLI binary (parking lot — token auth system is designed to support it when ready)
 ````
 
 ## File: docs/REVIEW.md
@@ -13829,6 +13624,237 @@ export default function StatusTemplatesTab({ teamId, isAdmin, teamColor }: Props
 }
 ````
 
+## File: packages/web/src/components/ThemeSync.tsx
+````typescript
+/**
+ * ThemeSync — reads the user's server-side theme preference once auth
+ * initializes, then applies it via useDarkMode.
+ *
+ * This component renders nothing; it exists only for its side-effect.
+ * Mount it inside AuthProvider so useAuth is available.
+ */
+
+import { useEffect, useRef } from 'react'
+import { useAuth } from '@/contexts/AuthContext'
+import { useDarkMode } from '@/hooks/useDarkMode'
+import { usePreferenceMap } from '@/hooks/usePreferences'
+
+export default function ThemeSync() {
+  const { user, initializing } = useAuth()
+  const { applyTheme } = useDarkMode()
+  const prefMap = usePreferenceMap()
+  const applied = useRef(false)
+
+  useEffect(() => {
+    // Only apply once per session to avoid overriding manual toggles.
+    if (initializing || !user || applied.current) return
+    const serverTheme = prefMap['theme'] as string | undefined
+    if (serverTheme === 'dark' || serverTheme === 'light') {
+      applyTheme(serverTheme)
+      applied.current = true
+    } else if (serverTheme !== undefined) {
+      // Has a preference but it's something unexpected — mark applied to stop looping.
+      applied.current = true
+    }
+  }, [initializing, user, prefMap, applyTheme])
+
+  // Reset the applied guard when the user logs out.
+  useEffect(() => {
+    if (!user) applied.current = false
+  }, [user])
+
+  return null
+}
+````
+
+## File: packages/web/src/contexts/AuthContext.tsx
+````typescript
+/**
+ * Auth context: current user + access token in memory, refresh token in localStorage.
+ *
+ * Provides login, logout, and register actions so any component can
+ * authenticate without knowing about token storage details.
+ */
+
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
+import type { components } from '@draba/shared'
+import {
+  API_BASE,
+  ApiError,
+  clearStoredRefreshToken,
+  configureSilentRefresh,
+  getStoredRefreshToken,
+  storeRefreshToken,
+} from '@/lib/api'
+
+type User = components['schemas']['User']
+type AuthResponse = components['schemas']['AuthResponse']
+type RefreshResponse = components['schemas']['RefreshResponse']
+
+interface AuthState {
+  user: User | null
+  accessToken: string | null
+  /** True while checking the stored refresh token on initial mount. */
+  initializing: boolean
+}
+
+interface AuthContextValue extends AuthState {
+  getAccessToken: () => string | null
+  login: (email: string, password: string) => Promise<void>
+  /** Registers a new account and returns the fresh access token directly,
+   *  avoiding a race against the async setState that follows. */
+  register: (email: string, password: string, displayName: string, inviteToken?: string) => Promise<string>
+  logout: () => void
+  /** Merges fields into the current user object — used after profile updates. */
+  patchUser: (patch: Partial<User>) => void
+}
+
+const AuthContext = createContext<AuthContextValue | null>(null)
+
+async function postJson<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  const data = await res.json()
+  if (!res.ok) {
+    const err = data as { error: { code: string; message: string } }
+    throw new ApiError(res.status, err.error?.code ?? 'UNKNOWN', err.error?.message ?? res.statusText)
+  }
+  return data as T
+}
+
+export function AuthProvider({ children }: { children: React.ReactNode }) {
+  const [state, setState] = useState<AuthState>({
+    user: null,
+    accessToken: null,
+    initializing: true,
+  })
+
+  // Stable ref so callbacks never capture a stale token.
+  const tokenRef = useRef<string | null>(null)
+  tokenRef.current = state.accessToken
+
+  const getAccessToken = useCallback(() => tokenRef.current, [])
+
+  // On mount, attempt to restore session via the stored refresh token.
+  // After exchanging the refresh token we also fetch /auth/me so that `user`
+  // is populated — without it, admin checks (canEditTeam etc.) always fail
+  // because userId is '' and no member's userId matches an empty string.
+  useEffect(() => {
+    const refresh = getStoredRefreshToken()
+    if (!refresh) {
+      setState(s => ({ ...s, initializing: false }))
+      return
+    }
+    postJson<RefreshResponse>('/auth/refresh', { refreshToken: refresh })
+      .then(async ({ accessToken }) => {
+        try {
+          const res = await fetch(`${API_BASE}/auth/me`, {
+            headers: { Authorization: `Bearer ${accessToken}` },
+          })
+          const user: User | null = res.ok ? (await res.json() as User) : null
+          setState({ user, accessToken, initializing: false })
+        } catch {
+          // /auth/me failed but the token is still valid — set what we have.
+          setState(s => ({ ...s, accessToken, initializing: false }))
+        }
+      })
+      .catch(() => {
+        clearStoredRefreshToken()
+        setState(s => ({ ...s, initializing: false }))
+      })
+  }, [])
+
+  const login = useCallback(async (email: string, password: string) => {
+    const { user, accessToken, refreshToken } = await postJson<AuthResponse>('/auth/login', {
+      email,
+      password,
+    })
+    storeRefreshToken(refreshToken)
+    setState({ user, accessToken, initializing: false })
+  }, [])
+
+  const register = useCallback(
+    async (
+      email: string,
+      password: string,
+      displayName: string,
+      inviteToken?: string,
+    ): Promise<string> => {
+      const { user, accessToken, refreshToken } = await postJson<AuthResponse>(
+        '/auth/register',
+        { email, password, displayName, inviteToken },
+      )
+      storeRefreshToken(refreshToken)
+      setState({ user, accessToken, initializing: false })
+      // Return the token directly so callers don't race against the async
+      // setState — tokenRef won't update until the next render cycle.
+      return accessToken
+    },
+    [],
+  )
+
+  const logout = useCallback(() => {
+    clearStoredRefreshToken()
+    setState({ user: null, accessToken: null, initializing: false })
+  }, [])
+
+  // Register a silent-refresh callback with the API layer so that any 401
+  // anywhere in the app triggers a token refresh rather than a hard failure.
+  // On refresh failure, clear the session and redirect to /login.
+  useEffect(() => {
+    const silentRefresh = async (): Promise<string | null> => {
+      const refresh = getStoredRefreshToken()
+      if (!refresh) {
+        logout()
+        window.location.replace('/login')
+        return null
+      }
+      try {
+        const { accessToken: newToken } = await postJson<RefreshResponse>('/auth/refresh', { refreshToken: refresh })
+        setState(s => ({ ...s, accessToken: newToken }))
+        return newToken
+      } catch {
+        clearStoredRefreshToken()
+        setState({ user: null, accessToken: null, initializing: false })
+        window.location.replace('/login')
+        return null
+      }
+    }
+    configureSilentRefresh(silentRefresh)
+    return () => configureSilentRefresh(null)
+  }, [logout])
+
+  const patchUser = useCallback((patch: Partial<User>) => {
+    setState(s => s.user ? { ...s, user: { ...s.user, ...patch } } : s)
+  }, [])
+
+  const value = useMemo<AuthContextValue>(
+    () => ({ ...state, getAccessToken, login, register, logout, patchUser }),
+    [state, getAccessToken, login, register, logout, patchUser],
+  )
+
+  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
+}
+
+/** Returns the auth context. Throws if used outside of AuthProvider. */
+export function useAuth(): AuthContextValue {
+  const ctx = useContext(AuthContext)
+  if (!ctx) throw new Error('useAuth must be used inside AuthProvider')
+  return ctx
+}
+````
+
 ## File: packages/web/src/contexts/FindContext.tsx
 ````typescript
 /**
@@ -13947,6 +13973,50 @@ export function useFind(): FindContextValue {
   const ctx = useContext(FindContext)
   if (!ctx) throw new Error('useFind must be used inside FindProvider')
   return ctx
+}
+````
+
+## File: packages/web/src/hooks/useDarkMode.ts
+````typescript
+/**
+ * Manages the dark/light theme toggle.
+ *
+ * Persistence: localStorage key "draba_theme".
+ * Initial value: stored preference, falling back to prefers-color-scheme.
+ * Effect: sets/removes the `dark` class on <html> whenever the value changes.
+ */
+
+import { useEffect, useState } from 'react'
+
+type Theme = 'dark' | 'light'
+
+const STORAGE_KEY = 'draba_theme'
+
+function getInitialTheme(): Theme {
+  const stored = localStorage.getItem(STORAGE_KEY) as Theme | null
+  if (stored === 'dark' || stored === 'light') return stored
+  return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+}
+
+export function useDarkMode() {
+  const [theme, setTheme] = useState<Theme>(getInitialTheme)
+
+  useEffect(() => {
+    const root = document.documentElement
+    if (theme === 'dark') {
+      root.classList.add('dark')
+    } else {
+      root.classList.remove('dark')
+    }
+    localStorage.setItem(STORAGE_KEY, theme)
+  }, [theme])
+
+  const toggle = () => setTheme(t => (t === 'dark' ? 'light' : 'dark'))
+
+  /** Explicitly set the theme (used when syncing from server-side preference). */
+  const applyTheme = (t: Theme) => setTheme(t)
+
+  return { theme, toggle, applyTheme, isDark: theme === 'dark' } as const
 }
 ````
 
@@ -14256,6 +14326,32 @@ export function useRevokeUser() {
     onSuccess: () => {
       client.invalidateQueries({ queryKey: ['teams'] })
     },
+  })
+}
+````
+
+## File: packages/web/src/hooks/usePublicSettings.ts
+````typescript
+/**
+ * usePublicSettings — fetches /settings/branding without authentication.
+ *
+ * Used by LoginPage and App.tsx to display instance name and apply
+ * the admin-configured accent color before the user has signed in.
+ */
+
+import { useQuery } from '@tanstack/react-query'
+import { apiFetch } from '@/lib/api'
+
+interface PublicBranding {
+  instanceName: string
+  accentColor: string
+}
+
+export function usePublicSettings() {
+  return useQuery({
+    queryKey: ['settings', 'branding'],
+    queryFn: () => apiFetch<PublicBranding>('/settings/branding'),
+    staleTime: 5 * 60 * 1000,
   })
 }
 ````
@@ -14816,6 +14912,152 @@ export function useWebSocket({ token, teamIds = [], onMessage }: Options) {
   }, [])
 
   return { status, subscribe } as const
+}
+````
+
+## File: packages/web/src/lib/api.ts
+````typescript
+/**
+ * Thin fetch wrapper over the draba REST API.
+ *
+ * Token lifecycle:
+ *   - Access token: kept in memory via the AuthContext; passed as Authorization header.
+ *   - Refresh token: persisted in localStorage under REFRESH_TOKEN_KEY.
+ *     On a 401, the client attempts one silent refresh then retries the original request.
+ *     Concurrent 401s share a single refresh call (mutex via in-flight promise).
+ *     If refresh also fails, the registered logout handler is called and the user
+ *     is redirected to /login.
+ *
+ * All callers receive typed JSON or throw an ApiError.
+ */
+
+import type { components } from '@draba/shared'
+
+export type ApiErrorBody = components['schemas']['ApiError']
+
+// Empty string = same-origin relative URLs, which is correct when the SPA is
+// embedded in the Go binary. Set VITE_API_URL for local dev against a
+// separate API server (e.g. VITE_API_URL=http://localhost:8080).
+export const API_BASE =
+  (import.meta.env.VITE_API_URL as string | undefined) ?? ''
+
+export const REFRESH_TOKEN_KEY = 'draba_refresh_token'
+
+/** Thrown for any non-2xx response. */
+export class ApiError extends Error {
+  constructor(
+    public readonly status: number,
+    public readonly code: string,
+    message: string,
+    /** Extra fields from the error response body (e.g. assignmentCount on 409). */
+    public readonly data?: Record<string, unknown>,
+  ) {
+    super(message)
+    this.name = 'ApiError'
+  }
+}
+
+/** Reads the stored refresh token from localStorage. */
+export function getStoredRefreshToken(): string | null {
+  return localStorage.getItem(REFRESH_TOKEN_KEY)
+}
+
+/** Persists the refresh token to localStorage. */
+export function storeRefreshToken(token: string): void {
+  localStorage.setItem(REFRESH_TOKEN_KEY, token)
+}
+
+/** Removes the refresh token from localStorage (on logout). */
+export function clearStoredRefreshToken(): void {
+  localStorage.removeItem(REFRESH_TOKEN_KEY)
+}
+
+async function parseError(res: Response): Promise<ApiError> {
+  try {
+    const body = (await res.json()) as ApiErrorBody & Record<string, unknown>
+    const { error, ...rest } = body
+    const data = Object.keys(rest).length > 0 ? (rest as Record<string, unknown>) : undefined
+    return new ApiError(res.status, error.code, error.message, data)
+  } catch {
+    return new ApiError(res.status, 'UNKNOWN', res.statusText)
+  }
+}
+
+/** Low-level fetch that injects the access token and throws ApiError on non-2xx. */
+export async function apiFetch<T>(
+  path: string,
+  init: RequestInit & { accessToken?: string } = {},
+): Promise<T> {
+  const { accessToken, ...rest } = init
+  const headers = new Headers(rest.headers)
+  headers.set('Content-Type', 'application/json')
+  if (accessToken) {
+    headers.set('Authorization', `Bearer ${accessToken}`)
+  }
+
+  const res = await fetch(`${API_BASE}${path}`, { ...rest, headers })
+
+  if (!res.ok) {
+    throw await parseError(res)
+  }
+
+  // 204 No Content — return undefined cast as T
+  if (res.status === 204) {
+    return undefined as unknown as T
+  }
+
+  return res.json() as Promise<T>
+}
+
+// ── Silent refresh ───────────────────────────────────────────────────────────
+
+/**
+ * Registered by AuthProvider on mount. Returns the new access token, or null
+ * if the refresh token is expired/invalid (AuthProvider also handles logout
+ * and redirect in that case).
+ */
+let _silentRefresh: (() => Promise<string | null>) | null = null
+
+/** Mutex: if a refresh is already in flight, share it instead of firing a new one. */
+let _refreshInFlight: Promise<string | null> | null = null
+
+/** Called by AuthProvider to register the silent-refresh callback. */
+export function configureSilentRefresh(fn: (() => Promise<string | null>) | null): void {
+  _silentRefresh = fn
+}
+
+async function doSilentRefresh(): Promise<string | null> {
+  if (!_silentRefresh) return null
+  // Reuse an in-flight refresh instead of firing multiple simultaneous calls.
+  if (!_refreshInFlight) {
+    _refreshInFlight = _silentRefresh().finally(() => {
+      _refreshInFlight = null
+    })
+  }
+  return _refreshInFlight
+}
+
+/**
+ * Higher-level wrapper that supplies the access token from a getter function.
+ * On a 401, attempts one silent refresh and retries. If the refresh also fails,
+ * the registered silentRefresh callback handles logout and redirect.
+ *
+ * Used by TanStack Query hooks so they never capture a stale token closure.
+ */
+export function createAuthFetch(getToken: () => string | null) {
+  return async function authFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
+    try {
+      return await apiFetch<T>(path, { ...init, accessToken: getToken() ?? undefined })
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401 && _silentRefresh) {
+        const newToken = await doSilentRefresh()
+        if (!newToken) throw err
+        // Retry with the freshly-issued token.
+        return apiFetch<T>(path, { ...init, accessToken: newToken })
+      }
+      throw err
+    }
+  }
 }
 ````
 
@@ -16082,6 +16324,65 @@ export const STATUS_LABELS: Record<ActivityStatus, string> = {
   'in-progress': 'In progress',
   'done':        'Done',
 };
+````
+
+## File: packages/web/src/App.tsx
+````typescript
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { AuthProvider } from '@/contexts/AuthContext'
+import ProtectedRoute from '@/components/ProtectedRoute'
+import ThemeSync from '@/components/ThemeSync'
+import BrandingSync from '@/components/BrandingSync'
+import LoginPage from '@/pages/LoginPage'
+import RegisterPage from '@/pages/RegisterPage'
+import DashboardPage from '@/pages/DashboardPage'
+import SetupPage from '@/pages/SetupPage'
+import SettingsPage from '@/pages/SettingsPage'
+import ForgotPasswordPage from '@/pages/ForgotPasswordPage'
+import ResetPasswordPage from '@/pages/ResetPasswordPage'
+
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      staleTime: 30_000,
+      retry: 1,
+    },
+  },
+})
+
+export default function App() {
+  return (
+    <QueryClientProvider client={queryClient}>
+      <BrowserRouter>
+        <AuthProvider>
+          {/* Side-effect components — render nothing but apply global state. */}
+          <ThemeSync />
+          <BrandingSync />
+          <Routes>
+            {/* First-run setup — public, shown before any users exist */}
+            <Route path="/setup" element={<SetupPage />} />
+
+            {/* Public routes */}
+            <Route path="/login" element={<LoginPage />} />
+            <Route path="/register" element={<RegisterPage />} />
+            <Route path="/forgot-password" element={<ForgotPasswordPage />} />
+            <Route path="/reset-password" element={<ResetPasswordPage />} />
+
+            {/* Protected routes */}
+            <Route element={<ProtectedRoute />}>
+              <Route path="/" element={<DashboardPage />} />
+              <Route path="/settings/*" element={<SettingsPage />} />
+            </Route>
+
+            {/* Fallback */}
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </AuthProvider>
+      </BrowserRouter>
+    </QueryClientProvider>
+  )
+}
 ````
 
 ## File: packages/web/src/index.css
@@ -18455,6 +18756,386 @@ Safe to pause when:
 *Once you've reviewed and tweaked, the agreed version replaces the "Phase 11.1 — Web — List / Spreadsheet View" section in [ROADMAP.md](../ROADMAP.md).*
 ````
 
+## File: docs/plans/phase-11.2-calendar-view.md
+````markdown
+# Phase 11.2 — Calendar View
+
+**UI name:** "Calendar" (view-switcher label, alongside Gantt / List / Kanban).
+
+**Status:** 🟢 Reviewed — scope settled. Re-engineered from the original ROADMAP.md plan after two design decisions were made (see [Decisions](#decisions-resolved) at the bottom). Replaces the prior "Month / Week / Day with 24-hour time grid" proposal.
+
+**Why this rewrite exists:** the original plan was modeled on Google Calendar / Outlook — three sub-layouts (Month / Week / **Day**) with a 24-hour vertical time grid and a side-by-side *time-overlap* lane algorithm. That framing is wrong for draba: **every activity is all-day.** There is no time-of-day editor anywhere in the product, and (per the Person + Time Range + Work mental model) there is no plan to add one before Phase 15. So:
+
+1. **Day view is cut.** A day view exists to show hour-by-hour scheduling. With all-day activities there is nothing to schedule within a day — a "day" is just a single calendar cell. Week + Month cover every need.
+2. **The 24-hour time grid is cut.** There is no time axis. Both Week and Month are pure **all-day-bar** surfaces.
+3. **The time-overlap lane algorithm is cut.** Activities never overlap *in time-of-day* (they have none). The only layout problem that remains is **vertical stacking of concurrent multi-day bars** — a date-range packing problem, not a time-of-day one.
+
+What's left is genuinely simpler than the original L-effort estimate suggested, *except* for three pieces that carry real weight: the lane-packing algorithm, the manual row-height resize affordance, and drag-move/resize on a week-wrapping grid.
+
+---
+
+## What we're actually building
+
+A familiar calendar surface that answers **"what is the team working on this week / this month?"** at a glance. It is **not** a Gantt replacement (Gantt answers "how does this project unfold over a quarter?"). Two zoom levels:
+
+- **Month** — a 6-week grid (the canonical calendar). Multi-day activities render as continuous bars spanning day cells; bars lane-pack within each week row.
+- **Week** — 7 day columns, taller cells, same all-day bar model. More vertical room per day, so more lanes are visible before overflow.
+
+Both reuse one component skeleton and one lane-packing core. Both carry over **color-by** (activity / member / status) from Gantt/List, open the existing **`ActivityDetailPanel`** on bar click, prefill **create** on empty-cell click, and support **drag-move + edge-resize** with whole-day snapping.
+
+### The density problem (the one real design question)
+
+With 5 team members each on 1–2 concurrent activities, every day is crossed by 5–10 bars. A naive grid turns into mush. The decision (see [Decisions](#decisions-resolved)) is **classic shared grid + color**, *not* member swimlanes — keep the familiar single-grid Google-calendar feel and lean on three levers to keep it legible:
+
+1. **Color-by** — the primary signal. `color-by: member` lets you read *whose* week is loaded at a glance by hue; `color-by: status` shows what's in-progress vs. blocked; `color-by: activity` is per-activity color. Carried over verbatim from Gantt's `ColorBy` model.
+2. **Filters** — the existing filter engine (Phase 10.4.6) is the escape hatch. "Show only Brian's work," "Open only," saved filters — all apply to Calendar unchanged.
+3. **Overflow handling = "+N more" popover *plus* a manual row-height resize handle** (the hybrid decision). Each week row has a *visible-lane cap*. Bars beyond the cap collapse into a `+N more` chip per day; clicking it opens a **day popover** listing every activity on that day (each row → `ActivityDetailPanel`). Critically, the user can **drag the bottom edge of any week row to raise its visible-lane cap**, revealing more lanes inline instead of going through the popover. Row-height (cap) state persists per-timeline-per-user.
+
+This hybrid is the heart of the re-plan: uniform compact rows by default (calm, scannable), with a one-drag escape valve to "open up" a busy week without leaving the grid or losing the at-a-glance layout.
+
+---
+
+## Reused infrastructure (do not rebuild)
+
+Everything below already exists and Calendar consumes it as-is. This is most of why the phase is tractable.
+
+| Capability | Where it lives | How Calendar uses it |
+|---|---|---|
+| View-switcher (`ViewMode = 'gantt' \| 'list' \| 'calendar' \| 'kanban'`) | `TopBar.tsx`, `DashboardPage.tsx` (`view` state, per-timeline `view_mode` pref) | `'calendar'` branch added to the content-area switch, exactly like the `'list'` branch at `DashboardPage.tsx:529`. |
+| **Color-by** (`ColorBy = 'activity' \| 'member' \| 'status'`) | `GanttToolbar.tsx:14`; resolution logic in `GanttView.tsx` `toRichActivity` (`:148–151`) | Lift the color-resolution expression into a tiny shared helper (`lib/activityColor.ts`) so Gantt, List, and Calendar share one source of truth. Calendar bars fill from it. |
+| **Edit sidebar** (`ActivityDetailPanel`) | Mounted at `DashboardPage.tsx:569`, fed by `selectedApiActivity` / `onSelectApiActivity` | Bar click → `onSelectApiActivity(activity)` → existing panel slides in. **Zero new code** in the panel itself. |
+| **Create panel** (`ActivityCreatePanel`) | `DashboardPage.tsx:581`, fed by `createDefaults` | Empty-cell click → set `createDefaults` with `{ start, end, memberId: null }` prefilled to the clicked day. Same mechanism as Gantt lane-drag. |
+| **Live drag → sidebar preview** | `onBarDragProgress` / `onBarDragEnd` / `liveDragDates` (`DashboardPage.tsx:513–520`) | Calendar's drag fires the same callbacks so the open sidebar shows live snapped dates during a drag, identical to Gantt. |
+| **Filter engine** | `applyActiveFilter` (`lib/presetFilters.ts`), `FilterContext` | Calendar computes `visibleActivities` the same way `GanttView` does (`:494`). |
+| **Find** | `FindContext`, `matchEvents` (`lib/findMatcher.ts`) | Calendar registers ordered matches and applies the same highlight treatment to bars. |
+| **Timezone-safe dates** | `lib/activityDates.ts` (Phase 11.1.1) — `parseActivityDateUTC`, `formatActivityDate`, `toDateInput`, `toISODate` | **All** calendar cell math, bar positioning, and the today marker use the **UTC basis**. This is non-negotiable — same defect class Phase 11.1.1 fixed for Gantt/List. |
+| **Member typing + colors** | `toMember`, `MEMBER_COLORS`, `resolveColorHex` | Same conversion `GanttView` uses (`:105–114`). |
+| Per-timeline preference persistence | `usePreferences` / `saveTimelinePref` | Stores `calendar_layout` (month/week), `calendar_anchor_date`, and per-week row-cap overrides. |
+
+---
+
+## Architecture
+
+```
+DashboardPage
+ └─ CalendarView                 (data container — mirrors GanttView's responsibilities)
+     ├─ useTimelineActivities / useTeamMembers / useUpdateActivity
+     ├─ applyActiveFilter → visibleActivities
+     ├─ buildCalendarModel()    (pure, unit-tested — see below)
+     └─ CalendarGrid             (presentational — cells, bars, drag, popover)
+         ├─ CalendarToolbar      (layout toggle, today/prev/next, jump-to-date) — or fold into existing toolbar slot
+         ├─ MonthGrid / WeekGrid (share cell + bar renderers)
+         └─ DayOverflowPopover
+```
+
+`CalendarView` is the analog of `GanttView`: it owns no layout chrome, takes `colorBy` / `layout` / `anchorDate` as props from `DashboardPage`, fetches + filters, builds the model, and hands it to `CalendarGrid`. Keep the **pure model-builder exported** for unit tests, exactly as `GanttView` exports `buildRows`.
+
+### The lane-packing core (`lib/calendarLanes.ts`, new, pure, unit-tested)
+
+This is the one genuinely new algorithm. Per **week row** (a contiguous run of 7 day-columns):
+
+1. Clip every activity's `[startAt, endAt]` (UTC, all-day) to the week's date span; drop activities that don't intersect the week.
+2. Sort the week's segments by start day, then by longer span first (stable, predictable packing).
+3. Greedy lane assignment: place each segment in the lowest lane index whose existing segments don't overlap its `[startCol, endCol]`. This yields the minimum lane count and a deterministic layout.
+4. A multi-day activity that crosses a week boundary (e.g. Thu→next Mon) is **split into one segment per week row**, each independently lane-packed. Mark the cut edges so the bar renders without an end-cap on the continued side (standard calendar "continues" affordance).
+
+The model the builder emits:
+
+```ts
+interface CalendarSegment {
+  activityId: string;
+  startCol: number;      // 0–6 within the week row
+  endCol: number;        // 0–6, inclusive
+  lane: number;          // 0-based packing lane
+  continuesLeft: boolean;  // clipped at week start (came from prior week)
+  continuesRight: boolean; // clipped at week end (continues next week)
+  color: string;           // resolved via shared activityColor helper
+  title: string;
+  // …find-match flag, isChild, etc.
+}
+interface WeekRow {
+  weekStart: Date;            // UTC midnight, Monday/Sunday per week_start pref
+  days: Date[];               // 7 UTC dates
+  segments: CalendarSegment[];
+  laneCount: number;          // max lane + 1 (the natural height)
+  visibleLaneCap: number;     // from per-week pref; default e.g. 3
+}
+```
+
+`visibleLaneCap` drives both rendering (lanes `>= cap` are hidden) and the per-day `+N more` counts (count of that day's segments whose `lane >= cap`).
+
+### Overflow: "+N more" popover + manual row resize
+
+- **Default cap:** Month rows default to a small cap (≈3 lanes) so a 6-week month stays one screen. Week rows default higher (taller cells, ≈6) since there are only ever 1–5 rows.
+- **`+N more` chip:** rendered in a day cell when that day has hidden segments. Click → `DayOverflowPopover` anchored to the cell, listing **all** of that day's activities (color dot + title + date range), each click-through to `ActivityDetailPanel`.
+- **Manual row-height handle:** a 4–6px grab strip along the **bottom edge of each week row**. Dragging it down raises that row's `visibleLaneCap` (snapping per lane-height); dragging up lowers it. Min = 1, max = the row's natural `laneCount` (can't drag past "everything visible"). Persisted per-timeline-per-user keyed by week index *or* by `weekStart` ISO. Reuses the same pointer-drag scaffolding as the Gantt label-column resize (`GanttGrid.tsx` `onLabelColWChange`, `:457–466`) — a controlled value + an `onChange`.
+
+### Drag-move and edge-resize on the grid
+
+The user explicitly wants move + resize via mouse (parity with Gantt). The Gantt drag code (`GanttGrid.tsx` bar-drag, `:334–431`) is **column-index based on a single horizontal axis** and does *not* port directly — a calendar wraps weekly, so a horizontal drag can cross a week boundary into a different visual row.
+
+Approach for v1:
+- **Hit zones** mirror Gantt: left/right `EDGE_W`(≈8px) edges = resize, body = move.
+- **Pointer math is geometric, not column-index:** on pointer-move, hit-test the cursor against the rendered day-cell rects (a flat `Date[]` for the whole visible grid) to resolve the **target day**. This naturally handles week-wrap — moving the cursor to the next row maps to the correct date. Snap to whole days (no sub-day in an all-day model).
+- **Move** preserves duration: `newStart = targetDay - grabOffsetDays`, `newEnd = newStart + originalSpan`. **Resize** moves only the grabbed edge, clamped so `end >= start`.
+- Fire `onBarDragProgress(id, newStart, newEnd)` live (sidebar preview) and `onBarDrag(id, newStart, newEnd)` on pointer-up → `PATCH /activities/:id` with `{ startAt, endAt }` as ISO UTC midnights (`toISODate`), with the same optimistic `setQueriesData` cache write Gantt uses (`GanttView.tsx:567–589`).
+- **Reuse, don't re-derive:** lift Gantt's `handleBarDrag` (optimistic cache update + sidebar push + mutate) into a shared hook (`useActivityDrag`) so Calendar and Gantt share the commit path; only the *geometry → dates* step differs.
+
+---
+
+## Build order
+
+1. **`lib/activityColor.ts`** — extract the color-by resolver from `GanttView.toRichActivity`; refactor Gantt to use it (no behavior change, keeps the three views identical). Tests.
+2. **`lib/calendarLanes.ts`** — pure `buildWeekRows(activities, range, weekStart, colorBy, …)` + greedy lane packing + week-boundary splitting. Unit tests are the bulk of correctness here (single-day, multi-day, cross-week, fully-overlapping stacks, empty weeks, `+N` counts at a given cap).
+3. **`CalendarGrid` (Month)** — render weeks → day cells → lane-positioned bars; today marker (UTC); `+N more` chips; `DayOverflowPopover`. Read-only first.
+4. **Wire into `DashboardPage`** — `'calendar'` content branch, `view === 'calendar'` toolbar slot (layout toggle + today/prev/next + jump-to-date), `calendar_layout` / `calendar_anchor_date` prefs. Color-by reuses existing `colorBy` state.
+5. **Click behaviors** — bar → `onSelectApiActivity`; empty cell → `createDefaults` prefilled; popover row → sidebar. (All callbacks already exist on `DashboardPage`.)
+6. **Week layout** — same renderers, 7 columns, taller cells, higher default cap.
+7. **Manual row-height resize** — bottom-edge handle per week row; per-week cap pref persistence; reuse Gantt resize scaffolding.
+8. **`useActivityDrag`** — extract Gantt's commit path; add Calendar's geometric drag-move + edge-resize with whole-day snapping and live sidebar preview.
+9. **Find + filter parity** — register matches, apply highlight; confirm `applyActiveFilter` flows through.
+10. **Polish** — `week_start` / `date_format` prefs honored; dark mode; empty-state; keyboard (←/→ prev/next, `t` today) if cheap.
+
+---
+
+## Decisions (resolved)
+
+- **Day view: cut.** All activities are all-day; a day view has nothing hour-level to show. Week + Month only.
+- **Time grid + time-overlap lane algorithm: cut.** No time axis exists. The only layout problem is multi-day bar stacking.
+- **Dense-day model: classic shared grid + color**, not member swimlanes. Keep the familiar single-grid calendar; color-by + filters + overflow handle density. (Swimlanes were considered as the "team at a glance" answer and rejected to preserve the familiar calendar feel — revisit only if the grid proves illegible in practice.)
+- **Overflow: "+N more" day popover *plus* a manual per-week row-height resize handle.** Uniform compact rows by default; drag a row's bottom edge to reveal more lanes inline; popover lists the full day for anything still hidden. Cap persists per-timeline-per-user.
+- **Color-by: carried over** from Gantt/List via a shared `activityColor` helper (no new toolbar concept — same three modes).
+- **Bar click → existing `ActivityDetailPanel`; empty cell → existing `ActivityCreatePanel`.** No new sidebar UI.
+- **Drag-move + edge-resize: in v1, both Week and Month**, whole-day snapping, geometric hit-testing (not column-index), sharing Gantt's optimistic commit path via a new `useActivityDrag` hook.
+
+## Open questions (resolve during build, low-risk)
+
+- **Default `visibleLaneCap` values** (Month vs Week) — tune against the multi-assignee sample timeline; the row-resize handle makes the exact default forgiving.
+- **Row-cap persistence key** — per `weekStart` ISO date (survives navigation, but unbounded growth) vs. per visible-row-index (bounded, but resets on navigation). Lean to `weekStart` with a capped LRU, decide in step 7.
+- **Multi-assignee bar affordance** — a single bar per activity colored by `colorBy`, with stacked member dots on the bar (mirroring the List/Gantt group-header dots from 11.1.2) vs. plain. Cheap to add; decide in step 3.
+
+## Exit criteria — safe to pause when:
+
+- View switcher toggles Gantt ↔ List ↔ Calendar, persisting the choice per timeline.
+- Calendar renders the active timeline's activities in correct day cells, honoring the active filter and `week_start` / `date_format` prefs.
+- Month and Week layouts both render with no data discrepancy between them or vs. Gantt/List.
+- A multi-day activity renders as a continuous bar spanning cells, with correct "continues" affordance across week boundaries.
+- Color-by (activity / member / status) recolors bars and matches Gantt/List for the same activity.
+- A day with more bars than the visible cap shows a correct `+N more` chip; the popover lists every activity that day; each row opens `ActivityDetailPanel`.
+- Dragging a week row's bottom edge raises/lowers its visible lanes and the change survives a reload.
+- Clicking a bar opens the edit sidebar; clicking an empty cell opens create prefilled to that day.
+- Dragging a bar's body moves it (duration preserved, whole-day snap, correct across week-wrap) and PATCHes; dragging an edge resizes it; the open sidebar shows live dates mid-drag.
+- Find highlights matching bars in both layouts.
+- `lib/calendarLanes.ts` and `lib/activityColor.ts` have unit tests covering the packing/coloring edge cases.
+- `pnpm --filter web lint` clean; `pnpm --filter web test` passes.
+````
+
+## File: docs/REQUIREMENTS.md
+````markdown
+# Requirements
+
+## Product Summary
+draba is a lightweight team coordination and planning tool. It answers one question — **"Who is working on what, and when?"** — without the overhead of a full project management suite. The primary interface is a horizontal timeline grouped by person, where work appears as blocks across time. Teams adopt it in minutes, not weeks.
+
+**Target users:** Small teams of 5–20 people. Marketing, creative, and product teams who need visibility across people and time without tickets, sprints, or dependencies.
+
+**Positioning:** Not a calendar replacement. Not a project management tool. A shared team timeline.
+
+---
+
+## Functional Requirements
+
+### Users and Auth
+- [ ] Admins can invite users to a team via email invite link
+- [ ] Invited users register by following the invite link and setting up an account (email + password)
+- [ ] Users have: display name, email, optional avatar
+- [ ] Four levels of participation:
+  - **Team Admins:** Manage the team overall. Can invite new people to the team and can create multiple teams.
+  - **Timeline Admins:** Scoped to specific timelines. Can configure those timelines and add/remove people (from the team) to their timelines.
+  - **Users:** Have a login. Can participate in timelines assigned to them.
+  - **Participants:** Do not have a login. Managed as team members (e.g. contractors) so they can be scheduled on timelines and assigned colors without needing account access.
+- [ ] Users can belong to multiple teams simultaneously
+- [ ] Password reset via email
+
+### API Access Tokens
+Programmatic access (CLI, webhooks, MCP) uses scoped API tokens rather than user passwords.
+
+- [ ] Admins and members can generate named API tokens for their account
+- [ ] Tokens have a configurable permission scope: read-only | add | edit/delete own | edit/delete all
+- [ ] Tokens can be revoked at any time
+- [ ] Token values are shown once at creation and never stored in plaintext (hashed at rest)
+- [ ] CLI, webhook consumers, and MCP integrations authenticate using these tokens
+
+### Teams
+- [ ] Admins can create teams with a name, description, notes, and identity (icon + color)
+- [ ] Admins can edit team name, description, notes, and identity
+- [ ] Admins can invite users to a team by email (one-time invite)
+- [ ] Admins can generate a reusable invite link for a team; anyone with the link can register and join
+- [ ] Admins can revoke or regenerate the reusable invite link
+- [ ] Admins can add existing registered users to a team
+- [ ] Admins can remove members from a team (cannot remove the last admin)
+- [ ] Admins can promote a member to team admin or demote to member
+- [ ] Admins can create participants (login-less team members) who can be assigned to activities but don't have draba accounts
+- [ ] Teams can be archived (hidden from active views, data preserved, restorable)
+- [ ] Teams have a name, description, notes, identity, and a list of members
+
+### Members
+- [ ] Each team member has a display name, identity (icon + color), and a role (admin, member, or participant)
+- [ ] Admins can edit any member's display name, identity, and role
+- [ ] Members can edit their own display name and identity
+- [ ] Members can be inactivated (access disabled, data preserved, reversible) — uses the same archive pattern as other entities but displayed as "Inactivate" in the UI
+- [ ] Inactivated members cannot log in; their activity assignments are preserved
+- [ ] Super admins can promote any non-participant member to super admin status
+- [ ] Super admins can inactivate or delete user accounts (delete only when no active activities and single team)
+- [ ] Each member has computed stats: timeline counts (active/archived), activity counts (past due, running, upcoming, unscheduled, archived) — date-relative, not status-relative
+
+### Activities
+Activities are the core data object — a block of time assigned to one or more people.
+
+- [ ] Activities have: title, start date/time, end date/time, description/notes, status, percent complete, tags, icon, color, assigned people (one or more)
+- [ ] Activities can have a parent activity (another event within the same team), enabling simple nesting (e.g., "Launch Week" contains "Design Review")
+- [ ] Activities store all standard CalDAV VEVENT fields natively (UID, DTSTART, DTEND, SUMMARY, DESCRIPTION, LOCATION, URL, RRULE, etc.) so no information is lost in sync
+- [ ] Activities support recurrence rules (RRULE) from CalDAV/Google
+- [ ] Activities are scoped to a team
+- [ ] Activities can be archived (hidden from active views but not deleted; recoverable)
+
+### Timelines
+Timelines are named viewing windows — a name and a date range — scoped to a team. They are not data containers; they are views over the team's activities.
+
+- [ ] Teams can create multiple timelines, including overlapping ones
+- [ ] Each timeline has: name, start date, end date
+- [ ] Team membership controls who can view a timeline by default; team admins implicitly access all timelines, members require an explicit access grant (see RBAC in Phase 8.0)
+- [ ] Timelines can be archived (removed from active list but preserved; recoverable)
+- [ ] External / public visibility is handled via the **Shares** model (below) — a timeline is not inherently "public" or "restricted"; it becomes externally visible only via a share link the team explicitly creates
+
+### Timeline Views
+The primary view is a Gantt chart. Additional views display the same underlying activities in different formats.
+
+- [ ] **Timeline / Gantt view** (primary) — horizontal Gantt chart; one row per activity, bars span their date range; see `docs/design/UX_PATTERNS.md`
+  - A **timeline sub-toolbar** sits between the top bar and the grid. It provides:
+    - **Zoom** — variable column width (day granularity, zoom in/out)
+    - **Group by** — controls how activity rows are organized:
+      - _None_ — flat list, sorted by the active sort key
+      - _Member_ — one labeled section per assigned team member; events with multiple assignees appear under their primary assignee
+      - _Parent activity_ — root activities shown first; child events (those with `parentActivityId` set) indented beneath their parent
+    - **Sort by** — Start date (default), End date, Title A–Z
+    - **Export** — triggers CSV/Excel export of the visible date range (wires in Phase 13)
+- [ ] **Calendar view** — weekly, daily, and monthly grid layouts (standard calendar format)
+- [ ] **List view** (also referred to as the "spreadsheet" view) — dense, sortable, inline-editable table of activities; columns are show/hide-able and resizable; supports bulk selection for archive/delete/status-change. The "power user" surface for scanning and editing many activities at once.
+- [ ] **Kanban view** — read-only; columns = statuses (in the team's configured status order); cards = activities, color-coded by assigned person(s); multiple assignees shown as stacked color indicators. This is a viewing mode only — dragging cards to change status is out of scope for v1.
+- [ ] View switcher in the timeline header to toggle between available views
+- [ ] Each view persists its own toolbar state per timeline (group / sort / zoom / column visibility / filter preset) via user preferences
+
+> **Note:** Kanban is intentionally read-only in v1; drag-to-change-status is a later addition once the status model is proven.
+
+### Team Configuration
+Admins can customize team-level settings that apply to all members and views.
+
+**Statuses**
+- [ ] Each team has a configurable list of statuses (name + color)
+- [ ] Default statuses created when a team is created: `Planned`, `In Progress`, `Done`
+- [ ] Admins can add, rename, reorder, and delete statuses
+- [ ] Statuses have a display order that controls column order in Kanban view and sort order in dropdowns
+- [ ] At least one status must always exist (cannot delete the last one)
+- [ ] Deleting a status requires choosing a replacement status for any events currently using it
+- [ ] Status color is used as the column header color in Kanban view
+
+**Member Colors**
+- [ ] Each team member has a display color, used to color-code their events in Kanban view and any other person-first views
+- [ ] Admin can set member colors; members can also set their own
+- [ ] Default color is auto-assigned from a preset palette on invite acceptance
+
+### Real-Time Collaboration
+- [ ] Multiple users can view and edit the same timeline simultaneously
+- [ ] Changes (event create, update, delete) appear in real-time for all connected users
+- [ ] No last-write-wins data loss — changes are applied and broadcast immediately
+
+### Calendar Sync
+- [ ] Users can connect a personal Google Calendar account (OAuth 2.0) for two-way sync of their assigned events
+- [ ] Users can connect a personal CalDAV account (iOS/macOS Calendar, Fastmail, Thunderbird, etc.) for two-way sync
+- [ ] draba implements a built-in CalDAV endpoint — Apple Calendar users point their app directly at the draba server
+- [ ] Outbound sync: when an event is created/updated/deleted in draba, changes push to all connected personal calendars for assigned users
+- [ ] Inbound sync: changes made in Google Calendar trigger a webhook that updates draba
+- [ ] **Team read-only feed:** each timeline exposes a subscribable iCal/CalDAV URL that any calendar app can subscribe to for a read-only view of all team events in that timeline
+- [ ] Public iCal/Google Calendar feeds include only basic event info (title, date range, assigned people) — notes and internal fields are stripped
+- [ ] Microsoft/Outlook sync is explicitly out of scope for v1
+
+### External Connectors (e.g. Asana, Aha!)
+- [ ] Draba supports a one-way, read-only inbound feed from external systems of record.
+- [ ] Teams can generate unique inbound Webhook URLs to paste into Asana, Jira, etc.
+- [ ] External events appear alongside hand-crafted Draba events in the timeline and Gantt views.
+- [ ] Events generated via connectors are marked as "read-only" in Draba — users cannot change dates or properties via the Draba UI (they must change them in Asana).
+- [ ] The event card links back to the original source URL.
+
+### Sharing and Public Access
+Sharing in draba is a first-class entity, not a property of a timeline. A **Share** is a frozen pairing of `{ timeline + view type + view configuration + optional password + optional expiry }`. One timeline can have many shares, each tuned for a different audience.
+
+- [ ] A Share captures: the source timeline, the view type (Gantt / List / Calendar / Kanban), and a snapshot of the view's configuration at creation time (filter, sort, group, zoom, column visibility, etc.)
+- [ ] The view-config snapshot is **frozen** at creation — later edits to the live view do not retroactively change existing shares
+- [ ] A Share can optionally require a password to view (stored hashed; not retrievable)
+- [ ] A Share can optionally expire on a given date; expired shares return a clear "this link has expired" page
+- [ ] A Share can be revoked at any time by the creator or a team admin; revoked links are immediately unusable
+- [ ] A single timeline can host many independent shares simultaneously (e.g., a public Gantt for stakeholders + a password-protected List for contractors)
+- [ ] Share viewers see the chosen view in read-only mode — no drag, no inline edit, no create
+- [ ] Share URLs are unguessable (URL-safe random tokens); password-protected shares additionally rate-limit unlock attempts
+- [ ] Team admins can list, edit, and revoke any share for their team; members can only manage shares they created
+- [ ] Each timeline also exposes a public iCal feed URL (separate from the Share model) containing sanitized event data for calendar app subscription — see Calendar Sync
+
+### Data Portability
+Two flavors: **tabular** (data round-trips — CSV / xlsx in and out) and **visual** (one-way view exports for sharing offline — PDF / PNG / Markdown).
+
+**Tabular (round-trip):**
+- [ ] Events can be exported to CSV and Excel (.xlsx) from any timeline view
+- [ ] Events can be imported from a CSV or Excel file
+- [ ] A downloadable template file is provided showing the expected import format
+- [ ] Import shows a preview and validation errors before committing
+
+**Visual (view-shaped, one-way out):**
+- [ ] Gantt → PDF (landscape, paginated by date range) and PNG (single page)
+- [ ] Kanban → PDF (columns side-by-side, paginated when too wide for one page) and PNG
+- [ ] List → CSV, xlsx, Markdown table, and PDF
+- [ ] Calendar → PDF, one page per month / week depending on active layout
+- [ ] All visual exports include a header strip: team name, timeline name, generated-at timestamp, applied filter description
+- [ ] All visual exports respect the active filter / sort / group at time of export — the deliverable is "what's on the screen right now"
+
+---
+
+## Non-Functional Requirements
+- [ ] API response time < 200ms for standard reads under normal load
+- [ ] Real-time updates delivered within 500ms of a change
+- [ ] Self-hosted: runs as a single Docker container with no external service dependencies
+- [ ] Direct binary install is also supported (for users who don't use Docker)
+- [ ] Database: SQLite by default; MySQL/MariaDB and Postgres are supported configuration options
+- [ ] Same Docker artifact deploys to self-hosted and any future cloud offering
+- [ ] All API endpoints are authenticated (except public timeline share links and public iCal feeds)
+- [ ] All secrets, calendar credentials, and API tokens stored encrypted/hashed at rest
+
+---
+
+## Constraints
+- Must run as a single Docker container with zero required external services (SQLite path)
+- No paid third-party services required for self-hosting
+- Calendar sync credentials and API tokens must never be stored in plaintext
+- No server-side rendering required
+
+---
+
+## Out of Scope (v1)
+- Microsoft / Outlook / Exchange calendar sync
+- Kanban drag-to-change-status (Kanban is in v1 as a read-only view; interactive status changes via drag are v2)
+- Gantt dependency arrows / critical-path visualization (parent–child grouping is in scope; visual dependency arrows are not)
+- Time tracking or billable hours
+- Task dependencies or critical path
+- Workload balancing or capacity planning
+- Billing or invoicing
+- Automation or rule-based triggers
+- Mobile native apps (web/PWA first)
+- Multi-tenant cloud hosting (self-hosted per-customer to start)
+- SSO / SAML / OAuth login (email + password only for v1)
+- MCP server integration (parking lot — token auth system is designed to support it when ready)
+- CLI binary (parking lot — token auth system is designed to support it when ready)
+````
+
 ## File: packages/api/cmd/draba/main.go
 ````go
 // Command draba is the API server entry point. It wires repositories,
@@ -18599,6 +19280,250 @@ func getenv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+````
+
+## File: packages/api/internal/api/admin_handler.go
+````go
+package api
+
+import (
+	"encoding/json"
+	"log/slog"
+	"net/http"
+
+	"github.com/I0-1O/draba/packages/api/internal/mailer"
+)
+
+// requireSuperadmin is a shared guard for admin endpoints. Returns false
+// and writes a 403 if the caller is not a superadmin.
+func (s *Server) requireSuperadmin(w http.ResponseWriter, r *http.Request) bool {
+	claims := claimsFromContext(r.Context())
+	caller, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to verify permissions")
+		return false
+	}
+	if !caller.IsSuperadmin {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
+		return false
+	}
+	return true
+}
+
+// handleGetSMTP handles GET /admin/smtp. Returns the current SMTP config
+// with the password masked. Superadmin-only.
+func (s *Server) handleGetSMTP(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSuperadmin(w, r) {
+		return
+	}
+
+	cfg, err := s.mailer.LoadConfig()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load SMTP config")
+		return
+	}
+	if cfg == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"smtp": nil})
+		return
+	}
+
+	// Mask the password in the response.
+	masked := *cfg
+	if masked.Password != "" {
+		masked.Password = "••••••••"
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"smtp": masked})
+}
+
+// handlePutSMTP handles PUT /admin/smtp. Saves the SMTP configuration and
+// validates it by sending a test email to the caller's address. Superadmin-only.
+func (s *Server) handlePutSMTP(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSuperadmin(w, r) {
+		return
+	}
+
+	var cfg mailer.SMTPConfig
+	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+	if cfg.Host == "" || cfg.Port == 0 || cfg.FromEmail == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "host, port, and fromEmail are required")
+		return
+	}
+
+	// Fetch caller email for the validation test.
+	claims := claimsFromContext(r.Context())
+	caller, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to send test email")
+		return
+	}
+
+	// Validate by sending a test email before persisting.
+	if err := mailer.SendWithConfig(&cfg, caller.Email, "draba SMTP test", smtpTestBody()); err != nil {
+		slog.Warn("smtp validation failed", "err", err)
+		writeError(w, http.StatusBadRequest, "SMTP_SEND_FAILED", "SMTP validation failed; check server logs for details")
+		return
+	}
+
+	if err := s.mailer.SaveConfig(&cfg); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to save SMTP config")
+		return
+	}
+
+	masked := cfg
+	if masked.Password != "" {
+		masked.Password = "••••••••"
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"smtp": masked})
+}
+
+// handleTestSMTP handles POST /admin/smtp/test. Sends a test email using the
+// provided config without persisting it. Superadmin-only.
+func (s *Server) handleTestSMTP(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSuperadmin(w, r) {
+		return
+	}
+
+	var cfg mailer.SMTPConfig
+	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	claims := claimsFromContext(r.Context())
+	caller, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to fetch caller")
+		return
+	}
+
+	if err := mailer.SendWithConfig(&cfg, caller.Email, "draba SMTP test", smtpTestBody()); err != nil {
+		slog.Warn("smtp test failed", "err", err)
+		writeError(w, http.StatusBadRequest, "SMTP_SEND_FAILED", "SMTP test failed; check server logs for details")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "sent", "to": caller.Email})
+}
+
+// handleDeleteSMTP handles DELETE /admin/smtp. Clears the SMTP config.
+// Superadmin-only.
+func (s *Server) handleDeleteSMTP(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSuperadmin(w, r) {
+		return
+	}
+	if err := s.mailer.DeleteConfig(); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to clear SMTP config")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleGetAdminSettings handles GET /admin/settings. Returns instance-level
+// defaults. Superadmin-only.
+func (s *Server) handleGetAdminSettings(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSuperadmin(w, r) {
+		return
+	}
+
+	keys := []string{"registration_policy", "default_timezone", "default_date_format", "default_week_start", "instance_name", "accent_color"}
+	settings := make(map[string]string, len(keys))
+	for _, k := range keys {
+		v, err := s.instanceSets.Get(k)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load settings")
+			return
+		}
+		settings[k] = v
+	}
+
+	// Apply defaults for missing keys.
+	if settings["registration_policy"] == "" {
+		settings["registration_policy"] = "invite_only"
+	}
+	if settings["default_timezone"] == "" {
+		settings["default_timezone"] = "UTC"
+	}
+	if settings["default_date_format"] == "" {
+		settings["default_date_format"] = "MMM D, YYYY"
+	}
+	if settings["default_week_start"] == "" {
+		settings["default_week_start"] = "monday"
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"settings": settings})
+}
+
+// handlePatchAdminSettings handles PATCH /admin/settings. Updates one or more
+// instance-level settings. Superadmin-only.
+func (s *Server) handlePatchAdminSettings(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSuperadmin(w, r) {
+		return
+	}
+
+	var body map[string]string
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	// Validate known keys and values.
+	allowed := map[string]bool{
+		"registration_policy": true,
+		"default_timezone":    true,
+		"default_date_format": true,
+		"default_week_start":  true,
+		"instance_name":       true,
+		"accent_color":        true,
+	}
+	for k := range body {
+		if !allowed[k] {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "unknown setting key: "+k)
+			return
+		}
+	}
+	if v, ok := body["registration_policy"]; ok && v != "invite_only" && v != "open" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "registration_policy must be invite_only or open")
+		return
+	}
+	if v, ok := body["default_week_start"]; ok && v != "monday" && v != "sunday" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "default_week_start must be monday or sunday")
+		return
+	}
+
+	for k, v := range body {
+		if err := s.instanceSets.Set(k, v); err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to save settings")
+			return
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"settings": body})
+}
+
+// handleGetPublicBranding handles GET /settings/branding. Returns the
+// instance name and accent color without requiring authentication, so the
+// login page and shared timeline views can display branding before sign-in.
+//
+// Only cosmetic settings are exposed here. Never add sensitive keys (SMTP
+// credentials, JWT secrets, registration policy, etc.) to this handler.
+func (s *Server) handleGetPublicBranding(w http.ResponseWriter, _ *http.Request) {
+	name, _ := s.instanceSets.Get("instance_name")
+	accent, _ := s.instanceSets.Get("accent_color")
+	writeJSON(w, http.StatusOK, map[string]any{
+		"instanceName": name,
+		"accentColor":  accent,
+	})
+}
+
+func smtpTestBody() string {
+	return `<html><body>
+<p>This is a test email from <strong>draba</strong>.</p>
+<p>If you received this, your SMTP configuration is working correctly.</p>
+</body></html>`
 }
 ````
 
@@ -21730,278 +22655,58 @@ const InlineEditableTitle = forwardRef<HTMLInputElement, Props>(
 export default InlineEditableTitle
 ````
 
-## File: packages/web/src/components/ThemeSync.tsx
+## File: packages/web/src/components/BrandingSync.tsx
 ````typescript
 /**
- * ThemeSync — reads the user's server-side theme preference once auth
- * initializes, then applies it via useDarkMode.
+ * BrandingSync — fetches /settings/branding on app start and applies:
+ *   - instance name → document.title (and module-level makeDocTitle helper)
+ *   - accent color  → --primary CSS variable override on <html>
  *
- * This component renders nothing; it exists only for its side-effect.
- * Mount it inside AuthProvider so useAuth is available.
+ * Renders nothing; exists only for side-effects.
+ *
+ * Page-level title pattern: import makeDocTitle and call it in a useEffect.
+ * Example: document.title = makeDocTitle('Settings')  →  "Settings — Acme"
  */
 
-import { useEffect, useRef } from 'react'
-import { useAuth } from '@/contexts/AuthContext'
-import { useDarkMode } from '@/hooks/useDarkMode'
-import { usePreferenceMap } from '@/hooks/usePreferences'
+import { useEffect } from 'react'
+import { usePublicSettings } from '@/hooks/usePublicSettings'
 
-export default function ThemeSync() {
-  const { user, initializing } = useAuth()
-  const { applyTheme } = useDarkMode()
-  const prefMap = usePreferenceMap()
-  const applied = useRef(false)
+// Shared at module level so makeDocTitle is always current without React context.
+let _instanceBaseName = 'draba'
+
+/** Returns a document title following the "{page} — {app}" convention. */
+export function makeDocTitle(pageName?: string): string {
+  return pageName ? `${pageName} — ${_instanceBaseName}` : _instanceBaseName
+}
+
+/** Hex color guard — rejects anything that isn't a 6-digit hex string. */
+function isValidHex(value: string): boolean {
+  return /^#[0-9a-fA-F]{6}$/.test(value)
+}
+
+export default function BrandingSync() {
+  const { data } = usePublicSettings()
 
   useEffect(() => {
-    // Only apply once per session to avoid overriding manual toggles.
-    if (initializing || !user || applied.current) return
-    const serverTheme = prefMap['theme'] as string | undefined
-    if (serverTheme === 'dark' || serverTheme === 'light') {
-      applyTheme(serverTheme)
-      applied.current = true
-    } else if (serverTheme !== undefined) {
-      // Has a preference but it's something unexpected — mark applied to stop looping.
-      applied.current = true
+    if (!data) return
+
+    // Update the module-level name first so makeDocTitle is current for any
+    // page titles set after this effect runs.
+    _instanceBaseName = data.instanceName || 'draba'
+    document.title = makeDocTitle()
+
+    // Apply accent color override directly to --primary so all Tailwind utilities
+    // (bg-primary, text-primary, ring-primary…) pick it up without extra CSS rules.
+    // Removing the property falls back to the HSL value defined in index.css.
+    const root = document.documentElement
+    if (data.accentColor && isValidHex(data.accentColor)) {
+      root.style.setProperty('--primary', data.accentColor)
+    } else {
+      root.style.removeProperty('--primary')
     }
-  }, [initializing, user, prefMap, applyTheme])
-
-  // Reset the applied guard when the user logs out.
-  useEffect(() => {
-    if (!user) applied.current = false
-  }, [user])
+  }, [data])
 
   return null
-}
-````
-
-## File: packages/web/src/contexts/AuthContext.tsx
-````typescript
-/**
- * Auth context: current user + access token in memory, refresh token in localStorage.
- *
- * Provides login, logout, and register actions so any component can
- * authenticate without knowing about token storage details.
- */
-
-import {
-  createContext,
-  useCallback,
-  useContext,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from 'react'
-import type { components } from '@draba/shared'
-import {
-  API_BASE,
-  ApiError,
-  clearStoredRefreshToken,
-  configureSilentRefresh,
-  getStoredRefreshToken,
-  storeRefreshToken,
-} from '@/lib/api'
-
-type User = components['schemas']['User']
-type AuthResponse = components['schemas']['AuthResponse']
-type RefreshResponse = components['schemas']['RefreshResponse']
-
-interface AuthState {
-  user: User | null
-  accessToken: string | null
-  /** True while checking the stored refresh token on initial mount. */
-  initializing: boolean
-}
-
-interface AuthContextValue extends AuthState {
-  getAccessToken: () => string | null
-  login: (email: string, password: string) => Promise<void>
-  /** Registers a new account and returns the fresh access token directly,
-   *  avoiding a race against the async setState that follows. */
-  register: (email: string, password: string, displayName: string, inviteToken?: string) => Promise<string>
-  logout: () => void
-  /** Merges fields into the current user object — used after profile updates. */
-  patchUser: (patch: Partial<User>) => void
-}
-
-const AuthContext = createContext<AuthContextValue | null>(null)
-
-async function postJson<T>(path: string, body: unknown): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  })
-  const data = await res.json()
-  if (!res.ok) {
-    const err = data as { error: { code: string; message: string } }
-    throw new ApiError(res.status, err.error?.code ?? 'UNKNOWN', err.error?.message ?? res.statusText)
-  }
-  return data as T
-}
-
-export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [state, setState] = useState<AuthState>({
-    user: null,
-    accessToken: null,
-    initializing: true,
-  })
-
-  // Stable ref so callbacks never capture a stale token.
-  const tokenRef = useRef<string | null>(null)
-  tokenRef.current = state.accessToken
-
-  const getAccessToken = useCallback(() => tokenRef.current, [])
-
-  // On mount, attempt to restore session via the stored refresh token.
-  // After exchanging the refresh token we also fetch /auth/me so that `user`
-  // is populated — without it, admin checks (canEditTeam etc.) always fail
-  // because userId is '' and no member's userId matches an empty string.
-  useEffect(() => {
-    const refresh = getStoredRefreshToken()
-    if (!refresh) {
-      setState(s => ({ ...s, initializing: false }))
-      return
-    }
-    postJson<RefreshResponse>('/auth/refresh', { refreshToken: refresh })
-      .then(async ({ accessToken }) => {
-        try {
-          const res = await fetch(`${API_BASE}/auth/me`, {
-            headers: { Authorization: `Bearer ${accessToken}` },
-          })
-          const user: User | null = res.ok ? (await res.json() as User) : null
-          setState({ user, accessToken, initializing: false })
-        } catch {
-          // /auth/me failed but the token is still valid — set what we have.
-          setState(s => ({ ...s, accessToken, initializing: false }))
-        }
-      })
-      .catch(() => {
-        clearStoredRefreshToken()
-        setState(s => ({ ...s, initializing: false }))
-      })
-  }, [])
-
-  const login = useCallback(async (email: string, password: string) => {
-    const { user, accessToken, refreshToken } = await postJson<AuthResponse>('/auth/login', {
-      email,
-      password,
-    })
-    storeRefreshToken(refreshToken)
-    setState({ user, accessToken, initializing: false })
-  }, [])
-
-  const register = useCallback(
-    async (
-      email: string,
-      password: string,
-      displayName: string,
-      inviteToken?: string,
-    ): Promise<string> => {
-      const { user, accessToken, refreshToken } = await postJson<AuthResponse>(
-        '/auth/register',
-        { email, password, displayName, inviteToken },
-      )
-      storeRefreshToken(refreshToken)
-      setState({ user, accessToken, initializing: false })
-      // Return the token directly so callers don't race against the async
-      // setState — tokenRef won't update until the next render cycle.
-      return accessToken
-    },
-    [],
-  )
-
-  const logout = useCallback(() => {
-    clearStoredRefreshToken()
-    setState({ user: null, accessToken: null, initializing: false })
-  }, [])
-
-  // Register a silent-refresh callback with the API layer so that any 401
-  // anywhere in the app triggers a token refresh rather than a hard failure.
-  // On refresh failure, clear the session and redirect to /login.
-  useEffect(() => {
-    const silentRefresh = async (): Promise<string | null> => {
-      const refresh = getStoredRefreshToken()
-      if (!refresh) {
-        logout()
-        window.location.replace('/login')
-        return null
-      }
-      try {
-        const { accessToken: newToken } = await postJson<RefreshResponse>('/auth/refresh', { refreshToken: refresh })
-        setState(s => ({ ...s, accessToken: newToken }))
-        return newToken
-      } catch {
-        clearStoredRefreshToken()
-        setState({ user: null, accessToken: null, initializing: false })
-        window.location.replace('/login')
-        return null
-      }
-    }
-    configureSilentRefresh(silentRefresh)
-    return () => configureSilentRefresh(null)
-  }, [logout])
-
-  const patchUser = useCallback((patch: Partial<User>) => {
-    setState(s => s.user ? { ...s, user: { ...s.user, ...patch } } : s)
-  }, [])
-
-  const value = useMemo<AuthContextValue>(
-    () => ({ ...state, getAccessToken, login, register, logout, patchUser }),
-    [state, getAccessToken, login, register, logout, patchUser],
-  )
-
-  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
-}
-
-/** Returns the auth context. Throws if used outside of AuthProvider. */
-export function useAuth(): AuthContextValue {
-  const ctx = useContext(AuthContext)
-  if (!ctx) throw new Error('useAuth must be used inside AuthProvider')
-  return ctx
-}
-````
-
-## File: packages/web/src/hooks/useDarkMode.ts
-````typescript
-/**
- * Manages the dark/light theme toggle.
- *
- * Persistence: localStorage key "draba_theme".
- * Initial value: stored preference, falling back to prefers-color-scheme.
- * Effect: sets/removes the `dark` class on <html> whenever the value changes.
- */
-
-import { useEffect, useState } from 'react'
-
-type Theme = 'dark' | 'light'
-
-const STORAGE_KEY = 'draba_theme'
-
-function getInitialTheme(): Theme {
-  const stored = localStorage.getItem(STORAGE_KEY) as Theme | null
-  if (stored === 'dark' || stored === 'light') return stored
-  return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
-}
-
-export function useDarkMode() {
-  const [theme, setTheme] = useState<Theme>(getInitialTheme)
-
-  useEffect(() => {
-    const root = document.documentElement
-    if (theme === 'dark') {
-      root.classList.add('dark')
-    } else {
-      root.classList.remove('dark')
-    }
-    localStorage.setItem(STORAGE_KEY, theme)
-  }, [theme])
-
-  const toggle = () => setTheme(t => (t === 'dark' ? 'light' : 'dark'))
-
-  /** Explicitly set the theme (used when syncing from server-side preference). */
-  const applyTheme = (t: Theme) => setTheme(t)
-
-  return { theme, toggle, applyTheme, isDark: theme === 'dark' } as const
 }
 ````
 
@@ -22042,6 +22747,55 @@ describe('formatDate', () => {
     expect(formatDate(dec31, 'MMM D, YYYY')).toBe('Dec 31, 2026')
   })
 })
+````
+
+## File: packages/web/src/hooks/useFormatDate.ts
+````typescript
+/**
+ * useFormatDate — returns a formatter that respects the user's stored
+ * date_format preference.
+ *
+ * Supported formats (matching PreferencesPage options):
+ *   "MMM D, YYYY"  → "Jan 5, 2026"
+ *   "MM/DD/YYYY"   → "01/05/2026"
+ *   "DD/MM/YYYY"   → "05/01/2026"
+ *   "YYYY-MM-DD"   → "2026-01-05"
+ */
+
+import { useCallback } from 'react'
+import { usePreferenceMap } from '@/hooks/usePreferences'
+
+export type DateFormat = 'MMM D, YYYY' | 'MM/DD/YYYY' | 'DD/MM/YYYY' | 'YYYY-MM-DD'
+
+function pad2(n: number): string {
+  return n.toString().padStart(2, '0')
+}
+
+/** Pure formatting function — exported for use outside React (utilities, tests). */
+export function formatDate(date: Date, fmt: string): string {
+  const y = date.getFullYear()
+  const m = date.getMonth() + 1
+  const d = date.getDate()
+
+  switch (fmt) {
+    case 'MM/DD/YYYY':
+      return `${pad2(m)}/${pad2(d)}/${y}`
+    case 'DD/MM/YYYY':
+      return `${pad2(d)}/${pad2(m)}/${y}`
+    case 'YYYY-MM-DD':
+      return `${y}-${pad2(m)}-${pad2(d)}`
+    default:
+      // "MMM D, YYYY" — default
+      return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+  }
+}
+
+/** Returns a stable formatter function for the user's date_format preference. */
+export function useFormatDate(): (date: Date) => string {
+  const prefMap = usePreferenceMap()
+  const fmt = (prefMap['date_format'] as string | undefined) ?? 'MMM D, YYYY'
+  return useCallback((date: Date) => formatDate(date, fmt), [fmt])
+}
 ````
 
 ## File: packages/web/src/hooks/usePreferences.ts
@@ -22117,32 +22871,6 @@ export function usePreferenceMap(timelineId?: string): Record<string, unknown> {
     }
   }
   return map
-}
-````
-
-## File: packages/web/src/hooks/usePublicSettings.ts
-````typescript
-/**
- * usePublicSettings — fetches /settings/branding without authentication.
- *
- * Used by LoginPage and App.tsx to display instance name and apply
- * the admin-configured accent color before the user has signed in.
- */
-
-import { useQuery } from '@tanstack/react-query'
-import { apiFetch } from '@/lib/api'
-
-interface PublicBranding {
-  instanceName: string
-  accentColor: string
-}
-
-export function usePublicSettings() {
-  return useQuery({
-    queryKey: ['settings', 'branding'],
-    queryFn: () => apiFetch<PublicBranding>('/settings/branding'),
-    staleTime: 5 * 60 * 1000,
-  })
 }
 ````
 
@@ -22535,152 +23263,6 @@ describe('ApiError', () => {
     expect(err.code).toBe('NOT_FOUND')
   })
 })
-````
-
-## File: packages/web/src/lib/api.ts
-````typescript
-/**
- * Thin fetch wrapper over the draba REST API.
- *
- * Token lifecycle:
- *   - Access token: kept in memory via the AuthContext; passed as Authorization header.
- *   - Refresh token: persisted in localStorage under REFRESH_TOKEN_KEY.
- *     On a 401, the client attempts one silent refresh then retries the original request.
- *     Concurrent 401s share a single refresh call (mutex via in-flight promise).
- *     If refresh also fails, the registered logout handler is called and the user
- *     is redirected to /login.
- *
- * All callers receive typed JSON or throw an ApiError.
- */
-
-import type { components } from '@draba/shared'
-
-export type ApiErrorBody = components['schemas']['ApiError']
-
-// Empty string = same-origin relative URLs, which is correct when the SPA is
-// embedded in the Go binary. Set VITE_API_URL for local dev against a
-// separate API server (e.g. VITE_API_URL=http://localhost:8080).
-export const API_BASE =
-  (import.meta.env.VITE_API_URL as string | undefined) ?? ''
-
-export const REFRESH_TOKEN_KEY = 'draba_refresh_token'
-
-/** Thrown for any non-2xx response. */
-export class ApiError extends Error {
-  constructor(
-    public readonly status: number,
-    public readonly code: string,
-    message: string,
-    /** Extra fields from the error response body (e.g. assignmentCount on 409). */
-    public readonly data?: Record<string, unknown>,
-  ) {
-    super(message)
-    this.name = 'ApiError'
-  }
-}
-
-/** Reads the stored refresh token from localStorage. */
-export function getStoredRefreshToken(): string | null {
-  return localStorage.getItem(REFRESH_TOKEN_KEY)
-}
-
-/** Persists the refresh token to localStorage. */
-export function storeRefreshToken(token: string): void {
-  localStorage.setItem(REFRESH_TOKEN_KEY, token)
-}
-
-/** Removes the refresh token from localStorage (on logout). */
-export function clearStoredRefreshToken(): void {
-  localStorage.removeItem(REFRESH_TOKEN_KEY)
-}
-
-async function parseError(res: Response): Promise<ApiError> {
-  try {
-    const body = (await res.json()) as ApiErrorBody & Record<string, unknown>
-    const { error, ...rest } = body
-    const data = Object.keys(rest).length > 0 ? (rest as Record<string, unknown>) : undefined
-    return new ApiError(res.status, error.code, error.message, data)
-  } catch {
-    return new ApiError(res.status, 'UNKNOWN', res.statusText)
-  }
-}
-
-/** Low-level fetch that injects the access token and throws ApiError on non-2xx. */
-export async function apiFetch<T>(
-  path: string,
-  init: RequestInit & { accessToken?: string } = {},
-): Promise<T> {
-  const { accessToken, ...rest } = init
-  const headers = new Headers(rest.headers)
-  headers.set('Content-Type', 'application/json')
-  if (accessToken) {
-    headers.set('Authorization', `Bearer ${accessToken}`)
-  }
-
-  const res = await fetch(`${API_BASE}${path}`, { ...rest, headers })
-
-  if (!res.ok) {
-    throw await parseError(res)
-  }
-
-  // 204 No Content — return undefined cast as T
-  if (res.status === 204) {
-    return undefined as unknown as T
-  }
-
-  return res.json() as Promise<T>
-}
-
-// ── Silent refresh ───────────────────────────────────────────────────────────
-
-/**
- * Registered by AuthProvider on mount. Returns the new access token, or null
- * if the refresh token is expired/invalid (AuthProvider also handles logout
- * and redirect in that case).
- */
-let _silentRefresh: (() => Promise<string | null>) | null = null
-
-/** Mutex: if a refresh is already in flight, share it instead of firing a new one. */
-let _refreshInFlight: Promise<string | null> | null = null
-
-/** Called by AuthProvider to register the silent-refresh callback. */
-export function configureSilentRefresh(fn: (() => Promise<string | null>) | null): void {
-  _silentRefresh = fn
-}
-
-async function doSilentRefresh(): Promise<string | null> {
-  if (!_silentRefresh) return null
-  // Reuse an in-flight refresh instead of firing multiple simultaneous calls.
-  if (!_refreshInFlight) {
-    _refreshInFlight = _silentRefresh().finally(() => {
-      _refreshInFlight = null
-    })
-  }
-  return _refreshInFlight
-}
-
-/**
- * Higher-level wrapper that supplies the access token from a getter function.
- * On a 401, attempts one silent refresh and retries. If the refresh also fails,
- * the registered silentRefresh callback handles logout and redirect.
- *
- * Used by TanStack Query hooks so they never capture a stale token closure.
- */
-export function createAuthFetch(getToken: () => string | null) {
-  return async function authFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
-    try {
-      return await apiFetch<T>(path, { ...init, accessToken: getToken() ?? undefined })
-    } catch (err) {
-      if (err instanceof ApiError && err.status === 401 && _silentRefresh) {
-        const newToken = await doSilentRefresh()
-        if (!newToken) throw err
-        // Retry with the freshly-issued token.
-        return apiFetch<T>(path, { ...init, accessToken: newToken })
-      }
-      throw err
-    }
-  }
-}
 ````
 
 ## File: packages/web/src/lib/filterColors.ts
@@ -23522,6 +24104,397 @@ describe('comboSortComparator', () => {
 })
 ````
 
+## File: packages/web/src/pages/settings/OrganizationPage.tsx
+````typescript
+/**
+ * /settings/organization — Superadmin: organization name, registration policy,
+ * and system-wide defaults (language placeholder, timezone, week start).
+ * Language support is deferred to Phase 10.7 — Localization & Language Support.
+ */
+
+import { useState, useEffect } from 'react'
+import { useAdminSettings, usePatchAdminSettings } from '@/hooks/useSettings'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Button } from '@/components/ui/button'
+
+export default function OrganizationPage() {
+  const { data } = useAdminSettings()
+  const patch = usePatchAdminSettings()
+
+  const settings = data?.settings ?? {}
+  const [orgName, setOrgName] = useState('')
+  const [accentColor, setAccentColor] = useState('')
+  // Validated hex to submit — only a well-formed #RRGGBB is sent to the API.
+  const accentColorValid = accentColor === '' || /^#[0-9a-fA-F]{6}$/.test(accentColor)
+  const [regPolicy, setRegPolicy] = useState('invite_only')
+  const [timezone, setTimezone] = useState('UTC')
+  const [weekStart, setWeekStart] = useState('monday')
+  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
+
+  useEffect(() => {
+    setOrgName(settings.instance_name || '')
+    setAccentColor(settings.accent_color || '')
+    setRegPolicy(settings.registration_policy || 'invite_only')
+    setTimezone(settings.default_timezone || 'UTC')
+    setWeekStart(settings.default_week_start || 'monday')
+  }, [JSON.stringify(settings)])
+
+  async function handleSave() {
+    setFeedback(null)
+    try {
+      await patch.mutateAsync({
+        instance_name: orgName,
+        // Only submit a valid hex value; empty string clears the override.
+        accent_color: accentColorValid ? accentColor : '',
+        registration_policy: regPolicy,
+        default_timezone: timezone,
+        default_week_start: weekStart,
+      })
+      setFeedback({ type: 'success', msg: 'Settings saved.' })
+      setTimeout(() => setFeedback(null), 2000)
+    } catch {
+      setFeedback({ type: 'error', msg: 'Failed to save settings. Please try again.' })
+    }
+  }
+
+  return (
+    <div>
+      <h2 className="text-[17px] font-semibold text-foreground mb-1">Organization</h2>
+      <p className="text-sm text-muted-foreground mb-6">
+        System-wide identity and defaults for this draba installation.
+      </p>
+
+      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
+        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-4">
+          Identity
+        </h3>
+
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Organization name</Label>
+          <Input
+            value={orgName}
+            onChange={e => setOrgName(e.target.value)}
+            placeholder="My Company"
+            className="max-w-xs"
+          />
+          <p className="text-xs text-muted-foreground m-0">
+            Shown in the browser tab title and login page.
+          </p>
+        </div>
+
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Accent color</Label>
+          <div className="flex items-center gap-3">
+            <input
+              type="color"
+              value={accentColor || '#288C9B'}
+              onChange={e => setAccentColor(e.target.value)}
+              className="h-9 w-14 rounded border border-border cursor-pointer bg-transparent"
+            />
+            <Input
+              value={accentColor}
+              onChange={e => setAccentColor(e.target.value)}
+              placeholder="#288C9B"
+              className={`max-w-[140px] font-mono text-[13px] ${!accentColorValid ? 'border-destructive' : ''}`}
+            />
+            {accentColor && (
+              <button
+                type="button"
+                onClick={() => setAccentColor('')}
+                className="text-xs text-muted-foreground hover:text-foreground cursor-pointer bg-transparent border-none"
+              >
+                Reset
+              </button>
+            )}
+          </div>
+          {!accentColorValid && (
+            <p className="text-xs text-destructive m-0">Must be a 6-digit hex color (e.g. #288C9B).</p>
+          )}
+          <p className="text-xs text-muted-foreground m-0">
+            Overrides the primary color globally. Leave blank to use the default teal.
+          </p>
+        </div>
+
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Registration policy</Label>
+          <div className="flex gap-2">
+            {[
+              { v: 'invite_only', label: 'Invite only' },
+              { v: 'open', label: 'Open registration' },
+            ].map(({ v, label }) => (
+              <button
+                key={v}
+                onClick={() => setRegPolicy(v)}
+                className={`px-3.5 py-1.5 rounded-md text-[13px] border cursor-pointer ${
+                  regPolicy === v
+                    ? 'border-primary bg-primary/10 text-primary'
+                    : 'border-border bg-popover text-muted-foreground'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
+        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-2">
+          System defaults
+        </h3>
+        <p className="text-xs text-muted-foreground mb-4">
+          Applied to new accounts when the user hasn't set their own preference.
+        </p>
+
+        {/* Language placeholder — Phase 10.7 */}
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Default language</Label>
+          <select
+            disabled
+            className="bg-popover border border-border rounded-md text-foreground px-3 py-2 text-[13px] max-w-[240px] opacity-60 cursor-not-allowed"
+          >
+            <option value="en">English (en)</option>
+          </select>
+          <p className="text-xs text-muted-foreground m-0">
+            Additional languages coming in a future release (Phase 10.7).
+          </p>
+        </div>
+
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Default timezone</Label>
+          <select
+            value={timezone}
+            onChange={e => setTimezone(e.target.value)}
+            className="bg-popover border border-border rounded-md text-foreground px-3 py-2 text-[13px] cursor-pointer max-w-[280px]"
+          >
+            {['UTC', 'America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles',
+              'Europe/London', 'Europe/Paris', 'Asia/Tokyo', 'Australia/Sydney'].map(tz => (
+              <option key={tz} value={tz}>{tz}</option>
+            ))}
+          </select>
+        </div>
+
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Default week starts on</Label>
+          <div className="flex gap-2">
+            {(['monday', 'sunday'] as const).map(d => (
+              <button
+                key={d}
+                onClick={() => setWeekStart(d)}
+                className={`px-3.5 py-1.5 rounded-md text-[13px] border cursor-pointer capitalize ${
+                  weekStart === d
+                    ? 'border-primary bg-primary/10 text-primary'
+                    : 'border-border bg-popover text-muted-foreground'
+                }`}
+              >
+                {d}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {feedback && (
+        <p className={`text-[13px] mb-3 ${feedback.type === 'success' ? 'text-success' : 'text-destructive'}`}>
+          {feedback.msg}
+        </p>
+      )}
+      <Button onClick={handleSave} disabled={patch.isPending}>
+        {patch.isPending ? 'Saving…' : 'Save settings'}
+      </Button>
+    </div>
+  )
+}
+````
+
+## File: packages/web/src/pages/settings/PreferencesPage.tsx
+````typescript
+/**
+ * /settings/preferences — Regional settings, appearance theme, default team/timeline.
+ * Values are stored via the existing GET/PUT /users/me/preferences endpoints.
+ * Theme changes apply immediately via useDarkMode; the server value syncs on next login.
+ */
+
+import { useState, useEffect } from 'react'
+import { usePreferenceMap, useUpsertPreference } from '@/hooks/usePreferences'
+import { useDarkMode } from '@/hooks/useDarkMode'
+import { Label } from '@/components/ui/label'
+import { Button } from '@/components/ui/button'
+
+const TIMEZONES = [
+  'UTC',
+  'America/New_York',
+  'America/Chicago',
+  'America/Denver',
+  'America/Los_Angeles',
+  'America/Anchorage',
+  'Pacific/Honolulu',
+  'Europe/London',
+  'Europe/Paris',
+  'Europe/Berlin',
+  'Europe/Moscow',
+  'Asia/Dubai',
+  'Asia/Kolkata',
+  'Asia/Singapore',
+  'Asia/Tokyo',
+  'Australia/Sydney',
+]
+
+const DATE_FORMATS = [
+  { value: 'MMM D, YYYY', label: 'Jan 5, 2026' },
+  { value: 'MM/DD/YYYY', label: '01/05/2026' },
+  { value: 'DD/MM/YYYY', label: '05/01/2026' },
+  { value: 'YYYY-MM-DD', label: '2026-01-05' },
+]
+
+const selectCls = 'bg-popover border border-border rounded-md text-foreground px-3 py-2 text-[13px] cursor-pointer max-w-xs'
+
+export default function PreferencesPage() {
+  const prefMap = usePreferenceMap()
+  const upsert = useUpsertPreference()
+  const { theme: currentTheme, applyTheme } = useDarkMode()
+
+  const [timezone, setTimezone] = useState('UTC')
+  const [dateFormat, setDateFormat] = useState('MMM D, YYYY')
+  const [weekStart, setWeekStart] = useState('monday')
+  const [theme, setTheme] = useState<'light' | 'dark'>(currentTheme)
+  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
+
+  useEffect(() => {
+    setTimezone((prefMap['timezone'] as string | undefined) ?? 'UTC')
+    setDateFormat((prefMap['date_format'] as string | undefined) ?? 'MMM D, YYYY')
+    setWeekStart((prefMap['week_start'] as string | undefined) ?? 'monday')
+    const savedTheme = prefMap['theme'] as string | undefined
+    if (savedTheme === 'dark' || savedTheme === 'light') setTheme(savedTheme)
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- prefMap object identity changes on every fetch; JSON.stringify stabilizes the dep without pulling in the whole map
+  }, [JSON.stringify(prefMap)])
+
+  function handleThemeChange(t: 'light' | 'dark') {
+    setTheme(t)
+    applyTheme(t)
+  }
+
+  async function handleSave() {
+    setFeedback(null)
+    try {
+      await Promise.all([
+        upsert.mutateAsync({ key: 'timezone', value: JSON.stringify(timezone) }),
+        upsert.mutateAsync({ key: 'date_format', value: JSON.stringify(dateFormat) }),
+        upsert.mutateAsync({ key: 'week_start', value: JSON.stringify(weekStart) }),
+        upsert.mutateAsync({ key: 'theme', value: JSON.stringify(theme) }),
+      ])
+      setFeedback({ type: 'success', msg: 'Preferences saved.' })
+      setTimeout(() => setFeedback(null), 2000)
+    } catch {
+      setFeedback({ type: 'error', msg: 'Failed to save preferences. Please try again.' })
+    }
+  }
+
+  return (
+    <div>
+      <h2 className="text-[17px] font-semibold text-foreground mb-1">Preferences</h2>
+      <p className="text-sm text-muted-foreground mb-6">
+        Personal appearance and regional settings.
+      </p>
+
+      {/* Regional */}
+      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
+        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-4">
+          Regional
+        </h3>
+
+        {/* Language placeholder — Phase 10.7 */}
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Language</Label>
+          <select disabled className={`${selectCls} opacity-60 cursor-not-allowed`}>
+            <option value="en">English (en)</option>
+          </select>
+          <p className="text-xs text-muted-foreground m-0">
+            Additional languages coming in a future release (Phase 10.7).
+          </p>
+        </div>
+
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Timezone</Label>
+          <select value={timezone} onChange={e => setTimezone(e.target.value)} className={selectCls}>
+            {TIMEZONES.map(tz => (
+              <option key={tz} value={tz}>{tz}</option>
+            ))}
+          </select>
+        </div>
+
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Date format</Label>
+          <select value={dateFormat} onChange={e => setDateFormat(e.target.value)} className={selectCls}>
+            {DATE_FORMATS.map(f => (
+              <option key={f.value} value={f.value}>{f.label}</option>
+            ))}
+          </select>
+        </div>
+
+        <div className="flex flex-col gap-1.5 mb-4">
+          <Label>Week starts on</Label>
+          <div className="flex gap-2">
+            {(['monday', 'sunday'] as const).map(d => (
+              <button
+                key={d}
+                onClick={() => setWeekStart(d)}
+                className={`px-4 py-1.5 rounded-md text-[13px] border cursor-pointer capitalize ${
+                  weekStart === d
+                    ? 'border-primary bg-primary/10 text-primary'
+                    : 'border-border bg-popover text-muted-foreground'
+                }`}
+              >
+                {d}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Appearance */}
+      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
+        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-4">
+          Appearance
+        </h3>
+        <div className="flex flex-col gap-1.5 mb-2">
+          <Label>Theme</Label>
+          <div className="flex gap-2">
+            {(['light', 'dark'] as const).map(t => (
+              <button
+                key={t}
+                onClick={() => handleThemeChange(t)}
+                className={`px-4 py-1.5 rounded-md text-[13px] border cursor-pointer capitalize ${
+                  theme === t
+                    ? 'border-primary bg-primary/10 text-primary'
+                    : 'border-border bg-popover text-muted-foreground'
+                }`}
+              >
+                {t}
+              </button>
+            ))}
+          </div>
+          <p className="text-xs text-muted-foreground m-0">
+            Applies immediately. Persisted server-side so it syncs across devices.
+          </p>
+        </div>
+      </div>
+
+      {feedback && (
+        <p className={`text-[13px] mb-3 ${feedback.type === 'success' ? 'text-success' : 'text-destructive'}`}>
+          {feedback.msg}
+        </p>
+      )}
+
+      <Button onClick={handleSave} disabled={upsert.isPending}>
+        {upsert.isPending ? 'Saving…' : 'Save preferences'}
+      </Button>
+    </div>
+  )
+}
+````
+
 ## File: packages/web/src/pages/ForgotPasswordPage.tsx
 ````typescript
 /**
@@ -23609,6 +24582,425 @@ export default function ForgotPasswordPage() {
           )}
         </CardContent>
       </Card>
+    </div>
+  )
+}
+````
+
+## File: packages/web/src/pages/LoginPage.tsx
+````typescript
+import { useState } from 'react'
+import { useNavigate, useLocation, Link } from 'react-router-dom'
+import { Eye, EyeOff, Check, Loader2 } from 'lucide-react'
+import { useAuth } from '@/contexts/AuthContext'
+import { ApiError } from '@/lib/api'
+import DarkModeToggle from '@/components/DarkModeToggle'
+import { usePublicSettings } from '@/hooks/usePublicSettings'
+
+// ── Floating-label input ─────────────────────────────────────────────────────
+
+interface FloatInputProps {
+  id: string
+  label: string
+  type: string
+  value: string
+  autoComplete: string
+  error?: string | null
+  onChange: (v: string) => void
+  onKeyDown?: (e: React.KeyboardEvent) => void
+  rightSlot?: React.ReactNode
+}
+
+function FloatInput({ id, label, type, value, autoComplete, error, onChange, onKeyDown, rightSlot }: FloatInputProps) {
+  const [focused, setFocused] = useState(false)
+  const floated = focused || value.length > 0
+
+  const borderColor = error
+    ? '#e74c3c'
+    : focused
+    ? '#288C9B'
+    : 'hsl(210 15% 24%)'
+
+  const boxShadow = error
+    ? '0 0 0 3px rgba(231,76,60,0.15)'
+    : focused
+    ? '0 0 0 3px rgba(40,140,155,0.18)'
+    : 'none'
+
+  const labelColor = error
+    ? '#e74c3c'
+    : focused
+    ? '#5BC0DE'
+    : 'hsl(210 15% 65%)'
+
+  return (
+    <div>
+      <div style={{
+        position: 'relative',
+        borderRadius: 8,
+        border: `1px solid ${borderColor}`,
+        background: 'hsl(210 15% 17%)',
+        transition: 'border-color 180ms ease, box-shadow 180ms ease',
+        boxShadow,
+      }}>
+        {/* Floating label */}
+        <label
+          htmlFor={id}
+          style={{
+            position: 'absolute',
+            left: 14,
+            top: floated ? 8 : '50%',
+            transform: floated ? 'none' : 'translateY(-50%)',
+            fontSize: floated ? 11 : 14,
+            letterSpacing: floated ? '0.06em' : 0,
+            textTransform: floated ? 'uppercase' : 'none',
+            fontWeight: 600,
+            color: labelColor,
+            transition: 'all 160ms cubic-bezier(0.4, 0, 0.2, 1)',
+            pointerEvents: 'none',
+            userSelect: 'none',
+          }}
+        >
+          {label}
+        </label>
+
+        <input
+          id={id}
+          type={type}
+          autoComplete={autoComplete}
+          value={value}
+          onChange={e => onChange(e.target.value)}
+          onFocus={() => setFocused(true)}
+          onBlur={() => setFocused(false)}
+          onKeyDown={onKeyDown}
+          style={{
+            width: '100%',
+            padding: '22px 42px 8px 14px',
+            background: 'transparent',
+            border: 'none',
+            outline: 'none',
+            fontSize: 15,
+            color: 'hsl(210 17% 93%)',
+            fontFamily: 'inherit',
+            lineHeight: 1.4,
+            boxSizing: 'border-box',
+          }}
+        />
+
+        {rightSlot && (
+          <div style={{
+            position: 'absolute',
+            right: 12,
+            top: '50%',
+            transform: 'translateY(-50%)',
+          }}>
+            {rightSlot}
+          </div>
+        )}
+      </div>
+
+      {error && (
+        <p style={{ fontSize: 12, color: '#e74c3c', margin: '5px 0 0 2px' }}>{error}</p>
+      )}
+    </div>
+  )
+}
+
+// ── Spinner ──────────────────────────────────────────────────────────────────
+
+function Spinner() {
+  return (
+    <Loader2
+      size={16}
+      strokeWidth={2.5}
+      color="rgba(255,255,255,0.8)"
+      style={{ animation: 'spin 0.8s linear infinite' }}
+    />
+  )
+}
+
+// ── Main page ────────────────────────────────────────────────────────────────
+
+export default function LoginPage() {
+  const { login } = useAuth()
+  const navigate = useNavigate()
+  const location = useLocation()
+  const from = (location.state as { from?: { pathname: string } } | null)?.from?.pathname ?? '/'
+  const { data: branding } = usePublicSettings()
+  const instanceName = branding?.instanceName || 'draba'
+
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [showPassword, setShowPassword] = useState(false)
+  const [emailError, setEmailError] = useState<string | null>(null)
+  const [passwordError, setPasswordError] = useState<string | null>(null)
+  const [serverError, setServerError] = useState<string | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [success, setSuccess] = useState(false)
+
+  function validateAndSubmit() {
+    let valid = true
+    setServerError(null)
+
+    if (!email.trim()) {
+      setEmailError('Email is required')
+      valid = false
+    } else if (!/\S+@\S+\.\S+/.test(email)) {
+      setEmailError('Enter a valid email')
+      valid = false
+    } else {
+      setEmailError(null)
+    }
+
+    if (!password) {
+      setPasswordError('Password is required')
+      valid = false
+    } else if (password.length < 6) {
+      setPasswordError('Password must be at least 6 characters')
+      valid = false
+    } else {
+      setPasswordError(null)
+    }
+
+    if (!valid) return
+    doLogin()
+  }
+
+  async function doLogin() {
+    setLoading(true)
+    try {
+      await login(email, password)
+      setSuccess(true)
+      // Brief success flash then navigate
+      setTimeout(() => navigate(from, { replace: true }), 600)
+    } catch (err) {
+      if (err instanceof ApiError) {
+        setServerError(err.message)
+      } else {
+        setServerError('Something went wrong. Please try again.')
+      }
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  function handleSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    validateAndSubmit()
+  }
+
+  return (
+    <div style={{
+      minHeight: '100vh',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      background: 'var(--background)',
+      padding: '24px',
+      position: 'relative',
+    }}>
+      {/* Teal radial glow behind card */}
+      <div style={{
+        position: 'fixed',
+        inset: 0,
+        background: 'radial-gradient(ellipse 60% 50% at 20% 50%, rgba(40,140,155,0.12) 0%, transparent 70%)',
+        pointerEvents: 'none',
+      }} />
+
+      {/* Dark mode toggle */}
+      <div style={{ position: 'fixed', top: 16, right: 16, zIndex: 10 }}>
+        <DarkModeToggle />
+      </div>
+
+      {/* Card */}
+      <div style={{
+        width: '100%',
+        maxWidth: 860,
+        minHeight: 520,
+        borderRadius: 16,
+        overflow: 'hidden',
+        display: 'flex',
+        boxShadow: '0 32px 80px -12px rgba(0,0,0,0.55), 0 0 0 1px rgba(255,255,255,0.06)',
+        position: 'relative',
+        zIndex: 1,
+      }}>
+
+        {/* ── Left panel — brand ─────────────────────────────────────── */}
+        <div style={{
+          width: '38%',
+          flexShrink: 0,
+          background: 'linear-gradient(155deg, #2aa5b8 0%, #1c7585 60%, #145f6e 100%)',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: 4,
+          padding: '48px 32px',
+          position: 'relative',
+          overflow: 'hidden',
+        }}>
+          {/* Decorative circles */}
+          <div style={{ width: 220, height: 220, borderRadius: '50%', background: 'rgba(255,255,255,0.07)', position: 'absolute', top: -60, left: -60, pointerEvents: 'none' }} />
+          <div style={{ width: 160, height: 160, borderRadius: '50%', background: 'rgba(255,255,255,0.05)', position: 'absolute', bottom: -40, right: -40, pointerEvents: 'none' }} />
+
+          {/* Logo — 2× the handoff's 88px */}
+          <img
+            src="/logo-color.svg"
+            alt="draba"
+            style={{ width: 270, height: 270, filter: 'drop-shadow(0 4px 16px rgba(0,0,0,0.25))', position: 'relative', marginTop: '-15px', marginBottom: '-47px' }}
+          />
+
+          <div style={{ position: 'relative', textAlign: 'center' }}>
+            <div style={{ fontSize: 28, fontWeight: 700, color: '#fff', letterSpacing: '-0.01em', textShadow: '0 2px 8px rgba(0,0,0,0.2)' }}>
+              {instanceName}
+            </div>
+            <div style={{ fontSize: 13, fontWeight: 400, color: 'rgba(255,255,255,0.72)', lineHeight: 1.5, marginTop: 8 }}>
+              Team coordination,<br />simplified.
+            </div>
+          </div>
+        </div>
+
+        {/* ── Right panel — form ─────────────────────────────────────── */}
+        <div style={{
+          flex: 1,
+          background: 'var(--card)',
+          padding: '52px 48px',
+          display: 'flex',
+          flexDirection: 'column',
+          justifyContent: 'center',
+        }}>
+          {success ? (
+            /* Success state */
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', textAlign: 'center', gap: 0 }}>
+              <div style={{
+                width: 56, height: 56, borderRadius: '50%',
+                background: 'rgba(40,140,155,0.15)', border: '2px solid #288C9B',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                margin: '0 auto 20px',
+              }}>
+                <Check size={24} color="#288C9B" strokeWidth={2.5} />
+              </div>
+              <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--foreground)', marginBottom: 8 }}>
+                You're signed in
+              </div>
+              <div style={{ fontSize: 14, color: 'var(--muted-foreground)' }}>
+                Redirecting to your timeline…
+              </div>
+            </div>
+          ) : (
+            <form onSubmit={handleSubmit} noValidate>
+              {/* Heading */}
+              <div style={{ marginBottom: 28 }}>
+                <h1 style={{ fontSize: 28, fontWeight: 700, color: 'hsl(210 17% 93%)', letterSpacing: '-0.02em', margin: '0 0 6px' }}>
+                  Sign in
+                </h1>
+                <p style={{ fontSize: 14, color: 'hsl(210 15% 52%)', margin: 0 }}>
+                  Welcome back — sign in to your account.
+                </p>
+              </div>
+
+              {/* Fields */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 14, marginBottom: 24 }}>
+                <FloatInput
+                  id="email"
+                  label="Email"
+                  type="email"
+                  autoComplete="email"
+                  value={email}
+                  error={emailError}
+                  onChange={v => { setEmail(v); if (emailError) setEmailError(null) }}
+                />
+
+                <FloatInput
+                  id="password"
+                  label="Password"
+                  type={showPassword ? 'text' : 'password'}
+                  autoComplete="current-password"
+                  value={password}
+                  error={passwordError}
+                  onChange={v => { setPassword(v); if (passwordError) setPasswordError(null) }}
+                  rightSlot={
+                    <button
+                      type="button"
+                      onClick={() => setShowPassword(s => !s)}
+                      style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'hsl(210 15% 52%)', display: 'flex', padding: 0 }}
+                    >
+                      {showPassword ? <EyeOff size={18} strokeWidth={1.5} /> : <Eye size={18} strokeWidth={1.5} />}
+                    </button>
+                  }
+                />
+              </div>
+
+              {/* Forgot password */}
+              <div style={{ textAlign: 'right', marginBottom: 22, marginTop: -6 }}>
+                <Link
+                  to="/forgot-password"
+                  style={{ fontSize: 13, fontWeight: 600, color: '#5BC0DE', textDecoration: 'none' }}
+                  onMouseEnter={e => (e.currentTarget.style.textDecoration = 'underline')}
+                  onMouseLeave={e => (e.currentTarget.style.textDecoration = 'none')}
+                >
+                  Forgot password?
+                </Link>
+              </div>
+
+              {/* Server error */}
+              {serverError && (
+                <p style={{ fontSize: 13, color: '#e74c3c', margin: '0 0 16px' }}>{serverError}</p>
+              )}
+
+              {/* Sign in button */}
+              <button
+                type="submit"
+                disabled={loading}
+                style={{
+                  width: '100%',
+                  padding: '14px',
+                  borderRadius: 8,
+                  border: 'none',
+                  background: loading
+                    ? 'hsl(188 40% 35%)'
+                    : 'linear-gradient(135deg, #2aa5b8 0%, #1e8a9c 100%)',
+                  color: '#fff',
+                  fontSize: 15,
+                  fontWeight: 700,
+                  letterSpacing: '0.01em',
+                  boxShadow: loading ? 'none' : '0 4px 20px rgba(40,140,155,0.35)',
+                  cursor: loading ? 'not-allowed' : 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: 8,
+                  fontFamily: 'inherit',
+                  transition: 'opacity 160ms ease, transform 160ms ease, box-shadow 160ms ease',
+                }}
+                onMouseEnter={e => { if (!loading) { e.currentTarget.style.opacity = '0.92'; e.currentTarget.style.transform = 'translateY(-1px)' } }}
+                onMouseLeave={e => { e.currentTarget.style.opacity = '1'; e.currentTarget.style.transform = 'translateY(0)' }}
+                onMouseDown={e => { if (!loading) e.currentTarget.style.transform = 'scale(0.98)' }}
+                onMouseUp={e => { if (!loading) e.currentTarget.style.transform = 'translateY(-1px)' }}
+              >
+                {loading && <Spinner />}
+                {loading ? 'Signing in…' : 'Sign in'}
+              </button>
+
+              {/* Register link */}
+              <p style={{ marginTop: 24, fontSize: 13, textAlign: 'center', color: 'hsl(210 15% 52%)' }}>
+                Have an invite?{' '}
+                <Link
+                  to="/register"
+                  style={{ color: '#5BC0DE', fontWeight: 600, textDecoration: 'none' }}
+                  onMouseEnter={e => (e.currentTarget.style.textDecoration = 'underline')}
+                  onMouseLeave={e => (e.currentTarget.style.textDecoration = 'none')}
+                >
+                  Create an account
+                </Link>
+              </p>
+            </form>
+          )}
+        </div>
+      </div>
+
+      {/* Keyframe for spinner */}
+      <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
     </div>
   )
 }
@@ -24422,65 +25814,6 @@ export default function SetupPage() {
 }
 ````
 
-## File: packages/web/src/App.tsx
-````typescript
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { AuthProvider } from '@/contexts/AuthContext'
-import ProtectedRoute from '@/components/ProtectedRoute'
-import ThemeSync from '@/components/ThemeSync'
-import BrandingSync from '@/components/BrandingSync'
-import LoginPage from '@/pages/LoginPage'
-import RegisterPage from '@/pages/RegisterPage'
-import DashboardPage from '@/pages/DashboardPage'
-import SetupPage from '@/pages/SetupPage'
-import SettingsPage from '@/pages/SettingsPage'
-import ForgotPasswordPage from '@/pages/ForgotPasswordPage'
-import ResetPasswordPage from '@/pages/ResetPasswordPage'
-
-const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: {
-      staleTime: 30_000,
-      retry: 1,
-    },
-  },
-})
-
-export default function App() {
-  return (
-    <QueryClientProvider client={queryClient}>
-      <BrowserRouter>
-        <AuthProvider>
-          {/* Side-effect components — render nothing but apply global state. */}
-          <ThemeSync />
-          <BrandingSync />
-          <Routes>
-            {/* First-run setup — public, shown before any users exist */}
-            <Route path="/setup" element={<SetupPage />} />
-
-            {/* Public routes */}
-            <Route path="/login" element={<LoginPage />} />
-            <Route path="/register" element={<RegisterPage />} />
-            <Route path="/forgot-password" element={<ForgotPasswordPage />} />
-            <Route path="/reset-password" element={<ResetPasswordPage />} />
-
-            {/* Protected routes */}
-            <Route element={<ProtectedRoute />}>
-              <Route path="/" element={<DashboardPage />} />
-              <Route path="/settings/*" element={<SettingsPage />} />
-            </Route>
-
-            {/* Fallback */}
-            <Route path="*" element={<Navigate to="/" replace />} />
-          </Routes>
-        </AuthProvider>
-      </BrowserRouter>
-    </QueryClientProvider>
-  )
-}
-````
-
 ## File: packages/web/index.html
 ````html
 <!DOCTYPE html>
@@ -24957,250 +26290,6 @@ invites — generated at runtime
 password_reset_tokens — generated at runtime
 user_preferences — set by users at runtime
 ```
-````
-
-## File: packages/api/internal/api/admin_handler.go
-````go
-package api
-
-import (
-	"encoding/json"
-	"log/slog"
-	"net/http"
-
-	"github.com/I0-1O/draba/packages/api/internal/mailer"
-)
-
-// requireSuperadmin is a shared guard for admin endpoints. Returns false
-// and writes a 403 if the caller is not a superadmin.
-func (s *Server) requireSuperadmin(w http.ResponseWriter, r *http.Request) bool {
-	claims := claimsFromContext(r.Context())
-	caller, err := s.users.GetByID(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to verify permissions")
-		return false
-	}
-	if !caller.IsSuperadmin {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
-		return false
-	}
-	return true
-}
-
-// handleGetSMTP handles GET /admin/smtp. Returns the current SMTP config
-// with the password masked. Superadmin-only.
-func (s *Server) handleGetSMTP(w http.ResponseWriter, r *http.Request) {
-	if !s.requireSuperadmin(w, r) {
-		return
-	}
-
-	cfg, err := s.mailer.LoadConfig()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load SMTP config")
-		return
-	}
-	if cfg == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"smtp": nil})
-		return
-	}
-
-	// Mask the password in the response.
-	masked := *cfg
-	if masked.Password != "" {
-		masked.Password = "••••••••"
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"smtp": masked})
-}
-
-// handlePutSMTP handles PUT /admin/smtp. Saves the SMTP configuration and
-// validates it by sending a test email to the caller's address. Superadmin-only.
-func (s *Server) handlePutSMTP(w http.ResponseWriter, r *http.Request) {
-	if !s.requireSuperadmin(w, r) {
-		return
-	}
-
-	var cfg mailer.SMTPConfig
-	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-	if cfg.Host == "" || cfg.Port == 0 || cfg.FromEmail == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "host, port, and fromEmail are required")
-		return
-	}
-
-	// Fetch caller email for the validation test.
-	claims := claimsFromContext(r.Context())
-	caller, err := s.users.GetByID(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to send test email")
-		return
-	}
-
-	// Validate by sending a test email before persisting.
-	if err := mailer.SendWithConfig(&cfg, caller.Email, "draba SMTP test", smtpTestBody()); err != nil {
-		slog.Warn("smtp validation failed", "err", err)
-		writeError(w, http.StatusBadRequest, "SMTP_SEND_FAILED", "SMTP validation failed; check server logs for details")
-		return
-	}
-
-	if err := s.mailer.SaveConfig(&cfg); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to save SMTP config")
-		return
-	}
-
-	masked := cfg
-	if masked.Password != "" {
-		masked.Password = "••••••••"
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"smtp": masked})
-}
-
-// handleTestSMTP handles POST /admin/smtp/test. Sends a test email using the
-// provided config without persisting it. Superadmin-only.
-func (s *Server) handleTestSMTP(w http.ResponseWriter, r *http.Request) {
-	if !s.requireSuperadmin(w, r) {
-		return
-	}
-
-	var cfg mailer.SMTPConfig
-	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	claims := claimsFromContext(r.Context())
-	caller, err := s.users.GetByID(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to fetch caller")
-		return
-	}
-
-	if err := mailer.SendWithConfig(&cfg, caller.Email, "draba SMTP test", smtpTestBody()); err != nil {
-		slog.Warn("smtp test failed", "err", err)
-		writeError(w, http.StatusBadRequest, "SMTP_SEND_FAILED", "SMTP test failed; check server logs for details")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]string{"status": "sent", "to": caller.Email})
-}
-
-// handleDeleteSMTP handles DELETE /admin/smtp. Clears the SMTP config.
-// Superadmin-only.
-func (s *Server) handleDeleteSMTP(w http.ResponseWriter, r *http.Request) {
-	if !s.requireSuperadmin(w, r) {
-		return
-	}
-	if err := s.mailer.DeleteConfig(); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to clear SMTP config")
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
-// handleGetAdminSettings handles GET /admin/settings. Returns instance-level
-// defaults. Superadmin-only.
-func (s *Server) handleGetAdminSettings(w http.ResponseWriter, r *http.Request) {
-	if !s.requireSuperadmin(w, r) {
-		return
-	}
-
-	keys := []string{"registration_policy", "default_timezone", "default_date_format", "default_week_start", "instance_name", "accent_color"}
-	settings := make(map[string]string, len(keys))
-	for _, k := range keys {
-		v, err := s.instanceSets.Get(k)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load settings")
-			return
-		}
-		settings[k] = v
-	}
-
-	// Apply defaults for missing keys.
-	if settings["registration_policy"] == "" {
-		settings["registration_policy"] = "invite_only"
-	}
-	if settings["default_timezone"] == "" {
-		settings["default_timezone"] = "UTC"
-	}
-	if settings["default_date_format"] == "" {
-		settings["default_date_format"] = "MMM D, YYYY"
-	}
-	if settings["default_week_start"] == "" {
-		settings["default_week_start"] = "monday"
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{"settings": settings})
-}
-
-// handlePatchAdminSettings handles PATCH /admin/settings. Updates one or more
-// instance-level settings. Superadmin-only.
-func (s *Server) handlePatchAdminSettings(w http.ResponseWriter, r *http.Request) {
-	if !s.requireSuperadmin(w, r) {
-		return
-	}
-
-	var body map[string]string
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	// Validate known keys and values.
-	allowed := map[string]bool{
-		"registration_policy": true,
-		"default_timezone":    true,
-		"default_date_format": true,
-		"default_week_start":  true,
-		"instance_name":       true,
-		"accent_color":        true,
-	}
-	for k := range body {
-		if !allowed[k] {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "unknown setting key: "+k)
-			return
-		}
-	}
-	if v, ok := body["registration_policy"]; ok && v != "invite_only" && v != "open" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "registration_policy must be invite_only or open")
-		return
-	}
-	if v, ok := body["default_week_start"]; ok && v != "monday" && v != "sunday" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "default_week_start must be monday or sunday")
-		return
-	}
-
-	for k, v := range body {
-		if err := s.instanceSets.Set(k, v); err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to save settings")
-			return
-		}
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{"settings": body})
-}
-
-// handleGetPublicBranding handles GET /settings/branding. Returns the
-// instance name and accent color without requiring authentication, so the
-// login page and shared timeline views can display branding before sign-in.
-//
-// Only cosmetic settings are exposed here. Never add sensitive keys (SMTP
-// credentials, JWT secrets, registration policy, etc.) to this handler.
-func (s *Server) handleGetPublicBranding(w http.ResponseWriter, _ *http.Request) {
-	name, _ := s.instanceSets.Get("instance_name")
-	accent, _ := s.instanceSets.Get("accent_color")
-	writeJSON(w, http.StatusOK, map[string]any{
-		"instanceName": name,
-		"accentColor":  accent,
-	})
-}
-
-func smtpTestBody() string {
-	return `<html><body>
-<p>This is a test email from <strong>draba</strong>.</p>
-<p>If you received this, your SMTP configuration is working correctly.</p>
-</body></html>`
-}
 ````
 
 ## File: packages/api/internal/api/authz.go
@@ -27429,58 +28518,277 @@ export default function GanttToolbar({
 }
 ````
 
-## File: packages/web/src/components/BrandingSync.tsx
+## File: packages/web/src/components/gantt/granularity.ts
 ````typescript
 /**
- * BrandingSync — fetches /settings/branding on app start and applies:
- *   - instance name → document.title (and module-level makeDocTitle helper)
- *   - accent color  → --primary CSS variable override on <html>
+ * Time-granularity helpers for the Gantt view.
  *
- * Renders nothing; exists only for side-effects.
- *
- * Page-level title pattern: import makeDocTitle and call it in a useEffect.
- * Example: document.title = makeDocTitle('Settings')  →  "Settings — Acme"
+ * Generates column definitions and maps event date ranges to fractional
+ * column positions at any granularity (day → year).
  */
 
-import { useEffect } from 'react'
-import { usePublicSettings } from '@/hooks/usePublicSettings'
+export type TimeGranularity = 'day' | 'week' | 'month' | 'quarter' | 'year';
 
-// Shared at module level so makeDocTitle is always current without React context.
-let _instanceBaseName = 'draba'
-
-/** Returns a document title following the "{page} — {app}" convention. */
-export function makeDocTitle(pageName?: string): string {
-  return pageName ? `${pageName} — ${_instanceBaseName}` : _instanceBaseName
+export interface ColumnDef {
+  label: string;
+  /** Secondary label rendered on a second line (used for week numbers). */
+  sublabel?: string;
+  start: Date;
+  end: Date;
+  /** Calendar days this column spans (varies for months, quarters, years). */
+  days: number;
 }
 
-/** Hex color guard — rejects anything that isn't a 6-digit hex string. */
-function isValidHex(value: string): boolean {
-  return /^#[0-9a-fA-F]{6}$/.test(value)
+// ── Date helpers ────────────────────────────────────────────────────────────
+//
+// All helpers operate in UTC so that all-day activity dates stored as
+// midnight-UTC strings (e.g. "2026-05-31T00:00:00Z") land on the correct
+// calendar day regardless of the viewer's local timezone.
+//
+// TODO: branch on allDay when timed events ship (Phase 15 calendar sync).
+
+function daysBetween(a: Date, b: Date): number {
+  return Math.round((b.getTime() - a.getTime()) / 86_400_000);
 }
 
-export default function BrandingSync() {
-  const { data } = usePublicSettings()
+function startOfDay(d: Date): Date {
+  const r = new Date(d);
+  r.setUTCHours(0, 0, 0, 0);
+  return r;
+}
 
-  useEffect(() => {
-    if (!data) return
+function startOfWeek(d: Date, weekStart: 'monday' | 'sunday' = 'monday'): Date {
+  const r = startOfDay(d);
+  const day = r.getUTCDay(); // 0=Sun, 1=Mon, …, 6=Sat
+  if (weekStart === 'sunday') {
+    r.setUTCDate(r.getUTCDate() - day);
+  } else {
+    // Monday = ISO week start
+    r.setUTCDate(r.getUTCDate() - ((day + 6) % 7));
+  }
+  return r;
+}
 
-    // Update the module-level name first so makeDocTitle is current for any
-    // page titles set after this effect runs.
-    _instanceBaseName = data.instanceName || 'draba'
-    document.title = makeDocTitle()
+function startOfMonth(d: Date): Date {
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1));
+}
 
-    // Apply accent color override directly to --primary so all Tailwind utilities
-    // (bg-primary, text-primary, ring-primary…) pick it up without extra CSS rules.
-    // Removing the property falls back to the HSL value defined in index.css.
-    const root = document.documentElement
-    if (data.accentColor && isValidHex(data.accentColor)) {
-      root.style.setProperty('--primary', data.accentColor)
-    } else {
-      root.style.removeProperty('--primary')
+function startOfQuarter(d: Date): Date {
+  const q = Math.floor(d.getUTCMonth() / 3) * 3;
+  return new Date(Date.UTC(d.getUTCFullYear(), q, 1));
+}
+
+function startOfYear(d: Date): Date {
+  return new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+}
+
+export function addDays(d: Date, n: number): Date {
+  const r = new Date(d);
+  r.setUTCDate(r.getUTCDate() + n);
+  return r;
+}
+
+function addMonths(d: Date, n: number): Date {
+  const r = new Date(d);
+  r.setUTCMonth(r.getUTCMonth() + n);
+  return r;
+}
+
+function endOfPeriod(start: Date, gran: TimeGranularity): Date {
+  switch (gran) {
+    case 'day':     return addDays(start, 1);
+    case 'week':    return addDays(start, 7);
+    case 'month':   return addMonths(start, 1);
+    case 'quarter': return addMonths(start, 3);
+    case 'year':    return addMonths(start, 12);
+  }
+}
+
+function periodStart(d: Date, gran: TimeGranularity, weekStart: 'monday' | 'sunday' = 'monday'): Date {
+  switch (gran) {
+    case 'day':     return startOfDay(d);
+    case 'week':    return startOfWeek(d, weekStart);
+    case 'month':   return startOfMonth(d);
+    case 'quarter': return startOfQuarter(d);
+    case 'year':    return startOfYear(d);
+  }
+}
+
+// ── Label formatting ────────────────────────────────────────────────────────
+
+/** ISO 8601 week number (1–53). Week 1 contains Jan 4; weeks start Monday. */
+function isoWeekNumber(d: Date): number {
+  const date = new Date(d);
+  date.setUTCHours(0, 0, 0, 0);
+  date.setUTCDate(date.getUTCDate() + 3 - ((date.getUTCDay() + 6) % 7));
+  const week1 = new Date(Date.UTC(date.getUTCFullYear(), 0, 4));
+  return 1 + Math.round(
+    ((date.getTime() - week1.getTime()) / 86_400_000 - 3 + ((week1.getUTCDay() + 6) % 7)) / 7,
+  );
+}
+
+function formatLabel(start: Date, gran: TimeGranularity, locale = 'en-US'): string {
+  switch (gran) {
+    case 'day':
+      return start.toLocaleDateString(locale, { month: 'short', day: 'numeric', timeZone: 'UTC' });
+    case 'week': {
+      const end = addDays(start, 6);
+      const sameMonth = start.getUTCMonth() === end.getUTCMonth();
+      const s = start.toLocaleDateString(locale, { month: 'short', day: 'numeric', timeZone: 'UTC' });
+      const e = sameMonth
+        ? end.getUTCDate().toString()
+        : end.toLocaleDateString(locale, { month: 'short', day: 'numeric', timeZone: 'UTC' });
+      return `${s}–${e}`;
     }
-  }, [data])
+    case 'month':
+      return start.toLocaleDateString(locale, { month: 'short', year: 'numeric', timeZone: 'UTC' });
+    case 'quarter': {
+      const q = Math.floor(start.getUTCMonth() / 3) + 1;
+      return `Q${q} ${start.getUTCFullYear()}`;
+    }
+    case 'year':
+      return start.getUTCFullYear().toString();
+  }
+}
 
-  return null
+// ── Column generation ───────────────────────────────────────────────────────
+
+export interface GenerateColumnsOptions {
+  /** Which day the week grid starts on. Defaults to 'monday' (ISO). */
+  weekStart?: 'monday' | 'sunday';
+  /** BCP 47 locale tag for month name formatting. Defaults to 'en-US'. */
+  locale?: string;
+}
+
+export function generateColumns(
+  viewStart: Date,
+  viewEnd: Date,
+  granularity: TimeGranularity,
+  options?: GenerateColumnsOptions,
+): ColumnDef[] {
+  const weekStart = options?.weekStart ?? 'monday';
+  const locale = options?.locale ?? 'en-US';
+  const columns: ColumnDef[] = [];
+  let cur = periodStart(viewStart, granularity, weekStart);
+
+  while (cur <= viewEnd) {
+    const next = endOfPeriod(cur, granularity);
+    // Clamp to view bounds for the first and last columns
+    const colStart = cur < viewStart ? viewStart : cur;
+    const colEnd = next > addDays(viewEnd, 1) ? addDays(viewEnd, 1) : next;
+    columns.push({
+      label: formatLabel(cur, granularity, locale),
+      sublabel: granularity === 'week' ? `W${isoWeekNumber(cur)}` : undefined,
+      start: cur,
+      end: next,
+      days: daysBetween(colStart, colEnd),
+    });
+    cur = next;
+  }
+
+  return columns;
+}
+
+// ── Event positioning ───────────────────────────────────────────────────────
+
+/** Fractional position within the column array. */
+export function positionInColumns(
+  eventStart: Date,
+  eventEnd: Date,
+  columns: ColumnDef[],
+): { startCol: number; span: number } {
+  if (columns.length === 0) return { startCol: 0, span: 0 };
+
+  const evStartMs = eventStart.getTime();
+  const evEndMs = eventEnd.getTime();
+
+  let startCol = 0;
+  let endCol = columns.length;
+
+  for (let i = 0; i < columns.length; i++) {
+    const col = columns[i];
+    const colStartMs = col.start.getTime();
+    const colEndMs = col.end.getTime();
+    const colSpanMs = colEndMs - colStartMs;
+
+    if (evStartMs >= colStartMs && evStartMs < colEndMs) {
+      startCol = i + (colSpanMs > 0 ? (evStartMs - colStartMs) / colSpanMs : 0);
+    }
+    // End is inclusive day, so add 1 day for positioning
+    const evEndNextDayMs = evEndMs + 86_400_000;
+    if (evEndNextDayMs > colStartMs && evEndNextDayMs <= colEndMs) {
+      endCol = i + (colSpanMs > 0 ? (evEndNextDayMs - colStartMs) / colSpanMs : 1);
+    }
+  }
+
+  const span = Math.max(endCol - startCol, 0.15);
+  return { startCol, span };
+}
+
+// ── Snap divisor ────────────────────────────────────────────────────────────
+
+// Number of snap divisions per column at the given zoom granularity.
+// Higher divisor → finer snap (e.g. week columns snap to individual days).
+export function snapDivisorFor(granularity: TimeGranularity | 'auto'): number {
+  switch (granularity) {
+    case 'week':    return 7;  // snap to day within week
+    case 'month':   return 4;  // snap to week within month
+    case 'quarter': return 3;  // snap to month within quarter
+    case 'year':    return 4;  // snap to quarter within year
+    default:        return 1;  // day or auto → no finer snap
+  }
+}
+
+// ── Today position ──────────────────────────────────────────────────────────
+
+export function todayColumnPosition(columns: ColumnDef[]): number {
+  const now = startOfDay(new Date()); // startOfDay uses setUTCHours → UTC midnight
+  const nowMs = now.getTime();
+
+  for (let i = 0; i < columns.length; i++) {
+    const col = columns[i];
+    const colStartMs = col.start.getTime();
+    const colEndMs = col.end.getTime();
+    if (nowMs >= colStartMs && nowMs < colEndMs) {
+      const colSpanMs = colEndMs - colStartMs;
+      return i + (colSpanMs > 0 ? (nowMs - colStartMs) / colSpanMs : 0.5);
+    }
+  }
+  return -1;
+}
+
+// ── Auto-fit ────────────────────────────────────────────────────────────────
+
+const GRANULARITIES: TimeGranularity[] = ['day', 'week', 'month', 'quarter', 'year'];
+const BASE_COL_WIDTH = 80;
+
+export function autoFitGranularity(
+  viewStart: Date,
+  viewEnd: Date,
+  viewportWidth: number,
+): TimeGranularity {
+  const targetCols = Math.max(viewportWidth / BASE_COL_WIDTH, 2);
+
+  let best: TimeGranularity = 'month';
+  let bestDiff = Infinity;
+
+  for (const gran of GRANULARITIES) {
+    const cols = generateColumns(viewStart, viewEnd, gran).length;
+    if (cols < 2) continue;
+    // Prefer the finest granularity that fits within 50-150% of viewport
+    const ratio = cols / targetCols;
+    if (ratio >= 0.4 && ratio <= 1.5) {
+      // Within range — prefer finest (earliest in array)
+      return gran;
+    }
+    const diff = Math.abs(ratio - 1);
+    if (diff < bestDiff) {
+      bestDiff = diff;
+      best = gran;
+    }
+  }
+
+  return best;
 }
 ````
 
@@ -29564,55 +30872,6 @@ export function useFilter(): FilterContextValue {
 }
 ````
 
-## File: packages/web/src/hooks/useFormatDate.ts
-````typescript
-/**
- * useFormatDate — returns a formatter that respects the user's stored
- * date_format preference.
- *
- * Supported formats (matching PreferencesPage options):
- *   "MMM D, YYYY"  → "Jan 5, 2026"
- *   "MM/DD/YYYY"   → "01/05/2026"
- *   "DD/MM/YYYY"   → "05/01/2026"
- *   "YYYY-MM-DD"   → "2026-01-05"
- */
-
-import { useCallback } from 'react'
-import { usePreferenceMap } from '@/hooks/usePreferences'
-
-export type DateFormat = 'MMM D, YYYY' | 'MM/DD/YYYY' | 'DD/MM/YYYY' | 'YYYY-MM-DD'
-
-function pad2(n: number): string {
-  return n.toString().padStart(2, '0')
-}
-
-/** Pure formatting function — exported for use outside React (utilities, tests). */
-export function formatDate(date: Date, fmt: string): string {
-  const y = date.getFullYear()
-  const m = date.getMonth() + 1
-  const d = date.getDate()
-
-  switch (fmt) {
-    case 'MM/DD/YYYY':
-      return `${pad2(m)}/${pad2(d)}/${y}`
-    case 'DD/MM/YYYY':
-      return `${pad2(d)}/${pad2(m)}/${y}`
-    case 'YYYY-MM-DD':
-      return `${y}-${pad2(m)}-${pad2(d)}`
-    default:
-      // "MMM D, YYYY" — default
-      return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
-  }
-}
-
-/** Returns a stable formatter function for the user's date_format preference. */
-export function useFormatDate(): (date: Date) => string {
-  const prefMap = usePreferenceMap()
-  const fmt = (prefMap['date_format'] as string | undefined) ?? 'MMM D, YYYY'
-  return useCallback((date: Date) => formatDate(date, fmt), [fmt])
-}
-````
-
 ## File: packages/web/src/hooks/useSavedFilters.ts
 ````typescript
 /**
@@ -29909,814 +31168,63 @@ export function applyActiveFilter(
 }
 ````
 
-## File: packages/web/src/pages/settings/OrganizationPage.tsx
+## File: packages/web/vite.config.ts
 ````typescript
-/**
- * /settings/organization — Superadmin: organization name, registration policy,
- * and system-wide defaults (language placeholder, timezone, week start).
- * Language support is deferred to Phase 10.7 — Localization & Language Support.
- */
+/// <reference types="vitest" />
+import path from 'path'
+import { defineConfig, loadEnv } from 'vite'
+import react from '@vitejs/plugin-react'
+import tailwindcss from '@tailwindcss/vite'
 
-import { useState, useEffect } from 'react'
-import { useAdminSettings, usePatchAdminSettings } from '@/hooks/useSettings'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import { Button } from '@/components/ui/button'
+export default defineConfig(({ mode }) => {
+  const env = loadEnv(mode, process.cwd(), '')
+  const apiTarget = env.VITE_API_TARGET ?? 'http://localhost:8080'
 
-export default function OrganizationPage() {
-  const { data } = useAdminSettings()
-  const patch = usePatchAdminSettings()
-
-  const settings = data?.settings ?? {}
-  const [orgName, setOrgName] = useState('')
-  const [accentColor, setAccentColor] = useState('')
-  // Validated hex to submit — only a well-formed #RRGGBB is sent to the API.
-  const accentColorValid = accentColor === '' || /^#[0-9a-fA-F]{6}$/.test(accentColor)
-  const [regPolicy, setRegPolicy] = useState('invite_only')
-  const [timezone, setTimezone] = useState('UTC')
-  const [weekStart, setWeekStart] = useState('monday')
-  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
-
-  useEffect(() => {
-    setOrgName(settings.instance_name || '')
-    setAccentColor(settings.accent_color || '')
-    setRegPolicy(settings.registration_policy || 'invite_only')
-    setTimezone(settings.default_timezone || 'UTC')
-    setWeekStart(settings.default_week_start || 'monday')
-  }, [JSON.stringify(settings)])
-
-  async function handleSave() {
-    setFeedback(null)
-    try {
-      await patch.mutateAsync({
-        instance_name: orgName,
-        // Only submit a valid hex value; empty string clears the override.
-        accent_color: accentColorValid ? accentColor : '',
-        registration_policy: regPolicy,
-        default_timezone: timezone,
-        default_week_start: weekStart,
-      })
-      setFeedback({ type: 'success', msg: 'Settings saved.' })
-      setTimeout(() => setFeedback(null), 2000)
-    } catch {
-      setFeedback({ type: 'error', msg: 'Failed to save settings. Please try again.' })
-    }
+  return {
+    plugins: [
+      react(),
+      tailwindcss(),
+    ],
+    resolve: {
+      alias: {
+        '@': path.resolve(__dirname, './src'),
+      },
+    },
+    test: {
+      environment: 'jsdom',
+      globals: true,
+      alias: {
+        '@': path.resolve(__dirname, './src'),
+      },
+    },
+    server: {
+      proxy: {
+        '/setup': { target: apiTarget, changeOrigin: true },
+        '/auth': { target: apiTarget, changeOrigin: true },
+        '/users': { target: apiTarget, changeOrigin: true },
+        '/admin': { target: apiTarget, changeOrigin: true },
+        '/settings': { target: apiTarget, changeOrigin: true },
+        '/tokens': { target: apiTarget, changeOrigin: true },
+        '/teams': { target: apiTarget, changeOrigin: true },
+        '/timelines': { target: apiTarget, changeOrigin: true },
+        '/status-templates': { target: apiTarget, changeOrigin: true },
+        '/status-template-items': { target: apiTarget, changeOrigin: true },
+        '/statuses': { target: apiTarget, changeOrigin: true },
+        '/activities': { target: apiTarget, changeOrigin: true },
+        '/tags': { target: apiTarget, changeOrigin: true },
+        '/saved_filters': { target: apiTarget, changeOrigin: true },
+        '/events': { target: apiTarget, changeOrigin: true },
+        '/health': { target: apiTarget, changeOrigin: true },
+        '/ws': {
+          target: apiTarget.replace(/^http/, 'ws'),
+          changeOrigin: true,
+          ws: true,
+          rewriteWsOrigin: true,
+        },
+      },
+    },
   }
-
-  return (
-    <div>
-      <h2 className="text-[17px] font-semibold text-foreground mb-1">Organization</h2>
-      <p className="text-sm text-muted-foreground mb-6">
-        System-wide identity and defaults for this draba installation.
-      </p>
-
-      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
-        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-4">
-          Identity
-        </h3>
-
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Organization name</Label>
-          <Input
-            value={orgName}
-            onChange={e => setOrgName(e.target.value)}
-            placeholder="My Company"
-            className="max-w-xs"
-          />
-          <p className="text-xs text-muted-foreground m-0">
-            Shown in the browser tab title and login page.
-          </p>
-        </div>
-
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Accent color</Label>
-          <div className="flex items-center gap-3">
-            <input
-              type="color"
-              value={accentColor || '#288C9B'}
-              onChange={e => setAccentColor(e.target.value)}
-              className="h-9 w-14 rounded border border-border cursor-pointer bg-transparent"
-            />
-            <Input
-              value={accentColor}
-              onChange={e => setAccentColor(e.target.value)}
-              placeholder="#288C9B"
-              className={`max-w-[140px] font-mono text-[13px] ${!accentColorValid ? 'border-destructive' : ''}`}
-            />
-            {accentColor && (
-              <button
-                type="button"
-                onClick={() => setAccentColor('')}
-                className="text-xs text-muted-foreground hover:text-foreground cursor-pointer bg-transparent border-none"
-              >
-                Reset
-              </button>
-            )}
-          </div>
-          {!accentColorValid && (
-            <p className="text-xs text-destructive m-0">Must be a 6-digit hex color (e.g. #288C9B).</p>
-          )}
-          <p className="text-xs text-muted-foreground m-0">
-            Overrides the primary color globally. Leave blank to use the default teal.
-          </p>
-        </div>
-
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Registration policy</Label>
-          <div className="flex gap-2">
-            {[
-              { v: 'invite_only', label: 'Invite only' },
-              { v: 'open', label: 'Open registration' },
-            ].map(({ v, label }) => (
-              <button
-                key={v}
-                onClick={() => setRegPolicy(v)}
-                className={`px-3.5 py-1.5 rounded-md text-[13px] border cursor-pointer ${
-                  regPolicy === v
-                    ? 'border-primary bg-primary/10 text-primary'
-                    : 'border-border bg-popover text-muted-foreground'
-                }`}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
-        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-2">
-          System defaults
-        </h3>
-        <p className="text-xs text-muted-foreground mb-4">
-          Applied to new accounts when the user hasn't set their own preference.
-        </p>
-
-        {/* Language placeholder — Phase 10.7 */}
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Default language</Label>
-          <select
-            disabled
-            className="bg-popover border border-border rounded-md text-foreground px-3 py-2 text-[13px] max-w-[240px] opacity-60 cursor-not-allowed"
-          >
-            <option value="en">English (en)</option>
-          </select>
-          <p className="text-xs text-muted-foreground m-0">
-            Additional languages coming in a future release (Phase 10.7).
-          </p>
-        </div>
-
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Default timezone</Label>
-          <select
-            value={timezone}
-            onChange={e => setTimezone(e.target.value)}
-            className="bg-popover border border-border rounded-md text-foreground px-3 py-2 text-[13px] cursor-pointer max-w-[280px]"
-          >
-            {['UTC', 'America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles',
-              'Europe/London', 'Europe/Paris', 'Asia/Tokyo', 'Australia/Sydney'].map(tz => (
-              <option key={tz} value={tz}>{tz}</option>
-            ))}
-          </select>
-        </div>
-
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Default week starts on</Label>
-          <div className="flex gap-2">
-            {(['monday', 'sunday'] as const).map(d => (
-              <button
-                key={d}
-                onClick={() => setWeekStart(d)}
-                className={`px-3.5 py-1.5 rounded-md text-[13px] border cursor-pointer capitalize ${
-                  weekStart === d
-                    ? 'border-primary bg-primary/10 text-primary'
-                    : 'border-border bg-popover text-muted-foreground'
-                }`}
-              >
-                {d}
-              </button>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      {feedback && (
-        <p className={`text-[13px] mb-3 ${feedback.type === 'success' ? 'text-success' : 'text-destructive'}`}>
-          {feedback.msg}
-        </p>
-      )}
-      <Button onClick={handleSave} disabled={patch.isPending}>
-        {patch.isPending ? 'Saving…' : 'Save settings'}
-      </Button>
-    </div>
-  )
-}
-````
-
-## File: packages/web/src/pages/settings/PreferencesPage.tsx
-````typescript
-/**
- * /settings/preferences — Regional settings, appearance theme, default team/timeline.
- * Values are stored via the existing GET/PUT /users/me/preferences endpoints.
- * Theme changes apply immediately via useDarkMode; the server value syncs on next login.
- */
-
-import { useState, useEffect } from 'react'
-import { usePreferenceMap, useUpsertPreference } from '@/hooks/usePreferences'
-import { useDarkMode } from '@/hooks/useDarkMode'
-import { Label } from '@/components/ui/label'
-import { Button } from '@/components/ui/button'
-
-const TIMEZONES = [
-  'UTC',
-  'America/New_York',
-  'America/Chicago',
-  'America/Denver',
-  'America/Los_Angeles',
-  'America/Anchorage',
-  'Pacific/Honolulu',
-  'Europe/London',
-  'Europe/Paris',
-  'Europe/Berlin',
-  'Europe/Moscow',
-  'Asia/Dubai',
-  'Asia/Kolkata',
-  'Asia/Singapore',
-  'Asia/Tokyo',
-  'Australia/Sydney',
-]
-
-const DATE_FORMATS = [
-  { value: 'MMM D, YYYY', label: 'Jan 5, 2026' },
-  { value: 'MM/DD/YYYY', label: '01/05/2026' },
-  { value: 'DD/MM/YYYY', label: '05/01/2026' },
-  { value: 'YYYY-MM-DD', label: '2026-01-05' },
-]
-
-const selectCls = 'bg-popover border border-border rounded-md text-foreground px-3 py-2 text-[13px] cursor-pointer max-w-xs'
-
-export default function PreferencesPage() {
-  const prefMap = usePreferenceMap()
-  const upsert = useUpsertPreference()
-  const { theme: currentTheme, applyTheme } = useDarkMode()
-
-  const [timezone, setTimezone] = useState('UTC')
-  const [dateFormat, setDateFormat] = useState('MMM D, YYYY')
-  const [weekStart, setWeekStart] = useState('monday')
-  const [theme, setTheme] = useState<'light' | 'dark'>(currentTheme)
-  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
-
-  useEffect(() => {
-    setTimezone((prefMap['timezone'] as string | undefined) ?? 'UTC')
-    setDateFormat((prefMap['date_format'] as string | undefined) ?? 'MMM D, YYYY')
-    setWeekStart((prefMap['week_start'] as string | undefined) ?? 'monday')
-    const savedTheme = prefMap['theme'] as string | undefined
-    if (savedTheme === 'dark' || savedTheme === 'light') setTheme(savedTheme)
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- prefMap object identity changes on every fetch; JSON.stringify stabilizes the dep without pulling in the whole map
-  }, [JSON.stringify(prefMap)])
-
-  function handleThemeChange(t: 'light' | 'dark') {
-    setTheme(t)
-    applyTheme(t)
-  }
-
-  async function handleSave() {
-    setFeedback(null)
-    try {
-      await Promise.all([
-        upsert.mutateAsync({ key: 'timezone', value: JSON.stringify(timezone) }),
-        upsert.mutateAsync({ key: 'date_format', value: JSON.stringify(dateFormat) }),
-        upsert.mutateAsync({ key: 'week_start', value: JSON.stringify(weekStart) }),
-        upsert.mutateAsync({ key: 'theme', value: JSON.stringify(theme) }),
-      ])
-      setFeedback({ type: 'success', msg: 'Preferences saved.' })
-      setTimeout(() => setFeedback(null), 2000)
-    } catch {
-      setFeedback({ type: 'error', msg: 'Failed to save preferences. Please try again.' })
-    }
-  }
-
-  return (
-    <div>
-      <h2 className="text-[17px] font-semibold text-foreground mb-1">Preferences</h2>
-      <p className="text-sm text-muted-foreground mb-6">
-        Personal appearance and regional settings.
-      </p>
-
-      {/* Regional */}
-      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
-        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-4">
-          Regional
-        </h3>
-
-        {/* Language placeholder — Phase 10.7 */}
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Language</Label>
-          <select disabled className={`${selectCls} opacity-60 cursor-not-allowed`}>
-            <option value="en">English (en)</option>
-          </select>
-          <p className="text-xs text-muted-foreground m-0">
-            Additional languages coming in a future release (Phase 10.7).
-          </p>
-        </div>
-
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Timezone</Label>
-          <select value={timezone} onChange={e => setTimezone(e.target.value)} className={selectCls}>
-            {TIMEZONES.map(tz => (
-              <option key={tz} value={tz}>{tz}</option>
-            ))}
-          </select>
-        </div>
-
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Date format</Label>
-          <select value={dateFormat} onChange={e => setDateFormat(e.target.value)} className={selectCls}>
-            {DATE_FORMATS.map(f => (
-              <option key={f.value} value={f.value}>{f.label}</option>
-            ))}
-          </select>
-        </div>
-
-        <div className="flex flex-col gap-1.5 mb-4">
-          <Label>Week starts on</Label>
-          <div className="flex gap-2">
-            {(['monday', 'sunday'] as const).map(d => (
-              <button
-                key={d}
-                onClick={() => setWeekStart(d)}
-                className={`px-4 py-1.5 rounded-md text-[13px] border cursor-pointer capitalize ${
-                  weekStart === d
-                    ? 'border-primary bg-primary/10 text-primary'
-                    : 'border-border bg-popover text-muted-foreground'
-                }`}
-              >
-                {d}
-              </button>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      {/* Appearance */}
-      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
-        <h3 className="text-[13px] font-semibold text-muted-foreground uppercase tracking-[0.5px] mb-4">
-          Appearance
-        </h3>
-        <div className="flex flex-col gap-1.5 mb-2">
-          <Label>Theme</Label>
-          <div className="flex gap-2">
-            {(['light', 'dark'] as const).map(t => (
-              <button
-                key={t}
-                onClick={() => handleThemeChange(t)}
-                className={`px-4 py-1.5 rounded-md text-[13px] border cursor-pointer capitalize ${
-                  theme === t
-                    ? 'border-primary bg-primary/10 text-primary'
-                    : 'border-border bg-popover text-muted-foreground'
-                }`}
-              >
-                {t}
-              </button>
-            ))}
-          </div>
-          <p className="text-xs text-muted-foreground m-0">
-            Applies immediately. Persisted server-side so it syncs across devices.
-          </p>
-        </div>
-      </div>
-
-      {feedback && (
-        <p className={`text-[13px] mb-3 ${feedback.type === 'success' ? 'text-success' : 'text-destructive'}`}>
-          {feedback.msg}
-        </p>
-      )}
-
-      <Button onClick={handleSave} disabled={upsert.isPending}>
-        {upsert.isPending ? 'Saving…' : 'Save preferences'}
-      </Button>
-    </div>
-  )
-}
-````
-
-## File: packages/web/src/pages/LoginPage.tsx
-````typescript
-import { useState } from 'react'
-import { useNavigate, useLocation, Link } from 'react-router-dom'
-import { Eye, EyeOff, Check, Loader2 } from 'lucide-react'
-import { useAuth } from '@/contexts/AuthContext'
-import { ApiError } from '@/lib/api'
-import DarkModeToggle from '@/components/DarkModeToggle'
-import { usePublicSettings } from '@/hooks/usePublicSettings'
-
-// ── Floating-label input ─────────────────────────────────────────────────────
-
-interface FloatInputProps {
-  id: string
-  label: string
-  type: string
-  value: string
-  autoComplete: string
-  error?: string | null
-  onChange: (v: string) => void
-  onKeyDown?: (e: React.KeyboardEvent) => void
-  rightSlot?: React.ReactNode
-}
-
-function FloatInput({ id, label, type, value, autoComplete, error, onChange, onKeyDown, rightSlot }: FloatInputProps) {
-  const [focused, setFocused] = useState(false)
-  const floated = focused || value.length > 0
-
-  const borderColor = error
-    ? '#e74c3c'
-    : focused
-    ? '#288C9B'
-    : 'hsl(210 15% 24%)'
-
-  const boxShadow = error
-    ? '0 0 0 3px rgba(231,76,60,0.15)'
-    : focused
-    ? '0 0 0 3px rgba(40,140,155,0.18)'
-    : 'none'
-
-  const labelColor = error
-    ? '#e74c3c'
-    : focused
-    ? '#5BC0DE'
-    : 'hsl(210 15% 65%)'
-
-  return (
-    <div>
-      <div style={{
-        position: 'relative',
-        borderRadius: 8,
-        border: `1px solid ${borderColor}`,
-        background: 'hsl(210 15% 17%)',
-        transition: 'border-color 180ms ease, box-shadow 180ms ease',
-        boxShadow,
-      }}>
-        {/* Floating label */}
-        <label
-          htmlFor={id}
-          style={{
-            position: 'absolute',
-            left: 14,
-            top: floated ? 8 : '50%',
-            transform: floated ? 'none' : 'translateY(-50%)',
-            fontSize: floated ? 11 : 14,
-            letterSpacing: floated ? '0.06em' : 0,
-            textTransform: floated ? 'uppercase' : 'none',
-            fontWeight: 600,
-            color: labelColor,
-            transition: 'all 160ms cubic-bezier(0.4, 0, 0.2, 1)',
-            pointerEvents: 'none',
-            userSelect: 'none',
-          }}
-        >
-          {label}
-        </label>
-
-        <input
-          id={id}
-          type={type}
-          autoComplete={autoComplete}
-          value={value}
-          onChange={e => onChange(e.target.value)}
-          onFocus={() => setFocused(true)}
-          onBlur={() => setFocused(false)}
-          onKeyDown={onKeyDown}
-          style={{
-            width: '100%',
-            padding: '22px 42px 8px 14px',
-            background: 'transparent',
-            border: 'none',
-            outline: 'none',
-            fontSize: 15,
-            color: 'hsl(210 17% 93%)',
-            fontFamily: 'inherit',
-            lineHeight: 1.4,
-            boxSizing: 'border-box',
-          }}
-        />
-
-        {rightSlot && (
-          <div style={{
-            position: 'absolute',
-            right: 12,
-            top: '50%',
-            transform: 'translateY(-50%)',
-          }}>
-            {rightSlot}
-          </div>
-        )}
-      </div>
-
-      {error && (
-        <p style={{ fontSize: 12, color: '#e74c3c', margin: '5px 0 0 2px' }}>{error}</p>
-      )}
-    </div>
-  )
-}
-
-// ── Spinner ──────────────────────────────────────────────────────────────────
-
-function Spinner() {
-  return (
-    <Loader2
-      size={16}
-      strokeWidth={2.5}
-      color="rgba(255,255,255,0.8)"
-      style={{ animation: 'spin 0.8s linear infinite' }}
-    />
-  )
-}
-
-// ── Main page ────────────────────────────────────────────────────────────────
-
-export default function LoginPage() {
-  const { login } = useAuth()
-  const navigate = useNavigate()
-  const location = useLocation()
-  const from = (location.state as { from?: { pathname: string } } | null)?.from?.pathname ?? '/'
-  const { data: branding } = usePublicSettings()
-  const instanceName = branding?.instanceName || 'draba'
-
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
-  const [showPassword, setShowPassword] = useState(false)
-  const [emailError, setEmailError] = useState<string | null>(null)
-  const [passwordError, setPasswordError] = useState<string | null>(null)
-  const [serverError, setServerError] = useState<string | null>(null)
-  const [loading, setLoading] = useState(false)
-  const [success, setSuccess] = useState(false)
-
-  function validateAndSubmit() {
-    let valid = true
-    setServerError(null)
-
-    if (!email.trim()) {
-      setEmailError('Email is required')
-      valid = false
-    } else if (!/\S+@\S+\.\S+/.test(email)) {
-      setEmailError('Enter a valid email')
-      valid = false
-    } else {
-      setEmailError(null)
-    }
-
-    if (!password) {
-      setPasswordError('Password is required')
-      valid = false
-    } else if (password.length < 6) {
-      setPasswordError('Password must be at least 6 characters')
-      valid = false
-    } else {
-      setPasswordError(null)
-    }
-
-    if (!valid) return
-    doLogin()
-  }
-
-  async function doLogin() {
-    setLoading(true)
-    try {
-      await login(email, password)
-      setSuccess(true)
-      // Brief success flash then navigate
-      setTimeout(() => navigate(from, { replace: true }), 600)
-    } catch (err) {
-      if (err instanceof ApiError) {
-        setServerError(err.message)
-      } else {
-        setServerError('Something went wrong. Please try again.')
-      }
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  function handleSubmit(e: React.FormEvent) {
-    e.preventDefault()
-    validateAndSubmit()
-  }
-
-  return (
-    <div style={{
-      minHeight: '100vh',
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      background: 'var(--background)',
-      padding: '24px',
-      position: 'relative',
-    }}>
-      {/* Teal radial glow behind card */}
-      <div style={{
-        position: 'fixed',
-        inset: 0,
-        background: 'radial-gradient(ellipse 60% 50% at 20% 50%, rgba(40,140,155,0.12) 0%, transparent 70%)',
-        pointerEvents: 'none',
-      }} />
-
-      {/* Dark mode toggle */}
-      <div style={{ position: 'fixed', top: 16, right: 16, zIndex: 10 }}>
-        <DarkModeToggle />
-      </div>
-
-      {/* Card */}
-      <div style={{
-        width: '100%',
-        maxWidth: 860,
-        minHeight: 520,
-        borderRadius: 16,
-        overflow: 'hidden',
-        display: 'flex',
-        boxShadow: '0 32px 80px -12px rgba(0,0,0,0.55), 0 0 0 1px rgba(255,255,255,0.06)',
-        position: 'relative',
-        zIndex: 1,
-      }}>
-
-        {/* ── Left panel — brand ─────────────────────────────────────── */}
-        <div style={{
-          width: '38%',
-          flexShrink: 0,
-          background: 'linear-gradient(155deg, #2aa5b8 0%, #1c7585 60%, #145f6e 100%)',
-          display: 'flex',
-          flexDirection: 'column',
-          alignItems: 'center',
-          justifyContent: 'center',
-          gap: 4,
-          padding: '48px 32px',
-          position: 'relative',
-          overflow: 'hidden',
-        }}>
-          {/* Decorative circles */}
-          <div style={{ width: 220, height: 220, borderRadius: '50%', background: 'rgba(255,255,255,0.07)', position: 'absolute', top: -60, left: -60, pointerEvents: 'none' }} />
-          <div style={{ width: 160, height: 160, borderRadius: '50%', background: 'rgba(255,255,255,0.05)', position: 'absolute', bottom: -40, right: -40, pointerEvents: 'none' }} />
-
-          {/* Logo — 2× the handoff's 88px */}
-          <img
-            src="/logo-color.svg"
-            alt="draba"
-            style={{ width: 270, height: 270, filter: 'drop-shadow(0 4px 16px rgba(0,0,0,0.25))', position: 'relative', marginTop: '-15px', marginBottom: '-47px' }}
-          />
-
-          <div style={{ position: 'relative', textAlign: 'center' }}>
-            <div style={{ fontSize: 28, fontWeight: 700, color: '#fff', letterSpacing: '-0.01em', textShadow: '0 2px 8px rgba(0,0,0,0.2)' }}>
-              {instanceName}
-            </div>
-            <div style={{ fontSize: 13, fontWeight: 400, color: 'rgba(255,255,255,0.72)', lineHeight: 1.5, marginTop: 8 }}>
-              Team coordination,<br />simplified.
-            </div>
-          </div>
-        </div>
-
-        {/* ── Right panel — form ─────────────────────────────────────── */}
-        <div style={{
-          flex: 1,
-          background: 'var(--card)',
-          padding: '52px 48px',
-          display: 'flex',
-          flexDirection: 'column',
-          justifyContent: 'center',
-        }}>
-          {success ? (
-            /* Success state */
-            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', textAlign: 'center', gap: 0 }}>
-              <div style={{
-                width: 56, height: 56, borderRadius: '50%',
-                background: 'rgba(40,140,155,0.15)', border: '2px solid #288C9B',
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                margin: '0 auto 20px',
-              }}>
-                <Check size={24} color="#288C9B" strokeWidth={2.5} />
-              </div>
-              <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--foreground)', marginBottom: 8 }}>
-                You're signed in
-              </div>
-              <div style={{ fontSize: 14, color: 'var(--muted-foreground)' }}>
-                Redirecting to your timeline…
-              </div>
-            </div>
-          ) : (
-            <form onSubmit={handleSubmit} noValidate>
-              {/* Heading */}
-              <div style={{ marginBottom: 28 }}>
-                <h1 style={{ fontSize: 28, fontWeight: 700, color: 'hsl(210 17% 93%)', letterSpacing: '-0.02em', margin: '0 0 6px' }}>
-                  Sign in
-                </h1>
-                <p style={{ fontSize: 14, color: 'hsl(210 15% 52%)', margin: 0 }}>
-                  Welcome back — sign in to your account.
-                </p>
-              </div>
-
-              {/* Fields */}
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 14, marginBottom: 24 }}>
-                <FloatInput
-                  id="email"
-                  label="Email"
-                  type="email"
-                  autoComplete="email"
-                  value={email}
-                  error={emailError}
-                  onChange={v => { setEmail(v); if (emailError) setEmailError(null) }}
-                />
-
-                <FloatInput
-                  id="password"
-                  label="Password"
-                  type={showPassword ? 'text' : 'password'}
-                  autoComplete="current-password"
-                  value={password}
-                  error={passwordError}
-                  onChange={v => { setPassword(v); if (passwordError) setPasswordError(null) }}
-                  rightSlot={
-                    <button
-                      type="button"
-                      onClick={() => setShowPassword(s => !s)}
-                      style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'hsl(210 15% 52%)', display: 'flex', padding: 0 }}
-                    >
-                      {showPassword ? <EyeOff size={18} strokeWidth={1.5} /> : <Eye size={18} strokeWidth={1.5} />}
-                    </button>
-                  }
-                />
-              </div>
-
-              {/* Forgot password */}
-              <div style={{ textAlign: 'right', marginBottom: 22, marginTop: -6 }}>
-                <Link
-                  to="/forgot-password"
-                  style={{ fontSize: 13, fontWeight: 600, color: '#5BC0DE', textDecoration: 'none' }}
-                  onMouseEnter={e => (e.currentTarget.style.textDecoration = 'underline')}
-                  onMouseLeave={e => (e.currentTarget.style.textDecoration = 'none')}
-                >
-                  Forgot password?
-                </Link>
-              </div>
-
-              {/* Server error */}
-              {serverError && (
-                <p style={{ fontSize: 13, color: '#e74c3c', margin: '0 0 16px' }}>{serverError}</p>
-              )}
-
-              {/* Sign in button */}
-              <button
-                type="submit"
-                disabled={loading}
-                style={{
-                  width: '100%',
-                  padding: '14px',
-                  borderRadius: 8,
-                  border: 'none',
-                  background: loading
-                    ? 'hsl(188 40% 35%)'
-                    : 'linear-gradient(135deg, #2aa5b8 0%, #1e8a9c 100%)',
-                  color: '#fff',
-                  fontSize: 15,
-                  fontWeight: 700,
-                  letterSpacing: '0.01em',
-                  boxShadow: loading ? 'none' : '0 4px 20px rgba(40,140,155,0.35)',
-                  cursor: loading ? 'not-allowed' : 'pointer',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  gap: 8,
-                  fontFamily: 'inherit',
-                  transition: 'opacity 160ms ease, transform 160ms ease, box-shadow 160ms ease',
-                }}
-                onMouseEnter={e => { if (!loading) { e.currentTarget.style.opacity = '0.92'; e.currentTarget.style.transform = 'translateY(-1px)' } }}
-                onMouseLeave={e => { e.currentTarget.style.opacity = '1'; e.currentTarget.style.transform = 'translateY(0)' }}
-                onMouseDown={e => { if (!loading) e.currentTarget.style.transform = 'scale(0.98)' }}
-                onMouseUp={e => { if (!loading) e.currentTarget.style.transform = 'translateY(-1px)' }}
-              >
-                {loading && <Spinner />}
-                {loading ? 'Signing in…' : 'Sign in'}
-              </button>
-
-              {/* Register link */}
-              <p style={{ marginTop: 24, fontSize: 13, textAlign: 'center', color: 'hsl(210 15% 52%)' }}>
-                Have an invite?{' '}
-                <Link
-                  to="/register"
-                  style={{ color: '#5BC0DE', fontWeight: 600, textDecoration: 'none' }}
-                  onMouseEnter={e => (e.currentTarget.style.textDecoration = 'underline')}
-                  onMouseLeave={e => (e.currentTarget.style.textDecoration = 'none')}
-                >
-                  Create an account
-                </Link>
-              </p>
-            </form>
-          )}
-        </div>
-      </div>
-
-      {/* Keyframe for spinner */}
-      <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
-    </div>
-  )
-}
+})
 ````
 
 ## File: packages/api/internal/api/api_types.gen.go
@@ -31234,6 +31742,289 @@ type CreateSavedFilterJSONRequestBody CreateSavedFilterJSONBody
 type CreateTimelineJSONRequestBody CreateTimelineJSONBody
 ````
 
+## File: packages/api/internal/api/server.go
+````go
+// Package api hosts the HTTP handlers, routing, and middleware for the
+// draba REST API. Handlers are intentionally thin: they decode requests,
+// delegate to repositories and services, and write responses. Business
+// logic belongs in the domain packages, not here.
+package api
+
+import (
+	"fmt"
+	"io/fs"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/auth"
+	"github.com/I0-1O/draba/packages/api/internal/db"
+	"github.com/I0-1O/draba/packages/api/internal/events"
+	"github.com/I0-1O/draba/packages/api/internal/mailer"
+	"github.com/I0-1O/draba/packages/api/internal/models"
+	"github.com/I0-1O/draba/packages/api/internal/tier"
+	"github.com/I0-1O/draba/packages/api/internal/ws"
+)
+
+// TimelineStore is the persistence interface required by timeline handlers.
+// The concrete implementation is *db.TimelineRepo; tests may substitute a fake.
+type TimelineStore interface {
+	Create(t *models.Timeline) error
+	GetByID(id string) (*models.Timeline, error)
+	GetByShareToken(token string) (*models.Timeline, error)
+	ListByTeam(teamID string, includeArchived bool) ([]*models.Timeline, error)
+	HasAccess(timelineID, teamMemberID string) (bool, error)
+	GrantAccess(timelineID, teamMemberID, role string) error
+	RevokeAccess(timelineID, teamMemberID string) error
+	GetAccessRole(timelineID, teamMemberID string) (string, error)
+	ListAccess(timelineID string) ([]*models.TimelineAccessEntry, error)
+	SetArchived(id string, at *time.Time) error
+	Update(t *models.Timeline) error
+	Delete(id string) error
+}
+
+// Server holds shared dependencies for all HTTP handlers.
+type Server struct {
+	users          *db.UserRepo
+	invites        *db.InviteRepo
+	teams          *db.TeamRepo
+	activities     *db.ActivityRepo
+	timelines      TimelineStore
+	savedFilters   *db.SavedFilterRepo
+	preferences    *db.UserPreferenceRepo
+	apiTokens      *db.APITokenRepo
+	instanceSets   *db.InstanceSettingsRepo
+	passwordTokens *db.PasswordResetTokenRepo
+	statuses       *db.StatusRepo
+	tags           *db.TagRepo
+	mailer         *mailer.Mailer
+	tokens         *auth.TokenService
+	tier           tier.Tier
+	bus            *events.Bus
+	hub            *ws.Hub
+	uiFS           fs.FS
+}
+
+// NewServer constructs a Server with its required dependencies. It does not
+// touch the network; call Routes to obtain the http.Handler to serve.
+func NewServer(
+	users *db.UserRepo,
+	invites *db.InviteRepo,
+	teams *db.TeamRepo,
+	activitiesRepo *db.ActivityRepo,
+	timelinesRepo TimelineStore,
+	savedFiltersRepo *db.SavedFilterRepo,
+	preferencesRepo *db.UserPreferenceRepo,
+	apiTokensRepo *db.APITokenRepo,
+	instanceSetsRepo *db.InstanceSettingsRepo,
+	passwordTokensRepo *db.PasswordResetTokenRepo,
+	statusesRepo *db.StatusRepo,
+	tagsRepo *db.TagRepo,
+	m *mailer.Mailer,
+	tokens *auth.TokenService,
+	t tier.Tier,
+	bus *events.Bus,
+	hub *ws.Hub,
+) *Server {
+	return &Server{
+		users:          users,
+		invites:        invites,
+		teams:          teams,
+		activities:     activitiesRepo,
+		timelines:      timelinesRepo,
+		savedFilters:   savedFiltersRepo,
+		preferences:    preferencesRepo,
+		apiTokens:      apiTokensRepo,
+		instanceSets:   instanceSetsRepo,
+		passwordTokens: passwordTokensRepo,
+		statuses:       statusesRepo,
+		tags:           tagsRepo,
+		mailer:         m,
+		tokens:         tokens,
+		tier:           t,
+		bus:            bus,
+		hub:            hub,
+	}
+}
+
+// WithUI registers an embedded React SPA to be served at GET /. The FS must
+// be rooted at the build output directory (i.e. contain index.html directly).
+// When called, all unmatched GET paths fall back to index.html so React Router
+// handles client-side navigation. Safe to skip in dev (no-op when not called).
+func (s *Server) WithUI(uiFS fs.FS) *Server {
+	s.uiFS = uiFS
+	return s
+}
+
+// Routes returns the fully-wired HTTP handler for the API, including all
+// core routes plus any routes added by registered tier modules.
+func (s *Server) Routes() http.Handler {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("GET /setup/status", s.handleSetupStatus)
+
+	mux.HandleFunc("POST /auth/register", s.handleRegister)
+	mux.HandleFunc("POST /auth/login", s.handleLogin)
+	mux.HandleFunc("POST /auth/refresh", s.handleRefresh)
+	mux.HandleFunc("GET /auth/me", chain(s.handleMe, s.authMiddleware))
+	mux.HandleFunc("POST /auth/forgot-password", s.handleForgotPassword)
+	mux.HandleFunc("POST /auth/reset-password", s.handleResetPassword)
+
+	mux.HandleFunc("GET /users/me/preferences", chain(s.handleGetPreferences, s.authMiddleware))
+	mux.HandleFunc("PUT /users/me/preferences", chain(s.handleUpsertPreference, s.authMiddleware))
+	mux.HandleFunc("GET /users/me/stats", chain(s.handleGetMyStats, s.authMiddleware))
+	mux.HandleFunc("PATCH /users/me", chain(s.handleUpdateProfile, s.authMiddleware))
+	mux.HandleFunc("PUT /users/me/password", chain(s.handleChangePassword, s.authMiddleware))
+
+	mux.HandleFunc("GET /admin/smtp", chain(s.handleGetSMTP, s.authMiddleware))
+	mux.HandleFunc("PUT /admin/smtp", chain(s.handlePutSMTP, s.authMiddleware))
+	mux.HandleFunc("POST /admin/smtp/test", chain(s.handleTestSMTP, s.authMiddleware))
+	mux.HandleFunc("DELETE /admin/smtp", chain(s.handleDeleteSMTP, s.authMiddleware))
+	mux.HandleFunc("GET /admin/settings", chain(s.handleGetAdminSettings, s.authMiddleware))
+	mux.HandleFunc("PATCH /admin/settings", chain(s.handlePatchAdminSettings, s.authMiddleware))
+	mux.HandleFunc("GET /admin/users", chain(s.handleListAdminUsers, s.authMiddleware))
+
+	// Public — no auth required; used by the login page and shared views.
+	mux.HandleFunc("GET /settings/branding", s.handleGetPublicBranding)
+
+	mux.HandleFunc("POST /tokens", chain(s.handleCreateAPIToken, s.authMiddleware))
+	mux.HandleFunc("GET /tokens", chain(s.handleListAPITokens, s.authMiddleware))
+	mux.HandleFunc("DELETE /tokens/{id}", chain(s.handleDeleteAPIToken, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams", chain(s.handleListTeams, s.authMiddleware))
+	mux.HandleFunc("POST /teams", chain(s.handleCreateTeam, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}", chain(s.handleGetTeam, s.authMiddleware))
+	mux.HandleFunc("PATCH /teams/{id}", chain(s.handleUpdateTeam, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/archive", chain(s.handleArchiveTeam, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/unarchive", chain(s.handleUnarchiveTeam, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/invites", chain(s.handleCreateInvite, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/invites", chain(s.handleListInvites, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/invites/{inviteId}", chain(s.handleDeleteInvite, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/invite-link", chain(s.handleCreateInviteLink, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/invite-link/reset", chain(s.handleResetInviteLink, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/invite-link", chain(s.handleGetInviteLink, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/invite-link", chain(s.handleDeleteInviteLink, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/members", chain(s.handleListMembers, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/members/{memberId}", chain(s.handleGetMember, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/members/{memberId}/stats", chain(s.handleGetMemberStats, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/members", chain(s.handleAddMember, s.authMiddleware))
+	mux.HandleFunc("PATCH /teams/{id}/members/{memberId}", chain(s.handleUpdateMember, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/members/{memberId}", chain(s.handleDeleteMember, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/members/{memberId}/archive", chain(s.handleArchiveMember, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/members/{memberId}/unarchive", chain(s.handleUnarchiveMember, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/participants", chain(s.handleCreateParticipant, s.authMiddleware))
+	mux.HandleFunc("GET /users/search", chain(s.handleSearchUsers, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/promote", chain(s.handlePromoteUser, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/archive", chain(s.handleArchiveUser, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/unarchive", chain(s.handleUnarchiveUser, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/revoke", chain(s.handleRevokeUser, s.authMiddleware))
+	mux.HandleFunc("DELETE /users/{id}", chain(s.handleDeleteUser, s.authMiddleware))
+	// Activity routes use the team-scoped prefix (GET /teams/{id}/timelines/{timelineId}/...)
+	// to avoid a Go 1.22 mux conflict with GET /timelines/share/{token}: both are
+	// 3-segment GET paths and neither is more specific when the third segment differs.
+	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/activities", chain(s.handleCreateActivity, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/activities", chain(s.handleListActivities, s.authMiddleware))
+	mux.HandleFunc("PATCH /activities/{id}", chain(s.handleUpdateActivity, s.authMiddleware))
+	mux.HandleFunc("DELETE /activities/{id}", chain(s.handleDeleteActivity, s.authMiddleware))
+	mux.HandleFunc("POST /activities/{id}/archive", chain(s.handleArchiveActivity, s.authMiddleware))
+	mux.HandleFunc("POST /activities/{id}/unarchive", chain(s.handleUnarchiveActivity, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/tags", chain(s.handleListTags, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/tags", chain(s.handleCreateTag, s.authMiddleware))
+	mux.HandleFunc("PATCH /tags/{id}", chain(s.handleUpdateTag, s.authMiddleware))
+	mux.HandleFunc("DELETE /tags/{id}", chain(s.handleDeleteTag, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/saved_filters/all", chain(s.handleListAllTeamSavedFilters, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/saved_filters", chain(s.handleListSavedFilters, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/saved_filters", chain(s.handleCreateSavedFilter, s.authMiddleware))
+	mux.HandleFunc("PATCH /saved_filters/{id}", chain(s.handleUpdateSavedFilter, s.authMiddleware))
+	mux.HandleFunc("DELETE /saved_filters/{id}", chain(s.handleDeleteSavedFilter, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/status-templates", chain(s.handleListStatusTemplates, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/status-templates", chain(s.handleCreateStatusTemplate, s.authMiddleware))
+	mux.HandleFunc("PATCH /status-templates/{id}", chain(s.handleUpdateStatusTemplate, s.authMiddleware))
+	mux.HandleFunc("DELETE /status-templates/{id}", chain(s.handleDeleteStatusTemplate, s.authMiddleware))
+	mux.HandleFunc("POST /status-templates/{id}/items", chain(s.handleCreateTemplateItem, s.authMiddleware))
+	mux.HandleFunc("PATCH /status-template-items/{id}", chain(s.handleUpdateTemplateItem, s.authMiddleware))
+	mux.HandleFunc("DELETE /status-template-items/{id}", chain(s.handleDeleteTemplateItem, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/timelines", chain(s.handleListTimelines, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/timelines", chain(s.handleCreateTimeline, s.authMiddleware))
+	// GET /timelines/share/{token} must be registered before GET /timelines/{id} so
+	// the more-specific literal "share" segment takes precedence.
+	mux.HandleFunc("GET /timelines/share/{token}", s.handleGetTimelineByShareToken)
+	mux.HandleFunc("GET /timelines/{id}", chain(s.handleGetTimeline, s.authMiddleware))
+	// Timeline statuses are placed under /teams/{id}/timelines/{timelineId}/statuses
+	// rather than /timelines/{id}/statuses to avoid a Go 1.22 mux pattern conflict
+	// with GET /timelines/share/{token} (both are 3-segment paths and conflict on
+	// paths like /timelines/share/statuses).
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleListTimelineStatuses, s.authMiddleware))
+	mux.HandleFunc("POST /timelines/{id}/archive", chain(s.handleArchiveTimeline, s.authMiddleware))
+	mux.HandleFunc("POST /timelines/{id}/unarchive", chain(s.handleUnarchiveTimeline, s.authMiddleware))
+
+	mux.HandleFunc("PATCH /timelines/{id}", chain(s.handleUpdateTimeline, s.authMiddleware))
+	mux.HandleFunc("DELETE /timelines/{id}", chain(s.handleDeleteTimeline, s.authMiddleware))
+	// Access list routes use the team-scoped prefix to avoid a Go 1.22 mux
+	// conflict with GET /timelines/share/{token} on 3-segment GET paths.
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/access", chain(s.handleListTimelineAccess, s.authMiddleware))
+	mux.HandleFunc("PUT /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleGrantTimelineAccess, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleRevokeTimelineAccess, s.authMiddleware))
+	// Timeline status CRUD — POST shares the team-scoped prefix with GET statuses.
+	// PATCH and DELETE use a flat /statuses/{id} prefix (2 segments, no conflict).
+	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleCreateTimelineStatus, s.authMiddleware))
+	mux.HandleFunc("PATCH /statuses/{id}", chain(s.handleUpdateStatus, s.authMiddleware))
+	mux.HandleFunc("DELETE /statuses/{id}", chain(s.handleDeleteStatus, s.authMiddleware))
+
+	// GET /ws is intentionally outside authMiddleware — ServeWS validates the
+	// JWT itself before upgrading, because WebSocket clients can't set headers.
+	mux.HandleFunc("GET /ws", s.hub.ServeWS)
+
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	})
+
+	if s.uiFS != nil {
+		mux.Handle("GET /", spaHandler(s.uiFS))
+	}
+
+	ctx := &tier.ModuleContext{Mux: mux, Tier: s.tier}
+	for _, m := range tier.Registered() {
+		if err := m.Register(ctx); err != nil {
+			// Module registration is a startup invariant — a failure here is a programming error.
+			panic(fmt.Sprintf("tier module %q failed to register: %v", m.Name(), err))
+		}
+	}
+
+	return requestLogger(mux)
+}
+
+// chain applies a single middleware to a handler function.
+func chain(h http.HandlerFunc, m func(http.Handler) http.Handler) http.HandlerFunc {
+	return m(h).ServeHTTP
+}
+
+// spaHandler serves the embedded React SPA. Known static assets are served
+// directly; any unrecognised path falls back to index.html so React Router
+// handles client-side navigation.
+func spaHandler(uiFS fs.FS) http.Handler {
+	fserver := http.FileServer(http.FS(uiFS))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := strings.TrimPrefix(r.URL.Path, "/")
+		if path == "" {
+			path = "index.html"
+		}
+		if _, err := uiFS.Open(path); err != nil {
+			// Unknown path — serve index.html and let React Router handle it.
+			r = r.Clone(r.Context())
+			r.URL.Path = "/"
+			fserver.ServeHTTP(w, r)
+			return
+		}
+		fserver.ServeHTTP(w, r)
+	})
+}
+````
+
 ## File: packages/web/src/components/gantt/GanttView.tree.test.ts
 ````typescript
 /**
@@ -31541,280 +32332,6 @@ describe('positionInColumns — midnight-UTC activity dates land on correct day'
     expect(mayThirtyFirst!.label).not.toContain('30')
   })
 })
-````
-
-## File: packages/web/src/components/gantt/granularity.ts
-````typescript
-/**
- * Time-granularity helpers for the Gantt view.
- *
- * Generates column definitions and maps event date ranges to fractional
- * column positions at any granularity (day → year).
- */
-
-export type TimeGranularity = 'day' | 'week' | 'month' | 'quarter' | 'year';
-
-export interface ColumnDef {
-  label: string;
-  /** Secondary label rendered on a second line (used for week numbers). */
-  sublabel?: string;
-  start: Date;
-  end: Date;
-  /** Calendar days this column spans (varies for months, quarters, years). */
-  days: number;
-}
-
-// ── Date helpers ────────────────────────────────────────────────────────────
-//
-// All helpers operate in UTC so that all-day activity dates stored as
-// midnight-UTC strings (e.g. "2026-05-31T00:00:00Z") land on the correct
-// calendar day regardless of the viewer's local timezone.
-//
-// TODO: branch on allDay when timed events ship (Phase 15 calendar sync).
-
-function daysBetween(a: Date, b: Date): number {
-  return Math.round((b.getTime() - a.getTime()) / 86_400_000);
-}
-
-function startOfDay(d: Date): Date {
-  const r = new Date(d);
-  r.setUTCHours(0, 0, 0, 0);
-  return r;
-}
-
-function startOfWeek(d: Date, weekStart: 'monday' | 'sunday' = 'monday'): Date {
-  const r = startOfDay(d);
-  const day = r.getUTCDay(); // 0=Sun, 1=Mon, …, 6=Sat
-  if (weekStart === 'sunday') {
-    r.setUTCDate(r.getUTCDate() - day);
-  } else {
-    // Monday = ISO week start
-    r.setUTCDate(r.getUTCDate() - ((day + 6) % 7));
-  }
-  return r;
-}
-
-function startOfMonth(d: Date): Date {
-  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1));
-}
-
-function startOfQuarter(d: Date): Date {
-  const q = Math.floor(d.getUTCMonth() / 3) * 3;
-  return new Date(Date.UTC(d.getUTCFullYear(), q, 1));
-}
-
-function startOfYear(d: Date): Date {
-  return new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
-}
-
-export function addDays(d: Date, n: number): Date {
-  const r = new Date(d);
-  r.setUTCDate(r.getUTCDate() + n);
-  return r;
-}
-
-function addMonths(d: Date, n: number): Date {
-  const r = new Date(d);
-  r.setUTCMonth(r.getUTCMonth() + n);
-  return r;
-}
-
-function endOfPeriod(start: Date, gran: TimeGranularity): Date {
-  switch (gran) {
-    case 'day':     return addDays(start, 1);
-    case 'week':    return addDays(start, 7);
-    case 'month':   return addMonths(start, 1);
-    case 'quarter': return addMonths(start, 3);
-    case 'year':    return addMonths(start, 12);
-  }
-}
-
-function periodStart(d: Date, gran: TimeGranularity, weekStart: 'monday' | 'sunday' = 'monday'): Date {
-  switch (gran) {
-    case 'day':     return startOfDay(d);
-    case 'week':    return startOfWeek(d, weekStart);
-    case 'month':   return startOfMonth(d);
-    case 'quarter': return startOfQuarter(d);
-    case 'year':    return startOfYear(d);
-  }
-}
-
-// ── Label formatting ────────────────────────────────────────────────────────
-
-/** ISO 8601 week number (1–53). Week 1 contains Jan 4; weeks start Monday. */
-function isoWeekNumber(d: Date): number {
-  const date = new Date(d);
-  date.setUTCHours(0, 0, 0, 0);
-  date.setUTCDate(date.getUTCDate() + 3 - ((date.getUTCDay() + 6) % 7));
-  const week1 = new Date(Date.UTC(date.getUTCFullYear(), 0, 4));
-  return 1 + Math.round(
-    ((date.getTime() - week1.getTime()) / 86_400_000 - 3 + ((week1.getUTCDay() + 6) % 7)) / 7,
-  );
-}
-
-function formatLabel(start: Date, gran: TimeGranularity, locale = 'en-US'): string {
-  switch (gran) {
-    case 'day':
-      return start.toLocaleDateString(locale, { month: 'short', day: 'numeric', timeZone: 'UTC' });
-    case 'week': {
-      const end = addDays(start, 6);
-      const sameMonth = start.getUTCMonth() === end.getUTCMonth();
-      const s = start.toLocaleDateString(locale, { month: 'short', day: 'numeric', timeZone: 'UTC' });
-      const e = sameMonth
-        ? end.getUTCDate().toString()
-        : end.toLocaleDateString(locale, { month: 'short', day: 'numeric', timeZone: 'UTC' });
-      return `${s}–${e}`;
-    }
-    case 'month':
-      return start.toLocaleDateString(locale, { month: 'short', year: 'numeric', timeZone: 'UTC' });
-    case 'quarter': {
-      const q = Math.floor(start.getUTCMonth() / 3) + 1;
-      return `Q${q} ${start.getUTCFullYear()}`;
-    }
-    case 'year':
-      return start.getUTCFullYear().toString();
-  }
-}
-
-// ── Column generation ───────────────────────────────────────────────────────
-
-export interface GenerateColumnsOptions {
-  /** Which day the week grid starts on. Defaults to 'monday' (ISO). */
-  weekStart?: 'monday' | 'sunday';
-  /** BCP 47 locale tag for month name formatting. Defaults to 'en-US'. */
-  locale?: string;
-}
-
-export function generateColumns(
-  viewStart: Date,
-  viewEnd: Date,
-  granularity: TimeGranularity,
-  options?: GenerateColumnsOptions,
-): ColumnDef[] {
-  const weekStart = options?.weekStart ?? 'monday';
-  const locale = options?.locale ?? 'en-US';
-  const columns: ColumnDef[] = [];
-  let cur = periodStart(viewStart, granularity, weekStart);
-
-  while (cur <= viewEnd) {
-    const next = endOfPeriod(cur, granularity);
-    // Clamp to view bounds for the first and last columns
-    const colStart = cur < viewStart ? viewStart : cur;
-    const colEnd = next > addDays(viewEnd, 1) ? addDays(viewEnd, 1) : next;
-    columns.push({
-      label: formatLabel(cur, granularity, locale),
-      sublabel: granularity === 'week' ? `W${isoWeekNumber(cur)}` : undefined,
-      start: cur,
-      end: next,
-      days: daysBetween(colStart, colEnd),
-    });
-    cur = next;
-  }
-
-  return columns;
-}
-
-// ── Event positioning ───────────────────────────────────────────────────────
-
-/** Fractional position within the column array. */
-export function positionInColumns(
-  eventStart: Date,
-  eventEnd: Date,
-  columns: ColumnDef[],
-): { startCol: number; span: number } {
-  if (columns.length === 0) return { startCol: 0, span: 0 };
-
-  const evStartMs = eventStart.getTime();
-  const evEndMs = eventEnd.getTime();
-
-  let startCol = 0;
-  let endCol = columns.length;
-
-  for (let i = 0; i < columns.length; i++) {
-    const col = columns[i];
-    const colStartMs = col.start.getTime();
-    const colEndMs = col.end.getTime();
-    const colSpanMs = colEndMs - colStartMs;
-
-    if (evStartMs >= colStartMs && evStartMs < colEndMs) {
-      startCol = i + (colSpanMs > 0 ? (evStartMs - colStartMs) / colSpanMs : 0);
-    }
-    // End is inclusive day, so add 1 day for positioning
-    const evEndNextDayMs = evEndMs + 86_400_000;
-    if (evEndNextDayMs > colStartMs && evEndNextDayMs <= colEndMs) {
-      endCol = i + (colSpanMs > 0 ? (evEndNextDayMs - colStartMs) / colSpanMs : 1);
-    }
-  }
-
-  const span = Math.max(endCol - startCol, 0.15);
-  return { startCol, span };
-}
-
-// ── Snap divisor ────────────────────────────────────────────────────────────
-
-// Number of snap divisions per column at the given zoom granularity.
-// Higher divisor → finer snap (e.g. week columns snap to individual days).
-export function snapDivisorFor(granularity: TimeGranularity | 'auto'): number {
-  switch (granularity) {
-    case 'week':    return 7;  // snap to day within week
-    case 'month':   return 4;  // snap to week within month
-    case 'quarter': return 3;  // snap to month within quarter
-    case 'year':    return 4;  // snap to quarter within year
-    default:        return 1;  // day or auto → no finer snap
-  }
-}
-
-// ── Today position ──────────────────────────────────────────────────────────
-
-export function todayColumnPosition(columns: ColumnDef[]): number {
-  const now = startOfDay(new Date()); // startOfDay uses setUTCHours → UTC midnight
-  const nowMs = now.getTime();
-
-  for (let i = 0; i < columns.length; i++) {
-    const col = columns[i];
-    const colStartMs = col.start.getTime();
-    const colEndMs = col.end.getTime();
-    if (nowMs >= colStartMs && nowMs < colEndMs) {
-      const colSpanMs = colEndMs - colStartMs;
-      return i + (colSpanMs > 0 ? (nowMs - colStartMs) / colSpanMs : 0.5);
-    }
-  }
-  return -1;
-}
-
-// ── Auto-fit ────────────────────────────────────────────────────────────────
-
-const GRANULARITIES: TimeGranularity[] = ['day', 'week', 'month', 'quarter', 'year'];
-const BASE_COL_WIDTH = 80;
-
-export function autoFitGranularity(
-  viewStart: Date,
-  viewEnd: Date,
-  viewportWidth: number,
-): TimeGranularity {
-  const targetCols = Math.max(viewportWidth / BASE_COL_WIDTH, 2);
-
-  let best: TimeGranularity = 'month';
-  let bestDiff = Infinity;
-
-  for (const gran of GRANULARITIES) {
-    const cols = generateColumns(viewStart, viewEnd, gran).length;
-    if (cols < 2) continue;
-    // Prefer the finest granularity that fits within 50-150% of viewport
-    const ratio = cols / targetCols;
-    if (ratio >= 0.4 && ratio <= 1.5) {
-      // Within range — prefer finest (earliest in array)
-      return gran;
-    }
-    const diff = Math.abs(ratio - 1);
-    if (diff < bestDiff) {
-      bestDiff = diff;
-      best = gran;
-    }
-  }
-
-  return best;
-}
 ````
 
 ## File: packages/web/src/components/list/ListToolbar.tsx
@@ -32446,65 +32963,6 @@ describe("filter kind 'saved'", () => {
 })
 ````
 
-## File: packages/web/vite.config.ts
-````typescript
-/// <reference types="vitest" />
-import path from 'path'
-import { defineConfig, loadEnv } from 'vite'
-import react from '@vitejs/plugin-react'
-import tailwindcss from '@tailwindcss/vite'
-
-export default defineConfig(({ mode }) => {
-  const env = loadEnv(mode, process.cwd(), '')
-  const apiTarget = env.VITE_API_TARGET ?? 'http://localhost:8080'
-
-  return {
-    plugins: [
-      react(),
-      tailwindcss(),
-    ],
-    resolve: {
-      alias: {
-        '@': path.resolve(__dirname, './src'),
-      },
-    },
-    test: {
-      environment: 'jsdom',
-      globals: true,
-      alias: {
-        '@': path.resolve(__dirname, './src'),
-      },
-    },
-    server: {
-      proxy: {
-        '/setup': { target: apiTarget, changeOrigin: true },
-        '/auth': { target: apiTarget, changeOrigin: true },
-        '/users': { target: apiTarget, changeOrigin: true },
-        '/admin': { target: apiTarget, changeOrigin: true },
-        '/settings': { target: apiTarget, changeOrigin: true },
-        '/tokens': { target: apiTarget, changeOrigin: true },
-        '/teams': { target: apiTarget, changeOrigin: true },
-        '/timelines': { target: apiTarget, changeOrigin: true },
-        '/status-templates': { target: apiTarget, changeOrigin: true },
-        '/status-template-items': { target: apiTarget, changeOrigin: true },
-        '/statuses': { target: apiTarget, changeOrigin: true },
-        '/activities': { target: apiTarget, changeOrigin: true },
-        '/tags': { target: apiTarget, changeOrigin: true },
-        '/saved_filters': { target: apiTarget, changeOrigin: true },
-        '/events': { target: apiTarget, changeOrigin: true },
-        '/health': { target: apiTarget, changeOrigin: true },
-        '/ws': {
-          target: apiTarget.replace(/^http/, 'ws'),
-          changeOrigin: true,
-          ws: true,
-          rewriteWsOrigin: true,
-        },
-      },
-    },
-  }
-})
-````
-
 ## File: docs/TESTING.md
 ````markdown
 # Testing & Review Procedures
@@ -32953,289 +33411,6 @@ func (s *Server) handleDeleteSavedFilter(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
-}
-````
-
-## File: packages/api/internal/api/server.go
-````go
-// Package api hosts the HTTP handlers, routing, and middleware for the
-// draba REST API. Handlers are intentionally thin: they decode requests,
-// delegate to repositories and services, and write responses. Business
-// logic belongs in the domain packages, not here.
-package api
-
-import (
-	"fmt"
-	"io/fs"
-	"net/http"
-	"strings"
-	"time"
-
-	"github.com/I0-1O/draba/packages/api/internal/auth"
-	"github.com/I0-1O/draba/packages/api/internal/db"
-	"github.com/I0-1O/draba/packages/api/internal/events"
-	"github.com/I0-1O/draba/packages/api/internal/mailer"
-	"github.com/I0-1O/draba/packages/api/internal/models"
-	"github.com/I0-1O/draba/packages/api/internal/tier"
-	"github.com/I0-1O/draba/packages/api/internal/ws"
-)
-
-// TimelineStore is the persistence interface required by timeline handlers.
-// The concrete implementation is *db.TimelineRepo; tests may substitute a fake.
-type TimelineStore interface {
-	Create(t *models.Timeline) error
-	GetByID(id string) (*models.Timeline, error)
-	GetByShareToken(token string) (*models.Timeline, error)
-	ListByTeam(teamID string, includeArchived bool) ([]*models.Timeline, error)
-	HasAccess(timelineID, teamMemberID string) (bool, error)
-	GrantAccess(timelineID, teamMemberID, role string) error
-	RevokeAccess(timelineID, teamMemberID string) error
-	GetAccessRole(timelineID, teamMemberID string) (string, error)
-	ListAccess(timelineID string) ([]*models.TimelineAccessEntry, error)
-	SetArchived(id string, at *time.Time) error
-	Update(t *models.Timeline) error
-	Delete(id string) error
-}
-
-// Server holds shared dependencies for all HTTP handlers.
-type Server struct {
-	users          *db.UserRepo
-	invites        *db.InviteRepo
-	teams          *db.TeamRepo
-	activities     *db.ActivityRepo
-	timelines      TimelineStore
-	savedFilters   *db.SavedFilterRepo
-	preferences    *db.UserPreferenceRepo
-	apiTokens      *db.APITokenRepo
-	instanceSets   *db.InstanceSettingsRepo
-	passwordTokens *db.PasswordResetTokenRepo
-	statuses       *db.StatusRepo
-	tags           *db.TagRepo
-	mailer         *mailer.Mailer
-	tokens         *auth.TokenService
-	tier           tier.Tier
-	bus            *events.Bus
-	hub            *ws.Hub
-	uiFS           fs.FS
-}
-
-// NewServer constructs a Server with its required dependencies. It does not
-// touch the network; call Routes to obtain the http.Handler to serve.
-func NewServer(
-	users *db.UserRepo,
-	invites *db.InviteRepo,
-	teams *db.TeamRepo,
-	activitiesRepo *db.ActivityRepo,
-	timelinesRepo TimelineStore,
-	savedFiltersRepo *db.SavedFilterRepo,
-	preferencesRepo *db.UserPreferenceRepo,
-	apiTokensRepo *db.APITokenRepo,
-	instanceSetsRepo *db.InstanceSettingsRepo,
-	passwordTokensRepo *db.PasswordResetTokenRepo,
-	statusesRepo *db.StatusRepo,
-	tagsRepo *db.TagRepo,
-	m *mailer.Mailer,
-	tokens *auth.TokenService,
-	t tier.Tier,
-	bus *events.Bus,
-	hub *ws.Hub,
-) *Server {
-	return &Server{
-		users:          users,
-		invites:        invites,
-		teams:          teams,
-		activities:     activitiesRepo,
-		timelines:      timelinesRepo,
-		savedFilters:   savedFiltersRepo,
-		preferences:    preferencesRepo,
-		apiTokens:      apiTokensRepo,
-		instanceSets:   instanceSetsRepo,
-		passwordTokens: passwordTokensRepo,
-		statuses:       statusesRepo,
-		tags:           tagsRepo,
-		mailer:         m,
-		tokens:         tokens,
-		tier:           t,
-		bus:            bus,
-		hub:            hub,
-	}
-}
-
-// WithUI registers an embedded React SPA to be served at GET /. The FS must
-// be rooted at the build output directory (i.e. contain index.html directly).
-// When called, all unmatched GET paths fall back to index.html so React Router
-// handles client-side navigation. Safe to skip in dev (no-op when not called).
-func (s *Server) WithUI(uiFS fs.FS) *Server {
-	s.uiFS = uiFS
-	return s
-}
-
-// Routes returns the fully-wired HTTP handler for the API, including all
-// core routes plus any routes added by registered tier modules.
-func (s *Server) Routes() http.Handler {
-	mux := http.NewServeMux()
-
-	mux.HandleFunc("GET /setup/status", s.handleSetupStatus)
-
-	mux.HandleFunc("POST /auth/register", s.handleRegister)
-	mux.HandleFunc("POST /auth/login", s.handleLogin)
-	mux.HandleFunc("POST /auth/refresh", s.handleRefresh)
-	mux.HandleFunc("GET /auth/me", chain(s.handleMe, s.authMiddleware))
-	mux.HandleFunc("POST /auth/forgot-password", s.handleForgotPassword)
-	mux.HandleFunc("POST /auth/reset-password", s.handleResetPassword)
-
-	mux.HandleFunc("GET /users/me/preferences", chain(s.handleGetPreferences, s.authMiddleware))
-	mux.HandleFunc("PUT /users/me/preferences", chain(s.handleUpsertPreference, s.authMiddleware))
-	mux.HandleFunc("GET /users/me/stats", chain(s.handleGetMyStats, s.authMiddleware))
-	mux.HandleFunc("PATCH /users/me", chain(s.handleUpdateProfile, s.authMiddleware))
-	mux.HandleFunc("PUT /users/me/password", chain(s.handleChangePassword, s.authMiddleware))
-
-	mux.HandleFunc("GET /admin/smtp", chain(s.handleGetSMTP, s.authMiddleware))
-	mux.HandleFunc("PUT /admin/smtp", chain(s.handlePutSMTP, s.authMiddleware))
-	mux.HandleFunc("POST /admin/smtp/test", chain(s.handleTestSMTP, s.authMiddleware))
-	mux.HandleFunc("DELETE /admin/smtp", chain(s.handleDeleteSMTP, s.authMiddleware))
-	mux.HandleFunc("GET /admin/settings", chain(s.handleGetAdminSettings, s.authMiddleware))
-	mux.HandleFunc("PATCH /admin/settings", chain(s.handlePatchAdminSettings, s.authMiddleware))
-	mux.HandleFunc("GET /admin/users", chain(s.handleListAdminUsers, s.authMiddleware))
-
-	// Public — no auth required; used by the login page and shared views.
-	mux.HandleFunc("GET /settings/branding", s.handleGetPublicBranding)
-
-	mux.HandleFunc("POST /tokens", chain(s.handleCreateAPIToken, s.authMiddleware))
-	mux.HandleFunc("GET /tokens", chain(s.handleListAPITokens, s.authMiddleware))
-	mux.HandleFunc("DELETE /tokens/{id}", chain(s.handleDeleteAPIToken, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams", chain(s.handleListTeams, s.authMiddleware))
-	mux.HandleFunc("POST /teams", chain(s.handleCreateTeam, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}", chain(s.handleGetTeam, s.authMiddleware))
-	mux.HandleFunc("PATCH /teams/{id}", chain(s.handleUpdateTeam, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/archive", chain(s.handleArchiveTeam, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/unarchive", chain(s.handleUnarchiveTeam, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/invites", chain(s.handleCreateInvite, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/invites", chain(s.handleListInvites, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/invites/{inviteId}", chain(s.handleDeleteInvite, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/invite-link", chain(s.handleCreateInviteLink, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/invite-link/reset", chain(s.handleResetInviteLink, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/invite-link", chain(s.handleGetInviteLink, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/invite-link", chain(s.handleDeleteInviteLink, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/members", chain(s.handleListMembers, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/members/{memberId}", chain(s.handleGetMember, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/members/{memberId}/stats", chain(s.handleGetMemberStats, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/members", chain(s.handleAddMember, s.authMiddleware))
-	mux.HandleFunc("PATCH /teams/{id}/members/{memberId}", chain(s.handleUpdateMember, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/members/{memberId}", chain(s.handleDeleteMember, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/members/{memberId}/archive", chain(s.handleArchiveMember, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/members/{memberId}/unarchive", chain(s.handleUnarchiveMember, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/participants", chain(s.handleCreateParticipant, s.authMiddleware))
-	mux.HandleFunc("GET /users/search", chain(s.handleSearchUsers, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/promote", chain(s.handlePromoteUser, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/archive", chain(s.handleArchiveUser, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/unarchive", chain(s.handleUnarchiveUser, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/revoke", chain(s.handleRevokeUser, s.authMiddleware))
-	mux.HandleFunc("DELETE /users/{id}", chain(s.handleDeleteUser, s.authMiddleware))
-	// Activity routes use the team-scoped prefix (GET /teams/{id}/timelines/{timelineId}/...)
-	// to avoid a Go 1.22 mux conflict with GET /timelines/share/{token}: both are
-	// 3-segment GET paths and neither is more specific when the third segment differs.
-	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/activities", chain(s.handleCreateActivity, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/activities", chain(s.handleListActivities, s.authMiddleware))
-	mux.HandleFunc("PATCH /activities/{id}", chain(s.handleUpdateActivity, s.authMiddleware))
-	mux.HandleFunc("DELETE /activities/{id}", chain(s.handleDeleteActivity, s.authMiddleware))
-	mux.HandleFunc("POST /activities/{id}/archive", chain(s.handleArchiveActivity, s.authMiddleware))
-	mux.HandleFunc("POST /activities/{id}/unarchive", chain(s.handleUnarchiveActivity, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/tags", chain(s.handleListTags, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/tags", chain(s.handleCreateTag, s.authMiddleware))
-	mux.HandleFunc("PATCH /tags/{id}", chain(s.handleUpdateTag, s.authMiddleware))
-	mux.HandleFunc("DELETE /tags/{id}", chain(s.handleDeleteTag, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/saved_filters/all", chain(s.handleListAllTeamSavedFilters, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/saved_filters", chain(s.handleListSavedFilters, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/saved_filters", chain(s.handleCreateSavedFilter, s.authMiddleware))
-	mux.HandleFunc("PATCH /saved_filters/{id}", chain(s.handleUpdateSavedFilter, s.authMiddleware))
-	mux.HandleFunc("DELETE /saved_filters/{id}", chain(s.handleDeleteSavedFilter, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/status-templates", chain(s.handleListStatusTemplates, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/status-templates", chain(s.handleCreateStatusTemplate, s.authMiddleware))
-	mux.HandleFunc("PATCH /status-templates/{id}", chain(s.handleUpdateStatusTemplate, s.authMiddleware))
-	mux.HandleFunc("DELETE /status-templates/{id}", chain(s.handleDeleteStatusTemplate, s.authMiddleware))
-	mux.HandleFunc("POST /status-templates/{id}/items", chain(s.handleCreateTemplateItem, s.authMiddleware))
-	mux.HandleFunc("PATCH /status-template-items/{id}", chain(s.handleUpdateTemplateItem, s.authMiddleware))
-	mux.HandleFunc("DELETE /status-template-items/{id}", chain(s.handleDeleteTemplateItem, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/timelines", chain(s.handleListTimelines, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/timelines", chain(s.handleCreateTimeline, s.authMiddleware))
-	// GET /timelines/share/{token} must be registered before GET /timelines/{id} so
-	// the more-specific literal "share" segment takes precedence.
-	mux.HandleFunc("GET /timelines/share/{token}", s.handleGetTimelineByShareToken)
-	mux.HandleFunc("GET /timelines/{id}", chain(s.handleGetTimeline, s.authMiddleware))
-	// Timeline statuses are placed under /teams/{id}/timelines/{timelineId}/statuses
-	// rather than /timelines/{id}/statuses to avoid a Go 1.22 mux pattern conflict
-	// with GET /timelines/share/{token} (both are 3-segment paths and conflict on
-	// paths like /timelines/share/statuses).
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleListTimelineStatuses, s.authMiddleware))
-	mux.HandleFunc("POST /timelines/{id}/archive", chain(s.handleArchiveTimeline, s.authMiddleware))
-	mux.HandleFunc("POST /timelines/{id}/unarchive", chain(s.handleUnarchiveTimeline, s.authMiddleware))
-
-	mux.HandleFunc("PATCH /timelines/{id}", chain(s.handleUpdateTimeline, s.authMiddleware))
-	mux.HandleFunc("DELETE /timelines/{id}", chain(s.handleDeleteTimeline, s.authMiddleware))
-	// Access list routes use the team-scoped prefix to avoid a Go 1.22 mux
-	// conflict with GET /timelines/share/{token} on 3-segment GET paths.
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/access", chain(s.handleListTimelineAccess, s.authMiddleware))
-	mux.HandleFunc("PUT /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleGrantTimelineAccess, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleRevokeTimelineAccess, s.authMiddleware))
-	// Timeline status CRUD — POST shares the team-scoped prefix with GET statuses.
-	// PATCH and DELETE use a flat /statuses/{id} prefix (2 segments, no conflict).
-	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleCreateTimelineStatus, s.authMiddleware))
-	mux.HandleFunc("PATCH /statuses/{id}", chain(s.handleUpdateStatus, s.authMiddleware))
-	mux.HandleFunc("DELETE /statuses/{id}", chain(s.handleDeleteStatus, s.authMiddleware))
-
-	// GET /ws is intentionally outside authMiddleware — ServeWS validates the
-	// JWT itself before upgrading, because WebSocket clients can't set headers.
-	mux.HandleFunc("GET /ws", s.hub.ServeWS)
-
-	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-	})
-
-	if s.uiFS != nil {
-		mux.Handle("GET /", spaHandler(s.uiFS))
-	}
-
-	ctx := &tier.ModuleContext{Mux: mux, Tier: s.tier}
-	for _, m := range tier.Registered() {
-		if err := m.Register(ctx); err != nil {
-			// Module registration is a startup invariant — a failure here is a programming error.
-			panic(fmt.Sprintf("tier module %q failed to register: %v", m.Name(), err))
-		}
-	}
-
-	return requestLogger(mux)
-}
-
-// chain applies a single middleware to a handler function.
-func chain(h http.HandlerFunc, m func(http.Handler) http.Handler) http.HandlerFunc {
-	return m(h).ServeHTTP
-}
-
-// spaHandler serves the embedded React SPA. Known static assets are served
-// directly; any unrecognised path falls back to index.html so React Router
-// handles client-side navigation.
-func spaHandler(uiFS fs.FS) http.Handler {
-	fserver := http.FileServer(http.FS(uiFS))
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		path := strings.TrimPrefix(r.URL.Path, "/")
-		if path == "" {
-			path = "index.html"
-		}
-		if _, err := uiFS.Open(path); err != nil {
-			// Unknown path — serve index.html and let React Router handle it.
-			r = r.Clone(r.Context())
-			r.URL.Path = "/"
-			fserver.ServeHTTP(w, r)
-			return
-		}
-		fserver.ServeHTTP(w, r)
-	})
 }
 ````
 
@@ -44974,29 +45149,30 @@ Multi-assignee activities now appear under their exact assignee-set group in bot
 ---
 
 ### Timeline Views — Calendar (Web — Phase 11.2)
-Three sub-layouts sharing one component skeleton.
+**Month / Week** all-day-bar layouts sharing one skeleton. No Day view, no time grid (every activity is all-day). Detailed plan: `docs/plans/phase-11.2-calendar-view.md`.
 
 **Shared:**
-- [ ] Sub-layout switcher (Month / Week / Day) in the view's toolbar slot
+- [ ] Layout switcher (Month / Week) in the view's toolbar slot
 - [ ] Today / prev / next navigation; jump-to-date picker
-- [ ] Click empty cell → Event create form prefilled with that date
-- [ ] Click event → `EventDetailPanel`
-- [ ] Drag event between cells → PATCH new start/end preserving duration (Week / Day only for v1)
+- [ ] Color-by (activity / member / status) carried over via shared `lib/activityColor.ts`
+- [ ] Click empty cell → `ActivityCreatePanel` prefilled with that date
+- [ ] Click bar → existing `ActivityDetailPanel`
+- [ ] Drag bar body → move (duration-preserving, whole-day snap, week-wrap aware) → PATCH; drag edge → resize; live sidebar preview via shared `useActivityDrag`
+- [ ] Respects active filter, Find highlight, `week_start` / `date_format` prefs
+
+**Lane packing (`lib/calendarLanes.ts`, pure + unit-tested):**
+- [ ] Per-week-row greedy lane assignment for concurrent multi-day bars
+- [ ] Cross-week activities split into one segment per week row with "continues" edges
 
 **Month layout:**
-- [ ] 6-week grid; multi-day events render as continuous bars across cells
-- [ ] "+N more" overflow affordance per cell
+- [ ] 6-week grid; multi-day activities render as continuous bars across cells
 
 **Week layout:**
-- [ ] 7 day columns, 24-hour vertical time grid, configurable working-hours zoom
-- [ ] All-day strip above the time grid for events without time components
-- [ ] Overlapping-event lane algorithm: side-by-side columns within a day
+- [ ] 7 day columns, taller cells (higher default visible-lane cap)
 
-**Day layout:**
-- [ ] Single-day variant of Week; same time grid and lane algorithm
-
-**Open question to resolve at start of phase:**
-- [ ] Decide handling for date-only events in time-grid layouts (default 9am vs. all-day strip)
+**Density / overflow:**
+- [ ] Per-day "+N more" chip → day popover listing every activity that day → row click opens sidebar
+- [ ] Manual per-week row-height drag handle raises/lowers visible-lane cap; persists per-timeline-per-user
 
 ---
 
@@ -45065,7 +45241,7 @@ First-class Share entity. One timeline can host many shares, each frozen to a sp
 - [ ] Kanban → PDF: columns side-by-side, paginated when too wide
 - [ ] Kanban → PNG: single-page
 - [ ] List → Markdown (GitHub-flavored table) and PDF (styled table)
-- [ ] Calendar → PDF: one page per month / week / day depending on active sub-layout
+- [ ] Calendar → PDF: one page per month / week depending on active layout
 - [ ] Header strip on every visual export: team name, timeline name, generated-at timestamp, applied filter description
 - [ ] All visual exports respect active filter / sort / group at time of export
 
@@ -54772,41 +54948,26 @@ Format and position all activity `startAt`/`endAt` in **UTC** (no local conversi
 ### Phase 11.2 — Web — Calendar View
 **Status:** ⬜ | **Effort:** L (3–5 days)
 
-Three calendar sub-layouts (Month / Week / Day) sharing one component skeleton. Week / Day need an overlapping-event lane algorithm; Month is the cheaper grid.
+A familiar **Month / Week** calendar surface that answers "what is the team working on this week / this month?" — not a Gantt replacement. **Re-engineered 2026-06-02** from the original "Month / Week / Day + 24-hour time grid" plan: because every activity is all-day, **Day view, the time grid, and the time-overlap lane algorithm are all cut**. Both layouts are pure all-day-bar surfaces; the only layout problem left is vertical stacking of concurrent multi-day bars.
 
-**Design rationale:**
-A familiar surface for users coming from Google Calendar / Outlook. Not a Gantt replacement — it answers "what's happening this week?" rather than "how does this project unfold?". Multi-day events render as continuous bars across cells (Month) or pinned to an all-day strip above the time grid (Week / Day).
+**Detailed plan:** [docs/plans/phase-11.2-calendar-view.md](plans/phase-11.2-calendar-view.md) — reused-infrastructure table, lane-packing algorithm, overflow/row-resize model, drag geometry, build order, decisions, and exit criteria all live there. Scope is reviewed and settled.
 
-**Scope:**
-
-*Shared:*
-- Sub-layout switcher (Month / Week / Day) inside the view's toolbar slot
-- Today / prev / next navigation; "jump to date" picker
-- Click empty cell → open Event create form, prefilled with that date
-- Click event → open `EventDetailPanel`
-- Drag event between cells → PATCH new start/end (preserving duration); only valid on Week / Day for v1
-
-*Month layout:*
-- 6-week grid; multi-day events render as continuous bars spanning cells; overflow handled with a "+N more" affordance per cell
-
-*Week layout:*
-- 7 day columns, 24-hour vertical time grid, configurable working-hours zoom
-- All-day strip at the top for events without time components
-- Overlapping-event lane algorithm: side-by-side columns within a day
-
-*Day layout:*
-- Single-day variant of Week; same time grid and lane algorithm
-
-**Open question (resolve early in phase):**
-- Events without time components (date-only) — do they all live in the all-day strip, or do they get a default block at e.g. 9am? Affects sync compatibility with Phase 15 (Calendar Sync).
+**Scope (summary — see plan doc for detail):**
+- *Layouts:* **Month** (6-week grid, continuous multi-day bars, week-row lane packing) and **Week** (7 columns, taller cells). One shared skeleton + one `lib/calendarLanes.ts` packing core. **No Day view, no time grid.**
+- *Color-by* (activity / member / status) carried over from Gantt/List via a shared `lib/activityColor.ts` helper — the primary density signal.
+- *Dense-day handling (classic grid + color, not swimlanes):* color-by + the existing filter engine + a **"+N more" day popover paired with a manual per-week row-height resize handle** — uniform compact rows by default, drag a row's bottom edge to reveal more lanes inline; popover lists the full day for anything still hidden. Cap persists per-timeline-per-user.
+- *Click behaviors:* bar → existing `ActivityDetailPanel`; empty cell → existing `ActivityCreatePanel` prefilled to that day. No new sidebar UI.
+- *Drag:* move (duration-preserving) + edge-resize, whole-day snapping, geometric hit-testing (handles week-wrap), live sidebar preview, sharing Gantt's optimistic commit path via a new `useActivityDrag` hook. In v1 for **both** Month and Week.
+- *Parity:* respects active filter, Find highlight, `week_start` / `date_format` prefs.
 
 **Exit criteria — safe to pause when:**
-- Switching to Calendar from List/Gantt renders the current month with all events in correct cells
-- Month / Week / Day sub-toggles each render correctly with no data discrepancy
-- A multi-day event renders as a continuous bar in Month and pinned to the all-day strip in Week / Day
-- Two overlapping events in Week view render side-by-side without occlusion
-- Dragging an event to a different day in Week view updates start/end via PATCH
-- Find highlights matching events in all three sub-layouts
+- View switcher toggles Gantt ↔ List ↔ Calendar, persisting per timeline; Calendar renders the active timeline's activities in correct cells honoring the active filter
+- Month and Week render with no data discrepancy vs. each other or Gantt/List; a multi-day activity renders as a continuous bar with correct "continues" affordance across week boundaries
+- Color-by recolors bars and matches Gantt/List for the same activity
+- A day over the visible cap shows a correct "+N more" chip; the popover lists every activity that day; each row opens the edit sidebar
+- Dragging a week row's bottom edge raises/lowers visible lanes and survives a reload
+- Bar click opens the edit sidebar; empty-cell click opens create prefilled; bar drag moves/resizes via PATCH with live sidebar dates mid-drag
+- Find highlights matching bars in both layouts; `calendarLanes`/`activityColor` unit-tested; `pnpm --filter web lint` + `test` pass
 
 ---
 
@@ -55017,7 +55178,7 @@ PDFs are generated server-side using **gofpdf** (pure-Go, no Chrome dependency i
 - **Gantt → PDF:** landscape, paginated by date range; columns scale to fit a printable width per page; legend strip with member colors; export current filter/sort/group state. Gantt → PNG as a single-page variant.
 - **Kanban → PDF:** columns laid out side-by-side; if more columns than fit a printable width, paginate across pages with a column-overflow indicator. Kanban → PNG single-page.
 - **List → CSV, xlsx, Markdown, PDF.** Markdown export uses a GitHub-flavored table; PDF is a styled table with the same columns shown in the UI.
-- **Calendar → PDF:** Month layout → one page per month in range; Week layout → one page per week; Day layout → one page per day.
+- **Calendar → PDF:** Month layout → one page per month in range; Week layout → one page per week.
 - All visual exports include a header strip: team name, timeline name, generated-at timestamp, applied filter description.
 
 *Wiring:*
