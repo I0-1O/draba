@@ -1357,6 +1357,7 @@ Format and position all activity `startAt`/`endAt` in **UTC** (no local conversi
 - *Gantt labels:* `GanttGrid.tsx:184` and `granularity.ts:105–116` (`toLocaleDateString`).
 - *Gantt positioning (highest-risk piece):* events are parsed as UTC midnight (`GanttView.tsx:135–136` `new Date(toDateOnly(...))`) but the column axis is built in **local** time (`granularity.ts` `setHours(0,0,0,0)`, `new Date(y,m,1)`, `getDate()`, `setDate`) and the today marker (`GanttView.tsx:87` `todayMidnight()`) is local — so events map onto a local axis with UTC dates, shifting bars ~a day at boundaries. Pick **one basis (UTC)** for the axis, today marker, and event parsing together.
 - *Not this phase:* `allDay`-branching for timed events (deferred to Phase 15); backend emitting CalDAV `DATE` vs `DATE-TIME` (Phase 15 concern — backend stores/echoes RFC3339 verbatim and needs no change for the display bug).
+- *Bundled side change (commit `04e5c9c`):* "Reimagined new activity button" Sidebar UI redesign — split combo button with bulk-import stub, collapsed-mode portal positioning, and updated keyboard/outside-click handlers. Acknowledged out-of-scope but bundled here rather than a separate branch.
 
 **Exit criteria — safe to pause when:**
 - A `TZ=America/Denver` test run (Vitest honors `process.env.TZ`) asserts a midnight-UTC date renders on the **same** calendar day — guards against silent regression

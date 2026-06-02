@@ -250,7 +250,7 @@ interface Props {
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
 /** Formats a genuine timestamp (createdAt, updatedAt) in the user's local timezone. */
-function formatDate(iso: string | null | undefined): string {
+export function formatTimestamp(iso: string | null | undefined): string {
   if (!iso) return '—';
   const d = new Date(iso);
   return isNaN(d.getTime()) ? '—' : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
@@ -263,7 +263,7 @@ function formatDate(iso: string | null | undefined): string {
  *
  * TODO: branch on allDay when timed events ship (Phase 15 calendar sync).
  */
-function formatActivityDate(iso: string | null | undefined): string {
+export function formatActivityDate(iso: string | null | undefined): string {
   if (!iso) return '—';
   const d = new Date(iso);
   return isNaN(d.getTime()) ? '—' : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
@@ -2334,7 +2334,7 @@ export default function ListView({
                     return (
                       <td key={colId} style={cellStyle}>
                         <span style={{ color: 'var(--muted-foreground)' }}>
-                          {formatDate(iso)}
+                          {formatTimestamp(iso)}
                         </span>
                       </td>
                     );
