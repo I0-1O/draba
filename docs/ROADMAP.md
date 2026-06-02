@@ -48,6 +48,7 @@ This document organizes development into discrete phases with effort estimates a
 | 10.4.6 | [Filter Implementation](#phase-1046--filter-implementation) | M–L — 3–4 days | 🔄 |
 | 11.1 | [Web — List View](#phase-111--web--list-view) | M — 2–3 days | ✅ |
 | 11.1.1 | [Timezone-Safe Activity Dates](#phase-1111--timezone-safe-activity-dates) | S–M — 0.5–1 day | ✅ |
+| 11.1.2 | [Group by Assignee Combination](#phase-1112--group-by-assignee-combination) | S–M — 0.5–1 day | ⬜ |
 | 11.2 | [Web — Calendar View](#phase-112--web--calendar-view) | L — 3–5 days | ⬜ |
 | 11.3 | [Web — Kanban View (Read-Only)](#phase-113--web--kanban-view-read-only) | S–M — 1–2 days | ⬜ |
 | 12 | [Communications Testing](#phase-12--communications-testing) | S — 1 day | ⬜ |
@@ -1366,6 +1367,38 @@ Format and position all activity `startAt`/`endAt` in **UTC** (no local conversi
 - Gantt day/week/month labels match the List dates for the same activity
 - Gantt bars sit on the correct day in a negative-offset timezone (axis, today marker, and event positions all on a UTC basis)
 - Round-trip holds: open a date picker, save unchanged, and the displayed date does not shift
+
+---
+
+### Phase 11.1.2 — Group by Assignee Combination
+**Status:** ⬜ | **Effort:** S–M (0.5–1 day)
+
+"Group by → Member" (Gantt and List) currently buckets each activity by its *first* assignee, so an activity assigned to both Brian and Lindsay only ever appears under Brian — it is invisible in Lindsay's group and there is no signal that it is shared work. This phase regroups by the **exact set** of assignees: `{Brian}`, `{Lindsay}`, and `{Brian, Lindsay}` become three distinct groups.
+
+**Decision — replace, don't add:** the existing `'member'` group-by mode is *changed* to split by assignee combination; no new toolbar option is introduced. This trades the old "all of one person's work in one place" view (their shared work now scatters across combination groups) for an unambiguous "who is working on this together" view. The alternative model — duplicating a multi-assigned activity under *each* member's group — was rejected to avoid double-counting and split collapse state.
+
+**Approach:**
+- *Shared module (new, `packages/web/src/lib/memberGroups.ts`):* single source of truth so Gantt and List stay identical (today they drift — Gantt emits groups in team-member order, List in Map-insertion order).
+  - `memberComboKey(ids): string` — assignee IDs sorted by ID and joined; `__unassigned__` for the empty set. Order-independent and stable, so it doubles as the collapse key.
+  - `orderedComboIds(ids, memberOrder): string[]` — the set in team order, for the label and header dots.
+  - `memberComboLabel(orderedIds, nameById): string` — 1–3 members → Oxford join ("Brian", "Brian and Lindsay", "Brian, Lindsay, and Carol"); 4+ → "Brian, Lindsay, Carol +N".
+  - Group-sort comparator — lexicographic over the members' team-order indices, so groups cluster by anchor member ("Brian", "Brian, Lindsay", "Brian, Carol", … then "Lindsay", …); Unassigned last.
+- *Gantt (`GanttView.tsx` `buildRows`, the `groupBy === 'member'` branch):* bucket by `memberComboKey` over `assignedMemberIds` instead of `primaryMemberId`; extend the `'group'` row to carry `memberColors: string[]` for the header. Group-header renderer (`GanttGrid.tsx`) renders **stacked member color-dots** in team order in place of the single color swatch (a single-member group shows one dot — unchanged look).
+- *List (`ListView.tsx` `buildListRows`, the `groupBy === 'member'` branch):* mirror Gantt via the same shared helpers; carry member colors on the group row; group header renders the same stacked dots.
+- *Toolbar:* no enum change — the `'member'` value and "Member" label are retained (it still groups by member, just exactly). Renaming to "Assignees" is noted as optional polish, out of scope.
+
+**Edge cases:**
+- Empty assignee set → trailing "Unassigned" group (unified key across both views).
+- `colorBy='member'` bar coloring is unaffected (still keys on the first assignee).
+- Collapse machinery is unchanged; the Set simply stores the new composite keys. Stale member-id keys persisted from before harmlessly fail to match.
+
+**Exit criteria — safe to pause when:**
+- An activity assigned to two members renders as its own combination group in both Gantt and List, distinct from each member's solo group
+- Combination group labels read in team order with correct Oxford/truncation formatting; headers show stacked member dots
+- Group ordering is identical between Gantt and List (fixes the current drift) with Unassigned last
+- Collapse/expand works on combination groups; counts are per-group with no double-counting
+- `pnpm --filter web lint` and `pnpm --filter web test` pass, including new `memberGroups.test.ts` and updated `*.tree.test.ts` member-grouping suites
+- Verified in the preview against the multi-assignee sample timeline (Docker verification flagged pending, consistent with 11.1.x)
 
 ---
 
