@@ -27,7 +27,7 @@ import {
   type ColumnDef,
 } from './granularity';
 import { matchEvents } from '@/lib/findMatcher';
-import { memberComboKey, orderedComboIds, memberComboLabel, comboSortComparator, UNASSIGNED_KEY } from '@/lib/memberGroups';
+import { memberComboKey, orderedComboIds, memberComboLabel, comboSortComparator, UNASSIGNED_KEY, SEP } from '@/lib/memberGroups';
 import { useFind } from '@/contexts/FindContext';
 import { useFilter } from '@/contexts/FilterContext';
 import { usePreferenceMap } from '@/hooks/usePreferences';
@@ -204,6 +204,9 @@ export function buildRows(
   if (groupBy === 'member') {
     const memberOrder = members.map(m => m.id);
     const nameById = new Map(members.map(m => [m.id, m.name]));
+    // Colors here are already resolved hex (from the Member type / toMember conversion).
+    // ListView applies resolveColorHex on the raw API color string instead — both
+    // produce hex, but the resolution step happens at different layers.
     const colorById = new Map(members.map(m => [m.id, m.color]));
 
     const buckets = new Map<string, RichActivity[]>();
@@ -220,7 +223,7 @@ export function buildRows(
     const rows: GanttRow[] = [];
     for (const key of sortedKeys) {
       const evs = buckets.get(key)!;
-      const rawIds = key === UNASSIGNED_KEY ? [] : key.split('|');
+      const rawIds = key === UNASSIGNED_KEY ? [] : key.split(SEP);
       const orderedIds = orderedComboIds(rawIds, memberOrder);
       const label = key === UNASSIGNED_KEY ? 'Unassigned' : memberComboLabel(orderedIds, nameById);
       const memberColors = orderedIds.map(id => colorById.get(id) ?? 'var(--muted-foreground)');

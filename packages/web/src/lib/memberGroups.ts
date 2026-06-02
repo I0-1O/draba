@@ -5,7 +5,7 @@
  */
 
 export const UNASSIGNED_KEY = '__unassigned__';
-const SEP = '|';
+export const SEP = '|';
 
 /** Stable composite key for a set of assignee IDs. Order-independent. */
 export function memberComboKey(ids: string[]): string {

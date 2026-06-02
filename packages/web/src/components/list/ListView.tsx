@@ -54,7 +54,7 @@ import { useFilter } from '@/contexts/FilterContext';
 import { useFind } from '@/contexts/FindContext';
 import { applyActiveFilter } from '@/lib/presetFilters';
 import { matchEvents } from '@/lib/findMatcher';
-import { memberComboKey, orderedComboIds, memberComboLabel, comboSortComparator, UNASSIGNED_KEY } from '@/lib/memberGroups';
+import { memberComboKey, orderedComboIds, memberComboLabel, comboSortComparator, UNASSIGNED_KEY, SEP } from '@/lib/memberGroups';
 import { resolveColorHex } from '@/components/identity/identity-constants';
 import { Badge } from '@/components/identity/Badge';
 import { IdentityPicker } from '@/components/identity/IdentityPicker';
@@ -153,7 +153,7 @@ export function buildListRows(
     const rows: ListDisplayRow[] = [];
     for (const key of sortedKeys) {
       const activities = buckets.get(key)!;
-      const rawIds = key === UNASSIGNED_KEY ? [] : key.split('|');
+      const rawIds = key === UNASSIGNED_KEY ? [] : key.split(SEP);
       const orderedIds = orderedComboIds(rawIds, memberOrder);
       const label = key === UNASSIGNED_KEY ? 'Unassigned' : memberComboLabel(orderedIds, nameById);
       const memberColors = orderedIds.map(id => {
