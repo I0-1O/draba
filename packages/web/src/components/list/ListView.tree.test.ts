@@ -1,4 +1,4 @@
-/**
+﻿/**
  * buildListRows — group-by and tree-nesting behaviour.
  *
  * Mirrors the pattern in GanttView.tree.test.ts: pure logic tests on the
@@ -83,33 +83,53 @@ describe('buildListRows — groupBy: none', () => {
 
 // ── groupBy: member ───────────────────────────────────────────────────────────
 
-describe('buildListRows — groupBy: member', () => {
-  const members = new Map([
-    ['m1', { displayName: 'Alice' }],
-    ['m2', { displayName: 'Bob' }],
+describe('buildListRows — groupBy: member (combo-key)', () => {
+  const memberMap = new Map([
+    ['m1', { displayName: 'Alice', color: '#111' }],
+    ['m2', { displayName: 'Bob', color: '#222' }],
   ])
+  const memberOrder = ['m1', 'm2']
+
   const activities = [
     act('a1', { assignedMemberIds: ['m1'] }),
     act('a2', { assignedMemberIds: ['m1'] }),
     act('b1', { assignedMemberIds: ['m2'] }),
+    act('ab1', { assignedMemberIds: ['m1', 'm2'] }),
     act('u1'),  // unassigned
   ]
 
-  it('emits a group header per member then their activities', () => {
-    const rows = buildListRows(activities, 'member', members, emptyStatuses, [], NONE)
+  it('emits one group per unique assignee combination in team order', () => {
+    const rows = buildListRows(activities, 'member', memberMap, emptyStatuses, [], NONE, memberOrder)
     const groups = groupRows(rows)
     expect(groups[0]).toMatchObject({ label: 'Alice', count: 2 })
-    expect(groups[1]).toMatchObject({ label: 'Bob', count: 1 })
-    expect(groups[2]).toMatchObject({ key: '__unassigned__', label: 'Unassigned', count: 1 })
+    // combo group Alice + Bob
+    expect(groups[1].label).toBe('Alice and Bob')
+    expect(groups[1].count).toBe(1)
+    expect(groups[2]).toMatchObject({ label: 'Bob', count: 1 })
+    expect(groups[3]).toMatchObject({ key: '__unassigned__', label: 'Unassigned', count: 1 })
+  })
+
+  it('places multi-assignee activity under its own combination group (no duplication)', () => {
+    const rows = buildListRows(activities, 'member', memberMap, emptyStatuses, [], NONE, memberOrder)
+    const actIds = rows.filter(r => r.kind === 'activity').map(r => (r as Extract<typeof r, { kind: 'activity' }>).activity.id)
+    expect(actIds.filter(id => id === 'ab1')).toHaveLength(1)
+    expect(actIds).toHaveLength(5)
+  })
+
+  it('carries memberColors on group rows for member combos', () => {
+    const rows = buildListRows(activities, 'member', memberMap, emptyStatuses, [], NONE, memberOrder)
+    const groups = rows.filter((r): r is Extract<typeof r, { kind: 'group' }> => r.kind === 'group')
+    const comboGroup = groups.find(g => g.label === 'Alice and Bob')
+    expect(comboGroup?.memberColors).toHaveLength(2)
   })
 
   it('hides collapsed group activities but keeps the group header', () => {
-    const m1Key = 'm1'
-    const rows = buildListRows(activities, 'member', members, emptyStatuses, [], new Set([m1Key]))
-    const ids = rows.map(r => r.kind === 'group' ? `G:${r.key}` : `A:${r.activity.id}`)
+    // Solo-member key is just the member id (since memberComboKey(['m1']) === 'm1')
+    const rows = buildListRows(activities, 'member', memberMap, emptyStatuses, [], new Set(['m1']), memberOrder)
+    const ids = rows.map(r => r.kind === 'group' ? `G:${r.key}` : `A:${(r as Extract<typeof r, { kind: 'activity' }>).activity.id}`)
     expect(ids).not.toContain('A:a1')
     expect(ids).not.toContain('A:a2')
-    expect(ids).toContain(`G:${m1Key}`)
+    expect(ids).toContain('G:m1')
     expect(ids).toContain('A:b1')
   })
 })

@@ -27,6 +27,7 @@ import {
   type ColumnDef,
 } from './granularity';
 import { matchEvents } from '@/lib/findMatcher';
+import { memberComboKey, orderedComboIds, memberComboLabel, comboSortComparator, UNASSIGNED_KEY } from '@/lib/memberGroups';
 import { useFind } from '@/contexts/FindContext';
 import { useFilter } from '@/contexts/FilterContext';
 import { usePreferenceMap } from '@/hooks/usePreferences';
@@ -201,28 +202,33 @@ export function buildRows(
   }
 
   if (groupBy === 'member') {
-    const buckets: Record<string, RichActivity[]> = {};
+    const memberOrder = members.map(m => m.id);
+    const nameById = new Map(members.map(m => [m.id, m.name]));
+    const colorById = new Map(members.map(m => [m.id, m.color]));
+
+    const buckets = new Map<string, RichActivity[]>();
     for (const ev of sorted) {
-      const key = ev.primaryMemberId ?? '__none__';
-      (buckets[key] ??= []).push(ev);
+      const key = memberComboKey(ev.assignedMemberIds);
+      const list = buckets.get(key) ?? [];
+      list.push(ev);
+      buckets.set(key, list);
     }
+
+    const comparator = comboSortComparator(memberOrder);
+    const sortedKeys = [...buckets.keys()].sort(comparator);
 
     const rows: GanttRow[] = [];
-    const pushBucket = (id: string, label: string, color: string, evs: RichActivity[]) => {
-      const collapsed = collapsedGroups.has(id);
-      rows.push({ kind: 'group', id, label, color, count: evs.length, collapsed });
-      if (collapsed) return;
+    for (const key of sortedKeys) {
+      const evs = buckets.get(key)!;
+      const rawIds = key === UNASSIGNED_KEY ? [] : key.split('|');
+      const orderedIds = orderedComboIds(rawIds, memberOrder);
+      const label = key === UNASSIGNED_KEY ? 'Unassigned' : memberComboLabel(orderedIds, nameById);
+      const memberColors = orderedIds.map(id => colorById.get(id) ?? 'var(--muted-foreground)');
+      const primaryColor = key === UNASSIGNED_KEY ? 'var(--muted-foreground)' : (memberColors[0] ?? 'var(--muted-foreground)');
+      const collapsed = collapsedGroups.has(key);
+      rows.push({ kind: 'group', id: key, label, color: primaryColor, memberColors, count: evs.length, collapsed });
+      if (collapsed) continue;
       for (const ev of evs) rows.push({ kind: 'activity', event: { ...ev, isChild: false, depth: 0 } });
-    };
-
-    for (const m of members) {
-      const evs = buckets[m.id];
-      if (!evs?.length) continue;
-      pushBucket(m.id, m.name, m.color, evs);
-    }
-    const unassigned = buckets['__none__'];
-    if (unassigned?.length) {
-      pushBucket('__none__', 'Unassigned', 'var(--muted-foreground)', unassigned);
     }
     return rows;
   }

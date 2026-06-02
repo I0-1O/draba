@@ -54,6 +54,7 @@ import { useFilter } from '@/contexts/FilterContext';
 import { useFind } from '@/contexts/FindContext';
 import { applyActiveFilter } from '@/lib/presetFilters';
 import { matchEvents } from '@/lib/findMatcher';
+import { memberComboKey, orderedComboIds, memberComboLabel, comboSortComparator, UNASSIGNED_KEY } from '@/lib/memberGroups';
 import { resolveColorHex } from '@/components/identity/identity-constants';
 import { Badge } from '@/components/identity/Badge';
 import { IdentityPicker } from '@/components/identity/IdentityPicker';
@@ -114,17 +115,18 @@ const DEFAULT_WIDTHS: ColumnSizingState = Object.fromEntries(
 // ── Group-by row builder (exported for unit tests) ─────────────────────────────
 
 export type ListDisplayRow =
-  | { kind: 'group'; key: string; label: string; count: number }
+  | { kind: 'group'; key: string; label: string; count: number; memberColors?: string[] }
   | { kind: 'activity'; activity: ApiActivity; depth: number; hasChildren: boolean; groupKey: string };
 
 /** Converts a pre-sorted flat activity list into display rows for the given group-by mode. */
 export function buildListRows(
   sortedActivities: ApiActivity[],
   groupBy: ListGroupBy,
-  memberById: Map<string, { displayName: string }>,
+  memberById: Map<string, { displayName: string; color?: string | null }>,
   statusById: Map<string, { name: string }>,
   timelineStatuses: Status[],
   collapsedGroups: Set<string>,
+  memberOrder: string[] = [],
 ): ListDisplayRow[] {
   const emptyRow = (a: ApiActivity): ListDisplayRow => ({
     kind: 'activity', activity: a, depth: 0, hasChildren: false, groupKey: '',
@@ -133,18 +135,32 @@ export function buildListRows(
   if (groupBy === 'none') return sortedActivities.map(emptyRow);
 
   if (groupBy === 'member') {
-    const groups = new Map<string, { label: string; activities: ApiActivity[] }>();
+    const nameById = new Map(
+      [...memberById.entries()].map(([id, m]) => [id, m.displayName]),
+    );
+
+    const buckets = new Map<string, ApiActivity[]>();
     for (const activity of sortedActivities) {
-      const ids = activity.assignedMemberIds ?? [];
-      const key = ids.length === 0 ? '__unassigned__' : ids[0];
-      const label = ids.length === 0 ? 'Unassigned' : (memberById.get(ids[0])?.displayName ?? 'Unknown');
-      const group = groups.get(key) ?? { label, activities: [] };
-      group.activities.push(activity);
-      groups.set(key, group);
+      const key = memberComboKey(activity.assignedMemberIds ?? []);
+      const list = buckets.get(key) ?? [];
+      list.push(activity);
+      buckets.set(key, list);
     }
+
+    const comparator = comboSortComparator(memberOrder);
+    const sortedKeys = [...buckets.keys()].sort(comparator);
+
     const rows: ListDisplayRow[] = [];
-    for (const [key, { label, activities }] of groups) {
-      rows.push({ kind: 'group', key, label, count: activities.length });
+    for (const key of sortedKeys) {
+      const activities = buckets.get(key)!;
+      const rawIds = key === UNASSIGNED_KEY ? [] : key.split('|');
+      const orderedIds = orderedComboIds(rawIds, memberOrder);
+      const label = key === UNASSIGNED_KEY ? 'Unassigned' : memberComboLabel(orderedIds, nameById);
+      const memberColors = orderedIds.map(id => {
+        const raw = memberById.get(id)?.color;
+        return resolveColorHex(raw ?? null) ?? 'var(--muted-foreground)';
+      });
+      rows.push({ kind: 'group', key, label, count: activities.length, memberColors });
       if (!collapsedGroups.has(key)) {
         for (const a of activities) rows.push({ kind: 'activity', activity: a, depth: 0, hasChildren: false, groupKey: key });
       }
@@ -1115,9 +1131,11 @@ export default function ListView({
     [rawActivities],
   );
 
+  const memberOrder = useMemo(() => members.map(m => m.id), [members]);
+
   const displayRows = useMemo(
-    () => buildListRows(sortedActivities, groupBy, memberById, statusById, timelineStatuses, collapsedGroups),
-    [sortedActivities, groupBy, memberById, statusById, timelineStatuses, collapsedGroups],
+    () => buildListRows(sortedActivities, groupBy, memberById, statusById, timelineStatuses, collapsedGroups, memberOrder),
+    [sortedActivities, groupBy, memberById, statusById, timelineStatuses, collapsedGroups, memberOrder],
   );
 
   // Flat list of activity rows (for keyboard navigation indices)
@@ -1875,6 +1893,23 @@ export default function ListView({
                   >
                     <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                       {collapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
+                      {row.memberColors && row.memberColors.length > 0 && (
+                        <div style={{ display: 'flex', flexShrink: 0 }}>
+                          {row.memberColors.map((c, i) => (
+                            <div
+                              key={i}
+                              style={{
+                                width: 9,
+                                height: 9,
+                                borderRadius: '50%',
+                                background: c,
+                                marginLeft: i === 0 ? 0 : -3,
+                                outline: '1.5px solid var(--muted)',
+                              }}
+                            />
+                          ))}
+                        </div>
+                      )}
                       {row.label}
                       <span style={{ fontWeight: 400, opacity: 0.6 }}>({row.count})</span>
                     </div>

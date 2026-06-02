@@ -48,7 +48,7 @@ This document organizes development into discrete phases with effort estimates a
 | 10.4.6 | [Filter Implementation](#phase-1046--filter-implementation) | M–L — 3–4 days | 🔄 |
 | 11.1 | [Web — List View](#phase-111--web--list-view) | M — 2–3 days | ✅ |
 | 11.1.1 | [Timezone-Safe Activity Dates](#phase-1111--timezone-safe-activity-dates) | S–M — 0.5–1 day | ✅ |
-| 11.1.2 | [Group by Assignee Combination](#phase-1112--group-by-assignee-combination) | S–M — 0.5–1 day | ⬜ |
+| 11.1.2 | [Group by Assignee Combination](#phase-1112--group-by-assignee-combination) | S–M — 0.5–1 day | ✅ |
 | 11.2 | [Web — Calendar View](#phase-112--web--calendar-view) | L — 3–5 days | ⬜ |
 | 11.3 | [Web — Kanban View (Read-Only)](#phase-113--web--kanban-view-read-only) | S–M — 1–2 days | ⬜ |
 | 12 | [Communications Testing](#phase-12--communications-testing) | S — 1 day | ⬜ |
@@ -1371,7 +1371,7 @@ Format and position all activity `startAt`/`endAt` in **UTC** (no local conversi
 ---
 
 ### Phase 11.1.2 — Group by Assignee Combination
-**Status:** ⬜ | **Effort:** S–M (0.5–1 day)
+**Status:** ✅ Done (2026-06-02) | **Effort:** S–M (0.5–1 day)
 
 "Group by → Member" (Gantt and List) currently buckets each activity by its *first* assignee, so an activity assigned to both Brian and Lindsay only ever appears under Brian — it is invisible in Lindsay's group and there is no signal that it is shared work. This phase regroups by the **exact set** of assignees: `{Brian}`, `{Lindsay}`, and `{Brian, Lindsay}` become three distinct groups.
 

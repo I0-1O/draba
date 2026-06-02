@@ -1092,6 +1092,27 @@ Fixes midnight-UTC activity dates displaying one calendar day early in negative-
 
 ---
 
+### Group by Assignee Combination (Phase 11.1.2)
+Multi-assignee activities now appear under their exact assignee-set group in both Gantt and List.
+
+- [x] `lib/memberGroups.ts`: `memberComboKey`, `orderedComboIds`, `memberComboLabel`, `comboSortComparator`, `UNASSIGNED_KEY` — 2026-06-02
+- [x] `GanttGrid.tsx`: extend `GanttRow` group type with `memberColors?: string[]`; render stacked color dots in group headers — 2026-06-02
+- [x] `GanttView.tsx` `buildRows`: bucket by `memberComboKey(assignedMemberIds)`; sort groups via `comboSortComparator`; pass `memberColors` to group rows — 2026-06-02
+- [x] `ListView.tsx` `buildListRows`: same combo-key bucketing and sorting; `memberColors` on group rows; stacked dots in group header renderer — 2026-06-02
+- [x] `lib/memberGroups.test.ts`: full suite for key, label, ordering, comparator — 2026-06-02
+- [x] `GanttView.tree.test.ts`: updated member-grouping suite for combo-key behavior — 2026-06-02
+- [x] `ListView.tree.test.ts`: updated member-grouping suite for combo-key behavior — 2026-06-02
+- [x] `pnpm --filter web lint` clean — 2026-06-02
+- [x] `pnpm --filter web build` clean — 2026-06-02
+- [x] `pnpm --filter web test` — 187 tests pass — 2026-06-02
+- [ ] Manual: multi-assignee activity renders under its own combination group in both Gantt and List
+- [ ] Manual: combination group labels are in team order with Oxford/truncation formatting
+- [ ] Manual: group headers show stacked color dots
+- [ ] Manual: group ordering identical between Gantt and List; Unassigned last
+- [ ] Manual: collapse/expand works on combination groups; counts correct with no double-counting
+
+---
+
 ### Timeline Views — Calendar (Web — Phase 11.2)
 Three sub-layouts sharing one component skeleton.
 

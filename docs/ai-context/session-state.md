@@ -2,20 +2,20 @@
 
 _Updated after each significant work session. Read this first to orient — it is intentionally short. Per-phase implementation detail lives in [docs/log.md](../log.md); this file is a current-state snapshot only._
 
-**Last updated:** 2026-06-01 (Phase 11.1.1 Timezone-Safe Activity Dates: UTC-based Gantt positioning and List date display; all automated checks pass; Docker verification pending)
+**Last updated:** 2026-06-02 (Phase 11.1.2 Group by Assignee Combination: combo-key grouping in both Gantt and List; all automated checks pass; Docker verification pending)
 
 ---
 
 ## Phase Status
 
-**All phases through 10.4.6 are complete and automated-checks-pass.** That covers Identity (9.6), Teams/Members/Settings (10.1.x), Status Templates (10.2), Timelines CRUD (10.3), 10.4.1–10.4.5 polish, and 10.4.6 Filter Implementation. Phases through 10.4.5 are Docker-verified; 10.4.6, 11.1, and 11.1.1 are awaiting Docker verification.
+**All phases through 10.4.6 are complete and automated-checks-pass.** That covers Identity (9.6), Teams/Members/Settings (10.1.x), Status Templates (10.2), Timelines CRUD (10.3), 10.4.1–10.4.5 polish, and 10.4.6 Filter Implementation. Phases through 10.4.5 are Docker-verified; 10.4.6, 11.1, 11.1.1, and 11.1.2 are awaiting Docker verification.
 
-**Phase 11.1.1 — Timezone-Safe Activity Dates:** complete and checked (2026-06-01). Ships:
-- `granularity.ts`: all internal date helpers (startOfDay/Week/Month/Quarter/Year, addDays/addMonths, isoWeekNumber, formatLabel, todayColumnPosition) converted to UTC
-- `GanttView.tsx`: `todayMidnight()` and fallback view bounds use UTC
-- `GanttGrid.tsx`: `formatDragDate` adds `timeZone: 'UTC'`
-- `ListView.tsx`: `formatActivityDate` (UTC, for Start/End cells) separate from `formatDate` (local, for Created/Updated)
-- `granularity.test.ts`: existing tests updated to UTC assertions; new timezone-safety suite (149 total tests pass)
+**Phase 11.1.2 — Group by Assignee Combination:** complete and checked (2026-06-02). Ships:
+- `lib/memberGroups.ts` (new): `memberComboKey`, `orderedComboIds`, `memberComboLabel`, `comboSortComparator`, `UNASSIGNED_KEY` — shared by Gantt and List
+- `GanttGrid.tsx`: `GanttRow` group type extended with `memberColors?: string[]`; stacked color dots in group headers
+- `GanttView.tsx` `buildRows`: buckets by combo key over `assignedMemberIds`; groups sorted in team-anchor order; `memberColors` on every group row
+- `ListView.tsx` `buildListRows`: same combo-key bucketing; `memberColors` on group rows; stacked dots in group header renderer
+- 187 tests pass including new `memberGroups.test.ts` (17 tests) and updated tree suites
 
 | Next phase | Scope | Plan |
 |------------|-------|------|
@@ -25,7 +25,7 @@ _Updated after each significant work session. Read this first to orient — it i
 
 ## Open Issues
 
-None surfaced. Manual verification items for 10.4.6, 11.1, and 11.1.1 tracked in TASKS.md.
+None surfaced. Manual verification items for 10.4.6, 11.1, 11.1.1, and 11.1.2 tracked in TASKS.md.
 
 ---
 

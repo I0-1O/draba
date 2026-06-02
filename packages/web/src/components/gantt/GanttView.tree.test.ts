@@ -1,4 +1,4 @@
-/**
+﻿/**
  * buildRows — tree nesting and collapse behaviour.
  *
  * Covers the parent→child depth nesting (arbitrary levels), parent subtree
@@ -99,32 +99,71 @@ describe('buildRows — parent grouping (tree nesting)', () => {
   })
 })
 
-describe('buildRows — member grouping (group collapse)', () => {
+describe('buildRows — member grouping (combo-key grouping)', () => {
   const members: Member[] = [
     { id: 'm1', name: 'Alice', initials: 'A', color: '#111' },
     { id: 'm2', name: 'Bob', initials: 'B', color: '#222' },
   ]
-  const activities = [act('a1', null, 'm1'), act('a2', null, 'm1'), act('b1', null, 'm2')]
 
-  it('emits a group header per member followed by its activities', () => {
-    const rows = buildRows(activities, members, 'member', 'title', NONE, NONE)
-    expect(rows.map(r => (r.kind === 'group' ? `G:${r.id}` : `A:${r.event.id}`))).toEqual([
-      'G:m1',
-      'A:a1',
-      'A:a2',
-      'G:m2',
-      'A:b1',
-    ])
+  // Two activities assigned to m1 solo, one to m2 solo, one to both.
+  function makeActivities() {
+    const a1 = act('a1', null, 'm1')
+    const a2 = act('a2', null, 'm1')
+    const b1 = act('b1', null, 'm2')
+    // Multi-assignee activity
+    const ab1: RichActivity = { ...act('ab1', null, 'm1'), assignedMemberIds: ['m1', 'm2'] }
+    return [a1, a2, b1, ab1]
+  }
+
+  it('emits one group per unique assignee combination in team order', () => {
+    const rows = buildRows(makeActivities(), members, 'member', 'title', NONE, NONE)
+    const groupIds = rows.filter(r => r.kind === 'group').map(r => r.kind === 'group' ? r.id : '')
+    // m1 solo → m1+m2 combo → m2 solo (team order: Alice first)
+    expect(groupIds[0]).toBe('m1')           // Alice solo
+    // The combo key for m1+m2 is sorted by ID; exact string is implementation detail — just check it's not m1 or m2 solo
+    expect(groupIds[1]).not.toBe('m1')
+    expect(groupIds[1]).not.toBe('m2')
+    expect(groupIds[2]).toBe('m2')           // Bob solo
   })
 
-  it('hides a collapsed group’s activities but keeps the header', () => {
+  it('places multi-assignee activity under its own combination group, not duplicated', () => {
+    const rows = buildRows(makeActivities(), members, 'member', 'title', NONE, NONE)
+    const actIds = rows.filter(r => r.kind === 'activity').map(r => r.kind === 'activity' ? r.event.id : '')
+    // ab1 appears exactly once
+    expect(actIds.filter(id => id === 'ab1')).toHaveLength(1)
+    // Total activity count equals original (no duplication)
+    expect(actIds).toHaveLength(4)
+  })
+
+  it('carries memberColors on group rows', () => {
+    const rows = buildRows(makeActivities(), members, 'member', 'title', NONE, NONE)
+    const groups = rows.filter((r): r is Extract<typeof r, { kind: 'group' }> => r.kind === 'group')
+    for (const g of groups) {
+      expect(Array.isArray(g.memberColors)).toBe(true)
+    }
+    // The combo group should have two colors
+    const comboGroup = groups.find(g => g.memberColors && g.memberColors.length === 2)
+    expect(comboGroup).toBeDefined()
+  })
+
+  it('hides a collapsed group activities but keeps the header', () => {
+    const activities = [act('a1', null, 'm1'), act('a2', null, 'm1'), act('b1', null, 'm2')]
     const rows = buildRows(activities, members, 'member', 'title', NONE, new Set(['m1']))
-    expect(rows.map(r => (r.kind === 'group' ? `G:${r.id}` : `A:${r.event.id}`))).toEqual([
-      'G:m1',
-      'G:m2',
-      'A:b1',
-    ])
+    const labels = rows.map(r => (r.kind === 'group' ? `G:${r.id}` : `A:${r.event.id}`))
+    expect(labels).toContain('G:m1')
+    expect(labels).toContain('G:m2')
+    expect(labels).toContain('A:b1')
+    expect(labels).not.toContain('A:a1')
+    expect(labels).not.toContain('A:a2')
     const g = rows.find(r => r.kind === 'group' && r.id === 'm1')
     expect(g?.kind === 'group' && g.collapsed).toBe(true)
+  })
+
+  it('places unassigned activities last', () => {
+    const unassigned: RichActivity = { ...act('u1', null, null), assignedMemberIds: [] }
+    const activities = [act('a1', null, 'm1'), unassigned]
+    const rows = buildRows(activities, members, 'member', 'title', NONE, NONE)
+    const groupIds = rows.filter(r => r.kind === 'group').map(r => r.kind === 'group' ? r.id : '')
+    expect(groupIds[groupIds.length - 1]).toBe('__unassigned__')
   })
 })

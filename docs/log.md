@@ -2,6 +2,37 @@
 
 ---
 
+## 2026-06-02 — /test-phase 11.1.2
+
+- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
+- Result: all pass (1 skip — ws-smoke heartbeat; covered by unit tests)
+- Smoke target: http://epcot.lan:8081
+- Note: api-smoke assertion 18 (non-member authz) initially flagged as FAIL — investigated and confirmed false positive. The smoke subagent's "non-member" user had registered via the bootstrap-team invite and was therefore a member. Direct reproduction confirmed `requireTeamMember` returns 403 for a genuine non-member. TESTING.md Phase 3 assertion 18 updated with setup guidance.
+
+---
+
+## 2026-06-02 — Phase 11.1.2: Group by Assignee Combination
+
+**Goal:** Fix "Group by Member" in both Gantt and List to bucket activities by their exact set of assignees rather than by the first assignee only. A two-person activity now appears under a dedicated `{Alice, Bob}` combo group instead of being invisible to Bob.
+
+**Frontend:**
+- `lib/memberGroups.ts` (new): shared module with `memberComboKey`, `orderedComboIds`, `memberComboLabel`, `comboSortComparator`, and `UNASSIGNED_KEY`. Single source of truth consumed by both views.
+  - `memberComboKey(ids)` — sorts IDs and joins with `|`; returns `__unassigned__` for empty sets.
+  - `orderedComboIds(ids, memberOrder)` — re-orders the set into team order for labels and header dots.
+  - `memberComboLabel(orderedIds, nameById)` — Oxford join for 1–3 names; `"A, B, C +N"` for 4+.
+  - `comboSortComparator(memberOrder)` — lexicographic comparison over team-order indices; solo groups cluster before multi-member groups with the same anchor; Unassigned always last.
+- `GanttGrid.tsx`: extended `GanttRow` group type with `memberColors?: string[]`; group header renderer shows stacked circular color dots when `memberColors` is present (single-member group = one dot, unchanged look).
+- `GanttView.tsx` `buildRows` (member branch): buckets by `memberComboKey(assignedMemberIds)`; sorts keys via `comboSortComparator`; derives group label and `memberColors` from `orderedComboIds` + team color map.
+- `ListView.tsx` `buildListRows` (member branch): same combo-key bucketing and sort; added `memberOrder` parameter; `ListDisplayRow` group type extended with `memberColors?: string[]`; group header renderer shows stacked dots. Call site passes `memberOrder` derived from `members`.
+
+**Tests:**
+- `lib/memberGroups.test.ts` (new): 17 tests covering all four exports — key stability, ordering, Oxford/truncation labels, and comparator sort order.
+- `GanttView.tree.test.ts`: replaced the old member-grouping suite (bucketed by primary member) with a combo-key suite: one group per unique assignee set, no duplication, `memberColors` presence, collapse behavior, Unassigned last.
+- `ListView.tree.test.ts`: same replacement for List — combo-key bucketing, no duplication, `memberColors` on combo groups, collapse behavior.
+- All 187 tests pass; `pnpm --filter web lint` and `pnpm --filter web build` clean.
+
+---
+
 ## 2026-06-01 — Phase 11.1.1: Timezone-Safe Activity Dates
 
 **Goal:** Fix midnight-UTC activity dates (`"2026-05-31T00:00:00Z"`) displaying one calendar day early (e.g. "May 30") for users in negative-UTC-offset timezones. Root cause: Gantt column boundaries and List date formatters used local-time JS methods, while activity dates are UTC midnight — producing a systematic off-by-one in any timezone west of UTC.
