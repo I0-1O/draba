@@ -58,7 +58,7 @@ export default function RegisterPage() {
 
       {/* Logo + wordmark */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 32 }}>
-        <img src="/logo.svg" alt="draba" style={{ width: 36, height: 36 }} />
+        <img src="/logo-teal.svg" alt="draba" style={{ width: 36, height: 36 }} />
         <span style={{ fontSize: 20, fontWeight: 700, color: 'var(--foreground)', letterSpacing: '-0.01em' }}>
           draba
         </span>

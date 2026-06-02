@@ -438,7 +438,7 @@ export default function SetupPage() {
           marginBottom: 24,
         }}
       >
-        <img src="/logo.svg" alt="draba" style={{ width: 72, height: 72 }} />
+        <img src="/logo-teal.svg" alt="draba" style={{ width: 72, height: 72 }} />
         <span
           style={{
             fontSize: 36,

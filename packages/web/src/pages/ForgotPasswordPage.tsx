@@ -30,7 +30,7 @@ export default function ForgotPasswordPage() {
       background: 'var(--background)', padding: 24,
     }}>
       <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2, marginBottom: 24 }}>
-        <img src="/logo.svg" alt="draba" style={{ width: 72, height: 72 }} />
+        <img src="/logo-teal.svg" alt="draba" style={{ width: 72, height: 72 }} />
         <span style={{ fontSize: 36, fontWeight: 700, color: 'var(--foreground)', letterSpacing: '-0.02em' }}>
           draba
         </span>

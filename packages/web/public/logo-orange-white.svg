@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg width="100%" height="100%" viewBox="0 0 780 780" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xml:space="preserve" xmlns:serif="http://www.serif.com/" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;">
+    <g id="Orange-with-white" serif:id="Orange with white" transform="matrix(1.159434,0,0,1.159434,-30.345265,-77.584933)">
+        <g transform="matrix(1,0,0,1,46.331,3.899484)">
+            <path d="M120,446.966L120,120L403.971,120L403.971,288.759C384.521,276.648 361.564,269.65 336.985,269.65C266.9,269.65 210,326.551 210,396.636C210,399.865 210.121,403.067 210.358,406.236L120,446.966ZM308.872,520.493C317.917,522.54 327.326,523.621 336.985,523.621C407.071,523.621 463.971,466.721 463.971,396.636C463.971,394.41 463.914,392.198 463.8,390L463.971,390L463.971,120L600,120L600,600L273.034,600L308.872,520.493Z" style="fill:rgb(239,152,64);"/>
+        </g>
+        <g transform="matrix(1.140983,1.140983,-1.596028,1.596028,1047.878288,-585.713155)">
+            <path d="M60,651.621L135,510L210,651.621L135,611.748L60,651.621Z" style="fill:white;"/>
+        </g>
+    </g>
+</svg>

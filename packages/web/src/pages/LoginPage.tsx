@@ -254,9 +254,9 @@ export default function LoginPage() {
 
           {/* Logo — 2× the handoff's 88px */}
           <img
-            src="/icon-color.svg"
+            src="/logo-color.svg"
             alt="draba"
-            style={{ width: 270, height: 270, filter: 'drop-shadow(0 4px 16px rgba(0,0,0,0.25))', position: 'relative', marginBottom: '-62px' }}
+            style={{ width: 270, height: 270, filter: 'drop-shadow(0 4px 16px rgba(0,0,0,0.25))', position: 'relative', marginTop: '-15px', marginBottom: '-47px' }}
           />
 
           <div style={{ position: 'relative', textAlign: 'center' }}>
