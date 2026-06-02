@@ -2,30 +2,32 @@
 
 _Updated after each significant work session. Read this first to orient — it is intentionally short. Per-phase implementation detail lives in [docs/log.md](../log.md); this file is a current-state snapshot only._
 
-**Last updated:** 2026-06-02 (Phase 11.1.2 Group by Assignee Combination: combo-key grouping in both Gantt and List; all automated checks pass; Docker verification pending)
+**Last updated:** 2026-06-02 (Phase 11.2 Calendar View: Month/Week all-day-bar layouts; lane packing; drag/resize; filter/Find parity; all automated checks pass; Docker verification pending)
 
 ---
 
 ## Phase Status
 
-**All phases through 10.4.6 are complete and automated-checks-pass.** That covers Identity (9.6), Teams/Members/Settings (10.1.x), Status Templates (10.2), Timelines CRUD (10.3), 10.4.1–10.4.5 polish, and 10.4.6 Filter Implementation. Phases through 10.4.5 are Docker-verified; 10.4.6, 11.1, 11.1.1, and 11.1.2 are awaiting Docker verification.
+**All phases through 10.4.6 are complete and automated-checks-pass.** That covers Identity (9.6), Teams/Members/Settings (10.1.x), Status Templates (10.2), Timelines CRUD (10.3), 10.4.1–10.4.5 polish, and 10.4.6 Filter Implementation. Phases through 10.4.5 are Docker-verified; 10.4.6, 11.1, 11.1.1, 11.1.2, and 11.2 are awaiting Docker verification.
 
-**Phase 11.1.2 — Group by Assignee Combination:** complete and checked (2026-06-02). Ships:
-- `lib/memberGroups.ts` (new): `memberComboKey`, `orderedComboIds`, `memberComboLabel`, `comboSortComparator`, `UNASSIGNED_KEY` — shared by Gantt and List
-- `GanttGrid.tsx`: `GanttRow` group type extended with `memberColors?: string[]`; stacked color dots in group headers
-- `GanttView.tsx` `buildRows`: buckets by combo key over `assignedMemberIds`; groups sorted in team-anchor order; `memberColors` on every group row
-- `ListView.tsx` `buildListRows`: same combo-key bucketing; `memberColors` on group rows; stacked dots in group header renderer
-- 187 tests pass including new `memberGroups.test.ts` (17 tests) and updated tree suites
+**Phase 11.2 — Calendar View:** complete and checked (2026-06-02). Ships:
+- `lib/activityColor.ts` (new): shared color-by resolver (activity/member/status) used by CalendarView
+- `lib/calendarLanes.ts` (new): pure greedy lane-packing algorithm; `buildCalendarWeeks`, `overflowCountsForWeek`, `segmentsForDay`; 21 unit tests
+- `components/calendar/CalendarToolbar.tsx` (new): Month/Week toggle, prev/next/today nav, color-by, export/share stubs
+- `components/calendar/CalendarGrid.tsx` (new): week-row grid renderer; `CalendarBar`; `DayOverflowPopover`; `RowResizeHandle`; pointer-based bar drag (move + edge resize) with geometric day hit-testing
+- `components/calendar/CalendarView.tsx` (new): data container — fetches activities + members, applies filter + Find, builds model, manages lane-cap persistence
+- `DashboardPage.tsx`: calendar state + toolbar + content branch wired; prev/next/today nav callbacks
+- 208 tests pass including new `calendarLanes.test.ts` (21 tests)
 
 | Next phase | Scope | Plan |
 |------------|-------|------|
-| **11.2** | Calendar View | see ROADMAP.md |
+| **11.3** | Kanban View (Read-Only) | see ROADMAP.md |
 
 ---
 
 ## Open Issues
 
-None surfaced. Manual verification items for 10.4.6, 11.1, 11.1.1, and 11.1.2 tracked in TASKS.md.
+None surfaced. Manual verification items for 10.4.6, 11.1, 11.1.1, 11.1.2, and 11.2 tracked in TASKS.md.
 
 ---
 

@@ -1117,27 +1117,43 @@ Multi-assignee activities now appear under their exact assignee-set group in bot
 **Month / Week** all-day-bar layouts sharing one skeleton. No Day view, no time grid (every activity is all-day). Detailed plan: `docs/plans/phase-11.2-calendar-view.md`.
 
 **Shared:**
-- [ ] Layout switcher (Month / Week) in the view's toolbar slot
-- [ ] Today / prev / next navigation; jump-to-date picker
-- [ ] Color-by (activity / member / status) carried over via shared `lib/activityColor.ts`
-- [ ] Click empty cell → `ActivityCreatePanel` prefilled with that date
-- [ ] Click bar → existing `ActivityDetailPanel`
-- [ ] Drag bar body → move (duration-preserving, whole-day snap, week-wrap aware) → PATCH; drag edge → resize; live sidebar preview via shared `useActivityDrag`
-- [ ] Respects active filter, Find highlight, `week_start` / `date_format` prefs
+- [x] Layout switcher (Month / Week) in the view's toolbar slot — 2026-06-02
+- [x] Today / prev / next navigation — 2026-06-02
+- [x] Color-by (activity / member / status) carried over via shared `lib/activityColor.ts` — 2026-06-02
+- [x] Click empty cell → `ActivityCreatePanel` prefilled with that date — 2026-06-02
+- [x] Click bar → existing `ActivityDetailPanel` — 2026-06-02
+- [x] Drag bar body → move (duration-preserving, whole-day snap, week-wrap aware) → PATCH; drag edge → resize; live sidebar preview — 2026-06-02
+- [x] Respects active filter, Find highlight, `week_start` pref — 2026-06-02
 
 **Lane packing (`lib/calendarLanes.ts`, pure + unit-tested):**
-- [ ] Per-week-row greedy lane assignment for concurrent multi-day bars
-- [ ] Cross-week activities split into one segment per week row with "continues" edges
+- [x] Per-week-row greedy lane assignment for concurrent multi-day bars — 2026-06-02
+- [x] Cross-week activities split into one segment per week row with "continues" edges — 2026-06-02
 
 **Month layout:**
-- [ ] 6-week grid; multi-day activities render as continuous bars across cells
+- [x] 6-week grid; multi-day activities render as continuous bars across cells — 2026-06-02
 
 **Week layout:**
-- [ ] 7 day columns, taller cells (higher default visible-lane cap)
+- [x] 7 day columns, taller cells (higher default visible-lane cap = 6) — 2026-06-02
 
 **Density / overflow:**
-- [ ] Per-day "+N more" chip → day popover listing every activity that day → row click opens sidebar
-- [ ] Manual per-week row-height drag handle raises/lowers visible-lane cap; persists per-timeline-per-user
+- [x] Per-day "+N more" chip → day popover listing every activity that day → row click opens sidebar — 2026-06-02
+- [x] Manual per-week row-height drag handle raises/lowers visible-lane cap; persists per-timeline-per-user — 2026-06-02
+
+**Testing & verification:**
+- [x] `pnpm --filter web lint` clean — 2026-06-02
+- [x] `pnpm --filter web test` — 208 tests pass including new `calendarLanes.test.ts` (21 tests) — 2026-06-02
+- [x] `pnpm --filter web build` clean — 2026-06-02
+- [x] `golangci-lint run` clean; `go test ./...` passes — 2026-06-02
+- [ ] Manual: view switcher toggles Gantt ↔ List ↔ Calendar, persisting per timeline
+- [ ] Manual: Month and Week layouts render with correct day cells and today highlight
+- [ ] Manual: multi-day activity renders as a continuous bar with "continues" arrow on clipped edges
+- [ ] Manual: color-by recolors bars (activity / member / status)
+- [ ] Manual: "+N more" chip shows count; popover lists all activities for that day; row click opens sidebar
+- [ ] Manual: row-height resize handle raises/lowers visible lanes; persists after reload
+- [ ] Manual: bar click opens ActivityDetailPanel; empty-cell click opens ActivityCreatePanel prefilled
+- [ ] Manual: drag bar body moves it (duration preserved); drag edge resizes; sidebar shows live dates
+- [ ] Manual: Find highlights matching bars in both layouts
+- [ ] Manual: active filter applied (all 6 presets, saved filters)
 
 ---
 

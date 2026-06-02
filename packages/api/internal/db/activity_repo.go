@@ -222,7 +222,10 @@ func (r *ActivityRepo) ListByTimeline(timelineID string, from, to *time.Time, in
 	}
 
 	if from != nil {
-		query += ` AND start_at >= ?`
+		// Overlap semantics: include any activity whose end_at is at or after from.
+		// This catches multi-week/multi-month activities that START before the
+		// visible range but still cross it.
+		query += ` AND end_at >= ?`
 		args = append(args, from)
 	}
 	if to != nil {

@@ -2,6 +2,32 @@
 
 ---
 
+## 2026-06-02 — Phase 11.2: Calendar View
+
+**Goal:** Ship a Month / Week all-day-bar calendar view. Every activity is all-day, so Day view, the time grid, and the time-overlap lane algorithm are all cut. The only layout problem is vertical stacking of concurrent multi-day bars.
+
+**Frontend:**
+- `lib/activityColor.ts` (new): Shared color-by resolver extracted from `GanttView.toRichActivity`. Resolves the display hex color for an activity given `colorBy` ('activity' | 'member' | 'status'), the member map, and the status-color map. Calendar, Gantt, and List can now share one source of truth.
+- `lib/calendarLanes.ts` (new): Pure lane-packing algorithm. `buildCalendarWeeks(activities, gridStart, weekCount, laneCaps, defaultLaneCap, matchedIds, activeMatchId)` returns `WeekRow[]`. Each `WeekRow` carries 7 day dates, a packed `CalendarSegment[]`, `laneCount`, and `visibleLaneCap`. Activities spanning week boundaries are split into independent per-week segments with `continuesLeft/Right` flags. Greedy packing assigns each segment to the lowest non-conflicting lane. `overflowCountsForWeek` and `segmentsForDay` are also exported for the overflow chip UI.
+- `lib/calendarLanes.test.ts` (new): 21 unit tests covering `daysDiff`, single-week basics, single-day activities, multi-day spanning, week-boundary splitting, greedy lane packing (non-overlapping, overlapping, lane reuse, laneCount), overflow counts, segmentsForDay, and Find match flags.
+- `components/calendar/CalendarToolbar.tsx` (new): Sub-toolbar shown in the `view === 'calendar'` slot. Provides Month/Week layout toggle, prev/next/today navigation, color-by select, and export/share stubs. `anchorDate` drives the range label (e.g. "June 2026" or "Jun 1 – 7, 2026").
+- `components/calendar/CalendarGrid.tsx` (new): Presentational grid renderer. Shared by Month (6 weeks) and Week (1 week). Key responsibilities:
+  - `WeekRowRenderer`: renders 7 day cells with borders, date numbers, day-of-week labels (first row in Month, always in Week), today highlight, "+N more" overflow chips, and lane-positioned activity bars.
+  - `CalendarBar`: activity bar with `continuesLeft/Right` arrow affordances, no-end-cap border-radius, Find highlight treatment (amber glow for matches, 30% opacity for non-matches), and edge/body hit zones for drag.
+  - `RowResizeHandle`: 6px bottom-edge drag strip per week row. Pointer-captured drag raises/lowers `visibleLaneCap` (min 1, max `laneCount`). Fires `onCapChange` which persists the cap to per-timeline prefs.
+  - `DayOverflowPopover`: portal-like popover listing every activity on a day (visible + hidden). Click-through to `ActivityDetailPanel`. Closes on outside-click.
+  - Drag state machine: pointer-captured per-bar drag resolves target day via `document.elementFromPoint` + `data-date` attribute lookup on day cells (geometric hit-testing, naturally handles week-wrap). Fires `onBarDragProgress` live for sidebar preview and `onBarDragCommit` on pointer-up → `PATCH`.
+- `components/calendar/CalendarView.tsx` (new): Data container mirroring `GanttView`. Fetches activities + members via `useTimelineActivities` / `useTeamMembers`. Applies `applyActiveFilter`. Builds `CalendarActivity[]` with resolved colors. Runs Find matchEvents and registers ordered match IDs. Manages per-week lane cap persistence via `useUpsertPreference`. Handles bar drag commit (optimistic cache update + `useUpdateActivity.mutate`).
+- `DashboardPage.tsx`: Added `calendarLayout` + `calendarAnchorDate` state. Added `calendarPrev`, `calendarNext`, `calendarToday` navigation callbacks. Added `CalendarToolbar` in the `view === 'calendar'` toolbar slot. Added `CalendarView` in the content area `view === 'calendar'` branch, wiring all props (colorBy, filter, find, drag progress, create defaults, member load).
+
+**Tests:**
+- 208 total tests pass (up from 187 in 11.1.2), including new `calendarLanes.test.ts` (21 tests).
+- `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean; `pnpm --filter web build` clean.
+
+**Manual verification pending (Docker):** view switcher Calendar; Month/Week layouts; multi-day bars; color-by; "+N more" chip and popover; row-height resize; bar click / empty-cell click; bar drag move/resize; Find highlights; filter parity.
+
+---
+
 ## 2026-06-02 — /test-phase 11.1.2
 
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e

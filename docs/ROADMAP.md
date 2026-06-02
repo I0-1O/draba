@@ -49,7 +49,7 @@ This document organizes development into discrete phases with effort estimates a
 | 11.1 | [Web — List View](#phase-111--web--list-view) | M — 2–3 days | ✅ |
 | 11.1.1 | [Timezone-Safe Activity Dates](#phase-1111--timezone-safe-activity-dates) | S–M — 0.5–1 day | ✅ |
 | 11.1.2 | [Group by Assignee Combination](#phase-1112--group-by-assignee-combination) | S–M — 0.5–1 day | ✅ |
-| 11.2 | [Web — Calendar View](#phase-112--web--calendar-view) | L — 3–5 days | ⬜ |
+| 11.2 | [Web — Calendar View](#phase-112--web--calendar-view) | L — 3–5 days | 🔄 |
 | 11.3 | [Web — Kanban View (Read-Only)](#phase-113--web--kanban-view-read-only) | S–M — 1–2 days | ⬜ |
 | 12 | [Communications Testing](#phase-12--communications-testing) | S — 1 day | ⬜ |
 | 13 | [AI Key Management](#phase-13--ai-key-management) | M — 2–3 days | ⬜ |
@@ -1403,7 +1403,7 @@ Format and position all activity `startAt`/`endAt` in **UTC** (no local conversi
 ---
 
 ### Phase 11.2 — Web — Calendar View
-**Status:** ⬜ | **Effort:** L (3–5 days)
+**Status:** 🔄 In Progress — 2026-06-02, all automated checks pass; manual UI verification on Docker still needed | **Effort:** L (3–5 days)
 
 A familiar **Month / Week** calendar surface that answers "what is the team working on this week / this month?" — not a Gantt replacement. **Re-engineered 2026-06-02** from the original "Month / Week / Day + 24-hour time grid" plan: because every activity is all-day, **Day view, the time grid, and the time-overlap lane algorithm are all cut**. Both layouts are pure all-day-bar surfaces; the only layout problem left is vertical stacking of concurrent multi-day bars.
 
