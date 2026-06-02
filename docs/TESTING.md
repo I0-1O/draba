@@ -121,8 +121,8 @@ Live-smoke subagents (`api-smoke`, future `ws-smoke`) hit a running container. T
   - `GetValid` returns `sql.ErrNoRows` after `MarkAccepted` (single-use enforcement)
 
 **schema-check**
-- Start container against a fresh `data.db`; confirm these tables exist: `users`, `teams`, `team_members`, `invites`, `api_tokens`, `events`, `event_tags`, `event_assignments`, `timelines`, `timeline_access`, `calendar_connections`, `team_statuses`
-  - Note: the DB layer uses `events`/`event_tags`/`event_assignments`/`team_statuses`; the API layer surfaces these as `activities`/`statuses`. `status_templates`, `status_template_items`, `instance_settings`, and `password_reset_tokens` are managed via app logic, not standalone migration tables.
+- Start container against a fresh `data.db`; confirm these tables exist: `users`, `teams`, `team_members`, `invites`, `api_tokens`, `activities`, `activity_tags`, `activity_assignments`, `timelines`, `timeline_access`, `calendar_connections`, `statuses`
+  - Note: `status_templates`, `status_template_items`, `instance_settings`, and `password_reset_tokens` are managed via app logic, not standalone migration tables.
 - Restart the container; assert migration runner produces no schema changes (idempotency)
 
 **api-smoke** (against `$DRABA_TEST_URL`)
@@ -151,7 +151,7 @@ Live-smoke subagents (`api-smoke`, future `ws-smoke`) hit a running container. T
 - `GET /teams/:id` with non-member token → 403 Forbidden
 - `POST /teams/:id/invites` → returns invite token (201 Created)
 - Register via that token → user appears in `GET /teams/:id/members` (200 OK)
-- `POST /teams/:id/activities` (body: `name`, `startAt`, `endAt` as RFC3339), then `GET /teams/:id/activities?from=<RFC3339>&to=<RFC3339>` returns it (200 OK) — params must be full RFC3339 (e.g. `2026-01-01T00:00:00Z`), bare dates return 400
+- `POST /teams/:id/timelines/:timelineId/activities` (body: `title`, `startAt`, `endAt` as RFC3339) → 201 Created, then `GET /teams/:id/timelines/:timelineId/activities?from=<RFC3339>&to=<RFC3339>` returns it (200 OK) — params must be full RFC3339 (e.g. `2026-01-01T00:00:00Z`), bare dates return 400
 - `PATCH /activities/:id` updates fields (200 OK); `DELETE /activities/:id` removes it (204 No Content / 200 OK), subsequent GET excludes it
 - Auth: every endpoint rejects requests without a valid JWT (401 Unauthorized)
 - Authz: a user not on the team cannot read or mutate that team's activities (403 Forbidden)
