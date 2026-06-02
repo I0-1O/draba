@@ -287,6 +287,8 @@ packages/
         findMatcher.test.ts
         findMatcher.ts
         identity-constants.test.ts
+        memberGroups.test.ts
+        memberGroups.ts
         presetFilters.test.ts
         presetFilters.ts
         utils.ts
@@ -7482,6 +7484,64 @@ type PatchStatusTemplateItemJSONBody struct {
 }
 ````
 
+## File: packages/api/internal/api/timeline_types.go
+````go
+package api
+
+// createTimelineBody is the request body for POST /teams/{id}/timelines.
+// It replaces the generated CreateTimelineJSONBody to include identity and
+// free-text fields that the generated type omits.
+type createTimelineBody struct {
+	Name        string  `json:"name"`
+	StartDate   string  `json:"startDate"`
+	EndDate     string  `json:"endDate"`
+	Color       *string `json:"color,omitempty"`
+	Icon        *string `json:"icon,omitempty"`
+	Description *string `json:"description,omitempty"`
+	Notes       *string `json:"notes,omitempty"`
+	TemplateID  *string `json:"templateId,omitempty"`
+}
+
+// PatchTimelineJSONBody is the request body for PATCH /timelines/{id}.
+type PatchTimelineJSONBody struct {
+	Name        *string `json:"name,omitempty"`
+	StartDate   *string `json:"startDate,omitempty"`
+	EndDate     *string `json:"endDate,omitempty"`
+	Color       *string `json:"color,omitempty"`
+	Icon        *string `json:"icon,omitempty"`
+	Description *string `json:"description,omitempty"`
+	Notes       *string `json:"notes,omitempty"`
+}
+
+// CreateTimelineStatusJSONBody is the request body for POST /teams/{id}/timelines/{timelineId}/statuses.
+type CreateTimelineStatusJSONBody struct {
+	Name     string  `json:"name"`
+	Color    *string `json:"color,omitempty"`
+	Icon     *string `json:"icon,omitempty"`
+	IsClosed *bool   `json:"isClosed,omitempty"`
+}
+
+// PatchStatusJSONBody is the request body for PATCH /statuses/{id}.
+type PatchStatusJSONBody struct {
+	Name     *string `json:"name,omitempty"`
+	Color    *string `json:"color,omitempty"`
+	Icon     *string `json:"icon,omitempty"`
+	IsClosed *bool   `json:"isClosed,omitempty"`
+	Position *int    `json:"position,omitempty"`
+}
+
+// DeleteStatusJSONBody is the optional request body for DELETE /statuses/{id}.
+// When activities reference the status, replacementStatusId must be provided.
+type DeleteStatusJSONBody struct {
+	ReplacementStatusID *string `json:"replacementStatusId,omitempty"`
+}
+
+// GrantTimelineAccessJSONBody is the request body for PUT /teams/{id}/timelines/{timelineId}/access/{memberId}.
+type GrantTimelineAccessJSONBody struct {
+	Role string `json:"role"`
+}
+````
+
 ## File: packages/api/internal/api/user_handler.go
 ````go
 package api
@@ -8700,6 +8760,13 @@ DROP TABLE tmp_activities;
 DROP TABLE team_statuses;
 ````
 
+## File: packages/api/internal/db/migrations/013_timeline_desc_notes.sql
+````sql
+-- Add description and notes to timelines.
+ALTER TABLE timelines ADD COLUMN description TEXT;
+ALTER TABLE timelines ADD COLUMN notes TEXT;
+````
+
 ## File: packages/api/internal/db/api_token_repo.go
 ````go
 package db
@@ -9190,6 +9257,390 @@ func (r *PasswordResetTokenRepo) MarkUsed(id string) error {
 }
 ````
 
+## File: packages/api/internal/db/status_repo.go
+````go
+// Package db — StatusRepo manages status templates, template items,
+// and live timeline statuses.
+package db
+
+import (
+	"crypto/rand"
+	"encoding/hex"
+	"fmt"
+	"time"
+
+	"github.com/jmoiron/sqlx"
+
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// StatusRepo is the persistence layer for status templates and timeline statuses.
+type StatusRepo struct {
+	db *sqlx.DB
+}
+
+// NewStatusRepo returns a StatusRepo backed by db.
+func NewStatusRepo(db *sqlx.DB) *StatusRepo {
+	return &StatusRepo{db: db}
+}
+
+// ── Templates ─────────────────────────────────────────────────────────────────
+
+// ListTemplates returns all status templates for a team, ordered by position,
+// with their items populated.
+func (r *StatusRepo) ListTemplates(teamID string) ([]*models.StatusTemplate, error) {
+	var templates []*models.StatusTemplate
+	if err := r.db.Select(&templates, `
+		SELECT * FROM status_templates WHERE team_id = ? ORDER BY position, created_at
+	`, teamID); err != nil {
+		return nil, fmt.Errorf("listing status templates: %w", err)
+	}
+
+	// Populate items for each template in one query.
+	if len(templates) == 0 {
+		return templates, nil
+	}
+	ids := make([]string, len(templates))
+	for i, t := range templates {
+		ids[i] = t.ID
+	}
+
+	query, args, err := sqlx.In(`
+		SELECT * FROM status_template_items WHERE template_id IN (?) ORDER BY position
+	`, ids)
+	if err != nil {
+		return nil, fmt.Errorf("building status template items query: %w", err)
+	}
+	query = r.db.Rebind(query)
+	var items []models.StatusTemplateItem
+	if err := r.db.Select(&items, query, args...); err != nil {
+		return nil, fmt.Errorf("listing status template items: %w", err)
+	}
+
+	byTemplate := make(map[string][]models.StatusTemplateItem)
+	for _, item := range items {
+		byTemplate[item.TemplateID] = append(byTemplate[item.TemplateID], item)
+	}
+	for _, t := range templates {
+		t.Items = byTemplate[t.ID]
+		if t.Items == nil {
+			t.Items = []models.StatusTemplateItem{}
+		}
+	}
+	return templates, nil
+}
+
+// GetTemplate returns a single status template by ID.
+func (r *StatusRepo) GetTemplate(id string) (*models.StatusTemplate, error) {
+	var t models.StatusTemplate
+	if err := r.db.Get(&t, `SELECT * FROM status_templates WHERE id = ?`, id); err != nil {
+		return nil, fmt.Errorf("getting status template: %w", err)
+	}
+	var items []models.StatusTemplateItem
+	if err := r.db.Select(&items, `
+		SELECT * FROM status_template_items WHERE template_id = ? ORDER BY position
+	`, id); err != nil {
+		return nil, fmt.Errorf("getting status template items: %w", err)
+	}
+	t.Items = items
+	if t.Items == nil {
+		t.Items = []models.StatusTemplateItem{}
+	}
+	return &t, nil
+}
+
+// CreateTemplate inserts a new status template.
+func (r *StatusRepo) CreateTemplate(t *models.StatusTemplate) error {
+	_, err := r.db.NamedExec(`
+		INSERT INTO status_templates (id, team_id, name, description, position, created_by, created_at, updated_at)
+		VALUES (:id, :team_id, :name, :description, :position, :created_by, :created_at, :updated_at)
+	`, t)
+	if err != nil {
+		return fmt.Errorf("creating status template: %w", err)
+	}
+	return nil
+}
+
+// UpdateTemplate writes mutable template fields (name, description, position).
+func (r *StatusRepo) UpdateTemplate(t *models.StatusTemplate) error {
+	_, err := r.db.NamedExec(`
+		UPDATE status_templates
+		SET name = :name, description = :description, position = :position, updated_at = :updated_at
+		WHERE id = :id
+	`, t)
+	if err != nil {
+		return fmt.Errorf("updating status template: %w", err)
+	}
+	return nil
+}
+
+// CountTemplates returns the number of status templates for a team.
+func (r *StatusRepo) CountTemplates(teamID string) (int, error) {
+	var n int
+	if err := r.db.Get(&n, `SELECT COUNT(*) FROM status_templates WHERE team_id = ?`, teamID); err != nil {
+		return 0, fmt.Errorf("counting status templates: %w", err)
+	}
+	return n, nil
+}
+
+// DeleteTemplate deletes a status template by ID.
+func (r *StatusRepo) DeleteTemplate(id string) error {
+	_, err := r.db.Exec(`DELETE FROM status_templates WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("deleting status template: %w", err)
+	}
+	return nil
+}
+
+// ── Template items ────────────────────────────────────────────────────────────
+
+// GetTemplateItem returns a single template item by ID.
+func (r *StatusRepo) GetTemplateItem(id string) (*models.StatusTemplateItem, error) {
+	var item models.StatusTemplateItem
+	if err := r.db.Get(&item, `SELECT * FROM status_template_items WHERE id = ?`, id); err != nil {
+		return nil, fmt.Errorf("getting status template item: %w", err)
+	}
+	return &item, nil
+}
+
+// CreateTemplateItem inserts a new item into a template.
+func (r *StatusRepo) CreateTemplateItem(item *models.StatusTemplateItem) error {
+	_, err := r.db.NamedExec(`
+		INSERT INTO status_template_items (id, template_id, name, color, icon, is_closed, position)
+		VALUES (:id, :template_id, :name, :color, :icon, :is_closed, :position)
+	`, item)
+	if err != nil {
+		return fmt.Errorf("creating status template item: %w", err)
+	}
+	return nil
+}
+
+// UpdateTemplateItem writes mutable item fields (name, color, icon, is_closed, position).
+func (r *StatusRepo) UpdateTemplateItem(item *models.StatusTemplateItem) error {
+	_, err := r.db.NamedExec(`
+		UPDATE status_template_items
+		SET name = :name, color = :color, icon = :icon, is_closed = :is_closed, position = :position
+		WHERE id = :id
+	`, item)
+	if err != nil {
+		return fmt.Errorf("updating status template item: %w", err)
+	}
+	return nil
+}
+
+// CountTemplateItems returns the number of items in a template.
+func (r *StatusRepo) CountTemplateItems(templateID string) (int, error) {
+	var n int
+	if err := r.db.Get(&n, `SELECT COUNT(*) FROM status_template_items WHERE template_id = ?`, templateID); err != nil {
+		return 0, fmt.Errorf("counting status template items: %w", err)
+	}
+	return n, nil
+}
+
+// DeleteTemplateItem deletes a single template item by ID.
+func (r *StatusRepo) DeleteTemplateItem(id string) error {
+	_, err := r.db.Exec(`DELETE FROM status_template_items WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("deleting status template item: %w", err)
+	}
+	return nil
+}
+
+// ── Seeding ───────────────────────────────────────────────────────────────────
+
+// SeedDefaultTemplate creates the "Default" template (Planning / In Progress / Complete)
+// for a newly created team. Complete is marked is_closed = true.
+func (r *StatusRepo) SeedDefaultTemplate(teamID, createdBy string) error {
+	now := time.Now()
+	templateID := newRepoID()
+	t := &models.StatusTemplate{
+		ID:        templateID,
+		TeamID:    teamID,
+		Name:      "Default",
+		Position:  0,
+		CreatedBy: createdBy,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := r.CreateTemplate(t); err != nil {
+		return err
+	}
+
+	type seed struct {
+		name     string
+		color    string
+		isClosed bool
+	}
+	seeds := []seed{
+		{"Planning", "#3B82F6", false},
+		{"In Progress", "#F59E0B", false},
+		{"Complete", "#22C55E", true},
+	}
+	for i, s := range seeds {
+		item := &models.StatusTemplateItem{
+			ID:         newRepoID(),
+			TemplateID: templateID,
+			Name:       s.name,
+			Color:      s.color,
+			IsClosed:   s.isClosed,
+			Position:   i,
+		}
+		if err := r.CreateTemplateItem(item); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ── Timeline statuses ─────────────────────────────────────────────────────────
+
+// ListStatuses returns all statuses for a timeline, ordered by position.
+func (r *StatusRepo) ListStatuses(timelineID string) ([]*models.Status, error) {
+	var statuses []*models.Status
+	if err := r.db.Select(&statuses, `
+		SELECT * FROM statuses WHERE timeline_id = ? ORDER BY position
+	`, timelineID); err != nil {
+		return nil, fmt.Errorf("listing statuses: %w", err)
+	}
+	if statuses == nil {
+		statuses = []*models.Status{}
+	}
+	return statuses, nil
+}
+
+// GetStatus returns a single status by ID.
+func (r *StatusRepo) GetStatus(id string) (*models.Status, error) {
+	var s models.Status
+	if err := r.db.Get(&s, `SELECT * FROM statuses WHERE id = ?`, id); err != nil {
+		return nil, fmt.Errorf("getting status: %w", err)
+	}
+	return &s, nil
+}
+
+// CreateStatus inserts a new live status for a timeline.
+func (r *StatusRepo) CreateStatus(s *models.Status) error {
+	_, err := r.db.NamedExec(`
+		INSERT INTO statuses (id, timeline_id, name, color, icon, is_closed, position, created_at, updated_at)
+		VALUES (:id, :timeline_id, :name, :color, :icon, :is_closed, :position, :created_at, :updated_at)
+	`, s)
+	if err != nil {
+		return fmt.Errorf("creating status: %w", err)
+	}
+	return nil
+}
+
+// UpdateStatus writes mutable status fields: name, color, icon, is_closed, position.
+func (r *StatusRepo) UpdateStatus(s *models.Status) error {
+	_, err := r.db.NamedExec(`
+		UPDATE statuses
+		SET name = :name, color = :color, icon = :icon,
+		    is_closed = :is_closed, position = :position, updated_at = :updated_at
+		WHERE id = :id
+	`, s)
+	if err != nil {
+		return fmt.Errorf("updating status: %w", err)
+	}
+	return nil
+}
+
+// CountStatuses returns the number of live statuses for a timeline.
+func (r *StatusRepo) CountStatuses(timelineID string) (int, error) {
+	var n int
+	if err := r.db.Get(&n, `SELECT COUNT(*) FROM statuses WHERE timeline_id = ?`, timelineID); err != nil {
+		return 0, fmt.Errorf("counting statuses: %w", err)
+	}
+	return n, nil
+}
+
+// CountStatusActivities returns the number of activities that reference a
+// specific status ID. Used to guard status deletion.
+func (r *StatusRepo) CountStatusActivities(statusID string) (int, error) {
+	var n int
+	if err := r.db.Get(&n, `SELECT COUNT(*) FROM activities WHERE status_id = ?`, statusID); err != nil {
+		return 0, fmt.Errorf("counting status activities: %w", err)
+	}
+	return n, nil
+}
+
+// DeleteStatus deletes a live status. If replacementStatusID is non-empty,
+// activities pointing at the deleted status are re-pointed to the replacement
+// first. Returns an error if replacementStatusID is empty but activities
+// reference the status.
+func (r *StatusRepo) DeleteStatus(id, replacementStatusID string) error {
+	if replacementStatusID != "" {
+		if _, err := r.db.Exec(
+			`UPDATE activities SET status_id = ? WHERE status_id = ?`,
+			replacementStatusID, id,
+		); err != nil {
+			return fmt.Errorf("re-assigning activities before status delete: %w", err)
+		}
+	}
+	if _, err := r.db.Exec(`DELETE FROM statuses WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("deleting status: %w", err)
+	}
+	return nil
+}
+
+// CopyTemplateToTimeline copies a template's items into live statuses for a
+// timeline. If templateID is non-nil, that specific template is used; otherwise
+// the team's first template (by position then created_at) is used. If no
+// matching template is found the call is a silent no-op.
+func (r *StatusRepo) CopyTemplateToTimeline(teamID, timelineID string, templateID *string) error {
+	var template models.StatusTemplate
+	var err error
+	if templateID != nil && *templateID != "" {
+		err = r.db.Get(&template, `
+			SELECT * FROM status_templates WHERE id = ? AND team_id = ?
+		`, *templateID, teamID)
+	} else {
+		err = r.db.Get(&template, `
+			SELECT * FROM status_templates WHERE team_id = ? ORDER BY position, created_at LIMIT 1
+		`, teamID)
+	}
+	if err != nil {
+		// No template — not an error; leave the timeline with no statuses.
+		return nil
+	}
+
+	var items []models.StatusTemplateItem
+	if err := r.db.Select(&items, `
+		SELECT * FROM status_template_items WHERE template_id = ? ORDER BY position
+	`, template.ID); err != nil {
+		return fmt.Errorf("loading template items for copy: %w", err)
+	}
+
+	now := time.Now()
+	for _, item := range items {
+		s := &models.Status{
+			ID:         newRepoID(),
+			TimelineID: timelineID,
+			Name:       item.Name,
+			Color:      item.Color,
+			Icon:       item.Icon,
+			IsClosed:   item.IsClosed,
+			Position:   item.Position,
+			CreatedAt:  now,
+			UpdatedAt:  now,
+		}
+		if _, err := r.db.NamedExec(`
+			INSERT INTO statuses (id, timeline_id, name, color, icon, is_closed, position, created_at, updated_at)
+			VALUES (:id, :timeline_id, :name, :color, :icon, :is_closed, :position, :created_at, :updated_at)
+		`, s); err != nil {
+			return fmt.Errorf("copying status to timeline: %w", err)
+		}
+	}
+	return nil
+}
+
+// newRepoID generates a 32-character hex ID — same entropy as api.newID but
+// usable within the db package without importing the api package.
+func newRepoID() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}
+````
+
 ## File: packages/api/internal/db/team_repo.go
 ````go
 package db
@@ -9642,6 +10093,215 @@ func (r *TeamRepo) GetByInviteLinkToken(token string) (*models.Team, error) {
 		return nil, fmt.Errorf("getting team by invite link: %w", err)
 	}
 	return &t, nil
+}
+````
+
+## File: packages/api/internal/db/timeline_repo.go
+````go
+package db
+
+import (
+	"fmt"
+	"time"
+
+	"github.com/jmoiron/sqlx"
+
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// TimelineRepo is the persistence layer for Timeline records and their access
+// control entries.
+type TimelineRepo struct {
+	db *sqlx.DB
+}
+
+// NewTimelineRepo returns a TimelineRepo backed by db.
+func NewTimelineRepo(db *sqlx.DB) *TimelineRepo {
+	return &TimelineRepo{db: db}
+}
+
+// Create inserts a new Timeline row.
+func (r *TimelineRepo) Create(t *models.Timeline) error {
+	_, err := r.db.NamedExec(`
+		INSERT INTO timelines (
+			id, team_id, name, description, notes,
+			start_date, end_date, color, icon,
+			share_token, ical_token,
+			created_by, created_at, updated_at
+		) VALUES (
+			:id, :team_id, :name, :description, :notes,
+			:start_date, :end_date, :color, :icon,
+			:share_token, :ical_token,
+			:created_by, :created_at, :updated_at
+		)
+	`, t)
+	if err != nil {
+		return fmt.Errorf("creating timeline: %w", err)
+	}
+	return nil
+}
+
+// GetByID fetches a Timeline by primary key, including archived rows so the
+// archive/unarchive handlers can operate on them. Callers that should reject
+// archived timelines must check ArchivedAt explicitly.
+func (r *TimelineRepo) GetByID(id string) (*models.Timeline, error) {
+	var t models.Timeline
+	err := r.db.Get(&t, `SELECT * FROM timelines WHERE id = ?`, id)
+	if err != nil {
+		return nil, fmt.Errorf("getting timeline: %w", err)
+	}
+	return &t, nil
+}
+
+// SetArchived sets or clears archived_at on a timeline. Pass a non-nil time
+// to archive; pass nil to unarchive.
+func (r *TimelineRepo) SetArchived(id string, at *time.Time) error {
+	_, err := r.db.Exec(
+		`UPDATE timelines SET archived_at = ?, updated_at = ? WHERE id = ?`,
+		at, time.Now().UTC(), id,
+	)
+	if err != nil {
+		return fmt.Errorf("setting timeline archived_at: %w", err)
+	}
+	return nil
+}
+
+// GetByShareToken fetches a non-archived Timeline by its public share token.
+// Archived timelines are intentionally excluded — public share URLs should
+// 404 once a timeline is archived.
+// Returns sql.ErrNoRows (wrapped) when no row matches.
+func (r *TimelineRepo) GetByShareToken(token string) (*models.Timeline, error) {
+	var t models.Timeline
+	err := r.db.Get(&t, `SELECT * FROM timelines WHERE share_token = ? AND archived_at IS NULL`, token)
+	if err != nil {
+		return nil, fmt.Errorf("getting timeline by share token: %w", err)
+	}
+	return &t, nil
+}
+
+// ListByTeam returns timelines for a team ordered by creation date
+// descending. When includeArchived is false, archived rows are excluded.
+func (r *TimelineRepo) ListByTeam(teamID string, includeArchived bool) ([]*models.Timeline, error) {
+	ts := make([]*models.Timeline, 0)
+	query := `SELECT * FROM timelines WHERE team_id = ?`
+	if !includeArchived {
+		query += ` AND archived_at IS NULL`
+	}
+	query += ` ORDER BY created_at DESC`
+	err := r.db.Select(&ts, query, teamID)
+	if err != nil {
+		return nil, fmt.Errorf("listing timelines: %w", err)
+	}
+	return ts, nil
+}
+
+// HasAccess reports whether teamMemberID has an entry in timeline_access for
+// the given timeline. Returns false (not an error) when the row is absent.
+func (r *TimelineRepo) HasAccess(timelineID, teamMemberID string) (bool, error) {
+	var count int
+	err := r.db.Get(&count,
+		`SELECT COUNT(*) FROM timeline_access WHERE timeline_id = ? AND team_member_id = ?`,
+		timelineID, teamMemberID,
+	)
+	if err != nil {
+		return false, fmt.Errorf("checking timeline access: %w", err)
+	}
+	return count > 0, nil
+}
+
+// GrantAccess inserts a timeline_access row with the given role. On conflict
+// (row already exists) the role is updated to the supplied value.
+func (r *TimelineRepo) GrantAccess(timelineID, teamMemberID, role string) error {
+	_, err := r.db.Exec(
+		`INSERT INTO timeline_access (timeline_id, team_member_id, role)
+		 VALUES (?, ?, ?)
+		 ON CONFLICT(timeline_id, team_member_id) DO UPDATE SET role = excluded.role`,
+		timelineID, teamMemberID, role,
+	)
+	if err != nil {
+		return fmt.Errorf("granting timeline access: %w", err)
+	}
+	return nil
+}
+
+// RevokeAccess removes a timeline_access row. It is a no-op when the row
+// does not exist.
+func (r *TimelineRepo) RevokeAccess(timelineID, teamMemberID string) error {
+	_, err := r.db.Exec(
+		`DELETE FROM timeline_access WHERE timeline_id = ? AND team_member_id = ?`,
+		timelineID, teamMemberID,
+	)
+	if err != nil {
+		return fmt.Errorf("revoking timeline access: %w", err)
+	}
+	return nil
+}
+
+// GetAccessRole returns the role for a member in timeline_access, or "" if
+// no entry exists. Returns sql.ErrNoRows (wrapped) only on DB errors.
+func (r *TimelineRepo) GetAccessRole(timelineID, teamMemberID string) (string, error) {
+	var role string
+	err := r.db.Get(&role,
+		`SELECT role FROM timeline_access WHERE timeline_id = ? AND team_member_id = ?`,
+		timelineID, teamMemberID,
+	)
+	if err != nil {
+		// No row means no access — return empty string, not an error.
+		return "", nil
+	}
+	return role, nil
+}
+
+// ListAccess returns all access grants for a timeline, joined with member
+// display info, ordered by joined_at.
+func (r *TimelineRepo) ListAccess(timelineID string) ([]*models.TimelineAccessEntry, error) {
+	entries := make([]*models.TimelineAccessEntry, 0)
+	err := r.db.Select(&entries, `
+		SELECT
+			ta.timeline_id,
+			ta.team_member_id,
+			ta.role,
+			COALESCE(tm.display_name, u.display_name, '') AS display_name,
+			COALESCE(u.email, '')                           AS email,
+			tm.color,
+			tm.icon,
+			tm.user_id
+		FROM timeline_access ta
+		JOIN team_members tm ON tm.id = ta.team_member_id
+		LEFT JOIN users u ON u.id = tm.user_id
+		WHERE ta.timeline_id = ?
+		ORDER BY tm.joined_at
+	`, timelineID)
+	if err != nil {
+		return nil, fmt.Errorf("listing timeline access: %w", err)
+	}
+	return entries, nil
+}
+
+// Update writes mutable timeline fields: name, description, notes, start_date,
+// end_date, color, icon.
+func (r *TimelineRepo) Update(t *models.Timeline) error {
+	_, err := r.db.Exec(`
+		UPDATE timelines
+		SET name = ?, description = ?, notes = ?,
+		    start_date = ?, end_date = ?,
+		    color = ?, icon = ?, updated_at = ?
+		WHERE id = ?
+	`, t.Name, t.Description, t.Notes, t.StartDate, t.EndDate, t.Color, t.Icon, t.UpdatedAt, t.ID)
+	if err != nil {
+		return fmt.Errorf("updating timeline: %w", err)
+	}
+	return nil
+}
+
+// Delete hard-deletes a timeline and all its child rows (statuses,
+// timeline_access cascade via FK).
+func (r *TimelineRepo) Delete(id string) error {
+	_, err := r.db.Exec(`DELETE FROM timelines WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("deleting timeline: %w", err)
+	}
+	return nil
 }
 ````
 
@@ -20403,71 +21063,6 @@ func flatten[T any](s []*T) []T {
 }
 ````
 
-## File: packages/api/internal/api/timeline_types.go
-````go
-package api
-
-// createTimelineBody is the request body for POST /teams/{id}/timelines.
-// It replaces the generated CreateTimelineJSONBody to include identity and
-// free-text fields that the generated type omits.
-type createTimelineBody struct {
-	Name        string  `json:"name"`
-	StartDate   string  `json:"startDate"`
-	EndDate     string  `json:"endDate"`
-	Color       *string `json:"color,omitempty"`
-	Icon        *string `json:"icon,omitempty"`
-	Description *string `json:"description,omitempty"`
-	Notes       *string `json:"notes,omitempty"`
-	TemplateID  *string `json:"templateId,omitempty"`
-}
-
-// PatchTimelineJSONBody is the request body for PATCH /timelines/{id}.
-type PatchTimelineJSONBody struct {
-	Name        *string `json:"name,omitempty"`
-	StartDate   *string `json:"startDate,omitempty"`
-	EndDate     *string `json:"endDate,omitempty"`
-	Color       *string `json:"color,omitempty"`
-	Icon        *string `json:"icon,omitempty"`
-	Description *string `json:"description,omitempty"`
-	Notes       *string `json:"notes,omitempty"`
-}
-
-// CreateTimelineStatusJSONBody is the request body for POST /teams/{id}/timelines/{timelineId}/statuses.
-type CreateTimelineStatusJSONBody struct {
-	Name     string  `json:"name"`
-	Color    *string `json:"color,omitempty"`
-	Icon     *string `json:"icon,omitempty"`
-	IsClosed *bool   `json:"isClosed,omitempty"`
-}
-
-// PatchStatusJSONBody is the request body for PATCH /statuses/{id}.
-type PatchStatusJSONBody struct {
-	Name     *string `json:"name,omitempty"`
-	Color    *string `json:"color,omitempty"`
-	Icon     *string `json:"icon,omitempty"`
-	IsClosed *bool   `json:"isClosed,omitempty"`
-	Position *int    `json:"position,omitempty"`
-}
-
-// DeleteStatusJSONBody is the optional request body for DELETE /statuses/{id}.
-// When activities reference the status, replacementStatusId must be provided.
-type DeleteStatusJSONBody struct {
-	ReplacementStatusID *string `json:"replacementStatusId,omitempty"`
-}
-
-// GrantTimelineAccessJSONBody is the request body for PUT /teams/{id}/timelines/{timelineId}/access/{memberId}.
-type GrantTimelineAccessJSONBody struct {
-	Role string `json:"role"`
-}
-````
-
-## File: packages/api/internal/db/migrations/013_timeline_desc_notes.sql
-````sql
--- Add description and notes to timelines.
-ALTER TABLE timelines ADD COLUMN description TEXT;
-ALTER TABLE timelines ADD COLUMN notes TEXT;
-````
-
 ## File: packages/api/internal/db/migrations/014_activities_timeline_id.sql
 ````sql
 ALTER TABLE activities ADD COLUMN timeline_id TEXT REFERENCES timelines(id) ON DELETE SET NULL;
@@ -20513,599 +21108,6 @@ CREATE TABLE activity_tags (
 ## File: packages/api/internal/db/migrations/018_saved_filters_team_scope.sql
 ````sql
 ALTER TABLE saved_filters ADD COLUMN is_team_filter BOOLEAN NOT NULL DEFAULT 0;
-````
-
-## File: packages/api/internal/db/status_repo.go
-````go
-// Package db — StatusRepo manages status templates, template items,
-// and live timeline statuses.
-package db
-
-import (
-	"crypto/rand"
-	"encoding/hex"
-	"fmt"
-	"time"
-
-	"github.com/jmoiron/sqlx"
-
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// StatusRepo is the persistence layer for status templates and timeline statuses.
-type StatusRepo struct {
-	db *sqlx.DB
-}
-
-// NewStatusRepo returns a StatusRepo backed by db.
-func NewStatusRepo(db *sqlx.DB) *StatusRepo {
-	return &StatusRepo{db: db}
-}
-
-// ── Templates ─────────────────────────────────────────────────────────────────
-
-// ListTemplates returns all status templates for a team, ordered by position,
-// with their items populated.
-func (r *StatusRepo) ListTemplates(teamID string) ([]*models.StatusTemplate, error) {
-	var templates []*models.StatusTemplate
-	if err := r.db.Select(&templates, `
-		SELECT * FROM status_templates WHERE team_id = ? ORDER BY position, created_at
-	`, teamID); err != nil {
-		return nil, fmt.Errorf("listing status templates: %w", err)
-	}
-
-	// Populate items for each template in one query.
-	if len(templates) == 0 {
-		return templates, nil
-	}
-	ids := make([]string, len(templates))
-	for i, t := range templates {
-		ids[i] = t.ID
-	}
-
-	query, args, err := sqlx.In(`
-		SELECT * FROM status_template_items WHERE template_id IN (?) ORDER BY position
-	`, ids)
-	if err != nil {
-		return nil, fmt.Errorf("building status template items query: %w", err)
-	}
-	query = r.db.Rebind(query)
-	var items []models.StatusTemplateItem
-	if err := r.db.Select(&items, query, args...); err != nil {
-		return nil, fmt.Errorf("listing status template items: %w", err)
-	}
-
-	byTemplate := make(map[string][]models.StatusTemplateItem)
-	for _, item := range items {
-		byTemplate[item.TemplateID] = append(byTemplate[item.TemplateID], item)
-	}
-	for _, t := range templates {
-		t.Items = byTemplate[t.ID]
-		if t.Items == nil {
-			t.Items = []models.StatusTemplateItem{}
-		}
-	}
-	return templates, nil
-}
-
-// GetTemplate returns a single status template by ID.
-func (r *StatusRepo) GetTemplate(id string) (*models.StatusTemplate, error) {
-	var t models.StatusTemplate
-	if err := r.db.Get(&t, `SELECT * FROM status_templates WHERE id = ?`, id); err != nil {
-		return nil, fmt.Errorf("getting status template: %w", err)
-	}
-	var items []models.StatusTemplateItem
-	if err := r.db.Select(&items, `
-		SELECT * FROM status_template_items WHERE template_id = ? ORDER BY position
-	`, id); err != nil {
-		return nil, fmt.Errorf("getting status template items: %w", err)
-	}
-	t.Items = items
-	if t.Items == nil {
-		t.Items = []models.StatusTemplateItem{}
-	}
-	return &t, nil
-}
-
-// CreateTemplate inserts a new status template.
-func (r *StatusRepo) CreateTemplate(t *models.StatusTemplate) error {
-	_, err := r.db.NamedExec(`
-		INSERT INTO status_templates (id, team_id, name, description, position, created_by, created_at, updated_at)
-		VALUES (:id, :team_id, :name, :description, :position, :created_by, :created_at, :updated_at)
-	`, t)
-	if err != nil {
-		return fmt.Errorf("creating status template: %w", err)
-	}
-	return nil
-}
-
-// UpdateTemplate writes mutable template fields (name, description, position).
-func (r *StatusRepo) UpdateTemplate(t *models.StatusTemplate) error {
-	_, err := r.db.NamedExec(`
-		UPDATE status_templates
-		SET name = :name, description = :description, position = :position, updated_at = :updated_at
-		WHERE id = :id
-	`, t)
-	if err != nil {
-		return fmt.Errorf("updating status template: %w", err)
-	}
-	return nil
-}
-
-// CountTemplates returns the number of status templates for a team.
-func (r *StatusRepo) CountTemplates(teamID string) (int, error) {
-	var n int
-	if err := r.db.Get(&n, `SELECT COUNT(*) FROM status_templates WHERE team_id = ?`, teamID); err != nil {
-		return 0, fmt.Errorf("counting status templates: %w", err)
-	}
-	return n, nil
-}
-
-// DeleteTemplate deletes a status template by ID.
-func (r *StatusRepo) DeleteTemplate(id string) error {
-	_, err := r.db.Exec(`DELETE FROM status_templates WHERE id = ?`, id)
-	if err != nil {
-		return fmt.Errorf("deleting status template: %w", err)
-	}
-	return nil
-}
-
-// ── Template items ────────────────────────────────────────────────────────────
-
-// GetTemplateItem returns a single template item by ID.
-func (r *StatusRepo) GetTemplateItem(id string) (*models.StatusTemplateItem, error) {
-	var item models.StatusTemplateItem
-	if err := r.db.Get(&item, `SELECT * FROM status_template_items WHERE id = ?`, id); err != nil {
-		return nil, fmt.Errorf("getting status template item: %w", err)
-	}
-	return &item, nil
-}
-
-// CreateTemplateItem inserts a new item into a template.
-func (r *StatusRepo) CreateTemplateItem(item *models.StatusTemplateItem) error {
-	_, err := r.db.NamedExec(`
-		INSERT INTO status_template_items (id, template_id, name, color, icon, is_closed, position)
-		VALUES (:id, :template_id, :name, :color, :icon, :is_closed, :position)
-	`, item)
-	if err != nil {
-		return fmt.Errorf("creating status template item: %w", err)
-	}
-	return nil
-}
-
-// UpdateTemplateItem writes mutable item fields (name, color, icon, is_closed, position).
-func (r *StatusRepo) UpdateTemplateItem(item *models.StatusTemplateItem) error {
-	_, err := r.db.NamedExec(`
-		UPDATE status_template_items
-		SET name = :name, color = :color, icon = :icon, is_closed = :is_closed, position = :position
-		WHERE id = :id
-	`, item)
-	if err != nil {
-		return fmt.Errorf("updating status template item: %w", err)
-	}
-	return nil
-}
-
-// CountTemplateItems returns the number of items in a template.
-func (r *StatusRepo) CountTemplateItems(templateID string) (int, error) {
-	var n int
-	if err := r.db.Get(&n, `SELECT COUNT(*) FROM status_template_items WHERE template_id = ?`, templateID); err != nil {
-		return 0, fmt.Errorf("counting status template items: %w", err)
-	}
-	return n, nil
-}
-
-// DeleteTemplateItem deletes a single template item by ID.
-func (r *StatusRepo) DeleteTemplateItem(id string) error {
-	_, err := r.db.Exec(`DELETE FROM status_template_items WHERE id = ?`, id)
-	if err != nil {
-		return fmt.Errorf("deleting status template item: %w", err)
-	}
-	return nil
-}
-
-// ── Seeding ───────────────────────────────────────────────────────────────────
-
-// SeedDefaultTemplate creates the "Default" template (Planning / In Progress / Complete)
-// for a newly created team. Complete is marked is_closed = true.
-func (r *StatusRepo) SeedDefaultTemplate(teamID, createdBy string) error {
-	now := time.Now()
-	templateID := newRepoID()
-	t := &models.StatusTemplate{
-		ID:        templateID,
-		TeamID:    teamID,
-		Name:      "Default",
-		Position:  0,
-		CreatedBy: createdBy,
-		CreatedAt: now,
-		UpdatedAt: now,
-	}
-	if err := r.CreateTemplate(t); err != nil {
-		return err
-	}
-
-	type seed struct {
-		name     string
-		color    string
-		isClosed bool
-	}
-	seeds := []seed{
-		{"Planning", "#3B82F6", false},
-		{"In Progress", "#F59E0B", false},
-		{"Complete", "#22C55E", true},
-	}
-	for i, s := range seeds {
-		item := &models.StatusTemplateItem{
-			ID:         newRepoID(),
-			TemplateID: templateID,
-			Name:       s.name,
-			Color:      s.color,
-			IsClosed:   s.isClosed,
-			Position:   i,
-		}
-		if err := r.CreateTemplateItem(item); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// ── Timeline statuses ─────────────────────────────────────────────────────────
-
-// ListStatuses returns all statuses for a timeline, ordered by position.
-func (r *StatusRepo) ListStatuses(timelineID string) ([]*models.Status, error) {
-	var statuses []*models.Status
-	if err := r.db.Select(&statuses, `
-		SELECT * FROM statuses WHERE timeline_id = ? ORDER BY position
-	`, timelineID); err != nil {
-		return nil, fmt.Errorf("listing statuses: %w", err)
-	}
-	if statuses == nil {
-		statuses = []*models.Status{}
-	}
-	return statuses, nil
-}
-
-// GetStatus returns a single status by ID.
-func (r *StatusRepo) GetStatus(id string) (*models.Status, error) {
-	var s models.Status
-	if err := r.db.Get(&s, `SELECT * FROM statuses WHERE id = ?`, id); err != nil {
-		return nil, fmt.Errorf("getting status: %w", err)
-	}
-	return &s, nil
-}
-
-// CreateStatus inserts a new live status for a timeline.
-func (r *StatusRepo) CreateStatus(s *models.Status) error {
-	_, err := r.db.NamedExec(`
-		INSERT INTO statuses (id, timeline_id, name, color, icon, is_closed, position, created_at, updated_at)
-		VALUES (:id, :timeline_id, :name, :color, :icon, :is_closed, :position, :created_at, :updated_at)
-	`, s)
-	if err != nil {
-		return fmt.Errorf("creating status: %w", err)
-	}
-	return nil
-}
-
-// UpdateStatus writes mutable status fields: name, color, icon, is_closed, position.
-func (r *StatusRepo) UpdateStatus(s *models.Status) error {
-	_, err := r.db.NamedExec(`
-		UPDATE statuses
-		SET name = :name, color = :color, icon = :icon,
-		    is_closed = :is_closed, position = :position, updated_at = :updated_at
-		WHERE id = :id
-	`, s)
-	if err != nil {
-		return fmt.Errorf("updating status: %w", err)
-	}
-	return nil
-}
-
-// CountStatuses returns the number of live statuses for a timeline.
-func (r *StatusRepo) CountStatuses(timelineID string) (int, error) {
-	var n int
-	if err := r.db.Get(&n, `SELECT COUNT(*) FROM statuses WHERE timeline_id = ?`, timelineID); err != nil {
-		return 0, fmt.Errorf("counting statuses: %w", err)
-	}
-	return n, nil
-}
-
-// CountStatusActivities returns the number of activities that reference a
-// specific status ID. Used to guard status deletion.
-func (r *StatusRepo) CountStatusActivities(statusID string) (int, error) {
-	var n int
-	if err := r.db.Get(&n, `SELECT COUNT(*) FROM activities WHERE status_id = ?`, statusID); err != nil {
-		return 0, fmt.Errorf("counting status activities: %w", err)
-	}
-	return n, nil
-}
-
-// DeleteStatus deletes a live status. If replacementStatusID is non-empty,
-// activities pointing at the deleted status are re-pointed to the replacement
-// first. Returns an error if replacementStatusID is empty but activities
-// reference the status.
-func (r *StatusRepo) DeleteStatus(id, replacementStatusID string) error {
-	if replacementStatusID != "" {
-		if _, err := r.db.Exec(
-			`UPDATE activities SET status_id = ? WHERE status_id = ?`,
-			replacementStatusID, id,
-		); err != nil {
-			return fmt.Errorf("re-assigning activities before status delete: %w", err)
-		}
-	}
-	if _, err := r.db.Exec(`DELETE FROM statuses WHERE id = ?`, id); err != nil {
-		return fmt.Errorf("deleting status: %w", err)
-	}
-	return nil
-}
-
-// CopyTemplateToTimeline copies a template's items into live statuses for a
-// timeline. If templateID is non-nil, that specific template is used; otherwise
-// the team's first template (by position then created_at) is used. If no
-// matching template is found the call is a silent no-op.
-func (r *StatusRepo) CopyTemplateToTimeline(teamID, timelineID string, templateID *string) error {
-	var template models.StatusTemplate
-	var err error
-	if templateID != nil && *templateID != "" {
-		err = r.db.Get(&template, `
-			SELECT * FROM status_templates WHERE id = ? AND team_id = ?
-		`, *templateID, teamID)
-	} else {
-		err = r.db.Get(&template, `
-			SELECT * FROM status_templates WHERE team_id = ? ORDER BY position, created_at LIMIT 1
-		`, teamID)
-	}
-	if err != nil {
-		// No template — not an error; leave the timeline with no statuses.
-		return nil
-	}
-
-	var items []models.StatusTemplateItem
-	if err := r.db.Select(&items, `
-		SELECT * FROM status_template_items WHERE template_id = ? ORDER BY position
-	`, template.ID); err != nil {
-		return fmt.Errorf("loading template items for copy: %w", err)
-	}
-
-	now := time.Now()
-	for _, item := range items {
-		s := &models.Status{
-			ID:         newRepoID(),
-			TimelineID: timelineID,
-			Name:       item.Name,
-			Color:      item.Color,
-			Icon:       item.Icon,
-			IsClosed:   item.IsClosed,
-			Position:   item.Position,
-			CreatedAt:  now,
-			UpdatedAt:  now,
-		}
-		if _, err := r.db.NamedExec(`
-			INSERT INTO statuses (id, timeline_id, name, color, icon, is_closed, position, created_at, updated_at)
-			VALUES (:id, :timeline_id, :name, :color, :icon, :is_closed, :position, :created_at, :updated_at)
-		`, s); err != nil {
-			return fmt.Errorf("copying status to timeline: %w", err)
-		}
-	}
-	return nil
-}
-
-// newRepoID generates a 32-character hex ID — same entropy as api.newID but
-// usable within the db package without importing the api package.
-func newRepoID() string {
-	b := make([]byte, 16)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)
-}
-````
-
-## File: packages/api/internal/db/timeline_repo.go
-````go
-package db
-
-import (
-	"fmt"
-	"time"
-
-	"github.com/jmoiron/sqlx"
-
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// TimelineRepo is the persistence layer for Timeline records and their access
-// control entries.
-type TimelineRepo struct {
-	db *sqlx.DB
-}
-
-// NewTimelineRepo returns a TimelineRepo backed by db.
-func NewTimelineRepo(db *sqlx.DB) *TimelineRepo {
-	return &TimelineRepo{db: db}
-}
-
-// Create inserts a new Timeline row.
-func (r *TimelineRepo) Create(t *models.Timeline) error {
-	_, err := r.db.NamedExec(`
-		INSERT INTO timelines (
-			id, team_id, name, description, notes,
-			start_date, end_date, color, icon,
-			share_token, ical_token,
-			created_by, created_at, updated_at
-		) VALUES (
-			:id, :team_id, :name, :description, :notes,
-			:start_date, :end_date, :color, :icon,
-			:share_token, :ical_token,
-			:created_by, :created_at, :updated_at
-		)
-	`, t)
-	if err != nil {
-		return fmt.Errorf("creating timeline: %w", err)
-	}
-	return nil
-}
-
-// GetByID fetches a Timeline by primary key, including archived rows so the
-// archive/unarchive handlers can operate on them. Callers that should reject
-// archived timelines must check ArchivedAt explicitly.
-func (r *TimelineRepo) GetByID(id string) (*models.Timeline, error) {
-	var t models.Timeline
-	err := r.db.Get(&t, `SELECT * FROM timelines WHERE id = ?`, id)
-	if err != nil {
-		return nil, fmt.Errorf("getting timeline: %w", err)
-	}
-	return &t, nil
-}
-
-// SetArchived sets or clears archived_at on a timeline. Pass a non-nil time
-// to archive; pass nil to unarchive.
-func (r *TimelineRepo) SetArchived(id string, at *time.Time) error {
-	_, err := r.db.Exec(
-		`UPDATE timelines SET archived_at = ?, updated_at = ? WHERE id = ?`,
-		at, time.Now().UTC(), id,
-	)
-	if err != nil {
-		return fmt.Errorf("setting timeline archived_at: %w", err)
-	}
-	return nil
-}
-
-// GetByShareToken fetches a non-archived Timeline by its public share token.
-// Archived timelines are intentionally excluded — public share URLs should
-// 404 once a timeline is archived.
-// Returns sql.ErrNoRows (wrapped) when no row matches.
-func (r *TimelineRepo) GetByShareToken(token string) (*models.Timeline, error) {
-	var t models.Timeline
-	err := r.db.Get(&t, `SELECT * FROM timelines WHERE share_token = ? AND archived_at IS NULL`, token)
-	if err != nil {
-		return nil, fmt.Errorf("getting timeline by share token: %w", err)
-	}
-	return &t, nil
-}
-
-// ListByTeam returns timelines for a team ordered by creation date
-// descending. When includeArchived is false, archived rows are excluded.
-func (r *TimelineRepo) ListByTeam(teamID string, includeArchived bool) ([]*models.Timeline, error) {
-	ts := make([]*models.Timeline, 0)
-	query := `SELECT * FROM timelines WHERE team_id = ?`
-	if !includeArchived {
-		query += ` AND archived_at IS NULL`
-	}
-	query += ` ORDER BY created_at DESC`
-	err := r.db.Select(&ts, query, teamID)
-	if err != nil {
-		return nil, fmt.Errorf("listing timelines: %w", err)
-	}
-	return ts, nil
-}
-
-// HasAccess reports whether teamMemberID has an entry in timeline_access for
-// the given timeline. Returns false (not an error) when the row is absent.
-func (r *TimelineRepo) HasAccess(timelineID, teamMemberID string) (bool, error) {
-	var count int
-	err := r.db.Get(&count,
-		`SELECT COUNT(*) FROM timeline_access WHERE timeline_id = ? AND team_member_id = ?`,
-		timelineID, teamMemberID,
-	)
-	if err != nil {
-		return false, fmt.Errorf("checking timeline access: %w", err)
-	}
-	return count > 0, nil
-}
-
-// GrantAccess inserts a timeline_access row with the given role. On conflict
-// (row already exists) the role is updated to the supplied value.
-func (r *TimelineRepo) GrantAccess(timelineID, teamMemberID, role string) error {
-	_, err := r.db.Exec(
-		`INSERT INTO timeline_access (timeline_id, team_member_id, role)
-		 VALUES (?, ?, ?)
-		 ON CONFLICT(timeline_id, team_member_id) DO UPDATE SET role = excluded.role`,
-		timelineID, teamMemberID, role,
-	)
-	if err != nil {
-		return fmt.Errorf("granting timeline access: %w", err)
-	}
-	return nil
-}
-
-// RevokeAccess removes a timeline_access row. It is a no-op when the row
-// does not exist.
-func (r *TimelineRepo) RevokeAccess(timelineID, teamMemberID string) error {
-	_, err := r.db.Exec(
-		`DELETE FROM timeline_access WHERE timeline_id = ? AND team_member_id = ?`,
-		timelineID, teamMemberID,
-	)
-	if err != nil {
-		return fmt.Errorf("revoking timeline access: %w", err)
-	}
-	return nil
-}
-
-// GetAccessRole returns the role for a member in timeline_access, or "" if
-// no entry exists. Returns sql.ErrNoRows (wrapped) only on DB errors.
-func (r *TimelineRepo) GetAccessRole(timelineID, teamMemberID string) (string, error) {
-	var role string
-	err := r.db.Get(&role,
-		`SELECT role FROM timeline_access WHERE timeline_id = ? AND team_member_id = ?`,
-		timelineID, teamMemberID,
-	)
-	if err != nil {
-		// No row means no access — return empty string, not an error.
-		return "", nil
-	}
-	return role, nil
-}
-
-// ListAccess returns all access grants for a timeline, joined with member
-// display info, ordered by joined_at.
-func (r *TimelineRepo) ListAccess(timelineID string) ([]*models.TimelineAccessEntry, error) {
-	entries := make([]*models.TimelineAccessEntry, 0)
-	err := r.db.Select(&entries, `
-		SELECT
-			ta.timeline_id,
-			ta.team_member_id,
-			ta.role,
-			COALESCE(tm.display_name, u.display_name, '') AS display_name,
-			COALESCE(u.email, '')                           AS email,
-			tm.color,
-			tm.icon,
-			tm.user_id
-		FROM timeline_access ta
-		JOIN team_members tm ON tm.id = ta.team_member_id
-		LEFT JOIN users u ON u.id = tm.user_id
-		WHERE ta.timeline_id = ?
-		ORDER BY tm.joined_at
-	`, timelineID)
-	if err != nil {
-		return nil, fmt.Errorf("listing timeline access: %w", err)
-	}
-	return entries, nil
-}
-
-// Update writes mutable timeline fields: name, description, notes, start_date,
-// end_date, color, icon.
-func (r *TimelineRepo) Update(t *models.Timeline) error {
-	_, err := r.db.Exec(`
-		UPDATE timelines
-		SET name = ?, description = ?, notes = ?,
-		    start_date = ?, end_date = ?,
-		    color = ?, icon = ?, updated_at = ?
-		WHERE id = ?
-	`, t.Name, t.Description, t.Notes, t.StartDate, t.EndDate, t.Color, t.Icon, t.UpdatedAt, t.ID)
-	if err != nil {
-		return fmt.Errorf("updating timeline: %w", err)
-	}
-	return nil
-}
-
-// Delete hard-deletes a timeline and all its child rows (statuses,
-// timeline_access cascade via FK).
-func (r *TimelineRepo) Delete(id string) error {
-	_, err := r.db.Exec(`DELETE FROM timelines WHERE id = ?`, id)
-	if err != nil {
-		return fmt.Errorf("deleting timeline: %w", err)
-	}
-	return nil
-}
 ````
 
 ## File: packages/api/sample_data/01_users.sql
@@ -23835,6 +23837,231 @@ describe('matchActivities', () => {
 })
 ````
 
+## File: packages/web/src/lib/memberGroups.test.ts
+````typescript
+/**
+ * memberGroups — unit tests for combo key, label, ordering, and sort comparator.
+ */
+
+import { describe, it, expect } from 'vitest'
+import {
+  memberComboKey,
+  orderedComboIds,
+  memberComboLabel,
+  comboSortComparator,
+  UNASSIGNED_KEY,
+} from './memberGroups'
+
+// ── memberComboKey ──────────────────────────────────────────────────────────
+
+describe('memberComboKey', () => {
+  it('returns UNASSIGNED_KEY for empty array', () => {
+    expect(memberComboKey([])).toBe(UNASSIGNED_KEY)
+  })
+
+  it('returns the single id for a solo assignee', () => {
+    expect(memberComboKey(['abc'])).toBe('abc')
+  })
+
+  it('sorts ids before joining so order of input does not matter', () => {
+    expect(memberComboKey(['b', 'a'])).toBe(memberComboKey(['a', 'b']))
+  })
+
+  it('produces the same key for any permutation of three ids', () => {
+    const k = memberComboKey(['c', 'a', 'b'])
+    expect(memberComboKey(['a', 'b', 'c'])).toBe(k)
+    expect(memberComboKey(['b', 'c', 'a'])).toBe(k)
+  })
+})
+
+// ── orderedComboIds ─────────────────────────────────────────────────────────
+
+describe('orderedComboIds', () => {
+  const order = ['m1', 'm2', 'm3']
+
+  it('returns ids in team order', () => {
+    expect(orderedComboIds(['m3', 'm1'], order)).toEqual(['m1', 'm3'])
+  })
+
+  it('handles a single id', () => {
+    expect(orderedComboIds(['m2'], order)).toEqual(['m2'])
+  })
+
+  it('places unknown ids last (stable)', () => {
+    const result = orderedComboIds(['unknown', 'm1'], order)
+    expect(result[0]).toBe('m1')
+    expect(result[1]).toBe('unknown')
+  })
+})
+
+// ── memberComboLabel ────────────────────────────────────────────────────────
+
+describe('memberComboLabel', () => {
+  const names = new Map([['m1', 'Alice'], ['m2', 'Bob'], ['m3', 'Carol'], ['m4', 'Dave'], ['m5', 'Eve']])
+
+  it('1 member → bare name', () => {
+    expect(memberComboLabel(['m1'], names)).toBe('Alice')
+  })
+
+  it('2 members → "A and B"', () => {
+    expect(memberComboLabel(['m1', 'm2'], names)).toBe('Alice and Bob')
+  })
+
+  it('3 members → "A, B, and C"', () => {
+    expect(memberComboLabel(['m1', 'm2', 'm3'], names)).toBe('Alice, Bob, and Carol')
+  })
+
+  it('4 members → "A, B, C +1"', () => {
+    expect(memberComboLabel(['m1', 'm2', 'm3', 'm4'], names)).toBe('Alice, Bob, Carol +1')
+  })
+
+  it('5 members → "A, B, C +2"', () => {
+    expect(memberComboLabel(['m1', 'm2', 'm3', 'm4', 'm5'], names)).toBe('Alice, Bob, Carol +2')
+  })
+
+  it('unknown id falls back to "Unknown"', () => {
+    expect(memberComboLabel(['nope'], names)).toBe('Unknown')
+  })
+})
+
+// ── comboSortComparator ─────────────────────────────────────────────────────
+
+describe('comboSortComparator', () => {
+  const order = ['m1', 'm2', 'm3']
+  const cmp = comboSortComparator(order)
+
+  function key(...ids: string[]) { return memberComboKey(ids) }
+
+  it('solo Alice before solo Bob', () => {
+    expect(cmp(key('m1'), key('m2'))).toBeLessThan(0)
+  })
+
+  it('solo Alice before Alice+Bob', () => {
+    expect(cmp(key('m1'), key('m1', 'm2'))).toBeLessThan(0)
+  })
+
+  it('Alice+Bob before Alice+Carol', () => {
+    expect(cmp(key('m1', 'm2'), key('m1', 'm3'))).toBeLessThan(0)
+  })
+
+  it('Alice+Carol before solo Bob', () => {
+    expect(cmp(key('m1', 'm3'), key('m2'))).toBeLessThan(0)
+  })
+
+  it('solo Bob before Bob+Carol', () => {
+    expect(cmp(key('m2'), key('m2', 'm3'))).toBeLessThan(0)
+  })
+
+  it('Unassigned is last', () => {
+    expect(cmp(UNASSIGNED_KEY, key('m3'))).toBeGreaterThan(0)
+    expect(cmp(key('m1'), UNASSIGNED_KEY)).toBeLessThan(0)
+  })
+
+  it('equal keys compare as 0', () => {
+    expect(cmp(key('m1', 'm2'), key('m2', 'm1'))).toBe(0)
+  })
+
+  it('sorts a mixed list into the expected cluster order', () => {
+    const keys = [
+      UNASSIGNED_KEY,
+      key('m2'),
+      key('m1', 'm3'),
+      key('m1'),
+      key('m1', 'm2'),
+      key('m3'),
+      key('m2', 'm3'),
+    ].sort(cmp)
+    expect(keys).toEqual([
+      key('m1'),
+      key('m1', 'm2'),
+      key('m1', 'm3'),
+      key('m2'),
+      key('m2', 'm3'),
+      key('m3'),
+      UNASSIGNED_KEY,
+    ])
+  })
+})
+````
+
+## File: packages/web/src/lib/memberGroups.ts
+````typescript
+/**
+ * memberGroups — shared helpers for "group by member combination."
+ * Used by both GanttView and ListView so the two views stay identical in
+ * key generation, label formatting, and group ordering.
+ */
+
+export const UNASSIGNED_KEY = '__unassigned__';
+const SEP = '|';
+
+/** Stable composite key for a set of assignee IDs. Order-independent. */
+export function memberComboKey(ids: string[]): string {
+  if (ids.length === 0) return UNASSIGNED_KEY;
+  return [...ids].sort().join(SEP);
+}
+
+/**
+ * Returns the IDs from the combination in team-member order (as they appear
+ * in the memberOrder array). Used for label generation and header dots.
+ */
+export function orderedComboIds(ids: string[], memberOrder: string[]): string[] {
+  const orderIndex = new Map(memberOrder.map((id, i) => [id, i]));
+  return [...ids].sort((a, b) => {
+    const ia = orderIndex.get(a) ?? Infinity;
+    const ib = orderIndex.get(b) ?? Infinity;
+    return ia - ib;
+  });
+}
+
+/**
+ * Human-readable label for a combination, in team order:
+ * 1 → "Alice" | 2 → "Alice and Bob" | 3 → "Alice, Bob, and Carol" | 4+ → "Alice, Bob, Carol +N"
+ */
+export function memberComboLabel(orderedIds: string[], nameById: Map<string, string>): string {
+  const names = orderedIds.map(id => nameById.get(id) ?? 'Unknown');
+  if (names.length === 0) return 'Unassigned';
+  if (names.length === 1) return names[0];
+  if (names.length === 2) return `${names[0]} and ${names[1]}`;
+  if (names.length === 3) return `${names[0]}, ${names[1]}, and ${names[2]}`;
+  return `${names.slice(0, 3).join(', ')} +${names.length - 3}`;
+}
+
+/**
+ * Sort comparator for combo keys. Groups cluster by anchor member in team
+ * order ("Alice", "Alice + Bob", "Alice + Carol", …, "Bob", …); Unassigned last.
+ *
+ * Uses lexicographic comparison over each member's team-order index; missing
+ * positions are treated as -1 so single-member groups precede multi-member
+ * groups that share the same anchor.
+ */
+export function comboSortComparator(memberOrder: string[]): (a: string, b: string) => number {
+  const orderIndex = new Map(memberOrder.map((id, i) => [id, i]));
+
+  function indices(key: string): number[] {
+    if (key === UNASSIGNED_KEY) return [Infinity];
+    return key
+      .split(SEP)
+      .map(id => orderIndex.get(id) ?? Infinity)
+      .sort((a, b) => a - b); // ascending = team order
+  }
+
+  return (a: string, b: string): number => {
+    const ia = indices(a);
+    const ib = indices(b);
+    const len = Math.max(ia.length, ib.length);
+    for (let i = 0; i < len; i++) {
+      // Use -1 for missing positions so shorter combos sort before longer ones
+      // that share the same anchor (e.g. "Alice" before "Alice + Bob").
+      const va = ia[i] ?? -1;
+      const vb = ib[i] ?? -1;
+      if (va !== vb) return va - vb;
+    }
+    return 0;
+  };
+}
+````
+
 ## File: packages/web/src/pages/LoginPage.tsx
 ````typescript
 import { useState } from 'react'
@@ -25264,6 +25491,464 @@ func (s *Server) handleDeleteTag(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+````
+
+## File: packages/api/internal/api/timeline_handler.go
+````go
+package api
+
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/events"
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// handleListTimelines handles GET /teams/{id}/timelines. Any team member may
+// list the non-archived timelines for a team.
+func (s *Server) handleListTimelines(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+
+	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
+		return
+	}
+
+	includeArchived := r.URL.Query().Get("archived") == "true"
+	timelines, err := s.timelines.ListByTeam(teamID, includeArchived)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list timelines")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, timelines)
+}
+
+// handleCreateTimeline handles POST /teams/{id}/timelines. The authenticated
+// user must be a member of the team. The creator is automatically granted
+// timeline-admin access.
+func (s *Server) handleCreateTimeline(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	member, ok := s.requireTeamMember(w, r, teamID)
+	if !ok {
+		return
+	}
+
+	var req createTimelineBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	if strings.TrimSpace(req.Name) == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name is required")
+		return
+	}
+	if req.StartDate == "" || req.EndDate == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "startDate and endDate are required")
+		return
+	}
+
+	const dateLayout = "2006-01-02"
+	startDate, err := time.Parse(dateLayout, req.StartDate)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid startDate format")
+		return
+	}
+	endDate, err := time.Parse(dateLayout, req.EndDate)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid endDate format")
+		return
+	}
+
+	if endDate.Before(startDate) {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "endDate must not be before startDate")
+		return
+	}
+
+	now := time.Now()
+	timeline := &models.Timeline{
+		ID:          newID(),
+		TeamID:      teamID,
+		Name:        strings.TrimSpace(req.Name),
+		Description: req.Description,
+		Notes:       req.Notes,
+		StartDate:   startDate.Format(dateLayout),
+		EndDate:     endDate.Format(dateLayout),
+		Color:       req.Color,
+		Icon:        req.Icon,
+		ShareToken:  newID(),
+		IcalToken:   newID(),
+		CreatedBy:   claims.UserID,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	if err := s.timelines.Create(timeline); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create timeline")
+		return
+	}
+
+	// Always grant the creator timeline-admin access so they can manage it.
+	if err := s.timelines.GrantAccess(timeline.ID, member.ID, "admin"); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create timeline")
+		return
+	}
+
+	// Copy the selected (or first) status template into live statuses for this timeline.
+	if err := s.statuses.CopyTemplateToTimeline(teamID, timeline.ID, req.TemplateID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create timeline")
+		return
+	}
+
+	s.bus.Publish(events.Message{Type: events.TimelineCreated, TeamID: timeline.TeamID, Payload: timeline})
+	writeJSON(w, http.StatusCreated, timeline)
+}
+
+// handleGetTimeline handles GET /timelines/{id}. The authenticated user must
+// be a member of the timeline's team. Team admins may access any timeline;
+// other members require an entry in timeline_access.
+func (s *Server) handleGetTimeline(w http.ResponseWriter, r *http.Request) {
+	timelineID := r.PathValue("id")
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
+		return
+	}
+	// Hide archived timelines from the standard read path unless ?archived=true.
+	if timeline.ArchivedAt != nil && r.URL.Query().Get("archived") != "true" {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+		return
+	}
+
+	member, ok := s.requireTeamMember(w, r, timeline.TeamID)
+	if !ok {
+		return
+	}
+
+	// Team admins (and superadmins) can access all timelines; members need an explicit grant.
+	if member.Role != "admin" {
+		ok, err := s.timelines.HasAccess(timelineID, member.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
+			return
+		}
+		if !ok {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not on the access list for this timeline")
+			return
+		}
+	}
+
+	writeJSON(w, http.StatusOK, timeline)
+}
+
+// handleArchiveTimeline handles POST /timelines/{id}/archive. Only team
+// admins or timeline admins may archive.
+func (s *Server) handleArchiveTimeline(w http.ResponseWriter, r *http.Request) {
+	s.setTimelineArchive(w, r, true)
+}
+
+// handleUnarchiveTimeline handles POST /timelines/{id}/unarchive.
+func (s *Server) handleUnarchiveTimeline(w http.ResponseWriter, r *http.Request) {
+	s.setTimelineArchive(w, r, false)
+}
+
+// setTimelineArchive is the shared archive/unarchive implementation. Access
+// is admin-only: the caller must be a team admin, or hold timeline_access
+// with role='admin' for this timeline.
+func (s *Server) setTimelineArchive(w http.ResponseWriter, r *http.Request, archive bool) {
+	timelineID := r.PathValue("id")
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update timeline")
+		return
+	}
+
+	if _, ok := s.requireTeamAdmin(w, r, timeline.TeamID); !ok {
+		return
+	}
+
+	var at *time.Time
+	if archive {
+		now := time.Now().UTC()
+		at = &now
+	}
+	if err := s.timelines.SetArchived(timelineID, at); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update timeline")
+		return
+	}
+	timeline.ArchivedAt = at
+	timeline.UpdatedAt = time.Now().UTC()
+
+	s.bus.Publish(events.Message{Type: events.TimelineUpdated, TeamID: timeline.TeamID, Payload: timeline})
+	writeJSON(w, http.StatusOK, timeline)
+}
+
+// handleUpdateTimeline handles PATCH /timelines/{id}. Only a team admin or a
+// member with timeline_access role='admin' may rename or change dates.
+func (s *Server) handleUpdateTimeline(w http.ResponseWriter, r *http.Request) {
+	timelineID := r.PathValue("id")
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update timeline")
+		return
+	}
+
+	member, ok := s.requireTeamMember(w, r, timeline.TeamID)
+	if !ok {
+		return
+	}
+
+	if !s.canAdminTimeline(member, timelineID) {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "timeline admin role required")
+		return
+	}
+
+	var req PatchTimelineJSONBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	if req.Name != nil {
+		name := strings.TrimSpace(*req.Name)
+		if name == "" {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name cannot be empty")
+			return
+		}
+		timeline.Name = name
+	}
+	if req.StartDate != nil {
+		timeline.StartDate = *req.StartDate
+	}
+	if req.EndDate != nil {
+		timeline.EndDate = *req.EndDate
+	}
+	if req.Color != nil {
+		timeline.Color = req.Color
+	}
+	if req.Icon != nil {
+		timeline.Icon = req.Icon
+	}
+	if req.Description != nil {
+		timeline.Description = req.Description
+	}
+	if req.Notes != nil {
+		timeline.Notes = req.Notes
+	}
+	timeline.UpdatedAt = time.Now().UTC()
+
+	if err := s.timelines.Update(timeline); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update timeline")
+		return
+	}
+
+	s.bus.Publish(events.Message{Type: events.TimelineUpdated, TeamID: timeline.TeamID, Payload: timeline})
+	writeJSON(w, http.StatusOK, timeline)
+}
+
+// handleDeleteTimeline handles DELETE /timelines/{id}. Hard-deletes the
+// timeline; only a team admin may delete. Cascades to statuses and
+// timeline_access via foreign key.
+func (s *Server) handleDeleteTimeline(w http.ResponseWriter, r *http.Request) {
+	timelineID := r.PathValue("id")
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete timeline")
+		return
+	}
+
+	if _, ok := s.requireTeamAdmin(w, r, timeline.TeamID); !ok {
+		return
+	}
+
+	if err := s.timelines.Delete(timelineID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete timeline")
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleListTimelineAccess handles GET /teams/{id}/timelines/{timelineId}/access.
+// Team members may list the access grants for any timeline they can view.
+func (s *Server) handleListTimelineAccess(w http.ResponseWriter, r *http.Request) {
+	timelineID := r.PathValue("timelineId")
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list access")
+		return
+	}
+
+	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
+		return
+	}
+
+	entries, err := s.timelines.ListAccess(timelineID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list access")
+		return
+	}
+	writeJSON(w, http.StatusOK, entries)
+}
+
+// handleGrantTimelineAccess handles PUT /teams/{id}/timelines/{timelineId}/access/{memberId}.
+// Only team admins or timeline admins may manage the access list.
+func (s *Server) handleGrantTimelineAccess(w http.ResponseWriter, r *http.Request) {
+	timelineID := r.PathValue("timelineId")
+	targetMemberID := r.PathValue("memberId")
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to grant access")
+		return
+	}
+
+	member, ok := s.requireTeamMember(w, r, timeline.TeamID)
+	if !ok {
+		return
+	}
+	if !s.canAdminTimeline(member, timelineID) {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "timeline admin role required")
+		return
+	}
+
+	// Verify the target member exists and belongs to the same team as the
+	// timeline — prevents cross-team grants if a member ID is guessed.
+	targetMember, err := s.teams.GetMemberByID(targetMemberID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "team member not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to grant access")
+		return
+	}
+	if targetMember.TeamID != timeline.TeamID {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "team member not found")
+		return
+	}
+
+	var req GrantTimelineAccessJSONBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+	if req.Role != "admin" && req.Role != "member" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "role must be admin or member")
+		return
+	}
+
+	if err := s.timelines.GrantAccess(timelineID, targetMemberID, req.Role); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to grant access")
+		return
+	}
+
+	entries, err := s.timelines.ListAccess(timelineID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to grant access")
+		return
+	}
+	writeJSON(w, http.StatusOK, entries)
+}
+
+// handleRevokeTimelineAccess handles DELETE /teams/{id}/timelines/{timelineId}/access/{memberId}.
+// Only team admins or timeline admins may revoke access.
+func (s *Server) handleRevokeTimelineAccess(w http.ResponseWriter, r *http.Request) {
+	timelineID := r.PathValue("timelineId")
+	targetMemberID := r.PathValue("memberId")
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke access")
+		return
+	}
+
+	member, ok := s.requireTeamMember(w, r, timeline.TeamID)
+	if !ok {
+		return
+	}
+	if !s.canAdminTimeline(member, timelineID) {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "timeline admin role required")
+		return
+	}
+
+	if err := s.timelines.RevokeAccess(timelineID, targetMemberID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke access")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// canAdminTimeline reports whether a team member may perform admin operations
+// on a timeline. Team admins always pass; members must hold timeline_access
+// with role='admin'.
+func (s *Server) canAdminTimeline(member *models.TeamMember, timelineID string) bool {
+	if member.Role == "admin" {
+		return true
+	}
+	role, err := s.timelines.GetAccessRole(timelineID, member.ID)
+	if err != nil {
+		return false
+	}
+	return role == "admin"
+}
+
+// handleGetTimelineByShareToken handles GET /timelines/share/{token}. No
+// authentication is required; the token itself is the credential.
+func (s *Server) handleGetTimelineByShareToken(w http.ResponseWriter, r *http.Request) {
+	token := r.PathValue("token")
+
+	timeline, err := s.timelines.GetByShareToken(token)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, timeline)
 }
 ````
 
@@ -27241,321 +27926,6 @@ export default function GanttToolbar({
 }
 ````
 
-## File: packages/web/src/components/gantt/GanttView.tree.test.ts
-````typescript
-/**
- * buildRows — tree nesting and collapse behaviour.
- *
- * Covers the parent→child depth nesting (arbitrary levels), parent subtree
- * collapse, and member-group collapse added for the Gantt expand/contract work.
- */
-
-import { describe, it, expect } from 'vitest'
-import { buildRows, type RichActivity } from './GanttView'
-import type { GanttRow } from './GanttGrid'
-import type { Member } from '@/types'
-
-// Minimal RichActivity factory — only the fields buildRows reads matter.
-function act(id: string, parentActivityId: string | null, memberId: string | null = null): RichActivity {
-  return {
-    id,
-    title: id,
-    startCol: 0,
-    span: 1,
-    color: '#000',
-    members: [],
-    isChild: false,
-    startAtMs: 0,
-    endAtMs: 0,
-    parentActivityId,
-    primaryMemberId: memberId,
-    assignedMemberIds: memberId ? [memberId] : [],
-    statusId: null,
-  }
-}
-
-const NONE = new Set<string>()
-
-// Pull the activity rows out as [id, depth] tuples for concise assertions.
-function activityTuples(rows: GanttRow[]): Array<[string, number]> {
-  return rows
-    .filter((r): r is Extract<GanttRow, { kind: 'activity' }> => r.kind === 'activity')
-    .map(r => [r.event.id, r.event.depth ?? 0])
-}
-
-describe('buildRows — parent grouping (tree nesting)', () => {
-  // a → b → c (grandchild), plus a standalone root d
-  const activities = [act('a', null), act('b', 'a'), act('c', 'b'), act('d', null)]
-
-  it('nests grandchildren at increasing depth', () => {
-    const rows = buildRows(activities, [], 'parent', 'title', NONE, NONE)
-    expect(activityTuples(rows)).toEqual([
-      ['a', 0],
-      ['b', 1],
-      ['c', 2],
-      ['d', 0],
-    ])
-  })
-
-  it('marks parents as hasChildren and leaves as not', () => {
-    const rows = buildRows(activities, [], 'parent', 'title', NONE, NONE).filter(
-      (r): r is Extract<GanttRow, { kind: 'activity' }> => r.kind === 'activity',
-    )
-    const byId = Object.fromEntries(rows.map(r => [r.event.id, r.event]))
-    expect(byId.a.hasChildren).toBe(true)
-    expect(byId.b.hasChildren).toBe(true)
-    expect(byId.c.hasChildren).toBe(false)
-    expect(byId.d.hasChildren).toBe(false)
-  })
-
-  it('hides the whole subtree when a parent is collapsed', () => {
-    const rows = buildRows(activities, [], 'parent', 'title', new Set(['a']), NONE)
-    // a stays (marked collapsed); b and c are hidden; d unaffected.
-    expect(activityTuples(rows)).toEqual([
-      ['a', 0],
-      ['d', 0],
-    ])
-    const a = rows.find(r => r.kind === 'activity' && r.event.id === 'a')
-    expect(a?.kind === 'activity' && a.event.collapsed).toBe(true)
-  })
-
-  it('collapsing a mid-level parent hides only its descendants', () => {
-    const rows = buildRows(activities, [], 'parent', 'title', new Set(['b']), NONE)
-    expect(activityTuples(rows)).toEqual([
-      ['a', 0],
-      ['b', 1],
-      ['d', 0],
-    ])
-  })
-
-  it('treats an activity whose parent is out of view as a root', () => {
-    // orphan's parent "missing" is not in the set → orphan renders at depth 0.
-    const rows = buildRows([act('orphan', 'missing')], [], 'parent', 'title', NONE, NONE)
-    expect(activityTuples(rows)).toEqual([['orphan', 0]])
-  })
-
-  it('does not infinite-loop on a parent-pointer cycle', () => {
-    const x = act('x', 'y')
-    const y = act('y', 'x')
-    const rows = buildRows([x, y], [], 'parent', 'title', NONE, NONE)
-    // Both appear exactly once; exact ordering depends on sort but no dupes/hang.
-    const ids = activityTuples(rows).map(t => t[0]).sort()
-    expect(ids).toEqual(['x', 'y'])
-  })
-})
-
-describe('buildRows — member grouping (group collapse)', () => {
-  const members: Member[] = [
-    { id: 'm1', name: 'Alice', initials: 'A', color: '#111' },
-    { id: 'm2', name: 'Bob', initials: 'B', color: '#222' },
-  ]
-  const activities = [act('a1', null, 'm1'), act('a2', null, 'm1'), act('b1', null, 'm2')]
-
-  it('emits a group header per member followed by its activities', () => {
-    const rows = buildRows(activities, members, 'member', 'title', NONE, NONE)
-    expect(rows.map(r => (r.kind === 'group' ? `G:${r.id}` : `A:${r.event.id}`))).toEqual([
-      'G:m1',
-      'A:a1',
-      'A:a2',
-      'G:m2',
-      'A:b1',
-    ])
-  })
-
-  it('hides a collapsed group’s activities but keeps the header', () => {
-    const rows = buildRows(activities, members, 'member', 'title', NONE, new Set(['m1']))
-    expect(rows.map(r => (r.kind === 'group' ? `G:${r.id}` : `A:${r.event.id}`))).toEqual([
-      'G:m1',
-      'G:m2',
-      'A:b1',
-    ])
-    const g = rows.find(r => r.kind === 'group' && r.id === 'm1')
-    expect(g?.kind === 'group' && g.collapsed).toBe(true)
-  })
-})
-````
-
-## File: packages/web/src/components/list/ListView.tree.test.ts
-````typescript
-/**
- * buildListRows — group-by and tree-nesting behaviour.
- *
- * Mirrors the pattern in GanttView.tree.test.ts: pure logic tests on the
- * exported buildListRows function, no React rendering or hook mocks required.
- */
-
-import { describe, it, expect } from 'vitest'
-import { buildListRows } from './ListView'
-import type { ListDisplayRow } from './ListView'
-import type { components } from '@draba/shared'
-
-type ApiActivity = components['schemas']['Activity']
-type Status = components['schemas']['Status']
-
-const NONE = new Set<string>()
-
-function act(
-  id: string,
-  opts: {
-    parentActivityId?: string | null
-    assignedMemberIds?: string[]
-    statusId?: string | null
-  } = {},
-): ApiActivity {
-  return {
-    id,
-    title: id,
-    timelineId: 'tl1',
-    startAt: '2026-01-01T00:00:00Z',
-    endAt: '2026-01-02T00:00:00Z',
-    allDay: false,
-    createdBy: 'user1',
-    createdAt: '2026-01-01T00:00:00Z',
-    updatedAt: '2026-01-01T00:00:00Z',
-    description: null,
-    notes: null,
-    icon: null,
-    color: null,
-    percentComplete: null,
-    location: null,
-    url: null,
-    archivedAt: null,
-    parentActivityId: opts.parentActivityId ?? null,
-    assignedMemberIds: opts.assignedMemberIds ?? [],
-    tagIds: [],
-    statusId: opts.statusId ?? null,
-  }
-}
-
-function status(id: string, name: string): Status {
-  return { id, name, color: '#000', timelineId: 'tl1', isClosed: false, position: 0, createdAt: '', updatedAt: '' }
-}
-
-function actRows(rows: ListDisplayRow[]) {
-  return rows
-    .filter((r): r is Extract<ListDisplayRow, { kind: 'activity' }> => r.kind === 'activity')
-    .map(r => ({ id: r.activity.id, depth: r.depth, hasChildren: r.hasChildren }))
-}
-
-function groupRows(rows: ListDisplayRow[]) {
-  return rows
-    .filter((r): r is Extract<ListDisplayRow, { kind: 'group' }> => r.kind === 'group')
-    .map(r => ({ key: r.key, label: r.label, count: r.count }))
-}
-
-const emptyMembers = new Map<string, { displayName: string }>()
-const emptyStatuses = new Map<string, { name: string }>()
-
-// ── groupBy: none ─────────────────────────────────────────────────────────────
-
-describe('buildListRows — groupBy: none', () => {
-  it('returns one activity row per activity in order', () => {
-    const activities = [act('a'), act('b'), act('c')]
-    const rows = buildListRows(activities, 'none', emptyMembers, emptyStatuses, [], NONE)
-    expect(actRows(rows).map(r => r.id)).toEqual(['a', 'b', 'c'])
-  })
-
-  it('returns an empty array for an empty list', () => {
-    expect(buildListRows([], 'none', emptyMembers, emptyStatuses, [], NONE)).toEqual([])
-  })
-})
-
-// ── groupBy: member ───────────────────────────────────────────────────────────
-
-describe('buildListRows — groupBy: member', () => {
-  const members = new Map([
-    ['m1', { displayName: 'Alice' }],
-    ['m2', { displayName: 'Bob' }],
-  ])
-  const activities = [
-    act('a1', { assignedMemberIds: ['m1'] }),
-    act('a2', { assignedMemberIds: ['m1'] }),
-    act('b1', { assignedMemberIds: ['m2'] }),
-    act('u1'),  // unassigned
-  ]
-
-  it('emits a group header per member then their activities', () => {
-    const rows = buildListRows(activities, 'member', members, emptyStatuses, [], NONE)
-    const groups = groupRows(rows)
-    expect(groups[0]).toMatchObject({ label: 'Alice', count: 2 })
-    expect(groups[1]).toMatchObject({ label: 'Bob', count: 1 })
-    expect(groups[2]).toMatchObject({ key: '__unassigned__', label: 'Unassigned', count: 1 })
-  })
-
-  it('hides collapsed group activities but keeps the group header', () => {
-    const m1Key = 'm1'
-    const rows = buildListRows(activities, 'member', members, emptyStatuses, [], new Set([m1Key]))
-    const ids = rows.map(r => r.kind === 'group' ? `G:${r.key}` : `A:${r.activity.id}`)
-    expect(ids).not.toContain('A:a1')
-    expect(ids).not.toContain('A:a2')
-    expect(ids).toContain(`G:${m1Key}`)
-    expect(ids).toContain('A:b1')
-  })
-})
-
-// ── groupBy: status ───────────────────────────────────────────────────────────
-
-describe('buildListRows — groupBy: status', () => {
-  const statuses = [status('s1', 'In Progress'), status('s2', 'Done')]
-  const statusMap = new Map(statuses.map(s => [s.id, s]))
-  const activities = [
-    act('a', { statusId: 's1' }),
-    act('b', { statusId: 's2' }),
-    act('c'),  // no status
-  ]
-
-  it('emits statuses in ROADMAP order, no-status last', () => {
-    const rows = buildListRows(activities, 'status', emptyMembers, statusMap, statuses, NONE)
-    const groups = groupRows(rows)
-    expect(groups.map(g => g.label)).toEqual(['In Progress', 'Done', 'No status'])
-  })
-
-  it('skips statuses with no activities', () => {
-    const rows = buildListRows([act('a', { statusId: 's1' })], 'status', emptyMembers, statusMap, statuses, NONE)
-    const groups = groupRows(rows)
-    expect(groups.map(g => g.label)).toEqual(['In Progress'])
-  })
-})
-
-// ── groupBy: parent ───────────────────────────────────────────────────────────
-
-describe('buildListRows — groupBy: parent', () => {
-  const activities = [
-    act('a'),
-    act('b', { parentActivityId: 'a' }),
-    act('c', { parentActivityId: 'b' }),
-    act('d'),
-  ]
-
-  it('nests grandchildren at increasing depth', () => {
-    const rows = buildListRows(activities, 'parent', emptyMembers, emptyStatuses, [], NONE)
-    expect(actRows(rows)).toEqual([
-      { id: 'a', depth: 0, hasChildren: true },
-      { id: 'b', depth: 1, hasChildren: true },
-      { id: 'c', depth: 2, hasChildren: false },
-      { id: 'd', depth: 0, hasChildren: false },
-    ])
-  })
-
-  it('hides subtree when parent is collapsed', () => {
-    const rows = buildListRows(activities, 'parent', emptyMembers, emptyStatuses, [], new Set(['a']))
-    expect(actRows(rows).map(r => r.id)).toEqual(['a', 'd'])
-  })
-
-  it('treats an orphan (parent not in view) as a root', () => {
-    const rows = buildListRows([act('x', { parentActivityId: 'missing' })], 'parent', emptyMembers, emptyStatuses, [], NONE)
-    expect(actRows(rows)).toEqual([{ id: 'x', depth: 0, hasChildren: false }])
-  })
-
-  it('does not infinite-loop on a parent-pointer cycle', () => {
-    const x = act('x', { parentActivityId: 'y' })
-    const y = act('y', { parentActivityId: 'x' })
-    const rows = buildListRows([x, y], 'parent', emptyMembers, emptyStatuses, [], NONE)
-    expect(actRows(rows).map(r => r.id).sort()).toEqual(['x', 'y'])
-  })
-})
-````
-
 ## File: packages/web/src/components/BrandingSync.tsx
 ````typescript
 /**
@@ -29039,6 +29409,620 @@ export default function TeamModal({ mode, team, onClose, onTeamCreated, isAdmin 
 }
 ````
 
+## File: packages/web/src/components/TimelineModal.tsx
+````typescript
+/**
+ * TimelineModal — create / edit a timeline.
+ *
+ * Modes:
+ *  - "new":  name, identity, date range, description, notes; template picker seeds statuses
+ *  - "edit": same fields; plus Statuses tab (add/edit/delete live statuses)
+ */
+
+import { useState } from 'react'
+import { X, Plus, Trash2, Check, Archive, RotateCcw } from 'lucide-react'
+import { IdentityWidget } from '@/components/identity/IdentityWidget'
+import { Badge } from '@/components/identity/Badge'
+import type { Identity } from '@/components/identity/identity-constants'
+import { resolveColorHex } from '@/components/identity/identity-constants'
+import {
+  useCreateTimeline,
+  useUpdateTimeline,
+  useDeleteTimeline,
+  useArchiveTimeline,
+} from '@/hooks/useTeamActivities'
+import {
+  useTimelineStatuses,
+  useCreateTimelineStatus,
+  useUpdateTimelineStatus,
+  useDeleteTimelineStatus,
+} from '@/hooks/useStatusTemplates'
+import { useStatusTemplates } from '@/hooks/useStatusTemplates'
+import InlineEditableTitle from '@/components/shared/InlineEditableTitle'
+import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
+import type { components } from '@draba/shared'
+
+type Timeline = components['schemas']['Timeline']
+type Status = components['schemas']['Status']
+
+// ── Prop types ────────────────────────────────────────────────────────────────
+
+interface Props {
+  mode: 'new' | 'edit'
+  teamId: string
+  timeline?: Timeline
+  canAdmin?: boolean
+  onClose: () => void
+  onCreated?: (timeline: Timeline) => void
+  onUnarchive?: (timelineId: string) => void
+}
+
+type Tab = 'settings' | 'statuses'
+
+// ── Inline styles ─────────────────────────────────────────────────────────────
+
+const OVERLAY: React.CSSProperties = {
+  position: 'fixed', inset: 0,
+  background: 'rgba(0,0,0,0.5)', backdropFilter: 'blur(2px)',
+  zIndex: 300, display: 'flex', alignItems: 'center', justifyContent: 'center',
+}
+
+const PANEL: React.CSSProperties = {
+  background: 'var(--card)', border: '1px solid var(--border)',
+  borderRadius: 12, width: 560, maxWidth: '95vw',
+  maxHeight: '90vh', display: 'flex', flexDirection: 'column',
+  boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
+}
+
+const HEADER: React.CSSProperties = {
+  display: 'flex', alignItems: 'center', gap: 12,
+  padding: '18px 20px 14px', borderBottom: '1px solid var(--border)',
+  flexShrink: 0,
+}
+
+const TAB_BAR: React.CSSProperties = {
+  display: 'flex', gap: 2, padding: '0 20px',
+  borderBottom: '1px solid var(--border)', flexShrink: 0,
+}
+
+const CONTENT: React.CSSProperties = {
+  flex: 1, overflowY: 'auto', padding: '20px',
+}
+
+const FOOTER: React.CSSProperties = {
+  display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+  padding: '14px 20px', borderTop: '1px solid var(--border)', flexShrink: 0,
+}
+
+const FIELD_LABEL: React.CSSProperties = {
+  fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)',
+  textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 6,
+}
+
+const INPUT: React.CSSProperties = {
+  width: '100%', boxSizing: 'border-box',
+  fontSize: 13, color: 'var(--foreground)',
+  border: '1px solid var(--border)', borderRadius: 6,
+  padding: '7px 10px', background: 'var(--background)',
+  outline: 'none',
+}
+
+const TEXTAREA: React.CSSProperties = {
+  ...INPUT,
+  resize: 'vertical' as const,
+  minHeight: 68,
+  fontFamily: 'var(--font-sans)',
+  lineHeight: 1.5,
+}
+
+const archiveBtnStyle: React.CSSProperties = {
+  fontSize: 12, color: '#F59E0B', background: 'rgba(245,158,11,0.12)',
+  border: '1px solid rgba(245,158,11,0.35)', borderRadius: 7,
+  padding: '7px 12px', cursor: 'pointer', fontFamily: 'var(--font-sans)',
+  display: 'flex', alignItems: 'center', gap: 6,
+}
+
+const restoreBtnStyle: React.CSSProperties = {
+  fontSize: 12, color: '#1A97A2', background: 'rgba(26,151,162,0.12)',
+  border: '1px solid rgba(26,151,162,0.35)', borderRadius: 7,
+  padding: '7px 12px', cursor: 'pointer', fontFamily: 'var(--font-sans)',
+  display: 'flex', alignItems: 'center', gap: 6,
+}
+
+function tabStyle(active: boolean): React.CSSProperties {
+  return {
+    padding: '8px 14px', fontSize: 12, fontWeight: 500,
+    border: 'none', background: 'none', cursor: 'pointer',
+    borderBottom: active ? '2px solid var(--primary)' : '2px solid transparent',
+    color: active ? 'var(--foreground)' : 'var(--muted-foreground)',
+    fontFamily: 'var(--font-sans)',
+  }
+}
+
+// ── Status row (edit mode) ────────────────────────────────────────────────────
+
+interface StatusRowProps {
+  status: Status
+  canDelete: boolean
+  teamId: string
+  timelineId: string
+  allStatuses: Status[]
+}
+
+function StatusRow({ status, canDelete, teamId, timelineId, allStatuses }: StatusRowProps) {
+  const [editing, setEditing] = useState(false)
+  const [name, setName] = useState(status.name)
+  const [identity, setIdentity] = useState<Identity>({ color: status.color, icon: status.icon ?? '' })
+  const [isClosed, setIsClosed] = useState(status.isClosed)
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
+  const [replacementId, setReplacementId] = useState('')
+  const update = useUpdateTimelineStatus(teamId, timelineId)
+  const del = useDeleteTimelineStatus(teamId, timelineId)
+
+  function save() {
+    update.mutate(
+      { id: status.id, name: name.trim() || status.name, color: identity.color, icon: identity.icon || null, isClosed },
+      { onSuccess: () => setEditing(false) },
+    )
+  }
+
+  function doDelete() {
+    del.mutate(
+      { id: status.id, replacementStatusId: replacementId || undefined },
+      { onSuccess: () => setShowDeleteConfirm(false) },
+    )
+  }
+
+  if (showDeleteConfirm) {
+    const others = allStatuses.filter(s => s.id !== status.id)
+    return (
+      <div style={{ background: 'var(--muted)', borderRadius: 8, padding: 12, marginBottom: 6 }}>
+        <div style={{ fontSize: 12, color: 'var(--foreground)', marginBottom: 8 }}>
+          Delete <strong>{status.name}</strong>? Activities using this status will be reassigned.
+        </div>
+        {others.length > 0 && (
+          <div style={{ marginBottom: 8 }}>
+            <label style={{ ...FIELD_LABEL }}>Move activities to</label>
+            <select
+              value={replacementId}
+              onChange={e => setReplacementId(e.target.value)}
+              style={{ ...INPUT, fontSize: 12 }}
+            >
+              <option value="">— No status —</option>
+              {others.map(s => (
+                <option key={s.id} value={s.id}>{s.name}</option>
+              ))}
+            </select>
+          </div>
+        )}
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button onClick={() => setShowDeleteConfirm(false)} style={{ fontSize: 12, padding: '4px 10px', border: '1px solid var(--border)', borderRadius: 5, background: 'none', cursor: 'pointer', color: 'var(--foreground)' }}>Cancel</button>
+          <button onClick={doDelete} style={{ fontSize: 12, padding: '4px 10px', border: 'none', borderRadius: 5, background: 'var(--destructive)', color: 'white', cursor: 'pointer' }}>Delete</button>
+        </div>
+      </div>
+    )
+  }
+
+  if (editing) {
+    return (
+      <div style={{ background: 'var(--muted)', borderRadius: 8, padding: '10px 12px', marginBottom: 4, display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <IdentityWidget
+            identity={{ color: identity.color, icon: identity.icon ?? '' }}
+            name={name || status.name}
+            onChange={setIdentity}
+            shape="square"
+          />
+          <input
+            autoFocus
+            value={name}
+            onChange={e => setName(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') save(); if (e.key === 'Escape') setEditing(false) }}
+            style={{ ...INPUT, flex: 1 }}
+          />
+          <button onClick={save} disabled={update.isPending} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--primary)', padding: 4 }}>
+            <Check width={14} height={14} />
+          </button>
+          <button onClick={() => setEditing(false)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4 }}>
+            <X width={14} height={14} />
+          </button>
+        </div>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--muted-foreground)', cursor: 'pointer', userSelect: 'none', paddingLeft: 26 }}>
+          <input type="checkbox" checked={isClosed} onChange={e => setIsClosed(e.target.checked)} />
+          Closed status (marks this status as completed/done)
+        </label>
+      </div>
+    )
+  }
+
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 0' }}>
+      <Badge identity={{ color: status.color, icon: status.icon ?? '__none__' }} name={status.name} shape="square" size={18} />
+      <span style={{ fontSize: 13, flex: 1, cursor: 'pointer', color: 'var(--foreground)' }} onClick={() => setEditing(true)}>
+        {status.name}
+      </span>
+      {status.isClosed && (
+        <span style={{ fontSize: 10, padding: '1px 6px', border: '1px solid var(--border)', borderRadius: 4, color: 'var(--muted-foreground)' }}>closed</span>
+      )}
+      <button onClick={() => setEditing(true)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4, opacity: 0.5 }}>
+        ✎
+      </button>
+      {canDelete && (
+        <button onClick={() => setShowDeleteConfirm(true)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4 }}>
+          <Trash2 width={13} height={13} />
+        </button>
+      )}
+    </div>
+  )
+}
+
+// ── Add-status form ───────────────────────────────────────────────────────────
+
+interface AddStatusFormProps {
+  teamId: string
+  timelineId: string
+  primaryColor: string
+}
+
+function AddStatusForm({ teamId, timelineId, primaryColor }: AddStatusFormProps) {
+  const [expanding, setExpanding] = useState(false)
+  const [name, setName] = useState('')
+  const [identity, setIdentity] = useState<Identity>({ color: primaryColor, icon: '' })
+  const [isClosed, setIsClosed] = useState(false)
+  const createStatus = useCreateTimelineStatus(teamId, timelineId)
+
+  function handleAdd() {
+    if (!name.trim()) return
+    createStatus.mutate(
+      { name: name.trim(), color: identity.color, icon: identity.icon || null, isClosed },
+      {
+        onSuccess: () => {
+          setName('')
+          setIdentity({ color: primaryColor, icon: '' })
+          setIsClosed(false)
+          setExpanding(false)
+        },
+      },
+    )
+  }
+
+  function handleCancel() {
+    setExpanding(false)
+    setName('')
+    setIdentity({ color: primaryColor, icon: '' })
+    setIsClosed(false)
+  }
+
+  if (!expanding) {
+    return (
+      <button
+        onClick={() => setExpanding(true)}
+        style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 8, background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', fontSize: 12, padding: '4px 2px', fontFamily: 'var(--font-sans)' }}
+      >
+        <Plus width={13} height={13} /> Add status
+      </button>
+    )
+  }
+
+  return (
+    <div style={{ background: 'var(--muted)', borderRadius: 8, padding: '10px 12px', marginTop: 8, display: 'flex', flexDirection: 'column', gap: 8 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <IdentityWidget identity={identity} name={name || 'New status'} shape="square" onChange={setIdentity} />
+        <input
+          autoFocus
+          value={name}
+          onChange={e => setName(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') handleAdd(); if (e.key === 'Escape') handleCancel() }}
+          placeholder="Status name…"
+          style={{ ...INPUT, flex: 1 }}
+        />
+        <button onClick={handleAdd} disabled={!name.trim() || createStatus.isPending} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--primary)', padding: 4, display: 'flex' }}>
+          <Check width={14} height={14} />
+        </button>
+        <button onClick={handleCancel} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4, display: 'flex' }}>
+          <X width={14} height={14} />
+        </button>
+      </div>
+      <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--muted-foreground)', cursor: 'pointer', userSelect: 'none', paddingLeft: 26 }}>
+        <input type="checkbox" checked={isClosed} onChange={e => setIsClosed(e.target.checked)} />
+        Closed status (marks this status as completed/done)
+      </label>
+    </div>
+  )
+}
+
+// ── Main modal ────────────────────────────────────────────────────────────────
+
+export default function TimelineModal({ mode, teamId, timeline, canAdmin = false, onClose, onCreated, onUnarchive }: Props) {
+  const [activeTab, setActiveTab] = useState<Tab>('settings')
+  const [name, setName] = useState(timeline?.name ?? '')
+  const [description, setDescription] = useState(timeline?.description ?? '')
+  const [notes, setNotes] = useState(timeline?.notes ?? '')
+  const [startDate, setStartDate] = useState(timeline?.startDate ?? '')
+  const [endDate, setEndDate] = useState(timeline?.endDate ?? '')
+  const [identity, setIdentity] = useState<Identity>({ color: timeline?.color ?? '#1A97A2', icon: timeline?.icon ?? '' })
+  const [selectedTemplateId, setSelectedTemplateId] = useState<string>('')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
+  const [showArchiveConfirm, setShowArchiveConfirm] = useState(false)
+
+  const createTimeline = useCreateTimeline(teamId)
+  const updateTimeline = useUpdateTimeline(teamId)
+  const deleteTimeline = useDeleteTimeline(teamId)
+  const archiveTimeline = useArchiveTimeline(teamId)
+
+  const { data: statuses = [] } = useTimelineStatuses(teamId, timeline?.id ?? '')
+  const { data: templates = [] } = useStatusTemplates(teamId)
+
+  const timelineColor = resolveColorHex(identity.color) ?? identity.color ?? '#1A97A2'
+
+  function handleSave() {
+    if (!name.trim()) { setError('Name is required'); return }
+    if (!startDate || !endDate) { setError('Start and end dates are required'); return }
+    if (endDate < startDate) { setError('End date must not be before start date'); return }
+    setSaving(true)
+    setError('')
+
+    if (mode === 'new') {
+      createTimeline.mutate(
+        {
+          name: name.trim(),
+          startDate,
+          endDate,
+          color: identity.color || null,
+          icon: identity.icon || null,
+          description: description.trim() || null,
+          notes: notes.trim() || null,
+          templateId: selectedTemplateId || null,
+        },
+        {
+          onSuccess: (tl) => { setSaving(false); onCreated?.(tl); onClose() },
+          onError: () => { setSaving(false); setError('Failed to create timeline') },
+        },
+      )
+    } else if (timeline) {
+      updateTimeline.mutate(
+        {
+          timelineId: timeline.id,
+          patch: {
+            name: name.trim(),
+            startDate,
+            endDate,
+            color: identity.color || null,
+            icon: identity.icon || null,
+            description: description.trim() || null,
+            notes: notes.trim() || null,
+          },
+        },
+        {
+          onSuccess: () => { setSaving(false); onClose() },
+          onError: () => { setSaving(false); setError('Failed to save timeline') },
+        },
+      )
+    }
+  }
+
+  return (
+    <div style={OVERLAY}>
+      <div style={PANEL} onClick={e => e.stopPropagation()}>
+        {/* Header — identity widget + editable name */}
+        <div style={HEADER}>
+          <IdentityWidget
+            identity={identity}
+            name={name || (mode === 'new' ? 'New timeline' : timeline?.name ?? '')}
+            onChange={setIdentity}
+            shape="square"
+          />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 3 }}>
+              {mode === 'new' ? 'New Timeline' : 'Edit Timeline'}
+            </div>
+            <InlineEditableTitle
+              value={name}
+              onChange={v => { setName(v); setError('') }}
+              placeholder="Timeline name"
+              autoFocus={mode === 'new'}
+            />
+          </div>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4 }}>
+            <X width={18} height={18} />
+          </button>
+        </div>
+
+        {/* Tab bar — Statuses tab only in edit mode */}
+        <div style={TAB_BAR}>
+          <button style={tabStyle(activeTab === 'settings')} onClick={() => setActiveTab('settings')}>Settings</button>
+          {mode === 'edit' && (
+            <button style={tabStyle(activeTab === 'statuses')} onClick={() => setActiveTab('statuses')}>
+              Statuses {statuses.length > 0 && <span style={{ fontSize: 10, marginLeft: 4, opacity: 0.6 }}>({statuses.length})</span>}
+            </button>
+          )}
+        </div>
+
+        {/* Content */}
+        <div style={CONTENT}>
+          {/* Archive confirmation — replaces tab content */}
+          {showArchiveConfirm && timeline ? (
+            <ConfirmDialog
+              variant="amber"
+              icon={<Archive size={22} color="#F59E0B" />}
+              title="Archive timeline?"
+              body={`${timeline.name} will be hidden from the active list. All data is preserved and can be restored via the Archived section in the sidebar.`}
+              confirmLabel="Archive"
+              busy={archiveTimeline.isPending}
+              onCancel={() => setShowArchiveConfirm(false)}
+              onConfirm={() => archiveTimeline.mutate(timeline.id, { onSuccess: onClose })}
+            />
+          ) : showDeleteConfirm && timeline ? (
+            <ConfirmDialog
+              variant="red"
+              icon={<Trash2 size={22} color="#EF4444" />}
+              title="Delete timeline?"
+              body={`This permanently deletes ${timeline.name} and all its statuses. Activities are not deleted — they remain in the team.`}
+              confirmLabel="Delete timeline"
+              busy={deleteTimeline.isPending}
+              onCancel={() => setShowDeleteConfirm(false)}
+              onConfirm={() => deleteTimeline.mutate(timeline.id, { onSuccess: onClose })}
+            />
+          ) : activeTab === 'settings' ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+              {/* Date range */}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                <div>
+                  <div style={FIELD_LABEL}>Start date *</div>
+                  <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)} style={INPUT} />
+                </div>
+                <div>
+                  <div style={FIELD_LABEL}>End date *</div>
+                  <input type="date" value={endDate} onChange={e => setEndDate(e.target.value)} style={INPUT} />
+                </div>
+              </div>
+
+              {/* Description */}
+              <div>
+                <div style={FIELD_LABEL}>Description</div>
+                <input
+                  value={description}
+                  onChange={e => setDescription(e.target.value)}
+                  placeholder="Short description of this timeline's purpose…"
+                  style={INPUT}
+                />
+              </div>
+
+              {/* Notes */}
+              <div>
+                <div style={FIELD_LABEL}>Notes</div>
+                <textarea
+                  value={notes}
+                  onChange={e => setNotes(e.target.value)}
+                  placeholder="Internal notes, links, references…"
+                  style={TEXTAREA}
+                />
+              </div>
+
+              {/* Template picker (create mode only) */}
+              {mode === 'new' && templates.length > 0 && (
+                <div>
+                  <div style={FIELD_LABEL}>Status template</div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    {templates.map(tpl => {
+                      const isSelected = selectedTemplateId === tpl.id || (!selectedTemplateId && tpl === templates[0])
+                      return (
+                        <div
+                          key={tpl.id}
+                          onClick={() => setSelectedTemplateId(tpl.id)}
+                          style={{
+                            border: `1px solid ${isSelected ? timelineColor + '88' : 'var(--border)'}`,
+                            borderRadius: 8, padding: '10px 14px', cursor: 'pointer',
+                            background: isSelected ? timelineColor + '11' : 'var(--muted)',
+                            transition: 'all 0.1s',
+                          }}
+                        >
+                          <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6, color: 'var(--foreground)' }}>{tpl.name}</div>
+                          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                            {tpl.items.map(item => (
+                              <span key={item.id} style={{ fontSize: 11, padding: '2px 8px', borderRadius: 4, background: item.color + '22', border: `1px solid ${item.color}66`, color: item.color }}>
+                                {item.name}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* Archived banner */}
+              {mode === 'edit' && timeline?.archivedAt && (
+                <div style={{ fontSize: 12, color: '#F59E0B', background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.25)', borderRadius: 6, padding: '8px 12px' }}>
+                  This timeline is archived. It is hidden from the active list.
+                </div>
+              )}
+
+              {error && (
+                <div style={{ fontSize: 12, color: 'var(--destructive)', background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)', borderRadius: 6, padding: '8px 12px' }}>
+                  {error}
+                </div>
+              )}
+            </div>
+          ) : (
+            activeTab === 'statuses' && timeline && (
+              <div>
+                <div style={{ fontSize: 12, color: 'var(--muted-foreground)', marginBottom: 14, lineHeight: 1.5 }}>
+                  Statuses are specific to this timeline. Add, rename, recolor, or remove them here.
+                </div>
+
+                <div style={{ marginBottom: 4 }}>
+                  {statuses.map(s => (
+                    <StatusRow
+                      key={s.id}
+                      status={s}
+                      canDelete={statuses.length > 1}
+                      teamId={teamId}
+                      timelineId={timeline.id}
+                      allStatuses={statuses}
+                    />
+                  ))}
+                </div>
+
+                <AddStatusForm teamId={teamId} timelineId={timeline.id} primaryColor={timelineColor} />
+              </div>
+            )
+          )}
+        </div>
+
+        {/* Footer — hidden when a confirm dialog is showing */}
+        {!showArchiveConfirm && !showDeleteConfirm && (
+          <div style={FOOTER}>
+            <div style={{ display: 'flex', gap: 8 }}>
+              {mode === 'edit' && timeline && canAdmin && !timeline.archivedAt && (
+                <button onClick={() => setShowArchiveConfirm(true)} style={archiveBtnStyle}>
+                  <Archive size={13} />
+                  Archive
+                </button>
+              )}
+              {mode === 'edit' && timeline && canAdmin && timeline.archivedAt && onUnarchive && (
+                <button onClick={() => onUnarchive(timeline.id)} style={restoreBtnStyle}>
+                  <RotateCcw size={13} />
+                  Restore
+                </button>
+              )}
+              {mode === 'edit' && timeline && canAdmin && (
+                <button
+                  onClick={() => setShowDeleteConfirm(true)}
+                  style={{ fontSize: 12, padding: '7px 12px', border: '1px solid rgba(239,68,68,0.3)', borderRadius: 7, background: 'none', color: 'var(--destructive)', cursor: 'pointer', fontFamily: 'var(--font-sans)' }}
+                >
+                  Delete
+                </button>
+              )}
+            </div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button
+                onClick={onClose}
+                style={{ fontSize: 13, padding: '8px 16px', border: '1px solid var(--border)', borderRadius: 7, background: 'none', cursor: 'pointer', fontFamily: 'var(--font-sans)', color: 'var(--muted-foreground)' }}
+              >
+                Cancel
+              </button>
+              {activeTab === 'settings' && (
+                <button
+                  onClick={handleSave}
+                  disabled={saving}
+                  style={{ fontSize: 13, fontWeight: 600, padding: '8px 18px', border: 'none', borderRadius: 7, background: timelineColor, color: 'white', cursor: saving ? 'wait' : 'pointer', fontFamily: 'var(--font-sans)' }}
+                >
+                  {saving ? 'Saving…' : mode === 'new' ? 'Create timeline' : 'Save changes'}
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+````
+
 ## File: packages/web/src/contexts/FilterContext.tsx
 ````typescript
 /**
@@ -30250,462 +31234,177 @@ type CreateSavedFilterJSONRequestBody CreateSavedFilterJSONBody
 type CreateTimelineJSONRequestBody CreateTimelineJSONBody
 ````
 
-## File: packages/api/internal/api/timeline_handler.go
-````go
-package api
+## File: packages/web/src/components/gantt/GanttView.tree.test.ts
+````typescript
+/**
+ * buildRows — tree nesting and collapse behaviour.
+ *
+ * Covers the parent→child depth nesting (arbitrary levels), parent subtree
+ * collapse, and member-group collapse added for the Gantt expand/contract work.
+ */
 
-import (
-	"database/sql"
-	"encoding/json"
-	"errors"
-	"net/http"
-	"strings"
-	"time"
+import { describe, it, expect } from 'vitest'
+import { buildRows, type RichActivity } from './GanttView'
+import type { GanttRow } from './GanttGrid'
+import type { Member } from '@/types'
 
-	"github.com/I0-1O/draba/packages/api/internal/events"
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// handleListTimelines handles GET /teams/{id}/timelines. Any team member may
-// list the non-archived timelines for a team.
-func (s *Server) handleListTimelines(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-
-	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
-		return
-	}
-
-	includeArchived := r.URL.Query().Get("archived") == "true"
-	timelines, err := s.timelines.ListByTeam(teamID, includeArchived)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list timelines")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, timelines)
+// Minimal RichActivity factory — only the fields buildRows reads matter.
+function act(id: string, parentActivityId: string | null, memberId: string | null = null): RichActivity {
+  return {
+    id,
+    title: id,
+    startCol: 0,
+    span: 1,
+    color: '#000',
+    members: [],
+    isChild: false,
+    startAtMs: 0,
+    endAtMs: 0,
+    parentActivityId,
+    primaryMemberId: memberId,
+    assignedMemberIds: memberId ? [memberId] : [],
+    statusId: null,
+  }
 }
 
-// handleCreateTimeline handles POST /teams/{id}/timelines. The authenticated
-// user must be a member of the team. The creator is automatically granted
-// timeline-admin access.
-func (s *Server) handleCreateTimeline(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
+const NONE = new Set<string>()
 
-	member, ok := s.requireTeamMember(w, r, teamID)
-	if !ok {
-		return
-	}
-
-	var req createTimelineBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	if strings.TrimSpace(req.Name) == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name is required")
-		return
-	}
-	if req.StartDate == "" || req.EndDate == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "startDate and endDate are required")
-		return
-	}
-
-	const dateLayout = "2006-01-02"
-	startDate, err := time.Parse(dateLayout, req.StartDate)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid startDate format")
-		return
-	}
-	endDate, err := time.Parse(dateLayout, req.EndDate)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid endDate format")
-		return
-	}
-
-	if endDate.Before(startDate) {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "endDate must not be before startDate")
-		return
-	}
-
-	now := time.Now()
-	timeline := &models.Timeline{
-		ID:          newID(),
-		TeamID:      teamID,
-		Name:        strings.TrimSpace(req.Name),
-		Description: req.Description,
-		Notes:       req.Notes,
-		StartDate:   startDate.Format(dateLayout),
-		EndDate:     endDate.Format(dateLayout),
-		Color:       req.Color,
-		Icon:        req.Icon,
-		ShareToken:  newID(),
-		IcalToken:   newID(),
-		CreatedBy:   claims.UserID,
-		CreatedAt:   now,
-		UpdatedAt:   now,
-	}
-	if err := s.timelines.Create(timeline); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create timeline")
-		return
-	}
-
-	// Always grant the creator timeline-admin access so they can manage it.
-	if err := s.timelines.GrantAccess(timeline.ID, member.ID, "admin"); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create timeline")
-		return
-	}
-
-	// Copy the selected (or first) status template into live statuses for this timeline.
-	if err := s.statuses.CopyTemplateToTimeline(teamID, timeline.ID, req.TemplateID); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create timeline")
-		return
-	}
-
-	s.bus.Publish(events.Message{Type: events.TimelineCreated, TeamID: timeline.TeamID, Payload: timeline})
-	writeJSON(w, http.StatusCreated, timeline)
+// Pull the activity rows out as [id, depth] tuples for concise assertions.
+function activityTuples(rows: GanttRow[]): Array<[string, number]> {
+  return rows
+    .filter((r): r is Extract<GanttRow, { kind: 'activity' }> => r.kind === 'activity')
+    .map(r => [r.event.id, r.event.depth ?? 0])
 }
 
-// handleGetTimeline handles GET /timelines/{id}. The authenticated user must
-// be a member of the timeline's team. Team admins may access any timeline;
-// other members require an entry in timeline_access.
-func (s *Server) handleGetTimeline(w http.ResponseWriter, r *http.Request) {
-	timelineID := r.PathValue("id")
+describe('buildRows — parent grouping (tree nesting)', () => {
+  // a → b → c (grandchild), plus a standalone root d
+  const activities = [act('a', null), act('b', 'a'), act('c', 'b'), act('d', null)]
 
-	timeline, err := s.timelines.GetByID(timelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
-		return
-	}
-	// Hide archived timelines from the standard read path unless ?archived=true.
-	if timeline.ArchivedAt != nil && r.URL.Query().Get("archived") != "true" {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-		return
-	}
+  it('nests grandchildren at increasing depth', () => {
+    const rows = buildRows(activities, [], 'parent', 'title', NONE, NONE)
+    expect(activityTuples(rows)).toEqual([
+      ['a', 0],
+      ['b', 1],
+      ['c', 2],
+      ['d', 0],
+    ])
+  })
 
-	member, ok := s.requireTeamMember(w, r, timeline.TeamID)
-	if !ok {
-		return
-	}
+  it('marks parents as hasChildren and leaves as not', () => {
+    const rows = buildRows(activities, [], 'parent', 'title', NONE, NONE).filter(
+      (r): r is Extract<GanttRow, { kind: 'activity' }> => r.kind === 'activity',
+    )
+    const byId = Object.fromEntries(rows.map(r => [r.event.id, r.event]))
+    expect(byId.a.hasChildren).toBe(true)
+    expect(byId.b.hasChildren).toBe(true)
+    expect(byId.c.hasChildren).toBe(false)
+    expect(byId.d.hasChildren).toBe(false)
+  })
 
-	// Team admins (and superadmins) can access all timelines; members need an explicit grant.
-	if member.Role != "admin" {
-		ok, err := s.timelines.HasAccess(timelineID, member.ID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
-			return
-		}
-		if !ok {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not on the access list for this timeline")
-			return
-		}
-	}
+  it('hides the whole subtree when a parent is collapsed', () => {
+    const rows = buildRows(activities, [], 'parent', 'title', new Set(['a']), NONE)
+    // a stays (marked collapsed); b and c are hidden; d unaffected.
+    expect(activityTuples(rows)).toEqual([
+      ['a', 0],
+      ['d', 0],
+    ])
+    const a = rows.find(r => r.kind === 'activity' && r.event.id === 'a')
+    expect(a?.kind === 'activity' && a.event.collapsed).toBe(true)
+  })
 
-	writeJSON(w, http.StatusOK, timeline)
-}
+  it('collapsing a mid-level parent hides only its descendants', () => {
+    const rows = buildRows(activities, [], 'parent', 'title', new Set(['b']), NONE)
+    expect(activityTuples(rows)).toEqual([
+      ['a', 0],
+      ['b', 1],
+      ['d', 0],
+    ])
+  })
 
-// handleArchiveTimeline handles POST /timelines/{id}/archive. Only team
-// admins or timeline admins may archive.
-func (s *Server) handleArchiveTimeline(w http.ResponseWriter, r *http.Request) {
-	s.setTimelineArchive(w, r, true)
-}
+  it('treats an activity whose parent is out of view as a root', () => {
+    // orphan's parent "missing" is not in the set → orphan renders at depth 0.
+    const rows = buildRows([act('orphan', 'missing')], [], 'parent', 'title', NONE, NONE)
+    expect(activityTuples(rows)).toEqual([['orphan', 0]])
+  })
 
-// handleUnarchiveTimeline handles POST /timelines/{id}/unarchive.
-func (s *Server) handleUnarchiveTimeline(w http.ResponseWriter, r *http.Request) {
-	s.setTimelineArchive(w, r, false)
-}
+  it('does not infinite-loop on a parent-pointer cycle', () => {
+    const x = act('x', 'y')
+    const y = act('y', 'x')
+    const rows = buildRows([x, y], [], 'parent', 'title', NONE, NONE)
+    // Both appear exactly once; exact ordering depends on sort but no dupes/hang.
+    const ids = activityTuples(rows).map(t => t[0]).sort()
+    expect(ids).toEqual(['x', 'y'])
+  })
+})
 
-// setTimelineArchive is the shared archive/unarchive implementation. Access
-// is admin-only: the caller must be a team admin, or hold timeline_access
-// with role='admin' for this timeline.
-func (s *Server) setTimelineArchive(w http.ResponseWriter, r *http.Request, archive bool) {
-	timelineID := r.PathValue("id")
+describe('buildRows — member grouping (combo-key grouping)', () => {
+  const members: Member[] = [
+    { id: 'm1', name: 'Alice', initials: 'A', color: '#111' },
+    { id: 'm2', name: 'Bob', initials: 'B', color: '#222' },
+  ]
 
-	timeline, err := s.timelines.GetByID(timelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update timeline")
-		return
-	}
+  // Two activities assigned to m1 solo, one to m2 solo, one to both.
+  function makeActivities() {
+    const a1 = act('a1', null, 'm1')
+    const a2 = act('a2', null, 'm1')
+    const b1 = act('b1', null, 'm2')
+    // Multi-assignee activity
+    const ab1: RichActivity = { ...act('ab1', null, 'm1'), assignedMemberIds: ['m1', 'm2'] }
+    return [a1, a2, b1, ab1]
+  }
 
-	if _, ok := s.requireTeamAdmin(w, r, timeline.TeamID); !ok {
-		return
-	}
+  it('emits one group per unique assignee combination in team order', () => {
+    const rows = buildRows(makeActivities(), members, 'member', 'title', NONE, NONE)
+    const groupIds = rows.filter(r => r.kind === 'group').map(r => r.kind === 'group' ? r.id : '')
+    // m1 solo → m1+m2 combo → m2 solo (team order: Alice first)
+    expect(groupIds[0]).toBe('m1')           // Alice solo
+    // The combo key for m1+m2 is sorted by ID; exact string is implementation detail — just check it's not m1 or m2 solo
+    expect(groupIds[1]).not.toBe('m1')
+    expect(groupIds[1]).not.toBe('m2')
+    expect(groupIds[2]).toBe('m2')           // Bob solo
+  })
 
-	var at *time.Time
-	if archive {
-		now := time.Now().UTC()
-		at = &now
-	}
-	if err := s.timelines.SetArchived(timelineID, at); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update timeline")
-		return
-	}
-	timeline.ArchivedAt = at
-	timeline.UpdatedAt = time.Now().UTC()
+  it('places multi-assignee activity under its own combination group, not duplicated', () => {
+    const rows = buildRows(makeActivities(), members, 'member', 'title', NONE, NONE)
+    const actIds = rows.filter(r => r.kind === 'activity').map(r => r.kind === 'activity' ? r.event.id : '')
+    // ab1 appears exactly once
+    expect(actIds.filter(id => id === 'ab1')).toHaveLength(1)
+    // Total activity count equals original (no duplication)
+    expect(actIds).toHaveLength(4)
+  })
 
-	s.bus.Publish(events.Message{Type: events.TimelineUpdated, TeamID: timeline.TeamID, Payload: timeline})
-	writeJSON(w, http.StatusOK, timeline)
-}
+  it('carries memberColors on group rows', () => {
+    const rows = buildRows(makeActivities(), members, 'member', 'title', NONE, NONE)
+    const groups = rows.filter((r): r is Extract<typeof r, { kind: 'group' }> => r.kind === 'group')
+    for (const g of groups) {
+      expect(Array.isArray(g.memberColors)).toBe(true)
+    }
+    // The combo group should have two colors
+    const comboGroup = groups.find(g => g.memberColors && g.memberColors.length === 2)
+    expect(comboGroup).toBeDefined()
+  })
 
-// handleUpdateTimeline handles PATCH /timelines/{id}. Only a team admin or a
-// member with timeline_access role='admin' may rename or change dates.
-func (s *Server) handleUpdateTimeline(w http.ResponseWriter, r *http.Request) {
-	timelineID := r.PathValue("id")
+  it('hides a collapsed group activities but keeps the header', () => {
+    const activities = [act('a1', null, 'm1'), act('a2', null, 'm1'), act('b1', null, 'm2')]
+    const rows = buildRows(activities, members, 'member', 'title', NONE, new Set(['m1']))
+    const labels = rows.map(r => (r.kind === 'group' ? `G:${r.id}` : `A:${r.event.id}`))
+    expect(labels).toContain('G:m1')
+    expect(labels).toContain('G:m2')
+    expect(labels).toContain('A:b1')
+    expect(labels).not.toContain('A:a1')
+    expect(labels).not.toContain('A:a2')
+    const g = rows.find(r => r.kind === 'group' && r.id === 'm1')
+    expect(g?.kind === 'group' && g.collapsed).toBe(true)
+  })
 
-	timeline, err := s.timelines.GetByID(timelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update timeline")
-		return
-	}
-
-	member, ok := s.requireTeamMember(w, r, timeline.TeamID)
-	if !ok {
-		return
-	}
-
-	if !s.canAdminTimeline(member, timelineID) {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "timeline admin role required")
-		return
-	}
-
-	var req PatchTimelineJSONBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	if req.Name != nil {
-		name := strings.TrimSpace(*req.Name)
-		if name == "" {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name cannot be empty")
-			return
-		}
-		timeline.Name = name
-	}
-	if req.StartDate != nil {
-		timeline.StartDate = *req.StartDate
-	}
-	if req.EndDate != nil {
-		timeline.EndDate = *req.EndDate
-	}
-	if req.Color != nil {
-		timeline.Color = req.Color
-	}
-	if req.Icon != nil {
-		timeline.Icon = req.Icon
-	}
-	if req.Description != nil {
-		timeline.Description = req.Description
-	}
-	if req.Notes != nil {
-		timeline.Notes = req.Notes
-	}
-	timeline.UpdatedAt = time.Now().UTC()
-
-	if err := s.timelines.Update(timeline); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update timeline")
-		return
-	}
-
-	s.bus.Publish(events.Message{Type: events.TimelineUpdated, TeamID: timeline.TeamID, Payload: timeline})
-	writeJSON(w, http.StatusOK, timeline)
-}
-
-// handleDeleteTimeline handles DELETE /timelines/{id}. Hard-deletes the
-// timeline; only a team admin may delete. Cascades to statuses and
-// timeline_access via foreign key.
-func (s *Server) handleDeleteTimeline(w http.ResponseWriter, r *http.Request) {
-	timelineID := r.PathValue("id")
-
-	timeline, err := s.timelines.GetByID(timelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete timeline")
-		return
-	}
-
-	if _, ok := s.requireTeamAdmin(w, r, timeline.TeamID); !ok {
-		return
-	}
-
-	if err := s.timelines.Delete(timelineID); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete timeline")
-		return
-	}
-
-	w.WriteHeader(http.StatusNoContent)
-}
-
-// handleListTimelineAccess handles GET /teams/{id}/timelines/{timelineId}/access.
-// Team members may list the access grants for any timeline they can view.
-func (s *Server) handleListTimelineAccess(w http.ResponseWriter, r *http.Request) {
-	timelineID := r.PathValue("timelineId")
-
-	timeline, err := s.timelines.GetByID(timelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list access")
-		return
-	}
-
-	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
-		return
-	}
-
-	entries, err := s.timelines.ListAccess(timelineID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list access")
-		return
-	}
-	writeJSON(w, http.StatusOK, entries)
-}
-
-// handleGrantTimelineAccess handles PUT /teams/{id}/timelines/{timelineId}/access/{memberId}.
-// Only team admins or timeline admins may manage the access list.
-func (s *Server) handleGrantTimelineAccess(w http.ResponseWriter, r *http.Request) {
-	timelineID := r.PathValue("timelineId")
-	targetMemberID := r.PathValue("memberId")
-
-	timeline, err := s.timelines.GetByID(timelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to grant access")
-		return
-	}
-
-	member, ok := s.requireTeamMember(w, r, timeline.TeamID)
-	if !ok {
-		return
-	}
-	if !s.canAdminTimeline(member, timelineID) {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "timeline admin role required")
-		return
-	}
-
-	// Verify the target member exists and belongs to the same team as the
-	// timeline — prevents cross-team grants if a member ID is guessed.
-	targetMember, err := s.teams.GetMemberByID(targetMemberID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "team member not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to grant access")
-		return
-	}
-	if targetMember.TeamID != timeline.TeamID {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "team member not found")
-		return
-	}
-
-	var req GrantTimelineAccessJSONBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-	if req.Role != "admin" && req.Role != "member" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "role must be admin or member")
-		return
-	}
-
-	if err := s.timelines.GrantAccess(timelineID, targetMemberID, req.Role); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to grant access")
-		return
-	}
-
-	entries, err := s.timelines.ListAccess(timelineID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to grant access")
-		return
-	}
-	writeJSON(w, http.StatusOK, entries)
-}
-
-// handleRevokeTimelineAccess handles DELETE /teams/{id}/timelines/{timelineId}/access/{memberId}.
-// Only team admins or timeline admins may revoke access.
-func (s *Server) handleRevokeTimelineAccess(w http.ResponseWriter, r *http.Request) {
-	timelineID := r.PathValue("timelineId")
-	targetMemberID := r.PathValue("memberId")
-
-	timeline, err := s.timelines.GetByID(timelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke access")
-		return
-	}
-
-	member, ok := s.requireTeamMember(w, r, timeline.TeamID)
-	if !ok {
-		return
-	}
-	if !s.canAdminTimeline(member, timelineID) {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "timeline admin role required")
-		return
-	}
-
-	if err := s.timelines.RevokeAccess(timelineID, targetMemberID); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke access")
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
-// canAdminTimeline reports whether a team member may perform admin operations
-// on a timeline. Team admins always pass; members must hold timeline_access
-// with role='admin'.
-func (s *Server) canAdminTimeline(member *models.TeamMember, timelineID string) bool {
-	if member.Role == "admin" {
-		return true
-	}
-	role, err := s.timelines.GetAccessRole(timelineID, member.ID)
-	if err != nil {
-		return false
-	}
-	return role == "admin"
-}
-
-// handleGetTimelineByShareToken handles GET /timelines/share/{token}. No
-// authentication is required; the token itself is the credential.
-func (s *Server) handleGetTimelineByShareToken(w http.ResponseWriter, r *http.Request) {
-	token := r.PathValue("token")
-
-	timeline, err := s.timelines.GetByShareToken(token)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, timeline)
-}
+  it('places unassigned activities last', () => {
+    const unassigned: RichActivity = { ...act('u1', null, null), assignedMemberIds: [] }
+    const activities = [act('a1', null, 'm1'), unassigned]
+    const rows = buildRows(activities, members, 'member', 'title', NONE, NONE)
+    const groupIds = rows.filter(r => r.kind === 'group').map(r => r.kind === 'group' ? r.id : '')
+    expect(groupIds[groupIds.length - 1]).toBe('__unassigned__')
+  })
+})
 ````
 
 ## File: packages/web/src/components/gantt/granularity.test.ts
@@ -31311,618 +32010,205 @@ export default function ListToolbar({
 }
 ````
 
-## File: packages/web/src/components/TimelineModal.tsx
+## File: packages/web/src/components/list/ListView.tree.test.ts
 ````typescript
 /**
- * TimelineModal — create / edit a timeline.
+ * buildListRows — group-by and tree-nesting behaviour.
  *
- * Modes:
- *  - "new":  name, identity, date range, description, notes; template picker seeds statuses
- *  - "edit": same fields; plus Statuses tab (add/edit/delete live statuses)
+ * Mirrors the pattern in GanttView.tree.test.ts: pure logic tests on the
+ * exported buildListRows function, no React rendering or hook mocks required.
  */
 
-import { useState } from 'react'
-import { X, Plus, Trash2, Check, Archive, RotateCcw } from 'lucide-react'
-import { IdentityWidget } from '@/components/identity/IdentityWidget'
-import { Badge } from '@/components/identity/Badge'
-import type { Identity } from '@/components/identity/identity-constants'
-import { resolveColorHex } from '@/components/identity/identity-constants'
-import {
-  useCreateTimeline,
-  useUpdateTimeline,
-  useDeleteTimeline,
-  useArchiveTimeline,
-} from '@/hooks/useTeamActivities'
-import {
-  useTimelineStatuses,
-  useCreateTimelineStatus,
-  useUpdateTimelineStatus,
-  useDeleteTimelineStatus,
-} from '@/hooks/useStatusTemplates'
-import { useStatusTemplates } from '@/hooks/useStatusTemplates'
-import InlineEditableTitle from '@/components/shared/InlineEditableTitle'
-import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
+import { describe, it, expect } from 'vitest'
+import { buildListRows } from './ListView'
+import type { ListDisplayRow } from './ListView'
 import type { components } from '@draba/shared'
 
-type Timeline = components['schemas']['Timeline']
+type ApiActivity = components['schemas']['Activity']
 type Status = components['schemas']['Status']
 
-// ── Prop types ────────────────────────────────────────────────────────────────
+const NONE = new Set<string>()
 
-interface Props {
-  mode: 'new' | 'edit'
-  teamId: string
-  timeline?: Timeline
-  canAdmin?: boolean
-  onClose: () => void
-  onCreated?: (timeline: Timeline) => void
-  onUnarchive?: (timelineId: string) => void
-}
-
-type Tab = 'settings' | 'statuses'
-
-// ── Inline styles ─────────────────────────────────────────────────────────────
-
-const OVERLAY: React.CSSProperties = {
-  position: 'fixed', inset: 0,
-  background: 'rgba(0,0,0,0.5)', backdropFilter: 'blur(2px)',
-  zIndex: 300, display: 'flex', alignItems: 'center', justifyContent: 'center',
-}
-
-const PANEL: React.CSSProperties = {
-  background: 'var(--card)', border: '1px solid var(--border)',
-  borderRadius: 12, width: 560, maxWidth: '95vw',
-  maxHeight: '90vh', display: 'flex', flexDirection: 'column',
-  boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
-}
-
-const HEADER: React.CSSProperties = {
-  display: 'flex', alignItems: 'center', gap: 12,
-  padding: '18px 20px 14px', borderBottom: '1px solid var(--border)',
-  flexShrink: 0,
-}
-
-const TAB_BAR: React.CSSProperties = {
-  display: 'flex', gap: 2, padding: '0 20px',
-  borderBottom: '1px solid var(--border)', flexShrink: 0,
-}
-
-const CONTENT: React.CSSProperties = {
-  flex: 1, overflowY: 'auto', padding: '20px',
-}
-
-const FOOTER: React.CSSProperties = {
-  display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-  padding: '14px 20px', borderTop: '1px solid var(--border)', flexShrink: 0,
-}
-
-const FIELD_LABEL: React.CSSProperties = {
-  fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)',
-  textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 6,
-}
-
-const INPUT: React.CSSProperties = {
-  width: '100%', boxSizing: 'border-box',
-  fontSize: 13, color: 'var(--foreground)',
-  border: '1px solid var(--border)', borderRadius: 6,
-  padding: '7px 10px', background: 'var(--background)',
-  outline: 'none',
-}
-
-const TEXTAREA: React.CSSProperties = {
-  ...INPUT,
-  resize: 'vertical' as const,
-  minHeight: 68,
-  fontFamily: 'var(--font-sans)',
-  lineHeight: 1.5,
-}
-
-const archiveBtnStyle: React.CSSProperties = {
-  fontSize: 12, color: '#F59E0B', background: 'rgba(245,158,11,0.12)',
-  border: '1px solid rgba(245,158,11,0.35)', borderRadius: 7,
-  padding: '7px 12px', cursor: 'pointer', fontFamily: 'var(--font-sans)',
-  display: 'flex', alignItems: 'center', gap: 6,
-}
-
-const restoreBtnStyle: React.CSSProperties = {
-  fontSize: 12, color: '#1A97A2', background: 'rgba(26,151,162,0.12)',
-  border: '1px solid rgba(26,151,162,0.35)', borderRadius: 7,
-  padding: '7px 12px', cursor: 'pointer', fontFamily: 'var(--font-sans)',
-  display: 'flex', alignItems: 'center', gap: 6,
-}
-
-function tabStyle(active: boolean): React.CSSProperties {
+function act(
+  id: string,
+  opts: {
+    parentActivityId?: string | null
+    assignedMemberIds?: string[]
+    statusId?: string | null
+  } = {},
+): ApiActivity {
   return {
-    padding: '8px 14px', fontSize: 12, fontWeight: 500,
-    border: 'none', background: 'none', cursor: 'pointer',
-    borderBottom: active ? '2px solid var(--primary)' : '2px solid transparent',
-    color: active ? 'var(--foreground)' : 'var(--muted-foreground)',
-    fontFamily: 'var(--font-sans)',
+    id,
+    title: id,
+    timelineId: 'tl1',
+    startAt: '2026-01-01T00:00:00Z',
+    endAt: '2026-01-02T00:00:00Z',
+    allDay: false,
+    createdBy: 'user1',
+    createdAt: '2026-01-01T00:00:00Z',
+    updatedAt: '2026-01-01T00:00:00Z',
+    description: null,
+    notes: null,
+    icon: null,
+    color: null,
+    percentComplete: null,
+    location: null,
+    url: null,
+    archivedAt: null,
+    parentActivityId: opts.parentActivityId ?? null,
+    assignedMemberIds: opts.assignedMemberIds ?? [],
+    tagIds: [],
+    statusId: opts.statusId ?? null,
   }
 }
 
-// ── Status row (edit mode) ────────────────────────────────────────────────────
-
-interface StatusRowProps {
-  status: Status
-  canDelete: boolean
-  teamId: string
-  timelineId: string
-  allStatuses: Status[]
+function status(id: string, name: string): Status {
+  return { id, name, color: '#000', timelineId: 'tl1', isClosed: false, position: 0, createdAt: '', updatedAt: '' }
 }
 
-function StatusRow({ status, canDelete, teamId, timelineId, allStatuses }: StatusRowProps) {
-  const [editing, setEditing] = useState(false)
-  const [name, setName] = useState(status.name)
-  const [identity, setIdentity] = useState<Identity>({ color: status.color, icon: status.icon ?? '' })
-  const [isClosed, setIsClosed] = useState(status.isClosed)
-  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
-  const [replacementId, setReplacementId] = useState('')
-  const update = useUpdateTimelineStatus(teamId, timelineId)
-  const del = useDeleteTimelineStatus(teamId, timelineId)
-
-  function save() {
-    update.mutate(
-      { id: status.id, name: name.trim() || status.name, color: identity.color, icon: identity.icon || null, isClosed },
-      { onSuccess: () => setEditing(false) },
-    )
-  }
-
-  function doDelete() {
-    del.mutate(
-      { id: status.id, replacementStatusId: replacementId || undefined },
-      { onSuccess: () => setShowDeleteConfirm(false) },
-    )
-  }
-
-  if (showDeleteConfirm) {
-    const others = allStatuses.filter(s => s.id !== status.id)
-    return (
-      <div style={{ background: 'var(--muted)', borderRadius: 8, padding: 12, marginBottom: 6 }}>
-        <div style={{ fontSize: 12, color: 'var(--foreground)', marginBottom: 8 }}>
-          Delete <strong>{status.name}</strong>? Activities using this status will be reassigned.
-        </div>
-        {others.length > 0 && (
-          <div style={{ marginBottom: 8 }}>
-            <label style={{ ...FIELD_LABEL }}>Move activities to</label>
-            <select
-              value={replacementId}
-              onChange={e => setReplacementId(e.target.value)}
-              style={{ ...INPUT, fontSize: 12 }}
-            >
-              <option value="">— No status —</option>
-              {others.map(s => (
-                <option key={s.id} value={s.id}>{s.name}</option>
-              ))}
-            </select>
-          </div>
-        )}
-        <div style={{ display: 'flex', gap: 8 }}>
-          <button onClick={() => setShowDeleteConfirm(false)} style={{ fontSize: 12, padding: '4px 10px', border: '1px solid var(--border)', borderRadius: 5, background: 'none', cursor: 'pointer', color: 'var(--foreground)' }}>Cancel</button>
-          <button onClick={doDelete} style={{ fontSize: 12, padding: '4px 10px', border: 'none', borderRadius: 5, background: 'var(--destructive)', color: 'white', cursor: 'pointer' }}>Delete</button>
-        </div>
-      </div>
-    )
-  }
-
-  if (editing) {
-    return (
-      <div style={{ background: 'var(--muted)', borderRadius: 8, padding: '10px 12px', marginBottom: 4, display: 'flex', flexDirection: 'column', gap: 8 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <IdentityWidget
-            identity={{ color: identity.color, icon: identity.icon ?? '' }}
-            name={name || status.name}
-            onChange={setIdentity}
-            shape="square"
-          />
-          <input
-            autoFocus
-            value={name}
-            onChange={e => setName(e.target.value)}
-            onKeyDown={e => { if (e.key === 'Enter') save(); if (e.key === 'Escape') setEditing(false) }}
-            style={{ ...INPUT, flex: 1 }}
-          />
-          <button onClick={save} disabled={update.isPending} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--primary)', padding: 4 }}>
-            <Check width={14} height={14} />
-          </button>
-          <button onClick={() => setEditing(false)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4 }}>
-            <X width={14} height={14} />
-          </button>
-        </div>
-        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--muted-foreground)', cursor: 'pointer', userSelect: 'none', paddingLeft: 26 }}>
-          <input type="checkbox" checked={isClosed} onChange={e => setIsClosed(e.target.checked)} />
-          Closed status (marks this status as completed/done)
-        </label>
-      </div>
-    )
-  }
-
-  return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 0' }}>
-      <Badge identity={{ color: status.color, icon: status.icon ?? '__none__' }} name={status.name} shape="square" size={18} />
-      <span style={{ fontSize: 13, flex: 1, cursor: 'pointer', color: 'var(--foreground)' }} onClick={() => setEditing(true)}>
-        {status.name}
-      </span>
-      {status.isClosed && (
-        <span style={{ fontSize: 10, padding: '1px 6px', border: '1px solid var(--border)', borderRadius: 4, color: 'var(--muted-foreground)' }}>closed</span>
-      )}
-      <button onClick={() => setEditing(true)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4, opacity: 0.5 }}>
-        ✎
-      </button>
-      {canDelete && (
-        <button onClick={() => setShowDeleteConfirm(true)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4 }}>
-          <Trash2 width={13} height={13} />
-        </button>
-      )}
-    </div>
-  )
+function actRows(rows: ListDisplayRow[]) {
+  return rows
+    .filter((r): r is Extract<ListDisplayRow, { kind: 'activity' }> => r.kind === 'activity')
+    .map(r => ({ id: r.activity.id, depth: r.depth, hasChildren: r.hasChildren }))
 }
 
-// ── Add-status form ───────────────────────────────────────────────────────────
-
-interface AddStatusFormProps {
-  teamId: string
-  timelineId: string
-  primaryColor: string
+function groupRows(rows: ListDisplayRow[]) {
+  return rows
+    .filter((r): r is Extract<ListDisplayRow, { kind: 'group' }> => r.kind === 'group')
+    .map(r => ({ key: r.key, label: r.label, count: r.count }))
 }
 
-function AddStatusForm({ teamId, timelineId, primaryColor }: AddStatusFormProps) {
-  const [expanding, setExpanding] = useState(false)
-  const [name, setName] = useState('')
-  const [identity, setIdentity] = useState<Identity>({ color: primaryColor, icon: '' })
-  const [isClosed, setIsClosed] = useState(false)
-  const createStatus = useCreateTimelineStatus(teamId, timelineId)
+const emptyMembers = new Map<string, { displayName: string }>()
+const emptyStatuses = new Map<string, { name: string }>()
 
-  function handleAdd() {
-    if (!name.trim()) return
-    createStatus.mutate(
-      { name: name.trim(), color: identity.color, icon: identity.icon || null, isClosed },
-      {
-        onSuccess: () => {
-          setName('')
-          setIdentity({ color: primaryColor, icon: '' })
-          setIsClosed(false)
-          setExpanding(false)
-        },
-      },
-    )
-  }
+// ── groupBy: none ─────────────────────────────────────────────────────────────
 
-  function handleCancel() {
-    setExpanding(false)
-    setName('')
-    setIdentity({ color: primaryColor, icon: '' })
-    setIsClosed(false)
-  }
+describe('buildListRows — groupBy: none', () => {
+  it('returns one activity row per activity in order', () => {
+    const activities = [act('a'), act('b'), act('c')]
+    const rows = buildListRows(activities, 'none', emptyMembers, emptyStatuses, [], NONE)
+    expect(actRows(rows).map(r => r.id)).toEqual(['a', 'b', 'c'])
+  })
 
-  if (!expanding) {
-    return (
-      <button
-        onClick={() => setExpanding(true)}
-        style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 8, background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', fontSize: 12, padding: '4px 2px', fontFamily: 'var(--font-sans)' }}
-      >
-        <Plus width={13} height={13} /> Add status
-      </button>
-    )
-  }
+  it('returns an empty array for an empty list', () => {
+    expect(buildListRows([], 'none', emptyMembers, emptyStatuses, [], NONE)).toEqual([])
+  })
+})
 
-  return (
-    <div style={{ background: 'var(--muted)', borderRadius: 8, padding: '10px 12px', marginTop: 8, display: 'flex', flexDirection: 'column', gap: 8 }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-        <IdentityWidget identity={identity} name={name || 'New status'} shape="square" onChange={setIdentity} />
-        <input
-          autoFocus
-          value={name}
-          onChange={e => setName(e.target.value)}
-          onKeyDown={e => { if (e.key === 'Enter') handleAdd(); if (e.key === 'Escape') handleCancel() }}
-          placeholder="Status name…"
-          style={{ ...INPUT, flex: 1 }}
-        />
-        <button onClick={handleAdd} disabled={!name.trim() || createStatus.isPending} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--primary)', padding: 4, display: 'flex' }}>
-          <Check width={14} height={14} />
-        </button>
-        <button onClick={handleCancel} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4, display: 'flex' }}>
-          <X width={14} height={14} />
-        </button>
-      </div>
-      <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--muted-foreground)', cursor: 'pointer', userSelect: 'none', paddingLeft: 26 }}>
-        <input type="checkbox" checked={isClosed} onChange={e => setIsClosed(e.target.checked)} />
-        Closed status (marks this status as completed/done)
-      </label>
-    </div>
-  )
-}
+// ── groupBy: member ───────────────────────────────────────────────────────────
 
-// ── Main modal ────────────────────────────────────────────────────────────────
+describe('buildListRows — groupBy: member (combo-key)', () => {
+  const memberMap = new Map([
+    ['m1', { displayName: 'Alice', color: '#111' }],
+    ['m2', { displayName: 'Bob', color: '#222' }],
+  ])
+  const memberOrder = ['m1', 'm2']
 
-export default function TimelineModal({ mode, teamId, timeline, canAdmin = false, onClose, onCreated, onUnarchive }: Props) {
-  const [activeTab, setActiveTab] = useState<Tab>('settings')
-  const [name, setName] = useState(timeline?.name ?? '')
-  const [description, setDescription] = useState(timeline?.description ?? '')
-  const [notes, setNotes] = useState(timeline?.notes ?? '')
-  const [startDate, setStartDate] = useState(timeline?.startDate ?? '')
-  const [endDate, setEndDate] = useState(timeline?.endDate ?? '')
-  const [identity, setIdentity] = useState<Identity>({ color: timeline?.color ?? '#1A97A2', icon: timeline?.icon ?? '' })
-  const [selectedTemplateId, setSelectedTemplateId] = useState<string>('')
-  const [saving, setSaving] = useState(false)
-  const [error, setError] = useState('')
-  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
-  const [showArchiveConfirm, setShowArchiveConfirm] = useState(false)
+  const activities = [
+    act('a1', { assignedMemberIds: ['m1'] }),
+    act('a2', { assignedMemberIds: ['m1'] }),
+    act('b1', { assignedMemberIds: ['m2'] }),
+    act('ab1', { assignedMemberIds: ['m1', 'm2'] }),
+    act('u1'),  // unassigned
+  ]
 
-  const createTimeline = useCreateTimeline(teamId)
-  const updateTimeline = useUpdateTimeline(teamId)
-  const deleteTimeline = useDeleteTimeline(teamId)
-  const archiveTimeline = useArchiveTimeline(teamId)
+  it('emits one group per unique assignee combination in team order', () => {
+    const rows = buildListRows(activities, 'member', memberMap, emptyStatuses, [], NONE, memberOrder)
+    const groups = groupRows(rows)
+    expect(groups[0]).toMatchObject({ label: 'Alice', count: 2 })
+    // combo group Alice + Bob
+    expect(groups[1].label).toBe('Alice and Bob')
+    expect(groups[1].count).toBe(1)
+    expect(groups[2]).toMatchObject({ label: 'Bob', count: 1 })
+    expect(groups[3]).toMatchObject({ key: '__unassigned__', label: 'Unassigned', count: 1 })
+  })
 
-  const { data: statuses = [] } = useTimelineStatuses(teamId, timeline?.id ?? '')
-  const { data: templates = [] } = useStatusTemplates(teamId)
+  it('places multi-assignee activity under its own combination group (no duplication)', () => {
+    const rows = buildListRows(activities, 'member', memberMap, emptyStatuses, [], NONE, memberOrder)
+    const actIds = rows.filter(r => r.kind === 'activity').map(r => (r as Extract<typeof r, { kind: 'activity' }>).activity.id)
+    expect(actIds.filter(id => id === 'ab1')).toHaveLength(1)
+    expect(actIds).toHaveLength(5)
+  })
 
-  const timelineColor = resolveColorHex(identity.color) ?? identity.color ?? '#1A97A2'
+  it('carries memberColors on group rows for member combos', () => {
+    const rows = buildListRows(activities, 'member', memberMap, emptyStatuses, [], NONE, memberOrder)
+    const groups = rows.filter((r): r is Extract<typeof r, { kind: 'group' }> => r.kind === 'group')
+    const comboGroup = groups.find(g => g.label === 'Alice and Bob')
+    expect(comboGroup?.memberColors).toHaveLength(2)
+  })
 
-  function handleSave() {
-    if (!name.trim()) { setError('Name is required'); return }
-    if (!startDate || !endDate) { setError('Start and end dates are required'); return }
-    if (endDate < startDate) { setError('End date must not be before start date'); return }
-    setSaving(true)
-    setError('')
+  it('hides collapsed group activities but keeps the group header', () => {
+    // Solo-member key is just the member id (since memberComboKey(['m1']) === 'm1')
+    const rows = buildListRows(activities, 'member', memberMap, emptyStatuses, [], new Set(['m1']), memberOrder)
+    const ids = rows.map(r => r.kind === 'group' ? `G:${r.key}` : `A:${(r as Extract<typeof r, { kind: 'activity' }>).activity.id}`)
+    expect(ids).not.toContain('A:a1')
+    expect(ids).not.toContain('A:a2')
+    expect(ids).toContain('G:m1')
+    expect(ids).toContain('A:b1')
+  })
+})
 
-    if (mode === 'new') {
-      createTimeline.mutate(
-        {
-          name: name.trim(),
-          startDate,
-          endDate,
-          color: identity.color || null,
-          icon: identity.icon || null,
-          description: description.trim() || null,
-          notes: notes.trim() || null,
-          templateId: selectedTemplateId || null,
-        },
-        {
-          onSuccess: (tl) => { setSaving(false); onCreated?.(tl); onClose() },
-          onError: () => { setSaving(false); setError('Failed to create timeline') },
-        },
-      )
-    } else if (timeline) {
-      updateTimeline.mutate(
-        {
-          timelineId: timeline.id,
-          patch: {
-            name: name.trim(),
-            startDate,
-            endDate,
-            color: identity.color || null,
-            icon: identity.icon || null,
-            description: description.trim() || null,
-            notes: notes.trim() || null,
-          },
-        },
-        {
-          onSuccess: () => { setSaving(false); onClose() },
-          onError: () => { setSaving(false); setError('Failed to save timeline') },
-        },
-      )
-    }
-  }
+// ── groupBy: status ───────────────────────────────────────────────────────────
 
-  return (
-    <div style={OVERLAY}>
-      <div style={PANEL} onClick={e => e.stopPropagation()}>
-        {/* Header — identity widget + editable name */}
-        <div style={HEADER}>
-          <IdentityWidget
-            identity={identity}
-            name={name || (mode === 'new' ? 'New timeline' : timeline?.name ?? '')}
-            onChange={setIdentity}
-            shape="square"
-          />
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 3 }}>
-              {mode === 'new' ? 'New Timeline' : 'Edit Timeline'}
-            </div>
-            <InlineEditableTitle
-              value={name}
-              onChange={v => { setName(v); setError('') }}
-              placeholder="Timeline name"
-              autoFocus={mode === 'new'}
-            />
-          </div>
-          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4 }}>
-            <X width={18} height={18} />
-          </button>
-        </div>
+describe('buildListRows — groupBy: status', () => {
+  const statuses = [status('s1', 'In Progress'), status('s2', 'Done')]
+  const statusMap = new Map(statuses.map(s => [s.id, s]))
+  const activities = [
+    act('a', { statusId: 's1' }),
+    act('b', { statusId: 's2' }),
+    act('c'),  // no status
+  ]
 
-        {/* Tab bar — Statuses tab only in edit mode */}
-        <div style={TAB_BAR}>
-          <button style={tabStyle(activeTab === 'settings')} onClick={() => setActiveTab('settings')}>Settings</button>
-          {mode === 'edit' && (
-            <button style={tabStyle(activeTab === 'statuses')} onClick={() => setActiveTab('statuses')}>
-              Statuses {statuses.length > 0 && <span style={{ fontSize: 10, marginLeft: 4, opacity: 0.6 }}>({statuses.length})</span>}
-            </button>
-          )}
-        </div>
+  it('emits statuses in ROADMAP order, no-status last', () => {
+    const rows = buildListRows(activities, 'status', emptyMembers, statusMap, statuses, NONE)
+    const groups = groupRows(rows)
+    expect(groups.map(g => g.label)).toEqual(['In Progress', 'Done', 'No status'])
+  })
 
-        {/* Content */}
-        <div style={CONTENT}>
-          {/* Archive confirmation — replaces tab content */}
-          {showArchiveConfirm && timeline ? (
-            <ConfirmDialog
-              variant="amber"
-              icon={<Archive size={22} color="#F59E0B" />}
-              title="Archive timeline?"
-              body={`${timeline.name} will be hidden from the active list. All data is preserved and can be restored via the Archived section in the sidebar.`}
-              confirmLabel="Archive"
-              busy={archiveTimeline.isPending}
-              onCancel={() => setShowArchiveConfirm(false)}
-              onConfirm={() => archiveTimeline.mutate(timeline.id, { onSuccess: onClose })}
-            />
-          ) : showDeleteConfirm && timeline ? (
-            <ConfirmDialog
-              variant="red"
-              icon={<Trash2 size={22} color="#EF4444" />}
-              title="Delete timeline?"
-              body={`This permanently deletes ${timeline.name} and all its statuses. Activities are not deleted — they remain in the team.`}
-              confirmLabel="Delete timeline"
-              busy={deleteTimeline.isPending}
-              onCancel={() => setShowDeleteConfirm(false)}
-              onConfirm={() => deleteTimeline.mutate(timeline.id, { onSuccess: onClose })}
-            />
-          ) : activeTab === 'settings' ? (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-              {/* Date range */}
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-                <div>
-                  <div style={FIELD_LABEL}>Start date *</div>
-                  <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)} style={INPUT} />
-                </div>
-                <div>
-                  <div style={FIELD_LABEL}>End date *</div>
-                  <input type="date" value={endDate} onChange={e => setEndDate(e.target.value)} style={INPUT} />
-                </div>
-              </div>
+  it('skips statuses with no activities', () => {
+    const rows = buildListRows([act('a', { statusId: 's1' })], 'status', emptyMembers, statusMap, statuses, NONE)
+    const groups = groupRows(rows)
+    expect(groups.map(g => g.label)).toEqual(['In Progress'])
+  })
+})
 
-              {/* Description */}
-              <div>
-                <div style={FIELD_LABEL}>Description</div>
-                <input
-                  value={description}
-                  onChange={e => setDescription(e.target.value)}
-                  placeholder="Short description of this timeline's purpose…"
-                  style={INPUT}
-                />
-              </div>
+// ── groupBy: parent ───────────────────────────────────────────────────────────
 
-              {/* Notes */}
-              <div>
-                <div style={FIELD_LABEL}>Notes</div>
-                <textarea
-                  value={notes}
-                  onChange={e => setNotes(e.target.value)}
-                  placeholder="Internal notes, links, references…"
-                  style={TEXTAREA}
-                />
-              </div>
+describe('buildListRows — groupBy: parent', () => {
+  const activities = [
+    act('a'),
+    act('b', { parentActivityId: 'a' }),
+    act('c', { parentActivityId: 'b' }),
+    act('d'),
+  ]
 
-              {/* Template picker (create mode only) */}
-              {mode === 'new' && templates.length > 0 && (
-                <div>
-                  <div style={FIELD_LABEL}>Status template</div>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                    {templates.map(tpl => {
-                      const isSelected = selectedTemplateId === tpl.id || (!selectedTemplateId && tpl === templates[0])
-                      return (
-                        <div
-                          key={tpl.id}
-                          onClick={() => setSelectedTemplateId(tpl.id)}
-                          style={{
-                            border: `1px solid ${isSelected ? timelineColor + '88' : 'var(--border)'}`,
-                            borderRadius: 8, padding: '10px 14px', cursor: 'pointer',
-                            background: isSelected ? timelineColor + '11' : 'var(--muted)',
-                            transition: 'all 0.1s',
-                          }}
-                        >
-                          <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6, color: 'var(--foreground)' }}>{tpl.name}</div>
-                          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                            {tpl.items.map(item => (
-                              <span key={item.id} style={{ fontSize: 11, padding: '2px 8px', borderRadius: 4, background: item.color + '22', border: `1px solid ${item.color}66`, color: item.color }}>
-                                {item.name}
-                              </span>
-                            ))}
-                          </div>
-                        </div>
-                      )
-                    })}
-                  </div>
-                </div>
-              )}
+  it('nests grandchildren at increasing depth', () => {
+    const rows = buildListRows(activities, 'parent', emptyMembers, emptyStatuses, [], NONE)
+    expect(actRows(rows)).toEqual([
+      { id: 'a', depth: 0, hasChildren: true },
+      { id: 'b', depth: 1, hasChildren: true },
+      { id: 'c', depth: 2, hasChildren: false },
+      { id: 'd', depth: 0, hasChildren: false },
+    ])
+  })
 
-              {/* Archived banner */}
-              {mode === 'edit' && timeline?.archivedAt && (
-                <div style={{ fontSize: 12, color: '#F59E0B', background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.25)', borderRadius: 6, padding: '8px 12px' }}>
-                  This timeline is archived. It is hidden from the active list.
-                </div>
-              )}
+  it('hides subtree when parent is collapsed', () => {
+    const rows = buildListRows(activities, 'parent', emptyMembers, emptyStatuses, [], new Set(['a']))
+    expect(actRows(rows).map(r => r.id)).toEqual(['a', 'd'])
+  })
 
-              {error && (
-                <div style={{ fontSize: 12, color: 'var(--destructive)', background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)', borderRadius: 6, padding: '8px 12px' }}>
-                  {error}
-                </div>
-              )}
-            </div>
-          ) : (
-            activeTab === 'statuses' && timeline && (
-              <div>
-                <div style={{ fontSize: 12, color: 'var(--muted-foreground)', marginBottom: 14, lineHeight: 1.5 }}>
-                  Statuses are specific to this timeline. Add, rename, recolor, or remove them here.
-                </div>
+  it('treats an orphan (parent not in view) as a root', () => {
+    const rows = buildListRows([act('x', { parentActivityId: 'missing' })], 'parent', emptyMembers, emptyStatuses, [], NONE)
+    expect(actRows(rows)).toEqual([{ id: 'x', depth: 0, hasChildren: false }])
+  })
 
-                <div style={{ marginBottom: 4 }}>
-                  {statuses.map(s => (
-                    <StatusRow
-                      key={s.id}
-                      status={s}
-                      canDelete={statuses.length > 1}
-                      teamId={teamId}
-                      timelineId={timeline.id}
-                      allStatuses={statuses}
-                    />
-                  ))}
-                </div>
-
-                <AddStatusForm teamId={teamId} timelineId={timeline.id} primaryColor={timelineColor} />
-              </div>
-            )
-          )}
-        </div>
-
-        {/* Footer — hidden when a confirm dialog is showing */}
-        {!showArchiveConfirm && !showDeleteConfirm && (
-          <div style={FOOTER}>
-            <div style={{ display: 'flex', gap: 8 }}>
-              {mode === 'edit' && timeline && canAdmin && !timeline.archivedAt && (
-                <button onClick={() => setShowArchiveConfirm(true)} style={archiveBtnStyle}>
-                  <Archive size={13} />
-                  Archive
-                </button>
-              )}
-              {mode === 'edit' && timeline && canAdmin && timeline.archivedAt && onUnarchive && (
-                <button onClick={() => onUnarchive(timeline.id)} style={restoreBtnStyle}>
-                  <RotateCcw size={13} />
-                  Restore
-                </button>
-              )}
-              {mode === 'edit' && timeline && canAdmin && (
-                <button
-                  onClick={() => setShowDeleteConfirm(true)}
-                  style={{ fontSize: 12, padding: '7px 12px', border: '1px solid rgba(239,68,68,0.3)', borderRadius: 7, background: 'none', color: 'var(--destructive)', cursor: 'pointer', fontFamily: 'var(--font-sans)' }}
-                >
-                  Delete
-                </button>
-              )}
-            </div>
-            <div style={{ display: 'flex', gap: 8 }}>
-              <button
-                onClick={onClose}
-                style={{ fontSize: 13, padding: '8px 16px', border: '1px solid var(--border)', borderRadius: 7, background: 'none', cursor: 'pointer', fontFamily: 'var(--font-sans)', color: 'var(--muted-foreground)' }}
-              >
-                Cancel
-              </button>
-              {activeTab === 'settings' && (
-                <button
-                  onClick={handleSave}
-                  disabled={saving}
-                  style={{ fontSize: 13, fontWeight: 600, padding: '8px 18px', border: 'none', borderRadius: 7, background: timelineColor, color: 'white', cursor: saving ? 'wait' : 'pointer', fontFamily: 'var(--font-sans)' }}
-                >
-                  {saving ? 'Saving…' : mode === 'new' ? 'Create timeline' : 'Save changes'}
-                </button>
-              )}
-            </div>
-          </div>
-        )}
-      </div>
-    </div>
-  )
-}
+  it('does not infinite-loop on a parent-pointer cycle', () => {
+    const x = act('x', { parentActivityId: 'y' })
+    const y = act('y', { parentActivityId: 'x' })
+    const rows = buildListRows([x, y], 'parent', emptyMembers, emptyStatuses, [], NONE)
+    expect(actRows(rows).map(r => r.id).sort()).toEqual(['x', 'y'])
+  })
+})
 ````
 
 ## File: packages/web/src/lib/presetFilters.test.ts
@@ -32160,230 +32446,63 @@ describe("filter kind 'saved'", () => {
 })
 ````
 
-## File: docs/TESTING.md
-````markdown
-# Testing & Review Procedures
+## File: packages/web/vite.config.ts
+````typescript
+/// <reference types="vitest" />
+import path from 'path'
+import { defineConfig, loadEnv } from 'vite'
+import react from '@vitejs/plugin-react'
+import tailwindcss from '@tailwindcss/vite'
 
-This document is the source of truth for what we test and how. It is consumed by the `/test-phase` and `/review-phase` slash commands, which fan work out to subagents that run in parallel. The framework grows phase-by-phase: every new ROADMAP phase adds a section here, and the subagents pick it up automatically.
+export default defineConfig(({ mode }) => {
+  const env = loadEnv(mode, process.cwd(), '')
+  const apiTarget = env.VITE_API_TARGET ?? 'http://localhost:8080'
 
-For the human-review checklist used on diffs, see [REVIEW.md](REVIEW.md).
-
----
-
-## Test environment setup (manual, do once per host)
-
-These steps set up the docker host so `/test-phase` can run end-to-end. Do them **in this order** — later steps assume earlier ones are done.
-
-### Step 1 — One-time host prep (manual)
-On the docker host, as the `draba-test` user (created in the SSH setup steps below):
-
-1. Copy `scripts/reset-test-env.sh` to `~/scripts/reset-test-env.sh` and `chmod +x` it.
-2. Create `~/.draba-test.env` (chmod 600) with:
-   ```
-   DRABA_TEST_INVITE_TOKEN=<pick a long random string>
-   DRABA_TEST_ADMIN_EMAIL=test-admin@local
-   DRABA_TEST_INVITE_EMAIL=invitee@local
-   DRABA_DB_DIR=/portainer/Files/AppData/Config/draba/data
-   DRABA_CONTAINER=draba
-   ```
-   `DRABA_TEST_INVITE_EMAIL` is the email the api-smoke subagent registers as — it must match the email the invite was seeded for. Default `invitee@local` is fine.
-   The script auto-sources this file at startup. No sudo, no `/etc/`, no compose dir — the script uses `docker stop/start` directly and runs file ops inside throwaway containers, so the host user only needs `docker` group membership.
-
-### Step 2 — Per-run reset (manual or SSH-driven)
-Before each `/test-phase` run that needs a clean DB, run on the docker host:
-```bash
-./scripts/reset-test-env.sh
-```
-This stops the container, wipes the SQLite file, restarts, waits for migrations, and seeds a bootstrap team + a known invite token. After it completes, the container is in a known state with `DRABA_TEST_INVITE_TOKEN` valid for `POST /auth/register`.
-
-### Step 3 — Tell Claude how to reach it (one-time, on the dev box)
-On the machine where you run Claude (this Windows box):
-- The test URL should be stored in the `reference_test_docker.md` memory entry (not committed to the repo).
-- Set `DRABA_TEST_INVITE_TOKEN` in your shell or in a memory entry so subagents can pass it through. **Do not commit it.**
-- Configure key-based SSH from this box to the docker host so `/test-phase` can run the reset itself. Recommended setup: a dedicated `draba-test` user on the docker host, an ed25519 keypair with a passphrase loaded in `ssh-agent`, and the public key pinned in `authorized_keys` with `command="/usr/local/bin/draba-reset"` plus `no-pty,no-port-forwarding,no-X11-forwarding,no-agent-forwarding` so the key can only run the reset script. Add an SSH config alias `Host draba-test` so the call is just `ssh draba-test`.
-
-### What's manual vs automated, at a glance
-
-| Step | Where it runs | Who does it |
-|---|---|---|
-| Host prep (Step 1) | Docker host | **You, once** |
-| Reset before a test run (Step 2) | Docker host | **You manually** *(or SSH-driven if configured — Claude can trigger)* |
-| Static checks, unit tests, schema check, security review | Dev box (this machine) | Claude |
-| API smoke against live container | Dev box → live container | Claude |
-| Logging the run to `docs/log.md` | Dev box | Claude |
-
----
-
-## Global procedures
-
-These run regardless of phase.
-
-### Static checks
-- `cd packages/api && golangci-lint run`
-- `cd packages/api && go vet ./...`
-- `pnpm --filter web lint`
-- `pnpm --filter web build`
-
-### Unit & integration
-- `cd packages/api && go test -count=1 ./...`
-- Race detector (`-race`) requires CGO/GCC — not available on the Windows dev box. It runs in CI (GitHub Actions, Linux runner) on every push. Do not mark a local run as failed for omitting `-race`.
-
-### Live smoke target
-Live-smoke subagents (`api-smoke`, future `ws-smoke`) hit a running container. The URL is **not** stored in the repo — it's resolved at runtime in this priority order:
-1. `DRABA_TEST_URL` environment variable, if set.
-2. The `reference_test_docker.md` memory entry (Brian's local LAN host).
-3. If neither is available, the subagent reports **skipped**, not failed.
-
-### Review checklist (always)
-- CONVENTIONS.md compliance
-- No scope creep beyond the phase's ROADMAP entry
-- Errors handled at boundaries (HTTP, DB, external APIs); internal calls trust contracts
-- No secrets, no `.env` files, no host-specific values committed
-- Migrations idempotent (re-run produces no diff)
-- `docs/log.md` updated with a dated entry
-
----
-
-## Subagent map
-
-| Subagent | Scope | Active from |
-|---|---|---|
-| `static-check` | lint + vet + web typecheck/build | Phase 1 |
-| `unit-test` | `go test -race -count=1 ./...` | Phase 2 |
-| `schema-check` | run migrations on fresh SQLite, re-run, assert no diff | Phase 2 |
-| `api-smoke` | hit live container, run phase exit-criteria flows via curl | Phase 2 |
-| `security-review` | scan diff for secrets, missing auth, SQL concat, JWT misuse | Phase 2 |
-| `type-sync` | regen OpenAPI types, assert no diff | Phase 4 |
-| `ws-smoke` | WebSocket: team-scoped broadcast within 500ms, heartbeat | Phase 5 |
-| `web-e2e` | Chrome MCP — login, render timeline, drag-create | Phase 7 |
-
----
-
-## Per-phase procedures
-
-### Phase 1 — Project Infrastructure
-
-**static-check**
-- `go build ./...` from `packages/api/` succeeds with no errors
-- `pnpm build` from `packages/web/` succeeds
-- `golangci-lint run` is clean
-- `docker compose config` parses without error — skip if Docker is not installed on the dev box (verified by CI)
-
-### Phase 2 — API Foundation (DB & Auth)
-
-**unit-test**
-- All `*_test.go` under `packages/api/internal/` pass with `-race -count=1`
-- `internal/auth` package — unit tests needed (currently no test file; tracked gap):
-  - `IssueAccessToken` / `IssueRefreshToken` / `Validate` roundtrip returns correct claims
-  - `Validate` rejects a token signed with a different secret (tampered signature)
-  - `Validate` rejects an expired token
-  - `Validate` returns error when token type mismatches (`"refresh"` presented as `"access"` and vice versa)
-  - `Validate` rejects `alg=none` / non-HMAC algorithm (algorithm-confusion guard)
-  - `HashPassword` / `CheckPassword` roundtrip succeeds; wrong password returns error
-- `internal/db` — `invite_repo` unit tests needed (currently no test file; tracked gap):
-  - `GetValid` returns `sql.ErrNoRows` for an expired invite
-  - `GetValid` returns `sql.ErrNoRows` after `MarkAccepted` (single-use enforcement)
-
-**schema-check**
-- Start container against a fresh `data.db`; confirm these tables exist: `users`, `teams`, `team_members`, `invites`, `api_tokens`, `activities`, `activity_tags`, `activity_assignments`, `timelines`, `timeline_access`, `calendar_connections`, `statuses`
-  - Note: `status_templates`, `status_template_items`, `instance_settings`, and `password_reset_tokens` are managed via app logic, not standalone migration tables.
-- Restart the container; assert migration runner produces no schema changes (idempotency)
-
-**api-smoke** (against `$DRABA_TEST_URL`)
-- `POST /auth/register` with a valid invite token → 200/201, returns user + JWT
-- `POST /auth/register` with an invalid/missing invite token → 4xx
-- `POST /auth/register` with the **same** invite token a second time → 4xx (single-use)
-- `POST /auth/login` with the registered credentials → 200, returns JWT
-- `POST /auth/login` with a non-existent email → 401
-- `POST /auth/login` with bad credentials → 401
-- `POST /auth/refresh` with a valid refresh token → 200, returns new JWT
-- `POST /auth/refresh` with an access token (wrong type) → 401
-- `POST /auth/refresh` with a token signed by a different secret → 401
-- A subsequent authenticated request with the issued JWT → 200 (validates signing)
-
-**security-review**
-- No password fields stored in plaintext (grep migrations + handlers)
-- JWT secret loaded from env/config, not hardcoded
-- Invite tokens single-use (consumed on register) — also asserted behaviorally in api-smoke above
-- No SQL string concatenation in queries
-
-### Phase 3 — Core API (Events & Teams)
-
-**api-smoke**
-- `POST /teams` → returns team (201 Created)
-- `GET /teams/:id` with member token → 200 OK, returns team
-- `GET /teams/:id` with non-member token → 403 Forbidden
-- `POST /teams/:id/invites` → returns invite token (201 Created)
-- Register via that token → user appears in `GET /teams/:id/members` (200 OK)
-- `POST /teams/:id/timelines/:timelineId/activities` (body: `title`, `startAt`, `endAt` as RFC3339) → 201 Created, then `GET /teams/:id/timelines/:timelineId/activities?from=<RFC3339>&to=<RFC3339>` returns it (200 OK) — params must be full RFC3339 (e.g. `2026-01-01T00:00:00Z`), bare dates return 400
-- `PATCH /activities/:id` updates fields (200 OK); `DELETE /activities/:id` removes it (204 No Content / 200 OK), subsequent GET excludes it
-- Auth: every endpoint rejects requests without a valid JWT (401 Unauthorized)
-- Authz: a user not on the team cannot read or mutate that team's activities (403 Forbidden)
-- Tier Limits: exceeding the plan limits for a team returns appropriate HTTP errors (e.g., 402 Payment Required or 403 Forbidden)
-
-**security-review**
-- Every new route requires auth middleware
-- Team membership enforced on every team-scoped endpoint
-
-### Phase 4 — OpenAPI Spec & Type Generation
-
-**type-sync**
-- `pnpm generate` succeeds with no errors
-- `git diff` after generate is empty (committed types match spec)
-- All Phase 2–3 endpoints present in `packages/shared/openapi.yaml`
-
-### Phase 5 — Real-Time (WebSocket)
-
-**unit-test**
-- `TestHub_Heartbeat_PingReceived` — server sends a `{"type":"ping"}` JSON message within one heartbeat interval
-- `TestHub_Heartbeat_MissedPingDisconnects` — server closes the connection after `readTimeout` elapses with no pong
-- Both tests use `testSetupFast` (50ms heartbeat / 200ms readTimeout) so they run in milliseconds
-
-**ws-smoke**
-- Two clients on team A both receive a delta within 500ms of an event mutation
-- A client on team B does not receive team A's events
-- Heartbeat: connect, subscribe, respond to every `{"type":"ping"}` with `{"type":"pong"}`, assert connection stays open for at least 3 ping cycles (use a 30s real-interval container; verify no disconnect over ~100s)
-  - Note: this is a slow manual check; unit tests (`TestHub_Heartbeat_*`) cover the behavior at speed
-
-### Phase 6 — Timelines
-
-**unit-test**
-- `timeline_repo.RevokeAccess` — unit tests needed (currently no coverage; tracked gap):
-  - Grant access then revoke; `HasAccess` returns false after revoke
-  - Revoking access that was never granted is a no-op (no error)
-- `timeline_repo.ListByTeam` — unit test needed:
-  - Returns all non-archived timelines for a team in descending creation order
-  - Returns empty slice (not error) when team has no timelines
-
-**api-smoke**
-- `POST /teams/:id/timelines` with JWT → 201 Created
-- `GET /timelines/:id` with JWT (user on access list) → 200 OK
-- `GET /timelines/:id` with JWT (user not on access list) → 403 Forbidden
-- `GET /timelines/share/:token` → 200 OK without requiring auth
-
-### Phase 7 — Web — Scaffold
-
-**web-e2e**
-- Navigating to protected routes unauthenticated redirects to `/login`
-- Successful login redirects to the main app view and stores the token
-- TanStack Query successfully fetches team/event data from the API
-- WebSocket client successfully connects and maintains a heartbeat
-
-**Known gap — frontend component unit tests**
-No Vitest / Testing Library setup exists yet. Components (`TimelineGrid`, `EventPanel`, `Sidebar`, `MemberAvatar`) have zero unit-level coverage. This is intentional for early phases — the Chrome MCP e2e tests cover the golden path. When the web layer stabilises, add a `web-unit` subagent that runs `pnpm --filter web test` and assert render output for key components. Track as a Phase 8+ task.
-
-### Phase 8+ — Web
-
-*Stubs.* Detailed assertions added when each phase begins.
-
----
-
-## Adding tests for a new phase
-
-1. Find the phase's section in this file (or add one if missing).
-2. Under the relevant subagent heading, list concrete, runnable assertions tied to the ROADMAP exit criteria.
-3. If a new subagent is needed, add it to the subagent map with an "active from" phase.
-4. That's it — `/test-phase` will pick it up on the next run.
+  return {
+    plugins: [
+      react(),
+      tailwindcss(),
+    ],
+    resolve: {
+      alias: {
+        '@': path.resolve(__dirname, './src'),
+      },
+    },
+    test: {
+      environment: 'jsdom',
+      globals: true,
+      alias: {
+        '@': path.resolve(__dirname, './src'),
+      },
+    },
+    server: {
+      proxy: {
+        '/setup': { target: apiTarget, changeOrigin: true },
+        '/auth': { target: apiTarget, changeOrigin: true },
+        '/users': { target: apiTarget, changeOrigin: true },
+        '/admin': { target: apiTarget, changeOrigin: true },
+        '/settings': { target: apiTarget, changeOrigin: true },
+        '/tokens': { target: apiTarget, changeOrigin: true },
+        '/teams': { target: apiTarget, changeOrigin: true },
+        '/timelines': { target: apiTarget, changeOrigin: true },
+        '/status-templates': { target: apiTarget, changeOrigin: true },
+        '/status-template-items': { target: apiTarget, changeOrigin: true },
+        '/statuses': { target: apiTarget, changeOrigin: true },
+        '/activities': { target: apiTarget, changeOrigin: true },
+        '/tags': { target: apiTarget, changeOrigin: true },
+        '/saved_filters': { target: apiTarget, changeOrigin: true },
+        '/events': { target: apiTarget, changeOrigin: true },
+        '/health': { target: apiTarget, changeOrigin: true },
+        '/ws': {
+          target: apiTarget.replace(/^http/, 'ws'),
+          changeOrigin: true,
+          ws: true,
+          rewriteWsOrigin: true,
+        },
+      },
+    },
+  }
+})
 ````
 
 ## File: packages/api/internal/api/saved_filter_handler.go
@@ -33316,63 +33435,231 @@ export default function TopBar({
 }
 ````
 
-## File: packages/web/vite.config.ts
-````typescript
-/// <reference types="vitest" />
-import path from 'path'
-import { defineConfig, loadEnv } from 'vite'
-import react from '@vitejs/plugin-react'
-import tailwindcss from '@tailwindcss/vite'
+## File: docs/TESTING.md
+````markdown
+# Testing & Review Procedures
 
-export default defineConfig(({ mode }) => {
-  const env = loadEnv(mode, process.cwd(), '')
-  const apiTarget = env.VITE_API_TARGET ?? 'http://localhost:8080'
+This document is the source of truth for what we test and how. It is consumed by the `/test-phase` and `/review-phase` slash commands, which fan work out to subagents that run in parallel. The framework grows phase-by-phase: every new ROADMAP phase adds a section here, and the subagents pick it up automatically.
 
-  return {
-    plugins: [
-      react(),
-      tailwindcss(),
-    ],
-    resolve: {
-      alias: {
-        '@': path.resolve(__dirname, './src'),
-      },
-    },
-    test: {
-      environment: 'jsdom',
-      globals: true,
-      alias: {
-        '@': path.resolve(__dirname, './src'),
-      },
-    },
-    server: {
-      proxy: {
-        '/setup': { target: apiTarget, changeOrigin: true },
-        '/auth': { target: apiTarget, changeOrigin: true },
-        '/users': { target: apiTarget, changeOrigin: true },
-        '/admin': { target: apiTarget, changeOrigin: true },
-        '/settings': { target: apiTarget, changeOrigin: true },
-        '/tokens': { target: apiTarget, changeOrigin: true },
-        '/teams': { target: apiTarget, changeOrigin: true },
-        '/timelines': { target: apiTarget, changeOrigin: true },
-        '/status-templates': { target: apiTarget, changeOrigin: true },
-        '/status-template-items': { target: apiTarget, changeOrigin: true },
-        '/statuses': { target: apiTarget, changeOrigin: true },
-        '/activities': { target: apiTarget, changeOrigin: true },
-        '/tags': { target: apiTarget, changeOrigin: true },
-        '/saved_filters': { target: apiTarget, changeOrigin: true },
-        '/events': { target: apiTarget, changeOrigin: true },
-        '/health': { target: apiTarget, changeOrigin: true },
-        '/ws': {
-          target: apiTarget.replace(/^http/, 'ws'),
-          changeOrigin: true,
-          ws: true,
-          rewriteWsOrigin: true,
-        },
-      },
-    },
-  }
-})
+For the human-review checklist used on diffs, see [REVIEW.md](REVIEW.md).
+
+---
+
+## Test environment setup (manual, do once per host)
+
+These steps set up the docker host so `/test-phase` can run end-to-end. Do them **in this order** — later steps assume earlier ones are done.
+
+### Step 1 — One-time host prep (manual)
+On the docker host, as the `draba-test` user (created in the SSH setup steps below):
+
+1. Copy `scripts/reset-test-env.sh` to `~/scripts/reset-test-env.sh` and `chmod +x` it.
+2. Create `~/.draba-test.env` (chmod 600) with:
+   ```
+   DRABA_TEST_INVITE_TOKEN=<pick a long random string>
+   DRABA_TEST_ADMIN_EMAIL=test-admin@local
+   DRABA_TEST_INVITE_EMAIL=invitee@local
+   DRABA_DB_DIR=/portainer/Files/AppData/Config/draba/data
+   DRABA_CONTAINER=draba
+   ```
+   `DRABA_TEST_INVITE_EMAIL` is the email the api-smoke subagent registers as — it must match the email the invite was seeded for. Default `invitee@local` is fine.
+   The script auto-sources this file at startup. No sudo, no `/etc/`, no compose dir — the script uses `docker stop/start` directly and runs file ops inside throwaway containers, so the host user only needs `docker` group membership.
+
+### Step 2 — Per-run reset (manual or SSH-driven)
+Before each `/test-phase` run that needs a clean DB, run on the docker host:
+```bash
+./scripts/reset-test-env.sh
+```
+This stops the container, wipes the SQLite file, restarts, waits for migrations, and seeds a bootstrap team + a known invite token. After it completes, the container is in a known state with `DRABA_TEST_INVITE_TOKEN` valid for `POST /auth/register`.
+
+### Step 3 — Tell Claude how to reach it (one-time, on the dev box)
+On the machine where you run Claude (this Windows box):
+- The test URL should be stored in the `reference_test_docker.md` memory entry (not committed to the repo).
+- Set `DRABA_TEST_INVITE_TOKEN` in your shell or in a memory entry so subagents can pass it through. **Do not commit it.**
+- Configure key-based SSH from this box to the docker host so `/test-phase` can run the reset itself. Recommended setup: a dedicated `draba-test` user on the docker host, an ed25519 keypair with a passphrase loaded in `ssh-agent`, and the public key pinned in `authorized_keys` with `command="/usr/local/bin/draba-reset"` plus `no-pty,no-port-forwarding,no-X11-forwarding,no-agent-forwarding` so the key can only run the reset script. Add an SSH config alias `Host draba-test` so the call is just `ssh draba-test`.
+
+### What's manual vs automated, at a glance
+
+| Step | Where it runs | Who does it |
+|---|---|---|
+| Host prep (Step 1) | Docker host | **You, once** |
+| Reset before a test run (Step 2) | Docker host | **You manually** *(or SSH-driven if configured — Claude can trigger)* |
+| Static checks, unit tests, schema check, security review | Dev box (this machine) | Claude |
+| API smoke against live container | Dev box → live container | Claude |
+| Logging the run to `docs/log.md` | Dev box | Claude |
+
+---
+
+## Global procedures
+
+These run regardless of phase.
+
+### Static checks
+- `cd packages/api && golangci-lint run`
+- `cd packages/api && go vet ./...`
+- `pnpm --filter web lint`
+- `pnpm --filter web build`
+
+### Unit & integration
+- `cd packages/api && go test -count=1 ./...`
+- Race detector (`-race`) requires CGO/GCC — not available on the Windows dev box. It runs in CI (GitHub Actions, Linux runner) on every push. Do not mark a local run as failed for omitting `-race`.
+
+### Live smoke target
+Live-smoke subagents (`api-smoke`, future `ws-smoke`) hit a running container. The URL is **not** stored in the repo — it's resolved at runtime in this priority order:
+1. `DRABA_TEST_URL` environment variable, if set.
+2. The `reference_test_docker.md` memory entry (Brian's local LAN host).
+3. If neither is available, the subagent reports **skipped**, not failed.
+
+### Review checklist (always)
+- CONVENTIONS.md compliance
+- No scope creep beyond the phase's ROADMAP entry
+- Errors handled at boundaries (HTTP, DB, external APIs); internal calls trust contracts
+- No secrets, no `.env` files, no host-specific values committed
+- Migrations idempotent (re-run produces no diff)
+- `docs/log.md` updated with a dated entry
+
+---
+
+## Subagent map
+
+| Subagent | Scope | Active from |
+|---|---|---|
+| `static-check` | lint + vet + web typecheck/build | Phase 1 |
+| `unit-test` | `go test -race -count=1 ./...` | Phase 2 |
+| `schema-check` | run migrations on fresh SQLite, re-run, assert no diff | Phase 2 |
+| `api-smoke` | hit live container, run phase exit-criteria flows via curl | Phase 2 |
+| `security-review` | scan diff for secrets, missing auth, SQL concat, JWT misuse | Phase 2 |
+| `type-sync` | regen OpenAPI types, assert no diff | Phase 4 |
+| `ws-smoke` | WebSocket: team-scoped broadcast within 500ms, heartbeat | Phase 5 |
+| `web-e2e` | Chrome MCP — login, render timeline, drag-create | Phase 7 |
+
+---
+
+## Per-phase procedures
+
+### Phase 1 — Project Infrastructure
+
+**static-check**
+- `go build ./...` from `packages/api/` succeeds with no errors
+- `pnpm build` from `packages/web/` succeeds
+- `golangci-lint run` is clean
+- `docker compose config` parses without error — skip if Docker is not installed on the dev box (verified by CI)
+
+### Phase 2 — API Foundation (DB & Auth)
+
+**unit-test**
+- All `*_test.go` under `packages/api/internal/` pass with `-race -count=1`
+- `internal/auth` package — unit tests needed (currently no test file; tracked gap):
+  - `IssueAccessToken` / `IssueRefreshToken` / `Validate` roundtrip returns correct claims
+  - `Validate` rejects a token signed with a different secret (tampered signature)
+  - `Validate` rejects an expired token
+  - `Validate` returns error when token type mismatches (`"refresh"` presented as `"access"` and vice versa)
+  - `Validate` rejects `alg=none` / non-HMAC algorithm (algorithm-confusion guard)
+  - `HashPassword` / `CheckPassword` roundtrip succeeds; wrong password returns error
+- `internal/db` — `invite_repo` unit tests needed (currently no test file; tracked gap):
+  - `GetValid` returns `sql.ErrNoRows` for an expired invite
+  - `GetValid` returns `sql.ErrNoRows` after `MarkAccepted` (single-use enforcement)
+
+**schema-check**
+- Start container against a fresh `data.db`; confirm these tables exist: `users`, `teams`, `team_members`, `invites`, `api_tokens`, `activities`, `activity_tags`, `activity_assignments`, `timelines`, `timeline_access`, `calendar_connections`, `statuses`
+  - Note: `status_templates`, `status_template_items`, `instance_settings`, and `password_reset_tokens` are managed via app logic, not standalone migration tables.
+- Restart the container; assert migration runner produces no schema changes (idempotency)
+
+**api-smoke** (against `$DRABA_TEST_URL`)
+- `POST /auth/register` with a valid invite token → 200/201, returns user + JWT
+- `POST /auth/register` with an invalid/missing invite token → 4xx
+- `POST /auth/register` with the **same** invite token a second time → 4xx (single-use)
+- `POST /auth/login` with the registered credentials → 200, returns JWT
+- `POST /auth/login` with a non-existent email → 401
+- `POST /auth/login` with bad credentials → 401
+- `POST /auth/refresh` with a valid refresh token → 200, returns new JWT
+- `POST /auth/refresh` with an access token (wrong type) → 401
+- `POST /auth/refresh` with a token signed by a different secret → 401
+- A subsequent authenticated request with the issued JWT → 200 (validates signing)
+
+**security-review**
+- No password fields stored in plaintext (grep migrations + handlers)
+- JWT secret loaded from env/config, not hardcoded
+- Invite tokens single-use (consumed on register) — also asserted behaviorally in api-smoke above
+- No SQL string concatenation in queries
+
+### Phase 3 — Core API (Events & Teams)
+
+**api-smoke**
+- `POST /teams` → returns team (201 Created)
+- `GET /teams/:id` with member token → 200 OK, returns team
+- `GET /teams/:id` with non-member token → 403 Forbidden
+- `POST /teams/:id/invites` → returns invite token (201 Created)
+- Register via that token → user appears in `GET /teams/:id/members` (200 OK)
+- `POST /teams/:id/timelines/:timelineId/activities` (body: `title`, `startAt`, `endAt` as RFC3339) → 201 Created, then `GET /teams/:id/timelines/:timelineId/activities?from=<RFC3339>&to=<RFC3339>` returns it (200 OK) — params must be full RFC3339 (e.g. `2026-01-01T00:00:00Z`), bare dates return 400
+- `PATCH /activities/:id` updates fields (200 OK); `DELETE /activities/:id` removes it (204 No Content / 200 OK), subsequent GET excludes it
+- Auth: every endpoint rejects requests without a valid JWT (401 Unauthorized)
+- Authz: a user not on the team cannot read or mutate that team's activities (403 Forbidden)
+  - **Setup note:** the "non-member" user must be genuinely absent from the team under test. In the seeded environment every user registered via the bootstrap invite automatically joins `bootstrap-team`, so using that user against `bootstrap-team` produces `200 []` (correct member behaviour, not a 403). Correct approach: create a second team (`POST /teams`), issue an invite for that team, register a fresh user — that user is on team B only. Then use their JWT to hit team A's activity endpoint and expect `403`.
+- Tier Limits: exceeding the plan limits for a team returns appropriate HTTP errors (e.g., 402 Payment Required or 403 Forbidden)
+
+**security-review**
+- Every new route requires auth middleware
+- Team membership enforced on every team-scoped endpoint
+
+### Phase 4 — OpenAPI Spec & Type Generation
+
+**type-sync**
+- `pnpm generate` succeeds with no errors
+- `git diff` after generate is empty (committed types match spec)
+- All Phase 2–3 endpoints present in `packages/shared/openapi.yaml`
+
+### Phase 5 — Real-Time (WebSocket)
+
+**unit-test**
+- `TestHub_Heartbeat_PingReceived` — server sends a `{"type":"ping"}` JSON message within one heartbeat interval
+- `TestHub_Heartbeat_MissedPingDisconnects` — server closes the connection after `readTimeout` elapses with no pong
+- Both tests use `testSetupFast` (50ms heartbeat / 200ms readTimeout) so they run in milliseconds
+
+**ws-smoke**
+- Two clients on team A both receive a delta within 500ms of an event mutation
+- A client on team B does not receive team A's events
+- Heartbeat: connect, subscribe, respond to every `{"type":"ping"}` with `{"type":"pong"}`, assert connection stays open for at least 3 ping cycles (use a 30s real-interval container; verify no disconnect over ~100s)
+  - Note: this is a slow manual check; unit tests (`TestHub_Heartbeat_*`) cover the behavior at speed
+
+### Phase 6 — Timelines
+
+**unit-test**
+- `timeline_repo.RevokeAccess` — unit tests needed (currently no coverage; tracked gap):
+  - Grant access then revoke; `HasAccess` returns false after revoke
+  - Revoking access that was never granted is a no-op (no error)
+- `timeline_repo.ListByTeam` — unit test needed:
+  - Returns all non-archived timelines for a team in descending creation order
+  - Returns empty slice (not error) when team has no timelines
+
+**api-smoke**
+- `POST /teams/:id/timelines` with JWT → 201 Created
+- `GET /timelines/:id` with JWT (user on access list) → 200 OK
+- `GET /timelines/:id` with JWT (user not on access list) → 403 Forbidden
+- `GET /timelines/share/:token` → 200 OK without requiring auth
+
+### Phase 7 — Web — Scaffold
+
+**web-e2e**
+- Navigating to protected routes unauthenticated redirects to `/login`
+- Successful login redirects to the main app view and stores the token
+- TanStack Query successfully fetches team/event data from the API
+- WebSocket client successfully connects and maintains a heartbeat
+
+**Known gap — frontend component unit tests**
+No Vitest / Testing Library setup exists yet. Components (`TimelineGrid`, `EventPanel`, `Sidebar`, `MemberAvatar`) have zero unit-level coverage. This is intentional for early phases — the Chrome MCP e2e tests cover the golden path. When the web layer stabilises, add a `web-unit` subagent that runs `pnpm --filter web test` and assert render output for key components. Track as a Phase 8+ task.
+
+### Phase 8+ — Web
+
+*Stubs.* Detailed assertions added when each phase begins.
+
+---
+
+## Adding tests for a new phase
+
+1. Find the phase's section in this file (or add one if missing).
+2. Under the relevant subagent heading, list concrete, runnable assertions tied to the ROADMAP exit criteria.
+3. If a new subagent is needed, add it to the subagent map with an "active from" phase.
+4. That's it — `/test-phase` will pick it up on the next run.
 ````
 
 ## File: packages/api/internal/db/activity_repo.go
@@ -33676,6 +33963,328 @@ func (r *ActivityRepo) ListByTimeline(timelineID string, from, to *time.Time, in
 	}
 
 	return acts, nil
+}
+````
+
+## File: packages/api/internal/models/models.go
+````go
+// Package models holds the domain types shared across the API, db,
+// and event-bus packages. These types are persisted directly via sqlx
+// (db tags) and serialised on the wire (json tags); changing tags is a
+// schema change.
+package models
+
+import "time"
+
+// Activity is a scheduled item of work belonging to a Timeline. ArchivedAt is
+// non-nil when the activity is soft-deleted; list endpoints exclude archived
+// activities by default.
+//
+// AssignedMemberIDs is not stored on the activities table; it is populated by
+// the repository from activity_assignments after every list query.
+//
+// GoogleEventID and CaldavUID are preserved as-is — they identify the
+// corresponding records in external calendar systems (VEVENT identifiers).
+type Activity struct {
+	ID                string     `db:"id"                  json:"id"`
+	TimelineID        string     `db:"timeline_id"         json:"timelineId"`
+	Title             string     `db:"title"               json:"title"`
+	Description       *string    `db:"description"         json:"description,omitempty"`
+	Notes             *string    `db:"notes"               json:"notes,omitempty"`
+	Icon              *string    `db:"icon"                json:"icon,omitempty"`
+	Color             *string    `db:"color"               json:"color,omitempty"`
+	StartAt           time.Time  `db:"start_at"            json:"startAt"`
+	EndAt             time.Time  `db:"end_at"              json:"endAt"`
+	AllDay            bool       `db:"all_day"             json:"allDay"`
+	StatusID          *string    `db:"status_id"           json:"statusId,omitempty"`
+	ParentActivityID  *string    `db:"parent_activity_id"  json:"parentActivityId,omitempty"`
+	PercentComplete   *int       `db:"percent_complete"    json:"percentComplete,omitempty"`
+	Location          *string    `db:"location"            json:"location,omitempty"`
+	URL               *string    `db:"url"                 json:"url,omitempty"`
+	Rrule             *string    `db:"rrule"               json:"rrule,omitempty"`
+	CaldavUID         *string    `db:"caldav_uid"          json:"caldavUid,omitempty"`
+	GoogleEventID     *string    `db:"google_event_id"     json:"googleEventId,omitempty"`
+	CreatedBy         string     `db:"created_by"          json:"createdBy"`
+	CreatedAt         time.Time  `db:"created_at"          json:"createdAt"`
+	UpdatedAt         time.Time  `db:"updated_at"          json:"updatedAt"`
+	ArchivedAt        *time.Time `db:"archived_at"         json:"archivedAt,omitempty"`
+	AssignedMemberIDs []string   `db:"-"                   json:"assignedMemberIds"`
+	TagIDs            []string   `db:"-"                   json:"tagIds"`
+}
+
+// TeamMemberWithUser joins a TeamMember row with its associated User so
+// callers receive display names and emails in a single query. Participants
+// (no user account) have empty email and avatar; their display_name comes
+// from team_members.display_name via COALESCE in the query.
+type TeamMemberWithUser struct {
+	TeamMember
+	Email       string  `db:"email"        json:"email"`
+	DisplayName string  `db:"display_name" json:"displayName"`
+	AvatarURL   *string `db:"avatar_url"   json:"avatarUrl,omitempty"`
+}
+
+// User is an authenticated account. PasswordHash is omitted from JSON
+// to avoid leaking it through any handler that returns a User.
+// ArchivedAt is non-nil when the account is inactivated; login is rejected
+// for archived users. Color and Icon are user-level identity fields (migration
+// 010); they propagate to team_members rows for the user when changed.
+type User struct {
+	ID           string     `db:"id"             json:"id"`
+	Email        string     `db:"email"          json:"email"`
+	PasswordHash string     `db:"password_hash"  json:"-"`
+	DisplayName  string     `db:"display_name"   json:"displayName"`
+	AvatarURL    *string    `db:"avatar_url"     json:"avatarUrl,omitempty"`
+	Color        *string    `db:"color"          json:"color,omitempty"`
+	Icon         *string    `db:"icon"           json:"icon,omitempty"`
+	IsSuperadmin bool       `db:"is_superadmin"  json:"isSuperadmin"`
+	CreatedAt    time.Time  `db:"created_at"     json:"createdAt"`
+	UpdatedAt    time.Time  `db:"updated_at"     json:"updatedAt"`
+	ArchivedAt   *time.Time `db:"archived_at"    json:"archivedAt,omitempty"`
+}
+
+// Team is a workspace that groups users and their scheduled work. Color and
+// Icon are identity fields added in migration 006; both are nullable until
+// explicitly set by an admin. Description, Notes, and ArchivedAt are added in
+// migration 008; ArchivedAt is non-nil when the team is soft-deleted.
+// InviteLinkToken is a stable, reusable token added in migration 009; when
+// non-nil it can be used by anyone to join the team during registration.
+type Team struct {
+	ID              string     `db:"id"                  json:"id"`
+	Name            string     `db:"name"                json:"name"`
+	Slug            string     `db:"slug"                json:"slug"`
+	Description     *string    `db:"description"         json:"description,omitempty"`
+	Notes           *string    `db:"notes"               json:"notes,omitempty"`
+	Color           *string    `db:"color"               json:"color,omitempty"`
+	Icon            *string    `db:"icon"                json:"icon,omitempty"`
+	InviteLinkToken *string    `db:"invite_link_token"   json:"inviteLinkToken,omitempty"`
+	CreatedAt       time.Time  `db:"created_at"          json:"createdAt"`
+	UpdatedAt       time.Time  `db:"updated_at"          json:"updatedAt"`
+	ArchivedAt      *time.Time `db:"archived_at"         json:"archivedAt,omitempty"`
+}
+
+// TeamMember is the join row that puts a person in a Team. UserID is nil
+// for login-less Participants; DisplayName is populated for them instead.
+// Role is the team-level role: "admin" or "member". Color and Icon are
+// identity fields (migration 006); Color stores a color ID (e.g. "teal").
+// ArchivedAt is non-nil when the member is inactivated (migration 009);
+// inactivated members lose access but their data and assignments are preserved.
+type TeamMember struct {
+	ID          string     `db:"id"           json:"id"`
+	TeamID      string     `db:"team_id"      json:"teamId"`
+	UserID      *string    `db:"user_id"      json:"userId,omitempty"`
+	DisplayName *string    `db:"display_name" json:"displayName,omitempty"`
+	Role        string     `db:"role"         json:"role"`
+	Color       *string    `db:"color"        json:"color,omitempty"`
+	Icon        *string    `db:"icon"         json:"icon,omitempty"`
+	JoinedAt    time.Time  `db:"joined_at"    json:"joinedAt"`
+	ArchivedAt  *time.Time `db:"archived_at"  json:"archivedAt,omitempty"`
+}
+
+// MemberStats holds computed activity and timeline counts for a member.
+// All counts are date-relative and scoped to activities the member is assigned to.
+type MemberStats struct {
+	ActiveTimelines    int `json:"activeTimelines"`
+	ArchivedTimelines  int `json:"archivedTimelines"`
+	PastDue            int `json:"pastDue"`
+	Running            int `json:"running"`
+	Upcoming           int `json:"upcoming"`
+	Unscheduled        int `json:"unscheduled"`
+	ArchivedActivities int `json:"archivedActivities"`
+}
+
+// MemberDetail combines a TeamMemberWithUser with computed stats and the
+// member's full list of team memberships. Returned by GET /teams/:id/members/:memberId.
+// UserArchivedAt reflects users.archived_at (account-level deactivation), distinct
+// from ArchivedAt which is team_members.archived_at (membership-level inactivation).
+type MemberDetail struct {
+	TeamMemberWithUser
+	Stats          MemberStats          `json:"stats"`
+	Teams          []TeamMemberWithUser `json:"teams"`
+	Deletable      bool                 `json:"deletable"`
+	UserArchivedAt *time.Time           `json:"userArchivedAt,omitempty"`
+}
+
+// Timeline is a named date range over a team's events. It is not a data
+// container — it is a view over a team's events for a given date window.
+// Access is governed by timeline_access + team role; share_token allows
+// unauthenticated read access via a stable public URL. Color and Icon are
+// identity fields (migration 006). Description and Notes are free-text fields
+// added in migration 013.
+type Timeline struct {
+	ID          string     `db:"id"          json:"id"`
+	TeamID      string     `db:"team_id"     json:"teamId"`
+	Name        string     `db:"name"        json:"name"`
+	Description *string    `db:"description" json:"description,omitempty"`
+	Notes       *string    `db:"notes"       json:"notes,omitempty"`
+	StartDate   string     `db:"start_date"  json:"startDate"`
+	EndDate     string     `db:"end_date"    json:"endDate"`
+	Color       *string    `db:"color"       json:"color,omitempty"`
+	Icon        *string    `db:"icon"        json:"icon,omitempty"`
+	ShareToken  string     `db:"share_token" json:"shareToken"`
+	IcalToken   string     `db:"ical_token"  json:"icalToken"`
+	CreatedBy   string     `db:"created_by"  json:"createdBy"`
+	CreatedAt   time.Time  `db:"created_at"  json:"createdAt"`
+	UpdatedAt   time.Time  `db:"updated_at"  json:"updatedAt"`
+	ArchivedAt  *time.Time `db:"archived_at" json:"archivedAt,omitempty"`
+}
+
+// SavedFilter is a user-owned, team-scoped named filter spec. Definition is
+// an opaque JSON string interpreted by the client; the server treats it as
+// arbitrary text and only validates that it parses as JSON.
+type SavedFilter struct {
+	ID           string    `db:"id"             json:"id"`
+	TeamID       string    `db:"team_id"        json:"teamId"`
+	UserID       string    `db:"user_id"        json:"userId"`
+	Name         string    `db:"name"           json:"name"`
+	Definition   string    `db:"definition"     json:"definition"`
+	IsTeamFilter bool      `db:"is_team_filter" json:"isTeamFilter"`
+	CreatedAt    time.Time `db:"created_at"     json:"createdAt"`
+	UpdatedAt    time.Time `db:"updated_at"     json:"updatedAt"`
+}
+
+// UserPreference stores a single key/value setting for a user, optionally
+// scoped to a timeline. TimelineID is “” for global preferences so the
+// UNIQUE(user_id, timeline_id, key) DB constraint works without NULL handling.
+// Serialised JSON omits TimelineID when empty so callers see null for global prefs.
+type UserPreference struct {
+	ID         string    `db:"id"          json:"id"`
+	UserID     string    `db:"user_id"     json:"userId"`
+	TimelineID string    `db:"timeline_id" json:"timelineId,omitempty"`
+	Key        string    `db:"key"         json:"key"`
+	Value      string    `db:"value"       json:"value"`
+	UpdatedAt  time.Time `db:"updated_at"  json:"updatedAt"`
+}
+
+// APIToken is a long-lived Bearer credential a user issues for programmatic
+// access. token_hash stores SHA-256(rawToken); the raw value is shown to the
+// caller only once on creation. RevokedAt is non-nil when the token has been
+// revoked; revoked tokens are not deleted so listing remains stable.
+type APIToken struct {
+	ID         string     `db:"id"           json:"id"`
+	UserID     string     `db:"user_id"      json:"userId"`
+	Name       string     `db:"name"         json:"name"`
+	TokenHash  string     `db:"token_hash"   json:"-"`
+	Scope      string     `db:"scope"        json:"scope"`
+	LastUsedAt *time.Time `db:"last_used_at" json:"lastUsedAt,omitempty"`
+	CreatedAt  time.Time  `db:"created_at"   json:"createdAt"`
+	RevokedAt  *time.Time `db:"revoked_at"   json:"revokedAt,omitempty"`
+}
+
+// InstanceSetting stores a single instance-level configuration value.
+// SMTP config and defaults live here. The value column is plain text;
+// the mailer package handles decryption of the SMTP password field.
+type InstanceSetting struct {
+	Key       string    `db:"key"        json:"key"`
+	Value     string    `db:"value"      json:"value"`
+	UpdatedAt time.Time `db:"updated_at" json:"updatedAt"`
+}
+
+// PasswordResetToken is a single-use token for the forgot-password flow.
+// TokenHash stores SHA-256 of the raw token; the raw value is sent by email
+// and never stored. UsedAt is set when the token is consumed.
+type PasswordResetToken struct {
+	ID        string     `db:"id"         json:"id"`
+	UserID    string     `db:"user_id"    json:"userId"`
+	TokenHash string     `db:"token_hash" json:"-"`
+	ExpiresAt time.Time  `db:"expires_at" json:"expiresAt"`
+	UsedAt    *time.Time `db:"used_at"    json:"usedAt,omitempty"`
+	CreatedAt time.Time  `db:"created_at" json:"createdAt"`
+}
+
+// AdminUserRow is a flat view of a user for the admin users list. It includes
+// the user's fields plus the count of active team memberships.
+type AdminUserRow struct {
+	User
+	TeamCount int `db:"team_count" json:"teamCount"`
+}
+
+// RevokeUserResult summarizes the outcome of POST /users/:id/revoke.
+// The three counters let the caller show a meaningful summary in the UI.
+type RevokeUserResult struct {
+	AccountDeactivated     bool `json:"accountDeactivated"`
+	MembershipsInactivated int  `json:"membershipsInactivated"`
+	MembershipsRemoved     int  `json:"membershipsRemoved"`
+}
+
+// StatusTemplate is a reusable named preset of statuses owned by a team.
+// When a timeline is created the team's chosen template's items are copied
+// into live Status rows for that timeline.
+type StatusTemplate struct {
+	ID          string    `db:"id"          json:"id"`
+	TeamID      string    `db:"team_id"     json:"teamId"`
+	Name        string    `db:"name"        json:"name"`
+	Description *string   `db:"description" json:"description,omitempty"`
+	Position    int       `db:"position"    json:"position"`
+	CreatedBy   string    `db:"created_by"  json:"createdBy"`
+	CreatedAt   time.Time `db:"created_at"  json:"createdAt"`
+	UpdatedAt   time.Time `db:"updated_at"  json:"updatedAt"`
+	// Items is populated by the repository when listing templates.
+	Items []StatusTemplateItem `db:"-" json:"items"`
+}
+
+// StatusTemplateItem is one status value within a StatusTemplate.
+type StatusTemplateItem struct {
+	ID         string  `db:"id"          json:"id"`
+	TemplateID string  `db:"template_id" json:"templateId"`
+	Name       string  `db:"name"        json:"name"`
+	Color      string  `db:"color"       json:"color"`
+	Icon       *string `db:"icon"        json:"icon,omitempty"`
+	IsClosed   bool    `db:"is_closed"   json:"isClosed"`
+	Position   int     `db:"position"    json:"position"`
+}
+
+// Status is a live status value on a specific timeline. Rows are copied from a
+// StatusTemplate's items when the timeline is created and then evolve independently.
+type Status struct {
+	ID         string    `db:"id"          json:"id"`
+	TimelineID string    `db:"timeline_id" json:"timelineId"`
+	Name       string    `db:"name"        json:"name"`
+	Color      string    `db:"color"       json:"color"`
+	Icon       *string   `db:"icon"        json:"icon,omitempty"`
+	IsClosed   bool      `db:"is_closed"   json:"isClosed"`
+	Position   int       `db:"position"    json:"position"`
+	CreatedAt  time.Time `db:"created_at"  json:"createdAt"`
+	UpdatedAt  time.Time `db:"updated_at"  json:"updatedAt"`
+}
+
+// TimelineAccessEntry is a single timeline access grant joined with the team
+// member's display info. Returned by GET /teams/:id/timelines/:timelineId/access.
+type TimelineAccessEntry struct {
+	TimelineID   string  `db:"timeline_id"    json:"timelineId"`
+	TeamMemberID string  `db:"team_member_id" json:"teamMemberId"`
+	Role         string  `db:"role"           json:"role"`
+	DisplayName  string  `db:"display_name"   json:"displayName"`
+	Email        string  `db:"email"          json:"email"`
+	Color        *string `db:"color"          json:"color,omitempty"`
+	Icon         *string `db:"icon"           json:"icon,omitempty"`
+	UserID       *string `db:"user_id"        json:"userId,omitempty"`
+}
+
+// Tag is a team-scoped label that can be applied to activities. Tags are
+// normalized: a team_id+name pair is unique, enabling rename-all and
+// name-based filter matching across timelines.
+type Tag struct {
+	ID        string    `db:"id"         json:"id"`
+	TeamID    string    `db:"team_id"    json:"teamId"`
+	Name      string    `db:"name"       json:"name"`
+	Color     *string   `db:"color"      json:"color,omitempty"`
+	CreatedBy string    `db:"created_by" json:"createdBy"`
+	CreatedAt time.Time `db:"created_at" json:"createdAt"`
+}
+
+// Invite is a single-use token that grants an email address the right to
+// join a Team. AcceptedAt is non-nil once consumed; expired or accepted
+// invites are rejected by the registration handler.
+type Invite struct {
+	ID         string     `db:"id"          json:"id"`
+	TeamID     string     `db:"team_id"     json:"teamId"`
+	Email      string     `db:"email"       json:"email"`
+	Token      string     `db:"token"       json:"token"`
+	Role       string     `db:"role"        json:"role"`
+	InvitedBy  string     `db:"invited_by"  json:"invitedBy"`
+	ExpiresAt  time.Time  `db:"expires_at"  json:"expiresAt"`
+	AcceptedAt *time.Time `db:"accepted_at" json:"acceptedAt,omitempty"`
+	CreatedAt  time.Time  `db:"created_at"  json:"createdAt"`
 }
 ````
 
@@ -34101,328 +34710,6 @@ function ManageFiltersRow({ onClick }: { onClick: () => void }) {
       Manage filters
     </button>
   )
-}
-````
-
-## File: packages/api/internal/models/models.go
-````go
-// Package models holds the domain types shared across the API, db,
-// and event-bus packages. These types are persisted directly via sqlx
-// (db tags) and serialised on the wire (json tags); changing tags is a
-// schema change.
-package models
-
-import "time"
-
-// Activity is a scheduled item of work belonging to a Timeline. ArchivedAt is
-// non-nil when the activity is soft-deleted; list endpoints exclude archived
-// activities by default.
-//
-// AssignedMemberIDs is not stored on the activities table; it is populated by
-// the repository from activity_assignments after every list query.
-//
-// GoogleEventID and CaldavUID are preserved as-is — they identify the
-// corresponding records in external calendar systems (VEVENT identifiers).
-type Activity struct {
-	ID                string     `db:"id"                  json:"id"`
-	TimelineID        string     `db:"timeline_id"         json:"timelineId"`
-	Title             string     `db:"title"               json:"title"`
-	Description       *string    `db:"description"         json:"description,omitempty"`
-	Notes             *string    `db:"notes"               json:"notes,omitempty"`
-	Icon              *string    `db:"icon"                json:"icon,omitempty"`
-	Color             *string    `db:"color"               json:"color,omitempty"`
-	StartAt           time.Time  `db:"start_at"            json:"startAt"`
-	EndAt             time.Time  `db:"end_at"              json:"endAt"`
-	AllDay            bool       `db:"all_day"             json:"allDay"`
-	StatusID          *string    `db:"status_id"           json:"statusId,omitempty"`
-	ParentActivityID  *string    `db:"parent_activity_id"  json:"parentActivityId,omitempty"`
-	PercentComplete   *int       `db:"percent_complete"    json:"percentComplete,omitempty"`
-	Location          *string    `db:"location"            json:"location,omitempty"`
-	URL               *string    `db:"url"                 json:"url,omitempty"`
-	Rrule             *string    `db:"rrule"               json:"rrule,omitempty"`
-	CaldavUID         *string    `db:"caldav_uid"          json:"caldavUid,omitempty"`
-	GoogleEventID     *string    `db:"google_event_id"     json:"googleEventId,omitempty"`
-	CreatedBy         string     `db:"created_by"          json:"createdBy"`
-	CreatedAt         time.Time  `db:"created_at"          json:"createdAt"`
-	UpdatedAt         time.Time  `db:"updated_at"          json:"updatedAt"`
-	ArchivedAt        *time.Time `db:"archived_at"         json:"archivedAt,omitempty"`
-	AssignedMemberIDs []string   `db:"-"                   json:"assignedMemberIds"`
-	TagIDs            []string   `db:"-"                   json:"tagIds"`
-}
-
-// TeamMemberWithUser joins a TeamMember row with its associated User so
-// callers receive display names and emails in a single query. Participants
-// (no user account) have empty email and avatar; their display_name comes
-// from team_members.display_name via COALESCE in the query.
-type TeamMemberWithUser struct {
-	TeamMember
-	Email       string  `db:"email"        json:"email"`
-	DisplayName string  `db:"display_name" json:"displayName"`
-	AvatarURL   *string `db:"avatar_url"   json:"avatarUrl,omitempty"`
-}
-
-// User is an authenticated account. PasswordHash is omitted from JSON
-// to avoid leaking it through any handler that returns a User.
-// ArchivedAt is non-nil when the account is inactivated; login is rejected
-// for archived users. Color and Icon are user-level identity fields (migration
-// 010); they propagate to team_members rows for the user when changed.
-type User struct {
-	ID           string     `db:"id"             json:"id"`
-	Email        string     `db:"email"          json:"email"`
-	PasswordHash string     `db:"password_hash"  json:"-"`
-	DisplayName  string     `db:"display_name"   json:"displayName"`
-	AvatarURL    *string    `db:"avatar_url"     json:"avatarUrl,omitempty"`
-	Color        *string    `db:"color"          json:"color,omitempty"`
-	Icon         *string    `db:"icon"           json:"icon,omitempty"`
-	IsSuperadmin bool       `db:"is_superadmin"  json:"isSuperadmin"`
-	CreatedAt    time.Time  `db:"created_at"     json:"createdAt"`
-	UpdatedAt    time.Time  `db:"updated_at"     json:"updatedAt"`
-	ArchivedAt   *time.Time `db:"archived_at"    json:"archivedAt,omitempty"`
-}
-
-// Team is a workspace that groups users and their scheduled work. Color and
-// Icon are identity fields added in migration 006; both are nullable until
-// explicitly set by an admin. Description, Notes, and ArchivedAt are added in
-// migration 008; ArchivedAt is non-nil when the team is soft-deleted.
-// InviteLinkToken is a stable, reusable token added in migration 009; when
-// non-nil it can be used by anyone to join the team during registration.
-type Team struct {
-	ID              string     `db:"id"                  json:"id"`
-	Name            string     `db:"name"                json:"name"`
-	Slug            string     `db:"slug"                json:"slug"`
-	Description     *string    `db:"description"         json:"description,omitempty"`
-	Notes           *string    `db:"notes"               json:"notes,omitempty"`
-	Color           *string    `db:"color"               json:"color,omitempty"`
-	Icon            *string    `db:"icon"                json:"icon,omitempty"`
-	InviteLinkToken *string    `db:"invite_link_token"   json:"inviteLinkToken,omitempty"`
-	CreatedAt       time.Time  `db:"created_at"          json:"createdAt"`
-	UpdatedAt       time.Time  `db:"updated_at"          json:"updatedAt"`
-	ArchivedAt      *time.Time `db:"archived_at"         json:"archivedAt,omitempty"`
-}
-
-// TeamMember is the join row that puts a person in a Team. UserID is nil
-// for login-less Participants; DisplayName is populated for them instead.
-// Role is the team-level role: "admin" or "member". Color and Icon are
-// identity fields (migration 006); Color stores a color ID (e.g. "teal").
-// ArchivedAt is non-nil when the member is inactivated (migration 009);
-// inactivated members lose access but their data and assignments are preserved.
-type TeamMember struct {
-	ID          string     `db:"id"           json:"id"`
-	TeamID      string     `db:"team_id"      json:"teamId"`
-	UserID      *string    `db:"user_id"      json:"userId,omitempty"`
-	DisplayName *string    `db:"display_name" json:"displayName,omitempty"`
-	Role        string     `db:"role"         json:"role"`
-	Color       *string    `db:"color"        json:"color,omitempty"`
-	Icon        *string    `db:"icon"         json:"icon,omitempty"`
-	JoinedAt    time.Time  `db:"joined_at"    json:"joinedAt"`
-	ArchivedAt  *time.Time `db:"archived_at"  json:"archivedAt,omitempty"`
-}
-
-// MemberStats holds computed activity and timeline counts for a member.
-// All counts are date-relative and scoped to activities the member is assigned to.
-type MemberStats struct {
-	ActiveTimelines    int `json:"activeTimelines"`
-	ArchivedTimelines  int `json:"archivedTimelines"`
-	PastDue            int `json:"pastDue"`
-	Running            int `json:"running"`
-	Upcoming           int `json:"upcoming"`
-	Unscheduled        int `json:"unscheduled"`
-	ArchivedActivities int `json:"archivedActivities"`
-}
-
-// MemberDetail combines a TeamMemberWithUser with computed stats and the
-// member's full list of team memberships. Returned by GET /teams/:id/members/:memberId.
-// UserArchivedAt reflects users.archived_at (account-level deactivation), distinct
-// from ArchivedAt which is team_members.archived_at (membership-level inactivation).
-type MemberDetail struct {
-	TeamMemberWithUser
-	Stats          MemberStats          `json:"stats"`
-	Teams          []TeamMemberWithUser `json:"teams"`
-	Deletable      bool                 `json:"deletable"`
-	UserArchivedAt *time.Time           `json:"userArchivedAt,omitempty"`
-}
-
-// Timeline is a named date range over a team's events. It is not a data
-// container — it is a view over a team's events for a given date window.
-// Access is governed by timeline_access + team role; share_token allows
-// unauthenticated read access via a stable public URL. Color and Icon are
-// identity fields (migration 006). Description and Notes are free-text fields
-// added in migration 013.
-type Timeline struct {
-	ID          string     `db:"id"          json:"id"`
-	TeamID      string     `db:"team_id"     json:"teamId"`
-	Name        string     `db:"name"        json:"name"`
-	Description *string    `db:"description" json:"description,omitempty"`
-	Notes       *string    `db:"notes"       json:"notes,omitempty"`
-	StartDate   string     `db:"start_date"  json:"startDate"`
-	EndDate     string     `db:"end_date"    json:"endDate"`
-	Color       *string    `db:"color"       json:"color,omitempty"`
-	Icon        *string    `db:"icon"        json:"icon,omitempty"`
-	ShareToken  string     `db:"share_token" json:"shareToken"`
-	IcalToken   string     `db:"ical_token"  json:"icalToken"`
-	CreatedBy   string     `db:"created_by"  json:"createdBy"`
-	CreatedAt   time.Time  `db:"created_at"  json:"createdAt"`
-	UpdatedAt   time.Time  `db:"updated_at"  json:"updatedAt"`
-	ArchivedAt  *time.Time `db:"archived_at" json:"archivedAt,omitempty"`
-}
-
-// SavedFilter is a user-owned, team-scoped named filter spec. Definition is
-// an opaque JSON string interpreted by the client; the server treats it as
-// arbitrary text and only validates that it parses as JSON.
-type SavedFilter struct {
-	ID           string    `db:"id"             json:"id"`
-	TeamID       string    `db:"team_id"        json:"teamId"`
-	UserID       string    `db:"user_id"        json:"userId"`
-	Name         string    `db:"name"           json:"name"`
-	Definition   string    `db:"definition"     json:"definition"`
-	IsTeamFilter bool      `db:"is_team_filter" json:"isTeamFilter"`
-	CreatedAt    time.Time `db:"created_at"     json:"createdAt"`
-	UpdatedAt    time.Time `db:"updated_at"     json:"updatedAt"`
-}
-
-// UserPreference stores a single key/value setting for a user, optionally
-// scoped to a timeline. TimelineID is “” for global preferences so the
-// UNIQUE(user_id, timeline_id, key) DB constraint works without NULL handling.
-// Serialised JSON omits TimelineID when empty so callers see null for global prefs.
-type UserPreference struct {
-	ID         string    `db:"id"          json:"id"`
-	UserID     string    `db:"user_id"     json:"userId"`
-	TimelineID string    `db:"timeline_id" json:"timelineId,omitempty"`
-	Key        string    `db:"key"         json:"key"`
-	Value      string    `db:"value"       json:"value"`
-	UpdatedAt  time.Time `db:"updated_at"  json:"updatedAt"`
-}
-
-// APIToken is a long-lived Bearer credential a user issues for programmatic
-// access. token_hash stores SHA-256(rawToken); the raw value is shown to the
-// caller only once on creation. RevokedAt is non-nil when the token has been
-// revoked; revoked tokens are not deleted so listing remains stable.
-type APIToken struct {
-	ID         string     `db:"id"           json:"id"`
-	UserID     string     `db:"user_id"      json:"userId"`
-	Name       string     `db:"name"         json:"name"`
-	TokenHash  string     `db:"token_hash"   json:"-"`
-	Scope      string     `db:"scope"        json:"scope"`
-	LastUsedAt *time.Time `db:"last_used_at" json:"lastUsedAt,omitempty"`
-	CreatedAt  time.Time  `db:"created_at"   json:"createdAt"`
-	RevokedAt  *time.Time `db:"revoked_at"   json:"revokedAt,omitempty"`
-}
-
-// InstanceSetting stores a single instance-level configuration value.
-// SMTP config and defaults live here. The value column is plain text;
-// the mailer package handles decryption of the SMTP password field.
-type InstanceSetting struct {
-	Key       string    `db:"key"        json:"key"`
-	Value     string    `db:"value"      json:"value"`
-	UpdatedAt time.Time `db:"updated_at" json:"updatedAt"`
-}
-
-// PasswordResetToken is a single-use token for the forgot-password flow.
-// TokenHash stores SHA-256 of the raw token; the raw value is sent by email
-// and never stored. UsedAt is set when the token is consumed.
-type PasswordResetToken struct {
-	ID        string     `db:"id"         json:"id"`
-	UserID    string     `db:"user_id"    json:"userId"`
-	TokenHash string     `db:"token_hash" json:"-"`
-	ExpiresAt time.Time  `db:"expires_at" json:"expiresAt"`
-	UsedAt    *time.Time `db:"used_at"    json:"usedAt,omitempty"`
-	CreatedAt time.Time  `db:"created_at" json:"createdAt"`
-}
-
-// AdminUserRow is a flat view of a user for the admin users list. It includes
-// the user's fields plus the count of active team memberships.
-type AdminUserRow struct {
-	User
-	TeamCount int `db:"team_count" json:"teamCount"`
-}
-
-// RevokeUserResult summarizes the outcome of POST /users/:id/revoke.
-// The three counters let the caller show a meaningful summary in the UI.
-type RevokeUserResult struct {
-	AccountDeactivated     bool `json:"accountDeactivated"`
-	MembershipsInactivated int  `json:"membershipsInactivated"`
-	MembershipsRemoved     int  `json:"membershipsRemoved"`
-}
-
-// StatusTemplate is a reusable named preset of statuses owned by a team.
-// When a timeline is created the team's chosen template's items are copied
-// into live Status rows for that timeline.
-type StatusTemplate struct {
-	ID          string    `db:"id"          json:"id"`
-	TeamID      string    `db:"team_id"     json:"teamId"`
-	Name        string    `db:"name"        json:"name"`
-	Description *string   `db:"description" json:"description,omitempty"`
-	Position    int       `db:"position"    json:"position"`
-	CreatedBy   string    `db:"created_by"  json:"createdBy"`
-	CreatedAt   time.Time `db:"created_at"  json:"createdAt"`
-	UpdatedAt   time.Time `db:"updated_at"  json:"updatedAt"`
-	// Items is populated by the repository when listing templates.
-	Items []StatusTemplateItem `db:"-" json:"items"`
-}
-
-// StatusTemplateItem is one status value within a StatusTemplate.
-type StatusTemplateItem struct {
-	ID         string  `db:"id"          json:"id"`
-	TemplateID string  `db:"template_id" json:"templateId"`
-	Name       string  `db:"name"        json:"name"`
-	Color      string  `db:"color"       json:"color"`
-	Icon       *string `db:"icon"        json:"icon,omitempty"`
-	IsClosed   bool    `db:"is_closed"   json:"isClosed"`
-	Position   int     `db:"position"    json:"position"`
-}
-
-// Status is a live status value on a specific timeline. Rows are copied from a
-// StatusTemplate's items when the timeline is created and then evolve independently.
-type Status struct {
-	ID         string    `db:"id"          json:"id"`
-	TimelineID string    `db:"timeline_id" json:"timelineId"`
-	Name       string    `db:"name"        json:"name"`
-	Color      string    `db:"color"       json:"color"`
-	Icon       *string   `db:"icon"        json:"icon,omitempty"`
-	IsClosed   bool      `db:"is_closed"   json:"isClosed"`
-	Position   int       `db:"position"    json:"position"`
-	CreatedAt  time.Time `db:"created_at"  json:"createdAt"`
-	UpdatedAt  time.Time `db:"updated_at"  json:"updatedAt"`
-}
-
-// TimelineAccessEntry is a single timeline access grant joined with the team
-// member's display info. Returned by GET /teams/:id/timelines/:timelineId/access.
-type TimelineAccessEntry struct {
-	TimelineID   string  `db:"timeline_id"    json:"timelineId"`
-	TeamMemberID string  `db:"team_member_id" json:"teamMemberId"`
-	Role         string  `db:"role"           json:"role"`
-	DisplayName  string  `db:"display_name"   json:"displayName"`
-	Email        string  `db:"email"          json:"email"`
-	Color        *string `db:"color"          json:"color,omitempty"`
-	Icon         *string `db:"icon"           json:"icon,omitempty"`
-	UserID       *string `db:"user_id"        json:"userId,omitempty"`
-}
-
-// Tag is a team-scoped label that can be applied to activities. Tags are
-// normalized: a team_id+name pair is unique, enabling rename-all and
-// name-based filter matching across timelines.
-type Tag struct {
-	ID        string    `db:"id"         json:"id"`
-	TeamID    string    `db:"team_id"    json:"teamId"`
-	Name      string    `db:"name"       json:"name"`
-	Color     *string   `db:"color"      json:"color,omitempty"`
-	CreatedBy string    `db:"created_by" json:"createdBy"`
-	CreatedAt time.Time `db:"created_at" json:"createdAt"`
-}
-
-// Invite is a single-use token that grants an email address the right to
-// join a Team. AcceptedAt is non-nil once consumed; expired or accepted
-// invites are rejected by the registration handler.
-type Invite struct {
-	ID         string     `db:"id"          json:"id"`
-	TeamID     string     `db:"team_id"     json:"teamId"`
-	Email      string     `db:"email"       json:"email"`
-	Token      string     `db:"token"       json:"token"`
-	Role       string     `db:"role"        json:"role"`
-	InvitedBy  string     `db:"invited_by"  json:"invitedBy"`
-	ExpiresAt  time.Time  `db:"expires_at"  json:"expiresAt"`
-	AcceptedAt *time.Time `db:"accepted_at" json:"acceptedAt,omitempty"`
-	CreatedAt  time.Time  `db:"created_at"  json:"createdAt"`
 }
 ````
 
@@ -36134,1252 +36421,6 @@ export function useRevokeTimelineAccess(teamId: string, timelineId: string) {
     },
   })
 }
-````
-
-## File: docs/TASKS.md
-````markdown
-# Tasks
-
-## Current Sprint — Foundation
-
-### Repo & Tooling
-- [x] Initialize Go module (`packages/api/`) with basic project structure — 2026-04-29
-- [x] Initialize React + TypeScript + Vite project (`packages/web/`) — 2026-04-29
-- [x] Set up pnpm workspace (`pnpm-workspace.yaml`) — 2026-04-29
-- [x] Add `golangci-lint` config (`.golangci.yml`) — 2026-04-29
-- [x] Set up GitHub Actions CI: lint + test on PR — 2026-04-29
-- [x] Write `docker-compose.yml` for local development — 2026-04-29
-
-### API — Core
-- [x] DB abstraction layer with SQLite adapter (sqlx + modernc.org/sqlite) — 2026-04-30
-- [x] Migration runner (auto-runs on startup) — 2026-04-30
-- [x] Initial schema migrations: users, teams, team_members, invites, events, event_tags, event_assignments, timelines, timeline_access, calendar_connections, api_tokens — 2026-04-30
-- [x] Auth: JWT issue/validate, password hash/verify, invite token generate/validate — 2026-04-30
-- [x] `POST /auth/register` (invite token required) — 2026-04-30
-- [x] `POST /auth/login` — 2026-04-30
-- [x] `POST /auth/refresh` — 2026-04-30
-- [x] `POST /teams` — create team — 2026-05-03
-- [x] `POST /teams/:id/invites` — send invite — 2026-05-03
-- [x] `GET /teams/:id/members` — 2026-05-03
-- [x] `POST /teams/:id/events` — create event — 2026-05-03
-- [x] `GET /teams/:id/events` — list events (date range filter) — 2026-05-03
-- [x] `PATCH /events/:id` — update event — 2026-05-03
-- [x] `DELETE /events/:id` — delete event — 2026-05-03
-
-### API — Real-Time
-- [x] WebSocket hub (`internal/ws/`) — 2026-05-14
-- [x] Team-scoped subscription model — 2026-05-14
-- [x] Broadcast on `events.*` internal bus events — 2026-05-14
-
-### API — Timelines
-- [x] `POST /teams/:id/timelines` — create timeline — 2026-05-15
-- [x] `GET /timelines/:id` — fetch timeline (public or auth-gated) — 2026-05-15
-- [x] `GET /timelines/share/:token` — public share link handler — 2026-05-15
-- [x] Timeline access list enforcement — 2026-05-15
-
-### Web — Scaffold
-- [x] Initialize shadcn/ui: `pnpm dlx shadcn@latest init` — 2026-05-16
-- [x] Set color tokens in `src/index.css` once palette is decided — 2026-05-16
-- [x] Set up dark mode toggle (localStorage + `prefers-color-scheme`) — 2026-05-16
-- [x] Routing setup (React Router) — 2026-05-16
-- [x] Auth flow: login, register (via invite), token storage — 2026-05-16
-- [x] API client (TanStack Query + fetch wrapper using generated types) — 2026-05-16
-- [x] WebSocket client hook (`useWebSocket`) — 2026-05-16
-- [x] Embed React build in Go binary (`//go:embed`); API serves SPA at `GET /` — 2026-05-16
-
-### RBAC Refactor + First-Run Setup (Phase 8.0)
-- [x] Migration 003: `team_members` PK, nullable `user_id`, `display_name` — 2026-05-18
-- [x] Migration 003: `event_assignments` + `timeline_access` swap `user_id` FK for `team_member_id` — 2026-05-18
-- [x] Migration 003: `timeline_access` gains `role (admin|member)`; `visibility` dropped from `timelines` — 2026-05-18
-- [x] `User.IsSuperadmin`: first registered user auto-granted superadmin — 2026-05-18
-- [x] `GET /setup/status` — public endpoint (`{ needsSetup: bool }`) — 2026-05-18
-- [x] Timeline access: team admins bypass check; members require explicit `timeline_access` entry — 2026-05-18
-- [x] `SetupPage`: 3-step first-run wizard (account → team → timeline) — 2026-05-18
-- [x] `ProtectedRoute`: redirect to `/setup` when `needsSetup` is true — 2026-05-18
-- [x] Production Dockerfile: run as non-root `draba` user (uid 1000) — 2026-05-18
-
-### Web — Timeline View (Phase 8.1: Shell & Rendering — Gantt pivot)
-- [x] API: `GET /teams`, `GET /teams/:id/timelines`, `assignedMemberIds[]` on Event — 2026-05-18
-- [x] `TimelineView` + `TimelineGrid` (person-lane prototype, later pivoted) — 2026-05-18
-- [x] Pixel ↔ date math (map date range to X offset/width) — 2026-05-18
-- [x] Wire to `GET /teams/:id/events?start=&end=` and `GET /teams/:id/members` — 2026-05-18
-- [x] `TimelineGrid` rewrite: Gantt layout — one row per event, sticky label col, member avatars — 2026-05-18
-- [x] `TimelineToolbar` component: zoom in/out, group-by, sort-by, export stub — 2026-05-18
-- [x] `TimelineView` update: build `GanttRow[]` with grouping + sorting logic — 2026-05-18
-- [x] Group by Member: section headers per assignee, events under primary assignee — 2026-05-18
-- [x] Group by Parent: root events first, children indented below their parent — 2026-05-18
-- [x] Sort by: start date, end date, title A–Z — 2026-05-18
-- [x] Zoom: variable `colWidth` stepped through [40, 60, 80, 120, 160] px/day — 2026-05-18
-- [x] `DashboardPage`: render `TimelineToolbar`, pass group/sort/zoom state to `TimelineView` — 2026-05-18
-
-### Web — Timeline View (Phase 8.2: Interactions)
-- [x] Click event block → open `EventDetailPanel` (view mode) — 2026-05-19
-- [x] Edit form in panel (title, description, date range, status, assignees); save via `PATCH /events/:id` — 2026-05-19
-- [x] Delete event with confirm dialog; remove from timeline — 2026-05-19
-- [x] Drag on empty lane cell → open `EventCreateForm` pre-filled with date range + lane member — 2026-05-19
-- [x] Submit create form → `POST /teams/:id/events`, insert block into timeline — 2026-05-19
-
-### Web — Gantt Bar Drag (Phase 8.2.1: Resize & Move)
-- [x] Detect mousedown on left/right edge (8px zone) vs. bar body — 2026-05-19
-- [x] Edge drag: update start or end date live as user drags; snap to active granularity column — 2026-05-19
-- [x] Body drag: shift both start and end dates by the same column delta — 2026-05-19
-- [x] Show date tooltip during drag (start date for left edge, end date for right edge, both for body) — 2026-05-19
-- [x] PATCH `/events/:id` with new startAt/endAt on mouseup; optimistic update in cache — 2026-05-19
-- [x] Block drag on `is_external` events (read-only; Phase 14 flag) — 2026-05-19
-
-### Web — Timeline View (Phase 8.3: Real-Time Sync)
-- [x] Connect `useWebSocket` to subscribe to `events.*` for active team — 2026-05-19
-- [x] `events.created` delta: insert block into TanStack Query cache — 2026-05-19
-- [x] `events.updated` delta: update block in cache — 2026-05-19
-- [x] `events.deleted` delta: remove block from cache — 2026-05-19
-- [x] Handle optimistic update conflicts (in-flight local edit vs. arriving WS delta) — 2026-05-19
-
-### OpenAPI
-- [x] Write initial `openapi.yaml` in `packages/shared/` — 2026-05-04
-- [x] Set up TypeScript type generation from spec (openapi-typescript) — 2026-05-04
-- [x] Set up Go type generation from spec (`oapi-codegen`) — 2026-05-16
-- [x] Refactor existing Go handlers to use generated OpenAPI models — 2026-05-16
-
-### Web — Persistent View Settings (Phase 8.4)
-- [x] Migration 004: `user_preferences` table with empty-string sentinel for global scope — 2026-05-20
-- [x] `UserPreference` model (`models.go`) — 2026-05-20
-- [x] `UserPreferenceRepo`: `List` and `Upsert` methods — 2026-05-20
-- [x] `GET /users/me/preferences?timeline_id=` — returns scoped or global prefs — 2026-05-20
-- [x] `PUT /users/me/preferences` — upsert single key/value, validates JSON — 2026-05-20
-- [x] OpenAPI spec: `UserPreference` schema + two endpoints — 2026-05-20
-- [x] TypeScript types regenerated from spec — 2026-05-20
-- [x] `usePreferences` / `useUpsertPreference` / `usePreferenceMap` hooks — 2026-05-20
-- [x] `DashboardPage`: restore toolbar state from per-timeline prefs on timeline switch — 2026-05-20
-- [x] `DashboardPage`: save toolbar state (group_by, sort_by, zoom_granularity, color_by) on change — 2026-05-20
-- [x] `DashboardPage`: persist dark mode preference globally — 2026-05-20
-
-### Web — Find (Phase 8.5)
-In-view "find in page" with highlight + match navigation. Scoped to already-loaded events; respects active filters. Global cross-team search is deferred to Phase 15.
-
-**Find bar:**
-- [x] `FindBar` component in the TopBar (between FilterDropdown and ProfileMenu) — query input, match counter (`N / M`), prev/next chevrons, close (×) — 2026-05-20
-- [x] Open via `Ctrl/Cmd+F` global keybinding and via a search icon in the TopBar; close via `Esc` or × — 2026-05-20
-- [x] Debounced (~150ms) client-side matcher over already-fetched events — 2026-05-20
-
-**Match scope:**
-- [x] Case-insensitive match against: event title, description, assignee display names, parent event title — 2026-05-20
-- [x] Respect active filters — only events already visible in the current view are candidates — 2026-05-20
-
-**Visual treatment:**
-- [x] Matching events: amber outline / glow using existing design tokens — 2026-05-20
-- [x] Non-matching events: dimmed to ~0.3 opacity — 2026-05-20
-- [x] Active match (prev/next cursor position): stronger outline + subtle pulse to distinguish from other matches — 2026-05-20
-- [x] On hover, non-title matches show a "why matched" hint (e.g. `matched assignee Jane`) — 2026-05-20
-
-**Navigation:**
-- [x] `Enter` / `Shift+Enter` and ◀ ▶ chevrons walk forward/backward through matches — 2026-05-20
-- [x] Auto-scroll the Gantt on each step — horizontal pan to event's date range, vertical scroll to its row, centered in viewport — 2026-05-20
-
-**Empty / edge cases:**
-- [x] Zero matches, no filters active → bar shows `No matches` — 2026-05-20
-- [x] Zero matches in view, filters active → soft callout: *"No matches in current view. [Clear filters]"* — 2026-05-20
-- [x] Find query is ephemeral (not persisted across navigation/reload); bar open-state also ephemeral — 2026-05-20
-
-**Testing:**
-- [x] Unit: matcher returns correct hits across all match fields, case-insensitive — 2026-05-20
-- [ ] Integration: Find works at every granularity level and every group-by mode (requires live data — manual)
-- [ ] Keyboard: full prev/next cycle reachable with keyboard only (manual verification with live events)
-
-## Up Next
-
-> **Member management work is split across Phase 10.1.1 (Teams — CRUD) and Phase 10.1.2 (Members — Management & Editing)**. Team entity CRUD (create, edit, archive) is in 10.1.1; member lifecycle (add, edit, roles, invites, stubs, inactivation, admin actions) is in 10.1.2. The previously enumerated sidebar gear-icon + add-member-sheet tasks are absorbed into 10.1.2.
-
-### Web — Filter Scoping (FilterDropdown + API)
-Reorganizes the filter dropdown into four explicit sections. Filters are stored as personal by default; admins can promote any filter to team or timeline scope; members can nominate their filters for admin review.
-
-**Data model:**
-- Single `saved_filters` table: `(id, team_id, timeline_id nullable, created_by, name, definition JSON, scope ENUM(personal|nominated|team|timeline), status ENUM(active|pending_review))`
-- `scope=personal` — visible only to creator; `scope=team` — visible to all team members; `scope=timeline` — visible to all members of that timeline; `scope=nominated` — personal filter flagged by member for admin review (visible to admins)
-
-**API:**
-- [ ] Migration: replace current `saved_filters` shape with the unified schema above
-- [ ] `GET /teams/:id/filters` — returns filters scoped `team` or `timeline` (for the active timeline), plus the calling user's `personal` and `nominated` filters
-- [ ] `POST /teams/:id/filters` — create a new personal filter; `definition` is the filter JSON
-- [ ] `PATCH /filters/:id` — update name or definition (creator or admin)
-- [ ] `PATCH /filters/:id/scope` — promote/demote scope; admin-only for `team`/`timeline`; any member can set `nominated`
-- [ ] `DELETE /filters/:id` — creator or admin
-
-**Web — FilterDropdown layout:**
-- [ ] Reorganize dropdown into four labeled sections, each hidden when empty:
-  1. **Default** — All events / Upcoming / My events (hardcoded presets, always present)
-  2. **Team** — filters with `scope=team` from API
-  3. **Timeline** — filters with `scope=timeline` for the active timeline
-  4. **Mine** — caller's `personal` filters; nominated filters shown with a "Pending" badge
-- [ ] Filter names truncate with ellipsis at a max width; full name in tooltip on hover
-- [ ] "New filter…" opens filter editor (personal scope by default); "Share…" action on existing personal filters lets the member nominate it or (if admin) promote directly to team/timeline
-- [ ] Pass active timeline ID through context so the dropdown can fetch timeline-scoped filters
-- [ ] Admin-visible section at bottom of "Mine": nominated filters awaiting review, with Approve / Reject actions
-
----
-
-> **Connectors sidebar + per-timeline connector model is absorbed into the External Connectors (Inbound Webhooks) task block further down** — that section now carries both the webhook backend and the sidebar UI work.
-
-### API — Token Auth (Phase 9)
-- [x] `POST /tokens` — create API token (returns value once) — 2026-05-20
-- [x] `GET /tokens` — list tokens for current user — 2026-05-20
-- [x] `DELETE /tokens/:id` — revoke token (preserved row, sets revoked_at) — 2026-05-20
-- [x] Middleware: accept Bearer token (JWT or API token) on all authenticated routes — 2026-05-20
-- [x] Enforce token scope on writes (read-only tokens blocked from mutations) — 2026-05-20
-
-### API — Archive (Phase 9)
-- [x] `POST /events/:id/archive` and `POST /events/:id/unarchive` — 2026-05-20
-- [x] `POST /timelines/:id/archive` and `POST /timelines/:id/unarchive` (team-admin only) — 2026-05-20
-- [x] List endpoints exclude archived records by default; `?archived=true` to include — 2026-05-20
-
-### The Great Event → Activity Rename (Phase 9.5)
-Rename the domain entity `Event` → `Activity` everywhere. Runbook: [GreatEventToActivity.md](GreatEventToActivity.md). Roadmap: [Phase 9.5](ROADMAP.md#phase-95--rename-event--activity-the-great-rename).
-
-> **Historical note:** Phase 3 / 8.x / 9 task entries above use "event" because that was the entity's name when those phases shipped. Do not rewrite them. Phase 9.5 is the formal cutover; all later entries use "activity".
-
-**DB:**
-- [x] Write migration `005_rename_events_to_activities.sql` — 2026-05-21 (`ALTER TABLE ... RENAME`)
-- [x] Rename indexes containing `event` in their name — 2026-05-21
-- [x] Update `migrations_test.go` to assert new table + column names — 2026-05-21
-- [ ] Verify against a copy of the prod DB: row counts unchanged, `PRAGMA foreign_key_check` clean
-
-**Go API:**
-- [x] `models.Event` → `models.Activity` — 2026-05-21
-- [x] Rename file `internal/db/event_repo.go` → `activity_repo.go`; `EventRepo` → `ActivityRepo` — 2026-05-21
-- [x] Rename file `internal/api/event_handler.go` → `activity_handler.go`; all `handle*Event*` functions — 2026-05-21
-- [x] `server.go`: routes `/events*` → `/activities*` — 2026-05-21
-- [x] `internal/events/bus.go`: rename constants `EventCreated/Updated/Deleted` — 2026-05-21 → `ActivityCreated/Updated/Deleted` + wire strings (`event.*` → `activity.*`). **Keep** package name and `TimelineCreated/Updated`.
-- [x] Update `bus_test.go`, `hub_test.go` wire-string assertions — 2026-05-21
-- [x] `golangci-lint run` clean, `go test ./...` passes — 2026-05-21
-
-**OpenAPI + generated types:**
-- [x] `packages/shared/openapi.yaml`: schema, paths, operationIds — 2026-05-21, tags, body types. **Keep** `googleEventId` and `caldavUid` fields.
-- [x] Run `pnpm --filter shared generate`; verify `Activity` exports — 2026-05-21, zero `Event` exports
-
-**Web:**
-- [x] `src/types/index.ts`: `DrabaEvent`/`EventStatus`/`EVENT_COLORS` — 2026-05-21 → `DrabaActivity`/`ActivityStatus`/`ACTIVITY_COLORS`
-- [x] Rename `useTeamEvents.ts` → `useTeamActivities.ts`; hooks + query keys — 2026-05-21
-- [x] `useWebSocket.ts`: update message-type switch to `activity.*` — 2026-05-21
-- [x] Rename `EventDetailPanel`, `EventCreatePanel`, `EventPanel` → `Activity*` — 2026-05-21; fix imports
-- [x] UI copy sweep: sidebar label, panel titles, empty state, ARIA, button labels — 2026-05-21
-- [x] `pnpm --filter web lint` clean — 2026-05-21
-
-**Tests + seed:**
-- [x] Rename `event_handler_test.go` → `activity_handler_test.go` — 2026-05-21
-- [x] Rename `scripts/seed-find-test-events.sql` → `seed-find-test-activities.sql` — 2026-05-21; update INSERTs + cleanup
-
-**Docs:**
-- [x] Sweep ROADMAP.md, REQUIREMENTS.md, ARCHITECTURE.md, CONVENTIONS.md, TESTING.md, design/UX_PATTERNS.md — 2026-05-21
-- [x] Hand-review: ROADMAP Phase 3 title — 2026-05-21 → "Core API — Activities & Teams (originally Events; renamed in Phase 9.5)"
-- [x] Do **not** rewrite `docs/log.md` historical entries — 2026-05-21
-- [x] Add Phase 9.5 entry to `docs/log.md` — 2026-05-21
-
-**Verification (smoke against http://epcot.lan:8081):**
-- [ ] Create / edit / archive / unarchive / delete an Activity end-to-end
-- [ ] WebSocket frames arrive as `activity.created` / `.updated` / `.deleted`
-- [ ] Final sweep `rg "\bevent" packages/ docs/` returns only expected hits (bus package, calendar fields, log.md)
-
-### Identity System (Phase 9.6)
-Reusable Identity component system (color + icon) for all entities. Design spec: [IDENTITY_SYSTEM.md](design/IDENTITY_SYSTEM.md). Prototype: `docs/design/assets/identity-widget-prototype.html`.
-
-**Schema (migration 006):**
-- [x] Write migration `006_identity_fields.sql` — 2026-05-24
-- [x] Update `migrations_test.go` to assert new columns exist — 2026-05-24
-
-**Go API:**
-- [x] `models.go`: add `Icon *string` + `Color *string` to `Team`; add `Icon *string` + `Color *string` to `Timeline`; add `Icon *string` to `TeamMember` — 2026-05-24
-- [x] Update `TeamMemberWithUser` to surface the new `Icon` field (via embedding) — 2026-05-24
-- [x] Update OpenAPI spec: add `icon`/`color` to `Team`, `Timeline`, `TeamMember` schemas — 2026-05-24
-- [x] Regenerate TypeScript types (`pnpm --filter shared generate`) — 2026-05-24
-- [x] `golangci-lint run` clean; `go test ./...` passes — 2026-05-24
-
-**Web — component library (`src/components/identity/`):**
-- [x] `identity-constants.ts` — 2026-05-24
-- [x] `Badge.tsx` — 2026-05-24
-- [x] `IdentityTrigger.tsx` — 2026-05-24
-- [x] `IdentityPicker.tsx` — 2026-05-24
-- [x] `IdentityWidget.tsx` — 2026-05-24
-
-**Web — replace existing color/icon UI:**
-- [x] `ActivityDetailPanel`: `<IdentityWidget>` replacing icon stub + 8-color swatch — 2026-05-24
-- [x] `ActivityCreatePanel`: `<IdentityWidget>` replacing color swatch — 2026-05-24
-- [x] Gantt bar label column: `<Badge size={20} shape="square">` — 2026-05-24
-- [x] Sidebar timeline rows: `<Badge size={20} shape="square">` — 2026-05-24
-- [x] Sidebar member rows: `<Badge size={20} shape="circle">` — 2026-05-24
-
-**Web — MemberAvatar migration:**
-- [x] Refactor `MemberAvatar.tsx` to delegate to `<Badge>` — 2026-05-24
-- [ ] Verify all existing MemberAvatar call sites render correctly (manual)
-
-**Web — palette consolidation:**
-- [x] Update `types/index.ts`: re-export `ACTIVITY_COLORS` and `MEMBER_COLORS` from `identity-constants.ts` — 2026-05-24
-- [x] Update `index.css`: `--member-N-*` → 16 `--identity-<name>` custom properties — 2026-05-24
-- [x] Update `DESIGN_SYSTEM.md`: 8-color → 16-color identity palette reference — 2026-05-24
-
-**Testing & verification:**
-- [x] `pnpm --filter web lint` clean — 2026-05-24
-- [x] `golangci-lint run` clean — 2026-05-24
-- [x] `go test ./...` passes — 2026-05-24
-- [ ] Badge renders all four modes (Lucide icon, 1-letter, 2-letter, none) at sizes 20–40px, both shapes (manual)
-- [ ] IdentityWidget popover opens/closes; color, name option, and icon selection fire onChange (manual)
-- [ ] Legacy hex colors in existing activities display correctly via `hexToColorId()` mapping (manual — test on Docker)
-- [ ] Manual: ActivityDetailPanel uses IdentityWidget; changes persist as color IDs (manual — test on Docker)
-- [ ] Manual: sidebar member + timeline rows use Badge (manual)
-
-**Docs:**
-- [x] Add Phase 9.6 entry to `docs/log.md` — 2026-05-24
-
----
-
-### Phase 10 — Entity Management (data-cornerstone CRUD)
-
-Closes CRUD gaps for the three core data entities. Activities (renamed from Events in Phase 9.5) are already CRUD-complete (Phases 3 / 8.2 / 8.2.1 + Phase 9 archive); Teams and Timelines are not, so 10.x focuses on them.
-
-Design references:
-- Team Modal: `docs/design/handoffs/team-modal/` — Settings tab, Members tab, archive flow
-- Member Edit Modal: `docs/design/handoffs/member-modal/` — member profile, stats, admin actions
-
----
-
-### Teams — CRUD & Management (Phase 10.1.1)
-Closes the Teams data entity. Ships the Team Modal with Settings tab functional; Members tab scaffolded as locked/placeholder until 10.1.2.
-
-**Schema (migration 008):**
-- [x] Add `description TEXT` column to `teams` (nullable) — 2026-05-25
-- [x] Add `notes TEXT` column to `teams` (nullable) — 2026-05-25
-- [x] Add `archived_at DATETIME` column to `teams` (nullable) — 2026-05-25
-- [x] Update `migrations_test.go` to assert new columns — 2026-05-25
-
-**API — team-level:**
-- [x] `GET /teams/:id` — full team detail (name, description, notes, icon, color, archived_at) — 2026-05-25
-- [x] `PATCH /teams/:id` — update name, description, notes, icon, color (admin only) — 2026-05-25
-- [x] `POST /teams/:id/archive` and `POST /teams/:id/unarchive` — 2026-05-25
-- [x] Update `POST /teams` to accept `description`, `notes`, `icon`, `color` — 2026-05-25
-- [x] Update `GET /teams` — add `?archived=true` to include archived teams — 2026-05-25
-
-**OpenAPI + types:**
-- [x] Update `Team` schema: add `description`, `notes`, `archivedAt` — 2026-05-25
-- [x] Update `CreateTeamInput` and `PatchTeamInput` request bodies — 2026-05-25
-- [x] Regenerate TypeScript types (`pnpm --filter shared generate`) — 2026-05-25
-
-**Web — Team Modal (`<TeamModal>`):**
-- [x] Modal shell: portal, backdrop, panel (580px, dark theme), header, tab bar, scrollable content, footer — 2026-05-25
-- [x] Header: identity badge (36px square) + label ("NEW TEAM" / "EDIT TEAM") + team name + close button — 2026-05-25
-- [x] Tab bar: Settings (active) + Members (locked/placeholder in this phase) — 2026-05-25
-- [x] Members tab locked state: opacity 0.45, not-allowed cursor, tooltip "Save the team first to add members" — 2026-05-25
-- [x] Settings tab: `<IdentityPicker>` (square shape), name (required), description, notes (textarea) — 2026-05-25
-- [x] Footer: Archive team button (edit mode, left side), Cancel + Create team / Save changes (right side, team-color primary button) — 2026-05-25
-- [x] "Saved" banner: appears after new team creation, auto-dismisses after 3s — 2026-05-25
-- [x] New-team flow: Settings tab → Create team → banner → Members tab unlocks (placeholder content) — 2026-05-25
-- [x] Edit-team flow: pre-populated Settings tab, Members tab unlocked (placeholder) — 2026-05-25
-- [x] Archive confirmation dialog: replaces modal content, amber styling, icon, title, body, Cancel + Archive team buttons — 2026-05-25
-
-**Web — team picker + settings shell:**
-- [x] "New team" affordance in team picker dropdown → opens `<TeamModal mode="new">` — 2026-05-25
-- [x] Team edit affordance (gear icon or similar) → opens `<TeamModal mode="edit" team={...}>` — 2026-05-25
-- [x] `/settings` route shell with left-nav layout (foundation for 10.1.2–10.4.2) — 2026-05-25
-- [x] Archived teams in picker under collapsed "Archived" section with unarchive action — 2026-05-25
-- [x] `GET /teams` query includes archived teams for the picker's Archived section — 2026-05-25
-
-**Testing & verification:**
-- [x] `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean — 2026-05-25
-- [ ] Manual: create second team from picker, edit existing team, archive/unarchive
-- [ ] Manual: Team Modal opens in both modes with correct Settings tab behavior
-- [x] `docs/log.md` Phase 10.1.1 entry written — 2026-05-25
-
----
-
-### Members — Management & Editing (Phase 10.1.2)
-Fills in the Team Modal Members tab and adds the Member Edit Modal. Full member lifecycle: add, edit, roles, stubs, invites, reusable invite link, stats, inactivation, superadmin actions. Depends on 10.1.1 (Team Modal shell).
-
-**Terminology:** "Participant" = login-less team member (backend: `user_id = NULL`). Design handoffs use "stub" but we use "Participant" — established in Phase 8.0, more user-friendly. "Inactivate" = `archived_at`-based disabling. "Super Admin" = `is_superadmin`.
-
-**Schema (migration 009):**
-- [x] Add `archived_at DATETIME` column to `team_members` (nullable) — member inactivation — 2026-05-25
-- [x] Add `archived_at DATETIME` column to `users` (nullable) — account-level inactivation — 2026-05-25
-- [x] Add `invite_link_token TEXT UNIQUE` column to `teams` (nullable) — reusable invite link — 2026-05-25
-- [x] Update `migrations_test.go` to assert new columns — 2026-05-25
-
-**API — member CRUD:**
-- [x] `GET /teams/:id/members/:memberId` — full member detail with computed stats — 2026-05-25
-- [x] `POST /teams/:id/members` — add existing registered user by `userId` (admin only) — 2026-05-25
-- [x] `PATCH /teams/:id/members/:memberId` — update display name, color, icon, role (admin for role; self for own name/color/icon) — 2026-05-25
-- [x] `DELETE /teams/:id/members/:memberId` — remove from team; reject if last admin — 2026-05-25
-- [x] `POST /teams/:id/members/:memberId/archive` — inactivate member (set `archived_at`) — 2026-05-25
-- [x] `POST /teams/:id/members/:memberId/unarchive` — reactivate member (clear `archived_at`) — 2026-05-25
-
-**API — participant CRUD:**
-- [x] `POST /teams/:id/participants` — create login-less participant (admin only); name, icon, color, optional email — 2026-05-25
-- [x] Participants managed via same PATCH/DELETE member endpoints (role always `member`, `user_id` stays NULL) — 2026-05-25
-
-**API — invites:**
-- [x] `GET /teams/:id/invites` — list pending invites (email, sent date) — 2026-05-25
-- [x] `DELETE /teams/:id/invites/:inviteId` — revoke/cancel pending invite — 2026-05-25
-- [x] `POST /teams/:id/invite-link` — generate or regenerate reusable team invite link token — 2026-05-25
-- [x] `GET /teams/:id/invite-link` — get current invite link (or null) — 2026-05-25
-- [x] `DELETE /teams/:id/invite-link` — revoke current invite link — 2026-05-25
-- [x] Update `POST /auth/register` to accept reusable invite link tokens alongside existing one-time tokens — 2026-05-25
-
-**API — member stats (computed per request, not stored):**
-- [x] Timeline counts: active, archived (per member) — 2026-05-25
-- [x] Activity counts: past due, running, upcoming, unscheduled, archived (date-relative, not status-relative) — 2026-05-25
-
-**API — superadmin actions:**
-- [x] `POST /users/:id/promote` — set `is_superadmin = true` (superadmin only, not applicable to participants) — 2026-05-25
-- [x] `POST /users/:id/archive` — inactivate user account (superadmin only) — 2026-05-25
-- [x] `POST /users/:id/unarchive` — reactivate user account (superadmin only) — 2026-05-25
-- [x] `DELETE /users/:id` — hard delete user (superadmin only; zero active activities + single team only) — 2026-05-25
-- [x] Auth middleware: reject login from archived users with clear error — 2026-05-25
-
-**OpenAPI + types:**
-- [x] Add `MemberDetail` schema with stats, teams list, archived_at — 2026-05-25
-- [x] Add invite link endpoints to spec — 2026-05-25
-- [x] Add superadmin action endpoints to spec — 2026-05-25
-- [x] Update `TeamMember` schema with `archivedAt` — 2026-05-25
-- [x] Regenerate TypeScript types — 2026-05-25
-
-**Web — Team Modal Members tab:**
-- [x] Search/add input: search users by name/email, or type email to invite; clear button — 2026-05-25
-- [x] Search results dropdown: user matches with "Add" / "Already added" / "Invite pending"; email-only with "Invite" — 2026-05-25
-- [x] Participant creation: expandable inline form — identity picker (circle), name (required), optional email, "Create participant" button (amber) — 2026-05-25
-- [x] Member list: avatar (dashed border for stubs), name, "No login" pill (stubs, amber), email, `<RoleDropdown>`, remove (×) — 2026-05-25
-- [x] `<RoleDropdown>`: Admin (teal), Member (muted), Participant (amber) — with descriptions; portal-rendered; role changes save immediately — 2026-05-25
-- [x] Pending invitations section: rows with dashed-circle mail icon, email, sent date, "Revoke" button (red) — 2026-05-25
-- [x] Invite link section: URL display + "Copy link" button (teal transition to "Copied!"), explanatory note below — 2026-05-25
-- [x] Member count badge on Members tab label — 2026-05-25
-
-**Web — Member Edit Modal (`<MemberModal>`):**
-- [x] Modal shell: portal, backdrop, 560px panel, header / scrollable content / footer — 2026-05-25
-- [x] Header: `<IdentityPicker>` (40px circle), subline (participant/team member + viewer role label), name + badges ("No login" amber) — 2026-05-25
-- [x] Name + email row: 2-column grid; email read-only for participants ("No email — participant" placeholder) — 2026-05-25
-- [x] Timeline stats: 2 chips — Active (teal border), Archived (muted border) — 2026-05-25
-- [x] Activity stats: 5 chips — Past due (red if >0), Running (teal), Upcoming (blue), Unscheduled (muted), Archived (muted) — 2026-05-25
-- [x] Joined date: read-only pill with icon — 2026-05-25
-- [x] Teams list: each row with team badge (square, initials), team name, role pill — 2026-05-25
-- [x] Account section (team admin + non-participant): password reset button — shows "SMTP not configured" until Phase 14 — 2026-05-25
-- [x] Super Admin actions section (superadmin viewer only): Promote to Super Admin button (indigo), Inactivate (amber) / Delete (red) based on deletability — 2026-05-25
-- [x] Promote confirmation dialog: indigo icon, title, body, Cancel + Promote — 2026-05-25
-- [x] Inactivate confirmation dialog: amber icon, title, body, Cancel + Inactivate — 2026-05-25
-- [x] Delete confirmation dialog: red icon, title, body, Cancel + Delete — 2026-05-25
-- [x] Footer: Cancel + Save changes (member identity color) — 2026-05-25
-- [x] Deletable rule: zero active activities AND single team membership — 2026-05-25
-- [x] Role permission matrix enforcement: team admin vs superadmin capability differences — 2026-05-25
-
-**Web — sidebar integration:**
-- [x] Member rows: gear icon on hover → opens `<MemberModal>` for that member — 2026-05-25
-- [x] Inactivated members: reduced opacity — 2026-05-25
-
-**Testing & verification:**
-- [x] `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean — 2026-05-25
-- [ ] Manual: add user, invite email, create participant, change roles, remove member
-- [ ] Manual: generate invite link, copy, register new user via link
-- [ ] Manual: Member Modal shows correct stats, admin actions work with confirmations
-- [ ] Manual: inactivated user cannot log in; reactivation restores access
-- [x] `docs/log.md` Phase 10.1.2 entry written — 2026-05-25
-
----
-
-### Settings — Profile, Tokens & Admin (Phase 10.1.3)
-Builds out the `/settings` page into a working settings experience. Users get profile + identity management, security (password change), preferences, and API token management. Superadmins get SMTP config, instance defaults, and an orphaned-users view. Also ships forgot-password flow.
-
-**Design reference:** `docs/design/handoffs/settings-modal.zip` — directional prototype. Using the visual language (sidebar nav, field styling, token palette) but as a full page (existing `/settings` route), not a modal. Skipping Notifications panel (no infrastructure), Organization panel (multi-tenant concept doesn't apply), Billing panel (self-hosted), and Sessions section (JWTs are stateless). Security panel scoped to password change only.
-
-**Schema (migration 010):**
-- [x] Add `color TEXT` and `icon TEXT` columns to `users` table — user-level identity — 2026-05-26
-- [x] Create `instance_settings` table (`key TEXT PRIMARY KEY`, `value TEXT`, `updated_at DATETIME`) — 2026-05-26
-- [x] Create `password_reset_tokens` table (`id TEXT PK`, `user_id TEXT FK`, `token_hash TEXT`, `expires_at DATETIME`, `used_at DATETIME`, `created_at DATETIME`) — 2026-05-26
-- [x] Update `migrations_test.go` to assert new columns and tables — 2026-05-26
-
-**API — profile management:**
-- [x] `PATCH /users/me` — update `display_name`, `color`, `icon`; validate non-empty name; trim whitespace — 2026-05-26
-- [x] Identity propagation: when color/icon changes, update all `team_members` rows for the user where the member's value matches the user's old value or is NULL — 2026-05-26
-- [x] Add `UpdateProfile` repo method with propagation logic — 2026-05-26
-- [x] Test: happy path — name change persists; color change propagates to team_members — 2026-05-26
-- [x] Test: error path — empty name returns 400 — 2026-05-26
-
-**API — password change:**
-- [x] `PUT /users/me/password` — requires `{ currentPassword, newPassword }`; verify current hash; update; return 200 — 2026-05-26
-- [x] Return 401 `WRONG_PASSWORD` on mismatch; 400 `WEAK_PASSWORD` if < 8 chars — 2026-05-26
-- [x] Test: happy path — password changed — 2026-05-26
-- [x] Test: error path — wrong current password returns 401 — 2026-05-26
-
-**API — forgot password:**
-- [x] `POST /auth/forgot-password` — accepts `{ email }`; generate 1-hour reset token; store hash in `password_reset_tokens`; send email via mailer if configured; always return 200 — 2026-05-26
-- [x] `POST /auth/reset-password` — accepts `{ token, newPassword }`; validate token not expired/used; hash new password; update user; mark token used; return 200 — 2026-05-26
-- [x] Return 400 `TOKEN_INVALID` or `TOKEN_EXPIRED` on bad/expired token — 2026-05-26
-- [x] Test: invalid token returns TOKEN_INVALID — 2026-05-26
-- [x] Test: forgot-password always returns 200 (no enumeration) — 2026-05-26
-
-**API — SMTP configuration (superadmin only):**
-- [x] Internal `mailer` package (`internal/mailer/`): wraps `net/smtp`; reads config from `instance_settings` at send time; exposes `Send(to, subject, htmlBody) error` and `IsConfigured() bool` — 2026-05-26
-- [x] `GET /admin/smtp` — return current SMTP config with password masked; 403 if not superadmin — 2026-05-26
-- [x] `PUT /admin/smtp` — upsert config (host, port, username, password, from_name, from_email, encryption); validate by sending test email to caller; 403 if not superadmin — 2026-05-26
-- [x] `POST /admin/smtp/test` — send test email without saving; 403 if not superadmin — 2026-05-26
-- [x] `DELETE /admin/smtp` — clear SMTP config; 403 if not superadmin — 2026-05-26
-- [ ] SMTP password encrypted at rest (currently stored as JSON in instance_settings; encryption deferred)
-- [x] Test: 403 for non-superadmin on admin settings endpoints — 2026-05-26
-
-**API — instance settings (superadmin only):**
-- [x] `GET /admin/settings` — return all instance settings (registration_policy, default_timezone, default_date_format, default_week_start); 403 if not superadmin — 2026-05-26
-- [x] `PATCH /admin/settings` — update one or more settings; validate values; 403 if not superadmin — 2026-05-26
-- [ ] Test: set registration_policy to "open" → registration without invite succeeds (manual only)
-
-**API — orphaned users (superadmin only):**
-- [x] `GET /admin/users` — return all users with team membership count and status; support `?orphaned=true` filter; 403 if not superadmin — 2026-05-26
-- [x] Test: superadmin can list all users — 2026-05-26
-
-**OpenAPI + types:**
-- [x] Add `PATCH /users/me` to spec (UpdateProfile request/response) — 2026-05-26
-- [x] Add `PUT /users/me/password` to spec (ChangePassword request/response) — 2026-05-26
-- [x] Add `POST /auth/forgot-password` and `POST /auth/reset-password` to spec — 2026-05-26
-- [x] Add `GET/PUT/DELETE /admin/smtp` and `POST /admin/smtp/test` to spec — 2026-05-26
-- [x] Add `GET/PATCH /admin/settings` to spec — 2026-05-26
-- [x] Add `GET /admin/users` to spec — 2026-05-26
-- [x] Regenerate TypeScript types — 2026-05-26
-
-**Web — Settings page layout:**
-- [x] Rework `SettingsPage.tsx`: sidebar nav with grouped nav items, active state styling — 2026-05-26
-- [x] Route structure: `/settings/profile`, `/settings/security`, `/settings/preferences`, `/settings/tokens`, `/settings/admin` (superadmin only) — 2026-05-26
-- [x] Admin nav items hidden for non-superadmin users — 2026-05-26
-- [x] Sub-route content renders in right panel with title + subtitle header pattern — 2026-05-26
-
-**Web — Profile (`/settings/profile`):**
-- [x] Display name field with save button; calls `PATCH /users/me` — 2026-05-26
-- [x] Identity picker (reuse `IdentityWidget` from 9.6): color + icon selection; changes call `PATCH /users/me` with new color/icon — 2026-05-26
-- [x] Identity badge preview (avatar at current color/icon) — 2026-05-26
-- [x] Email shown read-only with explanatory note ("Email changes are not yet supported") — 2026-05-26
-- [x] Inline success/error feedback on save — 2026-05-26
-
-**Web — Security (`/settings/security`):**
-- [x] Change password form: current password, new password (min 8 chars), confirm new password — 2026-05-26
-- [x] Validation: new + confirm must match; save disabled until valid — 2026-05-26
-- [x] On success: show success message, clear form — 2026-05-26
-- [x] On 401 WRONG_PASSWORD: show "Current password is incorrect" error — 2026-05-26
-- [x] Calls `PUT /users/me/password` — 2026-05-26
-
-**Web — Preferences (`/settings/preferences`):**
-- [x] Regional section: timezone (IANA selector), date format dropdown, week starts on — 2026-05-26
-- [x] Appearance section: theme toggle (Light / Dark / System) — 2026-05-26
-- [x] All values read/written via existing `GET/PUT /users/me/preferences` endpoints — 2026-05-26
-- [x] Theme change applies immediately — 2026-05-26
-- [ ] Defaults section: default team/timeline dropdowns (deferred — requires loading teams/timelines)
-
-**Web — API Tokens (`/settings/tokens`):**
-- [x] Table: name, scope badge, last used (relative time or "Never"), created date, revoke button — 2026-05-26
-- [x] Create form: name input + scope picker with descriptions (read-only / add / edit-own / edit-all) — 2026-05-26
-- [x] On creation: one-time secret reveal with copy-to-clipboard button; close dismisses — 2026-05-26
-- [x] Revoke: inline confirmation → `DELETE /tokens/:id` → remove from list — 2026-05-26
-- [x] Empty state when no tokens exist — 2026-05-26
-
-**Web — Admin: Instance (`/settings/admin`):**
-- [x] Instance defaults form: default timezone, default week start — calls `PATCH /admin/settings` — 2026-05-26
-- [x] Registration policy toggle: invite-only vs open — calls `PATCH /admin/settings` — 2026-05-26
-- [x] Instance name field — 2026-05-26
-- [x] Save button with inline success feedback — 2026-05-26
-
-**Web — Admin: Email / SMTP (`/settings/admin`):**
-- [x] SMTP form: host, port (2-column), username, password (masked with eye toggle), from name, from email (2-column), encryption dropdown — 2026-05-26
-- [x] "Save SMTP settings" button → `PUT /admin/smtp` — 2026-05-26
-- [x] "Send test email" button → `POST /admin/smtp/test`; transitions through Sending → Sent/Failed — 2026-05-26
-- [x] Info note: "When SMTP is not configured, password resets and email invitations are unavailable" — 2026-05-26
-
-**Web — Admin: Users (`/settings/admin`):**
-- [x] Orphaned alert banner (when count > 0): warning-colored, count + "View" button — 2026-05-26
-- [x] Tabs: "All (N)" / "Orphaned (N)" — segmented control — 2026-05-26
-- [x] Search input: filter by name or email — 2026-05-26
-- [x] User rows: avatar, name, email, team count, status badge — 2026-05-26
-- [ ] Click user row → opens existing `MemberModal` (deferred — requires passing modal state up)
-- [ ] Orphaned users: "Assign team" action (deferred)
-
-**Web — Forgot password flow:**
-- [x] `/forgot-password` public page: email input → shows "If an account exists, a reset link has been sent" — 2026-05-26
-- [x] `/reset-password?token=...` public page: new password + confirm → success redirects to `/login` — 2026-05-26
-- [x] Login page: "Forgot password?" link below the password field — 2026-05-26
-- [ ] When SMTP not configured: `/forgot-password` shows "contact admin" (deferred — requires public SMTP status endpoint)
-
-**Testing & verification:**
-- [x] `golangci-lint run` clean — 2026-05-26
-- [x] `go test ./...` passes — 2026-05-26
-- [x] `pnpm --filter web lint` clean — 2026-05-26
-- [ ] Manual: change display name → visible in sidebar and team member lists after refresh
-- [ ] Manual: change identity color/icon → propagated to team memberships; visible on Gantt bars
-- [ ] Manual: change password → old password rejected, new password works
-- [ ] Manual: forgot-password → email received → click link → set new password → login works
-- [ ] Manual: create API token → secret shown once → copy → use in curl → works; revoke → rejected
-- [ ] Manual: configure SMTP → test email arrives → save persists across restart
-- [ ] Manual: set instance defaults → values persist
-- [ ] Manual: view all users; filter orphaned
-- [ ] Manual: toggle registration policy → test with/without invite
-- [ ] Manual: non-superadmin does not see admin sections
-- [x] `docs/log.md` Phase 10.1.3 entry written — 2026-05-26
-
----
-
-### Member Access & Data Lifecycle (Phase 10.1.4)
-Closes data-integrity and access-revocation gaps from 10.1.2. Protects historical activity data, defines the three membership lifecycle states, and gives superadmins a single "revoke all access" action.
-
-**Schema (migration 011):**
-- [x] Verify `activity_assignments.team_member_id` FK has `ON DELETE RESTRICT`; add explicit constraint in migration if missing — 2026-05-27
-- [x] Same check for `timeline_access.team_member_id` — 2026-05-27
-- [x] Enable `PRAGMA foreign_keys = ON` in DB initialization (`internal/db/`) — already set since early phases — 2026-05-27
-- [x] Update `migrations_test.go` to assert FK pragma is on and both FKs are RESTRICT — 2026-05-27
-
-**API — removal guard:**
-- [x] `DELETE /teams/:id/members/:memberId` — count `activity_assignments` before deleting; if count > 0, return 409 `MEMBER_HAS_ASSIGNMENTS` with `{ "assignmentCount": N }` — 2026-05-27
-- [x] Zero-assignment removal continues to hard-delete as before (deletes timeline_access first due to RESTRICT FK) — 2026-05-27
-- [x] Add `MemberHasAssignments` error handling to OpenAPI spec via `RevokeUserResult` and inline error response — 2026-05-27
-
-**API — full revoke (superadmin only):**
-- [x] `POST /users/:id/revoke` — new endpoint; superadmin only; atomically: set `users.archived_at`, set `archived_at` on all `team_members` for the user, hard-delete `team_members` rows where assignment count is 0; return `{ accountDeactivated: bool, membershipsInactivated: int, membershipsRemoved: int }` — 2026-05-27
-- [x] Add `RevokeUser` repo method: wraps the three steps in a transaction — 2026-05-27
-- [x] 403 if caller is not superadmin; 404 if user not found — 2026-05-27
-- [x] Add `POST /users/{id}/revoke` to OpenAPI spec; regenerate TypeScript types — 2026-05-27
-
-**Web — TeamModal Members tab:**
-- [x] On 409 `MEMBER_HAS_ASSIGNMENTS` from the remove (×) button, show inline error beneath the member row: "N assignment(s) — [Inactivate instead]" where the bracketed link calls `POST /teams/:id/members/:memberId/archive` — 2026-05-27
-- [x] On inactivate success from the inline error, dismiss the error and re-fetch the member list — 2026-05-27
-- [x] Clear the inline error before each new removal attempt for the same member — 2026-05-27
-
-**Web — MemberModal:**
-- [x] Add "Revoke all access" button to Super Admin Actions section (red, below Delete) — 2026-05-27
-- [x] Button hidden when user is already fully inactivated (`users.archived_at` set) — 2026-05-27
-- [x] Confirmation dialog: lists all three effects (account deactivated, memberships inactivated, zero-history memberships removed) — 2026-05-27
-- [x] On confirm: call `POST /users/:id/revoke`; on success show a summary chip for 2s, then close modal — 2026-05-27
-- [x] Invalidate `['teams']` query cache on success — 2026-05-27
-
-**Testing & verification:**
-- [ ] Manual: remove a member with assignments → 409; inline error appears; "Inactivate instead" button works
-- [ ] Manual: remove a member with zero assignments → success
-- [ ] Manual: superadmin uses "Revoke all access" → account deactivated; user can no longer log in; existing Gantt bars still show their avatar name
-- [ ] Manual: inactivated members' avatars still render on Gantt bars (data preserved)
-- [x] `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean — 2026-05-27
-- [x] `docs/log.md` Phase 10.1.4 entry written — 2026-05-27
-
----
-
-### Status Templates & Timeline Statuses (Phase 10.2)
-API + UI bundled. Required before Phase 11.3 (Kanban). Depends on 10.1.2 (Members).
-
-**Schema (migration 012):**
-- [x] Create `status_templates` (team-level), `status_template_items`, `statuses` (timeline-level) tables — 2026-05-27
-- [x] Rebuild `activities` table so `status_id` references `statuses` instead of `team_statuses`; drop `team_statuses` — 2026-05-27
-- [x] Update `migrations_test.go` — 2026-05-27
-
-**Go API:**
-- [x] `StatusTemplate`, `StatusTemplateItem`, `Status` models — 2026-05-27
-- [x] `StatusRepo`: list/get/create/update/delete templates; list/get/create/update/delete items; `SeedDefaultTemplate`; `CopyTemplateToTimeline` — 2026-05-27
-- [x] `handleCreateTeam` — seeds "Simple" template (Planned / In Progress / Done) on team creation — 2026-05-27
-- [x] `handleCreateTimeline` — copies first template's items into live statuses on timeline creation — 2026-05-27
-- [x] `GET /teams/:id/status-templates` — list templates with items — 2026-05-27
-- [x] `POST /teams/:id/status-templates` — create template — 2026-05-27
-- [x] `PATCH /status-templates/:id` — rename, reorder — 2026-05-27
-- [x] `DELETE /status-templates/:id` — blocked if last template on team — 2026-05-27
-- [x] `POST /status-templates/:id/items` — add item — 2026-05-27
-- [x] `PATCH /status-template-items/:id` — rename, recolor, reicon, toggle is_closed, reorder — 2026-05-27
-- [x] `DELETE /status-template-items/:id` — blocked if last item in template — 2026-05-27
-- [x] `GET /teams/:id/timelines/:timelineId/statuses` — list statuses for a timeline — 2026-05-27
-
-**OpenAPI + types:**
-- [x] `StatusTemplate`, `StatusTemplateItem`, `Status` schemas + input types — 2026-05-27
-- [x] All new endpoint paths — 2026-05-27
-- [x] Regenerate TypeScript types — 2026-05-27
-
-**Web:**
-- [x] `useStatusTemplates.ts` — hooks for all status template and statuses endpoints — 2026-05-27
-- [x] `StatusTemplatesTab.tsx` — template list with expandable item rows, inline editing, color picker, is_closed toggle, add/delete guards — 2026-05-27
-- [x] `TeamModal.tsx` — "Status Templates" tab added (locked until team saved) — 2026-05-27
-
-**Testing & verification:**
-- [x] `status_handler_test.go` — default seeding, admin-only create, last-template guard, item add/delete, statuses copied to timeline — 2026-05-27
-- [x] `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean — 2026-05-27
-- [ ] Manual: new team gets "Simple" template; open TeamModal → Status Templates tab shows Planned / In Progress / Done
-- [ ] Manual: create second template, add items, rename/recolor items
-- [ ] Manual: delete non-last template → success; delete last template → blocked with 409
-- [ ] Manual: create timeline → GET statuses returns 3 rows matching Simple template
-- [x] `docs/log.md` Phase 10.2 entry written — 2026-05-27
-
----
-
-### Timelines — Full CRUD (Phase 10.3)
-Closes the Timelines cornerstone. Today timelines can be created in the wizard and never managed afterward; access lists exist in schema but have no CRUD endpoints.
-
-**API — timeline-level:**
-- [x] `PATCH /timelines/:id` — rename, change start/end date, color, icon (team or timeline admin) — 2026-05-27
-- [x] `DELETE /timelines/:id` — hard delete; team admin only — 2026-05-27
-- [x] Archive endpoints already in Phase 9
-
-**API — timeline statuses (editing):**
-- [x] `POST /teams/:id/timelines/:timelineId/statuses` — add a status — 2026-05-27
-- [x] `PATCH /statuses/:id` — rename, recolor, reicon, toggle is_closed, reorder — 2026-05-27
-- [x] `DELETE /statuses/:id` — requires replacementStatusId if activities reference it; blocked if last status — 2026-05-27
-
-**API — access list:**
-- [x] `GET /teams/:id/timelines/:timelineId/access` — list current grants (team member + role) — 2026-05-27
-- [x] `PUT /teams/:id/timelines/:timelineId/access/:memberId` — grant or update role (admin / member) — 2026-05-27
-- [x] `DELETE /teams/:id/timelines/:timelineId/access/:memberId` — revoke grant — 2026-05-27
-
-**Web:**
-- [x] "New timeline" affordance in the sidebar timelines list → `TimelineModal` in create mode (name, date range, identity, template preview) — 2026-05-27
-- [x] Edit-timeline modal from the sidebar gear icon: rename, change date range, identity, archive, delete — 2026-05-27
-- [x] `TimelineModal` Statuses tab: add/edit/delete live statuses; delete-with-replacement dialog — 2026-05-27
-- [x] `TimelineModal` Access tab: search-pick team members, role toggle, remove — 2026-05-27
-- [x] Archived timelines under a collapsed "Archived" group in the sidebar; Restore button for unarchive — 2026-05-27
-- [x] Activity detail panel: status dropdown populated from live timeline statuses — 2026-05-27
-- [x] "Hide closed" toggle in GanttToolbar (shown when timeline has closed statuses) — 2026-05-27
-- [x] `TimelineAccessEntry` model + `TimelineStore` interface expanded; `canAdminTimeline` helper — 2026-05-27
-
-**Testing & verification:**
-- [x] `TestUpdateTimeline_AdminCanRename`, `TestUpdateTimeline_NonAdminForbidden` — 2026-05-27
-- [x] `TestDeleteTimeline_AdminCanDelete`, `TestDeleteTimeline_NonAdminForbidden` — 2026-05-27
-- [x] `TestTimelineAccessList_GrantAndRevoke` — 2026-05-27
-- [x] `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean — 2026-05-27
-- [ ] Manual: create second timeline from sidebar → modal opens → create → new timeline appears
-- [ ] Manual: edit timeline name, date range → save → sidebar reflects changes
-- [ ] Manual: add/edit/delete statuses via Statuses tab → activity detail panel shows updated list
-- [ ] Manual: grant/revoke member access via Access tab → member can/cannot access timeline
-- [ ] Manual: archive timeline → disappears from active list → appears in Archived → Restore restores it
-- [ ] Manual: delete timeline → confirm → gone from sidebar
-- [ ] Manual: hide-closed toggle hides activities with closed status; unchecking restores them
-- [x] `docs/log.md` Phase 10.3 entry written — 2026-05-27
-
----
-
-### Preference Consumption & Session Handling (Phase 10.4.1)
-Wires user and instance preferences (stored in 10.1.3) into views. Fixes the broken session lifecycle (access tokens expire after 15 min with no refresh interceptor). Adds cosmetic branding for admins.
-
-**Session lifecycle:**
-- [x] Add 401 interceptor to `apiFetch` (`packages/web/src/lib/api.ts`): on 401, attempt silent refresh via stored refresh token, retry original request; if refresh also fails, clear tokens and redirect to `/login`
-- [x] Mutex/queue so concurrent 401s don't fire multiple refresh calls
-- [x] Invisible to user — no toast, no banner (standard SPA pattern)
-
-**Preference consumption:**
-- [x] Create `useFormatDate()` hook — reads user's `date_format` preference, returns a formatter
-- [x] Gantt `granularity.ts` `formatLabel()`: replace hardcoded `en-US` with user's date format preference
-- [x] Gantt `granularity.ts` `startOfWeek()`: replace hardcoded Monday with user's `week_start` preference; Gantt columns align to user's chosen start day
-- [ ] `ActivityDetailPanel` and other date displays: consume date format preference (date inputs are native browser — no explicit text formatting needed until a read-only date display surface is added)
-- [ ] Public/shared timeline views: fall back to instance-level defaults when no user is logged in (deferred — shared views ship in Phase 13)
-- [x] Theme: sync server-side preference on login (`useDarkMode.ts` — added `applyTheme`; `ThemeSync` component applies server value on auth init)
-
-**Admin — branding (`/settings/admin`):**
-- [x] Instance name field (stored in `instance_settings`); shown in browser tab title and login page
-- [x] Accent color override (stored in `instance_settings`); applies globally via CSS custom property
-- [ ] Optional logo upload (stretch — deferred)
-
----
-
-### Activity Schema Normalization — Drop team_id (Phase 10.4.2)
-Removes `activities.team_id` (redundant now that `timeline_id` is stored). Hardens `timeline_id` to NOT NULL. Moves activity routes to `/teams/{id}/timelines/{timelineId}/activities` (team-scoped prefix avoids Go 1.22 mux conflict with `GET /timelines/share/{token}`).
-
-**Schema (migration 015):**
-- [x] Backfill NULL `timeline_id` rows (assign to team's oldest timeline) — 2026-05-28
-- [x] Rebuild `activities` table without `team_id`, with `timeline_id TEXT NOT NULL REFERENCES timelines(id) ON DELETE CASCADE` — 2026-05-28
-- [x] Recreate `idx_activities_timeline_id` on the new table — 2026-05-28
-
-**API — Go:**
-- [x] `models.Activity`: remove `TeamID` field; change `TimelineID` from `*string` to `string` — 2026-05-28
-- [x] `ActivityRepo.Create`: remove `team_id` from INSERT — 2026-05-28
-- [x] `ActivityRepo.ListByTeam` → `ListByTimeline(timelineID string, ...)`: query becomes `WHERE timeline_id = ?` — 2026-05-28
-- [x] `handleCreateActivity`, `handleListActivities`: path params are `teamId` + `timelineId`; look up timeline to verify ownership — 2026-05-28
-- [x] `handleUpdateActivity`, `handleDeleteActivity`, `handleArchive/Unarchive`: replace `activity.TeamID` with timeline lookup — 2026-05-28
-- [x] WebSocket broadcasts: derive `TeamID` from timeline lookup — 2026-05-28
-- [x] Move activity routes: `POST /teams/{id}/timelines/{timelineId}/activities`, `GET /teams/{id}/timelines/{timelineId}/activities` — 2026-05-28
-
-**OpenAPI + types:**
-- [x] Update `Activity` schema: replace `teamId` with `timelineId` (required, non-nullable) — 2026-05-28
-- [x] Update activity endpoints to new team-scoped path — 2026-05-28
-- [x] Regenerate TypeScript types — 2026-05-28
-
-**Frontend:**
-- [x] Rename `useTeamActivities` → `useTimelineActivities(teamId, timelineId, from, to)` — cache key `['timelines', timelineId, 'activities']` — 2026-05-28
-- [x] `useCreateActivity(teamId, timelineId)`: URL becomes `/teams/${teamId}/timelines/${timelineId}/activities`; no `timelineId` in request body — 2026-05-28
-- [x] `useUpdateActivity(timelineId)`, `useDeleteActivity(timelineId)`: cache key updated — 2026-05-28
-- [x] `useTeamActivitySync`: update cache key lookups to `['timelines', timelineId, 'activities']` — 2026-05-28
-- [x] `GanttView`: use `useTimelineActivities`; `timelineId` prop is now required (not optional) — 2026-05-28
-- [x] `ActivityCreatePanel`: `teamId` + `timelineId` passed to `useCreateActivity`; no `timelineId` in body — 2026-05-28
-- [x] `ActivityDetailPanel`: `timelineId` required; passed to `useUpdateActivity`/`useDeleteActivity` — 2026-05-28
-- [x] `DashboardPage`: updated GanttView/ActivityCreatePanel/ActivityDetailPanel prop signatures — 2026-05-28
-
-**Tests:**
-- [x] `activity_repo_test.go`: `makeActivity` uses `timelineID`; all `ListByTeam` calls → `ListByTimeline` — 2026-05-28
-- [x] Added `TestActivityRepo_ListByTimeline_Filter` — 2026-05-28
-- [x] `activity_handler_test.go`: `activityTestSetup` creates a timeline; all routes updated — 2026-05-28
-- [x] `archive_test.go`, `revoke_user_test.go`, `team_handler_test.go`: create timeline before activity; use new routes — 2026-05-28
-- [x] `user_repo_test.go`, `migrations_test.go`: activity INSERTs use `timeline_id` instead of `team_id` — 2026-05-28
-
-**Testing & verification:**
-- [x] `golangci-lint run` clean — 2026-05-28
-- [x] `go test ./...` passes — 2026-05-28
-- [x] `pnpm --filter web lint` clean — 2026-05-28
-- [ ] Manual: Gantt view loads activities for the active timeline
-- [ ] Manual: Creating an activity from the panel associates it with the correct timeline
-- [ ] Manual: `PRAGMA foreign_key_check` returns no rows after migration on Docker DB
-
----
-
-### UI Consistency — Modals, Sidebar & Toolbar (Phase 10.4.3) [was mislabeled 10.4.2]
-Standardizes visual patterns across TeamModal, MemberModal, TimelineModal, sidebar, and Gantt toolbar. Eliminates three different inline-editing patterns, three different archive button styles, three different confirmation dialog implementations, and mixed hardcoded hex colors vs CSS variables.
-
-**Inline name editing (3 → 1):**
-- [x] Extract shared `InlineEditableTitle` component: always-input with subtle bottom border on hover/focus — 2026-05-28
-- [x] Replace `MemberModal.tsx` name editing (focus underline pattern) with `InlineEditableTitle` — 2026-05-28
-- [x] Replace `TeamModal.tsx` name editing (toggle div/input state machine) with `InlineEditableTitle` — 2026-05-28
-- [x] Replace `TimelineModal.tsx` name editing (no visual cue) with `InlineEditableTitle` — 2026-05-28
-
-**Archive/restore buttons (3 → 1):**
-- [x] Standardize archive button: amber bg+border+icon (aligned with MemberModal prominence) — 2026-05-28
-- [x] Standardize restore button: teal bg+border+RotateCcw icon — 2026-05-28
-- [x] Fix `TeamModal.tsx` archive button (was neutral gray) — 2026-05-28
-- [x] Fix `TimelineModal.tsx` archive button (was border-only, no icon) — 2026-05-28
-
-**Confirmation dialogs (3 → 1):**
-- [x] Consolidate into shared `ConfirmDialog` component with color variants (red, amber, indigo, teal) — 2026-05-28
-- [x] Replace `MemberModal.tsx` custom ConfirmDialog — 2026-05-28
-- [x] Replace `TeamModal.tsx` ArchiveDialog — 2026-05-28
-- [x] Replace `TimelineModal.tsx` inline confirmation panels — 2026-05-28
-
-**Color system (mixed → CSS variables):**
-- [x] Migrate `TeamModal.tsx` hardcoded hex colors to CSS variables — 2026-05-28
-- [x] Migrate `MemberModal.tsx` hardcoded hex colors to CSS variables — 2026-05-28
-- [x] Verified `TimelineModal.tsx` CSS variable usage is consistent — 2026-05-28
-
-**Sidebar & toolbar audit:**
-- [x] Sidebar member/timeline rows: Badge usage, hover states, gear icon consistency verified — 2026-05-28
-- [x] Gantt toolbar controls: Tailwind + CSS vars, consistent with modal footer patterns — 2026-05-28
-- [x] No inconsistencies requiring fixes found — 2026-05-28
-
----
-
-### Gantt Interaction & Activity Edit Polish (Phase 10.4.4)
-
-**Schema (migration 016):**
-- [x] Add `notes TEXT` column to `activities` (nullable) — 2026-05-29
-
-**Go API:**
-- [x] `Activity` model: add `Notes *string` field — 2026-05-29
-- [x] `ActivityRepo.Update`: include `notes` in UPDATE SET — 2026-05-29
-- [x] `handleUpdateActivity`: parse `notes` from PATCH body — 2026-05-29
-
-**OpenAPI + types:**
-- [x] Add `notes` to `Activity` schema and PATCH body — 2026-05-29
-- [x] Regenerate TypeScript types — 2026-05-29
-- [x] Add `notes` to `UpdateActivityInput` patch type in `useTeamActivities.ts` — 2026-05-29
-
-**Gantt — resizable activity column:**
-- [x] Label column drag handle on right edge; min 140px, max 400px; live resize — 2026-05-29
-
-**Gantt — click-to-activate before drag:**
-- [x] Unselected bars show `cursor: pointer`; drag/resize only starts when bar is selected — 2026-05-29
-- [x] Resize handles (left/right edge) visible only on selected bars — 2026-05-29
-
-**Gantt — bar drag updates sidebar dates live:**
-- [x] `onBarDragProgress` callback fires during mousemove with current snapped dates — 2026-05-29
-- [x] `DashboardPage` stores `liveDragDates` and passes to `ActivityDetailPanel` — 2026-05-29
-- [x] `ActivityDetailPanel` shows live dates in date inputs without triggering saves — 2026-05-29
-- [x] `onBarDragEnd` callback clears live dates when drag completes — 2026-05-29
-
-**Gantt — finer-grained snap during drag:**
-- [x] `snapDivisorFor(granularity)`: day→1, week→7, month→4, quarter→3, year→4 — 2026-05-29
-- [x] `colFracToDate` interpolates fractional column positions for accurate date mapping — 2026-05-29
-- [x] Drag mousemove uses `Math.round(x / step) * step` with finer step — 2026-05-29
-- [x] `resolvedGranularity` prop passed from GanttView → GanttGrid — 2026-05-29
-
-**Gantt — "Hide closed" moves to filter preset:**
-- [x] Remove `hideClosed` checkbox and props from `GanttToolbar` — 2026-05-29
-- [x] Add `'open'` preset to `FilterDropdown` ("Open only — Hide activities with a closed status") — 2026-05-29
-- [x] Add `'open'` to `ActiveFilter` preset type in `FilterContext` — 2026-05-29
-- [x] `GanttView` reads `activeFilter.id === 'open'` to activate closed-status filtering — 2026-05-29
-- [x] Remove `hideClosed` state from `DashboardPage` — 2026-05-29
-
-**Activity Edit Sidebar — layout and field changes:**
-- [x] Remove "All day" checkbox — 2026-05-29
-- [x] Remove human-readable date summary line — 2026-05-29
-- [x] Move Description field directly below date pickers — 2026-05-29
-- [x] Restyle Assigned To with bordered card style matching create panel — 2026-05-29
-- [x] Status dropdown: replaced plain `<select>` with rich dropdown (color dot + name + CLOSED badge) — 2026-05-29
-- [x] Remove "Identity" line from Classify section — 2026-05-29
-- [x] Rename "Details" → "Advanced" — 2026-05-29
-- [x] Add Notes textarea (multi-line, resizable) backed by new `notes` column — 2026-05-29
-
-**Testing & verification:**
-- [x] `golangci-lint run` clean — 2026-05-29
-- [x] `go test ./...` passes — 2026-05-29
-- [x] `pnpm --filter web lint` clean — 2026-05-29
-- [ ] Manual: drag label column edge → width changes and persists during session
-- [ ] Manual: click bar (unselected) → selects it; second drag moves/resizes it
-- [ ] Manual: drag bar at week zoom → date tooltip shows day-level changes, not week-level
-- [ ] Manual: drag bar at month zoom → snaps to week boundaries
-- [ ] Manual: select "Open only" filter → closed-status activities hidden; clearing restores them
-- [ ] Manual: edit panel shows only date pickers (no allDay, no date summary)
-- [ ] Manual: description moves below dates; matches create panel layout
-- [ ] Manual: assignees use bordered card style (colored border + tint when selected)
-- [ ] Manual: status dropdown shows color dot + name; selection persists
-- [ ] Manual: notes textarea saves and loads correctly
-- [ ] Manual: bar drag → sidebar date inputs update live; stop drag → dates reset to server value
-
----
-
-### Activity Tags, Parent & Progress Fields (Phase 10.4.5)
-Replaces the three "coming soon" stubs in the activity edit panel with functional fields. Tags are normalized (team-scoped `tags` table). Parent and progress already had backend support; this phase adds the UI.
-
-**Schema (migration 017):**
-- [x] Create `tags` table: `id, team_id, name, color, created_by, created_at`; UNIQUE(team_id, name) — 2026-05-30
-- [x] Rebuild `activity_tags`: drop old text-junction table, create normalized FK junction — 2026-05-30
-
-**Go API:**
-- [x] `Tag` model added to `models.go` — 2026-05-30
-- [x] `Activity.TagIDs []string` field added (same `db:"-"` pattern as `AssignedMemberIDs`) — 2026-05-30
-- [x] `TagRepo`: `Create`, `GetByID`, `ListByTeam`, `Update`, `Delete` — 2026-05-30
-- [x] `ActivityRepo.SetTags` / `GetTags` — transaction pattern matching `SetAssignments` — 2026-05-30
-- [x] `ActivityRepo.ListByTimeline`: batch-populates `TagIDs` via `sqlx.In` (same as `AssignedMemberIDs`) — 2026-05-30
-- [x] `tag_handler.go`: `GET /teams/{id}/tags`, `POST /teams/{id}/tags`, `PATCH /tags/{id}`, `DELETE /tags/{id}` — 2026-05-30
-- [x] `activity_handler.go`: `handleCreateActivity` and `handleUpdateActivity` accept `tagIds`; `setActivityArchive` populates `TagIDs` on response — 2026-05-30
-- [x] `isUniqueConstraintError` helper added to `helpers.go` — 2026-05-30
-- [x] `server.go`: `tags *db.TagRepo` field; tag routes registered — 2026-05-30
-- [x] `main.go`: `db.NewTagRepo(database)` instantiated and passed to `NewServer` — 2026-05-30
-
-**OpenAPI + types:**
-- [x] `Tag` schema added to `openapi.yaml` — 2026-05-30
-- [x] `tagIds` added to `Activity` schema and create/update request bodies — 2026-05-30
-- [x] Regenerated TypeScript types — 2026-05-30
-
-**Frontend:**
-- [x] `useTags.ts`: `useTags`, `useCreateTag`, `useUpdateTag`, `useDeleteTag` hooks — 2026-05-30
-- [x] `TagInput.tsx`: combobox with colored pills, autocomplete, create-on-the-fly — 2026-05-30
-- [x] `ActivityDetailPanel`: Tags stub → `TagInput`; Parent stub → `<select>` from same-timeline activities; Progress stub → `<input type="range">`; tagIds/parentActivityId/percentComplete in state and save calls — 2026-05-30
-- [x] `ActivityCreatePanel`: `TagInput` added (below Assignees); `tagIds` in create mutation — 2026-05-30
-- [x] `GanttGrid`: progress fill overlay on bars (darker shade at `percentComplete%` width) — 2026-05-30
-- [x] `vite.config.ts`: `/tags` proxy added — 2026-05-30
-
-**Sample data:**
-- [x] `sample_data/10_tags.sql`: 8 tags for Product Marketing team + activity_tag associations — 2026-05-30
-
-**Tests:**
-- [x] `tag_repo_test.go`: CRUD, unique constraint, SetTags/GetTags, ListByTimeline TagIDs population — 2026-05-30
-- [x] `tag_handler_test.go`: create/list/update/delete happy paths, 409 duplicate, 404 not found, 403 non-member — 2026-05-30
-- [x] All existing test files updated to pass `db.NewTagRepo(database)` to `NewServer` — 2026-05-30
-
-**Testing & verification:**
-- [x] `golangci-lint run` clean — 2026-05-30
-- [x] `go test ./...` passes — 2026-05-30
-- [x] `pnpm --filter web lint` clean — 2026-05-30
-- [ ] Manual: create a tag in the activity detail panel; it appears in team tag list for future activities
-- [ ] Manual: tag autocomplete shows existing team tags; typing a new name offers "Create" option
-- [ ] Manual: tagged activity shows tag pills in the detail panel; pills persist across panel close/reopen
-- [ ] Manual: set parent activity; verify it persists across reload
-- [ ] Manual: drag the progress slider; Gantt bar shows progress fill; value persists
-- [ ] Manual: create activity with tags from the create panel; tags appear in detail panel
-
----
-
-### Filter Implementation (Phase 10.4.6)
-Full filter system: filter definition language, client-side engine, all 6 presets wired, filter builder UI, team filter promotion, and management panel.
-
-**Schema (migration 018):**
-- [x] `ALTER TABLE saved_filters ADD COLUMN is_team_filter BOOLEAN NOT NULL DEFAULT 0` — 2026-05-30
-
-**Backend:**
-- [x] `SavedFilter` model: add `IsTeamFilter bool` — 2026-05-30
-- [x] `SavedFilterRepo.Create`: include `is_team_filter` in INSERT — 2026-05-30
-- [x] `SavedFilterRepo.Update`: include `is_team_filter` in UPDATE — 2026-05-30
-- [x] `SavedFilterRepo.ListByTeamUser`: return user's own filters + all team filters (`is_team_filter = 1`) — 2026-05-30
-- [x] `handleCreateSavedFilter`: accept `isTeamFilter` (admin-only to set true) — 2026-05-30
-- [x] `handleUpdateSavedFilter`: admin can promote/demote; admin can edit name/def of existing team filters — 2026-05-30
-- [x] `handleDeleteSavedFilter`: admin can delete team filters they don't own — 2026-05-30
-
-**OpenAPI + types:**
-- [x] Add `isTeamFilter` boolean to `SavedFilter` schema — 2026-05-30
-- [x] Add `isTeamFilter` to `CreateSavedFilterJSONBody` and `PatchSavedFilterJSONBody` — 2026-05-30
-- [x] Update `api_types.gen.go` manually with new fields — 2026-05-30
-- [x] Regenerate TypeScript types (`pnpm --filter shared generate`) — 2026-05-30
-
-**Frontend — filter engine:**
-- [x] `lib/filterTypes.ts` — FilterDefinition type system (logic, conditions, operators per field type) — 2026-05-30
-- [x] `lib/filterEngine.ts` — `matchesFilter(activity, filter, ctx)` pure function — 2026-05-30
-- [x] `lib/presetFilters.ts` — `applyActiveFilter(activities, activeFilter, memberIdsByUserId, ctx)` — all 6 presets + member + saved filter kinds — 2026-05-30
-
-**Frontend — GanttView wiring:**
-- [x] Replace `closedStatusIds` prop with `timelineStatuses`, `savedFilters`, `tags` props — 2026-05-30
-- [x] Derive `closedStatusIds`, `statusesByTimeline`, `memberIdsByUserId`, `currentUserMemberIds` inside GanttView — 2026-05-30
-- [x] Replace old open-only filter with `applyActiveFilter` — makes all 6 presets + member + saved filters work — 2026-05-30
-
-**Frontend — filter builder UI:**
-- [x] `components/filters/FilterConditionRow.tsx` — field/op/value row with multi-select, text, number, date inputs — 2026-05-30
-- [x] `components/filters/FilterEditor.tsx` — name input, AND/OR toggle, condition rows, Save/Delete/Cancel footer — 2026-05-30
-- [x] `components/filters/FilterManagePanel.tsx` — My Filters + Team Filters sections with edit/delete/promote/demote — 2026-05-30
-
-**Frontend — FilterDropdown updates:**
-- [x] Partition saved filters into `teamFilters` and `myFilters` — 2026-05-30
-- [x] Render "Team filters" section with real data (replacing stub) — 2026-05-30
-- [x] Add "Manage filters" link at bottom of dropdown — 2026-05-30
-- [x] Add `onOpenManager` prop — 2026-05-30
-
-**Frontend — DashboardPage wiring:**
-- [x] Add `useSavedFilters` and `useTags` hooks — 2026-05-30
-- [x] Add `filterManageOpen` and `editingFilter` state — 2026-05-30
-- [x] Wire `FilterEditor` and `FilterManagePanel` into `RightSidebar` — 2026-05-30
-- [x] Pass `timelineStatuses`, `savedFilters`, `tags` to GanttView — 2026-05-30
-- [x] Add `onOpenFilterManager` to `TopBar` — 2026-05-30
-- [x] Update `useSavedFilters.ts`: add `isTeamFilter` to `UpdateSavedFilterInput` — 2026-05-30
-
-**Tests:**
-- [x] `lib/filterEngine.test.ts` — 20+ unit tests: each field type, each operator, AND/OR, edge cases, case-insensitive — 2026-05-30
-- [x] `lib/presetFilters.test.ts` — 11 unit tests: each preset, member filter, saved filter delegation — 2026-05-30
-- [x] `saved_filter_handler_test.go`: 5 new tests — team filter list includes team filters, admin can promote, non-admin cannot promote, admin can delete team filter, non-admin cannot — 2026-05-30
-- [x] `migrations_test.go`: assert `is_team_filter` column exists after migration 018 — 2026-05-30
-- [x] `golangci-lint run` clean; `go test ./...` all pass; `pnpm --filter web lint` clean; `pnpm --filter web build` clean — 2026-05-30
-
-**Manual verification (Docker):**
-- [ ] All 6 preset filters actually filter activities (open, upcoming, my, overdue, noassign, all)
-- [ ] Member filter kind filters by assignee
-- [ ] Filter builder: add/remove conditions, pick field/op/value for all supported fields, AND/OR toggle
-- [ ] Save/load/edit/delete custom filters end-to-end
-- [ ] Status conditions match by name across timelines
-- [ ] Tag conditions match by tag name
-- [ ] Team filter flag: admin promotes user filter → visible to all team members
-- [ ] "Manage filters" panel accessible from dropdown
-- [ ] `docs/log.md` Phase 10.4.6 entry written — 2026-05-30
-
----
-
-### Timeline Views — List / Spreadsheet (Web — Phase 11.1)
-Ships the view-switcher infrastructure plus the dense, sortable, inline-editable List view.
-
-**Infrastructure:**
-- [x] `ViewMode` already defined as `'gantt' | 'list' | 'calendar' | 'kanban'` in TopBar.tsx — 2026-05-31
-- [x] View switcher control in TopBar; per-timeline view mode persisted via preferences (key: `view_mode`) — 2026-05-31
-- [x] View-specific toolbar slots — GanttToolbar shown for gantt, ListToolbar shown for list — 2026-05-31
-
-**Dependencies installed:**
-- [x] `@tanstack/react-table@^8.21.3` — headless table (column visibility/order/sizing/pinning/sorting) — 2026-05-31
-- [x] `@dnd-kit/core`, `@dnd-kit/sortable`, `@dnd-kit/utilities` — column drag-reorder — 2026-05-31
-
-**ListToolbar (`components/list/ListToolbar.tsx`):**
-- [x] Columns menu (hide/show all columns via checkbox list) — 2026-05-31
-- [x] Density toggle (Comfortable / Compact) — 2026-05-31
-- [x] Group by (None / Member / Parent activity / Status) — 2026-05-31
-- [x] Sort by (Start date / End date / Title / Status / Progress) — 2026-05-31
-- [x] Color by (Activity / Member / Status) — 2026-05-31
-- [x] Export + Share stubs — 2026-05-31
-
-**ListView (`components/list/ListView.tsx`):**
-- [x] TanStack Table v8 with column visibility, order, sizing, pinning (Title always pinned left) — 2026-05-31
-- [x] Default columns: Title, Start, End, Duration, Status, Assignees, Tags (hidden: Progress, Parent, Description, Location, URL, Created, Updated) — 2026-05-31
-- [x] Column hide/show via toolbar Columns menu (pendingColumnToggle prop) — 2026-05-31
-- [x] Column drag-reorder via @dnd-kit (drag handles on column headers) — 2026-05-31
-- [x] Column resizing via TanStack's `columnResizeMode: 'onChange'` — 2026-05-31
-- [x] Column config (order/hidden/widths) persisted per-timeline via `list_columns` preference key — 2026-05-31
-- [x] Single-column sort by clicking column header (sort indicator arrow) — 2026-05-31
-- [x] Density toggle changes row height (comfortable: 40px, compact: 32px) and persists — 2026-05-31
-- [x] Keyboard navigation: Arrow keys move selection, Enter/F2 enters edit mode, Esc cancels, Tab/Shift+Tab commit+move horizontal, Enter in edit commits+moves down — 2026-05-31
-- [x] Inline editing: Title (text), Start (date), End (date), Description/Location/URL (text), Progress (number) — 2026-05-31
-- [x] Status cell: click to open StatusPicker popover with color pills — 2026-05-31
-- [x] Assignees cell: read-only display with member Badges (up to 4 + overflow count) — 2026-05-31
-- [x] Tags cell: read-only display with colored tag pills (up to 3 + overflow count) — 2026-05-31
-- [x] Progress cell: read-only mini progress bar + percentage — 2026-05-31
-- [x] Duration cell: computed from start/end dates (read-only) — 2026-05-31
-- [x] PATCH mutations via useUpdateActivity with optimistic updates — 2026-05-31
-- [x] Group-by: None / Member / Parent / Status with collapsible group header rows — 2026-05-31
-- [x] Color-by: left border stripe per row (activity color / primary member color / status color) — 2026-05-31
-- [x] Group-by/Color-by/Sort-by/Density persisted per-timeline in DashboardPage (keys: `list_group_by`, `list_color_by`, `list_sort_by`, `list_density`) — 2026-05-31
-- [x] Find bar highlights: matching rows amber outline, non-matching rows dimmed 30%, active match stronger outline — 2026-05-31
-- [x] Active filter applied (applyActiveFilter) — all 6 presets + member + saved filter kinds — 2026-05-31
-- [x] Row click opens ActivityDetailPanel; Space in selection mode opens detail panel — 2026-05-31
-- [x] Title column sticky left with box-shadow separator — 2026-05-31
-
-**DashboardPage wiring:**
-- [x] List toolbar state (listGroupBy, listSortBy, listColorBy, listDensity) in DashboardPage — 2026-05-31
-- [x] List toolbar state restored from per-timeline preferences on timeline switch — 2026-05-31
-- [x] List toolbar state saved to per-timeline preferences on change — 2026-05-31
-- [x] ListView rendered when view === 'list' with correct props — 2026-05-31
-
-**Testing & verification:**
-- [x] `golangci-lint run` clean — 2026-05-31
-- [x] `go test ./...` passes (135 tests) — 2026-05-31
-- [x] `pnpm --filter web lint` clean — 2026-05-31
-- [x] `pnpm --filter web build` clean — 2026-05-31
-- [ ] Manual: view switcher toggles Gantt ↔ List; choice persists per timeline
-- [ ] Manual: List shows activities with default columns, respects active filter
-- [ ] Manual: hide/show columns from Columns menu; persists across reload
-- [ ] Manual: drag column headers to reorder; persists across reload
-- [ ] Manual: resize column by dragging header right edge; persists
-- [ ] Manual: density toggle changes row height; persists
-- [ ] Manual: keyboard navigation (arrows, Enter/F2, Esc, Tab)
-- [ ] Manual: inline edit Title, Start, End → switches to Gantt → change reflected
-- [ ] Manual: click Status cell → picker opens → select → pill updates
-- [ ] Manual: Title column stays visible when scrolled horizontally
-- [ ] Manual: sort by column header (click once asc, twice desc, three times off)
-- [ ] Manual: group-by and color-by controls work
-- [ ] Manual: Find bar highlights matching rows in List view
-
----
-
-### Timezone-Safe Activity Dates (Phase 11.1.1)
-Fixes midnight-UTC activity dates displaying one calendar day early in negative-UTC-offset timezones.
-
-- [x] `granularity.ts`: switch all internal date helpers to UTC (startOfDay/Week/Month/Quarter/Year, addDays/addMonths, isoWeekNumber, formatLabel, todayColumnPosition) — 2026-06-01
-- [x] `GanttView.tsx`: `todayMidnight()` → `setUTCHours(0,0,0,0)`; fallback viewStart/viewEnd use `setUTCDate`/`getUTCDate` — 2026-06-01
-- [x] `GanttGrid.tsx`: `formatDragDate` → adds `timeZone: 'UTC'` to `toLocaleDateString` — 2026-06-01
-- [x] `ListView.tsx`: add `formatActivityDate` (UTC, for Start/End cells); keep `formatDate` (local, for Created/Updated) — 2026-06-01
-- [x] `granularity.test.ts`: update existing tests to use `getUTCDay`/`getUTCDate` assertions; add timezone-safety suite with midnight-UTC positioning and label checks — 2026-06-01
-- [x] `golangci-lint run` clean — 2026-06-01
-- [x] `go test ./...` passes — 2026-06-01
-- [x] `pnpm --filter web lint` clean — 2026-06-01
-- [x] `pnpm --filter web build` clean — 2026-06-01
-- [x] `pnpm --filter web test` — 149 tests pass including new timezone-safety suite — 2026-06-01
-- [ ] Manual: List Start/End cells show correct calendar day in a negative-offset timezone
-- [ ] Manual: Gantt bars land on the correct day column in a negative-offset timezone
-- [ ] Manual: Gantt day/week/month labels match List dates for same activity
-- [ ] Manual: round-trip — open date picker, save unchanged, displayed date does not shift
-
----
-
-### Timeline Views — Calendar (Web — Phase 11.2)
-Three sub-layouts sharing one component skeleton.
-
-**Shared:**
-- [ ] Sub-layout switcher (Month / Week / Day) in the view's toolbar slot
-- [ ] Today / prev / next navigation; jump-to-date picker
-- [ ] Click empty cell → Event create form prefilled with that date
-- [ ] Click event → `EventDetailPanel`
-- [ ] Drag event between cells → PATCH new start/end preserving duration (Week / Day only for v1)
-
-**Month layout:**
-- [ ] 6-week grid; multi-day events render as continuous bars across cells
-- [ ] "+N more" overflow affordance per cell
-
-**Week layout:**
-- [ ] 7 day columns, 24-hour vertical time grid, configurable working-hours zoom
-- [ ] All-day strip above the time grid for events without time components
-- [ ] Overlapping-event lane algorithm: side-by-side columns within a day
-
-**Day layout:**
-- [ ] Single-day variant of Week; same time grid and lane algorithm
-
-**Open question to resolve at start of phase:**
-- [ ] Decide handling for date-only events in time-grid layouts (default 9am vs. all-day strip)
-
----
-
-### Timeline Views — Kanban (Web — Phase 11.3)
-Read-only per requirements. Depends on Phase 10.1 (status API) and 10.2 (status UI).
-
-- [ ] Columns from `team_statuses` in display order; column header colored from status color
-- [ ] Cards: title, date range, assignee avatars (stacked color indicators for multi-assignee), parent badge if nested
-- [ ] Empty column shows muted "No events" placeholder
-- [ ] Each column scrolls independently when card count exceeds viewport height
-- [ ] Card click → `EventDetailPanel`
-- [ ] Status renamed/recolored in Settings updates Kanban column header without refresh
-- [ ] Attempting to drag a card produces no errors and no state change (read-only enforcement)
-
-### Calendar Sync
-- [ ] Google Calendar OAuth connect flow
-- [ ] Outbound sync: push draba events to Google Calendar on create/update/delete
-- [ ] Inbound sync: Google webhook handler → upsert event in draba
-- [ ] Built-in CalDAV server (`internal/caldav/`)
-- [ ] CalDAV connect flow (user provides URL + credentials)
-- [ ] Outbound sync: push draba events to CalDAV on create/update/delete
-- [ ] Team iCal feed endpoint: `GET /timelines/:ical_token/feed.ics` (public, sanitized — no notes)
-
-### Shares — Multi-Share Views with Passwords (Phase 13)
-First-class Share entity. One timeline can host many shares, each frozen to a specific view + config.
-
-**Schema:**
-- [ ] Migration: `shares` table — id, timeline_id, view_type, view_config JSON, password_hash (nullable), expires_at (nullable), created_by, created_at, last_viewed_at, view_count, revoked_at
-- [ ] Migration: migrate existing `timelines.share_token` value into a first share row, then drop the column in a follow-up migration once UI references are gone
-
-**API:**
-- [ ] `POST /timelines/:id/shares` — create share with view_type + view_config snapshot + optional password + optional expiry
-- [ ] `GET /timelines/:id/shares` — list shares (creator + admins)
-- [ ] `PATCH /shares/:id` — rename / change password / extend expiry / revoke
-- [ ] `DELETE /shares/:id` — hard delete
-- [ ] `GET /shares/:token` — public lookup; password-protected returns 401 with `passwordRequired: true`
-- [ ] `POST /shares/:token/unlock` — exchange password for a short-lived view JWT scoped to that share
-- [ ] Rate-limit unlock attempts per IP
-
-**Web — creating shares:**
-- [ ] "Share this view" button in every view's toolbar slot (Gantt / List / Calendar / Kanban)
-- [ ] Share modal: snapshots current toolbar state into `view_config`, optional password + expiry toggles, returns URL with copy button
-
-**Web — viewing shares:**
-- [ ] Public viewer route `/s/:token` — no auth required
-- [ ] Password gate page for protected shares
-- [ ] Mount the appropriate view component in read-only mode with `view_config` applied
-- [ ] Branding strip: team name, "Shared view", last-updated timestamp
-
-**Web — managing shares:**
-- [ ] Manage-shares section on each timeline (list, view counts, revoke, edit)
-- [ ] Indicator chip on timeline tile showing active share count
-
----
-
-### Data Portability & Exports (Phase 14)
-
-**Tabular (round-trip):**
-- [ ] `GET /timelines/:id/export.csv` and `GET /timelines/:id/export.xlsx`
-- [ ] `POST /teams/:id/events/import` — CSV/Excel import with preview + validation
-- [ ] Downloadable import template at `GET /import-template.csv` and `.xlsx`
-
-**Visual exports (gofpdf):**
-- [ ] Gantt → PDF: landscape, paginated by date range, member-color legend strip
-- [ ] Gantt → PNG: single-page rasterized variant
-- [ ] Kanban → PDF: columns side-by-side, paginated when too wide
-- [ ] Kanban → PNG: single-page
-- [ ] List → Markdown (GitHub-flavored table) and PDF (styled table)
-- [ ] Calendar → PDF: one page per month / week / day depending on active sub-layout
-- [ ] Header strip on every visual export: team name, timeline name, generated-at timestamp, applied filter description
-- [ ] All visual exports respect active filter / sort / group at time of export
-
-**Wiring:**
-- [ ] Gantt toolbar's existing "Export" stub becomes a real menu: CSV / xlsx / PDF / PNG
-- [ ] Same export menu in 11.1 / 11.2 / 11.3 toolbar slots, scoped to formats valid for that view
-
-**SMTP & password reset (lands here because import errors / reset emails are first SMTP use):**
-- [ ] Password reset flow (email required — pick SMTP or transactional email provider)
-- [ ] SMTP configuration surface in `/settings/admin`
-
----
-
-### External Connectors (Inbound Webhooks) — Phase 15
-Includes both the webhook backend and the per-timeline connector sidebar UI (previously a separate Up-Next block).
-
-**Backend:**
-- [ ] Create `team_inbound_webhooks` and `event_links` DB migrations
-- [ ] Add `is_external` boolean column to `events` table
-- [ ] `POST /teams/:id/webhooks` — generate an inbound webhook URL for a provider (e.g. Asana)
-- [ ] `GET /teams/:id/webhooks` — list active inbound webhooks
-- [ ] `POST /webhooks/:provider/:token` — generic inbound webhook handler to map payload to Draba events
-- [ ] Web UI: Render `is_external` events as read-only (disable drag-and-drop handles)
-- [ ] Web UI: Show external provider icon/link on the event detail card
-
-**Per-timeline connector model (was Up-Next "Web — Connectors"):**
-- [ ] Migration: `team_connectors (id, team_id, timeline_id, provider ENUM, display_name, config JSON, created_by, created_at)` — one row per connector instance
-- [ ] Provider values initially: `asana | aha | google_sheets | excel_online | webhook`
-- [ ] `GET /timelines/:id/connectors` — list connectors for a timeline
-- [ ] `POST /timelines/:id/connectors` — create connector (admin only); returns generated inbound token
-- [ ] `PATCH /connectors/:id` — update display name or config (admin only)
-- [ ] `DELETE /connectors/:id` — remove connector (admin only)
-- [ ] `POST /connectors/:token/ingest` — public inbound endpoint; validates token; maps payload via provider adapter
-
-**Sidebar CONNECTORS section (already stubbed):**
-- [ ] Wire `GET /timelines/:id/connectors` — list active connectors beneath the active timeline label
-- [ ] "Add connector" → connector setup sheet: provider picker → config fields → save → `POST /timelines/:id/connectors`
-- [ ] Connector row hover → gear icon → config drawer; delete with confirm
-- [ ] Provider icon set (Asana, Aha, Sheets, Excel, generic Plug)
-
-## Done
-- [x] Initialize repo scaffold — 2026-04-27
-- [x] Define requirements, architecture, conventions — 2026-04-27
-
-## Parking Lot
-- MySQL/MariaDB and Postgres DB adapters (SQLite first, then add others)
-- CLI binary
-- MCP server for AI agent access
-- Mobile native apps (ship PWA first)
-- Microsoft/Outlook calendar sync (v2)
-- Multi-tenant cloud hosting
-- SSO / OAuth login (GitHub, Google)
-- Notifications (email, push)
-- Recurring event UI (RRULE editing)
-- Kanban drag-to-change-status (v2; v1 Kanban is read-only)
 ````
 
 ## File: packages/shared/src/index.ts
@@ -45725,6 +44766,1770 @@ export default function ActivityDetailPanel({
 }
 ````
 
+## File: docs/TASKS.md
+````markdown
+# Tasks
+
+## Current Sprint — Foundation
+
+### Repo & Tooling
+- [x] Initialize Go module (`packages/api/`) with basic project structure — 2026-04-29
+- [x] Initialize React + TypeScript + Vite project (`packages/web/`) — 2026-04-29
+- [x] Set up pnpm workspace (`pnpm-workspace.yaml`) — 2026-04-29
+- [x] Add `golangci-lint` config (`.golangci.yml`) — 2026-04-29
+- [x] Set up GitHub Actions CI: lint + test on PR — 2026-04-29
+- [x] Write `docker-compose.yml` for local development — 2026-04-29
+
+### API — Core
+- [x] DB abstraction layer with SQLite adapter (sqlx + modernc.org/sqlite) — 2026-04-30
+- [x] Migration runner (auto-runs on startup) — 2026-04-30
+- [x] Initial schema migrations: users, teams, team_members, invites, events, event_tags, event_assignments, timelines, timeline_access, calendar_connections, api_tokens — 2026-04-30
+- [x] Auth: JWT issue/validate, password hash/verify, invite token generate/validate — 2026-04-30
+- [x] `POST /auth/register` (invite token required) — 2026-04-30
+- [x] `POST /auth/login` — 2026-04-30
+- [x] `POST /auth/refresh` — 2026-04-30
+- [x] `POST /teams` — create team — 2026-05-03
+- [x] `POST /teams/:id/invites` — send invite — 2026-05-03
+- [x] `GET /teams/:id/members` — 2026-05-03
+- [x] `POST /teams/:id/events` — create event — 2026-05-03
+- [x] `GET /teams/:id/events` — list events (date range filter) — 2026-05-03
+- [x] `PATCH /events/:id` — update event — 2026-05-03
+- [x] `DELETE /events/:id` — delete event — 2026-05-03
+
+### API — Real-Time
+- [x] WebSocket hub (`internal/ws/`) — 2026-05-14
+- [x] Team-scoped subscription model — 2026-05-14
+- [x] Broadcast on `events.*` internal bus events — 2026-05-14
+
+### API — Timelines
+- [x] `POST /teams/:id/timelines` — create timeline — 2026-05-15
+- [x] `GET /timelines/:id` — fetch timeline (public or auth-gated) — 2026-05-15
+- [x] `GET /timelines/share/:token` — public share link handler — 2026-05-15
+- [x] Timeline access list enforcement — 2026-05-15
+
+### Web — Scaffold
+- [x] Initialize shadcn/ui: `pnpm dlx shadcn@latest init` — 2026-05-16
+- [x] Set color tokens in `src/index.css` once palette is decided — 2026-05-16
+- [x] Set up dark mode toggle (localStorage + `prefers-color-scheme`) — 2026-05-16
+- [x] Routing setup (React Router) — 2026-05-16
+- [x] Auth flow: login, register (via invite), token storage — 2026-05-16
+- [x] API client (TanStack Query + fetch wrapper using generated types) — 2026-05-16
+- [x] WebSocket client hook (`useWebSocket`) — 2026-05-16
+- [x] Embed React build in Go binary (`//go:embed`); API serves SPA at `GET /` — 2026-05-16
+
+### RBAC Refactor + First-Run Setup (Phase 8.0)
+- [x] Migration 003: `team_members` PK, nullable `user_id`, `display_name` — 2026-05-18
+- [x] Migration 003: `event_assignments` + `timeline_access` swap `user_id` FK for `team_member_id` — 2026-05-18
+- [x] Migration 003: `timeline_access` gains `role (admin|member)`; `visibility` dropped from `timelines` — 2026-05-18
+- [x] `User.IsSuperadmin`: first registered user auto-granted superadmin — 2026-05-18
+- [x] `GET /setup/status` — public endpoint (`{ needsSetup: bool }`) — 2026-05-18
+- [x] Timeline access: team admins bypass check; members require explicit `timeline_access` entry — 2026-05-18
+- [x] `SetupPage`: 3-step first-run wizard (account → team → timeline) — 2026-05-18
+- [x] `ProtectedRoute`: redirect to `/setup` when `needsSetup` is true — 2026-05-18
+- [x] Production Dockerfile: run as non-root `draba` user (uid 1000) — 2026-05-18
+
+### Web — Timeline View (Phase 8.1: Shell & Rendering — Gantt pivot)
+- [x] API: `GET /teams`, `GET /teams/:id/timelines`, `assignedMemberIds[]` on Event — 2026-05-18
+- [x] `TimelineView` + `TimelineGrid` (person-lane prototype, later pivoted) — 2026-05-18
+- [x] Pixel ↔ date math (map date range to X offset/width) — 2026-05-18
+- [x] Wire to `GET /teams/:id/events?start=&end=` and `GET /teams/:id/members` — 2026-05-18
+- [x] `TimelineGrid` rewrite: Gantt layout — one row per event, sticky label col, member avatars — 2026-05-18
+- [x] `TimelineToolbar` component: zoom in/out, group-by, sort-by, export stub — 2026-05-18
+- [x] `TimelineView` update: build `GanttRow[]` with grouping + sorting logic — 2026-05-18
+- [x] Group by Member: section headers per assignee, events under primary assignee — 2026-05-18
+- [x] Group by Parent: root events first, children indented below their parent — 2026-05-18
+- [x] Sort by: start date, end date, title A–Z — 2026-05-18
+- [x] Zoom: variable `colWidth` stepped through [40, 60, 80, 120, 160] px/day — 2026-05-18
+- [x] `DashboardPage`: render `TimelineToolbar`, pass group/sort/zoom state to `TimelineView` — 2026-05-18
+
+### Web — Timeline View (Phase 8.2: Interactions)
+- [x] Click event block → open `EventDetailPanel` (view mode) — 2026-05-19
+- [x] Edit form in panel (title, description, date range, status, assignees); save via `PATCH /events/:id` — 2026-05-19
+- [x] Delete event with confirm dialog; remove from timeline — 2026-05-19
+- [x] Drag on empty lane cell → open `EventCreateForm` pre-filled with date range + lane member — 2026-05-19
+- [x] Submit create form → `POST /teams/:id/events`, insert block into timeline — 2026-05-19
+
+### Web — Gantt Bar Drag (Phase 8.2.1: Resize & Move)
+- [x] Detect mousedown on left/right edge (8px zone) vs. bar body — 2026-05-19
+- [x] Edge drag: update start or end date live as user drags; snap to active granularity column — 2026-05-19
+- [x] Body drag: shift both start and end dates by the same column delta — 2026-05-19
+- [x] Show date tooltip during drag (start date for left edge, end date for right edge, both for body) — 2026-05-19
+- [x] PATCH `/events/:id` with new startAt/endAt on mouseup; optimistic update in cache — 2026-05-19
+- [x] Block drag on `is_external` events (read-only; Phase 14 flag) — 2026-05-19
+
+### Web — Timeline View (Phase 8.3: Real-Time Sync)
+- [x] Connect `useWebSocket` to subscribe to `events.*` for active team — 2026-05-19
+- [x] `events.created` delta: insert block into TanStack Query cache — 2026-05-19
+- [x] `events.updated` delta: update block in cache — 2026-05-19
+- [x] `events.deleted` delta: remove block from cache — 2026-05-19
+- [x] Handle optimistic update conflicts (in-flight local edit vs. arriving WS delta) — 2026-05-19
+
+### OpenAPI
+- [x] Write initial `openapi.yaml` in `packages/shared/` — 2026-05-04
+- [x] Set up TypeScript type generation from spec (openapi-typescript) — 2026-05-04
+- [x] Set up Go type generation from spec (`oapi-codegen`) — 2026-05-16
+- [x] Refactor existing Go handlers to use generated OpenAPI models — 2026-05-16
+
+### Web — Persistent View Settings (Phase 8.4)
+- [x] Migration 004: `user_preferences` table with empty-string sentinel for global scope — 2026-05-20
+- [x] `UserPreference` model (`models.go`) — 2026-05-20
+- [x] `UserPreferenceRepo`: `List` and `Upsert` methods — 2026-05-20
+- [x] `GET /users/me/preferences?timeline_id=` — returns scoped or global prefs — 2026-05-20
+- [x] `PUT /users/me/preferences` — upsert single key/value, validates JSON — 2026-05-20
+- [x] OpenAPI spec: `UserPreference` schema + two endpoints — 2026-05-20
+- [x] TypeScript types regenerated from spec — 2026-05-20
+- [x] `usePreferences` / `useUpsertPreference` / `usePreferenceMap` hooks — 2026-05-20
+- [x] `DashboardPage`: restore toolbar state from per-timeline prefs on timeline switch — 2026-05-20
+- [x] `DashboardPage`: save toolbar state (group_by, sort_by, zoom_granularity, color_by) on change — 2026-05-20
+- [x] `DashboardPage`: persist dark mode preference globally — 2026-05-20
+
+### Web — Find (Phase 8.5)
+In-view "find in page" with highlight + match navigation. Scoped to already-loaded events; respects active filters. Global cross-team search is deferred to Phase 15.
+
+**Find bar:**
+- [x] `FindBar` component in the TopBar (between FilterDropdown and ProfileMenu) — query input, match counter (`N / M`), prev/next chevrons, close (×) — 2026-05-20
+- [x] Open via `Ctrl/Cmd+F` global keybinding and via a search icon in the TopBar; close via `Esc` or × — 2026-05-20
+- [x] Debounced (~150ms) client-side matcher over already-fetched events — 2026-05-20
+
+**Match scope:**
+- [x] Case-insensitive match against: event title, description, assignee display names, parent event title — 2026-05-20
+- [x] Respect active filters — only events already visible in the current view are candidates — 2026-05-20
+
+**Visual treatment:**
+- [x] Matching events: amber outline / glow using existing design tokens — 2026-05-20
+- [x] Non-matching events: dimmed to ~0.3 opacity — 2026-05-20
+- [x] Active match (prev/next cursor position): stronger outline + subtle pulse to distinguish from other matches — 2026-05-20
+- [x] On hover, non-title matches show a "why matched" hint (e.g. `matched assignee Jane`) — 2026-05-20
+
+**Navigation:**
+- [x] `Enter` / `Shift+Enter` and ◀ ▶ chevrons walk forward/backward through matches — 2026-05-20
+- [x] Auto-scroll the Gantt on each step — horizontal pan to event's date range, vertical scroll to its row, centered in viewport — 2026-05-20
+
+**Empty / edge cases:**
+- [x] Zero matches, no filters active → bar shows `No matches` — 2026-05-20
+- [x] Zero matches in view, filters active → soft callout: *"No matches in current view. [Clear filters]"* — 2026-05-20
+- [x] Find query is ephemeral (not persisted across navigation/reload); bar open-state also ephemeral — 2026-05-20
+
+**Testing:**
+- [x] Unit: matcher returns correct hits across all match fields, case-insensitive — 2026-05-20
+- [ ] Integration: Find works at every granularity level and every group-by mode (requires live data — manual)
+- [ ] Keyboard: full prev/next cycle reachable with keyboard only (manual verification with live events)
+
+## Up Next
+
+> **Member management work is split across Phase 10.1.1 (Teams — CRUD) and Phase 10.1.2 (Members — Management & Editing)**. Team entity CRUD (create, edit, archive) is in 10.1.1; member lifecycle (add, edit, roles, invites, stubs, inactivation, admin actions) is in 10.1.2. The previously enumerated sidebar gear-icon + add-member-sheet tasks are absorbed into 10.1.2.
+
+### Web — Filter Scoping (FilterDropdown + API)
+Reorganizes the filter dropdown into four explicit sections. Filters are stored as personal by default; admins can promote any filter to team or timeline scope; members can nominate their filters for admin review.
+
+**Data model:**
+- Single `saved_filters` table: `(id, team_id, timeline_id nullable, created_by, name, definition JSON, scope ENUM(personal|nominated|team|timeline), status ENUM(active|pending_review))`
+- `scope=personal` — visible only to creator; `scope=team` — visible to all team members; `scope=timeline` — visible to all members of that timeline; `scope=nominated` — personal filter flagged by member for admin review (visible to admins)
+
+**API:**
+- [ ] Migration: replace current `saved_filters` shape with the unified schema above
+- [ ] `GET /teams/:id/filters` — returns filters scoped `team` or `timeline` (for the active timeline), plus the calling user's `personal` and `nominated` filters
+- [ ] `POST /teams/:id/filters` — create a new personal filter; `definition` is the filter JSON
+- [ ] `PATCH /filters/:id` — update name or definition (creator or admin)
+- [ ] `PATCH /filters/:id/scope` — promote/demote scope; admin-only for `team`/`timeline`; any member can set `nominated`
+- [ ] `DELETE /filters/:id` — creator or admin
+
+**Web — FilterDropdown layout:**
+- [ ] Reorganize dropdown into four labeled sections, each hidden when empty:
+  1. **Default** — All events / Upcoming / My events (hardcoded presets, always present)
+  2. **Team** — filters with `scope=team` from API
+  3. **Timeline** — filters with `scope=timeline` for the active timeline
+  4. **Mine** — caller's `personal` filters; nominated filters shown with a "Pending" badge
+- [ ] Filter names truncate with ellipsis at a max width; full name in tooltip on hover
+- [ ] "New filter…" opens filter editor (personal scope by default); "Share…" action on existing personal filters lets the member nominate it or (if admin) promote directly to team/timeline
+- [ ] Pass active timeline ID through context so the dropdown can fetch timeline-scoped filters
+- [ ] Admin-visible section at bottom of "Mine": nominated filters awaiting review, with Approve / Reject actions
+
+---
+
+> **Connectors sidebar + per-timeline connector model is absorbed into the External Connectors (Inbound Webhooks) task block further down** — that section now carries both the webhook backend and the sidebar UI work.
+
+### API — Token Auth (Phase 9)
+- [x] `POST /tokens` — create API token (returns value once) — 2026-05-20
+- [x] `GET /tokens` — list tokens for current user — 2026-05-20
+- [x] `DELETE /tokens/:id` — revoke token (preserved row, sets revoked_at) — 2026-05-20
+- [x] Middleware: accept Bearer token (JWT or API token) on all authenticated routes — 2026-05-20
+- [x] Enforce token scope on writes (read-only tokens blocked from mutations) — 2026-05-20
+
+### API — Archive (Phase 9)
+- [x] `POST /events/:id/archive` and `POST /events/:id/unarchive` — 2026-05-20
+- [x] `POST /timelines/:id/archive` and `POST /timelines/:id/unarchive` (team-admin only) — 2026-05-20
+- [x] List endpoints exclude archived records by default; `?archived=true` to include — 2026-05-20
+
+### The Great Event → Activity Rename (Phase 9.5)
+Rename the domain entity `Event` → `Activity` everywhere. Runbook: [GreatEventToActivity.md](GreatEventToActivity.md). Roadmap: [Phase 9.5](ROADMAP.md#phase-95--rename-event--activity-the-great-rename).
+
+> **Historical note:** Phase 3 / 8.x / 9 task entries above use "event" because that was the entity's name when those phases shipped. Do not rewrite them. Phase 9.5 is the formal cutover; all later entries use "activity".
+
+**DB:**
+- [x] Write migration `005_rename_events_to_activities.sql` — 2026-05-21 (`ALTER TABLE ... RENAME`)
+- [x] Rename indexes containing `event` in their name — 2026-05-21
+- [x] Update `migrations_test.go` to assert new table + column names — 2026-05-21
+- [ ] Verify against a copy of the prod DB: row counts unchanged, `PRAGMA foreign_key_check` clean
+
+**Go API:**
+- [x] `models.Event` → `models.Activity` — 2026-05-21
+- [x] Rename file `internal/db/event_repo.go` → `activity_repo.go`; `EventRepo` → `ActivityRepo` — 2026-05-21
+- [x] Rename file `internal/api/event_handler.go` → `activity_handler.go`; all `handle*Event*` functions — 2026-05-21
+- [x] `server.go`: routes `/events*` → `/activities*` — 2026-05-21
+- [x] `internal/events/bus.go`: rename constants `EventCreated/Updated/Deleted` — 2026-05-21 → `ActivityCreated/Updated/Deleted` + wire strings (`event.*` → `activity.*`). **Keep** package name and `TimelineCreated/Updated`.
+- [x] Update `bus_test.go`, `hub_test.go` wire-string assertions — 2026-05-21
+- [x] `golangci-lint run` clean, `go test ./...` passes — 2026-05-21
+
+**OpenAPI + generated types:**
+- [x] `packages/shared/openapi.yaml`: schema, paths, operationIds — 2026-05-21, tags, body types. **Keep** `googleEventId` and `caldavUid` fields.
+- [x] Run `pnpm --filter shared generate`; verify `Activity` exports — 2026-05-21, zero `Event` exports
+
+**Web:**
+- [x] `src/types/index.ts`: `DrabaEvent`/`EventStatus`/`EVENT_COLORS` — 2026-05-21 → `DrabaActivity`/`ActivityStatus`/`ACTIVITY_COLORS`
+- [x] Rename `useTeamEvents.ts` → `useTeamActivities.ts`; hooks + query keys — 2026-05-21
+- [x] `useWebSocket.ts`: update message-type switch to `activity.*` — 2026-05-21
+- [x] Rename `EventDetailPanel`, `EventCreatePanel`, `EventPanel` → `Activity*` — 2026-05-21; fix imports
+- [x] UI copy sweep: sidebar label, panel titles, empty state, ARIA, button labels — 2026-05-21
+- [x] `pnpm --filter web lint` clean — 2026-05-21
+
+**Tests + seed:**
+- [x] Rename `event_handler_test.go` → `activity_handler_test.go` — 2026-05-21
+- [x] Rename `scripts/seed-find-test-events.sql` → `seed-find-test-activities.sql` — 2026-05-21; update INSERTs + cleanup
+
+**Docs:**
+- [x] Sweep ROADMAP.md, REQUIREMENTS.md, ARCHITECTURE.md, CONVENTIONS.md, TESTING.md, design/UX_PATTERNS.md — 2026-05-21
+- [x] Hand-review: ROADMAP Phase 3 title — 2026-05-21 → "Core API — Activities & Teams (originally Events; renamed in Phase 9.5)"
+- [x] Do **not** rewrite `docs/log.md` historical entries — 2026-05-21
+- [x] Add Phase 9.5 entry to `docs/log.md` — 2026-05-21
+
+**Verification (smoke against http://epcot.lan:8081):**
+- [ ] Create / edit / archive / unarchive / delete an Activity end-to-end
+- [ ] WebSocket frames arrive as `activity.created` / `.updated` / `.deleted`
+- [ ] Final sweep `rg "\bevent" packages/ docs/` returns only expected hits (bus package, calendar fields, log.md)
+
+### Identity System (Phase 9.6)
+Reusable Identity component system (color + icon) for all entities. Design spec: [IDENTITY_SYSTEM.md](design/IDENTITY_SYSTEM.md). Prototype: `docs/design/assets/identity-widget-prototype.html`.
+
+**Schema (migration 006):**
+- [x] Write migration `006_identity_fields.sql` — 2026-05-24
+- [x] Update `migrations_test.go` to assert new columns exist — 2026-05-24
+
+**Go API:**
+- [x] `models.go`: add `Icon *string` + `Color *string` to `Team`; add `Icon *string` + `Color *string` to `Timeline`; add `Icon *string` to `TeamMember` — 2026-05-24
+- [x] Update `TeamMemberWithUser` to surface the new `Icon` field (via embedding) — 2026-05-24
+- [x] Update OpenAPI spec: add `icon`/`color` to `Team`, `Timeline`, `TeamMember` schemas — 2026-05-24
+- [x] Regenerate TypeScript types (`pnpm --filter shared generate`) — 2026-05-24
+- [x] `golangci-lint run` clean; `go test ./...` passes — 2026-05-24
+
+**Web — component library (`src/components/identity/`):**
+- [x] `identity-constants.ts` — 2026-05-24
+- [x] `Badge.tsx` — 2026-05-24
+- [x] `IdentityTrigger.tsx` — 2026-05-24
+- [x] `IdentityPicker.tsx` — 2026-05-24
+- [x] `IdentityWidget.tsx` — 2026-05-24
+
+**Web — replace existing color/icon UI:**
+- [x] `ActivityDetailPanel`: `<IdentityWidget>` replacing icon stub + 8-color swatch — 2026-05-24
+- [x] `ActivityCreatePanel`: `<IdentityWidget>` replacing color swatch — 2026-05-24
+- [x] Gantt bar label column: `<Badge size={20} shape="square">` — 2026-05-24
+- [x] Sidebar timeline rows: `<Badge size={20} shape="square">` — 2026-05-24
+- [x] Sidebar member rows: `<Badge size={20} shape="circle">` — 2026-05-24
+
+**Web — MemberAvatar migration:**
+- [x] Refactor `MemberAvatar.tsx` to delegate to `<Badge>` — 2026-05-24
+- [ ] Verify all existing MemberAvatar call sites render correctly (manual)
+
+**Web — palette consolidation:**
+- [x] Update `types/index.ts`: re-export `ACTIVITY_COLORS` and `MEMBER_COLORS` from `identity-constants.ts` — 2026-05-24
+- [x] Update `index.css`: `--member-N-*` → 16 `--identity-<name>` custom properties — 2026-05-24
+- [x] Update `DESIGN_SYSTEM.md`: 8-color → 16-color identity palette reference — 2026-05-24
+
+**Testing & verification:**
+- [x] `pnpm --filter web lint` clean — 2026-05-24
+- [x] `golangci-lint run` clean — 2026-05-24
+- [x] `go test ./...` passes — 2026-05-24
+- [ ] Badge renders all four modes (Lucide icon, 1-letter, 2-letter, none) at sizes 20–40px, both shapes (manual)
+- [ ] IdentityWidget popover opens/closes; color, name option, and icon selection fire onChange (manual)
+- [ ] Legacy hex colors in existing activities display correctly via `hexToColorId()` mapping (manual — test on Docker)
+- [ ] Manual: ActivityDetailPanel uses IdentityWidget; changes persist as color IDs (manual — test on Docker)
+- [ ] Manual: sidebar member + timeline rows use Badge (manual)
+
+**Docs:**
+- [x] Add Phase 9.6 entry to `docs/log.md` — 2026-05-24
+
+---
+
+### Phase 10 — Entity Management (data-cornerstone CRUD)
+
+Closes CRUD gaps for the three core data entities. Activities (renamed from Events in Phase 9.5) are already CRUD-complete (Phases 3 / 8.2 / 8.2.1 + Phase 9 archive); Teams and Timelines are not, so 10.x focuses on them.
+
+Design references:
+- Team Modal: `docs/design/handoffs/team-modal/` — Settings tab, Members tab, archive flow
+- Member Edit Modal: `docs/design/handoffs/member-modal/` — member profile, stats, admin actions
+
+---
+
+### Teams — CRUD & Management (Phase 10.1.1)
+Closes the Teams data entity. Ships the Team Modal with Settings tab functional; Members tab scaffolded as locked/placeholder until 10.1.2.
+
+**Schema (migration 008):**
+- [x] Add `description TEXT` column to `teams` (nullable) — 2026-05-25
+- [x] Add `notes TEXT` column to `teams` (nullable) — 2026-05-25
+- [x] Add `archived_at DATETIME` column to `teams` (nullable) — 2026-05-25
+- [x] Update `migrations_test.go` to assert new columns — 2026-05-25
+
+**API — team-level:**
+- [x] `GET /teams/:id` — full team detail (name, description, notes, icon, color, archived_at) — 2026-05-25
+- [x] `PATCH /teams/:id` — update name, description, notes, icon, color (admin only) — 2026-05-25
+- [x] `POST /teams/:id/archive` and `POST /teams/:id/unarchive` — 2026-05-25
+- [x] Update `POST /teams` to accept `description`, `notes`, `icon`, `color` — 2026-05-25
+- [x] Update `GET /teams` — add `?archived=true` to include archived teams — 2026-05-25
+
+**OpenAPI + types:**
+- [x] Update `Team` schema: add `description`, `notes`, `archivedAt` — 2026-05-25
+- [x] Update `CreateTeamInput` and `PatchTeamInput` request bodies — 2026-05-25
+- [x] Regenerate TypeScript types (`pnpm --filter shared generate`) — 2026-05-25
+
+**Web — Team Modal (`<TeamModal>`):**
+- [x] Modal shell: portal, backdrop, panel (580px, dark theme), header, tab bar, scrollable content, footer — 2026-05-25
+- [x] Header: identity badge (36px square) + label ("NEW TEAM" / "EDIT TEAM") + team name + close button — 2026-05-25
+- [x] Tab bar: Settings (active) + Members (locked/placeholder in this phase) — 2026-05-25
+- [x] Members tab locked state: opacity 0.45, not-allowed cursor, tooltip "Save the team first to add members" — 2026-05-25
+- [x] Settings tab: `<IdentityPicker>` (square shape), name (required), description, notes (textarea) — 2026-05-25
+- [x] Footer: Archive team button (edit mode, left side), Cancel + Create team / Save changes (right side, team-color primary button) — 2026-05-25
+- [x] "Saved" banner: appears after new team creation, auto-dismisses after 3s — 2026-05-25
+- [x] New-team flow: Settings tab → Create team → banner → Members tab unlocks (placeholder content) — 2026-05-25
+- [x] Edit-team flow: pre-populated Settings tab, Members tab unlocked (placeholder) — 2026-05-25
+- [x] Archive confirmation dialog: replaces modal content, amber styling, icon, title, body, Cancel + Archive team buttons — 2026-05-25
+
+**Web — team picker + settings shell:**
+- [x] "New team" affordance in team picker dropdown → opens `<TeamModal mode="new">` — 2026-05-25
+- [x] Team edit affordance (gear icon or similar) → opens `<TeamModal mode="edit" team={...}>` — 2026-05-25
+- [x] `/settings` route shell with left-nav layout (foundation for 10.1.2–10.4.2) — 2026-05-25
+- [x] Archived teams in picker under collapsed "Archived" section with unarchive action — 2026-05-25
+- [x] `GET /teams` query includes archived teams for the picker's Archived section — 2026-05-25
+
+**Testing & verification:**
+- [x] `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean — 2026-05-25
+- [ ] Manual: create second team from picker, edit existing team, archive/unarchive
+- [ ] Manual: Team Modal opens in both modes with correct Settings tab behavior
+- [x] `docs/log.md` Phase 10.1.1 entry written — 2026-05-25
+
+---
+
+### Members — Management & Editing (Phase 10.1.2)
+Fills in the Team Modal Members tab and adds the Member Edit Modal. Full member lifecycle: add, edit, roles, stubs, invites, reusable invite link, stats, inactivation, superadmin actions. Depends on 10.1.1 (Team Modal shell).
+
+**Terminology:** "Participant" = login-less team member (backend: `user_id = NULL`). Design handoffs use "stub" but we use "Participant" — established in Phase 8.0, more user-friendly. "Inactivate" = `archived_at`-based disabling. "Super Admin" = `is_superadmin`.
+
+**Schema (migration 009):**
+- [x] Add `archived_at DATETIME` column to `team_members` (nullable) — member inactivation — 2026-05-25
+- [x] Add `archived_at DATETIME` column to `users` (nullable) — account-level inactivation — 2026-05-25
+- [x] Add `invite_link_token TEXT UNIQUE` column to `teams` (nullable) — reusable invite link — 2026-05-25
+- [x] Update `migrations_test.go` to assert new columns — 2026-05-25
+
+**API — member CRUD:**
+- [x] `GET /teams/:id/members/:memberId` — full member detail with computed stats — 2026-05-25
+- [x] `POST /teams/:id/members` — add existing registered user by `userId` (admin only) — 2026-05-25
+- [x] `PATCH /teams/:id/members/:memberId` — update display name, color, icon, role (admin for role; self for own name/color/icon) — 2026-05-25
+- [x] `DELETE /teams/:id/members/:memberId` — remove from team; reject if last admin — 2026-05-25
+- [x] `POST /teams/:id/members/:memberId/archive` — inactivate member (set `archived_at`) — 2026-05-25
+- [x] `POST /teams/:id/members/:memberId/unarchive` — reactivate member (clear `archived_at`) — 2026-05-25
+
+**API — participant CRUD:**
+- [x] `POST /teams/:id/participants` — create login-less participant (admin only); name, icon, color, optional email — 2026-05-25
+- [x] Participants managed via same PATCH/DELETE member endpoints (role always `member`, `user_id` stays NULL) — 2026-05-25
+
+**API — invites:**
+- [x] `GET /teams/:id/invites` — list pending invites (email, sent date) — 2026-05-25
+- [x] `DELETE /teams/:id/invites/:inviteId` — revoke/cancel pending invite — 2026-05-25
+- [x] `POST /teams/:id/invite-link` — generate or regenerate reusable team invite link token — 2026-05-25
+- [x] `GET /teams/:id/invite-link` — get current invite link (or null) — 2026-05-25
+- [x] `DELETE /teams/:id/invite-link` — revoke current invite link — 2026-05-25
+- [x] Update `POST /auth/register` to accept reusable invite link tokens alongside existing one-time tokens — 2026-05-25
+
+**API — member stats (computed per request, not stored):**
+- [x] Timeline counts: active, archived (per member) — 2026-05-25
+- [x] Activity counts: past due, running, upcoming, unscheduled, archived (date-relative, not status-relative) — 2026-05-25
+
+**API — superadmin actions:**
+- [x] `POST /users/:id/promote` — set `is_superadmin = true` (superadmin only, not applicable to participants) — 2026-05-25
+- [x] `POST /users/:id/archive` — inactivate user account (superadmin only) — 2026-05-25
+- [x] `POST /users/:id/unarchive` — reactivate user account (superadmin only) — 2026-05-25
+- [x] `DELETE /users/:id` — hard delete user (superadmin only; zero active activities + single team only) — 2026-05-25
+- [x] Auth middleware: reject login from archived users with clear error — 2026-05-25
+
+**OpenAPI + types:**
+- [x] Add `MemberDetail` schema with stats, teams list, archived_at — 2026-05-25
+- [x] Add invite link endpoints to spec — 2026-05-25
+- [x] Add superadmin action endpoints to spec — 2026-05-25
+- [x] Update `TeamMember` schema with `archivedAt` — 2026-05-25
+- [x] Regenerate TypeScript types — 2026-05-25
+
+**Web — Team Modal Members tab:**
+- [x] Search/add input: search users by name/email, or type email to invite; clear button — 2026-05-25
+- [x] Search results dropdown: user matches with "Add" / "Already added" / "Invite pending"; email-only with "Invite" — 2026-05-25
+- [x] Participant creation: expandable inline form — identity picker (circle), name (required), optional email, "Create participant" button (amber) — 2026-05-25
+- [x] Member list: avatar (dashed border for stubs), name, "No login" pill (stubs, amber), email, `<RoleDropdown>`, remove (×) — 2026-05-25
+- [x] `<RoleDropdown>`: Admin (teal), Member (muted), Participant (amber) — with descriptions; portal-rendered; role changes save immediately — 2026-05-25
+- [x] Pending invitations section: rows with dashed-circle mail icon, email, sent date, "Revoke" button (red) — 2026-05-25
+- [x] Invite link section: URL display + "Copy link" button (teal transition to "Copied!"), explanatory note below — 2026-05-25
+- [x] Member count badge on Members tab label — 2026-05-25
+
+**Web — Member Edit Modal (`<MemberModal>`):**
+- [x] Modal shell: portal, backdrop, 560px panel, header / scrollable content / footer — 2026-05-25
+- [x] Header: `<IdentityPicker>` (40px circle), subline (participant/team member + viewer role label), name + badges ("No login" amber) — 2026-05-25
+- [x] Name + email row: 2-column grid; email read-only for participants ("No email — participant" placeholder) — 2026-05-25
+- [x] Timeline stats: 2 chips — Active (teal border), Archived (muted border) — 2026-05-25
+- [x] Activity stats: 5 chips — Past due (red if >0), Running (teal), Upcoming (blue), Unscheduled (muted), Archived (muted) — 2026-05-25
+- [x] Joined date: read-only pill with icon — 2026-05-25
+- [x] Teams list: each row with team badge (square, initials), team name, role pill — 2026-05-25
+- [x] Account section (team admin + non-participant): password reset button — shows "SMTP not configured" until Phase 14 — 2026-05-25
+- [x] Super Admin actions section (superadmin viewer only): Promote to Super Admin button (indigo), Inactivate (amber) / Delete (red) based on deletability — 2026-05-25
+- [x] Promote confirmation dialog: indigo icon, title, body, Cancel + Promote — 2026-05-25
+- [x] Inactivate confirmation dialog: amber icon, title, body, Cancel + Inactivate — 2026-05-25
+- [x] Delete confirmation dialog: red icon, title, body, Cancel + Delete — 2026-05-25
+- [x] Footer: Cancel + Save changes (member identity color) — 2026-05-25
+- [x] Deletable rule: zero active activities AND single team membership — 2026-05-25
+- [x] Role permission matrix enforcement: team admin vs superadmin capability differences — 2026-05-25
+
+**Web — sidebar integration:**
+- [x] Member rows: gear icon on hover → opens `<MemberModal>` for that member — 2026-05-25
+- [x] Inactivated members: reduced opacity — 2026-05-25
+
+**Testing & verification:**
+- [x] `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean — 2026-05-25
+- [ ] Manual: add user, invite email, create participant, change roles, remove member
+- [ ] Manual: generate invite link, copy, register new user via link
+- [ ] Manual: Member Modal shows correct stats, admin actions work with confirmations
+- [ ] Manual: inactivated user cannot log in; reactivation restores access
+- [x] `docs/log.md` Phase 10.1.2 entry written — 2026-05-25
+
+---
+
+### Settings — Profile, Tokens & Admin (Phase 10.1.3)
+Builds out the `/settings` page into a working settings experience. Users get profile + identity management, security (password change), preferences, and API token management. Superadmins get SMTP config, instance defaults, and an orphaned-users view. Also ships forgot-password flow.
+
+**Design reference:** `docs/design/handoffs/settings-modal.zip` — directional prototype. Using the visual language (sidebar nav, field styling, token palette) but as a full page (existing `/settings` route), not a modal. Skipping Notifications panel (no infrastructure), Organization panel (multi-tenant concept doesn't apply), Billing panel (self-hosted), and Sessions section (JWTs are stateless). Security panel scoped to password change only.
+
+**Schema (migration 010):**
+- [x] Add `color TEXT` and `icon TEXT` columns to `users` table — user-level identity — 2026-05-26
+- [x] Create `instance_settings` table (`key TEXT PRIMARY KEY`, `value TEXT`, `updated_at DATETIME`) — 2026-05-26
+- [x] Create `password_reset_tokens` table (`id TEXT PK`, `user_id TEXT FK`, `token_hash TEXT`, `expires_at DATETIME`, `used_at DATETIME`, `created_at DATETIME`) — 2026-05-26
+- [x] Update `migrations_test.go` to assert new columns and tables — 2026-05-26
+
+**API — profile management:**
+- [x] `PATCH /users/me` — update `display_name`, `color`, `icon`; validate non-empty name; trim whitespace — 2026-05-26
+- [x] Identity propagation: when color/icon changes, update all `team_members` rows for the user where the member's value matches the user's old value or is NULL — 2026-05-26
+- [x] Add `UpdateProfile` repo method with propagation logic — 2026-05-26
+- [x] Test: happy path — name change persists; color change propagates to team_members — 2026-05-26
+- [x] Test: error path — empty name returns 400 — 2026-05-26
+
+**API — password change:**
+- [x] `PUT /users/me/password` — requires `{ currentPassword, newPassword }`; verify current hash; update; return 200 — 2026-05-26
+- [x] Return 401 `WRONG_PASSWORD` on mismatch; 400 `WEAK_PASSWORD` if < 8 chars — 2026-05-26
+- [x] Test: happy path — password changed — 2026-05-26
+- [x] Test: error path — wrong current password returns 401 — 2026-05-26
+
+**API — forgot password:**
+- [x] `POST /auth/forgot-password` — accepts `{ email }`; generate 1-hour reset token; store hash in `password_reset_tokens`; send email via mailer if configured; always return 200 — 2026-05-26
+- [x] `POST /auth/reset-password` — accepts `{ token, newPassword }`; validate token not expired/used; hash new password; update user; mark token used; return 200 — 2026-05-26
+- [x] Return 400 `TOKEN_INVALID` or `TOKEN_EXPIRED` on bad/expired token — 2026-05-26
+- [x] Test: invalid token returns TOKEN_INVALID — 2026-05-26
+- [x] Test: forgot-password always returns 200 (no enumeration) — 2026-05-26
+
+**API — SMTP configuration (superadmin only):**
+- [x] Internal `mailer` package (`internal/mailer/`): wraps `net/smtp`; reads config from `instance_settings` at send time; exposes `Send(to, subject, htmlBody) error` and `IsConfigured() bool` — 2026-05-26
+- [x] `GET /admin/smtp` — return current SMTP config with password masked; 403 if not superadmin — 2026-05-26
+- [x] `PUT /admin/smtp` — upsert config (host, port, username, password, from_name, from_email, encryption); validate by sending test email to caller; 403 if not superadmin — 2026-05-26
+- [x] `POST /admin/smtp/test` — send test email without saving; 403 if not superadmin — 2026-05-26
+- [x] `DELETE /admin/smtp` — clear SMTP config; 403 if not superadmin — 2026-05-26
+- [ ] SMTP password encrypted at rest (currently stored as JSON in instance_settings; encryption deferred)
+- [x] Test: 403 for non-superadmin on admin settings endpoints — 2026-05-26
+
+**API — instance settings (superadmin only):**
+- [x] `GET /admin/settings` — return all instance settings (registration_policy, default_timezone, default_date_format, default_week_start); 403 if not superadmin — 2026-05-26
+- [x] `PATCH /admin/settings` — update one or more settings; validate values; 403 if not superadmin — 2026-05-26
+- [ ] Test: set registration_policy to "open" → registration without invite succeeds (manual only)
+
+**API — orphaned users (superadmin only):**
+- [x] `GET /admin/users` — return all users with team membership count and status; support `?orphaned=true` filter; 403 if not superadmin — 2026-05-26
+- [x] Test: superadmin can list all users — 2026-05-26
+
+**OpenAPI + types:**
+- [x] Add `PATCH /users/me` to spec (UpdateProfile request/response) — 2026-05-26
+- [x] Add `PUT /users/me/password` to spec (ChangePassword request/response) — 2026-05-26
+- [x] Add `POST /auth/forgot-password` and `POST /auth/reset-password` to spec — 2026-05-26
+- [x] Add `GET/PUT/DELETE /admin/smtp` and `POST /admin/smtp/test` to spec — 2026-05-26
+- [x] Add `GET/PATCH /admin/settings` to spec — 2026-05-26
+- [x] Add `GET /admin/users` to spec — 2026-05-26
+- [x] Regenerate TypeScript types — 2026-05-26
+
+**Web — Settings page layout:**
+- [x] Rework `SettingsPage.tsx`: sidebar nav with grouped nav items, active state styling — 2026-05-26
+- [x] Route structure: `/settings/profile`, `/settings/security`, `/settings/preferences`, `/settings/tokens`, `/settings/admin` (superadmin only) — 2026-05-26
+- [x] Admin nav items hidden for non-superadmin users — 2026-05-26
+- [x] Sub-route content renders in right panel with title + subtitle header pattern — 2026-05-26
+
+**Web — Profile (`/settings/profile`):**
+- [x] Display name field with save button; calls `PATCH /users/me` — 2026-05-26
+- [x] Identity picker (reuse `IdentityWidget` from 9.6): color + icon selection; changes call `PATCH /users/me` with new color/icon — 2026-05-26
+- [x] Identity badge preview (avatar at current color/icon) — 2026-05-26
+- [x] Email shown read-only with explanatory note ("Email changes are not yet supported") — 2026-05-26
+- [x] Inline success/error feedback on save — 2026-05-26
+
+**Web — Security (`/settings/security`):**
+- [x] Change password form: current password, new password (min 8 chars), confirm new password — 2026-05-26
+- [x] Validation: new + confirm must match; save disabled until valid — 2026-05-26
+- [x] On success: show success message, clear form — 2026-05-26
+- [x] On 401 WRONG_PASSWORD: show "Current password is incorrect" error — 2026-05-26
+- [x] Calls `PUT /users/me/password` — 2026-05-26
+
+**Web — Preferences (`/settings/preferences`):**
+- [x] Regional section: timezone (IANA selector), date format dropdown, week starts on — 2026-05-26
+- [x] Appearance section: theme toggle (Light / Dark / System) — 2026-05-26
+- [x] All values read/written via existing `GET/PUT /users/me/preferences` endpoints — 2026-05-26
+- [x] Theme change applies immediately — 2026-05-26
+- [ ] Defaults section: default team/timeline dropdowns (deferred — requires loading teams/timelines)
+
+**Web — API Tokens (`/settings/tokens`):**
+- [x] Table: name, scope badge, last used (relative time or "Never"), created date, revoke button — 2026-05-26
+- [x] Create form: name input + scope picker with descriptions (read-only / add / edit-own / edit-all) — 2026-05-26
+- [x] On creation: one-time secret reveal with copy-to-clipboard button; close dismisses — 2026-05-26
+- [x] Revoke: inline confirmation → `DELETE /tokens/:id` → remove from list — 2026-05-26
+- [x] Empty state when no tokens exist — 2026-05-26
+
+**Web — Admin: Instance (`/settings/admin`):**
+- [x] Instance defaults form: default timezone, default week start — calls `PATCH /admin/settings` — 2026-05-26
+- [x] Registration policy toggle: invite-only vs open — calls `PATCH /admin/settings` — 2026-05-26
+- [x] Instance name field — 2026-05-26
+- [x] Save button with inline success feedback — 2026-05-26
+
+**Web — Admin: Email / SMTP (`/settings/admin`):**
+- [x] SMTP form: host, port (2-column), username, password (masked with eye toggle), from name, from email (2-column), encryption dropdown — 2026-05-26
+- [x] "Save SMTP settings" button → `PUT /admin/smtp` — 2026-05-26
+- [x] "Send test email" button → `POST /admin/smtp/test`; transitions through Sending → Sent/Failed — 2026-05-26
+- [x] Info note: "When SMTP is not configured, password resets and email invitations are unavailable" — 2026-05-26
+
+**Web — Admin: Users (`/settings/admin`):**
+- [x] Orphaned alert banner (when count > 0): warning-colored, count + "View" button — 2026-05-26
+- [x] Tabs: "All (N)" / "Orphaned (N)" — segmented control — 2026-05-26
+- [x] Search input: filter by name or email — 2026-05-26
+- [x] User rows: avatar, name, email, team count, status badge — 2026-05-26
+- [ ] Click user row → opens existing `MemberModal` (deferred — requires passing modal state up)
+- [ ] Orphaned users: "Assign team" action (deferred)
+
+**Web — Forgot password flow:**
+- [x] `/forgot-password` public page: email input → shows "If an account exists, a reset link has been sent" — 2026-05-26
+- [x] `/reset-password?token=...` public page: new password + confirm → success redirects to `/login` — 2026-05-26
+- [x] Login page: "Forgot password?" link below the password field — 2026-05-26
+- [ ] When SMTP not configured: `/forgot-password` shows "contact admin" (deferred — requires public SMTP status endpoint)
+
+**Testing & verification:**
+- [x] `golangci-lint run` clean — 2026-05-26
+- [x] `go test ./...` passes — 2026-05-26
+- [x] `pnpm --filter web lint` clean — 2026-05-26
+- [ ] Manual: change display name → visible in sidebar and team member lists after refresh
+- [ ] Manual: change identity color/icon → propagated to team memberships; visible on Gantt bars
+- [ ] Manual: change password → old password rejected, new password works
+- [ ] Manual: forgot-password → email received → click link → set new password → login works
+- [ ] Manual: create API token → secret shown once → copy → use in curl → works; revoke → rejected
+- [ ] Manual: configure SMTP → test email arrives → save persists across restart
+- [ ] Manual: set instance defaults → values persist
+- [ ] Manual: view all users; filter orphaned
+- [ ] Manual: toggle registration policy → test with/without invite
+- [ ] Manual: non-superadmin does not see admin sections
+- [x] `docs/log.md` Phase 10.1.3 entry written — 2026-05-26
+
+---
+
+### Member Access & Data Lifecycle (Phase 10.1.4)
+Closes data-integrity and access-revocation gaps from 10.1.2. Protects historical activity data, defines the three membership lifecycle states, and gives superadmins a single "revoke all access" action.
+
+**Schema (migration 011):**
+- [x] Verify `activity_assignments.team_member_id` FK has `ON DELETE RESTRICT`; add explicit constraint in migration if missing — 2026-05-27
+- [x] Same check for `timeline_access.team_member_id` — 2026-05-27
+- [x] Enable `PRAGMA foreign_keys = ON` in DB initialization (`internal/db/`) — already set since early phases — 2026-05-27
+- [x] Update `migrations_test.go` to assert FK pragma is on and both FKs are RESTRICT — 2026-05-27
+
+**API — removal guard:**
+- [x] `DELETE /teams/:id/members/:memberId` — count `activity_assignments` before deleting; if count > 0, return 409 `MEMBER_HAS_ASSIGNMENTS` with `{ "assignmentCount": N }` — 2026-05-27
+- [x] Zero-assignment removal continues to hard-delete as before (deletes timeline_access first due to RESTRICT FK) — 2026-05-27
+- [x] Add `MemberHasAssignments` error handling to OpenAPI spec via `RevokeUserResult` and inline error response — 2026-05-27
+
+**API — full revoke (superadmin only):**
+- [x] `POST /users/:id/revoke` — new endpoint; superadmin only; atomically: set `users.archived_at`, set `archived_at` on all `team_members` for the user, hard-delete `team_members` rows where assignment count is 0; return `{ accountDeactivated: bool, membershipsInactivated: int, membershipsRemoved: int }` — 2026-05-27
+- [x] Add `RevokeUser` repo method: wraps the three steps in a transaction — 2026-05-27
+- [x] 403 if caller is not superadmin; 404 if user not found — 2026-05-27
+- [x] Add `POST /users/{id}/revoke` to OpenAPI spec; regenerate TypeScript types — 2026-05-27
+
+**Web — TeamModal Members tab:**
+- [x] On 409 `MEMBER_HAS_ASSIGNMENTS` from the remove (×) button, show inline error beneath the member row: "N assignment(s) — [Inactivate instead]" where the bracketed link calls `POST /teams/:id/members/:memberId/archive` — 2026-05-27
+- [x] On inactivate success from the inline error, dismiss the error and re-fetch the member list — 2026-05-27
+- [x] Clear the inline error before each new removal attempt for the same member — 2026-05-27
+
+**Web — MemberModal:**
+- [x] Add "Revoke all access" button to Super Admin Actions section (red, below Delete) — 2026-05-27
+- [x] Button hidden when user is already fully inactivated (`users.archived_at` set) — 2026-05-27
+- [x] Confirmation dialog: lists all three effects (account deactivated, memberships inactivated, zero-history memberships removed) — 2026-05-27
+- [x] On confirm: call `POST /users/:id/revoke`; on success show a summary chip for 2s, then close modal — 2026-05-27
+- [x] Invalidate `['teams']` query cache on success — 2026-05-27
+
+**Testing & verification:**
+- [ ] Manual: remove a member with assignments → 409; inline error appears; "Inactivate instead" button works
+- [ ] Manual: remove a member with zero assignments → success
+- [ ] Manual: superadmin uses "Revoke all access" → account deactivated; user can no longer log in; existing Gantt bars still show their avatar name
+- [ ] Manual: inactivated members' avatars still render on Gantt bars (data preserved)
+- [x] `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean — 2026-05-27
+- [x] `docs/log.md` Phase 10.1.4 entry written — 2026-05-27
+
+---
+
+### Status Templates & Timeline Statuses (Phase 10.2)
+API + UI bundled. Required before Phase 11.3 (Kanban). Depends on 10.1.2 (Members).
+
+**Schema (migration 012):**
+- [x] Create `status_templates` (team-level), `status_template_items`, `statuses` (timeline-level) tables — 2026-05-27
+- [x] Rebuild `activities` table so `status_id` references `statuses` instead of `team_statuses`; drop `team_statuses` — 2026-05-27
+- [x] Update `migrations_test.go` — 2026-05-27
+
+**Go API:**
+- [x] `StatusTemplate`, `StatusTemplateItem`, `Status` models — 2026-05-27
+- [x] `StatusRepo`: list/get/create/update/delete templates; list/get/create/update/delete items; `SeedDefaultTemplate`; `CopyTemplateToTimeline` — 2026-05-27
+- [x] `handleCreateTeam` — seeds "Simple" template (Planned / In Progress / Done) on team creation — 2026-05-27
+- [x] `handleCreateTimeline` — copies first template's items into live statuses on timeline creation — 2026-05-27
+- [x] `GET /teams/:id/status-templates` — list templates with items — 2026-05-27
+- [x] `POST /teams/:id/status-templates` — create template — 2026-05-27
+- [x] `PATCH /status-templates/:id` — rename, reorder — 2026-05-27
+- [x] `DELETE /status-templates/:id` — blocked if last template on team — 2026-05-27
+- [x] `POST /status-templates/:id/items` — add item — 2026-05-27
+- [x] `PATCH /status-template-items/:id` — rename, recolor, reicon, toggle is_closed, reorder — 2026-05-27
+- [x] `DELETE /status-template-items/:id` — blocked if last item in template — 2026-05-27
+- [x] `GET /teams/:id/timelines/:timelineId/statuses` — list statuses for a timeline — 2026-05-27
+
+**OpenAPI + types:**
+- [x] `StatusTemplate`, `StatusTemplateItem`, `Status` schemas + input types — 2026-05-27
+- [x] All new endpoint paths — 2026-05-27
+- [x] Regenerate TypeScript types — 2026-05-27
+
+**Web:**
+- [x] `useStatusTemplates.ts` — hooks for all status template and statuses endpoints — 2026-05-27
+- [x] `StatusTemplatesTab.tsx` — template list with expandable item rows, inline editing, color picker, is_closed toggle, add/delete guards — 2026-05-27
+- [x] `TeamModal.tsx` — "Status Templates" tab added (locked until team saved) — 2026-05-27
+
+**Testing & verification:**
+- [x] `status_handler_test.go` — default seeding, admin-only create, last-template guard, item add/delete, statuses copied to timeline — 2026-05-27
+- [x] `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean — 2026-05-27
+- [ ] Manual: new team gets "Simple" template; open TeamModal → Status Templates tab shows Planned / In Progress / Done
+- [ ] Manual: create second template, add items, rename/recolor items
+- [ ] Manual: delete non-last template → success; delete last template → blocked with 409
+- [ ] Manual: create timeline → GET statuses returns 3 rows matching Simple template
+- [x] `docs/log.md` Phase 10.2 entry written — 2026-05-27
+
+---
+
+### Timelines — Full CRUD (Phase 10.3)
+Closes the Timelines cornerstone. Today timelines can be created in the wizard and never managed afterward; access lists exist in schema but have no CRUD endpoints.
+
+**API — timeline-level:**
+- [x] `PATCH /timelines/:id` — rename, change start/end date, color, icon (team or timeline admin) — 2026-05-27
+- [x] `DELETE /timelines/:id` — hard delete; team admin only — 2026-05-27
+- [x] Archive endpoints already in Phase 9
+
+**API — timeline statuses (editing):**
+- [x] `POST /teams/:id/timelines/:timelineId/statuses` — add a status — 2026-05-27
+- [x] `PATCH /statuses/:id` — rename, recolor, reicon, toggle is_closed, reorder — 2026-05-27
+- [x] `DELETE /statuses/:id` — requires replacementStatusId if activities reference it; blocked if last status — 2026-05-27
+
+**API — access list:**
+- [x] `GET /teams/:id/timelines/:timelineId/access` — list current grants (team member + role) — 2026-05-27
+- [x] `PUT /teams/:id/timelines/:timelineId/access/:memberId` — grant or update role (admin / member) — 2026-05-27
+- [x] `DELETE /teams/:id/timelines/:timelineId/access/:memberId` — revoke grant — 2026-05-27
+
+**Web:**
+- [x] "New timeline" affordance in the sidebar timelines list → `TimelineModal` in create mode (name, date range, identity, template preview) — 2026-05-27
+- [x] Edit-timeline modal from the sidebar gear icon: rename, change date range, identity, archive, delete — 2026-05-27
+- [x] `TimelineModal` Statuses tab: add/edit/delete live statuses; delete-with-replacement dialog — 2026-05-27
+- [x] `TimelineModal` Access tab: search-pick team members, role toggle, remove — 2026-05-27
+- [x] Archived timelines under a collapsed "Archived" group in the sidebar; Restore button for unarchive — 2026-05-27
+- [x] Activity detail panel: status dropdown populated from live timeline statuses — 2026-05-27
+- [x] "Hide closed" toggle in GanttToolbar (shown when timeline has closed statuses) — 2026-05-27
+- [x] `TimelineAccessEntry` model + `TimelineStore` interface expanded; `canAdminTimeline` helper — 2026-05-27
+
+**Testing & verification:**
+- [x] `TestUpdateTimeline_AdminCanRename`, `TestUpdateTimeline_NonAdminForbidden` — 2026-05-27
+- [x] `TestDeleteTimeline_AdminCanDelete`, `TestDeleteTimeline_NonAdminForbidden` — 2026-05-27
+- [x] `TestTimelineAccessList_GrantAndRevoke` — 2026-05-27
+- [x] `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean — 2026-05-27
+- [ ] Manual: create second timeline from sidebar → modal opens → create → new timeline appears
+- [ ] Manual: edit timeline name, date range → save → sidebar reflects changes
+- [ ] Manual: add/edit/delete statuses via Statuses tab → activity detail panel shows updated list
+- [ ] Manual: grant/revoke member access via Access tab → member can/cannot access timeline
+- [ ] Manual: archive timeline → disappears from active list → appears in Archived → Restore restores it
+- [ ] Manual: delete timeline → confirm → gone from sidebar
+- [ ] Manual: hide-closed toggle hides activities with closed status; unchecking restores them
+- [x] `docs/log.md` Phase 10.3 entry written — 2026-05-27
+
+---
+
+### Preference Consumption & Session Handling (Phase 10.4.1)
+Wires user and instance preferences (stored in 10.1.3) into views. Fixes the broken session lifecycle (access tokens expire after 15 min with no refresh interceptor). Adds cosmetic branding for admins.
+
+**Session lifecycle:**
+- [x] Add 401 interceptor to `apiFetch` (`packages/web/src/lib/api.ts`): on 401, attempt silent refresh via stored refresh token, retry original request; if refresh also fails, clear tokens and redirect to `/login`
+- [x] Mutex/queue so concurrent 401s don't fire multiple refresh calls
+- [x] Invisible to user — no toast, no banner (standard SPA pattern)
+
+**Preference consumption:**
+- [x] Create `useFormatDate()` hook — reads user's `date_format` preference, returns a formatter
+- [x] Gantt `granularity.ts` `formatLabel()`: replace hardcoded `en-US` with user's date format preference
+- [x] Gantt `granularity.ts` `startOfWeek()`: replace hardcoded Monday with user's `week_start` preference; Gantt columns align to user's chosen start day
+- [ ] `ActivityDetailPanel` and other date displays: consume date format preference (date inputs are native browser — no explicit text formatting needed until a read-only date display surface is added)
+- [ ] Public/shared timeline views: fall back to instance-level defaults when no user is logged in (deferred — shared views ship in Phase 13)
+- [x] Theme: sync server-side preference on login (`useDarkMode.ts` — added `applyTheme`; `ThemeSync` component applies server value on auth init)
+
+**Admin — branding (`/settings/admin`):**
+- [x] Instance name field (stored in `instance_settings`); shown in browser tab title and login page
+- [x] Accent color override (stored in `instance_settings`); applies globally via CSS custom property
+- [ ] Optional logo upload (stretch — deferred)
+
+---
+
+### Activity Schema Normalization — Drop team_id (Phase 10.4.2)
+Removes `activities.team_id` (redundant now that `timeline_id` is stored). Hardens `timeline_id` to NOT NULL. Moves activity routes to `/teams/{id}/timelines/{timelineId}/activities` (team-scoped prefix avoids Go 1.22 mux conflict with `GET /timelines/share/{token}`).
+
+**Schema (migration 015):**
+- [x] Backfill NULL `timeline_id` rows (assign to team's oldest timeline) — 2026-05-28
+- [x] Rebuild `activities` table without `team_id`, with `timeline_id TEXT NOT NULL REFERENCES timelines(id) ON DELETE CASCADE` — 2026-05-28
+- [x] Recreate `idx_activities_timeline_id` on the new table — 2026-05-28
+
+**API — Go:**
+- [x] `models.Activity`: remove `TeamID` field; change `TimelineID` from `*string` to `string` — 2026-05-28
+- [x] `ActivityRepo.Create`: remove `team_id` from INSERT — 2026-05-28
+- [x] `ActivityRepo.ListByTeam` → `ListByTimeline(timelineID string, ...)`: query becomes `WHERE timeline_id = ?` — 2026-05-28
+- [x] `handleCreateActivity`, `handleListActivities`: path params are `teamId` + `timelineId`; look up timeline to verify ownership — 2026-05-28
+- [x] `handleUpdateActivity`, `handleDeleteActivity`, `handleArchive/Unarchive`: replace `activity.TeamID` with timeline lookup — 2026-05-28
+- [x] WebSocket broadcasts: derive `TeamID` from timeline lookup — 2026-05-28
+- [x] Move activity routes: `POST /teams/{id}/timelines/{timelineId}/activities`, `GET /teams/{id}/timelines/{timelineId}/activities` — 2026-05-28
+
+**OpenAPI + types:**
+- [x] Update `Activity` schema: replace `teamId` with `timelineId` (required, non-nullable) — 2026-05-28
+- [x] Update activity endpoints to new team-scoped path — 2026-05-28
+- [x] Regenerate TypeScript types — 2026-05-28
+
+**Frontend:**
+- [x] Rename `useTeamActivities` → `useTimelineActivities(teamId, timelineId, from, to)` — cache key `['timelines', timelineId, 'activities']` — 2026-05-28
+- [x] `useCreateActivity(teamId, timelineId)`: URL becomes `/teams/${teamId}/timelines/${timelineId}/activities`; no `timelineId` in request body — 2026-05-28
+- [x] `useUpdateActivity(timelineId)`, `useDeleteActivity(timelineId)`: cache key updated — 2026-05-28
+- [x] `useTeamActivitySync`: update cache key lookups to `['timelines', timelineId, 'activities']` — 2026-05-28
+- [x] `GanttView`: use `useTimelineActivities`; `timelineId` prop is now required (not optional) — 2026-05-28
+- [x] `ActivityCreatePanel`: `teamId` + `timelineId` passed to `useCreateActivity`; no `timelineId` in body — 2026-05-28
+- [x] `ActivityDetailPanel`: `timelineId` required; passed to `useUpdateActivity`/`useDeleteActivity` — 2026-05-28
+- [x] `DashboardPage`: updated GanttView/ActivityCreatePanel/ActivityDetailPanel prop signatures — 2026-05-28
+
+**Tests:**
+- [x] `activity_repo_test.go`: `makeActivity` uses `timelineID`; all `ListByTeam` calls → `ListByTimeline` — 2026-05-28
+- [x] Added `TestActivityRepo_ListByTimeline_Filter` — 2026-05-28
+- [x] `activity_handler_test.go`: `activityTestSetup` creates a timeline; all routes updated — 2026-05-28
+- [x] `archive_test.go`, `revoke_user_test.go`, `team_handler_test.go`: create timeline before activity; use new routes — 2026-05-28
+- [x] `user_repo_test.go`, `migrations_test.go`: activity INSERTs use `timeline_id` instead of `team_id` — 2026-05-28
+
+**Testing & verification:**
+- [x] `golangci-lint run` clean — 2026-05-28
+- [x] `go test ./...` passes — 2026-05-28
+- [x] `pnpm --filter web lint` clean — 2026-05-28
+- [ ] Manual: Gantt view loads activities for the active timeline
+- [ ] Manual: Creating an activity from the panel associates it with the correct timeline
+- [ ] Manual: `PRAGMA foreign_key_check` returns no rows after migration on Docker DB
+
+---
+
+### UI Consistency — Modals, Sidebar & Toolbar (Phase 10.4.3) [was mislabeled 10.4.2]
+Standardizes visual patterns across TeamModal, MemberModal, TimelineModal, sidebar, and Gantt toolbar. Eliminates three different inline-editing patterns, three different archive button styles, three different confirmation dialog implementations, and mixed hardcoded hex colors vs CSS variables.
+
+**Inline name editing (3 → 1):**
+- [x] Extract shared `InlineEditableTitle` component: always-input with subtle bottom border on hover/focus — 2026-05-28
+- [x] Replace `MemberModal.tsx` name editing (focus underline pattern) with `InlineEditableTitle` — 2026-05-28
+- [x] Replace `TeamModal.tsx` name editing (toggle div/input state machine) with `InlineEditableTitle` — 2026-05-28
+- [x] Replace `TimelineModal.tsx` name editing (no visual cue) with `InlineEditableTitle` — 2026-05-28
+
+**Archive/restore buttons (3 → 1):**
+- [x] Standardize archive button: amber bg+border+icon (aligned with MemberModal prominence) — 2026-05-28
+- [x] Standardize restore button: teal bg+border+RotateCcw icon — 2026-05-28
+- [x] Fix `TeamModal.tsx` archive button (was neutral gray) — 2026-05-28
+- [x] Fix `TimelineModal.tsx` archive button (was border-only, no icon) — 2026-05-28
+
+**Confirmation dialogs (3 → 1):**
+- [x] Consolidate into shared `ConfirmDialog` component with color variants (red, amber, indigo, teal) — 2026-05-28
+- [x] Replace `MemberModal.tsx` custom ConfirmDialog — 2026-05-28
+- [x] Replace `TeamModal.tsx` ArchiveDialog — 2026-05-28
+- [x] Replace `TimelineModal.tsx` inline confirmation panels — 2026-05-28
+
+**Color system (mixed → CSS variables):**
+- [x] Migrate `TeamModal.tsx` hardcoded hex colors to CSS variables — 2026-05-28
+- [x] Migrate `MemberModal.tsx` hardcoded hex colors to CSS variables — 2026-05-28
+- [x] Verified `TimelineModal.tsx` CSS variable usage is consistent — 2026-05-28
+
+**Sidebar & toolbar audit:**
+- [x] Sidebar member/timeline rows: Badge usage, hover states, gear icon consistency verified — 2026-05-28
+- [x] Gantt toolbar controls: Tailwind + CSS vars, consistent with modal footer patterns — 2026-05-28
+- [x] No inconsistencies requiring fixes found — 2026-05-28
+
+---
+
+### Gantt Interaction & Activity Edit Polish (Phase 10.4.4)
+
+**Schema (migration 016):**
+- [x] Add `notes TEXT` column to `activities` (nullable) — 2026-05-29
+
+**Go API:**
+- [x] `Activity` model: add `Notes *string` field — 2026-05-29
+- [x] `ActivityRepo.Update`: include `notes` in UPDATE SET — 2026-05-29
+- [x] `handleUpdateActivity`: parse `notes` from PATCH body — 2026-05-29
+
+**OpenAPI + types:**
+- [x] Add `notes` to `Activity` schema and PATCH body — 2026-05-29
+- [x] Regenerate TypeScript types — 2026-05-29
+- [x] Add `notes` to `UpdateActivityInput` patch type in `useTeamActivities.ts` — 2026-05-29
+
+**Gantt — resizable activity column:**
+- [x] Label column drag handle on right edge; min 140px, max 400px; live resize — 2026-05-29
+
+**Gantt — click-to-activate before drag:**
+- [x] Unselected bars show `cursor: pointer`; drag/resize only starts when bar is selected — 2026-05-29
+- [x] Resize handles (left/right edge) visible only on selected bars — 2026-05-29
+
+**Gantt — bar drag updates sidebar dates live:**
+- [x] `onBarDragProgress` callback fires during mousemove with current snapped dates — 2026-05-29
+- [x] `DashboardPage` stores `liveDragDates` and passes to `ActivityDetailPanel` — 2026-05-29
+- [x] `ActivityDetailPanel` shows live dates in date inputs without triggering saves — 2026-05-29
+- [x] `onBarDragEnd` callback clears live dates when drag completes — 2026-05-29
+
+**Gantt — finer-grained snap during drag:**
+- [x] `snapDivisorFor(granularity)`: day→1, week→7, month→4, quarter→3, year→4 — 2026-05-29
+- [x] `colFracToDate` interpolates fractional column positions for accurate date mapping — 2026-05-29
+- [x] Drag mousemove uses `Math.round(x / step) * step` with finer step — 2026-05-29
+- [x] `resolvedGranularity` prop passed from GanttView → GanttGrid — 2026-05-29
+
+**Gantt — "Hide closed" moves to filter preset:**
+- [x] Remove `hideClosed` checkbox and props from `GanttToolbar` — 2026-05-29
+- [x] Add `'open'` preset to `FilterDropdown` ("Open only — Hide activities with a closed status") — 2026-05-29
+- [x] Add `'open'` to `ActiveFilter` preset type in `FilterContext` — 2026-05-29
+- [x] `GanttView` reads `activeFilter.id === 'open'` to activate closed-status filtering — 2026-05-29
+- [x] Remove `hideClosed` state from `DashboardPage` — 2026-05-29
+
+**Activity Edit Sidebar — layout and field changes:**
+- [x] Remove "All day" checkbox — 2026-05-29
+- [x] Remove human-readable date summary line — 2026-05-29
+- [x] Move Description field directly below date pickers — 2026-05-29
+- [x] Restyle Assigned To with bordered card style matching create panel — 2026-05-29
+- [x] Status dropdown: replaced plain `<select>` with rich dropdown (color dot + name + CLOSED badge) — 2026-05-29
+- [x] Remove "Identity" line from Classify section — 2026-05-29
+- [x] Rename "Details" → "Advanced" — 2026-05-29
+- [x] Add Notes textarea (multi-line, resizable) backed by new `notes` column — 2026-05-29
+
+**Testing & verification:**
+- [x] `golangci-lint run` clean — 2026-05-29
+- [x] `go test ./...` passes — 2026-05-29
+- [x] `pnpm --filter web lint` clean — 2026-05-29
+- [ ] Manual: drag label column edge → width changes and persists during session
+- [ ] Manual: click bar (unselected) → selects it; second drag moves/resizes it
+- [ ] Manual: drag bar at week zoom → date tooltip shows day-level changes, not week-level
+- [ ] Manual: drag bar at month zoom → snaps to week boundaries
+- [ ] Manual: select "Open only" filter → closed-status activities hidden; clearing restores them
+- [ ] Manual: edit panel shows only date pickers (no allDay, no date summary)
+- [ ] Manual: description moves below dates; matches create panel layout
+- [ ] Manual: assignees use bordered card style (colored border + tint when selected)
+- [ ] Manual: status dropdown shows color dot + name; selection persists
+- [ ] Manual: notes textarea saves and loads correctly
+- [ ] Manual: bar drag → sidebar date inputs update live; stop drag → dates reset to server value
+
+---
+
+### Activity Tags, Parent & Progress Fields (Phase 10.4.5)
+Replaces the three "coming soon" stubs in the activity edit panel with functional fields. Tags are normalized (team-scoped `tags` table). Parent and progress already had backend support; this phase adds the UI.
+
+**Schema (migration 017):**
+- [x] Create `tags` table: `id, team_id, name, color, created_by, created_at`; UNIQUE(team_id, name) — 2026-05-30
+- [x] Rebuild `activity_tags`: drop old text-junction table, create normalized FK junction — 2026-05-30
+
+**Go API:**
+- [x] `Tag` model added to `models.go` — 2026-05-30
+- [x] `Activity.TagIDs []string` field added (same `db:"-"` pattern as `AssignedMemberIDs`) — 2026-05-30
+- [x] `TagRepo`: `Create`, `GetByID`, `ListByTeam`, `Update`, `Delete` — 2026-05-30
+- [x] `ActivityRepo.SetTags` / `GetTags` — transaction pattern matching `SetAssignments` — 2026-05-30
+- [x] `ActivityRepo.ListByTimeline`: batch-populates `TagIDs` via `sqlx.In` (same as `AssignedMemberIDs`) — 2026-05-30
+- [x] `tag_handler.go`: `GET /teams/{id}/tags`, `POST /teams/{id}/tags`, `PATCH /tags/{id}`, `DELETE /tags/{id}` — 2026-05-30
+- [x] `activity_handler.go`: `handleCreateActivity` and `handleUpdateActivity` accept `tagIds`; `setActivityArchive` populates `TagIDs` on response — 2026-05-30
+- [x] `isUniqueConstraintError` helper added to `helpers.go` — 2026-05-30
+- [x] `server.go`: `tags *db.TagRepo` field; tag routes registered — 2026-05-30
+- [x] `main.go`: `db.NewTagRepo(database)` instantiated and passed to `NewServer` — 2026-05-30
+
+**OpenAPI + types:**
+- [x] `Tag` schema added to `openapi.yaml` — 2026-05-30
+- [x] `tagIds` added to `Activity` schema and create/update request bodies — 2026-05-30
+- [x] Regenerated TypeScript types — 2026-05-30
+
+**Frontend:**
+- [x] `useTags.ts`: `useTags`, `useCreateTag`, `useUpdateTag`, `useDeleteTag` hooks — 2026-05-30
+- [x] `TagInput.tsx`: combobox with colored pills, autocomplete, create-on-the-fly — 2026-05-30
+- [x] `ActivityDetailPanel`: Tags stub → `TagInput`; Parent stub → `<select>` from same-timeline activities; Progress stub → `<input type="range">`; tagIds/parentActivityId/percentComplete in state and save calls — 2026-05-30
+- [x] `ActivityCreatePanel`: `TagInput` added (below Assignees); `tagIds` in create mutation — 2026-05-30
+- [x] `GanttGrid`: progress fill overlay on bars (darker shade at `percentComplete%` width) — 2026-05-30
+- [x] `vite.config.ts`: `/tags` proxy added — 2026-05-30
+
+**Sample data:**
+- [x] `sample_data/10_tags.sql`: 8 tags for Product Marketing team + activity_tag associations — 2026-05-30
+
+**Tests:**
+- [x] `tag_repo_test.go`: CRUD, unique constraint, SetTags/GetTags, ListByTimeline TagIDs population — 2026-05-30
+- [x] `tag_handler_test.go`: create/list/update/delete happy paths, 409 duplicate, 404 not found, 403 non-member — 2026-05-30
+- [x] All existing test files updated to pass `db.NewTagRepo(database)` to `NewServer` — 2026-05-30
+
+**Testing & verification:**
+- [x] `golangci-lint run` clean — 2026-05-30
+- [x] `go test ./...` passes — 2026-05-30
+- [x] `pnpm --filter web lint` clean — 2026-05-30
+- [ ] Manual: create a tag in the activity detail panel; it appears in team tag list for future activities
+- [ ] Manual: tag autocomplete shows existing team tags; typing a new name offers "Create" option
+- [ ] Manual: tagged activity shows tag pills in the detail panel; pills persist across panel close/reopen
+- [ ] Manual: set parent activity; verify it persists across reload
+- [ ] Manual: drag the progress slider; Gantt bar shows progress fill; value persists
+- [ ] Manual: create activity with tags from the create panel; tags appear in detail panel
+
+---
+
+### Filter Implementation (Phase 10.4.6)
+Full filter system: filter definition language, client-side engine, all 6 presets wired, filter builder UI, team filter promotion, and management panel.
+
+**Schema (migration 018):**
+- [x] `ALTER TABLE saved_filters ADD COLUMN is_team_filter BOOLEAN NOT NULL DEFAULT 0` — 2026-05-30
+
+**Backend:**
+- [x] `SavedFilter` model: add `IsTeamFilter bool` — 2026-05-30
+- [x] `SavedFilterRepo.Create`: include `is_team_filter` in INSERT — 2026-05-30
+- [x] `SavedFilterRepo.Update`: include `is_team_filter` in UPDATE — 2026-05-30
+- [x] `SavedFilterRepo.ListByTeamUser`: return user's own filters + all team filters (`is_team_filter = 1`) — 2026-05-30
+- [x] `handleCreateSavedFilter`: accept `isTeamFilter` (admin-only to set true) — 2026-05-30
+- [x] `handleUpdateSavedFilter`: admin can promote/demote; admin can edit name/def of existing team filters — 2026-05-30
+- [x] `handleDeleteSavedFilter`: admin can delete team filters they don't own — 2026-05-30
+
+**OpenAPI + types:**
+- [x] Add `isTeamFilter` boolean to `SavedFilter` schema — 2026-05-30
+- [x] Add `isTeamFilter` to `CreateSavedFilterJSONBody` and `PatchSavedFilterJSONBody` — 2026-05-30
+- [x] Update `api_types.gen.go` manually with new fields — 2026-05-30
+- [x] Regenerate TypeScript types (`pnpm --filter shared generate`) — 2026-05-30
+
+**Frontend — filter engine:**
+- [x] `lib/filterTypes.ts` — FilterDefinition type system (logic, conditions, operators per field type) — 2026-05-30
+- [x] `lib/filterEngine.ts` — `matchesFilter(activity, filter, ctx)` pure function — 2026-05-30
+- [x] `lib/presetFilters.ts` — `applyActiveFilter(activities, activeFilter, memberIdsByUserId, ctx)` — all 6 presets + member + saved filter kinds — 2026-05-30
+
+**Frontend — GanttView wiring:**
+- [x] Replace `closedStatusIds` prop with `timelineStatuses`, `savedFilters`, `tags` props — 2026-05-30
+- [x] Derive `closedStatusIds`, `statusesByTimeline`, `memberIdsByUserId`, `currentUserMemberIds` inside GanttView — 2026-05-30
+- [x] Replace old open-only filter with `applyActiveFilter` — makes all 6 presets + member + saved filters work — 2026-05-30
+
+**Frontend — filter builder UI:**
+- [x] `components/filters/FilterConditionRow.tsx` — field/op/value row with multi-select, text, number, date inputs — 2026-05-30
+- [x] `components/filters/FilterEditor.tsx` — name input, AND/OR toggle, condition rows, Save/Delete/Cancel footer — 2026-05-30
+- [x] `components/filters/FilterManagePanel.tsx` — My Filters + Team Filters sections with edit/delete/promote/demote — 2026-05-30
+
+**Frontend — FilterDropdown updates:**
+- [x] Partition saved filters into `teamFilters` and `myFilters` — 2026-05-30
+- [x] Render "Team filters" section with real data (replacing stub) — 2026-05-30
+- [x] Add "Manage filters" link at bottom of dropdown — 2026-05-30
+- [x] Add `onOpenManager` prop — 2026-05-30
+
+**Frontend — DashboardPage wiring:**
+- [x] Add `useSavedFilters` and `useTags` hooks — 2026-05-30
+- [x] Add `filterManageOpen` and `editingFilter` state — 2026-05-30
+- [x] Wire `FilterEditor` and `FilterManagePanel` into `RightSidebar` — 2026-05-30
+- [x] Pass `timelineStatuses`, `savedFilters`, `tags` to GanttView — 2026-05-30
+- [x] Add `onOpenFilterManager` to `TopBar` — 2026-05-30
+- [x] Update `useSavedFilters.ts`: add `isTeamFilter` to `UpdateSavedFilterInput` — 2026-05-30
+
+**Tests:**
+- [x] `lib/filterEngine.test.ts` — 20+ unit tests: each field type, each operator, AND/OR, edge cases, case-insensitive — 2026-05-30
+- [x] `lib/presetFilters.test.ts` — 11 unit tests: each preset, member filter, saved filter delegation — 2026-05-30
+- [x] `saved_filter_handler_test.go`: 5 new tests — team filter list includes team filters, admin can promote, non-admin cannot promote, admin can delete team filter, non-admin cannot — 2026-05-30
+- [x] `migrations_test.go`: assert `is_team_filter` column exists after migration 018 — 2026-05-30
+- [x] `golangci-lint run` clean; `go test ./...` all pass; `pnpm --filter web lint` clean; `pnpm --filter web build` clean — 2026-05-30
+
+**Manual verification (Docker):**
+- [ ] All 6 preset filters actually filter activities (open, upcoming, my, overdue, noassign, all)
+- [ ] Member filter kind filters by assignee
+- [ ] Filter builder: add/remove conditions, pick field/op/value for all supported fields, AND/OR toggle
+- [ ] Save/load/edit/delete custom filters end-to-end
+- [ ] Status conditions match by name across timelines
+- [ ] Tag conditions match by tag name
+- [ ] Team filter flag: admin promotes user filter → visible to all team members
+- [ ] "Manage filters" panel accessible from dropdown
+- [ ] `docs/log.md` Phase 10.4.6 entry written — 2026-05-30
+
+---
+
+### Timeline Views — List / Spreadsheet (Web — Phase 11.1)
+Ships the view-switcher infrastructure plus the dense, sortable, inline-editable List view.
+
+**Infrastructure:**
+- [x] `ViewMode` already defined as `'gantt' | 'list' | 'calendar' | 'kanban'` in TopBar.tsx — 2026-05-31
+- [x] View switcher control in TopBar; per-timeline view mode persisted via preferences (key: `view_mode`) — 2026-05-31
+- [x] View-specific toolbar slots — GanttToolbar shown for gantt, ListToolbar shown for list — 2026-05-31
+
+**Dependencies installed:**
+- [x] `@tanstack/react-table@^8.21.3` — headless table (column visibility/order/sizing/pinning/sorting) — 2026-05-31
+- [x] `@dnd-kit/core`, `@dnd-kit/sortable`, `@dnd-kit/utilities` — column drag-reorder — 2026-05-31
+
+**ListToolbar (`components/list/ListToolbar.tsx`):**
+- [x] Columns menu (hide/show all columns via checkbox list) — 2026-05-31
+- [x] Density toggle (Comfortable / Compact) — 2026-05-31
+- [x] Group by (None / Member / Parent activity / Status) — 2026-05-31
+- [x] Sort by (Start date / End date / Title / Status / Progress) — 2026-05-31
+- [x] Color by (Activity / Member / Status) — 2026-05-31
+- [x] Export + Share stubs — 2026-05-31
+
+**ListView (`components/list/ListView.tsx`):**
+- [x] TanStack Table v8 with column visibility, order, sizing, pinning (Title always pinned left) — 2026-05-31
+- [x] Default columns: Title, Start, End, Duration, Status, Assignees, Tags (hidden: Progress, Parent, Description, Location, URL, Created, Updated) — 2026-05-31
+- [x] Column hide/show via toolbar Columns menu (pendingColumnToggle prop) — 2026-05-31
+- [x] Column drag-reorder via @dnd-kit (drag handles on column headers) — 2026-05-31
+- [x] Column resizing via TanStack's `columnResizeMode: 'onChange'` — 2026-05-31
+- [x] Column config (order/hidden/widths) persisted per-timeline via `list_columns` preference key — 2026-05-31
+- [x] Single-column sort by clicking column header (sort indicator arrow) — 2026-05-31
+- [x] Density toggle changes row height (comfortable: 40px, compact: 32px) and persists — 2026-05-31
+- [x] Keyboard navigation: Arrow keys move selection, Enter/F2 enters edit mode, Esc cancels, Tab/Shift+Tab commit+move horizontal, Enter in edit commits+moves down — 2026-05-31
+- [x] Inline editing: Title (text), Start (date), End (date), Description/Location/URL (text), Progress (number) — 2026-05-31
+- [x] Status cell: click to open StatusPicker popover with color pills — 2026-05-31
+- [x] Assignees cell: read-only display with member Badges (up to 4 + overflow count) — 2026-05-31
+- [x] Tags cell: read-only display with colored tag pills (up to 3 + overflow count) — 2026-05-31
+- [x] Progress cell: read-only mini progress bar + percentage — 2026-05-31
+- [x] Duration cell: computed from start/end dates (read-only) — 2026-05-31
+- [x] PATCH mutations via useUpdateActivity with optimistic updates — 2026-05-31
+- [x] Group-by: None / Member / Parent / Status with collapsible group header rows — 2026-05-31
+- [x] Color-by: left border stripe per row (activity color / primary member color / status color) — 2026-05-31
+- [x] Group-by/Color-by/Sort-by/Density persisted per-timeline in DashboardPage (keys: `list_group_by`, `list_color_by`, `list_sort_by`, `list_density`) — 2026-05-31
+- [x] Find bar highlights: matching rows amber outline, non-matching rows dimmed 30%, active match stronger outline — 2026-05-31
+- [x] Active filter applied (applyActiveFilter) — all 6 presets + member + saved filter kinds — 2026-05-31
+- [x] Row click opens ActivityDetailPanel; Space in selection mode opens detail panel — 2026-05-31
+- [x] Title column sticky left with box-shadow separator — 2026-05-31
+
+**DashboardPage wiring:**
+- [x] List toolbar state (listGroupBy, listSortBy, listColorBy, listDensity) in DashboardPage — 2026-05-31
+- [x] List toolbar state restored from per-timeline preferences on timeline switch — 2026-05-31
+- [x] List toolbar state saved to per-timeline preferences on change — 2026-05-31
+- [x] ListView rendered when view === 'list' with correct props — 2026-05-31
+
+**Testing & verification:**
+- [x] `golangci-lint run` clean — 2026-05-31
+- [x] `go test ./...` passes (135 tests) — 2026-05-31
+- [x] `pnpm --filter web lint` clean — 2026-05-31
+- [x] `pnpm --filter web build` clean — 2026-05-31
+- [ ] Manual: view switcher toggles Gantt ↔ List; choice persists per timeline
+- [ ] Manual: List shows activities with default columns, respects active filter
+- [ ] Manual: hide/show columns from Columns menu; persists across reload
+- [ ] Manual: drag column headers to reorder; persists across reload
+- [ ] Manual: resize column by dragging header right edge; persists
+- [ ] Manual: density toggle changes row height; persists
+- [ ] Manual: keyboard navigation (arrows, Enter/F2, Esc, Tab)
+- [ ] Manual: inline edit Title, Start, End → switches to Gantt → change reflected
+- [ ] Manual: click Status cell → picker opens → select → pill updates
+- [ ] Manual: Title column stays visible when scrolled horizontally
+- [ ] Manual: sort by column header (click once asc, twice desc, three times off)
+- [ ] Manual: group-by and color-by controls work
+- [ ] Manual: Find bar highlights matching rows in List view
+
+---
+
+### Timezone-Safe Activity Dates (Phase 11.1.1)
+Fixes midnight-UTC activity dates displaying one calendar day early in negative-UTC-offset timezones.
+
+- [x] `granularity.ts`: switch all internal date helpers to UTC (startOfDay/Week/Month/Quarter/Year, addDays/addMonths, isoWeekNumber, formatLabel, todayColumnPosition) — 2026-06-01
+- [x] `GanttView.tsx`: `todayMidnight()` → `setUTCHours(0,0,0,0)`; fallback viewStart/viewEnd use `setUTCDate`/`getUTCDate` — 2026-06-01
+- [x] `GanttGrid.tsx`: `formatDragDate` → adds `timeZone: 'UTC'` to `toLocaleDateString` — 2026-06-01
+- [x] `ListView.tsx`: add `formatActivityDate` (UTC, for Start/End cells); keep `formatDate` (local, for Created/Updated) — 2026-06-01
+- [x] `granularity.test.ts`: update existing tests to use `getUTCDay`/`getUTCDate` assertions; add timezone-safety suite with midnight-UTC positioning and label checks — 2026-06-01
+- [x] `golangci-lint run` clean — 2026-06-01
+- [x] `go test ./...` passes — 2026-06-01
+- [x] `pnpm --filter web lint` clean — 2026-06-01
+- [x] `pnpm --filter web build` clean — 2026-06-01
+- [x] `pnpm --filter web test` — 149 tests pass including new timezone-safety suite — 2026-06-01
+- [ ] Manual: List Start/End cells show correct calendar day in a negative-offset timezone
+- [ ] Manual: Gantt bars land on the correct day column in a negative-offset timezone
+- [ ] Manual: Gantt day/week/month labels match List dates for same activity
+- [ ] Manual: round-trip — open date picker, save unchanged, displayed date does not shift
+
+---
+
+### Group by Assignee Combination (Phase 11.1.2)
+Multi-assignee activities now appear under their exact assignee-set group in both Gantt and List.
+
+- [x] `lib/memberGroups.ts`: `memberComboKey`, `orderedComboIds`, `memberComboLabel`, `comboSortComparator`, `UNASSIGNED_KEY` — 2026-06-02
+- [x] `GanttGrid.tsx`: extend `GanttRow` group type with `memberColors?: string[]`; render stacked color dots in group headers — 2026-06-02
+- [x] `GanttView.tsx` `buildRows`: bucket by `memberComboKey(assignedMemberIds)`; sort groups via `comboSortComparator`; pass `memberColors` to group rows — 2026-06-02
+- [x] `ListView.tsx` `buildListRows`: same combo-key bucketing and sorting; `memberColors` on group rows; stacked dots in group header renderer — 2026-06-02
+- [x] `lib/memberGroups.test.ts`: full suite for key, label, ordering, comparator — 2026-06-02
+- [x] `GanttView.tree.test.ts`: updated member-grouping suite for combo-key behavior — 2026-06-02
+- [x] `ListView.tree.test.ts`: updated member-grouping suite for combo-key behavior — 2026-06-02
+- [x] `pnpm --filter web lint` clean — 2026-06-02
+- [x] `pnpm --filter web build` clean — 2026-06-02
+- [x] `pnpm --filter web test` — 187 tests pass — 2026-06-02
+- [ ] Manual: multi-assignee activity renders under its own combination group in both Gantt and List
+- [ ] Manual: combination group labels are in team order with Oxford/truncation formatting
+- [ ] Manual: group headers show stacked color dots
+- [ ] Manual: group ordering identical between Gantt and List; Unassigned last
+- [ ] Manual: collapse/expand works on combination groups; counts correct with no double-counting
+
+---
+
+### Timeline Views — Calendar (Web — Phase 11.2)
+Three sub-layouts sharing one component skeleton.
+
+**Shared:**
+- [ ] Sub-layout switcher (Month / Week / Day) in the view's toolbar slot
+- [ ] Today / prev / next navigation; jump-to-date picker
+- [ ] Click empty cell → Event create form prefilled with that date
+- [ ] Click event → `EventDetailPanel`
+- [ ] Drag event between cells → PATCH new start/end preserving duration (Week / Day only for v1)
+
+**Month layout:**
+- [ ] 6-week grid; multi-day events render as continuous bars across cells
+- [ ] "+N more" overflow affordance per cell
+
+**Week layout:**
+- [ ] 7 day columns, 24-hour vertical time grid, configurable working-hours zoom
+- [ ] All-day strip above the time grid for events without time components
+- [ ] Overlapping-event lane algorithm: side-by-side columns within a day
+
+**Day layout:**
+- [ ] Single-day variant of Week; same time grid and lane algorithm
+
+**Open question to resolve at start of phase:**
+- [ ] Decide handling for date-only events in time-grid layouts (default 9am vs. all-day strip)
+
+---
+
+### Timeline Views — Kanban (Web — Phase 11.3)
+Read-only per requirements. Depends on Phase 10.1 (status API) and 10.2 (status UI).
+
+- [ ] Columns from `team_statuses` in display order; column header colored from status color
+- [ ] Cards: title, date range, assignee avatars (stacked color indicators for multi-assignee), parent badge if nested
+- [ ] Empty column shows muted "No events" placeholder
+- [ ] Each column scrolls independently when card count exceeds viewport height
+- [ ] Card click → `EventDetailPanel`
+- [ ] Status renamed/recolored in Settings updates Kanban column header without refresh
+- [ ] Attempting to drag a card produces no errors and no state change (read-only enforcement)
+
+### Calendar Sync
+- [ ] Google Calendar OAuth connect flow
+- [ ] Outbound sync: push draba events to Google Calendar on create/update/delete
+- [ ] Inbound sync: Google webhook handler → upsert event in draba
+- [ ] Built-in CalDAV server (`internal/caldav/`)
+- [ ] CalDAV connect flow (user provides URL + credentials)
+- [ ] Outbound sync: push draba events to CalDAV on create/update/delete
+- [ ] Team iCal feed endpoint: `GET /timelines/:ical_token/feed.ics` (public, sanitized — no notes)
+
+### Shares — Multi-Share Views with Passwords (Phase 13)
+First-class Share entity. One timeline can host many shares, each frozen to a specific view + config.
+
+**Schema:**
+- [ ] Migration: `shares` table — id, timeline_id, view_type, view_config JSON, password_hash (nullable), expires_at (nullable), created_by, created_at, last_viewed_at, view_count, revoked_at
+- [ ] Migration: migrate existing `timelines.share_token` value into a first share row, then drop the column in a follow-up migration once UI references are gone
+
+**API:**
+- [ ] `POST /timelines/:id/shares` — create share with view_type + view_config snapshot + optional password + optional expiry
+- [ ] `GET /timelines/:id/shares` — list shares (creator + admins)
+- [ ] `PATCH /shares/:id` — rename / change password / extend expiry / revoke
+- [ ] `DELETE /shares/:id` — hard delete
+- [ ] `GET /shares/:token` — public lookup; password-protected returns 401 with `passwordRequired: true`
+- [ ] `POST /shares/:token/unlock` — exchange password for a short-lived view JWT scoped to that share
+- [ ] Rate-limit unlock attempts per IP
+
+**Web — creating shares:**
+- [ ] "Share this view" button in every view's toolbar slot (Gantt / List / Calendar / Kanban)
+- [ ] Share modal: snapshots current toolbar state into `view_config`, optional password + expiry toggles, returns URL with copy button
+
+**Web — viewing shares:**
+- [ ] Public viewer route `/s/:token` — no auth required
+- [ ] Password gate page for protected shares
+- [ ] Mount the appropriate view component in read-only mode with `view_config` applied
+- [ ] Branding strip: team name, "Shared view", last-updated timestamp
+
+**Web — managing shares:**
+- [ ] Manage-shares section on each timeline (list, view counts, revoke, edit)
+- [ ] Indicator chip on timeline tile showing active share count
+
+---
+
+### Data Portability & Exports (Phase 14)
+
+**Tabular (round-trip):**
+- [ ] `GET /timelines/:id/export.csv` and `GET /timelines/:id/export.xlsx`
+- [ ] `POST /teams/:id/events/import` — CSV/Excel import with preview + validation
+- [ ] Downloadable import template at `GET /import-template.csv` and `.xlsx`
+
+**Visual exports (gofpdf):**
+- [ ] Gantt → PDF: landscape, paginated by date range, member-color legend strip
+- [ ] Gantt → PNG: single-page rasterized variant
+- [ ] Kanban → PDF: columns side-by-side, paginated when too wide
+- [ ] Kanban → PNG: single-page
+- [ ] List → Markdown (GitHub-flavored table) and PDF (styled table)
+- [ ] Calendar → PDF: one page per month / week / day depending on active sub-layout
+- [ ] Header strip on every visual export: team name, timeline name, generated-at timestamp, applied filter description
+- [ ] All visual exports respect active filter / sort / group at time of export
+
+**Wiring:**
+- [ ] Gantt toolbar's existing "Export" stub becomes a real menu: CSV / xlsx / PDF / PNG
+- [ ] Same export menu in 11.1 / 11.2 / 11.3 toolbar slots, scoped to formats valid for that view
+
+**SMTP & password reset (lands here because import errors / reset emails are first SMTP use):**
+- [ ] Password reset flow (email required — pick SMTP or transactional email provider)
+- [ ] SMTP configuration surface in `/settings/admin`
+
+---
+
+### External Connectors (Inbound Webhooks) — Phase 15
+Includes both the webhook backend and the per-timeline connector sidebar UI (previously a separate Up-Next block).
+
+**Backend:**
+- [ ] Create `team_inbound_webhooks` and `event_links` DB migrations
+- [ ] Add `is_external` boolean column to `events` table
+- [ ] `POST /teams/:id/webhooks` — generate an inbound webhook URL for a provider (e.g. Asana)
+- [ ] `GET /teams/:id/webhooks` — list active inbound webhooks
+- [ ] `POST /webhooks/:provider/:token` — generic inbound webhook handler to map payload to Draba events
+- [ ] Web UI: Render `is_external` events as read-only (disable drag-and-drop handles)
+- [ ] Web UI: Show external provider icon/link on the event detail card
+
+**Per-timeline connector model (was Up-Next "Web — Connectors"):**
+- [ ] Migration: `team_connectors (id, team_id, timeline_id, provider ENUM, display_name, config JSON, created_by, created_at)` — one row per connector instance
+- [ ] Provider values initially: `asana | aha | google_sheets | excel_online | webhook`
+- [ ] `GET /timelines/:id/connectors` — list connectors for a timeline
+- [ ] `POST /timelines/:id/connectors` — create connector (admin only); returns generated inbound token
+- [ ] `PATCH /connectors/:id` — update display name or config (admin only)
+- [ ] `DELETE /connectors/:id` — remove connector (admin only)
+- [ ] `POST /connectors/:token/ingest` — public inbound endpoint; validates token; maps payload via provider adapter
+
+**Sidebar CONNECTORS section (already stubbed):**
+- [ ] Wire `GET /timelines/:id/connectors` — list active connectors beneath the active timeline label
+- [ ] "Add connector" → connector setup sheet: provider picker → config fields → save → `POST /timelines/:id/connectors`
+- [ ] Connector row hover → gear icon → config drawer; delete with confirm
+- [ ] Provider icon set (Asana, Aha, Sheets, Excel, generic Plug)
+
+## Done
+- [x] Initialize repo scaffold — 2026-04-27
+- [x] Define requirements, architecture, conventions — 2026-04-27
+
+## Parking Lot
+- MySQL/MariaDB and Postgres DB adapters (SQLite first, then add others)
+- CLI binary
+- MCP server for AI agent access
+- Mobile native apps (ship PWA first)
+- Microsoft/Outlook calendar sync (v2)
+- Multi-tenant cloud hosting
+- SSO / OAuth login (GitHub, Google)
+- Notifications (email, push)
+- Recurring event UI (RRULE editing)
+- Kanban drag-to-change-status (v2; v1 Kanban is read-only)
+````
+
+## File: packages/api/internal/api/activity_handler.go
+````go
+package api
+
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/db"
+	"github.com/I0-1O/draba/packages/api/internal/events"
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// handleCreateActivity handles POST /teams/{id}/timelines/{timelineId}/activities.
+// The authenticated user must be a member of the team.
+func (s *Server) handleCreateActivity(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	timelineID := r.PathValue("timelineId")
+
+	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
+		return
+	}
+
+	claims := claimsFromContext(r.Context())
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create activity")
+		return
+	}
+	if timeline.TeamID != teamID {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+		return
+	}
+
+	var req CreateActivityJSONBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	if req.Title == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "title is required")
+		return
+	}
+	if req.StartAt.IsZero() || req.EndAt.IsZero() {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "startAt and endAt are required")
+		return
+	}
+	if req.EndAt.Before(req.StartAt) {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "endAt must not be before startAt")
+		return
+	}
+
+	allDay := false
+	if req.AllDay != nil {
+		allDay = *req.AllDay
+	}
+
+	now := time.Now()
+	activity := &models.Activity{
+		ID:               newID(),
+		TimelineID:       timelineID,
+		Title:            req.Title,
+		Description:      req.Description,
+		Notes:            req.Notes,
+		Icon:             req.Icon,
+		Color:            req.Color,
+		StartAt:          req.StartAt,
+		EndAt:            req.EndAt,
+		AllDay:           allDay,
+		StatusID:         req.StatusId,
+		ParentActivityID: req.ParentActivityId,
+		PercentComplete:  req.PercentComplete,
+		Location:         req.Location,
+		URL:              req.Url,
+		Rrule:            req.Rrule,
+		CreatedBy:        claims.UserID,
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}
+	if err := s.activities.Create(activity); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create activity")
+		return
+	}
+
+	if req.AssignedMemberIds != nil {
+		if err := s.activities.SetAssignments(activity.ID, *req.AssignedMemberIds); err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity assignments")
+			return
+		}
+		activity.AssignedMemberIDs = *req.AssignedMemberIds
+	} else {
+		activity.AssignedMemberIDs = []string{}
+	}
+
+	if req.TagIds != nil {
+		if err := s.tags.ValidateTeamOwnership(timeline.TeamID, *req.TagIds); err != nil {
+			if errors.Is(err, db.ErrTagOwnership) {
+				writeError(w, http.StatusBadRequest, "INVALID_TAGS", "one or more tag IDs do not belong to this team")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to validate tags")
+			return
+		}
+		if err := s.activities.SetTags(activity.ID, *req.TagIds); err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity tags")
+			return
+		}
+		activity.TagIDs = *req.TagIds
+	} else {
+		activity.TagIDs = []string{}
+	}
+
+	s.bus.Publish(events.Message{Type: events.ActivityCreated, TeamID: timeline.TeamID, Payload: activity})
+	writeJSON(w, http.StatusCreated, activity)
+}
+
+// handleListActivities handles GET /teams/{id}/timelines/{timelineId}/activities.
+// Optional query params ?from=<RFC3339> and ?to=<RFC3339> bound the result by start_at.
+func (s *Server) handleListActivities(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	timelineID := r.PathValue("timelineId")
+
+	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
+		return
+	}
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list activities")
+		return
+	}
+	if timeline.TeamID != teamID {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+		return
+	}
+
+	var from, to *time.Time
+	if v := r.URL.Query().Get("from"); v != "" {
+		t, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "from must be RFC3339 (e.g. 2006-01-02T15:04:05Z)")
+			return
+		}
+		from = &t
+	}
+	if v := r.URL.Query().Get("to"); v != "" {
+		t, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "to must be RFC3339 (e.g. 2006-01-02T15:04:05Z)")
+			return
+		}
+		to = &t
+	}
+
+	includeArchived := r.URL.Query().Get("archived") == "true"
+	acts, err := s.activities.ListByTimeline(timelineID, from, to, includeArchived)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list activities")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, acts)
+}
+
+// handleUpdateActivity handles PATCH /activities/{id}. Only fields present in
+// the request body are applied; the caller must be a member of the activity's team.
+func (s *Server) handleUpdateActivity(w http.ResponseWriter, r *http.Request) {
+	activityID := r.PathValue("id")
+
+	activity, err := s.activities.GetByID(activityID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "activity not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update activity")
+		return
+	}
+
+	timeline, err := s.timelines.GetByID(activity.TimelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update activity")
+		return
+	}
+
+	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
+		return
+	}
+
+	// Decode into a map so we can detect which fields the caller provided.
+	var patch map[string]json.RawMessage
+	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	if v, ok := patch["title"]; ok {
+		if err := json.Unmarshal(v, &activity.Title); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid title")
+			return
+		}
+	}
+	if v, ok := patch["description"]; ok {
+		if err := json.Unmarshal(v, &activity.Description); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid description")
+			return
+		}
+	}
+	if v, ok := patch["notes"]; ok {
+		if err := json.Unmarshal(v, &activity.Notes); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid notes")
+			return
+		}
+	}
+	if v, ok := patch["icon"]; ok {
+		if err := json.Unmarshal(v, &activity.Icon); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid icon")
+			return
+		}
+	}
+	if v, ok := patch["color"]; ok {
+		if err := json.Unmarshal(v, &activity.Color); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid color")
+			return
+		}
+	}
+	if v, ok := patch["startAt"]; ok {
+		if err := json.Unmarshal(v, &activity.StartAt); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid startAt")
+			return
+		}
+	}
+	if v, ok := patch["endAt"]; ok {
+		if err := json.Unmarshal(v, &activity.EndAt); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid endAt")
+			return
+		}
+	}
+	if v, ok := patch["allDay"]; ok {
+		if err := json.Unmarshal(v, &activity.AllDay); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid allDay")
+			return
+		}
+	}
+	if v, ok := patch["statusId"]; ok {
+		if err := json.Unmarshal(v, &activity.StatusID); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid statusId")
+			return
+		}
+	}
+	if v, ok := patch["parentActivityId"]; ok {
+		if err := json.Unmarshal(v, &activity.ParentActivityID); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid parentActivityId")
+			return
+		}
+	}
+	if v, ok := patch["percentComplete"]; ok {
+		if err := json.Unmarshal(v, &activity.PercentComplete); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid percentComplete")
+			return
+		}
+	}
+	if v, ok := patch["location"]; ok {
+		if err := json.Unmarshal(v, &activity.Location); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid location")
+			return
+		}
+	}
+	if v, ok := patch["url"]; ok {
+		if err := json.Unmarshal(v, &activity.URL); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid url")
+			return
+		}
+	}
+	if v, ok := patch["rrule"]; ok {
+		if err := json.Unmarshal(v, &activity.Rrule); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid rrule")
+			return
+		}
+	}
+
+	var newAssignees *[]string
+	if v, ok := patch["assignedMemberIds"]; ok {
+		var ids []string
+		if err := json.Unmarshal(v, &ids); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid assignedMemberIds")
+			return
+		}
+		newAssignees = &ids
+	}
+
+	var newTagIDs *[]string
+	if v, ok := patch["tagIds"]; ok {
+		var ids []string
+		if err := json.Unmarshal(v, &ids); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid tagIds")
+			return
+		}
+		newTagIDs = &ids
+	}
+
+	if activity.Title == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "title must not be empty")
+		return
+	}
+	if activity.EndAt.Before(activity.StartAt) {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "endAt must not be before startAt")
+		return
+	}
+
+	activity.UpdatedAt = time.Now()
+	if err := s.activities.Update(activity); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update activity")
+		return
+	}
+
+	if newAssignees != nil {
+		if err := s.activities.SetAssignments(activity.ID, *newAssignees); err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity assignments")
+			return
+		}
+		activity.AssignedMemberIDs = *newAssignees
+	} else {
+		// Populate current assignments so the response always includes them.
+		existing, err := s.activities.GetAssignments(activity.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get activity assignments")
+			return
+		}
+		activity.AssignedMemberIDs = existing
+	}
+
+	if newTagIDs != nil {
+		if err := s.tags.ValidateTeamOwnership(timeline.TeamID, *newTagIDs); err != nil {
+			if errors.Is(err, db.ErrTagOwnership) {
+				writeError(w, http.StatusBadRequest, "INVALID_TAGS", "one or more tag IDs do not belong to this team")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to validate tags")
+			return
+		}
+		if err := s.activities.SetTags(activity.ID, *newTagIDs); err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity tags")
+			return
+		}
+		activity.TagIDs = *newTagIDs
+	} else {
+		existing, err := s.activities.GetTags(activity.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get activity tags")
+			return
+		}
+		activity.TagIDs = existing
+	}
+
+	s.bus.Publish(events.Message{Type: events.ActivityUpdated, TeamID: timeline.TeamID, Payload: activity})
+	writeJSON(w, http.StatusOK, activity)
+}
+
+// handleArchiveActivity handles POST /activities/{id}/archive. Any team member
+// may archive an activity; the row is soft-deleted (archived_at set) so it is
+// hidden from list responses by default but can be restored.
+func (s *Server) handleArchiveActivity(w http.ResponseWriter, r *http.Request) {
+	s.setActivityArchive(w, r, true)
+}
+
+// handleUnarchiveActivity handles POST /activities/{id}/unarchive.
+func (s *Server) handleUnarchiveActivity(w http.ResponseWriter, r *http.Request) {
+	s.setActivityArchive(w, r, false)
+}
+
+// setActivityArchive is the shared implementation for the archive/unarchive
+// endpoints. When archive is true, archived_at is set to now; otherwise it
+// is cleared.
+func (s *Server) setActivityArchive(w http.ResponseWriter, r *http.Request, archive bool) {
+	activityID := r.PathValue("id")
+
+	activity, err := s.activities.GetByID(activityID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "activity not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
+		return
+	}
+
+	timeline, err := s.timelines.GetByID(activity.TimelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
+		return
+	}
+
+	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
+		return
+	}
+
+	var at *time.Time
+	if archive {
+		now := time.Now().UTC()
+		at = &now
+		if err := s.activities.ClearParentRefs(activityID); err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
+			return
+		}
+	}
+	if err := s.activities.SetArchived(activityID, at); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
+		return
+	}
+	activity.ArchivedAt = at
+	activity.UpdatedAt = time.Now().UTC()
+
+	// Re-populate assignments and tags for a stable response shape.
+	if ids, err := s.activities.GetAssignments(activity.ID); err == nil {
+		activity.AssignedMemberIDs = ids
+	} else {
+		activity.AssignedMemberIDs = []string{}
+	}
+	if ids, err := s.activities.GetTags(activity.ID); err == nil {
+		activity.TagIDs = ids
+	} else {
+		activity.TagIDs = []string{}
+	}
+
+	s.bus.Publish(events.Message{Type: events.ActivityUpdated, TeamID: timeline.TeamID, Payload: activity})
+	writeJSON(w, http.StatusOK, activity)
+}
+
+// handleDeleteActivity handles DELETE /activities/{id}. Any member of the
+// activity's team may delete it.
+func (s *Server) handleDeleteActivity(w http.ResponseWriter, r *http.Request) {
+	activityID := r.PathValue("id")
+
+	activity, err := s.activities.GetByID(activityID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "activity not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
+		return
+	}
+
+	timeline, err := s.timelines.GetByID(activity.TimelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
+		return
+	}
+
+	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
+		return
+	}
+
+	if err := s.activities.ClearParentRefs(activityID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
+		return
+	}
+	if err := s.activities.Delete(activityID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
+		return
+	}
+
+	s.bus.Publish(events.Message{
+		Type:    events.ActivityDeleted,
+		TeamID:  timeline.TeamID,
+		Payload: map[string]string{"id": activityID},
+	})
+	w.WriteHeader(http.StatusNoContent)
+}
+````
+
 ## File: packages/web/src/components/gantt/GanttGrid.tsx
 ````typescript
 /**
@@ -45789,7 +46594,7 @@ export interface GanttActivity {
 }
 
 export type GanttRow =
-  | { kind: 'group'; id: string; label: string; color: string; count: number; collapsed?: boolean }
+  | { kind: 'group'; id: string; label: string; color: string; memberColors?: string[]; count: number; collapsed?: boolean }
   | { kind: 'activity'; event: GanttActivity };
 
 /** Visual state for the in-view Find feature. Passed from GanttView. */
@@ -46346,15 +47151,34 @@ export default function GanttGrid({
                         ? <ChevronRight size={14} strokeWidth={2.5} style={{ flexShrink: 0, color: 'var(--muted-foreground)' }} />
                         : <ChevronDown size={14} strokeWidth={2.5} style={{ flexShrink: 0, color: 'var(--muted-foreground)' }} />
                     ) : null}
-                    <div
-                      style={{
-                        width: 9,
-                        height: 9,
-                        borderRadius: 2,
-                        background: row.color,
-                        flexShrink: 0,
-                      }}
-                    />
+                    {row.memberColors && row.memberColors.length > 0 ? (
+                      // Stacked color dots for member-combination groups
+                      <div style={{ display: 'flex', flexShrink: 0 }}>
+                        {row.memberColors.map((c, i) => (
+                          <div
+                            key={i}
+                            style={{
+                              width: 9,
+                              height: 9,
+                              borderRadius: '50%',
+                              background: c,
+                              marginLeft: i === 0 ? 0 : -3,
+                              outline: '1.5px solid var(--muted)',
+                            }}
+                          />
+                        ))}
+                      </div>
+                    ) : (
+                      <div
+                        style={{
+                          width: 9,
+                          height: 9,
+                          borderRadius: 2,
+                          background: row.color,
+                          flexShrink: 0,
+                        }}
+                      />
+                    )}
                     <span
                       style={{
                         fontSize: 11,
@@ -46820,6 +47644,7 @@ import { useFilter } from '@/contexts/FilterContext';
 import { useFind } from '@/contexts/FindContext';
 import { applyActiveFilter } from '@/lib/presetFilters';
 import { matchEvents } from '@/lib/findMatcher';
+import { memberComboKey, orderedComboIds, memberComboLabel, comboSortComparator, UNASSIGNED_KEY } from '@/lib/memberGroups';
 import { resolveColorHex } from '@/components/identity/identity-constants';
 import { Badge } from '@/components/identity/Badge';
 import { IdentityPicker } from '@/components/identity/IdentityPicker';
@@ -46880,17 +47705,18 @@ const DEFAULT_WIDTHS: ColumnSizingState = Object.fromEntries(
 // ── Group-by row builder (exported for unit tests) ─────────────────────────────
 
 export type ListDisplayRow =
-  | { kind: 'group'; key: string; label: string; count: number }
+  | { kind: 'group'; key: string; label: string; count: number; memberColors?: string[] }
   | { kind: 'activity'; activity: ApiActivity; depth: number; hasChildren: boolean; groupKey: string };
 
 /** Converts a pre-sorted flat activity list into display rows for the given group-by mode. */
 export function buildListRows(
   sortedActivities: ApiActivity[],
   groupBy: ListGroupBy,
-  memberById: Map<string, { displayName: string }>,
+  memberById: Map<string, { displayName: string; color?: string | null }>,
   statusById: Map<string, { name: string }>,
   timelineStatuses: Status[],
   collapsedGroups: Set<string>,
+  memberOrder: string[] = [],
 ): ListDisplayRow[] {
   const emptyRow = (a: ApiActivity): ListDisplayRow => ({
     kind: 'activity', activity: a, depth: 0, hasChildren: false, groupKey: '',
@@ -46899,18 +47725,32 @@ export function buildListRows(
   if (groupBy === 'none') return sortedActivities.map(emptyRow);
 
   if (groupBy === 'member') {
-    const groups = new Map<string, { label: string; activities: ApiActivity[] }>();
+    const nameById = new Map(
+      [...memberById.entries()].map(([id, m]) => [id, m.displayName]),
+    );
+
+    const buckets = new Map<string, ApiActivity[]>();
     for (const activity of sortedActivities) {
-      const ids = activity.assignedMemberIds ?? [];
-      const key = ids.length === 0 ? '__unassigned__' : ids[0];
-      const label = ids.length === 0 ? 'Unassigned' : (memberById.get(ids[0])?.displayName ?? 'Unknown');
-      const group = groups.get(key) ?? { label, activities: [] };
-      group.activities.push(activity);
-      groups.set(key, group);
+      const key = memberComboKey(activity.assignedMemberIds ?? []);
+      const list = buckets.get(key) ?? [];
+      list.push(activity);
+      buckets.set(key, list);
     }
+
+    const comparator = comboSortComparator(memberOrder);
+    const sortedKeys = [...buckets.keys()].sort(comparator);
+
     const rows: ListDisplayRow[] = [];
-    for (const [key, { label, activities }] of groups) {
-      rows.push({ kind: 'group', key, label, count: activities.length });
+    for (const key of sortedKeys) {
+      const activities = buckets.get(key)!;
+      const rawIds = key === UNASSIGNED_KEY ? [] : key.split('|');
+      const orderedIds = orderedComboIds(rawIds, memberOrder);
+      const label = key === UNASSIGNED_KEY ? 'Unassigned' : memberComboLabel(orderedIds, nameById);
+      const memberColors = orderedIds.map(id => {
+        const raw = memberById.get(id)?.color;
+        return resolveColorHex(raw ?? null) ?? 'var(--muted-foreground)';
+      });
+      rows.push({ kind: 'group', key, label, count: activities.length, memberColors });
       if (!collapsedGroups.has(key)) {
         for (const a of activities) rows.push({ kind: 'activity', activity: a, depth: 0, hasChildren: false, groupKey: key });
       }
@@ -47881,9 +48721,11 @@ export default function ListView({
     [rawActivities],
   );
 
+  const memberOrder = useMemo(() => members.map(m => m.id), [members]);
+
   const displayRows = useMemo(
-    () => buildListRows(sortedActivities, groupBy, memberById, statusById, timelineStatuses, collapsedGroups),
-    [sortedActivities, groupBy, memberById, statusById, timelineStatuses, collapsedGroups],
+    () => buildListRows(sortedActivities, groupBy, memberById, statusById, timelineStatuses, collapsedGroups, memberOrder),
+    [sortedActivities, groupBy, memberById, statusById, timelineStatuses, collapsedGroups, memberOrder],
   );
 
   // Flat list of activity rows (for keyboard navigation indices)
@@ -48641,6 +49483,23 @@ export default function ListView({
                   >
                     <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                       {collapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
+                      {row.memberColors && row.memberColors.length > 0 && (
+                        <div style={{ display: 'flex', flexShrink: 0 }}>
+                          {row.memberColors.map((c, i) => (
+                            <div
+                              key={i}
+                              style={{
+                                width: 9,
+                                height: 9,
+                                borderRadius: '50%',
+                                background: c,
+                                marginLeft: i === 0 ? 0 : -3,
+                                outline: '1.5px solid var(--muted)',
+                              }}
+                            />
+                          ))}
+                        </div>
+                      )}
                       {row.label}
                       <span style={{ fontWeight: 400, opacity: 0.6 }}>({row.count})</span>
                     </div>
@@ -49325,1124 +50184,6 @@ export default function ListView({
 }
 ````
 
-## File: packages/api/internal/api/activity_handler.go
-````go
-package api
-
-import (
-	"database/sql"
-	"encoding/json"
-	"errors"
-	"net/http"
-	"time"
-
-	"github.com/I0-1O/draba/packages/api/internal/db"
-	"github.com/I0-1O/draba/packages/api/internal/events"
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// handleCreateActivity handles POST /teams/{id}/timelines/{timelineId}/activities.
-// The authenticated user must be a member of the team.
-func (s *Server) handleCreateActivity(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-	timelineID := r.PathValue("timelineId")
-
-	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
-		return
-	}
-
-	claims := claimsFromContext(r.Context())
-
-	timeline, err := s.timelines.GetByID(timelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create activity")
-		return
-	}
-	if timeline.TeamID != teamID {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-		return
-	}
-
-	var req CreateActivityJSONBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	if req.Title == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "title is required")
-		return
-	}
-	if req.StartAt.IsZero() || req.EndAt.IsZero() {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "startAt and endAt are required")
-		return
-	}
-	if req.EndAt.Before(req.StartAt) {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "endAt must not be before startAt")
-		return
-	}
-
-	allDay := false
-	if req.AllDay != nil {
-		allDay = *req.AllDay
-	}
-
-	now := time.Now()
-	activity := &models.Activity{
-		ID:               newID(),
-		TimelineID:       timelineID,
-		Title:            req.Title,
-		Description:      req.Description,
-		Notes:            req.Notes,
-		Icon:             req.Icon,
-		Color:            req.Color,
-		StartAt:          req.StartAt,
-		EndAt:            req.EndAt,
-		AllDay:           allDay,
-		StatusID:         req.StatusId,
-		ParentActivityID: req.ParentActivityId,
-		PercentComplete:  req.PercentComplete,
-		Location:         req.Location,
-		URL:              req.Url,
-		Rrule:            req.Rrule,
-		CreatedBy:        claims.UserID,
-		CreatedAt:        now,
-		UpdatedAt:        now,
-	}
-	if err := s.activities.Create(activity); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create activity")
-		return
-	}
-
-	if req.AssignedMemberIds != nil {
-		if err := s.activities.SetAssignments(activity.ID, *req.AssignedMemberIds); err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity assignments")
-			return
-		}
-		activity.AssignedMemberIDs = *req.AssignedMemberIds
-	} else {
-		activity.AssignedMemberIDs = []string{}
-	}
-
-	if req.TagIds != nil {
-		if err := s.tags.ValidateTeamOwnership(timeline.TeamID, *req.TagIds); err != nil {
-			if errors.Is(err, db.ErrTagOwnership) {
-				writeError(w, http.StatusBadRequest, "INVALID_TAGS", "one or more tag IDs do not belong to this team")
-				return
-			}
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to validate tags")
-			return
-		}
-		if err := s.activities.SetTags(activity.ID, *req.TagIds); err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity tags")
-			return
-		}
-		activity.TagIDs = *req.TagIds
-	} else {
-		activity.TagIDs = []string{}
-	}
-
-	s.bus.Publish(events.Message{Type: events.ActivityCreated, TeamID: timeline.TeamID, Payload: activity})
-	writeJSON(w, http.StatusCreated, activity)
-}
-
-// handleListActivities handles GET /teams/{id}/timelines/{timelineId}/activities.
-// Optional query params ?from=<RFC3339> and ?to=<RFC3339> bound the result by start_at.
-func (s *Server) handleListActivities(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-	timelineID := r.PathValue("timelineId")
-
-	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
-		return
-	}
-
-	timeline, err := s.timelines.GetByID(timelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list activities")
-		return
-	}
-	if timeline.TeamID != teamID {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-		return
-	}
-
-	var from, to *time.Time
-	if v := r.URL.Query().Get("from"); v != "" {
-		t, err := time.Parse(time.RFC3339, v)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "from must be RFC3339 (e.g. 2006-01-02T15:04:05Z)")
-			return
-		}
-		from = &t
-	}
-	if v := r.URL.Query().Get("to"); v != "" {
-		t, err := time.Parse(time.RFC3339, v)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "to must be RFC3339 (e.g. 2006-01-02T15:04:05Z)")
-			return
-		}
-		to = &t
-	}
-
-	includeArchived := r.URL.Query().Get("archived") == "true"
-	acts, err := s.activities.ListByTimeline(timelineID, from, to, includeArchived)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list activities")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, acts)
-}
-
-// handleUpdateActivity handles PATCH /activities/{id}. Only fields present in
-// the request body are applied; the caller must be a member of the activity's team.
-func (s *Server) handleUpdateActivity(w http.ResponseWriter, r *http.Request) {
-	activityID := r.PathValue("id")
-
-	activity, err := s.activities.GetByID(activityID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "activity not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update activity")
-		return
-	}
-
-	timeline, err := s.timelines.GetByID(activity.TimelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update activity")
-		return
-	}
-
-	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
-		return
-	}
-
-	// Decode into a map so we can detect which fields the caller provided.
-	var patch map[string]json.RawMessage
-	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	if v, ok := patch["title"]; ok {
-		if err := json.Unmarshal(v, &activity.Title); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid title")
-			return
-		}
-	}
-	if v, ok := patch["description"]; ok {
-		if err := json.Unmarshal(v, &activity.Description); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid description")
-			return
-		}
-	}
-	if v, ok := patch["notes"]; ok {
-		if err := json.Unmarshal(v, &activity.Notes); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid notes")
-			return
-		}
-	}
-	if v, ok := patch["icon"]; ok {
-		if err := json.Unmarshal(v, &activity.Icon); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid icon")
-			return
-		}
-	}
-	if v, ok := patch["color"]; ok {
-		if err := json.Unmarshal(v, &activity.Color); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid color")
-			return
-		}
-	}
-	if v, ok := patch["startAt"]; ok {
-		if err := json.Unmarshal(v, &activity.StartAt); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid startAt")
-			return
-		}
-	}
-	if v, ok := patch["endAt"]; ok {
-		if err := json.Unmarshal(v, &activity.EndAt); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid endAt")
-			return
-		}
-	}
-	if v, ok := patch["allDay"]; ok {
-		if err := json.Unmarshal(v, &activity.AllDay); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid allDay")
-			return
-		}
-	}
-	if v, ok := patch["statusId"]; ok {
-		if err := json.Unmarshal(v, &activity.StatusID); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid statusId")
-			return
-		}
-	}
-	if v, ok := patch["parentActivityId"]; ok {
-		if err := json.Unmarshal(v, &activity.ParentActivityID); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid parentActivityId")
-			return
-		}
-	}
-	if v, ok := patch["percentComplete"]; ok {
-		if err := json.Unmarshal(v, &activity.PercentComplete); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid percentComplete")
-			return
-		}
-	}
-	if v, ok := patch["location"]; ok {
-		if err := json.Unmarshal(v, &activity.Location); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid location")
-			return
-		}
-	}
-	if v, ok := patch["url"]; ok {
-		if err := json.Unmarshal(v, &activity.URL); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid url")
-			return
-		}
-	}
-	if v, ok := patch["rrule"]; ok {
-		if err := json.Unmarshal(v, &activity.Rrule); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid rrule")
-			return
-		}
-	}
-
-	var newAssignees *[]string
-	if v, ok := patch["assignedMemberIds"]; ok {
-		var ids []string
-		if err := json.Unmarshal(v, &ids); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid assignedMemberIds")
-			return
-		}
-		newAssignees = &ids
-	}
-
-	var newTagIDs *[]string
-	if v, ok := patch["tagIds"]; ok {
-		var ids []string
-		if err := json.Unmarshal(v, &ids); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid tagIds")
-			return
-		}
-		newTagIDs = &ids
-	}
-
-	if activity.Title == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "title must not be empty")
-		return
-	}
-	if activity.EndAt.Before(activity.StartAt) {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "endAt must not be before startAt")
-		return
-	}
-
-	activity.UpdatedAt = time.Now()
-	if err := s.activities.Update(activity); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update activity")
-		return
-	}
-
-	if newAssignees != nil {
-		if err := s.activities.SetAssignments(activity.ID, *newAssignees); err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity assignments")
-			return
-		}
-		activity.AssignedMemberIDs = *newAssignees
-	} else {
-		// Populate current assignments so the response always includes them.
-		existing, err := s.activities.GetAssignments(activity.ID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get activity assignments")
-			return
-		}
-		activity.AssignedMemberIDs = existing
-	}
-
-	if newTagIDs != nil {
-		if err := s.tags.ValidateTeamOwnership(timeline.TeamID, *newTagIDs); err != nil {
-			if errors.Is(err, db.ErrTagOwnership) {
-				writeError(w, http.StatusBadRequest, "INVALID_TAGS", "one or more tag IDs do not belong to this team")
-				return
-			}
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to validate tags")
-			return
-		}
-		if err := s.activities.SetTags(activity.ID, *newTagIDs); err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity tags")
-			return
-		}
-		activity.TagIDs = *newTagIDs
-	} else {
-		existing, err := s.activities.GetTags(activity.ID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get activity tags")
-			return
-		}
-		activity.TagIDs = existing
-	}
-
-	s.bus.Publish(events.Message{Type: events.ActivityUpdated, TeamID: timeline.TeamID, Payload: activity})
-	writeJSON(w, http.StatusOK, activity)
-}
-
-// handleArchiveActivity handles POST /activities/{id}/archive. Any team member
-// may archive an activity; the row is soft-deleted (archived_at set) so it is
-// hidden from list responses by default but can be restored.
-func (s *Server) handleArchiveActivity(w http.ResponseWriter, r *http.Request) {
-	s.setActivityArchive(w, r, true)
-}
-
-// handleUnarchiveActivity handles POST /activities/{id}/unarchive.
-func (s *Server) handleUnarchiveActivity(w http.ResponseWriter, r *http.Request) {
-	s.setActivityArchive(w, r, false)
-}
-
-// setActivityArchive is the shared implementation for the archive/unarchive
-// endpoints. When archive is true, archived_at is set to now; otherwise it
-// is cleared.
-func (s *Server) setActivityArchive(w http.ResponseWriter, r *http.Request, archive bool) {
-	activityID := r.PathValue("id")
-
-	activity, err := s.activities.GetByID(activityID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "activity not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
-		return
-	}
-
-	timeline, err := s.timelines.GetByID(activity.TimelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
-		return
-	}
-
-	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
-		return
-	}
-
-	var at *time.Time
-	if archive {
-		now := time.Now().UTC()
-		at = &now
-		if err := s.activities.ClearParentRefs(activityID); err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
-			return
-		}
-	}
-	if err := s.activities.SetArchived(activityID, at); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
-		return
-	}
-	activity.ArchivedAt = at
-	activity.UpdatedAt = time.Now().UTC()
-
-	// Re-populate assignments and tags for a stable response shape.
-	if ids, err := s.activities.GetAssignments(activity.ID); err == nil {
-		activity.AssignedMemberIDs = ids
-	} else {
-		activity.AssignedMemberIDs = []string{}
-	}
-	if ids, err := s.activities.GetTags(activity.ID); err == nil {
-		activity.TagIDs = ids
-	} else {
-		activity.TagIDs = []string{}
-	}
-
-	s.bus.Publish(events.Message{Type: events.ActivityUpdated, TeamID: timeline.TeamID, Payload: activity})
-	writeJSON(w, http.StatusOK, activity)
-}
-
-// handleDeleteActivity handles DELETE /activities/{id}. Any member of the
-// activity's team may delete it.
-func (s *Server) handleDeleteActivity(w http.ResponseWriter, r *http.Request) {
-	activityID := r.PathValue("id")
-
-	activity, err := s.activities.GetByID(activityID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "activity not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
-		return
-	}
-
-	timeline, err := s.timelines.GetByID(activity.TimelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
-		return
-	}
-
-	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
-		return
-	}
-
-	if err := s.activities.ClearParentRefs(activityID); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
-		return
-	}
-	if err := s.activities.Delete(activityID); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
-		return
-	}
-
-	s.bus.Publish(events.Message{
-		Type:    events.ActivityDeleted,
-		TeamID:  timeline.TeamID,
-		Payload: map[string]string{"id": activityID},
-	})
-	w.WriteHeader(http.StatusNoContent)
-}
-````
-
-## File: packages/web/src/components/gantt/GanttView.tsx
-````typescript
-/**
- * GanttView — data container for the Gantt grid.
- *
- * Fetches events and members, applies grouping and sorting, builds the
- * GanttRow list, and passes everything to GanttGrid. The component owns
- * no layout state — granularity, groupBy, and sortBy come from DashboardPage.
- *
- * Also owns the find-match computation: it reads the debounced query from
- * FindContext, matches against the fetched API events, and registers the
- * ordered match list back into FindContext so GanttGrid can apply visual
- * treatment and auto-scroll.
- */
-
-import { useMemo, useRef, useState, useLayoutEffect, useEffect, useCallback } from 'react';
-import { useQueryClient } from '@tanstack/react-query';
-import GanttGrid, { type GanttActivity, type GanttRow, type FindState } from './GanttGrid';
-import { useTimelineActivities, useTeamMembers, useUpdateActivity } from '@/hooks/useTeamActivities';
-import type { components } from '@draba/shared';
-import { type Member, ACTIVITY_COLORS, MEMBER_COLORS } from '@/types';
-import { resolveColorHex } from '@/components/identity/identity-constants';
-import type { GroupBy, SortBy, TimeGranularity, ColorBy } from './GanttToolbar';
-import {
-  generateColumns,
-  positionInColumns,
-  todayColumnPosition,
-  autoFitGranularity,
-  type ColumnDef,
-} from './granularity';
-import { matchEvents } from '@/lib/findMatcher';
-import { useFind } from '@/contexts/FindContext';
-import { useFilter } from '@/contexts/FilterContext';
-import { usePreferenceMap } from '@/hooks/usePreferences';
-import { applyActiveFilter } from '@/lib/presetFilters';
-
-type ApiActivity = components['schemas']['Activity'];
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
-type Status = components['schemas']['Status'];
-type SavedFilter = components['schemas']['SavedFilter'];
-type Tag = components['schemas']['Tag'];
-
-interface Props {
-  teamId: string;
-  /** Active timeline ID — activities are fetched scoped to this timeline. */
-  timelineId: string;
-  /** ISO date "YYYY-MM-DD" — defaults to 14 days before today. */
-  startDate?: string;
-  /** ISO date "YYYY-MM-DD" — defaults to 75 days after today. */
-  endDate?: string;
-  groupBy: GroupBy;
-  sortBy: SortBy;
-  granularity: TimeGranularity | 'auto';
-  colorBy: ColorBy;
-  /**
-   * Timeline statuses — used to derive closedStatusIds and resolve status names
-   * in the filter engine. Replaces the old closedStatusIds prop.
-   */
-  timelineStatuses?: Status[];
-  /** Saved filters for the active team — evaluated by the filter engine. */
-  savedFilters?: SavedFilter[];
-  /** Team tags — used to resolve tag names in the filter engine. */
-  tags?: Tag[];
-  selectedActivityId?: string | null;
-  onSelectActivity?: (id: string | null) => void;
-  /** Called when the user drags on an empty lane to create an activity. */
-  onLaneDrag?: (startDate: Date, endDate: Date, memberId: string | null) => void;
-  /** Called during a bar drag with live snapped dates — for sidebar preview. */
-  onBarDragProgress?: (activityId: string, newStart: Date, newEnd: Date) => void;
-  /** Called when a bar drag completes (before the PATCH fires). */
-  onBarDragEnd?: () => void;
-  /** Called once members are loaded, so the parent can access them for panels. */
-  onMembersLoaded?: (members: Member[]) => void;
-  /** Called when an activity is selected — passes the full API activity object. */
-  onSelectApiActivity?: (activity: ApiActivity | null) => void;
-  /** Label column width in px — passed through to GanttGrid for controlled persistence. */
-  labelColW?: number;
-  /** Called when the user drags the label column resize handle. */
-  onLabelColWChange?: (w: number) => void;
-}
-
-
-// ── Date helpers ────────────────────────────────────────────────────────────
-
-function toDateOnly(datetime: string): string {
-  return datetime.slice(0, 10);
-}
-
-function todayMidnight(): Date {
-  const d = new Date();
-  d.setUTCHours(0, 0, 0, 0); // UTC midnight so it aligns with UTC-stored activity dates
-  return d;
-}
-
-function initialsFrom(name: string): string {
-  return name
-    .split(/\s+/)
-    .map(w => w[0] ?? '')
-    .slice(0, 2)
-    .join('')
-    .toUpperCase();
-}
-
-// ── Type mapping ─────────────────────────────────────────────────────────────
-
-function toMember(m: TeamMemberWithUser, index: number): Member {
-  const name = m.displayName || m.email || 'Unknown';
-  const fallbackHex = MEMBER_COLORS[index % MEMBER_COLORS.length];
-  return {
-    id: m.id,
-    name,
-    initials: initialsFrom(name),
-    color: resolveColorHex(m.color) || fallbackHex,
-  };
-}
-
-/** Intermediate type that carries original API fields alongside view-state. */
-export interface RichActivity extends GanttActivity {
-  startAtMs: number;
-  endAtMs: number;
-  parentActivityId: string | null;
-  primaryMemberId: string | null;
-  assignedMemberIds: string[];
-  statusId: string | null;
-}
-
-function toRichActivity(
-  ev: ApiActivity,
-  index: number,
-  memberById: Record<string, Member>,
-  viewStart: Date,
-  viewEnd: Date,
-  columns: ColumnDef[],
-  colorBy: ColorBy,
-  statusColorById: Map<string, string>,
-): RichActivity | null {
-  const evStart = new Date(toDateOnly(ev.startAt));
-  const evEnd = new Date(toDateOnly(ev.endAt));
-
-  if (evEnd < viewStart || evStart > viewEnd) return null;
-
-  const clampedStart = evStart < viewStart ? viewStart : evStart;
-  const clampedEnd = evEnd > viewEnd ? viewEnd : evEnd;
-
-  const { startCol, span } = positionInColumns(clampedStart, clampedEnd, columns);
-  const assignedIds = ev.assignedMemberIds ?? [];
-  const members = assignedIds.map(id => memberById[id]).filter((m): m is Member => Boolean(m));
-
-  const color =
-    colorBy === 'member' ? (members[0]?.color ?? ev.color ?? ACTIVITY_COLORS[index % ACTIVITY_COLORS.length]) :
-    colorBy === 'status' ? (statusColorById.get((ev as ApiActivity & { statusId?: string | null }).statusId ?? '') ?? '#6b7280') :
-    /* activity */ (ev.color ?? ACTIVITY_COLORS[index % ACTIVITY_COLORS.length]);
-
-  return {
-    id: ev.id,
-    title: ev.title,
-    startCol,
-    span,
-    color,
-    icon: ev.icon ?? undefined,
-    members,
-    isChild: Boolean(ev.parentActivityId),
-    startAtMs: new Date(ev.startAt).getTime(),
-    endAtMs: new Date(ev.endAt).getTime(),
-    parentActivityId: ev.parentActivityId ?? null,
-    primaryMemberId: members[0]?.id ?? null,
-    assignedMemberIds: assignedIds,
-    statusId: (ev as ApiActivity & { statusId?: string | null }).statusId ?? null,
-  };
-}
-
-// ── Sorting ──────────────────────────────────────────────────────────────────
-
-function sortActivities(activities: RichActivity[], sortBy: SortBy): RichActivity[] {
-  return [...activities].sort((a, b) => {
-    if (sortBy === 'title') return a.title.localeCompare(b.title);
-    if (sortBy === 'endDate') return a.endAtMs - b.endAtMs;
-    return a.startAtMs - b.startAtMs;
-  });
-}
-
-// ── Grouping ─────────────────────────────────────────────────────────────────
-
-/**
- * Builds the flat GanttRow list from positioned activities, applying grouping,
- * sorting, parent→child nesting (arbitrary depth), and collapse state.
- * Exported for unit testing of the tree/collapse logic.
- */
-export function buildRows(
-  activities: RichActivity[],
-  members: Member[],
-  groupBy: GroupBy,
-  sortBy: SortBy,
-  collapsedParents: Set<string>,
-  collapsedGroups: Set<string>,
-  statuses?: Status[],
-): GanttRow[] {
-  const sorted = sortActivities(activities, sortBy);
-
-  if (groupBy === 'none') {
-    // Flat list — no parent nesting, so children are not indented.
-    return sorted.map(ev => ({ kind: 'activity' as const, event: { ...ev, isChild: false, depth: 0 } }));
-  }
-
-  if (groupBy === 'member') {
-    const buckets: Record<string, RichActivity[]> = {};
-    for (const ev of sorted) {
-      const key = ev.primaryMemberId ?? '__none__';
-      (buckets[key] ??= []).push(ev);
-    }
-
-    const rows: GanttRow[] = [];
-    const pushBucket = (id: string, label: string, color: string, evs: RichActivity[]) => {
-      const collapsed = collapsedGroups.has(id);
-      rows.push({ kind: 'group', id, label, color, count: evs.length, collapsed });
-      if (collapsed) return;
-      for (const ev of evs) rows.push({ kind: 'activity', event: { ...ev, isChild: false, depth: 0 } });
-    };
-
-    for (const m of members) {
-      const evs = buckets[m.id];
-      if (!evs?.length) continue;
-      pushBucket(m.id, m.name, m.color, evs);
-    }
-    const unassigned = buckets['__none__'];
-    if (unassigned?.length) {
-      pushBucket('__none__', 'Unassigned', 'var(--muted-foreground)', unassigned);
-    }
-    return rows;
-  }
-
-  if (groupBy === 'parent') {
-    // Build a parent→children index, then emit rows via depth-first traversal so
-    // grandchildren (and deeper) nest correctly. An activity is a "root" when it
-    // has no parent or its parent fell outside the current view.
-    const byId = new Map(sorted.map(a => [a.id, a]));
-    const childrenByParent = new Map<string, RichActivity[]>();
-    const roots: RichActivity[] = [];
-    for (const ev of sorted) {
-      const pid = ev.parentActivityId;
-      if (pid && byId.has(pid)) {
-        const list = childrenByParent.get(pid) ?? [];
-        list.push(ev);
-        childrenByParent.set(pid, list);
-      } else {
-        roots.push(ev);
-      }
-    }
-
-    const rows: GanttRow[] = [];
-    const seen = new Set<string>();   // emitted into rows (also guards cycles)
-    const hidden = new Set<string>(); // suppressed under a collapsed ancestor
-
-    // Recursively mark a collapsed node's descendants as hidden so the leftover
-    // sweep below doesn't resurrect them. The `hidden` guard also stops cycles.
-    const markHidden = (ev: RichActivity) => {
-      if (hidden.has(ev.id)) return;
-      hidden.add(ev.id);
-      for (const k of childrenByParent.get(ev.id) ?? []) markHidden(k);
-    };
-
-    const visit = (ev: RichActivity, depth: number) => {
-      if (seen.has(ev.id)) return;
-      seen.add(ev.id);
-      const kids = childrenByParent.get(ev.id) ?? [];
-      const hasChildren = kids.length > 0;
-      const collapsed = collapsedParents.has(ev.id);
-      rows.push({
-        kind: 'activity',
-        event: { ...ev, isChild: depth > 0, depth, hasChildren, collapsed },
-      });
-      if (!hasChildren) return;
-      if (collapsed) for (const k of kids) markHidden(k);
-      else for (const k of kids) visit(k, depth + 1);
-    };
-
-    for (const r of roots) visit(r, 0);
-    // Safety net: emit any activity unreachable from a root (e.g. a parent-
-    // pointer cycle where no node qualifies as a root) at depth 0, but never
-    // resurrect a node intentionally hidden under a collapsed ancestor.
-    for (const ev of sorted) {
-      if (!seen.has(ev.id) && !hidden.has(ev.id)) visit(ev, 0);
-    }
-    return rows;
-  }
-
-  if (groupBy === 'status') {
-    const buckets = new Map<string, RichActivity[]>();
-    for (const ev of sorted) {
-      const key = ev.statusId ?? '__no_status__';
-      const list = buckets.get(key) ?? [];
-      list.push(ev);
-      buckets.set(key, list);
-    }
-
-    const rows: GanttRow[] = [];
-    const pushStatusBucket = (id: string, label: string, color: string, evs: RichActivity[]) => {
-      const collapsed = collapsedGroups.has(id);
-      rows.push({ kind: 'group', id, label, color, count: evs.length, collapsed });
-      if (collapsed) return;
-      for (const ev of evs) rows.push({ kind: 'activity', event: { ...ev, isChild: false, depth: 0 } });
-    };
-
-    if (statuses) {
-      for (const s of statuses) {
-        const evs = buckets.get(s.id);
-        if (!evs?.length) continue;
-        pushStatusBucket(s.id, s.name, resolveColorHex(s.color ?? null) ?? 'var(--muted-foreground)', evs);
-      }
-    }
-    const noStatus = buckets.get('__no_status__');
-    if (noStatus?.length) {
-      pushStatusBucket('__no_status__', 'No status', 'var(--muted-foreground)', noStatus);
-    }
-    return rows;
-  }
-
-  return sorted.map(ev => ({ kind: 'activity' as const, event: ev }));
-}
-
-// ── Component ─────────────────────────────────────────────────────────────────
-
-/**
- * Returns only the activities whose status is not in closedStatusIds.
- * Extracted as a named export so the 'open' filter preset logic can be
- * unit-tested without mounting the full component.
- */
-export function filterOpenActivities<T extends { statusId?: string | null | undefined }>(
-  activities: T[],
-  closedStatusIds: Set<string>,
-): T[] {
-  return activities.filter(a => !a.statusId || !closedStatusIds.has(a.statusId))
-}
-
-export default function GanttView({
-  teamId,
-  timelineId,
-  startDate,
-  endDate,
-  groupBy,
-  sortBy,
-  granularity,
-  colorBy,
-  timelineStatuses,
-  savedFilters,
-  tags,
-  selectedActivityId = null,
-  onSelectActivity = () => {},
-  onLaneDrag,
-  onBarDragProgress,
-  onBarDragEnd,
-  onMembersLoaded,
-  onSelectApiActivity,
-  labelColW,
-  onLabelColWChange,
-}: Props) {
-  const queryClient = useQueryClient();
-  const updateActivity = useUpdateActivity(timelineId);
-  const today = todayMidnight();
-
-  // Collapse state for the Gantt tree. `collapsedParents` hides an activity's
-  // child subtree (parent grouping); `collapsedGroups` hides a member bucket's
-  // activities (member grouping). Both persist across re-renders and view tweaks.
-  const [collapsedParents, setCollapsedParents] = useState<Set<string>>(new Set());
-  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
-
-  const toggleParent = useCallback((id: string) => {
-    setCollapsedParents(prev => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id); else next.add(id);
-      return next;
-    });
-  }, []);
-
-  const toggleGroup = useCallback((id: string) => {
-    setCollapsedGroups(prev => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id); else next.add(id);
-      return next;
-    });
-  }, []);
-  const containerRef = useRef<HTMLDivElement>(null);
-  const [containerWidth, setContainerWidth] = useState(800);
-
-  const { debouncedQuery, registerMatches, activeMatchId, matchedIds, matchReasons } = useFind();
-  const { activeFilter } = useFilter();
-
-  const globalPrefs = usePreferenceMap();
-  const prefWeekStart = (globalPrefs['week_start'] as string | undefined) === 'sunday' ? 'sunday' : 'monday';
-  // Map the stored date_format preference to a BCP 47 locale for Gantt column labels.
-  // DD/MM/YYYY users prefer day-first ordering (en-GB: "5 Jan"); all others get MM-first (en-US: "Jan 5").
-  const prefDateFormat = (globalPrefs['date_format'] as string | undefined) ?? 'MMM D, YYYY';
-  const prefLocale = prefDateFormat === 'DD/MM/YYYY' ? 'en-GB' : 'en-US';
-
-  useLayoutEffect(() => {
-    const el = containerRef.current;
-    if (!el) return;
-    const ro = new ResizeObserver(entries => {
-      const w = entries[0]?.contentRect.width;
-      if (w && w > 0) setContainerWidth(w);
-    });
-    ro.observe(el);
-    setContainerWidth(el.clientWidth || 800);
-    return () => ro.disconnect();
-  }, []);
-
-  const viewStart = useMemo<Date>(() => {
-    if (startDate) return new Date(startDate);
-    const d = new Date(today);
-    d.setUTCDate(d.getUTCDate() - 14);
-    return d;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [startDate]);
-
-  const viewEnd = useMemo<Date>(() => {
-    if (endDate) return new Date(endDate);
-    const d = new Date(today);
-    d.setUTCDate(d.getUTCDate() + 75);
-    return d;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [endDate]);
-
-  const resolvedGranularity = useMemo<TimeGranularity>(() => {
-    if (granularity !== 'auto') return granularity;
-    return autoFitGranularity(viewStart, viewEnd, containerWidth);
-  }, [granularity, viewStart, viewEnd, containerWidth]);
-
-  const columns = useMemo(
-    () => generateColumns(viewStart, viewEnd, resolvedGranularity, { weekStart: prefWeekStart, locale: prefLocale }),
-    [viewStart, viewEnd, resolvedGranularity, prefWeekStart, prefLocale],
-  );
-
-  const todayIdx = useMemo(
-    () => todayColumnPosition(columns),
-    [columns],
-  );
-
-  const from = viewStart.toISOString();
-  const to = viewEnd.toISOString();
-
-  const { data: apiMembers = [] } = useTeamMembers(teamId);
-  const { data: apiActivities = [], isLoading } = useTimelineActivities(teamId, timelineId, from, to);
-
-  const members: Member[] = useMemo(
-    () => apiMembers.map((m, i) => toMember(m, i)),
-    [apiMembers],
-  );
-
-  const memberById = useMemo<Record<string, Member>>(() => {
-    const map: Record<string, Member> = {};
-    members.forEach(m => { map[m.id] = m; });
-    return map;
-  }, [members]);
-
-  // Notify parent once the member list resolves.
-  useEffect(() => {
-    if (onMembersLoaded && members.length > 0) {
-      onMembersLoaded(members);
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [members]);
-
-  // Derive data needed by the unified filter engine from the passed-in statuses/tags/filters.
-  const closedStatusIds = useMemo(
-    () => new Set((timelineStatuses ?? []).filter(s => s.isClosed).map(s => s.id)),
-    [timelineStatuses],
-  );
-
-  const statusesByTimeline = useMemo(() => {
-    const m = new Map<string, Status[]>();
-    if (timelineStatuses?.length) m.set(timelineId, timelineStatuses);
-    return m;
-  }, [timelineId, timelineStatuses]);
-
-  // Map userId → team_member_id[] so the 'member' filter kind can resolve by userId.
-  const memberIdsByUserId = useMemo(() => {
-    const m = new Map<string, string[]>();
-    apiMembers.forEach(member => {
-      if (member.userId) {
-        const existing = m.get(member.userId) ?? [];
-        m.set(member.userId, [...existing, member.id]);
-      }
-    });
-    return m;
-  }, [apiMembers]);
-
-  const visibleActivities = useMemo(() => applyActiveFilter(
-    apiActivities,
-    activeFilter,
-    memberIdsByUserId,
-    {
-      closedStatusIds,
-      savedFilters: savedFilters ?? [],
-      statuses: statusesByTimeline,
-      tags: tags ?? [],
-    },
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  ), [apiActivities, activeFilter, memberIdsByUserId, closedStatusIds, savedFilters, statusesByTimeline, tags]);
-
-  const statusColorById = useMemo(
-    () => new Map((timelineStatuses ?? []).map(s => [s.id, s.color])),
-    [timelineStatuses],
-  );
-
-  const rows: GanttRow[] = useMemo(() => {
-    const richActivities = visibleActivities
-      .map((ev, i) => toRichActivity(ev, i, memberById, viewStart, viewEnd, columns, colorBy, statusColorById))
-      .filter((a): a is RichActivity => a !== null);
-    return buildRows(richActivities, members, groupBy, sortBy, collapsedParents, collapsedGroups, timelineStatuses);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visibleActivities, members, memberById, groupBy, sortBy, colorBy, statusColorById, viewStart, viewEnd, columns, collapsedParents, collapsedGroups, timelineStatuses]);
-
-  // ── Find: compute matches and register with context ───────────────────────
-
-  const matchResults = useMemo(
-    () => matchEvents(debouncedQuery, visibleActivities, members, visibleActivities),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [debouncedQuery, visibleActivities, members],
-  );
-
-  const matchedSet = useMemo(
-    () => new Set(matchResults.map(r => r.activityId)),
-    [matchResults],
-  );
-
-  const computedMatchReasons = useMemo(() => {
-    const map = new Map<string, string[]>();
-    matchResults.forEach(r => map.set(r.activityId, r.reasons));
-    return map;
-  }, [matchResults]);
-
-  // Ordered match IDs follow the current row order so prev/next walks the
-  // visual top-to-bottom sequence rather than the arbitrary API order.
-  const orderedMatchIds = useMemo(
-    () => rows
-      .filter(r => r.kind === 'activity' && matchedSet.has(r.event.id))
-      .map(r => (r as { kind: 'activity'; event: GanttActivity }).event.id),
-    [rows, matchedSet],
-  );
-
-  useEffect(() => {
-    registerMatches(orderedMatchIds, computedMatchReasons);
-  }, [orderedMatchIds, computedMatchReasons, registerMatches]);
-
-  // Build the FindState passed to GanttGrid
-  const hasQuery = debouncedQuery.trim().length > 0;
-  const filtersActive = activeFilter.kind !== 'preset' || activeFilter.id !== 'all';
-  const findState: FindState = useMemo(() => ({
-    hasQuery,
-    matchedIds: matchedSet,
-    activeMatchId,
-    matchReasons,
-    filtersActive,
-    matchCount: matchedIds.length,
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [hasQuery, matchedSet, activeMatchId, matchReasons, filtersActive, matchedIds.length]);
-
-  // ── Bar drag ─────────────────────────────────────────────────────────────
-
-  const handleBarDrag = useCallback((activityId: string, newStartDate: Date, newEndDate: Date) => {
-    const patch = {
-      startAt: newStartDate.toISOString(),
-      endAt: newEndDate.toISOString(),
-    };
-
-    // Synchronously update the cache so the bar doesn't flash back to old
-    // position when GanttGrid clears its drag state in the same render cycle.
-    queryClient.setQueriesData<ApiActivity[]>(
-      { queryKey: ['timelines', timelineId, 'activities'] },
-      (old) => old?.map((a) => (a.id === activityId ? { ...a, ...patch } : a)),
-    );
-
-    // Push updated activity to the sidebar so it shows new dates immediately
-    // instead of the stale snapshot from when the activity was selected.
-    if (onSelectApiActivity) {
-      const updated = apiActivities.find(a => a.id === activityId);
-      if (updated) onSelectApiActivity({ ...updated, ...patch });
-    }
-
-    onBarDragEnd?.();
-    updateActivity.mutate({ activityId, patch });
-  }, [updateActivity, onBarDragEnd, queryClient, timelineId, apiActivities, onSelectApiActivity]);
-
-  if (isLoading) {
-    return (
-      <div ref={containerRef} className="flex items-center justify-center h-full text-muted-foreground text-[13px]">
-        Loading activities…
-      </div>
-    );
-  }
-
-  return (
-    <div ref={containerRef} style={{ flex: 1, minHeight: 0 }}>
-      <GanttGrid
-        rows={rows}
-        columns={columns}
-        todayIndex={todayIdx}
-        selectedActivityId={selectedActivityId}
-        findState={findState}
-        onSelectActivity={(id) => {
-          onSelectActivity(id);
-          if (onSelectApiActivity) {
-            const found = id ? (apiActivities.find(a => a.id === id) ?? null) : null;
-            onSelectApiActivity(found);
-          }
-        }}
-        onLaneDrag={onLaneDrag}
-        onBarDrag={handleBarDrag}
-        onBarDragProgress={onBarDragProgress}
-        resolvedGranularity={resolvedGranularity}
-        onClearFilters={filtersActive ? () => {} : undefined}
-        labelColW={labelColW}
-        onLabelColWChange={onLabelColWChange}
-        onToggleActivity={groupBy === 'parent' ? toggleParent : undefined}
-        onToggleGroup={groupBy === 'member' || groupBy === 'status' ? toggleGroup : undefined}
-      />
-    </div>
-  );
-}
-````
-
 ## File: packages/web/src/pages/DashboardPage.tsx
 ````typescript
 /**
@@ -51093,9 +50834,667 @@ export default function DashboardPage() {
 }
 ````
 
+## File: packages/web/src/components/gantt/GanttView.tsx
+````typescript
+/**
+ * GanttView — data container for the Gantt grid.
+ *
+ * Fetches events and members, applies grouping and sorting, builds the
+ * GanttRow list, and passes everything to GanttGrid. The component owns
+ * no layout state — granularity, groupBy, and sortBy come from DashboardPage.
+ *
+ * Also owns the find-match computation: it reads the debounced query from
+ * FindContext, matches against the fetched API events, and registers the
+ * ordered match list back into FindContext so GanttGrid can apply visual
+ * treatment and auto-scroll.
+ */
+
+import { useMemo, useRef, useState, useLayoutEffect, useEffect, useCallback } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
+import GanttGrid, { type GanttActivity, type GanttRow, type FindState } from './GanttGrid';
+import { useTimelineActivities, useTeamMembers, useUpdateActivity } from '@/hooks/useTeamActivities';
+import type { components } from '@draba/shared';
+import { type Member, ACTIVITY_COLORS, MEMBER_COLORS } from '@/types';
+import { resolveColorHex } from '@/components/identity/identity-constants';
+import type { GroupBy, SortBy, TimeGranularity, ColorBy } from './GanttToolbar';
+import {
+  generateColumns,
+  positionInColumns,
+  todayColumnPosition,
+  autoFitGranularity,
+  type ColumnDef,
+} from './granularity';
+import { matchEvents } from '@/lib/findMatcher';
+import { memberComboKey, orderedComboIds, memberComboLabel, comboSortComparator, UNASSIGNED_KEY } from '@/lib/memberGroups';
+import { useFind } from '@/contexts/FindContext';
+import { useFilter } from '@/contexts/FilterContext';
+import { usePreferenceMap } from '@/hooks/usePreferences';
+import { applyActiveFilter } from '@/lib/presetFilters';
+
+type ApiActivity = components['schemas']['Activity'];
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
+type Status = components['schemas']['Status'];
+type SavedFilter = components['schemas']['SavedFilter'];
+type Tag = components['schemas']['Tag'];
+
+interface Props {
+  teamId: string;
+  /** Active timeline ID — activities are fetched scoped to this timeline. */
+  timelineId: string;
+  /** ISO date "YYYY-MM-DD" — defaults to 14 days before today. */
+  startDate?: string;
+  /** ISO date "YYYY-MM-DD" — defaults to 75 days after today. */
+  endDate?: string;
+  groupBy: GroupBy;
+  sortBy: SortBy;
+  granularity: TimeGranularity | 'auto';
+  colorBy: ColorBy;
+  /**
+   * Timeline statuses — used to derive closedStatusIds and resolve status names
+   * in the filter engine. Replaces the old closedStatusIds prop.
+   */
+  timelineStatuses?: Status[];
+  /** Saved filters for the active team — evaluated by the filter engine. */
+  savedFilters?: SavedFilter[];
+  /** Team tags — used to resolve tag names in the filter engine. */
+  tags?: Tag[];
+  selectedActivityId?: string | null;
+  onSelectActivity?: (id: string | null) => void;
+  /** Called when the user drags on an empty lane to create an activity. */
+  onLaneDrag?: (startDate: Date, endDate: Date, memberId: string | null) => void;
+  /** Called during a bar drag with live snapped dates — for sidebar preview. */
+  onBarDragProgress?: (activityId: string, newStart: Date, newEnd: Date) => void;
+  /** Called when a bar drag completes (before the PATCH fires). */
+  onBarDragEnd?: () => void;
+  /** Called once members are loaded, so the parent can access them for panels. */
+  onMembersLoaded?: (members: Member[]) => void;
+  /** Called when an activity is selected — passes the full API activity object. */
+  onSelectApiActivity?: (activity: ApiActivity | null) => void;
+  /** Label column width in px — passed through to GanttGrid for controlled persistence. */
+  labelColW?: number;
+  /** Called when the user drags the label column resize handle. */
+  onLabelColWChange?: (w: number) => void;
+}
+
+
+// ── Date helpers ────────────────────────────────────────────────────────────
+
+function toDateOnly(datetime: string): string {
+  return datetime.slice(0, 10);
+}
+
+function todayMidnight(): Date {
+  const d = new Date();
+  d.setUTCHours(0, 0, 0, 0); // UTC midnight so it aligns with UTC-stored activity dates
+  return d;
+}
+
+function initialsFrom(name: string): string {
+  return name
+    .split(/\s+/)
+    .map(w => w[0] ?? '')
+    .slice(0, 2)
+    .join('')
+    .toUpperCase();
+}
+
+// ── Type mapping ─────────────────────────────────────────────────────────────
+
+function toMember(m: TeamMemberWithUser, index: number): Member {
+  const name = m.displayName || m.email || 'Unknown';
+  const fallbackHex = MEMBER_COLORS[index % MEMBER_COLORS.length];
+  return {
+    id: m.id,
+    name,
+    initials: initialsFrom(name),
+    color: resolveColorHex(m.color) || fallbackHex,
+  };
+}
+
+/** Intermediate type that carries original API fields alongside view-state. */
+export interface RichActivity extends GanttActivity {
+  startAtMs: number;
+  endAtMs: number;
+  parentActivityId: string | null;
+  primaryMemberId: string | null;
+  assignedMemberIds: string[];
+  statusId: string | null;
+}
+
+function toRichActivity(
+  ev: ApiActivity,
+  index: number,
+  memberById: Record<string, Member>,
+  viewStart: Date,
+  viewEnd: Date,
+  columns: ColumnDef[],
+  colorBy: ColorBy,
+  statusColorById: Map<string, string>,
+): RichActivity | null {
+  const evStart = new Date(toDateOnly(ev.startAt));
+  const evEnd = new Date(toDateOnly(ev.endAt));
+
+  if (evEnd < viewStart || evStart > viewEnd) return null;
+
+  const clampedStart = evStart < viewStart ? viewStart : evStart;
+  const clampedEnd = evEnd > viewEnd ? viewEnd : evEnd;
+
+  const { startCol, span } = positionInColumns(clampedStart, clampedEnd, columns);
+  const assignedIds = ev.assignedMemberIds ?? [];
+  const members = assignedIds.map(id => memberById[id]).filter((m): m is Member => Boolean(m));
+
+  const color =
+    colorBy === 'member' ? (members[0]?.color ?? ev.color ?? ACTIVITY_COLORS[index % ACTIVITY_COLORS.length]) :
+    colorBy === 'status' ? (statusColorById.get((ev as ApiActivity & { statusId?: string | null }).statusId ?? '') ?? '#6b7280') :
+    /* activity */ (ev.color ?? ACTIVITY_COLORS[index % ACTIVITY_COLORS.length]);
+
+  return {
+    id: ev.id,
+    title: ev.title,
+    startCol,
+    span,
+    color,
+    icon: ev.icon ?? undefined,
+    members,
+    isChild: Boolean(ev.parentActivityId),
+    startAtMs: new Date(ev.startAt).getTime(),
+    endAtMs: new Date(ev.endAt).getTime(),
+    parentActivityId: ev.parentActivityId ?? null,
+    primaryMemberId: members[0]?.id ?? null,
+    assignedMemberIds: assignedIds,
+    statusId: (ev as ApiActivity & { statusId?: string | null }).statusId ?? null,
+  };
+}
+
+// ── Sorting ──────────────────────────────────────────────────────────────────
+
+function sortActivities(activities: RichActivity[], sortBy: SortBy): RichActivity[] {
+  return [...activities].sort((a, b) => {
+    if (sortBy === 'title') return a.title.localeCompare(b.title);
+    if (sortBy === 'endDate') return a.endAtMs - b.endAtMs;
+    return a.startAtMs - b.startAtMs;
+  });
+}
+
+// ── Grouping ─────────────────────────────────────────────────────────────────
+
+/**
+ * Builds the flat GanttRow list from positioned activities, applying grouping,
+ * sorting, parent→child nesting (arbitrary depth), and collapse state.
+ * Exported for unit testing of the tree/collapse logic.
+ */
+export function buildRows(
+  activities: RichActivity[],
+  members: Member[],
+  groupBy: GroupBy,
+  sortBy: SortBy,
+  collapsedParents: Set<string>,
+  collapsedGroups: Set<string>,
+  statuses?: Status[],
+): GanttRow[] {
+  const sorted = sortActivities(activities, sortBy);
+
+  if (groupBy === 'none') {
+    // Flat list — no parent nesting, so children are not indented.
+    return sorted.map(ev => ({ kind: 'activity' as const, event: { ...ev, isChild: false, depth: 0 } }));
+  }
+
+  if (groupBy === 'member') {
+    const memberOrder = members.map(m => m.id);
+    const nameById = new Map(members.map(m => [m.id, m.name]));
+    const colorById = new Map(members.map(m => [m.id, m.color]));
+
+    const buckets = new Map<string, RichActivity[]>();
+    for (const ev of sorted) {
+      const key = memberComboKey(ev.assignedMemberIds);
+      const list = buckets.get(key) ?? [];
+      list.push(ev);
+      buckets.set(key, list);
+    }
+
+    const comparator = comboSortComparator(memberOrder);
+    const sortedKeys = [...buckets.keys()].sort(comparator);
+
+    const rows: GanttRow[] = [];
+    for (const key of sortedKeys) {
+      const evs = buckets.get(key)!;
+      const rawIds = key === UNASSIGNED_KEY ? [] : key.split('|');
+      const orderedIds = orderedComboIds(rawIds, memberOrder);
+      const label = key === UNASSIGNED_KEY ? 'Unassigned' : memberComboLabel(orderedIds, nameById);
+      const memberColors = orderedIds.map(id => colorById.get(id) ?? 'var(--muted-foreground)');
+      const primaryColor = key === UNASSIGNED_KEY ? 'var(--muted-foreground)' : (memberColors[0] ?? 'var(--muted-foreground)');
+      const collapsed = collapsedGroups.has(key);
+      rows.push({ kind: 'group', id: key, label, color: primaryColor, memberColors, count: evs.length, collapsed });
+      if (collapsed) continue;
+      for (const ev of evs) rows.push({ kind: 'activity', event: { ...ev, isChild: false, depth: 0 } });
+    }
+    return rows;
+  }
+
+  if (groupBy === 'parent') {
+    // Build a parent→children index, then emit rows via depth-first traversal so
+    // grandchildren (and deeper) nest correctly. An activity is a "root" when it
+    // has no parent or its parent fell outside the current view.
+    const byId = new Map(sorted.map(a => [a.id, a]));
+    const childrenByParent = new Map<string, RichActivity[]>();
+    const roots: RichActivity[] = [];
+    for (const ev of sorted) {
+      const pid = ev.parentActivityId;
+      if (pid && byId.has(pid)) {
+        const list = childrenByParent.get(pid) ?? [];
+        list.push(ev);
+        childrenByParent.set(pid, list);
+      } else {
+        roots.push(ev);
+      }
+    }
+
+    const rows: GanttRow[] = [];
+    const seen = new Set<string>();   // emitted into rows (also guards cycles)
+    const hidden = new Set<string>(); // suppressed under a collapsed ancestor
+
+    // Recursively mark a collapsed node's descendants as hidden so the leftover
+    // sweep below doesn't resurrect them. The `hidden` guard also stops cycles.
+    const markHidden = (ev: RichActivity) => {
+      if (hidden.has(ev.id)) return;
+      hidden.add(ev.id);
+      for (const k of childrenByParent.get(ev.id) ?? []) markHidden(k);
+    };
+
+    const visit = (ev: RichActivity, depth: number) => {
+      if (seen.has(ev.id)) return;
+      seen.add(ev.id);
+      const kids = childrenByParent.get(ev.id) ?? [];
+      const hasChildren = kids.length > 0;
+      const collapsed = collapsedParents.has(ev.id);
+      rows.push({
+        kind: 'activity',
+        event: { ...ev, isChild: depth > 0, depth, hasChildren, collapsed },
+      });
+      if (!hasChildren) return;
+      if (collapsed) for (const k of kids) markHidden(k);
+      else for (const k of kids) visit(k, depth + 1);
+    };
+
+    for (const r of roots) visit(r, 0);
+    // Safety net: emit any activity unreachable from a root (e.g. a parent-
+    // pointer cycle where no node qualifies as a root) at depth 0, but never
+    // resurrect a node intentionally hidden under a collapsed ancestor.
+    for (const ev of sorted) {
+      if (!seen.has(ev.id) && !hidden.has(ev.id)) visit(ev, 0);
+    }
+    return rows;
+  }
+
+  if (groupBy === 'status') {
+    const buckets = new Map<string, RichActivity[]>();
+    for (const ev of sorted) {
+      const key = ev.statusId ?? '__no_status__';
+      const list = buckets.get(key) ?? [];
+      list.push(ev);
+      buckets.set(key, list);
+    }
+
+    const rows: GanttRow[] = [];
+    const pushStatusBucket = (id: string, label: string, color: string, evs: RichActivity[]) => {
+      const collapsed = collapsedGroups.has(id);
+      rows.push({ kind: 'group', id, label, color, count: evs.length, collapsed });
+      if (collapsed) return;
+      for (const ev of evs) rows.push({ kind: 'activity', event: { ...ev, isChild: false, depth: 0 } });
+    };
+
+    if (statuses) {
+      for (const s of statuses) {
+        const evs = buckets.get(s.id);
+        if (!evs?.length) continue;
+        pushStatusBucket(s.id, s.name, resolveColorHex(s.color ?? null) ?? 'var(--muted-foreground)', evs);
+      }
+    }
+    const noStatus = buckets.get('__no_status__');
+    if (noStatus?.length) {
+      pushStatusBucket('__no_status__', 'No status', 'var(--muted-foreground)', noStatus);
+    }
+    return rows;
+  }
+
+  return sorted.map(ev => ({ kind: 'activity' as const, event: ev }));
+}
+
+// ── Component ─────────────────────────────────────────────────────────────────
+
+/**
+ * Returns only the activities whose status is not in closedStatusIds.
+ * Extracted as a named export so the 'open' filter preset logic can be
+ * unit-tested without mounting the full component.
+ */
+export function filterOpenActivities<T extends { statusId?: string | null | undefined }>(
+  activities: T[],
+  closedStatusIds: Set<string>,
+): T[] {
+  return activities.filter(a => !a.statusId || !closedStatusIds.has(a.statusId))
+}
+
+export default function GanttView({
+  teamId,
+  timelineId,
+  startDate,
+  endDate,
+  groupBy,
+  sortBy,
+  granularity,
+  colorBy,
+  timelineStatuses,
+  savedFilters,
+  tags,
+  selectedActivityId = null,
+  onSelectActivity = () => {},
+  onLaneDrag,
+  onBarDragProgress,
+  onBarDragEnd,
+  onMembersLoaded,
+  onSelectApiActivity,
+  labelColW,
+  onLabelColWChange,
+}: Props) {
+  const queryClient = useQueryClient();
+  const updateActivity = useUpdateActivity(timelineId);
+  const today = todayMidnight();
+
+  // Collapse state for the Gantt tree. `collapsedParents` hides an activity's
+  // child subtree (parent grouping); `collapsedGroups` hides a member bucket's
+  // activities (member grouping). Both persist across re-renders and view tweaks.
+  const [collapsedParents, setCollapsedParents] = useState<Set<string>>(new Set());
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
+
+  const toggleParent = useCallback((id: string) => {
+    setCollapsedParents(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }, []);
+
+  const toggleGroup = useCallback((id: string) => {
+    setCollapsedGroups(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }, []);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [containerWidth, setContainerWidth] = useState(800);
+
+  const { debouncedQuery, registerMatches, activeMatchId, matchedIds, matchReasons } = useFind();
+  const { activeFilter } = useFilter();
+
+  const globalPrefs = usePreferenceMap();
+  const prefWeekStart = (globalPrefs['week_start'] as string | undefined) === 'sunday' ? 'sunday' : 'monday';
+  // Map the stored date_format preference to a BCP 47 locale for Gantt column labels.
+  // DD/MM/YYYY users prefer day-first ordering (en-GB: "5 Jan"); all others get MM-first (en-US: "Jan 5").
+  const prefDateFormat = (globalPrefs['date_format'] as string | undefined) ?? 'MMM D, YYYY';
+  const prefLocale = prefDateFormat === 'DD/MM/YYYY' ? 'en-GB' : 'en-US';
+
+  useLayoutEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(entries => {
+      const w = entries[0]?.contentRect.width;
+      if (w && w > 0) setContainerWidth(w);
+    });
+    ro.observe(el);
+    setContainerWidth(el.clientWidth || 800);
+    return () => ro.disconnect();
+  }, []);
+
+  const viewStart = useMemo<Date>(() => {
+    if (startDate) return new Date(startDate);
+    const d = new Date(today);
+    d.setUTCDate(d.getUTCDate() - 14);
+    return d;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [startDate]);
+
+  const viewEnd = useMemo<Date>(() => {
+    if (endDate) return new Date(endDate);
+    const d = new Date(today);
+    d.setUTCDate(d.getUTCDate() + 75);
+    return d;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [endDate]);
+
+  const resolvedGranularity = useMemo<TimeGranularity>(() => {
+    if (granularity !== 'auto') return granularity;
+    return autoFitGranularity(viewStart, viewEnd, containerWidth);
+  }, [granularity, viewStart, viewEnd, containerWidth]);
+
+  const columns = useMemo(
+    () => generateColumns(viewStart, viewEnd, resolvedGranularity, { weekStart: prefWeekStart, locale: prefLocale }),
+    [viewStart, viewEnd, resolvedGranularity, prefWeekStart, prefLocale],
+  );
+
+  const todayIdx = useMemo(
+    () => todayColumnPosition(columns),
+    [columns],
+  );
+
+  const from = viewStart.toISOString();
+  const to = viewEnd.toISOString();
+
+  const { data: apiMembers = [] } = useTeamMembers(teamId);
+  const { data: apiActivities = [], isLoading } = useTimelineActivities(teamId, timelineId, from, to);
+
+  const members: Member[] = useMemo(
+    () => apiMembers.map((m, i) => toMember(m, i)),
+    [apiMembers],
+  );
+
+  const memberById = useMemo<Record<string, Member>>(() => {
+    const map: Record<string, Member> = {};
+    members.forEach(m => { map[m.id] = m; });
+    return map;
+  }, [members]);
+
+  // Notify parent once the member list resolves.
+  useEffect(() => {
+    if (onMembersLoaded && members.length > 0) {
+      onMembersLoaded(members);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [members]);
+
+  // Derive data needed by the unified filter engine from the passed-in statuses/tags/filters.
+  const closedStatusIds = useMemo(
+    () => new Set((timelineStatuses ?? []).filter(s => s.isClosed).map(s => s.id)),
+    [timelineStatuses],
+  );
+
+  const statusesByTimeline = useMemo(() => {
+    const m = new Map<string, Status[]>();
+    if (timelineStatuses?.length) m.set(timelineId, timelineStatuses);
+    return m;
+  }, [timelineId, timelineStatuses]);
+
+  // Map userId → team_member_id[] so the 'member' filter kind can resolve by userId.
+  const memberIdsByUserId = useMemo(() => {
+    const m = new Map<string, string[]>();
+    apiMembers.forEach(member => {
+      if (member.userId) {
+        const existing = m.get(member.userId) ?? [];
+        m.set(member.userId, [...existing, member.id]);
+      }
+    });
+    return m;
+  }, [apiMembers]);
+
+  const visibleActivities = useMemo(() => applyActiveFilter(
+    apiActivities,
+    activeFilter,
+    memberIdsByUserId,
+    {
+      closedStatusIds,
+      savedFilters: savedFilters ?? [],
+      statuses: statusesByTimeline,
+      tags: tags ?? [],
+    },
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  ), [apiActivities, activeFilter, memberIdsByUserId, closedStatusIds, savedFilters, statusesByTimeline, tags]);
+
+  const statusColorById = useMemo(
+    () => new Map((timelineStatuses ?? []).map(s => [s.id, s.color])),
+    [timelineStatuses],
+  );
+
+  const rows: GanttRow[] = useMemo(() => {
+    const richActivities = visibleActivities
+      .map((ev, i) => toRichActivity(ev, i, memberById, viewStart, viewEnd, columns, colorBy, statusColorById))
+      .filter((a): a is RichActivity => a !== null);
+    return buildRows(richActivities, members, groupBy, sortBy, collapsedParents, collapsedGroups, timelineStatuses);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visibleActivities, members, memberById, groupBy, sortBy, colorBy, statusColorById, viewStart, viewEnd, columns, collapsedParents, collapsedGroups, timelineStatuses]);
+
+  // ── Find: compute matches and register with context ───────────────────────
+
+  const matchResults = useMemo(
+    () => matchEvents(debouncedQuery, visibleActivities, members, visibleActivities),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [debouncedQuery, visibleActivities, members],
+  );
+
+  const matchedSet = useMemo(
+    () => new Set(matchResults.map(r => r.activityId)),
+    [matchResults],
+  );
+
+  const computedMatchReasons = useMemo(() => {
+    const map = new Map<string, string[]>();
+    matchResults.forEach(r => map.set(r.activityId, r.reasons));
+    return map;
+  }, [matchResults]);
+
+  // Ordered match IDs follow the current row order so prev/next walks the
+  // visual top-to-bottom sequence rather than the arbitrary API order.
+  const orderedMatchIds = useMemo(
+    () => rows
+      .filter(r => r.kind === 'activity' && matchedSet.has(r.event.id))
+      .map(r => (r as { kind: 'activity'; event: GanttActivity }).event.id),
+    [rows, matchedSet],
+  );
+
+  useEffect(() => {
+    registerMatches(orderedMatchIds, computedMatchReasons);
+  }, [orderedMatchIds, computedMatchReasons, registerMatches]);
+
+  // Build the FindState passed to GanttGrid
+  const hasQuery = debouncedQuery.trim().length > 0;
+  const filtersActive = activeFilter.kind !== 'preset' || activeFilter.id !== 'all';
+  const findState: FindState = useMemo(() => ({
+    hasQuery,
+    matchedIds: matchedSet,
+    activeMatchId,
+    matchReasons,
+    filtersActive,
+    matchCount: matchedIds.length,
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), [hasQuery, matchedSet, activeMatchId, matchReasons, filtersActive, matchedIds.length]);
+
+  // ── Bar drag ─────────────────────────────────────────────────────────────
+
+  const handleBarDrag = useCallback((activityId: string, newStartDate: Date, newEndDate: Date) => {
+    const patch = {
+      startAt: newStartDate.toISOString(),
+      endAt: newEndDate.toISOString(),
+    };
+
+    // Synchronously update the cache so the bar doesn't flash back to old
+    // position when GanttGrid clears its drag state in the same render cycle.
+    queryClient.setQueriesData<ApiActivity[]>(
+      { queryKey: ['timelines', timelineId, 'activities'] },
+      (old) => old?.map((a) => (a.id === activityId ? { ...a, ...patch } : a)),
+    );
+
+    // Push updated activity to the sidebar so it shows new dates immediately
+    // instead of the stale snapshot from when the activity was selected.
+    if (onSelectApiActivity) {
+      const updated = apiActivities.find(a => a.id === activityId);
+      if (updated) onSelectApiActivity({ ...updated, ...patch });
+    }
+
+    onBarDragEnd?.();
+    updateActivity.mutate({ activityId, patch });
+  }, [updateActivity, onBarDragEnd, queryClient, timelineId, apiActivities, onSelectApiActivity]);
+
+  if (isLoading) {
+    return (
+      <div ref={containerRef} className="flex items-center justify-center h-full text-muted-foreground text-[13px]">
+        Loading activities…
+      </div>
+    );
+  }
+
+  return (
+    <div ref={containerRef} style={{ flex: 1, minHeight: 0 }}>
+      <GanttGrid
+        rows={rows}
+        columns={columns}
+        todayIndex={todayIdx}
+        selectedActivityId={selectedActivityId}
+        findState={findState}
+        onSelectActivity={(id) => {
+          onSelectActivity(id);
+          if (onSelectApiActivity) {
+            const found = id ? (apiActivities.find(a => a.id === id) ?? null) : null;
+            onSelectApiActivity(found);
+          }
+        }}
+        onLaneDrag={onLaneDrag}
+        onBarDrag={handleBarDrag}
+        onBarDragProgress={onBarDragProgress}
+        resolvedGranularity={resolvedGranularity}
+        onClearFilters={filtersActive ? () => {} : undefined}
+        labelColW={labelColW}
+        onLabelColWChange={onLabelColWChange}
+        onToggleActivity={groupBy === 'parent' ? toggleParent : undefined}
+        onToggleGroup={groupBy === 'member' || groupBy === 'status' ? toggleGroup : undefined}
+      />
+    </div>
+  );
+}
+````
+
 ## File: docs/log.md
 ````markdown
 # Development Log
+
+---
+
+## 2026-06-02 — /test-phase 11.1.2
+
+- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
+- Result: all pass (1 skip — ws-smoke heartbeat; covered by unit tests)
+- Smoke target: http://epcot.lan:8081
+- Note: api-smoke assertion 18 (non-member authz) initially flagged as FAIL — investigated and confirmed false positive. The smoke subagent's "non-member" user had registered via the bootstrap-team invite and was therefore a member. Direct reproduction confirmed `requireTeamMember` returns 403 for a genuine non-member. TESTING.md Phase 3 assertion 18 updated with setup guidance.
+
+---
+
+## 2026-06-02 — Phase 11.1.2: Group by Assignee Combination
+
+**Goal:** Fix "Group by Member" in both Gantt and List to bucket activities by their exact set of assignees rather than by the first assignee only. A two-person activity now appears under a dedicated `{Alice, Bob}` combo group instead of being invisible to Bob.
+
+**Frontend:**
+- `lib/memberGroups.ts` (new): shared module with `memberComboKey`, `orderedComboIds`, `memberComboLabel`, `comboSortComparator`, and `UNASSIGNED_KEY`. Single source of truth consumed by both views.
+  - `memberComboKey(ids)` — sorts IDs and joins with `|`; returns `__unassigned__` for empty sets.
+  - `orderedComboIds(ids, memberOrder)` — re-orders the set into team order for labels and header dots.
+  - `memberComboLabel(orderedIds, nameById)` — Oxford join for 1–3 names; `"A, B, C +N"` for 4+.
+  - `comboSortComparator(memberOrder)` — lexicographic comparison over team-order indices; solo groups cluster before multi-member groups with the same anchor; Unassigned always last.
+- `GanttGrid.tsx`: extended `GanttRow` group type with `memberColors?: string[]`; group header renderer shows stacked circular color dots when `memberColors` is present (single-member group = one dot, unchanged look).
+- `GanttView.tsx` `buildRows` (member branch): buckets by `memberComboKey(assignedMemberIds)`; sorts keys via `comboSortComparator`; derives group label and `memberColors` from `orderedComboIds` + team color map.
+- `ListView.tsx` `buildListRows` (member branch): same combo-key bucketing and sort; added `memberOrder` parameter; `ListDisplayRow` group type extended with `memberColors?: string[]`; group header renderer shows stacked dots. Call site passes `memberOrder` derived from `members`.
+
+**Tests:**
+- `lib/memberGroups.test.ts` (new): 17 tests covering all four exports — key stability, ordering, Oxford/truncation labels, and comparator sort order.
+- `GanttView.tree.test.ts`: replaced the old member-grouping suite (bucketed by primary member) with a combo-key suite: one group per unique assignee set, no duplication, `memberColors` presence, collapse behavior, Unassigned last.
+- `ListView.tree.test.ts`: same replacement for List — combo-key bucketing, no duplication, `memberColors` on combo groups, collapse behavior.
+- All 187 tests pass; `pnpm --filter web lint` and `pnpm --filter web build` clean.
 
 ---
 
@@ -53013,7 +53412,7 @@ This document organizes development into discrete phases with effort estimates a
 | 10.4.6 | [Filter Implementation](#phase-1046--filter-implementation) | M–L — 3–4 days | 🔄 |
 | 11.1 | [Web — List View](#phase-111--web--list-view) | M — 2–3 days | ✅ |
 | 11.1.1 | [Timezone-Safe Activity Dates](#phase-1111--timezone-safe-activity-dates) | S–M — 0.5–1 day | ✅ |
-| 11.1.2 | [Group by Assignee Combination](#phase-1112--group-by-assignee-combination) | S–M — 0.5–1 day | ⬜ |
+| 11.1.2 | [Group by Assignee Combination](#phase-1112--group-by-assignee-combination) | S–M — 0.5–1 day | ✅ |
 | 11.2 | [Web — Calendar View](#phase-112--web--calendar-view) | L — 3–5 days | ⬜ |
 | 11.3 | [Web — Kanban View (Read-Only)](#phase-113--web--kanban-view-read-only) | S–M — 1–2 days | ⬜ |
 | 12 | [Communications Testing](#phase-12--communications-testing) | S — 1 day | ⬜ |
@@ -54336,7 +54735,7 @@ Format and position all activity `startAt`/`endAt` in **UTC** (no local conversi
 ---
 
 ### Phase 11.1.2 — Group by Assignee Combination
-**Status:** ⬜ | **Effort:** S–M (0.5–1 day)
+**Status:** ✅ Done (2026-06-02) | **Effort:** S–M (0.5–1 day)
 
 "Group by → Member" (Gantt and List) currently buckets each activity by its *first* assignee, so an activity assigned to both Brian and Lindsay only ever appears under Brian — it is invisible in Lindsay's group and there is no signal that it is shared work. This phase regroups by the **exact set** of assignees: `{Brian}`, `{Lindsay}`, and `{Brian, Lindsay}` become three distinct groups.
 
