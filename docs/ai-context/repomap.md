@@ -223,6 +223,7 @@ packages/
         gantt/
           ActivityCreatePanel.tsx
           ActivityDetailPanel.tsx
+          activityPanelFields.tsx
           GanttGrid.format.test.ts
           GanttGrid.tsx
           GanttToolbar.tsx
@@ -12720,6 +12721,82 @@ export default function RightSidebar({ open, title, onClose, children }: Props) 
 }
 ````
 
+## File: packages/web/src/components/shared/ConfirmDialog.tsx
+````typescript
+/**
+ * ConfirmDialog — shared confirmation panel for destructive / significant actions.
+ *
+ * Renders inline inside a modal panel (not a portal), replacing the modal's
+ * content area. The parent is responsible for showing/hiding this component.
+ */
+
+const cancelBtnStyle: React.CSSProperties = {
+  background: 'none',
+  border: '1px solid var(--border)',
+  color: 'var(--muted-foreground)',
+  fontSize: 13,
+  padding: '7px 18px',
+  borderRadius: 7,
+  cursor: 'pointer',
+  fontFamily: 'var(--font-sans)',
+}
+
+export interface ConfirmDialogProps {
+  /** Color variant: red = destructive delete, amber = archive, indigo = promote, teal = restore */
+  variant: 'red' | 'amber' | 'indigo' | 'teal'
+  icon: React.ReactNode
+  title: string
+  body: string
+  confirmLabel: string
+  busy: boolean
+  onCancel: () => void
+  onConfirm: () => void
+}
+
+const VARIANT_COLORS: Record<ConfirmDialogProps['variant'], string> = {
+  red:    '#EF4444',
+  amber:  '#F59E0B',
+  indigo: '#6366F1',
+  teal:   '#1A97A2',
+}
+
+export function ConfirmDialog({ variant, icon, title, body, confirmLabel, busy, onCancel, onConfirm }: ConfirmDialogProps) {
+  const c = VARIANT_COLORS[variant]
+  return (
+    <div style={{ padding: '28px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 14, textAlign: 'center' }}>
+      <div style={{
+        width: 48, height: 48, borderRadius: 12,
+        background: `${c}20`, border: `1.5px solid ${c}44`,
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+      }}>
+        {icon}
+      </div>
+      <div style={{ fontSize: 16, fontWeight: 600, color: 'var(--foreground)' }}>{title}</div>
+      <div style={{ fontSize: 13, color: 'var(--muted-foreground)', lineHeight: 1.6, maxWidth: 340 }}>{body}</div>
+      <div style={{ display: 'flex', gap: 10, marginTop: 4 }}>
+        <button onClick={onCancel} disabled={busy} style={cancelBtnStyle}>Cancel</button>
+        <button
+          onClick={onConfirm}
+          disabled={busy}
+          style={{
+            background: `${c}22`, border: `1px solid ${c}66`, color: c,
+            fontWeight: 600, fontSize: 13, padding: '7px 18px',
+            borderRadius: 7, cursor: 'pointer',
+            opacity: busy ? 0.6 : 1,
+            fontFamily: 'var(--font-sans)',
+          }}
+        >
+          {busy ? 'Working…' : confirmLabel}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+// Re-export color map so callers can reference variant colors for icons.
+export { VARIANT_COLORS }
+````
+
 ## File: packages/web/src/components/shared/EmptyState.tsx
 ````typescript
 /**
@@ -12784,6 +12861,68 @@ export default function EmptyState({ icon, message, description }: EmptyStatePro
     </div>
   );
 }
+````
+
+## File: packages/web/src/components/shared/InlineEditableTitle.tsx
+````typescript
+/**
+ * InlineEditableTitle — always-visible input for modal header names.
+ *
+ * Looks like plain text at rest; shows a subtle bottom border on hover/focus
+ * to signal editability. Standardizes the three different name-editing patterns
+ * across TeamModal, MemberModal, and TimelineModal.
+ */
+
+import { useState, forwardRef } from 'react'
+
+interface Props {
+  value: string
+  onChange: (v: string) => void
+  placeholder?: string
+  readOnly?: boolean
+  autoFocus?: boolean
+  onKeyDown?: (e: React.KeyboardEvent<HTMLInputElement>) => void
+}
+
+const InlineEditableTitle = forwardRef<HTMLInputElement, Props>(
+  function InlineEditableTitle({ value, onChange, placeholder, readOnly, autoFocus, onKeyDown }, ref) {
+    const [hovered, setHovered] = useState(false)
+    const [focused, setFocused] = useState(false)
+
+    return (
+      <input
+        ref={ref}
+        value={value}
+        onChange={e => onChange(e.target.value)}
+        placeholder={placeholder}
+        readOnly={readOnly}
+        autoFocus={autoFocus}
+        onKeyDown={onKeyDown}
+        onMouseEnter={() => setHovered(true)}
+        onMouseLeave={() => setHovered(false)}
+        onFocus={() => setFocused(true)}
+        onBlur={() => setFocused(false)}
+        style={{
+          fontSize: 16,
+          fontWeight: 600,
+          color: 'var(--foreground)',
+          background: 'transparent',
+          outline: 'none',
+          padding: '1px 0',
+          width: '100%',
+          fontFamily: 'var(--font-sans)',
+          border: 'none',
+          borderBottom: (hovered || focused) ? '1px solid var(--border)' : '1px solid transparent',
+          borderRadius: 0,
+          transition: 'border-color 0.12s',
+          cursor: readOnly ? 'default' : 'text',
+        }}
+      />
+    )
+  },
+)
+
+export default InlineEditableTitle
 ````
 
 ## File: packages/web/src/components/ui/button.tsx
@@ -24226,6 +24365,737 @@ export default function FilterConditionRow({
 }
 ````
 
+## File: packages/web/src/components/gantt/activityPanelFields.tsx
+````typescript
+/**
+ * Shared field components for the Gantt activity panels.
+ *
+ * Both ActivityCreatePanel (buffer-and-POST) and ActivityDetailPanel
+ * (save-on-change/blur) compose `ActivityFieldsBody` so the two panels show an
+ * identical field set, order, and styling. The components are fully controlled
+ * — value in, change out — so each panel owns its save strategy: the create
+ * panel buffers every change locally and submits once, while the detail panel
+ * saves per-field via PATCH. Nothing here knows or cares which.
+ */
+
+import { useState, useEffect, useRef } from 'react'
+import { ArrowRight, ChevronDown, Search } from 'lucide-react'
+import MemberAvatar from '@/components/MemberAvatar'
+import { IdentityWidget } from '@/components/identity/IdentityWidget'
+import { Badge } from '@/components/identity/Badge'
+import { resolveColorHex } from '@/components/identity/identity-constants'
+import type { Identity } from '@/components/identity/identity-constants'
+import TagInput from '@/components/TagInput'
+import type { Tag } from '@/hooks/useTags'
+import type { components } from '@draba/shared'
+import type { Member } from '@/types'
+
+type ApiActivity = components['schemas']['Activity']
+type Status = components['schemas']['Status']
+
+/** Shared slide-in panel width. */
+export const PANEL_WIDTH = 300
+
+// ── Date helpers ──────────────────────────────────────────────────────────────
+
+export function toDateInput(iso: string): string { return iso.slice(0, 10) }
+export function toISODate(d: string): string { return `${d}T00:00:00Z` }
+
+// ── Shared styles ─────────────────────────────────────────────────────────────
+
+const SEC_LABEL: React.CSSProperties = {
+  fontSize: 10,
+  fontWeight: 700,
+  color: 'var(--muted-foreground)',
+  textTransform: 'uppercase',
+  letterSpacing: '0.08em',
+  marginBottom: 6,
+}
+
+const FIELD_LABEL: React.CSSProperties = {
+  fontSize: 10,
+  fontWeight: 600,
+  color: 'var(--muted-foreground)',
+  textTransform: 'uppercase',
+  letterSpacing: '0.07em',
+  marginBottom: 3,
+  width: 68,
+  flexShrink: 0,
+}
+
+const STUB_VALUE: React.CSSProperties = {
+  fontSize: 12,
+  color: 'var(--muted-foreground)',
+  opacity: 0.5,
+  flex: 1,
+  display: 'flex',
+  alignItems: 'center',
+  gap: 4,
+  cursor: 'default',
+  userSelect: 'none',
+}
+
+const DIVIDER: React.CSSProperties = {
+  borderTop: '1px solid var(--border)',
+  margin: '10px 0',
+}
+
+const INPUT: React.CSSProperties = {
+  width: '100%',
+  boxSizing: 'border-box' as const,
+  fontSize: 12,
+  color: 'var(--foreground)',
+  border: '1px solid var(--border)',
+  borderRadius: 'var(--radius-md)',
+  padding: '5px 8px',
+  outline: 'none',
+  background: 'var(--background)',
+  fontFamily: 'var(--font-sans)',
+}
+
+// ── Rich status dropdown ──────────────────────────────────────────────────────
+
+interface StatusDropdownProps {
+  statuses: Status[]
+  value: string | null | undefined
+  onChange: (id: string | null) => void
+}
+
+export function StatusDropdown({ statuses, value, onChange }: StatusDropdownProps) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    function onDown(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [])
+
+  const selected = statuses.find(s => s.id === value) ?? null
+
+  return (
+    <div ref={ref} style={{ flex: 1, position: 'relative' }}>
+      <button
+        type="button"
+        onClick={() => setOpen(o => !o)}
+        style={{
+          width: '100%',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 6,
+          padding: '4px 8px',
+          border: '1px solid var(--border)',
+          borderRadius: 6,
+          background: 'var(--background)',
+          color: 'var(--foreground)',
+          cursor: 'pointer',
+          fontSize: 12,
+          fontFamily: 'var(--font-sans)',
+          textAlign: 'left',
+        }}
+      >
+        {selected ? (
+          <>
+            <div
+              style={{
+                width: 8,
+                height: 8,
+                borderRadius: '50%',
+                background: resolveColorHex(selected.color) ?? selected.color,
+                flexShrink: 0,
+              }}
+            />
+            <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {selected.name}
+            </span>
+          </>
+        ) : (
+          <span style={{ flex: 1, color: 'var(--muted-foreground)', fontStyle: 'italic' }}>— No status —</span>
+        )}
+        <ChevronDown size={11} strokeWidth={2} style={{ flexShrink: 0, color: 'var(--muted-foreground)' }} />
+      </button>
+
+      {open && (
+        <div
+          style={{
+            position: 'absolute',
+            top: 'calc(100% + 4px)',
+            left: 0,
+            right: 0,
+            background: 'var(--card)',
+            border: '1px solid var(--border)',
+            borderRadius: 6,
+            boxShadow: '0 4px 12px rgba(0,0,0,.12)',
+            zIndex: 100,
+            overflow: 'hidden',
+          }}
+        >
+          <div
+            onClick={() => { onChange(null); setOpen(false) }}
+            style={{
+              padding: '6px 10px',
+              fontSize: 12,
+              color: 'var(--muted-foreground)',
+              fontStyle: 'italic',
+              cursor: 'pointer',
+              borderBottom: statuses.length > 0 ? '1px solid var(--border)' : 'none',
+            }}
+            onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+            onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+          >
+            — No status —
+          </div>
+          {statuses.map(s => (
+            <div
+              key={s.id}
+              onClick={() => { onChange(s.id); setOpen(false) }}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                padding: '6px 10px',
+                fontSize: 12,
+                cursor: 'pointer',
+                background: s.id === value ? 'var(--muted)' : 'transparent',
+                fontWeight: s.id === value ? 600 : 400,
+              }}
+              onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+              onMouseLeave={e => (e.currentTarget.style.background = s.id === value ? 'var(--muted)' : 'transparent')}
+            >
+              <div
+                style={{
+                  width: 8,
+                  height: 8,
+                  borderRadius: '50%',
+                  background: resolveColorHex(s.color) ?? s.color,
+                  flexShrink: 0,
+                }}
+              />
+              <span style={{ flex: 1 }}>{s.name}</span>
+              {s.isClosed && (
+                <span style={{ fontSize: 9, color: 'var(--muted-foreground)', fontWeight: 500, letterSpacing: '0.05em' }}>
+                  CLOSED
+                </span>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Searchable parent activity picker ─────────────────────────────────────────
+
+interface ParentPickerProps {
+  activities: ApiActivity[]
+  value: string | null | undefined
+  onChange: (id: string | null) => void
+}
+
+/**
+ * Searchable combobox for choosing a parent activity. Scales past a plain
+ * <select> by filtering as you type, shows each activity's identity badge,
+ * and ellipsis-truncates long titles so the panel never overflows.
+ */
+export function ParentActivityPicker({ activities, value, onChange }: ParentPickerProps) {
+  const [open, setOpen] = useState(false)
+  const [query, setQuery] = useState('')
+  const ref = useRef<HTMLDivElement>(null)
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    function onDown(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) { setOpen(false); setQuery('') }
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [])
+
+  // Focus the search field whenever the dropdown opens.
+  useEffect(() => { if (open) inputRef.current?.focus() }, [open])
+
+  const selected = activities.find(a => a.id === value) ?? null
+  const filtered = activities.filter(a => a.title.toLowerCase().includes(query.trim().toLowerCase()))
+
+  function choose(id: string | null) {
+    onChange(id)
+    setOpen(false)
+    setQuery('')
+  }
+
+  return (
+    <div ref={ref} style={{ flex: 1, position: 'relative', minWidth: 0 }}>
+      <button
+        type="button"
+        onClick={() => setOpen(o => !o)}
+        style={{
+          width: '100%', display: 'flex', alignItems: 'center', gap: 6,
+          padding: '4px 8px', border: '1px solid var(--border)', borderRadius: 6,
+          background: 'var(--background)', color: 'var(--foreground)', cursor: 'pointer',
+          fontSize: 12, fontFamily: 'var(--font-sans)', textAlign: 'left',
+        }}
+      >
+        {selected ? (
+          <>
+            <Badge identity={{ color: selected.color ?? '#288C9B', icon: selected.icon ?? '__none__' }} name={selected.title} size={16} />
+            <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {selected.title}
+            </span>
+          </>
+        ) : (
+          <span style={{ flex: 1, color: 'var(--muted-foreground)', fontStyle: 'italic' }}>— None —</span>
+        )}
+        <ChevronDown size={11} strokeWidth={2} style={{ flexShrink: 0, color: 'var(--muted-foreground)' }} />
+      </button>
+
+      {open && (
+        <div
+          style={{
+            position: 'absolute', top: 'calc(100% + 4px)', left: 0, right: 0,
+            background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 6,
+            boxShadow: '0 4px 12px rgba(0,0,0,.12)', zIndex: 100, overflow: 'hidden',
+          }}
+        >
+          {/* Search field */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 8px', borderBottom: '1px solid var(--border)' }}>
+            <Search size={12} strokeWidth={2} style={{ flexShrink: 0, color: 'var(--muted-foreground)' }} />
+            <input
+              ref={inputRef}
+              value={query}
+              onChange={e => setQuery(e.target.value)}
+              placeholder="Search activities…"
+              style={{
+                flex: 1, minWidth: 0, border: 'none', outline: 'none', background: 'none',
+                fontSize: 12, color: 'var(--foreground)', fontFamily: 'var(--font-sans)',
+              }}
+            />
+          </div>
+
+          <div style={{ maxHeight: 200, overflowY: 'auto' }}>
+            <div
+              onClick={() => choose(null)}
+              style={{
+                padding: '6px 10px', fontSize: 12, color: 'var(--muted-foreground)',
+                fontStyle: 'italic', cursor: 'pointer',
+                borderBottom: filtered.length > 0 ? '1px solid var(--border)' : 'none',
+              }}
+              onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+              onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+            >
+              — None —
+            </div>
+            {filtered.map(a => (
+              <div
+                key={a.id}
+                onClick={() => choose(a.id)}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px',
+                  fontSize: 12, cursor: 'pointer',
+                  background: a.id === value ? 'var(--muted)' : 'transparent',
+                  fontWeight: a.id === value ? 600 : 400,
+                }}
+                onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+                onMouseLeave={e => (e.currentTarget.style.background = a.id === value ? 'var(--muted)' : 'transparent')}
+              >
+                <Badge identity={{ color: a.color ?? '#288C9B', icon: a.icon ?? '__none__' }} name={a.title} size={16} />
+                <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {a.title}
+                </span>
+              </div>
+            ))}
+            {filtered.length === 0 && (
+              <div style={{ padding: '8px 10px', fontSize: 11, color: 'var(--muted-foreground)', fontStyle: 'italic' }}>
+                No matching activities
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Progress row (slider + click-to-edit percent label) ───────────────────────
+
+interface ProgressRowProps {
+  value: number
+  /** Receives the clamped 0–100 integer when the user finishes dragging or typing. */
+  onCommit: (val: number) => void
+}
+
+function ProgressRow({ value, onCommit }: ProgressRowProps) {
+  // Mirror the committed value locally so the slider tracks the drag smoothly.
+  const [draftValue, setDraftValue] = useState(value)
+  // Percent renders as a label until clicked; `textDraft` holds the in-flight text.
+  const [editing, setEditing] = useState(false)
+  const [textDraft, setTextDraft] = useState('')
+
+  useEffect(() => { setDraftValue(value) }, [value])
+
+  function clamp(val: number): number {
+    return Math.max(0, Math.min(100, Math.round(Number.isFinite(val) ? val : 0)))
+  }
+
+  function commit(val: number) {
+    const clamped = clamp(val)
+    setDraftValue(clamped)
+    onCommit(clamped)
+  }
+
+  function startEdit() {
+    setTextDraft(String(draftValue))
+    setEditing(true)
+  }
+
+  function commitEdit() {
+    commit(textDraft === '' ? 0 : Number(textDraft))
+    setEditing(false)
+  }
+
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
+      <span style={FIELD_LABEL}>Progress</span>
+      <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 8 }}>
+        <input
+          type="range"
+          min={0}
+          max={100}
+          step={5}
+          value={draftValue}
+          onChange={e => setDraftValue(Number(e.target.value))}
+          onMouseUp={e => commit(Number((e.target as HTMLInputElement).value))}
+          onTouchEnd={e => commit(Number((e.target as HTMLInputElement).value))}
+          style={{ flex: 1, cursor: 'pointer', accentColor: 'var(--primary)' }}
+        />
+        {editing ? (
+          <input
+            autoFocus
+            type="text"
+            inputMode="numeric"
+            value={textDraft}
+            onChange={e => setTextDraft(e.target.value.replace(/[^0-9]/g, '').slice(0, 3))}
+            onBlur={commitEdit}
+            onKeyDown={e => {
+              if (e.key === 'Enter') commitEdit()
+              else if (e.key === 'Escape') setEditing(false)
+            }}
+            aria-label="Percent complete"
+            style={{
+              width: 40, fontSize: 11, textAlign: 'right', flexShrink: 0,
+              marginLeft: 'auto',
+              color: 'var(--foreground)', border: '1px solid var(--primary)',
+              borderRadius: 4, padding: '2px 4px', outline: 'none',
+              background: 'var(--background)', fontFamily: 'var(--font-sans)',
+            }}
+          />
+        ) : (
+          <span
+            onClick={startEdit}
+            title="Click to edit"
+            role="button"
+            tabIndex={0}
+            onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); startEdit() } }}
+            style={{
+              fontSize: 11, color: 'var(--muted-foreground)', minWidth: 34,
+              textAlign: 'right', flexShrink: 0, cursor: 'text', userSelect: 'none',
+              marginLeft: 'auto',
+              padding: '2px 4px', borderRadius: 4, border: '1px solid transparent',
+            }}
+            onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+            onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+          >
+            {draftValue}%
+          </span>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ── Composite body ────────────────────────────────────────────────────────────
+
+export interface ActivityFieldsBodyProps {
+  // Identity + title
+  identity: Identity
+  onIdentityChange: (next: Identity) => void
+  title: string
+  onTitleChange: (value: string) => void
+  /** Fired on title blur (detail panel saves here; create panel omits). */
+  onTitleBlur?: () => void
+  titlePlaceholder?: string
+  titleAutoFocus?: boolean
+  /** IdentityWidget name fallback shown when the title is empty. */
+  titleFallbackName: string
+
+  // When
+  startDate: string
+  endDate: string
+  onStartDateChange: (value: string) => void
+  onEndDateChange: (value: string) => void
+
+  // Description
+  description: string
+  onDescriptionChange: (value: string) => void
+  onDescriptionBlur?: () => void
+
+  // Assignees
+  members: Member[]
+  assignedIds: string[]
+  onToggleAssignee: (memberId: string) => void
+
+  // Classify
+  statuses: Status[]
+  statusId: string | null
+  onStatusChange: (id: string | null) => void
+  teamId: string
+  teamTags: Tag[]
+  tagIds: string[]
+  onTagsChange: (ids: string[]) => void
+
+  // Advanced
+  /** Candidate parents — caller filters out the current activity for the detail panel. */
+  parentActivities: ApiActivity[]
+  parentId: string | null
+  onParentChange: (id: string | null) => void
+  progress: number
+  onProgressCommit: (val: number) => void
+  location: string
+  onLocationChange: (value: string) => void
+  onLocationBlur?: () => void
+  url: string
+  onUrlChange: (value: string) => void
+  onUrlBlur?: () => void
+
+  // Notes
+  notes: string
+  onNotesChange: (value: string) => void
+  onNotesBlur?: () => void
+}
+
+/**
+ * The full scrollable field stack shared by both activity panels, in a fixed
+ * order: Identity+Title → When → Description → Assigned to → Classify
+ * (Status, Tags) → Advanced (Parent, Progress, Location, URL) → Notes.
+ *
+ * Callers wrap this in their own header bar and footer.
+ */
+export function ActivityFieldsBody(props: ActivityFieldsBodyProps) {
+  const {
+    identity, onIdentityChange, title, onTitleChange, onTitleBlur,
+    titlePlaceholder, titleAutoFocus, titleFallbackName,
+    startDate, endDate, onStartDateChange, onEndDateChange,
+    description, onDescriptionChange, onDescriptionBlur,
+    members, assignedIds, onToggleAssignee,
+    statuses, statusId, onStatusChange, teamId, teamTags, tagIds, onTagsChange,
+    parentActivities, parentId, onParentChange, progress, onProgressCommit,
+    location, onLocationChange, onLocationBlur,
+    url, onUrlChange, onUrlBlur,
+    notes, onNotesChange, onNotesBlur,
+  } = props
+
+  return (
+    <div style={{ flex: 1, overflowY: 'auto', padding: '14px 14px 8px' }}>
+
+      {/* 1. Identity widget + Title */}
+      <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start', marginBottom: 14 }}>
+        <div style={{ marginTop: 2, flexShrink: 0 }}>
+          <IdentityWidget
+            identity={identity}
+            name={title || titleFallbackName}
+            shape="square"
+            onChange={onIdentityChange}
+          />
+        </div>
+        <input
+          autoFocus={titleAutoFocus}
+          value={title}
+          onChange={e => onTitleChange(e.target.value)}
+          onBlur={e => { onTitleBlur?.(); e.target.style.borderColor = 'transparent'; e.target.style.background = 'transparent' }}
+          placeholder={titlePlaceholder}
+          style={{
+            flex: 1, fontSize: 13, fontWeight: 600,
+            color: 'var(--foreground)', border: '1px solid transparent',
+            borderRadius: 'var(--radius-md)', padding: '5px 6px',
+            outline: 'none', background: 'transparent', fontFamily: 'var(--font-sans)',
+          }}
+          onFocus={e => { e.target.style.borderColor = 'var(--primary)'; e.target.style.background = 'var(--background)' }}
+        />
+      </div>
+
+      <div style={DIVIDER} />
+
+      {/* 2. When — date pickers */}
+      <div style={{ marginBottom: 12 }}>
+        <div style={SEC_LABEL}>When</div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <input
+            type="date" value={startDate}
+            onChange={e => onStartDateChange(e.target.value)}
+            style={{ ...INPUT, flex: 1, padding: '5px 6px' }}
+            onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
+            onBlur={e => (e.target.style.borderColor = 'var(--border)')}
+          />
+          <ArrowRight size={11} color="var(--muted-foreground)" strokeWidth={2} style={{ flexShrink: 0 }} />
+          <input
+            type="date" value={endDate} min={startDate}
+            onChange={e => onEndDateChange(e.target.value)}
+            style={{ ...INPUT, flex: 1, padding: '5px 6px' }}
+            onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
+            onBlur={e => (e.target.style.borderColor = 'var(--border)')}
+          />
+        </div>
+      </div>
+
+      <div style={DIVIDER} />
+
+      {/* 3. Description */}
+      <div style={{ marginBottom: 12 }}>
+        <div style={SEC_LABEL}>Description</div>
+        <input
+          value={description}
+          onChange={e => onDescriptionChange(e.target.value)}
+          onBlur={e => { onDescriptionBlur?.(); e.target.style.borderColor = 'var(--border)' }}
+          placeholder="Optional description…"
+          style={{ ...INPUT, padding: '6px 8px' }}
+          onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
+        />
+      </div>
+
+      <div style={DIVIDER} />
+
+      {/* 4. Assigned to — bordered card style */}
+      {members.length > 0 && (
+        <>
+          <div style={{ marginBottom: 12 }}>
+            <div style={SEC_LABEL}>Assigned to</div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              {members.map(m => {
+                const assigned = assignedIds.includes(m.id)
+                return (
+                  <button
+                    key={m.id}
+                    type="button"
+                    onClick={() => onToggleAssignee(m.id)}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: 8,
+                      padding: '5px 8px',
+                      border: assigned ? `1px solid ${m.color}` : '1px solid var(--border)',
+                      borderRadius: 'var(--radius-md)',
+                      background: assigned ? `${m.color}18` : 'var(--background)',
+                      cursor: 'pointer', textAlign: 'left',
+                      transition: 'background 0.1s, border-color 0.1s',
+                    }}
+                  >
+                    <MemberAvatar member={m} size={18} />
+                    <span style={{ fontSize: 12, color: 'var(--foreground)', flex: 1 }}>{m.name}</span>
+                    {assigned && (
+                      <div style={{ width: 6, height: 6, borderRadius: '50%', background: m.color, flexShrink: 0 }} />
+                    )}
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+
+          <div style={DIVIDER} />
+        </>
+      )}
+
+      {/* 5. Classify — Status (rich dropdown), Tags */}
+      <div style={{ marginBottom: 12 }}>
+        <div style={SEC_LABEL}>Classify</div>
+
+        {/* Status picker */}
+        <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
+          <span style={FIELD_LABEL}>Status</span>
+          {statuses.length > 0 ? (
+            <StatusDropdown statuses={statuses} value={statusId} onChange={onStatusChange} />
+          ) : (
+            <div style={{ ...STUB_VALUE }}>
+              <span style={{ fontSize: 10, opacity: 0.5 }}>No statuses configured</span>
+            </div>
+          )}
+        </div>
+
+        {/* Tags */}
+        <div style={{ display: 'flex', alignItems: 'flex-start' }}>
+          <span style={{ ...FIELD_LABEL, paddingTop: 5 }}>Tags</span>
+          <TagInput teamId={teamId} tags={teamTags} selectedTagIds={tagIds} onChange={onTagsChange} />
+        </div>
+      </div>
+
+      <div style={DIVIDER} />
+
+      {/* 6. Advanced — Parent, Progress, Location, URL */}
+      <div style={{ marginBottom: 12 }}>
+        <div style={SEC_LABEL}>Advanced</div>
+
+        {/* Parent activity picker */}
+        <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
+          <span style={FIELD_LABEL}>Parent</span>
+          <ParentActivityPicker activities={parentActivities} value={parentId} onChange={onParentChange} />
+        </div>
+
+        {/* % Complete slider */}
+        <ProgressRow value={progress} onCommit={onProgressCommit} />
+
+        {/* Location */}
+        <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
+          <span style={FIELD_LABEL}>Location</span>
+          <input
+            value={location}
+            onChange={e => onLocationChange(e.target.value)}
+            onBlur={e => { onLocationBlur?.(); e.target.style.borderColor = 'var(--border)' }}
+            placeholder="—"
+            style={{ ...INPUT, flex: 1, padding: '4px 6px', fontSize: 12 }}
+            onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
+          />
+        </div>
+
+        {/* URL */}
+        <div style={{ display: 'flex', alignItems: 'center' }}>
+          <span style={FIELD_LABEL}>URL</span>
+          <input
+            value={url}
+            onChange={e => onUrlChange(e.target.value)}
+            onBlur={e => { onUrlBlur?.(); e.target.style.borderColor = 'var(--border)' }}
+            placeholder="—"
+            style={{ ...INPUT, flex: 1, padding: '4px 6px', fontSize: 12 }}
+            onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
+          />
+        </div>
+      </div>
+
+      <div style={DIVIDER} />
+
+      {/* 7. Notes — multi-line textarea */}
+      <div style={{ marginBottom: 8 }}>
+        <div style={SEC_LABEL}>Notes</div>
+        <textarea
+          value={notes}
+          onChange={e => onNotesChange(e.target.value)}
+          onBlur={e => { onNotesBlur?.(); e.target.style.borderColor = 'var(--border)' }}
+          placeholder="Add notes…"
+          rows={4}
+          style={{
+            ...INPUT,
+            padding: '6px 8px',
+            resize: 'vertical',
+            minHeight: 72,
+            lineHeight: 1.5,
+          }}
+          onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
+        />
+      </div>
+
+    </div>
+  )
+}
+````
+
 ## File: packages/web/src/components/gantt/GanttGrid.format.test.ts
 ````typescript
 import { describe, it, expect } from 'vitest'
@@ -24303,2000 +25173,6 @@ describe('filterOpenActivities', () => {
 })
 ````
 
-## File: packages/web/src/components/kanban/KanbanBoard.tsx
-````typescript
-/**
- * KanbanBoard — the DndContext host that owns all columns and the drag overlay.
- *
- * Renders columns in a horizontal scrolling row. On drag-end, derives the
- * correct PATCH payload for the active groupBy and calls onDrop.
- */
-
-import { DndContext, DragOverlay, PointerSensor, useSensor, useSensors } from '@dnd-kit/core';
-import type { DragEndEvent, DragStartEvent, DragOverEvent } from '@dnd-kit/core';
-import { useState } from 'react';
-import KanbanColumn from './KanbanColumn';
-import KanbanCard from './KanbanCard';
-import type { KanbanColumn as Column, KanbanCardField, KanbanGroupBy } from './kanbanColumns';
-import type { Member } from '@/types';
-import type { components } from '@draba/shared';
-
-type ApiActivity = components['schemas']['Activity'];
-type Status = components['schemas']['Status'];
-type Tag = components['schemas']['Tag'];
-
-export interface DropPayload {
-  activityId: string;
-  patch: {
-    statusId?: string | null;
-    assignedMemberIds?: string[];
-    parentActivityId?: string | null;
-  };
-}
-
-interface Props {
-  columns: Column[];
-  groupBy: KanbanGroupBy;
-  members: Member[];
-  statusById: Map<string, Status>;
-  tagById: Map<string, Tag>;
-  /** Per-activity resolved hex color for the card accent border. */
-  colorMap: Map<string, string>;
-  cardFields: KanbanCardField[];
-  suppressedFields: Set<KanbanCardField>;
-  selectedActivityId: string | null;
-  matchedIds: Set<string>;
-  activeMatchId: string | null;
-  hasQuery: boolean;
-  collapsedColumnIds: Set<string>;
-  onToggleCollapse: (columnId: string) => void;
-  onCardClick: (activity: ApiActivity) => void;
-  onAddInColumn: (column: Column) => void;
-  onDrop: (payload: DropPayload) => void;
-  /** Map of activity ID → ApiActivity for drag overlay lookup. */
-  activityById: Map<string, ApiActivity>;
-}
-
-export default function KanbanBoard({
-  columns,
-  groupBy,
-  members,
-  statusById,
-  tagById,
-  colorMap,
-  cardFields,
-  suppressedFields,
-  selectedActivityId,
-  matchedIds,
-  activeMatchId,
-  hasQuery,
-  collapsedColumnIds,
-  onToggleCollapse,
-  onCardClick,
-  onAddInColumn,
-  onDrop,
-  activityById,
-}: Props) {
-  const [draggingId, setDraggingId] = useState<string | null>(null);
-  const [overColumnId, setOverColumnId] = useState<string | null>(null);
-
-  // Require a 5px drag threshold to prevent accidental drags on card clicks.
-  const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
-  );
-
-  function handleDragStart({ active }: DragStartEvent) {
-    setDraggingId(active.id as string);
-  }
-
-  function handleDragEnd({ active, over }: DragEndEvent) {
-    setDraggingId(null);
-    setOverColumnId(null);
-    if (!over) return;
-
-    const activityId = String(active.id);
-    const columnId = String(over.id);
-
-    const column = columns.find(c => c.id === columnId);
-    if (!column || !column.droppable || !column.dropValue) return;
-
-    // Determine if anything actually changed before issuing a PATCH.
-    const activity = activityById.get(activityId);
-    if (!activity) return;
-
-    // Skip if the card is already in this column (no-op drop).
-    const isAlreadyHere = (() => {
-      switch (groupBy) {
-        case 'status': {
-          const currentStatus = (activity as ApiActivity & { statusId?: string | null }).statusId ?? null;
-          return currentStatus === (column.dropValue.statusId ?? null);
-        }
-        case 'member': {
-          const primary = activity.assignedMemberIds?.[0] ?? null;
-          const target = column.dropValue.assignedMemberIds?.[0] ?? null;
-          return primary === target;
-        }
-        case 'parent': {
-          const current = (activity as ApiActivity & { parentActivityId?: string | null }).parentActivityId ?? null;
-          return current === (column.dropValue.parentActivityId ?? null);
-        }
-        default:
-          return false;
-      }
-    })();
-
-    if (isAlreadyHere) return;
-
-    onDrop({ activityId, patch: column.dropValue });
-  }
-
-  function handleDragOver({ over }: DragOverEvent) {
-    setOverColumnId(over ? String(over.id) : null);
-  }
-
-  const draggingActivity = draggingId ? activityById.get(draggingId) : undefined;
-
-  return (
-    <DndContext
-      sensors={sensors}
-      onDragStart={handleDragStart}
-      onDragEnd={handleDragEnd}
-      onDragOver={handleDragOver}
-    >
-      <div
-        style={{
-          display: 'flex',
-          flexDirection: 'row',
-          gap: 12,
-          padding: '12px 16px 16px',
-          overflowX: 'auto',
-          overflowY: 'hidden',
-          height: '100%',
-          alignItems: 'flex-start',
-          boxSizing: 'border-box',
-        }}
-      >
-        {columns.map(col => (
-          <KanbanColumn
-            key={col.id}
-            column={col}
-            members={members}
-            statusById={statusById}
-            tagById={tagById}
-            colorMap={colorMap}
-            cardFields={cardFields}
-            suppressedFields={suppressedFields}
-            selectedActivityId={selectedActivityId}
-            matchedIds={matchedIds}
-            activeMatchId={activeMatchId}
-            hasQuery={hasQuery}
-            isOver={overColumnId === col.id && col.droppable}
-            isCollapsed={collapsedColumnIds.has(col.id)}
-            onToggleCollapse={() => onToggleCollapse(col.id)}
-            onCardClick={onCardClick}
-            onAddClick={() => onAddInColumn(col)}
-          />
-        ))}
-      </div>
-
-      {/* Drag overlay — floats above everything while dragging */}
-      <DragOverlay dropAnimation={null}>
-        {draggingActivity ? (
-          <KanbanCard
-            activity={draggingActivity}
-            accentColor={colorMap.get(draggingActivity.id) ?? '#6b7280'}
-            members={members}
-            statusById={statusById}
-            tagById={tagById}
-            cardFields={cardFields}
-            suppressedFields={suppressedFields}
-            isSelected={false}
-            dimmed={false}
-            activeMatch={false}
-            isDragOverlay
-            onClick={() => {}}
-          />
-        ) : null}
-      </DragOverlay>
-    </DndContext>
-  );
-}
-````
-
-## File: packages/web/src/components/kanban/KanbanCard.tsx
-````typescript
-/**
- * KanbanCard — a single draggable activity card.
- *
- * Renders the card accent border (driven by colorBy), title, and the
- * configured optional fields. Uses @dnd-kit useDraggable for drag support.
- */
-
-import { useDraggable } from '@dnd-kit/core';
-import { CSS } from '@dnd-kit/utilities';
-import { Calendar, User } from 'lucide-react';
-import { formatActivityDate } from '@/components/list/ListView';
-import { resolveColorHex } from '@/components/identity/identity-constants';
-import { Badge } from '@/components/identity/Badge';
-import type { Member } from '@/types';
-import type { components } from '@draba/shared';
-import type { KanbanCardField } from './kanbanColumns';
-
-type ApiActivity = components['schemas']['Activity'];
-type Status = components['schemas']['Status'];
-type Tag = components['schemas']['Tag'];
-
-interface Props {
-  activity: ApiActivity;
-  accentColor: string;
-  members: Member[];
-  statusById: Map<string, Status>;
-  tagById: Map<string, Tag>;
-  cardFields: KanbanCardField[];
-  /** Fields suppressed because they duplicate the current Group by axis. */
-  suppressedFields: Set<KanbanCardField>;
-  isSelected: boolean;
-  /** True when Find is active and this card doesn't match. */
-  dimmed: boolean;
-  /** True when Find is active and this card is the active match. */
-  activeMatch: boolean;
-  isDragOverlay?: boolean;
-  onClick: () => void;
-}
-
-export default function KanbanCard({
-  activity,
-  accentColor,
-  members,
-  statusById,
-  tagById,
-  cardFields,
-  suppressedFields,
-  isSelected,
-  dimmed,
-  activeMatch,
-  isDragOverlay = false,
-  onClick,
-}: Props) {
-  const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
-    id: activity.id,
-    data: { activityId: activity.id },
-    // Drag overlay renders separately; don't set draggable on the overlay copy.
-    disabled: isDragOverlay,
-  });
-
-  const style: React.CSSProperties = {
-    transform: CSS.Translate.toString(transform),
-    opacity: isDragging ? 0.4 : dimmed ? 0.3 : 1,
-    transition: dimmed ? 'opacity 150ms' : undefined,
-  };
-
-  const showField = (f: KanbanCardField) =>
-    cardFields.includes(f) && !suppressedFields.has(f);
-
-  const status = activity.statusId ? statusById.get(activity.statusId) : undefined;
-  const statusColor = status?.color ? resolveColorHex(status.color) : undefined;
-
-  const assignedMembers = (activity.assignedMemberIds ?? [])
-    .map(id => members.find(m => m.id === id))
-    .filter((m): m is Member => Boolean(m));
-
-  const tags = (activity.tagIds ?? [])
-    .map(id => tagById.get(id))
-    .filter((t): t is Tag => Boolean(t));
-
-  const formatDate = (iso: string | null | undefined) =>
-    iso ? formatActivityDate(iso) : null;
-
-  const startLabel = formatDate(activity.startAt);
-  const endLabel   = formatDate(activity.endAt);
-  const dateLabel  = startLabel && endLabel
-    ? startLabel === endLabel ? startLabel : `${startLabel} – ${endLabel}`
-    : startLabel ?? endLabel ?? null;
-
-  const cardStyle: React.CSSProperties = {
-    ...style,
-    background: 'var(--card)',
-    border: `1px solid ${isSelected ? accentColor : activeMatch ? '#f59e0b' : 'var(--border)'}`,
-    borderLeft: `3px solid ${accentColor}`,
-    borderRadius: 6,
-    padding: '8px 10px',
-    cursor: isDragOverlay ? 'grabbing' : 'pointer',
-    boxShadow: isDragOverlay
-      ? '0 8px 24px rgba(0,0,0,0.2)'
-      : isSelected
-      ? `0 0 0 2px ${accentColor}40`
-      : activeMatch
-      ? '0 0 0 2px #f59e0b80'
-      : undefined,
-    userSelect: 'none',
-    marginBottom: 6,
-    transition: 'box-shadow 100ms, border-color 100ms',
-  };
-
-  return (
-    <div
-      ref={setNodeRef}
-      {...listeners}
-      {...attributes}
-      style={cardStyle}
-      onClick={onClick}
-      role="button"
-      tabIndex={0}
-      onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') onClick(); }}
-    >
-      {/* Title — always shown, 2-line clamp */}
-      <div
-        style={{
-          fontSize: 13,
-          fontWeight: 500,
-          color: 'var(--foreground)',
-          lineHeight: 1.4,
-          display: '-webkit-box',
-          WebkitLineClamp: 2,
-          WebkitBoxOrient: 'vertical',
-          overflow: 'hidden',
-          marginBottom: 4,
-        }}
-      >
-        {activity.title}
-      </div>
-
-      {/* Description snippet */}
-      {showField('description') && activity.description && (
-        <div
-          style={{
-            fontSize: 11,
-            color: 'var(--muted-foreground)',
-            whiteSpace: 'nowrap',
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            marginBottom: 4,
-          }}
-        >
-          {activity.description}
-        </div>
-      )}
-
-      {/* Status pill */}
-      {showField('status') && status && (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 4 }}>
-          <span
-            style={{
-              width: 8,
-              height: 8,
-              borderRadius: '50%',
-              background: statusColor ?? '#6b7280',
-              flexShrink: 0,
-            }}
-          />
-          <span style={{ fontSize: 11, color: 'var(--muted-foreground)' }}>{status.name}</span>
-        </div>
-      )}
-
-      {/* Date range */}
-      {showField('dateRange') && dateLabel && (
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 4,
-            fontSize: 11,
-            color: 'var(--muted-foreground)',
-            marginBottom: 4,
-          }}
-        >
-          <Calendar size={11} strokeWidth={1.6} />
-          {dateLabel}
-        </div>
-      )}
-
-      {/* Tags */}
-      {showField('tags') && tags.length > 0 && (
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 3, marginBottom: 4 }}>
-          {tags.slice(0, 3).map(t => (
-            <span
-              key={t.id}
-              style={{
-                fontSize: 10,
-                fontWeight: 500,
-                padding: '1px 6px',
-                borderRadius: 10,
-                background: resolveColorHex(t.color ?? null) ? `${resolveColorHex(t.color ?? null)}22` : 'var(--muted)',
-                color: resolveColorHex(t.color ?? null) ?? 'var(--muted-foreground)',
-                border: `1px solid ${resolveColorHex(t.color ?? null) ?? 'var(--border)'}44`,
-              }}
-            >
-              {t.name}
-            </span>
-          ))}
-          {tags.length > 3 && (
-            <span style={{ fontSize: 10, color: 'var(--muted-foreground)' }}>+{tags.length - 3}</span>
-          )}
-        </div>
-      )}
-
-      {/* % complete bar */}
-      {showField('percentComplete') && activity.percentComplete != null && (
-        <div style={{ marginBottom: 4 }}>
-          <div
-            style={{
-              height: 3,
-              background: 'var(--muted)',
-              borderRadius: 2,
-              overflow: 'hidden',
-            }}
-          >
-            <div
-              style={{
-                height: '100%',
-                width: `${activity.percentComplete}%`,
-                background: accentColor,
-                borderRadius: 2,
-                transition: 'width 200ms',
-              }}
-            />
-          </div>
-        </div>
-      )}
-
-      {/* Footer: parent pill + member avatars */}
-      {(showField('parent') || showField('members')) && (
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 2 }}>
-          {/* Parent badge */}
-          {showField('parent') && (activity as ApiActivity & { parentActivityId?: string | null }).parentActivityId && (
-            <span
-              style={{
-                fontSize: 10,
-                color: 'var(--muted-foreground)',
-                display: 'flex',
-                alignItems: 'center',
-                gap: 3,
-              }}
-            >
-              <User size={9} strokeWidth={1.6} />
-              child
-            </span>
-          )}
-
-          {/* Member avatars */}
-          {showField('members') && assignedMembers.length > 0 && (
-            <div
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                marginLeft: 'auto',
-              }}
-            >
-              {assignedMembers.slice(0, 3).map((m, i) => (
-                <div
-                  key={m.id}
-                  style={{
-                    marginLeft: i === 0 ? 0 : -6,
-                    zIndex: assignedMembers.length - i,
-                    outline: '2px solid var(--card)',
-                    borderRadius: '50%',
-                  }}
-                  title={m.name}
-                >
-                  <Badge
-                    identity={{ color: m.color, icon: '__name_2__' }}
-                    name={m.name}
-                    shape="circle"
-                    size={20}
-                  />
-                </div>
-              ))}
-              {assignedMembers.length > 3 && (
-                <span style={{ fontSize: 10, color: 'var(--muted-foreground)', marginLeft: 4 }}>
-                  +{assignedMembers.length - 3}
-                </span>
-              )}
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-````
-
-## File: packages/web/src/components/kanban/KanbanColumn.tsx
-````typescript
-/**
- * KanbanColumn — a single droppable column with a header, card list, and "+ Add" affordance.
- *
- * Uses @dnd-kit useDroppable. When the column is non-droppable (combination/none grouping),
- * the drop-target is simply not registered and DnD events are ignored.
- */
-
-import { useDroppable } from '@dnd-kit/core';
-import { ChevronDown, ChevronRight, Plus } from 'lucide-react';
-import { resolveColorHex } from '@/components/identity/identity-constants';
-import KanbanCard from './KanbanCard';
-import type { KanbanColumn as Column, KanbanCardField } from './kanbanColumns';
-import type { Member } from '@/types';
-import type { components } from '@draba/shared';
-
-type ApiActivity = components['schemas']['Activity'];
-type Status = components['schemas']['Status'];
-type Tag = components['schemas']['Tag'];
-
-interface Props {
-  column: Column;
-  members: Member[];
-  statusById: Map<string, Status>;
-  tagById: Map<string, Tag>;
-  /** Per-activity resolved hex color for card accent borders. */
-  colorMap: Map<string, string>;
-  cardFields: KanbanCardField[];
-  suppressedFields: Set<KanbanCardField>;
-  selectedActivityId: string | null;
-  matchedIds: Set<string>;
-  activeMatchId: string | null;
-  hasQuery: boolean;
-  isOver: boolean;
-  isCollapsed: boolean;
-  onToggleCollapse: () => void;
-  onCardClick: (activity: ApiActivity) => void;
-  onAddClick: () => void;
-}
-
-const COLUMN_WIDTH = 260;
-const COLLAPSED_WIDTH = 40;
-
-export default function KanbanColumn({
-  column,
-  members,
-  statusById,
-  tagById,
-  colorMap,
-  cardFields,
-  suppressedFields,
-  selectedActivityId,
-  matchedIds,
-  activeMatchId,
-  hasQuery,
-  isOver,
-  isCollapsed,
-  onToggleCollapse,
-  onCardClick,
-  onAddClick,
-}: Props) {
-  const { setNodeRef, isOver: dndIsOver } = useDroppable({
-    id: column.id,
-    disabled: !column.droppable,
-    data: { columnId: column.id },
-  });
-
-  const accentColor = column.color
-    ? (resolveColorHex(column.color) ?? column.color)
-    : '#6b7280';
-
-  const highlighted = isOver || dndIsOver;
-
-  if (isCollapsed) {
-    return (
-      <div
-        style={{
-          width: COLLAPSED_WIDTH,
-          flexShrink: 0,
-          display: 'flex',
-          flexDirection: 'column',
-          alignItems: 'center',
-          background: 'var(--muted)',
-          borderRadius: 8,
-          padding: '8px 0',
-          cursor: 'pointer',
-          border: '1px solid var(--border)',
-          minHeight: 120,
-          gap: 8,
-        }}
-        onClick={onToggleCollapse}
-        title={`${column.label} (${column.items.length})`}
-      >
-        <ChevronRight size={14} strokeWidth={2} style={{ color: 'var(--muted-foreground)' }} />
-        <span
-          style={{
-            fontSize: 11,
-            fontWeight: 600,
-            color: 'var(--muted-foreground)',
-            writingMode: 'vertical-rl',
-            transform: 'rotate(180deg)',
-            letterSpacing: '0.04em',
-          }}
-        >
-          {column.label}
-        </span>
-        <span
-          style={{
-            fontSize: 10,
-            color: 'var(--muted-foreground)',
-            background: 'var(--border)',
-            borderRadius: 9,
-            padding: '1px 5px',
-          }}
-        >
-          {column.items.length}
-        </span>
-      </div>
-    );
-  }
-
-  return (
-    <div
-      ref={setNodeRef}
-      style={{
-        width: COLUMN_WIDTH,
-        flexShrink: 0,
-        display: 'flex',
-        flexDirection: 'column',
-        background: highlighted ? `${accentColor}0d` : 'var(--muted)',
-        border: `1px solid ${highlighted ? accentColor + '80' : 'var(--border)'}`,
-        borderRadius: 8,
-        transition: 'background 120ms, border-color 120ms',
-        maxHeight: '100%',
-      }}
-    >
-      {/* Column header */}
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 6,
-          padding: '8px 10px',
-          borderBottom: '1px solid var(--border)',
-          flexShrink: 0,
-        }}
-      >
-        {/* Accent dot */}
-        <span
-          style={{
-            width: 9,
-            height: 9,
-            borderRadius: '50%',
-            background: accentColor,
-            flexShrink: 0,
-          }}
-        />
-
-        {/* Column label */}
-        <span
-          style={{
-            flex: 1,
-            fontSize: 12,
-            fontWeight: 600,
-            color: 'var(--foreground)',
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            whiteSpace: 'nowrap',
-          }}
-        >
-          {column.label}
-        </span>
-
-        {/* Count badge */}
-        <span
-          style={{
-            fontSize: 11,
-            color: 'var(--muted-foreground)',
-            background: 'var(--border)',
-            borderRadius: 9,
-            padding: '1px 6px',
-            fontWeight: 600,
-          }}
-        >
-          {column.items.length}
-        </span>
-
-        {/* Collapse toggle */}
-        <button
-          onClick={onToggleCollapse}
-          title="Collapse column"
-          style={{
-            background: 'none',
-            border: 'none',
-            cursor: 'pointer',
-            padding: 2,
-            color: 'var(--muted-foreground)',
-            display: 'flex',
-            alignItems: 'center',
-          }}
-        >
-          <ChevronDown size={13} strokeWidth={2} />
-        </button>
-      </div>
-
-      {/* Card list — scrolls independently */}
-      <div
-        style={{
-          flex: 1,
-          overflowY: 'auto',
-          padding: '8px 8px 4px',
-          minHeight: 80,
-        }}
-      >
-        {column.items.length === 0 ? (
-          <div
-            style={{
-              padding: '12px 8px',
-              fontSize: 12,
-              color: 'var(--muted-foreground)',
-              textAlign: 'center',
-              fontStyle: 'italic',
-            }}
-          >
-            No activities
-          </div>
-        ) : (
-          column.items.map(act => (
-            <KanbanCard
-              key={act.id}
-              activity={act}
-              accentColor={colorMap.get(act.id) ?? accentColor}
-              members={members}
-              statusById={statusById}
-              tagById={tagById}
-              cardFields={cardFields}
-              suppressedFields={suppressedFields}
-              isSelected={selectedActivityId === act.id}
-              dimmed={hasQuery && !matchedIds.has(act.id)}
-              activeMatch={activeMatchId === act.id}
-              onClick={() => onCardClick(act)}
-            />
-          ))
-        )}
-      </div>
-
-      {/* + Add affordance */}
-      <div style={{ padding: '4px 8px 8px', flexShrink: 0 }}>
-        <button
-          onClick={onAddClick}
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 4,
-            width: '100%',
-            padding: '5px 8px',
-            background: 'none',
-            border: '1px dashed var(--border)',
-            borderRadius: 6,
-            cursor: 'pointer',
-            fontSize: 12,
-            color: 'var(--muted-foreground)',
-            transition: 'border-color 120ms, color 120ms',
-          }}
-          onMouseEnter={e => {
-            e.currentTarget.style.borderColor = accentColor;
-            e.currentTarget.style.color = accentColor;
-          }}
-          onMouseLeave={e => {
-            e.currentTarget.style.borderColor = 'var(--border)';
-            e.currentTarget.style.color = 'var(--muted-foreground)';
-          }}
-        >
-          <Plus size={12} strokeWidth={2} />
-          Add
-        </button>
-      </div>
-    </div>
-  );
-}
-````
-
-## File: packages/web/src/components/kanban/kanbanColumns.ts
-````typescript
-/**
- * kanbanColumns — pure column-building and sort logic for the Kanban view.
- *
- * Given a groupBy mode plus the visible activities, team members, and timeline
- * statuses, produces an ordered list of KanbanColumn objects ready for rendering.
- * All grouping/labeling/ordering lives here; the React components stay thin.
- */
-
-import type { components } from '@draba/shared';
-import {
-  memberComboKey,
-  orderedComboIds,
-  memberComboLabel,
-  comboSortComparator,
-  UNASSIGNED_KEY,
-} from '@/lib/memberGroups';
-
-type ApiActivity = components['schemas']['Activity'];
-type Status = components['schemas']['Status'];
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
-
-// ── Public types ───────────────────────────────────────────────────────────────
-
-export type KanbanGroupBy =
-  | 'status'
-  | 'member'
-  | 'member-combination'
-  | 'parent'
-  | 'none';
-
-export type KanbanSortBy =
-  | 'startDate'
-  | 'endDate'
-  | 'title'
-  | 'percentComplete'
-  | 'updatedAt';
-
-export type KanbanCardField =
-  | 'dateRange'
-  | 'status'
-  | 'tags'
-  | 'members'
-  | 'percentComplete'
-  | 'parent'
-  | 'description';
-
-export const DEFAULT_CARD_FIELDS: KanbanCardField[] = [
-  'dateRange',
-  'status',
-  'tags',
-  'members',
-];
-
-/** Sentinel IDs for "bucket with no value" columns. */
-export const NO_STATUS_ID   = '__no-status__';
-export const UNASSIGNED_ID  = '__unassigned__';
-export const NO_PARENT_ID   = '__no-parent__';
-export const NONE_COLUMN_ID = '__all__';
-
-/**
- * A resolved column, ready for rendering.
- *
- * `droppable: false` for combination and None groupings (drop semantics are
- * ambiguous or undefined). `dropValue` encodes what patch to apply on drop.
- */
-export interface KanbanColumn {
-  id: string;
-  label: string;
-  /** Hex color for the column accent (header dot, drop-highlight tint). */
-  color?: string;
-  icon?: string;
-  droppable: boolean;
-  /** The patch values to apply when a card is dropped into this column. */
-  dropValue?: {
-    statusId?: string | null;
-    assignedMemberIds?: string[];
-    parentActivityId?: string | null;
-  };
-  items: ApiActivity[];
-}
-
-// ── Sort comparators ───────────────────────────────────────────────────────────
-
-function cmp<T>(a: T, b: T, dir: 1 | -1 = 1): number {
-  if (a == null && b == null) return 0;
-  if (a == null) return 1;  // nulls last
-  if (b == null) return -1;
-  return a < b ? -dir : a > b ? dir : 0;
-}
-
-/** Sort activities within a column according to the chosen sort mode. */
-export function sortActivities(
-  activities: ApiActivity[],
-  sortBy: KanbanSortBy,
-): ApiActivity[] {
-  const sorted = [...activities];
-  switch (sortBy) {
-    case 'startDate':
-      // cmp with string comparison; null/undefined treated as nulls-last
-      sorted.sort((a, b) => {
-        const av = a.startAt ?? null;
-        const bv = b.startAt ?? null;
-        return cmp(av, bv);
-      });
-      break;
-    case 'endDate':
-      sorted.sort((a, b) => {
-        const av = a.endAt ?? null;
-        const bv = b.endAt ?? null;
-        return cmp(av, bv);
-      });
-      break;
-    case 'title':
-      sorted.sort((a, b) => a.title.localeCompare(b.title));
-      break;
-    case 'percentComplete':
-      // Descending: highest first, nulls last.
-      sorted.sort((a, b) => {
-        const av = a.percentComplete ?? null;
-        const bv = b.percentComplete ?? null;
-        if (av === null && bv === null) return 0;
-        if (av === null) return 1;
-        if (bv === null) return -1;
-        return bv - av;
-      });
-      break;
-    case 'updatedAt':
-      // Most-recently-updated first
-      sorted.sort((a, b) => cmp(b.updatedAt, a.updatedAt));
-      break;
-  }
-  return sorted;
-}
-
-// ── buildColumns ──────────────────────────────────────────────────────────────
-
-/**
- * Build the ordered column list from the active groupBy, activities, members,
- * and statuses. Applies `sortBy` within each column.
- */
-export function buildColumns(
-  groupBy: KanbanGroupBy,
-  activities: ApiActivity[],
-  members: TeamMemberWithUser[],
-  statuses: Status[],
-  sortBy: KanbanSortBy,
-): KanbanColumn[] {
-  switch (groupBy) {
-    case 'status':    return buildStatusColumns(activities, statuses, sortBy);
-    case 'member':    return buildMemberColumns(activities, members, sortBy);
-    case 'member-combination': return buildCombinationColumns(activities, members, sortBy);
-    case 'parent':    return buildParentColumns(activities, sortBy);
-    case 'none':      return buildNoneColumn(activities, sortBy);
-  }
-}
-
-// ── Status columns ─────────────────────────────────────────────────────────────
-
-function buildStatusColumns(
-  activities: ApiActivity[],
-  statuses: Status[],
-  sortBy: KanbanSortBy,
-): KanbanColumn[] {
-  // Bucket activities by statusId (null → no-status bucket).
-  const byStatus = new Map<string | null, ApiActivity[]>();
-  byStatus.set(null, []);
-  for (const s of statuses) byStatus.set(s.id, []);
-  for (const act of activities) {
-    const key = (act as ApiActivity & { statusId?: string | null }).statusId ?? null;
-    const bucket = byStatus.get(key) ?? byStatus.get(null)!;
-    bucket.push(act);
-  }
-
-  // "No status" column first, then statuses in position order.
-  const noStatusItems = sortActivities(byStatus.get(null) ?? [], sortBy);
-  const statusCols: KanbanColumn[] = statuses
-    .slice()
-    .sort((a, b) => (a.position ?? 0) - (b.position ?? 0))
-    .map(s => ({
-      id: s.id,
-      label: s.name,
-      color: s.color ?? undefined,
-      icon: s.icon ?? undefined,
-      droppable: true,
-      dropValue: { statusId: s.id },
-      items: sortActivities(byStatus.get(s.id) ?? [], sortBy),
-    }));
-
-  return [
-    {
-      id: NO_STATUS_ID,
-      label: 'No status',
-      droppable: true,
-      dropValue: { statusId: null },
-      items: noStatusItems,
-    },
-    ...statusCols,
-  ];
-}
-
-// ── Member columns ─────────────────────────────────────────────────────────────
-
-function buildMemberColumns(
-  activities: ApiActivity[],
-  members: TeamMemberWithUser[],
-  sortBy: KanbanSortBy,
-): KanbanColumn[] {
-  // Assign each activity to its first (primary) member; multi-member cards
-  // appear only once in the primary member's column. Unassigned → UNASSIGNED_ID.
-  const byMember = new Map<string, ApiActivity[]>();
-  byMember.set(UNASSIGNED_ID, []);
-  for (const m of members) byMember.set(m.id, []);
-  for (const act of activities) {
-    const ids = act.assignedMemberIds ?? [];
-    const key = ids.length > 0 ? ids[0] : UNASSIGNED_ID;
-    const bucket = byMember.get(key) ?? byMember.get(UNASSIGNED_ID)!;
-    bucket.push(act);
-  }
-
-  const memberCols: KanbanColumn[] = members.map(m => ({
-    id: m.id,
-    label: m.displayName || m.email || 'Unknown',
-    color: m.color ?? undefined,
-    droppable: true,
-    dropValue: { assignedMemberIds: [m.id] },
-    items: sortActivities(byMember.get(m.id) ?? [], sortBy),
-  }));
-
-  return [
-    {
-      id: UNASSIGNED_ID,
-      label: 'Unassigned',
-      droppable: true,
-      dropValue: { assignedMemberIds: [] },
-      items: sortActivities(byMember.get(UNASSIGNED_ID) ?? [], sortBy),
-    },
-    ...memberCols,
-  ];
-}
-
-// ── Combination columns ────────────────────────────────────────────────────────
-
-function buildCombinationColumns(
-  activities: ApiActivity[],
-  members: TeamMemberWithUser[],
-  sortBy: KanbanSortBy,
-): KanbanColumn[] {
-  const memberOrder = members.map(m => m.id);
-  const nameById = new Map(members.map(m => [m.id, m.displayName || m.email || 'Unknown']));
-
-  const byCombo = new Map<string, ApiActivity[]>();
-  for (const act of activities) {
-    const key = memberComboKey(act.assignedMemberIds ?? []);
-    if (!byCombo.has(key)) byCombo.set(key, []);
-    byCombo.get(key)!.push(act);
-  }
-
-  const comparator = comboSortComparator(memberOrder);
-  const sortedKeys = [...byCombo.keys()].sort(comparator);
-
-  return sortedKeys.map(key => {
-    const orderedIds = key === UNASSIGNED_KEY
-      ? []
-      : orderedComboIds(key.split('|'), memberOrder);
-    const label = key === UNASSIGNED_KEY
-      ? 'Unassigned'
-      : memberComboLabel(orderedIds, nameById);
-    return {
-      id: key,
-      label,
-      // Combination columns are non-droppable.
-      droppable: false,
-      items: sortActivities(byCombo.get(key) ?? [], sortBy),
-    };
-  });
-}
-
-// ── Parent columns ─────────────────────────────────────────────────────────────
-
-function buildParentColumns(
-  activities: ApiActivity[],
-  sortBy: KanbanSortBy,
-): KanbanColumn[] {
-  // Build a title-lookup map from activity ID.
-  const titleById = new Map(activities.map(a => [a.id, a.title]));
-
-  const byParent = new Map<string | null, ApiActivity[]>();
-  byParent.set(null, []);
-  for (const act of activities) {
-    const pid = (act as ApiActivity & { parentActivityId?: string | null }).parentActivityId ?? null;
-    if (pid !== null && !byParent.has(pid)) byParent.set(pid, []);
-    const bucket = byParent.get(pid) ?? byParent.get(null)!;
-    bucket.push(act);
-  }
-
-  // Parent columns sorted A–Z by parent title.
-  const parentIds = [...byParent.keys()]
-    .filter((k): k is string => k !== null)
-    .sort((a, b) => (titleById.get(a) ?? '').localeCompare(titleById.get(b) ?? ''));
-
-  const parentCols: KanbanColumn[] = parentIds.map(pid => ({
-    id: pid,
-    label: titleById.get(pid) ?? 'Unknown',
-    droppable: true,
-    dropValue: { parentActivityId: pid },
-    items: sortActivities(byParent.get(pid) ?? [], sortBy),
-  }));
-
-  return [
-    {
-      id: NO_PARENT_ID,
-      label: 'No parent',
-      droppable: true,
-      dropValue: { parentActivityId: null },
-      items: sortActivities(byParent.get(null) ?? [], sortBy),
-    },
-    ...parentCols,
-  ];
-}
-
-// ── None column ────────────────────────────────────────────────────────────────
-
-function buildNoneColumn(
-  activities: ApiActivity[],
-  sortBy: KanbanSortBy,
-): KanbanColumn[] {
-  return [
-    {
-      id: NONE_COLUMN_ID,
-      label: 'All activities',
-      droppable: false,
-      items: sortActivities(activities, sortBy),
-    },
-  ];
-}
-````
-
-## File: packages/web/src/components/kanban/KanbanToolbar.tsx
-````typescript
-/**
- * KanbanToolbar — sub-toolbar for the Kanban view.
- *
- * Controls: Group by · Sort by · Color by · Card fields multi-select · Export/Share stubs.
- * Follows the same visual idiom as GanttToolbar and CalendarToolbar.
- */
-
-import { useState, useRef, useEffect } from 'react';
-import { Download, Share2, ChevronDown, Check } from 'lucide-react';
-import type { ColorBy } from '@/components/gantt/GanttToolbar';
-import type { KanbanGroupBy, KanbanSortBy, KanbanCardField } from './kanbanColumns';
-import { DEFAULT_CARD_FIELDS } from './kanbanColumns';
-
-export type { KanbanGroupBy, KanbanSortBy, KanbanCardField };
-
-interface Props {
-  groupBy: KanbanGroupBy;
-  onGroupByChange: (g: KanbanGroupBy) => void;
-  sortBy: KanbanSortBy;
-  onSortByChange: (s: KanbanSortBy) => void;
-  colorBy: ColorBy;
-  onColorByChange: (c: ColorBy) => void;
-  cardFields: KanbanCardField[];
-  onCardFieldsChange: (fields: KanbanCardField[]) => void;
-  onExport?: () => void;
-  onShare?: () => void;
-}
-
-const btn = 'flex items-center justify-center gap-[5px] h-[26px] px-2 border border-border rounded-md bg-card text-foreground text-xs font-medium cursor-pointer shrink-0 hover:bg-muted transition-colors';
-const divider = 'w-px h-4 bg-border shrink-0';
-const label = 'text-[11px] text-muted-foreground shrink-0';
-const select = 'h-[26px] px-1.5 border border-border rounded-md bg-card text-foreground text-xs cursor-pointer shrink-0';
-
-const ALL_CARD_FIELDS: { id: KanbanCardField; label: string }[] = [
-  { id: 'dateRange',       label: 'Date range' },
-  { id: 'status',          label: 'Status' },
-  { id: 'tags',            label: 'Tags' },
-  { id: 'members',         label: 'Assigned to' },
-  { id: 'percentComplete', label: '% Complete' },
-  { id: 'parent',          label: 'Parent' },
-  { id: 'description',     label: 'Description' },
-];
-
-export default function KanbanToolbar({
-  groupBy,
-  onGroupByChange,
-  sortBy,
-  onSortByChange,
-  colorBy,
-  onColorByChange,
-  cardFields,
-  onCardFieldsChange,
-  onExport,
-  onShare,
-}: Props) {
-  const [cardFieldsOpen, setCardFieldsOpen] = useState(false);
-  const dropdownRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!cardFieldsOpen) return;
-    function handleClick(e: MouseEvent) {
-      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
-        setCardFieldsOpen(false);
-      }
-    }
-    document.addEventListener('mousedown', handleClick);
-    return () => document.removeEventListener('mousedown', handleClick);
-  }, [cardFieldsOpen]);
-
-  function toggleField(id: KanbanCardField) {
-    if (cardFields.includes(id)) {
-      onCardFieldsChange(cardFields.filter(f => f !== id));
-    } else {
-      onCardFieldsChange([...cardFields, id]);
-    }
-  }
-
-  const activeFieldCount = cardFields.length;
-
-  return (
-    <div
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 8,
-        padding: '0 12px',
-        height: 36,
-        background: 'var(--card)',
-        borderBottom: '1px solid var(--border)',
-        flexShrink: 0,
-      }}
-    >
-      {/* Group by */}
-      <span className={label}>Group by</span>
-      <select
-        className={select}
-        value={groupBy}
-        onChange={e => onGroupByChange(e.target.value as KanbanGroupBy)}
-      >
-        <option value="status">Status</option>
-        <option value="member">Assigned to</option>
-        <option value="member-combination">Assigned to (combination)</option>
-        <option value="parent">Parent</option>
-        <option value="none">None</option>
-      </select>
-
-      <div className={divider} />
-
-      {/* Sort by */}
-      <span className={label}>Sort by</span>
-      <select
-        className={select}
-        value={sortBy}
-        onChange={e => onSortByChange(e.target.value as KanbanSortBy)}
-      >
-        <option value="startDate">Start date</option>
-        <option value="endDate">End date</option>
-        <option value="title">Title</option>
-        <option value="percentComplete">% Complete</option>
-        <option value="updatedAt">Recently updated</option>
-      </select>
-
-      <div className={divider} />
-
-      {/* Color by */}
-      <span className={label}>Color by</span>
-      <select
-        className={select}
-        value={colorBy}
-        onChange={e => onColorByChange(e.target.value as ColorBy)}
-      >
-        <option value="activity">Activity</option>
-        <option value="member">Member</option>
-        <option value="status">Status</option>
-      </select>
-
-      <div className={divider} />
-
-      {/* Card fields multi-select */}
-      <div ref={dropdownRef} style={{ position: 'relative' }}>
-        <button
-          className={btn}
-          onClick={() => setCardFieldsOpen(o => !o)}
-          title="Configure card fields"
-        >
-          Card fields
-          {activeFieldCount > 0 && (
-            <span
-              style={{
-                background: 'var(--primary)',
-                color: 'var(--primary-foreground)',
-                borderRadius: 9,
-                fontSize: 10,
-                fontWeight: 700,
-                padding: '0 5px',
-                lineHeight: '16px',
-              }}
-            >
-              {activeFieldCount}
-            </span>
-          )}
-          <ChevronDown size={11} strokeWidth={2} />
-        </button>
-
-        {cardFieldsOpen && (
-          <div
-            style={{
-              position: 'absolute',
-              top: 'calc(100% + 4px)',
-              left: 0,
-              background: 'var(--card)',
-              border: '1px solid var(--border)',
-              borderRadius: 8,
-              boxShadow: '0 4px 16px rgba(0,0,0,0.12)',
-              zIndex: 50,
-              minWidth: 160,
-              padding: '4px 0',
-            }}
-          >
-            {ALL_CARD_FIELDS.map(f => {
-              const checked = cardFields.includes(f.id);
-              return (
-                <button
-                  key={f.id}
-                  onClick={() => toggleField(f.id)}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 8,
-                    width: '100%',
-                    padding: '6px 12px',
-                    background: 'none',
-                    border: 'none',
-                    cursor: 'pointer',
-                    fontSize: 12,
-                    color: 'var(--foreground)',
-                    textAlign: 'left',
-                  }}
-                  onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-                  onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-                >
-                  <span
-                    style={{
-                      width: 14,
-                      height: 14,
-                      border: '1.5px solid var(--border)',
-                      borderRadius: 3,
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      background: checked ? 'var(--primary)' : 'transparent',
-                      borderColor: checked ? 'var(--primary)' : 'var(--border)',
-                      flexShrink: 0,
-                    }}
-                  >
-                    {checked && <Check size={9} strokeWidth={3} color="var(--primary-foreground)" />}
-                  </span>
-                  {f.label}
-                </button>
-              );
-            })}
-            <div style={{ height: 1, background: 'var(--border)', margin: '4px 0' }} />
-            <button
-              onClick={() => onCardFieldsChange(DEFAULT_CARD_FIELDS)}
-              style={{
-                display: 'flex',
-                width: '100%',
-                padding: '6px 12px',
-                background: 'none',
-                border: 'none',
-                cursor: 'pointer',
-                fontSize: 11,
-                color: 'var(--muted-foreground)',
-                textAlign: 'left',
-              }}
-              onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-              onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-            >
-              Reset to defaults
-            </button>
-          </div>
-        )}
-      </div>
-
-      {/* Stubs — pushed to the right */}
-      <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
-        <div className={divider} />
-        <button className={btn} onClick={onExport} title="Export (coming soon)">
-          <Download size={12} strokeWidth={1.8} />
-          Export
-        </button>
-        <button className={btn} onClick={onShare} title="Share (coming soon)">
-          <Share2 size={12} strokeWidth={1.8} />
-          Share
-        </button>
-      </div>
-    </div>
-  );
-}
-````
-
-## File: packages/web/src/components/kanban/KanbanView.test.ts
-````typescript
-/**
- * Unit tests for kanbanColumns pure logic.
- * Mirrors the pattern used by calendarLanes.test.ts.
- */
-
-import { describe, it, expect } from 'vitest';
-import {
-  buildColumns,
-  sortActivities,
-  NO_STATUS_ID,
-  UNASSIGNED_ID,
-  NO_PARENT_ID,
-  NONE_COLUMN_ID,
-  type KanbanGroupBy,
-} from './kanbanColumns';
-import type { components } from '@draba/shared';
-
-type ApiActivity = components['schemas']['Activity'];
-type Status = components['schemas']['Status'];
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
-
-// ── Fixtures ──────────────────────────────────────────────────────────────────
-
-function makeActivity(overrides: Partial<ApiActivity> & { id: string }): ApiActivity {
-  return {
-    id: overrides.id,
-    title: overrides.title ?? `Activity ${overrides.id}`,
-    timelineId: 'tl1',
-    startAt: overrides.startAt ?? '2026-01-01T00:00:00Z',
-    endAt: overrides.endAt ?? '2026-01-07T00:00:00Z',
-    color: overrides.color ?? '#288C9B',
-    createdAt: '2026-01-01T00:00:00Z',
-    updatedAt: overrides.updatedAt ?? '2026-01-01T00:00:00Z',
-    assignedMemberIds: overrides.assignedMemberIds ?? [],
-    tagIds: overrides.tagIds ?? [],
-    percentComplete: overrides.percentComplete ?? null,
-    archivedAt: null,
-    description: overrides.description ?? null,
-    icon: overrides.icon ?? null,
-    location: overrides.location ?? null,
-    notes: overrides.notes ?? null,
-    statusId: overrides.statusId ?? null,
-    parentActivityId: overrides.parentActivityId ?? null,
-    url: overrides.url ?? null,
-  } as ApiActivity;
-}
-
-function makeStatus(id: string, name: string, position: number, color = '#288C9B'): Status {
-  return { id, name, position, color, icon: null, isClosed: false, timelineId: 'tl1', createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' } as Status;
-}
-
-function makeMember(id: string, displayName: string): TeamMemberWithUser {
-  return { id, displayName, email: `${id}@test.com`, role: 'member', userId: id, color: null, icon: null, archivedAt: null, joinedAt: '2026-01-01T00:00:00Z', teamId: 'team1' } as unknown as TeamMemberWithUser;
-}
-
-const statuses = [
-  makeStatus('s1', 'Planned', 0, '#888'),
-  makeStatus('s2', 'In Progress', 1, '#1A97A2'),
-  makeStatus('s3', 'Done', 2, '#22c55e'),
-];
-
-const members = [
-  makeMember('m1', 'Alice'),
-  makeMember('m2', 'Bob'),
-  makeMember('m3', 'Carol'),
-];
-
-// ── sortActivities ─────────────────────────────────────────────────────────────
-
-describe('sortActivities', () => {
-  it('sorts by startDate ascending', () => {
-    const acts = [
-      makeActivity({ id: 'c', startAt: '2026-03-01T00:00:00Z' }),
-      makeActivity({ id: 'a', startAt: '2026-01-01T00:00:00Z' }),
-      makeActivity({ id: 'b', startAt: '2026-02-01T00:00:00Z' }),
-    ];
-    const result = sortActivities(acts, 'startDate');
-    expect(result.map(a => a.id)).toEqual(['a', 'b', 'c']);
-  });
-
-  it('sorts by title A-Z', () => {
-    const acts = [
-      makeActivity({ id: '1', title: 'Zebra' }),
-      makeActivity({ id: '2', title: 'Alpha' }),
-      makeActivity({ id: '3', title: 'Mango' }),
-    ];
-    const result = sortActivities(acts, 'title');
-    expect(result.map(a => a.title)).toEqual(['Alpha', 'Mango', 'Zebra']);
-  });
-
-  it('sorts percentComplete descending, nulls last', () => {
-    const acts = [
-      makeActivity({ id: 'a', percentComplete: 50 }),
-      makeActivity({ id: 'b', percentComplete: null }),
-      makeActivity({ id: 'c', percentComplete: 100 }),
-    ];
-    const result = sortActivities(acts, 'percentComplete');
-    expect(result.map(a => a.id)).toEqual(['c', 'a', 'b']);
-  });
-
-  it('sorts updatedAt descending (most recent first)', () => {
-    const acts = [
-      makeActivity({ id: 'old', updatedAt: '2026-01-01T00:00:00Z' }),
-      makeActivity({ id: 'new', updatedAt: '2026-06-01T00:00:00Z' }),
-    ];
-    const result = sortActivities(acts, 'updatedAt');
-    expect(result[0].id).toBe('new');
-  });
-});
-
-// ── buildColumns — status ──────────────────────────────────────────────────────
-
-describe('buildColumns: status', () => {
-  it('creates No-status column plus one column per status in position order', () => {
-    const acts = [makeActivity({ id: 'a1', statusId: 's1' })];
-    const cols = buildColumns('status', acts, [], statuses, 'startDate');
-    expect(cols[0].id).toBe(NO_STATUS_ID);
-    expect(cols[0].label).toBe('No status');
-    expect(cols.slice(1).map(c => c.id)).toEqual(['s1', 's2', 's3']);
-  });
-
-  it('routes activities to the correct status column', () => {
-    const acts = [
-      makeActivity({ id: 'a1', statusId: 's2' }),
-      makeActivity({ id: 'a2', statusId: null }),
-      makeActivity({ id: 'a3', statusId: 's1' }),
-    ];
-    const cols = buildColumns('status', acts, [], statuses, 'startDate');
-    expect(cols.find(c => c.id === NO_STATUS_ID)!.items.map(a => a.id)).toEqual(['a2']);
-    expect(cols.find(c => c.id === 's1')!.items.map(a => a.id)).toEqual(['a3']);
-    expect(cols.find(c => c.id === 's2')!.items.map(a => a.id)).toEqual(['a1']);
-  });
-
-  it('status columns are droppable; no-status column is droppable with null statusId', () => {
-    const cols = buildColumns('status', [], [], statuses, 'startDate');
-    const noStatus = cols.find(c => c.id === NO_STATUS_ID)!;
-    expect(noStatus.droppable).toBe(true);
-    expect(noStatus.dropValue).toEqual({ statusId: null });
-    const s1 = cols.find(c => c.id === 's1')!;
-    expect(s1.droppable).toBe(true);
-    expect(s1.dropValue).toEqual({ statusId: 's1' });
-  });
-
-  it('handles unknown statusId gracefully (routes to no-status)', () => {
-    const acts = [makeActivity({ id: 'x', statusId: 'deleted-status' })];
-    const cols = buildColumns('status', acts, [], statuses, 'startDate');
-    expect(cols.find(c => c.id === NO_STATUS_ID)!.items.map(a => a.id)).toEqual(['x']);
-  });
-});
-
-// ── buildColumns — member ──────────────────────────────────────────────────────
-
-describe('buildColumns: member', () => {
-  it('creates Unassigned column first, then one column per member', () => {
-    const cols = buildColumns('member', [], members, [], 'startDate');
-    expect(cols[0].id).toBe(UNASSIGNED_ID);
-    expect(cols.slice(1).map(c => c.id)).toEqual(['m1', 'm2', 'm3']);
-  });
-
-  it('routes activity to primary (first) member column', () => {
-    const acts = [makeActivity({ id: 'a', assignedMemberIds: ['m2', 'm1'] })];
-    const cols = buildColumns('member', acts, members, [], 'startDate');
-    expect(cols.find(c => c.id === 'm2')!.items.map(a => a.id)).toEqual(['a']);
-    expect(cols.find(c => c.id === 'm1')!.items).toHaveLength(0);
-  });
-
-  it('routes unassigned activity to Unassigned column', () => {
-    const acts = [makeActivity({ id: 'u', assignedMemberIds: [] })];
-    const cols = buildColumns('member', acts, members, [], 'startDate');
-    expect(cols.find(c => c.id === UNASSIGNED_ID)!.items.map(a => a.id)).toEqual(['u']);
-  });
-
-  it('dropValue for member column sets assignedMemberIds to singleton', () => {
-    const cols = buildColumns('member', [], members, [], 'startDate');
-    const m1col = cols.find(c => c.id === 'm1')!;
-    expect(m1col.dropValue).toEqual({ assignedMemberIds: ['m1'] });
-  });
-
-  it('dropValue for Unassigned column sets assignedMemberIds to empty', () => {
-    const cols = buildColumns('member', [], members, [], 'startDate');
-    const unassigned = cols.find(c => c.id === UNASSIGNED_ID)!;
-    expect(unassigned.dropValue).toEqual({ assignedMemberIds: [] });
-  });
-});
-
-// ── buildColumns — member-combination ─────────────────────────────────────────
-
-describe('buildColumns: member-combination', () => {
-  it('groups by exact assignee set, not primary member', () => {
-    const acts = [
-      makeActivity({ id: 'solo-alice', assignedMemberIds: ['m1'] }),
-      makeActivity({ id: 'alice-bob', assignedMemberIds: ['m1', 'm2'] }),
-      makeActivity({ id: 'solo-alice-2', assignedMemberIds: ['m1'] }),
-    ];
-    const cols = buildColumns('member-combination', acts, members, [], 'startDate');
-    const aliceCol = cols.find(c => c.label === 'Alice')!;
-    expect(aliceCol.items).toHaveLength(2);
-    const combCol = cols.find(c => c.label === 'Alice and Bob')!;
-    expect(combCol.items).toHaveLength(1);
-  });
-
-  it('combination columns are non-droppable', () => {
-    const acts = [makeActivity({ id: 'a', assignedMemberIds: ['m1', 'm2'] })];
-    const cols = buildColumns('member-combination', acts, members, [], 'startDate');
-    expect(cols.every(c => !c.droppable)).toBe(true);
-  });
-
-  it('empty assignee set maps to Unassigned column', () => {
-    const acts = [makeActivity({ id: 'u', assignedMemberIds: [] })];
-    const cols = buildColumns('member-combination', acts, members, [], 'startDate');
-    const unassigned = cols.find(c => c.label === 'Unassigned');
-    expect(unassigned).toBeDefined();
-    expect(unassigned!.items).toHaveLength(1);
-  });
-});
-
-// ── buildColumns — parent ──────────────────────────────────────────────────────
-
-describe('buildColumns: parent', () => {
-  it('creates No-parent column first, then parent columns sorted A-Z', () => {
-    const acts = [
-      makeActivity({ id: 'p1', title: 'Zephyr', parentActivityId: null }),
-      makeActivity({ id: 'p2', title: 'Alpha milestone', parentActivityId: null }),
-      makeActivity({ id: 'c1', parentActivityId: 'p1' }),
-      makeActivity({ id: 'c2', parentActivityId: 'p2' }),
-    ];
-    const cols = buildColumns('parent', acts, [], [], 'startDate');
-    expect(cols[0].id).toBe(NO_PARENT_ID);
-    // Parent columns should be sorted A-Z by parent title
-    const parentCols = cols.slice(1);
-    const labels = parentCols.map(c => c.label);
-    expect(labels).toEqual([...labels].sort((a, b) => a.localeCompare(b)));
-  });
-
-  it('dropValue sets parentActivityId to the parent ID or null', () => {
-    const acts = [
-      makeActivity({ id: 'p', parentActivityId: null }),
-      makeActivity({ id: 'c', parentActivityId: 'p' }),
-    ];
-    const cols = buildColumns('parent', acts, [], [], 'startDate');
-    expect(cols.find(c => c.id === NO_PARENT_ID)!.dropValue).toEqual({ parentActivityId: null });
-    expect(cols.find(c => c.id === 'p')!.dropValue).toEqual({ parentActivityId: 'p' });
-  });
-});
-
-// ── buildColumns — none ────────────────────────────────────────────────────────
-
-describe('buildColumns: none', () => {
-  it('produces a single All activities column that is non-droppable', () => {
-    const acts = [
-      makeActivity({ id: 'a' }),
-      makeActivity({ id: 'b' }),
-    ];
-    const cols = buildColumns('none', acts, [], [], 'startDate');
-    expect(cols).toHaveLength(1);
-    expect(cols[0].id).toBe(NONE_COLUMN_ID);
-    expect(cols[0].droppable).toBe(false);
-    expect(cols[0].items).toHaveLength(2);
-  });
-});
-
-// ── empty activities ───────────────────────────────────────────────────────────
-
-describe('buildColumns with no activities', () => {
-  const emptyActs: ApiActivity[] = [];
-
-  (['status', 'member', 'member-combination', 'parent', 'none'] as KanbanGroupBy[]).forEach(mode => {
-    it(`${mode} groupBy produces columns without throwing`, () => {
-      expect(() =>
-        buildColumns(mode, emptyActs, members, statuses, 'startDate'),
-      ).not.toThrow();
-    });
-  });
-});
-````
-
-## File: packages/web/src/components/kanban/KanbanView.tsx
-````typescript
-/**
- * KanbanView — data container for the Kanban board.
- *
- * Mirrors CalendarView: fetches activities + members, applies the active filter
- * and Find query, builds columns via kanbanColumns, and hands off to KanbanBoard
- * for rendering. Owns no layout chrome — groupBy, sortBy, colorBy, and cardFields
- * come from DashboardPage.
- */
-
-import { useMemo, useEffect, useCallback } from 'react';
-import { useQueryClient } from '@tanstack/react-query';
-import KanbanBoard from './KanbanBoard';
-import {
-  buildColumns,
-  DEFAULT_CARD_FIELDS,
-  type KanbanGroupBy,
-  type KanbanSortBy,
-  type KanbanCardField,
-} from './kanbanColumns';
-import { resolveActivityColor } from '@/lib/activityColor';
-import { useTimelineActivities, useTeamMembers, useUpdateActivity } from '@/hooks/useTeamActivities';
-import { matchEvents } from '@/lib/findMatcher';
-import { useFind } from '@/contexts/FindContext';
-import { useFilter } from '@/contexts/FilterContext';
-import { applyActiveFilter } from '@/lib/presetFilters';
-import { useUpsertPreference } from '@/hooks/usePreferences';
-import { resolveColorHex } from '@/components/identity/identity-constants';
-import type { ColorBy } from '@/components/gantt/GanttToolbar';
-import type { components } from '@draba/shared';
-import type { Member } from '@/types';
-import { MEMBER_COLORS } from '@/types';
-import type { DropPayload } from './KanbanBoard';
-
-type ApiActivity = components['schemas']['Activity'];
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
-type Status = components['schemas']['Status'];
-type SavedFilter = components['schemas']['SavedFilter'];
-type Tag = components['schemas']['Tag'];
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-function initialsFrom(name: string): string {
-  return name.split(/\s+/).map(w => w[0] ?? '').slice(0, 2).join('').toUpperCase();
-}
-
-function toMember(m: TeamMemberWithUser, index: number): Member {
-  const name = m.displayName || m.email || 'Unknown';
-  return {
-    id: m.id,
-    name,
-    initials: initialsFrom(name),
-    color: resolveColorHex(m.color) || MEMBER_COLORS[index % MEMBER_COLORS.length],
-  };
-}
-
-// ── Props ─────────────────────────────────────────────────────────────────────
-
-interface Props {
-  teamId: string;
-  timelineId: string;
-  groupBy: KanbanGroupBy;
-  sortBy: KanbanSortBy;
-  colorBy: ColorBy;
-  cardFields: KanbanCardField[];
-  collapsedColumnIds: string[];
-  onCollapsedColumnIdsChange: (ids: string[]) => void;
-  timelineStatuses?: Status[];
-  savedFilters?: SavedFilter[];
-  tags?: Tag[];
-  selectedActivityId?: string | null;
-  onSelectActivity?: (id: string | null) => void;
-  onSelectApiActivity?: (activity: ApiActivity | null) => void;
-  /** Called when "+ Add" is clicked in a column; provides pre-fill context. */
-  onAddActivity?: (defaults: { start: string; end: string; memberId: string | null }) => void;
-  onMembersLoaded?: (members: Member[]) => void;
-}
-
-// ── KanbanView ────────────────────────────────────────────────────────────────
-
-export default function KanbanView({
-  teamId,
-  timelineId,
-  groupBy,
-  sortBy,
-  colorBy,
-  cardFields,
-  collapsedColumnIds,
-  onCollapsedColumnIdsChange,
-  timelineStatuses,
-  savedFilters,
-  tags,
-  selectedActivityId,
-  onSelectActivity,
-  onSelectApiActivity,
-  onAddActivity,
-  onMembersLoaded,
-}: Props) {
-  const queryClient = useQueryClient();
-  const { debouncedQuery, registerMatches, activeMatchId } = useFind();
-  const { activeFilter } = useFilter();
-  const upsert = useUpsertPreference();
-
-  // Fetch data — no date bounds for Kanban (show all activities on the timeline).
-  const { data: apiMembers = [] } = useTeamMembers(teamId);
-  const { data: apiActivities = [], isLoading } = useTimelineActivities(teamId, timelineId);
-  const updateActivity = useUpdateActivity(timelineId);
-
-  const members: Member[] = useMemo(
-    () => apiMembers.map((m, i) => toMember(m, i)),
-    [apiMembers],
-  );
-
-  const memberById = useMemo<Record<string, Member>>(() => {
-    const map: Record<string, Member> = {};
-    members.forEach(m => { map[m.id] = m; });
-    return map;
-  }, [members]);
-
-  useEffect(() => {
-    if (onMembersLoaded && members.length > 0) onMembersLoaded(members);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [members]);
-
-  // Filter engine context.
-  const closedStatusIds = useMemo(
-    () => new Set((timelineStatuses ?? []).filter(s => s.isClosed).map(s => s.id)),
-    [timelineStatuses],
-  );
-  const statusesByTimeline = useMemo(() => {
-    const m = new Map<string, Status[]>();
-    if (timelineStatuses?.length) m.set(timelineId, timelineStatuses);
-    return m;
-  }, [timelineId, timelineStatuses]);
-  const memberIdsByUserId = useMemo(() => {
-    const m = new Map<string, string[]>();
-    apiMembers.forEach(mem => {
-      if (mem.userId) {
-        const existing = m.get(mem.userId) ?? [];
-        m.set(mem.userId, [...existing, mem.id]);
-      }
-    });
-    return m;
-  }, [apiMembers]);
-
-  const visibleActivities = useMemo(
-    () => applyActiveFilter(
-      apiActivities,
-      activeFilter,
-      memberIdsByUserId,
-      {
-        closedStatusIds,
-        savedFilters: savedFilters ?? [],
-        statuses: statusesByTimeline,
-        tags: tags ?? [],
-      },
-    ),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [apiActivities, activeFilter, memberIdsByUserId, closedStatusIds, savedFilters, statusesByTimeline, tags],
-  );
-
-  const statusById = useMemo(
-    () => new Map((timelineStatuses ?? []).map(s => [s.id, s])),
-    [timelineStatuses],
-  );
-  const statusColorById = useMemo(
-    () => new Map((timelineStatuses ?? []).map(s => [s.id, s.color ?? ''])),
-    [timelineStatuses],
-  );
-  const tagById = useMemo(
-    () => new Map((tags ?? []).map(t => [t.id, t])),
-    [tags],
-  );
-
-  // Per-activity resolved hex color (driven by colorBy) — used as card accent border.
-  const colorMap = useMemo<Map<string, string>>(() => {
-    const map = new Map<string, string>();
-    visibleActivities.forEach((act, i) => {
-      map.set(act.id, resolveActivityColor(act, i, memberById, colorBy, statusColorById));
-    });
-    return map;
-  }, [visibleActivities, memberById, colorBy, statusColorById]);
-
-  // Build columns.
-  const columns = useMemo(
-    () => buildColumns(
-      groupBy,
-      visibleActivities,
-      apiMembers,
-      timelineStatuses ?? [],
-      sortBy,
-    ),
-    [groupBy, visibleActivities, apiMembers, timelineStatuses, sortBy],
-  );
-
-  // Activity ID → ApiActivity map for drag overlay and optimistic updates.
-  const activityById = useMemo<Map<string, ApiActivity>>(
-    () => new Map(apiActivities.map(a => [a.id, a])),
-    [apiActivities],
-  );
-
-  // Collapsed column persistence.
-  const collapsedSet = useMemo(() => new Set(collapsedColumnIds), [collapsedColumnIds]);
-
-  const handleToggleCollapse = useCallback((columnId: string) => {
-    const next = collapsedSet.has(columnId)
-      ? collapsedColumnIds.filter(id => id !== columnId)
-      : [...collapsedColumnIds, columnId];
-    onCollapsedColumnIdsChange(next);
-    if (timelineId) {
-      upsert.mutate({
-        key: 'kanban_collapsed',
-        value: JSON.stringify(next),
-        timelineId,
-      });
-    }
-  }, [collapsedSet, collapsedColumnIds, onCollapsedColumnIdsChange, timelineId, upsert]);
-
-  // Find: compute matches.
-  const matchResults = useMemo(
-    () => matchEvents(debouncedQuery, visibleActivities, members, visibleActivities),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [debouncedQuery, visibleActivities, members],
-  );
-  const matchedSet = useMemo(() => new Set(matchResults.map(r => r.activityId)), [matchResults]);
-
-  // Register ordered match IDs in column → in-column sort order.
-  const orderedMatchIds = useMemo(() => {
-    const ids: string[] = [];
-    for (const col of columns) {
-      if (collapsedSet.has(col.id)) continue;
-      for (const act of col.items) {
-        if (matchedSet.has(act.id)) ids.push(act.id);
-      }
-    }
-    return ids;
-  }, [columns, collapsedSet, matchedSet]);
-
-  useEffect(() => {
-    registerMatches(orderedMatchIds, new Map());
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [orderedMatchIds]);
-
-  // Auto-expand a collapsed column that contains the active match.
-  useEffect(() => {
-    if (!activeMatchId) return;
-    const containingCol = columns.find(col =>
-      collapsedSet.has(col.id) && col.items.some(a => a.id === activeMatchId),
-    );
-    if (containingCol) {
-      handleToggleCollapse(containingCol.id);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeMatchId]);
-
-  // Derive which field is the current Group by axis (auto-suppressed on cards).
-  const suppressedFields = useMemo((): Set<KanbanCardField> => {
-    const s = new Set<KanbanCardField>();
-    if (groupBy === 'status') s.add('status');
-    if (groupBy === 'member' || groupBy === 'member-combination') s.add('members');
-    if (groupBy === 'parent') s.add('parent');
-    return s;
-  }, [groupBy]);
-
-  // Card click → open detail panel.
-  const handleCardClick = useCallback((activity: ApiActivity) => {
-    if (onSelectApiActivity) onSelectApiActivity(activity);
-    if (onSelectActivity)    onSelectActivity(activity.id);
-  }, [onSelectApiActivity, onSelectActivity]);
-
-  // "+ Add" in a column → open create panel prefilled with the column's context.
-  const handleAddInColumn = useCallback((column: { id: string; dropValue?: { assignedMemberIds?: string[] } }) => {
-    const today = new Date().toISOString().slice(0, 10);
-    const memberId = column.dropValue?.assignedMemberIds?.[0] ?? null;
-    if (onAddActivity) {
-      onAddActivity({ start: today, end: today, memberId });
-    }
-  }, [onAddActivity]);
-
-  // Drag commit.
-  const handleDrop = useCallback((payload: DropPayload) => {
-    // Optimistic cache update.
-    queryClient.setQueriesData<ApiActivity[]>(
-      { queryKey: ['timelines', timelineId, 'activities'] },
-      old => old?.map(a => a.id === payload.activityId ? { ...a, ...payload.patch } : a),
-    );
-    updateActivity.mutate({ activityId: payload.activityId, patch: payload.patch });
-  }, [queryClient, timelineId, updateActivity]);
-
-  const hasQuery = debouncedQuery.trim().length > 0;
-
-  // ── Effective card fields: apply context-aware suppression at render time ────
-  const effectiveCardFields = useMemo(
-    () => (cardFields.length > 0 ? cardFields : DEFAULT_CARD_FIELDS),
-    [cardFields],
-  );
-
-  // ── Loading ────────────────────────────────────────────────────────────────
-
-  if (isLoading) {
-    return (
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: 'var(--muted-foreground)', fontSize: 13 }}>
-        Loading activities…
-      </div>
-    );
-  }
-
-  return (
-    <KanbanBoard
-      columns={columns}
-      groupBy={groupBy}
-      members={members}
-      statusById={statusById}
-      tagById={tagById}
-      colorMap={colorMap}
-      cardFields={effectiveCardFields}
-      suppressedFields={suppressedFields}
-      selectedActivityId={selectedActivityId ?? null}
-      matchedIds={matchedSet}
-      activeMatchId={activeMatchId}
-      hasQuery={hasQuery}
-      collapsedColumnIds={collapsedSet}
-      onToggleCollapse={handleToggleCollapse}
-      onCardClick={handleCardClick}
-      onAddInColumn={handleAddInColumn}
-      onDrop={handleDrop}
-      activityById={activityById}
-    />
-  );
-}
-````
-
 ## File: packages/web/src/components/list/ListView.format.test.ts
 ````typescript
 import { describe, it, expect } from 'vitest'
@@ -26367,142 +25243,1795 @@ describe('formatTimestamp', () => {
 // never shift in formatActivityDate regardless of the runner's timezone.
 ````
 
-## File: packages/web/src/components/shared/ConfirmDialog.tsx
+## File: packages/web/src/components/MemberModal.tsx
 ````typescript
 /**
- * ConfirmDialog — shared confirmation panel for destructive / significant actions.
+ * MemberModal — view and edit a team member's profile, identity, and role.
  *
- * Renders inline inside a modal panel (not a portal), replacing the modal's
- * content area. The parent is responsible for showing/hiding this component.
+ * Shows computed stats (timelines, activities by date status) and exposes
+ * superadmin actions (promote, inactivate, delete) when the viewer is a
+ * superadmin. Password reset is present but shows "SMTP not configured"
+ * until Phase 14.
  */
 
+import { useState } from 'react'
+import { createPortal } from 'react-dom'
+import { X, Shield, Archive, Trash2, AlertTriangle, Clock, Activity, Calendar, Users, ShieldOff } from 'lucide-react'
+import { IdentityWidget } from '@/components/identity/IdentityWidget'
+import type { Identity } from '@/components/identity/identity-constants'
+import { Badge } from '@/components/identity/Badge'
+import { useMemberDetail, useUpdateMember, usePromoteUser, useArchiveUser, useUnarchiveUser, useDeleteUser, useRevokeUser } from '@/hooks/useMemberManagement'
+import { useAuth } from '@/contexts/AuthContext'
+import InlineEditableTitle from '@/components/shared/InlineEditableTitle'
+import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
+import type { components } from '@draba/shared'
+
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
+
+interface Props {
+  teamId: string
+  memberId: string
+  /** Whether the current viewer is a team admin. */
+  isAdmin: boolean
+  /** Whether the current viewer is a superadmin. */
+  isSuperadmin: boolean
+  onClose: () => void
+}
+
+// ── Small shared styles ───────────────────────────────────────────────────────
+
+const chipStyle = (color: string): React.CSSProperties => ({
+  display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+  padding: '10px 16px', borderRadius: 8, flex: 1,
+  border: `1px solid ${color}44`, borderTop: `3px solid ${color}`,
+  background: `${color}0a`, textAlign: 'center', minWidth: 0,
+})
+
+const cancelBtn: React.CSSProperties = {
+  background: 'none', border: '1px solid var(--border)', color: 'var(--muted-foreground)',
+  fontSize: 13, padding: '7px 18px', borderRadius: 7, cursor: 'pointer', fontFamily: 'var(--font-sans)',
+}
+
+// ── Main component ────────────────────────────────────────────────────────────
+
+export default function MemberModal({ teamId, memberId, isAdmin, isSuperadmin, onClose }: Props) {
+  const { user: currentUser } = useAuth()
+  const { data: detail, isLoading, isError } = useMemberDetail(teamId, memberId)
+  const updateMember = useUpdateMember(teamId)
+  const promoteUser = usePromoteUser()
+  const archiveUser = useArchiveUser()
+  const unarchiveUser = useUnarchiveUser()
+  const deleteUser = useDeleteUser()
+  const revokeUser = useRevokeUser()
+
+  const [identity, setIdentity] = useState<Identity | null>(null)
+  const [displayName, setDisplayName] = useState<string | null>(null)
+  const [confirm, setConfirm] = useState<'promote' | 'inactivate' | 'delete' | 'revoke' | null>(null)
+  const [revokeResult, setRevokeResult] = useState<{ membershipsInactivated: number; membershipsRemoved: number } | null>(null)
+
+  if (isLoading || isError || !detail) {
+    return createPortal(
+      <div
+        onClick={e => { if (e.target === e.currentTarget) onClose() }}
+        style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1100 }}
+      >
+        <div style={{ width: 560, height: 300, background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 14, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 10, position: 'relative' }}>
+          <button onClick={onClose} style={{ position: 'absolute', top: 12, right: 14, background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4, display: 'flex' }}>
+            <X size={18} />
+          </button>
+          {isError ? (
+            <>
+              <span style={{ color: '#EF4444', fontSize: 13 }}>Failed to load member — the member may have been removed.</span>
+              <button onClick={onClose} style={{ fontSize: 12, color: 'var(--muted-foreground)', background: 'none', border: '1px solid var(--border)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)' }}>Dismiss</button>
+            </>
+          ) : (
+            <span style={{ color: 'var(--muted-foreground)', fontSize: 13 }}>Loading…</span>
+          )}
+        </div>
+      </div>,
+      document.body,
+    )
+  }
+
+  const effectiveIdentity: Identity = identity ?? {
+    color: detail.color ?? '#1A97A2',
+    icon: detail.icon ?? '__name_words__',
+  }
+  const effectiveName = displayName ?? detail.displayName
+
+  const isParticipant = !detail.userId
+  const isInactivated = Boolean(detail.archivedAt)
+  const stats = detail.stats
+  const activeActivityCount = stats.pastDue + stats.running + stats.upcoming + stats.unscheduled
+
+  const busy = updateMember.isPending || promoteUser.isPending || archiveUser.isPending || unarchiveUser.isPending || deleteUser.isPending || revokeUser.isPending
+
+  // detail is guaranteed non-null here (early return above handles loading/undefined).
+  // Non-null assertions in callbacks are safe because they only fire when the
+  // rendered modal is interactive, which requires detail to be loaded.
+  function handleSave() {
+    const patch: { displayName?: string | null; color?: string | null; icon?: string | null } = {}
+    if (displayName !== null) patch.displayName = displayName
+    if (identity !== null) { patch.color = identity.color; patch.icon = identity.icon }
+    updateMember.mutate({ memberId, patch }, { onSuccess: onClose })
+  }
+
+  function handlePromote() {
+    if (!detail!.userId) return
+    promoteUser.mutate(detail!.userId, { onSuccess: () => setConfirm(null) })
+  }
+
+  function handleInactivate() {
+    if (!detail!.userId) return
+    archiveUser.mutate(detail!.userId, { onSuccess: () => { setConfirm(null); onClose() } })
+  }
+
+  function handleReactivate() {
+    if (!detail!.userId) return
+    unarchiveUser.mutate(detail!.userId, { onSuccess: onClose })
+  }
+
+  function handleRevoke() {
+    if (!detail!.userId) return
+    revokeUser.mutate(detail!.userId, {
+      onSuccess: (result) => {
+        setConfirm(null)
+        setRevokeResult({ membershipsInactivated: result.membershipsInactivated, membershipsRemoved: result.membershipsRemoved })
+        // Close the modal after a short delay so the user can see the summary.
+        setTimeout(onClose, 2000)
+      },
+    })
+  }
+
+  function handleDelete() {
+    if (!detail!.userId) return
+    deleteUser.mutate(detail!.userId, { onSuccess: () => { setConfirm(null); onClose() } })
+  }
+
+  const memberColor = effectiveIdentity.color
+
+  return createPortal(
+    <div
+      onClick={e => { if (e.target === e.currentTarget) onClose() }}
+      style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1100 }}
+    >
+      <div style={{ width: 560, maxHeight: '90vh', background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 14, boxShadow: '0 24px 64px rgba(0,0,0,.6)', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+
+        {/* Confirm overlays */}
+        {confirm === 'promote' && (
+          <ConfirmDialog
+            variant="indigo"
+            icon={<Shield size={22} color="#6366F1" />}
+            title="Promote to Super Admin?"
+            body={`${effectiveName} will gain full administrative access to all teams and settings. This cannot be undone without direct database access.`}
+            confirmLabel="Promote"
+            busy={busy}
+            onCancel={() => setConfirm(null)}
+            onConfirm={handlePromote}
+          />
+        )}
+        {confirm === 'inactivate' && (
+          <ConfirmDialog
+            variant="amber"
+            icon={<Archive size={22} color="#F59E0B" />}
+            title={`Inactivate ${effectiveName}?`}
+            body="The account will be disabled. The member will not be able to log in. Their data and activity assignments are preserved and access can be restored at any time."
+            confirmLabel="Inactivate"
+            busy={busy}
+            onCancel={() => setConfirm(null)}
+            onConfirm={handleInactivate}
+          />
+        )}
+        {confirm === 'delete' && (
+          <ConfirmDialog
+            variant="red"
+            icon={<Trash2 size={22} color="#EF4444" />}
+            title={`Delete ${effectiveName}?`}
+            body="This permanently removes the user account and cannot be undone. Only allowed when the user has no active activities and belongs to a single team."
+            confirmLabel="Delete permanently"
+            busy={busy}
+            onCancel={() => setConfirm(null)}
+            onConfirm={handleDelete}
+          />
+        )}
+        {confirm === 'revoke' && (
+          <ConfirmDialog
+            variant="red"
+            icon={<ShieldOff size={22} color="#EF4444" />}
+            title={`Revoke all access for ${effectiveName}?`}
+            body="This will: (1) deactivate the account — the user cannot log in anywhere; (2) inactivate all team memberships that have activity history; (3) permanently remove memberships with no activity history. Activity data is always preserved."
+            confirmLabel="Revoke all access"
+            busy={busy}
+            onCancel={() => setConfirm(null)}
+            onConfirm={handleRevoke}
+          />
+        )}
+
+        {confirm === null && (
+          <>
+            {/* Header */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '16px 20px', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
+              <div style={{ flexShrink: 0 }}>
+                <IdentityWidget
+                  identity={effectiveIdentity}
+                  name={effectiveName}
+                  shape="circle"
+                  onChange={setIdentity}
+                />
+              </div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 3 }}>
+                  {isParticipant ? 'Participant' : 'Team Member'}
+                  {isInactivated && ' · Inactive'}
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                  {(isAdmin || currentUser?.id === detail.userId) ? (
+                    <InlineEditableTitle
+                      value={displayName ?? detail.displayName}
+                      onChange={setDisplayName}
+                    />
+                  ) : (
+                    <span style={{ fontSize: 16, fontWeight: 600, color: 'var(--foreground)' }}>{effectiveName}</span>
+                  )}
+                  {isParticipant && (
+                    <span style={{ fontSize: 11, fontWeight: 600, background: 'rgba(245,158,11,0.12)', border: '1px solid rgba(245,158,11,0.35)', color: '#F59E0B', borderRadius: 99, padding: '1px 7px', flexShrink: 0 }}>No login</span>
+                  )}
+                </div>
+              </div>
+              <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4, display: 'flex', flexShrink: 0 }}>
+                <X size={18} />
+              </button>
+            </div>
+
+            {/* Scrollable body */}
+            <div style={{ flex: 1, overflowY: 'auto', padding: '20px' }}>
+
+              {/* Email */}
+              {!isParticipant && (
+                <div style={{ marginBottom: 20 }}>
+                  <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 6, display: 'block' }}>Email</label>
+                  <div style={{ fontSize: 13, color: 'var(--muted-foreground)', padding: '8px 0', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {detail.email}
+                  </div>
+                </div>
+              )}
+
+              {/* Timeline stats */}
+              <div style={{ marginBottom: 16 }}>
+                <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 8, display: 'block' }}>
+                  <Calendar size={11} style={{ display: 'inline', marginRight: 5 }} />
+                  Timelines
+                </label>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <div style={chipStyle('#1A97A2')}>
+                    <span style={{ fontSize: 22, fontWeight: 700, color: '#1A97A2' }}>{stats.activeTimelines}</span>
+                    <span style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 2 }}>Active</span>
+                  </div>
+                  <div style={chipStyle('#484f58')}>
+                    <span style={{ fontSize: 22, fontWeight: 700, color: '#8b949e' }}>{stats.archivedTimelines}</span>
+                    <span style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 2 }}>Archived</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Activity stats */}
+              <div style={{ marginBottom: 16 }}>
+                <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 8, display: 'block' }}>
+                  <Activity size={11} style={{ display: 'inline', marginRight: 5 }} />
+                  Activities
+                </label>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <div style={chipStyle(stats.pastDue > 0 ? '#EF4444' : '#484f58')}>
+                    <span style={{ fontSize: 20, fontWeight: 700, color: stats.pastDue > 0 ? '#EF4444' : '#8b949e' }}>{stats.pastDue}</span>
+                    <span style={{ fontSize: 10, color: 'var(--muted-foreground)', marginTop: 2 }}>Past due</span>
+                  </div>
+                  <div style={chipStyle('#1A97A2')}>
+                    <span style={{ fontSize: 20, fontWeight: 700, color: '#1A97A2' }}>{stats.running}</span>
+                    <span style={{ fontSize: 10, color: 'var(--muted-foreground)', marginTop: 2 }}>Running</span>
+                  </div>
+                  <div style={chipStyle('#3B82F6')}>
+                    <span style={{ fontSize: 20, fontWeight: 700, color: '#3B82F6' }}>{stats.upcoming}</span>
+                    <span style={{ fontSize: 10, color: 'var(--muted-foreground)', marginTop: 2 }}>Upcoming</span>
+                  </div>
+                  <div style={chipStyle('#484f58')}>
+                    <span style={{ fontSize: 20, fontWeight: 700, color: '#8b949e' }}>{stats.archivedActivities}</span>
+                    <span style={{ fontSize: 10, color: 'var(--muted-foreground)', marginTop: 2 }}>Archived</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Teams list */}
+              {detail.teams.length > 0 && (
+                <div style={{ marginBottom: 16 }}>
+                  <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 8, display: 'block' }}>
+                    <Users size={11} style={{ display: 'inline', marginRight: 5 }} />
+                    Teams ({detail.teams.length})
+                  </label>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                    {detail.teams.map((tm: TeamMemberWithUser) => (
+                      <div key={tm.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 10px', background: 'var(--muted)', borderRadius: 7 }}>
+                        <Badge identity={{ color: tm.color ?? '#1A97A2', icon: '__name_1__' }} name={tm.teamId} shape="square" size={20} />
+                        <span style={{ fontSize: 13, color: 'var(--foreground)', flex: 1 }}>{tm.teamId}</span>
+                        <span style={{ fontSize: 11, fontWeight: 600, color: tm.role === 'admin' ? '#1A97A2' : 'var(--muted-foreground)', background: tm.role === 'admin' ? 'rgba(26,151,162,0.12)' : 'var(--muted)', border: `1px solid ${tm.role === 'admin' ? 'rgba(26,151,162,0.35)' : 'var(--border)'}`, borderRadius: 99, padding: '1px 8px' }}>
+                          {tm.role}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Joined date */}
+              <div style={{ display: 'flex', gap: 8, marginBottom: 20 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '5px 10px', background: 'var(--muted)', borderRadius: 6, fontSize: 12, color: 'var(--muted-foreground)' }}>
+                  <Clock size={12} />
+                  Joined {new Date(detail.joinedAt).toLocaleDateString()}
+                </div>
+              </div>
+
+              {/* Account section — non-participant only */}
+              {!isParticipant && isAdmin && (
+                <div style={{ borderTop: '1px solid var(--border)', paddingTop: 16, marginBottom: 16 }}>
+                  <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 10, display: 'block' }}>Account</label>
+                  <button
+                    style={{ fontSize: 12, color: 'var(--muted-foreground)', background: 'none', border: '1px solid var(--border)', borderRadius: 7, padding: '6px 14px', cursor: 'not-allowed', fontFamily: 'var(--font-sans)' }}
+                    title="SMTP is not configured"
+                    disabled
+                  >
+                    Reset password — SMTP not configured
+                  </button>
+                </div>
+              )}
+
+              {/* Superadmin actions */}
+              {isSuperadmin && !isParticipant && (
+                <div style={{ borderTop: '1px solid var(--border)', paddingTop: 16 }}>
+                  <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 10, display: 'block' }}>
+                    <AlertTriangle size={11} style={{ display: 'inline', marginRight: 5 }} />
+                    Super Admin Actions
+                  </label>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                    {!isInactivated && (
+                      <button
+                        onClick={() => setConfirm('promote')}
+                        style={{ fontSize: 12, color: '#6366F1', background: 'rgba(99,102,241,0.12)', border: '1px solid rgba(99,102,241,0.35)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)', display: 'flex', alignItems: 'center', gap: 6 }}
+                      >
+                        <Shield size={13} />
+                        Promote to Super Admin
+                      </button>
+                    )}
+                    {isInactivated ? (
+                      <button
+                        onClick={handleReactivate}
+                        disabled={busy}
+                        style={{ fontSize: 12, color: '#1A97A2', background: 'rgba(26,151,162,0.12)', border: '1px solid rgba(26,151,162,0.35)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)', opacity: busy ? 0.6 : 1 }}
+                      >
+                        Reactivate account
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() => setConfirm('inactivate')}
+                        style={{ fontSize: 12, color: '#F59E0B', background: 'rgba(245,158,11,0.12)', border: '1px solid rgba(245,158,11,0.35)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)', display: 'flex', alignItems: 'center', gap: 6 }}
+                      >
+                        <Archive size={13} />
+                        Inactivate
+                      </button>
+                    )}
+                    {detail.deletable && (
+                      <button
+                        onClick={() => setConfirm('delete')}
+                        style={{ fontSize: 12, color: '#EF4444', background: 'rgba(239,68,68,0.12)', border: '1px solid rgba(239,68,68,0.35)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)', display: 'flex', alignItems: 'center', gap: 6 }}
+                      >
+                        <Trash2 size={13} />
+                        Delete
+                      </button>
+                    )}
+                    {/* Hidden once the account itself is deactivated — membership-level
+                        inactivation alone still leaves the account active on other teams */}
+                    {!detail.userArchivedAt && (
+                      <button
+                        onClick={() => setConfirm('revoke')}
+                        style={{ fontSize: 12, color: '#EF4444', background: 'rgba(239,68,68,0.12)', border: '1px solid rgba(239,68,68,0.35)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)', display: 'flex', alignItems: 'center', gap: 6 }}
+                      >
+                        <ShieldOff size={13} />
+                        Revoke all access
+                      </button>
+                    )}
+                  </div>
+                  {activeActivityCount > 0 && (
+                    <div style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 8 }}>
+                      Member has {activeActivityCount} active {activeActivityCount === 1 ? 'activity' : 'activities'} — remove assignments before deleting.
+                    </div>
+                  )}
+                  {revokeResult && (
+                    <div style={{ fontSize: 12, color: 'var(--foreground)', background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.25)', borderRadius: 7, padding: '7px 12px', marginTop: 8 }}>
+                      Account deactivated · {revokeResult.membershipsInactivated} membership{revokeResult.membershipsInactivated === 1 ? '' : 's'} inactivated · {revokeResult.membershipsRemoved} removed
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Footer */}
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 8, padding: '12px 20px', borderTop: '1px solid var(--border)', flexShrink: 0 }}>
+              <button onClick={onClose} style={cancelBtn}>Cancel</button>
+              {(isAdmin || currentUser?.id === detail.userId) && (
+                <button
+                  onClick={handleSave}
+                  disabled={busy}
+                  style={{ background: memberColor, color: '#fff', fontWeight: 600, fontSize: 13, padding: '7px 18px', borderRadius: 7, cursor: 'pointer', border: 'none', opacity: busy ? 0.6 : 1, fontFamily: 'var(--font-sans)' }}
+                >
+                  {busy ? 'Saving…' : 'Save changes'}
+                </button>
+              )}
+            </div>
+          </>
+        )}
+      </div>
+    </div>,
+    document.body,
+  )
+}
+````
+
+## File: packages/web/src/components/TeamModal.tsx
+````typescript
+/**
+ * TeamModal — create / edit a team in a portal-rendered modal.
+ *
+ * The Members tab is fully functional after Phase 10.1.2. The Settings tab
+ * handles team identity and metadata. Identity and name live in the modal
+ * header so they remain visible while the user scrolls the tab body.
+ */
+
+import { useState, useEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
+import { X, Archive, Mail, Link2, Copy, Check, Plus, Minus, RefreshCw, UserMinus, RotateCcw } from 'lucide-react';
+import { ApiError } from '@/lib/api';
+import { IdentityWidget } from '@/components/identity/IdentityWidget';
+import { Badge } from '@/components/identity/Badge';
+import type { Identity } from '@/components/identity/identity-constants';
+import { IDENTITY_COLORS } from '@/components/identity/identity-constants';
+import { useCreateTeam, useUpdateTeam, useArchiveTeam, useUnarchiveTeam, useTeamMembers } from '@/hooks/useTeamActivities';
+import StatusTemplatesTab from '@/components/StatusTemplatesTab';
+import { useAuth } from '@/contexts/AuthContext';
+import {
+  useTeamInvites, useRevokeInvite,
+  useTeamInviteLink, useCreateInviteLink, useRevokeInviteLink,
+  useAddMember, useDeleteMember, useArchiveMember, useUnarchiveMember,
+  useCreateParticipant, useUpdateMember, useUserSearch,
+} from '@/hooks/useMemberManagement';
+import RoleDropdown, { type MemberRole } from '@/components/RoleDropdown';
+import InlineEditableTitle from '@/components/shared/InlineEditableTitle';
+import { ConfirmDialog } from '@/components/shared/ConfirmDialog';
+import type { components } from '@draba/shared';
+
+type Team = components['schemas']['Team'];
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
+
+interface Props {
+  mode: 'new' | 'edit';
+  team?: Team;
+  onClose: () => void;
+  /** Called with the newly created team immediately after server confirmation. */
+  onTeamCreated?: (team: Team) => void;
+  /** Whether the current user is a team admin. */
+  isAdmin?: boolean;
+}
+
+type Tab = 'settings' | 'members' | 'statuses';
+
+const DEFAULT_COLOR = IDENTITY_COLORS[0].hex;
+const DEFAULT_ICON = '__name_1__';
+
+function resolveIdentity(team?: Team): Identity {
+  return {
+    color: team?.color ?? DEFAULT_COLOR,
+    icon: team?.icon ?? DEFAULT_ICON,
+  };
+}
+
+// ── Shared button styles ────────────────────────────────────────────────────
+
 const cancelBtnStyle: React.CSSProperties = {
-  background: 'none',
-  border: '1px solid var(--border)',
-  color: 'var(--muted-foreground)',
-  fontSize: 13,
-  padding: '7px 18px',
-  borderRadius: 7,
-  cursor: 'pointer',
-  fontFamily: 'var(--font-sans)',
-}
+  background: 'none', border: '1px solid var(--border)', color: 'var(--muted-foreground)',
+  fontSize: 13, padding: '7px 18px', borderRadius: 7, cursor: 'pointer', fontFamily: 'var(--font-sans)',
+};
 
-export interface ConfirmDialogProps {
-  /** Color variant: red = destructive delete, amber = archive, indigo = promote, teal = restore */
-  variant: 'red' | 'amber' | 'indigo' | 'teal'
-  icon: React.ReactNode
-  title: string
-  body: string
-  confirmLabel: string
-  busy: boolean
-  onCancel: () => void
-  onConfirm: () => void
-}
+const inputStyle: React.CSSProperties = {
+  background: 'var(--muted)', border: '1px solid var(--border)', borderRadius: 7,
+  padding: '8px 12px', color: 'var(--foreground)', fontSize: 13,
+  width: '100%', boxSizing: 'border-box', fontFamily: 'var(--font-sans)',
+};
 
-const VARIANT_COLORS: Record<ConfirmDialogProps['variant'], string> = {
-  red:    '#EF4444',
-  amber:  '#F59E0B',
-  indigo: '#6366F1',
-  teal:   '#1A97A2',
-}
+const labelStyle: React.CSSProperties = {
+  fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px',
+  textTransform: 'uppercase', marginBottom: 6, display: 'block',
+};
 
-export function ConfirmDialog({ variant, icon, title, body, confirmLabel, busy, onCancel, onConfirm }: ConfirmDialogProps) {
-  const c = VARIANT_COLORS[variant]
-  return (
-    <div style={{ padding: '28px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 14, textAlign: 'center' }}>
-      <div style={{
-        width: 48, height: 48, borderRadius: 12,
-        background: `${c}20`, border: `1.5px solid ${c}44`,
+const archiveBtnStyle: React.CSSProperties = {
+  fontSize: 12, color: '#F59E0B', background: 'rgba(245,158,11,0.12)',
+  border: '1px solid rgba(245,158,11,0.35)', borderRadius: 7,
+  padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)',
+  display: 'flex', alignItems: 'center', gap: 6,
+};
+
+const restoreBtnStyle: React.CSSProperties = {
+  fontSize: 12, color: '#1A97A2', background: 'rgba(26,151,162,0.12)',
+  border: '1px solid rgba(26,151,162,0.35)', borderRadius: 7,
+  padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)',
+  display: 'flex', alignItems: 'center', gap: 6,
+};
+
+// ── Main component ──────────────────────────────────────────────────────────
+
+export default function TeamModal({ mode, team, onClose, onTeamCreated, isAdmin = true }: Props) {
+  const { user } = useAuth()
+  const currentUserId = (user as { id?: string } | null)?.id ?? ''
+  const [tab, setTab] = useState<Tab>('settings');
+  const [teamSaved, setTeamSaved] = useState(mode === 'edit');
+  const [showBanner, setShowBanner] = useState(false);
+  const [showArchiveConfirm, setShowArchiveConfirm] = useState(false);
+  const bannerTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const [identity, setIdentity] = useState<Identity>(resolveIdentity(team));
+  const [name, setName] = useState(team?.name ?? '');
+  const [description, setDescription] = useState(team?.description ?? '');
+  const [notes, setNotes] = useState(team?.notes ?? '');
+
+  const [savedTeamId, setSavedTeamId] = useState(team?.id ?? '');
+
+  const createTeam = useCreateTeam();
+  const updateTeam = useUpdateTeam();
+  const archiveTeam = useArchiveTeam();
+  const unarchiveTeam = useUnarchiveTeam();
+
+  // Members tab state — only loaded when the team exists.
+  const activeTeamId = savedTeamId || team?.id || '';
+  const { data: members = [] } = useTeamMembers(activeTeamId);
+  const { data: invites = [] } = useTeamInvites(activeTeamId);
+  const { data: inviteLink } = useTeamInviteLink(activeTeamId);
+  const addMember = useAddMember(activeTeamId);
+  const deleteMember = useDeleteMember(activeTeamId);
+  const archiveMember = useArchiveMember(activeTeamId);
+  const unarchiveMember = useUnarchiveMember(activeTeamId);
+  const createParticipant = useCreateParticipant(activeTeamId);
+  const updateMember = useUpdateMember(activeTeamId);
+  const revokeInvite = useRevokeInvite(activeTeamId);
+  const createInviteLink = useCreateInviteLink(activeTeamId);
+  const revokeInviteLink = useRevokeInviteLink(activeTeamId);
+
+  const [searchQ, setSearchQ] = useState('');
+  const [showParticipantForm, setShowParticipantForm] = useState(false);
+  // Maps memberId → assignmentCount when a 409 MEMBER_HAS_ASSIGNMENTS is returned.
+  const [removeErrors, setRemoveErrors] = useState<Record<string, number>>({});
+  const [participantName, setParticipantName] = useState('');
+  const [participantIdentity, setParticipantIdentity] = useState<Identity>({ color: IDENTITY_COLORS[3].hex, icon: '__name_1__' });
+  const [copyLinkLabel, setCopyLinkLabel] = useState<'copy' | 'copied'>('copy');
+  const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const { data: searchResults = [] } = useUserSearch(searchQ);
+
+  const isArchived = Boolean(team?.archivedAt);
+  const busy = createTeam.isPending || updateTeam.isPending || archiveTeam.isPending || unarchiveTeam.isPending;
+
+  useEffect(() => {
+    return () => { if (bannerTimer.current) clearTimeout(bannerTimer.current); };
+  }, []);
+
+  // Stale 409 errors belong to a specific member row; clear them when the
+  // search changes because the member list may reorder or filter differently.
+  useEffect(() => {
+    setRemoveErrors({});
+  }, [searchQ]);
+
+  useEffect(() => {
+    function handleKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') onClose();
+    }
+    document.addEventListener('keydown', handleKey);
+    return () => document.removeEventListener('keydown', handleKey);
+  }, [onClose]);
+
+  function handleSave() {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+
+    const patch = {
+      name: trimmed,
+      description: description.trim() || null,
+      notes: notes.trim() || null,
+      color: identity.color,
+      icon: identity.icon,
+    };
+
+    if (mode === 'new' && !teamSaved) {
+      createTeam.mutate(patch, {
+        onSuccess: (created) => {
+          setSavedTeamId(created.id);
+          setTeamSaved(true);
+          setShowBanner(true);
+          onTeamCreated?.(created);
+          bannerTimer.current = setTimeout(() => setShowBanner(false), 3000);
+        },
+      });
+    } else {
+      const tid = savedTeamId || team?.id;
+      if (!tid) return;
+      updateTeam.mutate({ teamId: tid, patch }, { onSuccess: () => { /* noop */ } });
+    }
+  }
+
+  function handleArchive() {
+    const tid = savedTeamId || team?.id;
+    if (!tid) return;
+    archiveTeam.mutate(tid, { onSuccess: onClose });
+  }
+
+  function handleRestore() {
+    const tid = savedTeamId || team?.id;
+    if (!tid) return;
+    unarchiveTeam.mutate(tid, { onSuccess: onClose });
+  }
+
+  const teamColor = identity.color;
+  const isNew = mode === 'new';
+  const primaryLabel = teamSaved ? 'Save changes' : 'Create team';
+  const membersLocked = !teamSaved;
+
+  return createPortal(
+    <div
+      style={{
+        position: 'fixed', inset: 0, background: 'rgba(0,0,0,.7)',
         display: 'flex', alignItems: 'center', justifyContent: 'center',
-      }}>
-        {icon}
+        zIndex: 1000,
+      }}
+    >
+      <div
+        style={{
+          width: 580, maxHeight: '90vh', background: 'var(--card)',
+          border: '1px solid var(--border)', borderRadius: 14,
+          boxShadow: '0 24px 64px rgba(0,0,0,.6)',
+          display: 'flex', flexDirection: 'column', overflow: 'hidden',
+        }}
+      >
+        {/* Header — identity widget + editable name */}
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 12,
+          padding: '16px 20px', borderBottom: '1px solid var(--border)',
+        }}>
+          <IdentityWidget identity={identity} name={name} shape="square" onChange={setIdentity} />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 3 }}>
+              {isNew ? 'New Team' : 'Edit Team'}
+            </div>
+            <InlineEditableTitle
+              value={name}
+              onChange={setName}
+              placeholder="Team name…"
+              autoFocus={mode === 'new'}
+              onKeyDown={e => { if (e.key === 'Escape') onClose(); }}
+            />
+          </div>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4, display: 'flex' }}>
+            <X size={18} />
+          </button>
+        </div>
+
+        {/* Saved banner */}
+        {showBanner && (
+          <div style={{
+            padding: '8px 20px',
+            background: `${teamColor}18`,
+            borderBottom: `1px solid ${teamColor}44`,
+            display: 'flex', alignItems: 'center', gap: 8,
+          }}>
+            <span style={{ fontSize: 14, color: teamColor }}>✓</span>
+            <span style={{ fontSize: 12, color: teamColor }}>Team created — you can now add members.</span>
+          </div>
+        )}
+
+        {/* Tab bar */}
+        <div style={{ display: 'flex', padding: '0 20px', borderBottom: '1px solid var(--border)' }}>
+          {(['settings', 'members', 'statuses'] as Tab[]).map(t => {
+            const isActive = tab === t;
+            const locked = (t === 'members' || t === 'statuses') && membersLocked;
+            return (
+              <div key={t} style={{ position: 'relative' }}>
+                <button
+                  onClick={() => !locked && setTab(t)}
+                  title={locked ? 'Save the team first to add members' : undefined}
+                  style={{
+                    padding: '10px 14px', fontSize: 13, fontWeight: 500, background: 'none', border: 'none',
+                    borderBottom: `2px solid ${isActive ? teamColor : 'transparent'}`,
+                    color: isActive ? 'var(--foreground)' : 'var(--muted-foreground)',
+                    cursor: locked ? 'not-allowed' : 'pointer',
+                    opacity: locked ? 0.45 : 1,
+                    marginBottom: -1, fontFamily: 'var(--font-sans)',
+                    display: 'flex', alignItems: 'center', gap: 6,
+                    textTransform: 'capitalize',
+                  }}
+                >
+                  {t === 'statuses' ? 'Status Templates' : t}
+                  {t === 'members' && teamSaved && (
+                    <span style={{ fontSize: 11, color: 'var(--muted-foreground)', background: 'var(--muted)', borderRadius: 99, padding: '1px 6px' }}>
+                      {members.length}
+                    </span>
+                  )}
+                </button>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Content */}
+        <div style={{ flex: 1, overflowY: 'auto' }}>
+          {showArchiveConfirm ? (
+            <ConfirmDialog
+              variant="amber"
+              icon={<Archive size={22} color="#F59E0B" />}
+              title={`Archive "${name || 'this team'}"?`}
+              body="The team will be hidden from active views. All timelines and activities will be preserved and the team can be restored from the Archived section at any time."
+              confirmLabel="Archive"
+              busy={archiveTeam.isPending}
+              onCancel={() => setShowArchiveConfirm(false)}
+              onConfirm={handleArchive}
+            />
+          ) : tab === 'settings' ? (
+            <div style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 18 }}>
+              {/* Description */}
+              <div>
+                <label style={labelStyle}>Description</label>
+                <input
+                  autoFocus={mode === 'edit'}
+                  value={description}
+                  onChange={e => setDescription(e.target.value)}
+                  placeholder="Short description of this team…"
+                  style={inputStyle}
+                />
+              </div>
+
+              {/* Notes */}
+              <div>
+                <label style={labelStyle}>Notes</label>
+                <textarea
+                  value={notes}
+                  onChange={e => setNotes(e.target.value)}
+                  placeholder="Internal notes, context, links…"
+                  rows={4}
+                  style={{ ...inputStyle, resize: 'vertical', lineHeight: 1.5 }}
+                />
+              </div>
+
+              {createTeam.isError && (
+                <div style={{ fontSize: 12, color: 'var(--destructive)' }}>
+                  Something went wrong — refer to logs for details.
+                </div>
+              )}
+              {updateTeam.isError && (
+                <div style={{ fontSize: 12, color: 'var(--destructive)' }}>
+                  Something went wrong — refer to logs for details.
+                </div>
+              )}
+            </div>
+          ) : tab === 'statuses' ? (
+            <StatusTemplatesTab
+              teamId={activeTeamId}
+              isAdmin={isAdmin}
+              teamColor={teamColor}
+            />
+          ) : (
+            // Members tab
+            <div style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 16 }}>
+
+              {/* Search / add input */}
+              {isAdmin && (
+                <div>
+                  <label style={labelStyle}>Add member or invite by email</label>
+                  <div style={{ position: 'relative' }}>
+                    <input
+                      value={searchQ}
+                      onChange={e => setSearchQ(e.target.value)}
+                      placeholder="Search by name or email…"
+                      style={{ ...inputStyle, paddingRight: 36 }}
+                    />
+                    {searchQ && (
+                      <button
+                        onClick={() => setSearchQ('')}
+                        style={{ position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', display: 'flex', padding: 2 }}
+                      >
+                        <X size={14} />
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Search results */}
+                  {searchQ.length >= 2 && (
+                    <div style={{ background: 'var(--muted)', border: '1px solid var(--border)', borderRadius: 8, marginTop: 4, overflow: 'hidden' }}>
+                      {searchResults.length === 0 ? (
+                        <div style={{ padding: '10px 14px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                          <span style={{ fontSize: 12, color: 'var(--muted-foreground)' }}>No users found for "{searchQ}"</span>
+                          <button
+                            onClick={() => {
+                              // Trigger email invite
+                              const email = searchQ.includes('@') ? searchQ : null;
+                              if (!email) return;
+                              fetch(`/teams/${activeTeamId}/invites`, {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${localStorage.getItem('accessToken') ?? ''}` },
+                                body: JSON.stringify({ email }),
+                              }).then(() => setSearchQ(''));
+                            }}
+                            style={{ fontSize: 11, color: '#1A97A2', background: 'rgba(26,151,162,0.12)', border: '1px solid rgba(26,151,162,0.35)', borderRadius: 6, padding: '3px 10px', cursor: 'pointer', fontFamily: 'var(--font-sans)' }}
+                          >
+                            <Mail size={11} style={{ display: 'inline', marginRight: 4 }} />
+                            Invite
+                          </button>
+                        </div>
+                      ) : (
+                        searchResults.map(u => {
+                          const alreadyMember = members.some(m => m.userId === u.id);
+                          return (
+                            <div key={u.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 14px', borderBottom: '1px solid var(--border)' }}>
+                              <Badge identity={{ color: '#8b949e', icon: '__name_1__' }} name={u.displayName} shape="circle" size={22} />
+                              <div style={{ flex: 1, minWidth: 0 }}>
+                                <div style={{ fontSize: 13, color: 'var(--foreground)' }}>{u.displayName}</div>
+                                <div style={{ fontSize: 11, color: 'var(--muted-foreground)' }}>{u.email}</div>
+                              </div>
+                              {alreadyMember ? (
+                                <span style={{ fontSize: 11, color: 'var(--muted-foreground)' }}>Already added</span>
+                              ) : (
+                                <button
+                                  onClick={() => addMember.mutate({ userId: u.id }, { onSuccess: () => setSearchQ('') })}
+                                  style={{ fontSize: 11, color: '#1A97A2', background: 'rgba(26,151,162,0.12)', border: '1px solid rgba(26,151,162,0.35)', borderRadius: 6, padding: '3px 10px', cursor: 'pointer', fontFamily: 'var(--font-sans)', display: 'flex', alignItems: 'center', gap: 4 }}
+                                >
+                                  <Plus size={11} />
+                                  Add
+                                </button>
+                              )}
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Participant creation form */}
+              {isAdmin && (
+                <div>
+                  {!showParticipantForm ? (
+                    <button
+                      onClick={() => setShowParticipantForm(true)}
+                      style={{ fontSize: 12, color: '#F59E0B', background: 'rgba(245,158,11,0.12)', border: '1px solid rgba(245,158,11,0.35)', borderRadius: 7, padding: '5px 12px', cursor: 'pointer', fontFamily: 'var(--font-sans)', display: 'flex', alignItems: 'center', gap: 6 }}
+                    >
+                      <Plus size={12} />
+                      Add participant (no login)
+                    </button>
+                  ) : (
+                    <div style={{ background: 'var(--muted)', border: '1px solid var(--border)', borderRadius: 8, padding: 14 }}>
+                      <label style={labelStyle}>New participant</label>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                        <IdentityWidget
+                          identity={participantIdentity}
+                          name={participantName}
+                          shape="circle"
+                          onChange={setParticipantIdentity}
+                        />
+                        <input
+                          value={participantName}
+                          onChange={e => setParticipantName(e.target.value)}
+                          placeholder="Display name (required)…"
+                          style={{ ...inputStyle, flex: 1 }}
+                          autoFocus
+                        />
+                        <button
+                          onClick={() => {
+                            if (!participantName.trim()) return;
+                            createParticipant.mutate({
+                              name: participantName.trim(),
+                              color: participantIdentity.color,
+                              icon: participantIdentity.icon,
+                            }, {
+                              onSuccess: () => { setParticipantName(''); setShowParticipantForm(false); },
+                            });
+                          }}
+                          disabled={!participantName.trim() || createParticipant.isPending}
+                          style={{ background: '#F59E0B', color: '#000', fontWeight: 600, fontSize: 12, padding: '7px 14px', borderRadius: 7, border: 'none', cursor: 'pointer', fontFamily: 'var(--font-sans)', flexShrink: 0, opacity: !participantName.trim() ? 0.5 : 1 }}
+                        >
+                          Create
+                        </button>
+                        <button onClick={() => setShowParticipantForm(false)} style={{ ...cancelBtnStyle, padding: '7px 10px' }}>
+                          <X size={14} />
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Role-change error banner */}
+              {updateMember.isError && (
+                <div style={{ fontSize: 12, color: '#F59E0B', background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.25)', borderRadius: 7, padding: '7px 12px' }}>
+                  {(updateMember.error as { message?: string })?.message ?? 'Could not update role.'}
+                </div>
+              )}
+
+              {/* Member list */}
+              <div>
+                <label style={labelStyle}>Members ({members.length})</label>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                  {members.map((m: TeamMemberWithUser) => {
+                    const isParticipant = !m.userId;
+                    const isInactive = Boolean(m.archivedAt);
+                    const memberRole: MemberRole = isParticipant ? 'participant' : (m.role as MemberRole);
+                    const removeError = removeErrors[m.id];
+                    return (
+                      <div key={m.id}>
+                        <div
+                          style={{
+                            display: 'flex', alignItems: 'center', gap: 10,
+                            padding: '7px 10px', borderRadius: 7,
+                            background: isInactive ? 'rgba(255,255,255,0.01)' : 'rgba(255,255,255,0.02)',
+                            opacity: isInactive ? 0.5 : 1,
+                          }}
+                        >
+                          <div style={{ flexShrink: 0, border: isParticipant ? '1.5px dashed var(--muted-foreground)' : 'none', borderRadius: '50%' }}>
+                            <Badge
+                              identity={{ color: m.color ?? '#8b949e', icon: m.icon ?? '__name_words__' }}
+                              name={m.displayName}
+                              shape="circle"
+                              size={24}
+                            />
+                          </div>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                              <span style={{ fontSize: 13, color: 'var(--foreground)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{m.displayName}</span>
+                              {isParticipant && <span style={{ fontSize: 10, fontWeight: 600, background: 'rgba(245,158,11,0.12)', border: '1px solid rgba(245,158,11,0.35)', color: '#F59E0B', borderRadius: 99, padding: '0px 5px', flexShrink: 0 }}>No login</span>}
+                            </div>
+                            {!isParticipant && <div style={{ fontSize: 11, color: 'var(--muted-foreground)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{m.email}</div>}
+                          </div>
+                          {isAdmin && (
+                            <RoleDropdown
+                              value={memberRole}
+                              onChange={role => {
+                                if (isParticipant || role === 'participant') return;
+                                updateMember.mutate({ memberId: m.id, patch: { role: role as 'admin' | 'member' } });
+                              }}
+                              disabled={isParticipant || m.userId === currentUserId}
+                              hideParticipant={!isParticipant}
+                            />
+                          )}
+                          {isAdmin && (
+                            <div style={{ display: 'flex', gap: 4 }}>
+                              {isInactive ? (
+                                <button
+                                  title="Reactivate member"
+                                  onClick={() => unarchiveMember.mutate(m.id)}
+                                  style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 3, display: 'flex' }}
+                                  onMouseEnter={e => (e.currentTarget.style.color = '#1A97A2')}
+                                  onMouseLeave={e => (e.currentTarget.style.color = 'var(--muted-foreground)')}
+                                >
+                                  <RefreshCw size={13} />
+                                </button>
+                              ) : (
+                                <button
+                                  title="Inactivate member"
+                                  onClick={() => archiveMember.mutate(m.id)}
+                                  style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 3, display: 'flex' }}
+                                  onMouseEnter={e => (e.currentTarget.style.color = '#F59E0B')}
+                                  onMouseLeave={e => (e.currentTarget.style.color = 'var(--muted-foreground)')}
+                                >
+                                  <UserMinus size={13} />
+                                </button>
+                              )}
+                              <button
+                                title="Remove from team"
+                                onClick={() => {
+                                  setRemoveErrors(prev => { const next = { ...prev }; delete next[m.id]; return next; });
+                                  deleteMember.mutate(m.id, {
+                                    onError: (err) => {
+                                      if (err instanceof ApiError && err.code === 'MEMBER_HAS_ASSIGNMENTS') {
+                                        const count = (err.data?.assignmentCount as number) ?? 0;
+                                        setRemoveErrors(prev => ({ ...prev, [m.id]: count }));
+                                      }
+                                    },
+                                  });
+                                }}
+                                style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 3, display: 'flex' }}
+                                onMouseEnter={e => (e.currentTarget.style.color = '#EF4444')}
+                                onMouseLeave={e => (e.currentTarget.style.color = 'var(--muted-foreground)')}
+                              >
+                                <Minus size={13} />
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                        {removeError !== undefined && (
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: '#F59E0B', padding: '4px 10px 4px 44px' }}>
+                            <span>{removeError} assignment{removeError === 1 ? '' : 's'} — can't remove.</span>
+                            <button
+                              onClick={() => {
+                                archiveMember.mutate(m.id, {
+                                  onSuccess: () => setRemoveErrors(prev => { const next = { ...prev }; delete next[m.id]; return next; }),
+                                });
+                              }}
+                              style={{ fontSize: 12, color: '#F59E0B', background: 'none', border: '1px solid rgba(245,158,11,0.4)', borderRadius: 5, padding: '2px 8px', cursor: 'pointer', fontFamily: 'var(--font-sans)' }}
+                            >
+                              Inactivate instead
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Pending invitations */}
+              {isAdmin && invites.length > 0 && (
+                <div>
+                  <label style={labelStyle}>Pending invitations ({invites.length})</label>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                    {invites.map(inv => (
+                      <div key={inv.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 10px', borderRadius: 7, background: 'rgba(255,255,255,0.02)' }}>
+                        <div style={{ width: 24, height: 24, borderRadius: '50%', border: '1.5px dashed var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                          <Mail size={11} color="var(--muted-foreground)" />
+                        </div>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: 13, color: 'var(--muted-foreground)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{inv.email}</div>
+                          <div style={{ fontSize: 11, color: 'var(--muted-foreground)' }}>
+                            Sent {new Date(inv.createdAt).toLocaleDateString()} · expires {new Date(inv.expiresAt).toLocaleDateString()}
+                          </div>
+                        </div>
+                        <button
+                          onClick={() => revokeInvite.mutate(inv.id)}
+                          style={{ fontSize: 11, color: '#EF4444', background: 'rgba(239,68,68,0.12)', border: '1px solid rgba(239,68,68,0.35)', borderRadius: 6, padding: '3px 10px', cursor: 'pointer', fontFamily: 'var(--font-sans)' }}
+                        >
+                          Revoke
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Invite link */}
+              {isAdmin && (
+                <div>
+                  <label style={labelStyle}>
+                    <Link2 size={11} style={{ display: 'inline', marginRight: 5 }} />
+                    Invite link
+                  </label>
+                  {inviteLink?.token ? (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                      <div style={{ display: 'flex', gap: 6 }}>
+                        <input
+                          readOnly
+                          value={`${window.location.origin}/register?token=${inviteLink.token}`}
+                          style={{ ...inputStyle, color: 'var(--muted-foreground)', flex: 1 }}
+                          onClick={e => (e.target as HTMLInputElement).select()}
+                        />
+                        <button
+                          onClick={() => {
+                            navigator.clipboard.writeText(`${window.location.origin}/register?token=${inviteLink.token!}`);
+                            setCopyLinkLabel('copied');
+                            if (copyTimer.current) clearTimeout(copyTimer.current);
+                            copyTimer.current = setTimeout(() => setCopyLinkLabel('copy'), 2000);
+                          }}
+                          style={{
+                            background: copyLinkLabel === 'copied' ? 'rgba(26,151,162,0.12)' : 'var(--muted)',
+                            border: `1px solid ${copyLinkLabel === 'copied' ? 'rgba(26,151,162,0.35)' : 'var(--border)'}`,
+                            color: copyLinkLabel === 'copied' ? '#1A97A2' : 'var(--muted-foreground)',
+                            borderRadius: 7, padding: '0 14px', cursor: 'pointer',
+                            display: 'flex', alignItems: 'center', gap: 5, fontSize: 12, fontFamily: 'var(--font-sans)',
+                            transition: 'all 0.15s', flexShrink: 0,
+                          }}
+                        >
+                          {copyLinkLabel === 'copied' ? <Check size={12} /> : <Copy size={12} />}
+                          {copyLinkLabel === 'copied' ? 'Copied!' : 'Copy link'}
+                        </button>
+                      </div>
+                      <div style={{ display: 'flex', gap: 6 }}>
+                        <span style={{ fontSize: 11, color: 'var(--muted-foreground)', flex: 1, lineHeight: 1.5 }}>
+                          Anyone with this link can join the team as a member.
+                        </span>
+                        <button
+                          onClick={() => createInviteLink.mutate()}
+                          style={{ fontSize: 11, color: 'var(--muted-foreground)', background: 'none', border: '1px solid var(--border)', borderRadius: 6, padding: '3px 10px', cursor: 'pointer', fontFamily: 'var(--font-sans)', display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}
+                        >
+                          <RefreshCw size={11} /> Regenerate
+                        </button>
+                        <button
+                          onClick={() => revokeInviteLink.mutate()}
+                          style={{ fontSize: 11, color: '#EF4444', background: 'none', border: '1px solid rgba(239,68,68,0.35)', borderRadius: 6, padding: '3px 10px', cursor: 'pointer', fontFamily: 'var(--font-sans)', flexShrink: 0 }}
+                        >
+                          Revoke
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                      <span style={{ fontSize: 12, color: 'var(--muted-foreground)' }}>No invite link — generate one to share a reusable join URL.</span>
+                      <button
+                        onClick={() => createInviteLink.mutate()}
+                        style={{ fontSize: 12, color: '#1A97A2', background: 'rgba(26,151,162,0.12)', border: '1px solid rgba(26,151,162,0.35)', borderRadius: 7, padding: '5px 12px', cursor: 'pointer', fontFamily: 'var(--font-sans)', flexShrink: 0 }}
+                      >
+                        Generate
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Footer — hidden when archive confirm is showing */}
+        {!showArchiveConfirm && (
+          <div style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+            padding: '12px 20px', borderTop: '1px solid var(--border)',
+          }}>
+            <div>
+              {mode === 'edit' && (
+                isArchived ? (
+                  <button
+                    onClick={handleRestore}
+                    disabled={busy}
+                    style={{ ...restoreBtnStyle, opacity: busy ? 0.6 : 1 }}
+                  >
+                    <RotateCcw size={13} />
+                    Restore team
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => setShowArchiveConfirm(true)}
+                    style={archiveBtnStyle}
+                  >
+                    <Archive size={13} />
+                    Archive
+                  </button>
+                )
+              )}
+            </div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button onClick={onClose} style={cancelBtnStyle}>Cancel</button>
+              <button
+                onClick={handleSave}
+                disabled={busy || !name.trim()}
+                style={{
+                  background: teamColor, color: '#fff', fontWeight: 600,
+                  fontSize: 13, padding: '7px 18px', borderRadius: 7, cursor: 'pointer',
+                  border: 'none', opacity: (busy || !name.trim()) ? 0.6 : 1,
+                  fontFamily: 'var(--font-sans)',
+                }}
+              >
+                {busy ? 'Saving…' : primaryLabel}
+              </button>
+            </div>
+          </div>
+        )}
       </div>
-      <div style={{ fontSize: 16, fontWeight: 600, color: 'var(--foreground)' }}>{title}</div>
-      <div style={{ fontSize: 13, color: 'var(--muted-foreground)', lineHeight: 1.6, maxWidth: 340 }}>{body}</div>
-      <div style={{ display: 'flex', gap: 10, marginTop: 4 }}>
-        <button onClick={onCancel} disabled={busy} style={cancelBtnStyle}>Cancel</button>
-        <button
-          onClick={onConfirm}
-          disabled={busy}
-          style={{
-            background: `${c}22`, border: `1px solid ${c}66`, color: c,
-            fontWeight: 600, fontSize: 13, padding: '7px 18px',
-            borderRadius: 7, cursor: 'pointer',
-            opacity: busy ? 0.6 : 1,
-            fontFamily: 'var(--font-sans)',
-          }}
-        >
-          {busy ? 'Working…' : confirmLabel}
+    </div>,
+    document.body,
+  );
+}
+````
+
+## File: packages/web/src/components/TimelineModal.tsx
+````typescript
+/**
+ * TimelineModal — create / edit a timeline.
+ *
+ * Modes:
+ *  - "new":  name, identity, date range, description, notes; template picker seeds statuses
+ *  - "edit": same fields; plus Statuses tab (add/edit/delete live statuses)
+ */
+
+import { useState } from 'react'
+import { X, Plus, Trash2, Check, Archive, RotateCcw } from 'lucide-react'
+import { IdentityWidget } from '@/components/identity/IdentityWidget'
+import { Badge } from '@/components/identity/Badge'
+import type { Identity } from '@/components/identity/identity-constants'
+import { resolveColorHex } from '@/components/identity/identity-constants'
+import {
+  useCreateTimeline,
+  useUpdateTimeline,
+  useDeleteTimeline,
+  useArchiveTimeline,
+} from '@/hooks/useTeamActivities'
+import {
+  useTimelineStatuses,
+  useCreateTimelineStatus,
+  useUpdateTimelineStatus,
+  useDeleteTimelineStatus,
+} from '@/hooks/useStatusTemplates'
+import { useStatusTemplates } from '@/hooks/useStatusTemplates'
+import InlineEditableTitle from '@/components/shared/InlineEditableTitle'
+import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
+import type { components } from '@draba/shared'
+
+type Timeline = components['schemas']['Timeline']
+type Status = components['schemas']['Status']
+
+// ── Prop types ────────────────────────────────────────────────────────────────
+
+interface Props {
+  mode: 'new' | 'edit'
+  teamId: string
+  timeline?: Timeline
+  canAdmin?: boolean
+  onClose: () => void
+  onCreated?: (timeline: Timeline) => void
+  onUnarchive?: (timelineId: string) => void
+}
+
+type Tab = 'settings' | 'statuses'
+
+// ── Inline styles ─────────────────────────────────────────────────────────────
+
+const OVERLAY: React.CSSProperties = {
+  position: 'fixed', inset: 0,
+  background: 'rgba(0,0,0,0.5)', backdropFilter: 'blur(2px)',
+  zIndex: 300, display: 'flex', alignItems: 'center', justifyContent: 'center',
+}
+
+const PANEL: React.CSSProperties = {
+  background: 'var(--card)', border: '1px solid var(--border)',
+  borderRadius: 12, width: 560, maxWidth: '95vw',
+  maxHeight: '90vh', display: 'flex', flexDirection: 'column',
+  boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
+}
+
+const HEADER: React.CSSProperties = {
+  display: 'flex', alignItems: 'center', gap: 12,
+  padding: '18px 20px 14px', borderBottom: '1px solid var(--border)',
+  flexShrink: 0,
+}
+
+const TAB_BAR: React.CSSProperties = {
+  display: 'flex', gap: 2, padding: '0 20px',
+  borderBottom: '1px solid var(--border)', flexShrink: 0,
+}
+
+const CONTENT: React.CSSProperties = {
+  flex: 1, overflowY: 'auto', padding: '20px',
+}
+
+const FOOTER: React.CSSProperties = {
+  display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+  padding: '14px 20px', borderTop: '1px solid var(--border)', flexShrink: 0,
+}
+
+const FIELD_LABEL: React.CSSProperties = {
+  fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)',
+  textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 6,
+}
+
+const INPUT: React.CSSProperties = {
+  width: '100%', boxSizing: 'border-box',
+  fontSize: 13, color: 'var(--foreground)',
+  border: '1px solid var(--border)', borderRadius: 6,
+  padding: '7px 10px', background: 'var(--background)',
+  outline: 'none',
+}
+
+const TEXTAREA: React.CSSProperties = {
+  ...INPUT,
+  resize: 'vertical' as const,
+  minHeight: 68,
+  fontFamily: 'var(--font-sans)',
+  lineHeight: 1.5,
+}
+
+const archiveBtnStyle: React.CSSProperties = {
+  fontSize: 12, color: '#F59E0B', background: 'rgba(245,158,11,0.12)',
+  border: '1px solid rgba(245,158,11,0.35)', borderRadius: 7,
+  padding: '7px 12px', cursor: 'pointer', fontFamily: 'var(--font-sans)',
+  display: 'flex', alignItems: 'center', gap: 6,
+}
+
+const restoreBtnStyle: React.CSSProperties = {
+  fontSize: 12, color: '#1A97A2', background: 'rgba(26,151,162,0.12)',
+  border: '1px solid rgba(26,151,162,0.35)', borderRadius: 7,
+  padding: '7px 12px', cursor: 'pointer', fontFamily: 'var(--font-sans)',
+  display: 'flex', alignItems: 'center', gap: 6,
+}
+
+function tabStyle(active: boolean): React.CSSProperties {
+  return {
+    padding: '8px 14px', fontSize: 12, fontWeight: 500,
+    border: 'none', background: 'none', cursor: 'pointer',
+    borderBottom: active ? '2px solid var(--primary)' : '2px solid transparent',
+    color: active ? 'var(--foreground)' : 'var(--muted-foreground)',
+    fontFamily: 'var(--font-sans)',
+  }
+}
+
+// ── Status row (edit mode) ────────────────────────────────────────────────────
+
+interface StatusRowProps {
+  status: Status
+  canDelete: boolean
+  teamId: string
+  timelineId: string
+  allStatuses: Status[]
+}
+
+function StatusRow({ status, canDelete, teamId, timelineId, allStatuses }: StatusRowProps) {
+  const [editing, setEditing] = useState(false)
+  const [name, setName] = useState(status.name)
+  const [identity, setIdentity] = useState<Identity>({ color: status.color, icon: status.icon ?? '' })
+  const [isClosed, setIsClosed] = useState(status.isClosed)
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
+  const [replacementId, setReplacementId] = useState('')
+  const update = useUpdateTimelineStatus(teamId, timelineId)
+  const del = useDeleteTimelineStatus(teamId, timelineId)
+
+  function save() {
+    update.mutate(
+      { id: status.id, name: name.trim() || status.name, color: identity.color, icon: identity.icon || null, isClosed },
+      { onSuccess: () => setEditing(false) },
+    )
+  }
+
+  function doDelete() {
+    del.mutate(
+      { id: status.id, replacementStatusId: replacementId || undefined },
+      { onSuccess: () => setShowDeleteConfirm(false) },
+    )
+  }
+
+  if (showDeleteConfirm) {
+    const others = allStatuses.filter(s => s.id !== status.id)
+    return (
+      <div style={{ background: 'var(--muted)', borderRadius: 8, padding: 12, marginBottom: 6 }}>
+        <div style={{ fontSize: 12, color: 'var(--foreground)', marginBottom: 8 }}>
+          Delete <strong>{status.name}</strong>? Activities using this status will be reassigned.
+        </div>
+        {others.length > 0 && (
+          <div style={{ marginBottom: 8 }}>
+            <label style={{ ...FIELD_LABEL }}>Move activities to</label>
+            <select
+              value={replacementId}
+              onChange={e => setReplacementId(e.target.value)}
+              style={{ ...INPUT, fontSize: 12 }}
+            >
+              <option value="">— No status —</option>
+              {others.map(s => (
+                <option key={s.id} value={s.id}>{s.name}</option>
+              ))}
+            </select>
+          </div>
+        )}
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button onClick={() => setShowDeleteConfirm(false)} style={{ fontSize: 12, padding: '4px 10px', border: '1px solid var(--border)', borderRadius: 5, background: 'none', cursor: 'pointer', color: 'var(--foreground)' }}>Cancel</button>
+          <button onClick={doDelete} style={{ fontSize: 12, padding: '4px 10px', border: 'none', borderRadius: 5, background: 'var(--destructive)', color: 'white', cursor: 'pointer' }}>Delete</button>
+        </div>
+      </div>
+    )
+  }
+
+  if (editing) {
+    return (
+      <div style={{ background: 'var(--muted)', borderRadius: 8, padding: '10px 12px', marginBottom: 4, display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <IdentityWidget
+            identity={{ color: identity.color, icon: identity.icon ?? '' }}
+            name={name || status.name}
+            onChange={setIdentity}
+            shape="square"
+          />
+          <input
+            autoFocus
+            value={name}
+            onChange={e => setName(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') save(); if (e.key === 'Escape') setEditing(false) }}
+            style={{ ...INPUT, flex: 1 }}
+          />
+          <button onClick={save} disabled={update.isPending} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--primary)', padding: 4 }}>
+            <Check width={14} height={14} />
+          </button>
+          <button onClick={() => setEditing(false)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4 }}>
+            <X width={14} height={14} />
+          </button>
+        </div>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--muted-foreground)', cursor: 'pointer', userSelect: 'none', paddingLeft: 26 }}>
+          <input type="checkbox" checked={isClosed} onChange={e => setIsClosed(e.target.checked)} />
+          Closed status (marks this status as completed/done)
+        </label>
+      </div>
+    )
+  }
+
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 0' }}>
+      <Badge identity={{ color: status.color, icon: status.icon ?? '__none__' }} name={status.name} shape="square" size={18} />
+      <span style={{ fontSize: 13, flex: 1, cursor: 'pointer', color: 'var(--foreground)' }} onClick={() => setEditing(true)}>
+        {status.name}
+      </span>
+      {status.isClosed && (
+        <span style={{ fontSize: 10, padding: '1px 6px', border: '1px solid var(--border)', borderRadius: 4, color: 'var(--muted-foreground)' }}>closed</span>
+      )}
+      <button onClick={() => setEditing(true)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4, opacity: 0.5 }}>
+        ✎
+      </button>
+      {canDelete && (
+        <button onClick={() => setShowDeleteConfirm(true)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4 }}>
+          <Trash2 width={13} height={13} />
         </button>
-      </div>
+      )}
     </div>
   )
 }
 
-// Re-export color map so callers can reference variant colors for icons.
-export { VARIANT_COLORS }
-````
+// ── Add-status form ───────────────────────────────────────────────────────────
 
-## File: packages/web/src/components/shared/InlineEditableTitle.tsx
-````typescript
-/**
- * InlineEditableTitle — always-visible input for modal header names.
- *
- * Looks like plain text at rest; shows a subtle bottom border on hover/focus
- * to signal editability. Standardizes the three different name-editing patterns
- * across TeamModal, MemberModal, and TimelineModal.
- */
-
-import { useState, forwardRef } from 'react'
-
-interface Props {
-  value: string
-  onChange: (v: string) => void
-  placeholder?: string
-  readOnly?: boolean
-  autoFocus?: boolean
-  onKeyDown?: (e: React.KeyboardEvent<HTMLInputElement>) => void
+interface AddStatusFormProps {
+  teamId: string
+  timelineId: string
+  primaryColor: string
 }
 
-const InlineEditableTitle = forwardRef<HTMLInputElement, Props>(
-  function InlineEditableTitle({ value, onChange, placeholder, readOnly, autoFocus, onKeyDown }, ref) {
-    const [hovered, setHovered] = useState(false)
-    const [focused, setFocused] = useState(false)
+function AddStatusForm({ teamId, timelineId, primaryColor }: AddStatusFormProps) {
+  const [expanding, setExpanding] = useState(false)
+  const [name, setName] = useState('')
+  const [identity, setIdentity] = useState<Identity>({ color: primaryColor, icon: '' })
+  const [isClosed, setIsClosed] = useState(false)
+  const createStatus = useCreateTimelineStatus(teamId, timelineId)
 
-    return (
-      <input
-        ref={ref}
-        value={value}
-        onChange={e => onChange(e.target.value)}
-        placeholder={placeholder}
-        readOnly={readOnly}
-        autoFocus={autoFocus}
-        onKeyDown={onKeyDown}
-        onMouseEnter={() => setHovered(true)}
-        onMouseLeave={() => setHovered(false)}
-        onFocus={() => setFocused(true)}
-        onBlur={() => setFocused(false)}
-        style={{
-          fontSize: 16,
-          fontWeight: 600,
-          color: 'var(--foreground)',
-          background: 'transparent',
-          outline: 'none',
-          padding: '1px 0',
-          width: '100%',
-          fontFamily: 'var(--font-sans)',
-          border: 'none',
-          borderBottom: (hovered || focused) ? '1px solid var(--border)' : '1px solid transparent',
-          borderRadius: 0,
-          transition: 'border-color 0.12s',
-          cursor: readOnly ? 'default' : 'text',
-        }}
-      />
+  function handleAdd() {
+    if (!name.trim()) return
+    createStatus.mutate(
+      { name: name.trim(), color: identity.color, icon: identity.icon || null, isClosed },
+      {
+        onSuccess: () => {
+          setName('')
+          setIdentity({ color: primaryColor, icon: '' })
+          setIsClosed(false)
+          setExpanding(false)
+        },
+      },
     )
-  },
-)
+  }
 
-export default InlineEditableTitle
+  function handleCancel() {
+    setExpanding(false)
+    setName('')
+    setIdentity({ color: primaryColor, icon: '' })
+    setIsClosed(false)
+  }
+
+  if (!expanding) {
+    return (
+      <button
+        onClick={() => setExpanding(true)}
+        style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 8, background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', fontSize: 12, padding: '4px 2px', fontFamily: 'var(--font-sans)' }}
+      >
+        <Plus width={13} height={13} /> Add status
+      </button>
+    )
+  }
+
+  return (
+    <div style={{ background: 'var(--muted)', borderRadius: 8, padding: '10px 12px', marginTop: 8, display: 'flex', flexDirection: 'column', gap: 8 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <IdentityWidget identity={identity} name={name || 'New status'} shape="square" onChange={setIdentity} />
+        <input
+          autoFocus
+          value={name}
+          onChange={e => setName(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') handleAdd(); if (e.key === 'Escape') handleCancel() }}
+          placeholder="Status name…"
+          style={{ ...INPUT, flex: 1 }}
+        />
+        <button onClick={handleAdd} disabled={!name.trim() || createStatus.isPending} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--primary)', padding: 4, display: 'flex' }}>
+          <Check width={14} height={14} />
+        </button>
+        <button onClick={handleCancel} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4, display: 'flex' }}>
+          <X width={14} height={14} />
+        </button>
+      </div>
+      <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--muted-foreground)', cursor: 'pointer', userSelect: 'none', paddingLeft: 26 }}>
+        <input type="checkbox" checked={isClosed} onChange={e => setIsClosed(e.target.checked)} />
+        Closed status (marks this status as completed/done)
+      </label>
+    </div>
+  )
+}
+
+// ── Main modal ────────────────────────────────────────────────────────────────
+
+export default function TimelineModal({ mode, teamId, timeline, canAdmin = false, onClose, onCreated, onUnarchive }: Props) {
+  const [activeTab, setActiveTab] = useState<Tab>('settings')
+  const [name, setName] = useState(timeline?.name ?? '')
+  const [description, setDescription] = useState(timeline?.description ?? '')
+  const [notes, setNotes] = useState(timeline?.notes ?? '')
+  const [startDate, setStartDate] = useState(timeline?.startDate ?? '')
+  const [endDate, setEndDate] = useState(timeline?.endDate ?? '')
+  const [identity, setIdentity] = useState<Identity>({ color: timeline?.color ?? '#1A97A2', icon: timeline?.icon ?? '' })
+  const [selectedTemplateId, setSelectedTemplateId] = useState<string>('')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
+  const [showArchiveConfirm, setShowArchiveConfirm] = useState(false)
+
+  const createTimeline = useCreateTimeline(teamId)
+  const updateTimeline = useUpdateTimeline(teamId)
+  const deleteTimeline = useDeleteTimeline(teamId)
+  const archiveTimeline = useArchiveTimeline(teamId)
+
+  const { data: statuses = [] } = useTimelineStatuses(teamId, timeline?.id ?? '')
+  const { data: templates = [] } = useStatusTemplates(teamId)
+
+  const timelineColor = resolveColorHex(identity.color) ?? identity.color ?? '#1A97A2'
+
+  function handleSave() {
+    if (!name.trim()) { setError('Name is required'); return }
+    if (!startDate || !endDate) { setError('Start and end dates are required'); return }
+    if (endDate < startDate) { setError('End date must not be before start date'); return }
+    setSaving(true)
+    setError('')
+
+    if (mode === 'new') {
+      createTimeline.mutate(
+        {
+          name: name.trim(),
+          startDate,
+          endDate,
+          color: identity.color || null,
+          icon: identity.icon || null,
+          description: description.trim() || null,
+          notes: notes.trim() || null,
+          templateId: selectedTemplateId || null,
+        },
+        {
+          onSuccess: (tl) => { setSaving(false); onCreated?.(tl); onClose() },
+          onError: () => { setSaving(false); setError('Failed to create timeline') },
+        },
+      )
+    } else if (timeline) {
+      updateTimeline.mutate(
+        {
+          timelineId: timeline.id,
+          patch: {
+            name: name.trim(),
+            startDate,
+            endDate,
+            color: identity.color || null,
+            icon: identity.icon || null,
+            description: description.trim() || null,
+            notes: notes.trim() || null,
+          },
+        },
+        {
+          onSuccess: () => { setSaving(false); onClose() },
+          onError: () => { setSaving(false); setError('Failed to save timeline') },
+        },
+      )
+    }
+  }
+
+  return (
+    <div style={OVERLAY}>
+      <div style={PANEL} onClick={e => e.stopPropagation()}>
+        {/* Header — identity widget + editable name */}
+        <div style={HEADER}>
+          <IdentityWidget
+            identity={identity}
+            name={name || (mode === 'new' ? 'New timeline' : timeline?.name ?? '')}
+            onChange={setIdentity}
+            shape="square"
+          />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 3 }}>
+              {mode === 'new' ? 'New Timeline' : 'Edit Timeline'}
+            </div>
+            <InlineEditableTitle
+              value={name}
+              onChange={v => { setName(v); setError('') }}
+              placeholder="Timeline name"
+              autoFocus={mode === 'new'}
+            />
+          </div>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4 }}>
+            <X width={18} height={18} />
+          </button>
+        </div>
+
+        {/* Tab bar — Statuses tab only in edit mode */}
+        <div style={TAB_BAR}>
+          <button style={tabStyle(activeTab === 'settings')} onClick={() => setActiveTab('settings')}>Settings</button>
+          {mode === 'edit' && (
+            <button style={tabStyle(activeTab === 'statuses')} onClick={() => setActiveTab('statuses')}>
+              Statuses {statuses.length > 0 && <span style={{ fontSize: 10, marginLeft: 4, opacity: 0.6 }}>({statuses.length})</span>}
+            </button>
+          )}
+        </div>
+
+        {/* Content */}
+        <div style={CONTENT}>
+          {/* Archive confirmation — replaces tab content */}
+          {showArchiveConfirm && timeline ? (
+            <ConfirmDialog
+              variant="amber"
+              icon={<Archive size={22} color="#F59E0B" />}
+              title="Archive timeline?"
+              body={`${timeline.name} will be hidden from the active list. All data is preserved and can be restored via the Archived section in the sidebar.`}
+              confirmLabel="Archive"
+              busy={archiveTimeline.isPending}
+              onCancel={() => setShowArchiveConfirm(false)}
+              onConfirm={() => archiveTimeline.mutate(timeline.id, { onSuccess: onClose })}
+            />
+          ) : showDeleteConfirm && timeline ? (
+            <ConfirmDialog
+              variant="red"
+              icon={<Trash2 size={22} color="#EF4444" />}
+              title="Delete timeline?"
+              body={`This permanently deletes ${timeline.name} and all its statuses. Activities are not deleted — they remain in the team.`}
+              confirmLabel="Delete timeline"
+              busy={deleteTimeline.isPending}
+              onCancel={() => setShowDeleteConfirm(false)}
+              onConfirm={() => deleteTimeline.mutate(timeline.id, { onSuccess: onClose })}
+            />
+          ) : activeTab === 'settings' ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+              {/* Date range */}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                <div>
+                  <div style={FIELD_LABEL}>Start date *</div>
+                  <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)} style={INPUT} />
+                </div>
+                <div>
+                  <div style={FIELD_LABEL}>End date *</div>
+                  <input type="date" value={endDate} onChange={e => setEndDate(e.target.value)} style={INPUT} />
+                </div>
+              </div>
+
+              {/* Description */}
+              <div>
+                <div style={FIELD_LABEL}>Description</div>
+                <input
+                  value={description}
+                  onChange={e => setDescription(e.target.value)}
+                  placeholder="Short description of this timeline's purpose…"
+                  style={INPUT}
+                />
+              </div>
+
+              {/* Notes */}
+              <div>
+                <div style={FIELD_LABEL}>Notes</div>
+                <textarea
+                  value={notes}
+                  onChange={e => setNotes(e.target.value)}
+                  placeholder="Internal notes, links, references…"
+                  style={TEXTAREA}
+                />
+              </div>
+
+              {/* Template picker (create mode only) */}
+              {mode === 'new' && templates.length > 0 && (
+                <div>
+                  <div style={FIELD_LABEL}>Status template</div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    {templates.map(tpl => {
+                      const isSelected = selectedTemplateId === tpl.id || (!selectedTemplateId && tpl === templates[0])
+                      return (
+                        <div
+                          key={tpl.id}
+                          onClick={() => setSelectedTemplateId(tpl.id)}
+                          style={{
+                            border: `1px solid ${isSelected ? timelineColor + '88' : 'var(--border)'}`,
+                            borderRadius: 8, padding: '10px 14px', cursor: 'pointer',
+                            background: isSelected ? timelineColor + '11' : 'var(--muted)',
+                            transition: 'all 0.1s',
+                          }}
+                        >
+                          <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6, color: 'var(--foreground)' }}>{tpl.name}</div>
+                          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                            {tpl.items.map(item => (
+                              <span key={item.id} style={{ fontSize: 11, padding: '2px 8px', borderRadius: 4, background: item.color + '22', border: `1px solid ${item.color}66`, color: item.color }}>
+                                {item.name}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* Archived banner */}
+              {mode === 'edit' && timeline?.archivedAt && (
+                <div style={{ fontSize: 12, color: '#F59E0B', background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.25)', borderRadius: 6, padding: '8px 12px' }}>
+                  This timeline is archived. It is hidden from the active list.
+                </div>
+              )}
+
+              {error && (
+                <div style={{ fontSize: 12, color: 'var(--destructive)', background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)', borderRadius: 6, padding: '8px 12px' }}>
+                  {error}
+                </div>
+              )}
+            </div>
+          ) : (
+            activeTab === 'statuses' && timeline && (
+              <div>
+                <div style={{ fontSize: 12, color: 'var(--muted-foreground)', marginBottom: 14, lineHeight: 1.5 }}>
+                  Statuses are specific to this timeline. Add, rename, recolor, or remove them here.
+                </div>
+
+                <div style={{ marginBottom: 4 }}>
+                  {statuses.map(s => (
+                    <StatusRow
+                      key={s.id}
+                      status={s}
+                      canDelete={statuses.length > 1}
+                      teamId={teamId}
+                      timelineId={timeline.id}
+                      allStatuses={statuses}
+                    />
+                  ))}
+                </div>
+
+                <AddStatusForm teamId={teamId} timelineId={timeline.id} primaryColor={timelineColor} />
+              </div>
+            )
+          )}
+        </div>
+
+        {/* Footer — hidden when a confirm dialog is showing */}
+        {!showArchiveConfirm && !showDeleteConfirm && (
+          <div style={FOOTER}>
+            <div style={{ display: 'flex', gap: 8 }}>
+              {mode === 'edit' && timeline && canAdmin && !timeline.archivedAt && (
+                <button onClick={() => setShowArchiveConfirm(true)} style={archiveBtnStyle}>
+                  <Archive size={13} />
+                  Archive
+                </button>
+              )}
+              {mode === 'edit' && timeline && canAdmin && timeline.archivedAt && onUnarchive && (
+                <button onClick={() => onUnarchive(timeline.id)} style={restoreBtnStyle}>
+                  <RotateCcw size={13} />
+                  Restore
+                </button>
+              )}
+              {mode === 'edit' && timeline && canAdmin && (
+                <button
+                  onClick={() => setShowDeleteConfirm(true)}
+                  style={{ fontSize: 12, padding: '7px 12px', border: '1px solid rgba(239,68,68,0.3)', borderRadius: 7, background: 'none', color: 'var(--destructive)', cursor: 'pointer', fontFamily: 'var(--font-sans)' }}
+                >
+                  Delete
+                </button>
+              )}
+            </div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button
+                onClick={onClose}
+                style={{ fontSize: 13, padding: '8px 16px', border: '1px solid var(--border)', borderRadius: 7, background: 'none', cursor: 'pointer', fontFamily: 'var(--font-sans)', color: 'var(--muted-foreground)' }}
+              >
+                Cancel
+              </button>
+              {activeTab === 'settings' && (
+                <button
+                  onClick={handleSave}
+                  disabled={saving}
+                  style={{ fontSize: 13, fontWeight: 600, padding: '8px 18px', border: 'none', borderRadius: 7, background: timelineColor, color: 'white', cursor: saving ? 'wait' : 'pointer', fontFamily: 'var(--font-sans)' }}
+                >
+                  {saving ? 'Saving…' : mode === 'new' ? 'Create timeline' : 'Save changes'}
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
 ````
 
 ## File: packages/web/src/hooks/useTags.test.ts
@@ -32619,310 +33148,6 @@ export default function FilterManageModal({
 }
 ````
 
-## File: packages/web/src/components/gantt/ActivityCreatePanel.tsx
-````typescript
-/**
- * ActivityCreatePanel — right-side slide-in panel for creating a new Gantt activity.
- *
- * Defaults come from the drag selection: start/end date and the lane member.
- * Submits via POST /timelines/:id/activities.
- */
-
-import { useState, useEffect } from 'react'
-import { X, ArrowRight, Loader2 } from 'lucide-react'
-import MemberAvatar from '@/components/MemberAvatar'
-import { IdentityWidget } from '@/components/identity/IdentityWidget'
-import type { Identity } from '@/components/identity/identity-constants'
-import { useCreateActivity } from '@/hooks/useTeamActivities'
-import { useTags } from '@/hooks/useTags'
-import TagInput from '@/components/TagInput'
-import type { Member } from '@/types'
-
-const PANEL_WIDTH = 300
-
-interface Props {
-  open: boolean
-  teamId: string
-  timelineId: string
-  members: Member[]
-  defaultStart: string
-  defaultEnd: string
-  defaultMemberId?: string | null
-  onClose: () => void
-}
-
-const LABEL: React.CSSProperties = {
-  fontSize: 10,
-  fontWeight: 600,
-  color: 'var(--muted-foreground)',
-  textTransform: 'uppercase',
-  letterSpacing: '0.07em',
-  marginBottom: 4,
-}
-
-export default function ActivityCreatePanel({
-  open,
-  teamId,
-  timelineId,
-  members,
-  defaultStart,
-  defaultEnd,
-  defaultMemberId,
-  onClose,
-}: Props) {
-  const createMutation = useCreateActivity(teamId, timelineId)
-  const { data: teamTags = [] } = useTags(teamId)
-
-  const [title, setTitle] = useState('')
-  const [description, setDescription] = useState('')
-  const [startDate, setStartDate] = useState(defaultStart)
-  const [endDate, setEndDate] = useState(defaultEnd)
-  const [identity, setIdentity] = useState<Identity>({ color: '#288C9B', icon: '__none__' })
-  const [assignedIds, setAssignedIds] = useState<string[]>(
-    defaultMemberId ? [defaultMemberId] : [],
-  )
-  const [tagIds, setTagIds] = useState<string[]>([])
-
-  // Reset all fields to defaults each time the panel opens so re-opening
-  // the panel always shows a blank form rather than the previous session's data.
-  useEffect(() => {
-    if (!open) return
-    setTitle('')
-    setDescription('')
-    setStartDate(defaultStart)
-    setEndDate(defaultEnd)
-    setIdentity({ color: '#288C9B', icon: '__none__' })
-    setAssignedIds(defaultMemberId ? [defaultMemberId] : [])
-    setTagIds([])
-  }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  const creating = createMutation.isPending
-  const titleTrimmed = title.trim()
-
-  function toggleAssignee(memberId: string) {
-    setAssignedIds(prev =>
-      prev.includes(memberId) ? prev.filter(id => id !== memberId) : [...prev, memberId],
-    )
-  }
-
-  function handleSubmit(e: React.FormEvent) {
-    e.preventDefault()
-    if (!titleTrimmed) return
-    createMutation.mutate(
-      {
-        title: titleTrimmed,
-        startAt: `${startDate}T00:00:00Z`,
-        endAt: `${endDate}T00:00:00Z`,
-        description: description.trim() || null,
-        color: identity.color,
-        icon: identity.icon,
-        assignedMemberIds: assignedIds,
-        tagIds,
-      },
-      { onSuccess: onClose },
-    )
-  }
-
-  return (
-    <div
-      style={{
-        width: open ? PANEL_WIDTH : 0,
-        flexShrink: 0,
-        borderLeft: open ? '1px solid var(--border)' : 'none',
-        background: 'var(--card)',
-        display: 'flex',
-        flexDirection: 'column',
-        overflow: 'hidden',
-        transition: 'width 0.2s ease',
-      }}
-    >
-    <div style={{ width: PANEL_WIDTH, display: 'flex', flexDirection: 'column', height: '100%' }}>
-      {/* Header */}
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          padding: '0 12px',
-          height: 'var(--topbar-h, 40px)',
-          borderBottom: '1px solid var(--border)',
-          flexShrink: 0,
-        }}
-      >
-        <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)' }}>New activity</span>
-        <button
-          onClick={onClose}
-          style={{
-            width: 24, height: 24, border: 'none', background: 'none', borderRadius: 4,
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            cursor: 'pointer', color: 'var(--muted-foreground)',
-          }}
-          onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-          onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-        >
-          <X size={14} strokeWidth={2} />
-        </button>
-      </div>
-
-      {/* Form */}
-      <form onSubmit={handleSubmit} style={{ flex: 1, overflowY: 'auto', padding: 14, display: 'flex', flexDirection: 'column', gap: 14 }}>
-
-        {/* Identity + Title — mirrors the modal header pattern: badge on left, editable name on right */}
-        <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
-          <div style={{ marginTop: 2, flexShrink: 0 }}>
-            <IdentityWidget
-              identity={identity}
-              name={title || 'New Activity'}
-              shape="square"
-              onChange={setIdentity}
-            />
-          </div>
-          <input
-            autoFocus
-            value={title}
-            onChange={e => setTitle(e.target.value)}
-            placeholder="Activity title…"
-            style={{
-              flex: 1, fontSize: 13, fontWeight: 600,
-              color: 'var(--foreground)', border: '1px solid transparent',
-              borderRadius: 'var(--radius-md)', padding: '5px 6px',
-              outline: 'none', background: 'transparent', fontFamily: 'var(--font-sans)',
-            }}
-            onFocus={e => { e.target.style.borderColor = 'var(--primary)'; e.target.style.background = 'var(--background)' }}
-            onBlur={e => { e.target.style.borderColor = 'transparent'; e.target.style.background = 'transparent' }}
-          />
-        </div>
-
-        {/* Date range */}
-        <div>
-          <div style={LABEL}>Date range</div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            <input
-              type="date"
-              value={startDate}
-              onChange={e => {
-                setStartDate(e.target.value)
-                if (e.target.value > endDate) setEndDate(e.target.value)
-              }}
-              style={{
-                flex: 1, fontSize: 12, color: 'var(--foreground)',
-                border: '1px solid var(--border)', borderRadius: 'var(--radius-md)',
-                padding: '6px 8px', outline: 'none', background: 'var(--background)',
-                fontFamily: 'var(--font-sans)', cursor: 'pointer',
-              }}
-            />
-            <ArrowRight size={11} color="var(--muted-foreground)" strokeWidth={2} style={{ flexShrink: 0 }} />
-            <input
-              type="date"
-              value={endDate}
-              min={startDate}
-              onChange={e => setEndDate(e.target.value)}
-              style={{
-                flex: 1, fontSize: 12, color: 'var(--foreground)',
-                border: '1px solid var(--border)', borderRadius: 'var(--radius-md)',
-                padding: '6px 8px', outline: 'none', background: 'var(--background)',
-                fontFamily: 'var(--font-sans)', cursor: 'pointer',
-              }}
-            />
-          </div>
-        </div>
-
-        {/* Description */}
-        <div>
-          <div style={LABEL}>Description</div>
-          <input
-            value={description}
-            onChange={e => setDescription(e.target.value)}
-            placeholder="Optional description…"
-            style={{
-              width: '100%', boxSizing: 'border-box',
-              fontSize: 12, color: 'var(--foreground)',
-              border: '1px solid var(--border)', borderRadius: 'var(--radius-md)',
-              padding: '6px 8px', outline: 'none', background: 'var(--background)',
-              fontFamily: 'var(--font-sans)',
-            }}
-            onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
-            onBlur={e => (e.target.style.borderColor = 'var(--border)')}
-          />
-        </div>
-
-        {/* Assignees */}
-        {members.length > 0 && (
-          <div>
-            <div style={LABEL}>Assignees</div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-              {members.map(m => {
-                const assigned = assignedIds.includes(m.id)
-                return (
-                  <button
-                    key={m.id}
-                    type="button"
-                    onClick={() => toggleAssignee(m.id)}
-                    style={{
-                      display: 'flex', alignItems: 'center', gap: 8,
-                      padding: '5px 8px',
-                      border: assigned ? `1px solid ${m.color}` : '1px solid var(--border)',
-                      borderRadius: 'var(--radius-md)',
-                      background: assigned ? `${m.color}18` : 'var(--background)',
-                      cursor: 'pointer', textAlign: 'left',
-                      transition: 'background 0.1s, border-color 0.1s',
-                    }}
-                  >
-                    <MemberAvatar member={m} size={18} />
-                    <span style={{ fontSize: 12, color: 'var(--foreground)', flex: 1 }}>{m.name}</span>
-                    {assigned && (
-                      <div style={{ width: 6, height: 6, borderRadius: '50%', background: m.color, flexShrink: 0 }} />
-                    )}
-                  </button>
-                )
-              })}
-            </div>
-          </div>
-        )}
-
-        {/* Tags */}
-        <div>
-          <div style={LABEL}>Tags</div>
-          <TagInput
-            teamId={teamId}
-            tags={teamTags}
-            selectedTagIds={tagIds}
-            onChange={setTagIds}
-          />
-        </div>
-
-        {/* Spacer pushes submit to bottom */}
-        <div style={{ flex: 1 }} />
-      </form>
-
-      {/* Footer */}
-      <div style={{ padding: '10px 14px', borderTop: '1px solid var(--border)', flexShrink: 0 }}>
-        <button
-          type="submit"
-          form=""
-          onClick={handleSubmit}
-          disabled={!titleTrimmed || creating}
-          style={{
-            width: '100%', fontSize: 13, fontWeight: 600, padding: 8,
-            borderRadius: 'var(--radius-md)', border: 'none',
-            background: titleTrimmed && !creating ? 'var(--primary)' : 'var(--muted)',
-            color: titleTrimmed && !creating ? 'white' : 'var(--muted-foreground)',
-            cursor: titleTrimmed && !creating ? 'pointer' : 'not-allowed',
-            fontFamily: 'var(--font-sans)',
-            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
-            transition: 'background 0.1s',
-          }}
-        >
-          {creating && <Loader2 size={13} className="animate-spin" />}
-          Create activity
-        </button>
-      </div>
-    </div>
-    </div>
-  )
-}
-````
-
 ## File: packages/web/src/components/gantt/GanttToolbar.tsx
 ````typescript
 /**
@@ -33550,434 +33775,2223 @@ export function autoFitGranularity(
 }
 ````
 
-## File: packages/web/src/components/MemberModal.tsx
+## File: packages/web/src/components/kanban/KanbanBoard.tsx
 ````typescript
 /**
- * MemberModal — view and edit a team member's profile, identity, and role.
+ * KanbanBoard — the DndContext host that owns all columns and the drag overlay.
  *
- * Shows computed stats (timelines, activities by date status) and exposes
- * superadmin actions (promote, inactivate, delete) when the viewer is a
- * superadmin. Password reset is present but shows "SMTP not configured"
- * until Phase 14.
+ * Renders columns in a horizontal scrolling row. On drag-end, derives the
+ * correct PATCH payload for the active groupBy and calls onDrop.
  */
 
-import { useState } from 'react'
-import { createPortal } from 'react-dom'
-import { X, Shield, Archive, Trash2, AlertTriangle, Clock, Activity, Calendar, Users, ShieldOff } from 'lucide-react'
-import { IdentityWidget } from '@/components/identity/IdentityWidget'
-import type { Identity } from '@/components/identity/identity-constants'
-import { Badge } from '@/components/identity/Badge'
-import { useMemberDetail, useUpdateMember, usePromoteUser, useArchiveUser, useUnarchiveUser, useDeleteUser, useRevokeUser } from '@/hooks/useMemberManagement'
-import { useAuth } from '@/contexts/AuthContext'
-import InlineEditableTitle from '@/components/shared/InlineEditableTitle'
-import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
-import type { components } from '@draba/shared'
+import { DndContext, DragOverlay, PointerSensor, useSensor, useSensors } from '@dnd-kit/core';
+import type { DragEndEvent, DragStartEvent, DragOverEvent } from '@dnd-kit/core';
+import { useState } from 'react';
+import KanbanColumn from './KanbanColumn';
+import KanbanCard from './KanbanCard';
+import type { KanbanColumn as Column, KanbanCardField, KanbanGroupBy } from './kanbanColumns';
+import type { Member } from '@/types';
+import type { components } from '@draba/shared';
 
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
+type ApiActivity = components['schemas']['Activity'];
+type Status = components['schemas']['Status'];
+type Tag = components['schemas']['Tag'];
+
+export interface DropPayload {
+  activityId: string;
+  patch: {
+    statusId?: string | null;
+    assignedMemberIds?: string[];
+    parentActivityId?: string | null;
+  };
+}
 
 interface Props {
-  teamId: string
-  memberId: string
-  /** Whether the current viewer is a team admin. */
-  isAdmin: boolean
-  /** Whether the current viewer is a superadmin. */
-  isSuperadmin: boolean
-  onClose: () => void
+  columns: Column[];
+  groupBy: KanbanGroupBy;
+  members: Member[];
+  statusById: Map<string, Status>;
+  tagById: Map<string, Tag>;
+  /** Per-activity resolved hex color for the card accent border. */
+  colorMap: Map<string, string>;
+  cardFields: KanbanCardField[];
+  suppressedFields: Set<KanbanCardField>;
+  selectedActivityId: string | null;
+  matchedIds: Set<string>;
+  activeMatchId: string | null;
+  hasQuery: boolean;
+  collapsedColumnIds: Set<string>;
+  onToggleCollapse: (columnId: string) => void;
+  onCardClick: (activity: ApiActivity) => void;
+  onAddInColumn: (column: Column) => void;
+  onDrop: (payload: DropPayload) => void;
+  /** Map of activity ID → ApiActivity for drag overlay lookup. */
+  activityById: Map<string, ApiActivity>;
+  /** Map of activity ID → title, for showing parent names on child cards. */
+  activityTitleById: Map<string, string>;
+  // ── Hierarchy ────────────────────────────────────────────────────────────────
+  showHierarchy: boolean;
+  childrenByParentId: Map<string, ApiActivity[]>;
+  collapsedParents: Set<string>;
+  onToggleParent: (activityId: string) => void;
 }
 
-// ── Small shared styles ───────────────────────────────────────────────────────
+export default function KanbanBoard({
+  columns,
+  groupBy,
+  members,
+  statusById,
+  tagById,
+  colorMap,
+  cardFields,
+  suppressedFields,
+  showHierarchy,
+  childrenByParentId,
+  collapsedParents,
+  onToggleParent,
+  selectedActivityId,
+  matchedIds,
+  activeMatchId,
+  hasQuery,
+  collapsedColumnIds,
+  onToggleCollapse,
+  onCardClick,
+  onAddInColumn,
+  onDrop,
+  activityById,
+  activityTitleById,
+}: Props) {
+  const [draggingId, setDraggingId] = useState<string | null>(null);
+  const [overColumnId, setOverColumnId] = useState<string | null>(null);
 
-const chipStyle = (color: string): React.CSSProperties => ({
-  display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-  padding: '10px 16px', borderRadius: 8, flex: 1,
-  border: `1px solid ${color}44`, borderTop: `3px solid ${color}`,
-  background: `${color}0a`, textAlign: 'center', minWidth: 0,
-})
+  // Require a 5px drag threshold to prevent accidental drags on card clicks.
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
+  );
 
-const cancelBtn: React.CSSProperties = {
-  background: 'none', border: '1px solid var(--border)', color: 'var(--muted-foreground)',
-  fontSize: 13, padding: '7px 18px', borderRadius: 7, cursor: 'pointer', fontFamily: 'var(--font-sans)',
-}
+  function handleDragStart({ active }: DragStartEvent) {
+    setDraggingId(active.id as string);
+  }
 
-// ── Main component ────────────────────────────────────────────────────────────
+  function handleDragEnd({ active, over }: DragEndEvent) {
+    setDraggingId(null);
+    setOverColumnId(null);
+    if (!over) return;
 
-export default function MemberModal({ teamId, memberId, isAdmin, isSuperadmin, onClose }: Props) {
-  const { user: currentUser } = useAuth()
-  const { data: detail, isLoading, isError } = useMemberDetail(teamId, memberId)
-  const updateMember = useUpdateMember(teamId)
-  const promoteUser = usePromoteUser()
-  const archiveUser = useArchiveUser()
-  const unarchiveUser = useUnarchiveUser()
-  const deleteUser = useDeleteUser()
-  const revokeUser = useRevokeUser()
+    const activityId = String(active.id);
+    const columnId = String(over.id);
 
-  const [identity, setIdentity] = useState<Identity | null>(null)
-  const [displayName, setDisplayName] = useState<string | null>(null)
-  const [confirm, setConfirm] = useState<'promote' | 'inactivate' | 'delete' | 'revoke' | null>(null)
-  const [revokeResult, setRevokeResult] = useState<{ membershipsInactivated: number; membershipsRemoved: number } | null>(null)
+    const column = columns.find(c => c.id === columnId);
+    if (!column || !column.droppable || !column.dropValue) return;
 
-  if (isLoading || isError || !detail) {
-    return createPortal(
+    // Determine if anything actually changed before issuing a PATCH.
+    const activity = activityById.get(activityId);
+    if (!activity) return;
+
+    // Skip if the card is already in this column (no-op drop).
+    const isAlreadyHere = (() => {
+      switch (groupBy) {
+        case 'status': {
+          const currentStatus = (activity as ApiActivity & { statusId?: string | null }).statusId ?? null;
+          return currentStatus === (column.dropValue.statusId ?? null);
+        }
+        case 'member': {
+          const primary = activity.assignedMemberIds?.[0] ?? null;
+          const target = column.dropValue.assignedMemberIds?.[0] ?? null;
+          return primary === target;
+        }
+        default:
+          return false;
+      }
+    })();
+
+    if (isAlreadyHere) return;
+
+    onDrop({ activityId, patch: column.dropValue });
+  }
+
+  function handleDragOver({ over }: DragOverEvent) {
+    setOverColumnId(over ? String(over.id) : null);
+  }
+
+  const draggingActivity = draggingId ? activityById.get(draggingId) : undefined;
+
+  return (
+    <DndContext
+      sensors={sensors}
+      onDragStart={handleDragStart}
+      onDragEnd={handleDragEnd}
+      onDragOver={handleDragOver}
+    >
       <div
-        onClick={e => { if (e.target === e.currentTarget) onClose() }}
-        style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1100 }}
+        style={{
+          display: 'flex',
+          flexDirection: 'row',
+          gap: 12,
+          padding: '12px 16px 16px',
+          overflowX: 'auto',
+          overflowY: 'hidden',
+          height: '100%',
+          alignItems: 'flex-start',
+          boxSizing: 'border-box',
+        }}
       >
-        <div style={{ width: 560, height: 300, background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 14, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 10, position: 'relative' }}>
-          <button onClick={onClose} style={{ position: 'absolute', top: 12, right: 14, background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4, display: 'flex' }}>
-            <X size={18} />
+        {columns.map(col => (
+          <KanbanColumn
+            key={col.id}
+            column={col}
+            members={members}
+            statusById={statusById}
+            tagById={tagById}
+            colorMap={colorMap}
+            activityTitleById={activityTitleById}
+            cardFields={cardFields}
+            suppressedFields={suppressedFields}
+            showHierarchy={showHierarchy}
+            childrenByParentId={childrenByParentId}
+            collapsedParents={collapsedParents}
+            onToggleParent={onToggleParent}
+            selectedActivityId={selectedActivityId}
+            matchedIds={matchedIds}
+            activeMatchId={activeMatchId}
+            hasQuery={hasQuery}
+            isOver={overColumnId === col.id && col.droppable}
+            isCollapsed={collapsedColumnIds.has(col.id)}
+            onToggleCollapse={() => onToggleCollapse(col.id)}
+            onCardClick={onCardClick}
+            onAddClick={() => onAddInColumn(col)}
+          />
+        ))}
+      </div>
+
+      {/* Drag overlay — floats above everything while dragging */}
+      <DragOverlay dropAnimation={null}>
+        {draggingActivity ? (
+          <KanbanCard
+            activity={draggingActivity}
+            accentColor={colorMap.get(draggingActivity.id) ?? '#6b7280'}
+            members={members}
+            statusById={statusById}
+            tagById={tagById}
+            cardFields={cardFields}
+            suppressedFields={suppressedFields}
+            isSelected={false}
+            dimmed={false}
+            activeMatch={false}
+            isDragOverlay
+            onClick={() => {}}
+          />
+        ) : null}
+      </DragOverlay>
+    </DndContext>
+  );
+}
+````
+
+## File: packages/web/src/components/kanban/KanbanCard.tsx
+````typescript
+/**
+ * KanbanCard — a single draggable activity card.
+ *
+ * Renders the card accent border (driven by colorBy), title, and the
+ * configured optional fields. Uses @dnd-kit useDraggable for drag support.
+ */
+
+import { useDraggable } from '@dnd-kit/core';
+import { Calendar, GitBranch, ChevronDown, ChevronRight } from 'lucide-react';
+import { formatActivityDate } from '@/components/list/ListView';
+import { resolveColorHex } from '@/components/identity/identity-constants';
+import { Badge } from '@/components/identity/Badge';
+import type { Member } from '@/types';
+import type { components } from '@draba/shared';
+import type { KanbanCardField } from './kanbanColumns';
+
+type ApiActivity = components['schemas']['Activity'];
+type Status = components['schemas']['Status'];
+type Tag = components['schemas']['Tag'];
+
+interface Props {
+  activity: ApiActivity;
+  accentColor: string;
+  members: Member[];
+  statusById: Map<string, Status>;
+  tagById: Map<string, Tag>;
+  /** Activity ID → title, used to show the parent's name when "Parent" field is on. */
+  activityTitleById?: Map<string, string>;
+  cardFields: KanbanCardField[];
+  /** Fields suppressed because they duplicate the current Group by axis. */
+  suppressedFields: Set<KanbanCardField>;
+  isSelected: boolean;
+  /** True when Find is active and this card doesn't match. */
+  dimmed: boolean;
+  /** True when Find is active and this card is the active match. */
+  activeMatch: boolean;
+  isDragOverlay?: boolean;
+  onClick: () => void;
+
+  // ── Hierarchy ────────────────────────────────────────────────────────────────
+  /** True when hierarchy mode is on and this card has children to show/hide. */
+  hasHierarchyChildren?: boolean;
+  /** Whether the children are currently hidden. */
+  isHierarchyCollapsed?: boolean;
+  /**
+   * Click handler for the collapse/expand chevron.
+   * Receives the mouse event so the handler can stopPropagation (prevents
+   * the card-click from also opening the detail panel).
+   */
+  onToggleHierarchy?: (e: React.MouseEvent) => void;
+  /** True when this card is nested under a parent — disables drag. */
+  isChildCard?: boolean;
+}
+
+export default function KanbanCard({
+  activity,
+  accentColor,
+  members,
+  statusById,
+  tagById,
+  cardFields,
+  suppressedFields,
+  isSelected,
+  dimmed,
+  activeMatch,
+  isDragOverlay = false,
+  onClick,
+  hasHierarchyChildren = false,
+  isHierarchyCollapsed = false,
+  onToggleHierarchy,
+  isChildCard = false,
+  activityTitleById,
+}: Props) {
+  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
+    id: activity.id,
+    data: { activityId: activity.id },
+    // Drag overlay renders separately, and child cards travel with their parent.
+    disabled: isDragOverlay || isChildCard,
+  });
+
+  // Do NOT apply the dnd-kit transform to the original card.
+  //
+  // We use DragOverlay for the visual movement, so the overlay card floats as
+  // the user drags and the original stays in place as an invisible placeholder.
+  // Applying the transform here causes the column's overflow container to expand
+  // its scroll area as the mouse moves, producing a growing scrollbar.
+  const style: React.CSSProperties = isDragging && !isDragOverlay
+    ? { visibility: 'hidden' }   // placeholder: preserves layout space, no transform, no scrollbar growth
+    : { opacity: dimmed ? 0.3 : 1, transition: dimmed ? 'opacity 150ms' : undefined };
+
+  const showField = (f: KanbanCardField) =>
+    cardFields.includes(f) && !suppressedFields.has(f);
+
+  const status = activity.statusId ? statusById.get(activity.statusId) : undefined;
+  const statusColor = status?.color ? resolveColorHex(status.color) : undefined;
+
+  const assignedMembers = (activity.assignedMemberIds ?? [])
+    .map(id => members.find(m => m.id === id))
+    .filter((m): m is Member => Boolean(m));
+
+  const tags = (activity.tagIds ?? [])
+    .map(id => tagById.get(id))
+    .filter((t): t is Tag => Boolean(t));
+
+  const formatDate = (iso: string | null | undefined) =>
+    iso ? formatActivityDate(iso) : null;
+
+  const startLabel = formatDate(activity.startAt);
+  const endLabel   = formatDate(activity.endAt);
+  const dateLabel  = startLabel && endLabel
+    ? startLabel === endLabel ? startLabel : `${startLabel} – ${endLabel}`
+    : startLabel ?? endLabel ?? null;
+
+  const cardStyle: React.CSSProperties = {
+    ...style,
+    background: 'var(--card)',
+    border: `1px solid ${isSelected ? accentColor : activeMatch ? '#f59e0b' : 'var(--border)'}`,
+    borderLeft: `3px solid ${accentColor}`,
+    borderRadius: 6,
+    padding: '8px 10px',
+    cursor: isDragOverlay ? 'grabbing' : 'pointer',
+    boxShadow: isDragOverlay
+      ? '0 8px 24px rgba(0,0,0,0.2)'
+      : isSelected
+      ? `0 0 0 2px ${accentColor}40`
+      : activeMatch
+      ? '0 0 0 2px #f59e0b80'
+      : undefined,
+    userSelect: 'none',
+    marginBottom: 6,
+    transition: 'box-shadow 100ms, border-color 100ms',
+  };
+
+  return (
+    <div
+      ref={setNodeRef}
+      {...listeners}
+      {...attributes}
+      style={cardStyle}
+      onClick={onClick}
+      role="button"
+      tabIndex={0}
+      onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') onClick(); }}
+    >
+      {/* Title row — with optional collapse chevron for hierarchy parents */}
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 4, marginBottom: 4 }}>
+        {hasHierarchyChildren && (
+          <button
+            onClick={e => { e.stopPropagation(); onToggleHierarchy?.(e); }}
+            title={isHierarchyCollapsed ? 'Expand children' : 'Collapse children'}
+            style={{
+              flexShrink: 0,
+              marginTop: 1,
+              background: 'none',
+              border: 'none',
+              padding: 0,
+              cursor: 'pointer',
+              color: 'var(--muted-foreground)',
+              display: 'flex',
+              alignItems: 'center',
+            }}
+          >
+            {isHierarchyCollapsed
+              ? <ChevronRight size={13} strokeWidth={2} />
+              : <ChevronDown  size={13} strokeWidth={2} />
+            }
           </button>
-          {isError ? (
-            <>
-              <span style={{ color: '#EF4444', fontSize: 13 }}>Failed to load member — the member may have been removed.</span>
-              <button onClick={onClose} style={{ fontSize: 12, color: 'var(--muted-foreground)', background: 'none', border: '1px solid var(--border)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)' }}>Dismiss</button>
-            </>
-          ) : (
-            <span style={{ color: 'var(--muted-foreground)', fontSize: 13 }}>Loading…</span>
+        )}
+        <div
+          style={{
+            flex: 1,
+            fontSize: 13,
+            fontWeight: 500,
+            color: 'var(--foreground)',
+            lineHeight: 1.4,
+            display: '-webkit-box',
+            WebkitLineClamp: 2,
+            WebkitBoxOrient: 'vertical',
+            overflow: 'hidden',
+          }}
+        >
+          {activity.title}
+        </div>
+      </div>
+
+      {/* Description snippet */}
+      {showField('description') && activity.description && (
+        <div
+          style={{
+            fontSize: 11,
+            color: 'var(--muted-foreground)',
+            whiteSpace: 'nowrap',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            marginBottom: 4,
+          }}
+        >
+          {activity.description}
+        </div>
+      )}
+
+      {/* Status pill */}
+      {showField('status') && status && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 4 }}>
+          <span
+            style={{
+              width: 8,
+              height: 8,
+              borderRadius: '50%',
+              background: statusColor ?? '#6b7280',
+              flexShrink: 0,
+            }}
+          />
+          <span style={{ fontSize: 11, color: 'var(--muted-foreground)' }}>{status.name}</span>
+        </div>
+      )}
+
+      {/* Date range */}
+      {showField('dateRange') && dateLabel && (
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 4,
+            fontSize: 11,
+            color: 'var(--muted-foreground)',
+            marginBottom: 4,
+          }}
+        >
+          <Calendar size={11} strokeWidth={1.6} />
+          {dateLabel}
+        </div>
+      )}
+
+      {/* Tags */}
+      {showField('tags') && tags.length > 0 && (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 3, marginBottom: 4 }}>
+          {tags.slice(0, 3).map(t => (
+            <span
+              key={t.id}
+              style={{
+                fontSize: 10,
+                fontWeight: 500,
+                padding: '1px 6px',
+                borderRadius: 10,
+                background: resolveColorHex(t.color ?? null) ? `${resolveColorHex(t.color ?? null)}22` : 'var(--muted)',
+                color: resolveColorHex(t.color ?? null) ?? 'var(--muted-foreground)',
+                border: `1px solid ${resolveColorHex(t.color ?? null) ?? 'var(--border)'}44`,
+              }}
+            >
+              {t.name}
+            </span>
+          ))}
+          {tags.length > 3 && (
+            <span style={{ fontSize: 10, color: 'var(--muted-foreground)' }}>+{tags.length - 3}</span>
           )}
         </div>
-      </div>,
-      document.body,
-    )
-  }
+      )}
 
-  const effectiveIdentity: Identity = identity ?? {
-    color: detail.color ?? '#1A97A2',
-    icon: detail.icon ?? '__name_words__',
-  }
-  const effectiveName = displayName ?? detail.displayName
+      {/* % complete bar */}
+      {showField('percentComplete') && activity.percentComplete != null && (
+        <div style={{ marginBottom: 4 }}>
+          <div
+            style={{
+              height: 3,
+              background: 'var(--muted)',
+              borderRadius: 2,
+              overflow: 'hidden',
+            }}
+          >
+            <div
+              style={{
+                height: '100%',
+                width: `${activity.percentComplete}%`,
+                background: accentColor,
+                borderRadius: 2,
+                transition: 'width 200ms',
+              }}
+            />
+          </div>
+        </div>
+      )}
 
-  const isParticipant = !detail.userId
-  const isInactivated = Boolean(detail.archivedAt)
-  const stats = detail.stats
-  const activeActivityCount = stats.pastDue + stats.running + stats.upcoming + stats.unscheduled
+      {/* Footer: parent pill + member avatars */}
+      {(showField('parent') || showField('members')) && (
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 2 }}>
+          {/* Parent badge — shows the parent activity's title */}
+          {showField('parent') && activity.parentActivityId && (
+            <span
+              style={{
+                fontSize: 10,
+                color: 'var(--muted-foreground)',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 3,
+                overflow: 'hidden',
+                flex: 1,
+              }}
+            >
+              <GitBranch size={9} strokeWidth={1.6} style={{ flexShrink: 0 }} />
+              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {activityTitleById?.get(activity.parentActivityId) ?? 'Parent'}
+              </span>
+            </span>
+          )}
 
-  const busy = updateMember.isPending || promoteUser.isPending || archiveUser.isPending || unarchiveUser.isPending || deleteUser.isPending || revokeUser.isPending
-
-  // detail is guaranteed non-null here (early return above handles loading/undefined).
-  // Non-null assertions in callbacks are safe because they only fire when the
-  // rendered modal is interactive, which requires detail to be loaded.
-  function handleSave() {
-    const patch: { displayName?: string | null; color?: string | null; icon?: string | null } = {}
-    if (displayName !== null) patch.displayName = displayName
-    if (identity !== null) { patch.color = identity.color; patch.icon = identity.icon }
-    updateMember.mutate({ memberId, patch }, { onSuccess: onClose })
-  }
-
-  function handlePromote() {
-    if (!detail!.userId) return
-    promoteUser.mutate(detail!.userId, { onSuccess: () => setConfirm(null) })
-  }
-
-  function handleInactivate() {
-    if (!detail!.userId) return
-    archiveUser.mutate(detail!.userId, { onSuccess: () => { setConfirm(null); onClose() } })
-  }
-
-  function handleReactivate() {
-    if (!detail!.userId) return
-    unarchiveUser.mutate(detail!.userId, { onSuccess: onClose })
-  }
-
-  function handleRevoke() {
-    if (!detail!.userId) return
-    revokeUser.mutate(detail!.userId, {
-      onSuccess: (result) => {
-        setConfirm(null)
-        setRevokeResult({ membershipsInactivated: result.membershipsInactivated, membershipsRemoved: result.membershipsRemoved })
-        // Close the modal after a short delay so the user can see the summary.
-        setTimeout(onClose, 2000)
-      },
-    })
-  }
-
-  function handleDelete() {
-    if (!detail!.userId) return
-    deleteUser.mutate(detail!.userId, { onSuccess: () => { setConfirm(null); onClose() } })
-  }
-
-  const memberColor = effectiveIdentity.color
-
-  return createPortal(
-    <div
-      onClick={e => { if (e.target === e.currentTarget) onClose() }}
-      style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1100 }}
-    >
-      <div style={{ width: 560, maxHeight: '90vh', background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 14, boxShadow: '0 24px 64px rgba(0,0,0,.6)', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-
-        {/* Confirm overlays */}
-        {confirm === 'promote' && (
-          <ConfirmDialog
-            variant="indigo"
-            icon={<Shield size={22} color="#6366F1" />}
-            title="Promote to Super Admin?"
-            body={`${effectiveName} will gain full administrative access to all teams and settings. This cannot be undone without direct database access.`}
-            confirmLabel="Promote"
-            busy={busy}
-            onCancel={() => setConfirm(null)}
-            onConfirm={handlePromote}
-          />
-        )}
-        {confirm === 'inactivate' && (
-          <ConfirmDialog
-            variant="amber"
-            icon={<Archive size={22} color="#F59E0B" />}
-            title={`Inactivate ${effectiveName}?`}
-            body="The account will be disabled. The member will not be able to log in. Their data and activity assignments are preserved and access can be restored at any time."
-            confirmLabel="Inactivate"
-            busy={busy}
-            onCancel={() => setConfirm(null)}
-            onConfirm={handleInactivate}
-          />
-        )}
-        {confirm === 'delete' && (
-          <ConfirmDialog
-            variant="red"
-            icon={<Trash2 size={22} color="#EF4444" />}
-            title={`Delete ${effectiveName}?`}
-            body="This permanently removes the user account and cannot be undone. Only allowed when the user has no active activities and belongs to a single team."
-            confirmLabel="Delete permanently"
-            busy={busy}
-            onCancel={() => setConfirm(null)}
-            onConfirm={handleDelete}
-          />
-        )}
-        {confirm === 'revoke' && (
-          <ConfirmDialog
-            variant="red"
-            icon={<ShieldOff size={22} color="#EF4444" />}
-            title={`Revoke all access for ${effectiveName}?`}
-            body="This will: (1) deactivate the account — the user cannot log in anywhere; (2) inactivate all team memberships that have activity history; (3) permanently remove memberships with no activity history. Activity data is always preserved."
-            confirmLabel="Revoke all access"
-            busy={busy}
-            onCancel={() => setConfirm(null)}
-            onConfirm={handleRevoke}
-          />
-        )}
-
-        {confirm === null && (
-          <>
-            {/* Header */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '16px 20px', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
-              <div style={{ flexShrink: 0 }}>
-                <IdentityWidget
-                  identity={effectiveIdentity}
-                  name={effectiveName}
-                  shape="circle"
-                  onChange={setIdentity}
-                />
-              </div>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 3 }}>
-                  {isParticipant ? 'Participant' : 'Team Member'}
-                  {isInactivated && ' · Inactive'}
-                </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                  {(isAdmin || currentUser?.id === detail.userId) ? (
-                    <InlineEditableTitle
-                      value={displayName ?? detail.displayName}
-                      onChange={setDisplayName}
-                    />
-                  ) : (
-                    <span style={{ fontSize: 16, fontWeight: 600, color: 'var(--foreground)' }}>{effectiveName}</span>
-                  )}
-                  {isParticipant && (
-                    <span style={{ fontSize: 11, fontWeight: 600, background: 'rgba(245,158,11,0.12)', border: '1px solid rgba(245,158,11,0.35)', color: '#F59E0B', borderRadius: 99, padding: '1px 7px', flexShrink: 0 }}>No login</span>
-                  )}
-                </div>
-              </div>
-              <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4, display: 'flex', flexShrink: 0 }}>
-                <X size={18} />
-              </button>
-            </div>
-
-            {/* Scrollable body */}
-            <div style={{ flex: 1, overflowY: 'auto', padding: '20px' }}>
-
-              {/* Email */}
-              {!isParticipant && (
-                <div style={{ marginBottom: 20 }}>
-                  <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 6, display: 'block' }}>Email</label>
-                  <div style={{ fontSize: 13, color: 'var(--muted-foreground)', padding: '8px 0', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {detail.email}
-                  </div>
-                </div>
-              )}
-
-              {/* Timeline stats */}
-              <div style={{ marginBottom: 16 }}>
-                <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 8, display: 'block' }}>
-                  <Calendar size={11} style={{ display: 'inline', marginRight: 5 }} />
-                  Timelines
-                </label>
-                <div style={{ display: 'flex', gap: 8 }}>
-                  <div style={chipStyle('#1A97A2')}>
-                    <span style={{ fontSize: 22, fontWeight: 700, color: '#1A97A2' }}>{stats.activeTimelines}</span>
-                    <span style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 2 }}>Active</span>
-                  </div>
-                  <div style={chipStyle('#484f58')}>
-                    <span style={{ fontSize: 22, fontWeight: 700, color: '#8b949e' }}>{stats.archivedTimelines}</span>
-                    <span style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 2 }}>Archived</span>
-                  </div>
-                </div>
-              </div>
-
-              {/* Activity stats */}
-              <div style={{ marginBottom: 16 }}>
-                <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 8, display: 'block' }}>
-                  <Activity size={11} style={{ display: 'inline', marginRight: 5 }} />
-                  Activities
-                </label>
-                <div style={{ display: 'flex', gap: 8 }}>
-                  <div style={chipStyle(stats.pastDue > 0 ? '#EF4444' : '#484f58')}>
-                    <span style={{ fontSize: 20, fontWeight: 700, color: stats.pastDue > 0 ? '#EF4444' : '#8b949e' }}>{stats.pastDue}</span>
-                    <span style={{ fontSize: 10, color: 'var(--muted-foreground)', marginTop: 2 }}>Past due</span>
-                  </div>
-                  <div style={chipStyle('#1A97A2')}>
-                    <span style={{ fontSize: 20, fontWeight: 700, color: '#1A97A2' }}>{stats.running}</span>
-                    <span style={{ fontSize: 10, color: 'var(--muted-foreground)', marginTop: 2 }}>Running</span>
-                  </div>
-                  <div style={chipStyle('#3B82F6')}>
-                    <span style={{ fontSize: 20, fontWeight: 700, color: '#3B82F6' }}>{stats.upcoming}</span>
-                    <span style={{ fontSize: 10, color: 'var(--muted-foreground)', marginTop: 2 }}>Upcoming</span>
-                  </div>
-                  <div style={chipStyle('#484f58')}>
-                    <span style={{ fontSize: 20, fontWeight: 700, color: '#8b949e' }}>{stats.archivedActivities}</span>
-                    <span style={{ fontSize: 10, color: 'var(--muted-foreground)', marginTop: 2 }}>Archived</span>
-                  </div>
-                </div>
-              </div>
-
-              {/* Teams list */}
-              {detail.teams.length > 0 && (
-                <div style={{ marginBottom: 16 }}>
-                  <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 8, display: 'block' }}>
-                    <Users size={11} style={{ display: 'inline', marginRight: 5 }} />
-                    Teams ({detail.teams.length})
-                  </label>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                    {detail.teams.map((tm: TeamMemberWithUser) => (
-                      <div key={tm.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 10px', background: 'var(--muted)', borderRadius: 7 }}>
-                        <Badge identity={{ color: tm.color ?? '#1A97A2', icon: '__name_1__' }} name={tm.teamId} shape="square" size={20} />
-                        <span style={{ fontSize: 13, color: 'var(--foreground)', flex: 1 }}>{tm.teamId}</span>
-                        <span style={{ fontSize: 11, fontWeight: 600, color: tm.role === 'admin' ? '#1A97A2' : 'var(--muted-foreground)', background: tm.role === 'admin' ? 'rgba(26,151,162,0.12)' : 'var(--muted)', border: `1px solid ${tm.role === 'admin' ? 'rgba(26,151,162,0.35)' : 'var(--border)'}`, borderRadius: 99, padding: '1px 8px' }}>
-                          {tm.role}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* Joined date */}
-              <div style={{ display: 'flex', gap: 8, marginBottom: 20 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '5px 10px', background: 'var(--muted)', borderRadius: 6, fontSize: 12, color: 'var(--muted-foreground)' }}>
-                  <Clock size={12} />
-                  Joined {new Date(detail.joinedAt).toLocaleDateString()}
-                </div>
-              </div>
-
-              {/* Account section — non-participant only */}
-              {!isParticipant && isAdmin && (
-                <div style={{ borderTop: '1px solid var(--border)', paddingTop: 16, marginBottom: 16 }}>
-                  <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 10, display: 'block' }}>Account</label>
-                  <button
-                    style={{ fontSize: 12, color: 'var(--muted-foreground)', background: 'none', border: '1px solid var(--border)', borderRadius: 7, padding: '6px 14px', cursor: 'not-allowed', fontFamily: 'var(--font-sans)' }}
-                    title="SMTP is not configured"
-                    disabled
-                  >
-                    Reset password — SMTP not configured
-                  </button>
-                </div>
-              )}
-
-              {/* Superadmin actions */}
-              {isSuperadmin && !isParticipant && (
-                <div style={{ borderTop: '1px solid var(--border)', paddingTop: 16 }}>
-                  <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px', textTransform: 'uppercase', marginBottom: 10, display: 'block' }}>
-                    <AlertTriangle size={11} style={{ display: 'inline', marginRight: 5 }} />
-                    Super Admin Actions
-                  </label>
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-                    {!isInactivated && (
-                      <button
-                        onClick={() => setConfirm('promote')}
-                        style={{ fontSize: 12, color: '#6366F1', background: 'rgba(99,102,241,0.12)', border: '1px solid rgba(99,102,241,0.35)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)', display: 'flex', alignItems: 'center', gap: 6 }}
-                      >
-                        <Shield size={13} />
-                        Promote to Super Admin
-                      </button>
-                    )}
-                    {isInactivated ? (
-                      <button
-                        onClick={handleReactivate}
-                        disabled={busy}
-                        style={{ fontSize: 12, color: '#1A97A2', background: 'rgba(26,151,162,0.12)', border: '1px solid rgba(26,151,162,0.35)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)', opacity: busy ? 0.6 : 1 }}
-                      >
-                        Reactivate account
-                      </button>
-                    ) : (
-                      <button
-                        onClick={() => setConfirm('inactivate')}
-                        style={{ fontSize: 12, color: '#F59E0B', background: 'rgba(245,158,11,0.12)', border: '1px solid rgba(245,158,11,0.35)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)', display: 'flex', alignItems: 'center', gap: 6 }}
-                      >
-                        <Archive size={13} />
-                        Inactivate
-                      </button>
-                    )}
-                    {detail.deletable && (
-                      <button
-                        onClick={() => setConfirm('delete')}
-                        style={{ fontSize: 12, color: '#EF4444', background: 'rgba(239,68,68,0.12)', border: '1px solid rgba(239,68,68,0.35)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)', display: 'flex', alignItems: 'center', gap: 6 }}
-                      >
-                        <Trash2 size={13} />
-                        Delete
-                      </button>
-                    )}
-                    {/* Hidden once the account itself is deactivated — membership-level
-                        inactivation alone still leaves the account active on other teams */}
-                    {!detail.userArchivedAt && (
-                      <button
-                        onClick={() => setConfirm('revoke')}
-                        style={{ fontSize: 12, color: '#EF4444', background: 'rgba(239,68,68,0.12)', border: '1px solid rgba(239,68,68,0.35)', borderRadius: 7, padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)', display: 'flex', alignItems: 'center', gap: 6 }}
-                      >
-                        <ShieldOff size={13} />
-                        Revoke all access
-                      </button>
-                    )}
-                  </div>
-                  {activeActivityCount > 0 && (
-                    <div style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 8 }}>
-                      Member has {activeActivityCount} active {activeActivityCount === 1 ? 'activity' : 'activities'} — remove assignments before deleting.
-                    </div>
-                  )}
-                  {revokeResult && (
-                    <div style={{ fontSize: 12, color: 'var(--foreground)', background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.25)', borderRadius: 7, padding: '7px 12px', marginTop: 8 }}>
-                      Account deactivated · {revokeResult.membershipsInactivated} membership{revokeResult.membershipsInactivated === 1 ? '' : 's'} inactivated · {revokeResult.membershipsRemoved} removed
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-
-            {/* Footer */}
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 8, padding: '12px 20px', borderTop: '1px solid var(--border)', flexShrink: 0 }}>
-              <button onClick={onClose} style={cancelBtn}>Cancel</button>
-              {(isAdmin || currentUser?.id === detail.userId) && (
-                <button
-                  onClick={handleSave}
-                  disabled={busy}
-                  style={{ background: memberColor, color: '#fff', fontWeight: 600, fontSize: 13, padding: '7px 18px', borderRadius: 7, cursor: 'pointer', border: 'none', opacity: busy ? 0.6 : 1, fontFamily: 'var(--font-sans)' }}
+          {/* Member avatars */}
+          {showField('members') && assignedMembers.length > 0 && (
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                marginLeft: 'auto',
+              }}
+            >
+              {assignedMembers.slice(0, 3).map((m, i) => (
+                <div
+                  key={m.id}
+                  style={{
+                    marginLeft: i === 0 ? 0 : -6,
+                    zIndex: assignedMembers.length - i,
+                    outline: '2px solid var(--card)',
+                    borderRadius: '50%',
+                  }}
+                  title={m.name}
                 >
-                  {busy ? 'Saving…' : 'Save changes'}
-                </button>
+                  <Badge
+                    identity={{ color: m.color, icon: '__name_2__' }}
+                    name={m.name}
+                    shape="circle"
+                    size={20}
+                  />
+                </div>
+              ))}
+              {assignedMembers.length > 3 && (
+                <span style={{ fontSize: 10, color: 'var(--muted-foreground)', marginLeft: 4 }}>
+                  +{assignedMembers.length - 3}
+                </span>
               )}
             </div>
-          </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+````
+
+## File: packages/web/src/components/kanban/KanbanColumn.tsx
+````typescript
+/**
+ * KanbanColumn — a single droppable column with a header, card list, and "+ Add" affordance.
+ *
+ * Uses @dnd-kit useDroppable. When the column is non-droppable (combination/none grouping),
+ * the drop-target is simply not registered and DnD events are ignored.
+ *
+ * Hierarchy: when showHierarchy is on, CardTree renders each root activity plus
+ * its descendants indented beneath it. CardTree is defined at module level (outside
+ * KanbanColumn) to give it a stable identity across re-renders — defining a component
+ * inside another component causes React to unmount/remount the subtree on every render.
+ */
+
+import { useDroppable } from '@dnd-kit/core';
+import { ChevronDown, ChevronRight, Plus } from 'lucide-react';
+import { resolveColorHex } from '@/components/identity/identity-constants';
+import KanbanCard from './KanbanCard';
+import type { KanbanColumn as Column, KanbanCardField } from './kanbanColumns';
+import type { Member } from '@/types';
+import type { components } from '@draba/shared';
+
+type ApiActivity = components['schemas']['Activity'];
+type Status = components['schemas']['Status'];
+type Tag = components['schemas']['Tag'];
+
+// ── CardTree ──────────────────────────────────────────────────────────────────
+
+/**
+ * Renders one activity card and, when hierarchy is on, its children indented
+ * beneath it (recursively). Defined at module level so React gives it a stable
+ * component identity and doesn't unmount/remount on every KanbanColumn render.
+ */
+interface CardTreeProps {
+  activity: ApiActivity;
+  depth: number;
+  // Column rendering context
+  accentColor: string;
+  colorMap: Map<string, string>;
+  members: Member[];
+  statusById: Map<string, Status>;
+  tagById: Map<string, Tag>;
+  activityTitleById: Map<string, string>;
+  cardFields: KanbanCardField[];
+  suppressedFields: Set<KanbanCardField>;
+  selectedActivityId: string | null;
+  matchedIds: Set<string>;
+  activeMatchId: string | null;
+  hasQuery: boolean;
+  onCardClick: (activity: ApiActivity) => void;
+  // Hierarchy context
+  showHierarchy: boolean;
+  childrenByParentId: Map<string, ApiActivity[]>;
+  collapsedParents: Set<string>;
+  onToggleParent: (activityId: string) => void;
+}
+
+function CardTree({
+  activity,
+  depth,
+  accentColor,
+  colorMap,
+  members,
+  statusById,
+  tagById,
+  activityTitleById,
+  cardFields,
+  suppressedFields,
+  selectedActivityId,
+  matchedIds,
+  activeMatchId,
+  hasQuery,
+  onCardClick,
+  showHierarchy,
+  childrenByParentId,
+  collapsedParents,
+  onToggleParent,
+}: CardTreeProps) {
+  const children = showHierarchy ? (childrenByParentId.get(activity.id) ?? []) : [];
+  const hasChildren = children.length > 0;
+  const isCollapsed = collapsedParents.has(activity.id);
+  const indentPx = Math.min(depth, 2) * 16;
+
+  const cardTreeProps = {
+    accentColor,
+    colorMap,
+    members,
+    statusById,
+    tagById,
+    activityTitleById,
+    cardFields,
+    suppressedFields,
+    selectedActivityId,
+    matchedIds,
+    activeMatchId,
+    hasQuery,
+    onCardClick,
+    showHierarchy,
+    childrenByParentId,
+    collapsedParents,
+    onToggleParent,
+  };
+
+  return (
+    <>
+      <div style={depth > 0 ? { paddingLeft: indentPx } : undefined}>
+        <KanbanCard
+          activity={activity}
+          accentColor={colorMap.get(activity.id) ?? accentColor}
+          members={members}
+          statusById={statusById}
+          tagById={tagById}
+          activityTitleById={activityTitleById}
+          cardFields={cardFields}
+          suppressedFields={suppressedFields}
+          isSelected={selectedActivityId === activity.id}
+          dimmed={hasQuery && !matchedIds.has(activity.id)}
+          activeMatch={activeMatchId === activity.id}
+          isChildCard={depth > 0}
+          hasHierarchyChildren={hasChildren}
+          isHierarchyCollapsed={isCollapsed}
+          onToggleHierarchy={() => onToggleParent(activity.id)}
+          onClick={() => onCardClick(activity)}
+        />
+      </div>
+      {hasChildren && !isCollapsed && children.map(child => (
+        <CardTree
+          key={child.id}
+          activity={child}
+          depth={depth + 1}
+          {...cardTreeProps}
+        />
+      ))}
+    </>
+  );
+}
+
+interface Props {
+  column: Column;
+  members: Member[];
+  statusById: Map<string, Status>;
+  tagById: Map<string, Tag>;
+  /** Per-activity resolved hex color for card accent borders. */
+  colorMap: Map<string, string>;
+  /** Activity ID → title, for showing the parent name on child cards. */
+  activityTitleById: Map<string, string>;
+  cardFields: KanbanCardField[];
+  suppressedFields: Set<KanbanCardField>;
+  selectedActivityId: string | null;
+  matchedIds: Set<string>;
+  activeMatchId: string | null;
+  hasQuery: boolean;
+  isOver: boolean;
+  isCollapsed: boolean;
+  onToggleCollapse: () => void;
+  onCardClick: (activity: ApiActivity) => void;
+  onAddClick: () => void;
+  // ── Hierarchy ────────────────────────────────────────────────────────────────
+  showHierarchy: boolean;
+  /** Maps parentActivityId → direct child activities. */
+  childrenByParentId: Map<string, ApiActivity[]>;
+  /** Set of parent activity IDs whose children are hidden. */
+  collapsedParents: Set<string>;
+  onToggleParent: (activityId: string) => void;
+}
+
+const COLUMN_WIDTH = 260;
+const COLLAPSED_WIDTH = 40;
+
+export default function KanbanColumn({
+  column,
+  members,
+  statusById,
+  tagById,
+  colorMap,
+  activityTitleById,
+  cardFields,
+  suppressedFields,
+  selectedActivityId,
+  matchedIds,
+  activeMatchId,
+  hasQuery,
+  isOver,
+  isCollapsed,
+  onToggleCollapse,
+  onCardClick,
+  onAddClick,
+  showHierarchy,
+  childrenByParentId,
+  collapsedParents,
+  onToggleParent,
+}: Props) {
+  const { setNodeRef, isOver: dndIsOver } = useDroppable({
+    id: column.id,
+    disabled: !column.droppable,
+    data: { columnId: column.id },
+  });
+
+  const accentColor = column.color
+    ? (resolveColorHex(column.color) ?? column.color)
+    : '#6b7280';
+
+  const highlighted = isOver || dndIsOver;
+
+  // Shared props forwarded to each CardTree node.
+  const treeProps = {
+    accentColor,
+    colorMap,
+    members,
+    statusById,
+    tagById,
+    activityTitleById,
+    cardFields,
+    suppressedFields,
+    selectedActivityId,
+    matchedIds,
+    activeMatchId,
+    hasQuery,
+    onCardClick,
+    showHierarchy,
+    childrenByParentId,
+    collapsedParents,
+    onToggleParent,
+  };
+
+  if (isCollapsed) {
+    return (
+      <div
+        style={{
+          width: COLLAPSED_WIDTH,
+          flexShrink: 0,
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          background: 'var(--muted)',
+          borderRadius: 8,
+          padding: '8px 0',
+          cursor: 'pointer',
+          border: '1px solid var(--border)',
+          minHeight: 120,
+          gap: 8,
+        }}
+        onClick={onToggleCollapse}
+        title={`${column.label} (${column.items.length})`}
+      >
+        <ChevronRight size={14} strokeWidth={2} style={{ color: 'var(--muted-foreground)' }} />
+        <span
+          style={{
+            fontSize: 11,
+            fontWeight: 600,
+            color: 'var(--muted-foreground)',
+            writingMode: 'vertical-rl',
+            transform: 'rotate(180deg)',
+            letterSpacing: '0.04em',
+          }}
+        >
+          {column.label}
+        </span>
+        <span
+          style={{
+            fontSize: 10,
+            color: 'var(--muted-foreground)',
+            background: 'var(--border)',
+            borderRadius: 9,
+            padding: '1px 5px',
+          }}
+        >
+          {column.items.length}
+        </span>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      ref={setNodeRef}
+      style={{
+        width: COLUMN_WIDTH,
+        flexShrink: 0,
+        display: 'flex',
+        flexDirection: 'column',
+        background: highlighted ? `${accentColor}0d` : 'var(--muted)',
+        border: `1px solid ${highlighted ? accentColor + '80' : 'var(--border)'}`,
+        borderRadius: 8,
+        transition: 'background 120ms, border-color 120ms',
+        maxHeight: '100%',
+      }}
+    >
+      {/* Column header */}
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 6,
+          padding: '8px 10px',
+          borderBottom: '1px solid var(--border)',
+          flexShrink: 0,
+        }}
+      >
+        {/* Accent dot */}
+        <span
+          style={{
+            width: 9,
+            height: 9,
+            borderRadius: '50%',
+            background: accentColor,
+            flexShrink: 0,
+          }}
+        />
+
+        {/* Column label */}
+        <span
+          style={{
+            flex: 1,
+            fontSize: 12,
+            fontWeight: 600,
+            color: 'var(--foreground)',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+          }}
+        >
+          {column.label}
+        </span>
+
+        {/* Count badge */}
+        <span
+          style={{
+            fontSize: 11,
+            color: 'var(--muted-foreground)',
+            background: 'var(--border)',
+            borderRadius: 9,
+            padding: '1px 6px',
+            fontWeight: 600,
+          }}
+        >
+          {column.items.length}
+        </span>
+
+        {/* Collapse toggle */}
+        <button
+          onClick={onToggleCollapse}
+          title="Collapse column"
+          style={{
+            background: 'none',
+            border: 'none',
+            cursor: 'pointer',
+            padding: 2,
+            color: 'var(--muted-foreground)',
+            display: 'flex',
+            alignItems: 'center',
+          }}
+        >
+          <ChevronDown size={13} strokeWidth={2} />
+        </button>
+      </div>
+
+      {/* Card list — scrolls independently */}
+      <div
+        style={{
+          flex: 1,
+          overflowY: 'auto',
+          padding: '8px 8px 4px',
+          minHeight: 80,
+        }}
+      >
+        {column.items.length === 0 ? (
+          <div
+            style={{
+              padding: '12px 8px',
+              fontSize: 12,
+              color: 'var(--muted-foreground)',
+              textAlign: 'center',
+              fontStyle: 'italic',
+            }}
+          >
+            No activities
+          </div>
+        ) : (
+          column.items.map(act => (
+            <CardTree
+              key={act.id}
+              activity={act}
+              depth={0}
+              {...treeProps}
+            />
+          ))
         )}
       </div>
-    </div>,
-    document.body,
-  )
+
+      {/* + Add affordance */}
+      <div style={{ padding: '4px 8px 8px', flexShrink: 0 }}>
+        <button
+          onClick={onAddClick}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 4,
+            width: '100%',
+            padding: '5px 8px',
+            background: 'none',
+            border: '1px dashed var(--border)',
+            borderRadius: 6,
+            cursor: 'pointer',
+            fontSize: 12,
+            color: 'var(--muted-foreground)',
+            transition: 'border-color 120ms, color 120ms',
+          }}
+          onMouseEnter={e => {
+            e.currentTarget.style.borderColor = accentColor;
+            e.currentTarget.style.color = accentColor;
+          }}
+          onMouseLeave={e => {
+            e.currentTarget.style.borderColor = 'var(--border)';
+            e.currentTarget.style.color = 'var(--muted-foreground)';
+          }}
+        >
+          <Plus size={12} strokeWidth={2} />
+          Add
+        </button>
+      </div>
+    </div>
+  );
+}
+````
+
+## File: packages/web/src/components/kanban/kanbanColumns.ts
+````typescript
+/**
+ * kanbanColumns — pure column-building and sort logic for the Kanban view.
+ *
+ * Given a groupBy mode plus the visible activities, team members, and timeline
+ * statuses, produces an ordered list of KanbanColumn objects ready for rendering.
+ * All grouping/labeling/ordering lives here; the React components stay thin.
+ */
+
+import type { components } from '@draba/shared';
+import {
+  memberComboKey,
+  orderedComboIds,
+  memberComboLabel,
+  comboSortComparator,
+  UNASSIGNED_KEY,
+} from '@/lib/memberGroups';
+
+type ApiActivity = components['schemas']['Activity'];
+type Status = components['schemas']['Status'];
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
+
+// ── Public types ───────────────────────────────────────────────────────────────
+
+export type KanbanGroupBy =
+  | 'status'
+  | 'member'
+  | 'member-combination';
+
+export type KanbanSortBy =
+  | 'startDate'
+  | 'endDate'
+  | 'title'
+  | 'percentComplete'
+  | 'updatedAt';
+
+export type KanbanCardField =
+  | 'dateRange'
+  | 'status'
+  | 'tags'
+  | 'members'
+  | 'percentComplete'
+  | 'parent'
+  | 'description';
+
+export const DEFAULT_CARD_FIELDS: KanbanCardField[] = [
+  'dateRange',
+  'status',
+  'tags',
+  'members',
+];
+
+/** Sentinel IDs for "bucket with no value" columns. */
+export const NO_STATUS_ID  = '__no-status__';
+export const UNASSIGNED_ID = '__unassigned__';
+
+/**
+ * A resolved column, ready for rendering.
+ *
+ * `droppable: false` for combination and None groupings (drop semantics are
+ * ambiguous or undefined). `dropValue` encodes what patch to apply on drop.
+ */
+export interface KanbanColumn {
+  id: string;
+  label: string;
+  /** Hex color for the column accent (header dot, drop-highlight tint). */
+  color?: string;
+  icon?: string;
+  droppable: boolean;
+  /** The patch values to apply when a card is dropped into this column. */
+  dropValue?: {
+    statusId?: string | null;
+    assignedMemberIds?: string[];
+    parentActivityId?: string | null;
+  };
+  items: ApiActivity[];
+}
+
+// ── Sort comparators ───────────────────────────────────────────────────────────
+
+function cmp<T>(a: T, b: T, dir: 1 | -1 = 1): number {
+  if (a == null && b == null) return 0;
+  if (a == null) return 1;  // nulls last
+  if (b == null) return -1;
+  return a < b ? -dir : a > b ? dir : 0;
+}
+
+/** Sort activities within a column according to the chosen sort mode. */
+export function sortActivities(
+  activities: ApiActivity[],
+  sortBy: KanbanSortBy,
+): ApiActivity[] {
+  const sorted = [...activities];
+  switch (sortBy) {
+    case 'startDate':
+      // cmp with string comparison; null/undefined treated as nulls-last
+      sorted.sort((a, b) => {
+        const av = a.startAt ?? null;
+        const bv = b.startAt ?? null;
+        return cmp(av, bv);
+      });
+      break;
+    case 'endDate':
+      sorted.sort((a, b) => {
+        const av = a.endAt ?? null;
+        const bv = b.endAt ?? null;
+        return cmp(av, bv);
+      });
+      break;
+    case 'title':
+      sorted.sort((a, b) => a.title.localeCompare(b.title));
+      break;
+    case 'percentComplete':
+      // Descending: highest first, nulls last.
+      sorted.sort((a, b) => {
+        const av = a.percentComplete ?? null;
+        const bv = b.percentComplete ?? null;
+        if (av === null && bv === null) return 0;
+        if (av === null) return 1;
+        if (bv === null) return -1;
+        return bv - av;
+      });
+      break;
+    case 'updatedAt':
+      // Most-recently-updated first
+      sorted.sort((a, b) => cmp(b.updatedAt, a.updatedAt));
+      break;
+  }
+  return sorted;
+}
+
+// ── buildColumns ──────────────────────────────────────────────────────────────
+
+/**
+ * Build the ordered column list from the active groupBy, activities, members,
+ * and statuses. Applies `sortBy` within each column.
+ */
+export function buildColumns(
+  groupBy: KanbanGroupBy,
+  activities: ApiActivity[],
+  members: TeamMemberWithUser[],
+  statuses: Status[],
+  sortBy: KanbanSortBy,
+): KanbanColumn[] {
+  switch (groupBy) {
+    case 'status':             return buildStatusColumns(activities, statuses, sortBy);
+    case 'member':             return buildMemberColumns(activities, members, sortBy);
+    case 'member-combination': return buildCombinationColumns(activities, members, sortBy);
+  }
+}
+
+// ── Status columns ─────────────────────────────────────────────────────────────
+
+function buildStatusColumns(
+  activities: ApiActivity[],
+  statuses: Status[],
+  sortBy: KanbanSortBy,
+): KanbanColumn[] {
+  // Bucket activities by statusId (null → no-status bucket).
+  const byStatus = new Map<string | null, ApiActivity[]>();
+  byStatus.set(null, []);
+  for (const s of statuses) byStatus.set(s.id, []);
+  for (const act of activities) {
+    const key = (act as ApiActivity & { statusId?: string | null }).statusId ?? null;
+    const bucket = byStatus.get(key) ?? byStatus.get(null)!;
+    bucket.push(act);
+  }
+
+  // "No status" column first, then statuses in position order.
+  const noStatusItems = sortActivities(byStatus.get(null) ?? [], sortBy);
+  const statusCols: KanbanColumn[] = statuses
+    .slice()
+    .sort((a, b) => (a.position ?? 0) - (b.position ?? 0))
+    .map(s => ({
+      id: s.id,
+      label: s.name,
+      color: s.color ?? undefined,
+      icon: s.icon ?? undefined,
+      droppable: true,
+      dropValue: { statusId: s.id },
+      items: sortActivities(byStatus.get(s.id) ?? [], sortBy),
+    }));
+
+  return [
+    {
+      id: NO_STATUS_ID,
+      label: 'No status',
+      droppable: true,
+      dropValue: { statusId: null },
+      items: noStatusItems,
+    },
+    ...statusCols,
+  ];
+}
+
+// ── Member columns ─────────────────────────────────────────────────────────────
+
+function buildMemberColumns(
+  activities: ApiActivity[],
+  members: TeamMemberWithUser[],
+  sortBy: KanbanSortBy,
+): KanbanColumn[] {
+  // Assign each activity to its first (primary) member; multi-member cards
+  // appear only once in the primary member's column. Unassigned → UNASSIGNED_ID.
+  const byMember = new Map<string, ApiActivity[]>();
+  byMember.set(UNASSIGNED_ID, []);
+  for (const m of members) byMember.set(m.id, []);
+  for (const act of activities) {
+    const ids = act.assignedMemberIds ?? [];
+    const key = ids.length > 0 ? ids[0] : UNASSIGNED_ID;
+    const bucket = byMember.get(key) ?? byMember.get(UNASSIGNED_ID)!;
+    bucket.push(act);
+  }
+
+  const memberCols: KanbanColumn[] = members.map(m => ({
+    id: m.id,
+    label: m.displayName || m.email || 'Unknown',
+    color: m.color ?? undefined,
+    droppable: true,
+    dropValue: { assignedMemberIds: [m.id] },
+    items: sortActivities(byMember.get(m.id) ?? [], sortBy),
+  }));
+
+  return [
+    {
+      id: UNASSIGNED_ID,
+      label: 'Unassigned',
+      droppable: true,
+      dropValue: { assignedMemberIds: [] },
+      items: sortActivities(byMember.get(UNASSIGNED_ID) ?? [], sortBy),
+    },
+    ...memberCols,
+  ];
+}
+
+// ── Combination columns ────────────────────────────────────────────────────────
+
+function buildCombinationColumns(
+  activities: ApiActivity[],
+  members: TeamMemberWithUser[],
+  sortBy: KanbanSortBy,
+): KanbanColumn[] {
+  const memberOrder = members.map(m => m.id);
+  const nameById = new Map(members.map(m => [m.id, m.displayName || m.email || 'Unknown']));
+
+  const byCombo = new Map<string, ApiActivity[]>();
+  for (const act of activities) {
+    const key = memberComboKey(act.assignedMemberIds ?? []);
+    if (!byCombo.has(key)) byCombo.set(key, []);
+    byCombo.get(key)!.push(act);
+  }
+
+  const comparator = comboSortComparator(memberOrder);
+  const sortedKeys = [...byCombo.keys()].sort(comparator);
+
+  return sortedKeys.map(key => {
+    const orderedIds = key === UNASSIGNED_KEY
+      ? []
+      : orderedComboIds(key.split('|'), memberOrder);
+    const label = key === UNASSIGNED_KEY
+      ? 'Unassigned'
+      : memberComboLabel(orderedIds, nameById);
+    return {
+      id: key,
+      label,
+      // Combination columns are non-droppable.
+      droppable: false,
+      items: sortActivities(byCombo.get(key) ?? [], sortBy),
+    };
+  });
+}
+````
+
+## File: packages/web/src/components/kanban/KanbanToolbar.tsx
+````typescript
+/**
+ * KanbanToolbar — sub-toolbar for the Kanban view.
+ *
+ * Controls: Group by · Sort by · Color by · Card fields multi-select · Export/Share stubs.
+ * Follows the same visual idiom as GanttToolbar and CalendarToolbar.
+ */
+
+import { useState, useRef, useEffect } from 'react';
+import { Download, Share2, ChevronDown, Check, Network } from 'lucide-react';
+import type { ColorBy } from '@/components/gantt/GanttToolbar';
+import type { KanbanGroupBy, KanbanSortBy, KanbanCardField } from './kanbanColumns';
+import { DEFAULT_CARD_FIELDS } from './kanbanColumns';
+
+export type { KanbanGroupBy, KanbanSortBy, KanbanCardField };
+
+interface Props {
+  groupBy: KanbanGroupBy;
+  onGroupByChange: (g: KanbanGroupBy) => void;
+  sortBy: KanbanSortBy;
+  onSortByChange: (s: KanbanSortBy) => void;
+  colorBy: ColorBy;
+  onColorByChange: (c: ColorBy) => void;
+  cardFields: KanbanCardField[];
+  onCardFieldsChange: (fields: KanbanCardField[]) => void;
+  showHierarchy: boolean;
+  onShowHierarchyChange: (on: boolean) => void;
+  onExport?: () => void;
+  onShare?: () => void;
+}
+
+const btn = 'flex items-center justify-center gap-[5px] h-[26px] px-2 border border-border rounded-md bg-card text-foreground text-xs font-medium cursor-pointer shrink-0 hover:bg-muted transition-colors';
+const divider = 'w-px h-4 bg-border shrink-0';
+const label = 'text-[11px] text-muted-foreground shrink-0';
+const select = 'h-[26px] px-1.5 border border-border rounded-md bg-card text-foreground text-xs cursor-pointer shrink-0';
+
+const ALL_CARD_FIELDS: { id: KanbanCardField; label: string }[] = [
+  { id: 'dateRange',       label: 'Date range' },
+  { id: 'status',          label: 'Status' },
+  { id: 'tags',            label: 'Tags' },
+  { id: 'members',         label: 'Assigned to' },
+  { id: 'percentComplete', label: '% Complete' },
+  { id: 'parent',          label: 'Parent' },
+  { id: 'description',     label: 'Description' },
+];
+
+export default function KanbanToolbar({
+  groupBy,
+  onGroupByChange,
+  sortBy,
+  onSortByChange,
+  colorBy,
+  onColorByChange,
+  cardFields,
+  onCardFieldsChange,
+  showHierarchy,
+  onShowHierarchyChange,
+  onExport,
+  onShare,
+}: Props) {
+  const [cardFieldsOpen, setCardFieldsOpen] = useState(false);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!cardFieldsOpen) return;
+    function handleClick(e: MouseEvent) {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
+        setCardFieldsOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, [cardFieldsOpen]);
+
+  function toggleField(id: KanbanCardField) {
+    if (cardFields.includes(id)) {
+      onCardFieldsChange(cardFields.filter(f => f !== id));
+    } else {
+      onCardFieldsChange([...cardFields, id]);
+    }
+  }
+
+  const activeFieldCount = cardFields.length;
+
+  return (
+    <div
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
+        padding: '0 12px',
+        height: 36,
+        background: 'var(--card)',
+        borderBottom: '1px solid var(--border)',
+        flexShrink: 0,
+      }}
+    >
+      {/* Group by */}
+      <span className={label}>Group by</span>
+      <select
+        className={select}
+        value={groupBy}
+        onChange={e => onGroupByChange(e.target.value as KanbanGroupBy)}
+      >
+        <option value="status">Status</option>
+        <option value="member">Assigned to</option>
+        <option value="member-combination">Assigned to (combo)</option>
+      </select>
+
+      <div className={divider} />
+
+      {/* Sort by */}
+      <span className={label}>Sort by</span>
+      <select
+        className={select}
+        value={sortBy}
+        onChange={e => onSortByChange(e.target.value as KanbanSortBy)}
+      >
+        <option value="startDate">Start date</option>
+        <option value="endDate">End date</option>
+        <option value="title">Title</option>
+        <option value="percentComplete">% Complete</option>
+        <option value="updatedAt">Recently updated</option>
+      </select>
+
+      <div className={divider} />
+
+      {/* Color by */}
+      <span className={label}>Color by</span>
+      <select
+        className={select}
+        value={colorBy}
+        onChange={e => onColorByChange(e.target.value as ColorBy)}
+      >
+        <option value="activity">Activity</option>
+        <option value="member">Member</option>
+        <option value="status">Status</option>
+      </select>
+
+      <div className={divider} />
+
+      {/* Card fields multi-select */}
+      <div ref={dropdownRef} style={{ position: 'relative' }}>
+        <button
+          className={btn}
+          onClick={() => setCardFieldsOpen(o => !o)}
+          title="Configure card fields"
+        >
+          Card fields
+          {activeFieldCount > 0 && (
+            <span
+              style={{
+                background: 'var(--primary)',
+                color: 'var(--primary-foreground)',
+                borderRadius: 9,
+                fontSize: 10,
+                fontWeight: 700,
+                padding: '0 5px',
+                lineHeight: '16px',
+              }}
+            >
+              {activeFieldCount}
+            </span>
+          )}
+          <ChevronDown size={11} strokeWidth={2} />
+        </button>
+
+        {cardFieldsOpen && (
+          <div
+            style={{
+              position: 'absolute',
+              top: 'calc(100% + 4px)',
+              left: 0,
+              background: 'var(--card)',
+              border: '1px solid var(--border)',
+              borderRadius: 8,
+              boxShadow: '0 4px 16px rgba(0,0,0,0.12)',
+              zIndex: 50,
+              minWidth: 160,
+              padding: '4px 0',
+            }}
+          >
+            {ALL_CARD_FIELDS.map(f => {
+              const checked = cardFields.includes(f.id);
+              return (
+                <button
+                  key={f.id}
+                  onClick={() => toggleField(f.id)}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 8,
+                    width: '100%',
+                    padding: '6px 12px',
+                    background: 'none',
+                    border: 'none',
+                    cursor: 'pointer',
+                    fontSize: 12,
+                    color: 'var(--foreground)',
+                    textAlign: 'left',
+                  }}
+                  onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+                  onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                >
+                  <span
+                    style={{
+                      width: 14,
+                      height: 14,
+                      border: '1.5px solid var(--border)',
+                      borderRadius: 3,
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      background: checked ? 'var(--primary)' : 'transparent',
+                      borderColor: checked ? 'var(--primary)' : 'var(--border)',
+                      flexShrink: 0,
+                    }}
+                  >
+                    {checked && <Check size={9} strokeWidth={3} color="var(--primary-foreground)" />}
+                  </span>
+                  {f.label}
+                </button>
+              );
+            })}
+            <div style={{ height: 1, background: 'var(--border)', margin: '4px 0' }} />
+            <button
+              onClick={() => onCardFieldsChange(DEFAULT_CARD_FIELDS)}
+              style={{
+                display: 'flex',
+                width: '100%',
+                padding: '6px 12px',
+                background: 'none',
+                border: 'none',
+                cursor: 'pointer',
+                fontSize: 11,
+                color: 'var(--muted-foreground)',
+                textAlign: 'left',
+              }}
+              onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+              onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+            >
+              Reset to defaults
+            </button>
+          </div>
+        )}
+      </div>
+
+      <div className={divider} />
+
+      {/* Hierarchy toggle */}
+      <button
+        className={btn}
+        onClick={() => onShowHierarchyChange(!showHierarchy)}
+        title={showHierarchy
+          ? 'Hierarchy on: child activities nest under their parent. Click to show flat list.'
+          : 'Hierarchy off: all activities shown at top level. Click to nest children under parents.'}
+        style={{
+          background: showHierarchy ? 'var(--primary)' : undefined,
+          color: showHierarchy ? 'var(--primary-foreground)' : undefined,
+          borderColor: showHierarchy ? 'var(--primary)' : undefined,
+        }}
+      >
+        <Network size={12} strokeWidth={1.8} />
+        Hierarchy
+      </button>
+
+      {/* Stubs — pushed to the right */}
+      <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
+        <div className={divider} />
+        <button className={btn} onClick={onExport} title="Export (coming soon)">
+          <Download size={12} strokeWidth={1.8} />
+          Export
+        </button>
+        <button className={btn} onClick={onShare} title="Share (coming soon)">
+          <Share2 size={12} strokeWidth={1.8} />
+          Share
+        </button>
+      </div>
+    </div>
+  );
+}
+````
+
+## File: packages/web/src/components/kanban/KanbanView.test.ts
+````typescript
+/**
+ * Unit tests for kanbanColumns pure logic.
+ * Mirrors the pattern used by calendarLanes.test.ts.
+ */
+
+import { describe, it, expect } from 'vitest';
+import {
+  buildColumns,
+  sortActivities,
+  NO_STATUS_ID,
+  UNASSIGNED_ID,
+  type KanbanGroupBy,
+} from './kanbanColumns';
+import type { components } from '@draba/shared';
+
+type ApiActivity = components['schemas']['Activity'];
+type Status = components['schemas']['Status'];
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
+
+// ── Fixtures ──────────────────────────────────────────────────────────────────
+
+function makeActivity(overrides: Partial<ApiActivity> & { id: string }): ApiActivity {
+  return {
+    id: overrides.id,
+    title: overrides.title ?? `Activity ${overrides.id}`,
+    timelineId: 'tl1',
+    startAt: overrides.startAt ?? '2026-01-01T00:00:00Z',
+    endAt: overrides.endAt ?? '2026-01-07T00:00:00Z',
+    color: overrides.color ?? '#288C9B',
+    createdAt: '2026-01-01T00:00:00Z',
+    updatedAt: overrides.updatedAt ?? '2026-01-01T00:00:00Z',
+    assignedMemberIds: overrides.assignedMemberIds ?? [],
+    tagIds: overrides.tagIds ?? [],
+    percentComplete: overrides.percentComplete ?? null,
+    archivedAt: null,
+    description: overrides.description ?? null,
+    icon: overrides.icon ?? null,
+    location: overrides.location ?? null,
+    notes: overrides.notes ?? null,
+    statusId: overrides.statusId ?? null,
+    parentActivityId: overrides.parentActivityId ?? null,
+    url: overrides.url ?? null,
+  } as ApiActivity;
+}
+
+function makeStatus(id: string, name: string, position: number, color = '#288C9B'): Status {
+  return { id, name, position, color, icon: null, isClosed: false, timelineId: 'tl1', createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' } as Status;
+}
+
+function makeMember(id: string, displayName: string): TeamMemberWithUser {
+  return { id, displayName, email: `${id}@test.com`, role: 'member', userId: id, color: null, icon: null, archivedAt: null, joinedAt: '2026-01-01T00:00:00Z', teamId: 'team1' } as unknown as TeamMemberWithUser;
+}
+
+const statuses = [
+  makeStatus('s1', 'Planned', 0, '#888'),
+  makeStatus('s2', 'In Progress', 1, '#1A97A2'),
+  makeStatus('s3', 'Done', 2, '#22c55e'),
+];
+
+const members = [
+  makeMember('m1', 'Alice'),
+  makeMember('m2', 'Bob'),
+  makeMember('m3', 'Carol'),
+];
+
+// ── sortActivities ─────────────────────────────────────────────────────────────
+
+describe('sortActivities', () => {
+  it('sorts by startDate ascending', () => {
+    const acts = [
+      makeActivity({ id: 'c', startAt: '2026-03-01T00:00:00Z' }),
+      makeActivity({ id: 'a', startAt: '2026-01-01T00:00:00Z' }),
+      makeActivity({ id: 'b', startAt: '2026-02-01T00:00:00Z' }),
+    ];
+    const result = sortActivities(acts, 'startDate');
+    expect(result.map(a => a.id)).toEqual(['a', 'b', 'c']);
+  });
+
+  it('sorts by title A-Z', () => {
+    const acts = [
+      makeActivity({ id: '1', title: 'Zebra' }),
+      makeActivity({ id: '2', title: 'Alpha' }),
+      makeActivity({ id: '3', title: 'Mango' }),
+    ];
+    const result = sortActivities(acts, 'title');
+    expect(result.map(a => a.title)).toEqual(['Alpha', 'Mango', 'Zebra']);
+  });
+
+  it('sorts percentComplete descending, nulls last', () => {
+    const acts = [
+      makeActivity({ id: 'a', percentComplete: 50 }),
+      makeActivity({ id: 'b', percentComplete: null }),
+      makeActivity({ id: 'c', percentComplete: 100 }),
+    ];
+    const result = sortActivities(acts, 'percentComplete');
+    expect(result.map(a => a.id)).toEqual(['c', 'a', 'b']);
+  });
+
+  it('sorts updatedAt descending (most recent first)', () => {
+    const acts = [
+      makeActivity({ id: 'old', updatedAt: '2026-01-01T00:00:00Z' }),
+      makeActivity({ id: 'new', updatedAt: '2026-06-01T00:00:00Z' }),
+    ];
+    const result = sortActivities(acts, 'updatedAt');
+    expect(result[0].id).toBe('new');
+  });
+});
+
+// ── buildColumns — status ──────────────────────────────────────────────────────
+
+describe('buildColumns: status', () => {
+  it('creates No-status column plus one column per status in position order', () => {
+    const acts = [makeActivity({ id: 'a1', statusId: 's1' })];
+    const cols = buildColumns('status', acts, [], statuses, 'startDate');
+    expect(cols[0].id).toBe(NO_STATUS_ID);
+    expect(cols[0].label).toBe('No status');
+    expect(cols.slice(1).map(c => c.id)).toEqual(['s1', 's2', 's3']);
+  });
+
+  it('routes activities to the correct status column', () => {
+    const acts = [
+      makeActivity({ id: 'a1', statusId: 's2' }),
+      makeActivity({ id: 'a2', statusId: null }),
+      makeActivity({ id: 'a3', statusId: 's1' }),
+    ];
+    const cols = buildColumns('status', acts, [], statuses, 'startDate');
+    expect(cols.find(c => c.id === NO_STATUS_ID)!.items.map(a => a.id)).toEqual(['a2']);
+    expect(cols.find(c => c.id === 's1')!.items.map(a => a.id)).toEqual(['a3']);
+    expect(cols.find(c => c.id === 's2')!.items.map(a => a.id)).toEqual(['a1']);
+  });
+
+  it('status columns are droppable; no-status column is droppable with null statusId', () => {
+    const cols = buildColumns('status', [], [], statuses, 'startDate');
+    const noStatus = cols.find(c => c.id === NO_STATUS_ID)!;
+    expect(noStatus.droppable).toBe(true);
+    expect(noStatus.dropValue).toEqual({ statusId: null });
+    const s1 = cols.find(c => c.id === 's1')!;
+    expect(s1.droppable).toBe(true);
+    expect(s1.dropValue).toEqual({ statusId: 's1' });
+  });
+
+  it('handles unknown statusId gracefully (routes to no-status)', () => {
+    const acts = [makeActivity({ id: 'x', statusId: 'deleted-status' })];
+    const cols = buildColumns('status', acts, [], statuses, 'startDate');
+    expect(cols.find(c => c.id === NO_STATUS_ID)!.items.map(a => a.id)).toEqual(['x']);
+  });
+});
+
+// ── buildColumns — member ──────────────────────────────────────────────────────
+
+describe('buildColumns: member', () => {
+  it('creates Unassigned column first, then one column per member', () => {
+    const cols = buildColumns('member', [], members, [], 'startDate');
+    expect(cols[0].id).toBe(UNASSIGNED_ID);
+    expect(cols.slice(1).map(c => c.id)).toEqual(['m1', 'm2', 'm3']);
+  });
+
+  it('routes activity to primary (first) member column', () => {
+    const acts = [makeActivity({ id: 'a', assignedMemberIds: ['m2', 'm1'] })];
+    const cols = buildColumns('member', acts, members, [], 'startDate');
+    expect(cols.find(c => c.id === 'm2')!.items.map(a => a.id)).toEqual(['a']);
+    expect(cols.find(c => c.id === 'm1')!.items).toHaveLength(0);
+  });
+
+  it('routes unassigned activity to Unassigned column', () => {
+    const acts = [makeActivity({ id: 'u', assignedMemberIds: [] })];
+    const cols = buildColumns('member', acts, members, [], 'startDate');
+    expect(cols.find(c => c.id === UNASSIGNED_ID)!.items.map(a => a.id)).toEqual(['u']);
+  });
+
+  it('dropValue for member column sets assignedMemberIds to singleton', () => {
+    const cols = buildColumns('member', [], members, [], 'startDate');
+    const m1col = cols.find(c => c.id === 'm1')!;
+    expect(m1col.dropValue).toEqual({ assignedMemberIds: ['m1'] });
+  });
+
+  it('dropValue for Unassigned column sets assignedMemberIds to empty', () => {
+    const cols = buildColumns('member', [], members, [], 'startDate');
+    const unassigned = cols.find(c => c.id === UNASSIGNED_ID)!;
+    expect(unassigned.dropValue).toEqual({ assignedMemberIds: [] });
+  });
+});
+
+// ── buildColumns — member-combination ─────────────────────────────────────────
+
+describe('buildColumns: member-combination', () => {
+  it('groups by exact assignee set, not primary member', () => {
+    const acts = [
+      makeActivity({ id: 'solo-alice', assignedMemberIds: ['m1'] }),
+      makeActivity({ id: 'alice-bob', assignedMemberIds: ['m1', 'm2'] }),
+      makeActivity({ id: 'solo-alice-2', assignedMemberIds: ['m1'] }),
+    ];
+    const cols = buildColumns('member-combination', acts, members, [], 'startDate');
+    const aliceCol = cols.find(c => c.label === 'Alice')!;
+    expect(aliceCol.items).toHaveLength(2);
+    const combCol = cols.find(c => c.label === 'Alice and Bob')!;
+    expect(combCol.items).toHaveLength(1);
+  });
+
+  it('combination columns are non-droppable', () => {
+    const acts = [makeActivity({ id: 'a', assignedMemberIds: ['m1', 'm2'] })];
+    const cols = buildColumns('member-combination', acts, members, [], 'startDate');
+    expect(cols.every(c => !c.droppable)).toBe(true);
+  });
+
+  it('empty assignee set maps to Unassigned column', () => {
+    const acts = [makeActivity({ id: 'u', assignedMemberIds: [] })];
+    const cols = buildColumns('member-combination', acts, members, [], 'startDate');
+    const unassigned = cols.find(c => c.label === 'Unassigned');
+    expect(unassigned).toBeDefined();
+    expect(unassigned!.items).toHaveLength(1);
+  });
+});
+
+// ── empty activities ───────────────────────────────────────────────────────────
+
+describe('buildColumns with no activities', () => {
+  const emptyActs: ApiActivity[] = [];
+
+  (['status', 'member', 'member-combination'] as KanbanGroupBy[]).forEach(mode => {
+    it(`${mode} groupBy produces columns without throwing`, () => {
+      expect(() =>
+        buildColumns(mode, emptyActs, members, statuses, 'startDate'),
+      ).not.toThrow();
+    });
+  });
+});
+````
+
+## File: packages/web/src/components/kanban/KanbanView.tsx
+````typescript
+/**
+ * KanbanView — data container for the Kanban board.
+ *
+ * Mirrors CalendarView: fetches activities + members, applies the active filter
+ * and Find query, builds columns via kanbanColumns, and hands off to KanbanBoard
+ * for rendering. Owns no layout chrome — groupBy, sortBy, colorBy, and cardFields
+ * come from DashboardPage.
+ */
+
+import { useMemo, useEffect, useCallback, useState } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
+import KanbanBoard from './KanbanBoard';
+import {
+  buildColumns,
+  DEFAULT_CARD_FIELDS,
+  type KanbanGroupBy,
+  type KanbanSortBy,
+  type KanbanCardField,
+} from './kanbanColumns';
+import { resolveActivityColor } from '@/lib/activityColor';
+import { useTimelineActivities, useTeamMembers, useUpdateActivity } from '@/hooks/useTeamActivities';
+import { matchEvents } from '@/lib/findMatcher';
+import { useFind } from '@/contexts/FindContext';
+import { useFilter } from '@/contexts/FilterContext';
+import { applyActiveFilter } from '@/lib/presetFilters';
+import { useUpsertPreference } from '@/hooks/usePreferences';
+import { resolveColorHex } from '@/components/identity/identity-constants';
+import type { ColorBy } from '@/components/gantt/GanttToolbar';
+import type { components } from '@draba/shared';
+import type { Member } from '@/types';
+import { MEMBER_COLORS } from '@/types';
+import type { DropPayload } from './KanbanBoard';
+
+type ApiActivity = components['schemas']['Activity'];
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
+type Status = components['schemas']['Status'];
+type SavedFilter = components['schemas']['SavedFilter'];
+type Tag = components['schemas']['Tag'];
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function initialsFrom(name: string): string {
+  return name.split(/\s+/).map(w => w[0] ?? '').slice(0, 2).join('').toUpperCase();
+}
+
+function toMember(m: TeamMemberWithUser, index: number): Member {
+  const name = m.displayName || m.email || 'Unknown';
+  return {
+    id: m.id,
+    name,
+    initials: initialsFrom(name),
+    color: resolveColorHex(m.color) || MEMBER_COLORS[index % MEMBER_COLORS.length],
+  };
+}
+
+// ── Props ─────────────────────────────────────────────────────────────────────
+
+interface Props {
+  teamId: string;
+  timelineId: string;
+  groupBy: KanbanGroupBy;
+  sortBy: KanbanSortBy;
+  colorBy: ColorBy;
+  cardFields: KanbanCardField[];
+  collapsedColumnIds: string[];
+  onCollapsedColumnIdsChange: (ids: string[]) => void;
+  /** When true, child activities nest beneath their parent in the parent's column. */
+  showHierarchy: boolean;
+  timelineStatuses?: Status[];
+  savedFilters?: SavedFilter[];
+  tags?: Tag[];
+  selectedActivityId?: string | null;
+  onSelectActivity?: (id: string | null) => void;
+  onSelectApiActivity?: (activity: ApiActivity | null) => void;
+  /** Called when "+ Add" is clicked in a column; provides pre-fill context. */
+  onAddActivity?: (defaults: { start: string; end: string; memberId: string | null; statusId?: string | null }) => void;
+  onMembersLoaded?: (members: Member[]) => void;
+}
+
+// ── KanbanView ────────────────────────────────────────────────────────────────
+
+export default function KanbanView({
+  teamId,
+  timelineId,
+  groupBy,
+  sortBy,
+  colorBy,
+  cardFields,
+  collapsedColumnIds,
+  onCollapsedColumnIdsChange,
+  showHierarchy,
+  timelineStatuses,
+  savedFilters,
+  tags,
+  selectedActivityId,
+  onSelectActivity,
+  onSelectApiActivity,
+  onAddActivity,
+  onMembersLoaded,
+}: Props) {
+  const queryClient = useQueryClient();
+  const { debouncedQuery, registerMatches, activeMatchId } = useFind();
+  const { activeFilter } = useFilter();
+  const upsert = useUpsertPreference();
+
+  // Fetch data — no date bounds for Kanban (show all activities on the timeline).
+  const { data: apiMembers = [] } = useTeamMembers(teamId);
+  const { data: apiActivities = [], isLoading } = useTimelineActivities(teamId, timelineId);
+  const updateActivity = useUpdateActivity(timelineId);
+
+  const members: Member[] = useMemo(
+    () => apiMembers.map((m, i) => toMember(m, i)),
+    [apiMembers],
+  );
+
+  const memberById = useMemo<Record<string, Member>>(() => {
+    const map: Record<string, Member> = {};
+    members.forEach(m => { map[m.id] = m; });
+    return map;
+  }, [members]);
+
+  useEffect(() => {
+    if (onMembersLoaded && members.length > 0) onMembersLoaded(members);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [members]);
+
+  // Filter engine context.
+  const closedStatusIds = useMemo(
+    () => new Set((timelineStatuses ?? []).filter(s => s.isClosed).map(s => s.id)),
+    [timelineStatuses],
+  );
+  const statusesByTimeline = useMemo(() => {
+    const m = new Map<string, Status[]>();
+    if (timelineStatuses?.length) m.set(timelineId, timelineStatuses);
+    return m;
+  }, [timelineId, timelineStatuses]);
+  const memberIdsByUserId = useMemo(() => {
+    const m = new Map<string, string[]>();
+    apiMembers.forEach(mem => {
+      if (mem.userId) {
+        const existing = m.get(mem.userId) ?? [];
+        m.set(mem.userId, [...existing, mem.id]);
+      }
+    });
+    return m;
+  }, [apiMembers]);
+
+  const visibleActivities = useMemo(
+    () => applyActiveFilter(
+      apiActivities,
+      activeFilter,
+      memberIdsByUserId,
+      {
+        closedStatusIds,
+        savedFilters: savedFilters ?? [],
+        statuses: statusesByTimeline,
+        tags: tags ?? [],
+      },
+    ),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [apiActivities, activeFilter, memberIdsByUserId, closedStatusIds, savedFilters, statusesByTimeline, tags],
+  );
+
+  const statusById = useMemo(
+    () => new Map((timelineStatuses ?? []).map(s => [s.id, s])),
+    [timelineStatuses],
+  );
+  const statusColorById = useMemo(
+    () => new Map((timelineStatuses ?? []).map(s => [s.id, s.color ?? ''])),
+    [timelineStatuses],
+  );
+  const tagById = useMemo(
+    () => new Map((tags ?? []).map(t => [t.id, t])),
+    [tags],
+  );
+
+  // Per-activity resolved hex color (driven by colorBy) — used as card accent border.
+  const colorMap = useMemo<Map<string, string>>(() => {
+    const map = new Map<string, string>();
+    visibleActivities.forEach((act, i) => {
+      map.set(act.id, resolveActivityColor(act, i, memberById, colorBy, statusColorById));
+    });
+    return map;
+  }, [visibleActivities, memberById, colorBy, statusColorById]);
+
+  // ── Hierarchy ────────────────────────────────────────────────────────────────
+
+  /**
+   * When hierarchy is on, build a parentId → direct-children map.
+   * Only includes children whose parent is also in the visible set (so orphaned
+   * children — whose parent is filtered out — still appear as roots).
+   */
+  const childrenByParentId = useMemo<Map<string, ApiActivity[]>>(() => {
+    if (!showHierarchy) return new Map();
+    const visibleIds = new Set(visibleActivities.map(a => a.id));
+    const map = new Map<string, ApiActivity[]>();
+    for (const act of visibleActivities) {
+      const pid = (act as ApiActivity & { parentActivityId?: string | null }).parentActivityId ?? null;
+      if (pid && visibleIds.has(pid)) {
+        if (!map.has(pid)) map.set(pid, []);
+        map.get(pid)!.push(act);
+      }
+    }
+    return map;
+  }, [visibleActivities, showHierarchy]);
+
+  /**
+   * IDs of activities that are children of another visible activity.
+   * When hierarchy is on, these are excluded from column items so they
+   * don't also appear as top-level cards.
+   */
+  const childIds = useMemo<Set<string>>(() => {
+    if (!showHierarchy) return new Set();
+    const s = new Set<string>();
+    childrenByParentId.forEach(children => children.forEach(c => s.add(c.id)));
+    return s;
+  }, [childrenByParentId, showHierarchy]);
+
+  /**
+   * Activities used for column building.
+   * When hierarchy is on, only root activities (not nested children) get a
+   * column slot — children are rendered under their parent by KanbanColumn.
+   */
+  const columnActivities = useMemo(
+    () => showHierarchy
+      ? visibleActivities.filter(a => !childIds.has(a.id))
+      : visibleActivities,
+    [visibleActivities, showHierarchy, childIds],
+  );
+
+  /** Per-parent collapse state — ephemeral (not persisted). Starts fully expanded. */
+  const [collapsedParents, setCollapsedParents] = useState<Set<string>>(new Set());
+
+  const handleToggleParent = useCallback((activityId: string) => {
+    setCollapsedParents(prev => {
+      const next = new Set(prev);
+      if (next.has(activityId)) next.delete(activityId);
+      else next.add(activityId);
+      return next;
+    });
+  }, []);
+
+  // Build columns.
+  const columns = useMemo(
+    () => buildColumns(
+      groupBy,
+      columnActivities,
+      apiMembers,
+      timelineStatuses ?? [],
+      sortBy,
+    ),
+    [groupBy, columnActivities, apiMembers, timelineStatuses, sortBy],
+  );
+
+  // Activity ID → ApiActivity map for drag overlay and optimistic updates.
+  const activityById = useMemo<Map<string, ApiActivity>>(
+    () => new Map(apiActivities.map(a => [a.id, a])),
+    [apiActivities],
+  );
+
+  // Activity ID → title lookup for the "Parent" card field.
+  // Uses apiActivities (all activities, not just visible) so the parent title
+  // still shows when the parent activity is filtered out by the active filter.
+  const activityTitleById = useMemo<Map<string, string>>(
+    () => new Map(apiActivities.map(a => [a.id, a.title])),
+    [apiActivities],
+  );
+
+  // Collapsed column persistence.
+  const collapsedSet = useMemo(() => new Set(collapsedColumnIds), [collapsedColumnIds]);
+
+  const handleToggleCollapse = useCallback((columnId: string) => {
+    const next = collapsedSet.has(columnId)
+      ? collapsedColumnIds.filter(id => id !== columnId)
+      : [...collapsedColumnIds, columnId];
+    onCollapsedColumnIdsChange(next);
+    if (timelineId) {
+      upsert.mutate({
+        key: 'kanban_collapsed',
+        value: JSON.stringify(next),
+        timelineId,
+      });
+    }
+  }, [collapsedSet, collapsedColumnIds, onCollapsedColumnIdsChange, timelineId, upsert]);
+
+  // Find: compute matches.
+  const matchResults = useMemo(
+    () => matchEvents(debouncedQuery, visibleActivities, members, visibleActivities),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [debouncedQuery, visibleActivities, members],
+  );
+  const matchedSet = useMemo(() => new Set(matchResults.map(r => r.activityId)), [matchResults]);
+
+  // Register ordered match IDs walking the full tree (root + children).
+  const orderedMatchIds = useMemo(() => {
+    const ids: string[] = [];
+
+    function walkActivity(act: ApiActivity) {
+      if (matchedSet.has(act.id)) ids.push(act.id);
+      if (showHierarchy) {
+        const children = childrenByParentId.get(act.id) ?? [];
+        children.forEach(walkActivity);
+      }
+    }
+
+    for (const col of columns) {
+      if (collapsedSet.has(col.id)) continue;
+      col.items.forEach(walkActivity);
+    }
+    return ids;
+  }, [columns, collapsedSet, matchedSet, showHierarchy, childrenByParentId]);
+
+  useEffect(() => {
+    registerMatches(orderedMatchIds, new Map());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [orderedMatchIds]);
+
+  // Auto-expand a collapsed column that contains the active match.
+  useEffect(() => {
+    if (!activeMatchId) return;
+    // Expand collapsed column.
+    const containingCol = columns.find(col =>
+      collapsedSet.has(col.id) && col.items.some(a => a.id === activeMatchId),
+    );
+    if (containingCol) handleToggleCollapse(containingCol.id);
+
+    // Auto-expand a collapsed parent whose descendant is the active match.
+    if (showHierarchy) {
+      for (const [parentId, children] of childrenByParentId) {
+        if (collapsedParents.has(parentId)) {
+          function isDescendant(id: string): boolean {
+            if (id === activeMatchId) return true;
+            return (childrenByParentId.get(id) ?? []).some(c => isDescendant(c.id));
+          }
+          if (children.some(c => isDescendant(c.id))) {
+            handleToggleParent(parentId);
+          }
+        }
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeMatchId]);
+
+  // Derive which field is the current Group by axis (auto-suppressed on cards).
+  const suppressedFields = useMemo((): Set<KanbanCardField> => {
+    const s = new Set<KanbanCardField>();
+    if (groupBy === 'status') s.add('status');
+    if (groupBy === 'member' || groupBy === 'member-combination') s.add('members');
+    return s;
+  }, [groupBy]);
+
+  // Card click → open detail panel.
+  const handleCardClick = useCallback((activity: ApiActivity) => {
+    if (onSelectApiActivity) onSelectApiActivity(activity);
+    if (onSelectActivity)    onSelectActivity(activity.id);
+  }, [onSelectApiActivity, onSelectActivity]);
+
+  // "+ Add" in a column → open create panel prefilled with the column's context.
+  const handleAddInColumn = useCallback((column: { id: string; dropValue?: { statusId?: string | null; assignedMemberIds?: string[] } }) => {
+    const today = new Date().toISOString().slice(0, 10);
+    const memberId = column.dropValue?.assignedMemberIds?.[0] ?? null;
+    // Pass statusId only when it's explicitly present in dropValue (status grouping).
+    const statusId = 'statusId' in (column.dropValue ?? {}) ? column.dropValue!.statusId : undefined;
+    if (onAddActivity) {
+      onAddActivity({ start: today, end: today, memberId, statusId });
+    }
+  }, [onAddActivity]);
+
+  // Drag commit.
+  const handleDrop = useCallback((payload: DropPayload) => {
+    const existing = activityById.get(payload.activityId);
+    const merged: ApiActivity | undefined = existing
+      ? { ...existing, ...payload.patch }
+      : undefined;
+
+    // Optimistic cache update.
+    queryClient.setQueriesData<ApiActivity[]>(
+      { queryKey: ['timelines', timelineId, 'activities'] },
+      old => old?.map(a => a.id === payload.activityId ? (merged ?? a) : a),
+    );
+
+    // If the dragged card is currently open in the edit panel, sync the panel
+    // immediately so the user sees the new status / assignee without closing and
+    // re-opening the sidebar.
+    if (merged && selectedActivityId === payload.activityId && onSelectApiActivity) {
+      onSelectApiActivity(merged);
+    }
+
+    updateActivity.mutate({ activityId: payload.activityId, patch: payload.patch });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [queryClient, timelineId, updateActivity, activityById, selectedActivityId, onSelectApiActivity]);
+
+  const hasQuery = debouncedQuery.trim().length > 0;
+
+  // ── Effective card fields: apply context-aware suppression at render time ────
+  const effectiveCardFields = useMemo(
+    () => (cardFields.length > 0 ? cardFields : DEFAULT_CARD_FIELDS),
+    [cardFields],
+  );
+
+  // ── Loading ────────────────────────────────────────────────────────────────
+
+  if (isLoading) {
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: 'var(--muted-foreground)', fontSize: 13 }}>
+        Loading activities…
+      </div>
+    );
+  }
+
+  return (
+    <KanbanBoard
+      columns={columns}
+      groupBy={groupBy}
+      members={members}
+      statusById={statusById}
+      tagById={tagById}
+      colorMap={colorMap}
+      cardFields={effectiveCardFields}
+      suppressedFields={suppressedFields}
+      selectedActivityId={selectedActivityId ?? null}
+      matchedIds={matchedSet}
+      activeMatchId={activeMatchId}
+      hasQuery={hasQuery}
+      collapsedColumnIds={collapsedSet}
+      onToggleCollapse={handleToggleCollapse}
+      onCardClick={handleCardClick}
+      onAddInColumn={handleAddInColumn}
+      onDrop={handleDrop}
+      activityById={activityById}
+      activityTitleById={activityTitleById}
+      showHierarchy={showHierarchy}
+      childrenByParentId={childrenByParentId}
+      collapsedParents={collapsedParents}
+      onToggleParent={handleToggleParent}
+    />
+  );
 }
 ````
 
@@ -34227,1366 +36241,6 @@ export default function TagInput({ teamId, tags, selectedTagIds, onChange }: Pro
           )}
         </div>
       )}
-    </div>
-  )
-}
-````
-
-## File: packages/web/src/components/TeamModal.tsx
-````typescript
-/**
- * TeamModal — create / edit a team in a portal-rendered modal.
- *
- * The Members tab is fully functional after Phase 10.1.2. The Settings tab
- * handles team identity and metadata. Identity and name live in the modal
- * header so they remain visible while the user scrolls the tab body.
- */
-
-import { useState, useEffect, useRef } from 'react';
-import { createPortal } from 'react-dom';
-import { X, Archive, Mail, Link2, Copy, Check, Plus, Minus, RefreshCw, UserMinus, RotateCcw } from 'lucide-react';
-import { ApiError } from '@/lib/api';
-import { IdentityWidget } from '@/components/identity/IdentityWidget';
-import { Badge } from '@/components/identity/Badge';
-import type { Identity } from '@/components/identity/identity-constants';
-import { IDENTITY_COLORS } from '@/components/identity/identity-constants';
-import { useCreateTeam, useUpdateTeam, useArchiveTeam, useUnarchiveTeam, useTeamMembers } from '@/hooks/useTeamActivities';
-import StatusTemplatesTab from '@/components/StatusTemplatesTab';
-import { useAuth } from '@/contexts/AuthContext';
-import {
-  useTeamInvites, useRevokeInvite,
-  useTeamInviteLink, useCreateInviteLink, useRevokeInviteLink,
-  useAddMember, useDeleteMember, useArchiveMember, useUnarchiveMember,
-  useCreateParticipant, useUpdateMember, useUserSearch,
-} from '@/hooks/useMemberManagement';
-import RoleDropdown, { type MemberRole } from '@/components/RoleDropdown';
-import InlineEditableTitle from '@/components/shared/InlineEditableTitle';
-import { ConfirmDialog } from '@/components/shared/ConfirmDialog';
-import type { components } from '@draba/shared';
-
-type Team = components['schemas']['Team'];
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
-
-interface Props {
-  mode: 'new' | 'edit';
-  team?: Team;
-  onClose: () => void;
-  /** Called with the newly created team immediately after server confirmation. */
-  onTeamCreated?: (team: Team) => void;
-  /** Whether the current user is a team admin. */
-  isAdmin?: boolean;
-}
-
-type Tab = 'settings' | 'members' | 'statuses';
-
-const DEFAULT_COLOR = IDENTITY_COLORS[0].hex;
-const DEFAULT_ICON = '__name_1__';
-
-function resolveIdentity(team?: Team): Identity {
-  return {
-    color: team?.color ?? DEFAULT_COLOR,
-    icon: team?.icon ?? DEFAULT_ICON,
-  };
-}
-
-// ── Shared button styles ────────────────────────────────────────────────────
-
-const cancelBtnStyle: React.CSSProperties = {
-  background: 'none', border: '1px solid var(--border)', color: 'var(--muted-foreground)',
-  fontSize: 13, padding: '7px 18px', borderRadius: 7, cursor: 'pointer', fontFamily: 'var(--font-sans)',
-};
-
-const inputStyle: React.CSSProperties = {
-  background: 'var(--muted)', border: '1px solid var(--border)', borderRadius: 7,
-  padding: '8px 12px', color: 'var(--foreground)', fontSize: 13,
-  width: '100%', boxSizing: 'border-box', fontFamily: 'var(--font-sans)',
-};
-
-const labelStyle: React.CSSProperties = {
-  fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.4px',
-  textTransform: 'uppercase', marginBottom: 6, display: 'block',
-};
-
-const archiveBtnStyle: React.CSSProperties = {
-  fontSize: 12, color: '#F59E0B', background: 'rgba(245,158,11,0.12)',
-  border: '1px solid rgba(245,158,11,0.35)', borderRadius: 7,
-  padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)',
-  display: 'flex', alignItems: 'center', gap: 6,
-};
-
-const restoreBtnStyle: React.CSSProperties = {
-  fontSize: 12, color: '#1A97A2', background: 'rgba(26,151,162,0.12)',
-  border: '1px solid rgba(26,151,162,0.35)', borderRadius: 7,
-  padding: '6px 14px', cursor: 'pointer', fontFamily: 'var(--font-sans)',
-  display: 'flex', alignItems: 'center', gap: 6,
-};
-
-// ── Main component ──────────────────────────────────────────────────────────
-
-export default function TeamModal({ mode, team, onClose, onTeamCreated, isAdmin = true }: Props) {
-  const { user } = useAuth()
-  const currentUserId = (user as { id?: string } | null)?.id ?? ''
-  const [tab, setTab] = useState<Tab>('settings');
-  const [teamSaved, setTeamSaved] = useState(mode === 'edit');
-  const [showBanner, setShowBanner] = useState(false);
-  const [showArchiveConfirm, setShowArchiveConfirm] = useState(false);
-  const bannerTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const [identity, setIdentity] = useState<Identity>(resolveIdentity(team));
-  const [name, setName] = useState(team?.name ?? '');
-  const [description, setDescription] = useState(team?.description ?? '');
-  const [notes, setNotes] = useState(team?.notes ?? '');
-
-  const [savedTeamId, setSavedTeamId] = useState(team?.id ?? '');
-
-  const createTeam = useCreateTeam();
-  const updateTeam = useUpdateTeam();
-  const archiveTeam = useArchiveTeam();
-  const unarchiveTeam = useUnarchiveTeam();
-
-  // Members tab state — only loaded when the team exists.
-  const activeTeamId = savedTeamId || team?.id || '';
-  const { data: members = [] } = useTeamMembers(activeTeamId);
-  const { data: invites = [] } = useTeamInvites(activeTeamId);
-  const { data: inviteLink } = useTeamInviteLink(activeTeamId);
-  const addMember = useAddMember(activeTeamId);
-  const deleteMember = useDeleteMember(activeTeamId);
-  const archiveMember = useArchiveMember(activeTeamId);
-  const unarchiveMember = useUnarchiveMember(activeTeamId);
-  const createParticipant = useCreateParticipant(activeTeamId);
-  const updateMember = useUpdateMember(activeTeamId);
-  const revokeInvite = useRevokeInvite(activeTeamId);
-  const createInviteLink = useCreateInviteLink(activeTeamId);
-  const revokeInviteLink = useRevokeInviteLink(activeTeamId);
-
-  const [searchQ, setSearchQ] = useState('');
-  const [showParticipantForm, setShowParticipantForm] = useState(false);
-  // Maps memberId → assignmentCount when a 409 MEMBER_HAS_ASSIGNMENTS is returned.
-  const [removeErrors, setRemoveErrors] = useState<Record<string, number>>({});
-  const [participantName, setParticipantName] = useState('');
-  const [participantIdentity, setParticipantIdentity] = useState<Identity>({ color: IDENTITY_COLORS[3].hex, icon: '__name_1__' });
-  const [copyLinkLabel, setCopyLinkLabel] = useState<'copy' | 'copied'>('copy');
-  const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const { data: searchResults = [] } = useUserSearch(searchQ);
-
-  const isArchived = Boolean(team?.archivedAt);
-  const busy = createTeam.isPending || updateTeam.isPending || archiveTeam.isPending || unarchiveTeam.isPending;
-
-  useEffect(() => {
-    return () => { if (bannerTimer.current) clearTimeout(bannerTimer.current); };
-  }, []);
-
-  // Stale 409 errors belong to a specific member row; clear them when the
-  // search changes because the member list may reorder or filter differently.
-  useEffect(() => {
-    setRemoveErrors({});
-  }, [searchQ]);
-
-  useEffect(() => {
-    function handleKey(e: KeyboardEvent) {
-      if (e.key === 'Escape') onClose();
-    }
-    document.addEventListener('keydown', handleKey);
-    return () => document.removeEventListener('keydown', handleKey);
-  }, [onClose]);
-
-  function handleSave() {
-    const trimmed = name.trim();
-    if (!trimmed) return;
-
-    const patch = {
-      name: trimmed,
-      description: description.trim() || null,
-      notes: notes.trim() || null,
-      color: identity.color,
-      icon: identity.icon,
-    };
-
-    if (mode === 'new' && !teamSaved) {
-      createTeam.mutate(patch, {
-        onSuccess: (created) => {
-          setSavedTeamId(created.id);
-          setTeamSaved(true);
-          setShowBanner(true);
-          onTeamCreated?.(created);
-          bannerTimer.current = setTimeout(() => setShowBanner(false), 3000);
-        },
-      });
-    } else {
-      const tid = savedTeamId || team?.id;
-      if (!tid) return;
-      updateTeam.mutate({ teamId: tid, patch }, { onSuccess: () => { /* noop */ } });
-    }
-  }
-
-  function handleArchive() {
-    const tid = savedTeamId || team?.id;
-    if (!tid) return;
-    archiveTeam.mutate(tid, { onSuccess: onClose });
-  }
-
-  function handleRestore() {
-    const tid = savedTeamId || team?.id;
-    if (!tid) return;
-    unarchiveTeam.mutate(tid, { onSuccess: onClose });
-  }
-
-  const teamColor = identity.color;
-  const isNew = mode === 'new';
-  const primaryLabel = teamSaved ? 'Save changes' : 'Create team';
-  const membersLocked = !teamSaved;
-
-  return createPortal(
-    <div
-      style={{
-        position: 'fixed', inset: 0, background: 'rgba(0,0,0,.7)',
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-        zIndex: 1000,
-      }}
-    >
-      <div
-        style={{
-          width: 580, maxHeight: '90vh', background: 'var(--card)',
-          border: '1px solid var(--border)', borderRadius: 14,
-          boxShadow: '0 24px 64px rgba(0,0,0,.6)',
-          display: 'flex', flexDirection: 'column', overflow: 'hidden',
-        }}
-      >
-        {/* Header — identity widget + editable name */}
-        <div style={{
-          display: 'flex', alignItems: 'center', gap: 12,
-          padding: '16px 20px', borderBottom: '1px solid var(--border)',
-        }}>
-          <IdentityWidget identity={identity} name={name} shape="square" onChange={setIdentity} />
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 3 }}>
-              {isNew ? 'New Team' : 'Edit Team'}
-            </div>
-            <InlineEditableTitle
-              value={name}
-              onChange={setName}
-              placeholder="Team name…"
-              autoFocus={mode === 'new'}
-              onKeyDown={e => { if (e.key === 'Escape') onClose(); }}
-            />
-          </div>
-          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4, display: 'flex' }}>
-            <X size={18} />
-          </button>
-        </div>
-
-        {/* Saved banner */}
-        {showBanner && (
-          <div style={{
-            padding: '8px 20px',
-            background: `${teamColor}18`,
-            borderBottom: `1px solid ${teamColor}44`,
-            display: 'flex', alignItems: 'center', gap: 8,
-          }}>
-            <span style={{ fontSize: 14, color: teamColor }}>✓</span>
-            <span style={{ fontSize: 12, color: teamColor }}>Team created — you can now add members.</span>
-          </div>
-        )}
-
-        {/* Tab bar */}
-        <div style={{ display: 'flex', padding: '0 20px', borderBottom: '1px solid var(--border)' }}>
-          {(['settings', 'members', 'statuses'] as Tab[]).map(t => {
-            const isActive = tab === t;
-            const locked = (t === 'members' || t === 'statuses') && membersLocked;
-            return (
-              <div key={t} style={{ position: 'relative' }}>
-                <button
-                  onClick={() => !locked && setTab(t)}
-                  title={locked ? 'Save the team first to add members' : undefined}
-                  style={{
-                    padding: '10px 14px', fontSize: 13, fontWeight: 500, background: 'none', border: 'none',
-                    borderBottom: `2px solid ${isActive ? teamColor : 'transparent'}`,
-                    color: isActive ? 'var(--foreground)' : 'var(--muted-foreground)',
-                    cursor: locked ? 'not-allowed' : 'pointer',
-                    opacity: locked ? 0.45 : 1,
-                    marginBottom: -1, fontFamily: 'var(--font-sans)',
-                    display: 'flex', alignItems: 'center', gap: 6,
-                    textTransform: 'capitalize',
-                  }}
-                >
-                  {t === 'statuses' ? 'Status Templates' : t}
-                  {t === 'members' && teamSaved && (
-                    <span style={{ fontSize: 11, color: 'var(--muted-foreground)', background: 'var(--muted)', borderRadius: 99, padding: '1px 6px' }}>
-                      {members.length}
-                    </span>
-                  )}
-                </button>
-              </div>
-            );
-          })}
-        </div>
-
-        {/* Content */}
-        <div style={{ flex: 1, overflowY: 'auto' }}>
-          {showArchiveConfirm ? (
-            <ConfirmDialog
-              variant="amber"
-              icon={<Archive size={22} color="#F59E0B" />}
-              title={`Archive "${name || 'this team'}"?`}
-              body="The team will be hidden from active views. All timelines and activities will be preserved and the team can be restored from the Archived section at any time."
-              confirmLabel="Archive"
-              busy={archiveTeam.isPending}
-              onCancel={() => setShowArchiveConfirm(false)}
-              onConfirm={handleArchive}
-            />
-          ) : tab === 'settings' ? (
-            <div style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 18 }}>
-              {/* Description */}
-              <div>
-                <label style={labelStyle}>Description</label>
-                <input
-                  autoFocus={mode === 'edit'}
-                  value={description}
-                  onChange={e => setDescription(e.target.value)}
-                  placeholder="Short description of this team…"
-                  style={inputStyle}
-                />
-              </div>
-
-              {/* Notes */}
-              <div>
-                <label style={labelStyle}>Notes</label>
-                <textarea
-                  value={notes}
-                  onChange={e => setNotes(e.target.value)}
-                  placeholder="Internal notes, context, links…"
-                  rows={4}
-                  style={{ ...inputStyle, resize: 'vertical', lineHeight: 1.5 }}
-                />
-              </div>
-
-              {createTeam.isError && (
-                <div style={{ fontSize: 12, color: 'var(--destructive)' }}>
-                  Something went wrong — refer to logs for details.
-                </div>
-              )}
-              {updateTeam.isError && (
-                <div style={{ fontSize: 12, color: 'var(--destructive)' }}>
-                  Something went wrong — refer to logs for details.
-                </div>
-              )}
-            </div>
-          ) : tab === 'statuses' ? (
-            <StatusTemplatesTab
-              teamId={activeTeamId}
-              isAdmin={isAdmin}
-              teamColor={teamColor}
-            />
-          ) : (
-            // Members tab
-            <div style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 16 }}>
-
-              {/* Search / add input */}
-              {isAdmin && (
-                <div>
-                  <label style={labelStyle}>Add member or invite by email</label>
-                  <div style={{ position: 'relative' }}>
-                    <input
-                      value={searchQ}
-                      onChange={e => setSearchQ(e.target.value)}
-                      placeholder="Search by name or email…"
-                      style={{ ...inputStyle, paddingRight: 36 }}
-                    />
-                    {searchQ && (
-                      <button
-                        onClick={() => setSearchQ('')}
-                        style={{ position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', display: 'flex', padding: 2 }}
-                      >
-                        <X size={14} />
-                      </button>
-                    )}
-                  </div>
-
-                  {/* Search results */}
-                  {searchQ.length >= 2 && (
-                    <div style={{ background: 'var(--muted)', border: '1px solid var(--border)', borderRadius: 8, marginTop: 4, overflow: 'hidden' }}>
-                      {searchResults.length === 0 ? (
-                        <div style={{ padding: '10px 14px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                          <span style={{ fontSize: 12, color: 'var(--muted-foreground)' }}>No users found for "{searchQ}"</span>
-                          <button
-                            onClick={() => {
-                              // Trigger email invite
-                              const email = searchQ.includes('@') ? searchQ : null;
-                              if (!email) return;
-                              fetch(`/teams/${activeTeamId}/invites`, {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${localStorage.getItem('accessToken') ?? ''}` },
-                                body: JSON.stringify({ email }),
-                              }).then(() => setSearchQ(''));
-                            }}
-                            style={{ fontSize: 11, color: '#1A97A2', background: 'rgba(26,151,162,0.12)', border: '1px solid rgba(26,151,162,0.35)', borderRadius: 6, padding: '3px 10px', cursor: 'pointer', fontFamily: 'var(--font-sans)' }}
-                          >
-                            <Mail size={11} style={{ display: 'inline', marginRight: 4 }} />
-                            Invite
-                          </button>
-                        </div>
-                      ) : (
-                        searchResults.map(u => {
-                          const alreadyMember = members.some(m => m.userId === u.id);
-                          return (
-                            <div key={u.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 14px', borderBottom: '1px solid var(--border)' }}>
-                              <Badge identity={{ color: '#8b949e', icon: '__name_1__' }} name={u.displayName} shape="circle" size={22} />
-                              <div style={{ flex: 1, minWidth: 0 }}>
-                                <div style={{ fontSize: 13, color: 'var(--foreground)' }}>{u.displayName}</div>
-                                <div style={{ fontSize: 11, color: 'var(--muted-foreground)' }}>{u.email}</div>
-                              </div>
-                              {alreadyMember ? (
-                                <span style={{ fontSize: 11, color: 'var(--muted-foreground)' }}>Already added</span>
-                              ) : (
-                                <button
-                                  onClick={() => addMember.mutate({ userId: u.id }, { onSuccess: () => setSearchQ('') })}
-                                  style={{ fontSize: 11, color: '#1A97A2', background: 'rgba(26,151,162,0.12)', border: '1px solid rgba(26,151,162,0.35)', borderRadius: 6, padding: '3px 10px', cursor: 'pointer', fontFamily: 'var(--font-sans)', display: 'flex', alignItems: 'center', gap: 4 }}
-                                >
-                                  <Plus size={11} />
-                                  Add
-                                </button>
-                              )}
-                            </div>
-                          );
-                        })
-                      )}
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* Participant creation form */}
-              {isAdmin && (
-                <div>
-                  {!showParticipantForm ? (
-                    <button
-                      onClick={() => setShowParticipantForm(true)}
-                      style={{ fontSize: 12, color: '#F59E0B', background: 'rgba(245,158,11,0.12)', border: '1px solid rgba(245,158,11,0.35)', borderRadius: 7, padding: '5px 12px', cursor: 'pointer', fontFamily: 'var(--font-sans)', display: 'flex', alignItems: 'center', gap: 6 }}
-                    >
-                      <Plus size={12} />
-                      Add participant (no login)
-                    </button>
-                  ) : (
-                    <div style={{ background: 'var(--muted)', border: '1px solid var(--border)', borderRadius: 8, padding: 14 }}>
-                      <label style={labelStyle}>New participant</label>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                        <IdentityWidget
-                          identity={participantIdentity}
-                          name={participantName}
-                          shape="circle"
-                          onChange={setParticipantIdentity}
-                        />
-                        <input
-                          value={participantName}
-                          onChange={e => setParticipantName(e.target.value)}
-                          placeholder="Display name (required)…"
-                          style={{ ...inputStyle, flex: 1 }}
-                          autoFocus
-                        />
-                        <button
-                          onClick={() => {
-                            if (!participantName.trim()) return;
-                            createParticipant.mutate({
-                              name: participantName.trim(),
-                              color: participantIdentity.color,
-                              icon: participantIdentity.icon,
-                            }, {
-                              onSuccess: () => { setParticipantName(''); setShowParticipantForm(false); },
-                            });
-                          }}
-                          disabled={!participantName.trim() || createParticipant.isPending}
-                          style={{ background: '#F59E0B', color: '#000', fontWeight: 600, fontSize: 12, padding: '7px 14px', borderRadius: 7, border: 'none', cursor: 'pointer', fontFamily: 'var(--font-sans)', flexShrink: 0, opacity: !participantName.trim() ? 0.5 : 1 }}
-                        >
-                          Create
-                        </button>
-                        <button onClick={() => setShowParticipantForm(false)} style={{ ...cancelBtnStyle, padding: '7px 10px' }}>
-                          <X size={14} />
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* Role-change error banner */}
-              {updateMember.isError && (
-                <div style={{ fontSize: 12, color: '#F59E0B', background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.25)', borderRadius: 7, padding: '7px 12px' }}>
-                  {(updateMember.error as { message?: string })?.message ?? 'Could not update role.'}
-                </div>
-              )}
-
-              {/* Member list */}
-              <div>
-                <label style={labelStyle}>Members ({members.length})</label>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                  {members.map((m: TeamMemberWithUser) => {
-                    const isParticipant = !m.userId;
-                    const isInactive = Boolean(m.archivedAt);
-                    const memberRole: MemberRole = isParticipant ? 'participant' : (m.role as MemberRole);
-                    const removeError = removeErrors[m.id];
-                    return (
-                      <div key={m.id}>
-                        <div
-                          style={{
-                            display: 'flex', alignItems: 'center', gap: 10,
-                            padding: '7px 10px', borderRadius: 7,
-                            background: isInactive ? 'rgba(255,255,255,0.01)' : 'rgba(255,255,255,0.02)',
-                            opacity: isInactive ? 0.5 : 1,
-                          }}
-                        >
-                          <div style={{ flexShrink: 0, border: isParticipant ? '1.5px dashed var(--muted-foreground)' : 'none', borderRadius: '50%' }}>
-                            <Badge
-                              identity={{ color: m.color ?? '#8b949e', icon: m.icon ?? '__name_words__' }}
-                              name={m.displayName}
-                              shape="circle"
-                              size={24}
-                            />
-                          </div>
-                          <div style={{ flex: 1, minWidth: 0 }}>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                              <span style={{ fontSize: 13, color: 'var(--foreground)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{m.displayName}</span>
-                              {isParticipant && <span style={{ fontSize: 10, fontWeight: 600, background: 'rgba(245,158,11,0.12)', border: '1px solid rgba(245,158,11,0.35)', color: '#F59E0B', borderRadius: 99, padding: '0px 5px', flexShrink: 0 }}>No login</span>}
-                            </div>
-                            {!isParticipant && <div style={{ fontSize: 11, color: 'var(--muted-foreground)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{m.email}</div>}
-                          </div>
-                          {isAdmin && (
-                            <RoleDropdown
-                              value={memberRole}
-                              onChange={role => {
-                                if (isParticipant || role === 'participant') return;
-                                updateMember.mutate({ memberId: m.id, patch: { role: role as 'admin' | 'member' } });
-                              }}
-                              disabled={isParticipant || m.userId === currentUserId}
-                              hideParticipant={!isParticipant}
-                            />
-                          )}
-                          {isAdmin && (
-                            <div style={{ display: 'flex', gap: 4 }}>
-                              {isInactive ? (
-                                <button
-                                  title="Reactivate member"
-                                  onClick={() => unarchiveMember.mutate(m.id)}
-                                  style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 3, display: 'flex' }}
-                                  onMouseEnter={e => (e.currentTarget.style.color = '#1A97A2')}
-                                  onMouseLeave={e => (e.currentTarget.style.color = 'var(--muted-foreground)')}
-                                >
-                                  <RefreshCw size={13} />
-                                </button>
-                              ) : (
-                                <button
-                                  title="Inactivate member"
-                                  onClick={() => archiveMember.mutate(m.id)}
-                                  style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 3, display: 'flex' }}
-                                  onMouseEnter={e => (e.currentTarget.style.color = '#F59E0B')}
-                                  onMouseLeave={e => (e.currentTarget.style.color = 'var(--muted-foreground)')}
-                                >
-                                  <UserMinus size={13} />
-                                </button>
-                              )}
-                              <button
-                                title="Remove from team"
-                                onClick={() => {
-                                  setRemoveErrors(prev => { const next = { ...prev }; delete next[m.id]; return next; });
-                                  deleteMember.mutate(m.id, {
-                                    onError: (err) => {
-                                      if (err instanceof ApiError && err.code === 'MEMBER_HAS_ASSIGNMENTS') {
-                                        const count = (err.data?.assignmentCount as number) ?? 0;
-                                        setRemoveErrors(prev => ({ ...prev, [m.id]: count }));
-                                      }
-                                    },
-                                  });
-                                }}
-                                style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 3, display: 'flex' }}
-                                onMouseEnter={e => (e.currentTarget.style.color = '#EF4444')}
-                                onMouseLeave={e => (e.currentTarget.style.color = 'var(--muted-foreground)')}
-                              >
-                                <Minus size={13} />
-                              </button>
-                            </div>
-                          )}
-                        </div>
-                        {removeError !== undefined && (
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: '#F59E0B', padding: '4px 10px 4px 44px' }}>
-                            <span>{removeError} assignment{removeError === 1 ? '' : 's'} — can't remove.</span>
-                            <button
-                              onClick={() => {
-                                archiveMember.mutate(m.id, {
-                                  onSuccess: () => setRemoveErrors(prev => { const next = { ...prev }; delete next[m.id]; return next; }),
-                                });
-                              }}
-                              style={{ fontSize: 12, color: '#F59E0B', background: 'none', border: '1px solid rgba(245,158,11,0.4)', borderRadius: 5, padding: '2px 8px', cursor: 'pointer', fontFamily: 'var(--font-sans)' }}
-                            >
-                              Inactivate instead
-                            </button>
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-
-              {/* Pending invitations */}
-              {isAdmin && invites.length > 0 && (
-                <div>
-                  <label style={labelStyle}>Pending invitations ({invites.length})</label>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                    {invites.map(inv => (
-                      <div key={inv.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 10px', borderRadius: 7, background: 'rgba(255,255,255,0.02)' }}>
-                        <div style={{ width: 24, height: 24, borderRadius: '50%', border: '1.5px dashed var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-                          <Mail size={11} color="var(--muted-foreground)" />
-                        </div>
-                        <div style={{ flex: 1, minWidth: 0 }}>
-                          <div style={{ fontSize: 13, color: 'var(--muted-foreground)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{inv.email}</div>
-                          <div style={{ fontSize: 11, color: 'var(--muted-foreground)' }}>
-                            Sent {new Date(inv.createdAt).toLocaleDateString()} · expires {new Date(inv.expiresAt).toLocaleDateString()}
-                          </div>
-                        </div>
-                        <button
-                          onClick={() => revokeInvite.mutate(inv.id)}
-                          style={{ fontSize: 11, color: '#EF4444', background: 'rgba(239,68,68,0.12)', border: '1px solid rgba(239,68,68,0.35)', borderRadius: 6, padding: '3px 10px', cursor: 'pointer', fontFamily: 'var(--font-sans)' }}
-                        >
-                          Revoke
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* Invite link */}
-              {isAdmin && (
-                <div>
-                  <label style={labelStyle}>
-                    <Link2 size={11} style={{ display: 'inline', marginRight: 5 }} />
-                    Invite link
-                  </label>
-                  {inviteLink?.token ? (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                      <div style={{ display: 'flex', gap: 6 }}>
-                        <input
-                          readOnly
-                          value={`${window.location.origin}/register?token=${inviteLink.token}`}
-                          style={{ ...inputStyle, color: 'var(--muted-foreground)', flex: 1 }}
-                          onClick={e => (e.target as HTMLInputElement).select()}
-                        />
-                        <button
-                          onClick={() => {
-                            navigator.clipboard.writeText(`${window.location.origin}/register?token=${inviteLink.token!}`);
-                            setCopyLinkLabel('copied');
-                            if (copyTimer.current) clearTimeout(copyTimer.current);
-                            copyTimer.current = setTimeout(() => setCopyLinkLabel('copy'), 2000);
-                          }}
-                          style={{
-                            background: copyLinkLabel === 'copied' ? 'rgba(26,151,162,0.12)' : 'var(--muted)',
-                            border: `1px solid ${copyLinkLabel === 'copied' ? 'rgba(26,151,162,0.35)' : 'var(--border)'}`,
-                            color: copyLinkLabel === 'copied' ? '#1A97A2' : 'var(--muted-foreground)',
-                            borderRadius: 7, padding: '0 14px', cursor: 'pointer',
-                            display: 'flex', alignItems: 'center', gap: 5, fontSize: 12, fontFamily: 'var(--font-sans)',
-                            transition: 'all 0.15s', flexShrink: 0,
-                          }}
-                        >
-                          {copyLinkLabel === 'copied' ? <Check size={12} /> : <Copy size={12} />}
-                          {copyLinkLabel === 'copied' ? 'Copied!' : 'Copy link'}
-                        </button>
-                      </div>
-                      <div style={{ display: 'flex', gap: 6 }}>
-                        <span style={{ fontSize: 11, color: 'var(--muted-foreground)', flex: 1, lineHeight: 1.5 }}>
-                          Anyone with this link can join the team as a member.
-                        </span>
-                        <button
-                          onClick={() => createInviteLink.mutate()}
-                          style={{ fontSize: 11, color: 'var(--muted-foreground)', background: 'none', border: '1px solid var(--border)', borderRadius: 6, padding: '3px 10px', cursor: 'pointer', fontFamily: 'var(--font-sans)', display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}
-                        >
-                          <RefreshCw size={11} /> Regenerate
-                        </button>
-                        <button
-                          onClick={() => revokeInviteLink.mutate()}
-                          style={{ fontSize: 11, color: '#EF4444', background: 'none', border: '1px solid rgba(239,68,68,0.35)', borderRadius: 6, padding: '3px 10px', cursor: 'pointer', fontFamily: 'var(--font-sans)', flexShrink: 0 }}
-                        >
-                          Revoke
-                        </button>
-                      </div>
-                    </div>
-                  ) : (
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                      <span style={{ fontSize: 12, color: 'var(--muted-foreground)' }}>No invite link — generate one to share a reusable join URL.</span>
-                      <button
-                        onClick={() => createInviteLink.mutate()}
-                        style={{ fontSize: 12, color: '#1A97A2', background: 'rgba(26,151,162,0.12)', border: '1px solid rgba(26,151,162,0.35)', borderRadius: 7, padding: '5px 12px', cursor: 'pointer', fontFamily: 'var(--font-sans)', flexShrink: 0 }}
-                      >
-                        Generate
-                      </button>
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-
-        {/* Footer — hidden when archive confirm is showing */}
-        {!showArchiveConfirm && (
-          <div style={{
-            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-            padding: '12px 20px', borderTop: '1px solid var(--border)',
-          }}>
-            <div>
-              {mode === 'edit' && (
-                isArchived ? (
-                  <button
-                    onClick={handleRestore}
-                    disabled={busy}
-                    style={{ ...restoreBtnStyle, opacity: busy ? 0.6 : 1 }}
-                  >
-                    <RotateCcw size={13} />
-                    Restore team
-                  </button>
-                ) : (
-                  <button
-                    onClick={() => setShowArchiveConfirm(true)}
-                    style={archiveBtnStyle}
-                  >
-                    <Archive size={13} />
-                    Archive
-                  </button>
-                )
-              )}
-            </div>
-            <div style={{ display: 'flex', gap: 8 }}>
-              <button onClick={onClose} style={cancelBtnStyle}>Cancel</button>
-              <button
-                onClick={handleSave}
-                disabled={busy || !name.trim()}
-                style={{
-                  background: teamColor, color: '#fff', fontWeight: 600,
-                  fontSize: 13, padding: '7px 18px', borderRadius: 7, cursor: 'pointer',
-                  border: 'none', opacity: (busy || !name.trim()) ? 0.6 : 1,
-                  fontFamily: 'var(--font-sans)',
-                }}
-              >
-                {busy ? 'Saving…' : primaryLabel}
-              </button>
-            </div>
-          </div>
-        )}
-      </div>
-    </div>,
-    document.body,
-  );
-}
-````
-
-## File: packages/web/src/components/TimelineModal.tsx
-````typescript
-/**
- * TimelineModal — create / edit a timeline.
- *
- * Modes:
- *  - "new":  name, identity, date range, description, notes; template picker seeds statuses
- *  - "edit": same fields; plus Statuses tab (add/edit/delete live statuses)
- */
-
-import { useState } from 'react'
-import { X, Plus, Trash2, Check, Archive, RotateCcw } from 'lucide-react'
-import { IdentityWidget } from '@/components/identity/IdentityWidget'
-import { Badge } from '@/components/identity/Badge'
-import type { Identity } from '@/components/identity/identity-constants'
-import { resolveColorHex } from '@/components/identity/identity-constants'
-import {
-  useCreateTimeline,
-  useUpdateTimeline,
-  useDeleteTimeline,
-  useArchiveTimeline,
-} from '@/hooks/useTeamActivities'
-import {
-  useTimelineStatuses,
-  useCreateTimelineStatus,
-  useUpdateTimelineStatus,
-  useDeleteTimelineStatus,
-} from '@/hooks/useStatusTemplates'
-import { useStatusTemplates } from '@/hooks/useStatusTemplates'
-import InlineEditableTitle from '@/components/shared/InlineEditableTitle'
-import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
-import type { components } from '@draba/shared'
-
-type Timeline = components['schemas']['Timeline']
-type Status = components['schemas']['Status']
-
-// ── Prop types ────────────────────────────────────────────────────────────────
-
-interface Props {
-  mode: 'new' | 'edit'
-  teamId: string
-  timeline?: Timeline
-  canAdmin?: boolean
-  onClose: () => void
-  onCreated?: (timeline: Timeline) => void
-  onUnarchive?: (timelineId: string) => void
-}
-
-type Tab = 'settings' | 'statuses'
-
-// ── Inline styles ─────────────────────────────────────────────────────────────
-
-const OVERLAY: React.CSSProperties = {
-  position: 'fixed', inset: 0,
-  background: 'rgba(0,0,0,0.5)', backdropFilter: 'blur(2px)',
-  zIndex: 300, display: 'flex', alignItems: 'center', justifyContent: 'center',
-}
-
-const PANEL: React.CSSProperties = {
-  background: 'var(--card)', border: '1px solid var(--border)',
-  borderRadius: 12, width: 560, maxWidth: '95vw',
-  maxHeight: '90vh', display: 'flex', flexDirection: 'column',
-  boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
-}
-
-const HEADER: React.CSSProperties = {
-  display: 'flex', alignItems: 'center', gap: 12,
-  padding: '18px 20px 14px', borderBottom: '1px solid var(--border)',
-  flexShrink: 0,
-}
-
-const TAB_BAR: React.CSSProperties = {
-  display: 'flex', gap: 2, padding: '0 20px',
-  borderBottom: '1px solid var(--border)', flexShrink: 0,
-}
-
-const CONTENT: React.CSSProperties = {
-  flex: 1, overflowY: 'auto', padding: '20px',
-}
-
-const FOOTER: React.CSSProperties = {
-  display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-  padding: '14px 20px', borderTop: '1px solid var(--border)', flexShrink: 0,
-}
-
-const FIELD_LABEL: React.CSSProperties = {
-  fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)',
-  textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 6,
-}
-
-const INPUT: React.CSSProperties = {
-  width: '100%', boxSizing: 'border-box',
-  fontSize: 13, color: 'var(--foreground)',
-  border: '1px solid var(--border)', borderRadius: 6,
-  padding: '7px 10px', background: 'var(--background)',
-  outline: 'none',
-}
-
-const TEXTAREA: React.CSSProperties = {
-  ...INPUT,
-  resize: 'vertical' as const,
-  minHeight: 68,
-  fontFamily: 'var(--font-sans)',
-  lineHeight: 1.5,
-}
-
-const archiveBtnStyle: React.CSSProperties = {
-  fontSize: 12, color: '#F59E0B', background: 'rgba(245,158,11,0.12)',
-  border: '1px solid rgba(245,158,11,0.35)', borderRadius: 7,
-  padding: '7px 12px', cursor: 'pointer', fontFamily: 'var(--font-sans)',
-  display: 'flex', alignItems: 'center', gap: 6,
-}
-
-const restoreBtnStyle: React.CSSProperties = {
-  fontSize: 12, color: '#1A97A2', background: 'rgba(26,151,162,0.12)',
-  border: '1px solid rgba(26,151,162,0.35)', borderRadius: 7,
-  padding: '7px 12px', cursor: 'pointer', fontFamily: 'var(--font-sans)',
-  display: 'flex', alignItems: 'center', gap: 6,
-}
-
-function tabStyle(active: boolean): React.CSSProperties {
-  return {
-    padding: '8px 14px', fontSize: 12, fontWeight: 500,
-    border: 'none', background: 'none', cursor: 'pointer',
-    borderBottom: active ? '2px solid var(--primary)' : '2px solid transparent',
-    color: active ? 'var(--foreground)' : 'var(--muted-foreground)',
-    fontFamily: 'var(--font-sans)',
-  }
-}
-
-// ── Status row (edit mode) ────────────────────────────────────────────────────
-
-interface StatusRowProps {
-  status: Status
-  canDelete: boolean
-  teamId: string
-  timelineId: string
-  allStatuses: Status[]
-}
-
-function StatusRow({ status, canDelete, teamId, timelineId, allStatuses }: StatusRowProps) {
-  const [editing, setEditing] = useState(false)
-  const [name, setName] = useState(status.name)
-  const [identity, setIdentity] = useState<Identity>({ color: status.color, icon: status.icon ?? '' })
-  const [isClosed, setIsClosed] = useState(status.isClosed)
-  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
-  const [replacementId, setReplacementId] = useState('')
-  const update = useUpdateTimelineStatus(teamId, timelineId)
-  const del = useDeleteTimelineStatus(teamId, timelineId)
-
-  function save() {
-    update.mutate(
-      { id: status.id, name: name.trim() || status.name, color: identity.color, icon: identity.icon || null, isClosed },
-      { onSuccess: () => setEditing(false) },
-    )
-  }
-
-  function doDelete() {
-    del.mutate(
-      { id: status.id, replacementStatusId: replacementId || undefined },
-      { onSuccess: () => setShowDeleteConfirm(false) },
-    )
-  }
-
-  if (showDeleteConfirm) {
-    const others = allStatuses.filter(s => s.id !== status.id)
-    return (
-      <div style={{ background: 'var(--muted)', borderRadius: 8, padding: 12, marginBottom: 6 }}>
-        <div style={{ fontSize: 12, color: 'var(--foreground)', marginBottom: 8 }}>
-          Delete <strong>{status.name}</strong>? Activities using this status will be reassigned.
-        </div>
-        {others.length > 0 && (
-          <div style={{ marginBottom: 8 }}>
-            <label style={{ ...FIELD_LABEL }}>Move activities to</label>
-            <select
-              value={replacementId}
-              onChange={e => setReplacementId(e.target.value)}
-              style={{ ...INPUT, fontSize: 12 }}
-            >
-              <option value="">— No status —</option>
-              {others.map(s => (
-                <option key={s.id} value={s.id}>{s.name}</option>
-              ))}
-            </select>
-          </div>
-        )}
-        <div style={{ display: 'flex', gap: 8 }}>
-          <button onClick={() => setShowDeleteConfirm(false)} style={{ fontSize: 12, padding: '4px 10px', border: '1px solid var(--border)', borderRadius: 5, background: 'none', cursor: 'pointer', color: 'var(--foreground)' }}>Cancel</button>
-          <button onClick={doDelete} style={{ fontSize: 12, padding: '4px 10px', border: 'none', borderRadius: 5, background: 'var(--destructive)', color: 'white', cursor: 'pointer' }}>Delete</button>
-        </div>
-      </div>
-    )
-  }
-
-  if (editing) {
-    return (
-      <div style={{ background: 'var(--muted)', borderRadius: 8, padding: '10px 12px', marginBottom: 4, display: 'flex', flexDirection: 'column', gap: 8 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <IdentityWidget
-            identity={{ color: identity.color, icon: identity.icon ?? '' }}
-            name={name || status.name}
-            onChange={setIdentity}
-            shape="square"
-          />
-          <input
-            autoFocus
-            value={name}
-            onChange={e => setName(e.target.value)}
-            onKeyDown={e => { if (e.key === 'Enter') save(); if (e.key === 'Escape') setEditing(false) }}
-            style={{ ...INPUT, flex: 1 }}
-          />
-          <button onClick={save} disabled={update.isPending} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--primary)', padding: 4 }}>
-            <Check width={14} height={14} />
-          </button>
-          <button onClick={() => setEditing(false)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4 }}>
-            <X width={14} height={14} />
-          </button>
-        </div>
-        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--muted-foreground)', cursor: 'pointer', userSelect: 'none', paddingLeft: 26 }}>
-          <input type="checkbox" checked={isClosed} onChange={e => setIsClosed(e.target.checked)} />
-          Closed status (marks this status as completed/done)
-        </label>
-      </div>
-    )
-  }
-
-  return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 0' }}>
-      <Badge identity={{ color: status.color, icon: status.icon ?? '__none__' }} name={status.name} shape="square" size={18} />
-      <span style={{ fontSize: 13, flex: 1, cursor: 'pointer', color: 'var(--foreground)' }} onClick={() => setEditing(true)}>
-        {status.name}
-      </span>
-      {status.isClosed && (
-        <span style={{ fontSize: 10, padding: '1px 6px', border: '1px solid var(--border)', borderRadius: 4, color: 'var(--muted-foreground)' }}>closed</span>
-      )}
-      <button onClick={() => setEditing(true)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4, opacity: 0.5 }}>
-        ✎
-      </button>
-      {canDelete && (
-        <button onClick={() => setShowDeleteConfirm(true)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4 }}>
-          <Trash2 width={13} height={13} />
-        </button>
-      )}
-    </div>
-  )
-}
-
-// ── Add-status form ───────────────────────────────────────────────────────────
-
-interface AddStatusFormProps {
-  teamId: string
-  timelineId: string
-  primaryColor: string
-}
-
-function AddStatusForm({ teamId, timelineId, primaryColor }: AddStatusFormProps) {
-  const [expanding, setExpanding] = useState(false)
-  const [name, setName] = useState('')
-  const [identity, setIdentity] = useState<Identity>({ color: primaryColor, icon: '' })
-  const [isClosed, setIsClosed] = useState(false)
-  const createStatus = useCreateTimelineStatus(teamId, timelineId)
-
-  function handleAdd() {
-    if (!name.trim()) return
-    createStatus.mutate(
-      { name: name.trim(), color: identity.color, icon: identity.icon || null, isClosed },
-      {
-        onSuccess: () => {
-          setName('')
-          setIdentity({ color: primaryColor, icon: '' })
-          setIsClosed(false)
-          setExpanding(false)
-        },
-      },
-    )
-  }
-
-  function handleCancel() {
-    setExpanding(false)
-    setName('')
-    setIdentity({ color: primaryColor, icon: '' })
-    setIsClosed(false)
-  }
-
-  if (!expanding) {
-    return (
-      <button
-        onClick={() => setExpanding(true)}
-        style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 8, background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', fontSize: 12, padding: '4px 2px', fontFamily: 'var(--font-sans)' }}
-      >
-        <Plus width={13} height={13} /> Add status
-      </button>
-    )
-  }
-
-  return (
-    <div style={{ background: 'var(--muted)', borderRadius: 8, padding: '10px 12px', marginTop: 8, display: 'flex', flexDirection: 'column', gap: 8 }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-        <IdentityWidget identity={identity} name={name || 'New status'} shape="square" onChange={setIdentity} />
-        <input
-          autoFocus
-          value={name}
-          onChange={e => setName(e.target.value)}
-          onKeyDown={e => { if (e.key === 'Enter') handleAdd(); if (e.key === 'Escape') handleCancel() }}
-          placeholder="Status name…"
-          style={{ ...INPUT, flex: 1 }}
-        />
-        <button onClick={handleAdd} disabled={!name.trim() || createStatus.isPending} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--primary)', padding: 4, display: 'flex' }}>
-          <Check width={14} height={14} />
-        </button>
-        <button onClick={handleCancel} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4, display: 'flex' }}>
-          <X width={14} height={14} />
-        </button>
-      </div>
-      <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--muted-foreground)', cursor: 'pointer', userSelect: 'none', paddingLeft: 26 }}>
-        <input type="checkbox" checked={isClosed} onChange={e => setIsClosed(e.target.checked)} />
-        Closed status (marks this status as completed/done)
-      </label>
-    </div>
-  )
-}
-
-// ── Main modal ────────────────────────────────────────────────────────────────
-
-export default function TimelineModal({ mode, teamId, timeline, canAdmin = false, onClose, onCreated, onUnarchive }: Props) {
-  const [activeTab, setActiveTab] = useState<Tab>('settings')
-  const [name, setName] = useState(timeline?.name ?? '')
-  const [description, setDescription] = useState(timeline?.description ?? '')
-  const [notes, setNotes] = useState(timeline?.notes ?? '')
-  const [startDate, setStartDate] = useState(timeline?.startDate ?? '')
-  const [endDate, setEndDate] = useState(timeline?.endDate ?? '')
-  const [identity, setIdentity] = useState<Identity>({ color: timeline?.color ?? '#1A97A2', icon: timeline?.icon ?? '' })
-  const [selectedTemplateId, setSelectedTemplateId] = useState<string>('')
-  const [saving, setSaving] = useState(false)
-  const [error, setError] = useState('')
-  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
-  const [showArchiveConfirm, setShowArchiveConfirm] = useState(false)
-
-  const createTimeline = useCreateTimeline(teamId)
-  const updateTimeline = useUpdateTimeline(teamId)
-  const deleteTimeline = useDeleteTimeline(teamId)
-  const archiveTimeline = useArchiveTimeline(teamId)
-
-  const { data: statuses = [] } = useTimelineStatuses(teamId, timeline?.id ?? '')
-  const { data: templates = [] } = useStatusTemplates(teamId)
-
-  const timelineColor = resolveColorHex(identity.color) ?? identity.color ?? '#1A97A2'
-
-  function handleSave() {
-    if (!name.trim()) { setError('Name is required'); return }
-    if (!startDate || !endDate) { setError('Start and end dates are required'); return }
-    if (endDate < startDate) { setError('End date must not be before start date'); return }
-    setSaving(true)
-    setError('')
-
-    if (mode === 'new') {
-      createTimeline.mutate(
-        {
-          name: name.trim(),
-          startDate,
-          endDate,
-          color: identity.color || null,
-          icon: identity.icon || null,
-          description: description.trim() || null,
-          notes: notes.trim() || null,
-          templateId: selectedTemplateId || null,
-        },
-        {
-          onSuccess: (tl) => { setSaving(false); onCreated?.(tl); onClose() },
-          onError: () => { setSaving(false); setError('Failed to create timeline') },
-        },
-      )
-    } else if (timeline) {
-      updateTimeline.mutate(
-        {
-          timelineId: timeline.id,
-          patch: {
-            name: name.trim(),
-            startDate,
-            endDate,
-            color: identity.color || null,
-            icon: identity.icon || null,
-            description: description.trim() || null,
-            notes: notes.trim() || null,
-          },
-        },
-        {
-          onSuccess: () => { setSaving(false); onClose() },
-          onError: () => { setSaving(false); setError('Failed to save timeline') },
-        },
-      )
-    }
-  }
-
-  return (
-    <div style={OVERLAY}>
-      <div style={PANEL} onClick={e => e.stopPropagation()}>
-        {/* Header — identity widget + editable name */}
-        <div style={HEADER}>
-          <IdentityWidget
-            identity={identity}
-            name={name || (mode === 'new' ? 'New timeline' : timeline?.name ?? '')}
-            onChange={setIdentity}
-            shape="square"
-          />
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 3 }}>
-              {mode === 'new' ? 'New Timeline' : 'Edit Timeline'}
-            </div>
-            <InlineEditableTitle
-              value={name}
-              onChange={v => { setName(v); setError('') }}
-              placeholder="Timeline name"
-              autoFocus={mode === 'new'}
-            />
-          </div>
-          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 4 }}>
-            <X width={18} height={18} />
-          </button>
-        </div>
-
-        {/* Tab bar — Statuses tab only in edit mode */}
-        <div style={TAB_BAR}>
-          <button style={tabStyle(activeTab === 'settings')} onClick={() => setActiveTab('settings')}>Settings</button>
-          {mode === 'edit' && (
-            <button style={tabStyle(activeTab === 'statuses')} onClick={() => setActiveTab('statuses')}>
-              Statuses {statuses.length > 0 && <span style={{ fontSize: 10, marginLeft: 4, opacity: 0.6 }}>({statuses.length})</span>}
-            </button>
-          )}
-        </div>
-
-        {/* Content */}
-        <div style={CONTENT}>
-          {/* Archive confirmation — replaces tab content */}
-          {showArchiveConfirm && timeline ? (
-            <ConfirmDialog
-              variant="amber"
-              icon={<Archive size={22} color="#F59E0B" />}
-              title="Archive timeline?"
-              body={`${timeline.name} will be hidden from the active list. All data is preserved and can be restored via the Archived section in the sidebar.`}
-              confirmLabel="Archive"
-              busy={archiveTimeline.isPending}
-              onCancel={() => setShowArchiveConfirm(false)}
-              onConfirm={() => archiveTimeline.mutate(timeline.id, { onSuccess: onClose })}
-            />
-          ) : showDeleteConfirm && timeline ? (
-            <ConfirmDialog
-              variant="red"
-              icon={<Trash2 size={22} color="#EF4444" />}
-              title="Delete timeline?"
-              body={`This permanently deletes ${timeline.name} and all its statuses. Activities are not deleted — they remain in the team.`}
-              confirmLabel="Delete timeline"
-              busy={deleteTimeline.isPending}
-              onCancel={() => setShowDeleteConfirm(false)}
-              onConfirm={() => deleteTimeline.mutate(timeline.id, { onSuccess: onClose })}
-            />
-          ) : activeTab === 'settings' ? (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-              {/* Date range */}
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-                <div>
-                  <div style={FIELD_LABEL}>Start date *</div>
-                  <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)} style={INPUT} />
-                </div>
-                <div>
-                  <div style={FIELD_LABEL}>End date *</div>
-                  <input type="date" value={endDate} onChange={e => setEndDate(e.target.value)} style={INPUT} />
-                </div>
-              </div>
-
-              {/* Description */}
-              <div>
-                <div style={FIELD_LABEL}>Description</div>
-                <input
-                  value={description}
-                  onChange={e => setDescription(e.target.value)}
-                  placeholder="Short description of this timeline's purpose…"
-                  style={INPUT}
-                />
-              </div>
-
-              {/* Notes */}
-              <div>
-                <div style={FIELD_LABEL}>Notes</div>
-                <textarea
-                  value={notes}
-                  onChange={e => setNotes(e.target.value)}
-                  placeholder="Internal notes, links, references…"
-                  style={TEXTAREA}
-                />
-              </div>
-
-              {/* Template picker (create mode only) */}
-              {mode === 'new' && templates.length > 0 && (
-                <div>
-                  <div style={FIELD_LABEL}>Status template</div>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                    {templates.map(tpl => {
-                      const isSelected = selectedTemplateId === tpl.id || (!selectedTemplateId && tpl === templates[0])
-                      return (
-                        <div
-                          key={tpl.id}
-                          onClick={() => setSelectedTemplateId(tpl.id)}
-                          style={{
-                            border: `1px solid ${isSelected ? timelineColor + '88' : 'var(--border)'}`,
-                            borderRadius: 8, padding: '10px 14px', cursor: 'pointer',
-                            background: isSelected ? timelineColor + '11' : 'var(--muted)',
-                            transition: 'all 0.1s',
-                          }}
-                        >
-                          <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6, color: 'var(--foreground)' }}>{tpl.name}</div>
-                          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                            {tpl.items.map(item => (
-                              <span key={item.id} style={{ fontSize: 11, padding: '2px 8px', borderRadius: 4, background: item.color + '22', border: `1px solid ${item.color}66`, color: item.color }}>
-                                {item.name}
-                              </span>
-                            ))}
-                          </div>
-                        </div>
-                      )
-                    })}
-                  </div>
-                </div>
-              )}
-
-              {/* Archived banner */}
-              {mode === 'edit' && timeline?.archivedAt && (
-                <div style={{ fontSize: 12, color: '#F59E0B', background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.25)', borderRadius: 6, padding: '8px 12px' }}>
-                  This timeline is archived. It is hidden from the active list.
-                </div>
-              )}
-
-              {error && (
-                <div style={{ fontSize: 12, color: 'var(--destructive)', background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)', borderRadius: 6, padding: '8px 12px' }}>
-                  {error}
-                </div>
-              )}
-            </div>
-          ) : (
-            activeTab === 'statuses' && timeline && (
-              <div>
-                <div style={{ fontSize: 12, color: 'var(--muted-foreground)', marginBottom: 14, lineHeight: 1.5 }}>
-                  Statuses are specific to this timeline. Add, rename, recolor, or remove them here.
-                </div>
-
-                <div style={{ marginBottom: 4 }}>
-                  {statuses.map(s => (
-                    <StatusRow
-                      key={s.id}
-                      status={s}
-                      canDelete={statuses.length > 1}
-                      teamId={teamId}
-                      timelineId={timeline.id}
-                      allStatuses={statuses}
-                    />
-                  ))}
-                </div>
-
-                <AddStatusForm teamId={teamId} timelineId={timeline.id} primaryColor={timelineColor} />
-              </div>
-            )
-          )}
-        </div>
-
-        {/* Footer — hidden when a confirm dialog is showing */}
-        {!showArchiveConfirm && !showDeleteConfirm && (
-          <div style={FOOTER}>
-            <div style={{ display: 'flex', gap: 8 }}>
-              {mode === 'edit' && timeline && canAdmin && !timeline.archivedAt && (
-                <button onClick={() => setShowArchiveConfirm(true)} style={archiveBtnStyle}>
-                  <Archive size={13} />
-                  Archive
-                </button>
-              )}
-              {mode === 'edit' && timeline && canAdmin && timeline.archivedAt && onUnarchive && (
-                <button onClick={() => onUnarchive(timeline.id)} style={restoreBtnStyle}>
-                  <RotateCcw size={13} />
-                  Restore
-                </button>
-              )}
-              {mode === 'edit' && timeline && canAdmin && (
-                <button
-                  onClick={() => setShowDeleteConfirm(true)}
-                  style={{ fontSize: 12, padding: '7px 12px', border: '1px solid rgba(239,68,68,0.3)', borderRadius: 7, background: 'none', color: 'var(--destructive)', cursor: 'pointer', fontFamily: 'var(--font-sans)' }}
-                >
-                  Delete
-                </button>
-              )}
-            </div>
-            <div style={{ display: 'flex', gap: 8 }}>
-              <button
-                onClick={onClose}
-                style={{ fontSize: 13, padding: '8px 16px', border: '1px solid var(--border)', borderRadius: 7, background: 'none', cursor: 'pointer', fontFamily: 'var(--font-sans)', color: 'var(--muted-foreground)' }}
-              >
-                Cancel
-              </button>
-              {activeTab === 'settings' && (
-                <button
-                  onClick={handleSave}
-                  disabled={saving}
-                  style={{ fontSize: 13, fontWeight: 600, padding: '8px 18px', border: 'none', borderRadius: 7, background: timelineColor, color: 'white', cursor: saving ? 'wait' : 'pointer', fontFamily: 'var(--font-sans)' }}
-                >
-                  {saving ? 'Saving…' : mode === 'new' ? 'Create timeline' : 'Save changes'}
-                </button>
-              )}
-            </div>
-          </div>
-        )}
-      </div>
     </div>
   )
 }
@@ -38052,6 +38706,240 @@ export default function CalendarGrid({
 }
 ````
 
+## File: packages/web/src/components/gantt/ActivityCreatePanel.tsx
+````typescript
+/**
+ * ActivityCreatePanel — right-side slide-in panel for creating a new Gantt activity.
+ *
+ * Shares its field stack with ActivityDetailPanel via ActivityFieldsBody
+ * (see activityPanelFields.tsx) so the create and edit forms show an identical
+ * field set and order. Unlike the detail panel, every change buffers in local
+ * state; nothing persists until the user clicks "Create activity", which
+ * submits the whole form via POST /timelines/:id/activities.
+ *
+ * Defaults come from the drag selection: start/end date and the lane member.
+ */
+
+import { useState, useEffect } from 'react'
+import { X, Loader2 } from 'lucide-react'
+import type { Identity } from '@/components/identity/identity-constants'
+import { useCreateActivity, useTimelineActivities } from '@/hooks/useTeamActivities'
+import { useTags } from '@/hooks/useTags'
+import type { Member } from '@/types'
+import type { components } from '@draba/shared'
+import { ActivityFieldsBody, PANEL_WIDTH } from './activityPanelFields'
+
+type Status = components['schemas']['Status']
+
+interface Props {
+  open: boolean
+  teamId: string
+  timelineId: string
+  members: Member[]
+  timelineStatuses?: Status[]
+  defaultStart: string
+  defaultEnd: string
+  defaultMemberId?: string | null
+  defaultStatusId?: string | null
+  onClose: () => void
+}
+
+export default function ActivityCreatePanel({
+  open,
+  teamId,
+  timelineId,
+  members,
+  timelineStatuses = [],
+  defaultStart,
+  defaultEnd,
+  defaultMemberId,
+  defaultStatusId,
+  onClose,
+}: Props) {
+  const createMutation = useCreateActivity(teamId, timelineId)
+  const { data: teamTags = [] } = useTags(teamId)
+  const { data: allActivities = [] } = useTimelineActivities(teamId, timelineId)
+
+  const [title, setTitle] = useState('')
+  const [description, setDescription] = useState('')
+  const [notes, setNotes] = useState('')
+  const [startDate, setStartDate] = useState(defaultStart)
+  const [endDate, setEndDate] = useState(defaultEnd)
+  const [identity, setIdentity] = useState<Identity>({ color: '#288C9B', icon: '__none__' })
+  const [assignedIds, setAssignedIds] = useState<string[]>(
+    defaultMemberId ? [defaultMemberId] : [],
+  )
+  const [statusId, setStatusId] = useState<string | null>(defaultStatusId ?? null)
+  const [tagIds, setTagIds] = useState<string[]>([])
+  const [parentId, setParentId] = useState<string | null>(null)
+  const [progress, setProgress] = useState(0)
+  const [location, setLocation] = useState('')
+  const [url, setUrl] = useState('')
+
+  // Reset all fields to defaults each time the panel opens so re-opening
+  // the panel always shows a blank form rather than the previous session's data.
+  useEffect(() => {
+    if (!open) return
+    setTitle('')
+    setDescription('')
+    setNotes('')
+    setStartDate(defaultStart)
+    setEndDate(defaultEnd)
+    setIdentity({ color: '#288C9B', icon: '__none__' })
+    setAssignedIds(defaultMemberId ? [defaultMemberId] : [])
+    setStatusId(defaultStatusId ?? null)
+    setTagIds([])
+    setParentId(null)
+    setProgress(0)
+    setLocation('')
+    setUrl('')
+  }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const creating = createMutation.isPending
+  const titleTrimmed = title.trim()
+
+  function toggleAssignee(memberId: string) {
+    setAssignedIds(prev =>
+      prev.includes(memberId) ? prev.filter(id => id !== memberId) : [...prev, memberId],
+    )
+  }
+
+  // Keep the end date from drifting before the start date.
+  function handleStartDateChange(val: string) {
+    setStartDate(val)
+    if (val > endDate) setEndDate(val)
+  }
+
+  function handleSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    if (!titleTrimmed) return
+    createMutation.mutate(
+      {
+        title: titleTrimmed,
+        startAt: `${startDate}T00:00:00Z`,
+        endAt: `${endDate}T00:00:00Z`,
+        description: description.trim() || null,
+        notes: notes.trim() || null,
+        color: identity.color,
+        icon: identity.icon,
+        assignedMemberIds: assignedIds,
+        statusId: statusId ?? undefined,
+        tagIds,
+        parentActivityId: parentId,
+        percentComplete: progress,
+        location: location.trim() || null,
+        url: url.trim() || null,
+      },
+      { onSuccess: onClose },
+    )
+  }
+
+  return (
+    <div
+      style={{
+        width: open ? PANEL_WIDTH : 0,
+        flexShrink: 0,
+        borderLeft: open ? '1px solid var(--border)' : 'none',
+        background: 'var(--card)',
+        display: 'flex',
+        flexDirection: 'column',
+        overflow: 'hidden',
+        transition: 'width 0.2s ease',
+      }}
+    >
+    <div style={{ width: PANEL_WIDTH, display: 'flex', flexDirection: 'column', height: '100%' }}>
+      {/* Header */}
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          padding: '0 12px',
+          height: 'var(--topbar-h, 40px)',
+          borderBottom: '1px solid var(--border)',
+          flexShrink: 0,
+        }}
+      >
+        <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)' }}>New activity</span>
+        <button
+          onClick={onClose}
+          style={{
+            width: 24, height: 24, border: 'none', background: 'none', borderRadius: 4,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            cursor: 'pointer', color: 'var(--muted-foreground)',
+          }}
+          onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+          onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+        >
+          <X size={14} strokeWidth={2} />
+        </button>
+      </div>
+
+      {/* Body (shared with detail panel) */}
+      <ActivityFieldsBody
+        identity={identity}
+        onIdentityChange={setIdentity}
+        title={title}
+        onTitleChange={setTitle}
+        titlePlaceholder="Activity title…"
+        titleAutoFocus
+        titleFallbackName="New Activity"
+        startDate={startDate}
+        endDate={endDate}
+        onStartDateChange={handleStartDateChange}
+        onEndDateChange={setEndDate}
+        description={description}
+        onDescriptionChange={setDescription}
+        members={members}
+        assignedIds={assignedIds}
+        onToggleAssignee={toggleAssignee}
+        statuses={timelineStatuses}
+        statusId={statusId}
+        onStatusChange={setStatusId}
+        teamId={teamId}
+        teamTags={teamTags}
+        tagIds={tagIds}
+        onTagsChange={setTagIds}
+        parentActivities={allActivities}
+        parentId={parentId}
+        onParentChange={setParentId}
+        progress={progress}
+        onProgressCommit={setProgress}
+        location={location}
+        onLocationChange={setLocation}
+        url={url}
+        onUrlChange={setUrl}
+        notes={notes}
+        onNotesChange={setNotes}
+      />
+
+      {/* Footer */}
+      <div style={{ padding: '10px 14px', borderTop: '1px solid var(--border)', flexShrink: 0 }}>
+        <button
+          type="button"
+          onClick={handleSubmit}
+          disabled={!titleTrimmed || creating}
+          style={{
+            width: '100%', fontSize: 13, fontWeight: 600, padding: 8,
+            borderRadius: 'var(--radius-md)', border: 'none',
+            background: titleTrimmed && !creating ? 'var(--primary)' : 'var(--muted)',
+            color: titleTrimmed && !creating ? 'white' : 'var(--muted-foreground)',
+            cursor: titleTrimmed && !creating ? 'pointer' : 'not-allowed',
+            fontFamily: 'var(--font-sans)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+            transition: 'background 0.1s',
+          }}
+        >
+          {creating && <Loader2 size={13} className="animate-spin" />}
+          Create activity
+        </button>
+      </div>
+    </div>
+    </div>
+  )
+}
+````
+
 ## File: packages/web/src/components/gantt/GanttView.tree.test.ts
 ````typescript
 /**
@@ -39928,558 +40816,6 @@ function ManageFiltersRow({ onClick }: { onClick: () => void }) {
       Manage filters
     </button>
   )
-}
-````
-
-## File: packages/web/src/hooks/useTeamActivities.ts
-````typescript
-/**
- * TanStack Query hooks for team-scoped data.
- *
- * All hooks call createAuthFetch to inject the current access token at
- * query-time so stale closures never send an expired token.
- */
-
-import { useCallback } from 'react'
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import type { components } from '@draba/shared'
-import { createAuthFetch } from '@/lib/api'
-import { useAuth } from '@/contexts/AuthContext'
-import { useWebSocket } from '@/hooks/useWebSocket'
-
-type Activity = components['schemas']['Activity']
-type Team = components['schemas']['Team']
-type Timeline = components['schemas']['Timeline']
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
-type TimelineAccessEntry = components['schemas']['TimelineAccessEntry']
-type PatchTimelineInput = components['schemas']['PatchTimelineInput']
-
-/** Query key factory — centralises cache key strings. */
-export const keys = {
-  myTeams: () => ['teams'] as const,
-  timelineActivities: (timelineId: string, from?: string, to?: string) =>
-    ['timelines', timelineId, 'activities', { from, to }] as const,
-  teamMembers: (teamId: string) =>
-    ['teams', teamId, 'members'] as const,
-  teamTimelines: (teamId: string) =>
-    ['teams', teamId, 'timelines'] as const,
-}
-
-/** Fetches all teams the authenticated user belongs to. */
-export function useMyTeams(includeArchived = false) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: [...keys.myTeams(), { includeArchived }],
-    queryFn: async () => (await authFetch<Team[] | null>(includeArchived ? '/teams?archived=true' : '/teams')) ?? [],
-  })
-}
-
-/** Fetches a single team by ID. */
-export function useTeam(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: ['teams', teamId],
-    queryFn: () => authFetch<Team>(`/teams/${teamId}`),
-    enabled: Boolean(teamId),
-  })
-}
-
-/** Fetches all non-archived timelines for a team. */
-export function useTeamTimelines(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: keys.teamTimelines(teamId),
-    queryFn: async () => (await authFetch<Timeline[] | null>(`/teams/${teamId}/timelines`)) ?? [],
-    enabled: Boolean(teamId),
-  })
-}
-
-/** Fetches activities for a timeline, optionally bounded by date range. */
-export function useTimelineActivities(teamId: string, timelineId: string, from?: string, to?: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: keys.timelineActivities(timelineId, from, to),
-    queryFn: async () => {
-      const params = new URLSearchParams()
-      if (from) params.set('from', from)
-      if (to) params.set('to', to)
-      const qs = params.toString()
-      return (await authFetch<Activity[] | null>(`/teams/${teamId}/timelines/${timelineId}/activities${qs ? `?${qs}` : ''}`)) ?? []
-    },
-    enabled: Boolean(teamId) && Boolean(timelineId),
-  })
-}
-
-/** Fetches the member list for a team. */
-export function useTeamMembers(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: keys.teamMembers(teamId),
-    queryFn: async () => (await authFetch<TeamMemberWithUser[] | null>(`/teams/${teamId}/members`)) ?? [],
-    enabled: Boolean(teamId),
-  })
-}
-
-/**
- * Subscribes to the team's WebSocket feed and applies surgical cache updates
- * for activity.created / activity.updated / activity.deleted deltas.
- *
- * Conflict strategy: for activity.updated, incoming deltas are only applied
- * when their updatedAt timestamp is strictly newer than the cached version.
- * This prevents self-echo (our own PATCH broadcast arriving back) and handles
- * the last-writer-wins case where a concurrent remote edit arrives while our
- * mutation is in-flight — the server-returned updatedAt on our onSuccess will
- * always win if our PATCH was truly last.
- */
-export function useTeamActivitySync(
-  teamId: string,
-  accessToken: string | null | undefined,
-) {
-  const client = useQueryClient()
-
-  const handleMessage = useCallback(
-    (msg: { type: string; payload?: unknown }) => {
-      if (!teamId || !msg.payload) return
-
-      if (msg.type === 'activity.created') {
-        const incoming = msg.payload as Activity
-        // Target all timeline-scoped activity cache entries by using the
-        // timelineId from the incoming activity payload.
-        if (!incoming.timelineId) return
-        client.setQueriesData<Activity[]>(
-          { queryKey: ['timelines', incoming.timelineId, 'activities'] },
-          (old) => {
-            if (!old) return old
-            // Guard against duplicate delivery.
-            if (old.some((a) => a.id === incoming.id)) return old
-            return [...old, incoming]
-          },
-        )
-      } else if (msg.type === 'activity.updated') {
-        const incoming = msg.payload as Activity
-        if (!incoming.timelineId) return
-        client.setQueriesData<Activity[]>(
-          { queryKey: ['timelines', incoming.timelineId, 'activities'] },
-          (old) => {
-            if (!old) return old
-            return old.map((a) => {
-              if (a.id !== incoming.id) return a
-              // Skip if the cache already holds the same or a newer version.
-              const cachedMs = new Date(a.updatedAt).getTime()
-              const incomingMs = new Date(incoming.updatedAt).getTime()
-              return incomingMs > cachedMs ? incoming : a
-            })
-          },
-        )
-      } else if (msg.type === 'activity.deleted') {
-        const { id } = msg.payload as { id: string }
-        // activity.deleted payload only has id — invalidate all timeline
-        // activity queries for this team so caches stay consistent.
-        client.invalidateQueries({ queryKey: ['timelines'] })
-        // Optimistically remove from all cached timeline activity lists.
-        client.setQueriesData<Activity[]>(
-          { queryKey: ['timelines'] },
-          (old) => old?.filter((a) => a.id !== id),
-        )
-      }
-    },
-    [client, teamId],
-  )
-
-  useWebSocket({
-    token: accessToken,
-    teamIds: teamId ? [teamId] : [],
-    onMessage: handleMessage,
-  })
-}
-
-interface CreateActivityInput {
-  title: string
-  startAt: string
-  endAt: string
-  description?: string | null
-  color?: string | null
-  icon?: string | null
-  assignedMemberIds?: string[]
-  tagIds?: string[]
-  parentActivityId?: string | null
-  percentComplete?: number | null
-  /** Client-only: if set, replace this placeholder ID in the cache instead of appending. */
-  _tempId?: string
-}
-
-interface UpdateActivityInput {
-  activityId: string
-  patch: {
-    title?: string
-    description?: string | null
-    notes?: string | null
-    startAt?: string
-    endAt?: string
-    allDay?: boolean
-    color?: string | null
-    icon?: string | null
-    location?: string | null
-    url?: string | null
-    statusId?: string | null
-    parentActivityId?: string | null
-    percentComplete?: number | null
-    assignedMemberIds?: string[]
-    tagIds?: string[]
-  }
-}
-
-/** Creates an activity in a timeline and inserts it directly into the cache. */
-export function useCreateActivity(teamId: string, timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: ({ _tempId: _, ...input }: CreateActivityInput) =>
-      authFetch<Activity>(`/teams/${teamId}/timelines/${timelineId}/activities`, {
-        method: 'POST',
-        body: JSON.stringify(input),
-      }),
-    onSuccess: (created, variables) => {
-      const tempId = variables._tempId
-      client.setQueriesData<Activity[]>(
-        { queryKey: ['timelines', timelineId, 'activities'] },
-        (old) => {
-          if (!old) return [created]
-          const hasReal = old.some((a) => a.id === created.id)
-          const hasTemp = tempId ? old.some((a) => a.id === tempId) : false
-          // The WS activity.created self-echo may win the race and append the
-          // real record before this onSuccess runs. In that case we must still
-          // drop the optimistic placeholder, otherwise it lingers as a duplicate
-          // "New Activity" row (and inline edits keep targeting the dead temp id).
-          if (hasReal) {
-            return hasTemp ? old.filter((a) => a.id !== tempId) : old
-          }
-          // Replace optimistic placeholder in-place to avoid a position flash.
-          if (hasTemp) {
-            return old.map((a) => (a.id === tempId ? created : a))
-          }
-          return [...old, created]
-        },
-      )
-    },
-  })
-}
-
-/** PATCHes an activity and optimistically updates the cache. */
-export function useUpdateActivity(timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: ({ activityId, patch }: UpdateActivityInput) =>
-      authFetch<Activity>(`/activities/${activityId}`, {
-        method: 'PATCH',
-        body: JSON.stringify(patch),
-      }),
-    onMutate: async ({ activityId, patch }) => {
-      await client.cancelQueries({ queryKey: ['timelines', timelineId, 'activities'] })
-      const snapshot = client.getQueriesData<Activity[]>({ queryKey: ['timelines', timelineId, 'activities'] })
-      client.setQueriesData<Activity[]>(
-        { queryKey: ['timelines', timelineId, 'activities'] },
-        (old) => old?.map((a) => (a.id === activityId ? { ...a, ...patch } : a)),
-      )
-      return { snapshot }
-    },
-    onError: (_err, _vars, context) => {
-      if (context?.snapshot) {
-        for (const [key, data] of context.snapshot) {
-          client.setQueryData(key, data)
-        }
-      }
-    },
-    onSuccess: (updated) => {
-      client.setQueriesData<Activity[]>(
-        { queryKey: ['timelines', timelineId, 'activities'] },
-        (old) => old?.map((a) => (a.id === updated.id ? updated : a)),
-      )
-    },
-  })
-}
-
-interface CreateTeamInput {
-  name: string
-  description?: string | null
-  notes?: string | null
-  color?: string | null
-  icon?: string | null
-}
-
-interface UpdateTeamInput {
-  teamId: string
-  patch: {
-    name?: string
-    description?: string | null
-    notes?: string | null
-    color?: string | null
-    icon?: string | null
-  }
-}
-
-/** Creates a team and inserts it into the active-teams cache. */
-export function useCreateTeam() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (input: CreateTeamInput) =>
-      authFetch<Team>('/teams', {
-        method: 'POST',
-        body: JSON.stringify(input),
-      }),
-    onSuccess: () => {
-      // Invalidate both active and archived team lists.
-      client.invalidateQueries({ queryKey: ['teams'] })
-    },
-  })
-}
-
-/** PATCHes a team's mutable fields and refreshes the cache. */
-export function useUpdateTeam() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: ({ teamId, patch }: UpdateTeamInput) =>
-      authFetch<Team>(`/teams/${teamId}`, {
-        method: 'PATCH',
-        body: JSON.stringify(patch),
-      }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: ['teams'] })
-    },
-  })
-}
-
-/** Archives a team (soft delete). */
-export function useArchiveTeam() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (teamId: string) =>
-      authFetch<Team>(`/teams/${teamId}/archive`, { method: 'POST' }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: ['teams'] })
-    },
-  })
-}
-
-/** Restores an archived team. */
-export function useUnarchiveTeam() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (teamId: string) =>
-      authFetch<Team>(`/teams/${teamId}/unarchive`, { method: 'POST' }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: ['teams'] })
-    },
-  })
-}
-
-/** Archives an activity (soft-delete). Removes it from the active-list cache. */
-export function useArchiveActivity(timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (activityId: string) =>
-      authFetch<Activity>(`/activities/${activityId}/archive`, { method: 'POST' }),
-    onSuccess: (_data, activityId) => {
-      client.setQueriesData<Activity[]>(
-        { queryKey: ['timelines', timelineId, 'activities'] },
-        (old) => old?.filter((a) => a.id !== activityId),
-      )
-    },
-  })
-}
-
-/** Deletes an activity and removes it from the cache. */
-export function useDeleteActivity(timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (activityId: string) =>
-      authFetch<void>(`/activities/${activityId}`, { method: 'DELETE' }),
-    onSuccess: (_data, activityId) => {
-      client.setQueriesData<Activity[]>(
-        { queryKey: ['timelines', timelineId, 'activities'] },
-        (old) => old?.filter((a) => a.id !== activityId),
-      )
-    },
-  })
-}
-
-// ── Timeline CRUD (Phase 10.3) ────────────────────────────────────────────────
-
-/** Fetches all timelines for a team, optionally including archived ones. */
-export function useTeamTimelinesWithArchived(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: [...keys.teamTimelines(teamId), { includeArchived: true }],
-    queryFn: async () =>
-      (await authFetch<Timeline[] | null>(`/teams/${teamId}/timelines?archived=true`)) ?? [],
-    enabled: Boolean(teamId),
-  })
-}
-
-/** Creates a new timeline for a team. */
-export function useCreateTimeline(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (input: { name: string; startDate: string; endDate: string; color?: string | null; icon?: string | null; description?: string | null; notes?: string | null; templateId?: string | null }) =>
-      authFetch<Timeline>(`/teams/${teamId}/timelines`, {
-        method: 'POST',
-        body: JSON.stringify(input),
-      }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
-    },
-  })
-}
-
-/** PATCHes a timeline's mutable fields. */
-export function useUpdateTimeline(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: ({ timelineId, patch }: { timelineId: string; patch: PatchTimelineInput }) =>
-      authFetch<Timeline>(`/timelines/${timelineId}`, {
-        method: 'PATCH',
-        body: JSON.stringify(patch),
-      }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
-    },
-  })
-}
-
-/** Hard-deletes a timeline. */
-export function useDeleteTimeline(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (timelineId: string) =>
-      authFetch<void>(`/timelines/${timelineId}`, { method: 'DELETE' }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
-    },
-  })
-}
-
-/** Archives a timeline. */
-export function useArchiveTimeline(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (timelineId: string) =>
-      authFetch<Timeline>(`/timelines/${timelineId}/archive`, { method: 'POST' }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
-    },
-  })
-}
-
-/** Restores an archived timeline. */
-export function useUnarchiveTimeline(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (timelineId: string) =>
-      authFetch<Timeline>(`/timelines/${timelineId}/unarchive`, { method: 'POST' }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
-    },
-  })
-}
-
-/** Fetches the access grant list for a timeline. */
-export function useTimelineAccess(teamId: string, timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: ['teams', teamId, 'timelines', timelineId, 'access'],
-    queryFn: async () =>
-      (await authFetch<TimelineAccessEntry[]>(
-        `/teams/${teamId}/timelines/${timelineId}/access`,
-      )) ?? [],
-    enabled: Boolean(teamId) && Boolean(timelineId),
-  })
-}
-
-/** Grants or updates a member's access to a timeline. */
-export function useGrantTimelineAccess(teamId: string, timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: ({ memberId, role }: { memberId: string; role: 'admin' | 'member' }) =>
-      authFetch<TimelineAccessEntry[]>(
-        `/teams/${teamId}/timelines/${timelineId}/access/${memberId}`,
-        { method: 'PUT', body: JSON.stringify({ role }) },
-      ),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: ['teams', teamId, 'timelines', timelineId, 'access'] })
-    },
-  })
-}
-
-/** Revokes a member's access to a timeline. */
-export function useRevokeTimelineAccess(teamId: string, timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (memberId: string) =>
-      authFetch<void>(`/teams/${teamId}/timelines/${timelineId}/access/${memberId}`, {
-        method: 'DELETE',
-      }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: ['teams', teamId, 'timelines', timelineId, 'access'] })
-    },
-  })
 }
 ````
 
@@ -47916,6 +48252,562 @@ paths:
           $ref: "#/components/responses/InternalError"
 ````
 
+## File: packages/web/src/hooks/useTeamActivities.ts
+````typescript
+/**
+ * TanStack Query hooks for team-scoped data.
+ *
+ * All hooks call createAuthFetch to inject the current access token at
+ * query-time so stale closures never send an expired token.
+ */
+
+import { useCallback } from 'react'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import type { components } from '@draba/shared'
+import { createAuthFetch } from '@/lib/api'
+import { useAuth } from '@/contexts/AuthContext'
+import { useWebSocket } from '@/hooks/useWebSocket'
+
+type Activity = components['schemas']['Activity']
+type Team = components['schemas']['Team']
+type Timeline = components['schemas']['Timeline']
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
+type TimelineAccessEntry = components['schemas']['TimelineAccessEntry']
+type PatchTimelineInput = components['schemas']['PatchTimelineInput']
+
+/** Query key factory — centralises cache key strings. */
+export const keys = {
+  myTeams: () => ['teams'] as const,
+  timelineActivities: (timelineId: string, from?: string, to?: string) =>
+    ['timelines', timelineId, 'activities', { from, to }] as const,
+  teamMembers: (teamId: string) =>
+    ['teams', teamId, 'members'] as const,
+  teamTimelines: (teamId: string) =>
+    ['teams', teamId, 'timelines'] as const,
+}
+
+/** Fetches all teams the authenticated user belongs to. */
+export function useMyTeams(includeArchived = false) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: [...keys.myTeams(), { includeArchived }],
+    queryFn: async () => (await authFetch<Team[] | null>(includeArchived ? '/teams?archived=true' : '/teams')) ?? [],
+  })
+}
+
+/** Fetches a single team by ID. */
+export function useTeam(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: ['teams', teamId],
+    queryFn: () => authFetch<Team>(`/teams/${teamId}`),
+    enabled: Boolean(teamId),
+  })
+}
+
+/** Fetches all non-archived timelines for a team. */
+export function useTeamTimelines(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: keys.teamTimelines(teamId),
+    queryFn: async () => (await authFetch<Timeline[] | null>(`/teams/${teamId}/timelines`)) ?? [],
+    enabled: Boolean(teamId),
+  })
+}
+
+/** Fetches activities for a timeline, optionally bounded by date range. */
+export function useTimelineActivities(teamId: string, timelineId: string, from?: string, to?: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: keys.timelineActivities(timelineId, from, to),
+    queryFn: async () => {
+      const params = new URLSearchParams()
+      if (from) params.set('from', from)
+      if (to) params.set('to', to)
+      const qs = params.toString()
+      return (await authFetch<Activity[] | null>(`/teams/${teamId}/timelines/${timelineId}/activities${qs ? `?${qs}` : ''}`)) ?? []
+    },
+    enabled: Boolean(teamId) && Boolean(timelineId),
+  })
+}
+
+/** Fetches the member list for a team. */
+export function useTeamMembers(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: keys.teamMembers(teamId),
+    queryFn: async () => (await authFetch<TeamMemberWithUser[] | null>(`/teams/${teamId}/members`)) ?? [],
+    enabled: Boolean(teamId),
+  })
+}
+
+/**
+ * Subscribes to the team's WebSocket feed and applies surgical cache updates
+ * for activity.created / activity.updated / activity.deleted deltas.
+ *
+ * Conflict strategy: for activity.updated, incoming deltas are only applied
+ * when their updatedAt timestamp is strictly newer than the cached version.
+ * This prevents self-echo (our own PATCH broadcast arriving back) and handles
+ * the last-writer-wins case where a concurrent remote edit arrives while our
+ * mutation is in-flight — the server-returned updatedAt on our onSuccess will
+ * always win if our PATCH was truly last.
+ */
+export function useTeamActivitySync(
+  teamId: string,
+  accessToken: string | null | undefined,
+) {
+  const client = useQueryClient()
+
+  const handleMessage = useCallback(
+    (msg: { type: string; payload?: unknown }) => {
+      if (!teamId || !msg.payload) return
+
+      if (msg.type === 'activity.created') {
+        const incoming = msg.payload as Activity
+        // Target all timeline-scoped activity cache entries by using the
+        // timelineId from the incoming activity payload.
+        if (!incoming.timelineId) return
+        client.setQueriesData<Activity[]>(
+          { queryKey: ['timelines', incoming.timelineId, 'activities'] },
+          (old) => {
+            if (!old) return old
+            // Guard against duplicate delivery.
+            if (old.some((a) => a.id === incoming.id)) return old
+            return [...old, incoming]
+          },
+        )
+      } else if (msg.type === 'activity.updated') {
+        const incoming = msg.payload as Activity
+        if (!incoming.timelineId) return
+        client.setQueriesData<Activity[]>(
+          { queryKey: ['timelines', incoming.timelineId, 'activities'] },
+          (old) => {
+            if (!old) return old
+            return old.map((a) => {
+              if (a.id !== incoming.id) return a
+              // Skip if the cache already holds the same or a newer version.
+              const cachedMs = new Date(a.updatedAt).getTime()
+              const incomingMs = new Date(incoming.updatedAt).getTime()
+              return incomingMs > cachedMs ? incoming : a
+            })
+          },
+        )
+      } else if (msg.type === 'activity.deleted') {
+        const { id } = msg.payload as { id: string }
+        // activity.deleted payload only has id — invalidate all timeline
+        // activity queries for this team so caches stay consistent.
+        client.invalidateQueries({ queryKey: ['timelines'] })
+        // Optimistically remove from all cached timeline activity lists.
+        client.setQueriesData<Activity[]>(
+          { queryKey: ['timelines'] },
+          (old) => old?.filter((a) => a.id !== id),
+        )
+      }
+    },
+    [client, teamId],
+  )
+
+  useWebSocket({
+    token: accessToken,
+    teamIds: teamId ? [teamId] : [],
+    onMessage: handleMessage,
+  })
+}
+
+interface CreateActivityInput {
+  title: string
+  startAt: string
+  endAt: string
+  description?: string | null
+  notes?: string | null
+  color?: string | null
+  icon?: string | null
+  assignedMemberIds?: string[]
+  tagIds?: string[]
+  statusId?: string | null
+  parentActivityId?: string | null
+  percentComplete?: number | null
+  location?: string | null
+  url?: string | null
+  /** Client-only: if set, replace this placeholder ID in the cache instead of appending. */
+  _tempId?: string
+}
+
+interface UpdateActivityInput {
+  activityId: string
+  patch: {
+    title?: string
+    description?: string | null
+    notes?: string | null
+    startAt?: string
+    endAt?: string
+    allDay?: boolean
+    color?: string | null
+    icon?: string | null
+    location?: string | null
+    url?: string | null
+    statusId?: string | null
+    parentActivityId?: string | null
+    percentComplete?: number | null
+    assignedMemberIds?: string[]
+    tagIds?: string[]
+  }
+}
+
+/** Creates an activity in a timeline and inserts it directly into the cache. */
+export function useCreateActivity(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({ _tempId: _, ...input }: CreateActivityInput) =>
+      authFetch<Activity>(`/teams/${teamId}/timelines/${timelineId}/activities`, {
+        method: 'POST',
+        body: JSON.stringify(input),
+      }),
+    onSuccess: (created, variables) => {
+      const tempId = variables._tempId
+      client.setQueriesData<Activity[]>(
+        { queryKey: ['timelines', timelineId, 'activities'] },
+        (old) => {
+          if (!old) return [created]
+          const hasReal = old.some((a) => a.id === created.id)
+          const hasTemp = tempId ? old.some((a) => a.id === tempId) : false
+          // The WS activity.created self-echo may win the race and append the
+          // real record before this onSuccess runs. In that case we must still
+          // drop the optimistic placeholder, otherwise it lingers as a duplicate
+          // "New Activity" row (and inline edits keep targeting the dead temp id).
+          if (hasReal) {
+            return hasTemp ? old.filter((a) => a.id !== tempId) : old
+          }
+          // Replace optimistic placeholder in-place to avoid a position flash.
+          if (hasTemp) {
+            return old.map((a) => (a.id === tempId ? created : a))
+          }
+          return [...old, created]
+        },
+      )
+    },
+  })
+}
+
+/** PATCHes an activity and optimistically updates the cache. */
+export function useUpdateActivity(timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({ activityId, patch }: UpdateActivityInput) =>
+      authFetch<Activity>(`/activities/${activityId}`, {
+        method: 'PATCH',
+        body: JSON.stringify(patch),
+      }),
+    onMutate: async ({ activityId, patch }) => {
+      await client.cancelQueries({ queryKey: ['timelines', timelineId, 'activities'] })
+      const snapshot = client.getQueriesData<Activity[]>({ queryKey: ['timelines', timelineId, 'activities'] })
+      client.setQueriesData<Activity[]>(
+        { queryKey: ['timelines', timelineId, 'activities'] },
+        (old) => old?.map((a) => (a.id === activityId ? { ...a, ...patch } : a)),
+      )
+      return { snapshot }
+    },
+    onError: (_err, _vars, context) => {
+      if (context?.snapshot) {
+        for (const [key, data] of context.snapshot) {
+          client.setQueryData(key, data)
+        }
+      }
+    },
+    onSuccess: (updated) => {
+      client.setQueriesData<Activity[]>(
+        { queryKey: ['timelines', timelineId, 'activities'] },
+        (old) => old?.map((a) => (a.id === updated.id ? updated : a)),
+      )
+    },
+  })
+}
+
+interface CreateTeamInput {
+  name: string
+  description?: string | null
+  notes?: string | null
+  color?: string | null
+  icon?: string | null
+}
+
+interface UpdateTeamInput {
+  teamId: string
+  patch: {
+    name?: string
+    description?: string | null
+    notes?: string | null
+    color?: string | null
+    icon?: string | null
+  }
+}
+
+/** Creates a team and inserts it into the active-teams cache. */
+export function useCreateTeam() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (input: CreateTeamInput) =>
+      authFetch<Team>('/teams', {
+        method: 'POST',
+        body: JSON.stringify(input),
+      }),
+    onSuccess: () => {
+      // Invalidate both active and archived team lists.
+      client.invalidateQueries({ queryKey: ['teams'] })
+    },
+  })
+}
+
+/** PATCHes a team's mutable fields and refreshes the cache. */
+export function useUpdateTeam() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({ teamId, patch }: UpdateTeamInput) =>
+      authFetch<Team>(`/teams/${teamId}`, {
+        method: 'PATCH',
+        body: JSON.stringify(patch),
+      }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ['teams'] })
+    },
+  })
+}
+
+/** Archives a team (soft delete). */
+export function useArchiveTeam() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (teamId: string) =>
+      authFetch<Team>(`/teams/${teamId}/archive`, { method: 'POST' }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ['teams'] })
+    },
+  })
+}
+
+/** Restores an archived team. */
+export function useUnarchiveTeam() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (teamId: string) =>
+      authFetch<Team>(`/teams/${teamId}/unarchive`, { method: 'POST' }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ['teams'] })
+    },
+  })
+}
+
+/** Archives an activity (soft-delete). Removes it from the active-list cache. */
+export function useArchiveActivity(timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (activityId: string) =>
+      authFetch<Activity>(`/activities/${activityId}/archive`, { method: 'POST' }),
+    onSuccess: (_data, activityId) => {
+      client.setQueriesData<Activity[]>(
+        { queryKey: ['timelines', timelineId, 'activities'] },
+        (old) => old?.filter((a) => a.id !== activityId),
+      )
+    },
+  })
+}
+
+/** Deletes an activity and removes it from the cache. */
+export function useDeleteActivity(timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (activityId: string) =>
+      authFetch<void>(`/activities/${activityId}`, { method: 'DELETE' }),
+    onSuccess: (_data, activityId) => {
+      client.setQueriesData<Activity[]>(
+        { queryKey: ['timelines', timelineId, 'activities'] },
+        (old) => old?.filter((a) => a.id !== activityId),
+      )
+    },
+  })
+}
+
+// ── Timeline CRUD (Phase 10.3) ────────────────────────────────────────────────
+
+/** Fetches all timelines for a team, optionally including archived ones. */
+export function useTeamTimelinesWithArchived(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: [...keys.teamTimelines(teamId), { includeArchived: true }],
+    queryFn: async () =>
+      (await authFetch<Timeline[] | null>(`/teams/${teamId}/timelines?archived=true`)) ?? [],
+    enabled: Boolean(teamId),
+  })
+}
+
+/** Creates a new timeline for a team. */
+export function useCreateTimeline(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (input: { name: string; startDate: string; endDate: string; color?: string | null; icon?: string | null; description?: string | null; notes?: string | null; templateId?: string | null }) =>
+      authFetch<Timeline>(`/teams/${teamId}/timelines`, {
+        method: 'POST',
+        body: JSON.stringify(input),
+      }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
+    },
+  })
+}
+
+/** PATCHes a timeline's mutable fields. */
+export function useUpdateTimeline(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({ timelineId, patch }: { timelineId: string; patch: PatchTimelineInput }) =>
+      authFetch<Timeline>(`/timelines/${timelineId}`, {
+        method: 'PATCH',
+        body: JSON.stringify(patch),
+      }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
+    },
+  })
+}
+
+/** Hard-deletes a timeline. */
+export function useDeleteTimeline(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (timelineId: string) =>
+      authFetch<void>(`/timelines/${timelineId}`, { method: 'DELETE' }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
+    },
+  })
+}
+
+/** Archives a timeline. */
+export function useArchiveTimeline(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (timelineId: string) =>
+      authFetch<Timeline>(`/timelines/${timelineId}/archive`, { method: 'POST' }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
+    },
+  })
+}
+
+/** Restores an archived timeline. */
+export function useUnarchiveTimeline(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (timelineId: string) =>
+      authFetch<Timeline>(`/timelines/${timelineId}/unarchive`, { method: 'POST' }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
+    },
+  })
+}
+
+/** Fetches the access grant list for a timeline. */
+export function useTimelineAccess(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: ['teams', teamId, 'timelines', timelineId, 'access'],
+    queryFn: async () =>
+      (await authFetch<TimelineAccessEntry[]>(
+        `/teams/${teamId}/timelines/${timelineId}/access`,
+      )) ?? [],
+    enabled: Boolean(teamId) && Boolean(timelineId),
+  })
+}
+
+/** Grants or updates a member's access to a timeline. */
+export function useGrantTimelineAccess(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({ memberId, role }: { memberId: string; role: 'admin' | 'member' }) =>
+      authFetch<TimelineAccessEntry[]>(
+        `/teams/${teamId}/timelines/${timelineId}/access/${memberId}`,
+        { method: 'PUT', body: JSON.stringify({ role }) },
+      ),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ['teams', teamId, 'timelines', timelineId, 'access'] })
+    },
+  })
+}
+
+/** Revokes a member's access to a timeline. */
+export function useRevokeTimelineAccess(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (memberId: string) =>
+      authFetch<void>(`/teams/${teamId}/timelines/${timelineId}/access/${memberId}`, {
+        method: 'DELETE',
+      }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ['teams', teamId, 'timelines', timelineId, 'access'] })
+    },
+  })
+}
+````
+
 ## File: packages/api/internal/api/activity_handler.go
 ````go
 package api
@@ -48418,38 +49310,28 @@ func (s *Server) handleDeleteActivity(w http.ResponseWriter, r *http.Request) {
 /**
  * ActivityDetailPanel — right-side slide-in panel for a selected Gantt activity.
  *
- * Field order (top to bottom):
- *   1. Header — Identity widget + Title
- *   2. When — Date pickers (start → end)
- *   3. Description — single-line input
- *   4. Assigned to — bordered card style (matches create panel)
- *   5. Classify — Status (rich dropdown with color dot + icon + name), Tags (stub)
- *   6. Advanced — Parent (stub), Progress (stub), Location, URL
- *   7. Notes — multi-line textarea
- *   8. Footer — Delete button
+ * Shares its field stack with ActivityCreatePanel via ActivityFieldsBody
+ * (see activityPanelFields.tsx) — header bar, footer, and save behavior live
+ * here, the fields themselves are shared. Field order is fixed by the shared
+ * body: Identity+Title → When → Description → Assigned to → Classify
+ * (Status, Tags) → Advanced (Parent, Progress, Location, URL) → Notes.
  *
  * All functional fields save on change/blur via PATCH /activities/:id.
- * liveDragStart / liveDragEnd display live dates during bar drag without triggering saves.
+ * liveDragStart / liveDragEnd display live dates during bar drag without
+ * triggering saves.
  */
 
-import { useState, useEffect, useRef } from 'react'
-import { X, Trash2, Archive, ArrowRight, Loader2, ChevronDown, Search } from 'lucide-react'
-import MemberAvatar from '@/components/MemberAvatar'
-import { IdentityWidget } from '@/components/identity/IdentityWidget'
-import { Badge } from '@/components/identity/Badge'
-import { resolveColorHex } from '@/components/identity/identity-constants'
+import { useState, useEffect } from 'react'
+import { X, Trash2, Archive, Loader2 } from 'lucide-react'
 import type { Identity } from '@/components/identity/identity-constants'
 import { useUpdateActivity, useDeleteActivity, useArchiveActivity, useTimelineActivities } from '@/hooks/useTeamActivities'
 import { useTimelineStatuses } from '@/hooks/useStatusTemplates'
 import { useTags } from '@/hooks/useTags'
-import TagInput from '@/components/TagInput'
 import type { components } from '@draba/shared'
 import type { Member } from '@/types'
+import { ActivityFieldsBody, PANEL_WIDTH, toDateInput, toISODate } from './activityPanelFields'
 
 type ApiActivity = components['schemas']['Activity']
-type Status = components['schemas']['Status']
-
-const PANEL_WIDTH = 300
 
 interface Props {
   event: ApiActivity | null
@@ -48463,326 +49345,6 @@ interface Props {
   /** Display-only end date override during bar drag (YYYY-MM-DD). Does not trigger a save. */
   liveDragEnd?: string
 }
-
-// ── Small helpers ─────────────────────────────────────────────────────────────
-
-function toDateInput(iso: string): string { return iso.slice(0, 10) }
-function toISODate(d: string): string { return `${d}T00:00:00Z` }
-
-const SEC_LABEL: React.CSSProperties = {
-  fontSize: 10,
-  fontWeight: 700,
-  color: 'var(--muted-foreground)',
-  textTransform: 'uppercase',
-  letterSpacing: '0.08em',
-  marginBottom: 6,
-}
-
-const FIELD_LABEL: React.CSSProperties = {
-  fontSize: 10,
-  fontWeight: 600,
-  color: 'var(--muted-foreground)',
-  textTransform: 'uppercase',
-  letterSpacing: '0.07em',
-  marginBottom: 3,
-  width: 68,
-  flexShrink: 0,
-}
-
-const STUB_VALUE: React.CSSProperties = {
-  fontSize: 12,
-  color: 'var(--muted-foreground)',
-  opacity: 0.5,
-  flex: 1,
-  display: 'flex',
-  alignItems: 'center',
-  gap: 4,
-  cursor: 'default',
-  userSelect: 'none',
-}
-
-const DIVIDER: React.CSSProperties = {
-  borderTop: '1px solid var(--border)',
-  margin: '10px 0',
-}
-
-const INPUT: React.CSSProperties = {
-  width: '100%',
-  boxSizing: 'border-box' as const,
-  fontSize: 12,
-  color: 'var(--foreground)',
-  border: '1px solid var(--border)',
-  borderRadius: 'var(--radius-md)',
-  padding: '5px 8px',
-  outline: 'none',
-  background: 'var(--background)',
-  fontFamily: 'var(--font-sans)',
-}
-
-// ── Rich status dropdown ──────────────────────────────────────────────────────
-
-interface StatusDropdownProps {
-  statuses: Status[]
-  value: string | null | undefined
-  onChange: (id: string | null) => void
-}
-
-function StatusDropdown({ statuses, value, onChange }: StatusDropdownProps) {
-  const [open, setOpen] = useState(false)
-  const ref = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    function onDown(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
-    }
-    document.addEventListener('mousedown', onDown)
-    return () => document.removeEventListener('mousedown', onDown)
-  }, [])
-
-  const selected = statuses.find(s => s.id === value) ?? null
-
-  return (
-    <div ref={ref} style={{ flex: 1, position: 'relative' }}>
-      <button
-        onClick={() => setOpen(o => !o)}
-        style={{
-          width: '100%',
-          display: 'flex',
-          alignItems: 'center',
-          gap: 6,
-          padding: '4px 8px',
-          border: '1px solid var(--border)',
-          borderRadius: 6,
-          background: 'var(--background)',
-          color: 'var(--foreground)',
-          cursor: 'pointer',
-          fontSize: 12,
-          fontFamily: 'var(--font-sans)',
-          textAlign: 'left',
-        }}
-      >
-        {selected ? (
-          <>
-            <div
-              style={{
-                width: 8,
-                height: 8,
-                borderRadius: '50%',
-                background: resolveColorHex(selected.color) ?? selected.color,
-                flexShrink: 0,
-              }}
-            />
-            <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {selected.name}
-            </span>
-          </>
-        ) : (
-          <span style={{ flex: 1, color: 'var(--muted-foreground)', fontStyle: 'italic' }}>— No status —</span>
-        )}
-        <ChevronDown size={11} strokeWidth={2} style={{ flexShrink: 0, color: 'var(--muted-foreground)' }} />
-      </button>
-
-      {open && (
-        <div
-          style={{
-            position: 'absolute',
-            top: 'calc(100% + 4px)',
-            left: 0,
-            right: 0,
-            background: 'var(--card)',
-            border: '1px solid var(--border)',
-            borderRadius: 6,
-            boxShadow: '0 4px 12px rgba(0,0,0,.12)',
-            zIndex: 100,
-            overflow: 'hidden',
-          }}
-        >
-          <div
-            onClick={() => { onChange(null); setOpen(false) }}
-            style={{
-              padding: '6px 10px',
-              fontSize: 12,
-              color: 'var(--muted-foreground)',
-              fontStyle: 'italic',
-              cursor: 'pointer',
-              borderBottom: statuses.length > 0 ? '1px solid var(--border)' : 'none',
-            }}
-            onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-            onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-          >
-            — No status —
-          </div>
-          {statuses.map(s => (
-            <div
-              key={s.id}
-              onClick={() => { onChange(s.id); setOpen(false) }}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 8,
-                padding: '6px 10px',
-                fontSize: 12,
-                cursor: 'pointer',
-                background: s.id === value ? 'var(--muted)' : 'transparent',
-                fontWeight: s.id === value ? 600 : 400,
-              }}
-              onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-              onMouseLeave={e => (e.currentTarget.style.background = s.id === value ? 'var(--muted)' : 'transparent')}
-            >
-              <div
-                style={{
-                  width: 8,
-                  height: 8,
-                  borderRadius: '50%',
-                  background: resolveColorHex(s.color) ?? s.color,
-                  flexShrink: 0,
-                }}
-              />
-              <span style={{ flex: 1 }}>{s.name}</span>
-              {s.isClosed && (
-                <span style={{ fontSize: 9, color: 'var(--muted-foreground)', fontWeight: 500, letterSpacing: '0.05em' }}>
-                  CLOSED
-                </span>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  )
-}
-
-// ── Searchable parent activity picker ─────────────────────────────────────────
-
-interface ParentPickerProps {
-  activities: ApiActivity[]
-  value: string | null | undefined
-  onChange: (id: string | null) => void
-}
-
-/**
- * Searchable combobox for choosing a parent activity. Scales past a plain
- * <select> by filtering as you type, shows each activity's identity badge,
- * and ellipsis-truncates long titles so the panel never overflows.
- */
-function ParentActivityPicker({ activities, value, onChange }: ParentPickerProps) {
-  const [open, setOpen] = useState(false)
-  const [query, setQuery] = useState('')
-  const ref = useRef<HTMLDivElement>(null)
-  const inputRef = useRef<HTMLInputElement>(null)
-
-  useEffect(() => {
-    function onDown(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) { setOpen(false); setQuery('') }
-    }
-    document.addEventListener('mousedown', onDown)
-    return () => document.removeEventListener('mousedown', onDown)
-  }, [])
-
-  // Focus the search field whenever the dropdown opens.
-  useEffect(() => { if (open) inputRef.current?.focus() }, [open])
-
-  const selected = activities.find(a => a.id === value) ?? null
-  const filtered = activities.filter(a => a.title.toLowerCase().includes(query.trim().toLowerCase()))
-
-  function choose(id: string | null) {
-    onChange(id)
-    setOpen(false)
-    setQuery('')
-  }
-
-  return (
-    <div ref={ref} style={{ flex: 1, position: 'relative', minWidth: 0 }}>
-      <button
-        onClick={() => setOpen(o => !o)}
-        style={{
-          width: '100%', display: 'flex', alignItems: 'center', gap: 6,
-          padding: '4px 8px', border: '1px solid var(--border)', borderRadius: 6,
-          background: 'var(--background)', color: 'var(--foreground)', cursor: 'pointer',
-          fontSize: 12, fontFamily: 'var(--font-sans)', textAlign: 'left',
-        }}
-      >
-        {selected ? (
-          <>
-            <Badge identity={{ color: selected.color ?? '#288C9B', icon: selected.icon ?? '__none__' }} name={selected.title} size={16} />
-            <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {selected.title}
-            </span>
-          </>
-        ) : (
-          <span style={{ flex: 1, color: 'var(--muted-foreground)', fontStyle: 'italic' }}>— None —</span>
-        )}
-        <ChevronDown size={11} strokeWidth={2} style={{ flexShrink: 0, color: 'var(--muted-foreground)' }} />
-      </button>
-
-      {open && (
-        <div
-          style={{
-            position: 'absolute', top: 'calc(100% + 4px)', left: 0, right: 0,
-            background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 6,
-            boxShadow: '0 4px 12px rgba(0,0,0,.12)', zIndex: 100, overflow: 'hidden',
-          }}
-        >
-          {/* Search field */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 8px', borderBottom: '1px solid var(--border)' }}>
-            <Search size={12} strokeWidth={2} style={{ flexShrink: 0, color: 'var(--muted-foreground)' }} />
-            <input
-              ref={inputRef}
-              value={query}
-              onChange={e => setQuery(e.target.value)}
-              placeholder="Search activities…"
-              style={{
-                flex: 1, minWidth: 0, border: 'none', outline: 'none', background: 'none',
-                fontSize: 12, color: 'var(--foreground)', fontFamily: 'var(--font-sans)',
-              }}
-            />
-          </div>
-
-          <div style={{ maxHeight: 200, overflowY: 'auto' }}>
-            <div
-              onClick={() => choose(null)}
-              style={{
-                padding: '6px 10px', fontSize: 12, color: 'var(--muted-foreground)',
-                fontStyle: 'italic', cursor: 'pointer',
-                borderBottom: filtered.length > 0 ? '1px solid var(--border)' : 'none',
-              }}
-              onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-              onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-            >
-              — None —
-            </div>
-            {filtered.map(a => (
-              <div
-                key={a.id}
-                onClick={() => choose(a.id)}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px',
-                  fontSize: 12, cursor: 'pointer',
-                  background: a.id === value ? 'var(--muted)' : 'transparent',
-                  fontWeight: a.id === value ? 600 : 400,
-                }}
-                onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-                onMouseLeave={e => (e.currentTarget.style.background = a.id === value ? 'var(--muted)' : 'transparent')}
-              >
-                <Badge identity={{ color: a.color ?? '#288C9B', icon: a.icon ?? '__none__' }} name={a.title} size={16} />
-                <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {a.title}
-                </span>
-              </div>
-            ))}
-            {filtered.length === 0 && (
-              <div style={{ padding: '8px 10px', fontSize: 11, color: 'var(--muted-foreground)', fontStyle: 'italic' }}>
-                No matching activities
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-    </div>
-  )
-}
-
-// ── Component ─────────────────────────────────────────────────────────────────
 
 export default function ActivityDetailPanel({
   event, open, members, teamId, timelineId, onClose, liveDragStart, liveDragEnd,
@@ -48813,10 +49375,6 @@ export default function ActivityDetailPanel({
   // doesn't refresh until the activity is reselected.
   const [parentId, setParentId] = useState<string | null>(event?.parentActivityId ?? null)
   const [statusId, setStatusId] = useState<string | null>(event?.statusId ?? null)
-  // Progress percent renders as a label until clicked; `progressDraft` holds the
-  // in-flight text while editing.
-  const [editingProgress, setEditingProgress] = useState(false)
-  const [progressDraft, setProgressDraft] = useState('')
   const [confirmDelete, setConfirmDelete] = useState(false)
 
   // Re-sync when the selected activity changes.
@@ -48835,17 +49393,31 @@ export default function ActivityDetailPanel({
     setProgressValue(event.percentComplete ?? 0)
     setParentId(event.parentActivityId ?? null)
     setStatusId(event.statusId ?? null)
-    setEditingProgress(false)
     setConfirmDelete(false)
   }, [event?.id]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Sync local date state when the event's dates change (e.g. after a drag commit).
+  // Sync local date state when the event's dates change (e.g. after a Gantt bar drag).
   const eventStartAt = event?.startAt
   const eventEndAt = event?.endAt
   useEffect(() => {
     if (eventStartAt) setStartDate(toDateInput(eventStartAt))
     if (eventEndAt) setEndDate(toDateInput(eventEndAt))
   }, [eventStartAt, eventEndAt])
+
+  // Sync status when changed externally on the same activity (e.g. after a Kanban
+  // drag-to-column). The main sync effect only fires on id change, so we need a
+  // separate effect keyed on statusId.
+  const eventStatusId = event?.statusId
+  useEffect(() => {
+    setStatusId(eventStatusId ?? null)
+  }, [eventStatusId])
+
+  // Sync assigned members when changed externally (e.g. after a Kanban drag to a
+  // member column). Arrays compare by reference, so use a stable string key.
+  const eventAssignedKey = (event?.assignedMemberIds ?? []).join(',')
+  useEffect(() => {
+    setAssignedIds(event?.assignedMemberIds ?? [])
+  }, [eventAssignedKey]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const saving = updateMutation.isPending
   const deleting = deleteMutation.isPending
@@ -48908,31 +49480,12 @@ export default function ActivityDetailPanel({
     save({ tagIds: ids } as Parameters<typeof save>[0])
   }
 
-  function handleProgressChange(e: React.ChangeEvent<HTMLInputElement>) {
-    setProgressValue(Number(e.target.value))
-  }
-
-  // Clamps to 0–100, rounds to an integer, and saves only on a real change.
-  function commitProgress(val: number) {
-    const clamped = Math.max(0, Math.min(100, Math.round(Number.isFinite(val) ? val : 0)))
+  // Saves only on a real change. The shared ProgressRow already clamps to 0–100.
+  function handleProgressCommit(clamped: number) {
     setProgressValue(clamped)
     if (clamped !== (event?.percentComplete ?? 0)) {
       save({ percentComplete: clamped } as Parameters<typeof save>[0])
     }
-  }
-
-  function handleProgressCommit(e: React.ChangeEvent<HTMLInputElement>) {
-    commitProgress(Number(e.target.value))
-  }
-
-  function startEditProgress() {
-    setProgressDraft(String(progressValue))
-    setEditingProgress(true)
-  }
-
-  function commitProgressEdit() {
-    commitProgress(progressDraft === '' ? 0 : Number(progressDraft))
-    setEditingProgress(false)
   }
 
   function handleDelete() {
@@ -48985,268 +49538,46 @@ export default function ActivityDetailPanel({
           </button>
         </div>
 
-        {/* ── Scrollable body ── */}
-        <div style={{ flex: 1, overflowY: 'auto', padding: '14px 14px 8px' }}>
-
-          {/* 1. Identity widget + Title */}
-          <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start', marginBottom: 14 }}>
-            <div style={{ marginTop: 2, flexShrink: 0 }}>
-              <IdentityWidget
-                identity={identity}
-                name={title || event?.title || ''}
-                shape="square"
-                onChange={handleIdentityChange}
-              />
-            </div>
-            <input
-              value={title}
-              onChange={e => setTitle(e.target.value)}
-              onBlur={handleTitleBlur}
-              style={{
-                flex: 1, fontSize: 13, fontWeight: 600,
-                color: 'var(--foreground)', border: '1px solid transparent',
-                borderRadius: 'var(--radius-md)', padding: '5px 6px',
-                outline: 'none', background: 'transparent', fontFamily: 'var(--font-sans)',
-              }}
-              onFocus={e => { e.target.style.borderColor = 'var(--primary)'; e.target.style.background = 'var(--background)' }}
-              onBlurCapture={e => { e.target.style.borderColor = 'transparent'; e.target.style.background = 'transparent' }}
-            />
-          </div>
-
-          <div style={DIVIDER} />
-
-          {/* 2. When — date pickers only (no allDay checkbox, no date summary) */}
-          <div style={{ marginBottom: 12 }}>
-            <div style={SEC_LABEL}>When</div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-              <input
-                type="date" value={displayStart}
-                onChange={e => handleStartDateChange(e.target.value)}
-                style={{ ...INPUT, flex: 1, padding: '5px 6px' }}
-                onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
-                onBlur={e => (e.target.style.borderColor = 'var(--border)')}
-              />
-              <ArrowRight size={11} color="var(--muted-foreground)" strokeWidth={2} style={{ flexShrink: 0 }} />
-              <input
-                type="date" value={displayEnd} min={startDate}
-                onChange={e => handleEndDateChange(e.target.value)}
-                style={{ ...INPUT, flex: 1, padding: '5px 6px' }}
-                onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
-                onBlur={e => (e.target.style.borderColor = 'var(--border)')}
-              />
-            </div>
-          </div>
-
-          <div style={DIVIDER} />
-
-          {/* 3. Description — below dates, matching create panel */}
-          <div style={{ marginBottom: 12 }}>
-            <div style={SEC_LABEL}>Description</div>
-            <input
-              value={description}
-              onChange={e => setDescription(e.target.value)}
-              onBlur={e => { handleDescriptionBlur(); e.target.style.borderColor = 'var(--border)' }}
-              placeholder="Optional description…"
-              style={{ ...INPUT, padding: '6px 8px' }}
-              onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
-            />
-          </div>
-
-          <div style={DIVIDER} />
-
-          {/* 4. Assigned to — bordered card style matching create panel */}
-          {members.length > 0 && (
-            <div style={{ marginBottom: 12 }}>
-              <div style={SEC_LABEL}>Assigned to</div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                {members.map(m => {
-                  const assigned = assignedIds.includes(m.id)
-                  return (
-                    <button
-                      key={m.id}
-                      onClick={() => toggleAssignee(m.id)}
-                      style={{
-                        display: 'flex', alignItems: 'center', gap: 8,
-                        padding: '5px 8px',
-                        border: assigned ? `1px solid ${m.color}` : '1px solid var(--border)',
-                        borderRadius: 'var(--radius-md)',
-                        background: assigned ? `${m.color}18` : 'var(--background)',
-                        cursor: 'pointer', textAlign: 'left',
-                        transition: 'background 0.1s, border-color 0.1s',
-                      }}
-                    >
-                      <MemberAvatar member={m} size={18} />
-                      <span style={{ fontSize: 12, color: 'var(--foreground)', flex: 1 }}>{m.name}</span>
-                      {assigned && (
-                        <div style={{ width: 6, height: 6, borderRadius: '50%', background: m.color, flexShrink: 0 }} />
-                      )}
-                    </button>
-                  )
-                })}
-              </div>
-            </div>
-          )}
-
-          <div style={DIVIDER} />
-
-          {/* 5. Classify — Status (rich dropdown), Tags (stub) */}
-          <div style={{ marginBottom: 12 }}>
-            <div style={SEC_LABEL}>Classify</div>
-
-            {/* Status picker */}
-            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
-              <span style={FIELD_LABEL}>Status</span>
-              {statuses.length > 0 ? (
-                <StatusDropdown
-                  statuses={statuses}
-                  value={statusId}
-                  onChange={id => { setStatusId(id); save({ statusId: id } as Parameters<typeof save>[0]) }}
-                />
-              ) : (
-                <div style={{ ...STUB_VALUE }}>
-                  <span style={{ fontSize: 10, opacity: 0.5 }}>No statuses configured</span>
-                </div>
-              )}
-            </div>
-
-            {/* Tags */}
-            <div style={{ display: 'flex', alignItems: 'flex-start' }}>
-              <span style={{ ...FIELD_LABEL, paddingTop: 5 }}>Tags</span>
-              <TagInput
-                teamId={teamId}
-                tags={teamTags}
-                selectedTagIds={tagIds}
-                onChange={handleTagsChange}
-              />
-            </div>
-          </div>
-
-          <div style={DIVIDER} />
-
-          {/* 6. Advanced (was "Details") — Parent, Progress, Location, URL */}
-          <div style={{ marginBottom: 12 }}>
-            <div style={SEC_LABEL}>Advanced</div>
-
-            {/* Parent activity picker */}
-            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
-              <span style={FIELD_LABEL}>Parent</span>
-              <ParentActivityPicker
-                activities={allActivities.filter(a => a.id !== event.id)}
-                value={parentId}
-                onChange={id => { setParentId(id); save({ parentActivityId: id } as Parameters<typeof save>[0]) }}
-              />
-            </div>
-
-            {/* % Complete slider */}
-            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
-              <span style={FIELD_LABEL}>Progress</span>
-              <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 8 }}>
-                <input
-                  type="range"
-                  min={0}
-                  max={100}
-                  step={5}
-                  value={progressValue}
-                  onChange={handleProgressChange}
-                  onMouseUp={handleProgressCommit as unknown as React.MouseEventHandler}
-                  onTouchEnd={handleProgressCommit as unknown as React.TouchEventHandler}
-                  style={{ flex: 1, cursor: 'pointer', accentColor: 'var(--primary)' }}
-                />
-                {editingProgress ? (
-                  <input
-                    autoFocus
-                    type="text"
-                    inputMode="numeric"
-                    value={progressDraft}
-                    onChange={e => setProgressDraft(e.target.value.replace(/[^0-9]/g, '').slice(0, 3))}
-                    onBlur={commitProgressEdit}
-                    onKeyDown={e => {
-                      if (e.key === 'Enter') commitProgressEdit()
-                      else if (e.key === 'Escape') setEditingProgress(false)
-                    }}
-                    aria-label="Percent complete"
-                    style={{
-                      width: 40, fontSize: 11, textAlign: 'right', flexShrink: 0,
-                      marginLeft: 'auto',
-                      color: 'var(--foreground)', border: '1px solid var(--primary)',
-                      borderRadius: 4, padding: '2px 4px', outline: 'none',
-                      background: 'var(--background)', fontFamily: 'var(--font-sans)',
-                    }}
-                  />
-                ) : (
-                  <span
-                    onClick={startEditProgress}
-                    title="Click to edit"
-                    role="button"
-                    tabIndex={0}
-                    onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); startEditProgress() } }}
-                    style={{
-                      fontSize: 11, color: 'var(--muted-foreground)', minWidth: 34,
-                      textAlign: 'right', flexShrink: 0, cursor: 'text', userSelect: 'none',
-                      marginLeft: 'auto',
-                      padding: '2px 4px', borderRadius: 4, border: '1px solid transparent',
-                    }}
-                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-                    onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-                  >
-                    {progressValue}%
-                  </span>
-                )}
-              </div>
-            </div>
-
-            {/* Location (functional) */}
-            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
-              <span style={FIELD_LABEL}>Location</span>
-              <input
-                value={location}
-                onChange={e => setLocation(e.target.value)}
-                onBlur={handleLocationBlur}
-                placeholder="—"
-                style={{ ...INPUT, flex: 1, padding: '4px 6px', fontSize: 12 }}
-                onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
-                onBlurCapture={e => (e.target.style.borderColor = 'var(--border)')}
-              />
-            </div>
-
-            {/* URL (functional) */}
-            <div style={{ display: 'flex', alignItems: 'center' }}>
-              <span style={FIELD_LABEL}>URL</span>
-              <input
-                value={url}
-                onChange={e => setUrl(e.target.value)}
-                onBlur={handleUrlBlur}
-                placeholder="—"
-                style={{ ...INPUT, flex: 1, padding: '4px 6px', fontSize: 12 }}
-                onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
-                onBlurCapture={e => (e.target.style.borderColor = 'var(--border)')}
-              />
-            </div>
-          </div>
-
-          <div style={DIVIDER} />
-
-          {/* 7. Notes — multi-line textarea */}
-          <div style={{ marginBottom: 8 }}>
-            <div style={SEC_LABEL}>Notes</div>
-            <textarea
-              value={notes}
-              onChange={e => setNotes(e.target.value)}
-              onBlur={e => { handleNotesBlur(); e.target.style.borderColor = 'var(--border)' }}
-              placeholder="Add notes…"
-              rows={4}
-              style={{
-                ...INPUT,
-                padding: '6px 8px',
-                resize: 'vertical',
-                minHeight: 72,
-                lineHeight: 1.5,
-              }}
-              onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
-            />
-          </div>
-
-        </div>
+        {/* ── Scrollable body (shared with create panel) ── */}
+        <ActivityFieldsBody
+          identity={identity}
+          onIdentityChange={handleIdentityChange}
+          title={title}
+          onTitleChange={setTitle}
+          onTitleBlur={handleTitleBlur}
+          titleFallbackName={event.title || ''}
+          startDate={displayStart}
+          endDate={displayEnd}
+          onStartDateChange={handleStartDateChange}
+          onEndDateChange={handleEndDateChange}
+          description={description}
+          onDescriptionChange={setDescription}
+          onDescriptionBlur={handleDescriptionBlur}
+          members={members}
+          assignedIds={assignedIds}
+          onToggleAssignee={toggleAssignee}
+          statuses={statuses}
+          statusId={statusId}
+          onStatusChange={id => { setStatusId(id); save({ statusId: id } as Parameters<typeof save>[0]) }}
+          teamId={teamId}
+          teamTags={teamTags}
+          tagIds={tagIds}
+          onTagsChange={handleTagsChange}
+          parentActivities={allActivities.filter(a => a.id !== event.id)}
+          parentId={parentId}
+          onParentChange={id => { setParentId(id); save({ parentActivityId: id } as Parameters<typeof save>[0]) }}
+          progress={progressValue}
+          onProgressCommit={handleProgressCommit}
+          location={location}
+          onLocationChange={setLocation}
+          onLocationBlur={handleLocationBlur}
+          url={url}
+          onUrlChange={setUrl}
+          onUrlBlur={handleUrlBlur}
+          notes={notes}
+          onNotesChange={setNotes}
+          onNotesBlur={handleNotesBlur}
+        />
 
         {/* ── Footer — Archive + Delete buttons ── */}
         <div style={{ padding: '10px 14px', borderTop: '1px solid var(--border)', flexShrink: 0 }}>
@@ -56154,7 +56485,7 @@ function DashboardShell() {
   const [selectedActivityId, setSelectedActivityId] = useState<string | null>(null)
   const [selectedApiActivity, setSelectedApiActivity] = useState<ApiActivity | null>(null)
   const [ganttMembers, setGanttMembers] = useState<Member[]>([])
-  const [createDefaults, setCreateDefaults] = useState<{ start: string; end: string; memberId: string | null } | null>(null)
+  const [createDefaults, setCreateDefaults] = useState<{ start: string; end: string; memberId: string | null; statusId?: string | null } | null>(null)
   const [filterModalOpen, setFilterModalOpen] = useState(false)
   const [liveDragDates, setLiveDragDates] = useState<{ activityId: string; start: string; end: string } | null>(null)
   // Gantt toolbar state
@@ -56185,6 +56516,7 @@ function DashboardShell() {
   const [kanbanSortBy, setKanbanSortBy] = useState<KanbanSortBy>('startDate')
   const [kanbanCardFields, setKanbanCardFields] = useState<KanbanCardField[]>(DEFAULT_CARD_FIELDS)
   const [kanbanCollapsedColumns, setKanbanCollapsedColumns] = useState<string[]>([])
+  const [kanbanShowHierarchy, setKanbanShowHierarchy] = useState(false)
   // Incremented to trigger inline row creation in list view
   const [listNewRowSeq, setListNewRowSeq] = useState(0)
   const profileRef = useRef<HTMLDivElement>(null)
@@ -56423,6 +56755,9 @@ function DashboardShell() {
     if (typeof timelinePrefs['kanban_collapsed'] === 'string') {
       try { setKanbanCollapsedColumns(JSON.parse(timelinePrefs['kanban_collapsed']) as string[]) } catch { /* ignore */ }
     }
+    if (typeof timelinePrefs['kanban_show_hierarchy'] === 'string') {
+      try { setKanbanShowHierarchy(JSON.parse(timelinePrefs['kanban_show_hierarchy']) as boolean) } catch { /* ignore */ }
+    }
   }, [activeTimelineId, prefsSettled, timelinePrefs])
 
   // Save toolbar state changes to per-timeline prefs.
@@ -56495,6 +56830,11 @@ function DashboardShell() {
     if (prefsAppliedForTimeline.current !== activeTimelineId) return
     saveTimelinePref('kanban_card_fields', JSON.stringify(kanbanCardFields))
   }, [kanbanCardFields, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('kanban_show_hierarchy', JSON.stringify(kanbanShowHierarchy))
+  }, [kanbanShowHierarchy, saveTimelinePref])
 
   // Global preferences: persist dark mode, active team, and active timeline.
   useEffect(() => {
@@ -56696,6 +57036,8 @@ function DashboardShell() {
             onColorByChange={setColorBy}
             cardFields={kanbanCardFields}
             onCardFieldsChange={setKanbanCardFields}
+            showHierarchy={kanbanShowHierarchy}
+            onShowHierarchyChange={setKanbanShowHierarchy}
             onExport={() => {}}
             onShare={() => {}}
           />
@@ -56819,6 +57161,7 @@ function DashboardShell() {
               cardFields={kanbanCardFields}
               collapsedColumnIds={kanbanCollapsedColumns}
               onCollapsedColumnIdsChange={setKanbanCollapsedColumns}
+              showHierarchy={kanbanShowHierarchy}
               timelineStatuses={activeTimelineStatuses}
               savedFilters={savedFilters}
               tags={tags}
@@ -56870,9 +57213,11 @@ function DashboardShell() {
         teamId={teamId}
         timelineId={activeTimelineId ?? ''}
         members={ganttMembers}
+        timelineStatuses={activeTimelineStatuses}
         defaultStart={createDefaults?.start ?? new Date().toISOString().slice(0, 10)}
         defaultEnd={createDefaults?.end ?? new Date().toISOString().slice(0, 10)}
         defaultMemberId={createDefaults?.memberId}
+        defaultStatusId={createDefaults?.statusId}
         onClose={() => setCreateDefaults(null)}
       />
 
