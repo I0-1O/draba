@@ -283,6 +283,7 @@ packages/
         useTeamActivities.ts
         useWebSocket.ts
       lib/
+        activityColor.test.ts
         activityColor.ts
         api.test.ts
         api.ts
@@ -22297,6 +22298,70 @@ func (s *Server) handleGetTimelineByShareToken(w http.ResponseWriter, r *http.Re
 }
 ````
 
+## File: packages/api/internal/db/migrations/015_normalize_activities.sql
+````sql
+-- Backfill any activities that lack a timeline_id by assigning them to the
+-- team's oldest timeline. In practice this column has been populated since
+-- Phase 10.4.1, so the UPDATE should affect zero rows on current data.
+UPDATE activities
+SET timeline_id = (
+    SELECT id FROM timelines
+    WHERE team_id = activities.team_id
+    ORDER BY created_at ASC
+    LIMIT 1
+)
+WHERE timeline_id IS NULL;
+
+-- Rebuild the activities table to:
+--   1. Drop the redundant team_id column (activity → timeline → team is sufficient)
+--   2. Harden timeline_id to NOT NULL with ON DELETE CASCADE
+-- SQLite does not support DROP COLUMN with FK changes, so we use
+-- the CREATE-new / INSERT / DROP-old / RENAME pattern.
+CREATE TABLE activities_new (
+    id                 TEXT PRIMARY KEY,
+    timeline_id        TEXT NOT NULL REFERENCES timelines(id) ON DELETE CASCADE,
+    title              TEXT NOT NULL,
+    description        TEXT,
+    icon               TEXT,
+    color              TEXT,
+    start_at           DATETIME NOT NULL,
+    end_at             DATETIME NOT NULL,
+    all_day            BOOLEAN NOT NULL DEFAULT 0,
+    status_id          TEXT REFERENCES statuses(id) ON DELETE SET NULL,
+    parent_activity_id TEXT REFERENCES activities(id),
+    percent_complete   INTEGER,
+    location           TEXT,
+    url                TEXT,
+    rrule              TEXT,
+    caldav_uid         TEXT,
+    google_event_id    TEXT,
+    created_by         TEXT NOT NULL REFERENCES users(id),
+    created_at         DATETIME NOT NULL DEFAULT (datetime('now')),
+    updated_at         DATETIME NOT NULL DEFAULT (datetime('now')),
+    archived_at        DATETIME
+);
+
+INSERT INTO activities_new (
+    id, timeline_id, title, description, icon, color,
+    start_at, end_at, all_day, status_id, parent_activity_id,
+    percent_complete, location, url, rrule, caldav_uid, google_event_id,
+    created_by, created_at, updated_at, archived_at
+)
+SELECT
+    id, timeline_id, title, description, icon, color,
+    start_at, end_at, all_day, status_id, parent_activity_id,
+    percent_complete, location, url, rrule, caldav_uid, google_event_id,
+    created_by, created_at, updated_at, archived_at
+-- No WHERE filter: any row with NULL timeline_id after backfill violates the
+-- NOT NULL constraint and aborts the migration loudly rather than silently dropping data.
+FROM activities;
+
+DROP TABLE activities;
+ALTER TABLE activities_new RENAME TO activities;
+
+CREATE INDEX IF NOT EXISTS idx_activities_timeline_id ON activities(timeline_id);
+````
+
 ## File: packages/api/internal/db/migrations/016_activity_notes.sql
 ````sql
 -- Migration 016: Add notes column to activities
@@ -23661,6 +23726,101 @@ export function useDeleteTag(teamId: string) {
     onSuccess: () => qc.invalidateQueries({ queryKey: tagsKey(teamId) }),
   })
 }
+````
+
+## File: packages/web/src/lib/activityColor.test.ts
+````typescript
+/**
+ * Tests for resolveActivityColor — the shared color-by helper used by all
+ * three views (Gantt, List, Calendar).
+ */
+
+import { describe, it, expect } from 'vitest';
+import { resolveActivityColor } from './activityColor';
+import { ACTIVITY_COLORS } from '@/types';
+import type { components } from '@draba/shared';
+import type { Member } from '@/types';
+
+type ApiActivity = components['schemas']['Activity'];
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function makeActivity(overrides: Partial<ApiActivity> = {}): ApiActivity {
+  return {
+    id: 'act-1',
+    title: 'Test',
+    timelineId: 'tl-1',
+    startAt: '2026-05-01T00:00:00Z',
+    endAt: '2026-05-02T00:00:00Z',
+    color: '#ff0000',
+    assignedMemberIds: [],
+    createdBy: 'user-1',
+    createdAt: '2026-01-01T00:00:00Z',
+    updatedAt: '2026-01-01T00:00:00Z',
+    ...overrides,
+  } as ApiActivity;
+}
+
+function makeMember(id: string, color: string): Member {
+  return { id, name: 'Test User', initials: 'TU', color };
+}
+
+const NO_MEMBERS: Record<string, Member> = {};
+const NO_STATUS_COLORS = new Map<string, string>();
+
+// ── colorBy='activity' ────────────────────────────────────────────────────────
+
+describe('resolveActivityColor — colorBy=activity', () => {
+  it('returns activity.color when set', () => {
+    const act = makeActivity({ color: '#abcdef' });
+    expect(resolveActivityColor(act, 0, NO_MEMBERS, 'activity', NO_STATUS_COLORS)).toBe('#abcdef');
+  });
+
+  it('cycles through ACTIVITY_COLORS by index when activity.color is null', () => {
+    // reason: the API type allows null but the runtime value can be null
+    const act = makeActivity({ color: null as unknown as string });
+    const result = resolveActivityColor(act, 2, NO_MEMBERS, 'activity', NO_STATUS_COLORS);
+    expect(result).toBe(ACTIVITY_COLORS[2 % ACTIVITY_COLORS.length]);
+  });
+});
+
+// ── colorBy='member' ──────────────────────────────────────────────────────────
+
+describe('resolveActivityColor — colorBy=member', () => {
+  it('returns the primary member color', () => {
+    const member = makeMember('mem-1', '#00ff00');
+    const act = makeActivity({ assignedMemberIds: ['mem-1'] });
+    const result = resolveActivityColor(act, 0, { 'mem-1': member }, 'member', NO_STATUS_COLORS);
+    expect(result).toBe('#00ff00');
+  });
+
+  it('falls back to activity.color when primary member is not in memberById', () => {
+    const act = makeActivity({ assignedMemberIds: ['mem-missing'], color: '#123456' });
+    expect(resolveActivityColor(act, 0, NO_MEMBERS, 'member', NO_STATUS_COLORS)).toBe('#123456');
+  });
+
+  it('falls back to ACTIVITY_COLORS index when member and activity.color are both absent', () => {
+    const act = makeActivity({ assignedMemberIds: [], color: null as unknown as string });
+    const result = resolveActivityColor(act, 1, NO_MEMBERS, 'member', NO_STATUS_COLORS);
+    expect(result).toBe(ACTIVITY_COLORS[1 % ACTIVITY_COLORS.length]);
+  });
+});
+
+// ── colorBy='status' ──────────────────────────────────────────────────────────
+
+describe('resolveActivityColor — colorBy=status', () => {
+  it('returns the status color from the map', () => {
+    // reason: statusId is an optional field added by the API beyond the base type
+    const act = makeActivity({ statusId: 'st-1' } as Partial<ApiActivity>);
+    const statusColors = new Map([['st-1', '#9900ff']]);
+    expect(resolveActivityColor(act, 0, NO_MEMBERS, 'status', statusColors)).toBe('#9900ff');
+  });
+
+  it('falls back to #6b7280 when status is not in the map', () => {
+    const act = makeActivity();
+    expect(resolveActivityColor(act, 0, NO_MEMBERS, 'status', NO_STATUS_COLORS)).toBe('#6b7280');
+  });
+});
 ````
 
 ## File: packages/web/src/lib/activityColor.ts
@@ -26689,6 +26849,289 @@ func superadminMember(teamID, userID string) *models.TeamMember {
 }
 ````
 
+## File: packages/api/internal/api/server.go
+````go
+// Package api hosts the HTTP handlers, routing, and middleware for the
+// draba REST API. Handlers are intentionally thin: they decode requests,
+// delegate to repositories and services, and write responses. Business
+// logic belongs in the domain packages, not here.
+package api
+
+import (
+	"fmt"
+	"io/fs"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/auth"
+	"github.com/I0-1O/draba/packages/api/internal/db"
+	"github.com/I0-1O/draba/packages/api/internal/events"
+	"github.com/I0-1O/draba/packages/api/internal/mailer"
+	"github.com/I0-1O/draba/packages/api/internal/models"
+	"github.com/I0-1O/draba/packages/api/internal/tier"
+	"github.com/I0-1O/draba/packages/api/internal/ws"
+)
+
+// TimelineStore is the persistence interface required by timeline handlers.
+// The concrete implementation is *db.TimelineRepo; tests may substitute a fake.
+type TimelineStore interface {
+	Create(t *models.Timeline) error
+	GetByID(id string) (*models.Timeline, error)
+	GetByShareToken(token string) (*models.Timeline, error)
+	ListByTeam(teamID string, includeArchived bool) ([]*models.Timeline, error)
+	HasAccess(timelineID, teamMemberID string) (bool, error)
+	GrantAccess(timelineID, teamMemberID, role string) error
+	RevokeAccess(timelineID, teamMemberID string) error
+	GetAccessRole(timelineID, teamMemberID string) (string, error)
+	ListAccess(timelineID string) ([]*models.TimelineAccessEntry, error)
+	SetArchived(id string, at *time.Time) error
+	Update(t *models.Timeline) error
+	Delete(id string) error
+}
+
+// Server holds shared dependencies for all HTTP handlers.
+type Server struct {
+	users          *db.UserRepo
+	invites        *db.InviteRepo
+	teams          *db.TeamRepo
+	activities     *db.ActivityRepo
+	timelines      TimelineStore
+	savedFilters   *db.SavedFilterRepo
+	preferences    *db.UserPreferenceRepo
+	apiTokens      *db.APITokenRepo
+	instanceSets   *db.InstanceSettingsRepo
+	passwordTokens *db.PasswordResetTokenRepo
+	statuses       *db.StatusRepo
+	tags           *db.TagRepo
+	mailer         *mailer.Mailer
+	tokens         *auth.TokenService
+	tier           tier.Tier
+	bus            *events.Bus
+	hub            *ws.Hub
+	uiFS           fs.FS
+}
+
+// NewServer constructs a Server with its required dependencies. It does not
+// touch the network; call Routes to obtain the http.Handler to serve.
+func NewServer(
+	users *db.UserRepo,
+	invites *db.InviteRepo,
+	teams *db.TeamRepo,
+	activitiesRepo *db.ActivityRepo,
+	timelinesRepo TimelineStore,
+	savedFiltersRepo *db.SavedFilterRepo,
+	preferencesRepo *db.UserPreferenceRepo,
+	apiTokensRepo *db.APITokenRepo,
+	instanceSetsRepo *db.InstanceSettingsRepo,
+	passwordTokensRepo *db.PasswordResetTokenRepo,
+	statusesRepo *db.StatusRepo,
+	tagsRepo *db.TagRepo,
+	m *mailer.Mailer,
+	tokens *auth.TokenService,
+	t tier.Tier,
+	bus *events.Bus,
+	hub *ws.Hub,
+) *Server {
+	return &Server{
+		users:          users,
+		invites:        invites,
+		teams:          teams,
+		activities:     activitiesRepo,
+		timelines:      timelinesRepo,
+		savedFilters:   savedFiltersRepo,
+		preferences:    preferencesRepo,
+		apiTokens:      apiTokensRepo,
+		instanceSets:   instanceSetsRepo,
+		passwordTokens: passwordTokensRepo,
+		statuses:       statusesRepo,
+		tags:           tagsRepo,
+		mailer:         m,
+		tokens:         tokens,
+		tier:           t,
+		bus:            bus,
+		hub:            hub,
+	}
+}
+
+// WithUI registers an embedded React SPA to be served at GET /. The FS must
+// be rooted at the build output directory (i.e. contain index.html directly).
+// When called, all unmatched GET paths fall back to index.html so React Router
+// handles client-side navigation. Safe to skip in dev (no-op when not called).
+func (s *Server) WithUI(uiFS fs.FS) *Server {
+	s.uiFS = uiFS
+	return s
+}
+
+// Routes returns the fully-wired HTTP handler for the API, including all
+// core routes plus any routes added by registered tier modules.
+func (s *Server) Routes() http.Handler {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("GET /setup/status", s.handleSetupStatus)
+
+	mux.HandleFunc("POST /auth/register", s.handleRegister)
+	mux.HandleFunc("POST /auth/login", s.handleLogin)
+	mux.HandleFunc("POST /auth/refresh", s.handleRefresh)
+	mux.HandleFunc("GET /auth/me", chain(s.handleMe, s.authMiddleware))
+	mux.HandleFunc("POST /auth/forgot-password", s.handleForgotPassword)
+	mux.HandleFunc("POST /auth/reset-password", s.handleResetPassword)
+
+	mux.HandleFunc("GET /users/me/preferences", chain(s.handleGetPreferences, s.authMiddleware))
+	mux.HandleFunc("PUT /users/me/preferences", chain(s.handleUpsertPreference, s.authMiddleware))
+	mux.HandleFunc("GET /users/me/stats", chain(s.handleGetMyStats, s.authMiddleware))
+	mux.HandleFunc("PATCH /users/me", chain(s.handleUpdateProfile, s.authMiddleware))
+	mux.HandleFunc("PUT /users/me/password", chain(s.handleChangePassword, s.authMiddleware))
+
+	mux.HandleFunc("GET /admin/smtp", chain(s.handleGetSMTP, s.authMiddleware))
+	mux.HandleFunc("PUT /admin/smtp", chain(s.handlePutSMTP, s.authMiddleware))
+	mux.HandleFunc("POST /admin/smtp/test", chain(s.handleTestSMTP, s.authMiddleware))
+	mux.HandleFunc("DELETE /admin/smtp", chain(s.handleDeleteSMTP, s.authMiddleware))
+	mux.HandleFunc("GET /admin/settings", chain(s.handleGetAdminSettings, s.authMiddleware))
+	mux.HandleFunc("PATCH /admin/settings", chain(s.handlePatchAdminSettings, s.authMiddleware))
+	mux.HandleFunc("GET /admin/users", chain(s.handleListAdminUsers, s.authMiddleware))
+
+	// Public — no auth required; used by the login page and shared views.
+	mux.HandleFunc("GET /settings/branding", s.handleGetPublicBranding)
+
+	mux.HandleFunc("POST /tokens", chain(s.handleCreateAPIToken, s.authMiddleware))
+	mux.HandleFunc("GET /tokens", chain(s.handleListAPITokens, s.authMiddleware))
+	mux.HandleFunc("DELETE /tokens/{id}", chain(s.handleDeleteAPIToken, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams", chain(s.handleListTeams, s.authMiddleware))
+	mux.HandleFunc("POST /teams", chain(s.handleCreateTeam, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}", chain(s.handleGetTeam, s.authMiddleware))
+	mux.HandleFunc("PATCH /teams/{id}", chain(s.handleUpdateTeam, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/archive", chain(s.handleArchiveTeam, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/unarchive", chain(s.handleUnarchiveTeam, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/invites", chain(s.handleCreateInvite, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/invites", chain(s.handleListInvites, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/invites/{inviteId}", chain(s.handleDeleteInvite, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/invite-link", chain(s.handleCreateInviteLink, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/invite-link/reset", chain(s.handleResetInviteLink, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/invite-link", chain(s.handleGetInviteLink, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/invite-link", chain(s.handleDeleteInviteLink, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/members", chain(s.handleListMembers, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/members/{memberId}", chain(s.handleGetMember, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/members/{memberId}/stats", chain(s.handleGetMemberStats, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/members", chain(s.handleAddMember, s.authMiddleware))
+	mux.HandleFunc("PATCH /teams/{id}/members/{memberId}", chain(s.handleUpdateMember, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/members/{memberId}", chain(s.handleDeleteMember, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/members/{memberId}/archive", chain(s.handleArchiveMember, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/members/{memberId}/unarchive", chain(s.handleUnarchiveMember, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/participants", chain(s.handleCreateParticipant, s.authMiddleware))
+	mux.HandleFunc("GET /users/search", chain(s.handleSearchUsers, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/promote", chain(s.handlePromoteUser, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/archive", chain(s.handleArchiveUser, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/unarchive", chain(s.handleUnarchiveUser, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/revoke", chain(s.handleRevokeUser, s.authMiddleware))
+	mux.HandleFunc("DELETE /users/{id}", chain(s.handleDeleteUser, s.authMiddleware))
+	// Activity routes use the team-scoped prefix (GET /teams/{id}/timelines/{timelineId}/...)
+	// to avoid a Go 1.22 mux conflict with GET /timelines/share/{token}: both are
+	// 3-segment GET paths and neither is more specific when the third segment differs.
+	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/activities", chain(s.handleCreateActivity, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/activities", chain(s.handleListActivities, s.authMiddleware))
+	mux.HandleFunc("PATCH /activities/{id}", chain(s.handleUpdateActivity, s.authMiddleware))
+	mux.HandleFunc("DELETE /activities/{id}", chain(s.handleDeleteActivity, s.authMiddleware))
+	mux.HandleFunc("POST /activities/{id}/archive", chain(s.handleArchiveActivity, s.authMiddleware))
+	mux.HandleFunc("POST /activities/{id}/unarchive", chain(s.handleUnarchiveActivity, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/tags", chain(s.handleListTags, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/tags", chain(s.handleCreateTag, s.authMiddleware))
+	mux.HandleFunc("PATCH /tags/{id}", chain(s.handleUpdateTag, s.authMiddleware))
+	mux.HandleFunc("DELETE /tags/{id}", chain(s.handleDeleteTag, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/saved_filters/all", chain(s.handleListAllTeamSavedFilters, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/saved_filters", chain(s.handleListSavedFilters, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/saved_filters", chain(s.handleCreateSavedFilter, s.authMiddleware))
+	mux.HandleFunc("PATCH /saved_filters/{id}", chain(s.handleUpdateSavedFilter, s.authMiddleware))
+	mux.HandleFunc("DELETE /saved_filters/{id}", chain(s.handleDeleteSavedFilter, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/status-templates", chain(s.handleListStatusTemplates, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/status-templates", chain(s.handleCreateStatusTemplate, s.authMiddleware))
+	mux.HandleFunc("PATCH /status-templates/{id}", chain(s.handleUpdateStatusTemplate, s.authMiddleware))
+	mux.HandleFunc("DELETE /status-templates/{id}", chain(s.handleDeleteStatusTemplate, s.authMiddleware))
+	mux.HandleFunc("POST /status-templates/{id}/items", chain(s.handleCreateTemplateItem, s.authMiddleware))
+	mux.HandleFunc("PATCH /status-template-items/{id}", chain(s.handleUpdateTemplateItem, s.authMiddleware))
+	mux.HandleFunc("DELETE /status-template-items/{id}", chain(s.handleDeleteTemplateItem, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/timelines", chain(s.handleListTimelines, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/timelines", chain(s.handleCreateTimeline, s.authMiddleware))
+	// GET /timelines/share/{token} must be registered before GET /timelines/{id} so
+	// the more-specific literal "share" segment takes precedence.
+	mux.HandleFunc("GET /timelines/share/{token}", s.handleGetTimelineByShareToken)
+	mux.HandleFunc("GET /timelines/{id}", chain(s.handleGetTimeline, s.authMiddleware))
+	// Timeline statuses are placed under /teams/{id}/timelines/{timelineId}/statuses
+	// rather than /timelines/{id}/statuses to avoid a Go 1.22 mux pattern conflict
+	// with GET /timelines/share/{token} (both are 3-segment paths and conflict on
+	// paths like /timelines/share/statuses).
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleListTimelineStatuses, s.authMiddleware))
+	mux.HandleFunc("POST /timelines/{id}/archive", chain(s.handleArchiveTimeline, s.authMiddleware))
+	mux.HandleFunc("POST /timelines/{id}/unarchive", chain(s.handleUnarchiveTimeline, s.authMiddleware))
+
+	mux.HandleFunc("PATCH /timelines/{id}", chain(s.handleUpdateTimeline, s.authMiddleware))
+	mux.HandleFunc("DELETE /timelines/{id}", chain(s.handleDeleteTimeline, s.authMiddleware))
+	// Access list routes use the team-scoped prefix to avoid a Go 1.22 mux
+	// conflict with GET /timelines/share/{token} on 3-segment GET paths.
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/access", chain(s.handleListTimelineAccess, s.authMiddleware))
+	mux.HandleFunc("PUT /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleGrantTimelineAccess, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleRevokeTimelineAccess, s.authMiddleware))
+	// Timeline status CRUD — POST shares the team-scoped prefix with GET statuses.
+	// PATCH and DELETE use a flat /statuses/{id} prefix (2 segments, no conflict).
+	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleCreateTimelineStatus, s.authMiddleware))
+	mux.HandleFunc("PATCH /statuses/{id}", chain(s.handleUpdateStatus, s.authMiddleware))
+	mux.HandleFunc("DELETE /statuses/{id}", chain(s.handleDeleteStatus, s.authMiddleware))
+
+	// GET /ws is intentionally outside authMiddleware — ServeWS validates the
+	// JWT itself before upgrading, because WebSocket clients can't set headers.
+	mux.HandleFunc("GET /ws", s.hub.ServeWS)
+
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	})
+
+	if s.uiFS != nil {
+		mux.Handle("GET /", spaHandler(s.uiFS))
+	}
+
+	ctx := &tier.ModuleContext{Mux: mux, Tier: s.tier}
+	for _, m := range tier.Registered() {
+		if err := m.Register(ctx); err != nil {
+			// Module registration is a startup invariant — a failure here is a programming error.
+			panic(fmt.Sprintf("tier module %q failed to register: %v", m.Name(), err))
+		}
+	}
+
+	return requestLogger(mux)
+}
+
+// chain applies a single middleware to a handler function.
+func chain(h http.HandlerFunc, m func(http.Handler) http.Handler) http.HandlerFunc {
+	return m(h).ServeHTTP
+}
+
+// spaHandler serves the embedded React SPA. Known static assets are served
+// directly; any unrecognised path falls back to index.html so React Router
+// handles client-side navigation.
+func spaHandler(uiFS fs.FS) http.Handler {
+	fserver := http.FileServer(http.FS(uiFS))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := strings.TrimPrefix(r.URL.Path, "/")
+		if path == "" {
+			path = "index.html"
+		}
+		if _, err := uiFS.Open(path); err != nil {
+			// Unknown path — serve index.html and let React Router handle it.
+			r = r.Clone(r.Context())
+			r.URL.Path = "/"
+			fserver.ServeHTTP(w, r)
+			return
+		}
+		fserver.ServeHTTP(w, r)
+	})
+}
+````
+
 ## File: packages/api/internal/api/tag_handler.go
 ````go
 package api
@@ -26853,70 +27296,6 @@ func (s *Server) handleDeleteTag(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
-````
-
-## File: packages/api/internal/db/migrations/015_normalize_activities.sql
-````sql
--- Backfill any activities that lack a timeline_id by assigning them to the
--- team's oldest timeline. In practice this column has been populated since
--- Phase 10.4.1, so the UPDATE should affect zero rows on current data.
-UPDATE activities
-SET timeline_id = (
-    SELECT id FROM timelines
-    WHERE team_id = activities.team_id
-    ORDER BY created_at ASC
-    LIMIT 1
-)
-WHERE timeline_id IS NULL;
-
--- Rebuild the activities table to:
---   1. Drop the redundant team_id column (activity → timeline → team is sufficient)
---   2. Harden timeline_id to NOT NULL with ON DELETE CASCADE
--- SQLite does not support DROP COLUMN with FK changes, so we use
--- the CREATE-new / INSERT / DROP-old / RENAME pattern.
-CREATE TABLE activities_new (
-    id                 TEXT PRIMARY KEY,
-    timeline_id        TEXT NOT NULL REFERENCES timelines(id) ON DELETE CASCADE,
-    title              TEXT NOT NULL,
-    description        TEXT,
-    icon               TEXT,
-    color              TEXT,
-    start_at           DATETIME NOT NULL,
-    end_at             DATETIME NOT NULL,
-    all_day            BOOLEAN NOT NULL DEFAULT 0,
-    status_id          TEXT REFERENCES statuses(id) ON DELETE SET NULL,
-    parent_activity_id TEXT REFERENCES activities(id),
-    percent_complete   INTEGER,
-    location           TEXT,
-    url                TEXT,
-    rrule              TEXT,
-    caldav_uid         TEXT,
-    google_event_id    TEXT,
-    created_by         TEXT NOT NULL REFERENCES users(id),
-    created_at         DATETIME NOT NULL DEFAULT (datetime('now')),
-    updated_at         DATETIME NOT NULL DEFAULT (datetime('now')),
-    archived_at        DATETIME
-);
-
-INSERT INTO activities_new (
-    id, timeline_id, title, description, icon, color,
-    start_at, end_at, all_day, status_id, parent_activity_id,
-    percent_complete, location, url, rrule, caldav_uid, google_event_id,
-    created_by, created_at, updated_at, archived_at
-)
-SELECT
-    id, timeline_id, title, description, icon, color,
-    start_at, end_at, all_day, status_id, parent_activity_id,
-    percent_complete, location, url, rrule, caldav_uid, google_event_id,
-    created_by, created_at, updated_at, archived_at
--- No WHERE filter: any row with NULL timeline_id after backfill violates the
--- NOT NULL constraint and aborts the migration loudly rather than silently dropping data.
-FROM activities;
-
-DROP TABLE activities;
-ALTER TABLE activities_new RENAME TO activities;
-
-CREATE INDEX IF NOT EXISTS idx_activities_timeline_id ON activities(timeline_id);
 ````
 
 ## File: packages/api/internal/db/saved_filter_repo.go
@@ -27436,709 +27815,6 @@ INSERT INTO activity_tags (activity_id, tag_id) VALUES
   ('a-reb-14', 'tag-mcf-launch'),
   ('a-reb-15', 'tag-mcf-analytics'),
   ('a-reb-15', 'tag-mcf-launch');
-````
-
-## File: packages/web/src/components/calendar/CalendarGrid.tsx
-````typescript
-/**
- * CalendarGrid — presentational grid for the Calendar view.
- *
- * Month (6-week) and Week (1-week) all-day-bar layouts.
- */
-
-import {
-  useRef,
-  useState,
-  useCallback,
-  useEffect,
-  useMemo,
-} from 'react';
-import type { CalendarLayout } from './CalendarToolbar';
-import type { WeekRow, CalendarSegment } from '@/lib/calendarLanes';
-import { overflowCountsForWeek, segmentsForDay, daysDiff } from '@/lib/calendarLanes';
-import type { components } from '@draba/shared';
-import type { Member } from '@/types';
-
-type ApiActivity = components['schemas']['Activity'];
-
-// ── Layout constants ──────────────────────────────────────────────────────────
-
-const MONTH_DAY_HEADER_H = 28;
-const WEEK_DAY_HEADER_H  = 60;
-const BAR_H           = 20;
-const LANE_SLOT_H     = 24;
-const WEEK_BAR_H      = 66;   // 3-line bar for week view
-const WEEK_LANE_SLOT_H = 70;  // WEEK_BAR_H + 4px gap
-const OVERFLOW_H   = 20;   // reserved for "+N more" chips (month)
-const EDGE_W       = 8;    // resize hit-zone on bar edges
-const ROW_RESIZE_H = 6;    // month row-height drag strip
-const COL_COUNT    = 7;
-
-// ── Drag state ────────────────────────────────────────────────────────────────
-
-type DragType = 'move' | 'resize-start' | 'resize-end';
-
-interface DragState {
-  activityId: string;
-  type: DragType;
-  originalStart: Date;
-  originalEnd: Date;
-  grabOffsetDays: number;
-  currentStart: Date;
-  currentEnd: Date;
-}
-
-/** Per-week position of the dragged bar during live drag. */
-interface LiveSegment {
-  startCol: number;
-  endCol: number;
-  continuesLeft: boolean;
-  continuesRight: boolean;
-  color: string;
-}
-
-// ── Utility ───────────────────────────────────────────────────────────────────
-
-function utcMidnight(iso: string): Date {
-  return new Date(iso.slice(0, 10) + 'T00:00:00Z');
-}
-
-/**
- * Find the calendar day under the cursor.
- * Uses elementsFromPoint (plural) so the bar element (pointer-events: auto)
- * doesn't occlude the day cell's data-date attribute beneath it.
- */
-function dayAtPoint(x: number, y: number): Date | null {
-  const elements = document.elementsFromPoint(x, y);
-  for (const el of elements) {
-    const iso = (el as HTMLElement).dataset?.date;
-    if (iso) return new Date(iso + 'T00:00:00Z');
-  }
-  return null;
-}
-
-function monthRowH(cap: number): number {
-  return MONTH_DAY_HEADER_H + cap * LANE_SLOT_H + OVERFLOW_H + ROW_RESIZE_H;
-}
-
-// ── DayOverflowPopover ────────────────────────────────────────────────────────
-
-function DayOverflowPopover({ segments, activityById, dayDate, anchorRect, onSelect, onClose }: {
-  segments: CalendarSegment[];
-  activityById: Map<string, ApiActivity>;
-  dayDate: Date;
-  anchorRect: DOMRect;
-  onSelect: (act: ApiActivity) => void;
-  onClose: () => void;
-}) {
-  const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    function onDown(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
-    }
-    document.addEventListener('mousedown', onDown, true);
-    return () => document.removeEventListener('mousedown', onDown, true);
-  }, [onClose]);
-  const label = dayDate.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
-  return (
-    <div ref={ref} style={{ position: 'fixed', top: anchorRect.bottom + 4, left: Math.min(anchorRect.left, window.innerWidth - 280), width: 260, background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 8, boxShadow: '0 4px 20px rgba(0,0,0,0.2)', zIndex: 200, overflow: 'hidden' }}>
-      <div style={{ padding: '8px 12px', borderBottom: '1px solid var(--border)', fontSize: 12, fontWeight: 600, color: 'var(--foreground)' }}>{label}</div>
-      <div style={{ maxHeight: 260, overflowY: 'auto' }}>
-        {segments.map(seg => {
-          const act = activityById.get(seg.activityId);
-          if (!act) return null;
-          return (
-            <button key={seg.activityId} onClick={() => { onSelect(act); onClose(); }}
-              style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', padding: '7px 12px', background: 'none', border: 'none', textAlign: 'left', cursor: 'pointer', fontSize: 12, color: 'var(--foreground)', borderBottom: '1px solid var(--border)' }}
-              onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-              onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-            >
-              <span style={{ width: 10, height: 10, borderRadius: 3, background: seg.color, flexShrink: 0 }} />
-              <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{seg.title}</span>
-            </button>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-// ── CalendarBar ───────────────────────────────────────────────────────────────
-
-interface BarProps {
-  seg: CalendarSegment | LiveSegment & Pick<CalendarSegment, 'activityId' | 'lane' | 'title' | 'isMatch' | 'isActiveMatch' | 'assignedMemberIds' | 'statusName' | 'statusColor' | 'tags'>;
-  topPx: number;
-  barH: number;
-  isSelected: boolean;
-  hasQuery: boolean;
-  isWeekLayout: boolean;
-  memberById: Record<string, Member>;
-  onPointerDown: (e: React.PointerEvent, activityId: string, type: DragType) => void;
-  onClick: (activityId: string, e: React.MouseEvent) => void;
-}
-
-function CalendarBar({ seg, topPx, barH, isSelected, hasQuery, isWeekLayout, memberById, onPointerDown, onClick }: BarProps) {
-  const isHighlighted = seg.isMatch || seg.isActiveMatch;
-  const isDimmed = hasQuery && !isHighlighted;
-
-  const assigneeNames = seg.assignedMemberIds
-    .slice(0, 3)
-    .map(id => memberById[id]?.name?.split(' ')[0])
-    .filter((n): n is string => Boolean(n));
-
-  const style: React.CSSProperties = {
-    position: 'absolute',
-    top: topPx + 2,
-    left: `calc(${(seg.startCol / COL_COUNT) * 100}% + 2px)`,
-    width: `calc(${((seg.endCol - seg.startCol + 1) / COL_COUNT) * 100}% - 4px)`,
-    height: barH,
-    background: seg.color,
-    borderRadius: `${seg.continuesLeft ? 0 : 4}px ${seg.continuesRight ? 0 : 4}px ${seg.continuesRight ? 0 : 4}px ${seg.continuesLeft ? 0 : 4}px`,
-    cursor: 'pointer',
-    display: 'flex',
-    alignItems: isWeekLayout ? 'stretch' : 'center',
-    overflow: 'hidden',
-    opacity: isDimmed ? 0.3 : 1,
-    outline: isSelected ? '2px solid var(--primary)' : seg.isActiveMatch ? '2px solid #f59e0b' : seg.isMatch ? '1px solid #f59e0b' : 'none',
-    outlineOffset: 1,
-    boxShadow: seg.isActiveMatch ? '0 0 0 3px rgba(245,158,11,0.3)' : 'none',
-    userSelect: 'none',
-    zIndex: isSelected ? 3 : 1,
-    pointerEvents: 'auto',
-  };
-
-  const edgeStyle: React.CSSProperties = { position: 'absolute', top: 0, height: '100%', width: EDGE_W, cursor: 'ew-resize', zIndex: 2 };
-
-  return (
-    <div style={style}
-      onClick={e => onClick(seg.activityId, e)}
-      onPointerDown={e => {
-        const rect = e.currentTarget.getBoundingClientRect();
-        const x = e.clientX - rect.left;
-        if (x < EDGE_W && !seg.continuesLeft) {
-          onPointerDown(e, seg.activityId, 'resize-start');
-        } else if (x > rect.width - EDGE_W && !seg.continuesRight) {
-          onPointerDown(e, seg.activityId, 'resize-end');
-        } else {
-          onPointerDown(e, seg.activityId, 'move');
-        }
-      }}
-    >
-      {!seg.continuesLeft  && <div style={{ ...edgeStyle, left: 0 }} />}
-      {!seg.continuesRight && <div style={{ ...edgeStyle, right: 0, left: 'auto' }} />}
-
-      {isWeekLayout ? (
-        /* Week view: 3-line layout — title+assignees / status / tags */
-        <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', padding: '4px 6px', flex: 1, minWidth: 0, overflow: 'hidden', gap: 3, pointerEvents: 'none' }}>
-          {/* Row 1: title + assignees */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 4, overflow: 'hidden' }}>
-            {seg.continuesLeft && <span style={{ fontSize: 10, color: '#fff', flexShrink: 0 }}>◀</span>}
-            <span style={{ fontSize: 11, fontWeight: 500, color: '#fff', overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis', flex: 1, minWidth: 0 }}>
-              {seg.title}
-            </span>
-            {assigneeNames.length > 0 && (
-              <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.85)', whiteSpace: 'nowrap', flexShrink: 0, maxWidth: '45%', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                {assigneeNames.join(', ')}
-              </span>
-            )}
-            {seg.continuesRight && <span style={{ fontSize: 10, color: '#fff', flexShrink: 0 }}>▶</span>}
-          </div>
-          {/* Row 2: status chip */}
-          <div style={{ overflow: 'hidden', lineHeight: '14px' }}>
-            {seg.statusName ? (
-              <span style={{
-                display: 'inline-flex', alignItems: 'center', gap: 3,
-                padding: '1px 5px', borderRadius: 3, fontSize: 10, fontWeight: 500,
-                background: seg.statusColor ? `color-mix(in srgb, ${seg.statusColor} 25%, rgba(255,255,255,0.15))` : 'rgba(255,255,255,0.15)',
-                color: '#fff',
-                border: `1px solid ${seg.statusColor ? `color-mix(in srgb, ${seg.statusColor} 50%, rgba(255,255,255,0.2))` : 'rgba(255,255,255,0.25)'}`,
-                whiteSpace: 'nowrap', maxWidth: '100%', overflow: 'hidden',
-              }}>
-                <span style={{ width: 6, height: 6, borderRadius: '50%', background: seg.statusColor ?? 'rgba(255,255,255,0.7)', flexShrink: 0 }} />
-                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{seg.statusName}</span>
-              </span>
-            ) : null}
-          </div>
-          {/* Row 3: tag chips */}
-          <div style={{ display: 'flex', gap: 3, overflow: 'hidden', lineHeight: '14px' }}>
-            {(seg.tags ?? []).slice(0, 3).map((t, i) => (
-              <span key={i} style={{
-                display: 'inline-block', padding: '1px 5px', borderRadius: 3, fontSize: 10,
-                background: t.color ? `color-mix(in srgb, ${t.color} 25%, rgba(255,255,255,0.15))` : 'rgba(255,255,255,0.15)',
-                color: '#fff',
-                border: `1px solid ${t.color ? `color-mix(in srgb, ${t.color} 50%, rgba(255,255,255,0.2))` : 'rgba(255,255,255,0.25)'}`,
-                whiteSpace: 'nowrap', flexShrink: 0,
-              }}>
-                {t.name}
-              </span>
-            ))}
-          </div>
-        </div>
-      ) : (
-        /* Month view: single-line layout */
-        <>
-          {seg.continuesLeft && <span style={{ fontSize: 10, color: '#fff', paddingLeft: 2, pointerEvents: 'none', flexShrink: 0 }}>◀</span>}
-          <span style={{ fontSize: 11, fontWeight: 500, color: '#fff', overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis', padding: '0 4px', pointerEvents: 'none', flex: 1, minWidth: 0 }}>
-            {seg.title}
-          </span>
-          {assigneeNames.length > 0 && (
-            <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.85)', paddingRight: 4, whiteSpace: 'nowrap', pointerEvents: 'none', flexShrink: 0, maxWidth: '45%', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-              {assigneeNames.join(', ')}
-            </span>
-          )}
-          {seg.continuesRight && <span style={{ fontSize: 10, color: '#fff', paddingRight: 2, pointerEvents: 'none', flexShrink: 0 }}>▶</span>}
-        </>
-      )}
-    </div>
-  );
-}
-
-// ── Month row-height resize handle ────────────────────────────────────────────
-
-function RowResizeHandle({ weekStart, currentCap, laneCount, onCapDraft, onCapCommit }: {
-  weekStart: Date;
-  currentCap: number;
-  laneCount: number;
-  onCapDraft: (weekStart: Date, newCap: number) => void;
-  onCapCommit: (weekStart: Date, newCap: number) => void;
-}) {
-  const isDragging = useRef(false);
-  const startY = useRef(0);
-  const startCap = useRef(0);
-  const lastCap = useRef(currentCap);
-
-  return (
-    <div
-      onPointerDown={e => {
-        e.preventDefault(); e.stopPropagation();
-        isDragging.current = true;
-        startY.current = e.clientY;
-        startCap.current = currentCap;
-        lastCap.current = currentCap;
-        e.currentTarget.setPointerCapture(e.pointerId);
-      }}
-      onPointerMove={e => {
-        if (!isDragging.current) return;
-        const dy = e.clientY - startY.current;
-        const newCap = Math.max(1, Math.min(laneCount || 6, startCap.current + Math.floor(dy / LANE_SLOT_H)));
-        if (newCap !== lastCap.current) { lastCap.current = newCap; onCapDraft(weekStart, newCap); }
-      }}
-      onPointerUp={e => {
-        if (isDragging.current) onCapCommit(weekStart, lastCap.current);
-        isDragging.current = false;
-        e.currentTarget.releasePointerCapture(e.pointerId);
-      }}
-      style={{ height: ROW_RESIZE_H, cursor: 'ns-resize', background: 'transparent', borderTop: '1px solid var(--border)', transition: 'background 0.15s' }}
-      onMouseEnter={e => { (e.currentTarget as HTMLElement).style.background = 'var(--muted)'; }}
-      onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = 'transparent'; }}
-      title="Drag to show more or fewer activities"
-    />
-  );
-}
-
-// ── WeekRowRenderer ───────────────────────────────────────────────────────────
-
-const DOW_LABELS_MON = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-const DOW_LABELS_SUN = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-
-function WeekRowRenderer({
-  row,
-  isFirst,
-  layout,
-  weekStartDay,
-  activityById,
-  memberById,
-  selectedActivityId,
-  hasQuery,
-  today,
-  /** The dragged bar's live position in this week row (or null if not overlapping). */
-  liveSeg,
-  /** Activity ID being dragged — to suppress the original static segment. */
-  dragActivityId,
-  onBarPointerDown,
-  onBarClick,
-  onCellClick,
-  onCapDraft,
-  onCapCommit,
-}: {
-  row: WeekRow;
-  isFirst: boolean;
-  layout: CalendarLayout;
-  weekStartDay: 0 | 1;
-  activityById: Map<string, ApiActivity>;
-  memberById: Record<string, Member>;
-  selectedActivityId: string | null;
-  hasQuery: boolean;
-  today: Date;
-  liveSeg: LiveSegment | null;
-  dragActivityId: string | null;
-  onBarPointerDown: (e: React.PointerEvent, activityId: string, type: DragType) => void;
-  onBarClick: (activityId: string, e: React.MouseEvent) => void;
-  onCellClick: (date: Date) => void;
-  onCapDraft: (weekStart: Date, newCap: number) => void;
-  onCapCommit: (weekStart: Date, newCap: number) => void;
-}) {
-  const [popover, setPopover] = useState<{ col: number; rect: DOMRect } | null>(null);
-  const overflows = useMemo(() => overflowCountsForWeek(row), [row]);
-  const dowLabels = weekStartDay === 0 ? DOW_LABELS_SUN : DOW_LABELS_MON;
-  const todayISO = today.toISOString().slice(0, 10);
-  const isWeek = layout === 'week';
-  const dayHeaderH  = isWeek ? WEEK_DAY_HEADER_H : MONTH_DAY_HEADER_H;
-  const barH        = isWeek ? WEEK_BAR_H      : BAR_H;
-  const laneSlotH   = isWeek ? WEEK_LANE_SLOT_H : LANE_SLOT_H;
-
-  // Month: cap-filtered. Week: all segments. Either way, suppress the dragged bar's
-  // static position so only the live overlay renders.
-  const staticSegments = (isWeek ? row.segments : row.segments.filter(s => s.lane < row.visibleLaneCap))
-    .filter(s => s.activityId !== dragActivityId);
-
-  // Week: min-height ensures all lanes are visible even if flex container is small.
-  const weekMinH = WEEK_DAY_HEADER_H + row.laneCount * WEEK_LANE_SLOT_H + 40;
-
-  const rowStyle: React.CSSProperties = isWeek
-    ? { position: 'relative', flex: 1, minHeight: weekMinH, borderBottom: '1px solid var(--border)' }
-    : { position: 'relative', height: monthRowH(row.visibleLaneCap), borderBottom: '1px solid var(--border)' };
-
-  return (
-    <div style={rowStyle}>
-      {/* Day cells — borders, date headers, click zones */}
-      <div style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: isWeek ? 0 : ROW_RESIZE_H, display: 'grid', gridTemplateColumns: `repeat(${COL_COUNT}, 1fr)` }}>
-        {row.days.map((day, col) => {
-          const dayISO = day.toISOString().slice(0, 10);
-          const isToday = dayISO === todayISO;
-          const overflowCount = isWeek ? 0 : overflows[col];
-          return (
-            <div key={col} data-date={dayISO}
-              style={{ borderRight: col < COL_COUNT - 1 ? '1px solid var(--border)' : 'none', background: isToday ? 'color-mix(in srgb, var(--primary) 6%, transparent)' : 'transparent', position: 'relative', cursor: 'default' }}
-              onClick={e => { if ((e.target as HTMLElement).closest('[data-bar]')) return; onCellClick(day); }}
-            >
-              {isWeek ? (
-                /* Week view: prominent centered header */
-                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: WEEK_DAY_HEADER_H, gap: 2, borderBottom: '1px solid var(--border)', pointerEvents: 'none' }}>
-                  <span style={{ fontSize: 11, fontWeight: 500, color: 'var(--muted-foreground)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-                    {dowLabels[col]}
-                  </span>
-                  <span style={{ fontSize: 22, fontWeight: isToday ? 700 : 400, color: isToday ? 'var(--primary)' : 'var(--foreground)', lineHeight: 1 }}>
-                    {day.getUTCDate()}
-                  </span>
-                </div>
-              ) : (
-                <>
-                  {isFirst && (
-                    <div style={{ fontSize: 10, color: 'var(--muted-foreground)', textAlign: 'center', paddingTop: 4, pointerEvents: 'none' }}>
-                      {dowLabels[col]}
-                    </div>
-                  )}
-                  <div style={{ position: 'absolute', top: isFirst ? 13 : 6, right: 6, fontSize: 11, fontWeight: isToday ? 700 : 400, color: isToday ? 'var(--primary)' : 'var(--muted-foreground)', lineHeight: 1, pointerEvents: 'none' }}>
-                    {day.getUTCDate()}
-                  </div>
-                  {overflowCount > 0 && (
-                    <button style={{ position: 'absolute', bottom: OVERFLOW_H / 2 - 8, left: 2, right: 2, height: 16, fontSize: 10, color: 'var(--muted-foreground)', background: 'var(--muted)', border: 'none', borderRadius: 3, cursor: 'pointer', padding: 0 }}
-                      onClick={e => { e.stopPropagation(); const rect = e.currentTarget.getBoundingClientRect(); setPopover(p => p?.col === col ? null : { col, rect }); }}
-                    >
-                      +{overflowCount} more
-                    </button>
-                  )}
-                </>
-              )}
-            </div>
-          );
-        })}
-      </div>
-
-      {/* Static activity bars (the dragged bar is suppressed here) */}
-      {staticSegments.map(seg => {
-        const act = activityById.get(seg.activityId);
-        if (!act) return null;
-        return (
-          <div key={seg.activityId} style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, pointerEvents: 'none' }}>
-            <div style={{ position: 'relative', height: '100%', pointerEvents: 'none' }}>
-              <CalendarBar
-                seg={seg}
-                topPx={dayHeaderH + seg.lane * laneSlotH}
-                barH={barH}
-                isSelected={selectedActivityId === seg.activityId}
-                hasQuery={hasQuery}
-                isWeekLayout={isWeek}
-                memberById={memberById}
-                onPointerDown={onBarPointerDown}
-                onClick={onBarClick}
-              />
-            </div>
-          </div>
-        );
-      })}
-
-      {/* Live drag overlay: the dragged bar at its current position */}
-      {liveSeg && dragActivityId && (() => {
-        const origSeg = row.segments.find(s => s.activityId === dragActivityId) ?? row.segments[0];
-        const displaySeg: CalendarSegment = {
-          activityId: dragActivityId,
-          startCol: liveSeg.startCol,
-          endCol: liveSeg.endCol,
-          lane: origSeg?.lane ?? 0,
-          continuesLeft: liveSeg.continuesLeft,
-          continuesRight: liveSeg.continuesRight,
-          color: liveSeg.color,
-          title: activityById.get(dragActivityId)?.title ?? '',
-          icon: activityById.get(dragActivityId)?.icon ?? undefined,
-          assignedMemberIds: activityById.get(dragActivityId)?.assignedMemberIds ?? [],
-          isMatch: false,
-          isActiveMatch: false,
-        };
-        return (
-          <div style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, pointerEvents: 'none' }}>
-            <div style={{ position: 'relative', height: '100%', pointerEvents: 'none' }}>
-              <CalendarBar
-                seg={displaySeg}
-                topPx={dayHeaderH + displaySeg.lane * laneSlotH}
-                barH={barH}
-                isSelected={selectedActivityId === dragActivityId}
-                hasQuery={false}
-                isWeekLayout={isWeek}
-                memberById={memberById}
-                onPointerDown={onBarPointerDown}
-                onClick={onBarClick}
-              />
-            </div>
-          </div>
-        );
-      })()}
-
-      {/* Month resize handle */}
-      {!isWeek && (
-        <div style={{ position: 'absolute', bottom: 0, left: 0, right: 0 }}>
-          <RowResizeHandle weekStart={row.weekStart} currentCap={row.visibleLaneCap} laneCount={row.laneCount} onCapDraft={onCapDraft} onCapCommit={onCapCommit} />
-        </div>
-      )}
-
-      {/* Overflow popover */}
-      {popover && (
-        <DayOverflowPopover
-          segments={segmentsForDay(row, popover.col)}
-          activityById={activityById}
-          dayDate={row.days[popover.col]}
-          anchorRect={popover.rect}
-          onSelect={act => { onBarClick(act.id, new MouseEvent('click') as unknown as React.MouseEvent); }}
-          onClose={() => setPopover(null)}
-        />
-      )}
-    </div>
-  );
-}
-
-// ── CalendarGrid ──────────────────────────────────────────────────────────────
-
-export interface CalendarGridProps {
-  weeks: WeekRow[];
-  layout: CalendarLayout;
-  weekStartDay: 0 | 1;
-  activityById: Map<string, ApiActivity>;
-  memberById: Record<string, Member>;
-  selectedActivityId: string | null;
-  hasQuery: boolean;
-  today: Date;
-  onSelectActivity: (act: ApiActivity | null) => void;
-  onCellClick: (date: Date) => void;
-  onBarDragProgress: (activityId: string, newStart: Date, newEnd: Date) => void;
-  onBarDragEnd: () => void;
-  onBarDragCommit: (activityId: string, newStart: Date, newEnd: Date) => void;
-  onCapDraft: (weekStart: Date, newCap: number) => void;
-  onCapCommit: (weekStart: Date, newCap: number) => void;
-}
-
-export default function CalendarGrid({
-  weeks,
-  layout,
-  weekStartDay,
-  activityById,
-  memberById,
-  selectedActivityId,
-  hasQuery,
-  today,
-  onSelectActivity,
-  onCellClick,
-  onBarDragProgress,
-  onBarDragEnd,
-  onBarDragCommit,
-  onCapDraft,
-  onCapCommit,
-}: CalendarGridProps) {
-  const [dragState, setDragState] = useState<DragState | null>(null);
-
-  // Ref for the latest drag position — prevents stale closure in the useEffect.
-  const liveDragRef = useRef<{ start: Date; end: Date } | null>(null);
-
-  // Refs for callbacks so the useEffect never captures stale props.
-  const onBarDragProgressRef = useRef(onBarDragProgress);
-  const onBarDragEndRef      = useRef(onBarDragEnd);
-  const onBarDragCommitRef   = useRef(onBarDragCommit);
-  const onSelectActivityRef  = useRef(onSelectActivity);
-  const activityByIdRef      = useRef(activityById);
-  useEffect(() => { onBarDragProgressRef.current = onBarDragProgress; }, [onBarDragProgress]);
-  useEffect(() => { onBarDragEndRef.current      = onBarDragEnd; },      [onBarDragEnd]);
-  useEffect(() => { onBarDragCommitRef.current   = onBarDragCommit; },   [onBarDragCommit]);
-  useEffect(() => { onSelectActivityRef.current  = onSelectActivity; },  [onSelectActivity]);
-  useEffect(() => { activityByIdRef.current      = activityById; },      [activityById]);
-
-  // ── Drag ────────────────────────────────────────────────────────────────────
-
-  const handleBarPointerDown = useCallback((
-    e: React.PointerEvent,
-    activityId: string,
-    type: DragType,
-  ) => {
-    e.preventDefault();
-    e.stopPropagation();
-    const act = activityById.get(activityId);
-    if (!act) return;
-    const originalStart = utcMidnight(act.startAt);
-    const originalEnd   = utcMidnight(act.endAt);
-
-    // Use elementsFromPoint to find the day cell beneath the bar.
-    const clickedDay = dayAtPoint(e.clientX, e.clientY);
-    const grabOffsetDays = clickedDay ? daysDiff(originalStart, clickedDay) : 0;
-
-    liveDragRef.current = { start: originalStart, end: originalEnd };
-    setDragState({ activityId, type, originalStart, originalEnd, grabOffsetDays, currentStart: originalStart, currentEnd: originalEnd });
-  }, [activityById]);
-
-  useEffect(() => {
-    if (!dragState) return;
-    const ds = dragState;
-    const originalSpan = daysDiff(ds.originalStart, ds.originalEnd);
-
-    function onPointerMove(e: PointerEvent) {
-      const targetDay = dayAtPoint(e.clientX, e.clientY);
-      if (!targetDay) return;
-
-      let newStart: Date;
-      let newEnd: Date;
-
-      if (ds.type === 'move') {
-        newStart = new Date(targetDay);
-        newStart.setUTCDate(targetDay.getUTCDate() - ds.grabOffsetDays);
-        newEnd = new Date(newStart);
-        newEnd.setUTCDate(newStart.getUTCDate() + originalSpan);
-      } else if (ds.type === 'resize-start') {
-        newStart = targetDay < ds.originalEnd ? targetDay : ds.originalEnd;
-        newEnd   = ds.originalEnd;
-      } else {
-        newStart = ds.originalStart;
-        newEnd   = targetDay > ds.originalStart ? targetDay : ds.originalStart;
-      }
-
-      liveDragRef.current = { start: newStart, end: newEnd };
-      setDragState(prev => prev ? { ...prev, currentStart: newStart, currentEnd: newEnd } : null);
-      onBarDragProgressRef.current(ds.activityId, newStart, newEnd);
-    }
-
-    function onPointerUp() {
-      const live = liveDragRef.current;
-      liveDragRef.current = null;
-      if (live) {
-        const changed =
-          live.start.getTime() !== ds.originalStart.getTime() ||
-          live.end.getTime()   !== ds.originalEnd.getTime();
-        if (changed) {
-          onBarDragCommitRef.current(ds.activityId, live.start, live.end);
-        } else {
-          // No movement — treat as a click. The DOM click event is unreliable
-          // here because pointerdown removes the bar from staticSegments and
-          // re-adds it after pointerup, so the click event fires on a
-          // different DOM node. Drive selection from the pointer lifecycle.
-          onSelectActivityRef.current(activityByIdRef.current.get(ds.activityId) ?? null);
-        }
-      }
-      onBarDragEndRef.current();
-      setDragState(null);
-    }
-
-    document.addEventListener('pointermove', onPointerMove);
-    document.addEventListener('pointerup', onPointerUp);
-    return () => {
-      document.removeEventListener('pointermove', onPointerMove);
-      document.removeEventListener('pointerup', onPointerUp);
-    };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dragState?.activityId, dragState?.type]);
-
-  // ── Live drag overlay across all weeks ──────────────────────────────────────
-
-  // Compute where the dragged bar currently sits in EVERY week row.
-  // This drives real-time rendering across week boundaries, even in weeks
-  // that didn't originally contain the bar.
-  const liveSegs: (LiveSegment | null)[] = useMemo(() => {
-    if (!dragState) return weeks.map(() => null);
-    const { activityId, currentStart, currentEnd } = dragState;
-
-    // Find the bar's color from any original segment.
-    let color = '#6b7280';
-    for (const row of weeks) {
-      const s = row.segments.find(s => s.activityId === activityId);
-      if (s) { color = s.color; break; }
-    }
-
-    return weeks.map(row => {
-      const weekEnd = row.days[6];
-      if (currentEnd < row.weekStart || currentStart > weekEnd) return null;
-      const rawStart = daysDiff(row.weekStart, currentStart);
-      const rawEnd   = daysDiff(row.weekStart, currentEnd);
-      return {
-        startCol: Math.max(0, rawStart),
-        endCol:   Math.min(6, rawEnd),
-        continuesLeft:  rawStart < 0,
-        continuesRight: rawEnd > 6,
-        color,
-      };
-    });
-  }, [dragState, weeks]);
-
-  const handleBarClick = useCallback((activityId: string, e: React.MouseEvent) => {
-    e.stopPropagation();
-    onSelectActivity(activityById.get(activityId) ?? null);
-  }, [activityById, onSelectActivity]);
-
-  // ── Render ──────────────────────────────────────────────────────────────────
-
-  const isWeek = layout === 'week';
-
-  const outerStyle: React.CSSProperties = isWeek
-    ? { flex: 1, display: 'flex', flexDirection: 'column', overflowY: 'auto', background: 'var(--background)' }
-    : { flex: 1, overflow: 'auto', background: 'var(--background)' };
-
-  const innerStyle: React.CSSProperties = isWeek
-    ? { flex: 1, display: 'flex', flexDirection: 'column', minWidth: 420, cursor: dragState ? 'grabbing' : undefined }
-    : { minWidth: 420, cursor: dragState ? 'grabbing' : undefined };
-
-  return (
-    <div style={outerStyle}>
-      <div style={innerStyle}>
-        {weeks.map((row, wi) => (
-          <WeekRowRenderer
-            key={row.weekStart.toISOString()}
-            row={row}
-            isFirst={wi === 0}
-            layout={layout}
-            weekStartDay={weekStartDay}
-            activityById={activityById}
-            memberById={memberById}
-            selectedActivityId={selectedActivityId}
-            hasQuery={hasQuery}
-            today={today}
-            liveSeg={liveSegs[wi]}
-            dragActivityId={dragState?.activityId ?? null}
-            onBarPointerDown={handleBarPointerDown}
-            onBarClick={handleBarClick}
-            onCellClick={onCellClick}
-            onCapDraft={onCapDraft}
-            onCapCommit={onCapCommit}
-          />
-        ))}
-      </div>
-    </div>
-  );
-}
 ````
 
 ## File: packages/web/src/components/calendar/CalendarToolbar.tsx
@@ -29839,6 +29515,310 @@ export default function FilterManageModal({
       </div>
     </div>,
     document.body,
+  )
+}
+````
+
+## File: packages/web/src/components/gantt/ActivityCreatePanel.tsx
+````typescript
+/**
+ * ActivityCreatePanel — right-side slide-in panel for creating a new Gantt activity.
+ *
+ * Defaults come from the drag selection: start/end date and the lane member.
+ * Submits via POST /timelines/:id/activities.
+ */
+
+import { useState, useEffect } from 'react'
+import { X, ArrowRight, Loader2 } from 'lucide-react'
+import MemberAvatar from '@/components/MemberAvatar'
+import { IdentityWidget } from '@/components/identity/IdentityWidget'
+import type { Identity } from '@/components/identity/identity-constants'
+import { useCreateActivity } from '@/hooks/useTeamActivities'
+import { useTags } from '@/hooks/useTags'
+import TagInput from '@/components/TagInput'
+import type { Member } from '@/types'
+
+const PANEL_WIDTH = 300
+
+interface Props {
+  open: boolean
+  teamId: string
+  timelineId: string
+  members: Member[]
+  defaultStart: string
+  defaultEnd: string
+  defaultMemberId?: string | null
+  onClose: () => void
+}
+
+const LABEL: React.CSSProperties = {
+  fontSize: 10,
+  fontWeight: 600,
+  color: 'var(--muted-foreground)',
+  textTransform: 'uppercase',
+  letterSpacing: '0.07em',
+  marginBottom: 4,
+}
+
+export default function ActivityCreatePanel({
+  open,
+  teamId,
+  timelineId,
+  members,
+  defaultStart,
+  defaultEnd,
+  defaultMemberId,
+  onClose,
+}: Props) {
+  const createMutation = useCreateActivity(teamId, timelineId)
+  const { data: teamTags = [] } = useTags(teamId)
+
+  const [title, setTitle] = useState('')
+  const [description, setDescription] = useState('')
+  const [startDate, setStartDate] = useState(defaultStart)
+  const [endDate, setEndDate] = useState(defaultEnd)
+  const [identity, setIdentity] = useState<Identity>({ color: '#288C9B', icon: '__none__' })
+  const [assignedIds, setAssignedIds] = useState<string[]>(
+    defaultMemberId ? [defaultMemberId] : [],
+  )
+  const [tagIds, setTagIds] = useState<string[]>([])
+
+  // Reset all fields to defaults each time the panel opens so re-opening
+  // the panel always shows a blank form rather than the previous session's data.
+  useEffect(() => {
+    if (!open) return
+    setTitle('')
+    setDescription('')
+    setStartDate(defaultStart)
+    setEndDate(defaultEnd)
+    setIdentity({ color: '#288C9B', icon: '__none__' })
+    setAssignedIds(defaultMemberId ? [defaultMemberId] : [])
+    setTagIds([])
+  }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const creating = createMutation.isPending
+  const titleTrimmed = title.trim()
+
+  function toggleAssignee(memberId: string) {
+    setAssignedIds(prev =>
+      prev.includes(memberId) ? prev.filter(id => id !== memberId) : [...prev, memberId],
+    )
+  }
+
+  function handleSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    if (!titleTrimmed) return
+    createMutation.mutate(
+      {
+        title: titleTrimmed,
+        startAt: `${startDate}T00:00:00Z`,
+        endAt: `${endDate}T00:00:00Z`,
+        description: description.trim() || null,
+        color: identity.color,
+        icon: identity.icon,
+        assignedMemberIds: assignedIds,
+        tagIds,
+      },
+      { onSuccess: onClose },
+    )
+  }
+
+  return (
+    <div
+      style={{
+        width: open ? PANEL_WIDTH : 0,
+        flexShrink: 0,
+        borderLeft: open ? '1px solid var(--border)' : 'none',
+        background: 'var(--card)',
+        display: 'flex',
+        flexDirection: 'column',
+        overflow: 'hidden',
+        transition: 'width 0.2s ease',
+      }}
+    >
+    <div style={{ width: PANEL_WIDTH, display: 'flex', flexDirection: 'column', height: '100%' }}>
+      {/* Header */}
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          padding: '0 12px',
+          height: 'var(--topbar-h, 40px)',
+          borderBottom: '1px solid var(--border)',
+          flexShrink: 0,
+        }}
+      >
+        <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)' }}>New activity</span>
+        <button
+          onClick={onClose}
+          style={{
+            width: 24, height: 24, border: 'none', background: 'none', borderRadius: 4,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            cursor: 'pointer', color: 'var(--muted-foreground)',
+          }}
+          onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+          onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+        >
+          <X size={14} strokeWidth={2} />
+        </button>
+      </div>
+
+      {/* Form */}
+      <form onSubmit={handleSubmit} style={{ flex: 1, overflowY: 'auto', padding: 14, display: 'flex', flexDirection: 'column', gap: 14 }}>
+
+        {/* Identity + Title — mirrors the modal header pattern: badge on left, editable name on right */}
+        <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+          <div style={{ marginTop: 2, flexShrink: 0 }}>
+            <IdentityWidget
+              identity={identity}
+              name={title || 'New Activity'}
+              shape="square"
+              onChange={setIdentity}
+            />
+          </div>
+          <input
+            autoFocus
+            value={title}
+            onChange={e => setTitle(e.target.value)}
+            placeholder="Activity title…"
+            style={{
+              flex: 1, fontSize: 13, fontWeight: 600,
+              color: 'var(--foreground)', border: '1px solid transparent',
+              borderRadius: 'var(--radius-md)', padding: '5px 6px',
+              outline: 'none', background: 'transparent', fontFamily: 'var(--font-sans)',
+            }}
+            onFocus={e => { e.target.style.borderColor = 'var(--primary)'; e.target.style.background = 'var(--background)' }}
+            onBlur={e => { e.target.style.borderColor = 'transparent'; e.target.style.background = 'transparent' }}
+          />
+        </div>
+
+        {/* Date range */}
+        <div>
+          <div style={LABEL}>Date range</div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <input
+              type="date"
+              value={startDate}
+              onChange={e => {
+                setStartDate(e.target.value)
+                if (e.target.value > endDate) setEndDate(e.target.value)
+              }}
+              style={{
+                flex: 1, fontSize: 12, color: 'var(--foreground)',
+                border: '1px solid var(--border)', borderRadius: 'var(--radius-md)',
+                padding: '6px 8px', outline: 'none', background: 'var(--background)',
+                fontFamily: 'var(--font-sans)', cursor: 'pointer',
+              }}
+            />
+            <ArrowRight size={11} color="var(--muted-foreground)" strokeWidth={2} style={{ flexShrink: 0 }} />
+            <input
+              type="date"
+              value={endDate}
+              min={startDate}
+              onChange={e => setEndDate(e.target.value)}
+              style={{
+                flex: 1, fontSize: 12, color: 'var(--foreground)',
+                border: '1px solid var(--border)', borderRadius: 'var(--radius-md)',
+                padding: '6px 8px', outline: 'none', background: 'var(--background)',
+                fontFamily: 'var(--font-sans)', cursor: 'pointer',
+              }}
+            />
+          </div>
+        </div>
+
+        {/* Description */}
+        <div>
+          <div style={LABEL}>Description</div>
+          <input
+            value={description}
+            onChange={e => setDescription(e.target.value)}
+            placeholder="Optional description…"
+            style={{
+              width: '100%', boxSizing: 'border-box',
+              fontSize: 12, color: 'var(--foreground)',
+              border: '1px solid var(--border)', borderRadius: 'var(--radius-md)',
+              padding: '6px 8px', outline: 'none', background: 'var(--background)',
+              fontFamily: 'var(--font-sans)',
+            }}
+            onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
+            onBlur={e => (e.target.style.borderColor = 'var(--border)')}
+          />
+        </div>
+
+        {/* Assignees */}
+        {members.length > 0 && (
+          <div>
+            <div style={LABEL}>Assignees</div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              {members.map(m => {
+                const assigned = assignedIds.includes(m.id)
+                return (
+                  <button
+                    key={m.id}
+                    type="button"
+                    onClick={() => toggleAssignee(m.id)}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: 8,
+                      padding: '5px 8px',
+                      border: assigned ? `1px solid ${m.color}` : '1px solid var(--border)',
+                      borderRadius: 'var(--radius-md)',
+                      background: assigned ? `${m.color}18` : 'var(--background)',
+                      cursor: 'pointer', textAlign: 'left',
+                      transition: 'background 0.1s, border-color 0.1s',
+                    }}
+                  >
+                    <MemberAvatar member={m} size={18} />
+                    <span style={{ fontSize: 12, color: 'var(--foreground)', flex: 1 }}>{m.name}</span>
+                    {assigned && (
+                      <div style={{ width: 6, height: 6, borderRadius: '50%', background: m.color, flexShrink: 0 }} />
+                    )}
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* Tags */}
+        <div>
+          <div style={LABEL}>Tags</div>
+          <TagInput
+            teamId={teamId}
+            tags={teamTags}
+            selectedTagIds={tagIds}
+            onChange={setTagIds}
+          />
+        </div>
+
+        {/* Spacer pushes submit to bottom */}
+        <div style={{ flex: 1 }} />
+      </form>
+
+      {/* Footer */}
+      <div style={{ padding: '10px 14px', borderTop: '1px solid var(--border)', flexShrink: 0 }}>
+        <button
+          type="submit"
+          form=""
+          onClick={handleSubmit}
+          disabled={!titleTrimmed || creating}
+          style={{
+            width: '100%', fontSize: 13, fontWeight: 600, padding: 8,
+            borderRadius: 'var(--radius-md)', border: 'none',
+            background: titleTrimmed && !creating ? 'var(--primary)' : 'var(--muted)',
+            color: titleTrimmed && !creating ? 'white' : 'var(--muted-foreground)',
+            cursor: titleTrimmed && !creating ? 'pointer' : 'not-allowed',
+            fontFamily: 'var(--font-sans)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+            transition: 'background 0.1s',
+          }}
+        >
+          {creating && <Loader2 size={13} className="animate-spin" />}
+          Create activity
+        </button>
+      </div>
+    </div>
+    </div>
   )
 }
 ````
@@ -33872,590 +33852,1103 @@ type CreateSavedFilterJSONRequestBody CreateSavedFilterJSONBody
 type CreateTimelineJSONRequestBody CreateTimelineJSONBody
 ````
 
-## File: packages/api/internal/api/server.go
+## File: packages/api/internal/models/models.go
 ````go
-// Package api hosts the HTTP handlers, routing, and middleware for the
-// draba REST API. Handlers are intentionally thin: they decode requests,
-// delegate to repositories and services, and write responses. Business
-// logic belongs in the domain packages, not here.
-package api
+// Package models holds the domain types shared across the API, db,
+// and event-bus packages. These types are persisted directly via sqlx
+// (db tags) and serialised on the wire (json tags); changing tags is a
+// schema change.
+package models
 
-import (
-	"fmt"
-	"io/fs"
-	"net/http"
-	"strings"
-	"time"
+import "time"
 
-	"github.com/I0-1O/draba/packages/api/internal/auth"
-	"github.com/I0-1O/draba/packages/api/internal/db"
-	"github.com/I0-1O/draba/packages/api/internal/events"
-	"github.com/I0-1O/draba/packages/api/internal/mailer"
-	"github.com/I0-1O/draba/packages/api/internal/models"
-	"github.com/I0-1O/draba/packages/api/internal/tier"
-	"github.com/I0-1O/draba/packages/api/internal/ws"
-)
-
-// TimelineStore is the persistence interface required by timeline handlers.
-// The concrete implementation is *db.TimelineRepo; tests may substitute a fake.
-type TimelineStore interface {
-	Create(t *models.Timeline) error
-	GetByID(id string) (*models.Timeline, error)
-	GetByShareToken(token string) (*models.Timeline, error)
-	ListByTeam(teamID string, includeArchived bool) ([]*models.Timeline, error)
-	HasAccess(timelineID, teamMemberID string) (bool, error)
-	GrantAccess(timelineID, teamMemberID, role string) error
-	RevokeAccess(timelineID, teamMemberID string) error
-	GetAccessRole(timelineID, teamMemberID string) (string, error)
-	ListAccess(timelineID string) ([]*models.TimelineAccessEntry, error)
-	SetArchived(id string, at *time.Time) error
-	Update(t *models.Timeline) error
-	Delete(id string) error
+// Activity is a scheduled item of work belonging to a Timeline. ArchivedAt is
+// non-nil when the activity is soft-deleted; list endpoints exclude archived
+// activities by default.
+//
+// AssignedMemberIDs is not stored on the activities table; it is populated by
+// the repository from activity_assignments after every list query.
+//
+// GoogleEventID and CaldavUID are preserved as-is — they identify the
+// corresponding records in external calendar systems (VEVENT identifiers).
+type Activity struct {
+	ID                string     `db:"id"                  json:"id"`
+	TimelineID        string     `db:"timeline_id"         json:"timelineId"`
+	Title             string     `db:"title"               json:"title"`
+	Description       *string    `db:"description"         json:"description,omitempty"`
+	Notes             *string    `db:"notes"               json:"notes,omitempty"`
+	Icon              *string    `db:"icon"                json:"icon,omitempty"`
+	Color             *string    `db:"color"               json:"color,omitempty"`
+	StartAt           time.Time  `db:"start_at"            json:"startAt"`
+	EndAt             time.Time  `db:"end_at"              json:"endAt"`
+	AllDay            bool       `db:"all_day"             json:"allDay"`
+	StatusID          *string    `db:"status_id"           json:"statusId,omitempty"`
+	ParentActivityID  *string    `db:"parent_activity_id"  json:"parentActivityId,omitempty"`
+	PercentComplete   *int       `db:"percent_complete"    json:"percentComplete,omitempty"`
+	Location          *string    `db:"location"            json:"location,omitempty"`
+	URL               *string    `db:"url"                 json:"url,omitempty"`
+	Rrule             *string    `db:"rrule"               json:"rrule,omitempty"`
+	CaldavUID         *string    `db:"caldav_uid"          json:"caldavUid,omitempty"`
+	GoogleEventID     *string    `db:"google_event_id"     json:"googleEventId,omitempty"`
+	CreatedBy         string     `db:"created_by"          json:"createdBy"`
+	CreatedAt         time.Time  `db:"created_at"          json:"createdAt"`
+	UpdatedAt         time.Time  `db:"updated_at"          json:"updatedAt"`
+	ArchivedAt        *time.Time `db:"archived_at"         json:"archivedAt,omitempty"`
+	AssignedMemberIDs []string   `db:"-"                   json:"assignedMemberIds"`
+	TagIDs            []string   `db:"-"                   json:"tagIds"`
 }
 
-// Server holds shared dependencies for all HTTP handlers.
-type Server struct {
-	users          *db.UserRepo
-	invites        *db.InviteRepo
-	teams          *db.TeamRepo
-	activities     *db.ActivityRepo
-	timelines      TimelineStore
-	savedFilters   *db.SavedFilterRepo
-	preferences    *db.UserPreferenceRepo
-	apiTokens      *db.APITokenRepo
-	instanceSets   *db.InstanceSettingsRepo
-	passwordTokens *db.PasswordResetTokenRepo
-	statuses       *db.StatusRepo
-	tags           *db.TagRepo
-	mailer         *mailer.Mailer
-	tokens         *auth.TokenService
-	tier           tier.Tier
-	bus            *events.Bus
-	hub            *ws.Hub
-	uiFS           fs.FS
+// TeamMemberWithUser joins a TeamMember row with its associated User so
+// callers receive display names and emails in a single query. Participants
+// (no user account) have empty email and avatar; their display_name comes
+// from team_members.display_name via COALESCE in the query.
+type TeamMemberWithUser struct {
+	TeamMember
+	Email       string  `db:"email"        json:"email"`
+	DisplayName string  `db:"display_name" json:"displayName"`
+	AvatarURL   *string `db:"avatar_url"   json:"avatarUrl,omitempty"`
 }
 
-// NewServer constructs a Server with its required dependencies. It does not
-// touch the network; call Routes to obtain the http.Handler to serve.
-func NewServer(
-	users *db.UserRepo,
-	invites *db.InviteRepo,
-	teams *db.TeamRepo,
-	activitiesRepo *db.ActivityRepo,
-	timelinesRepo TimelineStore,
-	savedFiltersRepo *db.SavedFilterRepo,
-	preferencesRepo *db.UserPreferenceRepo,
-	apiTokensRepo *db.APITokenRepo,
-	instanceSetsRepo *db.InstanceSettingsRepo,
-	passwordTokensRepo *db.PasswordResetTokenRepo,
-	statusesRepo *db.StatusRepo,
-	tagsRepo *db.TagRepo,
-	m *mailer.Mailer,
-	tokens *auth.TokenService,
-	t tier.Tier,
-	bus *events.Bus,
-	hub *ws.Hub,
-) *Server {
-	return &Server{
-		users:          users,
-		invites:        invites,
-		teams:          teams,
-		activities:     activitiesRepo,
-		timelines:      timelinesRepo,
-		savedFilters:   savedFiltersRepo,
-		preferences:    preferencesRepo,
-		apiTokens:      apiTokensRepo,
-		instanceSets:   instanceSetsRepo,
-		passwordTokens: passwordTokensRepo,
-		statuses:       statusesRepo,
-		tags:           tagsRepo,
-		mailer:         m,
-		tokens:         tokens,
-		tier:           t,
-		bus:            bus,
-		hub:            hub,
-	}
+// User is an authenticated account. PasswordHash is omitted from JSON
+// to avoid leaking it through any handler that returns a User.
+// ArchivedAt is non-nil when the account is inactivated; login is rejected
+// for archived users. Color and Icon are user-level identity fields (migration
+// 010); they propagate to team_members rows for the user when changed.
+type User struct {
+	ID           string     `db:"id"             json:"id"`
+	Email        string     `db:"email"          json:"email"`
+	PasswordHash string     `db:"password_hash"  json:"-"`
+	DisplayName  string     `db:"display_name"   json:"displayName"`
+	AvatarURL    *string    `db:"avatar_url"     json:"avatarUrl,omitempty"`
+	Color        *string    `db:"color"          json:"color,omitempty"`
+	Icon         *string    `db:"icon"           json:"icon,omitempty"`
+	IsSuperadmin bool       `db:"is_superadmin"  json:"isSuperadmin"`
+	CreatedAt    time.Time  `db:"created_at"     json:"createdAt"`
+	UpdatedAt    time.Time  `db:"updated_at"     json:"updatedAt"`
+	ArchivedAt   *time.Time `db:"archived_at"    json:"archivedAt,omitempty"`
 }
 
-// WithUI registers an embedded React SPA to be served at GET /. The FS must
-// be rooted at the build output directory (i.e. contain index.html directly).
-// When called, all unmatched GET paths fall back to index.html so React Router
-// handles client-side navigation. Safe to skip in dev (no-op when not called).
-func (s *Server) WithUI(uiFS fs.FS) *Server {
-	s.uiFS = uiFS
-	return s
+// Team is a workspace that groups users and their scheduled work. Color and
+// Icon are identity fields added in migration 006; both are nullable until
+// explicitly set by an admin. Description, Notes, and ArchivedAt are added in
+// migration 008; ArchivedAt is non-nil when the team is soft-deleted.
+// InviteLinkToken is a stable, reusable token added in migration 009; when
+// non-nil it can be used by anyone to join the team during registration.
+type Team struct {
+	ID              string     `db:"id"                  json:"id"`
+	Name            string     `db:"name"                json:"name"`
+	Slug            string     `db:"slug"                json:"slug"`
+	Description     *string    `db:"description"         json:"description,omitempty"`
+	Notes           *string    `db:"notes"               json:"notes,omitempty"`
+	Color           *string    `db:"color"               json:"color,omitempty"`
+	Icon            *string    `db:"icon"                json:"icon,omitempty"`
+	InviteLinkToken *string    `db:"invite_link_token"   json:"inviteLinkToken,omitempty"`
+	CreatedAt       time.Time  `db:"created_at"          json:"createdAt"`
+	UpdatedAt       time.Time  `db:"updated_at"          json:"updatedAt"`
+	ArchivedAt      *time.Time `db:"archived_at"         json:"archivedAt,omitempty"`
 }
 
-// Routes returns the fully-wired HTTP handler for the API, including all
-// core routes plus any routes added by registered tier modules.
-func (s *Server) Routes() http.Handler {
-	mux := http.NewServeMux()
-
-	mux.HandleFunc("GET /setup/status", s.handleSetupStatus)
-
-	mux.HandleFunc("POST /auth/register", s.handleRegister)
-	mux.HandleFunc("POST /auth/login", s.handleLogin)
-	mux.HandleFunc("POST /auth/refresh", s.handleRefresh)
-	mux.HandleFunc("GET /auth/me", chain(s.handleMe, s.authMiddleware))
-	mux.HandleFunc("POST /auth/forgot-password", s.handleForgotPassword)
-	mux.HandleFunc("POST /auth/reset-password", s.handleResetPassword)
-
-	mux.HandleFunc("GET /users/me/preferences", chain(s.handleGetPreferences, s.authMiddleware))
-	mux.HandleFunc("PUT /users/me/preferences", chain(s.handleUpsertPreference, s.authMiddleware))
-	mux.HandleFunc("GET /users/me/stats", chain(s.handleGetMyStats, s.authMiddleware))
-	mux.HandleFunc("PATCH /users/me", chain(s.handleUpdateProfile, s.authMiddleware))
-	mux.HandleFunc("PUT /users/me/password", chain(s.handleChangePassword, s.authMiddleware))
-
-	mux.HandleFunc("GET /admin/smtp", chain(s.handleGetSMTP, s.authMiddleware))
-	mux.HandleFunc("PUT /admin/smtp", chain(s.handlePutSMTP, s.authMiddleware))
-	mux.HandleFunc("POST /admin/smtp/test", chain(s.handleTestSMTP, s.authMiddleware))
-	mux.HandleFunc("DELETE /admin/smtp", chain(s.handleDeleteSMTP, s.authMiddleware))
-	mux.HandleFunc("GET /admin/settings", chain(s.handleGetAdminSettings, s.authMiddleware))
-	mux.HandleFunc("PATCH /admin/settings", chain(s.handlePatchAdminSettings, s.authMiddleware))
-	mux.HandleFunc("GET /admin/users", chain(s.handleListAdminUsers, s.authMiddleware))
-
-	// Public — no auth required; used by the login page and shared views.
-	mux.HandleFunc("GET /settings/branding", s.handleGetPublicBranding)
-
-	mux.HandleFunc("POST /tokens", chain(s.handleCreateAPIToken, s.authMiddleware))
-	mux.HandleFunc("GET /tokens", chain(s.handleListAPITokens, s.authMiddleware))
-	mux.HandleFunc("DELETE /tokens/{id}", chain(s.handleDeleteAPIToken, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams", chain(s.handleListTeams, s.authMiddleware))
-	mux.HandleFunc("POST /teams", chain(s.handleCreateTeam, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}", chain(s.handleGetTeam, s.authMiddleware))
-	mux.HandleFunc("PATCH /teams/{id}", chain(s.handleUpdateTeam, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/archive", chain(s.handleArchiveTeam, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/unarchive", chain(s.handleUnarchiveTeam, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/invites", chain(s.handleCreateInvite, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/invites", chain(s.handleListInvites, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/invites/{inviteId}", chain(s.handleDeleteInvite, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/invite-link", chain(s.handleCreateInviteLink, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/invite-link/reset", chain(s.handleResetInviteLink, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/invite-link", chain(s.handleGetInviteLink, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/invite-link", chain(s.handleDeleteInviteLink, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/members", chain(s.handleListMembers, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/members/{memberId}", chain(s.handleGetMember, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/members/{memberId}/stats", chain(s.handleGetMemberStats, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/members", chain(s.handleAddMember, s.authMiddleware))
-	mux.HandleFunc("PATCH /teams/{id}/members/{memberId}", chain(s.handleUpdateMember, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/members/{memberId}", chain(s.handleDeleteMember, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/members/{memberId}/archive", chain(s.handleArchiveMember, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/members/{memberId}/unarchive", chain(s.handleUnarchiveMember, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/participants", chain(s.handleCreateParticipant, s.authMiddleware))
-	mux.HandleFunc("GET /users/search", chain(s.handleSearchUsers, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/promote", chain(s.handlePromoteUser, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/archive", chain(s.handleArchiveUser, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/unarchive", chain(s.handleUnarchiveUser, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/revoke", chain(s.handleRevokeUser, s.authMiddleware))
-	mux.HandleFunc("DELETE /users/{id}", chain(s.handleDeleteUser, s.authMiddleware))
-	// Activity routes use the team-scoped prefix (GET /teams/{id}/timelines/{timelineId}/...)
-	// to avoid a Go 1.22 mux conflict with GET /timelines/share/{token}: both are
-	// 3-segment GET paths and neither is more specific when the third segment differs.
-	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/activities", chain(s.handleCreateActivity, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/activities", chain(s.handleListActivities, s.authMiddleware))
-	mux.HandleFunc("PATCH /activities/{id}", chain(s.handleUpdateActivity, s.authMiddleware))
-	mux.HandleFunc("DELETE /activities/{id}", chain(s.handleDeleteActivity, s.authMiddleware))
-	mux.HandleFunc("POST /activities/{id}/archive", chain(s.handleArchiveActivity, s.authMiddleware))
-	mux.HandleFunc("POST /activities/{id}/unarchive", chain(s.handleUnarchiveActivity, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/tags", chain(s.handleListTags, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/tags", chain(s.handleCreateTag, s.authMiddleware))
-	mux.HandleFunc("PATCH /tags/{id}", chain(s.handleUpdateTag, s.authMiddleware))
-	mux.HandleFunc("DELETE /tags/{id}", chain(s.handleDeleteTag, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/saved_filters/all", chain(s.handleListAllTeamSavedFilters, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/saved_filters", chain(s.handleListSavedFilters, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/saved_filters", chain(s.handleCreateSavedFilter, s.authMiddleware))
-	mux.HandleFunc("PATCH /saved_filters/{id}", chain(s.handleUpdateSavedFilter, s.authMiddleware))
-	mux.HandleFunc("DELETE /saved_filters/{id}", chain(s.handleDeleteSavedFilter, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/status-templates", chain(s.handleListStatusTemplates, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/status-templates", chain(s.handleCreateStatusTemplate, s.authMiddleware))
-	mux.HandleFunc("PATCH /status-templates/{id}", chain(s.handleUpdateStatusTemplate, s.authMiddleware))
-	mux.HandleFunc("DELETE /status-templates/{id}", chain(s.handleDeleteStatusTemplate, s.authMiddleware))
-	mux.HandleFunc("POST /status-templates/{id}/items", chain(s.handleCreateTemplateItem, s.authMiddleware))
-	mux.HandleFunc("PATCH /status-template-items/{id}", chain(s.handleUpdateTemplateItem, s.authMiddleware))
-	mux.HandleFunc("DELETE /status-template-items/{id}", chain(s.handleDeleteTemplateItem, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/timelines", chain(s.handleListTimelines, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/timelines", chain(s.handleCreateTimeline, s.authMiddleware))
-	// GET /timelines/share/{token} must be registered before GET /timelines/{id} so
-	// the more-specific literal "share" segment takes precedence.
-	mux.HandleFunc("GET /timelines/share/{token}", s.handleGetTimelineByShareToken)
-	mux.HandleFunc("GET /timelines/{id}", chain(s.handleGetTimeline, s.authMiddleware))
-	// Timeline statuses are placed under /teams/{id}/timelines/{timelineId}/statuses
-	// rather than /timelines/{id}/statuses to avoid a Go 1.22 mux pattern conflict
-	// with GET /timelines/share/{token} (both are 3-segment paths and conflict on
-	// paths like /timelines/share/statuses).
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleListTimelineStatuses, s.authMiddleware))
-	mux.HandleFunc("POST /timelines/{id}/archive", chain(s.handleArchiveTimeline, s.authMiddleware))
-	mux.HandleFunc("POST /timelines/{id}/unarchive", chain(s.handleUnarchiveTimeline, s.authMiddleware))
-
-	mux.HandleFunc("PATCH /timelines/{id}", chain(s.handleUpdateTimeline, s.authMiddleware))
-	mux.HandleFunc("DELETE /timelines/{id}", chain(s.handleDeleteTimeline, s.authMiddleware))
-	// Access list routes use the team-scoped prefix to avoid a Go 1.22 mux
-	// conflict with GET /timelines/share/{token} on 3-segment GET paths.
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/access", chain(s.handleListTimelineAccess, s.authMiddleware))
-	mux.HandleFunc("PUT /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleGrantTimelineAccess, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleRevokeTimelineAccess, s.authMiddleware))
-	// Timeline status CRUD — POST shares the team-scoped prefix with GET statuses.
-	// PATCH and DELETE use a flat /statuses/{id} prefix (2 segments, no conflict).
-	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleCreateTimelineStatus, s.authMiddleware))
-	mux.HandleFunc("PATCH /statuses/{id}", chain(s.handleUpdateStatus, s.authMiddleware))
-	mux.HandleFunc("DELETE /statuses/{id}", chain(s.handleDeleteStatus, s.authMiddleware))
-
-	// GET /ws is intentionally outside authMiddleware — ServeWS validates the
-	// JWT itself before upgrading, because WebSocket clients can't set headers.
-	mux.HandleFunc("GET /ws", s.hub.ServeWS)
-
-	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-	})
-
-	if s.uiFS != nil {
-		mux.Handle("GET /", spaHandler(s.uiFS))
-	}
-
-	ctx := &tier.ModuleContext{Mux: mux, Tier: s.tier}
-	for _, m := range tier.Registered() {
-		if err := m.Register(ctx); err != nil {
-			// Module registration is a startup invariant — a failure here is a programming error.
-			panic(fmt.Sprintf("tier module %q failed to register: %v", m.Name(), err))
-		}
-	}
-
-	return requestLogger(mux)
+// TeamMember is the join row that puts a person in a Team. UserID is nil
+// for login-less Participants; DisplayName is populated for them instead.
+// Role is the team-level role: "admin" or "member". Color and Icon are
+// identity fields (migration 006); Color stores a color ID (e.g. "teal").
+// ArchivedAt is non-nil when the member is inactivated (migration 009);
+// inactivated members lose access but their data and assignments are preserved.
+type TeamMember struct {
+	ID          string     `db:"id"           json:"id"`
+	TeamID      string     `db:"team_id"      json:"teamId"`
+	UserID      *string    `db:"user_id"      json:"userId,omitempty"`
+	DisplayName *string    `db:"display_name" json:"displayName,omitempty"`
+	Role        string     `db:"role"         json:"role"`
+	Color       *string    `db:"color"        json:"color,omitempty"`
+	Icon        *string    `db:"icon"         json:"icon,omitempty"`
+	JoinedAt    time.Time  `db:"joined_at"    json:"joinedAt"`
+	ArchivedAt  *time.Time `db:"archived_at"  json:"archivedAt,omitempty"`
 }
 
-// chain applies a single middleware to a handler function.
-func chain(h http.HandlerFunc, m func(http.Handler) http.Handler) http.HandlerFunc {
-	return m(h).ServeHTTP
+// MemberStats holds computed activity and timeline counts for a member.
+// All counts are date-relative and scoped to activities the member is assigned to.
+type MemberStats struct {
+	ActiveTimelines    int `json:"activeTimelines"`
+	ArchivedTimelines  int `json:"archivedTimelines"`
+	PastDue            int `json:"pastDue"`
+	Running            int `json:"running"`
+	Upcoming           int `json:"upcoming"`
+	Unscheduled        int `json:"unscheduled"`
+	ArchivedActivities int `json:"archivedActivities"`
 }
 
-// spaHandler serves the embedded React SPA. Known static assets are served
-// directly; any unrecognised path falls back to index.html so React Router
-// handles client-side navigation.
-func spaHandler(uiFS fs.FS) http.Handler {
-	fserver := http.FileServer(http.FS(uiFS))
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		path := strings.TrimPrefix(r.URL.Path, "/")
-		if path == "" {
-			path = "index.html"
-		}
-		if _, err := uiFS.Open(path); err != nil {
-			// Unknown path — serve index.html and let React Router handle it.
-			r = r.Clone(r.Context())
-			r.URL.Path = "/"
-			fserver.ServeHTTP(w, r)
-			return
-		}
-		fserver.ServeHTTP(w, r)
-	})
+// MemberDetail combines a TeamMemberWithUser with computed stats and the
+// member's full list of team memberships. Returned by GET /teams/:id/members/:memberId.
+// UserArchivedAt reflects users.archived_at (account-level deactivation), distinct
+// from ArchivedAt which is team_members.archived_at (membership-level inactivation).
+type MemberDetail struct {
+	TeamMemberWithUser
+	Stats          MemberStats          `json:"stats"`
+	Teams          []TeamMemberWithUser `json:"teams"`
+	Deletable      bool                 `json:"deletable"`
+	UserArchivedAt *time.Time           `json:"userArchivedAt,omitempty"`
+}
+
+// Timeline is a named date range over a team's events. It is not a data
+// container — it is a view over a team's events for a given date window.
+// Access is governed by timeline_access + team role; share_token allows
+// unauthenticated read access via a stable public URL. Color and Icon are
+// identity fields (migration 006). Description and Notes are free-text fields
+// added in migration 013.
+type Timeline struct {
+	ID          string     `db:"id"          json:"id"`
+	TeamID      string     `db:"team_id"     json:"teamId"`
+	Name        string     `db:"name"        json:"name"`
+	Description *string    `db:"description" json:"description,omitempty"`
+	Notes       *string    `db:"notes"       json:"notes,omitempty"`
+	StartDate   string     `db:"start_date"  json:"startDate"`
+	EndDate     string     `db:"end_date"    json:"endDate"`
+	Color       *string    `db:"color"       json:"color,omitempty"`
+	Icon        *string    `db:"icon"        json:"icon,omitempty"`
+	ShareToken  string     `db:"share_token" json:"shareToken"`
+	IcalToken   string     `db:"ical_token"  json:"icalToken"`
+	CreatedBy   string     `db:"created_by"  json:"createdBy"`
+	CreatedAt   time.Time  `db:"created_at"  json:"createdAt"`
+	UpdatedAt   time.Time  `db:"updated_at"  json:"updatedAt"`
+	ArchivedAt  *time.Time `db:"archived_at" json:"archivedAt,omitempty"`
+}
+
+// SavedFilter is a user-owned, team-scoped named filter spec. Definition is
+// an opaque JSON string interpreted by the client; the server treats it as
+// arbitrary text and only validates that it parses as JSON.
+type SavedFilter struct {
+	ID           string    `db:"id"             json:"id"`
+	TeamID       string    `db:"team_id"        json:"teamId"`
+	UserID       string    `db:"user_id"        json:"userId"`
+	Name         string    `db:"name"           json:"name"`
+	Definition   string    `db:"definition"     json:"definition"`
+	IsTeamFilter bool      `db:"is_team_filter" json:"isTeamFilter"`
+	CreatedAt    time.Time `db:"created_at"     json:"createdAt"`
+	UpdatedAt    time.Time `db:"updated_at"     json:"updatedAt"`
+}
+
+// UserPreference stores a single key/value setting for a user, optionally
+// scoped to a timeline. TimelineID is “” for global preferences so the
+// UNIQUE(user_id, timeline_id, key) DB constraint works without NULL handling.
+// Serialised JSON omits TimelineID when empty so callers see null for global prefs.
+type UserPreference struct {
+	ID         string    `db:"id"          json:"id"`
+	UserID     string    `db:"user_id"     json:"userId"`
+	TimelineID string    `db:"timeline_id" json:"timelineId,omitempty"`
+	Key        string    `db:"key"         json:"key"`
+	Value      string    `db:"value"       json:"value"`
+	UpdatedAt  time.Time `db:"updated_at"  json:"updatedAt"`
+}
+
+// APIToken is a long-lived Bearer credential a user issues for programmatic
+// access. token_hash stores SHA-256(rawToken); the raw value is shown to the
+// caller only once on creation. RevokedAt is non-nil when the token has been
+// revoked; revoked tokens are not deleted so listing remains stable.
+type APIToken struct {
+	ID         string     `db:"id"           json:"id"`
+	UserID     string     `db:"user_id"      json:"userId"`
+	Name       string     `db:"name"         json:"name"`
+	TokenHash  string     `db:"token_hash"   json:"-"`
+	Scope      string     `db:"scope"        json:"scope"`
+	LastUsedAt *time.Time `db:"last_used_at" json:"lastUsedAt,omitempty"`
+	CreatedAt  time.Time  `db:"created_at"   json:"createdAt"`
+	RevokedAt  *time.Time `db:"revoked_at"   json:"revokedAt,omitempty"`
+}
+
+// InstanceSetting stores a single instance-level configuration value.
+// SMTP config and defaults live here. The value column is plain text;
+// the mailer package handles decryption of the SMTP password field.
+type InstanceSetting struct {
+	Key       string    `db:"key"        json:"key"`
+	Value     string    `db:"value"      json:"value"`
+	UpdatedAt time.Time `db:"updated_at" json:"updatedAt"`
+}
+
+// PasswordResetToken is a single-use token for the forgot-password flow.
+// TokenHash stores SHA-256 of the raw token; the raw value is sent by email
+// and never stored. UsedAt is set when the token is consumed.
+type PasswordResetToken struct {
+	ID        string     `db:"id"         json:"id"`
+	UserID    string     `db:"user_id"    json:"userId"`
+	TokenHash string     `db:"token_hash" json:"-"`
+	ExpiresAt time.Time  `db:"expires_at" json:"expiresAt"`
+	UsedAt    *time.Time `db:"used_at"    json:"usedAt,omitempty"`
+	CreatedAt time.Time  `db:"created_at" json:"createdAt"`
+}
+
+// AdminUserRow is a flat view of a user for the admin users list. It includes
+// the user's fields plus the count of active team memberships.
+type AdminUserRow struct {
+	User
+	TeamCount int `db:"team_count" json:"teamCount"`
+}
+
+// RevokeUserResult summarizes the outcome of POST /users/:id/revoke.
+// The three counters let the caller show a meaningful summary in the UI.
+type RevokeUserResult struct {
+	AccountDeactivated     bool `json:"accountDeactivated"`
+	MembershipsInactivated int  `json:"membershipsInactivated"`
+	MembershipsRemoved     int  `json:"membershipsRemoved"`
+}
+
+// StatusTemplate is a reusable named preset of statuses owned by a team.
+// When a timeline is created the team's chosen template's items are copied
+// into live Status rows for that timeline.
+type StatusTemplate struct {
+	ID          string    `db:"id"          json:"id"`
+	TeamID      string    `db:"team_id"     json:"teamId"`
+	Name        string    `db:"name"        json:"name"`
+	Description *string   `db:"description" json:"description,omitempty"`
+	Position    int       `db:"position"    json:"position"`
+	CreatedBy   string    `db:"created_by"  json:"createdBy"`
+	CreatedAt   time.Time `db:"created_at"  json:"createdAt"`
+	UpdatedAt   time.Time `db:"updated_at"  json:"updatedAt"`
+	// Items is populated by the repository when listing templates.
+	Items []StatusTemplateItem `db:"-" json:"items"`
+}
+
+// StatusTemplateItem is one status value within a StatusTemplate.
+type StatusTemplateItem struct {
+	ID         string  `db:"id"          json:"id"`
+	TemplateID string  `db:"template_id" json:"templateId"`
+	Name       string  `db:"name"        json:"name"`
+	Color      string  `db:"color"       json:"color"`
+	Icon       *string `db:"icon"        json:"icon,omitempty"`
+	IsClosed   bool    `db:"is_closed"   json:"isClosed"`
+	Position   int     `db:"position"    json:"position"`
+}
+
+// Status is a live status value on a specific timeline. Rows are copied from a
+// StatusTemplate's items when the timeline is created and then evolve independently.
+type Status struct {
+	ID         string    `db:"id"          json:"id"`
+	TimelineID string    `db:"timeline_id" json:"timelineId"`
+	Name       string    `db:"name"        json:"name"`
+	Color      string    `db:"color"       json:"color"`
+	Icon       *string   `db:"icon"        json:"icon,omitempty"`
+	IsClosed   bool      `db:"is_closed"   json:"isClosed"`
+	Position   int       `db:"position"    json:"position"`
+	CreatedAt  time.Time `db:"created_at"  json:"createdAt"`
+	UpdatedAt  time.Time `db:"updated_at"  json:"updatedAt"`
+}
+
+// TimelineAccessEntry is a single timeline access grant joined with the team
+// member's display info. Returned by GET /teams/:id/timelines/:timelineId/access.
+type TimelineAccessEntry struct {
+	TimelineID   string  `db:"timeline_id"    json:"timelineId"`
+	TeamMemberID string  `db:"team_member_id" json:"teamMemberId"`
+	Role         string  `db:"role"           json:"role"`
+	DisplayName  string  `db:"display_name"   json:"displayName"`
+	Email        string  `db:"email"          json:"email"`
+	Color        *string `db:"color"          json:"color,omitempty"`
+	Icon         *string `db:"icon"           json:"icon,omitempty"`
+	UserID       *string `db:"user_id"        json:"userId,omitempty"`
+}
+
+// Tag is a team-scoped label that can be applied to activities. Tags are
+// normalized: a team_id+name pair is unique, enabling rename-all and
+// name-based filter matching across timelines.
+type Tag struct {
+	ID        string    `db:"id"         json:"id"`
+	TeamID    string    `db:"team_id"    json:"teamId"`
+	Name      string    `db:"name"       json:"name"`
+	Color     *string   `db:"color"      json:"color,omitempty"`
+	CreatedBy string    `db:"created_by" json:"createdBy"`
+	CreatedAt time.Time `db:"created_at" json:"createdAt"`
+}
+
+// Invite is a single-use token that grants an email address the right to
+// join a Team. AcceptedAt is non-nil once consumed; expired or accepted
+// invites are rejected by the registration handler.
+type Invite struct {
+	ID         string     `db:"id"          json:"id"`
+	TeamID     string     `db:"team_id"     json:"teamId"`
+	Email      string     `db:"email"       json:"email"`
+	Token      string     `db:"token"       json:"token"`
+	Role       string     `db:"role"        json:"role"`
+	InvitedBy  string     `db:"invited_by"  json:"invitedBy"`
+	ExpiresAt  time.Time  `db:"expires_at"  json:"expiresAt"`
+	AcceptedAt *time.Time `db:"accepted_at" json:"acceptedAt,omitempty"`
+	CreatedAt  time.Time  `db:"created_at"  json:"createdAt"`
 }
 ````
 
-## File: packages/web/src/components/gantt/ActivityCreatePanel.tsx
+## File: packages/web/src/components/calendar/CalendarGrid.tsx
 ````typescript
 /**
- * ActivityCreatePanel — right-side slide-in panel for creating a new Gantt activity.
+ * CalendarGrid — presentational grid for the Calendar view.
  *
- * Defaults come from the drag selection: start/end date and the lane member.
- * Submits via POST /timelines/:id/activities.
+ * Month (6-week) and Week (1-week) all-day-bar layouts.
  */
 
-import { useState, useEffect } from 'react'
-import { X, ArrowRight, Loader2 } from 'lucide-react'
-import MemberAvatar from '@/components/MemberAvatar'
-import { IdentityWidget } from '@/components/identity/IdentityWidget'
-import type { Identity } from '@/components/identity/identity-constants'
-import { useCreateActivity } from '@/hooks/useTeamActivities'
-import { useTags } from '@/hooks/useTags'
-import TagInput from '@/components/TagInput'
-import type { Member } from '@/types'
+import {
+  useRef,
+  useState,
+  useCallback,
+  useEffect,
+  useMemo,
+} from 'react';
+import type { CalendarLayout } from './CalendarToolbar';
+import type { WeekRow, CalendarSegment } from '@/lib/calendarLanes';
+import { overflowCountsForWeek, segmentsForDay, daysDiff } from '@/lib/calendarLanes';
+import type { components } from '@draba/shared';
+import type { Member } from '@/types';
 
-const PANEL_WIDTH = 300
+type ApiActivity = components['schemas']['Activity'];
 
-interface Props {
-  open: boolean
-  teamId: string
-  timelineId: string
-  members: Member[]
-  defaultStart: string
-  defaultEnd: string
-  defaultMemberId?: string | null
-  onClose: () => void
+// ── Layout constants ──────────────────────────────────────────────────────────
+
+const MONTH_DAY_HEADER_H = 28;
+const WEEK_DAY_HEADER_H  = 60;
+const BAR_H           = 20;
+const LANE_SLOT_H     = 24;
+const WEEK_BAR_H      = 66;   // 3-line bar for week view
+const WEEK_LANE_SLOT_H = 70;  // WEEK_BAR_H + 4px gap
+const OVERFLOW_H   = 20;   // reserved for "+N more" chips (month)
+const EDGE_W       = 8;    // resize hit-zone on bar edges
+const ROW_RESIZE_H = 6;    // month row-height drag strip
+const COL_COUNT    = 7;
+
+// ── Drag state ────────────────────────────────────────────────────────────────
+
+type DragType = 'move' | 'resize-start' | 'resize-end';
+
+interface DragState {
+  activityId: string;
+  type: DragType;
+  originalStart: Date;
+  originalEnd: Date;
+  grabOffsetDays: number;
+  currentStart: Date;
+  currentEnd: Date;
 }
 
-const LABEL: React.CSSProperties = {
-  fontSize: 10,
-  fontWeight: 600,
-  color: 'var(--muted-foreground)',
-  textTransform: 'uppercase',
-  letterSpacing: '0.07em',
-  marginBottom: 4,
+/** Per-week position of the dragged bar during live drag. */
+interface LiveSegment {
+  startCol: number;
+  endCol: number;
+  continuesLeft: boolean;
+  continuesRight: boolean;
+  color: string;
 }
 
-export default function ActivityCreatePanel({
-  open,
-  teamId,
-  timelineId,
-  members,
-  defaultStart,
-  defaultEnd,
-  defaultMemberId,
-  onClose,
-}: Props) {
-  const createMutation = useCreateActivity(teamId, timelineId)
-  const { data: teamTags = [] } = useTags(teamId)
+// ── Style constants ───────────────────────────────────────────────────────────
+// Defining static React.CSSProperties objects at module level avoids creating
+// new object references on every render and keeps the JSX readable.
 
-  const [title, setTitle] = useState('')
-  const [description, setDescription] = useState('')
-  const [startDate, setStartDate] = useState(defaultStart)
-  const [endDate, setEndDate] = useState(defaultEnd)
-  const [identity, setIdentity] = useState<Identity>({ color: '#288C9B', icon: '__none__' })
-  const [assignedIds, setAssignedIds] = useState<string[]>(
-    defaultMemberId ? [defaultMemberId] : [],
-  )
-  const [tagIds, setTagIds] = useState<string[]>([])
+/** Invisible pointer hit zone on each resizable bar edge. */
+const EDGE_STYLE: React.CSSProperties = {
+  position: 'absolute', top: 0, height: '100%',
+  width: EDGE_W, cursor: 'ew-resize', zIndex: 2,
+};
 
-  // Reset all fields to defaults each time the panel opens so re-opening
-  // the panel always shows a blank form rather than the previous session's data.
+/** Full-coverage absolutely-positioned wrapper for bar overlay layers. */
+const OVERLAY_WRAPPER: React.CSSProperties = {
+  position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, pointerEvents: 'none',
+};
+const OVERLAY_INNER: React.CSSProperties = {
+  position: 'relative', height: '100%', pointerEvents: 'none',
+};
+
+// Overflow popover
+const POPOVER_HEADER: React.CSSProperties = {
+  padding: '8px 12px', borderBottom: '1px solid var(--border)',
+  fontSize: 12, fontWeight: 600, color: 'var(--foreground)',
+};
+const POPOVER_BODY: React.CSSProperties = { maxHeight: 260, overflowY: 'auto' };
+const POPOVER_ITEM_BASE: React.CSSProperties = {
+  display: 'flex', alignItems: 'center', gap: 8, width: '100%', padding: '7px 12px',
+  background: 'none', border: 'none', textAlign: 'left', cursor: 'pointer',
+  fontSize: 12, color: 'var(--foreground)', borderBottom: '1px solid var(--border)',
+};
+const POPOVER_LABEL: React.CSSProperties = {
+  flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+};
+
+// Activity bar content
+const WEEK_BAR_CONTENT: React.CSSProperties = {
+  display: 'flex', flexDirection: 'column', justifyContent: 'center',
+  padding: '4px 6px', flex: 1, minWidth: 0, overflow: 'hidden',
+  gap: 3, pointerEvents: 'none',
+};
+const WEEK_TITLE_ROW: React.CSSProperties = {
+  display: 'flex', alignItems: 'center', gap: 4, overflow: 'hidden',
+};
+const BAR_TITLE_TEXT: React.CSSProperties = {
+  fontSize: 11, fontWeight: 500, color: '#fff',
+  overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis',
+  flex: 1, minWidth: 0,
+};
+const BAR_ASSIGNEE_TEXT: React.CSSProperties = {
+  fontSize: 10, color: 'rgba(255,255,255,0.85)',
+  whiteSpace: 'nowrap', flexShrink: 0,
+  maxWidth: '45%', overflow: 'hidden', textOverflow: 'ellipsis',
+};
+const STATUS_CHIP_ROW: React.CSSProperties = { overflow: 'hidden', lineHeight: '14px' };
+const TAGS_ROW: React.CSSProperties = { display: 'flex', gap: 3, overflow: 'hidden', lineHeight: '14px' };
+const CHIP_TEXT: React.CSSProperties = { overflow: 'hidden', textOverflow: 'ellipsis' };
+
+// Week-layout day-header cell
+const WEEK_CELL_HEADER: React.CSSProperties = {
+  display: 'flex', flexDirection: 'column', alignItems: 'center',
+  justifyContent: 'center', height: WEEK_DAY_HEADER_H, gap: 2,
+  borderBottom: '1px solid var(--border)', pointerEvents: 'none',
+};
+const WEEK_DOW_LABEL: React.CSSProperties = {
+  fontSize: 11, fontWeight: 500, color: 'var(--muted-foreground)',
+  textTransform: 'uppercase', letterSpacing: '0.05em',
+};
+
+// Month-layout day-header cell
+const MONTH_DOW_ROW: React.CSSProperties = {
+  fontSize: 10, color: 'var(--muted-foreground)',
+  textAlign: 'center', paddingTop: 4, pointerEvents: 'none',
+};
+
+const ROW_RESIZE_WRAPPER: React.CSSProperties = {
+  position: 'absolute', bottom: 0, left: 0, right: 0,
+};
+
+// ── Utility ───────────────────────────────────────────────────────────────────
+
+function utcMidnight(iso: string): Date {
+  return new Date(iso.slice(0, 10) + 'T00:00:00Z');
+}
+
+/**
+ * Find the calendar day under the cursor.
+ * Uses elementsFromPoint (plural) so the bar element (pointer-events: auto)
+ * doesn't occlude the day cell's data-date attribute beneath it.
+ */
+function dayAtPoint(x: number, y: number): Date | null {
+  const elements = document.elementsFromPoint(x, y);
+  for (const el of elements) {
+    const iso = (el as HTMLElement).dataset?.date;
+    if (iso) return new Date(iso + 'T00:00:00Z');
+  }
+  return null;
+}
+
+function monthRowH(cap: number): number {
+  return MONTH_DAY_HEADER_H + cap * LANE_SLOT_H + OVERFLOW_H + ROW_RESIZE_H;
+}
+
+// ── DayOverflowPopover ────────────────────────────────────────────────────────
+
+function DayOverflowPopover({ segments, activityById, dayDate, anchorRect, onSelect, onClose }: {
+  segments: CalendarSegment[];
+  activityById: Map<string, ApiActivity>;
+  dayDate: Date;
+  anchorRect: DOMRect;
+  onSelect: (act: ApiActivity) => void;
+  onClose: () => void;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  // Close on any mousedown outside the popover. Capture phase fires before bar
+  // click handlers, preventing a bar click from immediately re-opening the popover
+  // on the same event that dismissed it.
   useEffect(() => {
-    if (!open) return
-    setTitle('')
-    setDescription('')
-    setStartDate(defaultStart)
-    setEndDate(defaultEnd)
-    setIdentity({ color: '#288C9B', icon: '__none__' })
-    setAssignedIds(defaultMemberId ? [defaultMemberId] : [])
-    setTagIds([])
-  }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
+    function onDown(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
+    }
+    document.addEventListener('mousedown', onDown, true);
+    return () => document.removeEventListener('mousedown', onDown, true);
+  }, [onClose]);
+  const label = dayDate.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
+  return (
+    <div ref={ref} style={{ position: 'fixed', top: anchorRect.bottom + 4, left: Math.min(anchorRect.left, window.innerWidth - 280), width: 260, background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 8, boxShadow: '0 4px 20px rgba(0,0,0,0.2)', zIndex: 200, overflow: 'hidden' }}>
+      <div style={POPOVER_HEADER}>{label}</div>
+      <div style={POPOVER_BODY}>
+        {segments.map(seg => {
+          const act = activityById.get(seg.activityId);
+          if (!act) return null;
+          return (
+            <button key={seg.activityId} onClick={() => { onSelect(act); onClose(); }}
+              style={POPOVER_ITEM_BASE}
+              onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+              onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+            >
+              <span style={{ width: 10, height: 10, borderRadius: 3, background: seg.color, flexShrink: 0 }} />
+              <span style={POPOVER_LABEL}>{seg.title}</span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
 
-  const creating = createMutation.isPending
-  const titleTrimmed = title.trim()
+// ── CalendarBar ───────────────────────────────────────────────────────────────
 
-  function toggleAssignee(memberId: string) {
-    setAssignedIds(prev =>
-      prev.includes(memberId) ? prev.filter(id => id !== memberId) : [...prev, memberId],
-    )
-  }
+interface BarProps {
+  // Always a full CalendarSegment — the live-drag overlay constructs displaySeg
+  // as CalendarSegment (populating all required fields) rather than passing a
+  // raw LiveSegment, so we can keep a single concrete type here.
+  seg: CalendarSegment;
+  topPx: number;
+  barH: number;
+  isSelected: boolean;
+  hasQuery: boolean;
+  isWeekLayout: boolean;
+  memberById: Record<string, Member>;
+  onPointerDown: (e: React.PointerEvent, activityId: string, type: DragType) => void;
+  onClick: (activityId: string, e: React.MouseEvent) => void;
+}
 
-  function handleSubmit(e: React.FormEvent) {
-    e.preventDefault()
-    if (!titleTrimmed) return
-    createMutation.mutate(
-      {
-        title: titleTrimmed,
-        startAt: `${startDate}T00:00:00Z`,
-        endAt: `${endDate}T00:00:00Z`,
-        description: description.trim() || null,
-        color: identity.color,
-        icon: identity.icon,
-        assignedMemberIds: assignedIds,
-        tagIds,
-      },
-      { onSuccess: onClose },
-    )
-  }
+function CalendarBar({ seg, topPx, barH, isSelected, hasQuery, isWeekLayout, memberById, onPointerDown, onClick }: BarProps) {
+  const isHighlighted = seg.isMatch || seg.isActiveMatch;
+  const isDimmed = hasQuery && !isHighlighted;
+
+  const assigneeNames = seg.assignedMemberIds
+    .slice(0, 3)
+    .map(id => memberById[id]?.name?.split(' ')[0])
+    .filter((n): n is string => Boolean(n));
+
+  const style: React.CSSProperties = {
+    position: 'absolute',
+    top: topPx + 2,
+    left: `calc(${(seg.startCol / COL_COUNT) * 100}% + 2px)`,
+    width: `calc(${((seg.endCol - seg.startCol + 1) / COL_COUNT) * 100}% - 4px)`,
+    height: barH,
+    background: seg.color,
+    borderRadius: `${seg.continuesLeft ? 0 : 4}px ${seg.continuesRight ? 0 : 4}px ${seg.continuesRight ? 0 : 4}px ${seg.continuesLeft ? 0 : 4}px`,
+    cursor: 'pointer',
+    display: 'flex',
+    alignItems: isWeekLayout ? 'stretch' : 'center',
+    overflow: 'hidden',
+    opacity: isDimmed ? 0.3 : 1,
+    outline: isSelected ? '2px solid var(--primary)' : seg.isActiveMatch ? '2px solid #f59e0b' : seg.isMatch ? '1px solid #f59e0b' : 'none',
+    outlineOffset: 1,
+    boxShadow: seg.isActiveMatch ? '0 0 0 3px rgba(245,158,11,0.3)' : 'none',
+    userSelect: 'none',
+    zIndex: isSelected ? 3 : 1,
+    pointerEvents: 'auto',
+  };
+
+  return (
+    <div style={style}
+      onClick={e => onClick(seg.activityId, e)}
+      onPointerDown={e => {
+        const rect = e.currentTarget.getBoundingClientRect();
+        const x = e.clientX - rect.left;
+        if (x < EDGE_W && !seg.continuesLeft) {
+          onPointerDown(e, seg.activityId, 'resize-start');
+        } else if (x > rect.width - EDGE_W && !seg.continuesRight) {
+          onPointerDown(e, seg.activityId, 'resize-end');
+        } else {
+          onPointerDown(e, seg.activityId, 'move');
+        }
+      }}
+    >
+      {!seg.continuesLeft  && <div style={{ ...EDGE_STYLE, left: 0 }} />}
+      {!seg.continuesRight && <div style={{ ...EDGE_STYLE, right: 0, left: 'auto' }} />}
+
+      {isWeekLayout ? (
+        /* Week view: 3-line layout — title+assignees / status / tags */
+        <div style={WEEK_BAR_CONTENT}>
+          {/* Row 1: title + assignees */}
+          <div style={WEEK_TITLE_ROW}>
+            {seg.continuesLeft && <span style={{ fontSize: 10, color: '#fff', flexShrink: 0 }}>◀</span>}
+            <span style={BAR_TITLE_TEXT}>{seg.title}</span>
+            {assigneeNames.length > 0 && (
+              <span style={BAR_ASSIGNEE_TEXT}>{assigneeNames.join(', ')}</span>
+            )}
+            {seg.continuesRight && <span style={{ fontSize: 10, color: '#fff', flexShrink: 0 }}>▶</span>}
+          </div>
+          {/* Row 2: status chip */}
+          <div style={STATUS_CHIP_ROW}>
+            {seg.statusName ? (
+              <span style={{
+                display: 'inline-flex', alignItems: 'center', gap: 3,
+                padding: '1px 5px', borderRadius: 3, fontSize: 10, fontWeight: 500,
+                background: seg.statusColor ? `color-mix(in srgb, ${seg.statusColor} 25%, rgba(255,255,255,0.15))` : 'rgba(255,255,255,0.15)',
+                color: '#fff',
+                border: `1px solid ${seg.statusColor ? `color-mix(in srgb, ${seg.statusColor} 50%, rgba(255,255,255,0.2))` : 'rgba(255,255,255,0.25)'}`,
+                whiteSpace: 'nowrap', maxWidth: '100%', overflow: 'hidden',
+              }}>
+                <span style={{ width: 6, height: 6, borderRadius: '50%', background: seg.statusColor ?? 'rgba(255,255,255,0.7)', flexShrink: 0 }} />
+                <span style={CHIP_TEXT}>{seg.statusName}</span>
+              </span>
+            ) : null}
+          </div>
+          {/* Row 3: tag chips */}
+          <div style={TAGS_ROW}>
+            {(seg.tags ?? []).slice(0, 3).map((t, i) => (
+              <span key={i} style={{
+                display: 'inline-block', padding: '1px 5px', borderRadius: 3, fontSize: 10,
+                background: t.color ? `color-mix(in srgb, ${t.color} 25%, rgba(255,255,255,0.15))` : 'rgba(255,255,255,0.15)',
+                color: '#fff',
+                border: `1px solid ${t.color ? `color-mix(in srgb, ${t.color} 50%, rgba(255,255,255,0.2))` : 'rgba(255,255,255,0.25)'}`,
+                whiteSpace: 'nowrap', flexShrink: 0,
+              }}>
+                {t.name}
+              </span>
+            ))}
+          </div>
+        </div>
+      ) : (
+        /* Month view: single-line layout */
+        <>
+          {seg.continuesLeft && <span style={{ fontSize: 10, color: '#fff', paddingLeft: 2, pointerEvents: 'none', flexShrink: 0 }}>◀</span>}
+          <span style={{ ...BAR_TITLE_TEXT, padding: '0 4px', pointerEvents: 'none' }}>{seg.title}</span>
+          {assigneeNames.length > 0 && (
+            <span style={{ ...BAR_ASSIGNEE_TEXT, paddingRight: 4, pointerEvents: 'none' }}>
+              {assigneeNames.join(', ')}
+            </span>
+          )}
+          {seg.continuesRight && <span style={{ fontSize: 10, color: '#fff', paddingRight: 2, pointerEvents: 'none', flexShrink: 0 }}>▶</span>}
+        </>
+      )}
+    </div>
+  );
+}
+
+// ── Month row-height resize handle ────────────────────────────────────────────
+
+function RowResizeHandle({ weekStart, currentCap, laneCount, onCapDraft, onCapCommit }: {
+  weekStart: Date;
+  currentCap: number;
+  laneCount: number;
+  onCapDraft: (weekStart: Date, newCap: number) => void;
+  onCapCommit: (weekStart: Date, newCap: number) => void;
+}) {
+  const isDragging = useRef(false);
+  const startY = useRef(0);
+  const startCap = useRef(0);
+  const lastCap = useRef(currentCap);
 
   return (
     <div
-      style={{
-        width: open ? PANEL_WIDTH : 0,
-        flexShrink: 0,
-        borderLeft: open ? '1px solid var(--border)' : 'none',
-        background: 'var(--card)',
-        display: 'flex',
-        flexDirection: 'column',
-        overflow: 'hidden',
-        transition: 'width 0.2s ease',
+      onPointerDown={e => {
+        e.preventDefault(); e.stopPropagation();
+        isDragging.current = true;
+        startY.current = e.clientY;
+        startCap.current = currentCap;
+        lastCap.current = currentCap;
+        e.currentTarget.setPointerCapture(e.pointerId);
       }}
-    >
-    <div style={{ width: PANEL_WIDTH, display: 'flex', flexDirection: 'column', height: '100%' }}>
-      {/* Header */}
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          padding: '0 12px',
-          height: 'var(--topbar-h, 40px)',
-          borderBottom: '1px solid var(--border)',
-          flexShrink: 0,
-        }}
-      >
-        <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)' }}>New activity</span>
-        <button
-          onClick={onClose}
-          style={{
-            width: 24, height: 24, border: 'none', background: 'none', borderRadius: 4,
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            cursor: 'pointer', color: 'var(--muted-foreground)',
-          }}
-          onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-          onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-        >
-          <X size={14} strokeWidth={2} />
-        </button>
+      onPointerMove={e => {
+        if (!isDragging.current) return;
+        const dy = e.clientY - startY.current;
+        const newCap = Math.max(1, Math.min(laneCount || 6, startCap.current + Math.floor(dy / LANE_SLOT_H)));
+        if (newCap !== lastCap.current) { lastCap.current = newCap; onCapDraft(weekStart, newCap); }
+      }}
+      onPointerUp={e => {
+        if (isDragging.current) onCapCommit(weekStart, lastCap.current);
+        isDragging.current = false;
+        e.currentTarget.releasePointerCapture(e.pointerId);
+      }}
+      style={{ height: ROW_RESIZE_H, cursor: 'ns-resize', background: 'transparent', borderTop: '1px solid var(--border)', transition: 'background 0.15s' }}
+      onMouseEnter={e => { (e.currentTarget as HTMLElement).style.background = 'var(--muted)'; }}
+      onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = 'transparent'; }}
+      title="Drag to show more or fewer activities"
+    />
+  );
+}
+
+// ── WeekRowRenderer ───────────────────────────────────────────────────────────
+
+const DOW_LABELS_MON = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+const DOW_LABELS_SUN = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+function WeekRowRenderer({
+  row,
+  isFirst,
+  layout,
+  weekStartDay,
+  activityById,
+  memberById,
+  selectedActivityId,
+  hasQuery,
+  today,
+  /** The dragged bar's live position in this week row (or null if not overlapping). */
+  liveSeg,
+  /** Activity ID being dragged — to suppress the original static segment. */
+  dragActivityId,
+  onBarPointerDown,
+  onBarClick,
+  onCellClick,
+  onCapDraft,
+  onCapCommit,
+}: {
+  row: WeekRow;
+  isFirst: boolean;
+  layout: CalendarLayout;
+  weekStartDay: 0 | 1;
+  activityById: Map<string, ApiActivity>;
+  memberById: Record<string, Member>;
+  selectedActivityId: string | null;
+  hasQuery: boolean;
+  today: Date;
+  liveSeg: LiveSegment | null;
+  dragActivityId: string | null;
+  onBarPointerDown: (e: React.PointerEvent, activityId: string, type: DragType) => void;
+  onBarClick: (activityId: string, e: React.MouseEvent) => void;
+  onCellClick: (date: Date) => void;
+  onCapDraft: (weekStart: Date, newCap: number) => void;
+  onCapCommit: (weekStart: Date, newCap: number) => void;
+}) {
+  const [popover, setPopover] = useState<{ col: number; rect: DOMRect } | null>(null);
+  const overflows = useMemo(() => overflowCountsForWeek(row), [row]);
+  const dowLabels = weekStartDay === 0 ? DOW_LABELS_SUN : DOW_LABELS_MON;
+  const todayISO = today.toISOString().slice(0, 10);
+  const isWeek = layout === 'week';
+  const dayHeaderH  = isWeek ? WEEK_DAY_HEADER_H : MONTH_DAY_HEADER_H;
+  const barH        = isWeek ? WEEK_BAR_H      : BAR_H;
+  const laneSlotH   = isWeek ? WEEK_LANE_SLOT_H : LANE_SLOT_H;
+
+  // Month: cap-filtered. Week: all segments. Either way, suppress the dragged bar's
+  // static position so only the live overlay renders.
+  const staticSegments = (isWeek ? row.segments : row.segments.filter(s => s.lane < row.visibleLaneCap))
+    .filter(s => s.activityId !== dragActivityId);
+
+  // Week: min-height ensures all lanes are visible even if flex container is small.
+  const weekMinH = WEEK_DAY_HEADER_H + row.laneCount * WEEK_LANE_SLOT_H + 40;
+
+  const rowStyle: React.CSSProperties = isWeek
+    ? { position: 'relative', flex: 1, minHeight: weekMinH, borderBottom: '1px solid var(--border)' }
+    : { position: 'relative', height: monthRowH(row.visibleLaneCap), borderBottom: '1px solid var(--border)' };
+
+  return (
+    <div style={rowStyle}>
+      {/* Day cells — borders, date headers, click zones */}
+      <div style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: isWeek ? 0 : ROW_RESIZE_H, display: 'grid', gridTemplateColumns: `repeat(${COL_COUNT}, 1fr)` }}>
+        {row.days.map((day, col) => {
+          const dayISO = day.toISOString().slice(0, 10);
+          const isToday = dayISO === todayISO;
+          const overflowCount = isWeek ? 0 : overflows[col];
+          return (
+            <div key={col} data-date={dayISO}
+              style={{ borderRight: col < COL_COUNT - 1 ? '1px solid var(--border)' : 'none', background: isToday ? 'color-mix(in srgb, var(--primary) 6%, transparent)' : 'transparent', position: 'relative', cursor: 'default' }}
+              onClick={e => { if ((e.target as HTMLElement).closest('[data-bar]')) return; onCellClick(day); }}
+            >
+              {isWeek ? (
+                /* Week view: prominent centered header */
+                <div style={WEEK_CELL_HEADER}>
+                  <span style={WEEK_DOW_LABEL}>{dowLabels[col]}</span>
+                  <span style={{ fontSize: 22, fontWeight: isToday ? 700 : 400, color: isToday ? 'var(--primary)' : 'var(--foreground)', lineHeight: 1 }}>
+                    {day.getUTCDate()}
+                  </span>
+                </div>
+              ) : (
+                <>
+                  {isFirst && (
+                    <div style={MONTH_DOW_ROW}>{dowLabels[col]}</div>
+                  )}
+                  <div style={{ position: 'absolute', top: isFirst ? 13 : 6, right: 6, fontSize: 11, fontWeight: isToday ? 700 : 400, color: isToday ? 'var(--primary)' : 'var(--muted-foreground)', lineHeight: 1, pointerEvents: 'none' }}>
+                    {day.getUTCDate()}
+                  </div>
+                  {overflowCount > 0 && (
+                    <button style={{ position: 'absolute', bottom: OVERFLOW_H / 2 - 8, left: 2, right: 2, height: 16, fontSize: 10, color: 'var(--muted-foreground)', background: 'var(--muted)', border: 'none', borderRadius: 3, cursor: 'pointer', padding: 0 }}
+                      onClick={e => { e.stopPropagation(); const rect = e.currentTarget.getBoundingClientRect(); setPopover(p => p?.col === col ? null : { col, rect }); }}
+                    >
+                      +{overflowCount} more
+                    </button>
+                  )}
+                </>
+              )}
+            </div>
+          );
+        })}
       </div>
 
-      {/* Form */}
-      <form onSubmit={handleSubmit} style={{ flex: 1, overflowY: 'auto', padding: 14, display: 'flex', flexDirection: 'column', gap: 14 }}>
-
-        {/* Identity + Title — mirrors the modal header pattern: badge on left, editable name on right */}
-        <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
-          <div style={{ marginTop: 2, flexShrink: 0 }}>
-            <IdentityWidget
-              identity={identity}
-              name={title || 'New Activity'}
-              shape="square"
-              onChange={setIdentity}
-            />
-          </div>
-          <input
-            autoFocus
-            value={title}
-            onChange={e => setTitle(e.target.value)}
-            placeholder="Activity title…"
-            style={{
-              flex: 1, fontSize: 13, fontWeight: 600,
-              color: 'var(--foreground)', border: '1px solid transparent',
-              borderRadius: 'var(--radius-md)', padding: '5px 6px',
-              outline: 'none', background: 'transparent', fontFamily: 'var(--font-sans)',
-            }}
-            onFocus={e => { e.target.style.borderColor = 'var(--primary)'; e.target.style.background = 'var(--background)' }}
-            onBlur={e => { e.target.style.borderColor = 'transparent'; e.target.style.background = 'transparent' }}
-          />
-        </div>
-
-        {/* Date range */}
-        <div>
-          <div style={LABEL}>Date range</div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            <input
-              type="date"
-              value={startDate}
-              onChange={e => {
-                setStartDate(e.target.value)
-                if (e.target.value > endDate) setEndDate(e.target.value)
-              }}
-              style={{
-                flex: 1, fontSize: 12, color: 'var(--foreground)',
-                border: '1px solid var(--border)', borderRadius: 'var(--radius-md)',
-                padding: '6px 8px', outline: 'none', background: 'var(--background)',
-                fontFamily: 'var(--font-sans)', cursor: 'pointer',
-              }}
-            />
-            <ArrowRight size={11} color="var(--muted-foreground)" strokeWidth={2} style={{ flexShrink: 0 }} />
-            <input
-              type="date"
-              value={endDate}
-              min={startDate}
-              onChange={e => setEndDate(e.target.value)}
-              style={{
-                flex: 1, fontSize: 12, color: 'var(--foreground)',
-                border: '1px solid var(--border)', borderRadius: 'var(--radius-md)',
-                padding: '6px 8px', outline: 'none', background: 'var(--background)',
-                fontFamily: 'var(--font-sans)', cursor: 'pointer',
-              }}
-            />
-          </div>
-        </div>
-
-        {/* Description */}
-        <div>
-          <div style={LABEL}>Description</div>
-          <input
-            value={description}
-            onChange={e => setDescription(e.target.value)}
-            placeholder="Optional description…"
-            style={{
-              width: '100%', boxSizing: 'border-box',
-              fontSize: 12, color: 'var(--foreground)',
-              border: '1px solid var(--border)', borderRadius: 'var(--radius-md)',
-              padding: '6px 8px', outline: 'none', background: 'var(--background)',
-              fontFamily: 'var(--font-sans)',
-            }}
-            onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
-            onBlur={e => (e.target.style.borderColor = 'var(--border)')}
-          />
-        </div>
-
-        {/* Assignees */}
-        {members.length > 0 && (
-          <div>
-            <div style={LABEL}>Assignees</div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-              {members.map(m => {
-                const assigned = assignedIds.includes(m.id)
-                return (
-                  <button
-                    key={m.id}
-                    type="button"
-                    onClick={() => toggleAssignee(m.id)}
-                    style={{
-                      display: 'flex', alignItems: 'center', gap: 8,
-                      padding: '5px 8px',
-                      border: assigned ? `1px solid ${m.color}` : '1px solid var(--border)',
-                      borderRadius: 'var(--radius-md)',
-                      background: assigned ? `${m.color}18` : 'var(--background)',
-                      cursor: 'pointer', textAlign: 'left',
-                      transition: 'background 0.1s, border-color 0.1s',
-                    }}
-                  >
-                    <MemberAvatar member={m} size={18} />
-                    <span style={{ fontSize: 12, color: 'var(--foreground)', flex: 1 }}>{m.name}</span>
-                    {assigned && (
-                      <div style={{ width: 6, height: 6, borderRadius: '50%', background: m.color, flexShrink: 0 }} />
-                    )}
-                  </button>
-                )
-              })}
+      {/* Static activity bars (the dragged bar is suppressed here) */}
+      {staticSegments.map(seg => {
+        const act = activityById.get(seg.activityId);
+        if (!act) return null;
+        return (
+          <div key={seg.activityId} style={OVERLAY_WRAPPER}>
+            <div style={OVERLAY_INNER}>
+              <CalendarBar
+                seg={seg}
+                topPx={dayHeaderH + seg.lane * laneSlotH}
+                barH={barH}
+                isSelected={selectedActivityId === seg.activityId}
+                hasQuery={hasQuery}
+                isWeekLayout={isWeek}
+                memberById={memberById}
+                onPointerDown={onBarPointerDown}
+                onClick={onBarClick}
+              />
             </div>
           </div>
-        )}
+        );
+      })}
 
-        {/* Tags */}
-        <div>
-          <div style={LABEL}>Tags</div>
-          <TagInput
-            teamId={teamId}
-            tags={teamTags}
-            selectedTagIds={tagIds}
-            onChange={setTagIds}
-          />
+      {/* Live drag overlay: the dragged bar at its current position */}
+      {liveSeg && dragActivityId && (() => {
+        const origSeg = row.segments.find(s => s.activityId === dragActivityId) ?? row.segments[0];
+        const displaySeg: CalendarSegment = {
+          activityId: dragActivityId,
+          startCol: liveSeg.startCol,
+          endCol: liveSeg.endCol,
+          lane: origSeg?.lane ?? 0,
+          continuesLeft: liveSeg.continuesLeft,
+          continuesRight: liveSeg.continuesRight,
+          color: liveSeg.color,
+          title: activityById.get(dragActivityId)?.title ?? '',
+          icon: activityById.get(dragActivityId)?.icon ?? undefined,
+          assignedMemberIds: activityById.get(dragActivityId)?.assignedMemberIds ?? [],
+          isMatch: false,
+          isActiveMatch: false,
+        };
+        return (
+          <div style={OVERLAY_WRAPPER}>
+            <div style={OVERLAY_INNER}>
+              <CalendarBar
+                seg={displaySeg}
+                topPx={dayHeaderH + displaySeg.lane * laneSlotH}
+                barH={barH}
+                isSelected={selectedActivityId === dragActivityId}
+                hasQuery={false}
+                isWeekLayout={isWeek}
+                memberById={memberById}
+                onPointerDown={onBarPointerDown}
+                onClick={onBarClick}
+              />
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* Month resize handle */}
+      {!isWeek && (
+        <div style={ROW_RESIZE_WRAPPER}>
+          <RowResizeHandle weekStart={row.weekStart} currentCap={row.visibleLaneCap} laneCount={row.laneCount} onCapDraft={onCapDraft} onCapCommit={onCapCommit} />
         </div>
+      )}
 
-        {/* Spacer pushes submit to bottom */}
-        <div style={{ flex: 1 }} />
-      </form>
+      {/* Overflow popover */}
+      {popover && (
+        <DayOverflowPopover
+          segments={segmentsForDay(row, popover.col)}
+          activityById={activityById}
+          dayDate={row.days[popover.col]}
+          anchorRect={popover.rect}
+          onSelect={act => { onBarClick(act.id, new MouseEvent('click') as unknown as React.MouseEvent); }}
+          onClose={() => setPopover(null)}
+        />
+      )}
+    </div>
+  );
+}
 
-      {/* Footer */}
-      <div style={{ padding: '10px 14px', borderTop: '1px solid var(--border)', flexShrink: 0 }}>
-        <button
-          type="submit"
-          form=""
-          onClick={handleSubmit}
-          disabled={!titleTrimmed || creating}
-          style={{
-            width: '100%', fontSize: 13, fontWeight: 600, padding: 8,
-            borderRadius: 'var(--radius-md)', border: 'none',
-            background: titleTrimmed && !creating ? 'var(--primary)' : 'var(--muted)',
-            color: titleTrimmed && !creating ? 'white' : 'var(--muted-foreground)',
-            cursor: titleTrimmed && !creating ? 'pointer' : 'not-allowed',
-            fontFamily: 'var(--font-sans)',
-            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
-            transition: 'background 0.1s',
-          }}
-        >
-          {creating && <Loader2 size={13} className="animate-spin" />}
-          Create activity
-        </button>
+// ── CalendarGrid ──────────────────────────────────────────────────────────────
+
+export interface CalendarGridProps {
+  weeks: WeekRow[];
+  layout: CalendarLayout;
+  weekStartDay: 0 | 1;
+  activityById: Map<string, ApiActivity>;
+  memberById: Record<string, Member>;
+  selectedActivityId: string | null;
+  hasQuery: boolean;
+  today: Date;
+  onSelectActivity: (act: ApiActivity | null) => void;
+  onCellClick: (date: Date) => void;
+  onBarDragProgress: (activityId: string, newStart: Date, newEnd: Date) => void;
+  onBarDragEnd: () => void;
+  onBarDragCommit: (activityId: string, newStart: Date, newEnd: Date) => void;
+  onCapDraft: (weekStart: Date, newCap: number) => void;
+  onCapCommit: (weekStart: Date, newCap: number) => void;
+}
+
+export default function CalendarGrid({
+  weeks,
+  layout,
+  weekStartDay,
+  activityById,
+  memberById,
+  selectedActivityId,
+  hasQuery,
+  today,
+  onSelectActivity,
+  onCellClick,
+  onBarDragProgress,
+  onBarDragEnd,
+  onBarDragCommit,
+  onCapDraft,
+  onCapCommit,
+}: CalendarGridProps) {
+  const [dragState, setDragState] = useState<DragState | null>(null);
+
+  // Ref for the latest drag position — prevents stale closure in the useEffect.
+  const liveDragRef = useRef<{ start: Date; end: Date } | null>(null);
+
+  // Refs for callbacks so the useEffect never captures stale props.
+  const onBarDragProgressRef = useRef(onBarDragProgress);
+  const onBarDragEndRef      = useRef(onBarDragEnd);
+  const onBarDragCommitRef   = useRef(onBarDragCommit);
+  const onSelectActivityRef  = useRef(onSelectActivity);
+  const activityByIdRef      = useRef(activityById);
+  useEffect(() => { onBarDragProgressRef.current = onBarDragProgress; }, [onBarDragProgress]);
+  useEffect(() => { onBarDragEndRef.current      = onBarDragEnd; },      [onBarDragEnd]);
+  useEffect(() => { onBarDragCommitRef.current   = onBarDragCommit; },   [onBarDragCommit]);
+  useEffect(() => { onSelectActivityRef.current  = onSelectActivity; },  [onSelectActivity]);
+  useEffect(() => { activityByIdRef.current      = activityById; },      [activityById]);
+
+  // ── Drag ────────────────────────────────────────────────────────────────────
+
+  const handleBarPointerDown = useCallback((
+    e: React.PointerEvent,
+    activityId: string,
+    type: DragType,
+  ) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const act = activityById.get(activityId);
+    if (!act) return;
+    const originalStart = utcMidnight(act.startAt);
+    const originalEnd   = utcMidnight(act.endAt);
+
+    // Use elementsFromPoint to find the day cell beneath the bar.
+    const clickedDay = dayAtPoint(e.clientX, e.clientY);
+    const grabOffsetDays = clickedDay ? daysDiff(originalStart, clickedDay) : 0;
+
+    liveDragRef.current = { start: originalStart, end: originalEnd };
+    setDragState({ activityId, type, originalStart, originalEnd, grabOffsetDays, currentStart: originalStart, currentEnd: originalEnd });
+  }, [activityById]);
+
+  useEffect(() => {
+    if (!dragState) return;
+    const ds = dragState;
+    const originalSpan = daysDiff(ds.originalStart, ds.originalEnd);
+
+    function onPointerMove(e: PointerEvent) {
+      const targetDay = dayAtPoint(e.clientX, e.clientY);
+      if (!targetDay) return;
+
+      let newStart: Date;
+      let newEnd: Date;
+
+      if (ds.type === 'move') {
+        newStart = new Date(targetDay);
+        newStart.setUTCDate(targetDay.getUTCDate() - ds.grabOffsetDays);
+        newEnd = new Date(newStart);
+        newEnd.setUTCDate(newStart.getUTCDate() + originalSpan);
+      } else if (ds.type === 'resize-start') {
+        newStart = targetDay < ds.originalEnd ? targetDay : ds.originalEnd;
+        newEnd   = ds.originalEnd;
+      } else {
+        newStart = ds.originalStart;
+        newEnd   = targetDay > ds.originalStart ? targetDay : ds.originalStart;
+      }
+
+      liveDragRef.current = { start: newStart, end: newEnd };
+      setDragState(prev => prev ? { ...prev, currentStart: newStart, currentEnd: newEnd } : null);
+      onBarDragProgressRef.current(ds.activityId, newStart, newEnd);
+    }
+
+    function onPointerUp() {
+      const live = liveDragRef.current;
+      liveDragRef.current = null;
+      if (live) {
+        const changed =
+          live.start.getTime() !== ds.originalStart.getTime() ||
+          live.end.getTime()   !== ds.originalEnd.getTime();
+        if (changed) {
+          onBarDragCommitRef.current(ds.activityId, live.start, live.end);
+        } else {
+          // No movement — treat as a click. The DOM click event is unreliable
+          // here because pointerdown removes the bar from staticSegments and
+          // re-adds it after pointerup, so the click event fires on a
+          // different DOM node. Drive selection from the pointer lifecycle.
+          onSelectActivityRef.current(activityByIdRef.current.get(ds.activityId) ?? null);
+        }
+      }
+      onBarDragEndRef.current();
+      setDragState(null);
+    }
+
+    document.addEventListener('pointermove', onPointerMove);
+    document.addEventListener('pointerup', onPointerUp);
+    return () => {
+      document.removeEventListener('pointermove', onPointerMove);
+      document.removeEventListener('pointerup', onPointerUp);
+    };
+  // Depend only on activityId + type, not the full dragState object — currentStart/currentEnd
+  // update on every pointermove frame, which would thrash listener registration if included.
+  // All callbacks are accessed via refs (onBarDragCommitRef etc.) so closures stay fresh
+  // without being listed as deps.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dragState?.activityId, dragState?.type]);
+
+  // ── Live drag overlay across all weeks ──────────────────────────────────────
+
+  // Compute where the dragged bar currently sits in EVERY week row.
+  // This drives real-time rendering across week boundaries, even in weeks
+  // that didn't originally contain the bar.
+  const liveSegs: (LiveSegment | null)[] = useMemo(() => {
+    if (!dragState) return weeks.map(() => null);
+    const { activityId, currentStart, currentEnd } = dragState;
+
+    // Find the bar's color from any original segment.
+    let color = '#6b7280';
+    for (const row of weeks) {
+      const s = row.segments.find(s => s.activityId === activityId);
+      if (s) { color = s.color; break; }
+    }
+
+    return weeks.map(row => {
+      const weekEnd = row.days[6];
+      if (currentEnd < row.weekStart || currentStart > weekEnd) return null;
+      const rawStart = daysDiff(row.weekStart, currentStart);
+      const rawEnd   = daysDiff(row.weekStart, currentEnd);
+      return {
+        startCol: Math.max(0, rawStart),
+        endCol:   Math.min(6, rawEnd),
+        continuesLeft:  rawStart < 0,
+        continuesRight: rawEnd > 6,
+        color,
+      };
+    });
+  }, [dragState, weeks]);
+
+  const handleBarClick = useCallback((activityId: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    onSelectActivity(activityById.get(activityId) ?? null);
+  }, [activityById, onSelectActivity]);
+
+  // ── Render ──────────────────────────────────────────────────────────────────
+
+  const isWeek = layout === 'week';
+
+  const outerStyle: React.CSSProperties = isWeek
+    ? { flex: 1, display: 'flex', flexDirection: 'column', overflowY: 'auto', background: 'var(--background)' }
+    : { flex: 1, overflow: 'auto', background: 'var(--background)' };
+
+  const innerStyle: React.CSSProperties = isWeek
+    ? { flex: 1, display: 'flex', flexDirection: 'column', minWidth: 420, cursor: dragState ? 'grabbing' : undefined }
+    : { minWidth: 420, cursor: dragState ? 'grabbing' : undefined };
+
+  return (
+    <div style={outerStyle}>
+      <div style={innerStyle}>
+        {weeks.map((row, wi) => (
+          <WeekRowRenderer
+            key={row.weekStart.toISOString()}
+            row={row}
+            isFirst={wi === 0}
+            layout={layout}
+            weekStartDay={weekStartDay}
+            activityById={activityById}
+            memberById={memberById}
+            selectedActivityId={selectedActivityId}
+            hasQuery={hasQuery}
+            today={today}
+            liveSeg={liveSegs[wi]}
+            dragActivityId={dragState?.activityId ?? null}
+            onBarPointerDown={handleBarPointerDown}
+            onBarClick={handleBarClick}
+            onCellClick={onCellClick}
+            onCapDraft={onCapDraft}
+            onCapCommit={onCapCommit}
+          />
+        ))}
       </div>
     </div>
-    </div>
-  )
+  );
 }
 ````
 
@@ -35485,328 +35978,6 @@ func (s *Server) handleDeleteSavedFilter(w http.ResponseWriter, r *http.Request)
 }
 ````
 
-## File: packages/api/internal/models/models.go
-````go
-// Package models holds the domain types shared across the API, db,
-// and event-bus packages. These types are persisted directly via sqlx
-// (db tags) and serialised on the wire (json tags); changing tags is a
-// schema change.
-package models
-
-import "time"
-
-// Activity is a scheduled item of work belonging to a Timeline. ArchivedAt is
-// non-nil when the activity is soft-deleted; list endpoints exclude archived
-// activities by default.
-//
-// AssignedMemberIDs is not stored on the activities table; it is populated by
-// the repository from activity_assignments after every list query.
-//
-// GoogleEventID and CaldavUID are preserved as-is — they identify the
-// corresponding records in external calendar systems (VEVENT identifiers).
-type Activity struct {
-	ID                string     `db:"id"                  json:"id"`
-	TimelineID        string     `db:"timeline_id"         json:"timelineId"`
-	Title             string     `db:"title"               json:"title"`
-	Description       *string    `db:"description"         json:"description,omitempty"`
-	Notes             *string    `db:"notes"               json:"notes,omitempty"`
-	Icon              *string    `db:"icon"                json:"icon,omitempty"`
-	Color             *string    `db:"color"               json:"color,omitempty"`
-	StartAt           time.Time  `db:"start_at"            json:"startAt"`
-	EndAt             time.Time  `db:"end_at"              json:"endAt"`
-	AllDay            bool       `db:"all_day"             json:"allDay"`
-	StatusID          *string    `db:"status_id"           json:"statusId,omitempty"`
-	ParentActivityID  *string    `db:"parent_activity_id"  json:"parentActivityId,omitempty"`
-	PercentComplete   *int       `db:"percent_complete"    json:"percentComplete,omitempty"`
-	Location          *string    `db:"location"            json:"location,omitempty"`
-	URL               *string    `db:"url"                 json:"url,omitempty"`
-	Rrule             *string    `db:"rrule"               json:"rrule,omitempty"`
-	CaldavUID         *string    `db:"caldav_uid"          json:"caldavUid,omitempty"`
-	GoogleEventID     *string    `db:"google_event_id"     json:"googleEventId,omitempty"`
-	CreatedBy         string     `db:"created_by"          json:"createdBy"`
-	CreatedAt         time.Time  `db:"created_at"          json:"createdAt"`
-	UpdatedAt         time.Time  `db:"updated_at"          json:"updatedAt"`
-	ArchivedAt        *time.Time `db:"archived_at"         json:"archivedAt,omitempty"`
-	AssignedMemberIDs []string   `db:"-"                   json:"assignedMemberIds"`
-	TagIDs            []string   `db:"-"                   json:"tagIds"`
-}
-
-// TeamMemberWithUser joins a TeamMember row with its associated User so
-// callers receive display names and emails in a single query. Participants
-// (no user account) have empty email and avatar; their display_name comes
-// from team_members.display_name via COALESCE in the query.
-type TeamMemberWithUser struct {
-	TeamMember
-	Email       string  `db:"email"        json:"email"`
-	DisplayName string  `db:"display_name" json:"displayName"`
-	AvatarURL   *string `db:"avatar_url"   json:"avatarUrl,omitempty"`
-}
-
-// User is an authenticated account. PasswordHash is omitted from JSON
-// to avoid leaking it through any handler that returns a User.
-// ArchivedAt is non-nil when the account is inactivated; login is rejected
-// for archived users. Color and Icon are user-level identity fields (migration
-// 010); they propagate to team_members rows for the user when changed.
-type User struct {
-	ID           string     `db:"id"             json:"id"`
-	Email        string     `db:"email"          json:"email"`
-	PasswordHash string     `db:"password_hash"  json:"-"`
-	DisplayName  string     `db:"display_name"   json:"displayName"`
-	AvatarURL    *string    `db:"avatar_url"     json:"avatarUrl,omitempty"`
-	Color        *string    `db:"color"          json:"color,omitempty"`
-	Icon         *string    `db:"icon"           json:"icon,omitempty"`
-	IsSuperadmin bool       `db:"is_superadmin"  json:"isSuperadmin"`
-	CreatedAt    time.Time  `db:"created_at"     json:"createdAt"`
-	UpdatedAt    time.Time  `db:"updated_at"     json:"updatedAt"`
-	ArchivedAt   *time.Time `db:"archived_at"    json:"archivedAt,omitempty"`
-}
-
-// Team is a workspace that groups users and their scheduled work. Color and
-// Icon are identity fields added in migration 006; both are nullable until
-// explicitly set by an admin. Description, Notes, and ArchivedAt are added in
-// migration 008; ArchivedAt is non-nil when the team is soft-deleted.
-// InviteLinkToken is a stable, reusable token added in migration 009; when
-// non-nil it can be used by anyone to join the team during registration.
-type Team struct {
-	ID              string     `db:"id"                  json:"id"`
-	Name            string     `db:"name"                json:"name"`
-	Slug            string     `db:"slug"                json:"slug"`
-	Description     *string    `db:"description"         json:"description,omitempty"`
-	Notes           *string    `db:"notes"               json:"notes,omitempty"`
-	Color           *string    `db:"color"               json:"color,omitempty"`
-	Icon            *string    `db:"icon"                json:"icon,omitempty"`
-	InviteLinkToken *string    `db:"invite_link_token"   json:"inviteLinkToken,omitempty"`
-	CreatedAt       time.Time  `db:"created_at"          json:"createdAt"`
-	UpdatedAt       time.Time  `db:"updated_at"          json:"updatedAt"`
-	ArchivedAt      *time.Time `db:"archived_at"         json:"archivedAt,omitempty"`
-}
-
-// TeamMember is the join row that puts a person in a Team. UserID is nil
-// for login-less Participants; DisplayName is populated for them instead.
-// Role is the team-level role: "admin" or "member". Color and Icon are
-// identity fields (migration 006); Color stores a color ID (e.g. "teal").
-// ArchivedAt is non-nil when the member is inactivated (migration 009);
-// inactivated members lose access but their data and assignments are preserved.
-type TeamMember struct {
-	ID          string     `db:"id"           json:"id"`
-	TeamID      string     `db:"team_id"      json:"teamId"`
-	UserID      *string    `db:"user_id"      json:"userId,omitempty"`
-	DisplayName *string    `db:"display_name" json:"displayName,omitempty"`
-	Role        string     `db:"role"         json:"role"`
-	Color       *string    `db:"color"        json:"color,omitempty"`
-	Icon        *string    `db:"icon"         json:"icon,omitempty"`
-	JoinedAt    time.Time  `db:"joined_at"    json:"joinedAt"`
-	ArchivedAt  *time.Time `db:"archived_at"  json:"archivedAt,omitempty"`
-}
-
-// MemberStats holds computed activity and timeline counts for a member.
-// All counts are date-relative and scoped to activities the member is assigned to.
-type MemberStats struct {
-	ActiveTimelines    int `json:"activeTimelines"`
-	ArchivedTimelines  int `json:"archivedTimelines"`
-	PastDue            int `json:"pastDue"`
-	Running            int `json:"running"`
-	Upcoming           int `json:"upcoming"`
-	Unscheduled        int `json:"unscheduled"`
-	ArchivedActivities int `json:"archivedActivities"`
-}
-
-// MemberDetail combines a TeamMemberWithUser with computed stats and the
-// member's full list of team memberships. Returned by GET /teams/:id/members/:memberId.
-// UserArchivedAt reflects users.archived_at (account-level deactivation), distinct
-// from ArchivedAt which is team_members.archived_at (membership-level inactivation).
-type MemberDetail struct {
-	TeamMemberWithUser
-	Stats          MemberStats          `json:"stats"`
-	Teams          []TeamMemberWithUser `json:"teams"`
-	Deletable      bool                 `json:"deletable"`
-	UserArchivedAt *time.Time           `json:"userArchivedAt,omitempty"`
-}
-
-// Timeline is a named date range over a team's events. It is not a data
-// container — it is a view over a team's events for a given date window.
-// Access is governed by timeline_access + team role; share_token allows
-// unauthenticated read access via a stable public URL. Color and Icon are
-// identity fields (migration 006). Description and Notes are free-text fields
-// added in migration 013.
-type Timeline struct {
-	ID          string     `db:"id"          json:"id"`
-	TeamID      string     `db:"team_id"     json:"teamId"`
-	Name        string     `db:"name"        json:"name"`
-	Description *string    `db:"description" json:"description,omitempty"`
-	Notes       *string    `db:"notes"       json:"notes,omitempty"`
-	StartDate   string     `db:"start_date"  json:"startDate"`
-	EndDate     string     `db:"end_date"    json:"endDate"`
-	Color       *string    `db:"color"       json:"color,omitempty"`
-	Icon        *string    `db:"icon"        json:"icon,omitempty"`
-	ShareToken  string     `db:"share_token" json:"shareToken"`
-	IcalToken   string     `db:"ical_token"  json:"icalToken"`
-	CreatedBy   string     `db:"created_by"  json:"createdBy"`
-	CreatedAt   time.Time  `db:"created_at"  json:"createdAt"`
-	UpdatedAt   time.Time  `db:"updated_at"  json:"updatedAt"`
-	ArchivedAt  *time.Time `db:"archived_at" json:"archivedAt,omitempty"`
-}
-
-// SavedFilter is a user-owned, team-scoped named filter spec. Definition is
-// an opaque JSON string interpreted by the client; the server treats it as
-// arbitrary text and only validates that it parses as JSON.
-type SavedFilter struct {
-	ID           string    `db:"id"             json:"id"`
-	TeamID       string    `db:"team_id"        json:"teamId"`
-	UserID       string    `db:"user_id"        json:"userId"`
-	Name         string    `db:"name"           json:"name"`
-	Definition   string    `db:"definition"     json:"definition"`
-	IsTeamFilter bool      `db:"is_team_filter" json:"isTeamFilter"`
-	CreatedAt    time.Time `db:"created_at"     json:"createdAt"`
-	UpdatedAt    time.Time `db:"updated_at"     json:"updatedAt"`
-}
-
-// UserPreference stores a single key/value setting for a user, optionally
-// scoped to a timeline. TimelineID is “” for global preferences so the
-// UNIQUE(user_id, timeline_id, key) DB constraint works without NULL handling.
-// Serialised JSON omits TimelineID when empty so callers see null for global prefs.
-type UserPreference struct {
-	ID         string    `db:"id"          json:"id"`
-	UserID     string    `db:"user_id"     json:"userId"`
-	TimelineID string    `db:"timeline_id" json:"timelineId,omitempty"`
-	Key        string    `db:"key"         json:"key"`
-	Value      string    `db:"value"       json:"value"`
-	UpdatedAt  time.Time `db:"updated_at"  json:"updatedAt"`
-}
-
-// APIToken is a long-lived Bearer credential a user issues for programmatic
-// access. token_hash stores SHA-256(rawToken); the raw value is shown to the
-// caller only once on creation. RevokedAt is non-nil when the token has been
-// revoked; revoked tokens are not deleted so listing remains stable.
-type APIToken struct {
-	ID         string     `db:"id"           json:"id"`
-	UserID     string     `db:"user_id"      json:"userId"`
-	Name       string     `db:"name"         json:"name"`
-	TokenHash  string     `db:"token_hash"   json:"-"`
-	Scope      string     `db:"scope"        json:"scope"`
-	LastUsedAt *time.Time `db:"last_used_at" json:"lastUsedAt,omitempty"`
-	CreatedAt  time.Time  `db:"created_at"   json:"createdAt"`
-	RevokedAt  *time.Time `db:"revoked_at"   json:"revokedAt,omitempty"`
-}
-
-// InstanceSetting stores a single instance-level configuration value.
-// SMTP config and defaults live here. The value column is plain text;
-// the mailer package handles decryption of the SMTP password field.
-type InstanceSetting struct {
-	Key       string    `db:"key"        json:"key"`
-	Value     string    `db:"value"      json:"value"`
-	UpdatedAt time.Time `db:"updated_at" json:"updatedAt"`
-}
-
-// PasswordResetToken is a single-use token for the forgot-password flow.
-// TokenHash stores SHA-256 of the raw token; the raw value is sent by email
-// and never stored. UsedAt is set when the token is consumed.
-type PasswordResetToken struct {
-	ID        string     `db:"id"         json:"id"`
-	UserID    string     `db:"user_id"    json:"userId"`
-	TokenHash string     `db:"token_hash" json:"-"`
-	ExpiresAt time.Time  `db:"expires_at" json:"expiresAt"`
-	UsedAt    *time.Time `db:"used_at"    json:"usedAt,omitempty"`
-	CreatedAt time.Time  `db:"created_at" json:"createdAt"`
-}
-
-// AdminUserRow is a flat view of a user for the admin users list. It includes
-// the user's fields plus the count of active team memberships.
-type AdminUserRow struct {
-	User
-	TeamCount int `db:"team_count" json:"teamCount"`
-}
-
-// RevokeUserResult summarizes the outcome of POST /users/:id/revoke.
-// The three counters let the caller show a meaningful summary in the UI.
-type RevokeUserResult struct {
-	AccountDeactivated     bool `json:"accountDeactivated"`
-	MembershipsInactivated int  `json:"membershipsInactivated"`
-	MembershipsRemoved     int  `json:"membershipsRemoved"`
-}
-
-// StatusTemplate is a reusable named preset of statuses owned by a team.
-// When a timeline is created the team's chosen template's items are copied
-// into live Status rows for that timeline.
-type StatusTemplate struct {
-	ID          string    `db:"id"          json:"id"`
-	TeamID      string    `db:"team_id"     json:"teamId"`
-	Name        string    `db:"name"        json:"name"`
-	Description *string   `db:"description" json:"description,omitempty"`
-	Position    int       `db:"position"    json:"position"`
-	CreatedBy   string    `db:"created_by"  json:"createdBy"`
-	CreatedAt   time.Time `db:"created_at"  json:"createdAt"`
-	UpdatedAt   time.Time `db:"updated_at"  json:"updatedAt"`
-	// Items is populated by the repository when listing templates.
-	Items []StatusTemplateItem `db:"-" json:"items"`
-}
-
-// StatusTemplateItem is one status value within a StatusTemplate.
-type StatusTemplateItem struct {
-	ID         string  `db:"id"          json:"id"`
-	TemplateID string  `db:"template_id" json:"templateId"`
-	Name       string  `db:"name"        json:"name"`
-	Color      string  `db:"color"       json:"color"`
-	Icon       *string `db:"icon"        json:"icon,omitempty"`
-	IsClosed   bool    `db:"is_closed"   json:"isClosed"`
-	Position   int     `db:"position"    json:"position"`
-}
-
-// Status is a live status value on a specific timeline. Rows are copied from a
-// StatusTemplate's items when the timeline is created and then evolve independently.
-type Status struct {
-	ID         string    `db:"id"          json:"id"`
-	TimelineID string    `db:"timeline_id" json:"timelineId"`
-	Name       string    `db:"name"        json:"name"`
-	Color      string    `db:"color"       json:"color"`
-	Icon       *string   `db:"icon"        json:"icon,omitempty"`
-	IsClosed   bool      `db:"is_closed"   json:"isClosed"`
-	Position   int       `db:"position"    json:"position"`
-	CreatedAt  time.Time `db:"created_at"  json:"createdAt"`
-	UpdatedAt  time.Time `db:"updated_at"  json:"updatedAt"`
-}
-
-// TimelineAccessEntry is a single timeline access grant joined with the team
-// member's display info. Returned by GET /teams/:id/timelines/:timelineId/access.
-type TimelineAccessEntry struct {
-	TimelineID   string  `db:"timeline_id"    json:"timelineId"`
-	TeamMemberID string  `db:"team_member_id" json:"teamMemberId"`
-	Role         string  `db:"role"           json:"role"`
-	DisplayName  string  `db:"display_name"   json:"displayName"`
-	Email        string  `db:"email"          json:"email"`
-	Color        *string `db:"color"          json:"color,omitempty"`
-	Icon         *string `db:"icon"           json:"icon,omitempty"`
-	UserID       *string `db:"user_id"        json:"userId,omitempty"`
-}
-
-// Tag is a team-scoped label that can be applied to activities. Tags are
-// normalized: a team_id+name pair is unique, enabling rename-all and
-// name-based filter matching across timelines.
-type Tag struct {
-	ID        string    `db:"id"         json:"id"`
-	TeamID    string    `db:"team_id"    json:"teamId"`
-	Name      string    `db:"name"       json:"name"`
-	Color     *string   `db:"color"      json:"color,omitempty"`
-	CreatedBy string    `db:"created_by" json:"createdBy"`
-	CreatedAt time.Time `db:"created_at" json:"createdAt"`
-}
-
-// Invite is a single-use token that grants an email address the right to
-// join a Team. AcceptedAt is non-nil once consumed; expired or accepted
-// invites are rejected by the registration handler.
-type Invite struct {
-	ID         string     `db:"id"          json:"id"`
-	TeamID     string     `db:"team_id"     json:"teamId"`
-	Email      string     `db:"email"       json:"email"`
-	Token      string     `db:"token"       json:"token"`
-	Role       string     `db:"role"        json:"role"`
-	InvitedBy  string     `db:"invited_by"  json:"invitedBy"`
-	ExpiresAt  time.Time  `db:"expires_at"  json:"expiresAt"`
-	AcceptedAt *time.Time `db:"accepted_at" json:"acceptedAt,omitempty"`
-	CreatedAt  time.Time  `db:"created_at"  json:"createdAt"`
-}
-````
-
 ## File: packages/web/src/components/layout/TopBar.tsx
 ````typescript
 /**
@@ -36141,8 +36312,10 @@ func (r *ActivityRepo) GetTags(activityID string) ([]string, error) {
 }
 
 // ListByTimeline returns activities for a specific timeline. When
-// includeArchived is false archived rows are excluded. When from or to are
-// non-nil they bound the query by start_at.
+// includeArchived is false archived rows are excluded. The bounds use overlap
+// semantics: from filters on end_at >= from (so a multi-week activity that
+// starts before the window still appears if it crosses it), and to filters on
+// start_at <= to.
 // AssignedMemberIDs is populated via a second query.
 func (r *ActivityRepo) ListByTimeline(timelineID string, from, to *time.Time, includeArchived bool) ([]*models.Activity, error) {
 	query := `SELECT * FROM activities WHERE timeline_id = ?`
@@ -45553,6 +45726,503 @@ export default function ActivityDetailPanel({
 }
 ````
 
+## File: packages/api/internal/api/activity_handler.go
+````go
+package api
+
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/db"
+	"github.com/I0-1O/draba/packages/api/internal/events"
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// handleCreateActivity handles POST /teams/{id}/timelines/{timelineId}/activities.
+// The authenticated user must be a member of the team.
+func (s *Server) handleCreateActivity(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	timelineID := r.PathValue("timelineId")
+
+	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
+		return
+	}
+
+	claims := claimsFromContext(r.Context())
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create activity")
+		return
+	}
+	if timeline.TeamID != teamID {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+		return
+	}
+
+	var req CreateActivityJSONBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	if req.Title == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "title is required")
+		return
+	}
+	if req.StartAt.IsZero() || req.EndAt.IsZero() {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "startAt and endAt are required")
+		return
+	}
+	if req.EndAt.Before(req.StartAt) {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "endAt must not be before startAt")
+		return
+	}
+
+	allDay := false
+	if req.AllDay != nil {
+		allDay = *req.AllDay
+	}
+
+	now := time.Now()
+	activity := &models.Activity{
+		ID:               newID(),
+		TimelineID:       timelineID,
+		Title:            req.Title,
+		Description:      req.Description,
+		Notes:            req.Notes,
+		Icon:             req.Icon,
+		Color:            req.Color,
+		StartAt:          req.StartAt,
+		EndAt:            req.EndAt,
+		AllDay:           allDay,
+		StatusID:         req.StatusId,
+		ParentActivityID: req.ParentActivityId,
+		PercentComplete:  req.PercentComplete,
+		Location:         req.Location,
+		URL:              req.Url,
+		Rrule:            req.Rrule,
+		CreatedBy:        claims.UserID,
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}
+	if err := s.activities.Create(activity); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create activity")
+		return
+	}
+
+	if req.AssignedMemberIds != nil {
+		if err := s.activities.SetAssignments(activity.ID, *req.AssignedMemberIds); err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity assignments")
+			return
+		}
+		activity.AssignedMemberIDs = *req.AssignedMemberIds
+	} else {
+		activity.AssignedMemberIDs = []string{}
+	}
+
+	if req.TagIds != nil {
+		if err := s.tags.ValidateTeamOwnership(timeline.TeamID, *req.TagIds); err != nil {
+			if errors.Is(err, db.ErrTagOwnership) {
+				writeError(w, http.StatusBadRequest, "INVALID_TAGS", "one or more tag IDs do not belong to this team")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to validate tags")
+			return
+		}
+		if err := s.activities.SetTags(activity.ID, *req.TagIds); err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity tags")
+			return
+		}
+		activity.TagIDs = *req.TagIds
+	} else {
+		activity.TagIDs = []string{}
+	}
+
+	s.bus.Publish(events.Message{Type: events.ActivityCreated, TeamID: timeline.TeamID, Payload: activity})
+	writeJSON(w, http.StatusCreated, activity)
+}
+
+// handleListActivities handles GET /teams/{id}/timelines/{timelineId}/activities.
+// Optional query params ?from=<RFC3339> and ?to=<RFC3339> bound the result by start_at.
+func (s *Server) handleListActivities(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	timelineID := r.PathValue("timelineId")
+
+	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
+		return
+	}
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list activities")
+		return
+	}
+	if timeline.TeamID != teamID {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+		return
+	}
+
+	var from, to *time.Time
+	if v := r.URL.Query().Get("from"); v != "" {
+		t, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "from must be RFC3339 (e.g. 2006-01-02T15:04:05Z)")
+			return
+		}
+		from = &t
+	}
+	if v := r.URL.Query().Get("to"); v != "" {
+		t, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "to must be RFC3339 (e.g. 2006-01-02T15:04:05Z)")
+			return
+		}
+		to = &t
+	}
+
+	includeArchived := r.URL.Query().Get("archived") == "true"
+	acts, err := s.activities.ListByTimeline(timelineID, from, to, includeArchived)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list activities")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, acts)
+}
+
+// handleUpdateActivity handles PATCH /activities/{id}. Only fields present in
+// the request body are applied; the caller must be a member of the activity's team.
+func (s *Server) handleUpdateActivity(w http.ResponseWriter, r *http.Request) {
+	activityID := r.PathValue("id")
+
+	activity, err := s.activities.GetByID(activityID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "activity not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update activity")
+		return
+	}
+
+	timeline, err := s.timelines.GetByID(activity.TimelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update activity")
+		return
+	}
+
+	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
+		return
+	}
+
+	// Decode into a map so we can detect which fields the caller provided.
+	var patch map[string]json.RawMessage
+	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	if v, ok := patch["title"]; ok {
+		if err := json.Unmarshal(v, &activity.Title); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid title")
+			return
+		}
+	}
+	if v, ok := patch["description"]; ok {
+		if err := json.Unmarshal(v, &activity.Description); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid description")
+			return
+		}
+	}
+	if v, ok := patch["notes"]; ok {
+		if err := json.Unmarshal(v, &activity.Notes); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid notes")
+			return
+		}
+	}
+	if v, ok := patch["icon"]; ok {
+		if err := json.Unmarshal(v, &activity.Icon); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid icon")
+			return
+		}
+	}
+	if v, ok := patch["color"]; ok {
+		if err := json.Unmarshal(v, &activity.Color); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid color")
+			return
+		}
+	}
+	if v, ok := patch["startAt"]; ok {
+		if err := json.Unmarshal(v, &activity.StartAt); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid startAt")
+			return
+		}
+	}
+	if v, ok := patch["endAt"]; ok {
+		if err := json.Unmarshal(v, &activity.EndAt); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid endAt")
+			return
+		}
+	}
+	if v, ok := patch["allDay"]; ok {
+		if err := json.Unmarshal(v, &activity.AllDay); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid allDay")
+			return
+		}
+	}
+	if v, ok := patch["statusId"]; ok {
+		if err := json.Unmarshal(v, &activity.StatusID); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid statusId")
+			return
+		}
+	}
+	if v, ok := patch["parentActivityId"]; ok {
+		if err := json.Unmarshal(v, &activity.ParentActivityID); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid parentActivityId")
+			return
+		}
+	}
+	if v, ok := patch["percentComplete"]; ok {
+		if err := json.Unmarshal(v, &activity.PercentComplete); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid percentComplete")
+			return
+		}
+	}
+	if v, ok := patch["location"]; ok {
+		if err := json.Unmarshal(v, &activity.Location); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid location")
+			return
+		}
+	}
+	if v, ok := patch["url"]; ok {
+		if err := json.Unmarshal(v, &activity.URL); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid url")
+			return
+		}
+	}
+	if v, ok := patch["rrule"]; ok {
+		if err := json.Unmarshal(v, &activity.Rrule); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid rrule")
+			return
+		}
+	}
+
+	var newAssignees *[]string
+	if v, ok := patch["assignedMemberIds"]; ok {
+		var ids []string
+		if err := json.Unmarshal(v, &ids); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid assignedMemberIds")
+			return
+		}
+		newAssignees = &ids
+	}
+
+	var newTagIDs *[]string
+	if v, ok := patch["tagIds"]; ok {
+		var ids []string
+		if err := json.Unmarshal(v, &ids); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid tagIds")
+			return
+		}
+		newTagIDs = &ids
+	}
+
+	if activity.Title == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "title must not be empty")
+		return
+	}
+	if activity.EndAt.Before(activity.StartAt) {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "endAt must not be before startAt")
+		return
+	}
+
+	activity.UpdatedAt = time.Now()
+	if err := s.activities.Update(activity); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update activity")
+		return
+	}
+
+	if newAssignees != nil {
+		if err := s.activities.SetAssignments(activity.ID, *newAssignees); err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity assignments")
+			return
+		}
+		activity.AssignedMemberIDs = *newAssignees
+	} else {
+		// Populate current assignments so the response always includes them.
+		existing, err := s.activities.GetAssignments(activity.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get activity assignments")
+			return
+		}
+		activity.AssignedMemberIDs = existing
+	}
+
+	if newTagIDs != nil {
+		if err := s.tags.ValidateTeamOwnership(timeline.TeamID, *newTagIDs); err != nil {
+			if errors.Is(err, db.ErrTagOwnership) {
+				writeError(w, http.StatusBadRequest, "INVALID_TAGS", "one or more tag IDs do not belong to this team")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to validate tags")
+			return
+		}
+		if err := s.activities.SetTags(activity.ID, *newTagIDs); err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity tags")
+			return
+		}
+		activity.TagIDs = *newTagIDs
+	} else {
+		existing, err := s.activities.GetTags(activity.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get activity tags")
+			return
+		}
+		activity.TagIDs = existing
+	}
+
+	s.bus.Publish(events.Message{Type: events.ActivityUpdated, TeamID: timeline.TeamID, Payload: activity})
+	writeJSON(w, http.StatusOK, activity)
+}
+
+// handleArchiveActivity handles POST /activities/{id}/archive. Any team member
+// may archive an activity; the row is soft-deleted (archived_at set) so it is
+// hidden from list responses by default but can be restored.
+func (s *Server) handleArchiveActivity(w http.ResponseWriter, r *http.Request) {
+	s.setActivityArchive(w, r, true)
+}
+
+// handleUnarchiveActivity handles POST /activities/{id}/unarchive.
+func (s *Server) handleUnarchiveActivity(w http.ResponseWriter, r *http.Request) {
+	s.setActivityArchive(w, r, false)
+}
+
+// setActivityArchive is the shared implementation for the archive/unarchive
+// endpoints. When archive is true, archived_at is set to now; otherwise it
+// is cleared.
+func (s *Server) setActivityArchive(w http.ResponseWriter, r *http.Request, archive bool) {
+	activityID := r.PathValue("id")
+
+	activity, err := s.activities.GetByID(activityID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "activity not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
+		return
+	}
+
+	timeline, err := s.timelines.GetByID(activity.TimelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
+		return
+	}
+
+	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
+		return
+	}
+
+	var at *time.Time
+	if archive {
+		now := time.Now().UTC()
+		at = &now
+		if err := s.activities.ClearParentRefs(activityID); err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
+			return
+		}
+	}
+	if err := s.activities.SetArchived(activityID, at); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
+		return
+	}
+	activity.ArchivedAt = at
+	activity.UpdatedAt = time.Now().UTC()
+
+	// Re-populate assignments and tags for a stable response shape.
+	if ids, err := s.activities.GetAssignments(activity.ID); err == nil {
+		activity.AssignedMemberIDs = ids
+	} else {
+		activity.AssignedMemberIDs = []string{}
+	}
+	if ids, err := s.activities.GetTags(activity.ID); err == nil {
+		activity.TagIDs = ids
+	} else {
+		activity.TagIDs = []string{}
+	}
+
+	s.bus.Publish(events.Message{Type: events.ActivityUpdated, TeamID: timeline.TeamID, Payload: activity})
+	writeJSON(w, http.StatusOK, activity)
+}
+
+// handleDeleteActivity handles DELETE /activities/{id}. Any member of the
+// activity's team may delete it.
+func (s *Server) handleDeleteActivity(w http.ResponseWriter, r *http.Request) {
+	activityID := r.PathValue("id")
+
+	activity, err := s.activities.GetByID(activityID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "activity not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
+		return
+	}
+
+	timeline, err := s.timelines.GetByID(activity.TimelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
+		return
+	}
+
+	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
+		return
+	}
+
+	if err := s.activities.ClearParentRefs(activityID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
+		return
+	}
+	if err := s.activities.Delete(activityID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
+		return
+	}
+
+	s.bus.Publish(events.Message{
+		Type:    events.ActivityDeleted,
+		TeamID:  timeline.TeamID,
+		Payload: map[string]string{"id": activityID},
+	})
+	w.WriteHeader(http.StatusNoContent)
+}
+````
+
 ## File: packages/web/src/components/layout/Sidebar.tsx
 ````typescript
 import { useState, useRef, useEffect } from 'react';
@@ -46717,503 +47387,6 @@ export default function Sidebar({ collapsed, onToggle, onNewActivity, onBulkImpo
       )}
     </div>
   );
-}
-````
-
-## File: packages/api/internal/api/activity_handler.go
-````go
-package api
-
-import (
-	"database/sql"
-	"encoding/json"
-	"errors"
-	"net/http"
-	"time"
-
-	"github.com/I0-1O/draba/packages/api/internal/db"
-	"github.com/I0-1O/draba/packages/api/internal/events"
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// handleCreateActivity handles POST /teams/{id}/timelines/{timelineId}/activities.
-// The authenticated user must be a member of the team.
-func (s *Server) handleCreateActivity(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-	timelineID := r.PathValue("timelineId")
-
-	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
-		return
-	}
-
-	claims := claimsFromContext(r.Context())
-
-	timeline, err := s.timelines.GetByID(timelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create activity")
-		return
-	}
-	if timeline.TeamID != teamID {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-		return
-	}
-
-	var req CreateActivityJSONBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	if req.Title == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "title is required")
-		return
-	}
-	if req.StartAt.IsZero() || req.EndAt.IsZero() {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "startAt and endAt are required")
-		return
-	}
-	if req.EndAt.Before(req.StartAt) {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "endAt must not be before startAt")
-		return
-	}
-
-	allDay := false
-	if req.AllDay != nil {
-		allDay = *req.AllDay
-	}
-
-	now := time.Now()
-	activity := &models.Activity{
-		ID:               newID(),
-		TimelineID:       timelineID,
-		Title:            req.Title,
-		Description:      req.Description,
-		Notes:            req.Notes,
-		Icon:             req.Icon,
-		Color:            req.Color,
-		StartAt:          req.StartAt,
-		EndAt:            req.EndAt,
-		AllDay:           allDay,
-		StatusID:         req.StatusId,
-		ParentActivityID: req.ParentActivityId,
-		PercentComplete:  req.PercentComplete,
-		Location:         req.Location,
-		URL:              req.Url,
-		Rrule:            req.Rrule,
-		CreatedBy:        claims.UserID,
-		CreatedAt:        now,
-		UpdatedAt:        now,
-	}
-	if err := s.activities.Create(activity); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create activity")
-		return
-	}
-
-	if req.AssignedMemberIds != nil {
-		if err := s.activities.SetAssignments(activity.ID, *req.AssignedMemberIds); err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity assignments")
-			return
-		}
-		activity.AssignedMemberIDs = *req.AssignedMemberIds
-	} else {
-		activity.AssignedMemberIDs = []string{}
-	}
-
-	if req.TagIds != nil {
-		if err := s.tags.ValidateTeamOwnership(timeline.TeamID, *req.TagIds); err != nil {
-			if errors.Is(err, db.ErrTagOwnership) {
-				writeError(w, http.StatusBadRequest, "INVALID_TAGS", "one or more tag IDs do not belong to this team")
-				return
-			}
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to validate tags")
-			return
-		}
-		if err := s.activities.SetTags(activity.ID, *req.TagIds); err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity tags")
-			return
-		}
-		activity.TagIDs = *req.TagIds
-	} else {
-		activity.TagIDs = []string{}
-	}
-
-	s.bus.Publish(events.Message{Type: events.ActivityCreated, TeamID: timeline.TeamID, Payload: activity})
-	writeJSON(w, http.StatusCreated, activity)
-}
-
-// handleListActivities handles GET /teams/{id}/timelines/{timelineId}/activities.
-// Optional query params ?from=<RFC3339> and ?to=<RFC3339> bound the result by start_at.
-func (s *Server) handleListActivities(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-	timelineID := r.PathValue("timelineId")
-
-	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
-		return
-	}
-
-	timeline, err := s.timelines.GetByID(timelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list activities")
-		return
-	}
-	if timeline.TeamID != teamID {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-		return
-	}
-
-	var from, to *time.Time
-	if v := r.URL.Query().Get("from"); v != "" {
-		t, err := time.Parse(time.RFC3339, v)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "from must be RFC3339 (e.g. 2006-01-02T15:04:05Z)")
-			return
-		}
-		from = &t
-	}
-	if v := r.URL.Query().Get("to"); v != "" {
-		t, err := time.Parse(time.RFC3339, v)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "to must be RFC3339 (e.g. 2006-01-02T15:04:05Z)")
-			return
-		}
-		to = &t
-	}
-
-	includeArchived := r.URL.Query().Get("archived") == "true"
-	acts, err := s.activities.ListByTimeline(timelineID, from, to, includeArchived)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list activities")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, acts)
-}
-
-// handleUpdateActivity handles PATCH /activities/{id}. Only fields present in
-// the request body are applied; the caller must be a member of the activity's team.
-func (s *Server) handleUpdateActivity(w http.ResponseWriter, r *http.Request) {
-	activityID := r.PathValue("id")
-
-	activity, err := s.activities.GetByID(activityID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "activity not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update activity")
-		return
-	}
-
-	timeline, err := s.timelines.GetByID(activity.TimelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update activity")
-		return
-	}
-
-	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
-		return
-	}
-
-	// Decode into a map so we can detect which fields the caller provided.
-	var patch map[string]json.RawMessage
-	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	if v, ok := patch["title"]; ok {
-		if err := json.Unmarshal(v, &activity.Title); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid title")
-			return
-		}
-	}
-	if v, ok := patch["description"]; ok {
-		if err := json.Unmarshal(v, &activity.Description); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid description")
-			return
-		}
-	}
-	if v, ok := patch["notes"]; ok {
-		if err := json.Unmarshal(v, &activity.Notes); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid notes")
-			return
-		}
-	}
-	if v, ok := patch["icon"]; ok {
-		if err := json.Unmarshal(v, &activity.Icon); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid icon")
-			return
-		}
-	}
-	if v, ok := patch["color"]; ok {
-		if err := json.Unmarshal(v, &activity.Color); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid color")
-			return
-		}
-	}
-	if v, ok := patch["startAt"]; ok {
-		if err := json.Unmarshal(v, &activity.StartAt); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid startAt")
-			return
-		}
-	}
-	if v, ok := patch["endAt"]; ok {
-		if err := json.Unmarshal(v, &activity.EndAt); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid endAt")
-			return
-		}
-	}
-	if v, ok := patch["allDay"]; ok {
-		if err := json.Unmarshal(v, &activity.AllDay); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid allDay")
-			return
-		}
-	}
-	if v, ok := patch["statusId"]; ok {
-		if err := json.Unmarshal(v, &activity.StatusID); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid statusId")
-			return
-		}
-	}
-	if v, ok := patch["parentActivityId"]; ok {
-		if err := json.Unmarshal(v, &activity.ParentActivityID); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid parentActivityId")
-			return
-		}
-	}
-	if v, ok := patch["percentComplete"]; ok {
-		if err := json.Unmarshal(v, &activity.PercentComplete); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid percentComplete")
-			return
-		}
-	}
-	if v, ok := patch["location"]; ok {
-		if err := json.Unmarshal(v, &activity.Location); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid location")
-			return
-		}
-	}
-	if v, ok := patch["url"]; ok {
-		if err := json.Unmarshal(v, &activity.URL); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid url")
-			return
-		}
-	}
-	if v, ok := patch["rrule"]; ok {
-		if err := json.Unmarshal(v, &activity.Rrule); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid rrule")
-			return
-		}
-	}
-
-	var newAssignees *[]string
-	if v, ok := patch["assignedMemberIds"]; ok {
-		var ids []string
-		if err := json.Unmarshal(v, &ids); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid assignedMemberIds")
-			return
-		}
-		newAssignees = &ids
-	}
-
-	var newTagIDs *[]string
-	if v, ok := patch["tagIds"]; ok {
-		var ids []string
-		if err := json.Unmarshal(v, &ids); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid tagIds")
-			return
-		}
-		newTagIDs = &ids
-	}
-
-	if activity.Title == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "title must not be empty")
-		return
-	}
-	if activity.EndAt.Before(activity.StartAt) {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "endAt must not be before startAt")
-		return
-	}
-
-	activity.UpdatedAt = time.Now()
-	if err := s.activities.Update(activity); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update activity")
-		return
-	}
-
-	if newAssignees != nil {
-		if err := s.activities.SetAssignments(activity.ID, *newAssignees); err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity assignments")
-			return
-		}
-		activity.AssignedMemberIDs = *newAssignees
-	} else {
-		// Populate current assignments so the response always includes them.
-		existing, err := s.activities.GetAssignments(activity.ID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get activity assignments")
-			return
-		}
-		activity.AssignedMemberIDs = existing
-	}
-
-	if newTagIDs != nil {
-		if err := s.tags.ValidateTeamOwnership(timeline.TeamID, *newTagIDs); err != nil {
-			if errors.Is(err, db.ErrTagOwnership) {
-				writeError(w, http.StatusBadRequest, "INVALID_TAGS", "one or more tag IDs do not belong to this team")
-				return
-			}
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to validate tags")
-			return
-		}
-		if err := s.activities.SetTags(activity.ID, *newTagIDs); err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity tags")
-			return
-		}
-		activity.TagIDs = *newTagIDs
-	} else {
-		existing, err := s.activities.GetTags(activity.ID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get activity tags")
-			return
-		}
-		activity.TagIDs = existing
-	}
-
-	s.bus.Publish(events.Message{Type: events.ActivityUpdated, TeamID: timeline.TeamID, Payload: activity})
-	writeJSON(w, http.StatusOK, activity)
-}
-
-// handleArchiveActivity handles POST /activities/{id}/archive. Any team member
-// may archive an activity; the row is soft-deleted (archived_at set) so it is
-// hidden from list responses by default but can be restored.
-func (s *Server) handleArchiveActivity(w http.ResponseWriter, r *http.Request) {
-	s.setActivityArchive(w, r, true)
-}
-
-// handleUnarchiveActivity handles POST /activities/{id}/unarchive.
-func (s *Server) handleUnarchiveActivity(w http.ResponseWriter, r *http.Request) {
-	s.setActivityArchive(w, r, false)
-}
-
-// setActivityArchive is the shared implementation for the archive/unarchive
-// endpoints. When archive is true, archived_at is set to now; otherwise it
-// is cleared.
-func (s *Server) setActivityArchive(w http.ResponseWriter, r *http.Request, archive bool) {
-	activityID := r.PathValue("id")
-
-	activity, err := s.activities.GetByID(activityID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "activity not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
-		return
-	}
-
-	timeline, err := s.timelines.GetByID(activity.TimelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
-		return
-	}
-
-	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
-		return
-	}
-
-	var at *time.Time
-	if archive {
-		now := time.Now().UTC()
-		at = &now
-		if err := s.activities.ClearParentRefs(activityID); err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
-			return
-		}
-	}
-	if err := s.activities.SetArchived(activityID, at); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
-		return
-	}
-	activity.ArchivedAt = at
-	activity.UpdatedAt = time.Now().UTC()
-
-	// Re-populate assignments and tags for a stable response shape.
-	if ids, err := s.activities.GetAssignments(activity.ID); err == nil {
-		activity.AssignedMemberIDs = ids
-	} else {
-		activity.AssignedMemberIDs = []string{}
-	}
-	if ids, err := s.activities.GetTags(activity.ID); err == nil {
-		activity.TagIDs = ids
-	} else {
-		activity.TagIDs = []string{}
-	}
-
-	s.bus.Publish(events.Message{Type: events.ActivityUpdated, TeamID: timeline.TeamID, Payload: activity})
-	writeJSON(w, http.StatusOK, activity)
-}
-
-// handleDeleteActivity handles DELETE /activities/{id}. Any member of the
-// activity's team may delete it.
-func (s *Server) handleDeleteActivity(w http.ResponseWriter, r *http.Request) {
-	activityID := r.PathValue("id")
-
-	activity, err := s.activities.GetByID(activityID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "activity not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
-		return
-	}
-
-	timeline, err := s.timelines.GetByID(activity.TimelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
-		return
-	}
-
-	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
-		return
-	}
-
-	if err := s.activities.ClearParentRefs(activityID); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
-		return
-	}
-	if err := s.activities.Delete(activityID); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
-		return
-	}
-
-	s.bus.Publish(events.Message{
-		Type:    events.ActivityDeleted,
-		TeamID:  timeline.TeamID,
-		Payload: map[string]string{"id": activityID},
-	})
-	w.WriteHeader(http.StatusNoContent)
 }
 ````
 
@@ -49552,6 +49725,636 @@ export default function GanttGrid({
           ))}
         </div>
       )}
+    </div>
+  );
+}
+````
+
+## File: packages/web/src/components/gantt/GanttView.tsx
+````typescript
+/**
+ * GanttView — data container for the Gantt grid.
+ *
+ * Fetches events and members, applies grouping and sorting, builds the
+ * GanttRow list, and passes everything to GanttGrid. The component owns
+ * no layout state — granularity, groupBy, and sortBy come from DashboardPage.
+ *
+ * Also owns the find-match computation: it reads the debounced query from
+ * FindContext, matches against the fetched API events, and registers the
+ * ordered match list back into FindContext so GanttGrid can apply visual
+ * treatment and auto-scroll.
+ */
+
+import { useMemo, useRef, useState, useLayoutEffect, useEffect, useCallback } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
+import GanttGrid, { type GanttActivity, type GanttRow, type FindState } from './GanttGrid';
+import { useTimelineActivities, useTeamMembers, useUpdateActivity } from '@/hooks/useTeamActivities';
+import type { components } from '@draba/shared';
+import { type Member, ACTIVITY_COLORS, MEMBER_COLORS } from '@/types';
+import { resolveColorHex } from '@/components/identity/identity-constants';
+import type { GroupBy, SortBy, TimeGranularity, ColorBy } from './GanttToolbar';
+import {
+  generateColumns,
+  positionInColumns,
+  todayColumnPosition,
+  autoFitGranularity,
+  type ColumnDef,
+} from './granularity';
+import { matchEvents } from '@/lib/findMatcher';
+import { memberComboKey, orderedComboIds, memberComboLabel, comboSortComparator, UNASSIGNED_KEY, SEP } from '@/lib/memberGroups';
+import { useFind } from '@/contexts/FindContext';
+import { useFilter } from '@/contexts/FilterContext';
+import { usePreferenceMap } from '@/hooks/usePreferences';
+import { applyActiveFilter } from '@/lib/presetFilters';
+
+type ApiActivity = components['schemas']['Activity'];
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
+type Status = components['schemas']['Status'];
+type SavedFilter = components['schemas']['SavedFilter'];
+type Tag = components['schemas']['Tag'];
+
+interface Props {
+  teamId: string;
+  /** Active timeline ID — activities are fetched scoped to this timeline. */
+  timelineId: string;
+  /** ISO date "YYYY-MM-DD" — defaults to 14 days before today. */
+  startDate?: string;
+  /** ISO date "YYYY-MM-DD" — defaults to 75 days after today. */
+  endDate?: string;
+  groupBy: GroupBy;
+  sortBy: SortBy;
+  granularity: TimeGranularity | 'auto';
+  colorBy: ColorBy;
+  /**
+   * Timeline statuses — used to derive closedStatusIds and resolve status names
+   * in the filter engine. Replaces the old closedStatusIds prop.
+   */
+  timelineStatuses?: Status[];
+  /** Saved filters for the active team — evaluated by the filter engine. */
+  savedFilters?: SavedFilter[];
+  /** Team tags — used to resolve tag names in the filter engine. */
+  tags?: Tag[];
+  selectedActivityId?: string | null;
+  onSelectActivity?: (id: string | null) => void;
+  /** Called when the user drags on an empty lane to create an activity. */
+  onLaneDrag?: (startDate: Date, endDate: Date, memberId: string | null) => void;
+  /** Called during a bar drag with live snapped dates — for sidebar preview. */
+  onBarDragProgress?: (activityId: string, newStart: Date, newEnd: Date) => void;
+  /** Called when a bar drag completes (before the PATCH fires). */
+  onBarDragEnd?: () => void;
+  /** Called once members are loaded, so the parent can access them for panels. */
+  onMembersLoaded?: (members: Member[]) => void;
+  /** Called when an activity is selected — passes the full API activity object. */
+  onSelectApiActivity?: (activity: ApiActivity | null) => void;
+  /** Label column width in px — passed through to GanttGrid for controlled persistence. */
+  labelColW?: number;
+  /** Called when the user drags the label column resize handle. */
+  onLabelColWChange?: (w: number) => void;
+}
+
+
+// ── Date helpers ────────────────────────────────────────────────────────────
+
+function toDateOnly(datetime: string): string {
+  return datetime.slice(0, 10);
+}
+
+function todayMidnight(): Date {
+  const d = new Date();
+  d.setUTCHours(0, 0, 0, 0); // UTC midnight so it aligns with UTC-stored activity dates
+  return d;
+}
+
+function initialsFrom(name: string): string {
+  return name
+    .split(/\s+/)
+    .map(w => w[0] ?? '')
+    .slice(0, 2)
+    .join('')
+    .toUpperCase();
+}
+
+// ── Type mapping ─────────────────────────────────────────────────────────────
+
+function toMember(m: TeamMemberWithUser, index: number): Member {
+  const name = m.displayName || m.email || 'Unknown';
+  const fallbackHex = MEMBER_COLORS[index % MEMBER_COLORS.length];
+  return {
+    id: m.id,
+    name,
+    initials: initialsFrom(name),
+    color: resolveColorHex(m.color) || fallbackHex,
+  };
+}
+
+/** Intermediate type that carries original API fields alongside view-state. */
+export interface RichActivity extends GanttActivity {
+  startAtMs: number;
+  endAtMs: number;
+  parentActivityId: string | null;
+  primaryMemberId: string | null;
+  assignedMemberIds: string[];
+  statusId: string | null;
+}
+
+function toRichActivity(
+  ev: ApiActivity,
+  index: number,
+  memberById: Record<string, Member>,
+  viewStart: Date,
+  viewEnd: Date,
+  columns: ColumnDef[],
+  colorBy: ColorBy,
+  statusColorById: Map<string, string>,
+): RichActivity | null {
+  const evStart = new Date(toDateOnly(ev.startAt));
+  const evEnd = new Date(toDateOnly(ev.endAt));
+
+  if (evEnd < viewStart || evStart > viewEnd) return null;
+
+  const clampedStart = evStart < viewStart ? viewStart : evStart;
+  const clampedEnd = evEnd > viewEnd ? viewEnd : evEnd;
+
+  const { startCol, span } = positionInColumns(clampedStart, clampedEnd, columns);
+  const assignedIds = ev.assignedMemberIds ?? [];
+  const members = assignedIds.map(id => memberById[id]).filter((m): m is Member => Boolean(m));
+
+  const color =
+    colorBy === 'member' ? (members[0]?.color ?? ev.color ?? ACTIVITY_COLORS[index % ACTIVITY_COLORS.length]) :
+    colorBy === 'status' ? (statusColorById.get((ev as ApiActivity & { statusId?: string | null }).statusId ?? '') ?? '#6b7280') :
+    /* activity */ (ev.color ?? ACTIVITY_COLORS[index % ACTIVITY_COLORS.length]);
+
+  return {
+    id: ev.id,
+    title: ev.title,
+    startCol,
+    span,
+    color,
+    icon: ev.icon ?? undefined,
+    members,
+    isChild: Boolean(ev.parentActivityId),
+    startAtMs: new Date(ev.startAt).getTime(),
+    endAtMs: new Date(ev.endAt).getTime(),
+    parentActivityId: ev.parentActivityId ?? null,
+    primaryMemberId: members[0]?.id ?? null,
+    assignedMemberIds: assignedIds,
+    statusId: (ev as ApiActivity & { statusId?: string | null }).statusId ?? null,
+  };
+}
+
+// ── Sorting ──────────────────────────────────────────────────────────────────
+
+function sortActivities(activities: RichActivity[], sortBy: SortBy): RichActivity[] {
+  return [...activities].sort((a, b) => {
+    if (sortBy === 'title') return a.title.localeCompare(b.title);
+    if (sortBy === 'endDate') return a.endAtMs - b.endAtMs;
+    return a.startAtMs - b.startAtMs;
+  });
+}
+
+// ── Grouping ─────────────────────────────────────────────────────────────────
+
+/**
+ * Builds the flat GanttRow list from positioned activities, applying grouping,
+ * sorting, parent→child nesting (arbitrary depth), and collapse state.
+ * Exported for unit testing of the tree/collapse logic.
+ */
+export function buildRows(
+  activities: RichActivity[],
+  members: Member[],
+  groupBy: GroupBy,
+  sortBy: SortBy,
+  collapsedParents: Set<string>,
+  collapsedGroups: Set<string>,
+  statuses?: Status[],
+): GanttRow[] {
+  const sorted = sortActivities(activities, sortBy);
+
+  if (groupBy === 'none') {
+    // Flat list — no parent nesting, so children are not indented.
+    return sorted.map(ev => ({ kind: 'activity' as const, event: { ...ev, isChild: false, depth: 0 } }));
+  }
+
+  if (groupBy === 'member') {
+    const memberOrder = members.map(m => m.id);
+    const nameById = new Map(members.map(m => [m.id, m.name]));
+    // Colors here are already resolved hex (from the Member type / toMember conversion).
+    // ListView applies resolveColorHex on the raw API color string instead — both
+    // produce hex, but the resolution step happens at different layers.
+    const colorById = new Map(members.map(m => [m.id, m.color]));
+
+    const buckets = new Map<string, RichActivity[]>();
+    for (const ev of sorted) {
+      const key = memberComboKey(ev.assignedMemberIds);
+      const list = buckets.get(key) ?? [];
+      list.push(ev);
+      buckets.set(key, list);
+    }
+
+    const comparator = comboSortComparator(memberOrder);
+    const sortedKeys = [...buckets.keys()].sort(comparator);
+
+    const rows: GanttRow[] = [];
+    for (const key of sortedKeys) {
+      const evs = buckets.get(key)!;
+      const rawIds = key === UNASSIGNED_KEY ? [] : key.split(SEP);
+      const orderedIds = orderedComboIds(rawIds, memberOrder);
+      const label = key === UNASSIGNED_KEY ? 'Unassigned' : memberComboLabel(orderedIds, nameById);
+      const memberColors = orderedIds.map(id => colorById.get(id) ?? 'var(--muted-foreground)');
+      const primaryColor = key === UNASSIGNED_KEY ? 'var(--muted-foreground)' : (memberColors[0] ?? 'var(--muted-foreground)');
+      const collapsed = collapsedGroups.has(key);
+      rows.push({ kind: 'group', id: key, label, color: primaryColor, memberColors, count: evs.length, collapsed });
+      if (collapsed) continue;
+      for (const ev of evs) rows.push({ kind: 'activity', event: { ...ev, isChild: false, depth: 0 } });
+    }
+    return rows;
+  }
+
+  if (groupBy === 'parent') {
+    // Build a parent→children index, then emit rows via depth-first traversal so
+    // grandchildren (and deeper) nest correctly. An activity is a "root" when it
+    // has no parent or its parent fell outside the current view.
+    const byId = new Map(sorted.map(a => [a.id, a]));
+    const childrenByParent = new Map<string, RichActivity[]>();
+    const roots: RichActivity[] = [];
+    for (const ev of sorted) {
+      const pid = ev.parentActivityId;
+      if (pid && byId.has(pid)) {
+        const list = childrenByParent.get(pid) ?? [];
+        list.push(ev);
+        childrenByParent.set(pid, list);
+      } else {
+        roots.push(ev);
+      }
+    }
+
+    const rows: GanttRow[] = [];
+    const seen = new Set<string>();   // emitted into rows (also guards cycles)
+    const hidden = new Set<string>(); // suppressed under a collapsed ancestor
+
+    // Recursively mark a collapsed node's descendants as hidden so the leftover
+    // sweep below doesn't resurrect them. The `hidden` guard also stops cycles.
+    const markHidden = (ev: RichActivity) => {
+      if (hidden.has(ev.id)) return;
+      hidden.add(ev.id);
+      for (const k of childrenByParent.get(ev.id) ?? []) markHidden(k);
+    };
+
+    const visit = (ev: RichActivity, depth: number) => {
+      if (seen.has(ev.id)) return;
+      seen.add(ev.id);
+      const kids = childrenByParent.get(ev.id) ?? [];
+      const hasChildren = kids.length > 0;
+      const collapsed = collapsedParents.has(ev.id);
+      rows.push({
+        kind: 'activity',
+        event: { ...ev, isChild: depth > 0, depth, hasChildren, collapsed },
+      });
+      if (!hasChildren) return;
+      if (collapsed) for (const k of kids) markHidden(k);
+      else for (const k of kids) visit(k, depth + 1);
+    };
+
+    for (const r of roots) visit(r, 0);
+    // Safety net: emit any activity unreachable from a root (e.g. a parent-
+    // pointer cycle where no node qualifies as a root) at depth 0, but never
+    // resurrect a node intentionally hidden under a collapsed ancestor.
+    for (const ev of sorted) {
+      if (!seen.has(ev.id) && !hidden.has(ev.id)) visit(ev, 0);
+    }
+    return rows;
+  }
+
+  if (groupBy === 'status') {
+    const buckets = new Map<string, RichActivity[]>();
+    for (const ev of sorted) {
+      const key = ev.statusId ?? '__no_status__';
+      const list = buckets.get(key) ?? [];
+      list.push(ev);
+      buckets.set(key, list);
+    }
+
+    const rows: GanttRow[] = [];
+    const pushStatusBucket = (id: string, label: string, color: string, evs: RichActivity[]) => {
+      const collapsed = collapsedGroups.has(id);
+      rows.push({ kind: 'group', id, label, color, count: evs.length, collapsed });
+      if (collapsed) return;
+      for (const ev of evs) rows.push({ kind: 'activity', event: { ...ev, isChild: false, depth: 0 } });
+    };
+
+    if (statuses) {
+      for (const s of statuses) {
+        const evs = buckets.get(s.id);
+        if (!evs?.length) continue;
+        pushStatusBucket(s.id, s.name, resolveColorHex(s.color ?? null) ?? 'var(--muted-foreground)', evs);
+      }
+    }
+    const noStatus = buckets.get('__no_status__');
+    if (noStatus?.length) {
+      pushStatusBucket('__no_status__', 'No status', 'var(--muted-foreground)', noStatus);
+    }
+    return rows;
+  }
+
+  return sorted.map(ev => ({ kind: 'activity' as const, event: ev }));
+}
+
+// ── Component ─────────────────────────────────────────────────────────────────
+
+/**
+ * Returns only the activities whose status is not in closedStatusIds.
+ * Extracted as a named export so the 'open' filter preset logic can be
+ * unit-tested without mounting the full component.
+ */
+export function filterOpenActivities<T extends { statusId?: string | null | undefined }>(
+  activities: T[],
+  closedStatusIds: Set<string>,
+): T[] {
+  return activities.filter(a => !a.statusId || !closedStatusIds.has(a.statusId))
+}
+
+export default function GanttView({
+  teamId,
+  timelineId,
+  startDate,
+  endDate,
+  groupBy,
+  sortBy,
+  granularity,
+  colorBy,
+  timelineStatuses,
+  savedFilters,
+  tags,
+  selectedActivityId = null,
+  onSelectActivity = () => {},
+  onLaneDrag,
+  onBarDragProgress,
+  onBarDragEnd,
+  onMembersLoaded,
+  onSelectApiActivity,
+  labelColW,
+  onLabelColWChange,
+}: Props) {
+  const queryClient = useQueryClient();
+  const updateActivity = useUpdateActivity(timelineId);
+  const today = todayMidnight();
+
+  // Collapse state for the Gantt tree. `collapsedParents` hides an activity's
+  // child subtree (parent grouping); `collapsedGroups` hides a member bucket's
+  // activities (member grouping). Both persist across re-renders and view tweaks.
+  const [collapsedParents, setCollapsedParents] = useState<Set<string>>(new Set());
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
+
+  const toggleParent = useCallback((id: string) => {
+    setCollapsedParents(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }, []);
+
+  const toggleGroup = useCallback((id: string) => {
+    setCollapsedGroups(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }, []);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [containerWidth, setContainerWidth] = useState(800);
+
+  const { debouncedQuery, registerMatches, activeMatchId, matchedIds, matchReasons } = useFind();
+  const { activeFilter } = useFilter();
+
+  const globalPrefs = usePreferenceMap();
+  const prefWeekStart = (globalPrefs['week_start'] as string | undefined) === 'sunday' ? 'sunday' : 'monday';
+  // Map the stored date_format preference to a BCP 47 locale for Gantt column labels.
+  // DD/MM/YYYY users prefer day-first ordering (en-GB: "5 Jan"); all others get MM-first (en-US: "Jan 5").
+  const prefDateFormat = (globalPrefs['date_format'] as string | undefined) ?? 'MMM D, YYYY';
+  const prefLocale = prefDateFormat === 'DD/MM/YYYY' ? 'en-GB' : 'en-US';
+
+  useLayoutEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(entries => {
+      const w = entries[0]?.contentRect.width;
+      if (w && w > 0) setContainerWidth(w);
+    });
+    ro.observe(el);
+    setContainerWidth(el.clientWidth || 800);
+    return () => ro.disconnect();
+  }, []);
+
+  const viewStart = useMemo<Date>(() => {
+    if (startDate) return new Date(startDate);
+    const d = new Date(today);
+    d.setUTCDate(d.getUTCDate() - 14);
+    return d;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [startDate]);
+
+  const viewEnd = useMemo<Date>(() => {
+    if (endDate) return new Date(endDate);
+    const d = new Date(today);
+    d.setUTCDate(d.getUTCDate() + 75);
+    return d;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [endDate]);
+
+  const resolvedGranularity = useMemo<TimeGranularity>(() => {
+    if (granularity !== 'auto') return granularity;
+    return autoFitGranularity(viewStart, viewEnd, containerWidth);
+  }, [granularity, viewStart, viewEnd, containerWidth]);
+
+  const columns = useMemo(
+    () => generateColumns(viewStart, viewEnd, resolvedGranularity, { weekStart: prefWeekStart, locale: prefLocale }),
+    [viewStart, viewEnd, resolvedGranularity, prefWeekStart, prefLocale],
+  );
+
+  const todayIdx = useMemo(
+    () => todayColumnPosition(columns),
+    [columns],
+  );
+
+  const from = viewStart.toISOString();
+  const to = viewEnd.toISOString();
+
+  const { data: apiMembers = [] } = useTeamMembers(teamId);
+  const { data: apiActivities = [], isLoading } = useTimelineActivities(teamId, timelineId, from, to);
+
+  const members: Member[] = useMemo(
+    () => apiMembers.map((m, i) => toMember(m, i)),
+    [apiMembers],
+  );
+
+  const memberById = useMemo<Record<string, Member>>(() => {
+    const map: Record<string, Member> = {};
+    members.forEach(m => { map[m.id] = m; });
+    return map;
+  }, [members]);
+
+  // Notify parent once the member list resolves.
+  useEffect(() => {
+    if (onMembersLoaded && members.length > 0) {
+      onMembersLoaded(members);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [members]);
+
+  // Derive data needed by the unified filter engine from the passed-in statuses/tags/filters.
+  const closedStatusIds = useMemo(
+    () => new Set((timelineStatuses ?? []).filter(s => s.isClosed).map(s => s.id)),
+    [timelineStatuses],
+  );
+
+  const statusesByTimeline = useMemo(() => {
+    const m = new Map<string, Status[]>();
+    if (timelineStatuses?.length) m.set(timelineId, timelineStatuses);
+    return m;
+  }, [timelineId, timelineStatuses]);
+
+  // Map userId → team_member_id[] so the 'member' filter kind can resolve by userId.
+  const memberIdsByUserId = useMemo(() => {
+    const m = new Map<string, string[]>();
+    apiMembers.forEach(member => {
+      if (member.userId) {
+        const existing = m.get(member.userId) ?? [];
+        m.set(member.userId, [...existing, member.id]);
+      }
+    });
+    return m;
+  }, [apiMembers]);
+
+  const visibleActivities = useMemo(() => applyActiveFilter(
+    apiActivities,
+    activeFilter,
+    memberIdsByUserId,
+    {
+      closedStatusIds,
+      savedFilters: savedFilters ?? [],
+      statuses: statusesByTimeline,
+      tags: tags ?? [],
+    },
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  ), [apiActivities, activeFilter, memberIdsByUserId, closedStatusIds, savedFilters, statusesByTimeline, tags]);
+
+  const statusColorById = useMemo(
+    () => new Map((timelineStatuses ?? []).map(s => [s.id, s.color])),
+    [timelineStatuses],
+  );
+
+  const rows: GanttRow[] = useMemo(() => {
+    const richActivities = visibleActivities
+      .map((ev, i) => toRichActivity(ev, i, memberById, viewStart, viewEnd, columns, colorBy, statusColorById))
+      .filter((a): a is RichActivity => a !== null);
+    return buildRows(richActivities, members, groupBy, sortBy, collapsedParents, collapsedGroups, timelineStatuses);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visibleActivities, members, memberById, groupBy, sortBy, colorBy, statusColorById, viewStart, viewEnd, columns, collapsedParents, collapsedGroups, timelineStatuses]);
+
+  // ── Find: compute matches and register with context ───────────────────────
+
+  const matchResults = useMemo(
+    () => matchEvents(debouncedQuery, visibleActivities, members, visibleActivities),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [debouncedQuery, visibleActivities, members],
+  );
+
+  const matchedSet = useMemo(
+    () => new Set(matchResults.map(r => r.activityId)),
+    [matchResults],
+  );
+
+  const computedMatchReasons = useMemo(() => {
+    const map = new Map<string, string[]>();
+    matchResults.forEach(r => map.set(r.activityId, r.reasons));
+    return map;
+  }, [matchResults]);
+
+  // Ordered match IDs follow the current row order so prev/next walks the
+  // visual top-to-bottom sequence rather than the arbitrary API order.
+  const orderedMatchIds = useMemo(
+    () => rows
+      .filter(r => r.kind === 'activity' && matchedSet.has(r.event.id))
+      .map(r => (r as { kind: 'activity'; event: GanttActivity }).event.id),
+    [rows, matchedSet],
+  );
+
+  useEffect(() => {
+    registerMatches(orderedMatchIds, computedMatchReasons);
+  }, [orderedMatchIds, computedMatchReasons, registerMatches]);
+
+  // Build the FindState passed to GanttGrid
+  const hasQuery = debouncedQuery.trim().length > 0;
+  const filtersActive = activeFilter.kind !== 'preset' || activeFilter.id !== 'all';
+  const findState: FindState = useMemo(() => ({
+    hasQuery,
+    matchedIds: matchedSet,
+    activeMatchId,
+    matchReasons,
+    filtersActive,
+    matchCount: matchedIds.length,
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), [hasQuery, matchedSet, activeMatchId, matchReasons, filtersActive, matchedIds.length]);
+
+  // ── Bar drag ─────────────────────────────────────────────────────────────
+
+  const handleBarDrag = useCallback((activityId: string, newStartDate: Date, newEndDate: Date) => {
+    const patch = {
+      startAt: newStartDate.toISOString(),
+      endAt: newEndDate.toISOString(),
+    };
+
+    // Synchronously update the cache so the bar doesn't flash back to old
+    // position when GanttGrid clears its drag state in the same render cycle.
+    queryClient.setQueriesData<ApiActivity[]>(
+      { queryKey: ['timelines', timelineId, 'activities'] },
+      (old) => old?.map((a) => (a.id === activityId ? { ...a, ...patch } : a)),
+    );
+
+    // Push updated activity to the sidebar so it shows new dates immediately
+    // instead of the stale snapshot from when the activity was selected.
+    if (onSelectApiActivity) {
+      const updated = apiActivities.find(a => a.id === activityId);
+      if (updated) onSelectApiActivity({ ...updated, ...patch });
+    }
+
+    onBarDragEnd?.();
+    updateActivity.mutate({ activityId, patch });
+  }, [updateActivity, onBarDragEnd, queryClient, timelineId, apiActivities, onSelectApiActivity]);
+
+  if (isLoading) {
+    return (
+      <div ref={containerRef} className="flex items-center justify-center h-full text-muted-foreground text-[13px]">
+        Loading activities…
+      </div>
+    );
+  }
+
+  return (
+    <div ref={containerRef} style={{ flex: 1, minHeight: 0 }}>
+      <GanttGrid
+        rows={rows}
+        columns={columns}
+        todayIndex={todayIdx}
+        selectedActivityId={selectedActivityId}
+        findState={findState}
+        onSelectActivity={(id) => {
+          onSelectActivity(id);
+          if (onSelectApiActivity) {
+            const found = id ? (apiActivities.find(a => a.id === id) ?? null) : null;
+            onSelectApiActivity(found);
+          }
+        }}
+        onLaneDrag={onLaneDrag}
+        onBarDrag={handleBarDrag}
+        onBarDragProgress={onBarDragProgress}
+        resolvedGranularity={resolvedGranularity}
+        onClearFilters={filtersActive ? () => {} : undefined}
+        labelColW={labelColW}
+        onLabelColWChange={onLabelColWChange}
+        onToggleActivity={groupBy === 'parent' ? toggleParent : undefined}
+        onToggleGroup={groupBy === 'member' || groupBy === 'status' ? toggleGroup : undefined}
+      />
     </div>
   );
 }
@@ -52150,636 +52953,6 @@ export default function ListView({
           {toast}
         </div>
       )}
-    </div>
-  );
-}
-````
-
-## File: packages/web/src/components/gantt/GanttView.tsx
-````typescript
-/**
- * GanttView — data container for the Gantt grid.
- *
- * Fetches events and members, applies grouping and sorting, builds the
- * GanttRow list, and passes everything to GanttGrid. The component owns
- * no layout state — granularity, groupBy, and sortBy come from DashboardPage.
- *
- * Also owns the find-match computation: it reads the debounced query from
- * FindContext, matches against the fetched API events, and registers the
- * ordered match list back into FindContext so GanttGrid can apply visual
- * treatment and auto-scroll.
- */
-
-import { useMemo, useRef, useState, useLayoutEffect, useEffect, useCallback } from 'react';
-import { useQueryClient } from '@tanstack/react-query';
-import GanttGrid, { type GanttActivity, type GanttRow, type FindState } from './GanttGrid';
-import { useTimelineActivities, useTeamMembers, useUpdateActivity } from '@/hooks/useTeamActivities';
-import type { components } from '@draba/shared';
-import { type Member, ACTIVITY_COLORS, MEMBER_COLORS } from '@/types';
-import { resolveColorHex } from '@/components/identity/identity-constants';
-import type { GroupBy, SortBy, TimeGranularity, ColorBy } from './GanttToolbar';
-import {
-  generateColumns,
-  positionInColumns,
-  todayColumnPosition,
-  autoFitGranularity,
-  type ColumnDef,
-} from './granularity';
-import { matchEvents } from '@/lib/findMatcher';
-import { memberComboKey, orderedComboIds, memberComboLabel, comboSortComparator, UNASSIGNED_KEY, SEP } from '@/lib/memberGroups';
-import { useFind } from '@/contexts/FindContext';
-import { useFilter } from '@/contexts/FilterContext';
-import { usePreferenceMap } from '@/hooks/usePreferences';
-import { applyActiveFilter } from '@/lib/presetFilters';
-
-type ApiActivity = components['schemas']['Activity'];
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
-type Status = components['schemas']['Status'];
-type SavedFilter = components['schemas']['SavedFilter'];
-type Tag = components['schemas']['Tag'];
-
-interface Props {
-  teamId: string;
-  /** Active timeline ID — activities are fetched scoped to this timeline. */
-  timelineId: string;
-  /** ISO date "YYYY-MM-DD" — defaults to 14 days before today. */
-  startDate?: string;
-  /** ISO date "YYYY-MM-DD" — defaults to 75 days after today. */
-  endDate?: string;
-  groupBy: GroupBy;
-  sortBy: SortBy;
-  granularity: TimeGranularity | 'auto';
-  colorBy: ColorBy;
-  /**
-   * Timeline statuses — used to derive closedStatusIds and resolve status names
-   * in the filter engine. Replaces the old closedStatusIds prop.
-   */
-  timelineStatuses?: Status[];
-  /** Saved filters for the active team — evaluated by the filter engine. */
-  savedFilters?: SavedFilter[];
-  /** Team tags — used to resolve tag names in the filter engine. */
-  tags?: Tag[];
-  selectedActivityId?: string | null;
-  onSelectActivity?: (id: string | null) => void;
-  /** Called when the user drags on an empty lane to create an activity. */
-  onLaneDrag?: (startDate: Date, endDate: Date, memberId: string | null) => void;
-  /** Called during a bar drag with live snapped dates — for sidebar preview. */
-  onBarDragProgress?: (activityId: string, newStart: Date, newEnd: Date) => void;
-  /** Called when a bar drag completes (before the PATCH fires). */
-  onBarDragEnd?: () => void;
-  /** Called once members are loaded, so the parent can access them for panels. */
-  onMembersLoaded?: (members: Member[]) => void;
-  /** Called when an activity is selected — passes the full API activity object. */
-  onSelectApiActivity?: (activity: ApiActivity | null) => void;
-  /** Label column width in px — passed through to GanttGrid for controlled persistence. */
-  labelColW?: number;
-  /** Called when the user drags the label column resize handle. */
-  onLabelColWChange?: (w: number) => void;
-}
-
-
-// ── Date helpers ────────────────────────────────────────────────────────────
-
-function toDateOnly(datetime: string): string {
-  return datetime.slice(0, 10);
-}
-
-function todayMidnight(): Date {
-  const d = new Date();
-  d.setUTCHours(0, 0, 0, 0); // UTC midnight so it aligns with UTC-stored activity dates
-  return d;
-}
-
-function initialsFrom(name: string): string {
-  return name
-    .split(/\s+/)
-    .map(w => w[0] ?? '')
-    .slice(0, 2)
-    .join('')
-    .toUpperCase();
-}
-
-// ── Type mapping ─────────────────────────────────────────────────────────────
-
-function toMember(m: TeamMemberWithUser, index: number): Member {
-  const name = m.displayName || m.email || 'Unknown';
-  const fallbackHex = MEMBER_COLORS[index % MEMBER_COLORS.length];
-  return {
-    id: m.id,
-    name,
-    initials: initialsFrom(name),
-    color: resolveColorHex(m.color) || fallbackHex,
-  };
-}
-
-/** Intermediate type that carries original API fields alongside view-state. */
-export interface RichActivity extends GanttActivity {
-  startAtMs: number;
-  endAtMs: number;
-  parentActivityId: string | null;
-  primaryMemberId: string | null;
-  assignedMemberIds: string[];
-  statusId: string | null;
-}
-
-function toRichActivity(
-  ev: ApiActivity,
-  index: number,
-  memberById: Record<string, Member>,
-  viewStart: Date,
-  viewEnd: Date,
-  columns: ColumnDef[],
-  colorBy: ColorBy,
-  statusColorById: Map<string, string>,
-): RichActivity | null {
-  const evStart = new Date(toDateOnly(ev.startAt));
-  const evEnd = new Date(toDateOnly(ev.endAt));
-
-  if (evEnd < viewStart || evStart > viewEnd) return null;
-
-  const clampedStart = evStart < viewStart ? viewStart : evStart;
-  const clampedEnd = evEnd > viewEnd ? viewEnd : evEnd;
-
-  const { startCol, span } = positionInColumns(clampedStart, clampedEnd, columns);
-  const assignedIds = ev.assignedMemberIds ?? [];
-  const members = assignedIds.map(id => memberById[id]).filter((m): m is Member => Boolean(m));
-
-  const color =
-    colorBy === 'member' ? (members[0]?.color ?? ev.color ?? ACTIVITY_COLORS[index % ACTIVITY_COLORS.length]) :
-    colorBy === 'status' ? (statusColorById.get((ev as ApiActivity & { statusId?: string | null }).statusId ?? '') ?? '#6b7280') :
-    /* activity */ (ev.color ?? ACTIVITY_COLORS[index % ACTIVITY_COLORS.length]);
-
-  return {
-    id: ev.id,
-    title: ev.title,
-    startCol,
-    span,
-    color,
-    icon: ev.icon ?? undefined,
-    members,
-    isChild: Boolean(ev.parentActivityId),
-    startAtMs: new Date(ev.startAt).getTime(),
-    endAtMs: new Date(ev.endAt).getTime(),
-    parentActivityId: ev.parentActivityId ?? null,
-    primaryMemberId: members[0]?.id ?? null,
-    assignedMemberIds: assignedIds,
-    statusId: (ev as ApiActivity & { statusId?: string | null }).statusId ?? null,
-  };
-}
-
-// ── Sorting ──────────────────────────────────────────────────────────────────
-
-function sortActivities(activities: RichActivity[], sortBy: SortBy): RichActivity[] {
-  return [...activities].sort((a, b) => {
-    if (sortBy === 'title') return a.title.localeCompare(b.title);
-    if (sortBy === 'endDate') return a.endAtMs - b.endAtMs;
-    return a.startAtMs - b.startAtMs;
-  });
-}
-
-// ── Grouping ─────────────────────────────────────────────────────────────────
-
-/**
- * Builds the flat GanttRow list from positioned activities, applying grouping,
- * sorting, parent→child nesting (arbitrary depth), and collapse state.
- * Exported for unit testing of the tree/collapse logic.
- */
-export function buildRows(
-  activities: RichActivity[],
-  members: Member[],
-  groupBy: GroupBy,
-  sortBy: SortBy,
-  collapsedParents: Set<string>,
-  collapsedGroups: Set<string>,
-  statuses?: Status[],
-): GanttRow[] {
-  const sorted = sortActivities(activities, sortBy);
-
-  if (groupBy === 'none') {
-    // Flat list — no parent nesting, so children are not indented.
-    return sorted.map(ev => ({ kind: 'activity' as const, event: { ...ev, isChild: false, depth: 0 } }));
-  }
-
-  if (groupBy === 'member') {
-    const memberOrder = members.map(m => m.id);
-    const nameById = new Map(members.map(m => [m.id, m.name]));
-    // Colors here are already resolved hex (from the Member type / toMember conversion).
-    // ListView applies resolveColorHex on the raw API color string instead — both
-    // produce hex, but the resolution step happens at different layers.
-    const colorById = new Map(members.map(m => [m.id, m.color]));
-
-    const buckets = new Map<string, RichActivity[]>();
-    for (const ev of sorted) {
-      const key = memberComboKey(ev.assignedMemberIds);
-      const list = buckets.get(key) ?? [];
-      list.push(ev);
-      buckets.set(key, list);
-    }
-
-    const comparator = comboSortComparator(memberOrder);
-    const sortedKeys = [...buckets.keys()].sort(comparator);
-
-    const rows: GanttRow[] = [];
-    for (const key of sortedKeys) {
-      const evs = buckets.get(key)!;
-      const rawIds = key === UNASSIGNED_KEY ? [] : key.split(SEP);
-      const orderedIds = orderedComboIds(rawIds, memberOrder);
-      const label = key === UNASSIGNED_KEY ? 'Unassigned' : memberComboLabel(orderedIds, nameById);
-      const memberColors = orderedIds.map(id => colorById.get(id) ?? 'var(--muted-foreground)');
-      const primaryColor = key === UNASSIGNED_KEY ? 'var(--muted-foreground)' : (memberColors[0] ?? 'var(--muted-foreground)');
-      const collapsed = collapsedGroups.has(key);
-      rows.push({ kind: 'group', id: key, label, color: primaryColor, memberColors, count: evs.length, collapsed });
-      if (collapsed) continue;
-      for (const ev of evs) rows.push({ kind: 'activity', event: { ...ev, isChild: false, depth: 0 } });
-    }
-    return rows;
-  }
-
-  if (groupBy === 'parent') {
-    // Build a parent→children index, then emit rows via depth-first traversal so
-    // grandchildren (and deeper) nest correctly. An activity is a "root" when it
-    // has no parent or its parent fell outside the current view.
-    const byId = new Map(sorted.map(a => [a.id, a]));
-    const childrenByParent = new Map<string, RichActivity[]>();
-    const roots: RichActivity[] = [];
-    for (const ev of sorted) {
-      const pid = ev.parentActivityId;
-      if (pid && byId.has(pid)) {
-        const list = childrenByParent.get(pid) ?? [];
-        list.push(ev);
-        childrenByParent.set(pid, list);
-      } else {
-        roots.push(ev);
-      }
-    }
-
-    const rows: GanttRow[] = [];
-    const seen = new Set<string>();   // emitted into rows (also guards cycles)
-    const hidden = new Set<string>(); // suppressed under a collapsed ancestor
-
-    // Recursively mark a collapsed node's descendants as hidden so the leftover
-    // sweep below doesn't resurrect them. The `hidden` guard also stops cycles.
-    const markHidden = (ev: RichActivity) => {
-      if (hidden.has(ev.id)) return;
-      hidden.add(ev.id);
-      for (const k of childrenByParent.get(ev.id) ?? []) markHidden(k);
-    };
-
-    const visit = (ev: RichActivity, depth: number) => {
-      if (seen.has(ev.id)) return;
-      seen.add(ev.id);
-      const kids = childrenByParent.get(ev.id) ?? [];
-      const hasChildren = kids.length > 0;
-      const collapsed = collapsedParents.has(ev.id);
-      rows.push({
-        kind: 'activity',
-        event: { ...ev, isChild: depth > 0, depth, hasChildren, collapsed },
-      });
-      if (!hasChildren) return;
-      if (collapsed) for (const k of kids) markHidden(k);
-      else for (const k of kids) visit(k, depth + 1);
-    };
-
-    for (const r of roots) visit(r, 0);
-    // Safety net: emit any activity unreachable from a root (e.g. a parent-
-    // pointer cycle where no node qualifies as a root) at depth 0, but never
-    // resurrect a node intentionally hidden under a collapsed ancestor.
-    for (const ev of sorted) {
-      if (!seen.has(ev.id) && !hidden.has(ev.id)) visit(ev, 0);
-    }
-    return rows;
-  }
-
-  if (groupBy === 'status') {
-    const buckets = new Map<string, RichActivity[]>();
-    for (const ev of sorted) {
-      const key = ev.statusId ?? '__no_status__';
-      const list = buckets.get(key) ?? [];
-      list.push(ev);
-      buckets.set(key, list);
-    }
-
-    const rows: GanttRow[] = [];
-    const pushStatusBucket = (id: string, label: string, color: string, evs: RichActivity[]) => {
-      const collapsed = collapsedGroups.has(id);
-      rows.push({ kind: 'group', id, label, color, count: evs.length, collapsed });
-      if (collapsed) return;
-      for (const ev of evs) rows.push({ kind: 'activity', event: { ...ev, isChild: false, depth: 0 } });
-    };
-
-    if (statuses) {
-      for (const s of statuses) {
-        const evs = buckets.get(s.id);
-        if (!evs?.length) continue;
-        pushStatusBucket(s.id, s.name, resolveColorHex(s.color ?? null) ?? 'var(--muted-foreground)', evs);
-      }
-    }
-    const noStatus = buckets.get('__no_status__');
-    if (noStatus?.length) {
-      pushStatusBucket('__no_status__', 'No status', 'var(--muted-foreground)', noStatus);
-    }
-    return rows;
-  }
-
-  return sorted.map(ev => ({ kind: 'activity' as const, event: ev }));
-}
-
-// ── Component ─────────────────────────────────────────────────────────────────
-
-/**
- * Returns only the activities whose status is not in closedStatusIds.
- * Extracted as a named export so the 'open' filter preset logic can be
- * unit-tested without mounting the full component.
- */
-export function filterOpenActivities<T extends { statusId?: string | null | undefined }>(
-  activities: T[],
-  closedStatusIds: Set<string>,
-): T[] {
-  return activities.filter(a => !a.statusId || !closedStatusIds.has(a.statusId))
-}
-
-export default function GanttView({
-  teamId,
-  timelineId,
-  startDate,
-  endDate,
-  groupBy,
-  sortBy,
-  granularity,
-  colorBy,
-  timelineStatuses,
-  savedFilters,
-  tags,
-  selectedActivityId = null,
-  onSelectActivity = () => {},
-  onLaneDrag,
-  onBarDragProgress,
-  onBarDragEnd,
-  onMembersLoaded,
-  onSelectApiActivity,
-  labelColW,
-  onLabelColWChange,
-}: Props) {
-  const queryClient = useQueryClient();
-  const updateActivity = useUpdateActivity(timelineId);
-  const today = todayMidnight();
-
-  // Collapse state for the Gantt tree. `collapsedParents` hides an activity's
-  // child subtree (parent grouping); `collapsedGroups` hides a member bucket's
-  // activities (member grouping). Both persist across re-renders and view tweaks.
-  const [collapsedParents, setCollapsedParents] = useState<Set<string>>(new Set());
-  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
-
-  const toggleParent = useCallback((id: string) => {
-    setCollapsedParents(prev => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id); else next.add(id);
-      return next;
-    });
-  }, []);
-
-  const toggleGroup = useCallback((id: string) => {
-    setCollapsedGroups(prev => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id); else next.add(id);
-      return next;
-    });
-  }, []);
-  const containerRef = useRef<HTMLDivElement>(null);
-  const [containerWidth, setContainerWidth] = useState(800);
-
-  const { debouncedQuery, registerMatches, activeMatchId, matchedIds, matchReasons } = useFind();
-  const { activeFilter } = useFilter();
-
-  const globalPrefs = usePreferenceMap();
-  const prefWeekStart = (globalPrefs['week_start'] as string | undefined) === 'sunday' ? 'sunday' : 'monday';
-  // Map the stored date_format preference to a BCP 47 locale for Gantt column labels.
-  // DD/MM/YYYY users prefer day-first ordering (en-GB: "5 Jan"); all others get MM-first (en-US: "Jan 5").
-  const prefDateFormat = (globalPrefs['date_format'] as string | undefined) ?? 'MMM D, YYYY';
-  const prefLocale = prefDateFormat === 'DD/MM/YYYY' ? 'en-GB' : 'en-US';
-
-  useLayoutEffect(() => {
-    const el = containerRef.current;
-    if (!el) return;
-    const ro = new ResizeObserver(entries => {
-      const w = entries[0]?.contentRect.width;
-      if (w && w > 0) setContainerWidth(w);
-    });
-    ro.observe(el);
-    setContainerWidth(el.clientWidth || 800);
-    return () => ro.disconnect();
-  }, []);
-
-  const viewStart = useMemo<Date>(() => {
-    if (startDate) return new Date(startDate);
-    const d = new Date(today);
-    d.setUTCDate(d.getUTCDate() - 14);
-    return d;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [startDate]);
-
-  const viewEnd = useMemo<Date>(() => {
-    if (endDate) return new Date(endDate);
-    const d = new Date(today);
-    d.setUTCDate(d.getUTCDate() + 75);
-    return d;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [endDate]);
-
-  const resolvedGranularity = useMemo<TimeGranularity>(() => {
-    if (granularity !== 'auto') return granularity;
-    return autoFitGranularity(viewStart, viewEnd, containerWidth);
-  }, [granularity, viewStart, viewEnd, containerWidth]);
-
-  const columns = useMemo(
-    () => generateColumns(viewStart, viewEnd, resolvedGranularity, { weekStart: prefWeekStart, locale: prefLocale }),
-    [viewStart, viewEnd, resolvedGranularity, prefWeekStart, prefLocale],
-  );
-
-  const todayIdx = useMemo(
-    () => todayColumnPosition(columns),
-    [columns],
-  );
-
-  const from = viewStart.toISOString();
-  const to = viewEnd.toISOString();
-
-  const { data: apiMembers = [] } = useTeamMembers(teamId);
-  const { data: apiActivities = [], isLoading } = useTimelineActivities(teamId, timelineId, from, to);
-
-  const members: Member[] = useMemo(
-    () => apiMembers.map((m, i) => toMember(m, i)),
-    [apiMembers],
-  );
-
-  const memberById = useMemo<Record<string, Member>>(() => {
-    const map: Record<string, Member> = {};
-    members.forEach(m => { map[m.id] = m; });
-    return map;
-  }, [members]);
-
-  // Notify parent once the member list resolves.
-  useEffect(() => {
-    if (onMembersLoaded && members.length > 0) {
-      onMembersLoaded(members);
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [members]);
-
-  // Derive data needed by the unified filter engine from the passed-in statuses/tags/filters.
-  const closedStatusIds = useMemo(
-    () => new Set((timelineStatuses ?? []).filter(s => s.isClosed).map(s => s.id)),
-    [timelineStatuses],
-  );
-
-  const statusesByTimeline = useMemo(() => {
-    const m = new Map<string, Status[]>();
-    if (timelineStatuses?.length) m.set(timelineId, timelineStatuses);
-    return m;
-  }, [timelineId, timelineStatuses]);
-
-  // Map userId → team_member_id[] so the 'member' filter kind can resolve by userId.
-  const memberIdsByUserId = useMemo(() => {
-    const m = new Map<string, string[]>();
-    apiMembers.forEach(member => {
-      if (member.userId) {
-        const existing = m.get(member.userId) ?? [];
-        m.set(member.userId, [...existing, member.id]);
-      }
-    });
-    return m;
-  }, [apiMembers]);
-
-  const visibleActivities = useMemo(() => applyActiveFilter(
-    apiActivities,
-    activeFilter,
-    memberIdsByUserId,
-    {
-      closedStatusIds,
-      savedFilters: savedFilters ?? [],
-      statuses: statusesByTimeline,
-      tags: tags ?? [],
-    },
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  ), [apiActivities, activeFilter, memberIdsByUserId, closedStatusIds, savedFilters, statusesByTimeline, tags]);
-
-  const statusColorById = useMemo(
-    () => new Map((timelineStatuses ?? []).map(s => [s.id, s.color])),
-    [timelineStatuses],
-  );
-
-  const rows: GanttRow[] = useMemo(() => {
-    const richActivities = visibleActivities
-      .map((ev, i) => toRichActivity(ev, i, memberById, viewStart, viewEnd, columns, colorBy, statusColorById))
-      .filter((a): a is RichActivity => a !== null);
-    return buildRows(richActivities, members, groupBy, sortBy, collapsedParents, collapsedGroups, timelineStatuses);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visibleActivities, members, memberById, groupBy, sortBy, colorBy, statusColorById, viewStart, viewEnd, columns, collapsedParents, collapsedGroups, timelineStatuses]);
-
-  // ── Find: compute matches and register with context ───────────────────────
-
-  const matchResults = useMemo(
-    () => matchEvents(debouncedQuery, visibleActivities, members, visibleActivities),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [debouncedQuery, visibleActivities, members],
-  );
-
-  const matchedSet = useMemo(
-    () => new Set(matchResults.map(r => r.activityId)),
-    [matchResults],
-  );
-
-  const computedMatchReasons = useMemo(() => {
-    const map = new Map<string, string[]>();
-    matchResults.forEach(r => map.set(r.activityId, r.reasons));
-    return map;
-  }, [matchResults]);
-
-  // Ordered match IDs follow the current row order so prev/next walks the
-  // visual top-to-bottom sequence rather than the arbitrary API order.
-  const orderedMatchIds = useMemo(
-    () => rows
-      .filter(r => r.kind === 'activity' && matchedSet.has(r.event.id))
-      .map(r => (r as { kind: 'activity'; event: GanttActivity }).event.id),
-    [rows, matchedSet],
-  );
-
-  useEffect(() => {
-    registerMatches(orderedMatchIds, computedMatchReasons);
-  }, [orderedMatchIds, computedMatchReasons, registerMatches]);
-
-  // Build the FindState passed to GanttGrid
-  const hasQuery = debouncedQuery.trim().length > 0;
-  const filtersActive = activeFilter.kind !== 'preset' || activeFilter.id !== 'all';
-  const findState: FindState = useMemo(() => ({
-    hasQuery,
-    matchedIds: matchedSet,
-    activeMatchId,
-    matchReasons,
-    filtersActive,
-    matchCount: matchedIds.length,
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [hasQuery, matchedSet, activeMatchId, matchReasons, filtersActive, matchedIds.length]);
-
-  // ── Bar drag ─────────────────────────────────────────────────────────────
-
-  const handleBarDrag = useCallback((activityId: string, newStartDate: Date, newEndDate: Date) => {
-    const patch = {
-      startAt: newStartDate.toISOString(),
-      endAt: newEndDate.toISOString(),
-    };
-
-    // Synchronously update the cache so the bar doesn't flash back to old
-    // position when GanttGrid clears its drag state in the same render cycle.
-    queryClient.setQueriesData<ApiActivity[]>(
-      { queryKey: ['timelines', timelineId, 'activities'] },
-      (old) => old?.map((a) => (a.id === activityId ? { ...a, ...patch } : a)),
-    );
-
-    // Push updated activity to the sidebar so it shows new dates immediately
-    // instead of the stale snapshot from when the activity was selected.
-    if (onSelectApiActivity) {
-      const updated = apiActivities.find(a => a.id === activityId);
-      if (updated) onSelectApiActivity({ ...updated, ...patch });
-    }
-
-    onBarDragEnd?.();
-    updateActivity.mutate({ activityId, patch });
-  }, [updateActivity, onBarDragEnd, queryClient, timelineId, apiActivities, onSelectApiActivity]);
-
-  if (isLoading) {
-    return (
-      <div ref={containerRef} className="flex items-center justify-center h-full text-muted-foreground text-[13px]">
-        Loading activities…
-      </div>
-    );
-  }
-
-  return (
-    <div ref={containerRef} style={{ flex: 1, minHeight: 0 }}>
-      <GanttGrid
-        rows={rows}
-        columns={columns}
-        todayIndex={todayIdx}
-        selectedActivityId={selectedActivityId}
-        findState={findState}
-        onSelectActivity={(id) => {
-          onSelectActivity(id);
-          if (onSelectApiActivity) {
-            const found = id ? (apiActivities.find(a => a.id === id) ?? null) : null;
-            onSelectApiActivity(found);
-          }
-        }}
-        onLaneDrag={onLaneDrag}
-        onBarDrag={handleBarDrag}
-        onBarDragProgress={onBarDragProgress}
-        resolvedGranularity={resolvedGranularity}
-        onClearFilters={filtersActive ? () => {} : undefined}
-        labelColW={labelColW}
-        onLabelColWChange={onLabelColWChange}
-        onToggleActivity={groupBy === 'parent' ? toggleParent : undefined}
-        onToggleGroup={groupBy === 'member' || groupBy === 'status' ? toggleGroup : undefined}
-      />
     </div>
   );
 }
