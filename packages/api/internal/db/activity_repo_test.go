@@ -190,6 +190,61 @@ func TestActivityRepo_AssignedMemberIDs_PopulatedInList(t *testing.T) {
 	assert.Equal(t, []string{memberID}, acts[0].AssignedMemberIDs)
 }
 
+// TestActivityRepo_ListByTimeline_OverlapFilter verifies the overlap-semantics
+// fix in ListByTimeline: a multi-week activity that *starts* before the query
+// window must still appear when its end_at falls inside (or beyond) the window.
+func TestActivityRepo_ListByTimeline_OverlapFilter(t *testing.T) {
+	database := openTestDB(t)
+	repo := db.NewActivityRepo(database)
+	teamID, userID := seedTeamAndUser(t, database, "ovl")
+
+	tlRepo := db.NewTimelineRepo(database)
+	tl := makeTimeline("tl-ovl", teamID, userID)
+	require.NoError(t, tlRepo.Create(tl))
+
+	// Starts Apr 15, ends May 15 — straddles the query window.
+	multiWeek := &models.Activity{
+		ID:         "act-ovl-multi",
+		TimelineID: tl.ID,
+		Title:      "Multi-week spanning activity",
+		StartAt:    time.Date(2026, 4, 15, 0, 0, 0, 0, time.UTC),
+		EndAt:      time.Date(2026, 5, 15, 0, 0, 0, 0, time.UTC),
+		CreatedBy:  userID,
+		CreatedAt:  time.Now().UTC(),
+		UpdatedAt:  time.Now().UTC(),
+	}
+	// Entirely before the window — should be excluded.
+	beforeWindow := &models.Activity{
+		ID:         "act-ovl-before",
+		TimelineID: tl.ID,
+		Title:      "Before window",
+		StartAt:    time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC),
+		EndAt:      time.Date(2026, 4, 30, 0, 0, 0, 0, time.UTC),
+		CreatedBy:  userID,
+		CreatedAt:  time.Now().UTC(),
+		UpdatedAt:  time.Now().UTC(),
+	}
+	// Fully inside the window.
+	inWindow := makeActivity("act-ovl-in", tl.ID, userID, time.Date(2026, 5, 10, 0, 0, 0, 0, time.UTC))
+
+	require.NoError(t, repo.Create(multiWeek))
+	require.NoError(t, repo.Create(beforeWindow))
+	require.NoError(t, repo.Create(inWindow))
+
+	from := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+	to := time.Date(2026, 5, 31, 23, 59, 59, 0, time.UTC)
+	acts, err := repo.ListByTimeline(tl.ID, &from, &to, false)
+	require.NoError(t, err)
+
+	ids := make([]string, 0, len(acts))
+	for _, a := range acts {
+		ids = append(ids, a.ID)
+	}
+	assert.Contains(t, ids, "act-ovl-multi", "multi-week activity overlapping the window should be returned")
+	assert.Contains(t, ids, "act-ovl-in", "activity inside the window should be returned")
+	assert.NotContains(t, ids, "act-ovl-before", "activity ending before the window should be excluded")
+}
+
 func TestActivityRepo_ListByTimeline_Filter(t *testing.T) {
 	database := openTestDB(t)
 	repo := db.NewActivityRepo(database)

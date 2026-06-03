@@ -211,8 +211,10 @@ func (r *ActivityRepo) GetTags(activityID string) ([]string, error) {
 }
 
 // ListByTimeline returns activities for a specific timeline. When
-// includeArchived is false archived rows are excluded. When from or to are
-// non-nil they bound the query by start_at.
+// includeArchived is false archived rows are excluded. The bounds use overlap
+// semantics: from filters on end_at >= from (so a multi-week activity that
+// starts before the window still appears if it crosses it), and to filters on
+// start_at <= to.
 // AssignedMemberIDs is populated via a second query.
 func (r *ActivityRepo) ListByTimeline(timelineID string, from, to *time.Time, includeArchived bool) ([]*models.Activity, error) {
 	query := `SELECT * FROM activities WHERE timeline_id = ?`

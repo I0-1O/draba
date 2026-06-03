@@ -55,6 +55,83 @@ interface LiveSegment {
   color: string;
 }
 
+// ── Style constants ───────────────────────────────────────────────────────────
+// Defining static React.CSSProperties objects at module level avoids creating
+// new object references on every render and keeps the JSX readable.
+
+/** Invisible pointer hit zone on each resizable bar edge. */
+const EDGE_STYLE: React.CSSProperties = {
+  position: 'absolute', top: 0, height: '100%',
+  width: EDGE_W, cursor: 'ew-resize', zIndex: 2,
+};
+
+/** Full-coverage absolutely-positioned wrapper for bar overlay layers. */
+const OVERLAY_WRAPPER: React.CSSProperties = {
+  position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, pointerEvents: 'none',
+};
+const OVERLAY_INNER: React.CSSProperties = {
+  position: 'relative', height: '100%', pointerEvents: 'none',
+};
+
+// Overflow popover
+const POPOVER_HEADER: React.CSSProperties = {
+  padding: '8px 12px', borderBottom: '1px solid var(--border)',
+  fontSize: 12, fontWeight: 600, color: 'var(--foreground)',
+};
+const POPOVER_BODY: React.CSSProperties = { maxHeight: 260, overflowY: 'auto' };
+const POPOVER_ITEM_BASE: React.CSSProperties = {
+  display: 'flex', alignItems: 'center', gap: 8, width: '100%', padding: '7px 12px',
+  background: 'none', border: 'none', textAlign: 'left', cursor: 'pointer',
+  fontSize: 12, color: 'var(--foreground)', borderBottom: '1px solid var(--border)',
+};
+const POPOVER_LABEL: React.CSSProperties = {
+  flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+};
+
+// Activity bar content
+const WEEK_BAR_CONTENT: React.CSSProperties = {
+  display: 'flex', flexDirection: 'column', justifyContent: 'center',
+  padding: '4px 6px', flex: 1, minWidth: 0, overflow: 'hidden',
+  gap: 3, pointerEvents: 'none',
+};
+const WEEK_TITLE_ROW: React.CSSProperties = {
+  display: 'flex', alignItems: 'center', gap: 4, overflow: 'hidden',
+};
+const BAR_TITLE_TEXT: React.CSSProperties = {
+  fontSize: 11, fontWeight: 500, color: '#fff',
+  overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis',
+  flex: 1, minWidth: 0,
+};
+const BAR_ASSIGNEE_TEXT: React.CSSProperties = {
+  fontSize: 10, color: 'rgba(255,255,255,0.85)',
+  whiteSpace: 'nowrap', flexShrink: 0,
+  maxWidth: '45%', overflow: 'hidden', textOverflow: 'ellipsis',
+};
+const STATUS_CHIP_ROW: React.CSSProperties = { overflow: 'hidden', lineHeight: '14px' };
+const TAGS_ROW: React.CSSProperties = { display: 'flex', gap: 3, overflow: 'hidden', lineHeight: '14px' };
+const CHIP_TEXT: React.CSSProperties = { overflow: 'hidden', textOverflow: 'ellipsis' };
+
+// Week-layout day-header cell
+const WEEK_CELL_HEADER: React.CSSProperties = {
+  display: 'flex', flexDirection: 'column', alignItems: 'center',
+  justifyContent: 'center', height: WEEK_DAY_HEADER_H, gap: 2,
+  borderBottom: '1px solid var(--border)', pointerEvents: 'none',
+};
+const WEEK_DOW_LABEL: React.CSSProperties = {
+  fontSize: 11, fontWeight: 500, color: 'var(--muted-foreground)',
+  textTransform: 'uppercase', letterSpacing: '0.05em',
+};
+
+// Month-layout day-header cell
+const MONTH_DOW_ROW: React.CSSProperties = {
+  fontSize: 10, color: 'var(--muted-foreground)',
+  textAlign: 'center', paddingTop: 4, pointerEvents: 'none',
+};
+
+const ROW_RESIZE_WRAPPER: React.CSSProperties = {
+  position: 'absolute', bottom: 0, left: 0, right: 0,
+};
+
 // ── Utility ───────────────────────────────────────────────────────────────────
 
 function utcMidnight(iso: string): Date {
@@ -90,6 +167,9 @@ function DayOverflowPopover({ segments, activityById, dayDate, anchorRect, onSel
   onClose: () => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
+  // Close on any mousedown outside the popover. Capture phase fires before bar
+  // click handlers, preventing a bar click from immediately re-opening the popover
+  // on the same event that dismissed it.
   useEffect(() => {
     function onDown(e: MouseEvent) {
       if (ref.current && !ref.current.contains(e.target as Node)) onClose();
@@ -100,19 +180,19 @@ function DayOverflowPopover({ segments, activityById, dayDate, anchorRect, onSel
   const label = dayDate.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
   return (
     <div ref={ref} style={{ position: 'fixed', top: anchorRect.bottom + 4, left: Math.min(anchorRect.left, window.innerWidth - 280), width: 260, background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 8, boxShadow: '0 4px 20px rgba(0,0,0,0.2)', zIndex: 200, overflow: 'hidden' }}>
-      <div style={{ padding: '8px 12px', borderBottom: '1px solid var(--border)', fontSize: 12, fontWeight: 600, color: 'var(--foreground)' }}>{label}</div>
-      <div style={{ maxHeight: 260, overflowY: 'auto' }}>
+      <div style={POPOVER_HEADER}>{label}</div>
+      <div style={POPOVER_BODY}>
         {segments.map(seg => {
           const act = activityById.get(seg.activityId);
           if (!act) return null;
           return (
             <button key={seg.activityId} onClick={() => { onSelect(act); onClose(); }}
-              style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', padding: '7px 12px', background: 'none', border: 'none', textAlign: 'left', cursor: 'pointer', fontSize: 12, color: 'var(--foreground)', borderBottom: '1px solid var(--border)' }}
+              style={POPOVER_ITEM_BASE}
               onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
               onMouseLeave={e => (e.currentTarget.style.background = 'none')}
             >
               <span style={{ width: 10, height: 10, borderRadius: 3, background: seg.color, flexShrink: 0 }} />
-              <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{seg.title}</span>
+              <span style={POPOVER_LABEL}>{seg.title}</span>
             </button>
           );
         })}
@@ -124,7 +204,10 @@ function DayOverflowPopover({ segments, activityById, dayDate, anchorRect, onSel
 // ── CalendarBar ───────────────────────────────────────────────────────────────
 
 interface BarProps {
-  seg: CalendarSegment | LiveSegment & Pick<CalendarSegment, 'activityId' | 'lane' | 'title' | 'isMatch' | 'isActiveMatch' | 'assignedMemberIds' | 'statusName' | 'statusColor' | 'tags'>;
+  // Always a full CalendarSegment — the live-drag overlay constructs displaySeg
+  // as CalendarSegment (populating all required fields) rather than passing a
+  // raw LiveSegment, so we can keep a single concrete type here.
+  seg: CalendarSegment;
   topPx: number;
   barH: number;
   isSelected: boolean;
@@ -165,8 +248,6 @@ function CalendarBar({ seg, topPx, barH, isSelected, hasQuery, isWeekLayout, mem
     pointerEvents: 'auto',
   };
 
-  const edgeStyle: React.CSSProperties = { position: 'absolute', top: 0, height: '100%', width: EDGE_W, cursor: 'ew-resize', zIndex: 2 };
-
   return (
     <div style={style}
       onClick={e => onClick(seg.activityId, e)}
@@ -182,27 +263,23 @@ function CalendarBar({ seg, topPx, barH, isSelected, hasQuery, isWeekLayout, mem
         }
       }}
     >
-      {!seg.continuesLeft  && <div style={{ ...edgeStyle, left: 0 }} />}
-      {!seg.continuesRight && <div style={{ ...edgeStyle, right: 0, left: 'auto' }} />}
+      {!seg.continuesLeft  && <div style={{ ...EDGE_STYLE, left: 0 }} />}
+      {!seg.continuesRight && <div style={{ ...EDGE_STYLE, right: 0, left: 'auto' }} />}
 
       {isWeekLayout ? (
         /* Week view: 3-line layout — title+assignees / status / tags */
-        <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', padding: '4px 6px', flex: 1, minWidth: 0, overflow: 'hidden', gap: 3, pointerEvents: 'none' }}>
+        <div style={WEEK_BAR_CONTENT}>
           {/* Row 1: title + assignees */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 4, overflow: 'hidden' }}>
+          <div style={WEEK_TITLE_ROW}>
             {seg.continuesLeft && <span style={{ fontSize: 10, color: '#fff', flexShrink: 0 }}>◀</span>}
-            <span style={{ fontSize: 11, fontWeight: 500, color: '#fff', overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis', flex: 1, minWidth: 0 }}>
-              {seg.title}
-            </span>
+            <span style={BAR_TITLE_TEXT}>{seg.title}</span>
             {assigneeNames.length > 0 && (
-              <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.85)', whiteSpace: 'nowrap', flexShrink: 0, maxWidth: '45%', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                {assigneeNames.join(', ')}
-              </span>
+              <span style={BAR_ASSIGNEE_TEXT}>{assigneeNames.join(', ')}</span>
             )}
             {seg.continuesRight && <span style={{ fontSize: 10, color: '#fff', flexShrink: 0 }}>▶</span>}
           </div>
           {/* Row 2: status chip */}
-          <div style={{ overflow: 'hidden', lineHeight: '14px' }}>
+          <div style={STATUS_CHIP_ROW}>
             {seg.statusName ? (
               <span style={{
                 display: 'inline-flex', alignItems: 'center', gap: 3,
@@ -213,12 +290,12 @@ function CalendarBar({ seg, topPx, barH, isSelected, hasQuery, isWeekLayout, mem
                 whiteSpace: 'nowrap', maxWidth: '100%', overflow: 'hidden',
               }}>
                 <span style={{ width: 6, height: 6, borderRadius: '50%', background: seg.statusColor ?? 'rgba(255,255,255,0.7)', flexShrink: 0 }} />
-                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{seg.statusName}</span>
+                <span style={CHIP_TEXT}>{seg.statusName}</span>
               </span>
             ) : null}
           </div>
           {/* Row 3: tag chips */}
-          <div style={{ display: 'flex', gap: 3, overflow: 'hidden', lineHeight: '14px' }}>
+          <div style={TAGS_ROW}>
             {(seg.tags ?? []).slice(0, 3).map((t, i) => (
               <span key={i} style={{
                 display: 'inline-block', padding: '1px 5px', borderRadius: 3, fontSize: 10,
@@ -236,11 +313,9 @@ function CalendarBar({ seg, topPx, barH, isSelected, hasQuery, isWeekLayout, mem
         /* Month view: single-line layout */
         <>
           {seg.continuesLeft && <span style={{ fontSize: 10, color: '#fff', paddingLeft: 2, pointerEvents: 'none', flexShrink: 0 }}>◀</span>}
-          <span style={{ fontSize: 11, fontWeight: 500, color: '#fff', overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis', padding: '0 4px', pointerEvents: 'none', flex: 1, minWidth: 0 }}>
-            {seg.title}
-          </span>
+          <span style={{ ...BAR_TITLE_TEXT, padding: '0 4px', pointerEvents: 'none' }}>{seg.title}</span>
           {assigneeNames.length > 0 && (
-            <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.85)', paddingRight: 4, whiteSpace: 'nowrap', pointerEvents: 'none', flexShrink: 0, maxWidth: '45%', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+            <span style={{ ...BAR_ASSIGNEE_TEXT, paddingRight: 4, pointerEvents: 'none' }}>
               {assigneeNames.join(', ')}
             </span>
           )}
@@ -372,10 +447,8 @@ function WeekRowRenderer({
             >
               {isWeek ? (
                 /* Week view: prominent centered header */
-                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: WEEK_DAY_HEADER_H, gap: 2, borderBottom: '1px solid var(--border)', pointerEvents: 'none' }}>
-                  <span style={{ fontSize: 11, fontWeight: 500, color: 'var(--muted-foreground)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-                    {dowLabels[col]}
-                  </span>
+                <div style={WEEK_CELL_HEADER}>
+                  <span style={WEEK_DOW_LABEL}>{dowLabels[col]}</span>
                   <span style={{ fontSize: 22, fontWeight: isToday ? 700 : 400, color: isToday ? 'var(--primary)' : 'var(--foreground)', lineHeight: 1 }}>
                     {day.getUTCDate()}
                   </span>
@@ -383,9 +456,7 @@ function WeekRowRenderer({
               ) : (
                 <>
                   {isFirst && (
-                    <div style={{ fontSize: 10, color: 'var(--muted-foreground)', textAlign: 'center', paddingTop: 4, pointerEvents: 'none' }}>
-                      {dowLabels[col]}
-                    </div>
+                    <div style={MONTH_DOW_ROW}>{dowLabels[col]}</div>
                   )}
                   <div style={{ position: 'absolute', top: isFirst ? 13 : 6, right: 6, fontSize: 11, fontWeight: isToday ? 700 : 400, color: isToday ? 'var(--primary)' : 'var(--muted-foreground)', lineHeight: 1, pointerEvents: 'none' }}>
                     {day.getUTCDate()}
@@ -409,8 +480,8 @@ function WeekRowRenderer({
         const act = activityById.get(seg.activityId);
         if (!act) return null;
         return (
-          <div key={seg.activityId} style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, pointerEvents: 'none' }}>
-            <div style={{ position: 'relative', height: '100%', pointerEvents: 'none' }}>
+          <div key={seg.activityId} style={OVERLAY_WRAPPER}>
+            <div style={OVERLAY_INNER}>
               <CalendarBar
                 seg={seg}
                 topPx={dayHeaderH + seg.lane * laneSlotH}
@@ -445,8 +516,8 @@ function WeekRowRenderer({
           isActiveMatch: false,
         };
         return (
-          <div style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, pointerEvents: 'none' }}>
-            <div style={{ position: 'relative', height: '100%', pointerEvents: 'none' }}>
+          <div style={OVERLAY_WRAPPER}>
+            <div style={OVERLAY_INNER}>
               <CalendarBar
                 seg={displaySeg}
                 topPx={dayHeaderH + displaySeg.lane * laneSlotH}
@@ -465,7 +536,7 @@ function WeekRowRenderer({
 
       {/* Month resize handle */}
       {!isWeek && (
-        <div style={{ position: 'absolute', bottom: 0, left: 0, right: 0 }}>
+        <div style={ROW_RESIZE_WRAPPER}>
           <RowResizeHandle weekStart={row.weekStart} currentCap={row.visibleLaneCap} laneCount={row.laneCount} onCapDraft={onCapDraft} onCapCommit={onCapCommit} />
         </div>
       )}
@@ -618,6 +689,10 @@ export default function CalendarGrid({
       document.removeEventListener('pointermove', onPointerMove);
       document.removeEventListener('pointerup', onPointerUp);
     };
+  // Depend only on activityId + type, not the full dragState object — currentStart/currentEnd
+  // update on every pointermove frame, which would thrash listener registration if included.
+  // All callbacks are accessed via refs (onBarDragCommitRef etc.) so closures stay fresh
+  // without being listed as deps.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dragState?.activityId, dragState?.type]);
 
