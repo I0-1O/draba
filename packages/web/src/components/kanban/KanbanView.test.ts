@@ -9,8 +9,6 @@ import {
   sortActivities,
   NO_STATUS_ID,
   UNASSIGNED_ID,
-  NO_PARENT_ID,
-  NONE_COLUMN_ID,
   type KanbanGroupBy,
 } from './kanbanColumns';
 import type { components } from '@draba/shared';
@@ -214,57 +212,12 @@ describe('buildColumns: member-combination', () => {
   });
 });
 
-// ── buildColumns — parent ──────────────────────────────────────────────────────
-
-describe('buildColumns: parent', () => {
-  it('creates No-parent column first, then parent columns sorted A-Z', () => {
-    const acts = [
-      makeActivity({ id: 'p1', title: 'Zephyr', parentActivityId: null }),
-      makeActivity({ id: 'p2', title: 'Alpha milestone', parentActivityId: null }),
-      makeActivity({ id: 'c1', parentActivityId: 'p1' }),
-      makeActivity({ id: 'c2', parentActivityId: 'p2' }),
-    ];
-    const cols = buildColumns('parent', acts, [], [], 'startDate');
-    expect(cols[0].id).toBe(NO_PARENT_ID);
-    // Parent columns should be sorted A-Z by parent title
-    const parentCols = cols.slice(1);
-    const labels = parentCols.map(c => c.label);
-    expect(labels).toEqual([...labels].sort((a, b) => a.localeCompare(b)));
-  });
-
-  it('dropValue sets parentActivityId to the parent ID or null', () => {
-    const acts = [
-      makeActivity({ id: 'p', parentActivityId: null }),
-      makeActivity({ id: 'c', parentActivityId: 'p' }),
-    ];
-    const cols = buildColumns('parent', acts, [], [], 'startDate');
-    expect(cols.find(c => c.id === NO_PARENT_ID)!.dropValue).toEqual({ parentActivityId: null });
-    expect(cols.find(c => c.id === 'p')!.dropValue).toEqual({ parentActivityId: 'p' });
-  });
-});
-
-// ── buildColumns — none ────────────────────────────────────────────────────────
-
-describe('buildColumns: none', () => {
-  it('produces a single All activities column that is non-droppable', () => {
-    const acts = [
-      makeActivity({ id: 'a' }),
-      makeActivity({ id: 'b' }),
-    ];
-    const cols = buildColumns('none', acts, [], [], 'startDate');
-    expect(cols).toHaveLength(1);
-    expect(cols[0].id).toBe(NONE_COLUMN_ID);
-    expect(cols[0].droppable).toBe(false);
-    expect(cols[0].items).toHaveLength(2);
-  });
-});
-
 // ── empty activities ───────────────────────────────────────────────────────────
 
 describe('buildColumns with no activities', () => {
   const emptyActs: ApiActivity[] = [];
 
-  (['status', 'member', 'member-combination', 'parent', 'none'] as KanbanGroupBy[]).forEach(mode => {
+  (['status', 'member', 'member-combination'] as KanbanGroupBy[]).forEach(mode => {
     it(`${mode} groupBy produces columns without throwing`, () => {
       expect(() =>
         buildColumns(mode, emptyActs, members, statuses, 'startDate'),

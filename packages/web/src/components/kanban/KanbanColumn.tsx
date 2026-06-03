@@ -3,6 +3,11 @@
  *
  * Uses @dnd-kit useDroppable. When the column is non-droppable (combination/none grouping),
  * the drop-target is simply not registered and DnD events are ignored.
+ *
+ * Hierarchy: when showHierarchy is on, CardTree renders each root activity plus
+ * its descendants indented beneath it. CardTree is defined at module level (outside
+ * KanbanColumn) to give it a stable identity across re-renders — defining a component
+ * inside another component causes React to unmount/remount the subtree on every render.
  */
 
 import { useDroppable } from '@dnd-kit/core';
@@ -17,6 +22,117 @@ type ApiActivity = components['schemas']['Activity'];
 type Status = components['schemas']['Status'];
 type Tag = components['schemas']['Tag'];
 
+// ── CardTree ──────────────────────────────────────────────────────────────────
+
+/**
+ * Renders one activity card and, when hierarchy is on, its children indented
+ * beneath it (recursively). Defined at module level so React gives it a stable
+ * component identity and doesn't unmount/remount on every KanbanColumn render.
+ */
+interface CardTreeProps {
+  activity: ApiActivity;
+  depth: number;
+  // Column rendering context
+  accentColor: string;
+  colorMap: Map<string, string>;
+  members: Member[];
+  statusById: Map<string, Status>;
+  tagById: Map<string, Tag>;
+  activityTitleById: Map<string, string>;
+  cardFields: KanbanCardField[];
+  suppressedFields: Set<KanbanCardField>;
+  selectedActivityId: string | null;
+  matchedIds: Set<string>;
+  activeMatchId: string | null;
+  hasQuery: boolean;
+  onCardClick: (activity: ApiActivity) => void;
+  // Hierarchy context
+  showHierarchy: boolean;
+  childrenByParentId: Map<string, ApiActivity[]>;
+  collapsedParents: Set<string>;
+  onToggleParent: (activityId: string) => void;
+}
+
+function CardTree({
+  activity,
+  depth,
+  accentColor,
+  colorMap,
+  members,
+  statusById,
+  tagById,
+  activityTitleById,
+  cardFields,
+  suppressedFields,
+  selectedActivityId,
+  matchedIds,
+  activeMatchId,
+  hasQuery,
+  onCardClick,
+  showHierarchy,
+  childrenByParentId,
+  collapsedParents,
+  onToggleParent,
+}: CardTreeProps) {
+  const children = showHierarchy ? (childrenByParentId.get(activity.id) ?? []) : [];
+  const hasChildren = children.length > 0;
+  const isCollapsed = collapsedParents.has(activity.id);
+  const indentPx = Math.min(depth, 2) * 16;
+
+  const cardTreeProps = {
+    accentColor,
+    colorMap,
+    members,
+    statusById,
+    tagById,
+    activityTitleById,
+    cardFields,
+    suppressedFields,
+    selectedActivityId,
+    matchedIds,
+    activeMatchId,
+    hasQuery,
+    onCardClick,
+    showHierarchy,
+    childrenByParentId,
+    collapsedParents,
+    onToggleParent,
+  };
+
+  return (
+    <>
+      <div style={depth > 0 ? { paddingLeft: indentPx } : undefined}>
+        <KanbanCard
+          activity={activity}
+          accentColor={colorMap.get(activity.id) ?? accentColor}
+          members={members}
+          statusById={statusById}
+          tagById={tagById}
+          activityTitleById={activityTitleById}
+          cardFields={cardFields}
+          suppressedFields={suppressedFields}
+          isSelected={selectedActivityId === activity.id}
+          dimmed={hasQuery && !matchedIds.has(activity.id)}
+          activeMatch={activeMatchId === activity.id}
+          isChildCard={depth > 0}
+          hasHierarchyChildren={hasChildren}
+          isHierarchyCollapsed={isCollapsed}
+          onToggleHierarchy={() => onToggleParent(activity.id)}
+          onClick={() => onCardClick(activity)}
+        />
+      </div>
+      {hasChildren && !isCollapsed && children.map(child => (
+        <CardTree
+          key={child.id}
+          activity={child}
+          depth={depth + 1}
+          {...cardTreeProps}
+        />
+      ))}
+    </>
+  );
+}
+
 interface Props {
   column: Column;
   members: Member[];
@@ -24,6 +140,8 @@ interface Props {
   tagById: Map<string, Tag>;
   /** Per-activity resolved hex color for card accent borders. */
   colorMap: Map<string, string>;
+  /** Activity ID → title, for showing the parent name on child cards. */
+  activityTitleById: Map<string, string>;
   cardFields: KanbanCardField[];
   suppressedFields: Set<KanbanCardField>;
   selectedActivityId: string | null;
@@ -35,6 +153,13 @@ interface Props {
   onToggleCollapse: () => void;
   onCardClick: (activity: ApiActivity) => void;
   onAddClick: () => void;
+  // ── Hierarchy ────────────────────────────────────────────────────────────────
+  showHierarchy: boolean;
+  /** Maps parentActivityId → direct child activities. */
+  childrenByParentId: Map<string, ApiActivity[]>;
+  /** Set of parent activity IDs whose children are hidden. */
+  collapsedParents: Set<string>;
+  onToggleParent: (activityId: string) => void;
 }
 
 const COLUMN_WIDTH = 260;
@@ -46,6 +171,7 @@ export default function KanbanColumn({
   statusById,
   tagById,
   colorMap,
+  activityTitleById,
   cardFields,
   suppressedFields,
   selectedActivityId,
@@ -57,6 +183,10 @@ export default function KanbanColumn({
   onToggleCollapse,
   onCardClick,
   onAddClick,
+  showHierarchy,
+  childrenByParentId,
+  collapsedParents,
+  onToggleParent,
 }: Props) {
   const { setNodeRef, isOver: dndIsOver } = useDroppable({
     id: column.id,
@@ -69,6 +199,27 @@ export default function KanbanColumn({
     : '#6b7280';
 
   const highlighted = isOver || dndIsOver;
+
+  // Shared props forwarded to each CardTree node.
+  const treeProps = {
+    accentColor,
+    colorMap,
+    members,
+    statusById,
+    tagById,
+    activityTitleById,
+    cardFields,
+    suppressedFields,
+    selectedActivityId,
+    matchedIds,
+    activeMatchId,
+    hasQuery,
+    onCardClick,
+    showHierarchy,
+    childrenByParentId,
+    collapsedParents,
+    onToggleParent,
+  };
 
   if (isCollapsed) {
     return (
@@ -225,19 +376,11 @@ export default function KanbanColumn({
           </div>
         ) : (
           column.items.map(act => (
-            <KanbanCard
+            <CardTree
               key={act.id}
               activity={act}
-              accentColor={colorMap.get(act.id) ?? accentColor}
-              members={members}
-              statusById={statusById}
-              tagById={tagById}
-              cardFields={cardFields}
-              suppressedFields={suppressedFields}
-              isSelected={selectedActivityId === act.id}
-              dimmed={hasQuery && !matchedIds.has(act.id)}
-              activeMatch={activeMatchId === act.id}
-              onClick={() => onCardClick(act)}
+              depth={0}
+              {...treeProps}
             />
           ))
         )}

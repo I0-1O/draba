@@ -6,7 +6,7 @@
  */
 
 import { useState, useRef, useEffect } from 'react';
-import { Download, Share2, ChevronDown, Check } from 'lucide-react';
+import { Download, Share2, ChevronDown, Check, Network } from 'lucide-react';
 import type { ColorBy } from '@/components/gantt/GanttToolbar';
 import type { KanbanGroupBy, KanbanSortBy, KanbanCardField } from './kanbanColumns';
 import { DEFAULT_CARD_FIELDS } from './kanbanColumns';
@@ -22,6 +22,8 @@ interface Props {
   onColorByChange: (c: ColorBy) => void;
   cardFields: KanbanCardField[];
   onCardFieldsChange: (fields: KanbanCardField[]) => void;
+  showHierarchy: boolean;
+  onShowHierarchyChange: (on: boolean) => void;
   onExport?: () => void;
   onShare?: () => void;
 }
@@ -50,6 +52,8 @@ export default function KanbanToolbar({
   onColorByChange,
   cardFields,
   onCardFieldsChange,
+  showHierarchy,
+  onShowHierarchyChange,
   onExport,
   onShare,
 }: Props) {
@@ -99,9 +103,7 @@ export default function KanbanToolbar({
       >
         <option value="status">Status</option>
         <option value="member">Assigned to</option>
-        <option value="member-combination">Assigned to (combination)</option>
-        <option value="parent">Parent</option>
-        <option value="none">None</option>
+        <option value="member-combination">Assigned to (combo)</option>
       </select>
 
       <div className={divider} />
@@ -241,6 +243,25 @@ export default function KanbanToolbar({
           </div>
         )}
       </div>
+
+      <div className={divider} />
+
+      {/* Hierarchy toggle */}
+      <button
+        className={btn}
+        onClick={() => onShowHierarchyChange(!showHierarchy)}
+        title={showHierarchy
+          ? 'Hierarchy on: child activities nest under their parent. Click to show flat list.'
+          : 'Hierarchy off: all activities shown at top level. Click to nest children under parents.'}
+        style={{
+          background: showHierarchy ? 'var(--primary)' : undefined,
+          color: showHierarchy ? 'var(--primary-foreground)' : undefined,
+          borderColor: showHierarchy ? 'var(--primary)' : undefined,
+        }}
+      >
+        <Network size={12} strokeWidth={1.8} />
+        Hierarchy
+      </button>
 
       {/* Stubs — pushed to the right */}
       <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>

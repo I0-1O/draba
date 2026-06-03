@@ -24,9 +24,7 @@ type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
 export type KanbanGroupBy =
   | 'status'
   | 'member'
-  | 'member-combination'
-  | 'parent'
-  | 'none';
+  | 'member-combination';
 
 export type KanbanSortBy =
   | 'startDate'
@@ -52,10 +50,8 @@ export const DEFAULT_CARD_FIELDS: KanbanCardField[] = [
 ];
 
 /** Sentinel IDs for "bucket with no value" columns. */
-export const NO_STATUS_ID   = '__no-status__';
-export const UNASSIGNED_ID  = '__unassigned__';
-export const NO_PARENT_ID   = '__no-parent__';
-export const NONE_COLUMN_ID = '__all__';
+export const NO_STATUS_ID  = '__no-status__';
+export const UNASSIGNED_ID = '__unassigned__';
 
 /**
  * A resolved column, ready for rendering.
@@ -146,11 +142,9 @@ export function buildColumns(
   sortBy: KanbanSortBy,
 ): KanbanColumn[] {
   switch (groupBy) {
-    case 'status':    return buildStatusColumns(activities, statuses, sortBy);
-    case 'member':    return buildMemberColumns(activities, members, sortBy);
+    case 'status':             return buildStatusColumns(activities, statuses, sortBy);
+    case 'member':             return buildMemberColumns(activities, members, sortBy);
     case 'member-combination': return buildCombinationColumns(activities, members, sortBy);
-    case 'parent':    return buildParentColumns(activities, sortBy);
-    case 'none':      return buildNoneColumn(activities, sortBy);
   }
 }
 
@@ -275,61 +269,3 @@ function buildCombinationColumns(
   });
 }
 
-// ── Parent columns ─────────────────────────────────────────────────────────────
-
-function buildParentColumns(
-  activities: ApiActivity[],
-  sortBy: KanbanSortBy,
-): KanbanColumn[] {
-  // Build a title-lookup map from activity ID.
-  const titleById = new Map(activities.map(a => [a.id, a.title]));
-
-  const byParent = new Map<string | null, ApiActivity[]>();
-  byParent.set(null, []);
-  for (const act of activities) {
-    const pid = (act as ApiActivity & { parentActivityId?: string | null }).parentActivityId ?? null;
-    if (pid !== null && !byParent.has(pid)) byParent.set(pid, []);
-    const bucket = byParent.get(pid) ?? byParent.get(null)!;
-    bucket.push(act);
-  }
-
-  // Parent columns sorted A–Z by parent title.
-  const parentIds = [...byParent.keys()]
-    .filter((k): k is string => k !== null)
-    .sort((a, b) => (titleById.get(a) ?? '').localeCompare(titleById.get(b) ?? ''));
-
-  const parentCols: KanbanColumn[] = parentIds.map(pid => ({
-    id: pid,
-    label: titleById.get(pid) ?? 'Unknown',
-    droppable: true,
-    dropValue: { parentActivityId: pid },
-    items: sortActivities(byParent.get(pid) ?? [], sortBy),
-  }));
-
-  return [
-    {
-      id: NO_PARENT_ID,
-      label: 'No parent',
-      droppable: true,
-      dropValue: { parentActivityId: null },
-      items: sortActivities(byParent.get(null) ?? [], sortBy),
-    },
-    ...parentCols,
-  ];
-}
-
-// ── None column ────────────────────────────────────────────────────────────────
-
-function buildNoneColumn(
-  activities: ApiActivity[],
-  sortBy: KanbanSortBy,
-): KanbanColumn[] {
-  return [
-    {
-      id: NONE_COLUMN_ID,
-      label: 'All activities',
-      droppable: false,
-      items: sortActivities(activities, sortBy),
-    },
-  ];
-}

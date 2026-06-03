@@ -48,6 +48,13 @@ interface Props {
   onDrop: (payload: DropPayload) => void;
   /** Map of activity ID → ApiActivity for drag overlay lookup. */
   activityById: Map<string, ApiActivity>;
+  /** Map of activity ID → title, for showing parent names on child cards. */
+  activityTitleById: Map<string, string>;
+  // ── Hierarchy ────────────────────────────────────────────────────────────────
+  showHierarchy: boolean;
+  childrenByParentId: Map<string, ApiActivity[]>;
+  collapsedParents: Set<string>;
+  onToggleParent: (activityId: string) => void;
 }
 
 export default function KanbanBoard({
@@ -59,6 +66,10 @@ export default function KanbanBoard({
   colorMap,
   cardFields,
   suppressedFields,
+  showHierarchy,
+  childrenByParentId,
+  collapsedParents,
+  onToggleParent,
   selectedActivityId,
   matchedIds,
   activeMatchId,
@@ -69,6 +80,7 @@ export default function KanbanBoard({
   onAddInColumn,
   onDrop,
   activityById,
+  activityTitleById,
 }: Props) {
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [overColumnId, setOverColumnId] = useState<string | null>(null);
@@ -108,10 +120,6 @@ export default function KanbanBoard({
           const primary = activity.assignedMemberIds?.[0] ?? null;
           const target = column.dropValue.assignedMemberIds?.[0] ?? null;
           return primary === target;
-        }
-        case 'parent': {
-          const current = (activity as ApiActivity & { parentActivityId?: string | null }).parentActivityId ?? null;
-          return current === (column.dropValue.parentActivityId ?? null);
         }
         default:
           return false;
@@ -157,8 +165,13 @@ export default function KanbanBoard({
             statusById={statusById}
             tagById={tagById}
             colorMap={colorMap}
+            activityTitleById={activityTitleById}
             cardFields={cardFields}
             suppressedFields={suppressedFields}
+            showHierarchy={showHierarchy}
+            childrenByParentId={childrenByParentId}
+            collapsedParents={collapsedParents}
+            onToggleParent={onToggleParent}
             selectedActivityId={selectedActivityId}
             matchedIds={matchedIds}
             activeMatchId={activeMatchId}

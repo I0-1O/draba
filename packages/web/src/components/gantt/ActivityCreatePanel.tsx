@@ -1,40 +1,37 @@
 /**
  * ActivityCreatePanel — right-side slide-in panel for creating a new Gantt activity.
  *
+ * Shares its field stack with ActivityDetailPanel via ActivityFieldsBody
+ * (see activityPanelFields.tsx) so the create and edit forms show an identical
+ * field set and order. Unlike the detail panel, every change buffers in local
+ * state; nothing persists until the user clicks "Create activity", which
+ * submits the whole form via POST /timelines/:id/activities.
+ *
  * Defaults come from the drag selection: start/end date and the lane member.
- * Submits via POST /timelines/:id/activities.
  */
 
 import { useState, useEffect } from 'react'
-import { X, ArrowRight, Loader2 } from 'lucide-react'
-import MemberAvatar from '@/components/MemberAvatar'
-import { IdentityWidget } from '@/components/identity/IdentityWidget'
+import { X, Loader2 } from 'lucide-react'
 import type { Identity } from '@/components/identity/identity-constants'
-import { useCreateActivity } from '@/hooks/useTeamActivities'
+import { useCreateActivity, useTimelineActivities } from '@/hooks/useTeamActivities'
 import { useTags } from '@/hooks/useTags'
-import TagInput from '@/components/TagInput'
 import type { Member } from '@/types'
+import type { components } from '@draba/shared'
+import { ActivityFieldsBody, PANEL_WIDTH } from './activityPanelFields'
 
-const PANEL_WIDTH = 300
+type Status = components['schemas']['Status']
 
 interface Props {
   open: boolean
   teamId: string
   timelineId: string
   members: Member[]
+  timelineStatuses?: Status[]
   defaultStart: string
   defaultEnd: string
   defaultMemberId?: string | null
+  defaultStatusId?: string | null
   onClose: () => void
-}
-
-const LABEL: React.CSSProperties = {
-  fontSize: 10,
-  fontWeight: 600,
-  color: 'var(--muted-foreground)',
-  textTransform: 'uppercase',
-  letterSpacing: '0.07em',
-  marginBottom: 4,
 }
 
 export default function ActivityCreatePanel({
@@ -42,23 +39,32 @@ export default function ActivityCreatePanel({
   teamId,
   timelineId,
   members,
+  timelineStatuses = [],
   defaultStart,
   defaultEnd,
   defaultMemberId,
+  defaultStatusId,
   onClose,
 }: Props) {
   const createMutation = useCreateActivity(teamId, timelineId)
   const { data: teamTags = [] } = useTags(teamId)
+  const { data: allActivities = [] } = useTimelineActivities(teamId, timelineId)
 
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
+  const [notes, setNotes] = useState('')
   const [startDate, setStartDate] = useState(defaultStart)
   const [endDate, setEndDate] = useState(defaultEnd)
   const [identity, setIdentity] = useState<Identity>({ color: '#288C9B', icon: '__none__' })
   const [assignedIds, setAssignedIds] = useState<string[]>(
     defaultMemberId ? [defaultMemberId] : [],
   )
+  const [statusId, setStatusId] = useState<string | null>(defaultStatusId ?? null)
   const [tagIds, setTagIds] = useState<string[]>([])
+  const [parentId, setParentId] = useState<string | null>(null)
+  const [progress, setProgress] = useState(0)
+  const [location, setLocation] = useState('')
+  const [url, setUrl] = useState('')
 
   // Reset all fields to defaults each time the panel opens so re-opening
   // the panel always shows a blank form rather than the previous session's data.
@@ -66,11 +72,17 @@ export default function ActivityCreatePanel({
     if (!open) return
     setTitle('')
     setDescription('')
+    setNotes('')
     setStartDate(defaultStart)
     setEndDate(defaultEnd)
     setIdentity({ color: '#288C9B', icon: '__none__' })
     setAssignedIds(defaultMemberId ? [defaultMemberId] : [])
+    setStatusId(defaultStatusId ?? null)
     setTagIds([])
+    setParentId(null)
+    setProgress(0)
+    setLocation('')
+    setUrl('')
   }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const creating = createMutation.isPending
@@ -82,6 +94,12 @@ export default function ActivityCreatePanel({
     )
   }
 
+  // Keep the end date from drifting before the start date.
+  function handleStartDateChange(val: string) {
+    setStartDate(val)
+    if (val > endDate) setEndDate(val)
+  }
+
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
     if (!titleTrimmed) return
@@ -91,10 +109,16 @@ export default function ActivityCreatePanel({
         startAt: `${startDate}T00:00:00Z`,
         endAt: `${endDate}T00:00:00Z`,
         description: description.trim() || null,
+        notes: notes.trim() || null,
         color: identity.color,
         icon: identity.icon,
         assignedMemberIds: assignedIds,
+        statusId: statusId ?? undefined,
         tagIds,
+        parentActivityId: parentId,
+        percentComplete: progress,
+        location: location.trim() || null,
+        url: url.trim() || null,
       },
       { onSuccess: onClose },
     )
@@ -141,142 +165,48 @@ export default function ActivityCreatePanel({
         </button>
       </div>
 
-      {/* Form */}
-      <form onSubmit={handleSubmit} style={{ flex: 1, overflowY: 'auto', padding: 14, display: 'flex', flexDirection: 'column', gap: 14 }}>
-
-        {/* Identity + Title — mirrors the modal header pattern: badge on left, editable name on right */}
-        <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
-          <div style={{ marginTop: 2, flexShrink: 0 }}>
-            <IdentityWidget
-              identity={identity}
-              name={title || 'New Activity'}
-              shape="square"
-              onChange={setIdentity}
-            />
-          </div>
-          <input
-            autoFocus
-            value={title}
-            onChange={e => setTitle(e.target.value)}
-            placeholder="Activity title…"
-            style={{
-              flex: 1, fontSize: 13, fontWeight: 600,
-              color: 'var(--foreground)', border: '1px solid transparent',
-              borderRadius: 'var(--radius-md)', padding: '5px 6px',
-              outline: 'none', background: 'transparent', fontFamily: 'var(--font-sans)',
-            }}
-            onFocus={e => { e.target.style.borderColor = 'var(--primary)'; e.target.style.background = 'var(--background)' }}
-            onBlur={e => { e.target.style.borderColor = 'transparent'; e.target.style.background = 'transparent' }}
-          />
-        </div>
-
-        {/* Date range */}
-        <div>
-          <div style={LABEL}>Date range</div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            <input
-              type="date"
-              value={startDate}
-              onChange={e => {
-                setStartDate(e.target.value)
-                if (e.target.value > endDate) setEndDate(e.target.value)
-              }}
-              style={{
-                flex: 1, fontSize: 12, color: 'var(--foreground)',
-                border: '1px solid var(--border)', borderRadius: 'var(--radius-md)',
-                padding: '6px 8px', outline: 'none', background: 'var(--background)',
-                fontFamily: 'var(--font-sans)', cursor: 'pointer',
-              }}
-            />
-            <ArrowRight size={11} color="var(--muted-foreground)" strokeWidth={2} style={{ flexShrink: 0 }} />
-            <input
-              type="date"
-              value={endDate}
-              min={startDate}
-              onChange={e => setEndDate(e.target.value)}
-              style={{
-                flex: 1, fontSize: 12, color: 'var(--foreground)',
-                border: '1px solid var(--border)', borderRadius: 'var(--radius-md)',
-                padding: '6px 8px', outline: 'none', background: 'var(--background)',
-                fontFamily: 'var(--font-sans)', cursor: 'pointer',
-              }}
-            />
-          </div>
-        </div>
-
-        {/* Description */}
-        <div>
-          <div style={LABEL}>Description</div>
-          <input
-            value={description}
-            onChange={e => setDescription(e.target.value)}
-            placeholder="Optional description…"
-            style={{
-              width: '100%', boxSizing: 'border-box',
-              fontSize: 12, color: 'var(--foreground)',
-              border: '1px solid var(--border)', borderRadius: 'var(--radius-md)',
-              padding: '6px 8px', outline: 'none', background: 'var(--background)',
-              fontFamily: 'var(--font-sans)',
-            }}
-            onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
-            onBlur={e => (e.target.style.borderColor = 'var(--border)')}
-          />
-        </div>
-
-        {/* Assignees */}
-        {members.length > 0 && (
-          <div>
-            <div style={LABEL}>Assignees</div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-              {members.map(m => {
-                const assigned = assignedIds.includes(m.id)
-                return (
-                  <button
-                    key={m.id}
-                    type="button"
-                    onClick={() => toggleAssignee(m.id)}
-                    style={{
-                      display: 'flex', alignItems: 'center', gap: 8,
-                      padding: '5px 8px',
-                      border: assigned ? `1px solid ${m.color}` : '1px solid var(--border)',
-                      borderRadius: 'var(--radius-md)',
-                      background: assigned ? `${m.color}18` : 'var(--background)',
-                      cursor: 'pointer', textAlign: 'left',
-                      transition: 'background 0.1s, border-color 0.1s',
-                    }}
-                  >
-                    <MemberAvatar member={m} size={18} />
-                    <span style={{ fontSize: 12, color: 'var(--foreground)', flex: 1 }}>{m.name}</span>
-                    {assigned && (
-                      <div style={{ width: 6, height: 6, borderRadius: '50%', background: m.color, flexShrink: 0 }} />
-                    )}
-                  </button>
-                )
-              })}
-            </div>
-          </div>
-        )}
-
-        {/* Tags */}
-        <div>
-          <div style={LABEL}>Tags</div>
-          <TagInput
-            teamId={teamId}
-            tags={teamTags}
-            selectedTagIds={tagIds}
-            onChange={setTagIds}
-          />
-        </div>
-
-        {/* Spacer pushes submit to bottom */}
-        <div style={{ flex: 1 }} />
-      </form>
+      {/* Body (shared with detail panel) */}
+      <ActivityFieldsBody
+        identity={identity}
+        onIdentityChange={setIdentity}
+        title={title}
+        onTitleChange={setTitle}
+        titlePlaceholder="Activity title…"
+        titleAutoFocus
+        titleFallbackName="New Activity"
+        startDate={startDate}
+        endDate={endDate}
+        onStartDateChange={handleStartDateChange}
+        onEndDateChange={setEndDate}
+        description={description}
+        onDescriptionChange={setDescription}
+        members={members}
+        assignedIds={assignedIds}
+        onToggleAssignee={toggleAssignee}
+        statuses={timelineStatuses}
+        statusId={statusId}
+        onStatusChange={setStatusId}
+        teamId={teamId}
+        teamTags={teamTags}
+        tagIds={tagIds}
+        onTagsChange={setTagIds}
+        parentActivities={allActivities}
+        parentId={parentId}
+        onParentChange={setParentId}
+        progress={progress}
+        onProgressCommit={setProgress}
+        location={location}
+        onLocationChange={setLocation}
+        url={url}
+        onUrlChange={setUrl}
+        notes={notes}
+        onNotesChange={setNotes}
+      />
 
       {/* Footer */}
       <div style={{ padding: '10px 14px', borderTop: '1px solid var(--border)', flexShrink: 0 }}>
         <button
-          type="submit"
-          form=""
+          type="button"
           onClick={handleSubmit}
           disabled={!titleTrimmed || creating}
           style={{

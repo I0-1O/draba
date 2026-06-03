@@ -77,7 +77,7 @@ function DashboardShell() {
   const [selectedActivityId, setSelectedActivityId] = useState<string | null>(null)
   const [selectedApiActivity, setSelectedApiActivity] = useState<ApiActivity | null>(null)
   const [ganttMembers, setGanttMembers] = useState<Member[]>([])
-  const [createDefaults, setCreateDefaults] = useState<{ start: string; end: string; memberId: string | null } | null>(null)
+  const [createDefaults, setCreateDefaults] = useState<{ start: string; end: string; memberId: string | null; statusId?: string | null } | null>(null)
   const [filterModalOpen, setFilterModalOpen] = useState(false)
   const [liveDragDates, setLiveDragDates] = useState<{ activityId: string; start: string; end: string } | null>(null)
   // Gantt toolbar state
@@ -108,6 +108,7 @@ function DashboardShell() {
   const [kanbanSortBy, setKanbanSortBy] = useState<KanbanSortBy>('startDate')
   const [kanbanCardFields, setKanbanCardFields] = useState<KanbanCardField[]>(DEFAULT_CARD_FIELDS)
   const [kanbanCollapsedColumns, setKanbanCollapsedColumns] = useState<string[]>([])
+  const [kanbanShowHierarchy, setKanbanShowHierarchy] = useState(false)
   // Incremented to trigger inline row creation in list view
   const [listNewRowSeq, setListNewRowSeq] = useState(0)
   const profileRef = useRef<HTMLDivElement>(null)
@@ -346,6 +347,9 @@ function DashboardShell() {
     if (typeof timelinePrefs['kanban_collapsed'] === 'string') {
       try { setKanbanCollapsedColumns(JSON.parse(timelinePrefs['kanban_collapsed']) as string[]) } catch { /* ignore */ }
     }
+    if (typeof timelinePrefs['kanban_show_hierarchy'] === 'string') {
+      try { setKanbanShowHierarchy(JSON.parse(timelinePrefs['kanban_show_hierarchy']) as boolean) } catch { /* ignore */ }
+    }
   }, [activeTimelineId, prefsSettled, timelinePrefs])
 
   // Save toolbar state changes to per-timeline prefs.
@@ -418,6 +422,11 @@ function DashboardShell() {
     if (prefsAppliedForTimeline.current !== activeTimelineId) return
     saveTimelinePref('kanban_card_fields', JSON.stringify(kanbanCardFields))
   }, [kanbanCardFields, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('kanban_show_hierarchy', JSON.stringify(kanbanShowHierarchy))
+  }, [kanbanShowHierarchy, saveTimelinePref])
 
   // Global preferences: persist dark mode, active team, and active timeline.
   useEffect(() => {
@@ -619,6 +628,8 @@ function DashboardShell() {
             onColorByChange={setColorBy}
             cardFields={kanbanCardFields}
             onCardFieldsChange={setKanbanCardFields}
+            showHierarchy={kanbanShowHierarchy}
+            onShowHierarchyChange={setKanbanShowHierarchy}
             onExport={() => {}}
             onShare={() => {}}
           />
@@ -742,6 +753,7 @@ function DashboardShell() {
               cardFields={kanbanCardFields}
               collapsedColumnIds={kanbanCollapsedColumns}
               onCollapsedColumnIdsChange={setKanbanCollapsedColumns}
+              showHierarchy={kanbanShowHierarchy}
               timelineStatuses={activeTimelineStatuses}
               savedFilters={savedFilters}
               tags={tags}
@@ -793,9 +805,11 @@ function DashboardShell() {
         teamId={teamId}
         timelineId={activeTimelineId ?? ''}
         members={ganttMembers}
+        timelineStatuses={activeTimelineStatuses}
         defaultStart={createDefaults?.start ?? new Date().toISOString().slice(0, 10)}
         defaultEnd={createDefaults?.end ?? new Date().toISOString().slice(0, 10)}
         defaultMemberId={createDefaults?.memberId}
+        defaultStatusId={createDefaults?.statusId}
         onClose={() => setCreateDefaults(null)}
       />
 

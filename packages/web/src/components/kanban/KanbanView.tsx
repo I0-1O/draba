@@ -7,7 +7,7 @@
  * come from DashboardPage.
  */
 
-import { useMemo, useEffect, useCallback } from 'react';
+import { useMemo, useEffect, useCallback, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import KanbanBoard from './KanbanBoard';
 import {
@@ -64,6 +64,8 @@ interface Props {
   cardFields: KanbanCardField[];
   collapsedColumnIds: string[];
   onCollapsedColumnIdsChange: (ids: string[]) => void;
+  /** When true, child activities nest beneath their parent in the parent's column. */
+  showHierarchy: boolean;
   timelineStatuses?: Status[];
   savedFilters?: SavedFilter[];
   tags?: Tag[];
@@ -71,7 +73,7 @@ interface Props {
   onSelectActivity?: (id: string | null) => void;
   onSelectApiActivity?: (activity: ApiActivity | null) => void;
   /** Called when "+ Add" is clicked in a column; provides pre-fill context. */
-  onAddActivity?: (defaults: { start: string; end: string; memberId: string | null }) => void;
+  onAddActivity?: (defaults: { start: string; end: string; memberId: string | null; statusId?: string | null }) => void;
   onMembersLoaded?: (members: Member[]) => void;
 }
 
@@ -86,6 +88,7 @@ export default function KanbanView({
   cardFields,
   collapsedColumnIds,
   onCollapsedColumnIdsChange,
+  showHierarchy,
   timelineStatuses,
   savedFilters,
   tags,
@@ -180,21 +183,86 @@ export default function KanbanView({
     return map;
   }, [visibleActivities, memberById, colorBy, statusColorById]);
 
+  // ── Hierarchy ────────────────────────────────────────────────────────────────
+
+  /**
+   * When hierarchy is on, build a parentId → direct-children map.
+   * Only includes children whose parent is also in the visible set (so orphaned
+   * children — whose parent is filtered out — still appear as roots).
+   */
+  const childrenByParentId = useMemo<Map<string, ApiActivity[]>>(() => {
+    if (!showHierarchy) return new Map();
+    const visibleIds = new Set(visibleActivities.map(a => a.id));
+    const map = new Map<string, ApiActivity[]>();
+    for (const act of visibleActivities) {
+      const pid = (act as ApiActivity & { parentActivityId?: string | null }).parentActivityId ?? null;
+      if (pid && visibleIds.has(pid)) {
+        if (!map.has(pid)) map.set(pid, []);
+        map.get(pid)!.push(act);
+      }
+    }
+    return map;
+  }, [visibleActivities, showHierarchy]);
+
+  /**
+   * IDs of activities that are children of another visible activity.
+   * When hierarchy is on, these are excluded from column items so they
+   * don't also appear as top-level cards.
+   */
+  const childIds = useMemo<Set<string>>(() => {
+    if (!showHierarchy) return new Set();
+    const s = new Set<string>();
+    childrenByParentId.forEach(children => children.forEach(c => s.add(c.id)));
+    return s;
+  }, [childrenByParentId, showHierarchy]);
+
+  /**
+   * Activities used for column building.
+   * When hierarchy is on, only root activities (not nested children) get a
+   * column slot — children are rendered under their parent by KanbanColumn.
+   */
+  const columnActivities = useMemo(
+    () => showHierarchy
+      ? visibleActivities.filter(a => !childIds.has(a.id))
+      : visibleActivities,
+    [visibleActivities, showHierarchy, childIds],
+  );
+
+  /** Per-parent collapse state — ephemeral (not persisted). Starts fully expanded. */
+  const [collapsedParents, setCollapsedParents] = useState<Set<string>>(new Set());
+
+  const handleToggleParent = useCallback((activityId: string) => {
+    setCollapsedParents(prev => {
+      const next = new Set(prev);
+      if (next.has(activityId)) next.delete(activityId);
+      else next.add(activityId);
+      return next;
+    });
+  }, []);
+
   // Build columns.
   const columns = useMemo(
     () => buildColumns(
       groupBy,
-      visibleActivities,
+      columnActivities,
       apiMembers,
       timelineStatuses ?? [],
       sortBy,
     ),
-    [groupBy, visibleActivities, apiMembers, timelineStatuses, sortBy],
+    [groupBy, columnActivities, apiMembers, timelineStatuses, sortBy],
   );
 
   // Activity ID → ApiActivity map for drag overlay and optimistic updates.
   const activityById = useMemo<Map<string, ApiActivity>>(
     () => new Map(apiActivities.map(a => [a.id, a])),
+    [apiActivities],
+  );
+
+  // Activity ID → title lookup for the "Parent" card field.
+  // Uses apiActivities (all activities, not just visible) so the parent title
+  // still shows when the parent activity is filtered out by the active filter.
+  const activityTitleById = useMemo<Map<string, string>>(
+    () => new Map(apiActivities.map(a => [a.id, a.title])),
     [apiActivities],
   );
 
@@ -223,17 +291,24 @@ export default function KanbanView({
   );
   const matchedSet = useMemo(() => new Set(matchResults.map(r => r.activityId)), [matchResults]);
 
-  // Register ordered match IDs in column → in-column sort order.
+  // Register ordered match IDs walking the full tree (root + children).
   const orderedMatchIds = useMemo(() => {
     const ids: string[] = [];
-    for (const col of columns) {
-      if (collapsedSet.has(col.id)) continue;
-      for (const act of col.items) {
-        if (matchedSet.has(act.id)) ids.push(act.id);
+
+    function walkActivity(act: ApiActivity) {
+      if (matchedSet.has(act.id)) ids.push(act.id);
+      if (showHierarchy) {
+        const children = childrenByParentId.get(act.id) ?? [];
+        children.forEach(walkActivity);
       }
     }
+
+    for (const col of columns) {
+      if (collapsedSet.has(col.id)) continue;
+      col.items.forEach(walkActivity);
+    }
     return ids;
-  }, [columns, collapsedSet, matchedSet]);
+  }, [columns, collapsedSet, matchedSet, showHierarchy, childrenByParentId]);
 
   useEffect(() => {
     registerMatches(orderedMatchIds, new Map());
@@ -243,11 +318,25 @@ export default function KanbanView({
   // Auto-expand a collapsed column that contains the active match.
   useEffect(() => {
     if (!activeMatchId) return;
+    // Expand collapsed column.
     const containingCol = columns.find(col =>
       collapsedSet.has(col.id) && col.items.some(a => a.id === activeMatchId),
     );
-    if (containingCol) {
-      handleToggleCollapse(containingCol.id);
+    if (containingCol) handleToggleCollapse(containingCol.id);
+
+    // Auto-expand a collapsed parent whose descendant is the active match.
+    if (showHierarchy) {
+      for (const [parentId, children] of childrenByParentId) {
+        if (collapsedParents.has(parentId)) {
+          function isDescendant(id: string): boolean {
+            if (id === activeMatchId) return true;
+            return (childrenByParentId.get(id) ?? []).some(c => isDescendant(c.id));
+          }
+          if (children.some(c => isDescendant(c.id))) {
+            handleToggleParent(parentId);
+          }
+        }
+      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeMatchId]);
@@ -257,7 +346,6 @@ export default function KanbanView({
     const s = new Set<KanbanCardField>();
     if (groupBy === 'status') s.add('status');
     if (groupBy === 'member' || groupBy === 'member-combination') s.add('members');
-    if (groupBy === 'parent') s.add('parent');
     return s;
   }, [groupBy]);
 
@@ -268,23 +356,39 @@ export default function KanbanView({
   }, [onSelectApiActivity, onSelectActivity]);
 
   // "+ Add" in a column → open create panel prefilled with the column's context.
-  const handleAddInColumn = useCallback((column: { id: string; dropValue?: { assignedMemberIds?: string[] } }) => {
+  const handleAddInColumn = useCallback((column: { id: string; dropValue?: { statusId?: string | null; assignedMemberIds?: string[] } }) => {
     const today = new Date().toISOString().slice(0, 10);
     const memberId = column.dropValue?.assignedMemberIds?.[0] ?? null;
+    // Pass statusId only when it's explicitly present in dropValue (status grouping).
+    const statusId = 'statusId' in (column.dropValue ?? {}) ? column.dropValue!.statusId : undefined;
     if (onAddActivity) {
-      onAddActivity({ start: today, end: today, memberId });
+      onAddActivity({ start: today, end: today, memberId, statusId });
     }
   }, [onAddActivity]);
 
   // Drag commit.
   const handleDrop = useCallback((payload: DropPayload) => {
+    const existing = activityById.get(payload.activityId);
+    const merged: ApiActivity | undefined = existing
+      ? { ...existing, ...payload.patch }
+      : undefined;
+
     // Optimistic cache update.
     queryClient.setQueriesData<ApiActivity[]>(
       { queryKey: ['timelines', timelineId, 'activities'] },
-      old => old?.map(a => a.id === payload.activityId ? { ...a, ...payload.patch } : a),
+      old => old?.map(a => a.id === payload.activityId ? (merged ?? a) : a),
     );
+
+    // If the dragged card is currently open in the edit panel, sync the panel
+    // immediately so the user sees the new status / assignee without closing and
+    // re-opening the sidebar.
+    if (merged && selectedActivityId === payload.activityId && onSelectApiActivity) {
+      onSelectApiActivity(merged);
+    }
+
     updateActivity.mutate({ activityId: payload.activityId, patch: payload.patch });
-  }, [queryClient, timelineId, updateActivity]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [queryClient, timelineId, updateActivity, activityById, selectedActivityId, onSelectApiActivity]);
 
   const hasQuery = debouncedQuery.trim().length > 0;
 
@@ -324,6 +428,11 @@ export default function KanbanView({
       onAddInColumn={handleAddInColumn}
       onDrop={handleDrop}
       activityById={activityById}
+      activityTitleById={activityTitleById}
+      showHierarchy={showHierarchy}
+      childrenByParentId={childrenByParentId}
+      collapsedParents={collapsedParents}
+      onToggleParent={handleToggleParent}
     />
   );
 }

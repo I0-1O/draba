@@ -173,12 +173,16 @@ interface CreateActivityInput {
   startAt: string
   endAt: string
   description?: string | null
+  notes?: string | null
   color?: string | null
   icon?: string | null
   assignedMemberIds?: string[]
   tagIds?: string[]
+  statusId?: string | null
   parentActivityId?: string | null
   percentComplete?: number | null
+  location?: string | null
+  url?: string | null
   /** Client-only: if set, replace this placeholder ID in the cache instead of appending. */
   _tempId?: string
 }

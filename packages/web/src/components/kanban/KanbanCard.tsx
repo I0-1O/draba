@@ -6,8 +6,7 @@
  */
 
 import { useDraggable } from '@dnd-kit/core';
-import { CSS } from '@dnd-kit/utilities';
-import { Calendar, User } from 'lucide-react';
+import { Calendar, GitBranch, ChevronDown, ChevronRight } from 'lucide-react';
 import { formatActivityDate } from '@/components/list/ListView';
 import { resolveColorHex } from '@/components/identity/identity-constants';
 import { Badge } from '@/components/identity/Badge';
@@ -25,6 +24,8 @@ interface Props {
   members: Member[];
   statusById: Map<string, Status>;
   tagById: Map<string, Tag>;
+  /** Activity ID → title, used to show the parent's name when "Parent" field is on. */
+  activityTitleById?: Map<string, string>;
   cardFields: KanbanCardField[];
   /** Fields suppressed because they duplicate the current Group by axis. */
   suppressedFields: Set<KanbanCardField>;
@@ -35,6 +36,20 @@ interface Props {
   activeMatch: boolean;
   isDragOverlay?: boolean;
   onClick: () => void;
+
+  // ── Hierarchy ────────────────────────────────────────────────────────────────
+  /** True when hierarchy mode is on and this card has children to show/hide. */
+  hasHierarchyChildren?: boolean;
+  /** Whether the children are currently hidden. */
+  isHierarchyCollapsed?: boolean;
+  /**
+   * Click handler for the collapse/expand chevron.
+   * Receives the mouse event so the handler can stopPropagation (prevents
+   * the card-click from also opening the detail panel).
+   */
+  onToggleHierarchy?: (e: React.MouseEvent) => void;
+  /** True when this card is nested under a parent — disables drag. */
+  isChildCard?: boolean;
 }
 
 export default function KanbanCard({
@@ -50,19 +65,28 @@ export default function KanbanCard({
   activeMatch,
   isDragOverlay = false,
   onClick,
+  hasHierarchyChildren = false,
+  isHierarchyCollapsed = false,
+  onToggleHierarchy,
+  isChildCard = false,
+  activityTitleById,
 }: Props) {
-  const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
+  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
     id: activity.id,
     data: { activityId: activity.id },
-    // Drag overlay renders separately; don't set draggable on the overlay copy.
-    disabled: isDragOverlay,
+    // Drag overlay renders separately, and child cards travel with their parent.
+    disabled: isDragOverlay || isChildCard,
   });
 
-  const style: React.CSSProperties = {
-    transform: CSS.Translate.toString(transform),
-    opacity: isDragging ? 0.4 : dimmed ? 0.3 : 1,
-    transition: dimmed ? 'opacity 150ms' : undefined,
-  };
+  // Do NOT apply the dnd-kit transform to the original card.
+  //
+  // We use DragOverlay for the visual movement, so the overlay card floats as
+  // the user drags and the original stays in place as an invisible placeholder.
+  // Applying the transform here causes the column's overflow container to expand
+  // its scroll area as the mouse moves, producing a growing scrollbar.
+  const style: React.CSSProperties = isDragging && !isDragOverlay
+    ? { visibility: 'hidden' }   // placeholder: preserves layout space, no transform, no scrollbar growth
+    : { opacity: dimmed ? 0.3 : 1, transition: dimmed ? 'opacity 150ms' : undefined };
 
   const showField = (f: KanbanCardField) =>
     cardFields.includes(f) && !suppressedFields.has(f);
@@ -118,21 +142,45 @@ export default function KanbanCard({
       tabIndex={0}
       onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') onClick(); }}
     >
-      {/* Title — always shown, 2-line clamp */}
-      <div
-        style={{
-          fontSize: 13,
-          fontWeight: 500,
-          color: 'var(--foreground)',
-          lineHeight: 1.4,
-          display: '-webkit-box',
-          WebkitLineClamp: 2,
-          WebkitBoxOrient: 'vertical',
-          overflow: 'hidden',
-          marginBottom: 4,
-        }}
-      >
-        {activity.title}
+      {/* Title row — with optional collapse chevron for hierarchy parents */}
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 4, marginBottom: 4 }}>
+        {hasHierarchyChildren && (
+          <button
+            onClick={e => { e.stopPropagation(); onToggleHierarchy?.(e); }}
+            title={isHierarchyCollapsed ? 'Expand children' : 'Collapse children'}
+            style={{
+              flexShrink: 0,
+              marginTop: 1,
+              background: 'none',
+              border: 'none',
+              padding: 0,
+              cursor: 'pointer',
+              color: 'var(--muted-foreground)',
+              display: 'flex',
+              alignItems: 'center',
+            }}
+          >
+            {isHierarchyCollapsed
+              ? <ChevronRight size={13} strokeWidth={2} />
+              : <ChevronDown  size={13} strokeWidth={2} />
+            }
+          </button>
+        )}
+        <div
+          style={{
+            flex: 1,
+            fontSize: 13,
+            fontWeight: 500,
+            color: 'var(--foreground)',
+            lineHeight: 1.4,
+            display: '-webkit-box',
+            WebkitLineClamp: 2,
+            WebkitBoxOrient: 'vertical',
+            overflow: 'hidden',
+          }}
+        >
+          {activity.title}
+        </div>
       </div>
 
       {/* Description snippet */}
@@ -236,8 +284,8 @@ export default function KanbanCard({
       {/* Footer: parent pill + member avatars */}
       {(showField('parent') || showField('members')) && (
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 2 }}>
-          {/* Parent badge */}
-          {showField('parent') && (activity as ApiActivity & { parentActivityId?: string | null }).parentActivityId && (
+          {/* Parent badge — shows the parent activity's title */}
+          {showField('parent') && activity.parentActivityId && (
             <span
               style={{
                 fontSize: 10,
@@ -245,10 +293,14 @@ export default function KanbanCard({
                 display: 'flex',
                 alignItems: 'center',
                 gap: 3,
+                overflow: 'hidden',
+                flex: 1,
               }}
             >
-              <User size={9} strokeWidth={1.6} />
-              child
+              <GitBranch size={9} strokeWidth={1.6} style={{ flexShrink: 0 }} />
+              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {activityTitleById?.get(activity.parentActivityId) ?? 'Parent'}
+              </span>
             </span>
           )}
 

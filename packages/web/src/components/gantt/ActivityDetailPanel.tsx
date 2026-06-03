@@ -1,38 +1,28 @@
 /**
  * ActivityDetailPanel — right-side slide-in panel for a selected Gantt activity.
  *
- * Field order (top to bottom):
- *   1. Header — Identity widget + Title
- *   2. When — Date pickers (start → end)
- *   3. Description — single-line input
- *   4. Assigned to — bordered card style (matches create panel)
- *   5. Classify — Status (rich dropdown with color dot + icon + name), Tags (stub)
- *   6. Advanced — Parent (stub), Progress (stub), Location, URL
- *   7. Notes — multi-line textarea
- *   8. Footer — Delete button
+ * Shares its field stack with ActivityCreatePanel via ActivityFieldsBody
+ * (see activityPanelFields.tsx) — header bar, footer, and save behavior live
+ * here, the fields themselves are shared. Field order is fixed by the shared
+ * body: Identity+Title → When → Description → Assigned to → Classify
+ * (Status, Tags) → Advanced (Parent, Progress, Location, URL) → Notes.
  *
  * All functional fields save on change/blur via PATCH /activities/:id.
- * liveDragStart / liveDragEnd display live dates during bar drag without triggering saves.
+ * liveDragStart / liveDragEnd display live dates during bar drag without
+ * triggering saves.
  */
 
-import { useState, useEffect, useRef } from 'react'
-import { X, Trash2, Archive, ArrowRight, Loader2, ChevronDown, Search } from 'lucide-react'
-import MemberAvatar from '@/components/MemberAvatar'
-import { IdentityWidget } from '@/components/identity/IdentityWidget'
-import { Badge } from '@/components/identity/Badge'
-import { resolveColorHex } from '@/components/identity/identity-constants'
+import { useState, useEffect } from 'react'
+import { X, Trash2, Archive, Loader2 } from 'lucide-react'
 import type { Identity } from '@/components/identity/identity-constants'
 import { useUpdateActivity, useDeleteActivity, useArchiveActivity, useTimelineActivities } from '@/hooks/useTeamActivities'
 import { useTimelineStatuses } from '@/hooks/useStatusTemplates'
 import { useTags } from '@/hooks/useTags'
-import TagInput from '@/components/TagInput'
 import type { components } from '@draba/shared'
 import type { Member } from '@/types'
+import { ActivityFieldsBody, PANEL_WIDTH, toDateInput, toISODate } from './activityPanelFields'
 
 type ApiActivity = components['schemas']['Activity']
-type Status = components['schemas']['Status']
-
-const PANEL_WIDTH = 300
 
 interface Props {
   event: ApiActivity | null
@@ -46,326 +36,6 @@ interface Props {
   /** Display-only end date override during bar drag (YYYY-MM-DD). Does not trigger a save. */
   liveDragEnd?: string
 }
-
-// ── Small helpers ─────────────────────────────────────────────────────────────
-
-function toDateInput(iso: string): string { return iso.slice(0, 10) }
-function toISODate(d: string): string { return `${d}T00:00:00Z` }
-
-const SEC_LABEL: React.CSSProperties = {
-  fontSize: 10,
-  fontWeight: 700,
-  color: 'var(--muted-foreground)',
-  textTransform: 'uppercase',
-  letterSpacing: '0.08em',
-  marginBottom: 6,
-}
-
-const FIELD_LABEL: React.CSSProperties = {
-  fontSize: 10,
-  fontWeight: 600,
-  color: 'var(--muted-foreground)',
-  textTransform: 'uppercase',
-  letterSpacing: '0.07em',
-  marginBottom: 3,
-  width: 68,
-  flexShrink: 0,
-}
-
-const STUB_VALUE: React.CSSProperties = {
-  fontSize: 12,
-  color: 'var(--muted-foreground)',
-  opacity: 0.5,
-  flex: 1,
-  display: 'flex',
-  alignItems: 'center',
-  gap: 4,
-  cursor: 'default',
-  userSelect: 'none',
-}
-
-const DIVIDER: React.CSSProperties = {
-  borderTop: '1px solid var(--border)',
-  margin: '10px 0',
-}
-
-const INPUT: React.CSSProperties = {
-  width: '100%',
-  boxSizing: 'border-box' as const,
-  fontSize: 12,
-  color: 'var(--foreground)',
-  border: '1px solid var(--border)',
-  borderRadius: 'var(--radius-md)',
-  padding: '5px 8px',
-  outline: 'none',
-  background: 'var(--background)',
-  fontFamily: 'var(--font-sans)',
-}
-
-// ── Rich status dropdown ──────────────────────────────────────────────────────
-
-interface StatusDropdownProps {
-  statuses: Status[]
-  value: string | null | undefined
-  onChange: (id: string | null) => void
-}
-
-function StatusDropdown({ statuses, value, onChange }: StatusDropdownProps) {
-  const [open, setOpen] = useState(false)
-  const ref = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    function onDown(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
-    }
-    document.addEventListener('mousedown', onDown)
-    return () => document.removeEventListener('mousedown', onDown)
-  }, [])
-
-  const selected = statuses.find(s => s.id === value) ?? null
-
-  return (
-    <div ref={ref} style={{ flex: 1, position: 'relative' }}>
-      <button
-        onClick={() => setOpen(o => !o)}
-        style={{
-          width: '100%',
-          display: 'flex',
-          alignItems: 'center',
-          gap: 6,
-          padding: '4px 8px',
-          border: '1px solid var(--border)',
-          borderRadius: 6,
-          background: 'var(--background)',
-          color: 'var(--foreground)',
-          cursor: 'pointer',
-          fontSize: 12,
-          fontFamily: 'var(--font-sans)',
-          textAlign: 'left',
-        }}
-      >
-        {selected ? (
-          <>
-            <div
-              style={{
-                width: 8,
-                height: 8,
-                borderRadius: '50%',
-                background: resolveColorHex(selected.color) ?? selected.color,
-                flexShrink: 0,
-              }}
-            />
-            <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {selected.name}
-            </span>
-          </>
-        ) : (
-          <span style={{ flex: 1, color: 'var(--muted-foreground)', fontStyle: 'italic' }}>— No status —</span>
-        )}
-        <ChevronDown size={11} strokeWidth={2} style={{ flexShrink: 0, color: 'var(--muted-foreground)' }} />
-      </button>
-
-      {open && (
-        <div
-          style={{
-            position: 'absolute',
-            top: 'calc(100% + 4px)',
-            left: 0,
-            right: 0,
-            background: 'var(--card)',
-            border: '1px solid var(--border)',
-            borderRadius: 6,
-            boxShadow: '0 4px 12px rgba(0,0,0,.12)',
-            zIndex: 100,
-            overflow: 'hidden',
-          }}
-        >
-          <div
-            onClick={() => { onChange(null); setOpen(false) }}
-            style={{
-              padding: '6px 10px',
-              fontSize: 12,
-              color: 'var(--muted-foreground)',
-              fontStyle: 'italic',
-              cursor: 'pointer',
-              borderBottom: statuses.length > 0 ? '1px solid var(--border)' : 'none',
-            }}
-            onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-            onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-          >
-            — No status —
-          </div>
-          {statuses.map(s => (
-            <div
-              key={s.id}
-              onClick={() => { onChange(s.id); setOpen(false) }}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 8,
-                padding: '6px 10px',
-                fontSize: 12,
-                cursor: 'pointer',
-                background: s.id === value ? 'var(--muted)' : 'transparent',
-                fontWeight: s.id === value ? 600 : 400,
-              }}
-              onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-              onMouseLeave={e => (e.currentTarget.style.background = s.id === value ? 'var(--muted)' : 'transparent')}
-            >
-              <div
-                style={{
-                  width: 8,
-                  height: 8,
-                  borderRadius: '50%',
-                  background: resolveColorHex(s.color) ?? s.color,
-                  flexShrink: 0,
-                }}
-              />
-              <span style={{ flex: 1 }}>{s.name}</span>
-              {s.isClosed && (
-                <span style={{ fontSize: 9, color: 'var(--muted-foreground)', fontWeight: 500, letterSpacing: '0.05em' }}>
-                  CLOSED
-                </span>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  )
-}
-
-// ── Searchable parent activity picker ─────────────────────────────────────────
-
-interface ParentPickerProps {
-  activities: ApiActivity[]
-  value: string | null | undefined
-  onChange: (id: string | null) => void
-}
-
-/**
- * Searchable combobox for choosing a parent activity. Scales past a plain
- * <select> by filtering as you type, shows each activity's identity badge,
- * and ellipsis-truncates long titles so the panel never overflows.
- */
-function ParentActivityPicker({ activities, value, onChange }: ParentPickerProps) {
-  const [open, setOpen] = useState(false)
-  const [query, setQuery] = useState('')
-  const ref = useRef<HTMLDivElement>(null)
-  const inputRef = useRef<HTMLInputElement>(null)
-
-  useEffect(() => {
-    function onDown(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) { setOpen(false); setQuery('') }
-    }
-    document.addEventListener('mousedown', onDown)
-    return () => document.removeEventListener('mousedown', onDown)
-  }, [])
-
-  // Focus the search field whenever the dropdown opens.
-  useEffect(() => { if (open) inputRef.current?.focus() }, [open])
-
-  const selected = activities.find(a => a.id === value) ?? null
-  const filtered = activities.filter(a => a.title.toLowerCase().includes(query.trim().toLowerCase()))
-
-  function choose(id: string | null) {
-    onChange(id)
-    setOpen(false)
-    setQuery('')
-  }
-
-  return (
-    <div ref={ref} style={{ flex: 1, position: 'relative', minWidth: 0 }}>
-      <button
-        onClick={() => setOpen(o => !o)}
-        style={{
-          width: '100%', display: 'flex', alignItems: 'center', gap: 6,
-          padding: '4px 8px', border: '1px solid var(--border)', borderRadius: 6,
-          background: 'var(--background)', color: 'var(--foreground)', cursor: 'pointer',
-          fontSize: 12, fontFamily: 'var(--font-sans)', textAlign: 'left',
-        }}
-      >
-        {selected ? (
-          <>
-            <Badge identity={{ color: selected.color ?? '#288C9B', icon: selected.icon ?? '__none__' }} name={selected.title} size={16} />
-            <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {selected.title}
-            </span>
-          </>
-        ) : (
-          <span style={{ flex: 1, color: 'var(--muted-foreground)', fontStyle: 'italic' }}>— None —</span>
-        )}
-        <ChevronDown size={11} strokeWidth={2} style={{ flexShrink: 0, color: 'var(--muted-foreground)' }} />
-      </button>
-
-      {open && (
-        <div
-          style={{
-            position: 'absolute', top: 'calc(100% + 4px)', left: 0, right: 0,
-            background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 6,
-            boxShadow: '0 4px 12px rgba(0,0,0,.12)', zIndex: 100, overflow: 'hidden',
-          }}
-        >
-          {/* Search field */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 8px', borderBottom: '1px solid var(--border)' }}>
-            <Search size={12} strokeWidth={2} style={{ flexShrink: 0, color: 'var(--muted-foreground)' }} />
-            <input
-              ref={inputRef}
-              value={query}
-              onChange={e => setQuery(e.target.value)}
-              placeholder="Search activities…"
-              style={{
-                flex: 1, minWidth: 0, border: 'none', outline: 'none', background: 'none',
-                fontSize: 12, color: 'var(--foreground)', fontFamily: 'var(--font-sans)',
-              }}
-            />
-          </div>
-
-          <div style={{ maxHeight: 200, overflowY: 'auto' }}>
-            <div
-              onClick={() => choose(null)}
-              style={{
-                padding: '6px 10px', fontSize: 12, color: 'var(--muted-foreground)',
-                fontStyle: 'italic', cursor: 'pointer',
-                borderBottom: filtered.length > 0 ? '1px solid var(--border)' : 'none',
-              }}
-              onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-              onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-            >
-              — None —
-            </div>
-            {filtered.map(a => (
-              <div
-                key={a.id}
-                onClick={() => choose(a.id)}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px',
-                  fontSize: 12, cursor: 'pointer',
-                  background: a.id === value ? 'var(--muted)' : 'transparent',
-                  fontWeight: a.id === value ? 600 : 400,
-                }}
-                onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-                onMouseLeave={e => (e.currentTarget.style.background = a.id === value ? 'var(--muted)' : 'transparent')}
-              >
-                <Badge identity={{ color: a.color ?? '#288C9B', icon: a.icon ?? '__none__' }} name={a.title} size={16} />
-                <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {a.title}
-                </span>
-              </div>
-            ))}
-            {filtered.length === 0 && (
-              <div style={{ padding: '8px 10px', fontSize: 11, color: 'var(--muted-foreground)', fontStyle: 'italic' }}>
-                No matching activities
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-    </div>
-  )
-}
-
-// ── Component ─────────────────────────────────────────────────────────────────
 
 export default function ActivityDetailPanel({
   event, open, members, teamId, timelineId, onClose, liveDragStart, liveDragEnd,
@@ -396,10 +66,6 @@ export default function ActivityDetailPanel({
   // doesn't refresh until the activity is reselected.
   const [parentId, setParentId] = useState<string | null>(event?.parentActivityId ?? null)
   const [statusId, setStatusId] = useState<string | null>(event?.statusId ?? null)
-  // Progress percent renders as a label until clicked; `progressDraft` holds the
-  // in-flight text while editing.
-  const [editingProgress, setEditingProgress] = useState(false)
-  const [progressDraft, setProgressDraft] = useState('')
   const [confirmDelete, setConfirmDelete] = useState(false)
 
   // Re-sync when the selected activity changes.
@@ -418,17 +84,31 @@ export default function ActivityDetailPanel({
     setProgressValue(event.percentComplete ?? 0)
     setParentId(event.parentActivityId ?? null)
     setStatusId(event.statusId ?? null)
-    setEditingProgress(false)
     setConfirmDelete(false)
   }, [event?.id]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Sync local date state when the event's dates change (e.g. after a drag commit).
+  // Sync local date state when the event's dates change (e.g. after a Gantt bar drag).
   const eventStartAt = event?.startAt
   const eventEndAt = event?.endAt
   useEffect(() => {
     if (eventStartAt) setStartDate(toDateInput(eventStartAt))
     if (eventEndAt) setEndDate(toDateInput(eventEndAt))
   }, [eventStartAt, eventEndAt])
+
+  // Sync status when changed externally on the same activity (e.g. after a Kanban
+  // drag-to-column). The main sync effect only fires on id change, so we need a
+  // separate effect keyed on statusId.
+  const eventStatusId = event?.statusId
+  useEffect(() => {
+    setStatusId(eventStatusId ?? null)
+  }, [eventStatusId])
+
+  // Sync assigned members when changed externally (e.g. after a Kanban drag to a
+  // member column). Arrays compare by reference, so use a stable string key.
+  const eventAssignedKey = (event?.assignedMemberIds ?? []).join(',')
+  useEffect(() => {
+    setAssignedIds(event?.assignedMemberIds ?? [])
+  }, [eventAssignedKey]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const saving = updateMutation.isPending
   const deleting = deleteMutation.isPending
@@ -491,31 +171,12 @@ export default function ActivityDetailPanel({
     save({ tagIds: ids } as Parameters<typeof save>[0])
   }
 
-  function handleProgressChange(e: React.ChangeEvent<HTMLInputElement>) {
-    setProgressValue(Number(e.target.value))
-  }
-
-  // Clamps to 0–100, rounds to an integer, and saves only on a real change.
-  function commitProgress(val: number) {
-    const clamped = Math.max(0, Math.min(100, Math.round(Number.isFinite(val) ? val : 0)))
+  // Saves only on a real change. The shared ProgressRow already clamps to 0–100.
+  function handleProgressCommit(clamped: number) {
     setProgressValue(clamped)
     if (clamped !== (event?.percentComplete ?? 0)) {
       save({ percentComplete: clamped } as Parameters<typeof save>[0])
     }
-  }
-
-  function handleProgressCommit(e: React.ChangeEvent<HTMLInputElement>) {
-    commitProgress(Number(e.target.value))
-  }
-
-  function startEditProgress() {
-    setProgressDraft(String(progressValue))
-    setEditingProgress(true)
-  }
-
-  function commitProgressEdit() {
-    commitProgress(progressDraft === '' ? 0 : Number(progressDraft))
-    setEditingProgress(false)
   }
 
   function handleDelete() {
@@ -568,268 +229,46 @@ export default function ActivityDetailPanel({
           </button>
         </div>
 
-        {/* ── Scrollable body ── */}
-        <div style={{ flex: 1, overflowY: 'auto', padding: '14px 14px 8px' }}>
-
-          {/* 1. Identity widget + Title */}
-          <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start', marginBottom: 14 }}>
-            <div style={{ marginTop: 2, flexShrink: 0 }}>
-              <IdentityWidget
-                identity={identity}
-                name={title || event?.title || ''}
-                shape="square"
-                onChange={handleIdentityChange}
-              />
-            </div>
-            <input
-              value={title}
-              onChange={e => setTitle(e.target.value)}
-              onBlur={handleTitleBlur}
-              style={{
-                flex: 1, fontSize: 13, fontWeight: 600,
-                color: 'var(--foreground)', border: '1px solid transparent',
-                borderRadius: 'var(--radius-md)', padding: '5px 6px',
-                outline: 'none', background: 'transparent', fontFamily: 'var(--font-sans)',
-              }}
-              onFocus={e => { e.target.style.borderColor = 'var(--primary)'; e.target.style.background = 'var(--background)' }}
-              onBlurCapture={e => { e.target.style.borderColor = 'transparent'; e.target.style.background = 'transparent' }}
-            />
-          </div>
-
-          <div style={DIVIDER} />
-
-          {/* 2. When — date pickers only (no allDay checkbox, no date summary) */}
-          <div style={{ marginBottom: 12 }}>
-            <div style={SEC_LABEL}>When</div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-              <input
-                type="date" value={displayStart}
-                onChange={e => handleStartDateChange(e.target.value)}
-                style={{ ...INPUT, flex: 1, padding: '5px 6px' }}
-                onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
-                onBlur={e => (e.target.style.borderColor = 'var(--border)')}
-              />
-              <ArrowRight size={11} color="var(--muted-foreground)" strokeWidth={2} style={{ flexShrink: 0 }} />
-              <input
-                type="date" value={displayEnd} min={startDate}
-                onChange={e => handleEndDateChange(e.target.value)}
-                style={{ ...INPUT, flex: 1, padding: '5px 6px' }}
-                onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
-                onBlur={e => (e.target.style.borderColor = 'var(--border)')}
-              />
-            </div>
-          </div>
-
-          <div style={DIVIDER} />
-
-          {/* 3. Description — below dates, matching create panel */}
-          <div style={{ marginBottom: 12 }}>
-            <div style={SEC_LABEL}>Description</div>
-            <input
-              value={description}
-              onChange={e => setDescription(e.target.value)}
-              onBlur={e => { handleDescriptionBlur(); e.target.style.borderColor = 'var(--border)' }}
-              placeholder="Optional description…"
-              style={{ ...INPUT, padding: '6px 8px' }}
-              onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
-            />
-          </div>
-
-          <div style={DIVIDER} />
-
-          {/* 4. Assigned to — bordered card style matching create panel */}
-          {members.length > 0 && (
-            <div style={{ marginBottom: 12 }}>
-              <div style={SEC_LABEL}>Assigned to</div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                {members.map(m => {
-                  const assigned = assignedIds.includes(m.id)
-                  return (
-                    <button
-                      key={m.id}
-                      onClick={() => toggleAssignee(m.id)}
-                      style={{
-                        display: 'flex', alignItems: 'center', gap: 8,
-                        padding: '5px 8px',
-                        border: assigned ? `1px solid ${m.color}` : '1px solid var(--border)',
-                        borderRadius: 'var(--radius-md)',
-                        background: assigned ? `${m.color}18` : 'var(--background)',
-                        cursor: 'pointer', textAlign: 'left',
-                        transition: 'background 0.1s, border-color 0.1s',
-                      }}
-                    >
-                      <MemberAvatar member={m} size={18} />
-                      <span style={{ fontSize: 12, color: 'var(--foreground)', flex: 1 }}>{m.name}</span>
-                      {assigned && (
-                        <div style={{ width: 6, height: 6, borderRadius: '50%', background: m.color, flexShrink: 0 }} />
-                      )}
-                    </button>
-                  )
-                })}
-              </div>
-            </div>
-          )}
-
-          <div style={DIVIDER} />
-
-          {/* 5. Classify — Status (rich dropdown), Tags (stub) */}
-          <div style={{ marginBottom: 12 }}>
-            <div style={SEC_LABEL}>Classify</div>
-
-            {/* Status picker */}
-            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
-              <span style={FIELD_LABEL}>Status</span>
-              {statuses.length > 0 ? (
-                <StatusDropdown
-                  statuses={statuses}
-                  value={statusId}
-                  onChange={id => { setStatusId(id); save({ statusId: id } as Parameters<typeof save>[0]) }}
-                />
-              ) : (
-                <div style={{ ...STUB_VALUE }}>
-                  <span style={{ fontSize: 10, opacity: 0.5 }}>No statuses configured</span>
-                </div>
-              )}
-            </div>
-
-            {/* Tags */}
-            <div style={{ display: 'flex', alignItems: 'flex-start' }}>
-              <span style={{ ...FIELD_LABEL, paddingTop: 5 }}>Tags</span>
-              <TagInput
-                teamId={teamId}
-                tags={teamTags}
-                selectedTagIds={tagIds}
-                onChange={handleTagsChange}
-              />
-            </div>
-          </div>
-
-          <div style={DIVIDER} />
-
-          {/* 6. Advanced (was "Details") — Parent, Progress, Location, URL */}
-          <div style={{ marginBottom: 12 }}>
-            <div style={SEC_LABEL}>Advanced</div>
-
-            {/* Parent activity picker */}
-            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
-              <span style={FIELD_LABEL}>Parent</span>
-              <ParentActivityPicker
-                activities={allActivities.filter(a => a.id !== event.id)}
-                value={parentId}
-                onChange={id => { setParentId(id); save({ parentActivityId: id } as Parameters<typeof save>[0]) }}
-              />
-            </div>
-
-            {/* % Complete slider */}
-            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
-              <span style={FIELD_LABEL}>Progress</span>
-              <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 8 }}>
-                <input
-                  type="range"
-                  min={0}
-                  max={100}
-                  step={5}
-                  value={progressValue}
-                  onChange={handleProgressChange}
-                  onMouseUp={handleProgressCommit as unknown as React.MouseEventHandler}
-                  onTouchEnd={handleProgressCommit as unknown as React.TouchEventHandler}
-                  style={{ flex: 1, cursor: 'pointer', accentColor: 'var(--primary)' }}
-                />
-                {editingProgress ? (
-                  <input
-                    autoFocus
-                    type="text"
-                    inputMode="numeric"
-                    value={progressDraft}
-                    onChange={e => setProgressDraft(e.target.value.replace(/[^0-9]/g, '').slice(0, 3))}
-                    onBlur={commitProgressEdit}
-                    onKeyDown={e => {
-                      if (e.key === 'Enter') commitProgressEdit()
-                      else if (e.key === 'Escape') setEditingProgress(false)
-                    }}
-                    aria-label="Percent complete"
-                    style={{
-                      width: 40, fontSize: 11, textAlign: 'right', flexShrink: 0,
-                      marginLeft: 'auto',
-                      color: 'var(--foreground)', border: '1px solid var(--primary)',
-                      borderRadius: 4, padding: '2px 4px', outline: 'none',
-                      background: 'var(--background)', fontFamily: 'var(--font-sans)',
-                    }}
-                  />
-                ) : (
-                  <span
-                    onClick={startEditProgress}
-                    title="Click to edit"
-                    role="button"
-                    tabIndex={0}
-                    onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); startEditProgress() } }}
-                    style={{
-                      fontSize: 11, color: 'var(--muted-foreground)', minWidth: 34,
-                      textAlign: 'right', flexShrink: 0, cursor: 'text', userSelect: 'none',
-                      marginLeft: 'auto',
-                      padding: '2px 4px', borderRadius: 4, border: '1px solid transparent',
-                    }}
-                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-                    onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-                  >
-                    {progressValue}%
-                  </span>
-                )}
-              </div>
-            </div>
-
-            {/* Location (functional) */}
-            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
-              <span style={FIELD_LABEL}>Location</span>
-              <input
-                value={location}
-                onChange={e => setLocation(e.target.value)}
-                onBlur={handleLocationBlur}
-                placeholder="—"
-                style={{ ...INPUT, flex: 1, padding: '4px 6px', fontSize: 12 }}
-                onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
-                onBlurCapture={e => (e.target.style.borderColor = 'var(--border)')}
-              />
-            </div>
-
-            {/* URL (functional) */}
-            <div style={{ display: 'flex', alignItems: 'center' }}>
-              <span style={FIELD_LABEL}>URL</span>
-              <input
-                value={url}
-                onChange={e => setUrl(e.target.value)}
-                onBlur={handleUrlBlur}
-                placeholder="—"
-                style={{ ...INPUT, flex: 1, padding: '4px 6px', fontSize: 12 }}
-                onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
-                onBlurCapture={e => (e.target.style.borderColor = 'var(--border)')}
-              />
-            </div>
-          </div>
-
-          <div style={DIVIDER} />
-
-          {/* 7. Notes — multi-line textarea */}
-          <div style={{ marginBottom: 8 }}>
-            <div style={SEC_LABEL}>Notes</div>
-            <textarea
-              value={notes}
-              onChange={e => setNotes(e.target.value)}
-              onBlur={e => { handleNotesBlur(); e.target.style.borderColor = 'var(--border)' }}
-              placeholder="Add notes…"
-              rows={4}
-              style={{
-                ...INPUT,
-                padding: '6px 8px',
-                resize: 'vertical',
-                minHeight: 72,
-                lineHeight: 1.5,
-              }}
-              onFocus={e => (e.target.style.borderColor = 'var(--primary)')}
-            />
-          </div>
-
-        </div>
+        {/* ── Scrollable body (shared with create panel) ── */}
+        <ActivityFieldsBody
+          identity={identity}
+          onIdentityChange={handleIdentityChange}
+          title={title}
+          onTitleChange={setTitle}
+          onTitleBlur={handleTitleBlur}
+          titleFallbackName={event.title || ''}
+          startDate={displayStart}
+          endDate={displayEnd}
+          onStartDateChange={handleStartDateChange}
+          onEndDateChange={handleEndDateChange}
+          description={description}
+          onDescriptionChange={setDescription}
+          onDescriptionBlur={handleDescriptionBlur}
+          members={members}
+          assignedIds={assignedIds}
+          onToggleAssignee={toggleAssignee}
+          statuses={statuses}
+          statusId={statusId}
+          onStatusChange={id => { setStatusId(id); save({ statusId: id } as Parameters<typeof save>[0]) }}
+          teamId={teamId}
+          teamTags={teamTags}
+          tagIds={tagIds}
+          onTagsChange={handleTagsChange}
+          parentActivities={allActivities.filter(a => a.id !== event.id)}
+          parentId={parentId}
+          onParentChange={id => { setParentId(id); save({ parentActivityId: id } as Parameters<typeof save>[0]) }}
+          progress={progressValue}
+          onProgressCommit={handleProgressCommit}
+          location={location}
+          onLocationChange={setLocation}
+          onLocationBlur={handleLocationBlur}
+          url={url}
+          onUrlChange={setUrl}
+          onUrlBlur={handleUrlBlur}
+          notes={notes}
+          onNotesChange={setNotes}
+          onNotesBlur={handleNotesBlur}
+        />
 
         {/* ── Footer — Archive + Delete buttons ── */}
         <div style={{ padding: '10px 14px', borderTop: '1px solid var(--border)', flexShrink: 0 }}>
