@@ -88,11 +88,9 @@ The primary view is a Gantt chart. Additional views display the same underlying 
     - **Export** — triggers CSV/Excel export of the visible date range (wires in Phase 13)
 - [ ] **Calendar view** — weekly, daily, and monthly grid layouts (standard calendar format)
 - [ ] **List view** (also referred to as the "spreadsheet" view) — dense, sortable, inline-editable table of activities; columns are show/hide-able and resizable; supports bulk selection for archive/delete/status-change. The "power user" surface for scanning and editing many activities at once.
-- [ ] **Kanban view** — read-only; columns = statuses (in the team's configured status order); cards = activities, color-coded by assigned person(s); multiple assignees shown as stacked color indicators. This is a viewing mode only — dragging cards to change status is out of scope for v1.
+- [ ] **Kanban view** — interactive board; the **column axis is the active Group by** (Status by default; also Assigned-to / Parent / None). Cards = activities, with a left accent border driven by Color by (activity / member / status); multiple members shown as stacked avatars. **Dragging a card between columns mutates that grouping value** (status change / reassign / reparent). Configurable card fields (dates / status / tags / assigned-to / % complete / parent / description), within-column sort, inline create per column, and click-to-edit. See [docs/plans/phase-11.3-kanban-view.md](plans/phase-11.3-kanban-view.md).
 - [ ] View switcher in the timeline header to toggle between available views
 - [ ] Each view persists its own toolbar state per timeline (group / sort / zoom / column visibility / filter preset) via user preferences
-
-> **Note:** Kanban is intentionally read-only in v1; drag-to-change-status is a later addition once the status model is proven.
 
 ### Team Configuration
 Admins can customize team-level settings that apply to all members and views.
@@ -188,7 +186,7 @@ Two flavors: **tabular** (data round-trips — CSV / xlsx in and out) and **visu
 
 ## Out of Scope (v1)
 - Microsoft / Outlook / Exchange calendar sync
-- Kanban drag-to-change-status (Kanban is in v1 as a read-only view; interactive status changes via drag are v2)
+- Kanban manual within-column card ordering (cards order by the chosen Sort in v1; hand-curated order needs an activity order field — possible Phase 11.3.1)
 - Gantt dependency arrows / critical-path visualization (parent–child grouping is in scope; visual dependency arrows are not)
 - Time tracking or billable hours
 - Task dependencies or critical path

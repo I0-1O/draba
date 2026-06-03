@@ -50,7 +50,7 @@ This document organizes development into discrete phases with effort estimates a
 | 11.1.1 | [Timezone-Safe Activity Dates](#phase-1111--timezone-safe-activity-dates) | S–M — 0.5–1 day | ✅ |
 | 11.1.2 | [Group by Assignee Combination](#phase-1112--group-by-assignee-combination) | S–M — 0.5–1 day | ✅ |
 | 11.2 | [Web — Calendar View](#phase-112--web--calendar-view) | L — 3–5 days | 🔄 |
-| 11.3 | [Web — Kanban View (Read-Only)](#phase-113--web--kanban-view-read-only) | S–M — 1–2 days | ⬜ |
+| 11.3 | [Web — Kanban View (Interactive)](#phase-113--web--kanban-view-interactive) | M — 2–3 days | ⬜ |
 | 12 | [Communications Testing](#phase-12--communications-testing) | S — 1 day | ⬜ |
 | 13 | [AI Key Management](#phase-13--ai-key-management) | M — 2–3 days | ⬜ |
 | 14 | [Localization & Language Support](#phase-14--localization--language-support) | L — 3–5 days | ⬜ |
@@ -1428,27 +1428,33 @@ A familiar **Month / Week** calendar surface that answers "what is the team work
 
 ---
 
-### Phase 11.3 — Web — Kanban View (Read-Only)
-**Status:** ⬜ | **Effort:** S–M (1–2 days)
+### Phase 11.3 — Web — Kanban View (Interactive)
+**Status:** ⬜ | **Effort:** M (2–3 days)
 
-Read-only Kanban per [REQUIREMENTS.md](REQUIREMENTS.md). Columns are team statuses in their configured order; cards are events colored by primary assignee. Drag-to-change-status is explicitly v2.
+A **fully interactive** board view — the column-and-card complement to Gantt / List / Calendar. **Re-scoped 2026-06-03** from the original "Read-Only" plan: drag-to-change-status is no longer v2, and the board generalizes beyond a fixed status axis. The **column axis is whatever `Group by` is set to** (Status by default); cards drag between columns to mutate that grouping value, open the existing edit panel on click, and create inline per column.
 
-**Depends on:** Phase 10.2 (statuses API + UI), so admins can actually configure columns.
+**Detailed plan:** [docs/plans/phase-11.3-kanban-view.md](plans/phase-11.3-kanban-view.md) — column model (Group by → columns), reassign/reparent drag semantics, sort model, card-field configuration, build order, corrections to the design handoff, and exit criteria all live there. Scope is reviewed and settled.
 
-**Scope:**
-- Columns from `team_statuses` in display order; column header colored from status color
-- Cards: title, date range, assignee avatars (stacked color indicators for multi-assignee), parent badge if nested
-- Empty column shows muted "No events" placeholder
-- Column scroll independently when card count exceeds viewport height
-- Card click → `EventDetailPanel`
-- Respects active filter, Find highlight, archived hiding
+**Design handoff:** `docs/design/handoffs/kanban-view/` (directional; corrected against the real data model in the plan — notably **draba has no priority field** and uses **Member / "Assigned to"**, not "Assignee").
+
+**Depends on:** Phase 10.2 (statuses API + UI). Reuses `useUpdateActivity` (already supports `statusId` / `assignedMemberIds` / `parentActivityId` patches — the entire drag backend), `lib/activityColor.ts`, `lib/memberGroups.ts`, the filter engine, Find, preferences, `@dnd-kit`, and `ActivityPanel`.
+
+**Scope (summary — see plan doc for detail):**
+- *Group by defines columns:* Status (default, + "No status") / Assigned to (member, + "Unassigned") / Assigned to (combination, read-only) / Parent / None. Columns rebuild on group-by change.
+- *Color by* (activity / member / status) drives the card accent border — reused from the other views.
+- *Sorts* (within column): Start date (default), End date, Title, % complete, Recently updated. Manual ordering deferred (no `Activity` order field — possible `11.3.1`).
+- *Card field toggles:* a "Card fields" multi-select (date range / status / tags / assigned-to / % complete / parent / description), persisted per-timeline-per-user, with context-aware suppression of the Group-by axis field.
+- *Interactive:* `@dnd-kit` drag-to-recolumn with optimistic PATCH; card click → `ActivityPanel` edit; "+ Add" → create prefilled with the column's value; collapse columns; real-time, filter, Find, archived-hiding parity.
 
 **Exit criteria — safe to pause when:**
-- Kanban columns appear in the same order as the team's configured statuses
-- Cards show the correct member color (or stacked indicators for multi-assignee)
-- A status renamed / recolored in Settings updates the Kanban column header without refresh
-- Find highlights matching cards across columns
-- Attempting to drag a card produces no errors and no state change (read-only enforcement)
+- View switcher toggles Gantt ↔ List ↔ Calendar ↔ Kanban, persisting per timeline
+- Group by = Status shows one column per timeline status (in `position` order) + "No status"; a status renamed/recolored in Settings updates the header live
+- Changing Group by to Member / Parent rebuilds columns; combination + None render without errors
+- Color by recolors the card accent and matches the other views; Sort by reorders within every column
+- Card-field toggles show/hide fields and persist across reload; the Group-by axis field auto-suppresses
+- Dragging a card to another column commits the mutation (status/reassign/reparent) via PATCH with optimistic update and no reload; combination/None are non-droppable without errors
+- Card click opens edit; "+ Add" opens create prefilled; Filter scopes the board; Find dims/highlights and walks matches, auto-expanding a collapsed column with the active match
+- `kanbanColumns` unit tests pass; `pnpm --filter web lint` + `test` pass
 
 ---
 

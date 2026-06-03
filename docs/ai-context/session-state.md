@@ -21,7 +21,9 @@ _Updated after each significant work session. Read this first to orient — it i
 
 | Next phase | Scope | Plan |
 |------------|-------|------|
-| **11.3** | Kanban View (Read-Only) | see ROADMAP.md |
+| **11.3** | Kanban View (**Interactive**) | [docs/plans/phase-11.3-kanban-view.md](../plans/phase-11.3-kanban-view.md) — scope settled 2026-06-03 |
+
+**Phase 11.3 re-scoped (2026-06-03, plan only — no code yet):** changed from "Read-Only" to a fully interactive board. Column axis = active **Group by** (Status default / Assigned-to / Parent / combination / None); drag-to-recolumn mutates the grouping value (status/reassign/reparent) via existing `useUpdateActivity`. Adds Color by, configurable Sorts, and a per-card **Card fields** toggle set. Decisions locked: member-column drop = replace `assignedMemberIds`; combination/None columns non-droppable; manual card ordering deferred (possible 11.3.1). ROADMAP §11.3 and REQUIREMENTS.md updated to match; design handoff archived at `docs/design/handoffs/kanban-view/`.
 
 ---
 
