@@ -441,7 +441,14 @@ export default function Sidebar({ collapsed, onToggle, onNewActivity, onBulkImpo
     endDate: t.endDate,
   }))
   const activeId = activeTimelineId ?? internalActiveId
-  const activeTimeline = timelines.find(t => t.id === activeId) ?? timelines[0] ?? null;
+  // timelines[0] is typed as Timeline (not T | undefined) because
+  // noUncheckedIndexedAccess is off in the tsconfig, but at runtime an empty
+  // array produces undefined. The explicit type annotation + length guard make
+  // the null case visible to TypeScript so the collapsed-section render below
+  // can safely guard against it.
+  const activeTimeline: Timeline | null =
+    timelines.find(t => t.id === activeId) ??
+    (timelines.length > 0 ? timelines[0] : null);
 
   const [sidebarWidth, setSidebarWidth] = useState(SIDEBAR_MIN);
   const dragging = useRef(false);
@@ -1053,8 +1060,10 @@ export default function Sidebar({ collapsed, onToggle, onNewActivity, onBulkImpo
                 </>
               )}
             </>
-          ) : (
-            /* Section collapsed: show just the active timeline */
+          ) : activeTimeline ? (
+            /* Section collapsed: show just the active timeline.
+               Guard required because activeTimeline is null when the timeline
+               list is empty — that state is briefly true on initial load. */
             <TimelineItem
               timeline={activeTimeline}
               active={true}
@@ -1064,7 +1073,7 @@ export default function Sidebar({ collapsed, onToggle, onNewActivity, onBulkImpo
               onClick={() => setTimelinesOpen(true)}
               onSettings={() => onEditTimeline?.(activeTimeline.id)}
             />
-          ))}
+          ) : null)}
         </div>
         {/* Connectors section — contextual to active timeline */}
         {!collapsed && (

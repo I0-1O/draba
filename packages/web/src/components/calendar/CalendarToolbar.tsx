@@ -109,17 +109,18 @@ export default function CalendarToolbar({
         <option value="status">Status</option>
       </select>
 
-      <div className={divider} />
-
-      {/* Stubs */}
-      <button className={btn} onClick={onExport} title="Export (coming soon)">
-        <Download size={12} strokeWidth={1.8} />
-        Export
-      </button>
-      <button className={btn} onClick={onShare} title="Share (coming soon)">
-        <Share2 size={12} strokeWidth={1.8} />
-        Share
-      </button>
+      {/* Stubs — pushed to the right edge */}
+      <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
+        <div className={divider} />
+        <button className={btn} onClick={onExport} title="Export (coming soon)">
+          <Download size={12} strokeWidth={1.8} />
+          Export
+        </button>
+        <button className={btn} onClick={onShare} title="Share (coming soon)">
+          <Share2 size={12} strokeWidth={1.8} />
+          Share
+        </button>
+      </div>
     </div>
   );
 }

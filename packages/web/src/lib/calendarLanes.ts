@@ -17,6 +17,9 @@ export interface CalendarActivity {
   color: string;
   icon?: string;
   assignedMemberIds: string[];
+  statusName?: string;
+  statusColor?: string;
+  tags?: Array<{ name: string; color?: string }>;
 }
 
 export interface CalendarSegment {
@@ -35,6 +38,9 @@ export interface CalendarSegment {
   title: string;
   icon?: string;
   assignedMemberIds: string[];
+  statusName?: string;
+  statusColor?: string;
+  tags?: Array<{ name: string; color?: string }>;
   isMatch: boolean;
   isActiveMatch: boolean;
 }
@@ -78,6 +84,9 @@ interface Candidate {
   endCol: number;
   continuesLeft: boolean;
   continuesRight: boolean;
+  statusName?: string;
+  statusColor?: string;
+  tags?: Array<{ name: string; color?: string }>;
   color: string;
   title: string;
   icon?: string;
@@ -169,6 +178,9 @@ export function buildCalendarWeeks(
         title: act.title,
         icon: act.icon,
         assignedMemberIds: act.assignedMemberIds,
+        statusName: act.statusName,
+        statusColor: act.statusColor,
+        tags: act.tags,
         isMatch: matchedIds.has(act.id),
         isActiveMatch: act.id === activeMatchId,
       });

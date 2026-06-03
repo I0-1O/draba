@@ -23,8 +23,10 @@ type ApiActivity = components['schemas']['Activity'];
 
 const MONTH_DAY_HEADER_H = 28;
 const WEEK_DAY_HEADER_H  = 60;
-const BAR_H        = 20;
-const LANE_SLOT_H  = 24;
+const BAR_H           = 20;
+const LANE_SLOT_H     = 24;
+const WEEK_BAR_H      = 66;   // 3-line bar for week view
+const WEEK_LANE_SLOT_H = 70;  // WEEK_BAR_H + 4px gap
 const OVERFLOW_H   = 20;   // reserved for "+N more" chips (month)
 const EDGE_W       = 8;    // resize hit-zone on bar edges
 const ROW_RESIZE_H = 6;    // month row-height drag strip
@@ -122,20 +124,21 @@ function DayOverflowPopover({ segments, activityById, dayDate, anchorRect, onSel
 // ── CalendarBar ───────────────────────────────────────────────────────────────
 
 interface BarProps {
-  seg: CalendarSegment | LiveSegment & Pick<CalendarSegment, 'activityId' | 'lane' | 'title' | 'isMatch' | 'isActiveMatch' | 'assignedMemberIds'>;
+  seg: CalendarSegment | LiveSegment & Pick<CalendarSegment, 'activityId' | 'lane' | 'title' | 'isMatch' | 'isActiveMatch' | 'assignedMemberIds' | 'statusName' | 'statusColor' | 'tags'>;
   topPx: number;
+  barH: number;
   isSelected: boolean;
   hasQuery: boolean;
+  isWeekLayout: boolean;
   memberById: Record<string, Member>;
   onPointerDown: (e: React.PointerEvent, activityId: string, type: DragType) => void;
   onClick: (activityId: string, e: React.MouseEvent) => void;
 }
 
-function CalendarBar({ seg, topPx, isSelected, hasQuery, memberById, onPointerDown, onClick }: BarProps) {
+function CalendarBar({ seg, topPx, barH, isSelected, hasQuery, isWeekLayout, memberById, onPointerDown, onClick }: BarProps) {
   const isHighlighted = seg.isMatch || seg.isActiveMatch;
   const isDimmed = hasQuery && !isHighlighted;
 
-  // Assignee first names (up to 3, separated by commas)
   const assigneeNames = seg.assignedMemberIds
     .slice(0, 3)
     .map(id => memberById[id]?.name?.split(' ')[0])
@@ -146,12 +149,12 @@ function CalendarBar({ seg, topPx, isSelected, hasQuery, memberById, onPointerDo
     top: topPx + 2,
     left: `calc(${(seg.startCol / COL_COUNT) * 100}% + 2px)`,
     width: `calc(${((seg.endCol - seg.startCol + 1) / COL_COUNT) * 100}% - 4px)`,
-    height: BAR_H,
+    height: barH,
     background: seg.color,
     borderRadius: `${seg.continuesLeft ? 0 : 4}px ${seg.continuesRight ? 0 : 4}px ${seg.continuesRight ? 0 : 4}px ${seg.continuesLeft ? 0 : 4}px`,
     cursor: 'pointer',
     display: 'flex',
-    alignItems: 'center',
+    alignItems: isWeekLayout ? 'stretch' : 'center',
     overflow: 'hidden',
     opacity: isDimmed ? 0.3 : 1,
     outline: isSelected ? '2px solid var(--primary)' : seg.isActiveMatch ? '2px solid #f59e0b' : seg.isMatch ? '1px solid #f59e0b' : 'none',
@@ -181,16 +184,69 @@ function CalendarBar({ seg, topPx, isSelected, hasQuery, memberById, onPointerDo
     >
       {!seg.continuesLeft  && <div style={{ ...edgeStyle, left: 0 }} />}
       {!seg.continuesRight && <div style={{ ...edgeStyle, right: 0, left: 'auto' }} />}
-      {seg.continuesLeft && <span style={{ fontSize: 10, color: '#fff', paddingLeft: 2, pointerEvents: 'none', flexShrink: 0 }}>◀</span>}
-      <span style={{ fontSize: 11, fontWeight: 500, color: '#fff', overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis', padding: '0 4px', pointerEvents: 'none', flex: 1, minWidth: 0 }}>
-        {seg.title}
-      </span>
-      {assigneeNames.length > 0 && (
-        <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.85)', paddingRight: 4, whiteSpace: 'nowrap', pointerEvents: 'none', flexShrink: 0, maxWidth: '45%', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-          {assigneeNames.join(', ')}
-        </span>
+
+      {isWeekLayout ? (
+        /* Week view: 3-line layout — title+assignees / status / tags */
+        <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', padding: '4px 6px', flex: 1, minWidth: 0, overflow: 'hidden', gap: 3, pointerEvents: 'none' }}>
+          {/* Row 1: title + assignees */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 4, overflow: 'hidden' }}>
+            {seg.continuesLeft && <span style={{ fontSize: 10, color: '#fff', flexShrink: 0 }}>◀</span>}
+            <span style={{ fontSize: 11, fontWeight: 500, color: '#fff', overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis', flex: 1, minWidth: 0 }}>
+              {seg.title}
+            </span>
+            {assigneeNames.length > 0 && (
+              <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.85)', whiteSpace: 'nowrap', flexShrink: 0, maxWidth: '45%', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                {assigneeNames.join(', ')}
+              </span>
+            )}
+            {seg.continuesRight && <span style={{ fontSize: 10, color: '#fff', flexShrink: 0 }}>▶</span>}
+          </div>
+          {/* Row 2: status chip */}
+          <div style={{ overflow: 'hidden', lineHeight: '14px' }}>
+            {seg.statusName ? (
+              <span style={{
+                display: 'inline-flex', alignItems: 'center', gap: 3,
+                padding: '1px 5px', borderRadius: 3, fontSize: 10, fontWeight: 500,
+                background: seg.statusColor ? `color-mix(in srgb, ${seg.statusColor} 25%, rgba(255,255,255,0.15))` : 'rgba(255,255,255,0.15)',
+                color: '#fff',
+                border: `1px solid ${seg.statusColor ? `color-mix(in srgb, ${seg.statusColor} 50%, rgba(255,255,255,0.2))` : 'rgba(255,255,255,0.25)'}`,
+                whiteSpace: 'nowrap', maxWidth: '100%', overflow: 'hidden',
+              }}>
+                <span style={{ width: 6, height: 6, borderRadius: '50%', background: seg.statusColor ?? 'rgba(255,255,255,0.7)', flexShrink: 0 }} />
+                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{seg.statusName}</span>
+              </span>
+            ) : null}
+          </div>
+          {/* Row 3: tag chips */}
+          <div style={{ display: 'flex', gap: 3, overflow: 'hidden', lineHeight: '14px' }}>
+            {(seg.tags ?? []).slice(0, 3).map((t, i) => (
+              <span key={i} style={{
+                display: 'inline-block', padding: '1px 5px', borderRadius: 3, fontSize: 10,
+                background: t.color ? `color-mix(in srgb, ${t.color} 25%, rgba(255,255,255,0.15))` : 'rgba(255,255,255,0.15)',
+                color: '#fff',
+                border: `1px solid ${t.color ? `color-mix(in srgb, ${t.color} 50%, rgba(255,255,255,0.2))` : 'rgba(255,255,255,0.25)'}`,
+                whiteSpace: 'nowrap', flexShrink: 0,
+              }}>
+                {t.name}
+              </span>
+            ))}
+          </div>
+        </div>
+      ) : (
+        /* Month view: single-line layout */
+        <>
+          {seg.continuesLeft && <span style={{ fontSize: 10, color: '#fff', paddingLeft: 2, pointerEvents: 'none', flexShrink: 0 }}>◀</span>}
+          <span style={{ fontSize: 11, fontWeight: 500, color: '#fff', overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis', padding: '0 4px', pointerEvents: 'none', flex: 1, minWidth: 0 }}>
+            {seg.title}
+          </span>
+          {assigneeNames.length > 0 && (
+            <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.85)', paddingRight: 4, whiteSpace: 'nowrap', pointerEvents: 'none', flexShrink: 0, maxWidth: '45%', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+              {assigneeNames.join(', ')}
+            </span>
+          )}
+          {seg.continuesRight && <span style={{ fontSize: 10, color: '#fff', paddingRight: 2, pointerEvents: 'none', flexShrink: 0 }}>▶</span>}
+        </>
       )}
-      {seg.continuesRight && <span style={{ fontSize: 10, color: '#fff', paddingRight: 2, pointerEvents: 'none', flexShrink: 0 }}>▶</span>}
     </div>
   );
 }
@@ -285,7 +341,9 @@ function WeekRowRenderer({
   const dowLabels = weekStartDay === 0 ? DOW_LABELS_SUN : DOW_LABELS_MON;
   const todayISO = today.toISOString().slice(0, 10);
   const isWeek = layout === 'week';
-  const dayHeaderH = isWeek ? WEEK_DAY_HEADER_H : MONTH_DAY_HEADER_H;
+  const dayHeaderH  = isWeek ? WEEK_DAY_HEADER_H : MONTH_DAY_HEADER_H;
+  const barH        = isWeek ? WEEK_BAR_H      : BAR_H;
+  const laneSlotH   = isWeek ? WEEK_LANE_SLOT_H : LANE_SLOT_H;
 
   // Month: cap-filtered. Week: all segments. Either way, suppress the dragged bar's
   // static position so only the live overlay renders.
@@ -293,7 +351,7 @@ function WeekRowRenderer({
     .filter(s => s.activityId !== dragActivityId);
 
   // Week: min-height ensures all lanes are visible even if flex container is small.
-  const weekMinH = WEEK_DAY_HEADER_H + row.laneCount * LANE_SLOT_H + 40;
+  const weekMinH = WEEK_DAY_HEADER_H + row.laneCount * WEEK_LANE_SLOT_H + 40;
 
   const rowStyle: React.CSSProperties = isWeek
     ? { position: 'relative', flex: 1, minHeight: weekMinH, borderBottom: '1px solid var(--border)' }
@@ -355,9 +413,11 @@ function WeekRowRenderer({
             <div style={{ position: 'relative', height: '100%', pointerEvents: 'none' }}>
               <CalendarBar
                 seg={seg}
-                topPx={dayHeaderH + seg.lane * LANE_SLOT_H}
+                topPx={dayHeaderH + seg.lane * laneSlotH}
+                barH={barH}
                 isSelected={selectedActivityId === seg.activityId}
                 hasQuery={hasQuery}
+                isWeekLayout={isWeek}
                 memberById={memberById}
                 onPointerDown={onBarPointerDown}
                 onClick={onBarClick}
@@ -389,9 +449,11 @@ function WeekRowRenderer({
             <div style={{ position: 'relative', height: '100%', pointerEvents: 'none' }}>
               <CalendarBar
                 seg={displaySeg}
-                topPx={dayHeaderH + displaySeg.lane * LANE_SLOT_H}
+                topPx={dayHeaderH + displaySeg.lane * laneSlotH}
+                barH={barH}
                 isSelected={selectedActivityId === dragActivityId}
                 hasQuery={false}
+                isWeekLayout={isWeek}
                 memberById={memberById}
                 onPointerDown={onBarPointerDown}
                 onClick={onBarClick}
@@ -469,9 +531,13 @@ export default function CalendarGrid({
   const onBarDragProgressRef = useRef(onBarDragProgress);
   const onBarDragEndRef      = useRef(onBarDragEnd);
   const onBarDragCommitRef   = useRef(onBarDragCommit);
+  const onSelectActivityRef  = useRef(onSelectActivity);
+  const activityByIdRef      = useRef(activityById);
   useEffect(() => { onBarDragProgressRef.current = onBarDragProgress; }, [onBarDragProgress]);
   useEffect(() => { onBarDragEndRef.current      = onBarDragEnd; },      [onBarDragEnd]);
   useEffect(() => { onBarDragCommitRef.current   = onBarDragCommit; },   [onBarDragCommit]);
+  useEffect(() => { onSelectActivityRef.current  = onSelectActivity; },  [onSelectActivity]);
+  useEffect(() => { activityByIdRef.current      = activityById; },      [activityById]);
 
   // ── Drag ────────────────────────────────────────────────────────────────────
 
@@ -532,7 +598,15 @@ export default function CalendarGrid({
         const changed =
           live.start.getTime() !== ds.originalStart.getTime() ||
           live.end.getTime()   !== ds.originalEnd.getTime();
-        if (changed) onBarDragCommitRef.current(ds.activityId, live.start, live.end);
+        if (changed) {
+          onBarDragCommitRef.current(ds.activityId, live.start, live.end);
+        } else {
+          // No movement — treat as a click. The DOM click event is unreliable
+          // here because pointerdown removes the bar from staticSegments and
+          // re-adds it after pointerup, so the click event fires on a
+          // different DOM node. Drive selection from the pointer lifecycle.
+          onSelectActivityRef.current(activityByIdRef.current.get(ds.activityId) ?? null);
+        }
       }
       onBarDragEndRef.current();
       setDragState(null);

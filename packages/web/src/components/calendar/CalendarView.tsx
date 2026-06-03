@@ -207,16 +207,28 @@ export default function CalendarView({
 
   // Build CalendarActivity list with resolved colors.
   const calendarActivities: CalendarActivity[] = useMemo(() => {
-    return visibleActivities.map((act, i) => ({
-      id: act.id,
-      startAt: act.startAt,
-      endAt:   act.endAt,
-      title:   act.title,
-      color:   resolveActivityColor(act, i, memberById, colorBy, statusColorById),
-      icon:    act.icon ?? undefined,
-      assignedMemberIds: act.assignedMemberIds ?? [],
-    }));
-  }, [visibleActivities, memberById, colorBy, statusColorById]);
+    const statusById = new Map((timelineStatuses ?? []).map(s => [s.id, s]));
+    const tagById    = new Map((tags ?? []).map(t => [t.id, t]));
+    return visibleActivities.map((act, i) => {
+      const status = act.statusId ? statusById.get(act.statusId) : undefined;
+      const tagList = (act.tagIds ?? [])
+        .map(id => tagById.get(id))
+        .filter((t): t is NonNullable<typeof t> => Boolean(t));
+      return {
+        id: act.id,
+        startAt: act.startAt,
+        endAt:   act.endAt,
+        title:   act.title,
+        color:   resolveActivityColor(act, i, memberById, colorBy, statusColorById),
+        icon:    act.icon ?? undefined,
+        assignedMemberIds: act.assignedMemberIds ?? [],
+        statusName:  status?.name,
+        statusColor: status ? (resolveColorHex(status.color ?? null) ?? undefined) : undefined,
+        tags: tagList.map(t => ({ name: t.name, color: resolveColorHex(t.color ?? null) ?? undefined })),
+      };
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visibleActivities, memberById, colorBy, statusColorById, timelineStatuses, tags]);
 
   // Activity lookup map for CalendarGrid (full ApiActivity for sidebar/create).
   const activityById = useMemo<Map<string, ApiActivity>>(

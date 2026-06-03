@@ -2,6 +2,15 @@
 
 ---
 
+## 2026-06-02 — /test-phase 11.2
+
+- Subagents run: static-check, unit-test (Go + Vitest), schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
+- Result: 7 pass, 1 skip (ws-smoke heartbeat 3rd cycle; 30s interval requires ~90s — unit tests cover at speed)
+- Smoke target: http://epcot.lan:8081
+- Notable: web-e2e confirmed calendar Month/Week layout, navigation, and tab switching; pre-existing `<TimelineItem>` render error in sidebar noted (unrelated to Phase 11.2)
+
+---
+
 ## 2026-06-02 — Phase 11.2: Calendar View
 
 **Goal:** Ship a Month / Week all-day-bar calendar view. Every activity is all-day, so Day view, the time grid, and the time-overlap lane algorithm are all cut. The only layout problem is vertical stacking of concurrent multi-day bars.

@@ -154,6 +154,7 @@ function DashboardShell() {
   // Global preferences — restored on login to seed team/timeline selection.
   const { isSuccess: globalPrefsSettled } = usePreferences()
   const globalPrefMap = usePreferenceMap()
+  const weekStartDay: 0 | 1 = (globalPrefMap['week_start'] as string | undefined) === 'sunday' ? 0 : 1
 
   // Team modal state
   const [teamModalMode, setTeamModalMode] = useState<'new' | 'edit' | null>(null)
@@ -282,13 +283,31 @@ function DashboardShell() {
     if (calendarLayout === 'month') {
       d.setUTCDate(1)
     } else {
-      // Snap to weekStart (Monday by default).
+      // Snap to weekStart.
       const dow = d.getUTCDay()
-      const daysBack = dow === 0 ? 6 : dow - 1
+      const daysBack = weekStartDay === 1 ? (dow === 0 ? 6 : dow - 1) : dow
       d.setUTCDate(d.getUTCDate() - daysBack)
     }
     setCalendarAnchorDate(d)
-  }, [calendarLayout])
+  }, [calendarLayout, weekStartDay])
+
+  // Switching layouts also snaps the anchor date to the correct boundary so
+  // the week-view always starts on the configured weekStart day.
+  const handleCalendarLayoutChange = useCallback((l: CalendarLayout) => {
+    setCalendarLayout(l)
+    setCalendarAnchorDate(prev => {
+      const d = new Date(prev)
+      d.setUTCHours(0, 0, 0, 0)
+      if (l === 'week') {
+        const dow = d.getUTCDay()
+        const daysBack = weekStartDay === 1 ? (dow === 0 ? 6 : dow - 1) : dow
+        d.setUTCDate(d.getUTCDate() - daysBack)
+      } else {
+        d.setUTCDate(1)
+      }
+      return d
+    })
+  }, [weekStartDay])
 
   useTeamActivitySync(teamId, accessToken)
 
@@ -540,7 +559,7 @@ function DashboardShell() {
         {view === 'calendar' && (
           <CalendarToolbar
             layout={calendarLayout}
-            onLayoutChange={setCalendarLayout}
+            onLayoutChange={handleCalendarLayoutChange}
             anchorDate={calendarAnchorDate}
             onPrev={calendarPrev}
             onNext={calendarNext}
