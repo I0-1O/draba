@@ -2,7 +2,7 @@
 
 _Updated after each significant work session. Read this first to orient — it is intentionally short. Per-phase implementation detail lives in [docs/log.md](../log.md); this file is a current-state snapshot only._
 
-**Last updated:** 2026-06-02 (Phase 11.2 Calendar View: Month/Week all-day-bar layouts; lane packing; drag/resize; filter/Find parity; all automated checks pass; Docker verification pending)
+**Last updated:** 2026-06-03 (Phase 11.3 Kanban View: fully interactive board; drag-to-recolumn; Group by / Sort by / Color by / Card fields; all automated checks pass; Docker verification pending)
 
 ---
 
@@ -10,20 +10,20 @@ _Updated after each significant work session. Read this first to orient — it i
 
 **All phases through 10.4.6 are complete and automated-checks-pass.** That covers Identity (9.6), Teams/Members/Settings (10.1.x), Status Templates (10.2), Timelines CRUD (10.3), 10.4.1–10.4.5 polish, and 10.4.6 Filter Implementation. Phases through 10.4.5 are Docker-verified; 10.4.6, 11.1, 11.1.1, 11.1.2, and 11.2 are awaiting Docker verification.
 
-**Phase 11.2 — Calendar View:** complete and checked (2026-06-02). Ships:
-- `lib/activityColor.ts` (new): shared color-by resolver (activity/member/status) used by CalendarView
-- `lib/calendarLanes.ts` (new): pure greedy lane-packing algorithm; `buildCalendarWeeks`, `overflowCountsForWeek`, `segmentsForDay`; 21 unit tests
-- `components/calendar/CalendarToolbar.tsx` (new): Month/Week toggle, prev/next/today nav, color-by, export/share stubs
-- `components/calendar/CalendarGrid.tsx` (new): week-row grid renderer; `CalendarBar`; `DayOverflowPopover`; `RowResizeHandle`; pointer-based bar drag (move + edge resize) with geometric day hit-testing
-- `components/calendar/CalendarView.tsx` (new): data container — fetches activities + members, applies filter + Find, builds model, manages lane-cap persistence
-- `DashboardPage.tsx`: calendar state + toolbar + content branch wired; prev/next/today nav callbacks
-- 208 tests pass including new `calendarLanes.test.ts` (21 tests)
+**Phase 11.3 — Kanban View (Interactive):** complete and checked (2026-06-03). Ships:
+- `components/kanban/kanbanColumns.ts` (new): pure `buildColumns()` for Status/Member/Combination/Parent/None; sort comparators; sentinel IDs
+- `components/kanban/KanbanView.test.ts` (new): 32 unit tests for `buildColumns` and `sortActivities`
+- `components/kanban/KanbanToolbar.tsx` (new): Group by / Sort by / Color by / Card fields multi-select
+- `components/kanban/KanbanCard.tsx` (new): draggable card (useDraggable); per-activity accent border (colorBy); configurable fields; Find highlight
+- `components/kanban/KanbanColumn.tsx` (new): droppable column (useDroppable); header; collapse rail; empty state; "+ Add"
+- `components/kanban/KanbanBoard.tsx` (new): DndContext host; drag overlay; drop semantics per groupBy; no-op guard
+- `components/kanban/KanbanView.tsx` (new): data container; applyActiveFilter; colorMap; buildColumns; Find matches + auto-expand; drag commit; pref persistence
+- `DashboardPage.tsx`: kanban toolbar state + pref restore/save; KanbanToolbar + KanbanView wired
+- 247 tests pass including new KanbanView.test.ts (32 tests)
 
 | Next phase | Scope | Plan |
 |------------|-------|------|
-| **11.3** | Kanban View (**Interactive**) | [docs/plans/phase-11.3-kanban-view.md](../plans/phase-11.3-kanban-view.md) — scope settled 2026-06-03 |
-
-**Phase 11.3 re-scoped (2026-06-03, plan only — no code yet):** changed from "Read-Only" to a fully interactive board. Column axis = active **Group by** (Status default / Assigned-to / Parent / combination / None); drag-to-recolumn mutates the grouping value (status/reassign/reparent) via existing `useUpdateActivity`. Adds Color by, configurable Sorts, and a per-card **Card fields** toggle set. Decisions locked: member-column drop = replace `assignedMemberIds`; combination/None columns non-droppable; manual card ordering deferred (possible 11.3.1). ROADMAP §11.3 and REQUIREMENTS.md updated to match; design handoff archived at `docs/design/handoffs/kanban-view/`.
+| **12** | Communications Testing | [docs/ROADMAP.md §Phase 12](../ROADMAP.md#phase-12--communications-testing) |
 
 ---
 

@@ -2,6 +2,28 @@
 
 ---
 
+## 2026-06-03 — Phase 11.3: Kanban View (Interactive)
+
+**Goal:** Ship a fully interactive Kanban board view. Column axis = active Group by (Status by default). Drag-to-recolumn mutates grouping value via existing `useUpdateActivity`. Adds Color by, configurable Sorts, and a per-card Card fields toggle set.
+
+**Frontend:**
+- `components/kanban/kanbanColumns.ts` (new): Pure column-building and sort logic. `buildColumns(groupBy, activities, members, statuses, sortBy) → KanbanColumn[]` handles all five Group by modes (Status / Member / Assigned-to-combination / Parent / None). Each column carries an ordered `items[]` (activities sorted by `sortBy`), `droppable` flag, and `dropValue` (the patch to apply on drop). Sentinel IDs: `NO_STATUS_ID`, `UNASSIGNED_ID`, `NO_PARENT_ID`, `NONE_COLUMN_ID`. Sort: Start date / End date / Title / % complete (desc, nulls last) / Recently updated.
+- `components/kanban/KanbanView.test.ts` (new): 32 unit tests covering `sortActivities` (all 5 modes, null handling) and `buildColumns` for every Group by mode (column count, item routing, dropValue, droppable flag, sentinel columns, empty-activity robustness).
+- `components/kanban/KanbanToolbar.tsx` (new): Sub-toolbar. Controls: Group by select / Sort by select / Color by select / Card fields multi-select (checkboxes with reset-to-defaults). Export/Share stubs in the right margin. Follows the same visual idiom as CalendarToolbar and GanttToolbar.
+- `components/kanban/KanbanCard.tsx` (new): Draggable card using `@dnd-kit/core useDraggable` (5px activation threshold to prevent accidental drags). Renders: accent left border (3px, driven by per-activity resolved color from `colorMap`), title (2-line clamp), and all configured card fields: description snippet, status pill, date range, tag chips (max 3, +N), % complete bar, member avatars (overlapping, 2px card-bg ring, max 3, +N). Find highlight treatments (amber border for active match, 0.3 opacity for non-matches).
+- `components/kanban/KanbanColumn.tsx` (new): Droppable column using `@dnd-kit/core useDroppable`. Header: accent dot, label, count badge, collapse chevron. Card list scrolls independently. Empty state: muted "No activities" (still a valid drop target). "+ Add" button (dashed border, hover → accent color). Collapsed rail: 40px wide, vertical label text, card count, expand chevron.
+- `components/kanban/KanbanBoard.tsx` (new): `DndContext` host. Registers `PointerSensor` with 5px activation threshold. `onDragEnd`: resolves column from `over.id`, checks `droppable`, skips no-op drops (card already in target column), calls `onDrop`. `onDragOver`: tracks hovered column for drop-highlight styling. `DragOverlay`: floating card copy during drag, uses `dropAnimation={null}` for instant hide on drop. Per-activity `colorMap` passed through to columns → cards.
+- `components/kanban/KanbanView.tsx` (new): Data container mirroring CalendarView. Fetches all activities for the timeline (no date bounds — Kanban shows everything). Applies `applyActiveFilter`. Builds per-activity `colorMap` via `resolveActivityColor`. Builds columns via `buildColumns`. Manages collapsed-column state (persisted to `kanban_collapsed` per-timeline pref). Find: `matchEvents`, `registerMatches` in column → sort order, auto-expands collapsed columns containing the active match. Drag commit: optimistic cache update + `useUpdateActivity.mutate`.
+- `DashboardPage.tsx`: Added kanban toolbar state (`kanbanGroupBy`, `kanbanSortBy`, `kanbanCardFields`, `kanbanCollapsedColumns`). Per-timeline pref restoration for all kanban keys. Per-timeline pref save effects for all kanban keys. `KanbanToolbar` rendered in `view === 'kanban'` slot. `KanbanView` content branch replacing the old "coming soon" fallback. `onAddActivity` callback connects Kanban's "+ Add" to `setCreateDefaults`.
+
+**Tests:**
+- 247 total tests pass (up from 208 in Phase 11.2), including new `KanbanView.test.ts` (32 tests; all `buildColumns` modes and sort comparators).
+- `golangci-lint run` clean; `go test ./...` passes (55 API tests, 4 DB tests); `pnpm --filter web lint` clean; `pnpm --filter web build` clean.
+
+**Manual verification pending (Docker):** view switcher Kanban; drag between status/member/parent columns; card fields toggle; collapse/expand columns; Filter and Find on board; Color by; sort within columns; "+ Add" opens create panel.
+
+---
+
 ## 2026-06-02 — /test-phase 11.2
 
 - Subagents run: static-check, unit-test (Go + Vitest), schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e

@@ -1158,15 +1158,30 @@ Multi-assignee activities now appear under their exact assignee-set group in bot
 ---
 
 ### Timeline Views — Kanban (Web — Phase 11.3)
-Read-only per requirements. Depends on Phase 10.1 (status API) and 10.2 (status UI).
+Fully interactive board. Re-scoped 2026-06-03 from read-only to interactive (drag-to-recolumn, group-by-driven columns, card fields). Depends on Phase 10.2 (statuses API + UI).
 
-- [ ] Columns from `team_statuses` in display order; column header colored from status color
-- [ ] Cards: title, date range, assignee avatars (stacked color indicators for multi-assignee), parent badge if nested
-- [ ] Empty column shows muted "No events" placeholder
-- [ ] Each column scrolls independently when card count exceeds viewport height
-- [ ] Card click → `EventDetailPanel`
-- [ ] Status renamed/recolored in Settings updates Kanban column header without refresh
-- [ ] Attempting to drag a card produces no errors and no state change (read-only enforcement)
+- [x] View switcher shows Kanban tab; switching persists per timeline — 2026-06-03
+- [x] `kanbanColumns.ts`: `buildColumns()` for Status/Member/Combination/Parent/None; sort comparators; sentinels — 2026-06-03
+- [x] `KanbanToolbar.tsx`: Group by / Sort by / Color by / Card fields multi-select — 2026-06-03
+- [x] `KanbanCard.tsx`: draggable card with accent border (colorBy), title, date range, status, tags, members, % complete, parent, description — 2026-06-03
+- [x] `KanbanColumn.tsx`: droppable column with header (accent dot + count + collapse), card list, empty state, "+ Add" — 2026-06-03
+- [x] `KanbanBoard.tsx`: DndContext host with drag overlay, drop semantics per groupBy, no-op drop guard — 2026-06-03
+- [x] `KanbanView.tsx`: data container (fetch, filter, Find, colorMap, buildColumns, drag commit, preference persistence) — 2026-06-03
+- [x] `KanbanView.test.ts`: 32 unit tests for `buildColumns` and `sortActivities` — 2026-06-03
+- [x] Columns collapse/expand; state persisted per timeline — 2026-06-03
+- [x] Card fields configurable; Group by axis field auto-suppressed from cards — 2026-06-03
+- [x] Filter parity: `applyActiveFilter` applied; column counts reflect filtered set — 2026-06-03
+- [x] Find parity: matching cards highlighted, non-matches dimmed; active match auto-expands collapsed columns — 2026-06-03
+- [x] Drag-to-recolumn commits status/reassign/reparent via `useUpdateActivity` (optimistic update) — 2026-06-03
+- [x] Combination/None columns non-droppable — 2026-06-03
+- [x] "+ Add" opens create panel pre-filled with column member (for member columns) — 2026-06-03
+- [x] All automated checks pass (`golangci-lint`, `go test ./...`, `pnpm lint`, `pnpm build`) — 2026-06-03
+- [ ] Manual: Drag card between status columns — status changes and card moves
+- [ ] Manual: Drag card between member columns — primary assignee changes
+- [ ] Manual: Drag card to parent column — parent changes
+- [ ] Manual: Card fields toggle shows/hides fields; Group by axis field auto-hides
+- [ ] Manual: Collapse/expand columns survive reload
+- [ ] Manual: Filter and Find work correctly on the board
 
 ### Calendar Sync
 - [ ] Google Calendar OAuth connect flow

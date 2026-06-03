@@ -50,7 +50,7 @@ This document organizes development into discrete phases with effort estimates a
 | 11.1.1 | [Timezone-Safe Activity Dates](#phase-1111--timezone-safe-activity-dates) | S–M — 0.5–1 day | ✅ |
 | 11.1.2 | [Group by Assignee Combination](#phase-1112--group-by-assignee-combination) | S–M — 0.5–1 day | ✅ |
 | 11.2 | [Web — Calendar View](#phase-112--web--calendar-view) | L — 3–5 days | 🔄 |
-| 11.3 | [Web — Kanban View (Interactive)](#phase-113--web--kanban-view-interactive) | M — 2–3 days | ⬜ |
+| 11.3 | [Web — Kanban View (Interactive)](#phase-113--web--kanban-view-interactive) | M — 2–3 days | 🔄 |
 | 12 | [Communications Testing](#phase-12--communications-testing) | S — 1 day | ⬜ |
 | 13 | [AI Key Management](#phase-13--ai-key-management) | M — 2–3 days | ⬜ |
 | 14 | [Localization & Language Support](#phase-14--localization--language-support) | L — 3–5 days | ⬜ |
@@ -1429,7 +1429,7 @@ A familiar **Month / Week** calendar surface that answers "what is the team work
 ---
 
 ### Phase 11.3 — Web — Kanban View (Interactive)
-**Status:** ⬜ | **Effort:** M (2–3 days)
+**Status:** 🔄 In Progress — 2026-06-03, all automated checks pass; manual UI verification on Docker still needed | **Effort:** M (2–3 days)
 
 A **fully interactive** board view — the column-and-card complement to Gantt / List / Calendar. **Re-scoped 2026-06-03** from the original "Read-Only" plan: drag-to-change-status is no longer v2, and the board generalizes beyond a fixed status axis. The **column axis is whatever `Group by` is set to** (Status by default); cards drag between columns to mutate that grouping value, open the existing edit panel on click, and create inline per column.
 
