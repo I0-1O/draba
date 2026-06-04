@@ -24,6 +24,14 @@
 
 ---
 
+## 2026-06-03 — /test-phase 11.3
+
+- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
+- Result: 8/8 pass (web-e2e verified with live browser automation: unauthenticated redirect ✓, login + token stored ✓, 10+ API calls 200 OK ✓, zero WS errors ✓)
+- Smoke target: http://epcot.lan:8081
+
+---
+
 ## 2026-06-02 — /test-phase 11.2
 
 - Subagents run: static-check, unit-test (Go + Vitest), schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
