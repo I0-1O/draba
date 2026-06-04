@@ -15,14 +15,22 @@ export default function RegisterPage() {
 
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
+  const [confirmPassword, setConfirmPassword] = useState('')
   const [displayName, setDisplayName] = useState('')
   // Pre-fill from ?token= query param (invite link).
   const [inviteToken, setInviteToken] = useState(searchParams.get('token') ?? '')
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
 
+  // Live mismatch warning once the confirm field has any input.
+  const mismatch = confirmPassword !== '' && password !== confirmPassword
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
+    if (password !== confirmPassword) {
+      setError('Passwords do not match.')
+      return
+    }
     setError(null)
     setLoading(true)
     try {
@@ -112,6 +120,25 @@ export default function RegisterPage() {
             </div>
 
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <Label htmlFor="confirmPassword">Confirm password</Label>
+              <Input
+                id="confirmPassword"
+                type="password"
+                autoComplete="new-password"
+                placeholder="Re-enter your password"
+                value={confirmPassword}
+                onChange={e => setConfirmPassword(e.target.value)}
+                required
+                minLength={8}
+              />
+              {mismatch && (
+                <p style={{ fontSize: 12, color: 'var(--destructive)', margin: 0 }}>
+                  Passwords don't match.
+                </p>
+              )}
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
               <Label htmlFor="inviteToken">Invite token</Label>
               <div
                 style={{
@@ -138,7 +165,7 @@ export default function RegisterPage() {
               <p style={{ fontSize: 13, color: 'var(--destructive)', margin: 0 }}>{error}</p>
             )}
 
-            <Button type="submit" disabled={loading} style={{ width: '100%' }}>
+            <Button type="submit" disabled={loading || mismatch} style={{ width: '100%' }}>
               {loading ? 'Creating account…' : 'Create account'}
             </Button>
           </form>

@@ -1460,7 +1460,7 @@ A **fully interactive** board view — the column-and-card complement to Gantt /
 ---
 
 ### Phase 12 — Communications Testing
-**Status:** ⬜ | **Effort:** S (1 day)
+**Status:** ✅ Complete (2026-06-04) — validated live on Docker with real Gmail SMTP | **Effort:** S (1 day)
 
 Comprehensive automated tests for every outbound email flow. This phase closes the test gap flagged in the 10.1.3 review and ensures all comms work correctly before enabling SMTP in production. Building the invite test surfaced that the invite flow never sent mail (it only created the token); wiring `handleCreateInvite` to email the invite link was added here as the one small feature needed to make the flow testable.
 

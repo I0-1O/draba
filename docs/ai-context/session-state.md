@@ -2,7 +2,7 @@
 
 _Updated after each significant work session. Read this first to orient — it is intentionally short. Per-phase implementation detail lives in [docs/log.md](../log.md); this file is a current-state snapshot only._
 
-**Last updated:** 2026-06-03 (Phase 11.3 Kanban View: fully interactive board; drag-to-recolumn; Group by / Sort by / Color by / Card fields; all automated checks pass; Docker verification pending)
+**Last updated:** 2026-06-04 (Phase 12 Communications Testing: outbound-email test harness + coverage; invite-email send wired up; base-URL and reset-feedback bugs fixed; register password-confirm added; validated live on Docker with real Gmail SMTP)
 
 ---
 
@@ -21,9 +21,11 @@ _Updated after each significant work session. Read this first to orient — it i
 - `DashboardPage.tsx`: kanban toolbar state + pref restore/save; KanbanToolbar + KanbanView wired
 - 247 tests pass including new KanbanView.test.ts (32 tests)
 
+**Phase 12 — Communications Testing:** complete and validated live (2026-06-04). Outbound-email test harness (`newTestSMTPServer`) + mailer unit tests + integration tests for SMTP test/validate, password reset, and invite email. Wired invite email into `handleCreateInvite` (the flow previously never sent mail). Fixed two bugs surfaced in live validation: unset `DRABA_BASE_URL` → localhost links in email (now documented + set on Docker), and missing reset-success feedback on `LoginPage`. Added password-confirm to `RegisterPage`. All checks pass; verified end-to-end on Docker with real Gmail SMTP.
+
 | Next phase | Scope | Plan |
 |------------|-------|------|
-| **12** | Communications Testing | [docs/ROADMAP.md §Phase 12](../ROADMAP.md#phase-12--communications-testing) |
+| **13** | AI Key Management | [docs/ROADMAP.md §Phase 13](../ROADMAP.md#phase-13--ai-key-management) |
 
 ---
 

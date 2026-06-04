@@ -2,6 +2,33 @@
 
 ---
 
+## 2026-06-04 — Phase 12: Communications Testing
+
+**Goal:** Automated coverage for every outbound email flow, then live end-to-end validation against Docker (`epcot.lan:8081`) with a real Gmail SMTP account.
+
+**Test infrastructure & coverage (`packages/api`):**
+- `internal/api/smtp_capture_test.go` (new): `newTestSMTPServer(t)` — an in-process TCP SMTP server that speaks just enough of the protocol (advertises no extensions, so the client uses the plain no-STARTTLS/no-auth path) and captures every message. Exposes `host()`/`port()`/`messages()`/`reset()`.
+- `internal/mailer/mailer_test.go` (new, white-box): 9 unit tests — encrypt/decrypt round-trip, `SaveConfig` encrypts at rest (`enc:v1:` sentinel, no plaintext leak, no caller mutation), `LoadConfig` decrypts + legacy-plaintext fallback, unconfigured `LoadConfig` returns `(nil,nil)`, `Send` no-op when unconfigured, `IsConfigured`.
+- `internal/api/comms_integration_test.go` (new): `POST /admin/smtp/test` (sends to caller, persists nothing), `PUT /admin/smtp` (sends validation email then persists) plus the validation-gate negative (unreachable server → 400, nothing persisted), password-reset email delivery + reset link, invite email delivery + link, and invite-with-no-email sends nothing.
+
+**Feature added (made the invite-email bullet real):**
+- `handleCreateInvite` (`team_handler.go`) now emails the invite link (`{DRABA_BASE_URL}/register?token=…`) when an address is supplied — best-effort, logged-not-fatal, no-op when SMTP is unconfigured or the invite is link-only. Previously it created the token but never sent mail, so the flow was untestable.
+
+**Bugs found during live validation & fixed:**
+- **Broken outbound links:** `getBaseURL()` falls back to `http://localhost:8080` when `DRABA_BASE_URL` is unset, so every emailed link (reset, invite) pointed at localhost. Documented the variable in `docker-compose.yml`; the live fix was adding `DRABA_BASE_URL=http://epcot.lan:8081` to the Portainer `api` stack and restarting.
+- **No reset-success feedback:** `ResetPasswordPage` routed a success message to `/login`, but `LoginPage` never read `location.state.message`, so a completed reset looked like a silent failure. `LoginPage` now renders the notice (green banner, suppressed once a server error shows).
+
+**Onboarding UX follow-up (Brian request):**
+- `RegisterPage` now requires password confirmation (enter twice) with a live "Passwords don't match" warning and a submit gated until they match. Verified in preview (mismatch → warning + disabled; match → enabled).
+
+**Live validation (Docker, real Gmail SMTP):** password-reset email ✓, invite email ✓ (created "TEST PERSON" via the invite → register flow), both links correctly `epcot.lan:8081`. SMTP connection confirmed via delivered mail.
+
+**Checks:** `go test ./...` clean; `golangci-lint run` clean; `pnpm --filter web lint` clean.
+
+**Note:** `.env.test.local` admin password was stale (`draba1234`); updated to the current value after the reset-flow test.
+
+---
+
 ## 2026-06-03 — Phase 11.3: Kanban View (Interactive)
 
 **Goal:** Ship a fully interactive Kanban board view. Column axis = active Group by (Status by default). Drag-to-recolumn mutates grouping value via existing `useUpdateActivity`. Adds Color by, configurable Sorts, and a per-card Card fields toggle set.
