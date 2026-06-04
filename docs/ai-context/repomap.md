@@ -9998,6 +9998,13 @@ ALTER TABLE activities_new RENAME TO activities;
 CREATE INDEX IF NOT EXISTS idx_activities_timeline_id ON activities(timeline_id);
 ````
 
+## File: packages/api/internal/db/migrations/016_activity_notes.sql
+````sql
+-- Migration 016: Add notes column to activities
+-- notes is separate from description (short text); notes is a longer multi-line field.
+ALTER TABLE activities ADD COLUMN notes TEXT;
+````
+
 ## File: packages/api/internal/db/api_token_repo.go
 ````go
 package db
@@ -25217,944 +25224,6 @@ func newToken() string {
 }
 ````
 
-## File: packages/api/internal/api/team_handler.go
-````go
-package api
-
-import (
-	"database/sql"
-	"encoding/json"
-	"errors"
-	"log/slog"
-	"net/http"
-	"net/url"
-	"regexp"
-	"strings"
-	"time"
-
-	"github.com/I0-1O/draba/packages/api/internal/db"
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// slugRe matches any run of characters that are not lowercase ASCII alphanumeric.
-var slugRe = regexp.MustCompile(`[^a-z0-9]+`)
-
-func (s *Server) handleListTeams(w http.ResponseWriter, r *http.Request) {
-	claims := claimsFromContext(r.Context())
-	includeArchived := r.URL.Query().Get("archived") == "true"
-
-	// Superadmins see all teams system-wide, not just the ones they belong to.
-	caller, err := s.users.GetByID(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list teams")
-		return
-	}
-
-	var teams []*models.Team
-	if caller.IsSuperadmin {
-		teams, err = s.teams.ListAll(includeArchived)
-	} else {
-		teams, err = s.teams.ListByUserID(claims.UserID, includeArchived)
-	}
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list teams")
-		return
-	}
-	writeJSON(w, http.StatusOK, teams)
-}
-
-func (s *Server) handleCreateTeam(w http.ResponseWriter, r *http.Request) {
-	var req CreateTeamJSONBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	req.Name = strings.TrimSpace(req.Name)
-	if req.Name == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name is required")
-		return
-	}
-
-	count, err := s.teams.Count()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create team")
-		return
-	}
-	if err := s.tier.CheckTeamLimit(count); err != nil {
-		writeError(w, http.StatusPaymentRequired, "TIER_TEAM_LIMIT", "team limit reached for current tier")
-		return
-	}
-
-	claims := claimsFromContext(r.Context())
-	now := time.Now()
-	id := newID()
-	team := &models.Team{
-		ID:          id,
-		Name:        req.Name,
-		Slug:        slugify(req.Name) + "-" + id[:8],
-		Description: req.Description,
-		Notes:       req.Notes,
-		Color:       req.Color,
-		Icon:        req.Icon,
-		CreatedAt:   now,
-		UpdatedAt:   now,
-	}
-	if err := s.teams.Create(team); err != nil {
-		if errors.Is(err, db.ErrDuplicateName) {
-			writeError(w, http.StatusConflict, "TEAM_NAME_TAKEN", "a team with that name already exists")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create team")
-		return
-	}
-
-	userID := claims.UserID
-	member := &models.TeamMember{
-		ID:       newID(),
-		TeamID:   team.ID,
-		UserID:   &userID,
-		Role:     "admin",
-		JoinedAt: now,
-	}
-	if err := s.teams.AddMember(member); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create team")
-		return
-	}
-
-	// Seed the default "Simple" status template for the new team.
-	if err := s.statuses.SeedDefaultTemplate(team.ID, claims.UserID); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create team")
-		return
-	}
-
-	writeJSON(w, http.StatusCreated, team)
-}
-
-func (s *Server) handleCreateInvite(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
-		return
-	}
-
-	var req CreateInviteJSONBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	var email string
-	if req.Email != nil {
-		email = strings.ToLower(strings.TrimSpace(string(*req.Email)))
-	}
-
-	role := "member"
-	if req.Role != nil {
-		role = string(*req.Role)
-	}
-	if role != "admin" && role != "member" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "role must be admin or member")
-		return
-	}
-
-	now := time.Now()
-	invite := &models.Invite{
-		ID:        newID(),
-		TeamID:    teamID,
-		Email:     email,
-		Token:     newToken(),
-		Role:      role,
-		InvitedBy: claims.UserID,
-		ExpiresAt: now.Add(7 * 24 * time.Hour),
-		CreatedAt: now,
-	}
-	if err := s.invites.Create(invite); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create invite")
-		return
-	}
-
-	// Email the invite link when an address was supplied. Best-effort: a send
-	// failure (or no SMTP configured) must not fail invite creation — the
-	// admin can still copy the link from the UI.
-	if email != "" {
-		s.sendInviteEmail(email, invite.Token)
-	}
-
-	writeJSON(w, http.StatusCreated, invite)
-}
-
-// sendInviteEmail sends the team invite link to the invitee. Errors are logged,
-// not returned: invite creation already succeeded and the link is also shown in
-// the UI, so a mail failure should not surface to the caller.
-func (s *Server) sendInviteEmail(email, token string) {
-	baseURL := strings.TrimRight(getBaseURL(), "/")
-	inviteLink := baseURL + "/register?token=" + url.QueryEscape(token)
-
-	subject := "You've been invited to draba"
-	body := "<html><body>" +
-		"<p>You've been invited to join a team on draba.</p>" +
-		"<p><a href=\"" + inviteLink + "\">Click here to accept the invitation</a></p>" +
-		"<p>This invitation expires in 7 days.</p>" +
-		"</body></html>"
-
-	if err := s.mailer.Send(email, subject, body); err != nil {
-		slog.Error("invite: failed to send email", "email", email, "err", err)
-	}
-}
-
-// handleGetTeam checks membership before fetching the team row to avoid leaking
-// team existence to non-members (a 403 is returned whether the team is missing
-// or the caller is just not on it).
-func (s *Server) handleGetTeam(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-
-	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
-		return
-	}
-
-	team, err := s.teams.GetByID(teamID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "team not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get team")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, team)
-}
-
-func (s *Server) handleListMembers(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-
-	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
-		return
-	}
-
-	members, err := s.teams.ListMembers(teamID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list members")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, members)
-}
-
-// handleUpdateTeam applies partial updates — nil fields in the request body are
-// ignored, not cleared. The caller does not need to fetch the current team state
-// before patching.
-func (s *Server) handleUpdateTeam(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-
-	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
-		return
-	}
-
-	team, err := s.teams.GetByID(teamID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "team not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update team")
-		return
-	}
-
-	var req UpdateTeamJSONBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	if req.Name != nil {
-		name := strings.TrimSpace(*req.Name)
-		if name == "" {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name cannot be empty")
-			return
-		}
-		team.Name = name
-		team.Slug = slugify(name) + "-" + team.ID[:8]
-	}
-	if req.Description != nil {
-		team.Description = req.Description
-	}
-	if req.Notes != nil {
-		team.Notes = req.Notes
-	}
-	if req.Color != nil {
-		team.Color = req.Color
-	}
-	if req.Icon != nil {
-		team.Icon = req.Icon
-	}
-	team.UpdatedAt = time.Now()
-
-	if err := s.teams.Update(team); err != nil {
-		if errors.Is(err, db.ErrDuplicateName) {
-			writeError(w, http.StatusConflict, "TEAM_NAME_TAKEN", "a team with that name already exists")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update team")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, team)
-}
-
-// handleArchiveTeam soft-deletes by setting archived_at rather than removing
-// the row, so activity history on the team is preserved and recovery is possible.
-func (s *Server) handleArchiveTeam(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-
-	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
-		return
-	}
-
-	now := time.Now()
-	if err := s.teams.SetArchived(teamID, &now); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive team")
-		return
-	}
-
-	team, err := s.teams.GetByID(teamID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "team not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive team")
-		return
-	}
-	writeJSON(w, http.StatusOK, team)
-}
-
-func (s *Server) handleUnarchiveTeam(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-
-	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
-		return
-	}
-
-	if err := s.teams.SetArchived(teamID, nil); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to unarchive team")
-		return
-	}
-
-	team, err := s.teams.GetByID(teamID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "team not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to unarchive team")
-		return
-	}
-	writeJSON(w, http.StatusOK, team)
-}
-
-// slugify converts a team name to a URL-safe slug by lowercasing, replacing
-// spaces and punctuation with hyphens, and collapsing consecutive hyphens.
-func slugify(name string) string {
-	s := slugRe.ReplaceAllString(strings.ToLower(name), "-")
-	s = strings.Trim(s, "-")
-	if s == "" {
-		s = newID()[:8]
-	}
-	return s
-}
-
-// ── Member CRUD ───────────────────────────────────────────────────────────────
-
-// handleGetMember fetches a single team member with computed stats.
-func (s *Server) handleGetMember(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-	memberID := r.PathValue("memberId")
-
-	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
-		return
-	}
-
-	m, err := s.teams.GetMemberByID(memberID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "member not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get member")
-		return
-	}
-	if m.TeamID != teamID {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "member not found")
-		return
-	}
-
-	stats, err := s.teams.GetMemberStats(memberID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to compute member stats")
-		return
-	}
-
-	var teams []*models.TeamMemberWithUser
-	if m.UserID != nil {
-		teams, err = s.teams.GetMemberAllTeams(*m.UserID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get member teams")
-			return
-		}
-	}
-
-	// Deletable: zero active assignments and single-team membership.
-	activeActivities := stats.PastDue + stats.Running + stats.Upcoming + stats.Unscheduled
-	deletable := activeActivities == 0 && len(teams) <= 1
-
-	// Expose users.archived_at separately from team_members.archived_at so the
-	// client can distinguish account deactivation from membership inactivation.
-	var userArchivedAt *time.Time
-	if m.UserID != nil {
-		if u, err := s.users.GetByID(*m.UserID); err == nil {
-			userArchivedAt = u.ArchivedAt
-		}
-	}
-
-	detail := &models.MemberDetail{
-		TeamMemberWithUser: *m,
-		Stats:              *stats,
-		Teams:              flatten(teams),
-		Deletable:          deletable,
-		UserArchivedAt:     userArchivedAt,
-	}
-	writeJSON(w, http.StatusOK, detail)
-}
-
-// handleAddMember adds an existing registered user to the team by their userID.
-func (s *Server) handleAddMember(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-
-	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
-		return
-	}
-
-	var req struct {
-		UserID string `json:"userId"`
-		Role   string `json:"role"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-	req.UserID = strings.TrimSpace(req.UserID)
-	if req.UserID == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "userId is required")
-		return
-	}
-	if req.Role == "" {
-		req.Role = "member"
-	}
-	if req.Role != "admin" && req.Role != "member" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "role must be admin or member")
-		return
-	}
-
-	// Verify the user exists.
-	if _, err := s.users.GetByID(req.UserID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "user not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to add member")
-		return
-	}
-
-	now := time.Now()
-	uid := req.UserID
-	member := &models.TeamMember{
-		ID:       newID(),
-		TeamID:   teamID,
-		UserID:   &uid,
-		Role:     req.Role,
-		JoinedAt: now,
-	}
-	if err := s.teams.AddMember(member); err != nil {
-		writeError(w, http.StatusConflict, "ALREADY_MEMBER", "user is already a member of this team")
-		return
-	}
-
-	m, err := s.teams.GetMemberByID(member.ID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get created member")
-		return
-	}
-	writeJSON(w, http.StatusCreated, m)
-}
-
-// handleUpdateMember updates display_name, color, icon, and/or role.
-// Admins can change any field; regular members can only update their own
-// display_name, color, and icon (not their role).
-func (s *Server) handleUpdateMember(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-	memberID := r.PathValue("memberId")
-	claims := claimsFromContext(r.Context())
-
-	callerMember, ok := s.requireTeamMember(w, r, teamID)
-	if !ok {
-		return
-	}
-
-	target, err := s.teams.GetMemberByID(memberID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "member not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update member")
-		return
-	}
-	if target.TeamID != teamID {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "member not found")
-		return
-	}
-
-	var req struct {
-		DisplayName *string `json:"displayName"`
-		Color       *string `json:"color"`
-		Icon        *string `json:"icon"`
-		Role        *string `json:"role"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	// Only admins can change role.
-	if req.Role != nil && callerMember.Role != "admin" {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "only admins can change roles")
-		return
-	}
-	// Members can only update their own identity.
-	if callerMember.Role != "admin" && callerMember.ID != memberID {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "members can only update their own profile")
-		return
-	}
-	if req.Role != nil && *req.Role != "admin" && *req.Role != "member" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "role must be admin or member")
-		return
-	}
-
-	// Admins cannot change their own role — another admin must do it.
-	if req.Role != nil && target.UserID != nil && *target.UserID == claims.UserID {
-		writeError(w, http.StatusConflict, "SELF_ROLE_CHANGE", "cannot change your own role")
-		return
-	}
-
-	if err := s.teams.UpdateMember(memberID, req.DisplayName, req.Color, req.Icon, req.Role); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update member")
-		return
-	}
-
-	m, err := s.teams.GetMemberByID(memberID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get updated member")
-		return
-	}
-	writeJSON(w, http.StatusOK, m)
-}
-
-// handleDeleteMember removes a team member row. Rejects if the member is the
-// last admin or has activity assignments (to prevent data loss on hard-delete).
-func (s *Server) handleDeleteMember(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-	memberID := r.PathValue("memberId")
-
-	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
-		return
-	}
-
-	target, err := s.teams.GetMemberByID(memberID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "member not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to remove member")
-		return
-	}
-	if target.TeamID != teamID {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "member not found")
-		return
-	}
-
-	if target.Role == "admin" {
-		admins, err := s.teams.CountAdmins(teamID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to remove member")
-			return
-		}
-		if admins <= 1 {
-			writeError(w, http.StatusConflict, "LAST_ADMIN", "cannot remove the last admin")
-			return
-		}
-	}
-
-	// Reject hard-delete when assignments exist: the RESTRICT FK would block it
-	// anyway, but we surface a 409 with the count so the UI can offer
-	// "Inactivate instead" rather than a generic error.
-	assignCount, err := s.teams.CountMemberAssignments(memberID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to remove member")
-		return
-	}
-	if assignCount > 0 {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusConflict)
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"error": map[string]string{
-				"code":    "MEMBER_HAS_ASSIGNMENTS",
-				"message": "member has activity assignments; inactivate instead of removing",
-			},
-			"assignmentCount": assignCount,
-		})
-		return
-	}
-
-	// Delete timeline_access first so the RESTRICT FK on team_members is satisfied.
-	if err := s.teams.DeleteMemberTimelineAccess(memberID); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to remove member")
-		return
-	}
-
-	if err := s.teams.DeleteMember(memberID); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to remove member")
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
-// handleArchiveMember inactivates a team member (sets archived_at).
-func (s *Server) handleArchiveMember(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-	memberID := r.PathValue("memberId")
-
-	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
-		return
-	}
-
-	target, err := s.teams.GetMemberByID(memberID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "member not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive member")
-		return
-	}
-	if target.TeamID != teamID {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "member not found")
-		return
-	}
-
-	if target.Role == "admin" {
-		admins, err := s.teams.CountAdmins(teamID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive member")
-			return
-		}
-		if admins <= 1 {
-			writeError(w, http.StatusConflict, "LAST_ADMIN", "cannot inactivate the last admin")
-			return
-		}
-	}
-
-	now := time.Now()
-	if err := s.teams.SetMemberArchived(memberID, &now); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive member")
-		return
-	}
-
-	m, err := s.teams.GetMemberByID(memberID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get archived member")
-		return
-	}
-	writeJSON(w, http.StatusOK, m)
-}
-
-// handleUnarchiveMember reactivates an inactivated team member.
-func (s *Server) handleUnarchiveMember(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-	memberID := r.PathValue("memberId")
-
-	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
-		return
-	}
-
-	target, err := s.teams.GetMemberByID(memberID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "member not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reactivate member")
-		return
-	}
-	if target.TeamID != teamID {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "member not found")
-		return
-	}
-
-	if err := s.teams.SetMemberArchived(memberID, nil); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reactivate member")
-		return
-	}
-
-	m, err := s.teams.GetMemberByID(memberID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get reactivated member")
-		return
-	}
-	writeJSON(w, http.StatusOK, m)
-}
-
-// handleCreateParticipant creates a login-less team member (Participant).
-func (s *Server) handleCreateParticipant(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-
-	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
-		return
-	}
-
-	var req struct {
-		Name  string  `json:"name"`
-		Color *string `json:"color"`
-		Icon  *string `json:"icon"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-	req.Name = strings.TrimSpace(req.Name)
-	if req.Name == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name is required")
-		return
-	}
-
-	now := time.Now()
-	name := req.Name
-	member := &models.TeamMember{
-		ID:          newID(),
-		TeamID:      teamID,
-		UserID:      nil,
-		DisplayName: &name,
-		Role:        "member",
-		Color:       req.Color,
-		Icon:        req.Icon,
-		JoinedAt:    now,
-	}
-	if err := s.teams.AddMember(member); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create participant")
-		return
-	}
-
-	m, err := s.teams.GetMemberByID(member.ID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get created participant")
-		return
-	}
-	writeJSON(w, http.StatusCreated, m)
-}
-
-// ── Invites ───────────────────────────────────────────────────────────────────
-
-// handleListInvites returns all pending invites for the team.
-func (s *Server) handleListInvites(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-
-	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
-		return
-	}
-
-	invites, err := s.invites.ListByTeam(teamID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list invites")
-		return
-	}
-	writeJSON(w, http.StatusOK, invites)
-}
-
-// handleDeleteInvite revokes a pending invite.
-func (s *Server) handleDeleteInvite(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-	inviteID := r.PathValue("inviteId")
-
-	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
-		return
-	}
-
-	if err := s.invites.DeleteByID(inviteID); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke invite")
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
-// ── Invite link ───────────────────────────────────────────────────────────────
-
-// handleCreateInviteLink generates or regenerates the reusable invite link
-// token for the team. Each call replaces the previous token.
-//
-// Design decision: tokens have no server-side expiry and are valid until an
-// admin explicitly revokes (DELETE) or resets (POST /reset) them. This keeps
-// the URL stable for onboarding docs and Slack pins. If time-bounded links are
-// needed, add an invite_link_expires_at column to teams and check it in the
-// registration handler.
-func (s *Server) handleCreateInviteLink(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-
-	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
-		return
-	}
-
-	token := newToken()
-	if err := s.teams.SetInviteLinkToken(teamID, &token); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create invite link")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]string{"token": token})
-}
-
-// handleGetInviteLink returns the current invite link token for the team, or
-// null if none is set.
-func (s *Server) handleGetInviteLink(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-
-	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
-		return
-	}
-
-	team, err := s.teams.GetByID(teamID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "team not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get invite link")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{"token": team.InviteLinkToken})
-}
-
-// handleResetInviteLink invalidates the current token and generates a fresh one.
-// Semantically identical to POST /invite-link; the distinct URL makes client
-// intent (reset vs. first-time create) explicit without a separate code path.
-func (s *Server) handleResetInviteLink(w http.ResponseWriter, r *http.Request) {
-	s.handleCreateInviteLink(w, r)
-}
-
-// handleDeleteInviteLink revokes the current invite link by clearing the token.
-func (s *Server) handleDeleteInviteLink(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-
-	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
-		return
-	}
-
-	if err := s.teams.SetInviteLinkToken(teamID, nil); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke invite link")
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
-// userSearchResult is the safe public projection returned by GET /users/search.
-// It intentionally omits isSuperadmin, archivedAt, createdAt, updatedAt, and
-// passwordHash so that search results are safe to expose to any team member.
-type userSearchResult struct {
-	ID          string  `json:"id"`
-	Email       string  `json:"email"`
-	DisplayName string  `json:"displayName"`
-	AvatarURL   *string `json:"avatarUrl,omitempty"`
-}
-
-// handleSearchUsers handles GET /users/search?q= and returns matching users.
-func (s *Server) handleSearchUsers(w http.ResponseWriter, r *http.Request) {
-	q := strings.TrimSpace(r.URL.Query().Get("q"))
-	if len(q) < 2 {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "query must be at least 2 characters")
-		return
-	}
-	users, err := s.users.SearchByNameOrEmail(q)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "search failed")
-		return
-	}
-	results := make([]userSearchResult, len(users))
-	for i, u := range users {
-		results[i] = userSearchResult{
-			ID:          u.ID,
-			Email:       u.Email,
-			DisplayName: u.DisplayName,
-			AvatarURL:   u.AvatarURL,
-		}
-	}
-	writeJSON(w, http.StatusOK, results)
-}
-
-// handleGetMemberStats returns computed activity and timeline counts for a
-// single team member. The full MemberDetail (with teams list) is available via
-// GET /teams/:id/members/:memberId; this endpoint is for lightweight stat polling.
-func (s *Server) handleGetMemberStats(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-	memberID := r.PathValue("memberId")
-
-	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
-		return
-	}
-
-	m, err := s.teams.GetMemberByID(memberID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "member not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get member stats")
-		return
-	}
-	if m.TeamID != teamID {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "member not found")
-		return
-	}
-
-	stats, err := s.teams.GetMemberStats(memberID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to compute member stats")
-		return
-	}
-	writeJSON(w, http.StatusOK, stats)
-}
-
-// flatten converts a nil slice to an empty slice for clean JSON serialisation.
-func flatten[T any](s []*T) []T {
-	out := make([]T, 0, len(s))
-	for _, v := range s {
-		if v != nil {
-			out = append(out, *v)
-		}
-	}
-	return out
-}
-````
-
-## File: packages/api/internal/db/migrations/016_activity_notes.sql
-````sql
--- Migration 016: Add notes column to activities
--- notes is separate from description (short text); notes is a longer multi-line field.
-ALTER TABLE activities ADD COLUMN notes TEXT;
-````
-
 ## File: packages/api/internal/db/migrations/017_tags_and_activity_tags.sql
 ````sql
 -- Team-scoped tags table: enables colored pills, autocomplete, rename-all,
@@ -26780,6 +25849,223 @@ describe('formatDragDate', () => {
     expect(formatDragDate(d)).toContain('2026')
   })
 })
+````
+
+## File: packages/web/src/components/gantt/GanttToolbar.tsx
+````typescript
+/**
+ * GanttToolbar — the thin sub-toolbar that sits between the top bar and
+ * the Gantt grid. Provides zoom (granularity), group-by, sort-by, and an
+ * export stub.
+ */
+
+import { Download, Share2, Plus, Minus } from 'lucide-react';
+import type { TimeGranularity } from './granularity';
+import { cn } from '@/lib/utils';
+
+export type { TimeGranularity } from './granularity';
+export type GroupBy = 'none' | 'member' | 'parent' | 'status';
+export type SortBy = 'startDate' | 'endDate' | 'title';
+export type ColorBy = 'activity' | 'member' | 'status';
+
+interface Props {
+  groupBy: GroupBy;
+  onGroupByChange: (g: GroupBy) => void;
+  sortBy: SortBy;
+  onSortByChange: (s: SortBy) => void;
+  granularity: TimeGranularity | 'auto';
+  onGranularityChange: (g: TimeGranularity | 'auto') => void;
+  colorBy: ColorBy;
+  onColorByChange: (c: ColorBy) => void;
+  onExport: () => void;
+  onShare?: () => void;
+}
+
+const ctrlBtn = 'flex items-center justify-center gap-[5px] h-[26px] px-2 border border-border rounded-md bg-card text-foreground text-xs font-medium cursor-pointer shrink-0';
+const divider = 'w-px h-4 bg-border shrink-0';
+const label   = 'text-[11px] text-muted-foreground shrink-0';
+const select  = 'h-[26px] px-1.5 border border-border rounded-md bg-card text-foreground text-xs cursor-pointer shrink-0';
+
+export default function GanttToolbar({
+  groupBy,
+  onGroupByChange,
+  sortBy,
+  onSortByChange,
+  granularity,
+  onGranularityChange,
+  colorBy,
+  onColorByChange,
+  onExport,
+  onShare,
+}: Props) {
+  const granularityMap = ['auto', 'day', 'week', 'month', 'quarter', 'year'] as const;
+  const granularityLabels = ['A', 'D', 'W', 'M', 'Q', 'Y'];
+  const currentIndex = granularityMap.indexOf(granularity as never) !== -1
+    ? granularityMap.indexOf(granularity as never)
+    : 0;
+  const currentLabel = granularityLabels[currentIndex];
+
+  const handleSliderChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = parseInt(e.target.value, 10);
+    onGranularityChange(granularityMap[val] as TimeGranularity | 'auto');
+  };
+
+  return (
+    <div className="flex items-center gap-2 px-3 h-9 bg-card border-b border-border shrink-0">
+      {/* Custom range-input thumb/track styles — no Tailwind equivalent for pseudo-elements */}
+      <style>{`
+        .gantt-zoom-slider {
+          -webkit-appearance: none;
+          appearance: none;
+          background: transparent;
+        }
+        .gantt-zoom-slider::-webkit-slider-thumb {
+          -webkit-appearance: none;
+          appearance: none;
+          width: 12px;
+          height: 12px;
+          border-radius: 50%;
+          background: var(--primary);
+          cursor: pointer;
+          margin-top: -4px;
+        }
+        .gantt-zoom-slider::-moz-range-thumb {
+          width: 12px;
+          height: 12px;
+          border-radius: 50%;
+          background: var(--primary);
+          cursor: pointer;
+          border: none;
+        }
+        .gantt-zoom-slider::-webkit-slider-runnable-track {
+          width: 100%;
+          height: 4px;
+          cursor: pointer;
+          background: var(--border);
+          border-radius: 2px;
+        }
+        .gantt-zoom-slider::-moz-range-track {
+          width: 100%;
+          height: 4px;
+          cursor: pointer;
+          background: var(--border);
+          border-radius: 2px;
+        }
+      `}</style>
+
+      {/* Zoom (granularity) */}
+      <div className="flex items-center gap-1.5 h-[26px]">
+        <button
+          onClick={() => { if (currentIndex > 0) onGranularityChange(granularityMap[currentIndex - 1] as TimeGranularity | 'auto'); }}
+          disabled={currentIndex === 0}
+          title="Zoom out"
+          className={cn(
+            'flex items-center justify-center border-none bg-transparent h-[22px] px-0.5',
+            currentIndex > 0 ? 'text-foreground cursor-pointer' : 'text-muted-foreground cursor-default',
+          )}
+        >
+          <Minus size={14} />
+        </button>
+
+        <div className="relative w-20 h-[26px] flex items-center">
+          <div className="absolute inset-x-[5px] inset-y-0 flex justify-between items-center pointer-events-none">
+            {[0, 1, 2, 3, 4, 5].map(i => (
+              <div key={i} className="w-0.5 h-1.5 bg-border rounded-[1px]" />
+            ))}
+          </div>
+          <input
+            type="range"
+            min="0"
+            max="5"
+            step="1"
+            value={currentIndex}
+            onChange={handleSliderChange}
+            className="gantt-zoom-slider w-full cursor-pointer m-0 relative z-10"
+            title={granularity.charAt(0).toUpperCase() + granularity.slice(1)}
+          />
+        </div>
+
+        <button
+          onClick={() => { if (currentIndex < 5) onGranularityChange(granularityMap[currentIndex + 1] as TimeGranularity | 'auto'); }}
+          disabled={currentIndex === 5}
+          title="Zoom in"
+          className={cn(
+            'flex items-center justify-center border-none bg-transparent h-[22px] px-0.5',
+            currentIndex < 5 ? 'text-foreground cursor-pointer' : 'text-muted-foreground cursor-default',
+          )}
+        >
+          <Plus size={14} />
+        </button>
+
+        <div
+          title={granularity.charAt(0).toUpperCase() + granularity.slice(1)}
+          className={cn(
+            'flex items-center justify-center w-[22px] h-[22px]',
+            'bg-card border border-border rounded-sm text-xs font-mono select-none',
+            currentLabel === 'A' ? 'font-bold text-primary' : 'font-medium text-muted-foreground',
+          )}
+        >
+          {currentLabel}
+        </div>
+      </div>
+
+      <div className={divider} />
+
+      {/* Group by */}
+      <span className={label}>Group by</span>
+      <select
+        className={select}
+        value={groupBy}
+        onChange={e => onGroupByChange(e.target.value as GroupBy)}
+      >
+        <option value="none">None</option>
+        <option value="member">Member</option>
+        <option value="parent">Parent activity</option>
+        <option value="status">Status</option>
+      </select>
+
+      <div className={divider} />
+
+      {/* Sort by */}
+      <span className={label}>Sort by</span>
+      <select
+        className={select}
+        value={sortBy}
+        onChange={e => onSortByChange(e.target.value as SortBy)}
+      >
+        <option value="startDate">Start date</option>
+        <option value="endDate">End date</option>
+        <option value="title">Title A–Z</option>
+      </select>
+
+      <div className={divider} />
+
+      {/* Color by */}
+      <span className={label}>Color by</span>
+      <select
+        className={select}
+        value={colorBy}
+        onChange={e => onColorByChange(e.target.value as ColorBy)}
+      >
+        <option value="activity">Activity</option>
+        <option value="member">Member</option>
+        <option value="status">Status</option>
+      </select>
+
+      <div className="flex-1" />
+
+      <button className={ctrlBtn} onClick={onExport} title="Export activities (coming soon)">
+        <Download size={13} strokeWidth={1.8} />
+        Export
+      </button>
+
+      <button className={ctrlBtn} onClick={onShare} title="Share">
+        <Share2 size={13} strokeWidth={1.8} />
+        Share
+      </button>
+    </div>
+  );
+}
 ````
 
 ## File: packages/web/src/components/gantt/GanttView.filter.test.ts
@@ -27627,6 +26913,44 @@ export function ActivityFieldsBody(props: ActivityFieldsBodyProps) {
 
     </div>
   )
+}
+````
+
+## File: packages/web/src/contexts/FilterContext.tsx
+````typescript
+/**
+ * Holds the dashboard-wide active filter selection. UI-only this round —
+ * the selected filter is not yet applied to the events list (real views
+ * land in Phase 8).
+ */
+
+import { createContext, useContext, useState } from 'react'
+
+export type ActiveFilter =
+  | { kind: 'preset'; id: 'all' | 'upcoming' | 'overdue' | 'noassign' | 'open' }
+  | { kind: 'member'; userId: string }
+  | { kind: 'saved'; id: string }
+
+interface FilterContextValue {
+  activeFilter: ActiveFilter
+  setActiveFilter: (f: ActiveFilter) => void
+}
+
+const FilterContext = createContext<FilterContextValue | null>(null)
+
+export function FilterProvider({ children }: { children: React.ReactNode }) {
+  const [activeFilter, setActiveFilter] = useState<ActiveFilter>({ kind: 'preset', id: 'all' })
+  return (
+    <FilterContext.Provider value={{ activeFilter, setActiveFilter }}>
+      {children}
+    </FilterContext.Provider>
+  )
+}
+
+export function useFilter(): FilterContextValue {
+  const ctx = useContext(FilterContext)
+  if (!ctx) throw new Error('useFilter must be used inside FilterProvider')
+  return ctx
 }
 ````
 
@@ -30584,6 +29908,941 @@ func (s *Server) handleDeleteTag(w http.ResponseWriter, r *http.Request) {
 }
 ````
 
+## File: packages/api/internal/api/team_handler.go
+````go
+package api
+
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"html"
+	"log/slog"
+	"net/http"
+	"net/url"
+	"regexp"
+	"strings"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/db"
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// slugRe matches any run of characters that are not lowercase ASCII alphanumeric.
+var slugRe = regexp.MustCompile(`[^a-z0-9]+`)
+
+func (s *Server) handleListTeams(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFromContext(r.Context())
+	includeArchived := r.URL.Query().Get("archived") == "true"
+
+	// Superadmins see all teams system-wide, not just the ones they belong to.
+	caller, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list teams")
+		return
+	}
+
+	var teams []*models.Team
+	if caller.IsSuperadmin {
+		teams, err = s.teams.ListAll(includeArchived)
+	} else {
+		teams, err = s.teams.ListByUserID(claims.UserID, includeArchived)
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list teams")
+		return
+	}
+	writeJSON(w, http.StatusOK, teams)
+}
+
+func (s *Server) handleCreateTeam(w http.ResponseWriter, r *http.Request) {
+	var req CreateTeamJSONBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	req.Name = strings.TrimSpace(req.Name)
+	if req.Name == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name is required")
+		return
+	}
+
+	count, err := s.teams.Count()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create team")
+		return
+	}
+	if err := s.tier.CheckTeamLimit(count); err != nil {
+		writeError(w, http.StatusPaymentRequired, "TIER_TEAM_LIMIT", "team limit reached for current tier")
+		return
+	}
+
+	claims := claimsFromContext(r.Context())
+	now := time.Now()
+	id := newID()
+	team := &models.Team{
+		ID:          id,
+		Name:        req.Name,
+		Slug:        slugify(req.Name) + "-" + id[:8],
+		Description: req.Description,
+		Notes:       req.Notes,
+		Color:       req.Color,
+		Icon:        req.Icon,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	if err := s.teams.Create(team); err != nil {
+		if errors.Is(err, db.ErrDuplicateName) {
+			writeError(w, http.StatusConflict, "TEAM_NAME_TAKEN", "a team with that name already exists")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create team")
+		return
+	}
+
+	userID := claims.UserID
+	member := &models.TeamMember{
+		ID:       newID(),
+		TeamID:   team.ID,
+		UserID:   &userID,
+		Role:     "admin",
+		JoinedAt: now,
+	}
+	if err := s.teams.AddMember(member); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create team")
+		return
+	}
+
+	// Seed the default "Simple" status template for the new team.
+	if err := s.statuses.SeedDefaultTemplate(team.ID, claims.UserID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create team")
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, team)
+}
+
+func (s *Server) handleCreateInvite(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
+		return
+	}
+
+	var req CreateInviteJSONBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	var email string
+	if req.Email != nil {
+		email = strings.ToLower(strings.TrimSpace(string(*req.Email)))
+	}
+
+	role := "member"
+	if req.Role != nil {
+		role = string(*req.Role)
+	}
+	if role != "admin" && role != "member" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "role must be admin or member")
+		return
+	}
+
+	now := time.Now()
+	invite := &models.Invite{
+		ID:        newID(),
+		TeamID:    teamID,
+		Email:     email,
+		Token:     newToken(),
+		Role:      role,
+		InvitedBy: claims.UserID,
+		ExpiresAt: now.Add(7 * 24 * time.Hour),
+		CreatedAt: now,
+	}
+	if err := s.invites.Create(invite); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create invite")
+		return
+	}
+
+	// Email the invite link when an address was supplied. Best-effort: a send
+	// failure (or no SMTP configured) must not fail invite creation — the
+	// admin can still copy the link from the UI.
+	if email != "" {
+		s.sendInviteEmail(email, invite.Token)
+	}
+
+	writeJSON(w, http.StatusCreated, invite)
+}
+
+// sendInviteEmail sends the team invite link to the invitee. Errors are logged,
+// not returned: invite creation already succeeded and the link is also shown in
+// the UI, so a mail failure should not surface to the caller.
+func (s *Server) sendInviteEmail(email, token string) {
+	baseURL := strings.TrimRight(getBaseURL(), "/")
+	inviteLink := baseURL + "/register?token=" + url.QueryEscape(token)
+
+	subject := "You've been invited to draba"
+	// html.EscapeString prevents a malformed href if the link ever contains
+	// HTML-special characters (shouldn't happen with url.QueryEscape tokens,
+	// but defence-in-depth for the email body).
+	body := "<html><body>" +
+		"<p>You've been invited to join a team on draba.</p>" +
+		"<p><a href=\"" + html.EscapeString(inviteLink) + "\">Click here to accept the invitation</a></p>" +
+		"<p>This invitation expires in 7 days.</p>" +
+		"</body></html>"
+
+	if err := s.mailer.Send(email, subject, body); err != nil {
+		slog.Error("invite: failed to send email", "email", email, "err", err)
+	}
+}
+
+// handleGetTeam checks membership before fetching the team row to avoid leaking
+// team existence to non-members (a 403 is returned whether the team is missing
+// or the caller is just not on it).
+func (s *Server) handleGetTeam(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+
+	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
+		return
+	}
+
+	team, err := s.teams.GetByID(teamID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "team not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get team")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, team)
+}
+
+func (s *Server) handleListMembers(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+
+	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
+		return
+	}
+
+	members, err := s.teams.ListMembers(teamID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list members")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, members)
+}
+
+// handleUpdateTeam applies partial updates — nil fields in the request body are
+// ignored, not cleared. The caller does not need to fetch the current team state
+// before patching.
+func (s *Server) handleUpdateTeam(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+
+	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
+		return
+	}
+
+	team, err := s.teams.GetByID(teamID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "team not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update team")
+		return
+	}
+
+	var req UpdateTeamJSONBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	if req.Name != nil {
+		name := strings.TrimSpace(*req.Name)
+		if name == "" {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name cannot be empty")
+			return
+		}
+		team.Name = name
+		team.Slug = slugify(name) + "-" + team.ID[:8]
+	}
+	if req.Description != nil {
+		team.Description = req.Description
+	}
+	if req.Notes != nil {
+		team.Notes = req.Notes
+	}
+	if req.Color != nil {
+		team.Color = req.Color
+	}
+	if req.Icon != nil {
+		team.Icon = req.Icon
+	}
+	team.UpdatedAt = time.Now()
+
+	if err := s.teams.Update(team); err != nil {
+		if errors.Is(err, db.ErrDuplicateName) {
+			writeError(w, http.StatusConflict, "TEAM_NAME_TAKEN", "a team with that name already exists")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update team")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, team)
+}
+
+// handleArchiveTeam soft-deletes by setting archived_at rather than removing
+// the row, so activity history on the team is preserved and recovery is possible.
+func (s *Server) handleArchiveTeam(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+
+	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
+		return
+	}
+
+	now := time.Now()
+	if err := s.teams.SetArchived(teamID, &now); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive team")
+		return
+	}
+
+	team, err := s.teams.GetByID(teamID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "team not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive team")
+		return
+	}
+	writeJSON(w, http.StatusOK, team)
+}
+
+func (s *Server) handleUnarchiveTeam(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+
+	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
+		return
+	}
+
+	if err := s.teams.SetArchived(teamID, nil); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to unarchive team")
+		return
+	}
+
+	team, err := s.teams.GetByID(teamID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "team not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to unarchive team")
+		return
+	}
+	writeJSON(w, http.StatusOK, team)
+}
+
+// slugify converts a team name to a URL-safe slug by lowercasing, replacing
+// spaces and punctuation with hyphens, and collapsing consecutive hyphens.
+func slugify(name string) string {
+	s := slugRe.ReplaceAllString(strings.ToLower(name), "-")
+	s = strings.Trim(s, "-")
+	if s == "" {
+		s = newID()[:8]
+	}
+	return s
+}
+
+// ── Member CRUD ───────────────────────────────────────────────────────────────
+
+// handleGetMember fetches a single team member with computed stats.
+func (s *Server) handleGetMember(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	memberID := r.PathValue("memberId")
+
+	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
+		return
+	}
+
+	m, err := s.teams.GetMemberByID(memberID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "member not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get member")
+		return
+	}
+	if m.TeamID != teamID {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "member not found")
+		return
+	}
+
+	stats, err := s.teams.GetMemberStats(memberID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to compute member stats")
+		return
+	}
+
+	var teams []*models.TeamMemberWithUser
+	if m.UserID != nil {
+		teams, err = s.teams.GetMemberAllTeams(*m.UserID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get member teams")
+			return
+		}
+	}
+
+	// Deletable: zero active assignments and single-team membership.
+	activeActivities := stats.PastDue + stats.Running + stats.Upcoming + stats.Unscheduled
+	deletable := activeActivities == 0 && len(teams) <= 1
+
+	// Expose users.archived_at separately from team_members.archived_at so the
+	// client can distinguish account deactivation from membership inactivation.
+	var userArchivedAt *time.Time
+	if m.UserID != nil {
+		if u, err := s.users.GetByID(*m.UserID); err == nil {
+			userArchivedAt = u.ArchivedAt
+		}
+	}
+
+	detail := &models.MemberDetail{
+		TeamMemberWithUser: *m,
+		Stats:              *stats,
+		Teams:              flatten(teams),
+		Deletable:          deletable,
+		UserArchivedAt:     userArchivedAt,
+	}
+	writeJSON(w, http.StatusOK, detail)
+}
+
+// handleAddMember adds an existing registered user to the team by their userID.
+func (s *Server) handleAddMember(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+
+	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
+		return
+	}
+
+	var req struct {
+		UserID string `json:"userId"`
+		Role   string `json:"role"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+	req.UserID = strings.TrimSpace(req.UserID)
+	if req.UserID == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "userId is required")
+		return
+	}
+	if req.Role == "" {
+		req.Role = "member"
+	}
+	if req.Role != "admin" && req.Role != "member" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "role must be admin or member")
+		return
+	}
+
+	// Verify the user exists.
+	if _, err := s.users.GetByID(req.UserID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "user not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to add member")
+		return
+	}
+
+	now := time.Now()
+	uid := req.UserID
+	member := &models.TeamMember{
+		ID:       newID(),
+		TeamID:   teamID,
+		UserID:   &uid,
+		Role:     req.Role,
+		JoinedAt: now,
+	}
+	if err := s.teams.AddMember(member); err != nil {
+		writeError(w, http.StatusConflict, "ALREADY_MEMBER", "user is already a member of this team")
+		return
+	}
+
+	m, err := s.teams.GetMemberByID(member.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get created member")
+		return
+	}
+	writeJSON(w, http.StatusCreated, m)
+}
+
+// handleUpdateMember updates display_name, color, icon, and/or role.
+// Admins can change any field; regular members can only update their own
+// display_name, color, and icon (not their role).
+func (s *Server) handleUpdateMember(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	memberID := r.PathValue("memberId")
+	claims := claimsFromContext(r.Context())
+
+	callerMember, ok := s.requireTeamMember(w, r, teamID)
+	if !ok {
+		return
+	}
+
+	target, err := s.teams.GetMemberByID(memberID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "member not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update member")
+		return
+	}
+	if target.TeamID != teamID {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "member not found")
+		return
+	}
+
+	var req struct {
+		DisplayName *string `json:"displayName"`
+		Color       *string `json:"color"`
+		Icon        *string `json:"icon"`
+		Role        *string `json:"role"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	// Only admins can change role.
+	if req.Role != nil && callerMember.Role != "admin" {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "only admins can change roles")
+		return
+	}
+	// Members can only update their own identity.
+	if callerMember.Role != "admin" && callerMember.ID != memberID {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "members can only update their own profile")
+		return
+	}
+	if req.Role != nil && *req.Role != "admin" && *req.Role != "member" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "role must be admin or member")
+		return
+	}
+
+	// Admins cannot change their own role — another admin must do it.
+	if req.Role != nil && target.UserID != nil && *target.UserID == claims.UserID {
+		writeError(w, http.StatusConflict, "SELF_ROLE_CHANGE", "cannot change your own role")
+		return
+	}
+
+	if err := s.teams.UpdateMember(memberID, req.DisplayName, req.Color, req.Icon, req.Role); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update member")
+		return
+	}
+
+	m, err := s.teams.GetMemberByID(memberID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get updated member")
+		return
+	}
+	writeJSON(w, http.StatusOK, m)
+}
+
+// handleDeleteMember removes a team member row. Rejects if the member is the
+// last admin or has activity assignments (to prevent data loss on hard-delete).
+func (s *Server) handleDeleteMember(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	memberID := r.PathValue("memberId")
+
+	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
+		return
+	}
+
+	target, err := s.teams.GetMemberByID(memberID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "member not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to remove member")
+		return
+	}
+	if target.TeamID != teamID {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "member not found")
+		return
+	}
+
+	if target.Role == "admin" {
+		admins, err := s.teams.CountAdmins(teamID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to remove member")
+			return
+		}
+		if admins <= 1 {
+			writeError(w, http.StatusConflict, "LAST_ADMIN", "cannot remove the last admin")
+			return
+		}
+	}
+
+	// Reject hard-delete when assignments exist: the RESTRICT FK would block it
+	// anyway, but we surface a 409 with the count so the UI can offer
+	// "Inactivate instead" rather than a generic error.
+	assignCount, err := s.teams.CountMemberAssignments(memberID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to remove member")
+		return
+	}
+	if assignCount > 0 {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"error": map[string]string{
+				"code":    "MEMBER_HAS_ASSIGNMENTS",
+				"message": "member has activity assignments; inactivate instead of removing",
+			},
+			"assignmentCount": assignCount,
+		})
+		return
+	}
+
+	// Delete timeline_access first so the RESTRICT FK on team_members is satisfied.
+	if err := s.teams.DeleteMemberTimelineAccess(memberID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to remove member")
+		return
+	}
+
+	if err := s.teams.DeleteMember(memberID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to remove member")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleArchiveMember inactivates a team member (sets archived_at).
+func (s *Server) handleArchiveMember(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	memberID := r.PathValue("memberId")
+
+	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
+		return
+	}
+
+	target, err := s.teams.GetMemberByID(memberID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "member not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive member")
+		return
+	}
+	if target.TeamID != teamID {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "member not found")
+		return
+	}
+
+	if target.Role == "admin" {
+		admins, err := s.teams.CountAdmins(teamID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive member")
+			return
+		}
+		if admins <= 1 {
+			writeError(w, http.StatusConflict, "LAST_ADMIN", "cannot inactivate the last admin")
+			return
+		}
+	}
+
+	now := time.Now()
+	if err := s.teams.SetMemberArchived(memberID, &now); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive member")
+		return
+	}
+
+	m, err := s.teams.GetMemberByID(memberID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get archived member")
+		return
+	}
+	writeJSON(w, http.StatusOK, m)
+}
+
+// handleUnarchiveMember reactivates an inactivated team member.
+func (s *Server) handleUnarchiveMember(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	memberID := r.PathValue("memberId")
+
+	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
+		return
+	}
+
+	target, err := s.teams.GetMemberByID(memberID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "member not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reactivate member")
+		return
+	}
+	if target.TeamID != teamID {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "member not found")
+		return
+	}
+
+	if err := s.teams.SetMemberArchived(memberID, nil); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reactivate member")
+		return
+	}
+
+	m, err := s.teams.GetMemberByID(memberID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get reactivated member")
+		return
+	}
+	writeJSON(w, http.StatusOK, m)
+}
+
+// handleCreateParticipant creates a login-less team member (Participant).
+func (s *Server) handleCreateParticipant(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+
+	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
+		return
+	}
+
+	var req struct {
+		Name  string  `json:"name"`
+		Color *string `json:"color"`
+		Icon  *string `json:"icon"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+	req.Name = strings.TrimSpace(req.Name)
+	if req.Name == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name is required")
+		return
+	}
+
+	now := time.Now()
+	name := req.Name
+	member := &models.TeamMember{
+		ID:          newID(),
+		TeamID:      teamID,
+		UserID:      nil,
+		DisplayName: &name,
+		Role:        "member",
+		Color:       req.Color,
+		Icon:        req.Icon,
+		JoinedAt:    now,
+	}
+	if err := s.teams.AddMember(member); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create participant")
+		return
+	}
+
+	m, err := s.teams.GetMemberByID(member.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get created participant")
+		return
+	}
+	writeJSON(w, http.StatusCreated, m)
+}
+
+// ── Invites ───────────────────────────────────────────────────────────────────
+
+// handleListInvites returns all pending invites for the team.
+func (s *Server) handleListInvites(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+
+	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
+		return
+	}
+
+	invites, err := s.invites.ListByTeam(teamID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list invites")
+		return
+	}
+	writeJSON(w, http.StatusOK, invites)
+}
+
+// handleDeleteInvite revokes a pending invite.
+func (s *Server) handleDeleteInvite(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	inviteID := r.PathValue("inviteId")
+
+	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
+		return
+	}
+
+	if err := s.invites.DeleteByID(inviteID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke invite")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// ── Invite link ───────────────────────────────────────────────────────────────
+
+// handleCreateInviteLink generates or regenerates the reusable invite link
+// token for the team. Each call replaces the previous token.
+//
+// Design decision: tokens have no server-side expiry and are valid until an
+// admin explicitly revokes (DELETE) or resets (POST /reset) them. This keeps
+// the URL stable for onboarding docs and Slack pins. If time-bounded links are
+// needed, add an invite_link_expires_at column to teams and check it in the
+// registration handler.
+func (s *Server) handleCreateInviteLink(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+
+	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
+		return
+	}
+
+	token := newToken()
+	if err := s.teams.SetInviteLinkToken(teamID, &token); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create invite link")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"token": token})
+}
+
+// handleGetInviteLink returns the current invite link token for the team, or
+// null if none is set.
+func (s *Server) handleGetInviteLink(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+
+	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
+		return
+	}
+
+	team, err := s.teams.GetByID(teamID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "team not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get invite link")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"token": team.InviteLinkToken})
+}
+
+// handleResetInviteLink invalidates the current token and generates a fresh one.
+// Semantically identical to POST /invite-link; the distinct URL makes client
+// intent (reset vs. first-time create) explicit without a separate code path.
+func (s *Server) handleResetInviteLink(w http.ResponseWriter, r *http.Request) {
+	s.handleCreateInviteLink(w, r)
+}
+
+// handleDeleteInviteLink revokes the current invite link by clearing the token.
+func (s *Server) handleDeleteInviteLink(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+
+	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
+		return
+	}
+
+	if err := s.teams.SetInviteLinkToken(teamID, nil); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke invite link")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// userSearchResult is the safe public projection returned by GET /users/search.
+// It intentionally omits isSuperadmin, archivedAt, createdAt, updatedAt, and
+// passwordHash so that search results are safe to expose to any team member.
+type userSearchResult struct {
+	ID          string  `json:"id"`
+	Email       string  `json:"email"`
+	DisplayName string  `json:"displayName"`
+	AvatarURL   *string `json:"avatarUrl,omitempty"`
+}
+
+// handleSearchUsers handles GET /users/search?q= and returns matching users.
+func (s *Server) handleSearchUsers(w http.ResponseWriter, r *http.Request) {
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	if len(q) < 2 {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "query must be at least 2 characters")
+		return
+	}
+	users, err := s.users.SearchByNameOrEmail(q)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "search failed")
+		return
+	}
+	results := make([]userSearchResult, len(users))
+	for i, u := range users {
+		results[i] = userSearchResult{
+			ID:          u.ID,
+			Email:       u.Email,
+			DisplayName: u.DisplayName,
+			AvatarURL:   u.AvatarURL,
+		}
+	}
+	writeJSON(w, http.StatusOK, results)
+}
+
+// handleGetMemberStats returns computed activity and timeline counts for a
+// single team member. The full MemberDetail (with teams list) is available via
+// GET /teams/:id/members/:memberId; this endpoint is for lightweight stat polling.
+func (s *Server) handleGetMemberStats(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	memberID := r.PathValue("memberId")
+
+	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
+		return
+	}
+
+	m, err := s.teams.GetMemberByID(memberID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "member not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get member stats")
+		return
+	}
+	if m.TeamID != teamID {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "member not found")
+		return
+	}
+
+	stats, err := s.teams.GetMemberStats(memberID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to compute member stats")
+		return
+	}
+	writeJSON(w, http.StatusOK, stats)
+}
+
+// flatten converts a nil slice to an empty slice for clean JSON serialisation.
+func flatten[T any](s []*T) []T {
+	out := make([]T, 0, len(s))
+	for _, v := range s {
+		if v != nil {
+			out = append(out, *v)
+		}
+	}
+	return out
+}
+````
+
 ## File: packages/api/internal/db/saved_filter_repo.go
 ````go
 package db
@@ -30788,6 +31047,328 @@ func (r *TagRepo) ValidateTeamOwnership(teamID string, tagIDs []string) error {
 		return ErrTagOwnership
 	}
 	return nil
+}
+````
+
+## File: packages/api/internal/models/models.go
+````go
+// Package models holds the domain types shared across the API, db,
+// and event-bus packages. These types are persisted directly via sqlx
+// (db tags) and serialised on the wire (json tags); changing tags is a
+// schema change.
+package models
+
+import "time"
+
+// Activity is a scheduled item of work belonging to a Timeline. ArchivedAt is
+// non-nil when the activity is soft-deleted; list endpoints exclude archived
+// activities by default.
+//
+// AssignedMemberIDs is not stored on the activities table; it is populated by
+// the repository from activity_assignments after every list query.
+//
+// GoogleEventID and CaldavUID are preserved as-is — they identify the
+// corresponding records in external calendar systems (VEVENT identifiers).
+type Activity struct {
+	ID                string     `db:"id"                  json:"id"`
+	TimelineID        string     `db:"timeline_id"         json:"timelineId"`
+	Title             string     `db:"title"               json:"title"`
+	Description       *string    `db:"description"         json:"description,omitempty"`
+	Notes             *string    `db:"notes"               json:"notes,omitempty"`
+	Icon              *string    `db:"icon"                json:"icon,omitempty"`
+	Color             *string    `db:"color"               json:"color,omitempty"`
+	StartAt           time.Time  `db:"start_at"            json:"startAt"`
+	EndAt             time.Time  `db:"end_at"              json:"endAt"`
+	AllDay            bool       `db:"all_day"             json:"allDay"`
+	StatusID          *string    `db:"status_id"           json:"statusId,omitempty"`
+	ParentActivityID  *string    `db:"parent_activity_id"  json:"parentActivityId,omitempty"`
+	PercentComplete   *int       `db:"percent_complete"    json:"percentComplete,omitempty"`
+	Location          *string    `db:"location"            json:"location,omitempty"`
+	URL               *string    `db:"url"                 json:"url,omitempty"`
+	Rrule             *string    `db:"rrule"               json:"rrule,omitempty"`
+	CaldavUID         *string    `db:"caldav_uid"          json:"caldavUid,omitempty"`
+	GoogleEventID     *string    `db:"google_event_id"     json:"googleEventId,omitempty"`
+	CreatedBy         string     `db:"created_by"          json:"createdBy"`
+	CreatedAt         time.Time  `db:"created_at"          json:"createdAt"`
+	UpdatedAt         time.Time  `db:"updated_at"          json:"updatedAt"`
+	ArchivedAt        *time.Time `db:"archived_at"         json:"archivedAt,omitempty"`
+	AssignedMemberIDs []string   `db:"-"                   json:"assignedMemberIds"`
+	TagIDs            []string   `db:"-"                   json:"tagIds"`
+}
+
+// TeamMemberWithUser joins a TeamMember row with its associated User so
+// callers receive display names and emails in a single query. Participants
+// (no user account) have empty email and avatar; their display_name comes
+// from team_members.display_name via COALESCE in the query.
+type TeamMemberWithUser struct {
+	TeamMember
+	Email       string  `db:"email"        json:"email"`
+	DisplayName string  `db:"display_name" json:"displayName"`
+	AvatarURL   *string `db:"avatar_url"   json:"avatarUrl,omitempty"`
+}
+
+// User is an authenticated account. PasswordHash is omitted from JSON
+// to avoid leaking it through any handler that returns a User.
+// ArchivedAt is non-nil when the account is inactivated; login is rejected
+// for archived users. Color and Icon are user-level identity fields (migration
+// 010); they propagate to team_members rows for the user when changed.
+type User struct {
+	ID           string     `db:"id"             json:"id"`
+	Email        string     `db:"email"          json:"email"`
+	PasswordHash string     `db:"password_hash"  json:"-"`
+	DisplayName  string     `db:"display_name"   json:"displayName"`
+	AvatarURL    *string    `db:"avatar_url"     json:"avatarUrl,omitempty"`
+	Color        *string    `db:"color"          json:"color,omitempty"`
+	Icon         *string    `db:"icon"           json:"icon,omitempty"`
+	IsSuperadmin bool       `db:"is_superadmin"  json:"isSuperadmin"`
+	CreatedAt    time.Time  `db:"created_at"     json:"createdAt"`
+	UpdatedAt    time.Time  `db:"updated_at"     json:"updatedAt"`
+	ArchivedAt   *time.Time `db:"archived_at"    json:"archivedAt,omitempty"`
+}
+
+// Team is a workspace that groups users and their scheduled work. Color and
+// Icon are identity fields added in migration 006; both are nullable until
+// explicitly set by an admin. Description, Notes, and ArchivedAt are added in
+// migration 008; ArchivedAt is non-nil when the team is soft-deleted.
+// InviteLinkToken is a stable, reusable token added in migration 009; when
+// non-nil it can be used by anyone to join the team during registration.
+type Team struct {
+	ID              string     `db:"id"                  json:"id"`
+	Name            string     `db:"name"                json:"name"`
+	Slug            string     `db:"slug"                json:"slug"`
+	Description     *string    `db:"description"         json:"description,omitempty"`
+	Notes           *string    `db:"notes"               json:"notes,omitempty"`
+	Color           *string    `db:"color"               json:"color,omitempty"`
+	Icon            *string    `db:"icon"                json:"icon,omitempty"`
+	InviteLinkToken *string    `db:"invite_link_token"   json:"inviteLinkToken,omitempty"`
+	CreatedAt       time.Time  `db:"created_at"          json:"createdAt"`
+	UpdatedAt       time.Time  `db:"updated_at"          json:"updatedAt"`
+	ArchivedAt      *time.Time `db:"archived_at"         json:"archivedAt,omitempty"`
+}
+
+// TeamMember is the join row that puts a person in a Team. UserID is nil
+// for login-less Participants; DisplayName is populated for them instead.
+// Role is the team-level role: "admin" or "member". Color and Icon are
+// identity fields (migration 006); Color stores a color ID (e.g. "teal").
+// ArchivedAt is non-nil when the member is inactivated (migration 009);
+// inactivated members lose access but their data and assignments are preserved.
+type TeamMember struct {
+	ID          string     `db:"id"           json:"id"`
+	TeamID      string     `db:"team_id"      json:"teamId"`
+	UserID      *string    `db:"user_id"      json:"userId,omitempty"`
+	DisplayName *string    `db:"display_name" json:"displayName,omitempty"`
+	Role        string     `db:"role"         json:"role"`
+	Color       *string    `db:"color"        json:"color,omitempty"`
+	Icon        *string    `db:"icon"         json:"icon,omitempty"`
+	JoinedAt    time.Time  `db:"joined_at"    json:"joinedAt"`
+	ArchivedAt  *time.Time `db:"archived_at"  json:"archivedAt,omitempty"`
+}
+
+// MemberStats holds computed activity and timeline counts for a member.
+// All counts are date-relative and scoped to activities the member is assigned to.
+type MemberStats struct {
+	ActiveTimelines    int `json:"activeTimelines"`
+	ArchivedTimelines  int `json:"archivedTimelines"`
+	PastDue            int `json:"pastDue"`
+	Running            int `json:"running"`
+	Upcoming           int `json:"upcoming"`
+	Unscheduled        int `json:"unscheduled"`
+	ArchivedActivities int `json:"archivedActivities"`
+}
+
+// MemberDetail combines a TeamMemberWithUser with computed stats and the
+// member's full list of team memberships. Returned by GET /teams/:id/members/:memberId.
+// UserArchivedAt reflects users.archived_at (account-level deactivation), distinct
+// from ArchivedAt which is team_members.archived_at (membership-level inactivation).
+type MemberDetail struct {
+	TeamMemberWithUser
+	Stats          MemberStats          `json:"stats"`
+	Teams          []TeamMemberWithUser `json:"teams"`
+	Deletable      bool                 `json:"deletable"`
+	UserArchivedAt *time.Time           `json:"userArchivedAt,omitempty"`
+}
+
+// Timeline is a named date range over a team's events. It is not a data
+// container — it is a view over a team's events for a given date window.
+// Access is governed by timeline_access + team role; share_token allows
+// unauthenticated read access via a stable public URL. Color and Icon are
+// identity fields (migration 006). Description and Notes are free-text fields
+// added in migration 013.
+type Timeline struct {
+	ID          string     `db:"id"          json:"id"`
+	TeamID      string     `db:"team_id"     json:"teamId"`
+	Name        string     `db:"name"        json:"name"`
+	Description *string    `db:"description" json:"description,omitempty"`
+	Notes       *string    `db:"notes"       json:"notes,omitempty"`
+	StartDate   string     `db:"start_date"  json:"startDate"`
+	EndDate     string     `db:"end_date"    json:"endDate"`
+	Color       *string    `db:"color"       json:"color,omitempty"`
+	Icon        *string    `db:"icon"        json:"icon,omitempty"`
+	ShareToken  string     `db:"share_token" json:"shareToken"`
+	IcalToken   string     `db:"ical_token"  json:"icalToken"`
+	CreatedBy   string     `db:"created_by"  json:"createdBy"`
+	CreatedAt   time.Time  `db:"created_at"  json:"createdAt"`
+	UpdatedAt   time.Time  `db:"updated_at"  json:"updatedAt"`
+	ArchivedAt  *time.Time `db:"archived_at" json:"archivedAt,omitempty"`
+}
+
+// SavedFilter is a user-owned, team-scoped named filter spec. Definition is
+// an opaque JSON string interpreted by the client; the server treats it as
+// arbitrary text and only validates that it parses as JSON.
+type SavedFilter struct {
+	ID           string    `db:"id"             json:"id"`
+	TeamID       string    `db:"team_id"        json:"teamId"`
+	UserID       string    `db:"user_id"        json:"userId"`
+	Name         string    `db:"name"           json:"name"`
+	Definition   string    `db:"definition"     json:"definition"`
+	IsTeamFilter bool      `db:"is_team_filter" json:"isTeamFilter"`
+	CreatedAt    time.Time `db:"created_at"     json:"createdAt"`
+	UpdatedAt    time.Time `db:"updated_at"     json:"updatedAt"`
+}
+
+// UserPreference stores a single key/value setting for a user, optionally
+// scoped to a timeline. TimelineID is “” for global preferences so the
+// UNIQUE(user_id, timeline_id, key) DB constraint works without NULL handling.
+// Serialised JSON omits TimelineID when empty so callers see null for global prefs.
+type UserPreference struct {
+	ID         string    `db:"id"          json:"id"`
+	UserID     string    `db:"user_id"     json:"userId"`
+	TimelineID string    `db:"timeline_id" json:"timelineId,omitempty"`
+	Key        string    `db:"key"         json:"key"`
+	Value      string    `db:"value"       json:"value"`
+	UpdatedAt  time.Time `db:"updated_at"  json:"updatedAt"`
+}
+
+// APIToken is a long-lived Bearer credential a user issues for programmatic
+// access. token_hash stores SHA-256(rawToken); the raw value is shown to the
+// caller only once on creation. RevokedAt is non-nil when the token has been
+// revoked; revoked tokens are not deleted so listing remains stable.
+type APIToken struct {
+	ID         string     `db:"id"           json:"id"`
+	UserID     string     `db:"user_id"      json:"userId"`
+	Name       string     `db:"name"         json:"name"`
+	TokenHash  string     `db:"token_hash"   json:"-"`
+	Scope      string     `db:"scope"        json:"scope"`
+	LastUsedAt *time.Time `db:"last_used_at" json:"lastUsedAt,omitempty"`
+	CreatedAt  time.Time  `db:"created_at"   json:"createdAt"`
+	RevokedAt  *time.Time `db:"revoked_at"   json:"revokedAt,omitempty"`
+}
+
+// InstanceSetting stores a single instance-level configuration value.
+// SMTP config and defaults live here. The value column is plain text;
+// the mailer package handles decryption of the SMTP password field.
+type InstanceSetting struct {
+	Key       string    `db:"key"        json:"key"`
+	Value     string    `db:"value"      json:"value"`
+	UpdatedAt time.Time `db:"updated_at" json:"updatedAt"`
+}
+
+// PasswordResetToken is a single-use token for the forgot-password flow.
+// TokenHash stores SHA-256 of the raw token; the raw value is sent by email
+// and never stored. UsedAt is set when the token is consumed.
+type PasswordResetToken struct {
+	ID        string     `db:"id"         json:"id"`
+	UserID    string     `db:"user_id"    json:"userId"`
+	TokenHash string     `db:"token_hash" json:"-"`
+	ExpiresAt time.Time  `db:"expires_at" json:"expiresAt"`
+	UsedAt    *time.Time `db:"used_at"    json:"usedAt,omitempty"`
+	CreatedAt time.Time  `db:"created_at" json:"createdAt"`
+}
+
+// AdminUserRow is a flat view of a user for the admin users list. It includes
+// the user's fields plus the count of active team memberships.
+type AdminUserRow struct {
+	User
+	TeamCount int `db:"team_count" json:"teamCount"`
+}
+
+// RevokeUserResult summarizes the outcome of POST /users/:id/revoke.
+// The three counters let the caller show a meaningful summary in the UI.
+type RevokeUserResult struct {
+	AccountDeactivated     bool `json:"accountDeactivated"`
+	MembershipsInactivated int  `json:"membershipsInactivated"`
+	MembershipsRemoved     int  `json:"membershipsRemoved"`
+}
+
+// StatusTemplate is a reusable named preset of statuses owned by a team.
+// When a timeline is created the team's chosen template's items are copied
+// into live Status rows for that timeline.
+type StatusTemplate struct {
+	ID          string    `db:"id"          json:"id"`
+	TeamID      string    `db:"team_id"     json:"teamId"`
+	Name        string    `db:"name"        json:"name"`
+	Description *string   `db:"description" json:"description,omitempty"`
+	Position    int       `db:"position"    json:"position"`
+	CreatedBy   string    `db:"created_by"  json:"createdBy"`
+	CreatedAt   time.Time `db:"created_at"  json:"createdAt"`
+	UpdatedAt   time.Time `db:"updated_at"  json:"updatedAt"`
+	// Items is populated by the repository when listing templates.
+	Items []StatusTemplateItem `db:"-" json:"items"`
+}
+
+// StatusTemplateItem is one status value within a StatusTemplate.
+type StatusTemplateItem struct {
+	ID         string  `db:"id"          json:"id"`
+	TemplateID string  `db:"template_id" json:"templateId"`
+	Name       string  `db:"name"        json:"name"`
+	Color      string  `db:"color"       json:"color"`
+	Icon       *string `db:"icon"        json:"icon,omitempty"`
+	IsClosed   bool    `db:"is_closed"   json:"isClosed"`
+	Position   int     `db:"position"    json:"position"`
+}
+
+// Status is a live status value on a specific timeline. Rows are copied from a
+// StatusTemplate's items when the timeline is created and then evolve independently.
+type Status struct {
+	ID         string    `db:"id"          json:"id"`
+	TimelineID string    `db:"timeline_id" json:"timelineId"`
+	Name       string    `db:"name"        json:"name"`
+	Color      string    `db:"color"       json:"color"`
+	Icon       *string   `db:"icon"        json:"icon,omitempty"`
+	IsClosed   bool      `db:"is_closed"   json:"isClosed"`
+	Position   int       `db:"position"    json:"position"`
+	CreatedAt  time.Time `db:"created_at"  json:"createdAt"`
+	UpdatedAt  time.Time `db:"updated_at"  json:"updatedAt"`
+}
+
+// TimelineAccessEntry is a single timeline access grant joined with the team
+// member's display info. Returned by GET /teams/:id/timelines/:timelineId/access.
+type TimelineAccessEntry struct {
+	TimelineID   string  `db:"timeline_id"    json:"timelineId"`
+	TeamMemberID string  `db:"team_member_id" json:"teamMemberId"`
+	Role         string  `db:"role"           json:"role"`
+	DisplayName  string  `db:"display_name"   json:"displayName"`
+	Email        string  `db:"email"          json:"email"`
+	Color        *string `db:"color"          json:"color,omitempty"`
+	Icon         *string `db:"icon"           json:"icon,omitempty"`
+	UserID       *string `db:"user_id"        json:"userId,omitempty"`
+}
+
+// Tag is a team-scoped label that can be applied to activities. Tags are
+// normalized: a team_id+name pair is unique, enabling rename-all and
+// name-based filter matching across timelines.
+type Tag struct {
+	ID        string    `db:"id"         json:"id"`
+	TeamID    string    `db:"team_id"    json:"teamId"`
+	Name      string    `db:"name"       json:"name"`
+	Color     *string   `db:"color"      json:"color,omitempty"`
+	CreatedBy string    `db:"created_by" json:"createdBy"`
+	CreatedAt time.Time `db:"created_at" json:"createdAt"`
+}
+
+// Invite is a single-use token that grants an email address the right to
+// join a Team. AcceptedAt is non-nil once consumed; expired or accepted
+// invites are rejected by the registration handler.
+type Invite struct {
+	ID         string     `db:"id"          json:"id"`
+	TeamID     string     `db:"team_id"     json:"teamId"`
+	Email      string     `db:"email"       json:"email"`
+	Token      string     `db:"token"       json:"token"`
+	Role       string     `db:"role"        json:"role"`
+	InvitedBy  string     `db:"invited_by"  json:"invitedBy"`
+	ExpiresAt  time.Time  `db:"expires_at"  json:"expiresAt"`
+	AcceptedAt *time.Time `db:"accepted_at" json:"acceptedAt,omitempty"`
+	CreatedAt  time.Time  `db:"created_at"  json:"createdAt"`
 }
 ````
 
@@ -32602,223 +33183,6 @@ export default function FilterManageModal({
 }
 ````
 
-## File: packages/web/src/components/gantt/GanttToolbar.tsx
-````typescript
-/**
- * GanttToolbar — the thin sub-toolbar that sits between the top bar and
- * the Gantt grid. Provides zoom (granularity), group-by, sort-by, and an
- * export stub.
- */
-
-import { Download, Share2, Plus, Minus } from 'lucide-react';
-import type { TimeGranularity } from './granularity';
-import { cn } from '@/lib/utils';
-
-export type { TimeGranularity } from './granularity';
-export type GroupBy = 'none' | 'member' | 'parent' | 'status';
-export type SortBy = 'startDate' | 'endDate' | 'title';
-export type ColorBy = 'activity' | 'member' | 'status';
-
-interface Props {
-  groupBy: GroupBy;
-  onGroupByChange: (g: GroupBy) => void;
-  sortBy: SortBy;
-  onSortByChange: (s: SortBy) => void;
-  granularity: TimeGranularity | 'auto';
-  onGranularityChange: (g: TimeGranularity | 'auto') => void;
-  colorBy: ColorBy;
-  onColorByChange: (c: ColorBy) => void;
-  onExport: () => void;
-  onShare?: () => void;
-}
-
-const ctrlBtn = 'flex items-center justify-center gap-[5px] h-[26px] px-2 border border-border rounded-md bg-card text-foreground text-xs font-medium cursor-pointer shrink-0';
-const divider = 'w-px h-4 bg-border shrink-0';
-const label   = 'text-[11px] text-muted-foreground shrink-0';
-const select  = 'h-[26px] px-1.5 border border-border rounded-md bg-card text-foreground text-xs cursor-pointer shrink-0';
-
-export default function GanttToolbar({
-  groupBy,
-  onGroupByChange,
-  sortBy,
-  onSortByChange,
-  granularity,
-  onGranularityChange,
-  colorBy,
-  onColorByChange,
-  onExport,
-  onShare,
-}: Props) {
-  const granularityMap = ['auto', 'day', 'week', 'month', 'quarter', 'year'] as const;
-  const granularityLabels = ['A', 'D', 'W', 'M', 'Q', 'Y'];
-  const currentIndex = granularityMap.indexOf(granularity as never) !== -1
-    ? granularityMap.indexOf(granularity as never)
-    : 0;
-  const currentLabel = granularityLabels[currentIndex];
-
-  const handleSliderChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const val = parseInt(e.target.value, 10);
-    onGranularityChange(granularityMap[val] as TimeGranularity | 'auto');
-  };
-
-  return (
-    <div className="flex items-center gap-2 px-3 h-9 bg-card border-b border-border shrink-0">
-      {/* Custom range-input thumb/track styles — no Tailwind equivalent for pseudo-elements */}
-      <style>{`
-        .gantt-zoom-slider {
-          -webkit-appearance: none;
-          appearance: none;
-          background: transparent;
-        }
-        .gantt-zoom-slider::-webkit-slider-thumb {
-          -webkit-appearance: none;
-          appearance: none;
-          width: 12px;
-          height: 12px;
-          border-radius: 50%;
-          background: var(--primary);
-          cursor: pointer;
-          margin-top: -4px;
-        }
-        .gantt-zoom-slider::-moz-range-thumb {
-          width: 12px;
-          height: 12px;
-          border-radius: 50%;
-          background: var(--primary);
-          cursor: pointer;
-          border: none;
-        }
-        .gantt-zoom-slider::-webkit-slider-runnable-track {
-          width: 100%;
-          height: 4px;
-          cursor: pointer;
-          background: var(--border);
-          border-radius: 2px;
-        }
-        .gantt-zoom-slider::-moz-range-track {
-          width: 100%;
-          height: 4px;
-          cursor: pointer;
-          background: var(--border);
-          border-radius: 2px;
-        }
-      `}</style>
-
-      {/* Zoom (granularity) */}
-      <div className="flex items-center gap-1.5 h-[26px]">
-        <button
-          onClick={() => { if (currentIndex > 0) onGranularityChange(granularityMap[currentIndex - 1] as TimeGranularity | 'auto'); }}
-          disabled={currentIndex === 0}
-          title="Zoom out"
-          className={cn(
-            'flex items-center justify-center border-none bg-transparent h-[22px] px-0.5',
-            currentIndex > 0 ? 'text-foreground cursor-pointer' : 'text-muted-foreground cursor-default',
-          )}
-        >
-          <Minus size={14} />
-        </button>
-
-        <div className="relative w-20 h-[26px] flex items-center">
-          <div className="absolute inset-x-[5px] inset-y-0 flex justify-between items-center pointer-events-none">
-            {[0, 1, 2, 3, 4, 5].map(i => (
-              <div key={i} className="w-0.5 h-1.5 bg-border rounded-[1px]" />
-            ))}
-          </div>
-          <input
-            type="range"
-            min="0"
-            max="5"
-            step="1"
-            value={currentIndex}
-            onChange={handleSliderChange}
-            className="gantt-zoom-slider w-full cursor-pointer m-0 relative z-10"
-            title={granularity.charAt(0).toUpperCase() + granularity.slice(1)}
-          />
-        </div>
-
-        <button
-          onClick={() => { if (currentIndex < 5) onGranularityChange(granularityMap[currentIndex + 1] as TimeGranularity | 'auto'); }}
-          disabled={currentIndex === 5}
-          title="Zoom in"
-          className={cn(
-            'flex items-center justify-center border-none bg-transparent h-[22px] px-0.5',
-            currentIndex < 5 ? 'text-foreground cursor-pointer' : 'text-muted-foreground cursor-default',
-          )}
-        >
-          <Plus size={14} />
-        </button>
-
-        <div
-          title={granularity.charAt(0).toUpperCase() + granularity.slice(1)}
-          className={cn(
-            'flex items-center justify-center w-[22px] h-[22px]',
-            'bg-card border border-border rounded-sm text-xs font-mono select-none',
-            currentLabel === 'A' ? 'font-bold text-primary' : 'font-medium text-muted-foreground',
-          )}
-        >
-          {currentLabel}
-        </div>
-      </div>
-
-      <div className={divider} />
-
-      {/* Group by */}
-      <span className={label}>Group by</span>
-      <select
-        className={select}
-        value={groupBy}
-        onChange={e => onGroupByChange(e.target.value as GroupBy)}
-      >
-        <option value="none">None</option>
-        <option value="member">Member</option>
-        <option value="parent">Parent activity</option>
-        <option value="status">Status</option>
-      </select>
-
-      <div className={divider} />
-
-      {/* Sort by */}
-      <span className={label}>Sort by</span>
-      <select
-        className={select}
-        value={sortBy}
-        onChange={e => onSortByChange(e.target.value as SortBy)}
-      >
-        <option value="startDate">Start date</option>
-        <option value="endDate">End date</option>
-        <option value="title">Title A–Z</option>
-      </select>
-
-      <div className={divider} />
-
-      {/* Color by */}
-      <span className={label}>Color by</span>
-      <select
-        className={select}
-        value={colorBy}
-        onChange={e => onColorByChange(e.target.value as ColorBy)}
-      >
-        <option value="activity">Activity</option>
-        <option value="member">Member</option>
-        <option value="status">Status</option>
-      </select>
-
-      <div className="flex-1" />
-
-      <button className={ctrlBtn} onClick={onExport} title="Export activities (coming soon)">
-        <Download size={13} strokeWidth={1.8} />
-        Export
-      </button>
-
-      <button className={ctrlBtn} onClick={onShare} title="Share">
-        <Share2 size={13} strokeWidth={1.8} />
-        Share
-      </button>
-    </div>
-  );
-}
-````
-
 ## File: packages/web/src/components/gantt/granularity.test.ts
 ````typescript
 import { describe, it, expect } from 'vitest'
@@ -34540,44 +34904,6 @@ export default function TagInput({ teamId, tags, selectedTagIds, onChange }: Pro
 }
 ````
 
-## File: packages/web/src/contexts/FilterContext.tsx
-````typescript
-/**
- * Holds the dashboard-wide active filter selection. UI-only this round —
- * the selected filter is not yet applied to the events list (real views
- * land in Phase 8).
- */
-
-import { createContext, useContext, useState } from 'react'
-
-export type ActiveFilter =
-  | { kind: 'preset'; id: 'all' | 'upcoming' | 'overdue' | 'noassign' | 'open' }
-  | { kind: 'member'; userId: string }
-  | { kind: 'saved'; id: string }
-
-interface FilterContextValue {
-  activeFilter: ActiveFilter
-  setActiveFilter: (f: ActiveFilter) => void
-}
-
-const FilterContext = createContext<FilterContextValue | null>(null)
-
-export function FilterProvider({ children }: { children: React.ReactNode }) {
-  const [activeFilter, setActiveFilter] = useState<ActiveFilter>({ kind: 'preset', id: 'all' })
-  return (
-    <FilterContext.Provider value={{ activeFilter, setActiveFilter }}>
-      {children}
-    </FilterContext.Provider>
-  )
-}
-
-export function useFilter(): FilterContextValue {
-  const ctx = useContext(FilterContext)
-  if (!ctx) throw new Error('useFilter must be used inside FilterProvider')
-  return ctx
-}
-````
-
 ## File: packages/web/src/hooks/useSavedFilters.ts
 ````typescript
 /**
@@ -35096,631 +35422,6 @@ export function applyActiveFilter(
   }
 
   return activities
-}
-````
-
-## File: packages/web/src/pages/LoginPage.tsx
-````typescript
-import { useState } from 'react'
-import { useNavigate, useLocation, Link } from 'react-router-dom'
-import { Eye, EyeOff, Check, Loader2 } from 'lucide-react'
-import { useAuth } from '@/contexts/AuthContext'
-import { ApiError } from '@/lib/api'
-import DarkModeToggle from '@/components/DarkModeToggle'
-import { usePublicSettings } from '@/hooks/usePublicSettings'
-
-// ── Floating-label input ─────────────────────────────────────────────────────
-
-interface FloatInputProps {
-  id: string
-  label: string
-  type: string
-  value: string
-  autoComplete: string
-  error?: string | null
-  onChange: (v: string) => void
-  onKeyDown?: (e: React.KeyboardEvent) => void
-  rightSlot?: React.ReactNode
-}
-
-function FloatInput({ id, label, type, value, autoComplete, error, onChange, onKeyDown, rightSlot }: FloatInputProps) {
-  const [focused, setFocused] = useState(false)
-  const floated = focused || value.length > 0
-
-  const borderColor = error
-    ? '#e74c3c'
-    : focused
-    ? '#288C9B'
-    : 'hsl(210 15% 24%)'
-
-  const boxShadow = error
-    ? '0 0 0 3px rgba(231,76,60,0.15)'
-    : focused
-    ? '0 0 0 3px rgba(40,140,155,0.18)'
-    : 'none'
-
-  const labelColor = error
-    ? '#e74c3c'
-    : focused
-    ? '#5BC0DE'
-    : 'hsl(210 15% 65%)'
-
-  return (
-    <div>
-      <div style={{
-        position: 'relative',
-        borderRadius: 8,
-        border: `1px solid ${borderColor}`,
-        background: 'hsl(210 15% 17%)',
-        transition: 'border-color 180ms ease, box-shadow 180ms ease',
-        boxShadow,
-      }}>
-        {/* Floating label */}
-        <label
-          htmlFor={id}
-          style={{
-            position: 'absolute',
-            left: 14,
-            top: floated ? 8 : '50%',
-            transform: floated ? 'none' : 'translateY(-50%)',
-            fontSize: floated ? 11 : 14,
-            letterSpacing: floated ? '0.06em' : 0,
-            textTransform: floated ? 'uppercase' : 'none',
-            fontWeight: 600,
-            color: labelColor,
-            transition: 'all 160ms cubic-bezier(0.4, 0, 0.2, 1)',
-            pointerEvents: 'none',
-            userSelect: 'none',
-          }}
-        >
-          {label}
-        </label>
-
-        <input
-          id={id}
-          type={type}
-          autoComplete={autoComplete}
-          value={value}
-          onChange={e => onChange(e.target.value)}
-          onFocus={() => setFocused(true)}
-          onBlur={() => setFocused(false)}
-          onKeyDown={onKeyDown}
-          style={{
-            width: '100%',
-            padding: '22px 42px 8px 14px',
-            background: 'transparent',
-            border: 'none',
-            outline: 'none',
-            fontSize: 15,
-            color: 'hsl(210 17% 93%)',
-            fontFamily: 'inherit',
-            lineHeight: 1.4,
-            boxSizing: 'border-box',
-          }}
-        />
-
-        {rightSlot && (
-          <div style={{
-            position: 'absolute',
-            right: 12,
-            top: '50%',
-            transform: 'translateY(-50%)',
-          }}>
-            {rightSlot}
-          </div>
-        )}
-      </div>
-
-      {error && (
-        <p style={{ fontSize: 12, color: '#e74c3c', margin: '5px 0 0 2px' }}>{error}</p>
-      )}
-    </div>
-  )
-}
-
-// ── Spinner ──────────────────────────────────────────────────────────────────
-
-function Spinner() {
-  return (
-    <Loader2
-      size={16}
-      strokeWidth={2.5}
-      color="rgba(255,255,255,0.8)"
-      style={{ animation: 'spin 0.8s linear infinite' }}
-    />
-  )
-}
-
-// ── Main page ────────────────────────────────────────────────────────────────
-
-export default function LoginPage() {
-  const { login } = useAuth()
-  const navigate = useNavigate()
-  const location = useLocation()
-  const from = (location.state as { from?: { pathname: string } } | null)?.from?.pathname ?? '/'
-  // A success message routed here from another page (e.g. password reset).
-  // Derived from navigation state, so it clears naturally on a full reload.
-  const notice = (location.state as { message?: string } | null)?.message ?? null
-  const { data: branding } = usePublicSettings()
-  const instanceName = branding?.instanceName || 'draba'
-
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
-  const [showPassword, setShowPassword] = useState(false)
-  const [emailError, setEmailError] = useState<string | null>(null)
-  const [passwordError, setPasswordError] = useState<string | null>(null)
-  const [serverError, setServerError] = useState<string | null>(null)
-  const [loading, setLoading] = useState(false)
-  const [success, setSuccess] = useState(false)
-
-  function validateAndSubmit() {
-    let valid = true
-    setServerError(null)
-
-    if (!email.trim()) {
-      setEmailError('Email is required')
-      valid = false
-    } else if (!/\S+@\S+\.\S+/.test(email)) {
-      setEmailError('Enter a valid email')
-      valid = false
-    } else {
-      setEmailError(null)
-    }
-
-    if (!password) {
-      setPasswordError('Password is required')
-      valid = false
-    } else if (password.length < 6) {
-      setPasswordError('Password must be at least 6 characters')
-      valid = false
-    } else {
-      setPasswordError(null)
-    }
-
-    if (!valid) return
-    doLogin()
-  }
-
-  async function doLogin() {
-    setLoading(true)
-    try {
-      await login(email, password)
-      setSuccess(true)
-      // Brief success flash then navigate
-      setTimeout(() => navigate(from, { replace: true }), 600)
-    } catch (err) {
-      if (err instanceof ApiError) {
-        setServerError(err.message)
-      } else {
-        setServerError('Something went wrong. Please try again.')
-      }
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  function handleSubmit(e: React.FormEvent) {
-    e.preventDefault()
-    validateAndSubmit()
-  }
-
-  return (
-    <div style={{
-      minHeight: '100vh',
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      background: 'var(--background)',
-      padding: '24px',
-      position: 'relative',
-    }}>
-      {/* Teal radial glow behind card */}
-      <div style={{
-        position: 'fixed',
-        inset: 0,
-        background: 'radial-gradient(ellipse 60% 50% at 20% 50%, rgba(40,140,155,0.12) 0%, transparent 70%)',
-        pointerEvents: 'none',
-      }} />
-
-      {/* Dark mode toggle */}
-      <div style={{ position: 'fixed', top: 16, right: 16, zIndex: 10 }}>
-        <DarkModeToggle />
-      </div>
-
-      {/* Card */}
-      <div style={{
-        width: '100%',
-        maxWidth: 860,
-        minHeight: 520,
-        borderRadius: 16,
-        overflow: 'hidden',
-        display: 'flex',
-        boxShadow: '0 32px 80px -12px rgba(0,0,0,0.55), 0 0 0 1px rgba(255,255,255,0.06)',
-        position: 'relative',
-        zIndex: 1,
-      }}>
-
-        {/* ── Left panel — brand ─────────────────────────────────────── */}
-        <div style={{
-          width: '38%',
-          flexShrink: 0,
-          background: 'linear-gradient(155deg, #2aa5b8 0%, #1c7585 60%, #145f6e 100%)',
-          display: 'flex',
-          flexDirection: 'column',
-          alignItems: 'center',
-          justifyContent: 'center',
-          gap: 4,
-          padding: '48px 32px',
-          position: 'relative',
-          overflow: 'hidden',
-        }}>
-          {/* Decorative circles */}
-          <div style={{ width: 220, height: 220, borderRadius: '50%', background: 'rgba(255,255,255,0.07)', position: 'absolute', top: -60, left: -60, pointerEvents: 'none' }} />
-          <div style={{ width: 160, height: 160, borderRadius: '50%', background: 'rgba(255,255,255,0.05)', position: 'absolute', bottom: -40, right: -40, pointerEvents: 'none' }} />
-
-          {/* Logo — 2× the handoff's 88px */}
-          <img
-            src="/logo-color.svg"
-            alt="draba"
-            style={{ width: 270, height: 270, filter: 'drop-shadow(0 4px 16px rgba(0,0,0,0.25))', position: 'relative', marginTop: '-15px', marginBottom: '-47px' }}
-          />
-
-          <div style={{ position: 'relative', textAlign: 'center' }}>
-            <div style={{ fontSize: 28, fontWeight: 700, color: '#fff', letterSpacing: '-0.01em', textShadow: '0 2px 8px rgba(0,0,0,0.2)' }}>
-              {instanceName}
-            </div>
-            <div style={{ fontSize: 13, fontWeight: 400, color: 'rgba(255,255,255,0.72)', lineHeight: 1.5, marginTop: 8 }}>
-              Team coordination,<br />simplified.
-            </div>
-          </div>
-        </div>
-
-        {/* ── Right panel — form ─────────────────────────────────────── */}
-        <div style={{
-          flex: 1,
-          background: 'var(--card)',
-          padding: '52px 48px',
-          display: 'flex',
-          flexDirection: 'column',
-          justifyContent: 'center',
-        }}>
-          {success ? (
-            /* Success state */
-            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', textAlign: 'center', gap: 0 }}>
-              <div style={{
-                width: 56, height: 56, borderRadius: '50%',
-                background: 'rgba(40,140,155,0.15)', border: '2px solid #288C9B',
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                margin: '0 auto 20px',
-              }}>
-                <Check size={24} color="#288C9B" strokeWidth={2.5} />
-              </div>
-              <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--foreground)', marginBottom: 8 }}>
-                You're signed in
-              </div>
-              <div style={{ fontSize: 14, color: 'var(--muted-foreground)' }}>
-                Redirecting to your timeline…
-              </div>
-            </div>
-          ) : (
-            <form onSubmit={handleSubmit} noValidate>
-              {/* Heading */}
-              <div style={{ marginBottom: 28 }}>
-                <h1 style={{ fontSize: 28, fontWeight: 700, color: 'hsl(210 17% 93%)', letterSpacing: '-0.02em', margin: '0 0 6px' }}>
-                  Sign in
-                </h1>
-                <p style={{ fontSize: 14, color: 'hsl(210 15% 52%)', margin: 0 }}>
-                  Welcome back — sign in to your account.
-                </p>
-              </div>
-
-              {/* Success notice routed from another page (e.g. password reset).
-                  Suppressed once a server error is shown so it can't go stale. */}
-              {notice && !serverError && (
-                <div style={{
-                  fontSize: 13,
-                  color: '#3bb38a',
-                  background: 'rgba(59,179,138,0.12)',
-                  border: '1px solid rgba(59,179,138,0.35)',
-                  borderRadius: 8,
-                  padding: '10px 12px',
-                  margin: '0 0 20px',
-                }}>
-                  {notice}
-                </div>
-              )}
-
-              {/* Fields */}
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 14, marginBottom: 24 }}>
-                <FloatInput
-                  id="email"
-                  label="Email"
-                  type="email"
-                  autoComplete="email"
-                  value={email}
-                  error={emailError}
-                  onChange={v => { setEmail(v); if (emailError) setEmailError(null) }}
-                />
-
-                <FloatInput
-                  id="password"
-                  label="Password"
-                  type={showPassword ? 'text' : 'password'}
-                  autoComplete="current-password"
-                  value={password}
-                  error={passwordError}
-                  onChange={v => { setPassword(v); if (passwordError) setPasswordError(null) }}
-                  rightSlot={
-                    <button
-                      type="button"
-                      onClick={() => setShowPassword(s => !s)}
-                      style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'hsl(210 15% 52%)', display: 'flex', padding: 0 }}
-                    >
-                      {showPassword ? <EyeOff size={18} strokeWidth={1.5} /> : <Eye size={18} strokeWidth={1.5} />}
-                    </button>
-                  }
-                />
-              </div>
-
-              {/* Forgot password */}
-              <div style={{ textAlign: 'right', marginBottom: 22, marginTop: -6 }}>
-                <Link
-                  to="/forgot-password"
-                  style={{ fontSize: 13, fontWeight: 600, color: '#5BC0DE', textDecoration: 'none' }}
-                  onMouseEnter={e => (e.currentTarget.style.textDecoration = 'underline')}
-                  onMouseLeave={e => (e.currentTarget.style.textDecoration = 'none')}
-                >
-                  Forgot password?
-                </Link>
-              </div>
-
-              {/* Server error */}
-              {serverError && (
-                <p style={{ fontSize: 13, color: '#e74c3c', margin: '0 0 16px' }}>{serverError}</p>
-              )}
-
-              {/* Sign in button */}
-              <button
-                type="submit"
-                disabled={loading}
-                style={{
-                  width: '100%',
-                  padding: '14px',
-                  borderRadius: 8,
-                  border: 'none',
-                  background: loading
-                    ? 'hsl(188 40% 35%)'
-                    : 'linear-gradient(135deg, #2aa5b8 0%, #1e8a9c 100%)',
-                  color: '#fff',
-                  fontSize: 15,
-                  fontWeight: 700,
-                  letterSpacing: '0.01em',
-                  boxShadow: loading ? 'none' : '0 4px 20px rgba(40,140,155,0.35)',
-                  cursor: loading ? 'not-allowed' : 'pointer',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  gap: 8,
-                  fontFamily: 'inherit',
-                  transition: 'opacity 160ms ease, transform 160ms ease, box-shadow 160ms ease',
-                }}
-                onMouseEnter={e => { if (!loading) { e.currentTarget.style.opacity = '0.92'; e.currentTarget.style.transform = 'translateY(-1px)' } }}
-                onMouseLeave={e => { e.currentTarget.style.opacity = '1'; e.currentTarget.style.transform = 'translateY(0)' }}
-                onMouseDown={e => { if (!loading) e.currentTarget.style.transform = 'scale(0.98)' }}
-                onMouseUp={e => { if (!loading) e.currentTarget.style.transform = 'translateY(-1px)' }}
-              >
-                {loading && <Spinner />}
-                {loading ? 'Signing in…' : 'Sign in'}
-              </button>
-
-              {/* Register link */}
-              <p style={{ marginTop: 24, fontSize: 13, textAlign: 'center', color: 'hsl(210 15% 52%)' }}>
-                Have an invite?{' '}
-                <Link
-                  to="/register"
-                  style={{ color: '#5BC0DE', fontWeight: 600, textDecoration: 'none' }}
-                  onMouseEnter={e => (e.currentTarget.style.textDecoration = 'underline')}
-                  onMouseLeave={e => (e.currentTarget.style.textDecoration = 'none')}
-                >
-                  Create an account
-                </Link>
-              </p>
-            </form>
-          )}
-        </div>
-      </div>
-
-      {/* Keyframe for spinner */}
-      <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
-    </div>
-  )
-}
-````
-
-## File: packages/web/src/pages/RegisterPage.tsx
-````typescript
-import { useState } from 'react'
-import { useNavigate, useSearchParams, Link } from 'react-router-dom'
-import { useAuth } from '@/contexts/AuthContext'
-import { ApiError } from '@/lib/api'
-import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
-import DarkModeToggle from '@/components/DarkModeToggle'
-
-export default function RegisterPage() {
-  const { register } = useAuth()
-  const navigate = useNavigate()
-  const [searchParams] = useSearchParams()
-
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
-  const [confirmPassword, setConfirmPassword] = useState('')
-  const [displayName, setDisplayName] = useState('')
-  // Pre-fill from ?token= query param (invite link).
-  const [inviteToken, setInviteToken] = useState(searchParams.get('token') ?? '')
-  const [error, setError] = useState<string | null>(null)
-  const [loading, setLoading] = useState(false)
-
-  // Live mismatch warning once the confirm field has any input.
-  const mismatch = confirmPassword !== '' && password !== confirmPassword
-
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault()
-    if (password !== confirmPassword) {
-      setError('Passwords do not match.')
-      return
-    }
-    setError(null)
-    setLoading(true)
-    try {
-      await register(email, password, displayName, inviteToken || undefined)
-      navigate('/', { replace: true })
-    } catch (err) {
-      if (err instanceof ApiError) {
-        setError(err.message)
-      } else {
-        setError('Something went wrong. Please try again.')
-      }
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  return (
-    <div
-      style={{
-        minHeight: '100vh',
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-        justifyContent: 'center',
-        background: 'var(--background)',
-        padding: '24px',
-      }}
-    >
-      {/* Dark mode toggle — top-right */}
-      <div style={{ position: 'fixed', top: 16, right: 16 }}>
-        <DarkModeToggle />
-      </div>
-
-      {/* Logo + wordmark */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 32 }}>
-        <img src="/logo-teal.svg" alt="draba" style={{ width: 36, height: 36 }} />
-        <span style={{ fontSize: 20, fontWeight: 700, color: 'var(--foreground)', letterSpacing: '-0.01em' }}>
-          draba
-        </span>
-      </div>
-
-      <Card style={{ width: '100%', maxWidth: 400 }}>
-        <CardHeader>
-          <CardTitle>Create your account</CardTitle>
-          <CardDescription>You need a valid invite token to register.</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              <Label htmlFor="displayName">Display name</Label>
-              <Input
-                id="displayName"
-                type="text"
-                autoComplete="name"
-                placeholder="Jane Smith"
-                value={displayName}
-                onChange={e => setDisplayName(e.target.value)}
-                required
-              />
-            </div>
-
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              <Label htmlFor="email">Email</Label>
-              <Input
-                id="email"
-                type="email"
-                autoComplete="email"
-                placeholder="you@example.com"
-                value={email}
-                onChange={e => setEmail(e.target.value)}
-                required
-              />
-            </div>
-
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              <Label htmlFor="password">Password</Label>
-              <Input
-                id="password"
-                type="password"
-                autoComplete="new-password"
-                placeholder="At least 8 characters"
-                value={password}
-                onChange={e => setPassword(e.target.value)}
-                required
-                minLength={8}
-              />
-            </div>
-
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              <Label htmlFor="confirmPassword">Confirm password</Label>
-              <Input
-                id="confirmPassword"
-                type="password"
-                autoComplete="new-password"
-                placeholder="Re-enter your password"
-                value={confirmPassword}
-                onChange={e => setConfirmPassword(e.target.value)}
-                required
-                minLength={8}
-              />
-              {mismatch && (
-                <p style={{ fontSize: 12, color: 'var(--destructive)', margin: 0 }}>
-                  Passwords don't match.
-                </p>
-              )}
-            </div>
-
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              <Label htmlFor="inviteToken">Invite token</Label>
-              <div
-                style={{
-                  fontSize: 12,
-                  color: 'var(--muted-foreground)',
-                  background: 'var(--muted)',
-                  borderRadius: 6,
-                  padding: '8px 10px',
-                  lineHeight: 1.5,
-                }}
-              >
-                draba is invite-only. Ask your team admin to send you an invite, or click the link in your invitation email — it will fill this in automatically.
-              </div>
-              <Input
-                id="inviteToken"
-                type="text"
-                placeholder="Paste your invite token"
-                value={inviteToken}
-                onChange={e => setInviteToken(e.target.value)}
-              />
-            </div>
-
-            {error && (
-              <p style={{ fontSize: 13, color: 'var(--destructive)', margin: 0 }}>{error}</p>
-            )}
-
-            <Button type="submit" disabled={loading || mismatch} style={{ width: '100%' }}>
-              {loading ? 'Creating account…' : 'Create account'}
-            </Button>
-          </form>
-
-          <p style={{ marginTop: 16, fontSize: 13, textAlign: 'center', color: 'var(--muted-foreground)' }}>
-            Already have an account?{' '}
-            <Link to="/login" style={{ color: 'var(--primary)', fontWeight: 600 }}>
-              Sign in
-            </Link>
-          </p>
-        </CardContent>
-      </Card>
-    </div>
-  )
 }
 ````
 
@@ -36746,328 +36447,6 @@ func (s *Server) handleDeleteSavedFilter(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
-}
-````
-
-## File: packages/api/internal/models/models.go
-````go
-// Package models holds the domain types shared across the API, db,
-// and event-bus packages. These types are persisted directly via sqlx
-// (db tags) and serialised on the wire (json tags); changing tags is a
-// schema change.
-package models
-
-import "time"
-
-// Activity is a scheduled item of work belonging to a Timeline. ArchivedAt is
-// non-nil when the activity is soft-deleted; list endpoints exclude archived
-// activities by default.
-//
-// AssignedMemberIDs is not stored on the activities table; it is populated by
-// the repository from activity_assignments after every list query.
-//
-// GoogleEventID and CaldavUID are preserved as-is — they identify the
-// corresponding records in external calendar systems (VEVENT identifiers).
-type Activity struct {
-	ID                string     `db:"id"                  json:"id"`
-	TimelineID        string     `db:"timeline_id"         json:"timelineId"`
-	Title             string     `db:"title"               json:"title"`
-	Description       *string    `db:"description"         json:"description,omitempty"`
-	Notes             *string    `db:"notes"               json:"notes,omitempty"`
-	Icon              *string    `db:"icon"                json:"icon,omitempty"`
-	Color             *string    `db:"color"               json:"color,omitempty"`
-	StartAt           time.Time  `db:"start_at"            json:"startAt"`
-	EndAt             time.Time  `db:"end_at"              json:"endAt"`
-	AllDay            bool       `db:"all_day"             json:"allDay"`
-	StatusID          *string    `db:"status_id"           json:"statusId,omitempty"`
-	ParentActivityID  *string    `db:"parent_activity_id"  json:"parentActivityId,omitempty"`
-	PercentComplete   *int       `db:"percent_complete"    json:"percentComplete,omitempty"`
-	Location          *string    `db:"location"            json:"location,omitempty"`
-	URL               *string    `db:"url"                 json:"url,omitempty"`
-	Rrule             *string    `db:"rrule"               json:"rrule,omitempty"`
-	CaldavUID         *string    `db:"caldav_uid"          json:"caldavUid,omitempty"`
-	GoogleEventID     *string    `db:"google_event_id"     json:"googleEventId,omitempty"`
-	CreatedBy         string     `db:"created_by"          json:"createdBy"`
-	CreatedAt         time.Time  `db:"created_at"          json:"createdAt"`
-	UpdatedAt         time.Time  `db:"updated_at"          json:"updatedAt"`
-	ArchivedAt        *time.Time `db:"archived_at"         json:"archivedAt,omitempty"`
-	AssignedMemberIDs []string   `db:"-"                   json:"assignedMemberIds"`
-	TagIDs            []string   `db:"-"                   json:"tagIds"`
-}
-
-// TeamMemberWithUser joins a TeamMember row with its associated User so
-// callers receive display names and emails in a single query. Participants
-// (no user account) have empty email and avatar; their display_name comes
-// from team_members.display_name via COALESCE in the query.
-type TeamMemberWithUser struct {
-	TeamMember
-	Email       string  `db:"email"        json:"email"`
-	DisplayName string  `db:"display_name" json:"displayName"`
-	AvatarURL   *string `db:"avatar_url"   json:"avatarUrl,omitempty"`
-}
-
-// User is an authenticated account. PasswordHash is omitted from JSON
-// to avoid leaking it through any handler that returns a User.
-// ArchivedAt is non-nil when the account is inactivated; login is rejected
-// for archived users. Color and Icon are user-level identity fields (migration
-// 010); they propagate to team_members rows for the user when changed.
-type User struct {
-	ID           string     `db:"id"             json:"id"`
-	Email        string     `db:"email"          json:"email"`
-	PasswordHash string     `db:"password_hash"  json:"-"`
-	DisplayName  string     `db:"display_name"   json:"displayName"`
-	AvatarURL    *string    `db:"avatar_url"     json:"avatarUrl,omitempty"`
-	Color        *string    `db:"color"          json:"color,omitempty"`
-	Icon         *string    `db:"icon"           json:"icon,omitempty"`
-	IsSuperadmin bool       `db:"is_superadmin"  json:"isSuperadmin"`
-	CreatedAt    time.Time  `db:"created_at"     json:"createdAt"`
-	UpdatedAt    time.Time  `db:"updated_at"     json:"updatedAt"`
-	ArchivedAt   *time.Time `db:"archived_at"    json:"archivedAt,omitempty"`
-}
-
-// Team is a workspace that groups users and their scheduled work. Color and
-// Icon are identity fields added in migration 006; both are nullable until
-// explicitly set by an admin. Description, Notes, and ArchivedAt are added in
-// migration 008; ArchivedAt is non-nil when the team is soft-deleted.
-// InviteLinkToken is a stable, reusable token added in migration 009; when
-// non-nil it can be used by anyone to join the team during registration.
-type Team struct {
-	ID              string     `db:"id"                  json:"id"`
-	Name            string     `db:"name"                json:"name"`
-	Slug            string     `db:"slug"                json:"slug"`
-	Description     *string    `db:"description"         json:"description,omitempty"`
-	Notes           *string    `db:"notes"               json:"notes,omitempty"`
-	Color           *string    `db:"color"               json:"color,omitempty"`
-	Icon            *string    `db:"icon"                json:"icon,omitempty"`
-	InviteLinkToken *string    `db:"invite_link_token"   json:"inviteLinkToken,omitempty"`
-	CreatedAt       time.Time  `db:"created_at"          json:"createdAt"`
-	UpdatedAt       time.Time  `db:"updated_at"          json:"updatedAt"`
-	ArchivedAt      *time.Time `db:"archived_at"         json:"archivedAt,omitempty"`
-}
-
-// TeamMember is the join row that puts a person in a Team. UserID is nil
-// for login-less Participants; DisplayName is populated for them instead.
-// Role is the team-level role: "admin" or "member". Color and Icon are
-// identity fields (migration 006); Color stores a color ID (e.g. "teal").
-// ArchivedAt is non-nil when the member is inactivated (migration 009);
-// inactivated members lose access but their data and assignments are preserved.
-type TeamMember struct {
-	ID          string     `db:"id"           json:"id"`
-	TeamID      string     `db:"team_id"      json:"teamId"`
-	UserID      *string    `db:"user_id"      json:"userId,omitempty"`
-	DisplayName *string    `db:"display_name" json:"displayName,omitempty"`
-	Role        string     `db:"role"         json:"role"`
-	Color       *string    `db:"color"        json:"color,omitempty"`
-	Icon        *string    `db:"icon"         json:"icon,omitempty"`
-	JoinedAt    time.Time  `db:"joined_at"    json:"joinedAt"`
-	ArchivedAt  *time.Time `db:"archived_at"  json:"archivedAt,omitempty"`
-}
-
-// MemberStats holds computed activity and timeline counts for a member.
-// All counts are date-relative and scoped to activities the member is assigned to.
-type MemberStats struct {
-	ActiveTimelines    int `json:"activeTimelines"`
-	ArchivedTimelines  int `json:"archivedTimelines"`
-	PastDue            int `json:"pastDue"`
-	Running            int `json:"running"`
-	Upcoming           int `json:"upcoming"`
-	Unscheduled        int `json:"unscheduled"`
-	ArchivedActivities int `json:"archivedActivities"`
-}
-
-// MemberDetail combines a TeamMemberWithUser with computed stats and the
-// member's full list of team memberships. Returned by GET /teams/:id/members/:memberId.
-// UserArchivedAt reflects users.archived_at (account-level deactivation), distinct
-// from ArchivedAt which is team_members.archived_at (membership-level inactivation).
-type MemberDetail struct {
-	TeamMemberWithUser
-	Stats          MemberStats          `json:"stats"`
-	Teams          []TeamMemberWithUser `json:"teams"`
-	Deletable      bool                 `json:"deletable"`
-	UserArchivedAt *time.Time           `json:"userArchivedAt,omitempty"`
-}
-
-// Timeline is a named date range over a team's events. It is not a data
-// container — it is a view over a team's events for a given date window.
-// Access is governed by timeline_access + team role; share_token allows
-// unauthenticated read access via a stable public URL. Color and Icon are
-// identity fields (migration 006). Description and Notes are free-text fields
-// added in migration 013.
-type Timeline struct {
-	ID          string     `db:"id"          json:"id"`
-	TeamID      string     `db:"team_id"     json:"teamId"`
-	Name        string     `db:"name"        json:"name"`
-	Description *string    `db:"description" json:"description,omitempty"`
-	Notes       *string    `db:"notes"       json:"notes,omitempty"`
-	StartDate   string     `db:"start_date"  json:"startDate"`
-	EndDate     string     `db:"end_date"    json:"endDate"`
-	Color       *string    `db:"color"       json:"color,omitempty"`
-	Icon        *string    `db:"icon"        json:"icon,omitempty"`
-	ShareToken  string     `db:"share_token" json:"shareToken"`
-	IcalToken   string     `db:"ical_token"  json:"icalToken"`
-	CreatedBy   string     `db:"created_by"  json:"createdBy"`
-	CreatedAt   time.Time  `db:"created_at"  json:"createdAt"`
-	UpdatedAt   time.Time  `db:"updated_at"  json:"updatedAt"`
-	ArchivedAt  *time.Time `db:"archived_at" json:"archivedAt,omitempty"`
-}
-
-// SavedFilter is a user-owned, team-scoped named filter spec. Definition is
-// an opaque JSON string interpreted by the client; the server treats it as
-// arbitrary text and only validates that it parses as JSON.
-type SavedFilter struct {
-	ID           string    `db:"id"             json:"id"`
-	TeamID       string    `db:"team_id"        json:"teamId"`
-	UserID       string    `db:"user_id"        json:"userId"`
-	Name         string    `db:"name"           json:"name"`
-	Definition   string    `db:"definition"     json:"definition"`
-	IsTeamFilter bool      `db:"is_team_filter" json:"isTeamFilter"`
-	CreatedAt    time.Time `db:"created_at"     json:"createdAt"`
-	UpdatedAt    time.Time `db:"updated_at"     json:"updatedAt"`
-}
-
-// UserPreference stores a single key/value setting for a user, optionally
-// scoped to a timeline. TimelineID is “” for global preferences so the
-// UNIQUE(user_id, timeline_id, key) DB constraint works without NULL handling.
-// Serialised JSON omits TimelineID when empty so callers see null for global prefs.
-type UserPreference struct {
-	ID         string    `db:"id"          json:"id"`
-	UserID     string    `db:"user_id"     json:"userId"`
-	TimelineID string    `db:"timeline_id" json:"timelineId,omitempty"`
-	Key        string    `db:"key"         json:"key"`
-	Value      string    `db:"value"       json:"value"`
-	UpdatedAt  time.Time `db:"updated_at"  json:"updatedAt"`
-}
-
-// APIToken is a long-lived Bearer credential a user issues for programmatic
-// access. token_hash stores SHA-256(rawToken); the raw value is shown to the
-// caller only once on creation. RevokedAt is non-nil when the token has been
-// revoked; revoked tokens are not deleted so listing remains stable.
-type APIToken struct {
-	ID         string     `db:"id"           json:"id"`
-	UserID     string     `db:"user_id"      json:"userId"`
-	Name       string     `db:"name"         json:"name"`
-	TokenHash  string     `db:"token_hash"   json:"-"`
-	Scope      string     `db:"scope"        json:"scope"`
-	LastUsedAt *time.Time `db:"last_used_at" json:"lastUsedAt,omitempty"`
-	CreatedAt  time.Time  `db:"created_at"   json:"createdAt"`
-	RevokedAt  *time.Time `db:"revoked_at"   json:"revokedAt,omitempty"`
-}
-
-// InstanceSetting stores a single instance-level configuration value.
-// SMTP config and defaults live here. The value column is plain text;
-// the mailer package handles decryption of the SMTP password field.
-type InstanceSetting struct {
-	Key       string    `db:"key"        json:"key"`
-	Value     string    `db:"value"      json:"value"`
-	UpdatedAt time.Time `db:"updated_at" json:"updatedAt"`
-}
-
-// PasswordResetToken is a single-use token for the forgot-password flow.
-// TokenHash stores SHA-256 of the raw token; the raw value is sent by email
-// and never stored. UsedAt is set when the token is consumed.
-type PasswordResetToken struct {
-	ID        string     `db:"id"         json:"id"`
-	UserID    string     `db:"user_id"    json:"userId"`
-	TokenHash string     `db:"token_hash" json:"-"`
-	ExpiresAt time.Time  `db:"expires_at" json:"expiresAt"`
-	UsedAt    *time.Time `db:"used_at"    json:"usedAt,omitempty"`
-	CreatedAt time.Time  `db:"created_at" json:"createdAt"`
-}
-
-// AdminUserRow is a flat view of a user for the admin users list. It includes
-// the user's fields plus the count of active team memberships.
-type AdminUserRow struct {
-	User
-	TeamCount int `db:"team_count" json:"teamCount"`
-}
-
-// RevokeUserResult summarizes the outcome of POST /users/:id/revoke.
-// The three counters let the caller show a meaningful summary in the UI.
-type RevokeUserResult struct {
-	AccountDeactivated     bool `json:"accountDeactivated"`
-	MembershipsInactivated int  `json:"membershipsInactivated"`
-	MembershipsRemoved     int  `json:"membershipsRemoved"`
-}
-
-// StatusTemplate is a reusable named preset of statuses owned by a team.
-// When a timeline is created the team's chosen template's items are copied
-// into live Status rows for that timeline.
-type StatusTemplate struct {
-	ID          string    `db:"id"          json:"id"`
-	TeamID      string    `db:"team_id"     json:"teamId"`
-	Name        string    `db:"name"        json:"name"`
-	Description *string   `db:"description" json:"description,omitempty"`
-	Position    int       `db:"position"    json:"position"`
-	CreatedBy   string    `db:"created_by"  json:"createdBy"`
-	CreatedAt   time.Time `db:"created_at"  json:"createdAt"`
-	UpdatedAt   time.Time `db:"updated_at"  json:"updatedAt"`
-	// Items is populated by the repository when listing templates.
-	Items []StatusTemplateItem `db:"-" json:"items"`
-}
-
-// StatusTemplateItem is one status value within a StatusTemplate.
-type StatusTemplateItem struct {
-	ID         string  `db:"id"          json:"id"`
-	TemplateID string  `db:"template_id" json:"templateId"`
-	Name       string  `db:"name"        json:"name"`
-	Color      string  `db:"color"       json:"color"`
-	Icon       *string `db:"icon"        json:"icon,omitempty"`
-	IsClosed   bool    `db:"is_closed"   json:"isClosed"`
-	Position   int     `db:"position"    json:"position"`
-}
-
-// Status is a live status value on a specific timeline. Rows are copied from a
-// StatusTemplate's items when the timeline is created and then evolve independently.
-type Status struct {
-	ID         string    `db:"id"          json:"id"`
-	TimelineID string    `db:"timeline_id" json:"timelineId"`
-	Name       string    `db:"name"        json:"name"`
-	Color      string    `db:"color"       json:"color"`
-	Icon       *string   `db:"icon"        json:"icon,omitempty"`
-	IsClosed   bool      `db:"is_closed"   json:"isClosed"`
-	Position   int       `db:"position"    json:"position"`
-	CreatedAt  time.Time `db:"created_at"  json:"createdAt"`
-	UpdatedAt  time.Time `db:"updated_at"  json:"updatedAt"`
-}
-
-// TimelineAccessEntry is a single timeline access grant joined with the team
-// member's display info. Returned by GET /teams/:id/timelines/:timelineId/access.
-type TimelineAccessEntry struct {
-	TimelineID   string  `db:"timeline_id"    json:"timelineId"`
-	TeamMemberID string  `db:"team_member_id" json:"teamMemberId"`
-	Role         string  `db:"role"           json:"role"`
-	DisplayName  string  `db:"display_name"   json:"displayName"`
-	Email        string  `db:"email"          json:"email"`
-	Color        *string `db:"color"          json:"color,omitempty"`
-	Icon         *string `db:"icon"           json:"icon,omitempty"`
-	UserID       *string `db:"user_id"        json:"userId,omitempty"`
-}
-
-// Tag is a team-scoped label that can be applied to activities. Tags are
-// normalized: a team_id+name pair is unique, enabling rename-all and
-// name-based filter matching across timelines.
-type Tag struct {
-	ID        string    `db:"id"         json:"id"`
-	TeamID    string    `db:"team_id"    json:"teamId"`
-	Name      string    `db:"name"       json:"name"`
-	Color     *string   `db:"color"      json:"color,omitempty"`
-	CreatedBy string    `db:"created_by" json:"createdBy"`
-	CreatedAt time.Time `db:"created_at" json:"createdAt"`
-}
-
-// Invite is a single-use token that grants an email address the right to
-// join a Team. AcceptedAt is non-nil once consumed; expired or accepted
-// invites are rejected by the registration handler.
-type Invite struct {
-	ID         string     `db:"id"          json:"id"`
-	TeamID     string     `db:"team_id"     json:"teamId"`
-	Email      string     `db:"email"       json:"email"`
-	Token      string     `db:"token"       json:"token"`
-	Role       string     `db:"role"        json:"role"`
-	InvitedBy  string     `db:"invited_by"  json:"invitedBy"`
-	ExpiresAt  time.Time  `db:"expires_at"  json:"expiresAt"`
-	AcceptedAt *time.Time `db:"accepted_at" json:"acceptedAt,omitempty"`
-	CreatedAt  time.Time  `db:"created_at"  json:"createdAt"`
 }
 ````
 
@@ -40154,122 +39533,620 @@ describe("filter kind 'saved'", () => {
 })
 ````
 
-## File: packages/web/src/components/layout/TopBar.tsx
+## File: packages/web/src/pages/LoginPage.tsx
 ````typescript
-/**
- * Top toolbar above the active view. Left side: global app navigation
- * (view switcher) and global object actions (Share). Right side: global
- * cross-view actions: Find bar (or Search icon trigger), Filter dropdown,
- * then whatever the parent injects into `rightSlot` (typically the profile menu).
- *
- * View-specific controls (date nav, zoom) intentionally live elsewhere —
- * a context-sensitive sub-toolbar hosts them.
- */
+import { useState } from 'react'
+import { useNavigate, useLocation, Link } from 'react-router-dom'
+import { Eye, EyeOff, Check, Loader2 } from 'lucide-react'
+import { useAuth } from '@/contexts/AuthContext'
+import { ApiError } from '@/lib/api'
+import DarkModeToggle from '@/components/DarkModeToggle'
+import { usePublicSettings } from '@/hooks/usePublicSettings'
 
-import { Search, CalendarDays, GanttChart, Columns3, List } from 'lucide-react';
-import FilterDropdown from '@/components/filters/FilterDropdown';
-import FindBar from '@/components/layout/FindBar';
-import { Badge } from '@/components/identity/Badge';
-import { useFind } from '@/contexts/FindContext';
-import { cn } from '@/lib/utils';
-import type { Identity } from '@/components/identity/identity-constants';
-import { DEFAULT_TIMELINE_IDENTITY } from '@/components/identity/identity-constants';
+// ── Floating-label input ─────────────────────────────────────────────────────
 
-export type ViewMode = 'calendar' | 'gantt' | 'kanban' | 'list';
-
-interface Props {
-  view: ViewMode;
-  teamId?: string;
-  timelineName?: string;
-  timelineIdentity?: Identity;
-  onViewChange: (view: ViewMode) => void;
-  onOpenFilterManager: () => void;
-  rightSlot?: React.ReactNode;
+interface FloatInputProps {
+  id: string
+  label: string
+  type: string
+  value: string
+  autoComplete: string
+  error?: string | null
+  onChange: (v: string) => void
+  onKeyDown?: (e: React.KeyboardEvent) => void
+  rightSlot?: React.ReactNode
 }
 
-const VIEWS: { id: ViewMode; icon: React.ReactNode; label: string }[] = [
-  { id: 'list',     icon: <List size={13} strokeWidth={1.8} />,        label: 'List' },
-  { id: 'calendar', icon: <CalendarDays size={13} strokeWidth={1.8} />, label: 'Calendar' },
-  { id: 'gantt',    icon: <GanttChart size={13} strokeWidth={1.8} />,  label: 'Gantt' },
-  { id: 'kanban',   icon: <Columns3 size={13} strokeWidth={1.8} />,    label: 'Kanban' },
-];
+function FloatInput({ id, label, type, value, autoComplete, error, onChange, onKeyDown, rightSlot }: FloatInputProps) {
+  const [focused, setFocused] = useState(false)
+  const floated = focused || value.length > 0
 
-export default function TopBar({
-  view,
-  teamId,
-  timelineName,
-  timelineIdentity,
-  onViewChange,
-  onOpenFilterManager,
-  rightSlot,
-}: Props) {
-  const { findBarOpen, setFindBarOpen } = useFind();
+  const borderColor = error
+    ? '#e74c3c'
+    : focused
+    ? '#288C9B'
+    : 'hsl(210 15% 24%)'
+
+  const boxShadow = error
+    ? '0 0 0 3px rgba(231,76,60,0.15)'
+    : focused
+    ? '0 0 0 3px rgba(40,140,155,0.18)'
+    : 'none'
+
+  const labelColor = error
+    ? '#e74c3c'
+    : focused
+    ? '#5BC0DE'
+    : 'hsl(210 15% 65%)'
 
   return (
-    <div className="flex items-center px-3 h-[var(--topbar-h)] bg-card border-b border-border shrink-0 z-40">
-      {/* Left zone: view switcher */}
-      <div className="flex items-center justify-start shrink-0">
-        <div className="flex items-center gap-px bg-muted rounded-md p-0.5 shrink-0">
-          {VIEWS.map(v => (
-            <button
-              key={v.id}
-              onClick={() => onViewChange(v.id)}
-              className={cn(
-                'flex items-center justify-center gap-[5px]',
-                'text-xs font-semibold px-2.5 py-1 rounded-[5px]',
-                'border-none cursor-pointer',
-                view === v.id
-                  ? 'bg-card text-foreground shadow-sm'
-                  : 'bg-transparent text-muted-foreground',
+    <div>
+      <div style={{
+        position: 'relative',
+        borderRadius: 8,
+        border: `1px solid ${borderColor}`,
+        background: 'hsl(210 15% 17%)',
+        transition: 'border-color 180ms ease, box-shadow 180ms ease',
+        boxShadow,
+      }}>
+        {/* Floating label */}
+        <label
+          htmlFor={id}
+          style={{
+            position: 'absolute',
+            left: 14,
+            top: floated ? 8 : '50%',
+            transform: floated ? 'none' : 'translateY(-50%)',
+            fontSize: floated ? 11 : 14,
+            letterSpacing: floated ? '0.06em' : 0,
+            textTransform: floated ? 'uppercase' : 'none',
+            fontWeight: 600,
+            color: labelColor,
+            transition: 'all 160ms cubic-bezier(0.4, 0, 0.2, 1)',
+            pointerEvents: 'none',
+            userSelect: 'none',
+          }}
+        >
+          {label}
+        </label>
+
+        <input
+          id={id}
+          type={type}
+          autoComplete={autoComplete}
+          value={value}
+          onChange={e => onChange(e.target.value)}
+          onFocus={() => setFocused(true)}
+          onBlur={() => setFocused(false)}
+          onKeyDown={onKeyDown}
+          style={{
+            width: '100%',
+            padding: '22px 42px 8px 14px',
+            background: 'transparent',
+            border: 'none',
+            outline: 'none',
+            fontSize: 15,
+            color: 'hsl(210 17% 93%)',
+            fontFamily: 'inherit',
+            lineHeight: 1.4,
+            boxSizing: 'border-box',
+          }}
+        />
+
+        {rightSlot && (
+          <div style={{
+            position: 'absolute',
+            right: 12,
+            top: '50%',
+            transform: 'translateY(-50%)',
+          }}>
+            {rightSlot}
+          </div>
+        )}
+      </div>
+
+      {error && (
+        <p style={{ fontSize: 12, color: '#e74c3c', margin: '5px 0 0 2px' }}>{error}</p>
+      )}
+    </div>
+  )
+}
+
+// ── Spinner ──────────────────────────────────────────────────────────────────
+
+function Spinner() {
+  return (
+    <Loader2
+      size={16}
+      strokeWidth={2.5}
+      color="rgba(255,255,255,0.8)"
+      style={{ animation: 'spin 0.8s linear infinite' }}
+    />
+  )
+}
+
+// ── Main page ────────────────────────────────────────────────────────────────
+
+export default function LoginPage() {
+  const { login } = useAuth()
+  const navigate = useNavigate()
+  const location = useLocation()
+  const from = (location.state as { from?: { pathname: string } } | null)?.from?.pathname ?? '/'
+  // A success message routed here from another page (e.g. password reset).
+  // Derived from navigation state, so it clears naturally on a full reload.
+  const notice = (location.state as { message?: string } | null)?.message ?? null
+  const { data: branding } = usePublicSettings()
+  const instanceName = branding?.instanceName || 'draba'
+
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [showPassword, setShowPassword] = useState(false)
+  const [emailError, setEmailError] = useState<string | null>(null)
+  const [passwordError, setPasswordError] = useState<string | null>(null)
+  const [serverError, setServerError] = useState<string | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [success, setSuccess] = useState(false)
+
+  function validateAndSubmit() {
+    let valid = true
+    setServerError(null)
+
+    if (!email.trim()) {
+      setEmailError('Email is required')
+      valid = false
+    } else if (!/\S+@\S+\.\S+/.test(email)) {
+      setEmailError('Enter a valid email')
+      valid = false
+    } else {
+      setEmailError(null)
+    }
+
+    if (!password) {
+      setPasswordError('Password is required')
+      valid = false
+    } else if (password.length < 6) {
+      setPasswordError('Password must be at least 6 characters')
+      valid = false
+    } else {
+      setPasswordError(null)
+    }
+
+    if (!valid) return
+    doLogin()
+  }
+
+  async function doLogin() {
+    setLoading(true)
+    try {
+      await login(email, password)
+      setSuccess(true)
+      // Brief success flash then navigate
+      setTimeout(() => navigate(from, { replace: true }), 600)
+    } catch (err) {
+      if (err instanceof ApiError) {
+        setServerError(err.message)
+      } else {
+        setServerError('Something went wrong. Please try again.')
+      }
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  function handleSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    validateAndSubmit()
+  }
+
+  return (
+    <div style={{
+      minHeight: '100vh',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      background: 'var(--background)',
+      padding: '24px',
+      position: 'relative',
+    }}>
+      {/* Teal radial glow behind card */}
+      <div style={{
+        position: 'fixed',
+        inset: 0,
+        background: 'radial-gradient(ellipse 60% 50% at 20% 50%, rgba(40,140,155,0.12) 0%, transparent 70%)',
+        pointerEvents: 'none',
+      }} />
+
+      {/* Dark mode toggle */}
+      <div style={{ position: 'fixed', top: 16, right: 16, zIndex: 10 }}>
+        <DarkModeToggle />
+      </div>
+
+      {/* Card */}
+      <div style={{
+        width: '100%',
+        maxWidth: 860,
+        minHeight: 520,
+        borderRadius: 16,
+        overflow: 'hidden',
+        display: 'flex',
+        boxShadow: '0 32px 80px -12px rgba(0,0,0,0.55), 0 0 0 1px rgba(255,255,255,0.06)',
+        position: 'relative',
+        zIndex: 1,
+      }}>
+
+        {/* ── Left panel — brand ─────────────────────────────────────── */}
+        <div style={{
+          width: '38%',
+          flexShrink: 0,
+          background: 'linear-gradient(155deg, #2aa5b8 0%, #1c7585 60%, #145f6e 100%)',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: 4,
+          padding: '48px 32px',
+          position: 'relative',
+          overflow: 'hidden',
+        }}>
+          {/* Decorative circles */}
+          <div style={{ width: 220, height: 220, borderRadius: '50%', background: 'rgba(255,255,255,0.07)', position: 'absolute', top: -60, left: -60, pointerEvents: 'none' }} />
+          <div style={{ width: 160, height: 160, borderRadius: '50%', background: 'rgba(255,255,255,0.05)', position: 'absolute', bottom: -40, right: -40, pointerEvents: 'none' }} />
+
+          {/* Logo — 2× the handoff's 88px */}
+          <img
+            src="/logo-color.svg"
+            alt="draba"
+            style={{ width: 270, height: 270, filter: 'drop-shadow(0 4px 16px rgba(0,0,0,0.25))', position: 'relative', marginTop: '-15px', marginBottom: '-47px' }}
+          />
+
+          <div style={{ position: 'relative', textAlign: 'center' }}>
+            <div style={{ fontSize: 28, fontWeight: 700, color: '#fff', letterSpacing: '-0.01em', textShadow: '0 2px 8px rgba(0,0,0,0.2)' }}>
+              {instanceName}
+            </div>
+            <div style={{ fontSize: 13, fontWeight: 400, color: 'rgba(255,255,255,0.72)', lineHeight: 1.5, marginTop: 8 }}>
+              Team coordination,<br />simplified.
+            </div>
+          </div>
+        </div>
+
+        {/* ── Right panel — form ─────────────────────────────────────── */}
+        <div style={{
+          flex: 1,
+          background: 'var(--card)',
+          padding: '52px 48px',
+          display: 'flex',
+          flexDirection: 'column',
+          justifyContent: 'center',
+        }}>
+          {success ? (
+            /* Success state */
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', textAlign: 'center', gap: 0 }}>
+              <div style={{
+                width: 56, height: 56, borderRadius: '50%',
+                background: 'rgba(40,140,155,0.15)', border: '2px solid #288C9B',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                margin: '0 auto 20px',
+              }}>
+                <Check size={24} color="#288C9B" strokeWidth={2.5} />
+              </div>
+              <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--foreground)', marginBottom: 8 }}>
+                You're signed in
+              </div>
+              <div style={{ fontSize: 14, color: 'var(--muted-foreground)' }}>
+                Redirecting to your timeline…
+              </div>
+            </div>
+          ) : (
+            <form onSubmit={handleSubmit} noValidate>
+              {/* Heading */}
+              <div style={{ marginBottom: 28 }}>
+                <h1 style={{ fontSize: 28, fontWeight: 700, color: 'hsl(210 17% 93%)', letterSpacing: '-0.02em', margin: '0 0 6px' }}>
+                  Sign in
+                </h1>
+                <p style={{ fontSize: 14, color: 'hsl(210 15% 52%)', margin: 0 }}>
+                  Welcome back — sign in to your account.
+                </p>
+              </div>
+
+              {/* Success notice routed from another page (e.g. password reset).
+                  Suppressed once a server error is shown so it can't go stale. */}
+              {notice && !serverError && (
+                <div className="mb-5 rounded-lg border border-emerald-500/35 bg-emerald-500/10 px-3 py-2.5 text-[13px] text-emerald-400">
+                  {notice}
+                </div>
               )}
-            >
-              {v.icon}
-              {v.label}
-            </button>
-          ))}
+
+              {/* Fields */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 14, marginBottom: 24 }}>
+                <FloatInput
+                  id="email"
+                  label="Email"
+                  type="email"
+                  autoComplete="email"
+                  value={email}
+                  error={emailError}
+                  onChange={v => { setEmail(v); if (emailError) setEmailError(null) }}
+                />
+
+                <FloatInput
+                  id="password"
+                  label="Password"
+                  type={showPassword ? 'text' : 'password'}
+                  autoComplete="current-password"
+                  value={password}
+                  error={passwordError}
+                  onChange={v => { setPassword(v); if (passwordError) setPasswordError(null) }}
+                  rightSlot={
+                    <button
+                      type="button"
+                      onClick={() => setShowPassword(s => !s)}
+                      style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'hsl(210 15% 52%)', display: 'flex', padding: 0 }}
+                    >
+                      {showPassword ? <EyeOff size={18} strokeWidth={1.5} /> : <Eye size={18} strokeWidth={1.5} />}
+                    </button>
+                  }
+                />
+              </div>
+
+              {/* Forgot password */}
+              <div style={{ textAlign: 'right', marginBottom: 22, marginTop: -6 }}>
+                <Link
+                  to="/forgot-password"
+                  style={{ fontSize: 13, fontWeight: 600, color: '#5BC0DE', textDecoration: 'none' }}
+                  onMouseEnter={e => (e.currentTarget.style.textDecoration = 'underline')}
+                  onMouseLeave={e => (e.currentTarget.style.textDecoration = 'none')}
+                >
+                  Forgot password?
+                </Link>
+              </div>
+
+              {/* Server error */}
+              {serverError && (
+                <p style={{ fontSize: 13, color: '#e74c3c', margin: '0 0 16px' }}>{serverError}</p>
+              )}
+
+              {/* Sign in button */}
+              <button
+                type="submit"
+                disabled={loading}
+                style={{
+                  width: '100%',
+                  padding: '14px',
+                  borderRadius: 8,
+                  border: 'none',
+                  background: loading
+                    ? 'hsl(188 40% 35%)'
+                    : 'linear-gradient(135deg, #2aa5b8 0%, #1e8a9c 100%)',
+                  color: '#fff',
+                  fontSize: 15,
+                  fontWeight: 700,
+                  letterSpacing: '0.01em',
+                  boxShadow: loading ? 'none' : '0 4px 20px rgba(40,140,155,0.35)',
+                  cursor: loading ? 'not-allowed' : 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: 8,
+                  fontFamily: 'inherit',
+                  transition: 'opacity 160ms ease, transform 160ms ease, box-shadow 160ms ease',
+                }}
+                onMouseEnter={e => { if (!loading) { e.currentTarget.style.opacity = '0.92'; e.currentTarget.style.transform = 'translateY(-1px)' } }}
+                onMouseLeave={e => { e.currentTarget.style.opacity = '1'; e.currentTarget.style.transform = 'translateY(0)' }}
+                onMouseDown={e => { if (!loading) e.currentTarget.style.transform = 'scale(0.98)' }}
+                onMouseUp={e => { if (!loading) e.currentTarget.style.transform = 'translateY(-1px)' }}
+              >
+                {loading && <Spinner />}
+                {loading ? 'Signing in…' : 'Sign in'}
+              </button>
+
+              {/* Register link */}
+              <p style={{ marginTop: 24, fontSize: 13, textAlign: 'center', color: 'hsl(210 15% 52%)' }}>
+                Have an invite?{' '}
+                <Link
+                  to="/register"
+                  style={{ color: '#5BC0DE', fontWeight: 600, textDecoration: 'none' }}
+                  onMouseEnter={e => (e.currentTarget.style.textDecoration = 'underline')}
+                  onMouseLeave={e => (e.currentTarget.style.textDecoration = 'none')}
+                >
+                  Create an account
+                </Link>
+              </p>
+            </form>
+          )}
         </div>
       </div>
 
-      {/* Center zone: timeline identity badge + name */}
-      <div className="flex-1 min-w-0 flex items-center justify-center gap-1.5 px-3">
-        <Badge
-          identity={timelineIdentity ?? DEFAULT_TIMELINE_IDENTITY}
-          name={timelineName ?? ''}
-          shape="square"
-          size={18}
-          className="shrink-0"
-        />
-        <span
-          title={timelineName}
-          className="text-xs font-medium text-muted-foreground truncate select-none"
-        >
-          {timelineName}
+      {/* Keyframe for spinner */}
+      <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
+    </div>
+  )
+}
+````
+
+## File: packages/web/src/pages/RegisterPage.tsx
+````typescript
+import { useState } from 'react'
+import { useNavigate, useSearchParams, Link } from 'react-router-dom'
+import { useAuth } from '@/contexts/AuthContext'
+import { ApiError } from '@/lib/api'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import DarkModeToggle from '@/components/DarkModeToggle'
+
+export default function RegisterPage() {
+  const { register } = useAuth()
+  const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
+
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [confirmPassword, setConfirmPassword] = useState('')
+  const [displayName, setDisplayName] = useState('')
+  // Pre-fill from ?token= query param (invite link).
+  const [inviteToken, setInviteToken] = useState(searchParams.get('token') ?? '')
+  const [error, setError] = useState<string | null>(null)
+  const [loading, setLoading] = useState(false)
+
+  // Live mismatch warning once the confirm field has any input.
+  const mismatch = confirmPassword !== '' && password !== confirmPassword
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    if (password !== confirmPassword) {
+      setError('Passwords do not match.')
+      return
+    }
+    setError(null)
+    setLoading(true)
+    try {
+      await register(email, password, displayName, inviteToken || undefined)
+      navigate('/', { replace: true })
+    } catch (err) {
+      if (err instanceof ApiError) {
+        setError(err.message)
+      } else {
+        setError('Something went wrong. Please try again.')
+      }
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div
+      style={{
+        minHeight: '100vh',
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        justifyContent: 'center',
+        background: 'var(--background)',
+        padding: '24px',
+      }}
+    >
+      {/* Dark mode toggle — top-right */}
+      <div style={{ position: 'fixed', top: 16, right: 16 }}>
+        <DarkModeToggle />
+      </div>
+
+      {/* Logo + wordmark */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 32 }}>
+        <img src="/logo-teal.svg" alt="draba" style={{ width: 36, height: 36 }} />
+        <span style={{ fontSize: 20, fontWeight: 700, color: 'var(--foreground)', letterSpacing: '-0.01em' }}>
+          draba
         </span>
       </div>
 
-      {/* Right zone: Find bar / trigger, Filter, profile slot */}
-      <div className="flex items-center justify-end gap-1.5 shrink-0 min-w-0">
-        {findBarOpen ? (
-          <FindBar />
-        ) : (
-          <button
-            onClick={() => setFindBarOpen(true)}
-            title="Find in view (Ctrl+F)"
-            className={cn(
-              'flex items-center justify-center w-7 h-7',
-              'border border-border rounded-md bg-card',
-              'cursor-pointer text-muted-foreground hover:text-foreground hover:bg-muted',
-              'transition-colors shrink-0',
+      <Card style={{ width: '100%', maxWidth: 400 }}>
+        <CardHeader>
+          <CardTitle>Create your account</CardTitle>
+          <CardDescription>You need a valid invite token to register.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <Label htmlFor="displayName">Display name</Label>
+              <Input
+                id="displayName"
+                type="text"
+                autoComplete="name"
+                placeholder="Jane Smith"
+                value={displayName}
+                onChange={e => setDisplayName(e.target.value)}
+                required
+              />
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <Label htmlFor="email">Email</Label>
+              <Input
+                id="email"
+                type="email"
+                autoComplete="email"
+                placeholder="you@example.com"
+                value={email}
+                onChange={e => setEmail(e.target.value)}
+                required
+              />
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <Label htmlFor="password">Password</Label>
+              <Input
+                id="password"
+                type="password"
+                autoComplete="new-password"
+                placeholder="At least 8 characters"
+                value={password}
+                onChange={e => setPassword(e.target.value)}
+                required
+                minLength={8}
+              />
+            </div>
+
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="confirmPassword">Confirm password</Label>
+              <Input
+                id="confirmPassword"
+                type="password"
+                autoComplete="new-password"
+                placeholder="Re-enter your password"
+                value={confirmPassword}
+                onChange={e => setConfirmPassword(e.target.value)}
+                required
+                minLength={8}
+              />
+              {mismatch && (
+                <p className="text-xs text-destructive">
+                  Passwords don't match.
+                </p>
+              )}
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <Label htmlFor="inviteToken">Invite token</Label>
+              <div
+                style={{
+                  fontSize: 12,
+                  color: 'var(--muted-foreground)',
+                  background: 'var(--muted)',
+                  borderRadius: 6,
+                  padding: '8px 10px',
+                  lineHeight: 1.5,
+                }}
+              >
+                draba is invite-only. Ask your team admin to send you an invite, or click the link in your invitation email — it will fill this in automatically.
+              </div>
+              <Input
+                id="inviteToken"
+                type="text"
+                placeholder="Paste your invite token"
+                value={inviteToken}
+                onChange={e => setInviteToken(e.target.value)}
+              />
+            </div>
+
+            {error && (
+              <p style={{ fontSize: 13, color: 'var(--destructive)', margin: 0 }}>{error}</p>
             )}
-          >
-            <Search size={13} strokeWidth={1.8} />
-          </button>
-        )}
-        <FilterDropdown teamId={teamId} onOpenManager={onOpenFilterManager} />
-        {rightSlot}
-      </div>
+
+            <Button type="submit" disabled={loading || mismatch} style={{ width: '100%' }}>
+              {loading ? 'Creating account…' : 'Create account'}
+            </Button>
+          </form>
+
+          <p style={{ marginTop: 16, fontSize: 13, textAlign: 'center', color: 'var(--muted-foreground)' }}>
+            Already have an account?{' '}
+            <Link to="/login" style={{ color: 'var(--primary)', fontWeight: 600 }}>
+              Sign in
+            </Link>
+          </p>
+        </CardContent>
+      </Card>
     </div>
-  );
+  )
 }
 ````
 
@@ -41004,6 +40881,125 @@ function ManageFiltersRow({ onClick }: { onClick: () => void }) {
       Manage filters
     </button>
   )
+}
+````
+
+## File: packages/web/src/components/layout/TopBar.tsx
+````typescript
+/**
+ * Top toolbar above the active view. Left side: global app navigation
+ * (view switcher) and global object actions (Share). Right side: global
+ * cross-view actions: Find bar (or Search icon trigger), Filter dropdown,
+ * then whatever the parent injects into `rightSlot` (typically the profile menu).
+ *
+ * View-specific controls (date nav, zoom) intentionally live elsewhere —
+ * a context-sensitive sub-toolbar hosts them.
+ */
+
+import { Search, CalendarDays, GanttChart, Columns3, List } from 'lucide-react';
+import FilterDropdown from '@/components/filters/FilterDropdown';
+import FindBar from '@/components/layout/FindBar';
+import { Badge } from '@/components/identity/Badge';
+import { useFind } from '@/contexts/FindContext';
+import { cn } from '@/lib/utils';
+import type { Identity } from '@/components/identity/identity-constants';
+import { DEFAULT_TIMELINE_IDENTITY } from '@/components/identity/identity-constants';
+
+export type ViewMode = 'calendar' | 'gantt' | 'kanban' | 'list';
+
+interface Props {
+  view: ViewMode;
+  teamId?: string;
+  timelineName?: string;
+  timelineIdentity?: Identity;
+  onViewChange: (view: ViewMode) => void;
+  onOpenFilterManager: () => void;
+  rightSlot?: React.ReactNode;
+}
+
+const VIEWS: { id: ViewMode; icon: React.ReactNode; label: string }[] = [
+  { id: 'list',     icon: <List size={13} strokeWidth={1.8} />,        label: 'List' },
+  { id: 'calendar', icon: <CalendarDays size={13} strokeWidth={1.8} />, label: 'Calendar' },
+  { id: 'gantt',    icon: <GanttChart size={13} strokeWidth={1.8} />,  label: 'Gantt' },
+  { id: 'kanban',   icon: <Columns3 size={13} strokeWidth={1.8} />,    label: 'Kanban' },
+];
+
+export default function TopBar({
+  view,
+  teamId,
+  timelineName,
+  timelineIdentity,
+  onViewChange,
+  onOpenFilterManager,
+  rightSlot,
+}: Props) {
+  const { findBarOpen, setFindBarOpen } = useFind();
+
+  return (
+    <div className="flex items-center px-3 h-[var(--topbar-h)] bg-card border-b border-border shrink-0 z-40">
+      {/* Left zone: view switcher */}
+      <div className="flex items-center justify-start shrink-0">
+        <div className="flex items-center gap-px bg-muted rounded-md p-0.5 shrink-0">
+          {VIEWS.map(v => (
+            <button
+              key={v.id}
+              onClick={() => onViewChange(v.id)}
+              className={cn(
+                'flex items-center justify-center gap-[5px]',
+                'text-xs font-semibold px-2.5 py-1 rounded-[5px]',
+                'border-none cursor-pointer',
+                view === v.id
+                  ? 'bg-card text-foreground shadow-sm'
+                  : 'bg-transparent text-muted-foreground',
+              )}
+            >
+              {v.icon}
+              {v.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Center zone: timeline identity badge + name */}
+      <div className="flex-1 min-w-0 flex items-center justify-center gap-1.5 px-3">
+        <Badge
+          identity={timelineIdentity ?? DEFAULT_TIMELINE_IDENTITY}
+          name={timelineName ?? ''}
+          shape="square"
+          size={18}
+          className="shrink-0"
+        />
+        <span
+          title={timelineName}
+          className="text-xs font-medium text-muted-foreground truncate select-none"
+        >
+          {timelineName}
+        </span>
+      </div>
+
+      {/* Right zone: Find bar / trigger, Filter, profile slot */}
+      <div className="flex items-center justify-end gap-1.5 shrink-0 min-w-0">
+        {findBarOpen ? (
+          <FindBar />
+        ) : (
+          <button
+            onClick={() => setFindBarOpen(true)}
+            title="Find in view (Ctrl+F)"
+            className={cn(
+              'flex items-center justify-center w-7 h-7',
+              'border border-border rounded-md bg-card',
+              'cursor-pointer text-muted-foreground hover:text-foreground hover:bg-muted',
+              'transition-colors shrink-0',
+            )}
+          >
+            <Search size={13} strokeWidth={1.8} />
+          </button>
+        )}
+        <FilterDropdown teamId={teamId} onOpenManager={onOpenFilterManager} />
+        {rightSlot}
+      </div>
+    </div>
+  );
 }
 ````
 
@@ -60953,7 +60949,12 @@ A **fully interactive** board view — the column-and-card complement to Gantt /
 ### Phase 12 — Communications Testing
 **Status:** ✅ Complete (2026-06-04) — validated live on Docker with real Gmail SMTP | **Effort:** S (1 day)
 
-Comprehensive automated tests for every outbound email flow. This phase closes the test gap flagged in the 10.1.3 review and ensures all comms work correctly before enabling SMTP in production. Building the invite test surfaced that the invite flow never sent mail (it only created the token); wiring `handleCreateInvite` to email the invite link was added here as the one small feature needed to make the flow testable.
+Comprehensive automated tests for every outbound email flow. This phase closes the test gap flagged in the 10.1.3 review and ensures all comms work correctly before enabling SMTP in production.
+
+*Scope additions discovered during implementation:*
+- **Invite email wire-up:** Building the invite test surfaced that `handleCreateInvite` only created the token but never sent mail. Wiring the actual send was the minimum required to make the flow testable.
+- **Reset-success feedback (bug fix):** Live validation revealed `LoginPage` never read `location.state.message`, so a completed password reset appeared as a silent failure. Added a dismissible success banner.
+- **Register confirm-password (UX hardening):** Added a confirm-password field with live mismatch warning and submit guard so users can't accidentally register with a typo in their password.
 
 **Scope:**
 
