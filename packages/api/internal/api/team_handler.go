@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"html"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -172,9 +173,12 @@ func (s *Server) sendInviteEmail(email, token string) {
 	inviteLink := baseURL + "/register?token=" + url.QueryEscape(token)
 
 	subject := "You've been invited to draba"
+	// html.EscapeString prevents a malformed href if the link ever contains
+	// HTML-special characters (shouldn't happen with url.QueryEscape tokens,
+	// but defence-in-depth for the email body).
 	body := "<html><body>" +
 		"<p>You've been invited to join a team on draba.</p>" +
-		"<p><a href=\"" + inviteLink + "\">Click here to accept the invitation</a></p>" +
+		"<p><a href=\"" + html.EscapeString(inviteLink) + "\">Click here to accept the invitation</a></p>" +
 		"<p>This invitation expires in 7 days.</p>" +
 		"</body></html>"
 

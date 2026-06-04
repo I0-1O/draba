@@ -119,7 +119,7 @@ export default function RegisterPage() {
               />
             </div>
 
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <div className="flex flex-col gap-1.5">
               <Label htmlFor="confirmPassword">Confirm password</Label>
               <Input
                 id="confirmPassword"
@@ -132,7 +132,7 @@ export default function RegisterPage() {
                 minLength={8}
               />
               {mismatch && (
-                <p style={{ fontSize: 12, color: 'var(--destructive)', margin: 0 }}>
+                <p className="text-xs text-destructive">
                   Passwords don't match.
                 </p>
               )}

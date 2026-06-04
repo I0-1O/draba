@@ -1462,7 +1462,12 @@ A **fully interactive** board view — the column-and-card complement to Gantt /
 ### Phase 12 — Communications Testing
 **Status:** ✅ Complete (2026-06-04) — validated live on Docker with real Gmail SMTP | **Effort:** S (1 day)
 
-Comprehensive automated tests for every outbound email flow. This phase closes the test gap flagged in the 10.1.3 review and ensures all comms work correctly before enabling SMTP in production. Building the invite test surfaced that the invite flow never sent mail (it only created the token); wiring `handleCreateInvite` to email the invite link was added here as the one small feature needed to make the flow testable.
+Comprehensive automated tests for every outbound email flow. This phase closes the test gap flagged in the 10.1.3 review and ensures all comms work correctly before enabling SMTP in production.
+
+*Scope additions discovered during implementation:*
+- **Invite email wire-up:** Building the invite test surfaced that `handleCreateInvite` only created the token but never sent mail. Wiring the actual send was the minimum required to make the flow testable.
+- **Reset-success feedback (bug fix):** Live validation revealed `LoginPage` never read `location.state.message`, so a completed password reset appeared as a silent failure. Added a dismissible success banner.
+- **Register confirm-password (UX hardening):** Added a confirm-password field with live mismatch warning and submit guard so users can't accidentally register with a typo in their password.
 
 **Scope:**
 

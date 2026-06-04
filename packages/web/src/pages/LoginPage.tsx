@@ -314,15 +314,7 @@ export default function LoginPage() {
               {/* Success notice routed from another page (e.g. password reset).
                   Suppressed once a server error is shown so it can't go stale. */}
               {notice && !serverError && (
-                <div style={{
-                  fontSize: 13,
-                  color: '#3bb38a',
-                  background: 'rgba(59,179,138,0.12)',
-                  border: '1px solid rgba(59,179,138,0.35)',
-                  borderRadius: 8,
-                  padding: '10px 12px',
-                  margin: '0 0 20px',
-                }}>
+                <div className="mb-5 rounded-lg border border-emerald-500/35 bg-emerald-500/10 px-3 py-2.5 text-[13px] text-emerald-400">
                   {notice}
                 </div>
               )}
