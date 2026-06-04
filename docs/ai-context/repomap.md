@@ -29079,166 +29079,6 @@ export default function ForgotPasswordPage() {
 }
 ````
 
-## File: packages/web/src/pages/RegisterPage.tsx
-````typescript
-import { useState } from 'react'
-import { useNavigate, useSearchParams, Link } from 'react-router-dom'
-import { useAuth } from '@/contexts/AuthContext'
-import { ApiError } from '@/lib/api'
-import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
-import DarkModeToggle from '@/components/DarkModeToggle'
-
-export default function RegisterPage() {
-  const { register } = useAuth()
-  const navigate = useNavigate()
-  const [searchParams] = useSearchParams()
-
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
-  const [displayName, setDisplayName] = useState('')
-  // Pre-fill from ?token= query param (invite link).
-  const [inviteToken, setInviteToken] = useState(searchParams.get('token') ?? '')
-  const [error, setError] = useState<string | null>(null)
-  const [loading, setLoading] = useState(false)
-
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault()
-    setError(null)
-    setLoading(true)
-    try {
-      await register(email, password, displayName, inviteToken || undefined)
-      navigate('/', { replace: true })
-    } catch (err) {
-      if (err instanceof ApiError) {
-        setError(err.message)
-      } else {
-        setError('Something went wrong. Please try again.')
-      }
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  return (
-    <div
-      style={{
-        minHeight: '100vh',
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-        justifyContent: 'center',
-        background: 'var(--background)',
-        padding: '24px',
-      }}
-    >
-      {/* Dark mode toggle — top-right */}
-      <div style={{ position: 'fixed', top: 16, right: 16 }}>
-        <DarkModeToggle />
-      </div>
-
-      {/* Logo + wordmark */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 32 }}>
-        <img src="/logo-teal.svg" alt="draba" style={{ width: 36, height: 36 }} />
-        <span style={{ fontSize: 20, fontWeight: 700, color: 'var(--foreground)', letterSpacing: '-0.01em' }}>
-          draba
-        </span>
-      </div>
-
-      <Card style={{ width: '100%', maxWidth: 400 }}>
-        <CardHeader>
-          <CardTitle>Create your account</CardTitle>
-          <CardDescription>You need a valid invite token to register.</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              <Label htmlFor="displayName">Display name</Label>
-              <Input
-                id="displayName"
-                type="text"
-                autoComplete="name"
-                placeholder="Jane Smith"
-                value={displayName}
-                onChange={e => setDisplayName(e.target.value)}
-                required
-              />
-            </div>
-
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              <Label htmlFor="email">Email</Label>
-              <Input
-                id="email"
-                type="email"
-                autoComplete="email"
-                placeholder="you@example.com"
-                value={email}
-                onChange={e => setEmail(e.target.value)}
-                required
-              />
-            </div>
-
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              <Label htmlFor="password">Password</Label>
-              <Input
-                id="password"
-                type="password"
-                autoComplete="new-password"
-                placeholder="At least 8 characters"
-                value={password}
-                onChange={e => setPassword(e.target.value)}
-                required
-                minLength={8}
-              />
-            </div>
-
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              <Label htmlFor="inviteToken">Invite token</Label>
-              <div
-                style={{
-                  fontSize: 12,
-                  color: 'var(--muted-foreground)',
-                  background: 'var(--muted)',
-                  borderRadius: 6,
-                  padding: '8px 10px',
-                  lineHeight: 1.5,
-                }}
-              >
-                draba is invite-only. Ask your team admin to send you an invite, or click the link in your invitation email — it will fill this in automatically.
-              </div>
-              <Input
-                id="inviteToken"
-                type="text"
-                placeholder="Paste your invite token"
-                value={inviteToken}
-                onChange={e => setInviteToken(e.target.value)}
-              />
-            </div>
-
-            {error && (
-              <p style={{ fontSize: 13, color: 'var(--destructive)', margin: 0 }}>{error}</p>
-            )}
-
-            <Button type="submit" disabled={loading} style={{ width: '100%' }}>
-              {loading ? 'Creating account…' : 'Create account'}
-            </Button>
-          </form>
-
-          <p style={{ marginTop: 16, fontSize: 13, textAlign: 'center', color: 'var(--muted-foreground)' }}>
-            Already have an account?{' '}
-            <Link to="/login" style={{ color: 'var(--primary)', fontWeight: 600 }}>
-              Sign in
-            </Link>
-          </p>
-        </CardContent>
-      </Card>
-    </div>
-  )
-}
-````
-
 ## File: packages/web/src/pages/ResetPasswordPage.tsx
 ````typescript
 /**
@@ -35692,6 +35532,193 @@ export default function LoginPage() {
 
       {/* Keyframe for spinner */}
       <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
+    </div>
+  )
+}
+````
+
+## File: packages/web/src/pages/RegisterPage.tsx
+````typescript
+import { useState } from 'react'
+import { useNavigate, useSearchParams, Link } from 'react-router-dom'
+import { useAuth } from '@/contexts/AuthContext'
+import { ApiError } from '@/lib/api'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import DarkModeToggle from '@/components/DarkModeToggle'
+
+export default function RegisterPage() {
+  const { register } = useAuth()
+  const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
+
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [confirmPassword, setConfirmPassword] = useState('')
+  const [displayName, setDisplayName] = useState('')
+  // Pre-fill from ?token= query param (invite link).
+  const [inviteToken, setInviteToken] = useState(searchParams.get('token') ?? '')
+  const [error, setError] = useState<string | null>(null)
+  const [loading, setLoading] = useState(false)
+
+  // Live mismatch warning once the confirm field has any input.
+  const mismatch = confirmPassword !== '' && password !== confirmPassword
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    if (password !== confirmPassword) {
+      setError('Passwords do not match.')
+      return
+    }
+    setError(null)
+    setLoading(true)
+    try {
+      await register(email, password, displayName, inviteToken || undefined)
+      navigate('/', { replace: true })
+    } catch (err) {
+      if (err instanceof ApiError) {
+        setError(err.message)
+      } else {
+        setError('Something went wrong. Please try again.')
+      }
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div
+      style={{
+        minHeight: '100vh',
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        justifyContent: 'center',
+        background: 'var(--background)',
+        padding: '24px',
+      }}
+    >
+      {/* Dark mode toggle — top-right */}
+      <div style={{ position: 'fixed', top: 16, right: 16 }}>
+        <DarkModeToggle />
+      </div>
+
+      {/* Logo + wordmark */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 32 }}>
+        <img src="/logo-teal.svg" alt="draba" style={{ width: 36, height: 36 }} />
+        <span style={{ fontSize: 20, fontWeight: 700, color: 'var(--foreground)', letterSpacing: '-0.01em' }}>
+          draba
+        </span>
+      </div>
+
+      <Card style={{ width: '100%', maxWidth: 400 }}>
+        <CardHeader>
+          <CardTitle>Create your account</CardTitle>
+          <CardDescription>You need a valid invite token to register.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <Label htmlFor="displayName">Display name</Label>
+              <Input
+                id="displayName"
+                type="text"
+                autoComplete="name"
+                placeholder="Jane Smith"
+                value={displayName}
+                onChange={e => setDisplayName(e.target.value)}
+                required
+              />
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <Label htmlFor="email">Email</Label>
+              <Input
+                id="email"
+                type="email"
+                autoComplete="email"
+                placeholder="you@example.com"
+                value={email}
+                onChange={e => setEmail(e.target.value)}
+                required
+              />
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <Label htmlFor="password">Password</Label>
+              <Input
+                id="password"
+                type="password"
+                autoComplete="new-password"
+                placeholder="At least 8 characters"
+                value={password}
+                onChange={e => setPassword(e.target.value)}
+                required
+                minLength={8}
+              />
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <Label htmlFor="confirmPassword">Confirm password</Label>
+              <Input
+                id="confirmPassword"
+                type="password"
+                autoComplete="new-password"
+                placeholder="Re-enter your password"
+                value={confirmPassword}
+                onChange={e => setConfirmPassword(e.target.value)}
+                required
+                minLength={8}
+              />
+              {mismatch && (
+                <p style={{ fontSize: 12, color: 'var(--destructive)', margin: 0 }}>
+                  Passwords don't match.
+                </p>
+              )}
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <Label htmlFor="inviteToken">Invite token</Label>
+              <div
+                style={{
+                  fontSize: 12,
+                  color: 'var(--muted-foreground)',
+                  background: 'var(--muted)',
+                  borderRadius: 6,
+                  padding: '8px 10px',
+                  lineHeight: 1.5,
+                }}
+              >
+                draba is invite-only. Ask your team admin to send you an invite, or click the link in your invitation email — it will fill this in automatically.
+              </div>
+              <Input
+                id="inviteToken"
+                type="text"
+                placeholder="Paste your invite token"
+                value={inviteToken}
+                onChange={e => setInviteToken(e.target.value)}
+              />
+            </div>
+
+            {error && (
+              <p style={{ fontSize: 13, color: 'var(--destructive)', margin: 0 }}>{error}</p>
+            )}
+
+            <Button type="submit" disabled={loading || mismatch} style={{ width: '100%' }}>
+              {loading ? 'Creating account…' : 'Create account'}
+            </Button>
+          </form>
+
+          <p style={{ marginTop: 16, fontSize: 13, textAlign: 'center', color: 'var(--muted-foreground)' }}>
+            Already have an account?{' '}
+            <Link to="/login" style={{ color: 'var(--primary)', fontWeight: 600 }}>
+              Sign in
+            </Link>
+          </p>
+        </CardContent>
+      </Card>
     </div>
   )
 }
@@ -57458,6 +57485,33 @@ export default function DashboardPage() {
 
 ---
 
+## 2026-06-04 — Phase 12: Communications Testing
+
+**Goal:** Automated coverage for every outbound email flow, then live end-to-end validation against Docker (`epcot.lan:8081`) with a real Gmail SMTP account.
+
+**Test infrastructure & coverage (`packages/api`):**
+- `internal/api/smtp_capture_test.go` (new): `newTestSMTPServer(t)` — an in-process TCP SMTP server that speaks just enough of the protocol (advertises no extensions, so the client uses the plain no-STARTTLS/no-auth path) and captures every message. Exposes `host()`/`port()`/`messages()`/`reset()`.
+- `internal/mailer/mailer_test.go` (new, white-box): 9 unit tests — encrypt/decrypt round-trip, `SaveConfig` encrypts at rest (`enc:v1:` sentinel, no plaintext leak, no caller mutation), `LoadConfig` decrypts + legacy-plaintext fallback, unconfigured `LoadConfig` returns `(nil,nil)`, `Send` no-op when unconfigured, `IsConfigured`.
+- `internal/api/comms_integration_test.go` (new): `POST /admin/smtp/test` (sends to caller, persists nothing), `PUT /admin/smtp` (sends validation email then persists) plus the validation-gate negative (unreachable server → 400, nothing persisted), password-reset email delivery + reset link, invite email delivery + link, and invite-with-no-email sends nothing.
+
+**Feature added (made the invite-email bullet real):**
+- `handleCreateInvite` (`team_handler.go`) now emails the invite link (`{DRABA_BASE_URL}/register?token=…`) when an address is supplied — best-effort, logged-not-fatal, no-op when SMTP is unconfigured or the invite is link-only. Previously it created the token but never sent mail, so the flow was untestable.
+
+**Bugs found during live validation & fixed:**
+- **Broken outbound links:** `getBaseURL()` falls back to `http://localhost:8080` when `DRABA_BASE_URL` is unset, so every emailed link (reset, invite) pointed at localhost. Documented the variable in `docker-compose.yml`; the live fix was adding `DRABA_BASE_URL=http://epcot.lan:8081` to the Portainer `api` stack and restarting.
+- **No reset-success feedback:** `ResetPasswordPage` routed a success message to `/login`, but `LoginPage` never read `location.state.message`, so a completed reset looked like a silent failure. `LoginPage` now renders the notice (green banner, suppressed once a server error shows).
+
+**Onboarding UX follow-up (Brian request):**
+- `RegisterPage` now requires password confirmation (enter twice) with a live "Passwords don't match" warning and a submit gated until they match. Verified in preview (mismatch → warning + disabled; match → enabled).
+
+**Live validation (Docker, real Gmail SMTP):** password-reset email ✓, invite email ✓ (created "TEST PERSON" via the invite → register flow), both links correctly `epcot.lan:8081`. SMTP connection confirmed via delivered mail.
+
+**Checks:** `go test ./...` clean; `golangci-lint run` clean; `pnpm --filter web lint` clean.
+
+**Note:** `.env.test.local` admin password was stale (`draba1234`); updated to the current value after the reset-flow test.
+
+---
+
 ## 2026-06-03 — Phase 11.3: Kanban View (Interactive)
 
 **Goal:** Ship a fully interactive Kanban board view. Column axis = active Group by (Status by default). Drag-to-recolumn mutates grouping value via existing `useUpdateActivity`. Adds Color by, configurable Sorts, and a per-card Card fields toggle set.
@@ -60897,7 +60951,7 @@ A **fully interactive** board view — the column-and-card complement to Gantt /
 ---
 
 ### Phase 12 — Communications Testing
-**Status:** ⬜ | **Effort:** S (1 day)
+**Status:** ✅ Complete (2026-06-04) — validated live on Docker with real Gmail SMTP | **Effort:** S (1 day)
 
 Comprehensive automated tests for every outbound email flow. This phase closes the test gap flagged in the 10.1.3 review and ensures all comms work correctly before enabling SMTP in production. Building the invite test surfaced that the invite flow never sent mail (it only created the token); wiring `handleCreateInvite` to email the invite link was added here as the one small feature needed to make the flow testable.
 
