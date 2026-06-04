@@ -135,6 +135,9 @@ export default function LoginPage() {
   const navigate = useNavigate()
   const location = useLocation()
   const from = (location.state as { from?: { pathname: string } } | null)?.from?.pathname ?? '/'
+  // A success message routed here from another page (e.g. password reset).
+  // Derived from navigation state, so it clears naturally on a full reload.
+  const notice = (location.state as { message?: string } | null)?.message ?? null
   const { data: branding } = usePublicSettings()
   const instanceName = branding?.instanceName || 'draba'
 
@@ -307,6 +310,22 @@ export default function LoginPage() {
                   Welcome back — sign in to your account.
                 </p>
               </div>
+
+              {/* Success notice routed from another page (e.g. password reset).
+                  Suppressed once a server error is shown so it can't go stale. */}
+              {notice && !serverError && (
+                <div style={{
+                  fontSize: 13,
+                  color: '#3bb38a',
+                  background: 'rgba(59,179,138,0.12)',
+                  border: '1px solid rgba(59,179,138,0.35)',
+                  borderRadius: 8,
+                  padding: '10px 12px',
+                  margin: '0 0 20px',
+                }}>
+                  {notice}
+                </div>
+              )}
 
               {/* Fields */}
               <div style={{ display: 'flex', flexDirection: 'column', gap: 14, marginBottom: 24 }}>

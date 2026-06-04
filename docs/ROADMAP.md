@@ -1462,12 +1462,12 @@ A **fully interactive** board view — the column-and-card complement to Gantt /
 ### Phase 12 — Communications Testing
 **Status:** ⬜ | **Effort:** S (1 day)
 
-Comprehensive automated tests for every outbound email flow. No new features; this phase closes the test gap flagged in the 10.1.3 review and ensures all comms work correctly before enabling SMTP in production.
+Comprehensive automated tests for every outbound email flow. This phase closes the test gap flagged in the 10.1.3 review and ensures all comms work correctly before enabling SMTP in production. Building the invite test surfaced that the invite flow never sent mail (it only created the token); wiring `handleCreateInvite` to email the invite link was added here as the one small feature needed to make the flow testable.
 
 **Scope:**
 
 *Flows to cover (one integration test each):*
-- Invite email: `POST /teams/:id/invites` → mailer.SendInvite called with correct recipient and link
+- Invite email: `POST /teams/:id/invites` with an email address → invite link emailed to the invitee (best-effort; link-only invites send nothing)
 - Password reset request: `POST /auth/forgot-password` with a known-SMTP server → email delivered; token stored hashed
 - Password reset confirm: `POST /auth/reset-password` → password updated; token marked used; second attempt rejected
 - SMTP validation: `PUT /admin/smtp` with a valid test server → test email sent before config is persisted

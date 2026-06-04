@@ -14,6 +14,11 @@ services:
       - DRABA_DB_DSN=./draba.db
       - DRABA_JWT_SECRET=dev-secret-change-in-prod
       - DRABA_LOG_LEVEL=debug
+      # Public base URL used to build links in outbound email (password reset,
+      # team invites). MUST be the externally reachable URL in any real
+      # deployment — when unset it falls back to http://localhost:8080 and
+      # emailed links point at localhost (broken for recipients).
+      - DRABA_BASE_URL=http://localhost:8080
 
   web:
     build:

@@ -4,7 +4,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -152,7 +154,33 @@ func (s *Server) handleCreateInvite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Email the invite link when an address was supplied. Best-effort: a send
+	// failure (or no SMTP configured) must not fail invite creation — the
+	// admin can still copy the link from the UI.
+	if email != "" {
+		s.sendInviteEmail(email, invite.Token)
+	}
+
 	writeJSON(w, http.StatusCreated, invite)
+}
+
+// sendInviteEmail sends the team invite link to the invitee. Errors are logged,
+// not returned: invite creation already succeeded and the link is also shown in
+// the UI, so a mail failure should not surface to the caller.
+func (s *Server) sendInviteEmail(email, token string) {
+	baseURL := strings.TrimRight(getBaseURL(), "/")
+	inviteLink := baseURL + "/register?token=" + url.QueryEscape(token)
+
+	subject := "You've been invited to draba"
+	body := "<html><body>" +
+		"<p>You've been invited to join a team on draba.</p>" +
+		"<p><a href=\"" + inviteLink + "\">Click here to accept the invitation</a></p>" +
+		"<p>This invitation expires in 7 days.</p>" +
+		"</body></html>"
+
+	if err := s.mailer.Send(email, subject, body); err != nil {
+		slog.Error("invite: failed to send email", "email", email, "err", err)
+	}
 }
 
 // handleGetTeam checks membership before fetching the team row to avoid leaking
