@@ -223,7 +223,6 @@ packages/
         gantt/
           ActivityCreatePanel.tsx
           ActivityDetailPanel.tsx
-          activityPanelFields.tsx
           GanttGrid.format.test.ts
           GanttGrid.tsx
           GanttToolbar.tsx
@@ -257,6 +256,7 @@ packages/
           ListView.tree.test.ts
           ListView.tsx
         shared/
+          activityPanelFields.tsx
           ConfirmDialog.tsx
           EmptyState.tsx
           InlineEditableTitle.tsx
@@ -11804,6 +11804,331 @@ CREATE TABLE IF NOT EXISTS calendar_connections (
 );
 ````
 
+## File: packages/api/sample_data/01_users.sql
+````sql
+-- Users: 13 total (2 super admins).
+-- Password for all users: "password" (bcrypt cost 12).
+-- Icon: __name_words__ (initials badge) for all users.
+
+INSERT INTO users (id, email, password_hash, display_name, color, icon, is_superadmin, created_at, updated_at) VALUES
+  ('u-brian-rieb',        'brian@rieb.cc',             '$2a$12$WKzPgLht8GL4iR76X0JfYuFw.4GqjricAMaKQPvA7ae8hiJp225dG', 'Brian Rieb',        '#3B82F6', '__name_words__', 1, datetime('now', '-90 days'), datetime('now', '-1 days')),
+  ('u-scott-fitzgerald',  'scott@fitzgerald.example',  '$2a$12$WKzPgLht8GL4iR76X0JfYuFw.4GqjricAMaKQPvA7ae8hiJp225dG', 'Scott Fitzgerald',  '#8B5CF6', '__name_words__', 1, datetime('now', '-90 days'), datetime('now', '-2 days')),
+  ('u-lindsay-k',         'lindsay.k@example.com',     '$2a$12$WKzPgLht8GL4iR76X0JfYuFw.4GqjricAMaKQPvA7ae8hiJp225dG', 'Lindsay K.',        '#EC4899', '__name_words__', 0, datetime('now', '-85 days'), datetime('now', '-3 days')),
+  ('u-erik-b',            'erik.b@example.com',        '$2a$12$WKzPgLht8GL4iR76X0JfYuFw.4GqjricAMaKQPvA7ae8hiJp225dG', 'Erik B',            '#F97316', '__name_words__', 0, datetime('now', '-85 days'), datetime('now', '-3 days')),
+  ('u-michelle-t',        'michelle.t@example.com',    '$2a$12$WKzPgLht8GL4iR76X0JfYuFw.4GqjricAMaKQPvA7ae8hiJp225dG', 'Michelle T',        '#22C55E', '__name_words__', 0, datetime('now', '-80 days'), datetime('now', '-5 days')),
+  ('u-codi-k',            'codi.k@example.com',        '$2a$12$WKzPgLht8GL4iR76X0JfYuFw.4GqjricAMaKQPvA7ae8hiJp225dG', 'Codi K',            '#06B6D4', '__name_words__', 0, datetime('now', '-88 days'), datetime('now', '-10 days')),
+  ('u-dan-s',             'dan.s@example.com',         '$2a$12$WKzPgLht8GL4iR76X0JfYuFw.4GqjricAMaKQPvA7ae8hiJp225dG', 'Dan S',             '#F43F5E', '__name_words__', 0, datetime('now', '-88 days'), datetime('now', '-10 days')),
+  ('u-kristen-k',         'kristen.k@example.com',     '$2a$12$WKzPgLht8GL4iR76X0JfYuFw.4GqjricAMaKQPvA7ae8hiJp225dG', 'Kristen K',         '#F59E0B', '__name_words__', 0, datetime('now', '-88 days'), datetime('now', '-10 days')),
+  ('u-jamie-f',           'jamie.f@example.com',       '$2a$12$WKzPgLht8GL4iR76X0JfYuFw.4GqjricAMaKQPvA7ae8hiJp225dG', 'Jamie F',           '#84CC16', '__name_words__', 0, datetime('now', '-88 days'), datetime('now', '-10 days')),
+  ('u-paula-h',           'paula.h@example.com',       '$2a$12$WKzPgLht8GL4iR76X0JfYuFw.4GqjricAMaKQPvA7ae8hiJp225dG', 'Paula H',           '#A855F7', '__name_words__', 0, datetime('now', '-75 days'), datetime('now', '-4 days')),
+  ('u-corey-f',           'corey.f@example.com',       '$2a$12$WKzPgLht8GL4iR76X0JfYuFw.4GqjricAMaKQPvA7ae8hiJp225dG', 'Corey F',           '#EF4444', '__name_words__', 0, datetime('now', '-75 days'), datetime('now', '-6 days')),
+  ('u-dan-b',             'dan.b@example.com',         '$2a$12$WKzPgLht8GL4iR76X0JfYuFw.4GqjricAMaKQPvA7ae8hiJp225dG', 'Dan B',             '#6366F1', '__name_words__', 0, datetime('now', '-75 days'), datetime('now', '-6 days')),
+  ('u-rick-s',            'rick.s@example.com',        '$2a$12$WKzPgLht8GL4iR76X0JfYuFw.4GqjricAMaKQPvA7ae8hiJp225dG', 'Rick S',            '#288C9B', '__name_words__', 0, datetime('now', '-75 days'), datetime('now', '-7 days'));
+````
+
+## File: packages/api/sample_data/02_teams.sql
+````sql
+-- Teams: 3 total (1 archived).
+
+INSERT INTO teams (id, name, slug, color, icon, created_at, updated_at) VALUES
+  ('t-product-marketing',    'Product Marketing',          'product-marketing',          '#F97316', 'briefcase', datetime('now', '-90 days'), datetime('now', '-1 days')),
+  ('t-pb-tiger-team',        'P&B Tiger Team',             'pb-tiger-team',              '#EF4444', 'target',    datetime('now', '-88 days'), datetime('now', '-30 days')),
+  ('t-marketing-cross-func', 'Marketing Cross Functional', 'marketing-cross-functional', '#8B5CF6', 'globe',     datetime('now', '-75 days'), datetime('now', '-2 days'));
+
+UPDATE teams SET archived_at = datetime('now', '-30 days') WHERE id = 't-pb-tiger-team';
+````
+
+## File: packages/api/sample_data/04_status_templates.sql
+````sql
+-- Status templates and their items.
+-- 5 templates total: Default + Workload for PM and MCF, Default for P&B.
+
+-- Product Marketing: Default
+INSERT INTO status_templates (id, team_id, name, position, created_by, created_at, updated_at) VALUES
+  ('st-pm-default', 't-product-marketing', 'Default', 0, 'u-brian-rieb', datetime('now', '-90 days'), datetime('now', '-90 days'));
+INSERT INTO status_template_items (id, template_id, name, color, is_closed, position) VALUES
+  ('sti-pm-d-planning',   'st-pm-default', 'Planning',    '#64748B', 0, 0),
+  ('sti-pm-d-inprogress', 'st-pm-default', 'In Progress', '#3B82F6', 0, 1),
+  ('sti-pm-d-done',       'st-pm-default', 'Done',        '#22C55E', 1, 2);
+
+-- Product Marketing: Workload
+INSERT INTO status_templates (id, team_id, name, position, created_by, created_at, updated_at) VALUES
+  ('st-pm-workload', 't-product-marketing', 'Workload', 1, 'u-brian-rieb', datetime('now', '-90 days'), datetime('now', '-90 days'));
+INSERT INTO status_template_items (id, template_id, name, color, is_closed, position) VALUES
+  ('sti-pm-w-planning',   'st-pm-workload', 'Planning',    '#64748B', 0, 0),
+  ('sti-pm-w-inprogress', 'st-pm-workload', 'In Progress', '#3B82F6', 0, 1),
+  ('sti-pm-w-blockers',   'st-pm-workload', 'Blockers',    '#EF4444', 0, 2),
+  ('sti-pm-w-done',       'st-pm-workload', 'Done',        '#22C55E', 1, 3),
+  ('sti-pm-w-deferred',   'st-pm-workload', 'Deferred',    '#F59E0B', 1, 4),
+  ('sti-pm-w-cancelled',  'st-pm-workload', 'Cancelled',   '#78716C', 1, 5);
+
+-- P&B Tiger Team: Default
+INSERT INTO status_templates (id, team_id, name, position, created_by, created_at, updated_at) VALUES
+  ('st-pb-default', 't-pb-tiger-team', 'Default', 0, 'u-brian-rieb', datetime('now', '-88 days'), datetime('now', '-88 days'));
+INSERT INTO status_template_items (id, template_id, name, color, is_closed, position) VALUES
+  ('sti-pb-d-planning',   'st-pb-default', 'Planning',    '#64748B', 0, 0),
+  ('sti-pb-d-inprogress', 'st-pb-default', 'In Progress', '#3B82F6', 0, 1),
+  ('sti-pb-d-done',       'st-pb-default', 'Done',        '#22C55E', 1, 2);
+
+-- Marketing Cross Functional: Default
+INSERT INTO status_templates (id, team_id, name, position, created_by, created_at, updated_at) VALUES
+  ('st-mcf-default', 't-marketing-cross-func', 'Default', 0, 'u-scott-fitzgerald', datetime('now', '-75 days'), datetime('now', '-75 days'));
+INSERT INTO status_template_items (id, template_id, name, color, is_closed, position) VALUES
+  ('sti-mcf-d-planning',   'st-mcf-default', 'Planning',    '#64748B', 0, 0),
+  ('sti-mcf-d-inprogress', 'st-mcf-default', 'In Progress', '#3B82F6', 0, 1),
+  ('sti-mcf-d-done',       'st-mcf-default', 'Done',        '#22C55E', 1, 2);
+
+-- Marketing Cross Functional: Workload
+INSERT INTO status_templates (id, team_id, name, position, created_by, created_at, updated_at) VALUES
+  ('st-mcf-workload', 't-marketing-cross-func', 'Workload', 1, 'u-scott-fitzgerald', datetime('now', '-75 days'), datetime('now', '-75 days'));
+INSERT INTO status_template_items (id, template_id, name, color, is_closed, position) VALUES
+  ('sti-mcf-w-planning',   'st-mcf-workload', 'Planning',    '#64748B', 0, 0),
+  ('sti-mcf-w-inprogress', 'st-mcf-workload', 'In Progress', '#3B82F6', 0, 1),
+  ('sti-mcf-w-blockers',   'st-mcf-workload', 'Blockers',    '#EF4444', 0, 2),
+  ('sti-mcf-w-done',       'st-mcf-workload', 'Done',        '#22C55E', 1, 3),
+  ('sti-mcf-w-deferred',   'st-mcf-workload', 'Deferred',    '#F59E0B', 1, 4),
+  ('sti-mcf-w-cancelled',  'st-mcf-workload', 'Cancelled',   '#78716C', 1, 5);
+````
+
+## File: packages/api/sample_data/05_timelines.sql
+````sql
+-- Timelines: 6 total (1 archived).
+
+-- Product Marketing: Q1 Workload (3 months: now-1mo to now+2mo)
+INSERT INTO timelines (id, team_id, name, start_date, end_date, color, icon, share_token, ical_token, created_by, created_at, updated_at) VALUES
+  ('tl-pm-q1', 't-product-marketing', 'Q1 Workload',
+   date('now', '-30 days'), date('now', '+60 days'),
+   '#F97316', 'bar-chart',
+   'share-pm-q1-token', 'ical-pm-q1-token',
+   'u-brian-rieb', datetime('now', '-30 days'), datetime('now', '-1 days'));
+
+-- Product Marketing: Sales Kick Off (2 months: now to now+2mo)
+INSERT INTO timelines (id, team_id, name, start_date, end_date, color, icon, share_token, ical_token, created_by, created_at, updated_at) VALUES
+  ('tl-pm-sko', 't-product-marketing', 'Sales Kick Off',
+   date('now'), date('now', '+60 days'),
+   '#06B6D4', 'award',
+   'share-pm-sko-token', 'ical-pm-sko-token',
+   'u-erik-b', datetime('now', '-14 days'), datetime('now', '-2 days'));
+
+-- Product Marketing: Q2 Workload (archived, 3 months in the past)
+INSERT INTO timelines (id, team_id, name, start_date, end_date, color, icon, share_token, ical_token, created_by, created_at, updated_at, archived_at) VALUES
+  ('tl-pm-q2', 't-product-marketing', 'Q2 Workload',
+   date('now', '-180 days'), date('now', '-90 days'),
+   '#F59E0B', 'clipboard',
+   'share-pm-q2-token', 'ical-pm-q2-token',
+   'u-brian-rieb', datetime('now', '-180 days'), datetime('now', '-90 days'), datetime('now', '-85 days'));
+
+-- P&B Tiger Team: Right to Win Initiative (2 months)
+INSERT INTO timelines (id, team_id, name, start_date, end_date, color, icon, share_token, ical_token, created_by, created_at, updated_at) VALUES
+  ('tl-pb-rtw', 't-pb-tiger-team', 'Right to Win Initiative',
+   date('now', '-120 days'), date('now', '-60 days'),
+   '#EF4444', 'search',
+   'share-pb-rtw-token', 'ical-pb-rtw-token',
+   'u-brian-rieb', datetime('now', '-120 days'), datetime('now', '-60 days'));
+
+-- P&B Tiger Team: Displacement GTM (3 months)
+INSERT INTO timelines (id, team_id, name, start_date, end_date, color, icon, share_token, ical_token, created_by, created_at, updated_at) VALUES
+  ('tl-pb-gtm', 't-pb-tiger-team', 'Displacement GTM',
+   date('now', '-150 days'), date('now', '-60 days'),
+   '#F43F5E', 'trending-up',
+   'share-pb-gtm-token', 'ical-pb-gtm-token',
+   'u-codi-k', datetime('now', '-150 days'), datetime('now', '-60 days'));
+
+-- Marketing Cross Functional: Web Site Rebrand (6 months: now-2mo to now+4mo)
+INSERT INTO timelines (id, team_id, name, start_date, end_date, color, icon, share_token, ical_token, created_by, created_at, updated_at) VALUES
+  ('tl-mcf-rebrand', 't-marketing-cross-func', 'Web Site Rebrand',
+   date('now', '-60 days'), date('now', '+120 days'),
+   '#A855F7', 'globe',
+   'share-mcf-rebrand-token', 'ical-mcf-rebrand-token',
+   'u-scott-fitzgerald', datetime('now', '-60 days'), datetime('now', '-2 days'));
+````
+
+## File: packages/api/sample_data/06_statuses.sql
+````sql
+-- Live statuses: one set per timeline, copied from the team's status template.
+
+-- Q1 Workload (Workload statuses)
+INSERT INTO statuses (id, timeline_id, name, color, is_closed, position, created_at, updated_at) VALUES
+  ('s-q1-planning',   'tl-pm-q1', 'Planning',    '#64748B', 0, 0, datetime('now', '-30 days'), datetime('now', '-30 days')),
+  ('s-q1-inprogress', 'tl-pm-q1', 'In Progress', '#3B82F6', 0, 1, datetime('now', '-30 days'), datetime('now', '-30 days')),
+  ('s-q1-blockers',   'tl-pm-q1', 'Blockers',    '#EF4444', 0, 2, datetime('now', '-30 days'), datetime('now', '-30 days')),
+  ('s-q1-done',       'tl-pm-q1', 'Done',        '#22C55E', 1, 3, datetime('now', '-30 days'), datetime('now', '-30 days')),
+  ('s-q1-deferred',   'tl-pm-q1', 'Deferred',    '#F59E0B', 1, 4, datetime('now', '-30 days'), datetime('now', '-30 days')),
+  ('s-q1-cancelled',  'tl-pm-q1', 'Cancelled',   '#78716C', 1, 5, datetime('now', '-30 days'), datetime('now', '-30 days'));
+
+-- Sales Kick Off (Default statuses)
+INSERT INTO statuses (id, timeline_id, name, color, is_closed, position, created_at, updated_at) VALUES
+  ('s-sko-planning',   'tl-pm-sko', 'Planning',    '#64748B', 0, 0, datetime('now', '-14 days'), datetime('now', '-14 days')),
+  ('s-sko-inprogress', 'tl-pm-sko', 'In Progress', '#3B82F6', 0, 1, datetime('now', '-14 days'), datetime('now', '-14 days')),
+  ('s-sko-done',       'tl-pm-sko', 'Done',        '#22C55E', 1, 2, datetime('now', '-14 days'), datetime('now', '-14 days'));
+
+-- Q2 Workload (Workload statuses, archived timeline)
+INSERT INTO statuses (id, timeline_id, name, color, is_closed, position, created_at, updated_at) VALUES
+  ('s-q2-planning',   'tl-pm-q2', 'Planning',    '#64748B', 0, 0, datetime('now', '-180 days'), datetime('now', '-180 days')),
+  ('s-q2-inprogress', 'tl-pm-q2', 'In Progress', '#3B82F6', 0, 1, datetime('now', '-180 days'), datetime('now', '-180 days')),
+  ('s-q2-blockers',   'tl-pm-q2', 'Blockers',    '#EF4444', 0, 2, datetime('now', '-180 days'), datetime('now', '-180 days')),
+  ('s-q2-done',       'tl-pm-q2', 'Done',        '#22C55E', 1, 3, datetime('now', '-180 days'), datetime('now', '-180 days')),
+  ('s-q2-deferred',   'tl-pm-q2', 'Deferred',    '#F59E0B', 1, 4, datetime('now', '-180 days'), datetime('now', '-180 days')),
+  ('s-q2-cancelled',  'tl-pm-q2', 'Cancelled',   '#78716C', 1, 5, datetime('now', '-180 days'), datetime('now', '-180 days'));
+
+-- Right to Win Initiative (Default statuses)
+INSERT INTO statuses (id, timeline_id, name, color, is_closed, position, created_at, updated_at) VALUES
+  ('s-rtw-planning',   'tl-pb-rtw', 'Planning',    '#64748B', 0, 0, datetime('now', '-120 days'), datetime('now', '-120 days')),
+  ('s-rtw-inprogress', 'tl-pb-rtw', 'In Progress', '#3B82F6', 0, 1, datetime('now', '-120 days'), datetime('now', '-120 days')),
+  ('s-rtw-done',       'tl-pb-rtw', 'Done',        '#22C55E', 1, 2, datetime('now', '-120 days'), datetime('now', '-120 days'));
+
+-- Displacement GTM (Default statuses)
+INSERT INTO statuses (id, timeline_id, name, color, is_closed, position, created_at, updated_at) VALUES
+  ('s-gtm-planning',   'tl-pb-gtm', 'Planning',    '#64748B', 0, 0, datetime('now', '-150 days'), datetime('now', '-150 days')),
+  ('s-gtm-inprogress', 'tl-pb-gtm', 'In Progress', '#3B82F6', 0, 1, datetime('now', '-150 days'), datetime('now', '-150 days')),
+  ('s-gtm-done',       'tl-pb-gtm', 'Done',        '#22C55E', 1, 2, datetime('now', '-150 days'), datetime('now', '-150 days'));
+
+-- Web Site Rebrand (Workload statuses)
+INSERT INTO statuses (id, timeline_id, name, color, is_closed, position, created_at, updated_at) VALUES
+  ('s-reb-planning',   'tl-mcf-rebrand', 'Planning',    '#64748B', 0, 0, datetime('now', '-60 days'), datetime('now', '-60 days')),
+  ('s-reb-inprogress', 'tl-mcf-rebrand', 'In Progress', '#3B82F6', 0, 1, datetime('now', '-60 days'), datetime('now', '-60 days')),
+  ('s-reb-blockers',   'tl-mcf-rebrand', 'Blockers',    '#EF4444', 0, 2, datetime('now', '-60 days'), datetime('now', '-60 days')),
+  ('s-reb-done',       'tl-mcf-rebrand', 'Done',        '#22C55E', 1, 3, datetime('now', '-60 days'), datetime('now', '-60 days')),
+  ('s-reb-deferred',   'tl-mcf-rebrand', 'Deferred',    '#F59E0B', 1, 4, datetime('now', '-60 days'), datetime('now', '-60 days')),
+  ('s-reb-cancelled',  'tl-mcf-rebrand', 'Cancelled',   '#78716C', 1, 5, datetime('now', '-60 days'), datetime('now', '-60 days'));
+````
+
+## File: packages/api/sample_data/08_activity_assignments.sql
+````sql
+-- Activity assignments: links activities to team members.
+-- Q1 Workload: mostly single-person. SKO: multi-person. Others: single.
+
+-- Q1 Workload
+INSERT INTO activity_assignments (activity_id, team_member_id) VALUES
+  ('a-q1-01', 'tm-pm-brian'),
+  ('a-q1-02', 'tm-pm-brian'),
+  ('a-q1-03', 'tm-pm-lindsay'),
+  ('a-q1-04', 'tm-pm-erik'),
+  ('a-q1-05', 'tm-pm-erik'),
+  ('a-q1-06', 'tm-pm-brian'),
+  ('a-q1-07', 'tm-pm-michelle'),
+  ('a-q1-08', 'tm-pm-brian'),
+  ('a-q1-09', 'tm-pm-lindsay'),
+  ('a-q1-10', 'tm-pm-michelle'),
+  ('a-q1-11', 'tm-pm-lindsay'),
+  ('a-q1-12', 'tm-pm-erik'),
+  ('a-q1-13', 'tm-pm-brian'),
+  ('a-q1-14', 'tm-pm-erik'),
+  ('a-q1-15', 'tm-pm-michelle'),
+  ('a-q1-16', 'tm-pm-brian'),
+  ('a-q1-17', 'tm-pm-erik'),
+  ('a-q1-18', 'tm-pm-brian'),
+  ('a-q1-19', 'tm-pm-lindsay'),
+  ('a-q1-20', 'tm-pm-brian');
+
+-- Sales Kick Off (multi-person assignments)
+INSERT INTO activity_assignments (activity_id, team_member_id) VALUES
+  ('a-sko-01', 'tm-pm-erik'),
+  ('a-sko-01', 'tm-pm-brian'),
+  ('a-sko-02', 'tm-pm-brian'),
+  ('a-sko-02', 'tm-pm-erik'),
+  ('a-sko-02', 'tm-pm-lindsay'),
+  ('a-sko-03', 'tm-pm-erik'),
+  ('a-sko-03', 'tm-pm-brian'),
+  ('a-sko-04', 'tm-pm-lindsay'),
+  ('a-sko-04', 'tm-pm-michelle'),
+  ('a-sko-05', 'tm-pm-brian'),
+  ('a-sko-05', 'tm-pm-erik'),
+  ('a-sko-06', 'tm-pm-michelle'),
+  ('a-sko-06', 'tm-pm-contractor'),
+  ('a-sko-07', 'tm-pm-brian'),
+  ('a-sko-07', 'tm-pm-erik'),
+  ('a-sko-08', 'tm-pm-lindsay'),
+  ('a-sko-08', 'tm-pm-contractor'),
+  ('a-sko-09', 'tm-pm-erik'),
+  ('a-sko-09', 'tm-pm-brian'),
+  ('a-sko-10', 'tm-pm-michelle'),
+  ('a-sko-10', 'tm-pm-lindsay');
+
+-- Q2 Workload
+INSERT INTO activity_assignments (activity_id, team_member_id) VALUES
+  ('a-q2-01', 'tm-pm-brian'),
+  ('a-q2-02', 'tm-pm-erik'),
+  ('a-q2-03', 'tm-pm-lindsay'),
+  ('a-q2-04', 'tm-pm-brian'),
+  ('a-q2-05', 'tm-pm-michelle');
+
+-- Right to Win Initiative
+INSERT INTO activity_assignments (activity_id, team_member_id) VALUES
+  ('a-rtw-01', 'tm-pb-dan'),
+  ('a-rtw-02', 'tm-pb-kristen'),
+  ('a-rtw-03', 'tm-pb-brian'),
+  ('a-rtw-04', 'tm-pb-codi');
+
+-- Displacement GTM
+INSERT INTO activity_assignments (activity_id, team_member_id) VALUES
+  ('a-gtm-01', 'tm-pb-codi'),
+  ('a-gtm-02', 'tm-pb-dan'),
+  ('a-gtm-03', 'tm-pb-jamie'),
+  ('a-gtm-04', 'tm-pb-scott');
+
+-- Web Site Rebrand
+INSERT INTO activity_assignments (activity_id, team_member_id) VALUES
+  ('a-reb-01', 'tm-mcf-scott'),
+  ('a-reb-02', 'tm-mcf-paula'),
+  ('a-reb-03', 'tm-mcf-corey'),
+  ('a-reb-04', 'tm-mcf-rick'),
+  ('a-reb-05', 'tm-mcf-dan'),
+  ('a-reb-06', 'tm-mcf-rick'),
+  ('a-reb-07', 'tm-mcf-corey'),
+  ('a-reb-08', 'tm-mcf-scott'),
+  ('a-reb-09', 'tm-mcf-paula'),
+  ('a-reb-10', 'tm-mcf-scott'),
+  ('a-reb-11', 'tm-mcf-paula'),
+  ('a-reb-12', 'tm-mcf-dan'),
+  ('a-reb-13', 'tm-mcf-rick'),
+  ('a-reb-14', 'tm-mcf-scott'),
+  ('a-reb-15', 'tm-mcf-rick');
+````
+
+## File: packages/api/sample_data/README.md
+````markdown
+# Sample Data
+
+SQL files that populate the database with realistic test data. Files are numbered to respect FK insertion order.
+
+| File | Contents |
+|---|---|
+| `00_flush.sql` | Deletes all data in FK-safe order |
+| `01_users.sql` | 13 users (2 super admins) |
+| `02_teams.sql` | 3 teams (1 archived) |
+| `03_team_members.sql` | 16 members (1 external participant) |
+| `04_status_templates.sql` | 5 templates + 21 items |
+| `05_timelines.sql` | 6 timelines (1 archived) |
+| `06_statuses.sql` | Live statuses per timeline |
+| `07_activities.sql` | 58 activities |
+| `08_activity_assignments.sql` | Activity → member links |
+| `09_timeline_access.sql` | Timeline → member access |
+
+## Usage
+
+All files concatenated in order form a complete flush-and-reload script.
+
+**SQLite CLI:**
+```bash
+cat sample_data/*.sql | sqlite3 draba.db
+```
+
+**Go test:** See `internal/db/sample_data_test.go`.
+
+## Updating
+
+When a schema migration changes a table that has sample data:
+1. Edit only the affected file (e.g., add a column to `01_users.sql`)
+2. Run `go test ./internal/db/ -run TestSampleDataLoads` to verify
+
+See `docs/SAMPLE_DATA.md` for the full dataset specification and identity rules.
+
+## Credentials
+
+All user passwords: `password`
+````
+
 ## File: packages/api/ui/static/.gitkeep
 ````
 
@@ -11892,6 +12217,40 @@ DRABA_BASE_URL=                 # public URL of the server (used for OAuth callb
 ## Conventions
 See `docs/CONVENTIONS.md` for Go patterns, error handling, and testing conventions.
 See `skills/go-comments.md` for comment conventions (package headers, exported doc comments, when to use inline comments). Apply these whenever writing or editing Go code.
+````
+
+## File: packages/api/go.mod
+````
+module github.com/I0-1O/draba/packages/api
+
+go 1.24.0
+
+require (
+	github.com/golang-jwt/jwt/v5 v5.3.1
+	github.com/gorilla/websocket v1.5.3
+	github.com/jmoiron/sqlx v1.4.0
+	github.com/mattn/go-sqlite3 v1.14.22
+	github.com/oapi-codegen/runtime v1.4.0
+	github.com/stretchr/testify v1.11.1
+	golang.org/x/crypto v0.46.0
+	modernc.org/sqlite v1.34.5
+)
+
+require (
+	github.com/davecgh/go-spew v1.1.1 // indirect
+	github.com/dustin/go-humanize v1.0.1 // indirect
+	github.com/google/uuid v1.6.0 // indirect
+	github.com/mattn/go-isatty v0.0.20 // indirect
+	github.com/ncruces/go-strftime v1.0.0 // indirect
+	github.com/pmezard/go-difflib v1.0.0 // indirect
+	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
+	golang.org/x/exp v0.0.0-20230315142452-642cacee5cc0 // indirect
+	golang.org/x/sys v0.39.0 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
+	modernc.org/libc v1.61.6 // indirect
+	modernc.org/mathutil v1.7.1 // indirect
+	modernc.org/memory v1.8.0 // indirect
+)
 ````
 
 ## File: packages/shared/CLAUDE.md
@@ -23172,6 +23531,320 @@ components/kanban/
 5. **Configure pencil vs. full-card click** — v1 uses full-card click to open the edit panel; the hover pencil is optional polish, not required.
 ````
 
+## File: docs/SAMPLE_DATA.md
+````markdown
+# Sample Data Procedure
+
+Guide for generating and maintaining a sample data SQL script that can flush and reload the database with realistic test data. Run this procedure whenever the schema changes in a way that affects the sample dataset.
+
+## When to regenerate
+
+- A migration adds, removes, or renames a column used by sample data
+- A new table is added that should be populated for a realistic experience
+- Identity system colors or icons change
+- Status template structure changes
+
+## How to run
+
+Sample data lives in `packages/api/sample_data/` as numbered per-table SQL files. Files are concatenated in sort order to form a complete flush-and-reload script.
+
+```bash
+# SQLite CLI
+cat packages/api/sample_data/*.sql | sqlite3 draba.db
+
+# Verify
+go test ./internal/db/ -run TestSampleDataLoads
+```
+
+### Updating a single table
+
+When a schema change affects one table, edit only that file (e.g. add a column to `01_users.sql`). Run the test to verify. No need to regenerate the entire dataset.
+
+---
+
+## Data generation rules
+
+### Passwords
+
+All user passwords must be `password` (minimum 8 characters per the app's validation). Store the bcrypt hash of `password` at cost 12 (the project standard). Generate the hash once and reuse it across all user rows.
+
+Current hash: `$2a$12$WKzPgLht8GL4iR76X0JfYuFw.4GqjricAMaKQPvA7ae8hiJp225dG`
+
+### Identity fields (color + icon)
+
+Every record that has identity fields (`color` and `icon` columns) gets a randomly chosen color and icon, subject to these rules:
+
+| Entity | color | icon | Notes |
+|---|---|---|---|
+| Teams | Random hex from palette | Random Lucide icon or `__name_2__` | |
+| Timelines | Random hex from palette | Random Lucide icon or `__none__` | |
+| Activities | Random hex from palette | Random Lucide icon or `__none__` | |
+| Users | Random hex from palette | `__name_words__` | Always use `__name_words__` for users |
+| Team members | Random hex from palette | `__name_words__` | Always use `__name_words__` for members |
+
+**Color palette** (16 colors, store as hex):
+
+| ID | Hex |
+|---|---|
+| teal | `#288C9B` |
+| cyan | `#06B6D4` |
+| blue | `#3B82F6` |
+| indigo | `#6366F1` |
+| violet | `#8B5CF6` |
+| purple | `#A855F7` |
+| pink | `#EC4899` |
+| rose | `#F43F5E` |
+| red | `#EF4444` |
+| orange | `#F97316` |
+| amber | `#F59E0B` |
+| yellow | `#EAB308` |
+| lime | `#84CC16` |
+| green | `#22C55E` |
+| slate | `#64748B` |
+| stone | `#78716C` |
+
+**Icon options for non-user/member entities** (pick from 64 Lucide IDs):
+`activity`, `archive`, `award`, `bar-chart`, `bell`, `bookmark`, `briefcase`, `calendar`, `check-circle`, `clipboard`, `clock`, `cloud`, `code`, `coffee`, `compass`, `cpu`, `database`, `download`, `edit`, `eye`, `file-text`, `filter`, `flag`, `folder`, `git-branch`, `globe`, `grid`, `heart`, `help-circle`, `home`, `info`, `layers`, `link`, `list`, `lock`, `mail`, `map`, `message-circle`, `moon`, `package`, `pencil`, `phone`, `pie-chart`, `plug`, `refresh-cw`, `search`, `server`, `settings`, `share`, `shield`, `star`, `sun`, `tag`, `target`, `terminal`, `trash`, `trending-up`, `upload`, `user`, `users`, `wifi`, `zap`, `alert-circle`, `copy`
+
+Or use the special tokens: `__none__` (color only), `__name_1__` (first letter), `__name_2__` (first two letters), `__name_words__` (initials).
+
+### IDs
+
+All IDs are UUIDs (TEXT). Generate deterministic UUIDs for sample data so the script is idempotent.
+
+### Timestamps
+
+Use relative dates anchored to "now" so the data always looks current:
+- `created_at` / `joined_at`: spread across the past few months
+- Timeline `start_date` / `end_date`: see per-timeline specs below
+- Activity date ranges: distributed within their timeline's window
+
+### Deletion order (flush)
+
+See `sample_data/00_flush.sql` — deletes all data in reverse FK dependency order. Tables NOT flushed: `schema_migrations`, `instance_settings`, `saved_filters`.
+
+---
+
+## Dataset specification
+
+### Super admins
+
+Set `is_superadmin = 1` on these users:
+
+| Name | Email |
+|---|---|
+| Brian Rieb | brian@rieb.cc |
+| Scott Fitzgerald | scott@fitzgerald.example |
+
+### Users
+
+Create a user row for every person referenced below. Each user gets:
+- Deterministic UUID
+- Email derived from name (e.g. `brian@rieb.cc` for Brian, `lindsay.k@example.com` for Lindsay K.)
+- `password_hash`: bcrypt of `pass`
+- `color`: random hex from palette
+- `icon`: `__name_words__`
+
+Full user list (deduplicated across all teams):
+- Brian R (super admin)
+- Scott F (super admin)
+- Lindsay K.
+- Erik B
+- Michelle T
+- Codi K
+- Dan S
+- Kristen K
+- Jamie F
+- Paula H
+- Corey F
+- Dan B
+- Rick S
+
+### Teams
+
+#### 1. Product Marketing
+
+- **Slug**: `product-marketing`
+- **Identity**: random color + random icon
+- **Members**:
+
+| Person | Role | Notes |
+|---|---|---|
+| Brian R | `admin` | |
+| Lindsay K | `member` | |
+| Erik B | `admin` | |
+| Michelle T | `member` | |
+| Contractor | `member` | Participant: `user_id = NULL`, `display_name = 'Contractor'` |
+
+- **Status templates**:
+  - **Default**: Planning, In Progress, Done
+  - **Workload**: Planning, In Progress, Blockers, Done, Deferred, Cancelled
+
+- **Timelines**:
+
+  **Q1 Workload**
+  - 3-month window (e.g. now − 1 month → now + 2 months)
+  - ~20 activities: PMM work (competitive analysis, messaging docs, launch plans, analyst briefings, content reviews, etc.)
+  - Most activities assigned to one person
+  - Uses **Workload** statuses
+  - Distribute statuses realistically (some done, some in progress, a few planning)
+
+  **Sales Kick Off**
+  - 2-month window
+  - ~10 activities: sales enablement prep (deck creation, battle cards, demo scripts, training sessions, etc.)
+  - Activities assigned to multiple people
+  - Uses **Default** statuses
+
+  **Q2 Workload** *(archived)*
+  - 3-month window in the past (set `archived_at`)
+  - ~5 activities: high-level PMM tasks
+  - Most assigned to one person
+  - Uses **Workload** statuses
+
+#### 2. P&B Tiger Team *(archived)*
+
+- **Slug**: `pb-tiger-team`
+- **Identity**: random color + random icon
+- **`archived_at`**: set to a past date
+- **Members**:
+
+| Person | Role |
+|---|---|
+| Brian R | `admin` |
+| Scott F | `member` |
+| Codi K | `admin` |
+| Dan S | `member` |
+| Kristen K | `member` |
+| Jamie F | `member` |
+
+Note: Kristen K is described as a "participant" in the brief, but the schema only supports `admin` and `member` roles. External participants use `user_id = NULL`. Since Kristen is a named user, she is a `member`.
+
+- **Status templates**:
+  - **Default**: Planning, In Progress, Done
+
+- **Timelines**:
+
+  **Right to Win Initiative**
+  - 2-month window
+  - ~4 activities: researching and presenting the right-to-win for a product
+  - Uses **Default** statuses
+
+  **Displacement GTM**
+  - 3-month window
+  - ~4 activities: building a GTM for a displacement play, sales enablement
+  - Uses **Default** statuses
+
+#### 3. Marketing Cross Functional
+
+- **Slug**: `marketing-cross-functional`
+- **Identity**: random color + random icon
+- **Members**:
+
+| Person | Role |
+|---|---|
+| Scott F | `admin` |
+| Paula H | `admin` |
+| Corey F | `member` |
+| Dan B | `member` |
+| Rick S | `member` |
+
+- **Status templates**:
+  - **Default**: Planning, In Progress, Done
+  - **Workload**: Planning, In Progress, Blockers, Done, Deferred, Cancelled
+
+- **Timelines**:
+
+  **Web Site Rebrand**
+  - 6-month window
+  - ~15 activities: rebranding and rebuilding the corporate website (design system, content migration, SEO audit, stakeholder reviews, launch prep, etc.)
+  - Uses **Workload** statuses
+
+---
+
+## Activity content guidelines
+
+When generating activity titles and descriptions, make them sound like real PMM / marketing work:
+
+- **PMM activities**: Competitive battlecard update, Analyst briefing prep, Q1 messaging framework, Product launch checklist, Win/loss interview synthesis, Pricing positioning doc, Sales one-pager refresh
+- **Sales enablement**: SKO keynote deck, Demo environment setup, Objection handling workshop, New rep onboarding kit, Customer story video
+- **Website/brand**: Brand guidelines v2, Homepage hero redesign, SEO keyword audit, Content migration plan, Analytics tagging spec, Stakeholder review meeting, Accessibility audit, Launch readiness checklist
+
+Activities should have realistic date ranges (a few days to a few weeks each), spread across their timeline window without excessive overlap.
+
+---
+
+## Tags
+
+Each team has its own tag vocabulary. Tags are team-scoped (`team_id`) and referenced from `activity_tags` via `tag_id`.
+
+### Product Marketing tags
+`urgent`, `design`, `content`, `research`, `launch`, `competitive`, `review`, `blocked`
+
+### P&B Tiger Team tags
+`positioning`, `strategy`, `research`, `competitive`, `enablement`, `executive`
+
+### Marketing Cross Functional tags
+`design`, `seo`, `analytics`, `brand`, `content`, `launch`
+
+A representative subset of activities across all timelines is tagged. Coverage is intentionally partial — not every activity is tagged, mirroring real-world usage.
+
+---
+
+## Activity parent-child relationships
+
+A few natural sub-task pairs are set via `parent_activity_id`:
+
+| Child activity | Parent activity | Rationale |
+|---|---|---|
+| Competitive battlecard refresh (a-q1-02) | Competitive landscape analysis (a-q1-01) | Battlecard updates follow from the research |
+| AR/PR coordination — Q1 launch (a-q1-14) | Product launch checklist — v4.2 (a-q1-06) | PR work is a sub-track of launch prep |
+| Demo environment setup (a-q1-17) | Product launch checklist — v4.2 (a-q1-06) | Demo env is a launch dependency |
+| Sales training session — pricing (a-sko-07) | Objection handling playbook (a-sko-05) | Training draws on the playbook |
+| Product pages rewrite (a-reb-08) | Design system v2 (a-reb-02) | Pages are implemented against the design system |
+| Blog template redesign (a-reb-09) | Design system v2 (a-reb-02) | Same — template uses design system components |
+
+---
+
+## Schema reference (current as of migration 017)
+
+This section summarizes the tables and columns that sample data touches. Regenerate this section if migrations change the schema.
+
+### Core tables
+
+```
+users (id, email, password_hash, display_name, avatar_url, color, icon, is_superadmin, created_at, updated_at, archived_at)
+teams (id, name, slug, color, icon, description, notes, archived_at, invite_link_token, created_at, updated_at)
+team_members (id, team_id, user_id, display_name, role, color, icon, joined_at, archived_at)
+timelines (id, team_id, name, start_date, end_date, description, notes, color, icon, share_token, ical_token, created_by, created_at, updated_at, archived_at)
+activities (id, timeline_id, title, description, icon, color, start_at, end_at, all_day, status_id, parent_activity_id, percent_complete, location, url, created_by, created_at, updated_at, archived_at)
+tags (id, team_id, name, color, created_by, created_at)
+```
+
+### Junction / child tables
+
+```
+activity_assignments (activity_id, team_member_id)
+activity_tags (activity_id, tag_id)
+timeline_access (timeline_id, team_member_id, role)
+status_templates (id, team_id, name, description, position, created_by, created_at, updated_at)
+status_template_items (id, template_id, name, color, icon, is_closed, position)
+statuses (id, timeline_id, name, color, icon, is_closed, position, created_at, updated_at)
+```
+
+### Tables NOT in sample data scope
+
+```
+schema_migrations — managed by the migration runner
+instance_settings — configured per deployment
+saved_filters — user-generated at runtime
+calendar_connections — requires real OAuth credentials
+api_tokens — generated at runtime
+invites — generated at runtime
+password_reset_tokens — generated at runtime
+user_preferences — set by users at runtime
+```
+````
+
 ## File: packages/api/cmd/draba/main.go
 ````go
 // Command draba is the API server entry point. It wires repositories,
@@ -25359,329 +26032,207 @@ CREATE TABLE activity_tags (
 ALTER TABLE saved_filters ADD COLUMN is_team_filter BOOLEAN NOT NULL DEFAULT 0;
 ````
 
-## File: packages/api/sample_data/01_users.sql
+## File: packages/api/sample_data/00_flush.sql
 ````sql
--- Users: 13 total (2 super admins).
--- Password for all users: "password" (bcrypt cost 12).
--- Icon: __name_words__ (initials badge) for all users.
+-- Flush all sample-data tables in FK-safe (reverse dependency) order.
+-- Tables NOT flushed: schema_migrations, instance_settings, saved_filters.
 
-INSERT INTO users (id, email, password_hash, display_name, color, icon, is_superadmin, created_at, updated_at) VALUES
-  ('u-brian-rieb',        'brian@rieb.cc',             '$2a$12$WKzPgLht8GL4iR76X0JfYuFw.4GqjricAMaKQPvA7ae8hiJp225dG', 'Brian Rieb',        '#3B82F6', '__name_words__', 1, datetime('now', '-90 days'), datetime('now', '-1 days')),
-  ('u-scott-fitzgerald',  'scott@fitzgerald.example',  '$2a$12$WKzPgLht8GL4iR76X0JfYuFw.4GqjricAMaKQPvA7ae8hiJp225dG', 'Scott Fitzgerald',  '#8B5CF6', '__name_words__', 1, datetime('now', '-90 days'), datetime('now', '-2 days')),
-  ('u-lindsay-k',         'lindsay.k@example.com',     '$2a$12$WKzPgLht8GL4iR76X0JfYuFw.4GqjricAMaKQPvA7ae8hiJp225dG', 'Lindsay K.',        '#EC4899', '__name_words__', 0, datetime('now', '-85 days'), datetime('now', '-3 days')),
-  ('u-erik-b',            'erik.b@example.com',        '$2a$12$WKzPgLht8GL4iR76X0JfYuFw.4GqjricAMaKQPvA7ae8hiJp225dG', 'Erik B',            '#F97316', '__name_words__', 0, datetime('now', '-85 days'), datetime('now', '-3 days')),
-  ('u-michelle-t',        'michelle.t@example.com',    '$2a$12$WKzPgLht8GL4iR76X0JfYuFw.4GqjricAMaKQPvA7ae8hiJp225dG', 'Michelle T',        '#22C55E', '__name_words__', 0, datetime('now', '-80 days'), datetime('now', '-5 days')),
-  ('u-codi-k',            'codi.k@example.com',        '$2a$12$WKzPgLht8GL4iR76X0JfYuFw.4GqjricAMaKQPvA7ae8hiJp225dG', 'Codi K',            '#06B6D4', '__name_words__', 0, datetime('now', '-88 days'), datetime('now', '-10 days')),
-  ('u-dan-s',             'dan.s@example.com',         '$2a$12$WKzPgLht8GL4iR76X0JfYuFw.4GqjricAMaKQPvA7ae8hiJp225dG', 'Dan S',             '#F43F5E', '__name_words__', 0, datetime('now', '-88 days'), datetime('now', '-10 days')),
-  ('u-kristen-k',         'kristen.k@example.com',     '$2a$12$WKzPgLht8GL4iR76X0JfYuFw.4GqjricAMaKQPvA7ae8hiJp225dG', 'Kristen K',         '#F59E0B', '__name_words__', 0, datetime('now', '-88 days'), datetime('now', '-10 days')),
-  ('u-jamie-f',           'jamie.f@example.com',       '$2a$12$WKzPgLht8GL4iR76X0JfYuFw.4GqjricAMaKQPvA7ae8hiJp225dG', 'Jamie F',           '#84CC16', '__name_words__', 0, datetime('now', '-88 days'), datetime('now', '-10 days')),
-  ('u-paula-h',           'paula.h@example.com',       '$2a$12$WKzPgLht8GL4iR76X0JfYuFw.4GqjricAMaKQPvA7ae8hiJp225dG', 'Paula H',           '#A855F7', '__name_words__', 0, datetime('now', '-75 days'), datetime('now', '-4 days')),
-  ('u-corey-f',           'corey.f@example.com',       '$2a$12$WKzPgLht8GL4iR76X0JfYuFw.4GqjricAMaKQPvA7ae8hiJp225dG', 'Corey F',           '#EF4444', '__name_words__', 0, datetime('now', '-75 days'), datetime('now', '-6 days')),
-  ('u-dan-b',             'dan.b@example.com',         '$2a$12$WKzPgLht8GL4iR76X0JfYuFw.4GqjricAMaKQPvA7ae8hiJp225dG', 'Dan B',             '#6366F1', '__name_words__', 0, datetime('now', '-75 days'), datetime('now', '-6 days')),
-  ('u-rick-s',            'rick.s@example.com',        '$2a$12$WKzPgLht8GL4iR76X0JfYuFw.4GqjricAMaKQPvA7ae8hiJp225dG', 'Rick S',            '#288C9B', '__name_words__', 0, datetime('now', '-75 days'), datetime('now', '-7 days'));
+DELETE FROM activity_assignments;
+DELETE FROM activity_tags;
+DELETE FROM activities;
+DELETE FROM tags;
+DELETE FROM statuses;
+DELETE FROM status_template_items;
+DELETE FROM status_templates;
+DELETE FROM timeline_access;
+DELETE FROM timelines;
+DELETE FROM team_members;
+DELETE FROM teams;
+DELETE FROM user_preferences;
+DELETE FROM password_reset_tokens;
+DELETE FROM invites;
+DELETE FROM api_tokens;
+DELETE FROM calendar_connections;
+DELETE FROM users;
 ````
 
-## File: packages/api/sample_data/02_teams.sql
+## File: packages/api/sample_data/03_team_members.sql
 ````sql
--- Teams: 3 total (1 archived).
+-- Team members: 16 total (includes 1 external participant with user_id=NULL).
+-- Icon: __name_words__ (initials badge) for all members.
 
-INSERT INTO teams (id, name, slug, color, icon, created_at, updated_at) VALUES
-  ('t-product-marketing',    'Product Marketing',          'product-marketing',          '#F97316', 'briefcase', datetime('now', '-90 days'), datetime('now', '-1 days')),
-  ('t-pb-tiger-team',        'P&B Tiger Team',             'pb-tiger-team',              '#EF4444', 'target',    datetime('now', '-88 days'), datetime('now', '-30 days')),
-  ('t-marketing-cross-func', 'Marketing Cross Functional', 'marketing-cross-functional', '#8B5CF6', 'globe',     datetime('now', '-75 days'), datetime('now', '-2 days'));
+-- Product Marketing (5 members: 2 admin, 2 member, 1 external participant)
+INSERT INTO team_members (id, team_id, user_id, display_name, role, color, icon, joined_at) VALUES
+  ('tm-pm-brian',      't-product-marketing', 'u-brian-rieb',  NULL,         'admin',  '#3B82F6', '__name_words__', datetime('now', '-90 days')),
+  ('tm-pm-lindsay',    't-product-marketing', 'u-lindsay-k',  NULL,         'member', '#EC4899', '__name_words__', datetime('now', '-85 days')),
+  ('tm-pm-erik',       't-product-marketing', 'u-erik-b',     NULL,         'admin',  '#F97316', '__name_words__', datetime('now', '-85 days')),
+  ('tm-pm-michelle',   't-product-marketing', 'u-michelle-t', NULL,         'member', '#22C55E', '__name_words__', datetime('now', '-80 days')),
+  ('tm-pm-contractor', 't-product-marketing', NULL,           'Contractor', 'member', '#64748B', '__name_words__', datetime('now', '-70 days'));
 
-UPDATE teams SET archived_at = datetime('now', '-30 days') WHERE id = 't-pb-tiger-team';
+-- P&B Tiger Team (6 members: 2 admin, 4 member)
+INSERT INTO team_members (id, team_id, user_id, display_name, role, color, icon, joined_at) VALUES
+  ('tm-pb-brian',   't-pb-tiger-team', 'u-brian-rieb',       NULL, 'admin',  '#3B82F6', '__name_words__', datetime('now', '-88 days')),
+  ('tm-pb-scott',   't-pb-tiger-team', 'u-scott-fitzgerald', NULL, 'member', '#8B5CF6', '__name_words__', datetime('now', '-88 days')),
+  ('tm-pb-codi',    't-pb-tiger-team', 'u-codi-k',          NULL, 'admin',  '#06B6D4', '__name_words__', datetime('now', '-88 days')),
+  ('tm-pb-dan',     't-pb-tiger-team', 'u-dan-s',           NULL, 'member', '#F43F5E', '__name_words__', datetime('now', '-88 days')),
+  ('tm-pb-kristen', 't-pb-tiger-team', 'u-kristen-k',       NULL, 'member', '#F59E0B', '__name_words__', datetime('now', '-88 days')),
+  ('tm-pb-jamie',   't-pb-tiger-team', 'u-jamie-f',         NULL, 'member', '#84CC16', '__name_words__', datetime('now', '-88 days'));
+
+-- Marketing Cross Functional (5 members: 2 admin, 3 member)
+INSERT INTO team_members (id, team_id, user_id, display_name, role, color, icon, joined_at) VALUES
+  ('tm-mcf-scott', 't-marketing-cross-func', 'u-scott-fitzgerald', NULL, 'admin',  '#8B5CF6', '__name_words__', datetime('now', '-75 days')),
+  ('tm-mcf-paula', 't-marketing-cross-func', 'u-paula-h',         NULL, 'admin',  '#A855F7', '__name_words__', datetime('now', '-75 days')),
+  ('tm-mcf-corey', 't-marketing-cross-func', 'u-corey-f',         NULL, 'member', '#EF4444', '__name_words__', datetime('now', '-75 days')),
+  ('tm-mcf-dan',   't-marketing-cross-func', 'u-dan-b',           NULL, 'member', '#6366F1', '__name_words__', datetime('now', '-75 days')),
+  ('tm-mcf-rick',  't-marketing-cross-func', 'u-rick-s',          NULL, 'member', '#288C9B', '__name_words__', datetime('now', '-75 days'));
 ````
 
-## File: packages/api/sample_data/04_status_templates.sql
+## File: packages/api/sample_data/07_activities.sql
 ````sql
--- Status templates and their items.
--- 5 templates total: Default + Workload for PM and MCF, Default for P&B.
+-- Activities: 58 total across 6 timelines.
+-- Columns: id, timeline_id, title, description, color, icon,
+--          start_at, end_at, status_id,
+--          parent_activity_id (NULL or sibling ID for sub-tasks),
+--          percent_complete (0-100),
+--          created_by, created_at, updated_at
 
--- Product Marketing: Default
-INSERT INTO status_templates (id, team_id, name, position, created_by, created_at, updated_at) VALUES
-  ('st-pm-default', 't-product-marketing', 'Default', 0, 'u-brian-rieb', datetime('now', '-90 days'), datetime('now', '-90 days'));
-INSERT INTO status_template_items (id, template_id, name, color, is_closed, position) VALUES
-  ('sti-pm-d-planning',   'st-pm-default', 'Planning',    '#64748B', 0, 0),
-  ('sti-pm-d-inprogress', 'st-pm-default', 'In Progress', '#3B82F6', 0, 1),
-  ('sti-pm-d-done',       'st-pm-default', 'Done',        '#22C55E', 1, 2);
+-- ── Q1 Workload (20 activities, Workload statuses) ───────────────────────────
+-- Parent-child pairs:
+--   a-q1-02 (battlecard refresh) → a-q1-01 (competitive landscape)
+--   a-q1-14 (AR/PR coordination) → a-q1-06 (launch checklist)
+--   a-q1-17 (demo env setup)     → a-q1-06 (launch checklist)
 
--- Product Marketing: Workload
-INSERT INTO status_templates (id, team_id, name, position, created_by, created_at, updated_at) VALUES
-  ('st-pm-workload', 't-product-marketing', 'Workload', 1, 'u-brian-rieb', datetime('now', '-90 days'), datetime('now', '-90 days'));
-INSERT INTO status_template_items (id, template_id, name, color, is_closed, position) VALUES
-  ('sti-pm-w-planning',   'st-pm-workload', 'Planning',    '#64748B', 0, 0),
-  ('sti-pm-w-inprogress', 'st-pm-workload', 'In Progress', '#3B82F6', 0, 1),
-  ('sti-pm-w-blockers',   'st-pm-workload', 'Blockers',    '#EF4444', 0, 2),
-  ('sti-pm-w-done',       'st-pm-workload', 'Done',        '#22C55E', 1, 3),
-  ('sti-pm-w-deferred',   'st-pm-workload', 'Deferred',    '#F59E0B', 1, 4),
-  ('sti-pm-w-cancelled',  'st-pm-workload', 'Cancelled',   '#78716C', 1, 5);
+INSERT INTO activities (id, timeline_id, title, description, color, icon, start_at, end_at, status_id, parent_activity_id, percent_complete, created_by, created_at, updated_at) VALUES
+  ('a-q1-01', 'tl-pm-q1', 'Competitive landscape analysis',      'Deep-dive on top 5 competitors — positioning, pricing, recent launches.', '#3B82F6', 'search',         datetime('now', '-28 days'), datetime('now', '-18 days'), 's-q1-done',       NULL,       100, 'u-brian-rieb',  datetime('now', '-28 days'), datetime('now', '-18 days')),
+  ('a-q1-02', 'tl-pm-q1', 'Competitive battlecard refresh',      'Update sales battlecards with latest competitive intel.',                  '#06B6D4', 'shield',         datetime('now', '-20 days'), datetime('now', '-12 days'), 's-q1-done',       'a-q1-01',  100, 'u-brian-rieb',  datetime('now', '-20 days'), datetime('now', '-12 days')),
+  ('a-q1-03', 'tl-pm-q1', 'Q1 messaging framework',              'Core positioning and messaging for Q1 product launches.',                  '#8B5CF6', 'file-text',      datetime('now', '-25 days'), datetime('now', '-10 days'), 's-q1-done',       NULL,       100, 'u-lindsay-k',   datetime('now', '-25 days'), datetime('now', '-10 days')),
+  ('a-q1-04', 'tl-pm-q1', 'Analyst briefing prep — Gartner',     'Slide deck and talking points for Gartner analyst meeting.',               '#F97316', 'briefcase',      datetime('now', '-15 days'), datetime('now', '-8 days'),  's-q1-done',       NULL,       100, 'u-erik-b',      datetime('now', '-15 days'), datetime('now', '-8 days')),
+  ('a-q1-05', 'tl-pm-q1', 'Analyst briefing prep — Forrester',   'Deck and prep for Forrester wave discussion.',                             '#F97316', 'briefcase',      datetime('now', '-12 days'), datetime('now', '-5 days'),  's-q1-done',       NULL,       100, 'u-erik-b',      datetime('now', '-12 days'), datetime('now', '-5 days')),
+  ('a-q1-06', 'tl-pm-q1', 'Product launch checklist — v4.2',     'End-to-end launch readiness: docs, blog, enablement, PR.',                 '#22C55E', 'check-circle',   datetime('now', '-20 days'), datetime('now', '-3 days'),  's-q1-done',       NULL,       100, 'u-brian-rieb',  datetime('now', '-20 days'), datetime('now', '-3 days')),
+  ('a-q1-07', 'tl-pm-q1', 'Win/loss interview synthesis',        'Summarize Q4 win/loss interviews into themes and recommendations.',         '#EC4899', 'message-circle', datetime('now', '-18 days'), datetime('now', '-7 days'),  's-q1-done',       NULL,       100, 'u-michelle-t',  datetime('now', '-18 days'), datetime('now', '-7 days')),
+  ('a-q1-08', 'tl-pm-q1', 'Pricing positioning doc',             'Updated pricing rationale and competitive positioning matrix.',             '#F43F5E', 'trending-up',    datetime('now', '-10 days'), datetime('now', '+5 days'),  's-q1-inprogress', NULL,        60, 'u-brian-rieb',  datetime('now', '-10 days'), datetime('now', '-2 days')),
+  ('a-q1-09', 'tl-pm-q1', 'Sales one-pager refresh',             'Refresh the 2-sided sales leave-behind for Q1 messaging.',                 '#84CC16', 'file-text',      datetime('now', '-8 days'),  datetime('now', '+3 days'),  's-q1-inprogress', NULL,        45, 'u-lindsay-k',   datetime('now', '-8 days'),  datetime('now', '-2 days')),
+  ('a-q1-10', 'tl-pm-q1', 'Customer story — Acme Corp',          'Draft case study from Acme Corp expansion deal.',                          '#288C9B', 'star',           datetime('now', '-14 days'), datetime('now', '-4 days'),  's-q1-done',       NULL,       100, 'u-michelle-t',  datetime('now', '-14 days'), datetime('now', '-4 days')),
+  ('a-q1-11', 'tl-pm-q1', 'Content calendar planning',           'Map out blog, social, and email content for next 6 weeks.',                '#A855F7', 'calendar',       datetime('now', '-5 days'),  datetime('now', '+7 days'),  's-q1-inprogress', NULL,        50, 'u-lindsay-k',   datetime('now', '-5 days'),  datetime('now', '-1 days')),
+  ('a-q1-12', 'tl-pm-q1', 'Webinar script — platform overview',  'Script and slide deck for monthly product webinar.',                       '#6366F1', 'edit',           datetime('now', '-3 days'),  datetime('now', '+10 days'), 's-q1-planning',   NULL,         0, 'u-erik-b',      datetime('now', '-3 days'),  datetime('now', '-1 days')),
+  ('a-q1-13', 'tl-pm-q1', 'Partner co-marketing brief',          'Joint value prop and co-marketing plan with PartnerCo.',                   '#F59E0B', 'share',          datetime('now', '-7 days'),  datetime('now', '+4 days'),  's-q1-inprogress', NULL,        35, 'u-brian-rieb',  datetime('now', '-7 days'),  datetime('now', '-1 days')),
+  ('a-q1-14', 'tl-pm-q1', 'AR/PR coordination — Q1 launch',     'Coordinate PR release and analyst outreach for v4.2 launch.',              '#EF4444', 'globe',          datetime('now', '-6 days'),  datetime('now', '+5 days'),  's-q1-inprogress', 'a-q1-06',   40, 'u-erik-b',      datetime('now', '-6 days'),  datetime('now', '-1 days')),
+  ('a-q1-15', 'tl-pm-q1', 'Persona refresh workshop',            'Internal workshop to validate and update buyer personas.',                 '#78716C', 'users',          datetime('now', '+2 days'),  datetime('now', '+5 days'),  's-q1-planning',   NULL,         0, 'u-michelle-t',  datetime('now', '-2 days'),  datetime('now', '-1 days')),
+  ('a-q1-16', 'tl-pm-q1', 'ROI calculator update',               'Refresh the interactive ROI calculator with new benchmark data.',          '#06B6D4', 'pie-chart',      datetime('now', '+5 days'),  datetime('now', '+18 days'), 's-q1-planning',   NULL,         0, 'u-brian-rieb',  datetime('now', '-1 days'),  datetime('now', '-1 days')),
+  ('a-q1-17', 'tl-pm-q1', 'Demo environment setup',              'Provision and configure demo environment for Q1 launches.',                '#288C9B', 'server',         datetime('now', '-4 days'),  datetime('now', '+3 days'),  's-q1-blockers',   'a-q1-06',   30, 'u-erik-b',      datetime('now', '-4 days'),  datetime('now', '-1 days')),
+  ('a-q1-18', 'tl-pm-q1', 'Competitive teardown — NewCo launch', 'Rapid response analysis of NewCo product announcement.',                  '#EF4444', 'alert-circle',   datetime('now', '+7 days'),  datetime('now', '+14 days'), 's-q1-planning',   NULL,         0, 'u-brian-rieb',  datetime('now', '-1 days'),  datetime('now', '-1 days')),
+  ('a-q1-19', 'tl-pm-q1', 'Sales enablement newsletter — March', 'Monthly enablement digest: new assets, competitive updates, wins.',        '#22C55E', 'mail',           datetime('now', '+10 days'), datetime('now', '+14 days'), 's-q1-planning',   NULL,         0, 'u-lindsay-k',   datetime('now', '-1 days'),  datetime('now', '-1 days')),
+  ('a-q1-20', 'tl-pm-q1', 'Quarterly business review deck',      'PMM section of the QBR deck: pipeline impact, content metrics.',           '#F97316', 'bar-chart',      datetime('now', '+14 days'), datetime('now', '+21 days'), 's-q1-planning',   NULL,         0, 'u-brian-rieb',  datetime('now', '-1 days'),  datetime('now', '-1 days'));
 
--- P&B Tiger Team: Default
-INSERT INTO status_templates (id, team_id, name, position, created_by, created_at, updated_at) VALUES
-  ('st-pb-default', 't-pb-tiger-team', 'Default', 0, 'u-brian-rieb', datetime('now', '-88 days'), datetime('now', '-88 days'));
-INSERT INTO status_template_items (id, template_id, name, color, is_closed, position) VALUES
-  ('sti-pb-d-planning',   'st-pb-default', 'Planning',    '#64748B', 0, 0),
-  ('sti-pb-d-inprogress', 'st-pb-default', 'In Progress', '#3B82F6', 0, 1),
-  ('sti-pb-d-done',       'st-pb-default', 'Done',        '#22C55E', 1, 2);
+-- ── Sales Kick Off (10 activities, Default statuses) ─────────────────────────
+-- Parent-child pair:
+--   a-sko-07 (sales training — pricing) → a-sko-05 (objection handling playbook)
 
--- Marketing Cross Functional: Default
-INSERT INTO status_templates (id, team_id, name, position, created_by, created_at, updated_at) VALUES
-  ('st-mcf-default', 't-marketing-cross-func', 'Default', 0, 'u-scott-fitzgerald', datetime('now', '-75 days'), datetime('now', '-75 days'));
-INSERT INTO status_template_items (id, template_id, name, color, is_closed, position) VALUES
-  ('sti-mcf-d-planning',   'st-mcf-default', 'Planning',    '#64748B', 0, 0),
-  ('sti-mcf-d-inprogress', 'st-mcf-default', 'In Progress', '#3B82F6', 0, 1),
-  ('sti-mcf-d-done',       'st-mcf-default', 'Done',        '#22C55E', 1, 2);
+INSERT INTO activities (id, timeline_id, title, description, color, icon, start_at, end_at, status_id, parent_activity_id, percent_complete, created_by, created_at, updated_at) VALUES
+  ('a-sko-01', 'tl-pm-sko', 'SKO keynote deck',                    'Main stage presentation — product vision and roadmap.',                  '#3B82F6', 'star',           datetime('now', '+2 days'),  datetime('now', '+14 days'), 's-sko-inprogress', NULL,        55, 'u-erik-b',     datetime('now', '-10 days'), datetime('now', '-1 days')),
+  ('a-sko-02', 'tl-pm-sko', 'Competitive battle card workshop',    'Interactive session: how to use battlecards in live deals.',             '#EF4444', 'shield',         datetime('now', '+7 days'),  datetime('now', '+12 days'), 's-sko-planning',   NULL,         0, 'u-brian-rieb', datetime('now', '-10 days'), datetime('now', '-1 days')),
+  ('a-sko-03', 'tl-pm-sko', 'Demo script — enterprise tier',       'Step-by-step demo flow for enterprise prospects.',                       '#22C55E', 'code',           datetime('now', '+3 days'),  datetime('now', '+10 days'), 's-sko-inprogress', NULL,        40, 'u-erik-b',     datetime('now', '-8 days'),  datetime('now', '-1 days')),
+  ('a-sko-04', 'tl-pm-sko', 'New rep onboarding kit',              'Welcome pack: product overview, personas, competitive cheat sheet.',     '#F97316', 'package',        datetime('now', '+5 days'),  datetime('now', '+15 days'), 's-sko-planning',   NULL,         0, 'u-lindsay-k',  datetime('now', '-7 days'),  datetime('now', '-1 days')),
+  ('a-sko-05', 'tl-pm-sko', 'Objection handling playbook',         'Top 15 objections with response frameworks and proof points.',           '#8B5CF6', 'message-circle', datetime('now', '+8 days'),  datetime('now', '+18 days'), 's-sko-planning',   NULL,         0, 'u-brian-rieb', datetime('now', '-6 days'),  datetime('now', '-1 days')),
+  ('a-sko-06', 'tl-pm-sko', 'Customer story video — GlobalTech',   'Film and edit 3-minute customer testimonial video.',                     '#EC4899', 'eye',            datetime('now', '+1 days'),  datetime('now', '+20 days'), 's-sko-inprogress', NULL,        70, 'u-michelle-t', datetime('now', '-12 days'), datetime('now', '-1 days')),
+  ('a-sko-07', 'tl-pm-sko', 'Sales training session — pricing',    'Live training: positioning premium tier and handling price objections.', '#F59E0B', 'trending-up',    datetime('now', '+14 days'), datetime('now', '+16 days'), 's-sko-planning',   'a-sko-05',   0, 'u-brian-rieb', datetime('now', '-5 days'),  datetime('now', '-1 days')),
+  ('a-sko-08', 'tl-pm-sko', 'SKO swag and logistics',              'Coordinate branded materials, venue AV, and printed collateral.',        '#64748B', 'package',        datetime('now'),             datetime('now', '+25 days'), 's-sko-inprogress', NULL,        25, 'u-lindsay-k',  datetime('now', '-14 days'), datetime('now', '-1 days')),
+  ('a-sko-09', 'tl-pm-sko', 'Breakout session — vertical selling', 'Prep for healthcare and finserv vertical breakout sessions.',            '#06B6D4', 'layers',         datetime('now', '+10 days'), datetime('now', '+18 days'), 's-sko-planning',   NULL,         0, 'u-erik-b',     datetime('now', '-4 days'),  datetime('now', '-1 days')),
+  ('a-sko-10', 'tl-pm-sko', 'Post-SKO follow-up plan',             'Email sequences and resource hub for post-event reinforcement.',         '#84CC16', 'mail',           datetime('now', '+20 days'), datetime('now', '+30 days'), 's-sko-planning',   NULL,         0, 'u-michelle-t', datetime('now', '-3 days'),  datetime('now', '-1 days'));
 
--- Marketing Cross Functional: Workload
-INSERT INTO status_templates (id, team_id, name, position, created_by, created_at, updated_at) VALUES
-  ('st-mcf-workload', 't-marketing-cross-func', 'Workload', 1, 'u-scott-fitzgerald', datetime('now', '-75 days'), datetime('now', '-75 days'));
-INSERT INTO status_template_items (id, template_id, name, color, is_closed, position) VALUES
-  ('sti-mcf-w-planning',   'st-mcf-workload', 'Planning',    '#64748B', 0, 0),
-  ('sti-mcf-w-inprogress', 'st-mcf-workload', 'In Progress', '#3B82F6', 0, 1),
-  ('sti-mcf-w-blockers',   'st-mcf-workload', 'Blockers',    '#EF4444', 0, 2),
-  ('sti-mcf-w-done',       'st-mcf-workload', 'Done',        '#22C55E', 1, 3),
-  ('sti-mcf-w-deferred',   'st-mcf-workload', 'Deferred',    '#F59E0B', 1, 4),
-  ('sti-mcf-w-cancelled',  'st-mcf-workload', 'Cancelled',   '#78716C', 1, 5);
+-- ── Q2 Workload (5 activities, archived, Workload statuses) ──────────────────
+
+INSERT INTO activities (id, timeline_id, title, description, color, icon, start_at, end_at, status_id, parent_activity_id, percent_complete, created_by, created_at, updated_at) VALUES
+  ('a-q2-01', 'tl-pm-q2', 'Q2 product launch plan',           'High-level launch timeline and DRI assignments for Q2 releases.',     '#3B82F6', 'calendar',     datetime('now', '-175 days'), datetime('now', '-140 days'), 's-q2-done',     NULL, 100, 'u-brian-rieb', datetime('now', '-178 days'), datetime('now', '-140 days')),
+  ('a-q2-02', 'tl-pm-q2', 'Analyst day preparation',           'Materials and dry-run for annual analyst day event.',                 '#F97316', 'briefcase',    datetime('now', '-160 days'), datetime('now', '-130 days'), 's-q2-done',     NULL, 100, 'u-erik-b',     datetime('now', '-165 days'), datetime('now', '-130 days')),
+  ('a-q2-03', 'tl-pm-q2', 'Mid-year messaging audit',          'Review all external messaging for consistency with Q2 positioning.', '#EC4899', 'eye',          datetime('now', '-145 days'), datetime('now', '-115 days'), 's-q2-done',     NULL, 100, 'u-lindsay-k',  datetime('now', '-150 days'), datetime('now', '-115 days')),
+  ('a-q2-04', 'tl-pm-q2', 'Competitive intel digest — June',   'Monthly competitive summary for sales and leadership.',              '#EF4444', 'alert-circle', datetime('now', '-120 days'), datetime('now', '-100 days'), 's-q2-done',     NULL, 100, 'u-brian-rieb', datetime('now', '-125 days'), datetime('now', '-100 days')),
+  ('a-q2-05', 'tl-pm-q2', 'Customer advisory board planning',  'Agenda and invite list for H2 customer advisory board session.',     '#22C55E', 'users',        datetime('now', '-110 days'), datetime('now', '-92 days'),  's-q2-deferred', NULL,   0, 'u-michelle-t', datetime('now', '-115 days'), datetime('now', '-92 days'));
+
+-- ── Right to Win Initiative (4 activities, Default statuses) ─────────────────
+
+INSERT INTO activities (id, timeline_id, title, description, color, icon, start_at, end_at, status_id, parent_activity_id, percent_complete, created_by, created_at, updated_at) VALUES
+  ('a-rtw-01', 'tl-pb-rtw', 'Market sizing research',         'TAM/SAM/SOM analysis for the target segment.',                       '#3B82F6', 'pie-chart',      datetime('now', '-118 days'), datetime('now', '-100 days'), 's-rtw-done', NULL, 100, 'u-dan-s',     datetime('now', '-118 days'), datetime('now', '-100 days')),
+  ('a-rtw-02', 'tl-pb-rtw', 'Customer interview round',       'Interview 8 target-segment customers on needs and pain points.',     '#22C55E', 'message-circle', datetime('now', '-105 days'), datetime('now', '-85 days'),  's-rtw-done', NULL, 100, 'u-kristen-k', datetime('now', '-105 days'), datetime('now', '-85 days')),
+  ('a-rtw-03', 'tl-pb-rtw', 'Right-to-win framework doc',     'Synthesize research into the right-to-win positioning framework.',   '#F97316', 'file-text',      datetime('now', '-90 days'),  datetime('now', '-70 days'),  's-rtw-done', NULL, 100, 'u-brian-rieb', datetime('now', '-90 days'),  datetime('now', '-70 days')),
+  ('a-rtw-04', 'tl-pb-rtw', 'Leadership presentation',        'Present findings and recommendation to exec team.',                  '#8B5CF6', 'award',          datetime('now', '-72 days'),  datetime('now', '-62 days'),  's-rtw-done', NULL, 100, 'u-codi-k',    datetime('now', '-72 days'),  datetime('now', '-62 days'));
+
+-- ── Displacement GTM (4 activities, Default statuses) ────────────────────────
+
+INSERT INTO activities (id, timeline_id, title, description, color, icon, start_at, end_at, status_id, parent_activity_id, percent_complete, created_by, created_at, updated_at) VALUES
+  ('a-gtm-01', 'tl-pb-gtm', 'Displacement playbook draft',    'End-to-end playbook: triggers, objections, migration path.',         '#EF4444', 'flag',        datetime('now', '-148 days'), datetime('now', '-120 days'), 's-gtm-done', NULL, 100, 'u-codi-k',           datetime('now', '-148 days'), datetime('now', '-120 days')),
+  ('a-gtm-02', 'tl-pb-gtm', 'Migration ROI calculator',       'Build ROI model showing TCO advantage of switching.',               '#22C55E', 'trending-up', datetime('now', '-125 days'), datetime('now', '-95 days'),  's-gtm-done', NULL, 100, 'u-dan-s',            datetime('now', '-125 days'), datetime('now', '-95 days')),
+  ('a-gtm-03', 'tl-pb-gtm', 'Sales enablement training',      'Train AEs on displacement selling motion and objection handling.',   '#F59E0B', 'users',       datetime('now', '-100 days'), datetime('now', '-75 days'),  's-gtm-done', NULL, 100, 'u-jamie-f',          datetime('now', '-100 days'), datetime('now', '-75 days')),
+  ('a-gtm-04', 'tl-pb-gtm', 'Pilot program launch',           'Identify 3 pilot accounts and run displacement proof-of-concept.',  '#3B82F6', 'target',      datetime('now', '-80 days'),  datetime('now', '-62 days'),  's-gtm-done', NULL, 100, 'u-scott-fitzgerald', datetime('now', '-80 days'),  datetime('now', '-62 days'));
+
+-- ── Web Site Rebrand (15 activities, Workload statuses) ──────────────────────
+-- Parent-child pairs:
+--   a-reb-08 (product pages rewrite) → a-reb-02 (design system v2)
+--   a-reb-09 (blog template redesign) → a-reb-02 (design system v2)
+
+INSERT INTO activities (id, timeline_id, title, description, color, icon, start_at, end_at, status_id, parent_activity_id, percent_complete, created_by, created_at, updated_at) VALUES
+  ('a-reb-01', 'tl-mcf-rebrand', 'Brand audit and gap analysis',        'Audit current brand assets against new brand strategy.',              '#8B5CF6', 'search',       datetime('now', '-58 days'), datetime('now', '-42 days'), 's-reb-done',       NULL,       100, 'u-scott-fitzgerald', datetime('now', '-58 days'), datetime('now', '-42 days')),
+  ('a-reb-02', 'tl-mcf-rebrand', 'Design system v2',                    'New component library: typography, color, spacing, elevation.',       '#3B82F6', 'grid',         datetime('now', '-50 days'), datetime('now', '-25 days'), 's-reb-done',       NULL,       100, 'u-paula-h',          datetime('now', '-50 days'), datetime('now', '-25 days')),
+  ('a-reb-03', 'tl-mcf-rebrand', 'Homepage hero redesign',              'New hero section: headline, value prop, CTA, and imagery.',           '#EC4899', 'eye',          datetime('now', '-30 days'), datetime('now', '-10 days'), 's-reb-done',       NULL,       100, 'u-corey-f',          datetime('now', '-30 days'), datetime('now', '-10 days')),
+  ('a-reb-04', 'tl-mcf-rebrand', 'SEO keyword audit',                   'Comprehensive keyword analysis and content gap identification.',      '#22C55E', 'search',       datetime('now', '-45 days'), datetime('now', '-20 days'), 's-reb-done',       NULL,       100, 'u-rick-s',           datetime('now', '-45 days'), datetime('now', '-20 days')),
+  ('a-reb-05', 'tl-mcf-rebrand', 'Content migration plan',              'Map existing pages to new IA; identify pages to create/retire.',      '#F97316', 'list',         datetime('now', '-35 days'), datetime('now', '-15 days'), 's-reb-done',       NULL,       100, 'u-dan-b',            datetime('now', '-35 days'), datetime('now', '-15 days')),
+  ('a-reb-06', 'tl-mcf-rebrand', 'Analytics tagging spec',              'Define UTM strategy, event taxonomy, and GA4 configuration.',         '#06B6D4', 'pie-chart',    datetime('now', '-20 days'), datetime('now', '-5 days'),  's-reb-done',       NULL,       100, 'u-rick-s',           datetime('now', '-20 days'), datetime('now', '-5 days')),
+  ('a-reb-07', 'tl-mcf-rebrand', 'Accessibility audit',                 'WCAG 2.1 AA audit of all new page templates.',                       '#F43F5E', 'shield',       datetime('now', '-10 days'), datetime('now', '+5 days'),  's-reb-inprogress', NULL,        60, 'u-corey-f',          datetime('now', '-10 days'), datetime('now', '-2 days')),
+  ('a-reb-08', 'tl-mcf-rebrand', 'Product pages rewrite',               'Rewrite all product/feature pages with new messaging.',               '#A855F7', 'file-text',    datetime('now', '-8 days'),  datetime('now', '+15 days'), 's-reb-inprogress', 'a-reb-02',  30, 'u-scott-fitzgerald', datetime('now', '-8 days'),  datetime('now', '-1 days')),
+  ('a-reb-09', 'tl-mcf-rebrand', 'Blog template redesign',              'New blog index and post templates matching brand refresh.',            '#84CC16', 'edit',         datetime('now', '-5 days'),  datetime('now', '+10 days'), 's-reb-inprogress', 'a-reb-02',  45, 'u-paula-h',          datetime('now', '-5 days'),  datetime('now', '-1 days')),
+  ('a-reb-10', 'tl-mcf-rebrand', 'Stakeholder review — round 1',        'First exec review of homepage, product pages, and navigation.',       '#64748B', 'users',        datetime('now', '+5 days'),  datetime('now', '+8 days'),  's-reb-planning',   NULL,         0, 'u-scott-fitzgerald', datetime('now', '-3 days'),  datetime('now', '-1 days')),
+  ('a-reb-11', 'tl-mcf-rebrand', 'Photography and illustration sprint', 'Commission new brand photography and custom illustrations.',          '#F59E0B', 'eye',          datetime('now', '+3 days'),  datetime('now', '+25 days'), 's-reb-planning',   NULL,         0, 'u-paula-h',          datetime('now', '-2 days'),  datetime('now', '-1 days')),
+  ('a-reb-12', 'tl-mcf-rebrand', 'Pricing page overhaul',               'Redesign pricing page with new tier structure and FAQ.',              '#EF4444', 'trending-up',  datetime('now', '+10 days'), datetime('now', '+30 days'), 's-reb-planning',   NULL,         0, 'u-dan-b',            datetime('now', '-2 days'),  datetime('now', '-1 days')),
+  ('a-reb-13', 'tl-mcf-rebrand', 'Redirect map and 301 plan',           'Map all old URLs to new structure; configure redirects.',             '#78716C', 'link',         datetime('now', '+15 days'), datetime('now', '+35 days'), 's-reb-planning',   NULL,         0, 'u-rick-s',           datetime('now', '-1 days'),  datetime('now', '-1 days')),
+  ('a-reb-14', 'tl-mcf-rebrand', 'Launch readiness checklist',          'Pre-launch verification: performance, SEO, analytics, redirects.',   '#288C9B', 'check-circle', datetime('now', '+30 days'), datetime('now', '+40 days'), 's-reb-planning',   NULL,         0, 'u-scott-fitzgerald', datetime('now', '-1 days'),  datetime('now', '-1 days')),
+  ('a-reb-15', 'tl-mcf-rebrand', 'Post-launch monitoring plan',         'Week-1 monitoring: traffic, errors, search console, conversions.',   '#F97316', 'activity',     datetime('now', '+40 days'), datetime('now', '+50 days'), 's-reb-planning',   NULL,         0, 'u-rick-s',           datetime('now', '-1 days'),  datetime('now', '-1 days'));
 ````
 
-## File: packages/api/sample_data/05_timelines.sql
+## File: packages/api/sample_data/09_timeline_access.sql
 ````sql
--- Timelines: 6 total (1 archived).
+-- Timeline access: all team members get access to their team's timelines.
+-- Team admins get 'admin' role, team members get 'member' role.
 
--- Product Marketing: Q1 Workload (3 months: now-1mo to now+2mo)
-INSERT INTO timelines (id, team_id, name, start_date, end_date, color, icon, share_token, ical_token, created_by, created_at, updated_at) VALUES
-  ('tl-pm-q1', 't-product-marketing', 'Q1 Workload',
-   date('now', '-30 days'), date('now', '+60 days'),
-   '#F97316', 'bar-chart',
-   'share-pm-q1-token', 'ical-pm-q1-token',
-   'u-brian-rieb', datetime('now', '-30 days'), datetime('now', '-1 days'));
+-- Product Marketing timelines
+INSERT INTO timeline_access (timeline_id, team_member_id, role) VALUES
+  ('tl-pm-q1',  'tm-pm-brian',      'admin'),
+  ('tl-pm-q1',  'tm-pm-lindsay',    'member'),
+  ('tl-pm-q1',  'tm-pm-erik',       'admin'),
+  ('tl-pm-q1',  'tm-pm-michelle',   'member'),
+  ('tl-pm-q1',  'tm-pm-contractor', 'member'),
+  ('tl-pm-sko', 'tm-pm-brian',      'admin'),
+  ('tl-pm-sko', 'tm-pm-lindsay',    'member'),
+  ('tl-pm-sko', 'tm-pm-erik',       'admin'),
+  ('tl-pm-sko', 'tm-pm-michelle',   'member'),
+  ('tl-pm-sko', 'tm-pm-contractor', 'member'),
+  ('tl-pm-q2',  'tm-pm-brian',      'admin'),
+  ('tl-pm-q2',  'tm-pm-lindsay',    'member'),
+  ('tl-pm-q2',  'tm-pm-erik',       'admin'),
+  ('tl-pm-q2',  'tm-pm-michelle',   'member'),
+  ('tl-pm-q2',  'tm-pm-contractor', 'member');
 
--- Product Marketing: Sales Kick Off (2 months: now to now+2mo)
-INSERT INTO timelines (id, team_id, name, start_date, end_date, color, icon, share_token, ical_token, created_by, created_at, updated_at) VALUES
-  ('tl-pm-sko', 't-product-marketing', 'Sales Kick Off',
-   date('now'), date('now', '+60 days'),
-   '#06B6D4', 'award',
-   'share-pm-sko-token', 'ical-pm-sko-token',
-   'u-erik-b', datetime('now', '-14 days'), datetime('now', '-2 days'));
+-- P&B Tiger Team timelines
+INSERT INTO timeline_access (timeline_id, team_member_id, role) VALUES
+  ('tl-pb-rtw', 'tm-pb-brian',   'admin'),
+  ('tl-pb-rtw', 'tm-pb-scott',   'member'),
+  ('tl-pb-rtw', 'tm-pb-codi',    'admin'),
+  ('tl-pb-rtw', 'tm-pb-dan',     'member'),
+  ('tl-pb-rtw', 'tm-pb-kristen', 'member'),
+  ('tl-pb-rtw', 'tm-pb-jamie',   'member'),
+  ('tl-pb-gtm', 'tm-pb-brian',   'admin'),
+  ('tl-pb-gtm', 'tm-pb-scott',   'member'),
+  ('tl-pb-gtm', 'tm-pb-codi',    'admin'),
+  ('tl-pb-gtm', 'tm-pb-dan',     'member'),
+  ('tl-pb-gtm', 'tm-pb-kristen', 'member'),
+  ('tl-pb-gtm', 'tm-pb-jamie',   'member');
 
--- Product Marketing: Q2 Workload (archived, 3 months in the past)
-INSERT INTO timelines (id, team_id, name, start_date, end_date, color, icon, share_token, ical_token, created_by, created_at, updated_at, archived_at) VALUES
-  ('tl-pm-q2', 't-product-marketing', 'Q2 Workload',
-   date('now', '-180 days'), date('now', '-90 days'),
-   '#F59E0B', 'clipboard',
-   'share-pm-q2-token', 'ical-pm-q2-token',
-   'u-brian-rieb', datetime('now', '-180 days'), datetime('now', '-90 days'), datetime('now', '-85 days'));
-
--- P&B Tiger Team: Right to Win Initiative (2 months)
-INSERT INTO timelines (id, team_id, name, start_date, end_date, color, icon, share_token, ical_token, created_by, created_at, updated_at) VALUES
-  ('tl-pb-rtw', 't-pb-tiger-team', 'Right to Win Initiative',
-   date('now', '-120 days'), date('now', '-60 days'),
-   '#EF4444', 'search',
-   'share-pb-rtw-token', 'ical-pb-rtw-token',
-   'u-brian-rieb', datetime('now', '-120 days'), datetime('now', '-60 days'));
-
--- P&B Tiger Team: Displacement GTM (3 months)
-INSERT INTO timelines (id, team_id, name, start_date, end_date, color, icon, share_token, ical_token, created_by, created_at, updated_at) VALUES
-  ('tl-pb-gtm', 't-pb-tiger-team', 'Displacement GTM',
-   date('now', '-150 days'), date('now', '-60 days'),
-   '#F43F5E', 'trending-up',
-   'share-pb-gtm-token', 'ical-pb-gtm-token',
-   'u-codi-k', datetime('now', '-150 days'), datetime('now', '-60 days'));
-
--- Marketing Cross Functional: Web Site Rebrand (6 months: now-2mo to now+4mo)
-INSERT INTO timelines (id, team_id, name, start_date, end_date, color, icon, share_token, ical_token, created_by, created_at, updated_at) VALUES
-  ('tl-mcf-rebrand', 't-marketing-cross-func', 'Web Site Rebrand',
-   date('now', '-60 days'), date('now', '+120 days'),
-   '#A855F7', 'globe',
-   'share-mcf-rebrand-token', 'ical-mcf-rebrand-token',
-   'u-scott-fitzgerald', datetime('now', '-60 days'), datetime('now', '-2 days'));
-````
-
-## File: packages/api/sample_data/06_statuses.sql
-````sql
--- Live statuses: one set per timeline, copied from the team's status template.
-
--- Q1 Workload (Workload statuses)
-INSERT INTO statuses (id, timeline_id, name, color, is_closed, position, created_at, updated_at) VALUES
-  ('s-q1-planning',   'tl-pm-q1', 'Planning',    '#64748B', 0, 0, datetime('now', '-30 days'), datetime('now', '-30 days')),
-  ('s-q1-inprogress', 'tl-pm-q1', 'In Progress', '#3B82F6', 0, 1, datetime('now', '-30 days'), datetime('now', '-30 days')),
-  ('s-q1-blockers',   'tl-pm-q1', 'Blockers',    '#EF4444', 0, 2, datetime('now', '-30 days'), datetime('now', '-30 days')),
-  ('s-q1-done',       'tl-pm-q1', 'Done',        '#22C55E', 1, 3, datetime('now', '-30 days'), datetime('now', '-30 days')),
-  ('s-q1-deferred',   'tl-pm-q1', 'Deferred',    '#F59E0B', 1, 4, datetime('now', '-30 days'), datetime('now', '-30 days')),
-  ('s-q1-cancelled',  'tl-pm-q1', 'Cancelled',   '#78716C', 1, 5, datetime('now', '-30 days'), datetime('now', '-30 days'));
-
--- Sales Kick Off (Default statuses)
-INSERT INTO statuses (id, timeline_id, name, color, is_closed, position, created_at, updated_at) VALUES
-  ('s-sko-planning',   'tl-pm-sko', 'Planning',    '#64748B', 0, 0, datetime('now', '-14 days'), datetime('now', '-14 days')),
-  ('s-sko-inprogress', 'tl-pm-sko', 'In Progress', '#3B82F6', 0, 1, datetime('now', '-14 days'), datetime('now', '-14 days')),
-  ('s-sko-done',       'tl-pm-sko', 'Done',        '#22C55E', 1, 2, datetime('now', '-14 days'), datetime('now', '-14 days'));
-
--- Q2 Workload (Workload statuses, archived timeline)
-INSERT INTO statuses (id, timeline_id, name, color, is_closed, position, created_at, updated_at) VALUES
-  ('s-q2-planning',   'tl-pm-q2', 'Planning',    '#64748B', 0, 0, datetime('now', '-180 days'), datetime('now', '-180 days')),
-  ('s-q2-inprogress', 'tl-pm-q2', 'In Progress', '#3B82F6', 0, 1, datetime('now', '-180 days'), datetime('now', '-180 days')),
-  ('s-q2-blockers',   'tl-pm-q2', 'Blockers',    '#EF4444', 0, 2, datetime('now', '-180 days'), datetime('now', '-180 days')),
-  ('s-q2-done',       'tl-pm-q2', 'Done',        '#22C55E', 1, 3, datetime('now', '-180 days'), datetime('now', '-180 days')),
-  ('s-q2-deferred',   'tl-pm-q2', 'Deferred',    '#F59E0B', 1, 4, datetime('now', '-180 days'), datetime('now', '-180 days')),
-  ('s-q2-cancelled',  'tl-pm-q2', 'Cancelled',   '#78716C', 1, 5, datetime('now', '-180 days'), datetime('now', '-180 days'));
-
--- Right to Win Initiative (Default statuses)
-INSERT INTO statuses (id, timeline_id, name, color, is_closed, position, created_at, updated_at) VALUES
-  ('s-rtw-planning',   'tl-pb-rtw', 'Planning',    '#64748B', 0, 0, datetime('now', '-120 days'), datetime('now', '-120 days')),
-  ('s-rtw-inprogress', 'tl-pb-rtw', 'In Progress', '#3B82F6', 0, 1, datetime('now', '-120 days'), datetime('now', '-120 days')),
-  ('s-rtw-done',       'tl-pb-rtw', 'Done',        '#22C55E', 1, 2, datetime('now', '-120 days'), datetime('now', '-120 days'));
-
--- Displacement GTM (Default statuses)
-INSERT INTO statuses (id, timeline_id, name, color, is_closed, position, created_at, updated_at) VALUES
-  ('s-gtm-planning',   'tl-pb-gtm', 'Planning',    '#64748B', 0, 0, datetime('now', '-150 days'), datetime('now', '-150 days')),
-  ('s-gtm-inprogress', 'tl-pb-gtm', 'In Progress', '#3B82F6', 0, 1, datetime('now', '-150 days'), datetime('now', '-150 days')),
-  ('s-gtm-done',       'tl-pb-gtm', 'Done',        '#22C55E', 1, 2, datetime('now', '-150 days'), datetime('now', '-150 days'));
-
--- Web Site Rebrand (Workload statuses)
-INSERT INTO statuses (id, timeline_id, name, color, is_closed, position, created_at, updated_at) VALUES
-  ('s-reb-planning',   'tl-mcf-rebrand', 'Planning',    '#64748B', 0, 0, datetime('now', '-60 days'), datetime('now', '-60 days')),
-  ('s-reb-inprogress', 'tl-mcf-rebrand', 'In Progress', '#3B82F6', 0, 1, datetime('now', '-60 days'), datetime('now', '-60 days')),
-  ('s-reb-blockers',   'tl-mcf-rebrand', 'Blockers',    '#EF4444', 0, 2, datetime('now', '-60 days'), datetime('now', '-60 days')),
-  ('s-reb-done',       'tl-mcf-rebrand', 'Done',        '#22C55E', 1, 3, datetime('now', '-60 days'), datetime('now', '-60 days')),
-  ('s-reb-deferred',   'tl-mcf-rebrand', 'Deferred',    '#F59E0B', 1, 4, datetime('now', '-60 days'), datetime('now', '-60 days')),
-  ('s-reb-cancelled',  'tl-mcf-rebrand', 'Cancelled',   '#78716C', 1, 5, datetime('now', '-60 days'), datetime('now', '-60 days'));
-````
-
-## File: packages/api/sample_data/08_activity_assignments.sql
-````sql
--- Activity assignments: links activities to team members.
--- Q1 Workload: mostly single-person. SKO: multi-person. Others: single.
-
--- Q1 Workload
-INSERT INTO activity_assignments (activity_id, team_member_id) VALUES
-  ('a-q1-01', 'tm-pm-brian'),
-  ('a-q1-02', 'tm-pm-brian'),
-  ('a-q1-03', 'tm-pm-lindsay'),
-  ('a-q1-04', 'tm-pm-erik'),
-  ('a-q1-05', 'tm-pm-erik'),
-  ('a-q1-06', 'tm-pm-brian'),
-  ('a-q1-07', 'tm-pm-michelle'),
-  ('a-q1-08', 'tm-pm-brian'),
-  ('a-q1-09', 'tm-pm-lindsay'),
-  ('a-q1-10', 'tm-pm-michelle'),
-  ('a-q1-11', 'tm-pm-lindsay'),
-  ('a-q1-12', 'tm-pm-erik'),
-  ('a-q1-13', 'tm-pm-brian'),
-  ('a-q1-14', 'tm-pm-erik'),
-  ('a-q1-15', 'tm-pm-michelle'),
-  ('a-q1-16', 'tm-pm-brian'),
-  ('a-q1-17', 'tm-pm-erik'),
-  ('a-q1-18', 'tm-pm-brian'),
-  ('a-q1-19', 'tm-pm-lindsay'),
-  ('a-q1-20', 'tm-pm-brian');
-
--- Sales Kick Off (multi-person assignments)
-INSERT INTO activity_assignments (activity_id, team_member_id) VALUES
-  ('a-sko-01', 'tm-pm-erik'),
-  ('a-sko-01', 'tm-pm-brian'),
-  ('a-sko-02', 'tm-pm-brian'),
-  ('a-sko-02', 'tm-pm-erik'),
-  ('a-sko-02', 'tm-pm-lindsay'),
-  ('a-sko-03', 'tm-pm-erik'),
-  ('a-sko-03', 'tm-pm-brian'),
-  ('a-sko-04', 'tm-pm-lindsay'),
-  ('a-sko-04', 'tm-pm-michelle'),
-  ('a-sko-05', 'tm-pm-brian'),
-  ('a-sko-05', 'tm-pm-erik'),
-  ('a-sko-06', 'tm-pm-michelle'),
-  ('a-sko-06', 'tm-pm-contractor'),
-  ('a-sko-07', 'tm-pm-brian'),
-  ('a-sko-07', 'tm-pm-erik'),
-  ('a-sko-08', 'tm-pm-lindsay'),
-  ('a-sko-08', 'tm-pm-contractor'),
-  ('a-sko-09', 'tm-pm-erik'),
-  ('a-sko-09', 'tm-pm-brian'),
-  ('a-sko-10', 'tm-pm-michelle'),
-  ('a-sko-10', 'tm-pm-lindsay');
-
--- Q2 Workload
-INSERT INTO activity_assignments (activity_id, team_member_id) VALUES
-  ('a-q2-01', 'tm-pm-brian'),
-  ('a-q2-02', 'tm-pm-erik'),
-  ('a-q2-03', 'tm-pm-lindsay'),
-  ('a-q2-04', 'tm-pm-brian'),
-  ('a-q2-05', 'tm-pm-michelle');
-
--- Right to Win Initiative
-INSERT INTO activity_assignments (activity_id, team_member_id) VALUES
-  ('a-rtw-01', 'tm-pb-dan'),
-  ('a-rtw-02', 'tm-pb-kristen'),
-  ('a-rtw-03', 'tm-pb-brian'),
-  ('a-rtw-04', 'tm-pb-codi');
-
--- Displacement GTM
-INSERT INTO activity_assignments (activity_id, team_member_id) VALUES
-  ('a-gtm-01', 'tm-pb-codi'),
-  ('a-gtm-02', 'tm-pb-dan'),
-  ('a-gtm-03', 'tm-pb-jamie'),
-  ('a-gtm-04', 'tm-pb-scott');
-
--- Web Site Rebrand
-INSERT INTO activity_assignments (activity_id, team_member_id) VALUES
-  ('a-reb-01', 'tm-mcf-scott'),
-  ('a-reb-02', 'tm-mcf-paula'),
-  ('a-reb-03', 'tm-mcf-corey'),
-  ('a-reb-04', 'tm-mcf-rick'),
-  ('a-reb-05', 'tm-mcf-dan'),
-  ('a-reb-06', 'tm-mcf-rick'),
-  ('a-reb-07', 'tm-mcf-corey'),
-  ('a-reb-08', 'tm-mcf-scott'),
-  ('a-reb-09', 'tm-mcf-paula'),
-  ('a-reb-10', 'tm-mcf-scott'),
-  ('a-reb-11', 'tm-mcf-paula'),
-  ('a-reb-12', 'tm-mcf-dan'),
-  ('a-reb-13', 'tm-mcf-rick'),
-  ('a-reb-14', 'tm-mcf-scott'),
-  ('a-reb-15', 'tm-mcf-rick');
-````
-
-## File: packages/api/sample_data/README.md
-````markdown
-# Sample Data
-
-SQL files that populate the database with realistic test data. Files are numbered to respect FK insertion order.
-
-| File | Contents |
-|---|---|
-| `00_flush.sql` | Deletes all data in FK-safe order |
-| `01_users.sql` | 13 users (2 super admins) |
-| `02_teams.sql` | 3 teams (1 archived) |
-| `03_team_members.sql` | 16 members (1 external participant) |
-| `04_status_templates.sql` | 5 templates + 21 items |
-| `05_timelines.sql` | 6 timelines (1 archived) |
-| `06_statuses.sql` | Live statuses per timeline |
-| `07_activities.sql` | 58 activities |
-| `08_activity_assignments.sql` | Activity → member links |
-| `09_timeline_access.sql` | Timeline → member access |
-
-## Usage
-
-All files concatenated in order form a complete flush-and-reload script.
-
-**SQLite CLI:**
-```bash
-cat sample_data/*.sql | sqlite3 draba.db
-```
-
-**Go test:** See `internal/db/sample_data_test.go`.
-
-## Updating
-
-When a schema migration changes a table that has sample data:
-1. Edit only the affected file (e.g., add a column to `01_users.sql`)
-2. Run `go test ./internal/db/ -run TestSampleDataLoads` to verify
-
-See `docs/SAMPLE_DATA.md` for the full dataset specification and identity rules.
-
-## Credentials
-
-All user passwords: `password`
+-- Marketing Cross Functional timelines
+INSERT INTO timeline_access (timeline_id, team_member_id, role) VALUES
+  ('tl-mcf-rebrand', 'tm-mcf-scott', 'admin'),
+  ('tl-mcf-rebrand', 'tm-mcf-paula', 'admin'),
+  ('tl-mcf-rebrand', 'tm-mcf-corey', 'member'),
+  ('tl-mcf-rebrand', 'tm-mcf-dan',   'member'),
+  ('tl-mcf-rebrand', 'tm-mcf-rick',  'member');
 ````
 
 ## File: packages/api/Dockerfile
@@ -25736,40 +26287,6 @@ WORKDIR /data
 USER draba
 EXPOSE 8080
 CMD ["draba"]
-````
-
-## File: packages/api/go.mod
-````
-module github.com/I0-1O/draba/packages/api
-
-go 1.24.0
-
-require (
-	github.com/golang-jwt/jwt/v5 v5.3.1
-	github.com/gorilla/websocket v1.5.3
-	github.com/jmoiron/sqlx v1.4.0
-	github.com/mattn/go-sqlite3 v1.14.22
-	github.com/oapi-codegen/runtime v1.4.0
-	github.com/stretchr/testify v1.11.1
-	golang.org/x/crypto v0.46.0
-	modernc.org/sqlite v1.34.5
-)
-
-require (
-	github.com/davecgh/go-spew v1.1.1 // indirect
-	github.com/dustin/go-humanize v1.0.1 // indirect
-	github.com/google/uuid v1.6.0 // indirect
-	github.com/mattn/go-isatty v0.0.20 // indirect
-	github.com/ncruces/go-strftime v1.0.0 // indirect
-	github.com/pmezard/go-difflib v1.0.0 // indirect
-	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
-	golang.org/x/exp v0.0.0-20230315142452-642cacee5cc0 // indirect
-	golang.org/x/sys v0.39.0 // indirect
-	gopkg.in/yaml.v3 v3.0.1 // indirect
-	modernc.org/libc v1.61.6 // indirect
-	modernc.org/mathutil v1.7.1 // indirect
-	modernc.org/memory v1.8.0 // indirect
-)
 ````
 
 ## File: packages/web/src/components/filters/FilterConditionRow.tsx
@@ -26156,10 +26673,157 @@ export default function FilterConditionRow({
 }
 ````
 
-## File: packages/web/src/components/gantt/activityPanelFields.tsx
+## File: packages/web/src/components/gantt/GanttGrid.format.test.ts
+````typescript
+import { describe, it, expect } from 'vitest'
+import { formatDragDate } from './GanttGrid'
+
+// ── formatDragDate — UTC drag-preview tooltip label ───────────────────────────
+
+describe('formatDragDate', () => {
+  it('midnight-UTC May 31 shows "May 31" in the drag tooltip', () => {
+    // Without timeZone:'UTC', a UTC-6 viewer would see "May 30" in the drag tooltip.
+    const d = new Date('2026-05-31T00:00:00Z')
+    const result = formatDragDate(d)
+    expect(result).toContain('31')
+    expect(result).not.toContain('30')
+  })
+
+  it('midnight-UTC Jan 1 shows Jan 1, not Dec 31', () => {
+    const d = new Date('2026-01-01T00:00:00Z')
+    const result = formatDragDate(d)
+    expect(result).toContain('2026')
+    expect(result).not.toContain('Dec')
+  })
+
+  it('output includes year', () => {
+    const d = new Date('2026-06-15T00:00:00Z')
+    expect(formatDragDate(d)).toContain('2026')
+  })
+})
+````
+
+## File: packages/web/src/components/gantt/GanttView.filter.test.ts
+````typescript
+import { describe, it, expect } from 'vitest'
+import { filterOpenActivities } from './GanttView'
+
+// ── filterOpenActivities — 'open' preset logic ────────────────────────────────
+
+describe('filterOpenActivities', () => {
+  const activities = [
+    { id: '1', statusId: 'closed-a' },
+    { id: '2', statusId: 'open-b' },
+    { id: '3', statusId: null },
+    { id: '4', statusId: undefined },
+    { id: '5', statusId: 'closed-c' },
+  ]
+
+  it('removes activities whose statusId is in the closed set', () => {
+    const closed = new Set(['closed-a', 'closed-c'])
+    const result = filterOpenActivities(activities, closed)
+    expect(result.map(a => a.id)).toEqual(['2', '3', '4'])
+  })
+
+  it('keeps activities with no status (null or undefined)', () => {
+    const closed = new Set(['closed-a'])
+    const result = filterOpenActivities(activities, closed)
+    const noStatusIds = result.filter(a => !a.statusId).map(a => a.id)
+    expect(noStatusIds).toContain('3')
+    expect(noStatusIds).toContain('4')
+  })
+
+  it('returns all activities unchanged when closed set is empty', () => {
+    const result = filterOpenActivities(activities, new Set())
+    expect(result).toHaveLength(activities.length)
+  })
+
+  it('returns empty array when all activities are closed', () => {
+    const closed = new Set(['closed-a', 'open-b', 'closed-c'])
+    const onlyClosed = [
+      { id: '1', statusId: 'closed-a' },
+      { id: '5', statusId: 'closed-c' },
+    ]
+    const result = filterOpenActivities(onlyClosed, closed)
+    expect(result).toHaveLength(0)
+  })
+})
+````
+
+## File: packages/web/src/components/list/ListView.format.test.ts
+````typescript
+import { describe, it, expect } from 'vitest'
+import { formatActivityDate, formatTimestamp } from './ListView'
+
+// ── formatActivityDate — UTC-pinned display for startAt / endAt ───────────────
+
+describe('formatActivityDate', () => {
+  it('null → em-dash', () => {
+    expect(formatActivityDate(null)).toBe('—')
+  })
+
+  it('undefined → em-dash', () => {
+    expect(formatActivityDate(undefined)).toBe('—')
+  })
+
+  it('invalid string → em-dash', () => {
+    expect(formatActivityDate('not-a-date')).toBe('—')
+  })
+
+  it('midnight-UTC May 31 displays as May 31 (timezone-safe)', () => {
+    // "2026-05-31T00:00:00Z" is the canonical form the API emits for all-day dates.
+    // Without timeZone:'UTC', a UTC-6 viewer would see "May 30".
+    const result = formatActivityDate('2026-05-31T00:00:00Z')
+    expect(result).toContain('31')
+    expect(result).not.toContain('30')
+  })
+
+  it('midnight-UTC Jan 1 displays as Jan 1 (not Dec 31)', () => {
+    const result = formatActivityDate('2026-01-01T00:00:00Z')
+    expect(result).toContain('1')
+    expect(result).toContain('2026')
+    // "Dec 31" would appear if local-time shift rolled back into the previous year/month
+    expect(result).not.toContain('Dec')
+  })
+})
+
+// ── formatTimestamp — local-time display for createdAt / updatedAt ────────────
+
+describe('formatTimestamp', () => {
+  it('null → em-dash', () => {
+    expect(formatTimestamp(null)).toBe('—')
+  })
+
+  it('undefined → em-dash', () => {
+    expect(formatTimestamp(undefined)).toBe('—')
+  })
+
+  it('invalid string → em-dash', () => {
+    expect(formatTimestamp('not-a-date')).toBe('—')
+  })
+
+  it('valid ISO returns a non-empty string with the year', () => {
+    // formatTimestamp uses local timezone, so the exact month/day varies by TZ;
+    // we can at least assert the year appears and the result is non-empty.
+    const result = formatTimestamp('2026-06-15T12:00:00Z')
+    expect(result).not.toBe('—')
+    expect(result).toContain('2026')
+  })
+})
+
+// ── Distinction: same ISO string, different rendering paths ───────────────────
+//
+// formatActivityDate always pins to UTC; formatTimestamp uses local time.
+// In UTC+0 both produce the same output, so we can't assert they differ here
+// without controlling process.env.TZ. The tests above independently verify
+// each function's contract — the key invariant is that midnight-UTC dates
+// never shift in formatActivityDate regardless of the runner's timezone.
+````
+
+## File: packages/web/src/components/shared/activityPanelFields.tsx
 ````typescript
 /**
- * Shared field components for the Gantt activity panels.
+ * Shared field components for activity panels across all views.
  *
  * Both ActivityCreatePanel (buffer-and-POST) and ActivityDetailPanel
  * (save-on-change/blur) compose `ActivityFieldsBody` so the two panels show an
@@ -26885,153 +27549,6 @@ export function ActivityFieldsBody(props: ActivityFieldsBodyProps) {
     </div>
   )
 }
-````
-
-## File: packages/web/src/components/gantt/GanttGrid.format.test.ts
-````typescript
-import { describe, it, expect } from 'vitest'
-import { formatDragDate } from './GanttGrid'
-
-// ── formatDragDate — UTC drag-preview tooltip label ───────────────────────────
-
-describe('formatDragDate', () => {
-  it('midnight-UTC May 31 shows "May 31" in the drag tooltip', () => {
-    // Without timeZone:'UTC', a UTC-6 viewer would see "May 30" in the drag tooltip.
-    const d = new Date('2026-05-31T00:00:00Z')
-    const result = formatDragDate(d)
-    expect(result).toContain('31')
-    expect(result).not.toContain('30')
-  })
-
-  it('midnight-UTC Jan 1 shows Jan 1, not Dec 31', () => {
-    const d = new Date('2026-01-01T00:00:00Z')
-    const result = formatDragDate(d)
-    expect(result).toContain('2026')
-    expect(result).not.toContain('Dec')
-  })
-
-  it('output includes year', () => {
-    const d = new Date('2026-06-15T00:00:00Z')
-    expect(formatDragDate(d)).toContain('2026')
-  })
-})
-````
-
-## File: packages/web/src/components/gantt/GanttView.filter.test.ts
-````typescript
-import { describe, it, expect } from 'vitest'
-import { filterOpenActivities } from './GanttView'
-
-// ── filterOpenActivities — 'open' preset logic ────────────────────────────────
-
-describe('filterOpenActivities', () => {
-  const activities = [
-    { id: '1', statusId: 'closed-a' },
-    { id: '2', statusId: 'open-b' },
-    { id: '3', statusId: null },
-    { id: '4', statusId: undefined },
-    { id: '5', statusId: 'closed-c' },
-  ]
-
-  it('removes activities whose statusId is in the closed set', () => {
-    const closed = new Set(['closed-a', 'closed-c'])
-    const result = filterOpenActivities(activities, closed)
-    expect(result.map(a => a.id)).toEqual(['2', '3', '4'])
-  })
-
-  it('keeps activities with no status (null or undefined)', () => {
-    const closed = new Set(['closed-a'])
-    const result = filterOpenActivities(activities, closed)
-    const noStatusIds = result.filter(a => !a.statusId).map(a => a.id)
-    expect(noStatusIds).toContain('3')
-    expect(noStatusIds).toContain('4')
-  })
-
-  it('returns all activities unchanged when closed set is empty', () => {
-    const result = filterOpenActivities(activities, new Set())
-    expect(result).toHaveLength(activities.length)
-  })
-
-  it('returns empty array when all activities are closed', () => {
-    const closed = new Set(['closed-a', 'open-b', 'closed-c'])
-    const onlyClosed = [
-      { id: '1', statusId: 'closed-a' },
-      { id: '5', statusId: 'closed-c' },
-    ]
-    const result = filterOpenActivities(onlyClosed, closed)
-    expect(result).toHaveLength(0)
-  })
-})
-````
-
-## File: packages/web/src/components/list/ListView.format.test.ts
-````typescript
-import { describe, it, expect } from 'vitest'
-import { formatActivityDate, formatTimestamp } from './ListView'
-
-// ── formatActivityDate — UTC-pinned display for startAt / endAt ───────────────
-
-describe('formatActivityDate', () => {
-  it('null → em-dash', () => {
-    expect(formatActivityDate(null)).toBe('—')
-  })
-
-  it('undefined → em-dash', () => {
-    expect(formatActivityDate(undefined)).toBe('—')
-  })
-
-  it('invalid string → em-dash', () => {
-    expect(formatActivityDate('not-a-date')).toBe('—')
-  })
-
-  it('midnight-UTC May 31 displays as May 31 (timezone-safe)', () => {
-    // "2026-05-31T00:00:00Z" is the canonical form the API emits for all-day dates.
-    // Without timeZone:'UTC', a UTC-6 viewer would see "May 30".
-    const result = formatActivityDate('2026-05-31T00:00:00Z')
-    expect(result).toContain('31')
-    expect(result).not.toContain('30')
-  })
-
-  it('midnight-UTC Jan 1 displays as Jan 1 (not Dec 31)', () => {
-    const result = formatActivityDate('2026-01-01T00:00:00Z')
-    expect(result).toContain('1')
-    expect(result).toContain('2026')
-    // "Dec 31" would appear if local-time shift rolled back into the previous year/month
-    expect(result).not.toContain('Dec')
-  })
-})
-
-// ── formatTimestamp — local-time display for createdAt / updatedAt ────────────
-
-describe('formatTimestamp', () => {
-  it('null → em-dash', () => {
-    expect(formatTimestamp(null)).toBe('—')
-  })
-
-  it('undefined → em-dash', () => {
-    expect(formatTimestamp(undefined)).toBe('—')
-  })
-
-  it('invalid string → em-dash', () => {
-    expect(formatTimestamp('not-a-date')).toBe('—')
-  })
-
-  it('valid ISO returns a non-empty string with the year', () => {
-    // formatTimestamp uses local timezone, so the exact month/day varies by TZ;
-    // we can at least assert the year appears and the result is non-empty.
-    const result = formatTimestamp('2026-06-15T12:00:00Z')
-    expect(result).not.toBe('—')
-    expect(result).toContain('2026')
-  })
-})
-
-// ── Distinction: same ISO string, different rendering paths ───────────────────
-//
-// formatActivityDate always pins to UTC; formatTimestamp uses local time.
-// In UTC+0 both produce the same output, so we can't assert they differ here
-// without controlling process.env.TZ. The tests above independently verify
-// each function's contract — the key invariant is that midnight-UTC dates
-// never shift in formatActivityDate regardless of the runner's timezone.
 ````
 
 ## File: packages/web/src/hooks/useTags.test.ts
@@ -30078,320 +30595,6 @@ Two flavors: **tabular** (data round-trips — CSV / xlsx in and out) and **visu
 - CLI binary (parking lot — token auth system is designed to support it when ready)
 ````
 
-## File: docs/SAMPLE_DATA.md
-````markdown
-# Sample Data Procedure
-
-Guide for generating and maintaining a sample data SQL script that can flush and reload the database with realistic test data. Run this procedure whenever the schema changes in a way that affects the sample dataset.
-
-## When to regenerate
-
-- A migration adds, removes, or renames a column used by sample data
-- A new table is added that should be populated for a realistic experience
-- Identity system colors or icons change
-- Status template structure changes
-
-## How to run
-
-Sample data lives in `packages/api/sample_data/` as numbered per-table SQL files. Files are concatenated in sort order to form a complete flush-and-reload script.
-
-```bash
-# SQLite CLI
-cat packages/api/sample_data/*.sql | sqlite3 draba.db
-
-# Verify
-go test ./internal/db/ -run TestSampleDataLoads
-```
-
-### Updating a single table
-
-When a schema change affects one table, edit only that file (e.g. add a column to `01_users.sql`). Run the test to verify. No need to regenerate the entire dataset.
-
----
-
-## Data generation rules
-
-### Passwords
-
-All user passwords must be `password` (minimum 8 characters per the app's validation). Store the bcrypt hash of `password` at cost 12 (the project standard). Generate the hash once and reuse it across all user rows.
-
-Current hash: `$2a$12$WKzPgLht8GL4iR76X0JfYuFw.4GqjricAMaKQPvA7ae8hiJp225dG`
-
-### Identity fields (color + icon)
-
-Every record that has identity fields (`color` and `icon` columns) gets a randomly chosen color and icon, subject to these rules:
-
-| Entity | color | icon | Notes |
-|---|---|---|---|
-| Teams | Random hex from palette | Random Lucide icon or `__name_2__` | |
-| Timelines | Random hex from palette | Random Lucide icon or `__none__` | |
-| Activities | Random hex from palette | Random Lucide icon or `__none__` | |
-| Users | Random hex from palette | `__name_words__` | Always use `__name_words__` for users |
-| Team members | Random hex from palette | `__name_words__` | Always use `__name_words__` for members |
-
-**Color palette** (16 colors, store as hex):
-
-| ID | Hex |
-|---|---|
-| teal | `#288C9B` |
-| cyan | `#06B6D4` |
-| blue | `#3B82F6` |
-| indigo | `#6366F1` |
-| violet | `#8B5CF6` |
-| purple | `#A855F7` |
-| pink | `#EC4899` |
-| rose | `#F43F5E` |
-| red | `#EF4444` |
-| orange | `#F97316` |
-| amber | `#F59E0B` |
-| yellow | `#EAB308` |
-| lime | `#84CC16` |
-| green | `#22C55E` |
-| slate | `#64748B` |
-| stone | `#78716C` |
-
-**Icon options for non-user/member entities** (pick from 64 Lucide IDs):
-`activity`, `archive`, `award`, `bar-chart`, `bell`, `bookmark`, `briefcase`, `calendar`, `check-circle`, `clipboard`, `clock`, `cloud`, `code`, `coffee`, `compass`, `cpu`, `database`, `download`, `edit`, `eye`, `file-text`, `filter`, `flag`, `folder`, `git-branch`, `globe`, `grid`, `heart`, `help-circle`, `home`, `info`, `layers`, `link`, `list`, `lock`, `mail`, `map`, `message-circle`, `moon`, `package`, `pencil`, `phone`, `pie-chart`, `plug`, `refresh-cw`, `search`, `server`, `settings`, `share`, `shield`, `star`, `sun`, `tag`, `target`, `terminal`, `trash`, `trending-up`, `upload`, `user`, `users`, `wifi`, `zap`, `alert-circle`, `copy`
-
-Or use the special tokens: `__none__` (color only), `__name_1__` (first letter), `__name_2__` (first two letters), `__name_words__` (initials).
-
-### IDs
-
-All IDs are UUIDs (TEXT). Generate deterministic UUIDs for sample data so the script is idempotent.
-
-### Timestamps
-
-Use relative dates anchored to "now" so the data always looks current:
-- `created_at` / `joined_at`: spread across the past few months
-- Timeline `start_date` / `end_date`: see per-timeline specs below
-- Activity date ranges: distributed within their timeline's window
-
-### Deletion order (flush)
-
-See `sample_data/00_flush.sql` — deletes all data in reverse FK dependency order. Tables NOT flushed: `schema_migrations`, `instance_settings`, `saved_filters`.
-
----
-
-## Dataset specification
-
-### Super admins
-
-Set `is_superadmin = 1` on these users:
-
-| Name | Email |
-|---|---|
-| Brian Rieb | brian@rieb.cc |
-| Scott Fitzgerald | scott@fitzgerald.example |
-
-### Users
-
-Create a user row for every person referenced below. Each user gets:
-- Deterministic UUID
-- Email derived from name (e.g. `brian@rieb.cc` for Brian, `lindsay.k@example.com` for Lindsay K.)
-- `password_hash`: bcrypt of `pass`
-- `color`: random hex from palette
-- `icon`: `__name_words__`
-
-Full user list (deduplicated across all teams):
-- Brian R (super admin)
-- Scott F (super admin)
-- Lindsay K.
-- Erik B
-- Michelle T
-- Codi K
-- Dan S
-- Kristen K
-- Jamie F
-- Paula H
-- Corey F
-- Dan B
-- Rick S
-
-### Teams
-
-#### 1. Product Marketing
-
-- **Slug**: `product-marketing`
-- **Identity**: random color + random icon
-- **Members**:
-
-| Person | Role | Notes |
-|---|---|---|
-| Brian R | `admin` | |
-| Lindsay K | `member` | |
-| Erik B | `admin` | |
-| Michelle T | `member` | |
-| Contractor | `member` | Participant: `user_id = NULL`, `display_name = 'Contractor'` |
-
-- **Status templates**:
-  - **Default**: Planning, In Progress, Done
-  - **Workload**: Planning, In Progress, Blockers, Done, Deferred, Cancelled
-
-- **Timelines**:
-
-  **Q1 Workload**
-  - 3-month window (e.g. now − 1 month → now + 2 months)
-  - ~20 activities: PMM work (competitive analysis, messaging docs, launch plans, analyst briefings, content reviews, etc.)
-  - Most activities assigned to one person
-  - Uses **Workload** statuses
-  - Distribute statuses realistically (some done, some in progress, a few planning)
-
-  **Sales Kick Off**
-  - 2-month window
-  - ~10 activities: sales enablement prep (deck creation, battle cards, demo scripts, training sessions, etc.)
-  - Activities assigned to multiple people
-  - Uses **Default** statuses
-
-  **Q2 Workload** *(archived)*
-  - 3-month window in the past (set `archived_at`)
-  - ~5 activities: high-level PMM tasks
-  - Most assigned to one person
-  - Uses **Workload** statuses
-
-#### 2. P&B Tiger Team *(archived)*
-
-- **Slug**: `pb-tiger-team`
-- **Identity**: random color + random icon
-- **`archived_at`**: set to a past date
-- **Members**:
-
-| Person | Role |
-|---|---|
-| Brian R | `admin` |
-| Scott F | `member` |
-| Codi K | `admin` |
-| Dan S | `member` |
-| Kristen K | `member` |
-| Jamie F | `member` |
-
-Note: Kristen K is described as a "participant" in the brief, but the schema only supports `admin` and `member` roles. External participants use `user_id = NULL`. Since Kristen is a named user, she is a `member`.
-
-- **Status templates**:
-  - **Default**: Planning, In Progress, Done
-
-- **Timelines**:
-
-  **Right to Win Initiative**
-  - 2-month window
-  - ~4 activities: researching and presenting the right-to-win for a product
-  - Uses **Default** statuses
-
-  **Displacement GTM**
-  - 3-month window
-  - ~4 activities: building a GTM for a displacement play, sales enablement
-  - Uses **Default** statuses
-
-#### 3. Marketing Cross Functional
-
-- **Slug**: `marketing-cross-functional`
-- **Identity**: random color + random icon
-- **Members**:
-
-| Person | Role |
-|---|---|
-| Scott F | `admin` |
-| Paula H | `admin` |
-| Corey F | `member` |
-| Dan B | `member` |
-| Rick S | `member` |
-
-- **Status templates**:
-  - **Default**: Planning, In Progress, Done
-  - **Workload**: Planning, In Progress, Blockers, Done, Deferred, Cancelled
-
-- **Timelines**:
-
-  **Web Site Rebrand**
-  - 6-month window
-  - ~15 activities: rebranding and rebuilding the corporate website (design system, content migration, SEO audit, stakeholder reviews, launch prep, etc.)
-  - Uses **Workload** statuses
-
----
-
-## Activity content guidelines
-
-When generating activity titles and descriptions, make them sound like real PMM / marketing work:
-
-- **PMM activities**: Competitive battlecard update, Analyst briefing prep, Q1 messaging framework, Product launch checklist, Win/loss interview synthesis, Pricing positioning doc, Sales one-pager refresh
-- **Sales enablement**: SKO keynote deck, Demo environment setup, Objection handling workshop, New rep onboarding kit, Customer story video
-- **Website/brand**: Brand guidelines v2, Homepage hero redesign, SEO keyword audit, Content migration plan, Analytics tagging spec, Stakeholder review meeting, Accessibility audit, Launch readiness checklist
-
-Activities should have realistic date ranges (a few days to a few weeks each), spread across their timeline window without excessive overlap.
-
----
-
-## Tags
-
-Each team has its own tag vocabulary. Tags are team-scoped (`team_id`) and referenced from `activity_tags` via `tag_id`.
-
-### Product Marketing tags
-`urgent`, `design`, `content`, `research`, `launch`, `competitive`, `review`, `blocked`
-
-### P&B Tiger Team tags
-`positioning`, `strategy`, `research`, `competitive`, `enablement`, `executive`
-
-### Marketing Cross Functional tags
-`design`, `seo`, `analytics`, `brand`, `content`, `launch`
-
-A representative subset of activities across all timelines is tagged. Coverage is intentionally partial — not every activity is tagged, mirroring real-world usage.
-
----
-
-## Activity parent-child relationships
-
-A few natural sub-task pairs are set via `parent_activity_id`:
-
-| Child activity | Parent activity | Rationale |
-|---|---|---|
-| Competitive battlecard refresh (a-q1-02) | Competitive landscape analysis (a-q1-01) | Battlecard updates follow from the research |
-| AR/PR coordination — Q1 launch (a-q1-14) | Product launch checklist — v4.2 (a-q1-06) | PR work is a sub-track of launch prep |
-| Demo environment setup (a-q1-17) | Product launch checklist — v4.2 (a-q1-06) | Demo env is a launch dependency |
-| Sales training session — pricing (a-sko-07) | Objection handling playbook (a-sko-05) | Training draws on the playbook |
-| Product pages rewrite (a-reb-08) | Design system v2 (a-reb-02) | Pages are implemented against the design system |
-| Blog template redesign (a-reb-09) | Design system v2 (a-reb-02) | Same — template uses design system components |
-
----
-
-## Schema reference (current as of migration 017)
-
-This section summarizes the tables and columns that sample data touches. Regenerate this section if migrations change the schema.
-
-### Core tables
-
-```
-users (id, email, password_hash, display_name, avatar_url, color, icon, is_superadmin, created_at, updated_at, archived_at)
-teams (id, name, slug, color, icon, description, notes, archived_at, invite_link_token, created_at, updated_at)
-team_members (id, team_id, user_id, display_name, role, color, icon, joined_at, archived_at)
-timelines (id, team_id, name, start_date, end_date, description, notes, color, icon, share_token, ical_token, created_by, created_at, updated_at, archived_at)
-activities (id, timeline_id, title, description, icon, color, start_at, end_at, all_day, status_id, parent_activity_id, percent_complete, location, url, created_by, created_at, updated_at, archived_at)
-tags (id, team_id, name, color, created_by, created_at)
-```
-
-### Junction / child tables
-
-```
-activity_assignments (activity_id, team_member_id)
-activity_tags (activity_id, tag_id)
-timeline_access (timeline_id, team_member_id, role)
-status_templates (id, team_id, name, description, position, created_by, created_at, updated_at)
-status_template_items (id, template_id, name, color, icon, is_closed, position)
-statuses (id, timeline_id, name, color, icon, is_closed, position, created_at, updated_at)
-```
-
-### Tables NOT in sample data scope
-
-```
-schema_migrations — managed by the migration runner
-instance_settings — configured per deployment
-saved_filters — user-generated at runtime
-calendar_connections — requires real OAuth credentials
-api_tokens — generated at runtime
-invites — generated at runtime
-password_reset_tokens — generated at runtime
-user_preferences — set by users at runtime
-```
-````
-
 ## File: packages/api/internal/api/authz.go
 ````go
 package api
@@ -31132,209 +31335,6 @@ func (r *TagRepo) ValidateTeamOwnership(teamID string, tagIDs []string) error {
 	}
 	return nil
 }
-````
-
-## File: packages/api/sample_data/00_flush.sql
-````sql
--- Flush all sample-data tables in FK-safe (reverse dependency) order.
--- Tables NOT flushed: schema_migrations, instance_settings, saved_filters.
-
-DELETE FROM activity_assignments;
-DELETE FROM activity_tags;
-DELETE FROM activities;
-DELETE FROM tags;
-DELETE FROM statuses;
-DELETE FROM status_template_items;
-DELETE FROM status_templates;
-DELETE FROM timeline_access;
-DELETE FROM timelines;
-DELETE FROM team_members;
-DELETE FROM teams;
-DELETE FROM user_preferences;
-DELETE FROM password_reset_tokens;
-DELETE FROM invites;
-DELETE FROM api_tokens;
-DELETE FROM calendar_connections;
-DELETE FROM users;
-````
-
-## File: packages/api/sample_data/03_team_members.sql
-````sql
--- Team members: 16 total (includes 1 external participant with user_id=NULL).
--- Icon: __name_words__ (initials badge) for all members.
-
--- Product Marketing (5 members: 2 admin, 2 member, 1 external participant)
-INSERT INTO team_members (id, team_id, user_id, display_name, role, color, icon, joined_at) VALUES
-  ('tm-pm-brian',      't-product-marketing', 'u-brian-rieb',  NULL,         'admin',  '#3B82F6', '__name_words__', datetime('now', '-90 days')),
-  ('tm-pm-lindsay',    't-product-marketing', 'u-lindsay-k',  NULL,         'member', '#EC4899', '__name_words__', datetime('now', '-85 days')),
-  ('tm-pm-erik',       't-product-marketing', 'u-erik-b',     NULL,         'admin',  '#F97316', '__name_words__', datetime('now', '-85 days')),
-  ('tm-pm-michelle',   't-product-marketing', 'u-michelle-t', NULL,         'member', '#22C55E', '__name_words__', datetime('now', '-80 days')),
-  ('tm-pm-contractor', 't-product-marketing', NULL,           'Contractor', 'member', '#64748B', '__name_words__', datetime('now', '-70 days'));
-
--- P&B Tiger Team (6 members: 2 admin, 4 member)
-INSERT INTO team_members (id, team_id, user_id, display_name, role, color, icon, joined_at) VALUES
-  ('tm-pb-brian',   't-pb-tiger-team', 'u-brian-rieb',       NULL, 'admin',  '#3B82F6', '__name_words__', datetime('now', '-88 days')),
-  ('tm-pb-scott',   't-pb-tiger-team', 'u-scott-fitzgerald', NULL, 'member', '#8B5CF6', '__name_words__', datetime('now', '-88 days')),
-  ('tm-pb-codi',    't-pb-tiger-team', 'u-codi-k',          NULL, 'admin',  '#06B6D4', '__name_words__', datetime('now', '-88 days')),
-  ('tm-pb-dan',     't-pb-tiger-team', 'u-dan-s',           NULL, 'member', '#F43F5E', '__name_words__', datetime('now', '-88 days')),
-  ('tm-pb-kristen', 't-pb-tiger-team', 'u-kristen-k',       NULL, 'member', '#F59E0B', '__name_words__', datetime('now', '-88 days')),
-  ('tm-pb-jamie',   't-pb-tiger-team', 'u-jamie-f',         NULL, 'member', '#84CC16', '__name_words__', datetime('now', '-88 days'));
-
--- Marketing Cross Functional (5 members: 2 admin, 3 member)
-INSERT INTO team_members (id, team_id, user_id, display_name, role, color, icon, joined_at) VALUES
-  ('tm-mcf-scott', 't-marketing-cross-func', 'u-scott-fitzgerald', NULL, 'admin',  '#8B5CF6', '__name_words__', datetime('now', '-75 days')),
-  ('tm-mcf-paula', 't-marketing-cross-func', 'u-paula-h',         NULL, 'admin',  '#A855F7', '__name_words__', datetime('now', '-75 days')),
-  ('tm-mcf-corey', 't-marketing-cross-func', 'u-corey-f',         NULL, 'member', '#EF4444', '__name_words__', datetime('now', '-75 days')),
-  ('tm-mcf-dan',   't-marketing-cross-func', 'u-dan-b',           NULL, 'member', '#6366F1', '__name_words__', datetime('now', '-75 days')),
-  ('tm-mcf-rick',  't-marketing-cross-func', 'u-rick-s',          NULL, 'member', '#288C9B', '__name_words__', datetime('now', '-75 days'));
-````
-
-## File: packages/api/sample_data/07_activities.sql
-````sql
--- Activities: 58 total across 6 timelines.
--- Columns: id, timeline_id, title, description, color, icon,
---          start_at, end_at, status_id,
---          parent_activity_id (NULL or sibling ID for sub-tasks),
---          percent_complete (0-100),
---          created_by, created_at, updated_at
-
--- ── Q1 Workload (20 activities, Workload statuses) ───────────────────────────
--- Parent-child pairs:
---   a-q1-02 (battlecard refresh) → a-q1-01 (competitive landscape)
---   a-q1-14 (AR/PR coordination) → a-q1-06 (launch checklist)
---   a-q1-17 (demo env setup)     → a-q1-06 (launch checklist)
-
-INSERT INTO activities (id, timeline_id, title, description, color, icon, start_at, end_at, status_id, parent_activity_id, percent_complete, created_by, created_at, updated_at) VALUES
-  ('a-q1-01', 'tl-pm-q1', 'Competitive landscape analysis',      'Deep-dive on top 5 competitors — positioning, pricing, recent launches.', '#3B82F6', 'search',         datetime('now', '-28 days'), datetime('now', '-18 days'), 's-q1-done',       NULL,       100, 'u-brian-rieb',  datetime('now', '-28 days'), datetime('now', '-18 days')),
-  ('a-q1-02', 'tl-pm-q1', 'Competitive battlecard refresh',      'Update sales battlecards with latest competitive intel.',                  '#06B6D4', 'shield',         datetime('now', '-20 days'), datetime('now', '-12 days'), 's-q1-done',       'a-q1-01',  100, 'u-brian-rieb',  datetime('now', '-20 days'), datetime('now', '-12 days')),
-  ('a-q1-03', 'tl-pm-q1', 'Q1 messaging framework',              'Core positioning and messaging for Q1 product launches.',                  '#8B5CF6', 'file-text',      datetime('now', '-25 days'), datetime('now', '-10 days'), 's-q1-done',       NULL,       100, 'u-lindsay-k',   datetime('now', '-25 days'), datetime('now', '-10 days')),
-  ('a-q1-04', 'tl-pm-q1', 'Analyst briefing prep — Gartner',     'Slide deck and talking points for Gartner analyst meeting.',               '#F97316', 'briefcase',      datetime('now', '-15 days'), datetime('now', '-8 days'),  's-q1-done',       NULL,       100, 'u-erik-b',      datetime('now', '-15 days'), datetime('now', '-8 days')),
-  ('a-q1-05', 'tl-pm-q1', 'Analyst briefing prep — Forrester',   'Deck and prep for Forrester wave discussion.',                             '#F97316', 'briefcase',      datetime('now', '-12 days'), datetime('now', '-5 days'),  's-q1-done',       NULL,       100, 'u-erik-b',      datetime('now', '-12 days'), datetime('now', '-5 days')),
-  ('a-q1-06', 'tl-pm-q1', 'Product launch checklist — v4.2',     'End-to-end launch readiness: docs, blog, enablement, PR.',                 '#22C55E', 'check-circle',   datetime('now', '-20 days'), datetime('now', '-3 days'),  's-q1-done',       NULL,       100, 'u-brian-rieb',  datetime('now', '-20 days'), datetime('now', '-3 days')),
-  ('a-q1-07', 'tl-pm-q1', 'Win/loss interview synthesis',        'Summarize Q4 win/loss interviews into themes and recommendations.',         '#EC4899', 'message-circle', datetime('now', '-18 days'), datetime('now', '-7 days'),  's-q1-done',       NULL,       100, 'u-michelle-t',  datetime('now', '-18 days'), datetime('now', '-7 days')),
-  ('a-q1-08', 'tl-pm-q1', 'Pricing positioning doc',             'Updated pricing rationale and competitive positioning matrix.',             '#F43F5E', 'trending-up',    datetime('now', '-10 days'), datetime('now', '+5 days'),  's-q1-inprogress', NULL,        60, 'u-brian-rieb',  datetime('now', '-10 days'), datetime('now', '-2 days')),
-  ('a-q1-09', 'tl-pm-q1', 'Sales one-pager refresh',             'Refresh the 2-sided sales leave-behind for Q1 messaging.',                 '#84CC16', 'file-text',      datetime('now', '-8 days'),  datetime('now', '+3 days'),  's-q1-inprogress', NULL,        45, 'u-lindsay-k',   datetime('now', '-8 days'),  datetime('now', '-2 days')),
-  ('a-q1-10', 'tl-pm-q1', 'Customer story — Acme Corp',          'Draft case study from Acme Corp expansion deal.',                          '#288C9B', 'star',           datetime('now', '-14 days'), datetime('now', '-4 days'),  's-q1-done',       NULL,       100, 'u-michelle-t',  datetime('now', '-14 days'), datetime('now', '-4 days')),
-  ('a-q1-11', 'tl-pm-q1', 'Content calendar planning',           'Map out blog, social, and email content for next 6 weeks.',                '#A855F7', 'calendar',       datetime('now', '-5 days'),  datetime('now', '+7 days'),  's-q1-inprogress', NULL,        50, 'u-lindsay-k',   datetime('now', '-5 days'),  datetime('now', '-1 days')),
-  ('a-q1-12', 'tl-pm-q1', 'Webinar script — platform overview',  'Script and slide deck for monthly product webinar.',                       '#6366F1', 'edit',           datetime('now', '-3 days'),  datetime('now', '+10 days'), 's-q1-planning',   NULL,         0, 'u-erik-b',      datetime('now', '-3 days'),  datetime('now', '-1 days')),
-  ('a-q1-13', 'tl-pm-q1', 'Partner co-marketing brief',          'Joint value prop and co-marketing plan with PartnerCo.',                   '#F59E0B', 'share',          datetime('now', '-7 days'),  datetime('now', '+4 days'),  's-q1-inprogress', NULL,        35, 'u-brian-rieb',  datetime('now', '-7 days'),  datetime('now', '-1 days')),
-  ('a-q1-14', 'tl-pm-q1', 'AR/PR coordination — Q1 launch',     'Coordinate PR release and analyst outreach for v4.2 launch.',              '#EF4444', 'globe',          datetime('now', '-6 days'),  datetime('now', '+5 days'),  's-q1-inprogress', 'a-q1-06',   40, 'u-erik-b',      datetime('now', '-6 days'),  datetime('now', '-1 days')),
-  ('a-q1-15', 'tl-pm-q1', 'Persona refresh workshop',            'Internal workshop to validate and update buyer personas.',                 '#78716C', 'users',          datetime('now', '+2 days'),  datetime('now', '+5 days'),  's-q1-planning',   NULL,         0, 'u-michelle-t',  datetime('now', '-2 days'),  datetime('now', '-1 days')),
-  ('a-q1-16', 'tl-pm-q1', 'ROI calculator update',               'Refresh the interactive ROI calculator with new benchmark data.',          '#06B6D4', 'pie-chart',      datetime('now', '+5 days'),  datetime('now', '+18 days'), 's-q1-planning',   NULL,         0, 'u-brian-rieb',  datetime('now', '-1 days'),  datetime('now', '-1 days')),
-  ('a-q1-17', 'tl-pm-q1', 'Demo environment setup',              'Provision and configure demo environment for Q1 launches.',                '#288C9B', 'server',         datetime('now', '-4 days'),  datetime('now', '+3 days'),  's-q1-blockers',   'a-q1-06',   30, 'u-erik-b',      datetime('now', '-4 days'),  datetime('now', '-1 days')),
-  ('a-q1-18', 'tl-pm-q1', 'Competitive teardown — NewCo launch', 'Rapid response analysis of NewCo product announcement.',                  '#EF4444', 'alert-circle',   datetime('now', '+7 days'),  datetime('now', '+14 days'), 's-q1-planning',   NULL,         0, 'u-brian-rieb',  datetime('now', '-1 days'),  datetime('now', '-1 days')),
-  ('a-q1-19', 'tl-pm-q1', 'Sales enablement newsletter — March', 'Monthly enablement digest: new assets, competitive updates, wins.',        '#22C55E', 'mail',           datetime('now', '+10 days'), datetime('now', '+14 days'), 's-q1-planning',   NULL,         0, 'u-lindsay-k',   datetime('now', '-1 days'),  datetime('now', '-1 days')),
-  ('a-q1-20', 'tl-pm-q1', 'Quarterly business review deck',      'PMM section of the QBR deck: pipeline impact, content metrics.',           '#F97316', 'bar-chart',      datetime('now', '+14 days'), datetime('now', '+21 days'), 's-q1-planning',   NULL,         0, 'u-brian-rieb',  datetime('now', '-1 days'),  datetime('now', '-1 days'));
-
--- ── Sales Kick Off (10 activities, Default statuses) ─────────────────────────
--- Parent-child pair:
---   a-sko-07 (sales training — pricing) → a-sko-05 (objection handling playbook)
-
-INSERT INTO activities (id, timeline_id, title, description, color, icon, start_at, end_at, status_id, parent_activity_id, percent_complete, created_by, created_at, updated_at) VALUES
-  ('a-sko-01', 'tl-pm-sko', 'SKO keynote deck',                    'Main stage presentation — product vision and roadmap.',                  '#3B82F6', 'star',           datetime('now', '+2 days'),  datetime('now', '+14 days'), 's-sko-inprogress', NULL,        55, 'u-erik-b',     datetime('now', '-10 days'), datetime('now', '-1 days')),
-  ('a-sko-02', 'tl-pm-sko', 'Competitive battle card workshop',    'Interactive session: how to use battlecards in live deals.',             '#EF4444', 'shield',         datetime('now', '+7 days'),  datetime('now', '+12 days'), 's-sko-planning',   NULL,         0, 'u-brian-rieb', datetime('now', '-10 days'), datetime('now', '-1 days')),
-  ('a-sko-03', 'tl-pm-sko', 'Demo script — enterprise tier',       'Step-by-step demo flow for enterprise prospects.',                       '#22C55E', 'code',           datetime('now', '+3 days'),  datetime('now', '+10 days'), 's-sko-inprogress', NULL,        40, 'u-erik-b',     datetime('now', '-8 days'),  datetime('now', '-1 days')),
-  ('a-sko-04', 'tl-pm-sko', 'New rep onboarding kit',              'Welcome pack: product overview, personas, competitive cheat sheet.',     '#F97316', 'package',        datetime('now', '+5 days'),  datetime('now', '+15 days'), 's-sko-planning',   NULL,         0, 'u-lindsay-k',  datetime('now', '-7 days'),  datetime('now', '-1 days')),
-  ('a-sko-05', 'tl-pm-sko', 'Objection handling playbook',         'Top 15 objections with response frameworks and proof points.',           '#8B5CF6', 'message-circle', datetime('now', '+8 days'),  datetime('now', '+18 days'), 's-sko-planning',   NULL,         0, 'u-brian-rieb', datetime('now', '-6 days'),  datetime('now', '-1 days')),
-  ('a-sko-06', 'tl-pm-sko', 'Customer story video — GlobalTech',   'Film and edit 3-minute customer testimonial video.',                     '#EC4899', 'eye',            datetime('now', '+1 days'),  datetime('now', '+20 days'), 's-sko-inprogress', NULL,        70, 'u-michelle-t', datetime('now', '-12 days'), datetime('now', '-1 days')),
-  ('a-sko-07', 'tl-pm-sko', 'Sales training session — pricing',    'Live training: positioning premium tier and handling price objections.', '#F59E0B', 'trending-up',    datetime('now', '+14 days'), datetime('now', '+16 days'), 's-sko-planning',   'a-sko-05',   0, 'u-brian-rieb', datetime('now', '-5 days'),  datetime('now', '-1 days')),
-  ('a-sko-08', 'tl-pm-sko', 'SKO swag and logistics',              'Coordinate branded materials, venue AV, and printed collateral.',        '#64748B', 'package',        datetime('now'),             datetime('now', '+25 days'), 's-sko-inprogress', NULL,        25, 'u-lindsay-k',  datetime('now', '-14 days'), datetime('now', '-1 days')),
-  ('a-sko-09', 'tl-pm-sko', 'Breakout session — vertical selling', 'Prep for healthcare and finserv vertical breakout sessions.',            '#06B6D4', 'layers',         datetime('now', '+10 days'), datetime('now', '+18 days'), 's-sko-planning',   NULL,         0, 'u-erik-b',     datetime('now', '-4 days'),  datetime('now', '-1 days')),
-  ('a-sko-10', 'tl-pm-sko', 'Post-SKO follow-up plan',             'Email sequences and resource hub for post-event reinforcement.',         '#84CC16', 'mail',           datetime('now', '+20 days'), datetime('now', '+30 days'), 's-sko-planning',   NULL,         0, 'u-michelle-t', datetime('now', '-3 days'),  datetime('now', '-1 days'));
-
--- ── Q2 Workload (5 activities, archived, Workload statuses) ──────────────────
-
-INSERT INTO activities (id, timeline_id, title, description, color, icon, start_at, end_at, status_id, parent_activity_id, percent_complete, created_by, created_at, updated_at) VALUES
-  ('a-q2-01', 'tl-pm-q2', 'Q2 product launch plan',           'High-level launch timeline and DRI assignments for Q2 releases.',     '#3B82F6', 'calendar',     datetime('now', '-175 days'), datetime('now', '-140 days'), 's-q2-done',     NULL, 100, 'u-brian-rieb', datetime('now', '-178 days'), datetime('now', '-140 days')),
-  ('a-q2-02', 'tl-pm-q2', 'Analyst day preparation',           'Materials and dry-run for annual analyst day event.',                 '#F97316', 'briefcase',    datetime('now', '-160 days'), datetime('now', '-130 days'), 's-q2-done',     NULL, 100, 'u-erik-b',     datetime('now', '-165 days'), datetime('now', '-130 days')),
-  ('a-q2-03', 'tl-pm-q2', 'Mid-year messaging audit',          'Review all external messaging for consistency with Q2 positioning.', '#EC4899', 'eye',          datetime('now', '-145 days'), datetime('now', '-115 days'), 's-q2-done',     NULL, 100, 'u-lindsay-k',  datetime('now', '-150 days'), datetime('now', '-115 days')),
-  ('a-q2-04', 'tl-pm-q2', 'Competitive intel digest — June',   'Monthly competitive summary for sales and leadership.',              '#EF4444', 'alert-circle', datetime('now', '-120 days'), datetime('now', '-100 days'), 's-q2-done',     NULL, 100, 'u-brian-rieb', datetime('now', '-125 days'), datetime('now', '-100 days')),
-  ('a-q2-05', 'tl-pm-q2', 'Customer advisory board planning',  'Agenda and invite list for H2 customer advisory board session.',     '#22C55E', 'users',        datetime('now', '-110 days'), datetime('now', '-92 days'),  's-q2-deferred', NULL,   0, 'u-michelle-t', datetime('now', '-115 days'), datetime('now', '-92 days'));
-
--- ── Right to Win Initiative (4 activities, Default statuses) ─────────────────
-
-INSERT INTO activities (id, timeline_id, title, description, color, icon, start_at, end_at, status_id, parent_activity_id, percent_complete, created_by, created_at, updated_at) VALUES
-  ('a-rtw-01', 'tl-pb-rtw', 'Market sizing research',         'TAM/SAM/SOM analysis for the target segment.',                       '#3B82F6', 'pie-chart',      datetime('now', '-118 days'), datetime('now', '-100 days'), 's-rtw-done', NULL, 100, 'u-dan-s',     datetime('now', '-118 days'), datetime('now', '-100 days')),
-  ('a-rtw-02', 'tl-pb-rtw', 'Customer interview round',       'Interview 8 target-segment customers on needs and pain points.',     '#22C55E', 'message-circle', datetime('now', '-105 days'), datetime('now', '-85 days'),  's-rtw-done', NULL, 100, 'u-kristen-k', datetime('now', '-105 days'), datetime('now', '-85 days')),
-  ('a-rtw-03', 'tl-pb-rtw', 'Right-to-win framework doc',     'Synthesize research into the right-to-win positioning framework.',   '#F97316', 'file-text',      datetime('now', '-90 days'),  datetime('now', '-70 days'),  's-rtw-done', NULL, 100, 'u-brian-rieb', datetime('now', '-90 days'),  datetime('now', '-70 days')),
-  ('a-rtw-04', 'tl-pb-rtw', 'Leadership presentation',        'Present findings and recommendation to exec team.',                  '#8B5CF6', 'award',          datetime('now', '-72 days'),  datetime('now', '-62 days'),  's-rtw-done', NULL, 100, 'u-codi-k',    datetime('now', '-72 days'),  datetime('now', '-62 days'));
-
--- ── Displacement GTM (4 activities, Default statuses) ────────────────────────
-
-INSERT INTO activities (id, timeline_id, title, description, color, icon, start_at, end_at, status_id, parent_activity_id, percent_complete, created_by, created_at, updated_at) VALUES
-  ('a-gtm-01', 'tl-pb-gtm', 'Displacement playbook draft',    'End-to-end playbook: triggers, objections, migration path.',         '#EF4444', 'flag',        datetime('now', '-148 days'), datetime('now', '-120 days'), 's-gtm-done', NULL, 100, 'u-codi-k',           datetime('now', '-148 days'), datetime('now', '-120 days')),
-  ('a-gtm-02', 'tl-pb-gtm', 'Migration ROI calculator',       'Build ROI model showing TCO advantage of switching.',               '#22C55E', 'trending-up', datetime('now', '-125 days'), datetime('now', '-95 days'),  's-gtm-done', NULL, 100, 'u-dan-s',            datetime('now', '-125 days'), datetime('now', '-95 days')),
-  ('a-gtm-03', 'tl-pb-gtm', 'Sales enablement training',      'Train AEs on displacement selling motion and objection handling.',   '#F59E0B', 'users',       datetime('now', '-100 days'), datetime('now', '-75 days'),  's-gtm-done', NULL, 100, 'u-jamie-f',          datetime('now', '-100 days'), datetime('now', '-75 days')),
-  ('a-gtm-04', 'tl-pb-gtm', 'Pilot program launch',           'Identify 3 pilot accounts and run displacement proof-of-concept.',  '#3B82F6', 'target',      datetime('now', '-80 days'),  datetime('now', '-62 days'),  's-gtm-done', NULL, 100, 'u-scott-fitzgerald', datetime('now', '-80 days'),  datetime('now', '-62 days'));
-
--- ── Web Site Rebrand (15 activities, Workload statuses) ──────────────────────
--- Parent-child pairs:
---   a-reb-08 (product pages rewrite) → a-reb-02 (design system v2)
---   a-reb-09 (blog template redesign) → a-reb-02 (design system v2)
-
-INSERT INTO activities (id, timeline_id, title, description, color, icon, start_at, end_at, status_id, parent_activity_id, percent_complete, created_by, created_at, updated_at) VALUES
-  ('a-reb-01', 'tl-mcf-rebrand', 'Brand audit and gap analysis',        'Audit current brand assets against new brand strategy.',              '#8B5CF6', 'search',       datetime('now', '-58 days'), datetime('now', '-42 days'), 's-reb-done',       NULL,       100, 'u-scott-fitzgerald', datetime('now', '-58 days'), datetime('now', '-42 days')),
-  ('a-reb-02', 'tl-mcf-rebrand', 'Design system v2',                    'New component library: typography, color, spacing, elevation.',       '#3B82F6', 'grid',         datetime('now', '-50 days'), datetime('now', '-25 days'), 's-reb-done',       NULL,       100, 'u-paula-h',          datetime('now', '-50 days'), datetime('now', '-25 days')),
-  ('a-reb-03', 'tl-mcf-rebrand', 'Homepage hero redesign',              'New hero section: headline, value prop, CTA, and imagery.',           '#EC4899', 'eye',          datetime('now', '-30 days'), datetime('now', '-10 days'), 's-reb-done',       NULL,       100, 'u-corey-f',          datetime('now', '-30 days'), datetime('now', '-10 days')),
-  ('a-reb-04', 'tl-mcf-rebrand', 'SEO keyword audit',                   'Comprehensive keyword analysis and content gap identification.',      '#22C55E', 'search',       datetime('now', '-45 days'), datetime('now', '-20 days'), 's-reb-done',       NULL,       100, 'u-rick-s',           datetime('now', '-45 days'), datetime('now', '-20 days')),
-  ('a-reb-05', 'tl-mcf-rebrand', 'Content migration plan',              'Map existing pages to new IA; identify pages to create/retire.',      '#F97316', 'list',         datetime('now', '-35 days'), datetime('now', '-15 days'), 's-reb-done',       NULL,       100, 'u-dan-b',            datetime('now', '-35 days'), datetime('now', '-15 days')),
-  ('a-reb-06', 'tl-mcf-rebrand', 'Analytics tagging spec',              'Define UTM strategy, event taxonomy, and GA4 configuration.',         '#06B6D4', 'pie-chart',    datetime('now', '-20 days'), datetime('now', '-5 days'),  's-reb-done',       NULL,       100, 'u-rick-s',           datetime('now', '-20 days'), datetime('now', '-5 days')),
-  ('a-reb-07', 'tl-mcf-rebrand', 'Accessibility audit',                 'WCAG 2.1 AA audit of all new page templates.',                       '#F43F5E', 'shield',       datetime('now', '-10 days'), datetime('now', '+5 days'),  's-reb-inprogress', NULL,        60, 'u-corey-f',          datetime('now', '-10 days'), datetime('now', '-2 days')),
-  ('a-reb-08', 'tl-mcf-rebrand', 'Product pages rewrite',               'Rewrite all product/feature pages with new messaging.',               '#A855F7', 'file-text',    datetime('now', '-8 days'),  datetime('now', '+15 days'), 's-reb-inprogress', 'a-reb-02',  30, 'u-scott-fitzgerald', datetime('now', '-8 days'),  datetime('now', '-1 days')),
-  ('a-reb-09', 'tl-mcf-rebrand', 'Blog template redesign',              'New blog index and post templates matching brand refresh.',            '#84CC16', 'edit',         datetime('now', '-5 days'),  datetime('now', '+10 days'), 's-reb-inprogress', 'a-reb-02',  45, 'u-paula-h',          datetime('now', '-5 days'),  datetime('now', '-1 days')),
-  ('a-reb-10', 'tl-mcf-rebrand', 'Stakeholder review — round 1',        'First exec review of homepage, product pages, and navigation.',       '#64748B', 'users',        datetime('now', '+5 days'),  datetime('now', '+8 days'),  's-reb-planning',   NULL,         0, 'u-scott-fitzgerald', datetime('now', '-3 days'),  datetime('now', '-1 days')),
-  ('a-reb-11', 'tl-mcf-rebrand', 'Photography and illustration sprint', 'Commission new brand photography and custom illustrations.',          '#F59E0B', 'eye',          datetime('now', '+3 days'),  datetime('now', '+25 days'), 's-reb-planning',   NULL,         0, 'u-paula-h',          datetime('now', '-2 days'),  datetime('now', '-1 days')),
-  ('a-reb-12', 'tl-mcf-rebrand', 'Pricing page overhaul',               'Redesign pricing page with new tier structure and FAQ.',              '#EF4444', 'trending-up',  datetime('now', '+10 days'), datetime('now', '+30 days'), 's-reb-planning',   NULL,         0, 'u-dan-b',            datetime('now', '-2 days'),  datetime('now', '-1 days')),
-  ('a-reb-13', 'tl-mcf-rebrand', 'Redirect map and 301 plan',           'Map all old URLs to new structure; configure redirects.',             '#78716C', 'link',         datetime('now', '+15 days'), datetime('now', '+35 days'), 's-reb-planning',   NULL,         0, 'u-rick-s',           datetime('now', '-1 days'),  datetime('now', '-1 days')),
-  ('a-reb-14', 'tl-mcf-rebrand', 'Launch readiness checklist',          'Pre-launch verification: performance, SEO, analytics, redirects.',   '#288C9B', 'check-circle', datetime('now', '+30 days'), datetime('now', '+40 days'), 's-reb-planning',   NULL,         0, 'u-scott-fitzgerald', datetime('now', '-1 days'),  datetime('now', '-1 days')),
-  ('a-reb-15', 'tl-mcf-rebrand', 'Post-launch monitoring plan',         'Week-1 monitoring: traffic, errors, search console, conversions.',   '#F97316', 'activity',     datetime('now', '+40 days'), datetime('now', '+50 days'), 's-reb-planning',   NULL,         0, 'u-rick-s',           datetime('now', '-1 days'),  datetime('now', '-1 days'));
-````
-
-## File: packages/api/sample_data/09_timeline_access.sql
-````sql
--- Timeline access: all team members get access to their team's timelines.
--- Team admins get 'admin' role, team members get 'member' role.
-
--- Product Marketing timelines
-INSERT INTO timeline_access (timeline_id, team_member_id, role) VALUES
-  ('tl-pm-q1',  'tm-pm-brian',      'admin'),
-  ('tl-pm-q1',  'tm-pm-lindsay',    'member'),
-  ('tl-pm-q1',  'tm-pm-erik',       'admin'),
-  ('tl-pm-q1',  'tm-pm-michelle',   'member'),
-  ('tl-pm-q1',  'tm-pm-contractor', 'member'),
-  ('tl-pm-sko', 'tm-pm-brian',      'admin'),
-  ('tl-pm-sko', 'tm-pm-lindsay',    'member'),
-  ('tl-pm-sko', 'tm-pm-erik',       'admin'),
-  ('tl-pm-sko', 'tm-pm-michelle',   'member'),
-  ('tl-pm-sko', 'tm-pm-contractor', 'member'),
-  ('tl-pm-q2',  'tm-pm-brian',      'admin'),
-  ('tl-pm-q2',  'tm-pm-lindsay',    'member'),
-  ('tl-pm-q2',  'tm-pm-erik',       'admin'),
-  ('tl-pm-q2',  'tm-pm-michelle',   'member'),
-  ('tl-pm-q2',  'tm-pm-contractor', 'member');
-
--- P&B Tiger Team timelines
-INSERT INTO timeline_access (timeline_id, team_member_id, role) VALUES
-  ('tl-pb-rtw', 'tm-pb-brian',   'admin'),
-  ('tl-pb-rtw', 'tm-pb-scott',   'member'),
-  ('tl-pb-rtw', 'tm-pb-codi',    'admin'),
-  ('tl-pb-rtw', 'tm-pb-dan',     'member'),
-  ('tl-pb-rtw', 'tm-pb-kristen', 'member'),
-  ('tl-pb-rtw', 'tm-pb-jamie',   'member'),
-  ('tl-pb-gtm', 'tm-pb-brian',   'admin'),
-  ('tl-pb-gtm', 'tm-pb-scott',   'member'),
-  ('tl-pb-gtm', 'tm-pb-codi',    'admin'),
-  ('tl-pb-gtm', 'tm-pb-dan',     'member'),
-  ('tl-pb-gtm', 'tm-pb-kristen', 'member'),
-  ('tl-pb-gtm', 'tm-pb-jamie',   'member');
-
--- Marketing Cross Functional timelines
-INSERT INTO timeline_access (timeline_id, team_member_id, role) VALUES
-  ('tl-mcf-rebrand', 'tm-mcf-scott', 'admin'),
-  ('tl-mcf-rebrand', 'tm-mcf-paula', 'admin'),
-  ('tl-mcf-rebrand', 'tm-mcf-corey', 'member'),
-  ('tl-mcf-rebrand', 'tm-mcf-dan',   'member'),
-  ('tl-mcf-rebrand', 'tm-mcf-rick',  'member');
 ````
 
 ## File: packages/api/sample_data/10_tags.sql
@@ -33148,240 +33148,6 @@ export default function FilterManageModal({
 }
 ````
 
-## File: packages/web/src/components/gantt/ActivityCreatePanel.tsx
-````typescript
-/**
- * ActivityCreatePanel — right-side slide-in panel for creating a new Gantt activity.
- *
- * Shares its field stack with ActivityDetailPanel via ActivityFieldsBody
- * (see activityPanelFields.tsx) so the create and edit forms show an identical
- * field set and order. Unlike the detail panel, every change buffers in local
- * state; nothing persists until the user clicks "Create activity", which
- * submits the whole form via POST /timelines/:id/activities.
- *
- * Defaults come from the drag selection: start/end date and the lane member.
- */
-
-import { useState, useEffect } from 'react'
-import { X, Loader2 } from 'lucide-react'
-import type { Identity } from '@/components/identity/identity-constants'
-import { useCreateActivity, useTimelineActivities } from '@/hooks/useTeamActivities'
-import { useTags } from '@/hooks/useTags'
-import type { Member } from '@/types'
-import type { components } from '@draba/shared'
-import { ActivityFieldsBody, PANEL_WIDTH } from './activityPanelFields'
-
-type Status = components['schemas']['Status']
-
-interface Props {
-  open: boolean
-  teamId: string
-  timelineId: string
-  members: Member[]
-  timelineStatuses?: Status[]
-  defaultStart: string
-  defaultEnd: string
-  defaultMemberId?: string | null
-  defaultStatusId?: string | null
-  onClose: () => void
-}
-
-export default function ActivityCreatePanel({
-  open,
-  teamId,
-  timelineId,
-  members,
-  timelineStatuses = [],
-  defaultStart,
-  defaultEnd,
-  defaultMemberId,
-  defaultStatusId,
-  onClose,
-}: Props) {
-  const createMutation = useCreateActivity(teamId, timelineId)
-  const { data: teamTags = [] } = useTags(teamId)
-  const { data: allActivities = [] } = useTimelineActivities(teamId, timelineId)
-
-  const [title, setTitle] = useState('')
-  const [description, setDescription] = useState('')
-  const [notes, setNotes] = useState('')
-  const [startDate, setStartDate] = useState(defaultStart)
-  const [endDate, setEndDate] = useState(defaultEnd)
-  const [identity, setIdentity] = useState<Identity>({ color: '#288C9B', icon: '__none__' })
-  const [assignedIds, setAssignedIds] = useState<string[]>(
-    defaultMemberId ? [defaultMemberId] : [],
-  )
-  const [statusId, setStatusId] = useState<string | null>(defaultStatusId ?? null)
-  const [tagIds, setTagIds] = useState<string[]>([])
-  const [parentId, setParentId] = useState<string | null>(null)
-  const [progress, setProgress] = useState(0)
-  const [location, setLocation] = useState('')
-  const [url, setUrl] = useState('')
-
-  // Reset all fields to defaults each time the panel opens so re-opening
-  // the panel always shows a blank form rather than the previous session's data.
-  useEffect(() => {
-    if (!open) return
-    setTitle('')
-    setDescription('')
-    setNotes('')
-    setStartDate(defaultStart)
-    setEndDate(defaultEnd)
-    setIdentity({ color: '#288C9B', icon: '__none__' })
-    setAssignedIds(defaultMemberId ? [defaultMemberId] : [])
-    setStatusId(defaultStatusId ?? null)
-    setTagIds([])
-    setParentId(null)
-    setProgress(0)
-    setLocation('')
-    setUrl('')
-  }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  const creating = createMutation.isPending
-  const titleTrimmed = title.trim()
-
-  function toggleAssignee(memberId: string) {
-    setAssignedIds(prev =>
-      prev.includes(memberId) ? prev.filter(id => id !== memberId) : [...prev, memberId],
-    )
-  }
-
-  // Keep the end date from drifting before the start date.
-  function handleStartDateChange(val: string) {
-    setStartDate(val)
-    if (val > endDate) setEndDate(val)
-  }
-
-  function handleSubmit(e: React.FormEvent) {
-    e.preventDefault()
-    if (!titleTrimmed) return
-    createMutation.mutate(
-      {
-        title: titleTrimmed,
-        startAt: `${startDate}T00:00:00Z`,
-        endAt: `${endDate}T00:00:00Z`,
-        description: description.trim() || null,
-        notes: notes.trim() || null,
-        color: identity.color,
-        icon: identity.icon,
-        assignedMemberIds: assignedIds,
-        statusId: statusId ?? undefined,
-        tagIds,
-        parentActivityId: parentId,
-        percentComplete: progress,
-        location: location.trim() || null,
-        url: url.trim() || null,
-      },
-      { onSuccess: onClose },
-    )
-  }
-
-  return (
-    <div
-      style={{
-        width: open ? PANEL_WIDTH : 0,
-        flexShrink: 0,
-        borderLeft: open ? '1px solid var(--border)' : 'none',
-        background: 'var(--card)',
-        display: 'flex',
-        flexDirection: 'column',
-        overflow: 'hidden',
-        transition: 'width 0.2s ease',
-      }}
-    >
-    <div style={{ width: PANEL_WIDTH, display: 'flex', flexDirection: 'column', height: '100%' }}>
-      {/* Header */}
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          padding: '0 12px',
-          height: 'var(--topbar-h, 40px)',
-          borderBottom: '1px solid var(--border)',
-          flexShrink: 0,
-        }}
-      >
-        <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)' }}>New activity</span>
-        <button
-          onClick={onClose}
-          style={{
-            width: 24, height: 24, border: 'none', background: 'none', borderRadius: 4,
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            cursor: 'pointer', color: 'var(--muted-foreground)',
-          }}
-          onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-          onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-        >
-          <X size={14} strokeWidth={2} />
-        </button>
-      </div>
-
-      {/* Body (shared with detail panel) */}
-      <ActivityFieldsBody
-        identity={identity}
-        onIdentityChange={setIdentity}
-        title={title}
-        onTitleChange={setTitle}
-        titlePlaceholder="Activity title…"
-        titleAutoFocus
-        titleFallbackName="New Activity"
-        startDate={startDate}
-        endDate={endDate}
-        onStartDateChange={handleStartDateChange}
-        onEndDateChange={setEndDate}
-        description={description}
-        onDescriptionChange={setDescription}
-        members={members}
-        assignedIds={assignedIds}
-        onToggleAssignee={toggleAssignee}
-        statuses={timelineStatuses}
-        statusId={statusId}
-        onStatusChange={setStatusId}
-        teamId={teamId}
-        teamTags={teamTags}
-        tagIds={tagIds}
-        onTagsChange={setTagIds}
-        parentActivities={allActivities}
-        parentId={parentId}
-        onParentChange={setParentId}
-        progress={progress}
-        onProgressCommit={setProgress}
-        location={location}
-        onLocationChange={setLocation}
-        url={url}
-        onUrlChange={setUrl}
-        notes={notes}
-        onNotesChange={setNotes}
-      />
-
-      {/* Footer */}
-      <div style={{ padding: '10px 14px', borderTop: '1px solid var(--border)', flexShrink: 0 }}>
-        <button
-          type="button"
-          onClick={handleSubmit}
-          disabled={!titleTrimmed || creating}
-          style={{
-            width: '100%', fontSize: 13, fontWeight: 600, padding: 8,
-            borderRadius: 'var(--radius-md)', border: 'none',
-            background: titleTrimmed && !creating ? 'var(--primary)' : 'var(--muted)',
-            color: titleTrimmed && !creating ? 'white' : 'var(--muted-foreground)',
-            cursor: titleTrimmed && !creating ? 'pointer' : 'not-allowed',
-            fontFamily: 'var(--font-sans)',
-            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
-            transition: 'background 0.1s',
-          }}
-        >
-          {creating && <Loader2 size={13} className="animate-spin" />}
-          Create activity
-        </button>
-      </div>
-    </div>
-    </div>
-  )
-}
-````
-
 ## File: packages/web/src/components/gantt/GanttToolbar.tsx
 ````typescript
 /**
@@ -34006,219 +33772,6 @@ export function autoFitGranularity(
   }
 
   return best;
-}
-````
-
-## File: packages/web/src/components/kanban/KanbanBoard.tsx
-````typescript
-/**
- * KanbanBoard — the DndContext host that owns all columns and the drag overlay.
- *
- * Renders columns in a horizontal scrolling row. On drag-end, derives the
- * correct PATCH payload for the active groupBy and calls onDrop.
- */
-
-import { DndContext, DragOverlay, PointerSensor, useSensor, useSensors } from '@dnd-kit/core';
-import type { DragEndEvent, DragStartEvent, DragOverEvent } from '@dnd-kit/core';
-import { useState } from 'react';
-import KanbanColumn from './KanbanColumn';
-import KanbanCard from './KanbanCard';
-import type { KanbanColumn as Column, KanbanCardField, KanbanGroupBy } from './kanbanColumns';
-import type { Member } from '@/types';
-import type { components } from '@draba/shared';
-
-type ApiActivity = components['schemas']['Activity'];
-type Status = components['schemas']['Status'];
-type Tag = components['schemas']['Tag'];
-
-export interface DropPayload {
-  activityId: string;
-  patch: {
-    statusId?: string | null;
-    assignedMemberIds?: string[];
-    parentActivityId?: string | null;
-  };
-}
-
-interface Props {
-  columns: Column[];
-  groupBy: KanbanGroupBy;
-  members: Member[];
-  statusById: Map<string, Status>;
-  tagById: Map<string, Tag>;
-  /** Per-activity resolved hex color for the card accent border. */
-  colorMap: Map<string, string>;
-  cardFields: KanbanCardField[];
-  suppressedFields: Set<KanbanCardField>;
-  selectedActivityId: string | null;
-  matchedIds: Set<string>;
-  activeMatchId: string | null;
-  hasQuery: boolean;
-  collapsedColumnIds: Set<string>;
-  onToggleCollapse: (columnId: string) => void;
-  onCardClick: (activity: ApiActivity) => void;
-  onAddInColumn: (column: Column) => void;
-  onDrop: (payload: DropPayload) => void;
-  /** Map of activity ID → ApiActivity for drag overlay lookup. */
-  activityById: Map<string, ApiActivity>;
-  /** Map of activity ID → title, for showing parent names on child cards. */
-  activityTitleById: Map<string, string>;
-  // ── Hierarchy ────────────────────────────────────────────────────────────────
-  showHierarchy: boolean;
-  childrenByParentId: Map<string, ApiActivity[]>;
-  collapsedParents: Set<string>;
-  onToggleParent: (activityId: string) => void;
-}
-
-export default function KanbanBoard({
-  columns,
-  groupBy,
-  members,
-  statusById,
-  tagById,
-  colorMap,
-  cardFields,
-  suppressedFields,
-  showHierarchy,
-  childrenByParentId,
-  collapsedParents,
-  onToggleParent,
-  selectedActivityId,
-  matchedIds,
-  activeMatchId,
-  hasQuery,
-  collapsedColumnIds,
-  onToggleCollapse,
-  onCardClick,
-  onAddInColumn,
-  onDrop,
-  activityById,
-  activityTitleById,
-}: Props) {
-  const [draggingId, setDraggingId] = useState<string | null>(null);
-  const [overColumnId, setOverColumnId] = useState<string | null>(null);
-
-  // Require a 5px drag threshold to prevent accidental drags on card clicks.
-  const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
-  );
-
-  function handleDragStart({ active }: DragStartEvent) {
-    setDraggingId(active.id as string);
-  }
-
-  function handleDragEnd({ active, over }: DragEndEvent) {
-    setDraggingId(null);
-    setOverColumnId(null);
-    if (!over) return;
-
-    const activityId = String(active.id);
-    const columnId = String(over.id);
-
-    const column = columns.find(c => c.id === columnId);
-    if (!column || !column.droppable || !column.dropValue) return;
-
-    // Determine if anything actually changed before issuing a PATCH.
-    const activity = activityById.get(activityId);
-    if (!activity) return;
-
-    // Skip if the card is already in this column (no-op drop).
-    const isAlreadyHere = (() => {
-      switch (groupBy) {
-        case 'status': {
-          const currentStatus = (activity as ApiActivity & { statusId?: string | null }).statusId ?? null;
-          return currentStatus === (column.dropValue.statusId ?? null);
-        }
-        case 'member': {
-          const primary = activity.assignedMemberIds?.[0] ?? null;
-          const target = column.dropValue.assignedMemberIds?.[0] ?? null;
-          return primary === target;
-        }
-        default:
-          return false;
-      }
-    })();
-
-    if (isAlreadyHere) return;
-
-    onDrop({ activityId, patch: column.dropValue });
-  }
-
-  function handleDragOver({ over }: DragOverEvent) {
-    setOverColumnId(over ? String(over.id) : null);
-  }
-
-  const draggingActivity = draggingId ? activityById.get(draggingId) : undefined;
-
-  return (
-    <DndContext
-      sensors={sensors}
-      onDragStart={handleDragStart}
-      onDragEnd={handleDragEnd}
-      onDragOver={handleDragOver}
-    >
-      <div
-        style={{
-          display: 'flex',
-          flexDirection: 'row',
-          gap: 12,
-          padding: '12px 16px 16px',
-          overflowX: 'auto',
-          overflowY: 'hidden',
-          height: '100%',
-          alignItems: 'flex-start',
-          boxSizing: 'border-box',
-        }}
-      >
-        {columns.map(col => (
-          <KanbanColumn
-            key={col.id}
-            column={col}
-            members={members}
-            statusById={statusById}
-            tagById={tagById}
-            colorMap={colorMap}
-            activityTitleById={activityTitleById}
-            cardFields={cardFields}
-            suppressedFields={suppressedFields}
-            showHierarchy={showHierarchy}
-            childrenByParentId={childrenByParentId}
-            collapsedParents={collapsedParents}
-            onToggleParent={onToggleParent}
-            selectedActivityId={selectedActivityId}
-            matchedIds={matchedIds}
-            activeMatchId={activeMatchId}
-            hasQuery={hasQuery}
-            isOver={overColumnId === col.id && col.droppable}
-            isCollapsed={collapsedColumnIds.has(col.id)}
-            onToggleCollapse={() => onToggleCollapse(col.id)}
-            onCardClick={onCardClick}
-            onAddClick={() => onAddInColumn(col)}
-          />
-        ))}
-      </div>
-
-      {/* Drag overlay — floats above everything while dragging */}
-      <DragOverlay dropAnimation={null}>
-        {draggingActivity ? (
-          <KanbanCard
-            activity={draggingActivity}
-            accentColor={colorMap.get(draggingActivity.id) ?? '#6b7280'}
-            members={members}
-            statusById={statusById}
-            tagById={tagById}
-            cardFields={cardFields}
-            suppressedFields={suppressedFields}
-            isSelected={false}
-            dimmed={false}
-            activeMatch={false}
-            isDragOverlay
-            onClick={() => {}}
-          />
-        ) : null}
-      </DragOverlay>
-    </DndContext>
-  );
 }
 ````
 
@@ -34998,280 +34551,6 @@ export default function KanbanColumn({
 }
 ````
 
-## File: packages/web/src/components/kanban/kanbanColumns.ts
-````typescript
-/**
- * kanbanColumns — pure column-building and sort logic for the Kanban view.
- *
- * Given a groupBy mode plus the visible activities, team members, and timeline
- * statuses, produces an ordered list of KanbanColumn objects ready for rendering.
- * All grouping/labeling/ordering lives here; the React components stay thin.
- */
-
-import type { components } from '@draba/shared';
-import {
-  memberComboKey,
-  orderedComboIds,
-  memberComboLabel,
-  comboSortComparator,
-  UNASSIGNED_KEY,
-} from '@/lib/memberGroups';
-
-type ApiActivity = components['schemas']['Activity'];
-type Status = components['schemas']['Status'];
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
-
-// ── Public types ───────────────────────────────────────────────────────────────
-
-export type KanbanGroupBy =
-  | 'status'
-  | 'member'
-  | 'member-combination';
-
-export type KanbanSortBy =
-  | 'startDate'
-  | 'endDate'
-  | 'title'
-  | 'percentComplete'
-  | 'updatedAt';
-
-export type KanbanCardField =
-  | 'dateRange'
-  | 'status'
-  | 'tags'
-  | 'members'
-  | 'percentComplete'
-  | 'parent'
-  | 'description';
-
-export const DEFAULT_CARD_FIELDS: KanbanCardField[] = [
-  'dateRange',
-  'status',
-  'tags',
-  'members',
-];
-
-/** Sentinel IDs for "bucket with no value" columns. */
-export const NO_STATUS_ID  = '__no-status__';
-export const UNASSIGNED_ID = '__unassigned__';
-
-/**
- * A resolved column, ready for rendering.
- *
- * `droppable: false` for combination and None groupings (drop semantics are
- * ambiguous or undefined). `dropValue` encodes what patch to apply on drop.
- */
-export interface KanbanColumn {
-  id: string;
-  label: string;
-  /** Hex color for the column accent (header dot, drop-highlight tint). */
-  color?: string;
-  icon?: string;
-  droppable: boolean;
-  /** The patch values to apply when a card is dropped into this column. */
-  dropValue?: {
-    statusId?: string | null;
-    assignedMemberIds?: string[];
-    parentActivityId?: string | null;
-  };
-  items: ApiActivity[];
-}
-
-// ── Sort comparators ───────────────────────────────────────────────────────────
-
-function cmp<T>(a: T, b: T, dir: 1 | -1 = 1): number {
-  if (a == null && b == null) return 0;
-  if (a == null) return 1;  // nulls last
-  if (b == null) return -1;
-  return a < b ? -dir : a > b ? dir : 0;
-}
-
-/** Sort activities within a column according to the chosen sort mode. */
-export function sortActivities(
-  activities: ApiActivity[],
-  sortBy: KanbanSortBy,
-): ApiActivity[] {
-  const sorted = [...activities];
-  switch (sortBy) {
-    case 'startDate':
-      // cmp with string comparison; null/undefined treated as nulls-last
-      sorted.sort((a, b) => {
-        const av = a.startAt ?? null;
-        const bv = b.startAt ?? null;
-        return cmp(av, bv);
-      });
-      break;
-    case 'endDate':
-      sorted.sort((a, b) => {
-        const av = a.endAt ?? null;
-        const bv = b.endAt ?? null;
-        return cmp(av, bv);
-      });
-      break;
-    case 'title':
-      sorted.sort((a, b) => a.title.localeCompare(b.title));
-      break;
-    case 'percentComplete':
-      // Descending: highest first, nulls last.
-      sorted.sort((a, b) => {
-        const av = a.percentComplete ?? null;
-        const bv = b.percentComplete ?? null;
-        if (av === null && bv === null) return 0;
-        if (av === null) return 1;
-        if (bv === null) return -1;
-        return bv - av;
-      });
-      break;
-    case 'updatedAt':
-      // Most-recently-updated first
-      sorted.sort((a, b) => cmp(b.updatedAt, a.updatedAt));
-      break;
-  }
-  return sorted;
-}
-
-// ── buildColumns ──────────────────────────────────────────────────────────────
-
-/**
- * Build the ordered column list from the active groupBy, activities, members,
- * and statuses. Applies `sortBy` within each column.
- */
-export function buildColumns(
-  groupBy: KanbanGroupBy,
-  activities: ApiActivity[],
-  members: TeamMemberWithUser[],
-  statuses: Status[],
-  sortBy: KanbanSortBy,
-): KanbanColumn[] {
-  switch (groupBy) {
-    case 'status':             return buildStatusColumns(activities, statuses, sortBy);
-    case 'member':             return buildMemberColumns(activities, members, sortBy);
-    case 'member-combination': return buildCombinationColumns(activities, members, sortBy);
-  }
-}
-
-// ── Status columns ─────────────────────────────────────────────────────────────
-
-function buildStatusColumns(
-  activities: ApiActivity[],
-  statuses: Status[],
-  sortBy: KanbanSortBy,
-): KanbanColumn[] {
-  // Bucket activities by statusId (null → no-status bucket).
-  const byStatus = new Map<string | null, ApiActivity[]>();
-  byStatus.set(null, []);
-  for (const s of statuses) byStatus.set(s.id, []);
-  for (const act of activities) {
-    const key = (act as ApiActivity & { statusId?: string | null }).statusId ?? null;
-    const bucket = byStatus.get(key) ?? byStatus.get(null)!;
-    bucket.push(act);
-  }
-
-  // "No status" column first, then statuses in position order.
-  const noStatusItems = sortActivities(byStatus.get(null) ?? [], sortBy);
-  const statusCols: KanbanColumn[] = statuses
-    .slice()
-    .sort((a, b) => (a.position ?? 0) - (b.position ?? 0))
-    .map(s => ({
-      id: s.id,
-      label: s.name,
-      color: s.color ?? undefined,
-      icon: s.icon ?? undefined,
-      droppable: true,
-      dropValue: { statusId: s.id },
-      items: sortActivities(byStatus.get(s.id) ?? [], sortBy),
-    }));
-
-  return [
-    {
-      id: NO_STATUS_ID,
-      label: 'No status',
-      droppable: true,
-      dropValue: { statusId: null },
-      items: noStatusItems,
-    },
-    ...statusCols,
-  ];
-}
-
-// ── Member columns ─────────────────────────────────────────────────────────────
-
-function buildMemberColumns(
-  activities: ApiActivity[],
-  members: TeamMemberWithUser[],
-  sortBy: KanbanSortBy,
-): KanbanColumn[] {
-  // Assign each activity to its first (primary) member; multi-member cards
-  // appear only once in the primary member's column. Unassigned → UNASSIGNED_ID.
-  const byMember = new Map<string, ApiActivity[]>();
-  byMember.set(UNASSIGNED_ID, []);
-  for (const m of members) byMember.set(m.id, []);
-  for (const act of activities) {
-    const ids = act.assignedMemberIds ?? [];
-    const key = ids.length > 0 ? ids[0] : UNASSIGNED_ID;
-    const bucket = byMember.get(key) ?? byMember.get(UNASSIGNED_ID)!;
-    bucket.push(act);
-  }
-
-  const memberCols: KanbanColumn[] = members.map(m => ({
-    id: m.id,
-    label: m.displayName || m.email || 'Unknown',
-    color: m.color ?? undefined,
-    droppable: true,
-    dropValue: { assignedMemberIds: [m.id] },
-    items: sortActivities(byMember.get(m.id) ?? [], sortBy),
-  }));
-
-  return [
-    {
-      id: UNASSIGNED_ID,
-      label: 'Unassigned',
-      droppable: true,
-      dropValue: { assignedMemberIds: [] },
-      items: sortActivities(byMember.get(UNASSIGNED_ID) ?? [], sortBy),
-    },
-    ...memberCols,
-  ];
-}
-
-// ── Combination columns ────────────────────────────────────────────────────────
-
-function buildCombinationColumns(
-  activities: ApiActivity[],
-  members: TeamMemberWithUser[],
-  sortBy: KanbanSortBy,
-): KanbanColumn[] {
-  const memberOrder = members.map(m => m.id);
-  const nameById = new Map(members.map(m => [m.id, m.displayName || m.email || 'Unknown']));
-
-  const byCombo = new Map<string, ApiActivity[]>();
-  for (const act of activities) {
-    const key = memberComboKey(act.assignedMemberIds ?? []);
-    if (!byCombo.has(key)) byCombo.set(key, []);
-    byCombo.get(key)!.push(act);
-  }
-
-  const comparator = comboSortComparator(memberOrder);
-  const sortedKeys = [...byCombo.keys()].sort(comparator);
-
-  return sortedKeys.map(key => {
-    const orderedIds = key === UNASSIGNED_KEY
-      ? []
-      : orderedComboIds(key.split('|'), memberOrder);
-    const label = key === UNASSIGNED_KEY
-      ? 'Unassigned'
-      : memberComboLabel(orderedIds, nameById);
-    return {
-      id: key,
-      label,
-      // Combination columns are non-droppable.
-      droppable: false,
-      items: sortActivities(byCombo.get(key) ?? [], sortBy),
-    };
-  });
-}
-````
-
 ## File: packages/web/src/components/kanban/KanbanToolbar.tsx
 ````typescript
 /**
@@ -35552,679 +34831,6 @@ export default function KanbanToolbar({
         </button>
       </div>
     </div>
-  );
-}
-````
-
-## File: packages/web/src/components/kanban/KanbanView.test.ts
-````typescript
-/**
- * Unit tests for kanbanColumns pure logic.
- * Mirrors the pattern used by calendarLanes.test.ts.
- */
-
-import { describe, it, expect } from 'vitest';
-import {
-  buildColumns,
-  sortActivities,
-  NO_STATUS_ID,
-  UNASSIGNED_ID,
-  type KanbanGroupBy,
-} from './kanbanColumns';
-import type { components } from '@draba/shared';
-
-type ApiActivity = components['schemas']['Activity'];
-type Status = components['schemas']['Status'];
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
-
-// ── Fixtures ──────────────────────────────────────────────────────────────────
-
-function makeActivity(overrides: Partial<ApiActivity> & { id: string }): ApiActivity {
-  return {
-    id: overrides.id,
-    title: overrides.title ?? `Activity ${overrides.id}`,
-    timelineId: 'tl1',
-    startAt: overrides.startAt ?? '2026-01-01T00:00:00Z',
-    endAt: overrides.endAt ?? '2026-01-07T00:00:00Z',
-    color: overrides.color ?? '#288C9B',
-    createdAt: '2026-01-01T00:00:00Z',
-    updatedAt: overrides.updatedAt ?? '2026-01-01T00:00:00Z',
-    assignedMemberIds: overrides.assignedMemberIds ?? [],
-    tagIds: overrides.tagIds ?? [],
-    percentComplete: overrides.percentComplete ?? null,
-    archivedAt: null,
-    description: overrides.description ?? null,
-    icon: overrides.icon ?? null,
-    location: overrides.location ?? null,
-    notes: overrides.notes ?? null,
-    statusId: overrides.statusId ?? null,
-    parentActivityId: overrides.parentActivityId ?? null,
-    url: overrides.url ?? null,
-  } as ApiActivity;
-}
-
-function makeStatus(id: string, name: string, position: number, color = '#288C9B'): Status {
-  return { id, name, position, color, icon: null, isClosed: false, timelineId: 'tl1', createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' } as Status;
-}
-
-function makeMember(id: string, displayName: string): TeamMemberWithUser {
-  return { id, displayName, email: `${id}@test.com`, role: 'member', userId: id, color: null, icon: null, archivedAt: null, joinedAt: '2026-01-01T00:00:00Z', teamId: 'team1' } as unknown as TeamMemberWithUser;
-}
-
-const statuses = [
-  makeStatus('s1', 'Planned', 0, '#888'),
-  makeStatus('s2', 'In Progress', 1, '#1A97A2'),
-  makeStatus('s3', 'Done', 2, '#22c55e'),
-];
-
-const members = [
-  makeMember('m1', 'Alice'),
-  makeMember('m2', 'Bob'),
-  makeMember('m3', 'Carol'),
-];
-
-// ── sortActivities ─────────────────────────────────────────────────────────────
-
-describe('sortActivities', () => {
-  it('sorts by startDate ascending', () => {
-    const acts = [
-      makeActivity({ id: 'c', startAt: '2026-03-01T00:00:00Z' }),
-      makeActivity({ id: 'a', startAt: '2026-01-01T00:00:00Z' }),
-      makeActivity({ id: 'b', startAt: '2026-02-01T00:00:00Z' }),
-    ];
-    const result = sortActivities(acts, 'startDate');
-    expect(result.map(a => a.id)).toEqual(['a', 'b', 'c']);
-  });
-
-  it('sorts by title A-Z', () => {
-    const acts = [
-      makeActivity({ id: '1', title: 'Zebra' }),
-      makeActivity({ id: '2', title: 'Alpha' }),
-      makeActivity({ id: '3', title: 'Mango' }),
-    ];
-    const result = sortActivities(acts, 'title');
-    expect(result.map(a => a.title)).toEqual(['Alpha', 'Mango', 'Zebra']);
-  });
-
-  it('sorts percentComplete descending, nulls last', () => {
-    const acts = [
-      makeActivity({ id: 'a', percentComplete: 50 }),
-      makeActivity({ id: 'b', percentComplete: null }),
-      makeActivity({ id: 'c', percentComplete: 100 }),
-    ];
-    const result = sortActivities(acts, 'percentComplete');
-    expect(result.map(a => a.id)).toEqual(['c', 'a', 'b']);
-  });
-
-  it('sorts updatedAt descending (most recent first)', () => {
-    const acts = [
-      makeActivity({ id: 'old', updatedAt: '2026-01-01T00:00:00Z' }),
-      makeActivity({ id: 'new', updatedAt: '2026-06-01T00:00:00Z' }),
-    ];
-    const result = sortActivities(acts, 'updatedAt');
-    expect(result[0].id).toBe('new');
-  });
-});
-
-// ── buildColumns — status ──────────────────────────────────────────────────────
-
-describe('buildColumns: status', () => {
-  it('creates No-status column plus one column per status in position order', () => {
-    const acts = [makeActivity({ id: 'a1', statusId: 's1' })];
-    const cols = buildColumns('status', acts, [], statuses, 'startDate');
-    expect(cols[0].id).toBe(NO_STATUS_ID);
-    expect(cols[0].label).toBe('No status');
-    expect(cols.slice(1).map(c => c.id)).toEqual(['s1', 's2', 's3']);
-  });
-
-  it('routes activities to the correct status column', () => {
-    const acts = [
-      makeActivity({ id: 'a1', statusId: 's2' }),
-      makeActivity({ id: 'a2', statusId: null }),
-      makeActivity({ id: 'a3', statusId: 's1' }),
-    ];
-    const cols = buildColumns('status', acts, [], statuses, 'startDate');
-    expect(cols.find(c => c.id === NO_STATUS_ID)!.items.map(a => a.id)).toEqual(['a2']);
-    expect(cols.find(c => c.id === 's1')!.items.map(a => a.id)).toEqual(['a3']);
-    expect(cols.find(c => c.id === 's2')!.items.map(a => a.id)).toEqual(['a1']);
-  });
-
-  it('status columns are droppable; no-status column is droppable with null statusId', () => {
-    const cols = buildColumns('status', [], [], statuses, 'startDate');
-    const noStatus = cols.find(c => c.id === NO_STATUS_ID)!;
-    expect(noStatus.droppable).toBe(true);
-    expect(noStatus.dropValue).toEqual({ statusId: null });
-    const s1 = cols.find(c => c.id === 's1')!;
-    expect(s1.droppable).toBe(true);
-    expect(s1.dropValue).toEqual({ statusId: 's1' });
-  });
-
-  it('handles unknown statusId gracefully (routes to no-status)', () => {
-    const acts = [makeActivity({ id: 'x', statusId: 'deleted-status' })];
-    const cols = buildColumns('status', acts, [], statuses, 'startDate');
-    expect(cols.find(c => c.id === NO_STATUS_ID)!.items.map(a => a.id)).toEqual(['x']);
-  });
-});
-
-// ── buildColumns — member ──────────────────────────────────────────────────────
-
-describe('buildColumns: member', () => {
-  it('creates Unassigned column first, then one column per member', () => {
-    const cols = buildColumns('member', [], members, [], 'startDate');
-    expect(cols[0].id).toBe(UNASSIGNED_ID);
-    expect(cols.slice(1).map(c => c.id)).toEqual(['m1', 'm2', 'm3']);
-  });
-
-  it('routes activity to primary (first) member column', () => {
-    const acts = [makeActivity({ id: 'a', assignedMemberIds: ['m2', 'm1'] })];
-    const cols = buildColumns('member', acts, members, [], 'startDate');
-    expect(cols.find(c => c.id === 'm2')!.items.map(a => a.id)).toEqual(['a']);
-    expect(cols.find(c => c.id === 'm1')!.items).toHaveLength(0);
-  });
-
-  it('routes unassigned activity to Unassigned column', () => {
-    const acts = [makeActivity({ id: 'u', assignedMemberIds: [] })];
-    const cols = buildColumns('member', acts, members, [], 'startDate');
-    expect(cols.find(c => c.id === UNASSIGNED_ID)!.items.map(a => a.id)).toEqual(['u']);
-  });
-
-  it('dropValue for member column sets assignedMemberIds to singleton', () => {
-    const cols = buildColumns('member', [], members, [], 'startDate');
-    const m1col = cols.find(c => c.id === 'm1')!;
-    expect(m1col.dropValue).toEqual({ assignedMemberIds: ['m1'] });
-  });
-
-  it('dropValue for Unassigned column sets assignedMemberIds to empty', () => {
-    const cols = buildColumns('member', [], members, [], 'startDate');
-    const unassigned = cols.find(c => c.id === UNASSIGNED_ID)!;
-    expect(unassigned.dropValue).toEqual({ assignedMemberIds: [] });
-  });
-});
-
-// ── buildColumns — member-combination ─────────────────────────────────────────
-
-describe('buildColumns: member-combination', () => {
-  it('groups by exact assignee set, not primary member', () => {
-    const acts = [
-      makeActivity({ id: 'solo-alice', assignedMemberIds: ['m1'] }),
-      makeActivity({ id: 'alice-bob', assignedMemberIds: ['m1', 'm2'] }),
-      makeActivity({ id: 'solo-alice-2', assignedMemberIds: ['m1'] }),
-    ];
-    const cols = buildColumns('member-combination', acts, members, [], 'startDate');
-    const aliceCol = cols.find(c => c.label === 'Alice')!;
-    expect(aliceCol.items).toHaveLength(2);
-    const combCol = cols.find(c => c.label === 'Alice and Bob')!;
-    expect(combCol.items).toHaveLength(1);
-  });
-
-  it('combination columns are non-droppable', () => {
-    const acts = [makeActivity({ id: 'a', assignedMemberIds: ['m1', 'm2'] })];
-    const cols = buildColumns('member-combination', acts, members, [], 'startDate');
-    expect(cols.every(c => !c.droppable)).toBe(true);
-  });
-
-  it('empty assignee set maps to Unassigned column', () => {
-    const acts = [makeActivity({ id: 'u', assignedMemberIds: [] })];
-    const cols = buildColumns('member-combination', acts, members, [], 'startDate');
-    const unassigned = cols.find(c => c.label === 'Unassigned');
-    expect(unassigned).toBeDefined();
-    expect(unassigned!.items).toHaveLength(1);
-  });
-});
-
-// ── empty activities ───────────────────────────────────────────────────────────
-
-describe('buildColumns with no activities', () => {
-  const emptyActs: ApiActivity[] = [];
-
-  (['status', 'member', 'member-combination'] as KanbanGroupBy[]).forEach(mode => {
-    it(`${mode} groupBy produces columns without throwing`, () => {
-      expect(() =>
-        buildColumns(mode, emptyActs, members, statuses, 'startDate'),
-      ).not.toThrow();
-    });
-  });
-});
-````
-
-## File: packages/web/src/components/kanban/KanbanView.tsx
-````typescript
-/**
- * KanbanView — data container for the Kanban board.
- *
- * Mirrors CalendarView: fetches activities + members, applies the active filter
- * and Find query, builds columns via kanbanColumns, and hands off to KanbanBoard
- * for rendering. Owns no layout chrome — groupBy, sortBy, colorBy, and cardFields
- * come from DashboardPage.
- */
-
-import { useMemo, useEffect, useCallback, useState } from 'react';
-import { useQueryClient } from '@tanstack/react-query';
-import KanbanBoard from './KanbanBoard';
-import {
-  buildColumns,
-  DEFAULT_CARD_FIELDS,
-  type KanbanGroupBy,
-  type KanbanSortBy,
-  type KanbanCardField,
-} from './kanbanColumns';
-import { resolveActivityColor } from '@/lib/activityColor';
-import { useTimelineActivities, useTeamMembers, useUpdateActivity } from '@/hooks/useTeamActivities';
-import { matchEvents } from '@/lib/findMatcher';
-import { useFind } from '@/contexts/FindContext';
-import { useFilter } from '@/contexts/FilterContext';
-import { applyActiveFilter } from '@/lib/presetFilters';
-import { useUpsertPreference } from '@/hooks/usePreferences';
-import { resolveColorHex } from '@/components/identity/identity-constants';
-import type { ColorBy } from '@/components/gantt/GanttToolbar';
-import type { components } from '@draba/shared';
-import type { Member } from '@/types';
-import { MEMBER_COLORS } from '@/types';
-import type { DropPayload } from './KanbanBoard';
-
-type ApiActivity = components['schemas']['Activity'];
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
-type Status = components['schemas']['Status'];
-type SavedFilter = components['schemas']['SavedFilter'];
-type Tag = components['schemas']['Tag'];
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-function initialsFrom(name: string): string {
-  return name.split(/\s+/).map(w => w[0] ?? '').slice(0, 2).join('').toUpperCase();
-}
-
-function toMember(m: TeamMemberWithUser, index: number): Member {
-  const name = m.displayName || m.email || 'Unknown';
-  return {
-    id: m.id,
-    name,
-    initials: initialsFrom(name),
-    color: resolveColorHex(m.color) || MEMBER_COLORS[index % MEMBER_COLORS.length],
-  };
-}
-
-// ── Props ─────────────────────────────────────────────────────────────────────
-
-interface Props {
-  teamId: string;
-  timelineId: string;
-  groupBy: KanbanGroupBy;
-  sortBy: KanbanSortBy;
-  colorBy: ColorBy;
-  cardFields: KanbanCardField[];
-  collapsedColumnIds: string[];
-  onCollapsedColumnIdsChange: (ids: string[]) => void;
-  /** When true, child activities nest beneath their parent in the parent's column. */
-  showHierarchy: boolean;
-  timelineStatuses?: Status[];
-  savedFilters?: SavedFilter[];
-  tags?: Tag[];
-  selectedActivityId?: string | null;
-  onSelectActivity?: (id: string | null) => void;
-  onSelectApiActivity?: (activity: ApiActivity | null) => void;
-  /** Called when "+ Add" is clicked in a column; provides pre-fill context. */
-  onAddActivity?: (defaults: { start: string; end: string; memberId: string | null; statusId?: string | null }) => void;
-  onMembersLoaded?: (members: Member[]) => void;
-}
-
-// ── KanbanView ────────────────────────────────────────────────────────────────
-
-export default function KanbanView({
-  teamId,
-  timelineId,
-  groupBy,
-  sortBy,
-  colorBy,
-  cardFields,
-  collapsedColumnIds,
-  onCollapsedColumnIdsChange,
-  showHierarchy,
-  timelineStatuses,
-  savedFilters,
-  tags,
-  selectedActivityId,
-  onSelectActivity,
-  onSelectApiActivity,
-  onAddActivity,
-  onMembersLoaded,
-}: Props) {
-  const queryClient = useQueryClient();
-  const { debouncedQuery, registerMatches, activeMatchId } = useFind();
-  const { activeFilter } = useFilter();
-  const upsert = useUpsertPreference();
-
-  // Fetch data — no date bounds for Kanban (show all activities on the timeline).
-  const { data: apiMembers = [] } = useTeamMembers(teamId);
-  const { data: apiActivities = [], isLoading } = useTimelineActivities(teamId, timelineId);
-  const updateActivity = useUpdateActivity(timelineId);
-
-  const members: Member[] = useMemo(
-    () => apiMembers.map((m, i) => toMember(m, i)),
-    [apiMembers],
-  );
-
-  const memberById = useMemo<Record<string, Member>>(() => {
-    const map: Record<string, Member> = {};
-    members.forEach(m => { map[m.id] = m; });
-    return map;
-  }, [members]);
-
-  useEffect(() => {
-    if (onMembersLoaded && members.length > 0) onMembersLoaded(members);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [members]);
-
-  // Filter engine context.
-  const closedStatusIds = useMemo(
-    () => new Set((timelineStatuses ?? []).filter(s => s.isClosed).map(s => s.id)),
-    [timelineStatuses],
-  );
-  const statusesByTimeline = useMemo(() => {
-    const m = new Map<string, Status[]>();
-    if (timelineStatuses?.length) m.set(timelineId, timelineStatuses);
-    return m;
-  }, [timelineId, timelineStatuses]);
-  const memberIdsByUserId = useMemo(() => {
-    const m = new Map<string, string[]>();
-    apiMembers.forEach(mem => {
-      if (mem.userId) {
-        const existing = m.get(mem.userId) ?? [];
-        m.set(mem.userId, [...existing, mem.id]);
-      }
-    });
-    return m;
-  }, [apiMembers]);
-
-  const visibleActivities = useMemo(
-    () => applyActiveFilter(
-      apiActivities,
-      activeFilter,
-      memberIdsByUserId,
-      {
-        closedStatusIds,
-        savedFilters: savedFilters ?? [],
-        statuses: statusesByTimeline,
-        tags: tags ?? [],
-      },
-    ),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [apiActivities, activeFilter, memberIdsByUserId, closedStatusIds, savedFilters, statusesByTimeline, tags],
-  );
-
-  const statusById = useMemo(
-    () => new Map((timelineStatuses ?? []).map(s => [s.id, s])),
-    [timelineStatuses],
-  );
-  const statusColorById = useMemo(
-    () => new Map((timelineStatuses ?? []).map(s => [s.id, s.color ?? ''])),
-    [timelineStatuses],
-  );
-  const tagById = useMemo(
-    () => new Map((tags ?? []).map(t => [t.id, t])),
-    [tags],
-  );
-
-  // Per-activity resolved hex color (driven by colorBy) — used as card accent border.
-  const colorMap = useMemo<Map<string, string>>(() => {
-    const map = new Map<string, string>();
-    visibleActivities.forEach((act, i) => {
-      map.set(act.id, resolveActivityColor(act, i, memberById, colorBy, statusColorById));
-    });
-    return map;
-  }, [visibleActivities, memberById, colorBy, statusColorById]);
-
-  // ── Hierarchy ────────────────────────────────────────────────────────────────
-
-  /**
-   * When hierarchy is on, build a parentId → direct-children map.
-   * Only includes children whose parent is also in the visible set (so orphaned
-   * children — whose parent is filtered out — still appear as roots).
-   */
-  const childrenByParentId = useMemo<Map<string, ApiActivity[]>>(() => {
-    if (!showHierarchy) return new Map();
-    const visibleIds = new Set(visibleActivities.map(a => a.id));
-    const map = new Map<string, ApiActivity[]>();
-    for (const act of visibleActivities) {
-      const pid = (act as ApiActivity & { parentActivityId?: string | null }).parentActivityId ?? null;
-      if (pid && visibleIds.has(pid)) {
-        if (!map.has(pid)) map.set(pid, []);
-        map.get(pid)!.push(act);
-      }
-    }
-    return map;
-  }, [visibleActivities, showHierarchy]);
-
-  /**
-   * IDs of activities that are children of another visible activity.
-   * When hierarchy is on, these are excluded from column items so they
-   * don't also appear as top-level cards.
-   */
-  const childIds = useMemo<Set<string>>(() => {
-    if (!showHierarchy) return new Set();
-    const s = new Set<string>();
-    childrenByParentId.forEach(children => children.forEach(c => s.add(c.id)));
-    return s;
-  }, [childrenByParentId, showHierarchy]);
-
-  /**
-   * Activities used for column building.
-   * When hierarchy is on, only root activities (not nested children) get a
-   * column slot — children are rendered under their parent by KanbanColumn.
-   */
-  const columnActivities = useMemo(
-    () => showHierarchy
-      ? visibleActivities.filter(a => !childIds.has(a.id))
-      : visibleActivities,
-    [visibleActivities, showHierarchy, childIds],
-  );
-
-  /** Per-parent collapse state — ephemeral (not persisted). Starts fully expanded. */
-  const [collapsedParents, setCollapsedParents] = useState<Set<string>>(new Set());
-
-  const handleToggleParent = useCallback((activityId: string) => {
-    setCollapsedParents(prev => {
-      const next = new Set(prev);
-      if (next.has(activityId)) next.delete(activityId);
-      else next.add(activityId);
-      return next;
-    });
-  }, []);
-
-  // Build columns.
-  const columns = useMemo(
-    () => buildColumns(
-      groupBy,
-      columnActivities,
-      apiMembers,
-      timelineStatuses ?? [],
-      sortBy,
-    ),
-    [groupBy, columnActivities, apiMembers, timelineStatuses, sortBy],
-  );
-
-  // Activity ID → ApiActivity map for drag overlay and optimistic updates.
-  const activityById = useMemo<Map<string, ApiActivity>>(
-    () => new Map(apiActivities.map(a => [a.id, a])),
-    [apiActivities],
-  );
-
-  // Activity ID → title lookup for the "Parent" card field.
-  // Uses apiActivities (all activities, not just visible) so the parent title
-  // still shows when the parent activity is filtered out by the active filter.
-  const activityTitleById = useMemo<Map<string, string>>(
-    () => new Map(apiActivities.map(a => [a.id, a.title])),
-    [apiActivities],
-  );
-
-  // Collapsed column persistence.
-  const collapsedSet = useMemo(() => new Set(collapsedColumnIds), [collapsedColumnIds]);
-
-  const handleToggleCollapse = useCallback((columnId: string) => {
-    const next = collapsedSet.has(columnId)
-      ? collapsedColumnIds.filter(id => id !== columnId)
-      : [...collapsedColumnIds, columnId];
-    onCollapsedColumnIdsChange(next);
-    if (timelineId) {
-      upsert.mutate({
-        key: 'kanban_collapsed',
-        value: JSON.stringify(next),
-        timelineId,
-      });
-    }
-  }, [collapsedSet, collapsedColumnIds, onCollapsedColumnIdsChange, timelineId, upsert]);
-
-  // Find: compute matches.
-  const matchResults = useMemo(
-    () => matchEvents(debouncedQuery, visibleActivities, members, visibleActivities),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [debouncedQuery, visibleActivities, members],
-  );
-  const matchedSet = useMemo(() => new Set(matchResults.map(r => r.activityId)), [matchResults]);
-
-  // Register ordered match IDs walking the full tree (root + children).
-  const orderedMatchIds = useMemo(() => {
-    const ids: string[] = [];
-
-    function walkActivity(act: ApiActivity) {
-      if (matchedSet.has(act.id)) ids.push(act.id);
-      if (showHierarchy) {
-        const children = childrenByParentId.get(act.id) ?? [];
-        children.forEach(walkActivity);
-      }
-    }
-
-    for (const col of columns) {
-      if (collapsedSet.has(col.id)) continue;
-      col.items.forEach(walkActivity);
-    }
-    return ids;
-  }, [columns, collapsedSet, matchedSet, showHierarchy, childrenByParentId]);
-
-  useEffect(() => {
-    registerMatches(orderedMatchIds, new Map());
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [orderedMatchIds]);
-
-  // Auto-expand a collapsed column that contains the active match.
-  useEffect(() => {
-    if (!activeMatchId) return;
-    // Expand collapsed column.
-    const containingCol = columns.find(col =>
-      collapsedSet.has(col.id) && col.items.some(a => a.id === activeMatchId),
-    );
-    if (containingCol) handleToggleCollapse(containingCol.id);
-
-    // Auto-expand a collapsed parent whose descendant is the active match.
-    if (showHierarchy) {
-      for (const [parentId, children] of childrenByParentId) {
-        if (collapsedParents.has(parentId)) {
-          function isDescendant(id: string): boolean {
-            if (id === activeMatchId) return true;
-            return (childrenByParentId.get(id) ?? []).some(c => isDescendant(c.id));
-          }
-          if (children.some(c => isDescendant(c.id))) {
-            handleToggleParent(parentId);
-          }
-        }
-      }
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeMatchId]);
-
-  // Derive which field is the current Group by axis (auto-suppressed on cards).
-  const suppressedFields = useMemo((): Set<KanbanCardField> => {
-    const s = new Set<KanbanCardField>();
-    if (groupBy === 'status') s.add('status');
-    if (groupBy === 'member' || groupBy === 'member-combination') s.add('members');
-    return s;
-  }, [groupBy]);
-
-  // Card click → open detail panel.
-  const handleCardClick = useCallback((activity: ApiActivity) => {
-    if (onSelectApiActivity) onSelectApiActivity(activity);
-    if (onSelectActivity)    onSelectActivity(activity.id);
-  }, [onSelectApiActivity, onSelectActivity]);
-
-  // "+ Add" in a column → open create panel prefilled with the column's context.
-  const handleAddInColumn = useCallback((column: { id: string; dropValue?: { statusId?: string | null; assignedMemberIds?: string[] } }) => {
-    const today = new Date().toISOString().slice(0, 10);
-    const memberId = column.dropValue?.assignedMemberIds?.[0] ?? null;
-    // Pass statusId only when it's explicitly present in dropValue (status grouping).
-    const statusId = 'statusId' in (column.dropValue ?? {}) ? column.dropValue!.statusId : undefined;
-    if (onAddActivity) {
-      onAddActivity({ start: today, end: today, memberId, statusId });
-    }
-  }, [onAddActivity]);
-
-  // Drag commit.
-  const handleDrop = useCallback((payload: DropPayload) => {
-    const existing = activityById.get(payload.activityId);
-    const merged: ApiActivity | undefined = existing
-      ? { ...existing, ...payload.patch }
-      : undefined;
-
-    // Optimistic cache update.
-    queryClient.setQueriesData<ApiActivity[]>(
-      { queryKey: ['timelines', timelineId, 'activities'] },
-      old => old?.map(a => a.id === payload.activityId ? (merged ?? a) : a),
-    );
-
-    // If the dragged card is currently open in the edit panel, sync the panel
-    // immediately so the user sees the new status / assignee without closing and
-    // re-opening the sidebar.
-    if (merged && selectedActivityId === payload.activityId && onSelectApiActivity) {
-      onSelectApiActivity(merged);
-    }
-
-    updateActivity.mutate({ activityId: payload.activityId, patch: payload.patch });
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [queryClient, timelineId, updateActivity, activityById, selectedActivityId, onSelectApiActivity]);
-
-  const hasQuery = debouncedQuery.trim().length > 0;
-
-  // ── Effective card fields: apply context-aware suppression at render time ────
-  const effectiveCardFields = useMemo(
-    () => (cardFields.length > 0 ? cardFields : DEFAULT_CARD_FIELDS),
-    [cardFields],
-  );
-
-  // ── Loading ────────────────────────────────────────────────────────────────
-
-  if (isLoading) {
-    return (
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: 'var(--muted-foreground)', fontSize: 13 }}>
-        Loading activities…
-      </div>
-    );
-  }
-
-  return (
-    <KanbanBoard
-      columns={columns}
-      groupBy={groupBy}
-      members={members}
-      statusById={statusById}
-      tagById={tagById}
-      colorMap={colorMap}
-      cardFields={effectiveCardFields}
-      suppressedFields={suppressedFields}
-      selectedActivityId={selectedActivityId ?? null}
-      matchedIds={matchedSet}
-      activeMatchId={activeMatchId}
-      hasQuery={hasQuery}
-      collapsedColumnIds={collapsedSet}
-      onToggleCollapse={handleToggleCollapse}
-      onCardClick={handleCardClick}
-      onAddInColumn={handleAddInColumn}
-      onDrop={handleDrop}
-      activityById={activityById}
-      activityTitleById={activityTitleById}
-      showHierarchy={showHierarchy}
-      childrenByParentId={childrenByParentId}
-      collapsedParents={collapsedParents}
-      onToggleParent={handleToggleParent}
-    />
   );
 }
 ````
@@ -38940,6 +37546,240 @@ export default function CalendarGrid({
 }
 ````
 
+## File: packages/web/src/components/gantt/ActivityCreatePanel.tsx
+````typescript
+/**
+ * ActivityCreatePanel — right-side slide-in panel for creating a new Gantt activity.
+ *
+ * Shares its field stack with ActivityDetailPanel via ActivityFieldsBody
+ * (see shared/activityPanelFields.tsx) so the create and edit forms show an identical
+ * field set and order. Unlike the detail panel, every change buffers in local
+ * state; nothing persists until the user clicks "Create activity", which
+ * submits the whole form via POST /timelines/:id/activities.
+ *
+ * Defaults come from the drag selection: start/end date and the lane member.
+ */
+
+import { useState, useEffect } from 'react'
+import { X, Loader2 } from 'lucide-react'
+import type { Identity } from '@/components/identity/identity-constants'
+import { useCreateActivity, useTimelineActivities } from '@/hooks/useTeamActivities'
+import { useTags } from '@/hooks/useTags'
+import type { Member } from '@/types'
+import type { components } from '@draba/shared'
+import { ActivityFieldsBody, PANEL_WIDTH } from '@/components/shared/activityPanelFields'
+
+type Status = components['schemas']['Status']
+
+interface Props {
+  open: boolean
+  teamId: string
+  timelineId: string
+  members: Member[]
+  timelineStatuses?: Status[]
+  defaultStart: string
+  defaultEnd: string
+  defaultMemberId?: string | null
+  defaultStatusId?: string | null
+  onClose: () => void
+}
+
+export default function ActivityCreatePanel({
+  open,
+  teamId,
+  timelineId,
+  members,
+  timelineStatuses = [],
+  defaultStart,
+  defaultEnd,
+  defaultMemberId,
+  defaultStatusId,
+  onClose,
+}: Props) {
+  const createMutation = useCreateActivity(teamId, timelineId)
+  const { data: teamTags = [] } = useTags(teamId)
+  const { data: allActivities = [] } = useTimelineActivities(teamId, timelineId)
+
+  const [title, setTitle] = useState('')
+  const [description, setDescription] = useState('')
+  const [notes, setNotes] = useState('')
+  const [startDate, setStartDate] = useState(defaultStart)
+  const [endDate, setEndDate] = useState(defaultEnd)
+  const [identity, setIdentity] = useState<Identity>({ color: '#288C9B', icon: '__none__' })
+  const [assignedIds, setAssignedIds] = useState<string[]>(
+    defaultMemberId ? [defaultMemberId] : [],
+  )
+  const [statusId, setStatusId] = useState<string | null>(defaultStatusId ?? null)
+  const [tagIds, setTagIds] = useState<string[]>([])
+  const [parentId, setParentId] = useState<string | null>(null)
+  const [progress, setProgress] = useState(0)
+  const [location, setLocation] = useState('')
+  const [url, setUrl] = useState('')
+
+  // Reset all fields to defaults each time the panel opens so re-opening
+  // the panel always shows a blank form rather than the previous session's data.
+  useEffect(() => {
+    if (!open) return
+    setTitle('')
+    setDescription('')
+    setNotes('')
+    setStartDate(defaultStart)
+    setEndDate(defaultEnd)
+    setIdentity({ color: '#288C9B', icon: '__none__' })
+    setAssignedIds(defaultMemberId ? [defaultMemberId] : [])
+    setStatusId(defaultStatusId ?? null)
+    setTagIds([])
+    setParentId(null)
+    setProgress(0)
+    setLocation('')
+    setUrl('')
+  }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const creating = createMutation.isPending
+  const titleTrimmed = title.trim()
+
+  function toggleAssignee(memberId: string) {
+    setAssignedIds(prev =>
+      prev.includes(memberId) ? prev.filter(id => id !== memberId) : [...prev, memberId],
+    )
+  }
+
+  // Keep the end date from drifting before the start date.
+  function handleStartDateChange(val: string) {
+    setStartDate(val)
+    if (val > endDate) setEndDate(val)
+  }
+
+  function handleSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    if (!titleTrimmed) return
+    createMutation.mutate(
+      {
+        title: titleTrimmed,
+        startAt: `${startDate}T00:00:00Z`,
+        endAt: `${endDate}T00:00:00Z`,
+        description: description.trim() || null,
+        notes: notes.trim() || null,
+        color: identity.color,
+        icon: identity.icon,
+        assignedMemberIds: assignedIds,
+        statusId: statusId ?? undefined,
+        tagIds,
+        parentActivityId: parentId,
+        percentComplete: progress,
+        location: location.trim() || null,
+        url: url.trim() || null,
+      },
+      { onSuccess: onClose },
+    )
+  }
+
+  return (
+    <div
+      style={{
+        width: open ? PANEL_WIDTH : 0,
+        flexShrink: 0,
+        borderLeft: open ? '1px solid var(--border)' : 'none',
+        background: 'var(--card)',
+        display: 'flex',
+        flexDirection: 'column',
+        overflow: 'hidden',
+        transition: 'width 0.2s ease',
+      }}
+    >
+    <div style={{ width: PANEL_WIDTH, display: 'flex', flexDirection: 'column', height: '100%' }}>
+      {/* Header */}
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          padding: '0 12px',
+          height: 'var(--topbar-h, 40px)',
+          borderBottom: '1px solid var(--border)',
+          flexShrink: 0,
+        }}
+      >
+        <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)' }}>New activity</span>
+        <button
+          onClick={onClose}
+          style={{
+            width: 24, height: 24, border: 'none', background: 'none', borderRadius: 4,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            cursor: 'pointer', color: 'var(--muted-foreground)',
+          }}
+          onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+          onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+        >
+          <X size={14} strokeWidth={2} />
+        </button>
+      </div>
+
+      {/* Body (shared with detail panel) */}
+      <ActivityFieldsBody
+        identity={identity}
+        onIdentityChange={setIdentity}
+        title={title}
+        onTitleChange={setTitle}
+        titlePlaceholder="Activity title…"
+        titleAutoFocus
+        titleFallbackName="New Activity"
+        startDate={startDate}
+        endDate={endDate}
+        onStartDateChange={handleStartDateChange}
+        onEndDateChange={setEndDate}
+        description={description}
+        onDescriptionChange={setDescription}
+        members={members}
+        assignedIds={assignedIds}
+        onToggleAssignee={toggleAssignee}
+        statuses={timelineStatuses}
+        statusId={statusId}
+        onStatusChange={setStatusId}
+        teamId={teamId}
+        teamTags={teamTags}
+        tagIds={tagIds}
+        onTagsChange={setTagIds}
+        parentActivities={allActivities}
+        parentId={parentId}
+        onParentChange={setParentId}
+        progress={progress}
+        onProgressCommit={setProgress}
+        location={location}
+        onLocationChange={setLocation}
+        url={url}
+        onUrlChange={setUrl}
+        notes={notes}
+        onNotesChange={setNotes}
+      />
+
+      {/* Footer */}
+      <div style={{ padding: '10px 14px', borderTop: '1px solid var(--border)', flexShrink: 0 }}>
+        <button
+          type="button"
+          onClick={handleSubmit}
+          disabled={!titleTrimmed || creating}
+          style={{
+            width: '100%', fontSize: 13, fontWeight: 600, padding: 8,
+            borderRadius: 'var(--radius-md)', border: 'none',
+            background: titleTrimmed && !creating ? 'var(--primary)' : 'var(--muted)',
+            color: titleTrimmed && !creating ? 'white' : 'var(--muted-foreground)',
+            cursor: titleTrimmed && !creating ? 'pointer' : 'not-allowed',
+            fontFamily: 'var(--font-sans)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+            transition: 'background 0.1s',
+          }}
+        >
+          {creating && <Loader2 size={13} className="animate-spin" />}
+          Create activity
+        </button>
+      </div>
+    </div>
+    </div>
+  )
+}
+````
+
 ## File: packages/web/src/components/gantt/GanttView.tree.test.ts
 ````typescript
 /**
@@ -39111,6 +37951,1275 @@ describe('buildRows — member grouping (combo-key grouping)', () => {
     expect(groupIds[groupIds.length - 1]).toBe('__unassigned__')
   })
 })
+````
+
+## File: packages/web/src/components/kanban/KanbanBoard.tsx
+````typescript
+/**
+ * KanbanBoard — the DndContext host that owns all columns and the drag overlay.
+ *
+ * Renders columns in a horizontal scrolling row. On drag-end, derives the
+ * correct PATCH payload for the active groupBy and calls onDrop.
+ */
+
+import { DndContext, DragOverlay, PointerSensor, useSensor, useSensors } from '@dnd-kit/core';
+import type { DragEndEvent, DragStartEvent, DragOverEvent } from '@dnd-kit/core';
+import { useState } from 'react';
+import KanbanColumn from './KanbanColumn';
+import KanbanCard from './KanbanCard';
+import type { KanbanColumn as Column, KanbanCardField, KanbanGroupBy } from './kanbanColumns';
+import type { Member } from '@/types';
+import type { components } from '@draba/shared';
+
+type ApiActivity = components['schemas']['Activity'];
+type Status = components['schemas']['Status'];
+type Tag = components['schemas']['Tag'];
+
+export interface DropPayload {
+  activityId: string;
+  patch: {
+    statusId?: string | null;
+    assignedMemberIds?: string[];
+    parentActivityId?: string | null;
+  };
+}
+
+interface Props {
+  columns: Column[];
+  groupBy: KanbanGroupBy;
+  members: Member[];
+  statusById: Map<string, Status>;
+  tagById: Map<string, Tag>;
+  /** Per-activity resolved hex color for the card accent border. */
+  colorMap: Map<string, string>;
+  cardFields: KanbanCardField[];
+  suppressedFields: Set<KanbanCardField>;
+  selectedActivityId: string | null;
+  matchedIds: Set<string>;
+  activeMatchId: string | null;
+  hasQuery: boolean;
+  collapsedColumnIds: Set<string>;
+  onToggleCollapse: (columnId: string) => void;
+  onCardClick: (activity: ApiActivity) => void;
+  onAddInColumn: (column: Column) => void;
+  onDrop: (payload: DropPayload) => void;
+  /** Map of activity ID → ApiActivity for drag overlay lookup. */
+  activityById: Map<string, ApiActivity>;
+  /** Map of activity ID → title, for showing parent names on child cards. */
+  activityTitleById: Map<string, string>;
+  // ── Hierarchy ────────────────────────────────────────────────────────────────
+  showHierarchy: boolean;
+  childrenByParentId: Map<string, ApiActivity[]>;
+  collapsedParents: Set<string>;
+  onToggleParent: (activityId: string) => void;
+}
+
+export default function KanbanBoard({
+  columns,
+  groupBy,
+  members,
+  statusById,
+  tagById,
+  colorMap,
+  cardFields,
+  suppressedFields,
+  showHierarchy,
+  childrenByParentId,
+  collapsedParents,
+  onToggleParent,
+  selectedActivityId,
+  matchedIds,
+  activeMatchId,
+  hasQuery,
+  collapsedColumnIds,
+  onToggleCollapse,
+  onCardClick,
+  onAddInColumn,
+  onDrop,
+  activityById,
+  activityTitleById,
+}: Props) {
+  const [draggingId, setDraggingId] = useState<string | null>(null);
+  const [overColumnId, setOverColumnId] = useState<string | null>(null);
+
+  // Require a 5px drag threshold to prevent accidental drags on card clicks.
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
+  );
+
+  function handleDragStart({ active }: DragStartEvent) {
+    setDraggingId(active.id as string);
+  }
+
+  function handleDragEnd({ active, over }: DragEndEvent) {
+    setDraggingId(null);
+    setOverColumnId(null);
+    if (!over) return;
+
+    const activityId = typeof active.id === 'string' ? active.id : String(active.id);
+    const columnId = typeof over.id === 'string' ? over.id : String(over.id);
+
+    const column = columns.find(c => c.id === columnId);
+    if (!column || !column.droppable || !column.dropValue) return;
+
+    // Determine if anything actually changed before issuing a PATCH.
+    const activity = activityById.get(activityId);
+    if (!activity) return;
+
+    // Skip if the card is already in this column (no-op drop).
+    const isAlreadyHere = (() => {
+      switch (groupBy) {
+        case 'status': {
+          const currentStatus = (activity as ApiActivity & { statusId?: string | null }).statusId ?? null;
+          return currentStatus === (column.dropValue.statusId ?? null);
+        }
+        case 'member': {
+          const primary = activity.assignedMemberIds?.[0] ?? null;
+          const target = column.dropValue.assignedMemberIds?.[0] ?? null;
+          return primary === target;
+        }
+        default:
+          return false;
+      }
+    })();
+
+    if (isAlreadyHere) return;
+
+    onDrop({ activityId, patch: column.dropValue });
+  }
+
+  function handleDragOver({ over }: DragOverEvent) {
+    setOverColumnId(over ? String(over.id) : null);
+  }
+
+  const draggingActivity = draggingId ? activityById.get(draggingId) : undefined;
+
+  return (
+    <DndContext
+      sensors={sensors}
+      onDragStart={handleDragStart}
+      onDragEnd={handleDragEnd}
+      onDragOver={handleDragOver}
+    >
+      <div
+        style={{
+          display: 'flex',
+          flexDirection: 'row',
+          gap: 12,
+          padding: '12px 16px 16px',
+          overflowX: 'auto',
+          overflowY: 'hidden',
+          height: '100%',
+          alignItems: 'flex-start',
+          boxSizing: 'border-box',
+        }}
+      >
+        {columns.map(col => (
+          <KanbanColumn
+            key={col.id}
+            column={col}
+            members={members}
+            statusById={statusById}
+            tagById={tagById}
+            colorMap={colorMap}
+            activityTitleById={activityTitleById}
+            cardFields={cardFields}
+            suppressedFields={suppressedFields}
+            showHierarchy={showHierarchy}
+            childrenByParentId={childrenByParentId}
+            collapsedParents={collapsedParents}
+            onToggleParent={onToggleParent}
+            selectedActivityId={selectedActivityId}
+            matchedIds={matchedIds}
+            activeMatchId={activeMatchId}
+            hasQuery={hasQuery}
+            isOver={overColumnId === col.id && col.droppable}
+            isCollapsed={collapsedColumnIds.has(col.id)}
+            onToggleCollapse={() => onToggleCollapse(col.id)}
+            onCardClick={onCardClick}
+            onAddClick={() => onAddInColumn(col)}
+          />
+        ))}
+      </div>
+
+      {/* Drag overlay — floats above everything while dragging */}
+      <DragOverlay dropAnimation={null}>
+        {draggingActivity ? (
+          <KanbanCard
+            activity={draggingActivity}
+            accentColor={colorMap.get(draggingActivity.id) ?? '#6b7280'}
+            members={members}
+            statusById={statusById}
+            tagById={tagById}
+            cardFields={cardFields}
+            suppressedFields={suppressedFields}
+            isSelected={false}
+            dimmed={false}
+            activeMatch={false}
+            isDragOverlay
+            onClick={() => {}}
+          />
+        ) : null}
+      </DragOverlay>
+    </DndContext>
+  );
+}
+````
+
+## File: packages/web/src/components/kanban/kanbanColumns.ts
+````typescript
+/**
+ * kanbanColumns — pure column-building and sort logic for the Kanban view.
+ *
+ * Given a groupBy mode plus the visible activities, team members, and timeline
+ * statuses, produces an ordered list of KanbanColumn objects ready for rendering.
+ * All grouping/labeling/ordering lives here; the React components stay thin.
+ */
+
+import type { components } from '@draba/shared';
+import {
+  memberComboKey,
+  orderedComboIds,
+  memberComboLabel,
+  comboSortComparator,
+  UNASSIGNED_KEY,
+} from '@/lib/memberGroups';
+
+type ApiActivity = components['schemas']['Activity'];
+type Status = components['schemas']['Status'];
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
+
+// ── Public types ───────────────────────────────────────────────────────────────
+
+export type KanbanGroupBy =
+  | 'status'
+  | 'member'
+  | 'member-combination';
+
+export type KanbanSortBy =
+  | 'startDate'
+  | 'endDate'
+  | 'title'
+  | 'percentComplete'
+  | 'updatedAt';
+
+export type KanbanCardField =
+  | 'dateRange'
+  | 'status'
+  | 'tags'
+  | 'members'
+  | 'percentComplete'
+  | 'parent'
+  | 'description';
+
+export const DEFAULT_CARD_FIELDS: KanbanCardField[] = [
+  'dateRange',
+  'status',
+  'tags',
+  'members',
+];
+
+/** Sentinel IDs for "bucket with no value" columns. */
+export const NO_STATUS_ID  = '__no-status__';
+export const UNASSIGNED_ID = '__unassigned__';
+
+/**
+ * A resolved column, ready for rendering.
+ *
+ * `droppable: false` for combination and None groupings (drop semantics are
+ * ambiguous or undefined). `dropValue` encodes what patch to apply on drop.
+ */
+export interface KanbanColumn {
+  id: string;
+  label: string;
+  /** Hex color for the column accent (header dot, drop-highlight tint). */
+  color?: string;
+  icon?: string;
+  droppable: boolean;
+  /** The patch values to apply when a card is dropped into this column. */
+  dropValue?: {
+    statusId?: string | null;
+    assignedMemberIds?: string[];
+    parentActivityId?: string | null;
+  };
+  items: ApiActivity[];
+}
+
+// ── Sort comparators ───────────────────────────────────────────────────────────
+
+function cmp<T>(a: T, b: T, dir: 1 | -1 = 1): number {
+  if (a == null && b == null) return 0;
+  if (a == null) return 1;  // nulls last
+  if (b == null) return -1;
+  return a < b ? -dir : a > b ? dir : 0;
+}
+
+/** Sort activities within a column according to the chosen sort mode. */
+export function sortActivities(
+  activities: ApiActivity[],
+  sortBy: KanbanSortBy,
+): ApiActivity[] {
+  const sorted = [...activities];
+  switch (sortBy) {
+    case 'startDate':
+      // cmp with string comparison; null/undefined treated as nulls-last
+      sorted.sort((a, b) => {
+        const av = a.startAt ?? null;
+        const bv = b.startAt ?? null;
+        return cmp(av, bv);
+      });
+      break;
+    case 'endDate':
+      sorted.sort((a, b) => {
+        const av = a.endAt ?? null;
+        const bv = b.endAt ?? null;
+        return cmp(av, bv);
+      });
+      break;
+    case 'title':
+      sorted.sort((a, b) => a.title.localeCompare(b.title));
+      break;
+    case 'percentComplete':
+      // Descending: highest first, nulls last.
+      sorted.sort((a, b) => {
+        const av = a.percentComplete ?? null;
+        const bv = b.percentComplete ?? null;
+        if (av === null && bv === null) return 0;
+        if (av === null) return 1;
+        if (bv === null) return -1;
+        return bv - av;
+      });
+      break;
+    case 'updatedAt':
+      // Most-recently-updated first
+      sorted.sort((a, b) => cmp(b.updatedAt, a.updatedAt));
+      break;
+  }
+  return sorted;
+}
+
+// ── Hierarchy helpers ─────────────────────────────────────────────────────────
+
+/**
+ * Compute parent→children and child-id maps for the hierarchy display mode.
+ *
+ * Only considers children whose parent is also present in `activities` — an
+ * orphaned child (parent filtered out) stays visible as a root card.
+ */
+export function buildHierarchyMaps(
+  activities: ApiActivity[],
+): { childrenByParentId: Map<string, ApiActivity[]>; childIds: Set<string> } {
+  const visibleIds = new Set(activities.map(a => a.id));
+  const childrenByParentId = new Map<string, ApiActivity[]>();
+  for (const act of activities) {
+    const pid = (act as ApiActivity & { parentActivityId?: string | null }).parentActivityId ?? null;
+    if (pid && visibleIds.has(pid)) {
+      if (!childrenByParentId.has(pid)) childrenByParentId.set(pid, []);
+      childrenByParentId.get(pid)!.push(act);
+    }
+  }
+  const childIds = new Set<string>();
+  childrenByParentId.forEach(children => children.forEach(c => childIds.add(c.id)));
+  return { childrenByParentId, childIds };
+}
+
+/**
+ * Toggle a column ID in/out of the collapsed set.
+ * Returns a new array — does not mutate the input.
+ */
+export function toggleCollapsedColumn(collapsedIds: string[], columnId: string): string[] {
+  return collapsedIds.includes(columnId)
+    ? collapsedIds.filter(id => id !== columnId)
+    : [...collapsedIds, columnId];
+}
+
+// ── buildColumns ──────────────────────────────────────────────────────────────
+
+/**
+ * Build the ordered column list from the active groupBy, activities, members,
+ * and statuses. Applies `sortBy` within each column.
+ */
+export function buildColumns(
+  groupBy: KanbanGroupBy,
+  activities: ApiActivity[],
+  members: TeamMemberWithUser[],
+  statuses: Status[],
+  sortBy: KanbanSortBy,
+): KanbanColumn[] {
+  switch (groupBy) {
+    case 'status':             return buildStatusColumns(activities, statuses, sortBy);
+    case 'member':             return buildMemberColumns(activities, members, sortBy);
+    case 'member-combination': return buildCombinationColumns(activities, members, sortBy);
+  }
+}
+
+// ── Status columns ─────────────────────────────────────────────────────────────
+
+function buildStatusColumns(
+  activities: ApiActivity[],
+  statuses: Status[],
+  sortBy: KanbanSortBy,
+): KanbanColumn[] {
+  // Bucket activities by statusId (null → no-status bucket).
+  const byStatus = new Map<string | null, ApiActivity[]>();
+  byStatus.set(null, []);
+  for (const s of statuses) byStatus.set(s.id, []);
+  for (const act of activities) {
+    const key = (act as ApiActivity & { statusId?: string | null }).statusId ?? null;
+    const bucket = byStatus.get(key) ?? byStatus.get(null)!;
+    bucket.push(act);
+  }
+
+  // "No status" column first, then statuses in position order.
+  const noStatusItems = sortActivities(byStatus.get(null) ?? [], sortBy);
+  const statusCols: KanbanColumn[] = statuses
+    .slice()
+    .sort((a, b) => (a.position ?? 0) - (b.position ?? 0))
+    .map(s => ({
+      id: s.id,
+      label: s.name,
+      color: s.color ?? undefined,
+      icon: s.icon ?? undefined,
+      droppable: true,
+      dropValue: { statusId: s.id },
+      items: sortActivities(byStatus.get(s.id) ?? [], sortBy),
+    }));
+
+  return [
+    {
+      id: NO_STATUS_ID,
+      label: 'No status',
+      droppable: true,
+      dropValue: { statusId: null },
+      items: noStatusItems,
+    },
+    ...statusCols,
+  ];
+}
+
+// ── Member columns ─────────────────────────────────────────────────────────────
+
+function buildMemberColumns(
+  activities: ApiActivity[],
+  members: TeamMemberWithUser[],
+  sortBy: KanbanSortBy,
+): KanbanColumn[] {
+  // Assign each activity to its first (primary) member; multi-member cards
+  // appear only once in the primary member's column. Unassigned → UNASSIGNED_ID.
+  const byMember = new Map<string, ApiActivity[]>();
+  byMember.set(UNASSIGNED_ID, []);
+  for (const m of members) byMember.set(m.id, []);
+  for (const act of activities) {
+    const ids = act.assignedMemberIds ?? [];
+    const key = ids.length > 0 ? ids[0] : UNASSIGNED_ID;
+    const bucket = byMember.get(key) ?? byMember.get(UNASSIGNED_ID)!;
+    bucket.push(act);
+  }
+
+  const memberCols: KanbanColumn[] = members.map(m => ({
+    id: m.id,
+    label: m.displayName || m.email || 'Unknown',
+    color: m.color ?? undefined,
+    droppable: true,
+    dropValue: { assignedMemberIds: [m.id] },
+    items: sortActivities(byMember.get(m.id) ?? [], sortBy),
+  }));
+
+  return [
+    {
+      id: UNASSIGNED_ID,
+      label: 'Unassigned',
+      droppable: true,
+      dropValue: { assignedMemberIds: [] },
+      items: sortActivities(byMember.get(UNASSIGNED_ID) ?? [], sortBy),
+    },
+    ...memberCols,
+  ];
+}
+
+// ── Combination columns ────────────────────────────────────────────────────────
+
+function buildCombinationColumns(
+  activities: ApiActivity[],
+  members: TeamMemberWithUser[],
+  sortBy: KanbanSortBy,
+): KanbanColumn[] {
+  const memberOrder = members.map(m => m.id);
+  const nameById = new Map(members.map(m => [m.id, m.displayName || m.email || 'Unknown']));
+
+  const byCombo = new Map<string, ApiActivity[]>();
+  for (const act of activities) {
+    const key = memberComboKey(act.assignedMemberIds ?? []);
+    if (!byCombo.has(key)) byCombo.set(key, []);
+    byCombo.get(key)!.push(act);
+  }
+
+  const comparator = comboSortComparator(memberOrder);
+  const sortedKeys = [...byCombo.keys()].sort(comparator);
+
+  return sortedKeys.map(key => {
+    const orderedIds = key === UNASSIGNED_KEY
+      ? []
+      : orderedComboIds(key.split('|'), memberOrder);
+    const label = key === UNASSIGNED_KEY
+      ? 'Unassigned'
+      : memberComboLabel(orderedIds, nameById);
+    return {
+      id: key,
+      label,
+      // Combination columns are non-droppable.
+      droppable: false,
+      items: sortActivities(byCombo.get(key) ?? [], sortBy),
+    };
+  });
+}
+````
+
+## File: packages/web/src/components/kanban/KanbanView.test.ts
+````typescript
+/**
+ * Unit tests for kanbanColumns pure logic.
+ * Mirrors the pattern used by calendarLanes.test.ts.
+ */
+
+import { describe, it, expect } from 'vitest';
+import {
+  buildColumns,
+  sortActivities,
+  buildHierarchyMaps,
+  toggleCollapsedColumn,
+  NO_STATUS_ID,
+  UNASSIGNED_ID,
+  type KanbanGroupBy,
+} from './kanbanColumns';
+import type { components } from '@draba/shared';
+
+type ApiActivity = components['schemas']['Activity'];
+type Status = components['schemas']['Status'];
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
+
+// ── Fixtures ──────────────────────────────────────────────────────────────────
+
+function makeActivity(overrides: Partial<ApiActivity> & { id: string }): ApiActivity {
+  return {
+    id: overrides.id,
+    title: overrides.title ?? `Activity ${overrides.id}`,
+    timelineId: 'tl1',
+    startAt: overrides.startAt ?? '2026-01-01T00:00:00Z',
+    endAt: overrides.endAt ?? '2026-01-07T00:00:00Z',
+    color: overrides.color ?? '#288C9B',
+    createdAt: '2026-01-01T00:00:00Z',
+    updatedAt: overrides.updatedAt ?? '2026-01-01T00:00:00Z',
+    assignedMemberIds: overrides.assignedMemberIds ?? [],
+    tagIds: overrides.tagIds ?? [],
+    percentComplete: overrides.percentComplete ?? null,
+    archivedAt: null,
+    description: overrides.description ?? null,
+    icon: overrides.icon ?? null,
+    location: overrides.location ?? null,
+    notes: overrides.notes ?? null,
+    statusId: overrides.statusId ?? null,
+    parentActivityId: overrides.parentActivityId ?? null,
+    url: overrides.url ?? null,
+  } as ApiActivity;
+}
+
+function makeStatus(id: string, name: string, position: number, color = '#288C9B'): Status {
+  return { id, name, position, color, icon: null, isClosed: false, timelineId: 'tl1', createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' } as Status;
+}
+
+function makeMember(id: string, displayName: string): TeamMemberWithUser {
+  return { id, displayName, email: `${id}@test.com`, role: 'member', userId: id, color: null, icon: null, archivedAt: null, joinedAt: '2026-01-01T00:00:00Z', teamId: 'team1' } as unknown as TeamMemberWithUser;
+}
+
+const statuses = [
+  makeStatus('s1', 'Planned', 0, '#888'),
+  makeStatus('s2', 'In Progress', 1, '#1A97A2'),
+  makeStatus('s3', 'Done', 2, '#22c55e'),
+];
+
+const members = [
+  makeMember('m1', 'Alice'),
+  makeMember('m2', 'Bob'),
+  makeMember('m3', 'Carol'),
+];
+
+// ── sortActivities ─────────────────────────────────────────────────────────────
+
+describe('sortActivities', () => {
+  it('sorts by startDate ascending', () => {
+    const acts = [
+      makeActivity({ id: 'c', startAt: '2026-03-01T00:00:00Z' }),
+      makeActivity({ id: 'a', startAt: '2026-01-01T00:00:00Z' }),
+      makeActivity({ id: 'b', startAt: '2026-02-01T00:00:00Z' }),
+    ];
+    const result = sortActivities(acts, 'startDate');
+    expect(result.map(a => a.id)).toEqual(['a', 'b', 'c']);
+  });
+
+  it('sorts by title A-Z', () => {
+    const acts = [
+      makeActivity({ id: '1', title: 'Zebra' }),
+      makeActivity({ id: '2', title: 'Alpha' }),
+      makeActivity({ id: '3', title: 'Mango' }),
+    ];
+    const result = sortActivities(acts, 'title');
+    expect(result.map(a => a.title)).toEqual(['Alpha', 'Mango', 'Zebra']);
+  });
+
+  it('sorts percentComplete descending, nulls last', () => {
+    const acts = [
+      makeActivity({ id: 'a', percentComplete: 50 }),
+      makeActivity({ id: 'b', percentComplete: null }),
+      makeActivity({ id: 'c', percentComplete: 100 }),
+    ];
+    const result = sortActivities(acts, 'percentComplete');
+    expect(result.map(a => a.id)).toEqual(['c', 'a', 'b']);
+  });
+
+  it('sorts updatedAt descending (most recent first)', () => {
+    const acts = [
+      makeActivity({ id: 'old', updatedAt: '2026-01-01T00:00:00Z' }),
+      makeActivity({ id: 'new', updatedAt: '2026-06-01T00:00:00Z' }),
+    ];
+    const result = sortActivities(acts, 'updatedAt');
+    expect(result[0].id).toBe('new');
+  });
+});
+
+// ── buildColumns — status ──────────────────────────────────────────────────────
+
+describe('buildColumns: status', () => {
+  it('creates No-status column plus one column per status in position order', () => {
+    const acts = [makeActivity({ id: 'a1', statusId: 's1' })];
+    const cols = buildColumns('status', acts, [], statuses, 'startDate');
+    expect(cols[0].id).toBe(NO_STATUS_ID);
+    expect(cols[0].label).toBe('No status');
+    expect(cols.slice(1).map(c => c.id)).toEqual(['s1', 's2', 's3']);
+  });
+
+  it('routes activities to the correct status column', () => {
+    const acts = [
+      makeActivity({ id: 'a1', statusId: 's2' }),
+      makeActivity({ id: 'a2', statusId: null }),
+      makeActivity({ id: 'a3', statusId: 's1' }),
+    ];
+    const cols = buildColumns('status', acts, [], statuses, 'startDate');
+    expect(cols.find(c => c.id === NO_STATUS_ID)!.items.map(a => a.id)).toEqual(['a2']);
+    expect(cols.find(c => c.id === 's1')!.items.map(a => a.id)).toEqual(['a3']);
+    expect(cols.find(c => c.id === 's2')!.items.map(a => a.id)).toEqual(['a1']);
+  });
+
+  it('status columns are droppable; no-status column is droppable with null statusId', () => {
+    const cols = buildColumns('status', [], [], statuses, 'startDate');
+    const noStatus = cols.find(c => c.id === NO_STATUS_ID)!;
+    expect(noStatus.droppable).toBe(true);
+    expect(noStatus.dropValue).toEqual({ statusId: null });
+    const s1 = cols.find(c => c.id === 's1')!;
+    expect(s1.droppable).toBe(true);
+    expect(s1.dropValue).toEqual({ statusId: 's1' });
+  });
+
+  it('handles unknown statusId gracefully (routes to no-status)', () => {
+    const acts = [makeActivity({ id: 'x', statusId: 'deleted-status' })];
+    const cols = buildColumns('status', acts, [], statuses, 'startDate');
+    expect(cols.find(c => c.id === NO_STATUS_ID)!.items.map(a => a.id)).toEqual(['x']);
+  });
+});
+
+// ── buildColumns — member ──────────────────────────────────────────────────────
+
+describe('buildColumns: member', () => {
+  it('creates Unassigned column first, then one column per member', () => {
+    const cols = buildColumns('member', [], members, [], 'startDate');
+    expect(cols[0].id).toBe(UNASSIGNED_ID);
+    expect(cols.slice(1).map(c => c.id)).toEqual(['m1', 'm2', 'm3']);
+  });
+
+  it('routes activity to primary (first) member column', () => {
+    const acts = [makeActivity({ id: 'a', assignedMemberIds: ['m2', 'm1'] })];
+    const cols = buildColumns('member', acts, members, [], 'startDate');
+    expect(cols.find(c => c.id === 'm2')!.items.map(a => a.id)).toEqual(['a']);
+    expect(cols.find(c => c.id === 'm1')!.items).toHaveLength(0);
+  });
+
+  it('routes unassigned activity to Unassigned column', () => {
+    const acts = [makeActivity({ id: 'u', assignedMemberIds: [] })];
+    const cols = buildColumns('member', acts, members, [], 'startDate');
+    expect(cols.find(c => c.id === UNASSIGNED_ID)!.items.map(a => a.id)).toEqual(['u']);
+  });
+
+  it('dropValue for member column sets assignedMemberIds to singleton', () => {
+    const cols = buildColumns('member', [], members, [], 'startDate');
+    const m1col = cols.find(c => c.id === 'm1')!;
+    expect(m1col.dropValue).toEqual({ assignedMemberIds: ['m1'] });
+  });
+
+  it('dropValue for Unassigned column sets assignedMemberIds to empty', () => {
+    const cols = buildColumns('member', [], members, [], 'startDate');
+    const unassigned = cols.find(c => c.id === UNASSIGNED_ID)!;
+    expect(unassigned.dropValue).toEqual({ assignedMemberIds: [] });
+  });
+});
+
+// ── buildColumns — member-combination ─────────────────────────────────────────
+
+describe('buildColumns: member-combination', () => {
+  it('groups by exact assignee set, not primary member', () => {
+    const acts = [
+      makeActivity({ id: 'solo-alice', assignedMemberIds: ['m1'] }),
+      makeActivity({ id: 'alice-bob', assignedMemberIds: ['m1', 'm2'] }),
+      makeActivity({ id: 'solo-alice-2', assignedMemberIds: ['m1'] }),
+    ];
+    const cols = buildColumns('member-combination', acts, members, [], 'startDate');
+    const aliceCol = cols.find(c => c.label === 'Alice')!;
+    expect(aliceCol.items).toHaveLength(2);
+    const combCol = cols.find(c => c.label === 'Alice and Bob')!;
+    expect(combCol.items).toHaveLength(1);
+  });
+
+  it('combination columns are non-droppable', () => {
+    const acts = [makeActivity({ id: 'a', assignedMemberIds: ['m1', 'm2'] })];
+    const cols = buildColumns('member-combination', acts, members, [], 'startDate');
+    expect(cols.every(c => !c.droppable)).toBe(true);
+  });
+
+  it('empty assignee set maps to Unassigned column', () => {
+    const acts = [makeActivity({ id: 'u', assignedMemberIds: [] })];
+    const cols = buildColumns('member-combination', acts, members, [], 'startDate');
+    const unassigned = cols.find(c => c.label === 'Unassigned');
+    expect(unassigned).toBeDefined();
+    expect(unassigned!.items).toHaveLength(1);
+  });
+});
+
+// ── empty activities ───────────────────────────────────────────────────────────
+
+describe('buildColumns with no activities', () => {
+  const emptyActs: ApiActivity[] = [];
+
+  (['status', 'member', 'member-combination'] as KanbanGroupBy[]).forEach(mode => {
+    it(`${mode} groupBy produces columns without throwing`, () => {
+      expect(() =>
+        buildColumns(mode, emptyActs, members, statuses, 'startDate'),
+      ).not.toThrow();
+    });
+  });
+});
+
+// ── buildHierarchyMaps ─────────────────────────────────────────────────────────
+
+describe('buildHierarchyMaps', () => {
+  it('returns empty maps when there are no parent-child relationships', () => {
+    const acts = [
+      makeActivity({ id: 'a' }),
+      makeActivity({ id: 'b' }),
+    ];
+    const { childrenByParentId, childIds } = buildHierarchyMaps(acts);
+    expect(childrenByParentId.size).toBe(0);
+    expect(childIds.size).toBe(0);
+  });
+
+  it('maps children to their parent', () => {
+    const acts = [
+      makeActivity({ id: 'parent' }),
+      makeActivity({ id: 'child1', parentActivityId: 'parent' }),
+      makeActivity({ id: 'child2', parentActivityId: 'parent' }),
+    ];
+    const { childrenByParentId, childIds } = buildHierarchyMaps(acts);
+    expect(childrenByParentId.get('parent')?.map(a => a.id)).toEqual(['child1', 'child2']);
+    expect(childIds).toEqual(new Set(['child1', 'child2']));
+  });
+
+  it('orphaned child (parent filtered out) is not placed in childrenByParentId', () => {
+    // Only the child is in the visible set; parent is absent (filtered).
+    const acts = [makeActivity({ id: 'child', parentActivityId: 'absent-parent' })];
+    const { childrenByParentId, childIds } = buildHierarchyMaps(acts);
+    expect(childrenByParentId.size).toBe(0);
+    // The child is NOT in childIds, so it surfaces as a root card.
+    expect(childIds.has('child')).toBe(false);
+  });
+
+  it('supports multi-level nesting', () => {
+    const acts = [
+      makeActivity({ id: 'root' }),
+      makeActivity({ id: 'mid', parentActivityId: 'root' }),
+      makeActivity({ id: 'leaf', parentActivityId: 'mid' }),
+    ];
+    const { childrenByParentId, childIds } = buildHierarchyMaps(acts);
+    expect(childrenByParentId.get('root')?.map(a => a.id)).toEqual(['mid']);
+    expect(childrenByParentId.get('mid')?.map(a => a.id)).toEqual(['leaf']);
+    expect(childIds).toEqual(new Set(['mid', 'leaf']));
+  });
+});
+
+// ── toggleCollapsedColumn ─────────────────────────────────────────────────────
+
+describe('toggleCollapsedColumn', () => {
+  it('adds a column ID when it is not yet collapsed', () => {
+    expect(toggleCollapsedColumn([], 'col-1')).toEqual(['col-1']);
+    expect(toggleCollapsedColumn(['col-2'], 'col-1')).toEqual(['col-2', 'col-1']);
+  });
+
+  it('removes a column ID when it is already collapsed', () => {
+    expect(toggleCollapsedColumn(['col-1'], 'col-1')).toEqual([]);
+    expect(toggleCollapsedColumn(['col-1', 'col-2'], 'col-1')).toEqual(['col-2']);
+  });
+
+  it('does not mutate the input array', () => {
+    const original = ['col-1'];
+    toggleCollapsedColumn(original, 'col-2');
+    expect(original).toEqual(['col-1']);
+  });
+});
+
+// ── handleAddInColumn prefill ─────────────────────────────────────────────────
+
+describe('column dropValue encodes correct prefill context', () => {
+  it('status column dropValue carries statusId for create prefill', () => {
+    const cols = buildColumns('status', [], [], statuses, 'startDate');
+    const s1 = cols.find(c => c.id === 's1')!;
+    // dropValue.statusId is what handleAddInColumn passes as the default statusId.
+    expect(s1.dropValue?.statusId).toBe('s1');
+    expect('statusId' in (s1.dropValue ?? {})).toBe(true);
+  });
+
+  it('no-status column dropValue has statusId: null', () => {
+    const cols = buildColumns('status', [], [], statuses, 'startDate');
+    const noStatus = cols.find(c => c.id === NO_STATUS_ID)!;
+    expect(noStatus.dropValue?.statusId).toBeNull();
+    expect('statusId' in (noStatus.dropValue ?? {})).toBe(true);
+  });
+
+  it('member column dropValue carries assignedMemberIds singleton', () => {
+    const cols = buildColumns('member', [], members, [], 'startDate');
+    const m1 = cols.find(c => c.id === 'm1')!;
+    expect(m1.dropValue?.assignedMemberIds).toEqual(['m1']);
+  });
+
+  it('unassigned column dropValue has empty assignedMemberIds and no statusId key', () => {
+    const cols = buildColumns('member', [], members, [], 'startDate');
+    const unassigned = cols.find(c => c.id === UNASSIGNED_ID)!;
+    expect(unassigned.dropValue?.assignedMemberIds).toEqual([]);
+    expect('statusId' in (unassigned.dropValue ?? {})).toBe(false);
+  });
+});
+````
+
+## File: packages/web/src/components/kanban/KanbanView.tsx
+````typescript
+/**
+ * KanbanView — data container for the Kanban board.
+ *
+ * Mirrors CalendarView: fetches activities + members, applies the active filter
+ * and Find query, builds columns via kanbanColumns, and hands off to KanbanBoard
+ * for rendering. Owns no layout chrome — groupBy, sortBy, colorBy, and cardFields
+ * come from DashboardPage.
+ */
+
+import { useMemo, useEffect, useCallback, useState } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
+import KanbanBoard from './KanbanBoard';
+import {
+  buildColumns,
+  buildHierarchyMaps,
+  toggleCollapsedColumn,
+  DEFAULT_CARD_FIELDS,
+  type KanbanGroupBy,
+  type KanbanSortBy,
+  type KanbanCardField,
+} from './kanbanColumns';
+import { resolveActivityColor } from '@/lib/activityColor';
+import { useTimelineActivities, useTeamMembers, useUpdateActivity } from '@/hooks/useTeamActivities';
+import { matchEvents } from '@/lib/findMatcher';
+import { useFind } from '@/contexts/FindContext';
+import { useFilter } from '@/contexts/FilterContext';
+import { applyActiveFilter } from '@/lib/presetFilters';
+import { useUpsertPreference } from '@/hooks/usePreferences';
+import { resolveColorHex } from '@/components/identity/identity-constants';
+import type { ColorBy } from '@/components/gantt/GanttToolbar';
+import type { components } from '@draba/shared';
+import type { Member } from '@/types';
+import { MEMBER_COLORS } from '@/types';
+import type { DropPayload } from './KanbanBoard';
+
+type ApiActivity = components['schemas']['Activity'];
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
+type Status = components['schemas']['Status'];
+type SavedFilter = components['schemas']['SavedFilter'];
+type Tag = components['schemas']['Tag'];
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function initialsFrom(name: string): string {
+  return name.split(/\s+/).map(w => w[0] ?? '').slice(0, 2).join('').toUpperCase();
+}
+
+function toMember(m: TeamMemberWithUser, index: number): Member {
+  const name = m.displayName || m.email || 'Unknown';
+  return {
+    id: m.id,
+    name,
+    initials: initialsFrom(name),
+    color: resolveColorHex(m.color) || MEMBER_COLORS[index % MEMBER_COLORS.length],
+  };
+}
+
+// ── Props ─────────────────────────────────────────────────────────────────────
+
+interface Props {
+  teamId: string;
+  timelineId: string;
+  groupBy: KanbanGroupBy;
+  sortBy: KanbanSortBy;
+  colorBy: ColorBy;
+  cardFields: KanbanCardField[];
+  collapsedColumnIds: string[];
+  onCollapsedColumnIdsChange: (ids: string[]) => void;
+  /** When true, child activities nest beneath their parent in the parent's column. */
+  showHierarchy: boolean;
+  timelineStatuses?: Status[];
+  savedFilters?: SavedFilter[];
+  tags?: Tag[];
+  selectedActivityId?: string | null;
+  onSelectActivity?: (id: string | null) => void;
+  onSelectApiActivity?: (activity: ApiActivity | null) => void;
+  /** Called when "+ Add" is clicked in a column; provides pre-fill context. */
+  onAddActivity?: (defaults: { start: string; end: string; memberId: string | null; statusId?: string | null }) => void;
+  onMembersLoaded?: (members: Member[]) => void;
+}
+
+// ── KanbanView ────────────────────────────────────────────────────────────────
+
+export default function KanbanView({
+  teamId,
+  timelineId,
+  groupBy,
+  sortBy,
+  colorBy,
+  cardFields,
+  collapsedColumnIds,
+  onCollapsedColumnIdsChange,
+  showHierarchy,
+  timelineStatuses,
+  savedFilters,
+  tags,
+  selectedActivityId,
+  onSelectActivity,
+  onSelectApiActivity,
+  onAddActivity,
+  onMembersLoaded,
+}: Props) {
+  const queryClient = useQueryClient();
+  const { debouncedQuery, registerMatches, activeMatchId } = useFind();
+  const { activeFilter } = useFilter();
+  const upsert = useUpsertPreference();
+
+  // Fetch data — no date bounds for Kanban (show all activities on the timeline).
+  const { data: apiMembers = [] } = useTeamMembers(teamId);
+  const { data: apiActivities = [], isLoading } = useTimelineActivities(teamId, timelineId);
+  const updateActivity = useUpdateActivity(timelineId);
+
+  const members: Member[] = useMemo(
+    () => apiMembers.map((m, i) => toMember(m, i)),
+    [apiMembers],
+  );
+
+  const memberById = useMemo<Record<string, Member>>(() => {
+    const map: Record<string, Member> = {};
+    members.forEach(m => { map[m.id] = m; });
+    return map;
+  }, [members]);
+
+  useEffect(() => {
+    if (onMembersLoaded && members.length > 0) onMembersLoaded(members);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [members]);
+
+  // Filter engine context.
+  const closedStatusIds = useMemo(
+    () => new Set((timelineStatuses ?? []).filter(s => s.isClosed).map(s => s.id)),
+    [timelineStatuses],
+  );
+  const statusesByTimeline = useMemo(() => {
+    const m = new Map<string, Status[]>();
+    if (timelineStatuses?.length) m.set(timelineId, timelineStatuses);
+    return m;
+  }, [timelineId, timelineStatuses]);
+  const memberIdsByUserId = useMemo(() => {
+    const m = new Map<string, string[]>();
+    apiMembers.forEach(mem => {
+      if (mem.userId) {
+        const existing = m.get(mem.userId) ?? [];
+        m.set(mem.userId, [...existing, mem.id]);
+      }
+    });
+    return m;
+  }, [apiMembers]);
+
+  const visibleActivities = useMemo(
+    () => applyActiveFilter(
+      apiActivities,
+      activeFilter,
+      memberIdsByUserId,
+      {
+        closedStatusIds,
+        savedFilters: savedFilters ?? [],
+        statuses: statusesByTimeline,
+        tags: tags ?? [],
+      },
+    ),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [apiActivities, activeFilter, memberIdsByUserId, closedStatusIds, savedFilters, statusesByTimeline, tags],
+  );
+
+  const statusById = useMemo(
+    () => new Map((timelineStatuses ?? []).map(s => [s.id, s])),
+    [timelineStatuses],
+  );
+  const statusColorById = useMemo(
+    () => new Map((timelineStatuses ?? []).map(s => [s.id, s.color ?? ''])),
+    [timelineStatuses],
+  );
+  const tagById = useMemo(
+    () => new Map((tags ?? []).map(t => [t.id, t])),
+    [tags],
+  );
+
+  // Per-activity resolved hex color (driven by colorBy) — used as card accent border.
+  const colorMap = useMemo<Map<string, string>>(() => {
+    const map = new Map<string, string>();
+    visibleActivities.forEach((act, i) => {
+      map.set(act.id, resolveActivityColor(act, i, memberById, colorBy, statusColorById));
+    });
+    return map;
+  }, [visibleActivities, memberById, colorBy, statusColorById]);
+
+  // ── Hierarchy ────────────────────────────────────────────────────────────────
+
+  const { childrenByParentId, childIds } = useMemo(
+    () => showHierarchy ? buildHierarchyMaps(visibleActivities) : { childrenByParentId: new Map<string, ApiActivity[]>(), childIds: new Set<string>() },
+    [visibleActivities, showHierarchy],
+  );
+
+  /**
+   * Activities used for column building.
+   * When hierarchy is on, only root activities (not nested children) get a
+   * column slot — children are rendered under their parent by KanbanColumn.
+   */
+  const columnActivities = useMemo(
+    () => showHierarchy
+      ? visibleActivities.filter(a => !childIds.has(a.id))
+      : visibleActivities,
+    [visibleActivities, showHierarchy, childIds],
+  );
+
+  /** Per-parent collapse state — ephemeral (not persisted). Starts fully expanded. */
+  const [collapsedParents, setCollapsedParents] = useState<Set<string>>(new Set());
+
+  const handleToggleParent = useCallback((activityId: string) => {
+    setCollapsedParents(prev => {
+      const next = new Set(prev);
+      if (next.has(activityId)) next.delete(activityId);
+      else next.add(activityId);
+      return next;
+    });
+  }, []);
+
+  // Build columns.
+  const columns = useMemo(
+    () => buildColumns(
+      groupBy,
+      columnActivities,
+      apiMembers,
+      timelineStatuses ?? [],
+      sortBy,
+    ),
+    [groupBy, columnActivities, apiMembers, timelineStatuses, sortBy],
+  );
+
+  // Activity ID → ApiActivity map for drag overlay and optimistic updates.
+  const activityById = useMemo<Map<string, ApiActivity>>(
+    () => new Map(apiActivities.map(a => [a.id, a])),
+    [apiActivities],
+  );
+
+  // Activity ID → title lookup for the "Parent" card field.
+  // Uses apiActivities (all activities, not just visible) so the parent title
+  // still shows when the parent activity is filtered out by the active filter.
+  const activityTitleById = useMemo<Map<string, string>>(
+    () => new Map(apiActivities.map(a => [a.id, a.title])),
+    [apiActivities],
+  );
+
+  // Collapsed column persistence.
+  const collapsedSet = useMemo(() => new Set(collapsedColumnIds), [collapsedColumnIds]);
+
+  const handleToggleCollapse = useCallback((columnId: string) => {
+    const next = toggleCollapsedColumn(collapsedColumnIds, columnId);
+    onCollapsedColumnIdsChange(next);
+    if (timelineId) {
+      upsert.mutate({
+        key: 'kanban_collapsed',
+        value: JSON.stringify(next),
+        timelineId,
+      });
+    }
+  }, [collapsedSet, collapsedColumnIds, onCollapsedColumnIdsChange, timelineId, upsert]);
+
+  // Find: compute matches.
+  const matchResults = useMemo(
+    () => matchEvents(debouncedQuery, visibleActivities, members, visibleActivities),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [debouncedQuery, visibleActivities, members],
+  );
+  const matchedSet = useMemo(() => new Set(matchResults.map(r => r.activityId)), [matchResults]);
+
+  // Register ordered match IDs walking the full tree (root + children).
+  const orderedMatchIds = useMemo(() => {
+    const ids: string[] = [];
+
+    function walkActivity(act: ApiActivity) {
+      if (matchedSet.has(act.id)) ids.push(act.id);
+      if (showHierarchy) {
+        const children = childrenByParentId.get(act.id) ?? [];
+        children.forEach(walkActivity);
+      }
+    }
+
+    for (const col of columns) {
+      if (collapsedSet.has(col.id)) continue;
+      col.items.forEach(walkActivity);
+    }
+    return ids;
+  }, [columns, collapsedSet, matchedSet, showHierarchy, childrenByParentId]);
+
+  useEffect(() => {
+    registerMatches(orderedMatchIds, new Map());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [orderedMatchIds]);
+
+  // Auto-expand a collapsed column that contains the active match.
+  useEffect(() => {
+    if (!activeMatchId) return;
+    // Expand collapsed column.
+    const containingCol = columns.find(col =>
+      collapsedSet.has(col.id) && col.items.some(a => a.id === activeMatchId),
+    );
+    if (containingCol) handleToggleCollapse(containingCol.id);
+
+    // Auto-expand a collapsed parent whose descendant is the active match.
+    if (showHierarchy) {
+      for (const [parentId, children] of childrenByParentId) {
+        if (collapsedParents.has(parentId)) {
+          function isDescendant(id: string): boolean {
+            if (id === activeMatchId) return true;
+            return (childrenByParentId.get(id) ?? []).some(c => isDescendant(c.id));
+          }
+          if (children.some(c => isDescendant(c.id))) {
+            handleToggleParent(parentId);
+          }
+        }
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeMatchId]);
+
+  // Derive which field is the current Group by axis (auto-suppressed on cards).
+  const suppressedFields = useMemo((): Set<KanbanCardField> => {
+    const s = new Set<KanbanCardField>();
+    if (groupBy === 'status') s.add('status');
+    if (groupBy === 'member' || groupBy === 'member-combination') s.add('members');
+    return s;
+  }, [groupBy]);
+
+  // Card click → open detail panel.
+  const handleCardClick = useCallback((activity: ApiActivity) => {
+    if (onSelectApiActivity) onSelectApiActivity(activity);
+    if (onSelectActivity)    onSelectActivity(activity.id);
+  }, [onSelectApiActivity, onSelectActivity]);
+
+  // "+ Add" in a column → open create panel prefilled with the column's context.
+  const handleAddInColumn = useCallback((column: { id: string; dropValue?: { statusId?: string | null; assignedMemberIds?: string[] } }) => {
+    const today = new Date().toISOString().slice(0, 10);
+    const memberId = column.dropValue?.assignedMemberIds?.[0] ?? null;
+    // Pass statusId only when it's explicitly present in dropValue (status grouping).
+    const statusId = 'statusId' in (column.dropValue ?? {}) ? column.dropValue!.statusId : undefined;
+    if (onAddActivity) {
+      onAddActivity({ start: today, end: today, memberId, statusId });
+    }
+  }, [onAddActivity]);
+
+  // Drag commit.
+  const handleDrop = useCallback((payload: DropPayload) => {
+    const existing = activityById.get(payload.activityId);
+    const merged: ApiActivity | undefined = existing
+      ? { ...existing, ...payload.patch }
+      : undefined;
+
+    // Optimistic cache update.
+    queryClient.setQueriesData<ApiActivity[]>(
+      { queryKey: ['timelines', timelineId, 'activities'] },
+      old => old?.map(a => a.id === payload.activityId ? (merged ?? a) : a),
+    );
+
+    // If the dragged card is currently open in the edit panel, sync the panel
+    // immediately so the user sees the new status / assignee without closing and
+    // re-opening the sidebar.
+    if (merged && selectedActivityId === payload.activityId && onSelectApiActivity) {
+      onSelectApiActivity(merged);
+    }
+
+    updateActivity.mutate({ activityId: payload.activityId, patch: payload.patch });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [queryClient, timelineId, updateActivity, activityById, selectedActivityId, onSelectApiActivity]);
+
+  const hasQuery = debouncedQuery.trim().length > 0;
+
+  // ── Effective card fields: apply context-aware suppression at render time ────
+  const effectiveCardFields = useMemo(
+    () => (cardFields.length > 0 ? cardFields : DEFAULT_CARD_FIELDS),
+    [cardFields],
+  );
+
+  // ── Loading ────────────────────────────────────────────────────────────────
+
+  if (isLoading) {
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: 'var(--muted-foreground)', fontSize: 13 }}>
+        Loading activities…
+      </div>
+    );
+  }
+
+  return (
+    <KanbanBoard
+      columns={columns}
+      groupBy={groupBy}
+      members={members}
+      statusById={statusById}
+      tagById={tagById}
+      colorMap={colorMap}
+      cardFields={effectiveCardFields}
+      suppressedFields={suppressedFields}
+      selectedActivityId={selectedActivityId ?? null}
+      matchedIds={matchedSet}
+      activeMatchId={activeMatchId}
+      hasQuery={hasQuery}
+      collapsedColumnIds={collapsedSet}
+      onToggleCollapse={handleToggleCollapse}
+      onCardClick={handleCardClick}
+      onAddInColumn={handleAddInColumn}
+      onDrop={handleDrop}
+      activityById={activityById}
+      activityTitleById={activityTitleById}
+      showHierarchy={showHierarchy}
+      childrenByParentId={childrenByParentId}
+      collapsedParents={collapsedParents}
+      onToggleParent={handleToggleParent}
+    />
+  );
+}
 ````
 
 ## File: packages/web/src/components/list/ListToolbar.tsx
@@ -48252,1408 +48361,6 @@ paths:
           $ref: "#/components/responses/InternalError"
 ````
 
-## File: packages/web/src/hooks/useTeamActivities.ts
-````typescript
-/**
- * TanStack Query hooks for team-scoped data.
- *
- * All hooks call createAuthFetch to inject the current access token at
- * query-time so stale closures never send an expired token.
- */
-
-import { useCallback } from 'react'
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import type { components } from '@draba/shared'
-import { createAuthFetch } from '@/lib/api'
-import { useAuth } from '@/contexts/AuthContext'
-import { useWebSocket } from '@/hooks/useWebSocket'
-
-type Activity = components['schemas']['Activity']
-type Team = components['schemas']['Team']
-type Timeline = components['schemas']['Timeline']
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
-type TimelineAccessEntry = components['schemas']['TimelineAccessEntry']
-type PatchTimelineInput = components['schemas']['PatchTimelineInput']
-
-/** Query key factory — centralises cache key strings. */
-export const keys = {
-  myTeams: () => ['teams'] as const,
-  timelineActivities: (timelineId: string, from?: string, to?: string) =>
-    ['timelines', timelineId, 'activities', { from, to }] as const,
-  teamMembers: (teamId: string) =>
-    ['teams', teamId, 'members'] as const,
-  teamTimelines: (teamId: string) =>
-    ['teams', teamId, 'timelines'] as const,
-}
-
-/** Fetches all teams the authenticated user belongs to. */
-export function useMyTeams(includeArchived = false) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: [...keys.myTeams(), { includeArchived }],
-    queryFn: async () => (await authFetch<Team[] | null>(includeArchived ? '/teams?archived=true' : '/teams')) ?? [],
-  })
-}
-
-/** Fetches a single team by ID. */
-export function useTeam(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: ['teams', teamId],
-    queryFn: () => authFetch<Team>(`/teams/${teamId}`),
-    enabled: Boolean(teamId),
-  })
-}
-
-/** Fetches all non-archived timelines for a team. */
-export function useTeamTimelines(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: keys.teamTimelines(teamId),
-    queryFn: async () => (await authFetch<Timeline[] | null>(`/teams/${teamId}/timelines`)) ?? [],
-    enabled: Boolean(teamId),
-  })
-}
-
-/** Fetches activities for a timeline, optionally bounded by date range. */
-export function useTimelineActivities(teamId: string, timelineId: string, from?: string, to?: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: keys.timelineActivities(timelineId, from, to),
-    queryFn: async () => {
-      const params = new URLSearchParams()
-      if (from) params.set('from', from)
-      if (to) params.set('to', to)
-      const qs = params.toString()
-      return (await authFetch<Activity[] | null>(`/teams/${teamId}/timelines/${timelineId}/activities${qs ? `?${qs}` : ''}`)) ?? []
-    },
-    enabled: Boolean(teamId) && Boolean(timelineId),
-  })
-}
-
-/** Fetches the member list for a team. */
-export function useTeamMembers(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: keys.teamMembers(teamId),
-    queryFn: async () => (await authFetch<TeamMemberWithUser[] | null>(`/teams/${teamId}/members`)) ?? [],
-    enabled: Boolean(teamId),
-  })
-}
-
-/**
- * Subscribes to the team's WebSocket feed and applies surgical cache updates
- * for activity.created / activity.updated / activity.deleted deltas.
- *
- * Conflict strategy: for activity.updated, incoming deltas are only applied
- * when their updatedAt timestamp is strictly newer than the cached version.
- * This prevents self-echo (our own PATCH broadcast arriving back) and handles
- * the last-writer-wins case where a concurrent remote edit arrives while our
- * mutation is in-flight — the server-returned updatedAt on our onSuccess will
- * always win if our PATCH was truly last.
- */
-export function useTeamActivitySync(
-  teamId: string,
-  accessToken: string | null | undefined,
-) {
-  const client = useQueryClient()
-
-  const handleMessage = useCallback(
-    (msg: { type: string; payload?: unknown }) => {
-      if (!teamId || !msg.payload) return
-
-      if (msg.type === 'activity.created') {
-        const incoming = msg.payload as Activity
-        // Target all timeline-scoped activity cache entries by using the
-        // timelineId from the incoming activity payload.
-        if (!incoming.timelineId) return
-        client.setQueriesData<Activity[]>(
-          { queryKey: ['timelines', incoming.timelineId, 'activities'] },
-          (old) => {
-            if (!old) return old
-            // Guard against duplicate delivery.
-            if (old.some((a) => a.id === incoming.id)) return old
-            return [...old, incoming]
-          },
-        )
-      } else if (msg.type === 'activity.updated') {
-        const incoming = msg.payload as Activity
-        if (!incoming.timelineId) return
-        client.setQueriesData<Activity[]>(
-          { queryKey: ['timelines', incoming.timelineId, 'activities'] },
-          (old) => {
-            if (!old) return old
-            return old.map((a) => {
-              if (a.id !== incoming.id) return a
-              // Skip if the cache already holds the same or a newer version.
-              const cachedMs = new Date(a.updatedAt).getTime()
-              const incomingMs = new Date(incoming.updatedAt).getTime()
-              return incomingMs > cachedMs ? incoming : a
-            })
-          },
-        )
-      } else if (msg.type === 'activity.deleted') {
-        const { id } = msg.payload as { id: string }
-        // activity.deleted payload only has id — invalidate all timeline
-        // activity queries for this team so caches stay consistent.
-        client.invalidateQueries({ queryKey: ['timelines'] })
-        // Optimistically remove from all cached timeline activity lists.
-        client.setQueriesData<Activity[]>(
-          { queryKey: ['timelines'] },
-          (old) => old?.filter((a) => a.id !== id),
-        )
-      }
-    },
-    [client, teamId],
-  )
-
-  useWebSocket({
-    token: accessToken,
-    teamIds: teamId ? [teamId] : [],
-    onMessage: handleMessage,
-  })
-}
-
-interface CreateActivityInput {
-  title: string
-  startAt: string
-  endAt: string
-  description?: string | null
-  notes?: string | null
-  color?: string | null
-  icon?: string | null
-  assignedMemberIds?: string[]
-  tagIds?: string[]
-  statusId?: string | null
-  parentActivityId?: string | null
-  percentComplete?: number | null
-  location?: string | null
-  url?: string | null
-  /** Client-only: if set, replace this placeholder ID in the cache instead of appending. */
-  _tempId?: string
-}
-
-interface UpdateActivityInput {
-  activityId: string
-  patch: {
-    title?: string
-    description?: string | null
-    notes?: string | null
-    startAt?: string
-    endAt?: string
-    allDay?: boolean
-    color?: string | null
-    icon?: string | null
-    location?: string | null
-    url?: string | null
-    statusId?: string | null
-    parentActivityId?: string | null
-    percentComplete?: number | null
-    assignedMemberIds?: string[]
-    tagIds?: string[]
-  }
-}
-
-/** Creates an activity in a timeline and inserts it directly into the cache. */
-export function useCreateActivity(teamId: string, timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: ({ _tempId: _, ...input }: CreateActivityInput) =>
-      authFetch<Activity>(`/teams/${teamId}/timelines/${timelineId}/activities`, {
-        method: 'POST',
-        body: JSON.stringify(input),
-      }),
-    onSuccess: (created, variables) => {
-      const tempId = variables._tempId
-      client.setQueriesData<Activity[]>(
-        { queryKey: ['timelines', timelineId, 'activities'] },
-        (old) => {
-          if (!old) return [created]
-          const hasReal = old.some((a) => a.id === created.id)
-          const hasTemp = tempId ? old.some((a) => a.id === tempId) : false
-          // The WS activity.created self-echo may win the race and append the
-          // real record before this onSuccess runs. In that case we must still
-          // drop the optimistic placeholder, otherwise it lingers as a duplicate
-          // "New Activity" row (and inline edits keep targeting the dead temp id).
-          if (hasReal) {
-            return hasTemp ? old.filter((a) => a.id !== tempId) : old
-          }
-          // Replace optimistic placeholder in-place to avoid a position flash.
-          if (hasTemp) {
-            return old.map((a) => (a.id === tempId ? created : a))
-          }
-          return [...old, created]
-        },
-      )
-    },
-  })
-}
-
-/** PATCHes an activity and optimistically updates the cache. */
-export function useUpdateActivity(timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: ({ activityId, patch }: UpdateActivityInput) =>
-      authFetch<Activity>(`/activities/${activityId}`, {
-        method: 'PATCH',
-        body: JSON.stringify(patch),
-      }),
-    onMutate: async ({ activityId, patch }) => {
-      await client.cancelQueries({ queryKey: ['timelines', timelineId, 'activities'] })
-      const snapshot = client.getQueriesData<Activity[]>({ queryKey: ['timelines', timelineId, 'activities'] })
-      client.setQueriesData<Activity[]>(
-        { queryKey: ['timelines', timelineId, 'activities'] },
-        (old) => old?.map((a) => (a.id === activityId ? { ...a, ...patch } : a)),
-      )
-      return { snapshot }
-    },
-    onError: (_err, _vars, context) => {
-      if (context?.snapshot) {
-        for (const [key, data] of context.snapshot) {
-          client.setQueryData(key, data)
-        }
-      }
-    },
-    onSuccess: (updated) => {
-      client.setQueriesData<Activity[]>(
-        { queryKey: ['timelines', timelineId, 'activities'] },
-        (old) => old?.map((a) => (a.id === updated.id ? updated : a)),
-      )
-    },
-  })
-}
-
-interface CreateTeamInput {
-  name: string
-  description?: string | null
-  notes?: string | null
-  color?: string | null
-  icon?: string | null
-}
-
-interface UpdateTeamInput {
-  teamId: string
-  patch: {
-    name?: string
-    description?: string | null
-    notes?: string | null
-    color?: string | null
-    icon?: string | null
-  }
-}
-
-/** Creates a team and inserts it into the active-teams cache. */
-export function useCreateTeam() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (input: CreateTeamInput) =>
-      authFetch<Team>('/teams', {
-        method: 'POST',
-        body: JSON.stringify(input),
-      }),
-    onSuccess: () => {
-      // Invalidate both active and archived team lists.
-      client.invalidateQueries({ queryKey: ['teams'] })
-    },
-  })
-}
-
-/** PATCHes a team's mutable fields and refreshes the cache. */
-export function useUpdateTeam() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: ({ teamId, patch }: UpdateTeamInput) =>
-      authFetch<Team>(`/teams/${teamId}`, {
-        method: 'PATCH',
-        body: JSON.stringify(patch),
-      }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: ['teams'] })
-    },
-  })
-}
-
-/** Archives a team (soft delete). */
-export function useArchiveTeam() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (teamId: string) =>
-      authFetch<Team>(`/teams/${teamId}/archive`, { method: 'POST' }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: ['teams'] })
-    },
-  })
-}
-
-/** Restores an archived team. */
-export function useUnarchiveTeam() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (teamId: string) =>
-      authFetch<Team>(`/teams/${teamId}/unarchive`, { method: 'POST' }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: ['teams'] })
-    },
-  })
-}
-
-/** Archives an activity (soft-delete). Removes it from the active-list cache. */
-export function useArchiveActivity(timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (activityId: string) =>
-      authFetch<Activity>(`/activities/${activityId}/archive`, { method: 'POST' }),
-    onSuccess: (_data, activityId) => {
-      client.setQueriesData<Activity[]>(
-        { queryKey: ['timelines', timelineId, 'activities'] },
-        (old) => old?.filter((a) => a.id !== activityId),
-      )
-    },
-  })
-}
-
-/** Deletes an activity and removes it from the cache. */
-export function useDeleteActivity(timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (activityId: string) =>
-      authFetch<void>(`/activities/${activityId}`, { method: 'DELETE' }),
-    onSuccess: (_data, activityId) => {
-      client.setQueriesData<Activity[]>(
-        { queryKey: ['timelines', timelineId, 'activities'] },
-        (old) => old?.filter((a) => a.id !== activityId),
-      )
-    },
-  })
-}
-
-// ── Timeline CRUD (Phase 10.3) ────────────────────────────────────────────────
-
-/** Fetches all timelines for a team, optionally including archived ones. */
-export function useTeamTimelinesWithArchived(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: [...keys.teamTimelines(teamId), { includeArchived: true }],
-    queryFn: async () =>
-      (await authFetch<Timeline[] | null>(`/teams/${teamId}/timelines?archived=true`)) ?? [],
-    enabled: Boolean(teamId),
-  })
-}
-
-/** Creates a new timeline for a team. */
-export function useCreateTimeline(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (input: { name: string; startDate: string; endDate: string; color?: string | null; icon?: string | null; description?: string | null; notes?: string | null; templateId?: string | null }) =>
-      authFetch<Timeline>(`/teams/${teamId}/timelines`, {
-        method: 'POST',
-        body: JSON.stringify(input),
-      }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
-    },
-  })
-}
-
-/** PATCHes a timeline's mutable fields. */
-export function useUpdateTimeline(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: ({ timelineId, patch }: { timelineId: string; patch: PatchTimelineInput }) =>
-      authFetch<Timeline>(`/timelines/${timelineId}`, {
-        method: 'PATCH',
-        body: JSON.stringify(patch),
-      }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
-    },
-  })
-}
-
-/** Hard-deletes a timeline. */
-export function useDeleteTimeline(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (timelineId: string) =>
-      authFetch<void>(`/timelines/${timelineId}`, { method: 'DELETE' }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
-    },
-  })
-}
-
-/** Archives a timeline. */
-export function useArchiveTimeline(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (timelineId: string) =>
-      authFetch<Timeline>(`/timelines/${timelineId}/archive`, { method: 'POST' }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
-    },
-  })
-}
-
-/** Restores an archived timeline. */
-export function useUnarchiveTimeline(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (timelineId: string) =>
-      authFetch<Timeline>(`/timelines/${timelineId}/unarchive`, { method: 'POST' }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
-    },
-  })
-}
-
-/** Fetches the access grant list for a timeline. */
-export function useTimelineAccess(teamId: string, timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: ['teams', teamId, 'timelines', timelineId, 'access'],
-    queryFn: async () =>
-      (await authFetch<TimelineAccessEntry[]>(
-        `/teams/${teamId}/timelines/${timelineId}/access`,
-      )) ?? [],
-    enabled: Boolean(teamId) && Boolean(timelineId),
-  })
-}
-
-/** Grants or updates a member's access to a timeline. */
-export function useGrantTimelineAccess(teamId: string, timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: ({ memberId, role }: { memberId: string; role: 'admin' | 'member' }) =>
-      authFetch<TimelineAccessEntry[]>(
-        `/teams/${teamId}/timelines/${timelineId}/access/${memberId}`,
-        { method: 'PUT', body: JSON.stringify({ role }) },
-      ),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: ['teams', teamId, 'timelines', timelineId, 'access'] })
-    },
-  })
-}
-
-/** Revokes a member's access to a timeline. */
-export function useRevokeTimelineAccess(teamId: string, timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (memberId: string) =>
-      authFetch<void>(`/teams/${teamId}/timelines/${timelineId}/access/${memberId}`, {
-        method: 'DELETE',
-      }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: ['teams', teamId, 'timelines', timelineId, 'access'] })
-    },
-  })
-}
-````
-
-## File: packages/api/internal/api/activity_handler.go
-````go
-package api
-
-import (
-	"database/sql"
-	"encoding/json"
-	"errors"
-	"net/http"
-	"time"
-
-	"github.com/I0-1O/draba/packages/api/internal/db"
-	"github.com/I0-1O/draba/packages/api/internal/events"
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// handleCreateActivity handles POST /teams/{id}/timelines/{timelineId}/activities.
-// The authenticated user must be a member of the team.
-func (s *Server) handleCreateActivity(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-	timelineID := r.PathValue("timelineId")
-
-	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
-		return
-	}
-
-	claims := claimsFromContext(r.Context())
-
-	timeline, err := s.timelines.GetByID(timelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create activity")
-		return
-	}
-	if timeline.TeamID != teamID {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-		return
-	}
-
-	var req CreateActivityJSONBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	if req.Title == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "title is required")
-		return
-	}
-	if req.StartAt.IsZero() || req.EndAt.IsZero() {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "startAt and endAt are required")
-		return
-	}
-	if req.EndAt.Before(req.StartAt) {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "endAt must not be before startAt")
-		return
-	}
-
-	allDay := false
-	if req.AllDay != nil {
-		allDay = *req.AllDay
-	}
-
-	now := time.Now()
-	activity := &models.Activity{
-		ID:               newID(),
-		TimelineID:       timelineID,
-		Title:            req.Title,
-		Description:      req.Description,
-		Notes:            req.Notes,
-		Icon:             req.Icon,
-		Color:            req.Color,
-		StartAt:          req.StartAt,
-		EndAt:            req.EndAt,
-		AllDay:           allDay,
-		StatusID:         req.StatusId,
-		ParentActivityID: req.ParentActivityId,
-		PercentComplete:  req.PercentComplete,
-		Location:         req.Location,
-		URL:              req.Url,
-		Rrule:            req.Rrule,
-		CreatedBy:        claims.UserID,
-		CreatedAt:        now,
-		UpdatedAt:        now,
-	}
-	if err := s.activities.Create(activity); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create activity")
-		return
-	}
-
-	if req.AssignedMemberIds != nil {
-		if err := s.activities.SetAssignments(activity.ID, *req.AssignedMemberIds); err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity assignments")
-			return
-		}
-		activity.AssignedMemberIDs = *req.AssignedMemberIds
-	} else {
-		activity.AssignedMemberIDs = []string{}
-	}
-
-	if req.TagIds != nil {
-		if err := s.tags.ValidateTeamOwnership(timeline.TeamID, *req.TagIds); err != nil {
-			if errors.Is(err, db.ErrTagOwnership) {
-				writeError(w, http.StatusBadRequest, "INVALID_TAGS", "one or more tag IDs do not belong to this team")
-				return
-			}
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to validate tags")
-			return
-		}
-		if err := s.activities.SetTags(activity.ID, *req.TagIds); err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity tags")
-			return
-		}
-		activity.TagIDs = *req.TagIds
-	} else {
-		activity.TagIDs = []string{}
-	}
-
-	s.bus.Publish(events.Message{Type: events.ActivityCreated, TeamID: timeline.TeamID, Payload: activity})
-	writeJSON(w, http.StatusCreated, activity)
-}
-
-// handleListActivities handles GET /teams/{id}/timelines/{timelineId}/activities.
-// Optional query params ?from=<RFC3339> and ?to=<RFC3339> bound the result by start_at.
-func (s *Server) handleListActivities(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-	timelineID := r.PathValue("timelineId")
-
-	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
-		return
-	}
-
-	timeline, err := s.timelines.GetByID(timelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list activities")
-		return
-	}
-	if timeline.TeamID != teamID {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-		return
-	}
-
-	var from, to *time.Time
-	if v := r.URL.Query().Get("from"); v != "" {
-		t, err := time.Parse(time.RFC3339, v)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "from must be RFC3339 (e.g. 2006-01-02T15:04:05Z)")
-			return
-		}
-		from = &t
-	}
-	if v := r.URL.Query().Get("to"); v != "" {
-		t, err := time.Parse(time.RFC3339, v)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "to must be RFC3339 (e.g. 2006-01-02T15:04:05Z)")
-			return
-		}
-		to = &t
-	}
-
-	includeArchived := r.URL.Query().Get("archived") == "true"
-	acts, err := s.activities.ListByTimeline(timelineID, from, to, includeArchived)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list activities")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, acts)
-}
-
-// handleUpdateActivity handles PATCH /activities/{id}. Only fields present in
-// the request body are applied; the caller must be a member of the activity's team.
-func (s *Server) handleUpdateActivity(w http.ResponseWriter, r *http.Request) {
-	activityID := r.PathValue("id")
-
-	activity, err := s.activities.GetByID(activityID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "activity not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update activity")
-		return
-	}
-
-	timeline, err := s.timelines.GetByID(activity.TimelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update activity")
-		return
-	}
-
-	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
-		return
-	}
-
-	// Decode into a map so we can detect which fields the caller provided.
-	var patch map[string]json.RawMessage
-	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	if v, ok := patch["title"]; ok {
-		if err := json.Unmarshal(v, &activity.Title); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid title")
-			return
-		}
-	}
-	if v, ok := patch["description"]; ok {
-		if err := json.Unmarshal(v, &activity.Description); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid description")
-			return
-		}
-	}
-	if v, ok := patch["notes"]; ok {
-		if err := json.Unmarshal(v, &activity.Notes); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid notes")
-			return
-		}
-	}
-	if v, ok := patch["icon"]; ok {
-		if err := json.Unmarshal(v, &activity.Icon); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid icon")
-			return
-		}
-	}
-	if v, ok := patch["color"]; ok {
-		if err := json.Unmarshal(v, &activity.Color); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid color")
-			return
-		}
-	}
-	if v, ok := patch["startAt"]; ok {
-		if err := json.Unmarshal(v, &activity.StartAt); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid startAt")
-			return
-		}
-	}
-	if v, ok := patch["endAt"]; ok {
-		if err := json.Unmarshal(v, &activity.EndAt); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid endAt")
-			return
-		}
-	}
-	if v, ok := patch["allDay"]; ok {
-		if err := json.Unmarshal(v, &activity.AllDay); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid allDay")
-			return
-		}
-	}
-	if v, ok := patch["statusId"]; ok {
-		if err := json.Unmarshal(v, &activity.StatusID); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid statusId")
-			return
-		}
-	}
-	if v, ok := patch["parentActivityId"]; ok {
-		if err := json.Unmarshal(v, &activity.ParentActivityID); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid parentActivityId")
-			return
-		}
-	}
-	if v, ok := patch["percentComplete"]; ok {
-		if err := json.Unmarshal(v, &activity.PercentComplete); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid percentComplete")
-			return
-		}
-	}
-	if v, ok := patch["location"]; ok {
-		if err := json.Unmarshal(v, &activity.Location); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid location")
-			return
-		}
-	}
-	if v, ok := patch["url"]; ok {
-		if err := json.Unmarshal(v, &activity.URL); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid url")
-			return
-		}
-	}
-	if v, ok := patch["rrule"]; ok {
-		if err := json.Unmarshal(v, &activity.Rrule); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid rrule")
-			return
-		}
-	}
-
-	var newAssignees *[]string
-	if v, ok := patch["assignedMemberIds"]; ok {
-		var ids []string
-		if err := json.Unmarshal(v, &ids); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid assignedMemberIds")
-			return
-		}
-		newAssignees = &ids
-	}
-
-	var newTagIDs *[]string
-	if v, ok := patch["tagIds"]; ok {
-		var ids []string
-		if err := json.Unmarshal(v, &ids); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid tagIds")
-			return
-		}
-		newTagIDs = &ids
-	}
-
-	if activity.Title == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "title must not be empty")
-		return
-	}
-	if activity.EndAt.Before(activity.StartAt) {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "endAt must not be before startAt")
-		return
-	}
-
-	activity.UpdatedAt = time.Now()
-	if err := s.activities.Update(activity); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update activity")
-		return
-	}
-
-	if newAssignees != nil {
-		if err := s.activities.SetAssignments(activity.ID, *newAssignees); err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity assignments")
-			return
-		}
-		activity.AssignedMemberIDs = *newAssignees
-	} else {
-		// Populate current assignments so the response always includes them.
-		existing, err := s.activities.GetAssignments(activity.ID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get activity assignments")
-			return
-		}
-		activity.AssignedMemberIDs = existing
-	}
-
-	if newTagIDs != nil {
-		if err := s.tags.ValidateTeamOwnership(timeline.TeamID, *newTagIDs); err != nil {
-			if errors.Is(err, db.ErrTagOwnership) {
-				writeError(w, http.StatusBadRequest, "INVALID_TAGS", "one or more tag IDs do not belong to this team")
-				return
-			}
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to validate tags")
-			return
-		}
-		if err := s.activities.SetTags(activity.ID, *newTagIDs); err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity tags")
-			return
-		}
-		activity.TagIDs = *newTagIDs
-	} else {
-		existing, err := s.activities.GetTags(activity.ID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get activity tags")
-			return
-		}
-		activity.TagIDs = existing
-	}
-
-	s.bus.Publish(events.Message{Type: events.ActivityUpdated, TeamID: timeline.TeamID, Payload: activity})
-	writeJSON(w, http.StatusOK, activity)
-}
-
-// handleArchiveActivity handles POST /activities/{id}/archive. Any team member
-// may archive an activity; the row is soft-deleted (archived_at set) so it is
-// hidden from list responses by default but can be restored.
-func (s *Server) handleArchiveActivity(w http.ResponseWriter, r *http.Request) {
-	s.setActivityArchive(w, r, true)
-}
-
-// handleUnarchiveActivity handles POST /activities/{id}/unarchive.
-func (s *Server) handleUnarchiveActivity(w http.ResponseWriter, r *http.Request) {
-	s.setActivityArchive(w, r, false)
-}
-
-// setActivityArchive is the shared implementation for the archive/unarchive
-// endpoints. When archive is true, archived_at is set to now; otherwise it
-// is cleared.
-func (s *Server) setActivityArchive(w http.ResponseWriter, r *http.Request, archive bool) {
-	activityID := r.PathValue("id")
-
-	activity, err := s.activities.GetByID(activityID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "activity not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
-		return
-	}
-
-	timeline, err := s.timelines.GetByID(activity.TimelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
-		return
-	}
-
-	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
-		return
-	}
-
-	var at *time.Time
-	if archive {
-		now := time.Now().UTC()
-		at = &now
-		if err := s.activities.ClearParentRefs(activityID); err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
-			return
-		}
-	}
-	if err := s.activities.SetArchived(activityID, at); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
-		return
-	}
-	activity.ArchivedAt = at
-	activity.UpdatedAt = time.Now().UTC()
-
-	// Re-populate assignments and tags for a stable response shape.
-	if ids, err := s.activities.GetAssignments(activity.ID); err == nil {
-		activity.AssignedMemberIDs = ids
-	} else {
-		activity.AssignedMemberIDs = []string{}
-	}
-	if ids, err := s.activities.GetTags(activity.ID); err == nil {
-		activity.TagIDs = ids
-	} else {
-		activity.TagIDs = []string{}
-	}
-
-	s.bus.Publish(events.Message{Type: events.ActivityUpdated, TeamID: timeline.TeamID, Payload: activity})
-	writeJSON(w, http.StatusOK, activity)
-}
-
-// handleDeleteActivity handles DELETE /activities/{id}. Any member of the
-// activity's team may delete it.
-func (s *Server) handleDeleteActivity(w http.ResponseWriter, r *http.Request) {
-	activityID := r.PathValue("id")
-
-	activity, err := s.activities.GetByID(activityID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "activity not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
-		return
-	}
-
-	timeline, err := s.timelines.GetByID(activity.TimelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
-		return
-	}
-
-	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
-		return
-	}
-
-	if err := s.activities.ClearParentRefs(activityID); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
-		return
-	}
-	if err := s.activities.Delete(activityID); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
-		return
-	}
-
-	s.bus.Publish(events.Message{
-		Type:    events.ActivityDeleted,
-		TeamID:  timeline.TeamID,
-		Payload: map[string]string{"id": activityID},
-	})
-	w.WriteHeader(http.StatusNoContent)
-}
-````
-
-## File: packages/web/src/components/gantt/ActivityDetailPanel.tsx
-````typescript
-/**
- * ActivityDetailPanel — right-side slide-in panel for a selected Gantt activity.
- *
- * Shares its field stack with ActivityCreatePanel via ActivityFieldsBody
- * (see activityPanelFields.tsx) — header bar, footer, and save behavior live
- * here, the fields themselves are shared. Field order is fixed by the shared
- * body: Identity+Title → When → Description → Assigned to → Classify
- * (Status, Tags) → Advanced (Parent, Progress, Location, URL) → Notes.
- *
- * All functional fields save on change/blur via PATCH /activities/:id.
- * liveDragStart / liveDragEnd display live dates during bar drag without
- * triggering saves.
- */
-
-import { useState, useEffect } from 'react'
-import { X, Trash2, Archive, Loader2 } from 'lucide-react'
-import type { Identity } from '@/components/identity/identity-constants'
-import { useUpdateActivity, useDeleteActivity, useArchiveActivity, useTimelineActivities } from '@/hooks/useTeamActivities'
-import { useTimelineStatuses } from '@/hooks/useStatusTemplates'
-import { useTags } from '@/hooks/useTags'
-import type { components } from '@draba/shared'
-import type { Member } from '@/types'
-import { ActivityFieldsBody, PANEL_WIDTH, toDateInput, toISODate } from './activityPanelFields'
-
-type ApiActivity = components['schemas']['Activity']
-
-interface Props {
-  event: ApiActivity | null
-  open: boolean
-  members: Member[]
-  teamId: string
-  timelineId: string
-  onClose: () => void
-  /** Display-only start date override during bar drag (YYYY-MM-DD). Does not trigger a save. */
-  liveDragStart?: string
-  /** Display-only end date override during bar drag (YYYY-MM-DD). Does not trigger a save. */
-  liveDragEnd?: string
-}
-
-export default function ActivityDetailPanel({
-  event, open, members, teamId, timelineId, onClose, liveDragStart, liveDragEnd,
-}: Props) {
-  const updateMutation = useUpdateActivity(timelineId)
-  const deleteMutation = useDeleteActivity(timelineId)
-  const archiveMutation = useArchiveActivity(timelineId)
-  const { data: statuses = [] } = useTimelineStatuses(teamId, timelineId)
-  const { data: teamTags = [] } = useTags(teamId)
-  const { data: allActivities = [] } = useTimelineActivities(teamId, timelineId)
-
-  const [title, setTitle] = useState(event?.title ?? '')
-  const [description, setDescription] = useState(event?.description ?? '')
-  const [notes, setNotes] = useState(event?.notes ?? '')
-  const [startDate, setStartDate] = useState(event ? toDateInput(event.startAt) : '')
-  const [endDate, setEndDate] = useState(event ? toDateInput(event.endAt) : '')
-  const [identity, setIdentity] = useState<Identity>({
-    color: event?.color ?? '#288C9B',
-    icon: event?.icon ?? '__none__',
-  })
-  const [assignedIds, setAssignedIds] = useState<string[]>(event?.assignedMemberIds ?? [])
-  const [tagIds, setTagIds] = useState<string[]>((event?.tagIds as string[] | undefined) ?? [])
-  const [location, setLocation] = useState(event?.location ?? '')
-  const [url, setUrl] = useState(event?.url ?? '')
-  const [progressValue, setProgressValue] = useState(event?.percentComplete ?? 0)
-  // Parent and status are mirrored locally so the picker reflects a change
-  // immediately — the `event` prop is a snapshot taken at selection time and
-  // doesn't refresh until the activity is reselected.
-  const [parentId, setParentId] = useState<string | null>(event?.parentActivityId ?? null)
-  const [statusId, setStatusId] = useState<string | null>(event?.statusId ?? null)
-  const [confirmDelete, setConfirmDelete] = useState(false)
-
-  // Re-sync when the selected activity changes.
-  useEffect(() => {
-    if (!event) return
-    setTitle(event.title)
-    setDescription(event.description ?? '')
-    setNotes(event.notes ?? '')
-    setStartDate(toDateInput(event.startAt))
-    setEndDate(toDateInput(event.endAt))
-    setIdentity({ color: event.color ?? '#288C9B', icon: event.icon ?? '__none__' })
-    setAssignedIds(event.assignedMemberIds ?? [])
-    setTagIds((event.tagIds as string[] | undefined) ?? [])
-    setLocation(event.location ?? '')
-    setUrl(event.url ?? '')
-    setProgressValue(event.percentComplete ?? 0)
-    setParentId(event.parentActivityId ?? null)
-    setStatusId(event.statusId ?? null)
-    setConfirmDelete(false)
-  }, [event?.id]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Sync local date state when the event's dates change (e.g. after a Gantt bar drag).
-  const eventStartAt = event?.startAt
-  const eventEndAt = event?.endAt
-  useEffect(() => {
-    if (eventStartAt) setStartDate(toDateInput(eventStartAt))
-    if (eventEndAt) setEndDate(toDateInput(eventEndAt))
-  }, [eventStartAt, eventEndAt])
-
-  // Sync status when changed externally on the same activity (e.g. after a Kanban
-  // drag-to-column). The main sync effect only fires on id change, so we need a
-  // separate effect keyed on statusId.
-  const eventStatusId = event?.statusId
-  useEffect(() => {
-    setStatusId(eventStatusId ?? null)
-  }, [eventStatusId])
-
-  // Sync assigned members when changed externally (e.g. after a Kanban drag to a
-  // member column). Arrays compare by reference, so use a stable string key.
-  const eventAssignedKey = (event?.assignedMemberIds ?? []).join(',')
-  useEffect(() => {
-    setAssignedIds(event?.assignedMemberIds ?? [])
-  }, [eventAssignedKey]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  const saving = updateMutation.isPending
-  const deleting = deleteMutation.isPending
-  const archiving = archiveMutation.isPending
-
-  // Display dates: live drag overrides take precedence while dragging.
-  const displayStart = liveDragStart ?? startDate
-  const displayEnd = liveDragEnd ?? endDate
-
-  function save(patch: Parameters<typeof updateMutation.mutate>[0]['patch']) {
-    if (!event) return
-    updateMutation.mutate({ activityId: event.id, patch })
-  }
-
-  function handleTitleBlur() {
-    if (title.trim() && title !== event?.title) save({ title: title.trim() })
-  }
-
-  function handleDescriptionBlur() {
-    if (description !== (event?.description ?? '')) save({ description: description || null })
-  }
-
-  function handleNotesBlur() {
-    if (notes !== (event?.notes ?? '')) save({ notes: notes || null } as Parameters<typeof save>[0])
-  }
-
-  function handleLocationBlur() {
-    if (location !== (event?.location ?? '')) save({ location: location || null })
-  }
-
-  function handleUrlBlur() {
-    if (url !== (event?.url ?? '')) save({ url: url || null })
-  }
-
-  function handleStartDateChange(val: string) {
-    setStartDate(val)
-    if (val && val <= endDate) save({ startAt: toISODate(val) })
-  }
-
-  function handleEndDateChange(val: string) {
-    setEndDate(val)
-    if (val && val >= startDate) save({ endAt: toISODate(val) })
-  }
-
-  function handleIdentityChange(next: Identity) {
-    setIdentity(next)
-    save({ color: next.color, icon: next.icon })
-  }
-
-  function toggleAssignee(memberId: string) {
-    const next = assignedIds.includes(memberId)
-      ? assignedIds.filter(id => id !== memberId)
-      : [...assignedIds, memberId]
-    setAssignedIds(next)
-    save({ assignedMemberIds: next })
-  }
-
-  function handleTagsChange(ids: string[]) {
-    setTagIds(ids)
-    save({ tagIds: ids } as Parameters<typeof save>[0])
-  }
-
-  // Saves only on a real change. The shared ProgressRow already clamps to 0–100.
-  function handleProgressCommit(clamped: number) {
-    setProgressValue(clamped)
-    if (clamped !== (event?.percentComplete ?? 0)) {
-      save({ percentComplete: clamped } as Parameters<typeof save>[0])
-    }
-  }
-
-  function handleDelete() {
-    if (!event) return
-    deleteMutation.mutate(event.id, { onSuccess: onClose })
-  }
-
-  function handleArchive() {
-    if (!event) return
-    archiveMutation.mutate(event.id, { onSuccess: onClose })
-  }
-
-  return (
-    <div
-      style={{
-        width: open ? PANEL_WIDTH : 0,
-        flexShrink: 0,
-        borderLeft: open ? '1px solid var(--border)' : 'none',
-        background: 'var(--card)',
-        display: 'flex',
-        flexDirection: 'column',
-        overflow: 'hidden',
-        transition: 'width 0.2s ease',
-      }}
-    >
-      <div style={{ width: PANEL_WIDTH, display: 'flex', flexDirection: 'column', height: '100%' }}>
-        {!event ? null : (<>
-
-        {/* ── Header bar ── */}
-        <div style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-          padding: '0 12px', height: 'var(--topbar-h, 40px)',
-          borderBottom: '1px solid var(--border)', flexShrink: 0,
-        }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-            <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)' }}>Activity detail</span>
-            {saving && <Loader2 size={11} style={{ opacity: 0.5 }} className="animate-spin" />}
-          </div>
-          <button
-            onClick={onClose}
-            style={{
-              width: 24, height: 24, border: 'none', background: 'none', borderRadius: 4,
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              cursor: 'pointer', color: 'var(--muted-foreground)',
-            }}
-            onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-            onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-          >
-            <X size={14} strokeWidth={2} />
-          </button>
-        </div>
-
-        {/* ── Scrollable body (shared with create panel) ── */}
-        <ActivityFieldsBody
-          identity={identity}
-          onIdentityChange={handleIdentityChange}
-          title={title}
-          onTitleChange={setTitle}
-          onTitleBlur={handleTitleBlur}
-          titleFallbackName={event.title || ''}
-          startDate={displayStart}
-          endDate={displayEnd}
-          onStartDateChange={handleStartDateChange}
-          onEndDateChange={handleEndDateChange}
-          description={description}
-          onDescriptionChange={setDescription}
-          onDescriptionBlur={handleDescriptionBlur}
-          members={members}
-          assignedIds={assignedIds}
-          onToggleAssignee={toggleAssignee}
-          statuses={statuses}
-          statusId={statusId}
-          onStatusChange={id => { setStatusId(id); save({ statusId: id } as Parameters<typeof save>[0]) }}
-          teamId={teamId}
-          teamTags={teamTags}
-          tagIds={tagIds}
-          onTagsChange={handleTagsChange}
-          parentActivities={allActivities.filter(a => a.id !== event.id)}
-          parentId={parentId}
-          onParentChange={id => { setParentId(id); save({ parentActivityId: id } as Parameters<typeof save>[0]) }}
-          progress={progressValue}
-          onProgressCommit={handleProgressCommit}
-          location={location}
-          onLocationChange={setLocation}
-          onLocationBlur={handleLocationBlur}
-          url={url}
-          onUrlChange={setUrl}
-          onUrlBlur={handleUrlBlur}
-          notes={notes}
-          onNotesChange={setNotes}
-          onNotesBlur={handleNotesBlur}
-        />
-
-        {/* ── Footer — Archive + Delete buttons ── */}
-        <div style={{ padding: '10px 14px', borderTop: '1px solid var(--border)', flexShrink: 0 }}>
-          {confirmDelete ? (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              <p style={{ fontSize: 12, color: 'var(--muted-foreground)', margin: 0, lineHeight: 1.4 }}>
-                Delete <strong style={{ color: 'var(--foreground)' }}>{event?.title}</strong>? This cannot be undone.
-              </p>
-              <div style={{ display: 'flex', gap: 6 }}>
-                <button
-                  onClick={() => setConfirmDelete(false)}
-                  disabled={deleting}
-                  style={{
-                    flex: 1, fontSize: 12, fontWeight: 600, padding: 7,
-                    borderRadius: 'var(--radius-md)', border: '1px solid var(--border)',
-                    background: 'var(--card)', color: 'var(--foreground)',
-                    cursor: 'pointer', fontFamily: 'var(--font-sans)',
-                  }}
-                >Cancel</button>
-                <button
-                  onClick={handleDelete}
-                  disabled={deleting}
-                  style={{
-                    flex: 1, fontSize: 12, fontWeight: 600, padding: 7,
-                    borderRadius: 'var(--radius-md)', border: 'none',
-                    background: 'var(--destructive)', color: 'white',
-                    cursor: deleting ? 'not-allowed' : 'pointer',
-                    fontFamily: 'var(--font-sans)',
-                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
-                  }}
-                >
-                  {deleting ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />}
-                  Delete
-                </button>
-              </div>
-            </div>
-          ) : (
-            <div style={{ display: 'flex', gap: 6 }}>
-              <button
-                onClick={handleArchive}
-                disabled={archiving}
-                style={{
-                  flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
-                  fontSize: 12, fontWeight: 600, padding: 7,
-                  borderRadius: 'var(--radius-md)', border: '1px solid var(--border)',
-                  background: 'var(--card)', color: 'var(--muted-foreground)',
-                  cursor: archiving ? 'not-allowed' : 'pointer', fontFamily: 'var(--font-sans)',
-                }}
-              >
-                {archiving ? <Loader2 size={12} className="animate-spin" /> : <Archive size={12} strokeWidth={2} />}
-                Archive
-              </button>
-              <button
-                onClick={() => setConfirmDelete(true)}
-                style={{
-                  flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
-                  fontSize: 12, fontWeight: 600, padding: 7,
-                  borderRadius: 'var(--radius-md)', border: 'none',
-                  background: 'hsl(0 72% 95%)', color: 'var(--destructive)',
-                  cursor: 'pointer', fontFamily: 'var(--font-sans)',
-                }}
-              >
-                <Trash2 size={12} strokeWidth={2} />
-                Delete
-              </button>
-            </div>
-          )}
-        </div>
-
-        </>)}
-      </div>
-    </div>
-  )
-}
-````
-
 ## File: packages/web/src/components/layout/Sidebar.tsx
 ````typescript
 import { useState, useRef, useEffect } from 'react';
@@ -50818,6 +49525,1420 @@ export default function Sidebar({ collapsed, onToggle, onNewActivity, onBulkImpo
       )}
     </div>
   );
+}
+````
+
+## File: packages/api/internal/api/activity_handler.go
+````go
+package api
+
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/db"
+	"github.com/I0-1O/draba/packages/api/internal/events"
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// handleCreateActivity handles POST /teams/{id}/timelines/{timelineId}/activities.
+// The authenticated user must be a member of the team.
+func (s *Server) handleCreateActivity(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	timelineID := r.PathValue("timelineId")
+
+	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
+		return
+	}
+
+	claims := claimsFromContext(r.Context())
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create activity")
+		return
+	}
+	if timeline.TeamID != teamID {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+		return
+	}
+
+	var req CreateActivityJSONBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	if req.Title == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "title is required")
+		return
+	}
+	if req.StartAt.IsZero() || req.EndAt.IsZero() {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "startAt and endAt are required")
+		return
+	}
+	if req.EndAt.Before(req.StartAt) {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "endAt must not be before startAt")
+		return
+	}
+
+	allDay := false
+	if req.AllDay != nil {
+		allDay = *req.AllDay
+	}
+
+	now := time.Now()
+	activity := &models.Activity{
+		ID:               newID(),
+		TimelineID:       timelineID,
+		Title:            req.Title,
+		Description:      req.Description,
+		Notes:            req.Notes,
+		Icon:             req.Icon,
+		Color:            req.Color,
+		StartAt:          req.StartAt,
+		EndAt:            req.EndAt,
+		AllDay:           allDay,
+		StatusID:         req.StatusId,
+		ParentActivityID: req.ParentActivityId,
+		PercentComplete:  req.PercentComplete,
+		Location:         req.Location,
+		URL:              req.Url,
+		Rrule:            req.Rrule,
+		CreatedBy:        claims.UserID,
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}
+	if err := s.activities.Create(activity); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create activity")
+		return
+	}
+
+	if req.AssignedMemberIds != nil {
+		if err := s.activities.SetAssignments(activity.ID, *req.AssignedMemberIds); err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity assignments")
+			return
+		}
+		activity.AssignedMemberIDs = *req.AssignedMemberIds
+	} else {
+		activity.AssignedMemberIDs = []string{}
+	}
+
+	if req.TagIds != nil {
+		if err := s.tags.ValidateTeamOwnership(timeline.TeamID, *req.TagIds); err != nil {
+			if errors.Is(err, db.ErrTagOwnership) {
+				writeError(w, http.StatusBadRequest, "INVALID_TAGS", "one or more tag IDs do not belong to this team")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to validate tags")
+			return
+		}
+		if err := s.activities.SetTags(activity.ID, *req.TagIds); err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity tags")
+			return
+		}
+		activity.TagIDs = *req.TagIds
+	} else {
+		activity.TagIDs = []string{}
+	}
+
+	s.bus.Publish(events.Message{Type: events.ActivityCreated, TeamID: timeline.TeamID, Payload: activity})
+	writeJSON(w, http.StatusCreated, activity)
+}
+
+// handleListActivities handles GET /teams/{id}/timelines/{timelineId}/activities.
+// Optional query params ?from=<RFC3339> and ?to=<RFC3339> bound the result by start_at.
+func (s *Server) handleListActivities(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	timelineID := r.PathValue("timelineId")
+
+	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
+		return
+	}
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list activities")
+		return
+	}
+	if timeline.TeamID != teamID {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+		return
+	}
+
+	var from, to *time.Time
+	if v := r.URL.Query().Get("from"); v != "" {
+		t, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "from must be RFC3339 (e.g. 2006-01-02T15:04:05Z)")
+			return
+		}
+		from = &t
+	}
+	if v := r.URL.Query().Get("to"); v != "" {
+		t, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "to must be RFC3339 (e.g. 2006-01-02T15:04:05Z)")
+			return
+		}
+		to = &t
+	}
+
+	includeArchived := r.URL.Query().Get("archived") == "true"
+	acts, err := s.activities.ListByTimeline(timelineID, from, to, includeArchived)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list activities")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, acts)
+}
+
+// handleUpdateActivity handles PATCH /activities/{id}. Only fields present in
+// the request body are applied; the caller must be a member of the activity's team.
+func (s *Server) handleUpdateActivity(w http.ResponseWriter, r *http.Request) {
+	activityID := r.PathValue("id")
+
+	activity, err := s.activities.GetByID(activityID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "activity not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update activity")
+		return
+	}
+
+	timeline, err := s.timelines.GetByID(activity.TimelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update activity")
+		return
+	}
+
+	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
+		return
+	}
+
+	// Decode into a map so we can detect which fields the caller provided.
+	var patch map[string]json.RawMessage
+	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	if v, ok := patch["title"]; ok {
+		if err := json.Unmarshal(v, &activity.Title); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid title")
+			return
+		}
+	}
+	if v, ok := patch["description"]; ok {
+		if err := json.Unmarshal(v, &activity.Description); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid description")
+			return
+		}
+	}
+	if v, ok := patch["notes"]; ok {
+		if err := json.Unmarshal(v, &activity.Notes); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid notes")
+			return
+		}
+	}
+	if v, ok := patch["icon"]; ok {
+		if err := json.Unmarshal(v, &activity.Icon); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid icon")
+			return
+		}
+	}
+	if v, ok := patch["color"]; ok {
+		if err := json.Unmarshal(v, &activity.Color); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid color")
+			return
+		}
+	}
+	if v, ok := patch["startAt"]; ok {
+		if err := json.Unmarshal(v, &activity.StartAt); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid startAt")
+			return
+		}
+	}
+	if v, ok := patch["endAt"]; ok {
+		if err := json.Unmarshal(v, &activity.EndAt); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid endAt")
+			return
+		}
+	}
+	if v, ok := patch["allDay"]; ok {
+		if err := json.Unmarshal(v, &activity.AllDay); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid allDay")
+			return
+		}
+	}
+	if v, ok := patch["statusId"]; ok {
+		if err := json.Unmarshal(v, &activity.StatusID); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid statusId")
+			return
+		}
+	}
+	if v, ok := patch["parentActivityId"]; ok {
+		if err := json.Unmarshal(v, &activity.ParentActivityID); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid parentActivityId")
+			return
+		}
+	}
+	if v, ok := patch["percentComplete"]; ok {
+		if err := json.Unmarshal(v, &activity.PercentComplete); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid percentComplete")
+			return
+		}
+	}
+	if v, ok := patch["location"]; ok {
+		if err := json.Unmarshal(v, &activity.Location); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid location")
+			return
+		}
+	}
+	if v, ok := patch["url"]; ok {
+		if err := json.Unmarshal(v, &activity.URL); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid url")
+			return
+		}
+	}
+	if v, ok := patch["rrule"]; ok {
+		if err := json.Unmarshal(v, &activity.Rrule); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid rrule")
+			return
+		}
+	}
+
+	var newAssignees *[]string
+	if v, ok := patch["assignedMemberIds"]; ok {
+		var ids []string
+		if err := json.Unmarshal(v, &ids); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid assignedMemberIds")
+			return
+		}
+		newAssignees = &ids
+	}
+
+	var newTagIDs *[]string
+	if v, ok := patch["tagIds"]; ok {
+		var ids []string
+		if err := json.Unmarshal(v, &ids); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid tagIds")
+			return
+		}
+		newTagIDs = &ids
+	}
+
+	if activity.Title == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "title must not be empty")
+		return
+	}
+	if activity.EndAt.Before(activity.StartAt) {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "endAt must not be before startAt")
+		return
+	}
+
+	activity.UpdatedAt = time.Now()
+	if err := s.activities.Update(activity); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update activity")
+		return
+	}
+
+	if newAssignees != nil {
+		if err := s.activities.SetAssignments(activity.ID, *newAssignees); err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity assignments")
+			return
+		}
+		activity.AssignedMemberIDs = *newAssignees
+	} else {
+		// Populate current assignments so the response always includes them.
+		existing, err := s.activities.GetAssignments(activity.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get activity assignments")
+			return
+		}
+		activity.AssignedMemberIDs = existing
+	}
+
+	if newTagIDs != nil {
+		if err := s.tags.ValidateTeamOwnership(timeline.TeamID, *newTagIDs); err != nil {
+			if errors.Is(err, db.ErrTagOwnership) {
+				writeError(w, http.StatusBadRequest, "INVALID_TAGS", "one or more tag IDs do not belong to this team")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to validate tags")
+			return
+		}
+		if err := s.activities.SetTags(activity.ID, *newTagIDs); err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity tags")
+			return
+		}
+		activity.TagIDs = *newTagIDs
+	} else {
+		existing, err := s.activities.GetTags(activity.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get activity tags")
+			return
+		}
+		activity.TagIDs = existing
+	}
+
+	s.bus.Publish(events.Message{Type: events.ActivityUpdated, TeamID: timeline.TeamID, Payload: activity})
+	writeJSON(w, http.StatusOK, activity)
+}
+
+// handleArchiveActivity handles POST /activities/{id}/archive. Any team member
+// may archive an activity; the row is soft-deleted (archived_at set) so it is
+// hidden from list responses by default but can be restored.
+func (s *Server) handleArchiveActivity(w http.ResponseWriter, r *http.Request) {
+	s.setActivityArchive(w, r, true)
+}
+
+// handleUnarchiveActivity handles POST /activities/{id}/unarchive.
+func (s *Server) handleUnarchiveActivity(w http.ResponseWriter, r *http.Request) {
+	s.setActivityArchive(w, r, false)
+}
+
+// setActivityArchive is the shared implementation for the archive/unarchive
+// endpoints. When archive is true, archived_at is set to now; otherwise it
+// is cleared.
+func (s *Server) setActivityArchive(w http.ResponseWriter, r *http.Request, archive bool) {
+	activityID := r.PathValue("id")
+
+	activity, err := s.activities.GetByID(activityID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "activity not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
+		return
+	}
+
+	timeline, err := s.timelines.GetByID(activity.TimelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
+		return
+	}
+
+	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
+		return
+	}
+
+	var at *time.Time
+	if archive {
+		now := time.Now().UTC()
+		at = &now
+		if err := s.activities.ClearParentRefs(activityID); err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
+			return
+		}
+	}
+	if err := s.activities.SetArchived(activityID, at); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
+		return
+	}
+	activity.ArchivedAt = at
+	activity.UpdatedAt = time.Now().UTC()
+
+	// Re-populate assignments and tags for a stable response shape.
+	if ids, err := s.activities.GetAssignments(activity.ID); err == nil {
+		activity.AssignedMemberIDs = ids
+	} else {
+		activity.AssignedMemberIDs = []string{}
+	}
+	if ids, err := s.activities.GetTags(activity.ID); err == nil {
+		activity.TagIDs = ids
+	} else {
+		activity.TagIDs = []string{}
+	}
+
+	s.bus.Publish(events.Message{Type: events.ActivityUpdated, TeamID: timeline.TeamID, Payload: activity})
+	writeJSON(w, http.StatusOK, activity)
+}
+
+// handleDeleteActivity handles DELETE /activities/{id}. Any member of the
+// activity's team may delete it.
+func (s *Server) handleDeleteActivity(w http.ResponseWriter, r *http.Request) {
+	activityID := r.PathValue("id")
+
+	activity, err := s.activities.GetByID(activityID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "activity not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
+		return
+	}
+
+	timeline, err := s.timelines.GetByID(activity.TimelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
+		return
+	}
+
+	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
+		return
+	}
+
+	if err := s.activities.ClearParentRefs(activityID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
+		return
+	}
+	if err := s.activities.Delete(activityID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
+		return
+	}
+
+	s.bus.Publish(events.Message{
+		Type:    events.ActivityDeleted,
+		TeamID:  timeline.TeamID,
+		Payload: map[string]string{"id": activityID},
+	})
+	w.WriteHeader(http.StatusNoContent)
+}
+````
+
+## File: packages/web/src/hooks/useTeamActivities.ts
+````typescript
+/**
+ * TanStack Query hooks for team-scoped data.
+ *
+ * All hooks call createAuthFetch to inject the current access token at
+ * query-time so stale closures never send an expired token.
+ */
+
+import { useCallback } from 'react'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import type { components } from '@draba/shared'
+import { createAuthFetch } from '@/lib/api'
+import { useAuth } from '@/contexts/AuthContext'
+import { useWebSocket } from '@/hooks/useWebSocket'
+
+type Activity = components['schemas']['Activity']
+type Team = components['schemas']['Team']
+type Timeline = components['schemas']['Timeline']
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
+type TimelineAccessEntry = components['schemas']['TimelineAccessEntry']
+type PatchTimelineInput = components['schemas']['PatchTimelineInput']
+
+/** Query key factory — centralises cache key strings. */
+export const keys = {
+  myTeams: () => ['teams'] as const,
+  timelineActivities: (timelineId: string, from?: string, to?: string) =>
+    ['timelines', timelineId, 'activities', { from, to }] as const,
+  teamMembers: (teamId: string) =>
+    ['teams', teamId, 'members'] as const,
+  teamTimelines: (teamId: string) =>
+    ['teams', teamId, 'timelines'] as const,
+}
+
+/** Fetches all teams the authenticated user belongs to. */
+export function useMyTeams(includeArchived = false) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: [...keys.myTeams(), { includeArchived }],
+    queryFn: async () => (await authFetch<Team[] | null>(includeArchived ? '/teams?archived=true' : '/teams')) ?? [],
+  })
+}
+
+/** Fetches a single team by ID. */
+export function useTeam(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: ['teams', teamId],
+    queryFn: () => authFetch<Team>(`/teams/${teamId}`),
+    enabled: Boolean(teamId),
+  })
+}
+
+/** Fetches all non-archived timelines for a team. */
+export function useTeamTimelines(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: keys.teamTimelines(teamId),
+    queryFn: async () => (await authFetch<Timeline[] | null>(`/teams/${teamId}/timelines`)) ?? [],
+    enabled: Boolean(teamId),
+  })
+}
+
+/** Fetches activities for a timeline, optionally bounded by date range. */
+export function useTimelineActivities(teamId: string, timelineId: string, from?: string, to?: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: keys.timelineActivities(timelineId, from, to),
+    queryFn: async () => {
+      const params = new URLSearchParams()
+      if (from) params.set('from', from)
+      if (to) params.set('to', to)
+      const qs = params.toString()
+      return (await authFetch<Activity[] | null>(`/teams/${teamId}/timelines/${timelineId}/activities${qs ? `?${qs}` : ''}`)) ?? []
+    },
+    enabled: Boolean(teamId) && Boolean(timelineId),
+  })
+}
+
+/** Fetches the member list for a team. */
+export function useTeamMembers(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: keys.teamMembers(teamId),
+    queryFn: async () => (await authFetch<TeamMemberWithUser[] | null>(`/teams/${teamId}/members`)) ?? [],
+    enabled: Boolean(teamId),
+  })
+}
+
+/**
+ * Subscribes to the team's WebSocket feed and applies surgical cache updates
+ * for activity.created / activity.updated / activity.deleted deltas.
+ *
+ * Conflict strategy: for activity.updated, incoming deltas are only applied
+ * when their updatedAt timestamp is strictly newer than the cached version.
+ * This prevents self-echo (our own PATCH broadcast arriving back) and handles
+ * the last-writer-wins case where a concurrent remote edit arrives while our
+ * mutation is in-flight — the server-returned updatedAt on our onSuccess will
+ * always win if our PATCH was truly last.
+ */
+export function useTeamActivitySync(
+  teamId: string,
+  accessToken: string | null | undefined,
+) {
+  const client = useQueryClient()
+
+  const handleMessage = useCallback(
+    (msg: { type: string; payload?: unknown }) => {
+      if (!teamId || !msg.payload) return
+
+      if (msg.type === 'activity.created') {
+        const incoming = msg.payload as Activity
+        // Target all timeline-scoped activity cache entries by using the
+        // timelineId from the incoming activity payload.
+        if (!incoming.timelineId) return
+        client.setQueriesData<Activity[]>(
+          { queryKey: ['timelines', incoming.timelineId, 'activities'] },
+          (old) => {
+            if (!old) return old
+            // Guard against duplicate delivery.
+            if (old.some((a) => a.id === incoming.id)) return old
+            return [...old, incoming]
+          },
+        )
+      } else if (msg.type === 'activity.updated') {
+        const incoming = msg.payload as Activity
+        if (!incoming.timelineId) return
+        client.setQueriesData<Activity[]>(
+          { queryKey: ['timelines', incoming.timelineId, 'activities'] },
+          (old) => {
+            if (!old) return old
+            return old.map((a) => {
+              if (a.id !== incoming.id) return a
+              // Skip if the cache already holds the same or a newer version.
+              const cachedMs = new Date(a.updatedAt).getTime()
+              const incomingMs = new Date(incoming.updatedAt).getTime()
+              return incomingMs > cachedMs ? incoming : a
+            })
+          },
+        )
+      } else if (msg.type === 'activity.deleted') {
+        const { id } = msg.payload as { id: string }
+        // activity.deleted payload only has id — scope invalidation to this
+        // team's timelines so we don't flush unrelated team caches when
+        // multiple teams are active in the same session.
+        const teamTimelines = client.getQueryData<Timeline[]>(keys.teamTimelines(teamId)) ?? []
+        if (teamTimelines.length > 0) {
+          for (const tl of teamTimelines) {
+            client.invalidateQueries({ queryKey: ['timelines', tl.id] })
+            client.setQueriesData<Activity[]>(
+              { queryKey: ['timelines', tl.id, 'activities'] },
+              (old) => old?.filter((a) => a.id !== id),
+            )
+          }
+        } else {
+          // Fallback when the team's timelines aren't cached yet.
+          client.invalidateQueries({ queryKey: ['timelines'] })
+          client.setQueriesData<Activity[]>(
+            { queryKey: ['timelines'] },
+            (old) => old?.filter((a) => a.id !== id),
+          )
+        }
+      }
+    },
+    [client, teamId],
+  )
+
+  useWebSocket({
+    token: accessToken,
+    teamIds: teamId ? [teamId] : [],
+    onMessage: handleMessage,
+  })
+}
+
+interface CreateActivityInput {
+  title: string
+  startAt: string
+  endAt: string
+  description?: string | null
+  notes?: string | null
+  color?: string | null
+  icon?: string | null
+  assignedMemberIds?: string[]
+  tagIds?: string[]
+  statusId?: string | null
+  parentActivityId?: string | null
+  percentComplete?: number | null
+  location?: string | null
+  url?: string | null
+  /** Client-only: if set, replace this placeholder ID in the cache instead of appending. */
+  _tempId?: string
+}
+
+interface UpdateActivityInput {
+  activityId: string
+  patch: {
+    title?: string
+    description?: string | null
+    notes?: string | null
+    startAt?: string
+    endAt?: string
+    allDay?: boolean
+    color?: string | null
+    icon?: string | null
+    location?: string | null
+    url?: string | null
+    statusId?: string | null
+    parentActivityId?: string | null
+    percentComplete?: number | null
+    assignedMemberIds?: string[]
+    tagIds?: string[]
+  }
+}
+
+/** Creates an activity in a timeline and inserts it directly into the cache. */
+export function useCreateActivity(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({ _tempId: _, ...input }: CreateActivityInput) =>
+      authFetch<Activity>(`/teams/${teamId}/timelines/${timelineId}/activities`, {
+        method: 'POST',
+        body: JSON.stringify(input),
+      }),
+    onSuccess: (created, variables) => {
+      const tempId = variables._tempId
+      client.setQueriesData<Activity[]>(
+        { queryKey: ['timelines', timelineId, 'activities'] },
+        (old) => {
+          if (!old) return [created]
+          const hasReal = old.some((a) => a.id === created.id)
+          const hasTemp = tempId ? old.some((a) => a.id === tempId) : false
+          // The WS activity.created self-echo may win the race and append the
+          // real record before this onSuccess runs. In that case we must still
+          // drop the optimistic placeholder, otherwise it lingers as a duplicate
+          // "New Activity" row (and inline edits keep targeting the dead temp id).
+          if (hasReal) {
+            return hasTemp ? old.filter((a) => a.id !== tempId) : old
+          }
+          // Replace optimistic placeholder in-place to avoid a position flash.
+          if (hasTemp) {
+            return old.map((a) => (a.id === tempId ? created : a))
+          }
+          return [...old, created]
+        },
+      )
+    },
+  })
+}
+
+/** PATCHes an activity and optimistically updates the cache. */
+export function useUpdateActivity(timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({ activityId, patch }: UpdateActivityInput) =>
+      authFetch<Activity>(`/activities/${activityId}`, {
+        method: 'PATCH',
+        body: JSON.stringify(patch),
+      }),
+    onMutate: async ({ activityId, patch }) => {
+      await client.cancelQueries({ queryKey: ['timelines', timelineId, 'activities'] })
+      const snapshot = client.getQueriesData<Activity[]>({ queryKey: ['timelines', timelineId, 'activities'] })
+      client.setQueriesData<Activity[]>(
+        { queryKey: ['timelines', timelineId, 'activities'] },
+        (old) => old?.map((a) => (a.id === activityId ? { ...a, ...patch } : a)),
+      )
+      return { snapshot }
+    },
+    onError: (_err, _vars, context) => {
+      if (context?.snapshot) {
+        for (const [key, data] of context.snapshot) {
+          client.setQueryData(key, data)
+        }
+      }
+    },
+    onSuccess: (updated) => {
+      client.setQueriesData<Activity[]>(
+        { queryKey: ['timelines', timelineId, 'activities'] },
+        (old) => old?.map((a) => (a.id === updated.id ? updated : a)),
+      )
+    },
+  })
+}
+
+interface CreateTeamInput {
+  name: string
+  description?: string | null
+  notes?: string | null
+  color?: string | null
+  icon?: string | null
+}
+
+interface UpdateTeamInput {
+  teamId: string
+  patch: {
+    name?: string
+    description?: string | null
+    notes?: string | null
+    color?: string | null
+    icon?: string | null
+  }
+}
+
+/** Creates a team and inserts it into the active-teams cache. */
+export function useCreateTeam() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (input: CreateTeamInput) =>
+      authFetch<Team>('/teams', {
+        method: 'POST',
+        body: JSON.stringify(input),
+      }),
+    onSuccess: () => {
+      // Invalidate both active and archived team lists.
+      client.invalidateQueries({ queryKey: ['teams'] })
+    },
+  })
+}
+
+/** PATCHes a team's mutable fields and refreshes the cache. */
+export function useUpdateTeam() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({ teamId, patch }: UpdateTeamInput) =>
+      authFetch<Team>(`/teams/${teamId}`, {
+        method: 'PATCH',
+        body: JSON.stringify(patch),
+      }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ['teams'] })
+    },
+  })
+}
+
+/** Archives a team (soft delete). */
+export function useArchiveTeam() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (teamId: string) =>
+      authFetch<Team>(`/teams/${teamId}/archive`, { method: 'POST' }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ['teams'] })
+    },
+  })
+}
+
+/** Restores an archived team. */
+export function useUnarchiveTeam() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (teamId: string) =>
+      authFetch<Team>(`/teams/${teamId}/unarchive`, { method: 'POST' }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ['teams'] })
+    },
+  })
+}
+
+/** Archives an activity (soft-delete). Removes it from the active-list cache. */
+export function useArchiveActivity(timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (activityId: string) =>
+      authFetch<Activity>(`/activities/${activityId}/archive`, { method: 'POST' }),
+    onSuccess: (_data, activityId) => {
+      client.setQueriesData<Activity[]>(
+        { queryKey: ['timelines', timelineId, 'activities'] },
+        (old) => old?.filter((a) => a.id !== activityId),
+      )
+    },
+  })
+}
+
+/** Deletes an activity and removes it from the cache. */
+export function useDeleteActivity(timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (activityId: string) =>
+      authFetch<void>(`/activities/${activityId}`, { method: 'DELETE' }),
+    onSuccess: (_data, activityId) => {
+      client.setQueriesData<Activity[]>(
+        { queryKey: ['timelines', timelineId, 'activities'] },
+        (old) => old?.filter((a) => a.id !== activityId),
+      )
+    },
+  })
+}
+
+// ── Timeline CRUD (Phase 10.3) ────────────────────────────────────────────────
+
+/** Fetches all timelines for a team, optionally including archived ones. */
+export function useTeamTimelinesWithArchived(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: [...keys.teamTimelines(teamId), { includeArchived: true }],
+    queryFn: async () =>
+      (await authFetch<Timeline[] | null>(`/teams/${teamId}/timelines?archived=true`)) ?? [],
+    enabled: Boolean(teamId),
+  })
+}
+
+/** Creates a new timeline for a team. */
+export function useCreateTimeline(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (input: { name: string; startDate: string; endDate: string; color?: string | null; icon?: string | null; description?: string | null; notes?: string | null; templateId?: string | null }) =>
+      authFetch<Timeline>(`/teams/${teamId}/timelines`, {
+        method: 'POST',
+        body: JSON.stringify(input),
+      }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
+    },
+  })
+}
+
+/** PATCHes a timeline's mutable fields. */
+export function useUpdateTimeline(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({ timelineId, patch }: { timelineId: string; patch: PatchTimelineInput }) =>
+      authFetch<Timeline>(`/timelines/${timelineId}`, {
+        method: 'PATCH',
+        body: JSON.stringify(patch),
+      }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
+    },
+  })
+}
+
+/** Hard-deletes a timeline. */
+export function useDeleteTimeline(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (timelineId: string) =>
+      authFetch<void>(`/timelines/${timelineId}`, { method: 'DELETE' }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
+    },
+  })
+}
+
+/** Archives a timeline. */
+export function useArchiveTimeline(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (timelineId: string) =>
+      authFetch<Timeline>(`/timelines/${timelineId}/archive`, { method: 'POST' }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
+    },
+  })
+}
+
+/** Restores an archived timeline. */
+export function useUnarchiveTimeline(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (timelineId: string) =>
+      authFetch<Timeline>(`/timelines/${timelineId}/unarchive`, { method: 'POST' }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
+    },
+  })
+}
+
+/** Fetches the access grant list for a timeline. */
+export function useTimelineAccess(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: ['teams', teamId, 'timelines', timelineId, 'access'],
+    queryFn: async () =>
+      (await authFetch<TimelineAccessEntry[]>(
+        `/teams/${teamId}/timelines/${timelineId}/access`,
+      )) ?? [],
+    enabled: Boolean(teamId) && Boolean(timelineId),
+  })
+}
+
+/** Grants or updates a member's access to a timeline. */
+export function useGrantTimelineAccess(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({ memberId, role }: { memberId: string; role: 'admin' | 'member' }) =>
+      authFetch<TimelineAccessEntry[]>(
+        `/teams/${teamId}/timelines/${timelineId}/access/${memberId}`,
+        { method: 'PUT', body: JSON.stringify({ role }) },
+      ),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ['teams', teamId, 'timelines', timelineId, 'access'] })
+    },
+  })
+}
+
+/** Revokes a member's access to a timeline. */
+export function useRevokeTimelineAccess(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (memberId: string) =>
+      authFetch<void>(`/teams/${teamId}/timelines/${timelineId}/access/${memberId}`, {
+        method: 'DELETE',
+      }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ['teams', teamId, 'timelines', timelineId, 'access'] })
+    },
+  })
+}
+````
+
+## File: packages/web/src/components/gantt/ActivityDetailPanel.tsx
+````typescript
+/**
+ * ActivityDetailPanel — right-side slide-in panel for a selected Gantt activity.
+ *
+ * Shares its field stack with ActivityCreatePanel via ActivityFieldsBody
+ * (see shared/activityPanelFields.tsx) — header bar, footer, and save behavior live
+ * here, the fields themselves are shared. Field order is fixed by the shared
+ * body: Identity+Title → When → Description → Assigned to → Classify
+ * (Status, Tags) → Advanced (Parent, Progress, Location, URL) → Notes.
+ *
+ * All functional fields save on change/blur via PATCH /activities/:id.
+ * liveDragStart / liveDragEnd display live dates during bar drag without
+ * triggering saves.
+ */
+
+import { useState, useEffect } from 'react'
+import { X, Trash2, Archive, Loader2 } from 'lucide-react'
+import type { Identity } from '@/components/identity/identity-constants'
+import { useUpdateActivity, useDeleteActivity, useArchiveActivity, useTimelineActivities } from '@/hooks/useTeamActivities'
+import { useTimelineStatuses } from '@/hooks/useStatusTemplates'
+import { useTags } from '@/hooks/useTags'
+import type { components } from '@draba/shared'
+import type { Member } from '@/types'
+import { ActivityFieldsBody, PANEL_WIDTH, toDateInput, toISODate } from '@/components/shared/activityPanelFields'
+
+type ApiActivity = components['schemas']['Activity']
+
+interface Props {
+  event: ApiActivity | null
+  open: boolean
+  members: Member[]
+  teamId: string
+  timelineId: string
+  onClose: () => void
+  /** Display-only start date override during bar drag (YYYY-MM-DD). Does not trigger a save. */
+  liveDragStart?: string
+  /** Display-only end date override during bar drag (YYYY-MM-DD). Does not trigger a save. */
+  liveDragEnd?: string
+}
+
+export default function ActivityDetailPanel({
+  event, open, members, teamId, timelineId, onClose, liveDragStart, liveDragEnd,
+}: Props) {
+  const updateMutation = useUpdateActivity(timelineId)
+  const deleteMutation = useDeleteActivity(timelineId)
+  const archiveMutation = useArchiveActivity(timelineId)
+  const { data: statuses = [] } = useTimelineStatuses(teamId, timelineId)
+  const { data: teamTags = [] } = useTags(teamId)
+  const { data: allActivities = [] } = useTimelineActivities(teamId, timelineId)
+
+  const [title, setTitle] = useState(event?.title ?? '')
+  const [description, setDescription] = useState(event?.description ?? '')
+  const [notes, setNotes] = useState(event?.notes ?? '')
+  const [startDate, setStartDate] = useState(event ? toDateInput(event.startAt) : '')
+  const [endDate, setEndDate] = useState(event ? toDateInput(event.endAt) : '')
+  const [identity, setIdentity] = useState<Identity>({
+    color: event?.color ?? '#288C9B',
+    icon: event?.icon ?? '__none__',
+  })
+  const [assignedIds, setAssignedIds] = useState<string[]>(event?.assignedMemberIds ?? [])
+  const [tagIds, setTagIds] = useState<string[]>((event?.tagIds as string[] | undefined) ?? [])
+  const [location, setLocation] = useState(event?.location ?? '')
+  const [url, setUrl] = useState(event?.url ?? '')
+  const [progressValue, setProgressValue] = useState(event?.percentComplete ?? 0)
+  // Parent and status are mirrored locally so the picker reflects a change
+  // immediately — the `event` prop is a snapshot taken at selection time and
+  // doesn't refresh until the activity is reselected.
+  const [parentId, setParentId] = useState<string | null>(event?.parentActivityId ?? null)
+  const [statusId, setStatusId] = useState<string | null>(event?.statusId ?? null)
+  const [confirmDelete, setConfirmDelete] = useState(false)
+
+  // Re-sync when the selected activity changes.
+  useEffect(() => {
+    if (!event) return
+    setTitle(event.title)
+    setDescription(event.description ?? '')
+    setNotes(event.notes ?? '')
+    setStartDate(toDateInput(event.startAt))
+    setEndDate(toDateInput(event.endAt))
+    setIdentity({ color: event.color ?? '#288C9B', icon: event.icon ?? '__none__' })
+    setAssignedIds(event.assignedMemberIds ?? [])
+    setTagIds((event.tagIds as string[] | undefined) ?? [])
+    setLocation(event.location ?? '')
+    setUrl(event.url ?? '')
+    setProgressValue(event.percentComplete ?? 0)
+    setParentId(event.parentActivityId ?? null)
+    setStatusId(event.statusId ?? null)
+    setConfirmDelete(false)
+  }, [event?.id]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Sync local date state when the event's dates change (e.g. after a Gantt bar drag).
+  const eventStartAt = event?.startAt
+  const eventEndAt = event?.endAt
+  useEffect(() => {
+    if (eventStartAt) setStartDate(toDateInput(eventStartAt))
+    if (eventEndAt) setEndDate(toDateInput(eventEndAt))
+  }, [eventStartAt, eventEndAt])
+
+  // Sync status when changed externally on the same activity (e.g. after a Kanban
+  // drag-to-column). The main sync effect only fires on id change, so we need a
+  // separate effect keyed on statusId.
+  const eventStatusId = event?.statusId
+  useEffect(() => {
+    setStatusId(eventStatusId ?? null)
+  }, [eventStatusId])
+
+  // Sync assigned members when changed externally (e.g. after a Kanban drag to a
+  // member column). Arrays compare by reference, so use a stable string key.
+  const eventAssignedKey = (event?.assignedMemberIds ?? []).join(',')
+  useEffect(() => {
+    setAssignedIds(event?.assignedMemberIds ?? [])
+  }, [eventAssignedKey]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const saving = updateMutation.isPending
+  const deleting = deleteMutation.isPending
+  const archiving = archiveMutation.isPending
+
+  // Display dates: live drag overrides take precedence while dragging.
+  const displayStart = liveDragStart ?? startDate
+  const displayEnd = liveDragEnd ?? endDate
+
+  function save(patch: Parameters<typeof updateMutation.mutate>[0]['patch']) {
+    if (!event) return
+    updateMutation.mutate({ activityId: event.id, patch })
+  }
+
+  function handleTitleBlur() {
+    if (title.trim() && title !== event?.title) save({ title: title.trim() })
+  }
+
+  function handleDescriptionBlur() {
+    if (description !== (event?.description ?? '')) save({ description: description || null })
+  }
+
+  function handleNotesBlur() {
+    if (notes !== (event?.notes ?? '')) save({ notes: notes || null } as Parameters<typeof save>[0])
+  }
+
+  function handleLocationBlur() {
+    if (location !== (event?.location ?? '')) save({ location: location || null })
+  }
+
+  function handleUrlBlur() {
+    if (url !== (event?.url ?? '')) save({ url: url || null })
+  }
+
+  function handleStartDateChange(val: string) {
+    setStartDate(val)
+    if (val && val <= endDate) save({ startAt: toISODate(val) })
+  }
+
+  function handleEndDateChange(val: string) {
+    setEndDate(val)
+    if (val && val >= startDate) save({ endAt: toISODate(val) })
+  }
+
+  function handleIdentityChange(next: Identity) {
+    setIdentity(next)
+    save({ color: next.color, icon: next.icon })
+  }
+
+  function toggleAssignee(memberId: string) {
+    const next = assignedIds.includes(memberId)
+      ? assignedIds.filter(id => id !== memberId)
+      : [...assignedIds, memberId]
+    setAssignedIds(next)
+    save({ assignedMemberIds: next })
+  }
+
+  function handleTagsChange(ids: string[]) {
+    setTagIds(ids)
+    save({ tagIds: ids } as Parameters<typeof save>[0])
+  }
+
+  // Saves only on a real change. The shared ProgressRow already clamps to 0–100.
+  function handleProgressCommit(clamped: number) {
+    setProgressValue(clamped)
+    if (clamped !== (event?.percentComplete ?? 0)) {
+      save({ percentComplete: clamped } as Parameters<typeof save>[0])
+    }
+  }
+
+  function handleDelete() {
+    if (!event) return
+    deleteMutation.mutate(event.id, { onSuccess: onClose })
+  }
+
+  function handleArchive() {
+    if (!event) return
+    archiveMutation.mutate(event.id, { onSuccess: onClose })
+  }
+
+  return (
+    <div
+      style={{
+        width: open ? PANEL_WIDTH : 0,
+        flexShrink: 0,
+        borderLeft: open ? '1px solid var(--border)' : 'none',
+        background: 'var(--card)',
+        display: 'flex',
+        flexDirection: 'column',
+        overflow: 'hidden',
+        transition: 'width 0.2s ease',
+      }}
+    >
+      <div style={{ width: PANEL_WIDTH, display: 'flex', flexDirection: 'column', height: '100%' }}>
+        {!event ? null : (<>
+
+        {/* ── Header bar ── */}
+        <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          padding: '0 12px', height: 'var(--topbar-h, 40px)',
+          borderBottom: '1px solid var(--border)', flexShrink: 0,
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+            <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)' }}>Activity detail</span>
+            {saving && <Loader2 size={11} style={{ opacity: 0.5 }} className="animate-spin" />}
+          </div>
+          <button
+            onClick={onClose}
+            style={{
+              width: 24, height: 24, border: 'none', background: 'none', borderRadius: 4,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              cursor: 'pointer', color: 'var(--muted-foreground)',
+            }}
+            onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+            onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+          >
+            <X size={14} strokeWidth={2} />
+          </button>
+        </div>
+
+        {/* ── Scrollable body (shared with create panel) ── */}
+        <ActivityFieldsBody
+          identity={identity}
+          onIdentityChange={handleIdentityChange}
+          title={title}
+          onTitleChange={setTitle}
+          onTitleBlur={handleTitleBlur}
+          titleFallbackName={event.title || ''}
+          startDate={displayStart}
+          endDate={displayEnd}
+          onStartDateChange={handleStartDateChange}
+          onEndDateChange={handleEndDateChange}
+          description={description}
+          onDescriptionChange={setDescription}
+          onDescriptionBlur={handleDescriptionBlur}
+          members={members}
+          assignedIds={assignedIds}
+          onToggleAssignee={toggleAssignee}
+          statuses={statuses}
+          statusId={statusId}
+          onStatusChange={id => { setStatusId(id); save({ statusId: id } as Parameters<typeof save>[0]) }}
+          teamId={teamId}
+          teamTags={teamTags}
+          tagIds={tagIds}
+          onTagsChange={handleTagsChange}
+          parentActivities={allActivities.filter(a => a.id !== event.id)}
+          parentId={parentId}
+          onParentChange={id => { setParentId(id); save({ parentActivityId: id } as Parameters<typeof save>[0]) }}
+          progress={progressValue}
+          onProgressCommit={handleProgressCommit}
+          location={location}
+          onLocationChange={setLocation}
+          onLocationBlur={handleLocationBlur}
+          url={url}
+          onUrlChange={setUrl}
+          onUrlBlur={handleUrlBlur}
+          notes={notes}
+          onNotesChange={setNotes}
+          onNotesBlur={handleNotesBlur}
+        />
+
+        {/* ── Footer — Archive + Delete buttons ── */}
+        <div style={{ padding: '10px 14px', borderTop: '1px solid var(--border)', flexShrink: 0 }}>
+          {confirmDelete ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <p style={{ fontSize: 12, color: 'var(--muted-foreground)', margin: 0, lineHeight: 1.4 }}>
+                Delete <strong style={{ color: 'var(--foreground)' }}>{event?.title}</strong>? This cannot be undone.
+              </p>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <button
+                  onClick={() => setConfirmDelete(false)}
+                  disabled={deleting}
+                  style={{
+                    flex: 1, fontSize: 12, fontWeight: 600, padding: 7,
+                    borderRadius: 'var(--radius-md)', border: '1px solid var(--border)',
+                    background: 'var(--card)', color: 'var(--foreground)',
+                    cursor: 'pointer', fontFamily: 'var(--font-sans)',
+                  }}
+                >Cancel</button>
+                <button
+                  onClick={handleDelete}
+                  disabled={deleting}
+                  style={{
+                    flex: 1, fontSize: 12, fontWeight: 600, padding: 7,
+                    borderRadius: 'var(--radius-md)', border: 'none',
+                    background: 'var(--destructive)', color: 'white',
+                    cursor: deleting ? 'not-allowed' : 'pointer',
+                    fontFamily: 'var(--font-sans)',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
+                  }}
+                >
+                  {deleting ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />}
+                  Delete
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div style={{ display: 'flex', gap: 6 }}>
+              <button
+                onClick={handleArchive}
+                disabled={archiving}
+                style={{
+                  flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
+                  fontSize: 12, fontWeight: 600, padding: 7,
+                  borderRadius: 'var(--radius-md)', border: '1px solid var(--border)',
+                  background: 'var(--card)', color: 'var(--muted-foreground)',
+                  cursor: archiving ? 'not-allowed' : 'pointer', fontFamily: 'var(--font-sans)',
+                }}
+              >
+                {archiving ? <Loader2 size={12} className="animate-spin" /> : <Archive size={12} strokeWidth={2} />}
+                Archive
+              </button>
+              <button
+                onClick={() => setConfirmDelete(true)}
+                style={{
+                  flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
+                  fontSize: 12, fontWeight: 600, padding: 7,
+                  borderRadius: 'var(--radius-md)', border: 'none',
+                  background: 'hsl(0 72% 95%)', color: 'var(--destructive)',
+                  cursor: 'pointer', fontFamily: 'var(--font-sans)',
+                }}
+              >
+                <Trash2 size={12} strokeWidth={2} />
+                Delete
+              </button>
+            </div>
+          )}
+        </div>
+
+        </>)}
+      </div>
+    </div>
+  )
 }
 ````
 
@@ -56514,6 +56635,7 @@ function DashboardShell() {
   // Kanban toolbar state
   const [kanbanGroupBy, setKanbanGroupBy] = useState<KanbanGroupBy>('status')
   const [kanbanSortBy, setKanbanSortBy] = useState<KanbanSortBy>('startDate')
+  const [kanbanColorBy, setKanbanColorBy] = useState<ColorBy>('activity')
   const [kanbanCardFields, setKanbanCardFields] = useState<KanbanCardField[]>(DEFAULT_CARD_FIELDS)
   const [kanbanCollapsedColumns, setKanbanCollapsedColumns] = useState<string[]>([])
   const [kanbanShowHierarchy, setKanbanShowHierarchy] = useState(false)
@@ -56748,7 +56870,7 @@ function DashboardShell() {
     if (typeof timelinePrefs['view_mode'] === 'string') setView(timelinePrefs['view_mode'] as ViewMode)
     if (typeof timelinePrefs['kanban_group_by'] === 'string') setKanbanGroupBy(timelinePrefs['kanban_group_by'] as KanbanGroupBy)
     if (typeof timelinePrefs['kanban_sort_by'] === 'string') setKanbanSortBy(timelinePrefs['kanban_sort_by'] as KanbanSortBy)
-    if (typeof timelinePrefs['kanban_color_by'] === 'string') setColorBy(timelinePrefs['kanban_color_by'] as ColorBy)
+    if (typeof timelinePrefs['kanban_color_by'] === 'string') setKanbanColorBy(timelinePrefs['kanban_color_by'] as ColorBy)
     if (typeof timelinePrefs['kanban_card_fields'] === 'string') {
       try { setKanbanCardFields(JSON.parse(timelinePrefs['kanban_card_fields']) as KanbanCardField[]) } catch { /* ignore */ }
     }
@@ -56823,8 +56945,8 @@ function DashboardShell() {
 
   useEffect(() => {
     if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('kanban_color_by', colorBy)
-  }, [colorBy, saveTimelinePref])
+    saveTimelinePref('kanban_color_by', kanbanColorBy)
+  }, [kanbanColorBy, saveTimelinePref])
 
   useEffect(() => {
     if (prefsAppliedForTimeline.current !== activeTimelineId) return
@@ -57032,8 +57154,8 @@ function DashboardShell() {
             onGroupByChange={setKanbanGroupBy}
             sortBy={kanbanSortBy}
             onSortByChange={setKanbanSortBy}
-            colorBy={colorBy}
-            onColorByChange={setColorBy}
+            colorBy={kanbanColorBy}
+            onColorByChange={setKanbanColorBy}
             cardFields={kanbanCardFields}
             onCardFieldsChange={setKanbanCardFields}
             showHierarchy={kanbanShowHierarchy}
@@ -57157,7 +57279,7 @@ function DashboardShell() {
               timelineId={activeTimelineId}
               groupBy={kanbanGroupBy}
               sortBy={kanbanSortBy}
-              colorBy={colorBy}
+              colorBy={kanbanColorBy}
               cardFields={kanbanCardFields}
               collapsedColumnIds={kanbanCollapsedColumns}
               onCollapsedColumnIdsChange={setKanbanCollapsedColumns}
@@ -57289,8 +57411,8 @@ export default function DashboardPage() {
 **Goal:** Ship a fully interactive Kanban board view. Column axis = active Group by (Status by default). Drag-to-recolumn mutates grouping value via existing `useUpdateActivity`. Adds Color by, configurable Sorts, and a per-card Card fields toggle set.
 
 **Frontend:**
-- `components/kanban/kanbanColumns.ts` (new): Pure column-building and sort logic. `buildColumns(groupBy, activities, members, statuses, sortBy) → KanbanColumn[]` handles all five Group by modes (Status / Member / Assigned-to-combination / Parent / None). Each column carries an ordered `items[]` (activities sorted by `sortBy`), `droppable` flag, and `dropValue` (the patch to apply on drop). Sentinel IDs: `NO_STATUS_ID`, `UNASSIGNED_ID`, `NO_PARENT_ID`, `NONE_COLUMN_ID`. Sort: Start date / End date / Title / % complete (desc, nulls last) / Recently updated.
-- `components/kanban/KanbanView.test.ts` (new): 32 unit tests covering `sortActivities` (all 5 modes, null handling) and `buildColumns` for every Group by mode (column count, item routing, dropValue, droppable flag, sentinel columns, empty-activity robustness).
+- `components/kanban/kanbanColumns.ts` (new): Pure column-building and sort logic. `buildColumns(groupBy, activities, members, statuses, sortBy) → KanbanColumn[]` handles three Group by modes (Status / Member / Assigned-to-combination). Parent and None groupBy modes were evaluated and removed — Parent is difficult to display without a dedicated tree layout, and None produces a single unsortable column with no grouping value; both will be reconsidered in a future sub-phase. Each column carries an ordered `items[]` (activities sorted by `sortBy`), `droppable` flag, and `dropValue` (the patch to apply on drop). Sentinel IDs: `NO_STATUS_ID`, `UNASSIGNED_ID`. Also exports `buildHierarchyMaps` (pure helper for parent-child nesting) and `toggleCollapsedColumn` (immutable collapse toggle). Sort: Start date / End date / Title / % complete (desc, nulls last) / Recently updated.
+- `components/kanban/KanbanView.test.ts` (new): 30 unit tests covering `sortActivities` (all 5 sort modes, null handling), `buildColumns` for all three Group by modes (column count, item routing, dropValue, droppable flag, sentinel columns, empty-activity robustness), `buildHierarchyMaps` (parent-child mapping, orphan handling, multi-level nesting), `toggleCollapsedColumn` (add/remove/immutability), and `handleAddInColumn` prefill semantics via dropValue assertions.
 - `components/kanban/KanbanToolbar.tsx` (new): Sub-toolbar. Controls: Group by select / Sort by select / Color by select / Card fields multi-select (checkboxes with reset-to-defaults). Export/Share stubs in the right margin. Follows the same visual idiom as CalendarToolbar and GanttToolbar.
 - `components/kanban/KanbanCard.tsx` (new): Draggable card using `@dnd-kit/core useDraggable` (5px activation threshold to prevent accidental drags). Renders: accent left border (3px, driven by per-activity resolved color from `colorMap`), title (2-line clamp), and all configured card fields: description snippet, status pill, date range, tag chips (max 3, +N), % complete bar, member avatars (overlapping, 2px card-bg ring, max 3, +N). Find highlight treatments (amber border for active match, 0.3 opacity for non-matches).
 - `components/kanban/KanbanColumn.tsx` (new): Droppable column using `@dnd-kit/core useDroppable`. Header: accent dot, label, count badge, collapse chevron. Card list scrolls independently. Empty state: muted "No activities" (still a valid drop target). "+ Add" button (dashed border, hover → accent color). Collapsed rail: 40px wide, vertical label text, card count, expand chevron.
@@ -57299,10 +57421,27 @@ export default function DashboardPage() {
 - `DashboardPage.tsx`: Added kanban toolbar state (`kanbanGroupBy`, `kanbanSortBy`, `kanbanCardFields`, `kanbanCollapsedColumns`). Per-timeline pref restoration for all kanban keys. Per-timeline pref save effects for all kanban keys. `KanbanToolbar` rendered in `view === 'kanban'` slot. `KanbanView` content branch replacing the old "coming soon" fallback. `onAddActivity` callback connects Kanban's "+ Add" to `setCreateDefaults`.
 
 **Tests:**
-- 247 total tests pass (up from 208 in Phase 11.2), including new `KanbanView.test.ts` (32 tests; all `buildColumns` modes and sort comparators).
+- 253 total tests pass (up from 208 in Phase 11.2), including `KanbanView.test.ts` (30 tests after review remediation — hierarchy, collapse toggle, and prefill coverage added). `pnpm --filter web lint` clean; `pnpm --filter web build` clean.
 - `golangci-lint run` clean; `go test ./...` passes (55 API tests, 4 DB tests); `pnpm --filter web lint` clean; `pnpm --filter web build` clean.
 
-**Manual verification pending (Docker):** view switcher Kanban; drag between status/member/parent columns; card fields toggle; collapse/expand columns; Filter and Find on board; Color by; sort within columns; "+ Add" opens create panel.
+**Manual verification pending (Docker):** view switcher Kanban; drag between status/member columns; card fields toggle; collapse/expand columns; Filter and Find on board; Color by (per-view, separate from Gantt); sort within columns; "+ Add" opens create panel.
+
+---
+
+## 2026-06-03 — Phase 11.3: Review remediation
+
+**Blockers addressed:**
+- **Test coverage**: Extracted `buildHierarchyMaps` and `toggleCollapsedColumn` as exported pure helpers in `kanbanColumns.ts`; `KanbanView.tsx` now imports them. Added 11 new tests covering hierarchy mapping (parent-child routing, orphan handling, multi-level), collapse toggle (add/remove/immutability), and `handleAddInColumn` prefill semantics via `dropValue` assertions. Total: 30 tests in `KanbanView.test.ts`.
+- **Log accuracy**: Corrected Group by mode count (3, not 5), test count, and manual verification scope. Removed references to `NO_PARENT_ID`, `NONE_COLUMN_ID` (never existed).
+
+**Suggestions addressed:**
+- **WS delete scope** (`useTeamActivities.ts`): `activity.deleted` now scopes cache invalidation to the current team's timeline IDs (from TanStack cache) rather than flushing all `['timelines']` queries. Falls back to the broad invalidation if the team timeline list isn't cached yet.
+- **Kanban color-by state** (`DashboardPage.tsx`): Added separate `kanbanColorBy`/`setKanbanColorBy` state, decoupled from the Gantt `colorBy`. Preference restore, save effect, `KanbanToolbar`, and `KanbanView` all now use the dedicated state.
+
+**Nits addressed:**
+- `activityPanelFields.tsx` moved from `gantt/` → `shared/`; imports in `ActivityCreatePanel.tsx` and `ActivityDetailPanel.tsx` updated to `@/components/shared/activityPanelFields`. File header updated.
+- `KanbanBoard.tsx`: `activityId` and `columnId` derivation now uses explicit `typeof` guards before `String()` fallback.
+- `ROADMAP.md`: Scope bullet updated — Parent/None groupBy cut documented with rationale; `showHierarchy` pre-wiring noted as future prep, not 11.3 exit criterion.
 
 ---
 
@@ -60686,8 +60825,9 @@ A **fully interactive** board view — the column-and-card complement to Gantt /
 **Depends on:** Phase 10.2 (statuses API + UI). Reuses `useUpdateActivity` (already supports `statusId` / `assignedMemberIds` / `parentActivityId` patches — the entire drag backend), `lib/activityColor.ts`, `lib/memberGroups.ts`, the filter engine, Find, preferences, `@dnd-kit`, and `ActivityPanel`.
 
 **Scope (summary — see plan doc for detail):**
-- *Group by defines columns:* Status (default, + "No status") / Assigned to (member, + "Unassigned") / Assigned to (combination, read-only) / Parent / None. Columns rebuild on group-by change.
-- *Color by* (activity / member / status) drives the card accent border — reused from the other views.
+- *Group by defines columns:* Status (default, + "No status") / Assigned to (member, + "Unassigned") / Assigned to (combination, read-only). **Parent and None were evaluated and cut from 11.3:** Parent requires a dedicated tree-layout surface; None produces a single flat list without grouping semantics. Both are candidates for a future sub-phase. Columns rebuild on group-by change.
+- *Hierarchy display:* `showHierarchy` state and preference persistence are pre-wired in 11.3 prep; the toolbar toggle is intentionally hidden until the hierarchy sub-phase. Not an 11.3 exit criterion.
+- *Color by* (activity / member / status) drives the card accent border — per-view state independent of the Gantt color-by setting.
 - *Sorts* (within column): Start date (default), End date, Title, % complete, Recently updated. Manual ordering deferred (no `Activity` order field — possible `11.3.1`).
 - *Card field toggles:* a "Card fields" multi-select (date range / status / tags / assigned-to / % complete / parent / description), persisted per-timeline-per-user, with context-aware suppression of the Group-by axis field.
 - *Interactive:* `@dnd-kit` drag-to-recolumn with optimistic PATCH; card click → `ActivityPanel` edit; "+ Add" → create prefilled with the column's value; collapse columns; real-time, filter, Find, archived-hiding parity.
