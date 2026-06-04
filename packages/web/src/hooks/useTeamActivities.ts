@@ -148,14 +148,26 @@ export function useTeamActivitySync(
         )
       } else if (msg.type === 'activity.deleted') {
         const { id } = msg.payload as { id: string }
-        // activity.deleted payload only has id — invalidate all timeline
-        // activity queries for this team so caches stay consistent.
-        client.invalidateQueries({ queryKey: ['timelines'] })
-        // Optimistically remove from all cached timeline activity lists.
-        client.setQueriesData<Activity[]>(
-          { queryKey: ['timelines'] },
-          (old) => old?.filter((a) => a.id !== id),
-        )
+        // activity.deleted payload only has id — scope invalidation to this
+        // team's timelines so we don't flush unrelated team caches when
+        // multiple teams are active in the same session.
+        const teamTimelines = client.getQueryData<Timeline[]>(keys.teamTimelines(teamId)) ?? []
+        if (teamTimelines.length > 0) {
+          for (const tl of teamTimelines) {
+            client.invalidateQueries({ queryKey: ['timelines', tl.id] })
+            client.setQueriesData<Activity[]>(
+              { queryKey: ['timelines', tl.id, 'activities'] },
+              (old) => old?.filter((a) => a.id !== id),
+            )
+          }
+        } else {
+          // Fallback when the team's timelines aren't cached yet.
+          client.invalidateQueries({ queryKey: ['timelines'] })
+          client.setQueriesData<Activity[]>(
+            { queryKey: ['timelines'] },
+            (old) => old?.filter((a) => a.id !== id),
+          )
+        }
       }
     },
     [client, teamId],

@@ -128,6 +128,41 @@ export function sortActivities(
   return sorted;
 }
 
+// ── Hierarchy helpers ─────────────────────────────────────────────────────────
+
+/**
+ * Compute parent→children and child-id maps for the hierarchy display mode.
+ *
+ * Only considers children whose parent is also present in `activities` — an
+ * orphaned child (parent filtered out) stays visible as a root card.
+ */
+export function buildHierarchyMaps(
+  activities: ApiActivity[],
+): { childrenByParentId: Map<string, ApiActivity[]>; childIds: Set<string> } {
+  const visibleIds = new Set(activities.map(a => a.id));
+  const childrenByParentId = new Map<string, ApiActivity[]>();
+  for (const act of activities) {
+    const pid = (act as ApiActivity & { parentActivityId?: string | null }).parentActivityId ?? null;
+    if (pid && visibleIds.has(pid)) {
+      if (!childrenByParentId.has(pid)) childrenByParentId.set(pid, []);
+      childrenByParentId.get(pid)!.push(act);
+    }
+  }
+  const childIds = new Set<string>();
+  childrenByParentId.forEach(children => children.forEach(c => childIds.add(c.id)));
+  return { childrenByParentId, childIds };
+}
+
+/**
+ * Toggle a column ID in/out of the collapsed set.
+ * Returns a new array — does not mutate the input.
+ */
+export function toggleCollapsedColumn(collapsedIds: string[], columnId: string): string[] {
+  return collapsedIds.includes(columnId)
+    ? collapsedIds.filter(id => id !== columnId)
+    : [...collapsedIds, columnId];
+}
+
 // ── buildColumns ──────────────────────────────────────────────────────────────
 
 /**

@@ -2,7 +2,7 @@
  * ActivityDetailPanel — right-side slide-in panel for a selected Gantt activity.
  *
  * Shares its field stack with ActivityCreatePanel via ActivityFieldsBody
- * (see activityPanelFields.tsx) — header bar, footer, and save behavior live
+ * (see shared/activityPanelFields.tsx) — header bar, footer, and save behavior live
  * here, the fields themselves are shared. Field order is fixed by the shared
  * body: Identity+Title → When → Description → Assigned to → Classify
  * (Status, Tags) → Advanced (Parent, Progress, Location, URL) → Notes.
@@ -20,7 +20,7 @@ import { useTimelineStatuses } from '@/hooks/useStatusTemplates'
 import { useTags } from '@/hooks/useTags'
 import type { components } from '@draba/shared'
 import type { Member } from '@/types'
-import { ActivityFieldsBody, PANEL_WIDTH, toDateInput, toISODate } from './activityPanelFields'
+import { ActivityFieldsBody, PANEL_WIDTH, toDateInput, toISODate } from '@/components/shared/activityPanelFields'
 
 type ApiActivity = components['schemas']['Activity']
 

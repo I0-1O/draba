@@ -99,8 +99,8 @@ export default function KanbanBoard({
     setOverColumnId(null);
     if (!over) return;
 
-    const activityId = String(active.id);
-    const columnId = String(over.id);
+    const activityId = typeof active.id === 'string' ? active.id : String(active.id);
+    const columnId = typeof over.id === 'string' ? over.id : String(over.id);
 
     const column = columns.find(c => c.id === columnId);
     if (!column || !column.droppable || !column.dropValue) return;

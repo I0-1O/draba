@@ -7,6 +7,8 @@ import { describe, it, expect } from 'vitest';
 import {
   buildColumns,
   sortActivities,
+  buildHierarchyMaps,
+  toggleCollapsedColumn,
   NO_STATUS_ID,
   UNASSIGNED_ID,
   type KanbanGroupBy,
@@ -223,5 +225,103 @@ describe('buildColumns with no activities', () => {
         buildColumns(mode, emptyActs, members, statuses, 'startDate'),
       ).not.toThrow();
     });
+  });
+});
+
+// ── buildHierarchyMaps ─────────────────────────────────────────────────────────
+
+describe('buildHierarchyMaps', () => {
+  it('returns empty maps when there are no parent-child relationships', () => {
+    const acts = [
+      makeActivity({ id: 'a' }),
+      makeActivity({ id: 'b' }),
+    ];
+    const { childrenByParentId, childIds } = buildHierarchyMaps(acts);
+    expect(childrenByParentId.size).toBe(0);
+    expect(childIds.size).toBe(0);
+  });
+
+  it('maps children to their parent', () => {
+    const acts = [
+      makeActivity({ id: 'parent' }),
+      makeActivity({ id: 'child1', parentActivityId: 'parent' }),
+      makeActivity({ id: 'child2', parentActivityId: 'parent' }),
+    ];
+    const { childrenByParentId, childIds } = buildHierarchyMaps(acts);
+    expect(childrenByParentId.get('parent')?.map(a => a.id)).toEqual(['child1', 'child2']);
+    expect(childIds).toEqual(new Set(['child1', 'child2']));
+  });
+
+  it('orphaned child (parent filtered out) is not placed in childrenByParentId', () => {
+    // Only the child is in the visible set; parent is absent (filtered).
+    const acts = [makeActivity({ id: 'child', parentActivityId: 'absent-parent' })];
+    const { childrenByParentId, childIds } = buildHierarchyMaps(acts);
+    expect(childrenByParentId.size).toBe(0);
+    // The child is NOT in childIds, so it surfaces as a root card.
+    expect(childIds.has('child')).toBe(false);
+  });
+
+  it('supports multi-level nesting', () => {
+    const acts = [
+      makeActivity({ id: 'root' }),
+      makeActivity({ id: 'mid', parentActivityId: 'root' }),
+      makeActivity({ id: 'leaf', parentActivityId: 'mid' }),
+    ];
+    const { childrenByParentId, childIds } = buildHierarchyMaps(acts);
+    expect(childrenByParentId.get('root')?.map(a => a.id)).toEqual(['mid']);
+    expect(childrenByParentId.get('mid')?.map(a => a.id)).toEqual(['leaf']);
+    expect(childIds).toEqual(new Set(['mid', 'leaf']));
+  });
+});
+
+// ── toggleCollapsedColumn ─────────────────────────────────────────────────────
+
+describe('toggleCollapsedColumn', () => {
+  it('adds a column ID when it is not yet collapsed', () => {
+    expect(toggleCollapsedColumn([], 'col-1')).toEqual(['col-1']);
+    expect(toggleCollapsedColumn(['col-2'], 'col-1')).toEqual(['col-2', 'col-1']);
+  });
+
+  it('removes a column ID when it is already collapsed', () => {
+    expect(toggleCollapsedColumn(['col-1'], 'col-1')).toEqual([]);
+    expect(toggleCollapsedColumn(['col-1', 'col-2'], 'col-1')).toEqual(['col-2']);
+  });
+
+  it('does not mutate the input array', () => {
+    const original = ['col-1'];
+    toggleCollapsedColumn(original, 'col-2');
+    expect(original).toEqual(['col-1']);
+  });
+});
+
+// ── handleAddInColumn prefill ─────────────────────────────────────────────────
+
+describe('column dropValue encodes correct prefill context', () => {
+  it('status column dropValue carries statusId for create prefill', () => {
+    const cols = buildColumns('status', [], [], statuses, 'startDate');
+    const s1 = cols.find(c => c.id === 's1')!;
+    // dropValue.statusId is what handleAddInColumn passes as the default statusId.
+    expect(s1.dropValue?.statusId).toBe('s1');
+    expect('statusId' in (s1.dropValue ?? {})).toBe(true);
+  });
+
+  it('no-status column dropValue has statusId: null', () => {
+    const cols = buildColumns('status', [], [], statuses, 'startDate');
+    const noStatus = cols.find(c => c.id === NO_STATUS_ID)!;
+    expect(noStatus.dropValue?.statusId).toBeNull();
+    expect('statusId' in (noStatus.dropValue ?? {})).toBe(true);
+  });
+
+  it('member column dropValue carries assignedMemberIds singleton', () => {
+    const cols = buildColumns('member', [], members, [], 'startDate');
+    const m1 = cols.find(c => c.id === 'm1')!;
+    expect(m1.dropValue?.assignedMemberIds).toEqual(['m1']);
+  });
+
+  it('unassigned column dropValue has empty assignedMemberIds and no statusId key', () => {
+    const cols = buildColumns('member', [], members, [], 'startDate');
+    const unassigned = cols.find(c => c.id === UNASSIGNED_ID)!;
+    expect(unassigned.dropValue?.assignedMemberIds).toEqual([]);
+    expect('statusId' in (unassigned.dropValue ?? {})).toBe(false);
   });
 });

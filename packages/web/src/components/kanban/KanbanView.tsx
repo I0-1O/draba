@@ -12,6 +12,8 @@ import { useQueryClient } from '@tanstack/react-query';
 import KanbanBoard from './KanbanBoard';
 import {
   buildColumns,
+  buildHierarchyMaps,
+  toggleCollapsedColumn,
   DEFAULT_CARD_FIELDS,
   type KanbanGroupBy,
   type KanbanSortBy,
@@ -185,36 +187,10 @@ export default function KanbanView({
 
   // ── Hierarchy ────────────────────────────────────────────────────────────────
 
-  /**
-   * When hierarchy is on, build a parentId → direct-children map.
-   * Only includes children whose parent is also in the visible set (so orphaned
-   * children — whose parent is filtered out — still appear as roots).
-   */
-  const childrenByParentId = useMemo<Map<string, ApiActivity[]>>(() => {
-    if (!showHierarchy) return new Map();
-    const visibleIds = new Set(visibleActivities.map(a => a.id));
-    const map = new Map<string, ApiActivity[]>();
-    for (const act of visibleActivities) {
-      const pid = (act as ApiActivity & { parentActivityId?: string | null }).parentActivityId ?? null;
-      if (pid && visibleIds.has(pid)) {
-        if (!map.has(pid)) map.set(pid, []);
-        map.get(pid)!.push(act);
-      }
-    }
-    return map;
-  }, [visibleActivities, showHierarchy]);
-
-  /**
-   * IDs of activities that are children of another visible activity.
-   * When hierarchy is on, these are excluded from column items so they
-   * don't also appear as top-level cards.
-   */
-  const childIds = useMemo<Set<string>>(() => {
-    if (!showHierarchy) return new Set();
-    const s = new Set<string>();
-    childrenByParentId.forEach(children => children.forEach(c => s.add(c.id)));
-    return s;
-  }, [childrenByParentId, showHierarchy]);
+  const { childrenByParentId, childIds } = useMemo(
+    () => showHierarchy ? buildHierarchyMaps(visibleActivities) : { childrenByParentId: new Map<string, ApiActivity[]>(), childIds: new Set<string>() },
+    [visibleActivities, showHierarchy],
+  );
 
   /**
    * Activities used for column building.
@@ -270,9 +246,7 @@ export default function KanbanView({
   const collapsedSet = useMemo(() => new Set(collapsedColumnIds), [collapsedColumnIds]);
 
   const handleToggleCollapse = useCallback((columnId: string) => {
-    const next = collapsedSet.has(columnId)
-      ? collapsedColumnIds.filter(id => id !== columnId)
-      : [...collapsedColumnIds, columnId];
+    const next = toggleCollapsedColumn(collapsedColumnIds, columnId);
     onCollapsedColumnIdsChange(next);
     if (timelineId) {
       upsert.mutate({

@@ -1440,8 +1440,9 @@ A **fully interactive** board view — the column-and-card complement to Gantt /
 **Depends on:** Phase 10.2 (statuses API + UI). Reuses `useUpdateActivity` (already supports `statusId` / `assignedMemberIds` / `parentActivityId` patches — the entire drag backend), `lib/activityColor.ts`, `lib/memberGroups.ts`, the filter engine, Find, preferences, `@dnd-kit`, and `ActivityPanel`.
 
 **Scope (summary — see plan doc for detail):**
-- *Group by defines columns:* Status (default, + "No status") / Assigned to (member, + "Unassigned") / Assigned to (combination, read-only) / Parent / None. Columns rebuild on group-by change.
-- *Color by* (activity / member / status) drives the card accent border — reused from the other views.
+- *Group by defines columns:* Status (default, + "No status") / Assigned to (member, + "Unassigned") / Assigned to (combination, read-only). **Parent and None were evaluated and cut from 11.3:** Parent requires a dedicated tree-layout surface; None produces a single flat list without grouping semantics. Both are candidates for a future sub-phase. Columns rebuild on group-by change.
+- *Hierarchy display:* `showHierarchy` state and preference persistence are pre-wired in 11.3 prep; the toolbar toggle is intentionally hidden until the hierarchy sub-phase. Not an 11.3 exit criterion.
+- *Color by* (activity / member / status) drives the card accent border — per-view state independent of the Gantt color-by setting.
 - *Sorts* (within column): Start date (default), End date, Title, % complete, Recently updated. Manual ordering deferred (no `Activity` order field — possible `11.3.1`).
 - *Card field toggles:* a "Card fields" multi-select (date range / status / tags / assigned-to / % complete / parent / description), persisted per-timeline-per-user, with context-aware suppression of the Group-by axis field.
 - *Interactive:* `@dnd-kit` drag-to-recolumn with optimistic PATCH; card click → `ActivityPanel` edit; "+ Add" → create prefilled with the column's value; collapse columns; real-time, filter, Find, archived-hiding parity.

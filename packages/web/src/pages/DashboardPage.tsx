@@ -106,6 +106,7 @@ function DashboardShell() {
   // Kanban toolbar state
   const [kanbanGroupBy, setKanbanGroupBy] = useState<KanbanGroupBy>('status')
   const [kanbanSortBy, setKanbanSortBy] = useState<KanbanSortBy>('startDate')
+  const [kanbanColorBy, setKanbanColorBy] = useState<ColorBy>('activity')
   const [kanbanCardFields, setKanbanCardFields] = useState<KanbanCardField[]>(DEFAULT_CARD_FIELDS)
   const [kanbanCollapsedColumns, setKanbanCollapsedColumns] = useState<string[]>([])
   const [kanbanShowHierarchy, setKanbanShowHierarchy] = useState(false)
@@ -340,7 +341,7 @@ function DashboardShell() {
     if (typeof timelinePrefs['view_mode'] === 'string') setView(timelinePrefs['view_mode'] as ViewMode)
     if (typeof timelinePrefs['kanban_group_by'] === 'string') setKanbanGroupBy(timelinePrefs['kanban_group_by'] as KanbanGroupBy)
     if (typeof timelinePrefs['kanban_sort_by'] === 'string') setKanbanSortBy(timelinePrefs['kanban_sort_by'] as KanbanSortBy)
-    if (typeof timelinePrefs['kanban_color_by'] === 'string') setColorBy(timelinePrefs['kanban_color_by'] as ColorBy)
+    if (typeof timelinePrefs['kanban_color_by'] === 'string') setKanbanColorBy(timelinePrefs['kanban_color_by'] as ColorBy)
     if (typeof timelinePrefs['kanban_card_fields'] === 'string') {
       try { setKanbanCardFields(JSON.parse(timelinePrefs['kanban_card_fields']) as KanbanCardField[]) } catch { /* ignore */ }
     }
@@ -415,8 +416,8 @@ function DashboardShell() {
 
   useEffect(() => {
     if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('kanban_color_by', colorBy)
-  }, [colorBy, saveTimelinePref])
+    saveTimelinePref('kanban_color_by', kanbanColorBy)
+  }, [kanbanColorBy, saveTimelinePref])
 
   useEffect(() => {
     if (prefsAppliedForTimeline.current !== activeTimelineId) return
@@ -624,8 +625,8 @@ function DashboardShell() {
             onGroupByChange={setKanbanGroupBy}
             sortBy={kanbanSortBy}
             onSortByChange={setKanbanSortBy}
-            colorBy={colorBy}
-            onColorByChange={setColorBy}
+            colorBy={kanbanColorBy}
+            onColorByChange={setKanbanColorBy}
             cardFields={kanbanCardFields}
             onCardFieldsChange={setKanbanCardFields}
             showHierarchy={kanbanShowHierarchy}
@@ -749,7 +750,7 @@ function DashboardShell() {
               timelineId={activeTimelineId}
               groupBy={kanbanGroupBy}
               sortBy={kanbanSortBy}
-              colorBy={colorBy}
+              colorBy={kanbanColorBy}
               cardFields={kanbanCardFields}
               collapsedColumnIds={kanbanCollapsedColumns}
               onCollapsedColumnIdsChange={setKanbanCollapsedColumns}

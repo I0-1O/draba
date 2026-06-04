@@ -1,5 +1,5 @@
 /**
- * Shared field components for the Gantt activity panels.
+ * Shared field components for activity panels across all views.
  *
  * Both ActivityCreatePanel (buffer-and-POST) and ActivityDetailPanel
  * (save-on-change/blur) compose `ActivityFieldsBody` so the two panels show an

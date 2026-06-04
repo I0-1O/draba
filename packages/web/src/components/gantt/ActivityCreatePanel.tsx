@@ -2,7 +2,7 @@
  * ActivityCreatePanel — right-side slide-in panel for creating a new Gantt activity.
  *
  * Shares its field stack with ActivityDetailPanel via ActivityFieldsBody
- * (see activityPanelFields.tsx) so the create and edit forms show an identical
+ * (see shared/activityPanelFields.tsx) so the create and edit forms show an identical
  * field set and order. Unlike the detail panel, every change buffers in local
  * state; nothing persists until the user clicks "Create activity", which
  * submits the whole form via POST /timelines/:id/activities.
@@ -17,7 +17,7 @@ import { useCreateActivity, useTimelineActivities } from '@/hooks/useTeamActivit
 import { useTags } from '@/hooks/useTags'
 import type { Member } from '@/types'
 import type { components } from '@draba/shared'
-import { ActivityFieldsBody, PANEL_WIDTH } from './activityPanelFields'
+import { ActivityFieldsBody, PANEL_WIDTH } from '@/components/shared/activityPanelFields'
 
 type Status = components['schemas']['Status']
 

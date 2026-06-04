@@ -7,8 +7,8 @@
 **Goal:** Ship a fully interactive Kanban board view. Column axis = active Group by (Status by default). Drag-to-recolumn mutates grouping value via existing `useUpdateActivity`. Adds Color by, configurable Sorts, and a per-card Card fields toggle set.
 
 **Frontend:**
-- `components/kanban/kanbanColumns.ts` (new): Pure column-building and sort logic. `buildColumns(groupBy, activities, members, statuses, sortBy) → KanbanColumn[]` handles all five Group by modes (Status / Member / Assigned-to-combination / Parent / None). Each column carries an ordered `items[]` (activities sorted by `sortBy`), `droppable` flag, and `dropValue` (the patch to apply on drop). Sentinel IDs: `NO_STATUS_ID`, `UNASSIGNED_ID`, `NO_PARENT_ID`, `NONE_COLUMN_ID`. Sort: Start date / End date / Title / % complete (desc, nulls last) / Recently updated.
-- `components/kanban/KanbanView.test.ts` (new): 32 unit tests covering `sortActivities` (all 5 modes, null handling) and `buildColumns` for every Group by mode (column count, item routing, dropValue, droppable flag, sentinel columns, empty-activity robustness).
+- `components/kanban/kanbanColumns.ts` (new): Pure column-building and sort logic. `buildColumns(groupBy, activities, members, statuses, sortBy) → KanbanColumn[]` handles three Group by modes (Status / Member / Assigned-to-combination). Parent and None groupBy modes were evaluated and removed — Parent is difficult to display without a dedicated tree layout, and None produces a single unsortable column with no grouping value; both will be reconsidered in a future sub-phase. Each column carries an ordered `items[]` (activities sorted by `sortBy`), `droppable` flag, and `dropValue` (the patch to apply on drop). Sentinel IDs: `NO_STATUS_ID`, `UNASSIGNED_ID`. Also exports `buildHierarchyMaps` (pure helper for parent-child nesting) and `toggleCollapsedColumn` (immutable collapse toggle). Sort: Start date / End date / Title / % complete (desc, nulls last) / Recently updated.
+- `components/kanban/KanbanView.test.ts` (new): 30 unit tests covering `sortActivities` (all 5 sort modes, null handling), `buildColumns` for all three Group by modes (column count, item routing, dropValue, droppable flag, sentinel columns, empty-activity robustness), `buildHierarchyMaps` (parent-child mapping, orphan handling, multi-level nesting), `toggleCollapsedColumn` (add/remove/immutability), and `handleAddInColumn` prefill semantics via dropValue assertions.
 - `components/kanban/KanbanToolbar.tsx` (new): Sub-toolbar. Controls: Group by select / Sort by select / Color by select / Card fields multi-select (checkboxes with reset-to-defaults). Export/Share stubs in the right margin. Follows the same visual idiom as CalendarToolbar and GanttToolbar.
 - `components/kanban/KanbanCard.tsx` (new): Draggable card using `@dnd-kit/core useDraggable` (5px activation threshold to prevent accidental drags). Renders: accent left border (3px, driven by per-activity resolved color from `colorMap`), title (2-line clamp), and all configured card fields: description snippet, status pill, date range, tag chips (max 3, +N), % complete bar, member avatars (overlapping, 2px card-bg ring, max 3, +N). Find highlight treatments (amber border for active match, 0.3 opacity for non-matches).
 - `components/kanban/KanbanColumn.tsx` (new): Droppable column using `@dnd-kit/core useDroppable`. Header: accent dot, label, count badge, collapse chevron. Card list scrolls independently. Empty state: muted "No activities" (still a valid drop target). "+ Add" button (dashed border, hover → accent color). Collapsed rail: 40px wide, vertical label text, card count, expand chevron.
@@ -17,10 +17,27 @@
 - `DashboardPage.tsx`: Added kanban toolbar state (`kanbanGroupBy`, `kanbanSortBy`, `kanbanCardFields`, `kanbanCollapsedColumns`). Per-timeline pref restoration for all kanban keys. Per-timeline pref save effects for all kanban keys. `KanbanToolbar` rendered in `view === 'kanban'` slot. `KanbanView` content branch replacing the old "coming soon" fallback. `onAddActivity` callback connects Kanban's "+ Add" to `setCreateDefaults`.
 
 **Tests:**
-- 247 total tests pass (up from 208 in Phase 11.2), including new `KanbanView.test.ts` (32 tests; all `buildColumns` modes and sort comparators).
+- 253 total tests pass (up from 208 in Phase 11.2), including `KanbanView.test.ts` (30 tests after review remediation — hierarchy, collapse toggle, and prefill coverage added). `pnpm --filter web lint` clean; `pnpm --filter web build` clean.
 - `golangci-lint run` clean; `go test ./...` passes (55 API tests, 4 DB tests); `pnpm --filter web lint` clean; `pnpm --filter web build` clean.
 
-**Manual verification pending (Docker):** view switcher Kanban; drag between status/member/parent columns; card fields toggle; collapse/expand columns; Filter and Find on board; Color by; sort within columns; "+ Add" opens create panel.
+**Manual verification pending (Docker):** view switcher Kanban; drag between status/member columns; card fields toggle; collapse/expand columns; Filter and Find on board; Color by (per-view, separate from Gantt); sort within columns; "+ Add" opens create panel.
+
+---
+
+## 2026-06-03 — Phase 11.3: Review remediation
+
+**Blockers addressed:**
+- **Test coverage**: Extracted `buildHierarchyMaps` and `toggleCollapsedColumn` as exported pure helpers in `kanbanColumns.ts`; `KanbanView.tsx` now imports them. Added 11 new tests covering hierarchy mapping (parent-child routing, orphan handling, multi-level), collapse toggle (add/remove/immutability), and `handleAddInColumn` prefill semantics via `dropValue` assertions. Total: 30 tests in `KanbanView.test.ts`.
+- **Log accuracy**: Corrected Group by mode count (3, not 5), test count, and manual verification scope. Removed references to `NO_PARENT_ID`, `NONE_COLUMN_ID` (never existed).
+
+**Suggestions addressed:**
+- **WS delete scope** (`useTeamActivities.ts`): `activity.deleted` now scopes cache invalidation to the current team's timeline IDs (from TanStack cache) rather than flushing all `['timelines']` queries. Falls back to the broad invalidation if the team timeline list isn't cached yet.
+- **Kanban color-by state** (`DashboardPage.tsx`): Added separate `kanbanColorBy`/`setKanbanColorBy` state, decoupled from the Gantt `colorBy`. Preference restore, save effect, `KanbanToolbar`, and `KanbanView` all now use the dedicated state.
+
+**Nits addressed:**
+- `activityPanelFields.tsx` moved from `gantt/` → `shared/`; imports in `ActivityCreatePanel.tsx` and `ActivityDetailPanel.tsx` updated to `@/components/shared/activityPanelFields`. File header updated.
+- `KanbanBoard.tsx`: `activityId` and `columnId` derivation now uses explicit `typeof` guards before `String()` fallback.
+- `ROADMAP.md`: Scope bullet updated — Parent/None groupBy cut documented with rationale; `showHierarchy` pre-wiring noted as future prep, not 11.3 exit criterion.
 
 ---
 
