@@ -289,10 +289,24 @@ type PublicTimeline struct {
 	EndDate   string  `json:"endDate"`
 }
 
+// PublicShare is the safe projection of a share row for the unauthenticated
+// gateway response. It omits operational telemetry (view_count, last_viewed_at)
+// and internal fields (created_by, revoked_at) that must not reach anonymous callers.
+type PublicShare struct {
+	ID         string     `json:"id"`
+	TimelineID string     `json:"timelineId"`
+	Token      string     `json:"token"`
+	Name       *string    `json:"name,omitempty"`
+	ViewType   string     `json:"viewType"`
+	ViewConfig string     `json:"viewConfig"`
+	CreatedAt  time.Time  `json:"createdAt"`
+	ExpiresAt  *time.Time `json:"expiresAt,omitempty"`
+}
+
 // ShareProjection is the full aggregate returned by GET /shares/{token}.
 // It contains all data the public viewer needs to render the configured view.
 type ShareProjection struct {
-	Share      Share            `json:"share"`
+	Share      PublicShare      `json:"share"`
 	Timeline   PublicTimeline   `json:"timeline"`
 	TeamName   string           `json:"teamName"`
 	Members    []PublicMember   `json:"members"`

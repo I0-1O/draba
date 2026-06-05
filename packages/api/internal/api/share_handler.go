@@ -105,6 +105,10 @@ func (s *Server) handleGetShareProjection(w http.ResponseWriter, r *http.Request
 	}
 
 	// Phase 13.3 — password gate handled here.
+	// NOTE: this check must stay above the cache read. PATCH invalidates the cache
+	// entry immediately (see handleUpdateShare), so a newly-added password_hash is
+	// never served from a stale cache. Moving the check below the cache read would
+	// silently bypass the password gate for the TTL window.
 	if share.PasswordHash != nil {
 		writeError(w, http.StatusUnauthorized, "PASSWORD_REQUIRED", "password required")
 		return
@@ -276,11 +280,21 @@ func (s *Server) buildShareProjection(share *models.Share) (*models.ShareProject
 		}
 	}
 
-	// Strip password hash before including share in the public projection.
-	safeShare := *share
-	safeShare.PasswordHash = nil
+	// Build the public share — only the fields anonymous callers need.
+	// Operational telemetry (view_count, last_viewed_at) and internal fields
+	// (created_by, revoked_at) are excluded from the public response.
+	pubShare := models.PublicShare{
+		ID:         share.ID,
+		TimelineID: share.TimelineID,
+		Token:      share.Token,
+		Name:       share.Name,
+		ViewType:   share.ViewType,
+		ViewConfig: share.ViewConfig,
+		CreatedAt:  share.CreatedAt,
+		ExpiresAt:  share.ExpiresAt,
+	}
 	proj := &models.ShareProjection{
-		Share:    safeShare,
+		Share:    pubShare,
 		TeamName: team.Name,
 		Timeline: models.PublicTimeline{
 			ID:        timeline.ID,

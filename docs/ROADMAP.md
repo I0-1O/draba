@@ -53,7 +53,7 @@ This document organizes development into discrete phases with effort estimates a
 | 11.3 | [Web — Kanban View (Interactive)](#phase-113--web--kanban-view-interactive) | M — 2–3 days | 🔄 |
 | 12 | [Communications Testing](#phase-12--communications-testing) | S — 1 day | ✅ |
 | 13 | [Shares — Public Read-Only View Links](#phase-13--shares--multi-share-views-with-passwords) (sub-phased) | L | ⬜ |
-| 13.1 | [Foundation, Public Gateway, Gantt Viewer (MVP)](#phase-131--foundation-public-gateway-gantt-viewer-mvp) | M–L | ⬜ |
+| 13.1 | [Foundation, Public Gateway, Gantt Viewer (MVP)](#phase-131--foundation-public-gateway-gantt-viewer-mvp) | M–L | ✅ |
 | 13.2 | [Remaining Views Read-Only](#phase-132--remaining-views-read-only) | M | ⬜ |
 | 13.3 | [Password Protection + Unlock](#phase-133--password-protection--unlock) | S–M | ⬜ |
 | 13.4 | [Lifecycle & Management](#phase-134--lifecycle--management) | S–M | ⬜ |
@@ -1516,7 +1516,7 @@ A first-class **Share** entity: one timeline can have many shares, each a frozen
 ---
 
 ### Phase 13.1 — Foundation, Public Gateway, Gantt Viewer (MVP)
-**Status:** 🔄 In Progress — automated checks pass, awaiting Docker verification | **Effort:** M–L
+**Status:** ✅ Complete (2026-06-05) — review findings addressed | **Effort:** M–L
 
 The whole data-leak surface is confronted here so 13.2–13.4 ride on a proven-safe gateway. Ships: `shares` schema + repo + **token migration** (each timeline's existing `share_token` becomes a `shares` row, so current links keep working; the `NOT NULL UNIQUE` column is dropped only in a later migration); a **Go filter evaluator** (`internal/filters` mirroring `matchesFilter`) + **shared golden fixtures** (`packages/shared/testdata/filter-fixtures.json`) run by both `filterEngine.test.ts` and a Go test; the **`GET /shares/{token}` gateway** (filter-first, view-driven field projection, referenced-entity pruning, TTL cache via `DRABA_SHARE_CACHE_TTL`); `POST/GET /timelines/{id}/shares` + `PATCH/DELETE /shares/{id}`; **Gantt `interactive=false` mode** (no chrome/drag/edit, forced light); "Share this view" in the Gantt toolbar (snapshots live toolbar state incl. the resolved filter definition); `/s/:token` public route + branding strip.
 

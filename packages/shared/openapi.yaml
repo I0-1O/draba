@@ -830,6 +830,38 @@ components:
           nullable: true
           format: date-time
 
+    PublicShare:
+      description: >
+        Safe projection of a Share for unauthenticated callers.
+        Omits operational telemetry (viewCount, lastViewedAt) and internal
+        fields (createdBy, revokedAt) that must not reach anonymous callers.
+      type: object
+      required: [id, timelineId, token, viewType, viewConfig, createdAt]
+      properties:
+        id:
+          type: string
+        timelineId:
+          type: string
+        token:
+          type: string
+        name:
+          type: string
+          nullable: true
+          description: Optional human-readable label for this share link.
+        viewType:
+          type: string
+          enum: [gantt, list, calendar, kanban]
+        viewConfig:
+          type: string
+          description: JSON-encoded view configuration snapshot.
+        createdAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          nullable: true
+          format: date-time
+
     CreateShareInput:
       type: object
       properties:
@@ -939,7 +971,7 @@ components:
       required: [share, timeline, teamName, members, statuses, tags, activities]
       properties:
         share:
-          $ref: "#/components/schemas/Share"
+          $ref: "#/components/schemas/PublicShare"
         teamName:
           type: string
         timeline:

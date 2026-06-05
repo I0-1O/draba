@@ -1526,6 +1526,22 @@ export interface components {
             /** Format: date-time */
             revokedAt?: string | null;
         };
+        /** @description Safe projection of a Share for unauthenticated callers. Omits operational telemetry (viewCount, lastViewedAt) and internal fields (createdBy, revokedAt) that must not reach anonymous callers. */
+        PublicShare: {
+            id: string;
+            timelineId: string;
+            token: string;
+            /** @description Optional human-readable label for this share link. */
+            name?: string | null;
+            /** @enum {string} */
+            viewType: "gantt" | "list" | "calendar" | "kanban";
+            /** @description JSON-encoded view configuration snapshot. */
+            viewConfig: string;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            expiresAt?: string | null;
+        };
         CreateShareInput: {
             name?: string | null;
             /** @enum {string} */
@@ -1573,7 +1589,7 @@ export interface components {
             endDate: string;
         };
         ShareProjection: {
-            share: components["schemas"]["Share"];
+            share: components["schemas"]["PublicShare"];
             teamName: string;
             timeline: components["schemas"]["PublicTimeline"];
             members: components["schemas"]["PublicMember"][];

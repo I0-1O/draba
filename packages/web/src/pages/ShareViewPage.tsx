@@ -87,10 +87,10 @@ export default function ShareViewPage() {
     }
   }, [])
 
-  // Re-apply whenever the component re-renders (e.g. ThemeSync fires later).
+  // Re-apply on mount in case ThemeSync fires after useLayoutEffect.
   useEffect(() => {
     document.documentElement.classList.remove('dark')
-  })
+  }, [])
 
   const vc = useMemo(
     () => parseViewConfig(proj?.share.viewConfig ?? '{}'),

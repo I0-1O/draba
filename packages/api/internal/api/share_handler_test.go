@@ -107,6 +107,65 @@ func TestShareDelete_Success(t *testing.T) {
 	assert.Equal(t, http.StatusNoContent, wD.Code)
 }
 
+// ── Update tests ──────────────────────────────────────────────────────────────
+
+func TestShareUpdate_Success(t *testing.T) {
+	srv, token, _, timelineID := shareTestSetup(t)
+
+	// Create a share.
+	wC := httptest.NewRecorder()
+	srv.ServeHTTP(wC, authReq(http.MethodPost, fmt.Sprintf("/timelines/%s/shares", timelineID), map[string]any{
+		"viewType": "gantt", "viewConfig": "{}",
+	}, token))
+	require.Equal(t, http.StatusCreated, wC.Code)
+	var created map[string]any
+	require.NoError(t, json.NewDecoder(wC.Body).Decode(&created))
+	shareID := created["id"].(string)
+
+	newName := "Updated Name"
+	wU := httptest.NewRecorder()
+	srv.ServeHTTP(wU, authReq(http.MethodPatch, fmt.Sprintf("/shares/%s", shareID), map[string]any{
+		"name": newName,
+	}, token))
+	assert.Equal(t, http.StatusOK, wU.Code)
+
+	var updated map[string]any
+	require.NoError(t, json.NewDecoder(wU.Body).Decode(&updated))
+	assert.Equal(t, newName, updated["name"])
+}
+
+func TestShareUpdate_Forbidden(t *testing.T) {
+	srv, aliceToken, teamID, timelineID := shareTestSetup(t)
+
+	// Alice creates a share.
+	wC := httptest.NewRecorder()
+	srv.ServeHTTP(wC, authReq(http.MethodPost, fmt.Sprintf("/timelines/%s/shares", timelineID), map[string]any{
+		"viewType": "gantt", "viewConfig": "{}",
+	}, aliceToken))
+	require.Equal(t, http.StatusCreated, wC.Code)
+	var created map[string]any
+	require.NoError(t, json.NewDecoder(wC.Body).Decode(&created))
+	shareID := created["id"].(string)
+
+	// Alice invites Bob so Bob can register.
+	wI := httptest.NewRecorder()
+	srv.ServeHTTP(wI, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/invites", teamID),
+		map[string]string{"email": "bob@share.com", "role": "member"}, aliceToken))
+	require.Equal(t, http.StatusCreated, wI.Code)
+	var inv map[string]any
+	require.NoError(t, json.NewDecoder(wI.Body).Decode(&inv))
+
+	// Bob joins as a regular member (not admin, not the share creator).
+	bobToken, _ := seedUserWithInvite(t, srv, "bob@share.com", "password2", "Bob", inv["token"].(string))
+
+	// Bob tries to PATCH Alice's share — fails because Bob is neither creator nor admin.
+	wU := httptest.NewRecorder()
+	srv.ServeHTTP(wU, authReq(http.MethodPatch, fmt.Sprintf("/shares/%s", shareID), map[string]any{
+		"name": "Hijacked",
+	}, bobToken))
+	assert.Equal(t, http.StatusForbidden, wU.Code)
+}
+
 // ── Public gateway tests (scope isolation) ────────────────────────────────────
 
 func TestShareGateway_Success(t *testing.T) {
