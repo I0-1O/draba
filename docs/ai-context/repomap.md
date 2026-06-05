@@ -8071,6 +8071,65 @@ func isValidPassword(p string) bool {
 }
 ````
 
+## File: packages/api/internal/api/helpers.go
+````go
+package api
+
+import (
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"net/http"
+	"strings"
+)
+
+// writeJSON sends v as a JSON response with the given status. Encoder
+// errors are ignored: the headers are already on the wire by the time
+// encoding happens, so there is nothing useful to do with the error.
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+// writeError writes the standard {error: {code, message}} envelope used
+// across the API. code is a stable machine identifier; message is a
+// human-readable explanation safe to surface to end users.
+func writeError(w http.ResponseWriter, status int, code, message string) {
+	writeJSON(w, status, map[string]any{
+		"error": map[string]string{
+			"code":    code,
+			"message": message,
+		},
+	})
+}
+
+// newID returns a 32-character hex ID derived from 16 random bytes
+// (128 bits — enough entropy that collisions are not a concern).
+func newID() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+// isUniqueConstraintError reports whether err came from a UNIQUE constraint
+// violation in SQLite. The driver surfaces these as plain errors whose message
+// contains "UNIQUE constraint failed".
+func isUniqueConstraintError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed")
+}
+
+// newToken returns a 64-character hex token derived from 32 random bytes
+// (256 bits). Use for invite tokens and other secrets; newID is for record IDs.
+// The longer length makes tokens visually distinct from IDs and raises the
+// brute-force bar.
+func newToken() string {
+	b := make([]byte, 32)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}
+````
+
 ## File: packages/api/internal/api/middleware.go
 ````go
 package api
@@ -10678,6 +10737,35 @@ CREATE INDEX IF NOT EXISTS idx_activities_timeline_id ON activities(timeline_id)
 -- Migration 016: Add notes column to activities
 -- notes is separate from description (short text); notes is a longer multi-line field.
 ALTER TABLE activities ADD COLUMN notes TEXT;
+````
+
+## File: packages/api/internal/db/migrations/017_tags_and_activity_tags.sql
+````sql
+-- Team-scoped tags table: enables colored pills, autocomplete, rename-all,
+-- and name-based filter matching across timelines.
+CREATE TABLE IF NOT EXISTS tags (
+    id         TEXT PRIMARY KEY,
+    team_id    TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+    name       TEXT NOT NULL,
+    color      TEXT,
+    created_by TEXT NOT NULL REFERENCES users(id),
+    created_at DATETIME NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(team_id, name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_tags_team_id ON tags(team_id);
+
+-- The original activity_tags table (migration 001, renamed in 005) used
+-- (activity_id, tag TEXT) — a simple text junction. No Go code, handler,
+-- or API endpoint has ever referenced it. Safe to drop and recreate with
+-- normalized FK references.
+DROP TABLE IF EXISTS activity_tags;
+
+CREATE TABLE activity_tags (
+    activity_id TEXT NOT NULL REFERENCES activities(id) ON DELETE CASCADE,
+    tag_id      TEXT NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+    PRIMARY KEY (activity_id, tag_id)
+);
 ````
 
 ## File: packages/api/internal/db/api_token_repo.go
@@ -19520,6 +19608,95 @@ export function useDeleteTimelineStatus(teamId: string, timelineId: string) {
 }
 ````
 
+## File: packages/web/src/hooks/useTags.ts
+````typescript
+/**
+ * TanStack Query hooks for Tag CRUD. Tags are team-scoped and can be applied
+ * to activities across any timeline in the team.
+ */
+
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { createAuthFetch } from '@/lib/api'
+import { useAuth } from '@/contexts/AuthContext'
+
+export interface Tag {
+  id: string
+  teamId: string
+  name: string
+  color?: string | null
+  createdBy: string
+  createdAt: string
+}
+
+const tagsKey = (teamId: string) => ['teams', teamId, 'tags'] as const
+
+/** Fetches all tags for a team, ordered by name. */
+export function useTags(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  return useQuery({
+    queryKey: tagsKey(teamId),
+    queryFn: () => authFetch<Tag[]>(`/teams/${teamId}/tags`),
+    enabled: Boolean(teamId),
+  })
+}
+
+interface CreateTagInput {
+  name: string
+  color?: string
+}
+
+/** Creates a new tag and invalidates the list. */
+export function useCreateTag(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (input: CreateTagInput) =>
+      authFetch<Tag>(`/teams/${teamId}/tags`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(input),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: tagsKey(teamId) }),
+  })
+}
+
+interface UpdateTagInput {
+  id: string
+  name?: string
+  color?: string | null
+}
+
+/** Updates a tag's name or color and invalidates the list. */
+export function useUpdateTag(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, ...patch }: UpdateTagInput) =>
+      authFetch<Tag>(`/tags/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(patch),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: tagsKey(teamId) }),
+  })
+}
+
+/** Deletes a tag (cascades activity_tags) and invalidates the list. */
+export function useDeleteTag(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) =>
+      authFetch<void>(`/tags/${id}`, { method: 'DELETE' }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: tagsKey(teamId) }),
+  })
+}
+````
+
 ## File: packages/web/src/hooks/useWebSocket.ts
 ````typescript
 /**
@@ -23114,6 +23291,37 @@ packages:
   - "packages/*"
 ````
 
+## File: .claude/commands/build-phase.md
+````markdown
+Read docs/ROADMAP.md and identify the phase specified in $ARGUMENTS (e.g. "1" or "Phase 1").
+
+1. Read the phase's scope and exit criteria from ROADMAP.md.
+2. Find the corresponding tasks in docs/TASKS.md.
+3. Read any referenced docs (ARCHITECTURE.md, CONVENTIONS.md, REQUIREMENTS.md) relevant to this phase before writing any code.
+4. Update the phase status in ROADMAP.md from ⬜ to 🔄 before starting work.
+5. Implement every task in the phase's scope, following CONVENTIONS.md throughout.
+6. After implementation, run all of the following checks in order — all must pass before marking the phase done:
+   - **Go:** `golangci-lint run` then `go test ./...`
+   - **Web lint:** `pnpm --filter web lint` (runs `tsc --noEmit` — catches type errors in isolation)
+   - **Web build:** `pnpm --filter web build` (runs `tsc -b && vite build` — catches additional errors that `--noEmit` misses, such as missing fields on exported interfaces, composite project reference issues, and import graph problems). This is the same build CI runs; skipping it is the most common source of "passes locally, fails in CI" build errors.
+   - Fix any errors found before proceeding, even if they're in files you didn't directly touch.
+   Suggest running `/test-phase <N>` and `/review-phase <N>` to fan the verification out across subagents in parallel.
+7. Check off completed items in TASKS.md.
+8. Update the phase status in ROADMAP.md:
+   - If all exit criteria pass: ✅ Done, add the completion date.
+   - If any exit criterion fails or needs manual verification: mark 🔄 In Progress and add a note listing what still needs review.
+9. Update `docs/log.md` (mandatory — this is the durable per-phase record):
+   - Prepend a dated entry at the top, matching the format of existing entries (Goal, then Backend / Frontend / Tests sections as relevant).
+   - This is the place for full implementation detail. Do **not** put that detail in session-state.md.
+10. Refresh `docs/ai-context/session-state.md` so it stays a *current-state snapshot*, never an append-log:
+   - Update the **Last updated** line.
+   - In **Phase Status**: if the phase passed all checks, leave it as the just-built phase awaiting manual verification; if a *previously* built phase has since been Docker-verified, collapse it into the "all phases through X.Y complete and verified" sentence and delete its detail (the detail already lives in log.md).
+   - Update **Open Issues** — add anything new this phase surfaced, remove anything now resolved.
+   - Point **Next phase** at the next ROADMAP item and its plan file.
+   - Keep the whole file short. If it grows past ~60 lines you are duplicating log.md — move detail out. The top-of-file contract ("per-phase detail lives in log.md; this is a snapshot only") is the rule; honor it.
+11. Summarize what was built and which exit criteria were verified vs. which need manual testing by the user.
+````
+
 ## File: docs/design/handoffs/kanban-view/Kanban View.html
 ````html
 <!doctype html>
@@ -25131,6 +25339,669 @@ user_preferences — set by users at runtime
 ```
 ````
 
+## File: packages/api/cmd/draba/main.go
+````go
+// Command draba is the API server entry point. It wires repositories,
+// the auth token service, and tier configuration into the HTTP server,
+// then listens for requests until the process is killed.
+package main
+
+import (
+	"fmt"
+	"io/fs"
+	"log/slog"
+	"net/http"
+	"os"
+	"strings"
+
+	"github.com/I0-1O/draba/packages/api/internal/api"
+	"github.com/I0-1O/draba/packages/api/internal/auth"
+	"github.com/I0-1O/draba/packages/api/internal/db"
+	"github.com/I0-1O/draba/packages/api/internal/events"
+	"github.com/I0-1O/draba/packages/api/internal/mailer"
+	"github.com/I0-1O/draba/packages/api/internal/tier"
+	"github.com/I0-1O/draba/packages/api/internal/ws"
+	drabui "github.com/I0-1O/draba/packages/api/ui"
+)
+
+const banner = "\n" +
+	"      _           _\n" +
+	"     | |         | |\n" +
+	"   __| |_ __ __ _| |__   __ _\n" +
+	"  / _` | '__/ _` | '_ \\ / _` |\n" +
+	" | (_| | | | (_| | |_) | (_| |\n" +
+	"  \\__,_|_|  \\__,_|_.__/ \\__,_|\n" +
+	"\n" +
+	"  see who's doing what, when.\n\n"
+
+func main() {
+	if len(os.Args) > 1 && os.Args[1] == "reset-password" {
+		runResetPassword(os.Args[2:])
+		return
+	}
+
+	setupLogger()
+	fmt.Print(banner)
+
+	port := getenv("DRABA_PORT", "8080")
+	dsn := getenv("DRABA_DB_DSN", "/data/draba.db")
+	jwtSecret := os.Getenv("DRABA_JWT_SECRET")
+	if jwtSecret == "" {
+		slog.Error("DRABA_JWT_SECRET must be set")
+		os.Exit(1)
+	}
+
+	t, err := tier.Load()
+	if err != nil {
+		slog.Error("tier load failed", "err", err)
+		os.Exit(1)
+	}
+	l := t.Limits()
+	if l.MaxUsers == 0 {
+		slog.Info("tier", "tier", t)
+	} else {
+		slog.Info("tier", "tier", t, "maxUsers", l.MaxUsers, "maxTeams", l.MaxTeams)
+	}
+
+	database, err := db.Open(dsn)
+	if err != nil {
+		slog.Error("db: open failed", "err", err)
+		os.Exit(1)
+	}
+	slog.Info("db: opened", "dsn", dsn)
+
+	if err := db.Migrate(database); err != nil {
+		slog.Error("db: migrate failed", "err", err)
+		os.Exit(1)
+	}
+	slog.Info("db: migrations applied")
+
+	users := db.NewUserRepo(database)
+	invites := db.NewInviteRepo(database)
+	teams := db.NewTeamRepo(database)
+	activityRepo := db.NewActivityRepo(database)
+	timelineRepo := db.NewTimelineRepo(database)
+	savedFilterRepo := db.NewSavedFilterRepo(database)
+	preferenceRepo := db.NewUserPreferenceRepo(database)
+	apiTokenRepo := db.NewAPITokenRepo(database)
+	instanceSetsRepo := db.NewInstanceSettingsRepo(database)
+	passwordTokensRepo := db.NewPasswordResetTokenRepo(database)
+	statusRepo := db.NewStatusRepo(database)
+	tagRepo := db.NewTagRepo(database)
+	shareRepo := db.NewShareRepo(database)
+	m := mailer.New(instanceSetsRepo, []byte(jwtSecret))
+	tokens := auth.NewTokenService(jwtSecret)
+
+	bus := events.NewBus()
+	hub := ws.NewHub(bus, tokens, func(teamID, userID string) error {
+		_, err := teams.GetMember(teamID, userID)
+		return err
+	})
+	go hub.Run()
+	slog.Info("ws: hub running")
+
+	if mods := tier.Registered(); len(mods) > 0 {
+		slog.Info("modules loaded", "count", len(mods))
+	}
+
+	srv := api.NewServer(users, invites, teams, activityRepo, timelineRepo, savedFilterRepo, preferenceRepo, apiTokenRepo, instanceSetsRepo, passwordTokensRepo, statusRepo, tagRepo, shareRepo, m, tokens, t, bus, hub)
+
+	// Wire up the embedded React SPA when a production build is present.
+	// In dev the static/ directory only has .gitkeep so this is a no-op.
+	if sub, err := fs.Sub(drabui.FS, "static"); err == nil {
+		if _, err := sub.Open("index.html"); err == nil {
+			srv.WithUI(sub)
+			slog.Info("ui: serving embedded SPA")
+		}
+	}
+
+	slog.Info("listening", "port", port)
+	if err := http.ListenAndServe(":"+port, srv.Routes()); err != nil {
+		slog.Error("server error", "err", err)
+		os.Exit(1)
+	}
+}
+
+// setupLogger initialises the global slog logger. Level is controlled by
+// DRABA_LOG_LEVEL (debug | info | warn | error); default is info.
+// All output goes to stdout so Docker captures it in `docker logs`.
+func setupLogger() {
+	level := slog.LevelInfo
+	switch strings.ToLower(os.Getenv("DRABA_LOG_LEVEL")) {
+	case "debug":
+		level = slog.LevelDebug
+	case "warn":
+		level = slog.LevelWarn
+	case "error":
+		level = slog.LevelError
+	}
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level})))
+}
+
+// getenv returns the env var value or fallback when unset/empty.
+func getenv(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+````
+
+## File: packages/api/internal/api/api_types.gen.go
+````go
+// Package api provides primitives to interact with the openapi HTTP API.
+//
+// Code generated by github.com/oapi-codegen/oapi-codegen/v2 version v2.7.0 DO NOT EDIT.
+package api
+
+import (
+	"time"
+
+	openapi_types "github.com/oapi-codegen/runtime/types"
+)
+
+const (
+	BearerAuthScopes bearerAuthContextKey = "bearerAuth.Scopes"
+)
+
+// Defines values for HealthResponseStatus.
+const (
+	Ok HealthResponseStatus = "ok"
+)
+
+// Valid indicates whether the value is a known member of the HealthResponseStatus enum.
+func (e HealthResponseStatus) Valid() bool {
+	switch e {
+	case Ok:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for InviteRole.
+const (
+	InviteRoleAdmin  InviteRole = "admin"
+	InviteRoleMember InviteRole = "member"
+)
+
+// Valid indicates whether the value is a known member of the InviteRole enum.
+func (e InviteRole) Valid() bool {
+	switch e {
+	case InviteRoleAdmin:
+		return true
+	case InviteRoleMember:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for TeamMemberRole.
+const (
+	TeamMemberRoleAdmin  TeamMemberRole = "admin"
+	TeamMemberRoleMember TeamMemberRole = "member"
+	TeamMemberRoleOwner  TeamMemberRole = "owner"
+)
+
+// Valid indicates whether the value is a known member of the TeamMemberRole enum.
+func (e TeamMemberRole) Valid() bool {
+	switch e {
+	case TeamMemberRoleAdmin:
+		return true
+	case TeamMemberRoleMember:
+		return true
+	case TeamMemberRoleOwner:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for TeamMemberWithUserRole.
+const (
+	TeamMemberWithUserRoleAdmin  TeamMemberWithUserRole = "admin"
+	TeamMemberWithUserRoleMember TeamMemberWithUserRole = "member"
+	TeamMemberWithUserRoleOwner  TeamMemberWithUserRole = "owner"
+)
+
+// Valid indicates whether the value is a known member of the TeamMemberWithUserRole enum.
+func (e TeamMemberWithUserRole) Valid() bool {
+	switch e {
+	case TeamMemberWithUserRoleAdmin:
+		return true
+	case TeamMemberWithUserRoleMember:
+		return true
+	case TeamMemberWithUserRoleOwner:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for TimelineVisibility.
+const (
+	TimelineVisibilityPublic     TimelineVisibility = "public"
+	TimelineVisibilityRestricted TimelineVisibility = "restricted"
+)
+
+// Valid indicates whether the value is a known member of the TimelineVisibility enum.
+func (e TimelineVisibility) Valid() bool {
+	switch e {
+	case TimelineVisibilityPublic:
+		return true
+	case TimelineVisibilityRestricted:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for CreateInviteJSONBodyRole.
+const (
+	CreateInviteJSONBodyRoleAdmin  CreateInviteJSONBodyRole = "admin"
+	CreateInviteJSONBodyRoleMember CreateInviteJSONBodyRole = "member"
+)
+
+// Valid indicates whether the value is a known member of the CreateInviteJSONBodyRole enum.
+func (e CreateInviteJSONBodyRole) Valid() bool {
+	switch e {
+	case CreateInviteJSONBodyRoleAdmin:
+		return true
+	case CreateInviteJSONBodyRoleMember:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for CreateTimelineJSONBodyVisibility.
+const (
+	CreateTimelineJSONBodyVisibilityPublic     CreateTimelineJSONBodyVisibility = "public"
+	CreateTimelineJSONBodyVisibilityRestricted CreateTimelineJSONBodyVisibility = "restricted"
+)
+
+// Valid indicates whether the value is a known member of the CreateTimelineJSONBodyVisibility enum.
+func (e CreateTimelineJSONBodyVisibility) Valid() bool {
+	switch e {
+	case CreateTimelineJSONBodyVisibilityPublic:
+		return true
+	case CreateTimelineJSONBodyVisibilityRestricted:
+		return true
+	default:
+		return false
+	}
+}
+
+// ApiError defines model for ApiError.
+type ApiError struct {
+	Error struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
+// AuthResponse defines model for AuthResponse.
+type AuthResponse struct {
+	AccessToken  string `json:"accessToken"`
+	RefreshToken string `json:"refreshToken"`
+	User         User   `json:"user"`
+}
+
+// Activity defines model for Activity.
+type Activity struct {
+	AllDay           bool       `json:"allDay"`
+	ArchivedAt       *time.Time `json:"archivedAt,omitempty"`
+	CaldavUid        *string    `json:"caldavUid,omitempty"`
+	Color            *string    `json:"color,omitempty"`
+	CreatedAt        time.Time  `json:"createdAt"`
+	CreatedBy        string     `json:"createdBy"`
+	Description      *string    `json:"description,omitempty"`
+	EndAt            time.Time  `json:"endAt"`
+	GoogleEventId    *string    `json:"googleEventId,omitempty"`
+	Icon             *string    `json:"icon,omitempty"`
+	Id               string     `json:"id"`
+	Location         *string    `json:"location,omitempty"`
+	ParentActivityId *string    `json:"parentActivityId,omitempty"`
+	PercentComplete  *int       `json:"percentComplete,omitempty"`
+	Rrule            *string    `json:"rrule,omitempty"`
+	StartAt          time.Time  `json:"startAt"`
+	StatusId         *string    `json:"statusId,omitempty"`
+	TeamId           string     `json:"teamId"`
+	Title            string     `json:"title"`
+	UpdatedAt        time.Time  `json:"updatedAt"`
+	Url              *string    `json:"url,omitempty"`
+}
+
+// HealthResponse defines model for HealthResponse.
+type HealthResponse struct {
+	Status HealthResponseStatus `json:"status"`
+}
+
+// HealthResponseStatus defines model for HealthResponse.Status.
+type HealthResponseStatus string
+
+// Invite defines model for Invite.
+type Invite struct {
+	AcceptedAt *time.Time `json:"acceptedAt,omitempty"`
+	CreatedAt  time.Time  `json:"createdAt"`
+	Email      string     `json:"email"`
+	ExpiresAt  time.Time  `json:"expiresAt"`
+	Id         string     `json:"id"`
+	InvitedBy  string     `json:"invitedBy"`
+	Role       InviteRole `json:"role"`
+	TeamId     string     `json:"teamId"`
+	Token      string     `json:"token"`
+}
+
+// InviteRole defines model for Invite.Role.
+type InviteRole string
+
+// RefreshResponse defines model for RefreshResponse.
+type RefreshResponse struct {
+	AccessToken string `json:"accessToken"`
+}
+
+// UserPreference defines model for UserPreference.
+type UserPreference struct {
+	Id         string    `json:"id"`
+	UserId     string    `json:"userId"`
+	TimelineId string    `json:"timelineId,omitempty"`
+	Key        string    `json:"key"`
+	Value      string    `json:"value"`
+	UpdatedAt  time.Time `json:"updatedAt"`
+}
+
+// UpsertPreferenceJSONBody defines parameters for UpsertPreference.
+type UpsertPreferenceJSONBody struct {
+	// Key Preference key (e.g. group_by, sort_by, zoom_granularity, theme).
+	Key string `json:"key"`
+
+	// Value JSON-encoded preference value.
+	Value string `json:"value"`
+
+	// TimelineId Optional timeline scope. Omit or pass "" for a global preference.
+	TimelineId *string `json:"timelineId,omitempty"`
+}
+
+// UpsertPreferenceJSONRequestBody defines body for UpsertPreference for application/json ContentType.
+type UpsertPreferenceJSONRequestBody UpsertPreferenceJSONBody
+
+// SavedFilter defines model for SavedFilter.
+type SavedFilter struct {
+	CreatedAt time.Time `json:"createdAt"`
+
+	// Definition Opaque JSON filter spec (validated client-side).
+	Definition string `json:"definition"`
+	Id         string `json:"id"`
+
+	// IsTeamFilter When true, the filter is visible to all team members (set by admins only).
+	IsTeamFilter bool      `json:"isTeamFilter"`
+	Name         string    `json:"name"`
+	TeamId       string    `json:"teamId"`
+	UpdatedAt    time.Time `json:"updatedAt"`
+	UserId       string    `json:"userId"`
+}
+
+// Team defines model for Team.
+type Team struct {
+	ArchivedAt  *time.Time `json:"archivedAt,omitempty"`
+	Color       *string    `json:"color,omitempty"`
+	CreatedAt   time.Time  `json:"createdAt"`
+	Description *string    `json:"description,omitempty"`
+	Icon        *string    `json:"icon,omitempty"`
+	Id          string     `json:"id"`
+	Name        string     `json:"name"`
+	Notes       *string    `json:"notes,omitempty"`
+	Slug        string     `json:"slug"`
+	UpdatedAt   time.Time  `json:"updatedAt"`
+}
+
+// TeamMember defines model for TeamMember.
+type TeamMember struct {
+	Color    *string        `json:"color,omitempty"`
+	JoinedAt time.Time      `json:"joinedAt"`
+	Role     TeamMemberRole `json:"role"`
+	TeamId   string         `json:"teamId"`
+	UserId   string         `json:"userId"`
+}
+
+// TeamMemberRole defines model for TeamMember.Role.
+type TeamMemberRole string
+
+// TeamMemberWithUser defines model for TeamMemberWithUser.
+type TeamMemberWithUser struct {
+	AvatarUrl   *string                `json:"avatarUrl,omitempty"`
+	Color       *string                `json:"color,omitempty"`
+	DisplayName string                 `json:"displayName"`
+	Email       openapi_types.Email    `json:"email"`
+	JoinedAt    time.Time              `json:"joinedAt"`
+	Role        TeamMemberWithUserRole `json:"role"`
+	TeamId      string                 `json:"teamId"`
+	UserId      string                 `json:"userId"`
+}
+
+// TeamMemberWithUserRole defines model for TeamMemberWithUser.Role.
+type TeamMemberWithUserRole string
+
+// Timeline defines model for Timeline.
+type Timeline struct {
+	ArchivedAt *time.Time         `json:"archivedAt,omitempty"`
+	CreatedAt  time.Time          `json:"createdAt"`
+	CreatedBy  string             `json:"createdBy"`
+	EndDate    openapi_types.Date `json:"endDate"`
+	IcalToken  string             `json:"icalToken"`
+	Id         string             `json:"id"`
+	Name       string             `json:"name"`
+	ShareToken string             `json:"shareToken"`
+	StartDate  openapi_types.Date `json:"startDate"`
+	TeamId     string             `json:"teamId"`
+	UpdatedAt  time.Time          `json:"updatedAt"`
+	Visibility TimelineVisibility `json:"visibility"`
+}
+
+// TimelineVisibility defines model for Timeline.Visibility.
+type TimelineVisibility string
+
+// User defines model for User.
+type User struct {
+	AvatarUrl   *string             `json:"avatarUrl,omitempty"`
+	CreatedAt   time.Time           `json:"createdAt"`
+	DisplayName string              `json:"displayName"`
+	Email       openapi_types.Email `json:"email"`
+	Id          string              `json:"id"`
+	UpdatedAt   time.Time           `json:"updatedAt"`
+}
+
+// ActivityId defines model for activityId.
+type ActivityId = string
+
+// SavedFilterId defines model for savedFilterId.
+type SavedFilterId = string
+
+// ShareToken defines model for shareToken.
+type ShareToken = string
+
+// TeamId defines model for teamId.
+type TeamId = string
+
+// TimelineId defines model for timelineId.
+type TimelineId = string
+
+// BadRequest defines model for BadRequest.
+type BadRequest = ApiError
+
+// Forbidden defines model for Forbidden.
+type Forbidden = ApiError
+
+// InternalError defines model for InternalError.
+type InternalError = ApiError
+
+// NotFound defines model for NotFound.
+type NotFound = ApiError
+
+// PaymentRequired defines model for PaymentRequired.
+type PaymentRequired = ApiError
+
+// Unauthorized defines model for Unauthorized.
+type Unauthorized = ApiError
+
+// bearerAuthContextKey is the context key for bearerAuth security scheme
+type bearerAuthContextKey string
+
+// LoginJSONBody defines parameters for Login.
+type LoginJSONBody struct {
+	Email    openapi_types.Email `json:"email"`
+	Password string              `json:"password"`
+}
+
+// RefreshTokenJSONBody defines parameters for RefreshToken.
+type RefreshTokenJSONBody struct {
+	RefreshToken string `json:"refreshToken"`
+}
+
+// RegisterJSONBody defines parameters for Register.
+type RegisterJSONBody struct {
+	DisplayName string              `json:"displayName"`
+	Email       openapi_types.Email `json:"email"`
+	InviteToken *string             `json:"inviteToken,omitempty"`
+	Password    string              `json:"password"`
+}
+
+// UpdateActivityJSONBody defines parameters for UpdateActivity.
+type UpdateActivityJSONBody struct {
+	AllDay           *bool      `json:"allDay,omitempty"`
+	Color            *string    `json:"color,omitempty"`
+	Description      *string    `json:"description,omitempty"`
+	EndAt            *time.Time `json:"endAt,omitempty"`
+	Icon             *string    `json:"icon,omitempty"`
+	Location         *string    `json:"location,omitempty"`
+	ParentActivityId *string    `json:"parentActivityId,omitempty"`
+	PercentComplete  *int       `json:"percentComplete,omitempty"`
+	Rrule            *string    `json:"rrule,omitempty"`
+	StartAt          *time.Time `json:"startAt,omitempty"`
+	StatusId         *string    `json:"statusId,omitempty"`
+	Title            *string    `json:"title,omitempty"`
+	Url              *string    `json:"url,omitempty"`
+}
+
+// UpdateSavedFilterJSONBody defines parameters for UpdateSavedFilter.
+type UpdateSavedFilterJSONBody struct {
+	Definition   *string `json:"definition,omitempty"`
+	IsTeamFilter *bool   `json:"isTeamFilter,omitempty"`
+	Name         *string `json:"name,omitempty"`
+}
+
+// CreateTeamJSONBody defines parameters for CreateTeam.
+type CreateTeamJSONBody struct {
+	Name        string  `json:"name"`
+	Description *string `json:"description,omitempty"`
+	Notes       *string `json:"notes,omitempty"`
+	Color       *string `json:"color,omitempty"`
+	Icon        *string `json:"icon,omitempty"`
+}
+
+// UpdateTeamJSONBody defines parameters for UpdateTeam.
+type UpdateTeamJSONBody struct {
+	Name        *string `json:"name,omitempty"`
+	Description *string `json:"description,omitempty"`
+	Notes       *string `json:"notes,omitempty"`
+	Color       *string `json:"color,omitempty"`
+	Icon        *string `json:"icon,omitempty"`
+}
+
+// ListActivitiesParams defines parameters for ListActivities.
+type ListActivitiesParams struct {
+	// From Only return activities where startAt >= from (RFC 3339).
+	From *time.Time `form:"from,omitempty" json:"from,omitempty"`
+
+	// To Only return activities where startAt <= to (RFC 3339).
+	To *time.Time `form:"to,omitempty" json:"to,omitempty"`
+}
+
+// CreateActivityJSONBody defines parameters for CreateActivity.
+type CreateActivityJSONBody struct {
+	AllDay            *bool     `json:"allDay,omitempty"`
+	AssignedMemberIds *[]string `json:"assignedMemberIds,omitempty"`
+	TagIds            *[]string `json:"tagIds,omitempty"`
+	Color             *string   `json:"color,omitempty"`
+	Description       *string   `json:"description,omitempty"`
+	EndAt             time.Time `json:"endAt"`
+	Icon              *string   `json:"icon,omitempty"`
+	Location          *string   `json:"location,omitempty"`
+	Notes             *string   `json:"notes,omitempty"`
+	ParentActivityId  *string   `json:"parentActivityId,omitempty"`
+	PercentComplete   *int      `json:"percentComplete,omitempty"`
+	Rrule             *string   `json:"rrule,omitempty"`
+	StartAt           time.Time `json:"startAt"`
+	StatusId          *string   `json:"statusId,omitempty"`
+	Title             string    `json:"title"`
+	Url               *string   `json:"url,omitempty"`
+}
+
+// CreateInviteJSONBody defines parameters for CreateInvite.
+type CreateInviteJSONBody struct {
+	// Email If provided, the invite is scoped to this email address.
+	Email *openapi_types.Email      `json:"email,omitempty"`
+	Role  *CreateInviteJSONBodyRole `json:"role,omitempty"`
+}
+
+// CreateInviteJSONBodyRole defines parameters for CreateInvite.
+type CreateInviteJSONBodyRole string
+
+// CreateSavedFilterJSONBody defines parameters for CreateSavedFilter.
+type CreateSavedFilterJSONBody struct {
+	// Definition Opaque JSON filter spec (validated client-side).
+	Definition   string `json:"definition"`
+	IsTeamFilter *bool  `json:"isTeamFilter,omitempty"`
+	Name         string `json:"name"`
+}
+
+// CreateTimelineJSONBody defines parameters for CreateTimeline.
+type CreateTimelineJSONBody struct {
+	EndDate    openapi_types.Date                `json:"endDate"`
+	Name       string                            `json:"name"`
+	StartDate  openapi_types.Date                `json:"startDate"`
+	Visibility *CreateTimelineJSONBodyVisibility `json:"visibility,omitempty"`
+}
+
+// CreateTimelineJSONBodyVisibility defines parameters for CreateTimeline.
+type CreateTimelineJSONBodyVisibility string
+
+// LoginJSONRequestBody defines body for Login for application/json ContentType.
+type LoginJSONRequestBody LoginJSONBody
+
+// RefreshTokenJSONRequestBody defines body for RefreshToken for application/json ContentType.
+type RefreshTokenJSONRequestBody RefreshTokenJSONBody
+
+// RegisterJSONRequestBody defines body for Register for application/json ContentType.
+type RegisterJSONRequestBody RegisterJSONBody
+
+// UpdateActivityJSONRequestBody defines body for UpdateActivity for application/json ContentType.
+type UpdateActivityJSONRequestBody UpdateActivityJSONBody
+
+// UpdateSavedFilterJSONRequestBody defines body for UpdateSavedFilter for application/json ContentType.
+type UpdateSavedFilterJSONRequestBody UpdateSavedFilterJSONBody
+
+// CreateTeamJSONRequestBody defines body for CreateTeam for application/json ContentType.
+type CreateTeamJSONRequestBody CreateTeamJSONBody
+
+// UpdateTeamJSONRequestBody defines body for UpdateTeam for application/json ContentType.
+type UpdateTeamJSONRequestBody UpdateTeamJSONBody
+
+// CreateActivityJSONRequestBody defines body for CreateActivity for application/json ContentType.
+type CreateActivityJSONRequestBody CreateActivityJSONBody
+
+// CreateInviteJSONRequestBody defines body for CreateInvite for application/json ContentType.
+type CreateInviteJSONRequestBody CreateInviteJSONBody
+
+// CreateSavedFilterJSONRequestBody defines body for CreateSavedFilter for application/json ContentType.
+type CreateSavedFilterJSONRequestBody CreateSavedFilterJSONBody
+
+// CreateTimelineJSONRequestBody defines body for CreateTimeline for application/json ContentType.
+type CreateTimelineJSONRequestBody CreateTimelineJSONBody
+````
+
 ## File: packages/api/internal/api/authz.go
 ````go
 package api
@@ -25217,92 +26088,170 @@ func superadminMember(teamID, userID string) *models.TeamMember {
 }
 ````
 
-## File: packages/api/internal/api/helpers.go
+## File: packages/api/internal/api/tag_handler.go
 ````go
 package api
 
 import (
-	"crypto/rand"
-	"encoding/hex"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
-	"strings"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/models"
 )
 
-// writeJSON sends v as a JSON response with the given status. Encoder
-// errors are ignored: the headers are already on the wire by the time
-// encoding happens, so there is nothing useful to do with the error.
-func writeJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
+// handleListTags handles GET /teams/{id}/tags. Returns all tags for the team,
+// ordered by name.
+func (s *Server) handleListTags(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+
+	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
+		return
+	}
+
+	tags, err := s.tags.ListByTeam(teamID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list tags")
+		return
+	}
+	writeJSON(w, http.StatusOK, tags)
 }
 
-// writeError writes the standard {error: {code, message}} envelope used
-// across the API. code is a stable machine identifier; message is a
-// human-readable explanation safe to surface to end users.
-func writeError(w http.ResponseWriter, status int, code, message string) {
-	writeJSON(w, status, map[string]any{
-		"error": map[string]string{
-			"code":    code,
-			"message": message,
-		},
-	})
+// tagNameMaxLen is the maximum byte length accepted for a tag name.
+const tagNameMaxLen = 50
+
+// handleCreateTag handles POST /teams/{id}/tags. Any team member may create a
+// tag; they become the creator. Returns 409 when a tag with the same name
+// already exists in the team.
+func (s *Server) handleCreateTag(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
+		return
+	}
+
+	var req struct {
+		Name  string  `json:"name"`
+		Color *string `json:"color,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+	if req.Name == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name is required")
+		return
+	}
+	if len(req.Name) > tagNameMaxLen {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name must be 50 characters or fewer")
+		return
+	}
+
+	tag := &models.Tag{
+		ID:        newID(),
+		TeamID:    teamID,
+		Name:      req.Name,
+		Color:     req.Color,
+		CreatedBy: claims.UserID,
+		CreatedAt: time.Now().UTC(),
+	}
+	if err := s.tags.Create(tag); err != nil {
+		// SQLite unique constraint violation message contains "UNIQUE constraint failed"
+		if isUniqueConstraintError(err) {
+			writeError(w, http.StatusConflict, "TAG_NAME_EXISTS", "a tag with this name already exists in the team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create tag")
+		return
+	}
+	writeJSON(w, http.StatusCreated, tag)
 }
 
-// newID returns a 32-character hex ID derived from 16 random bytes
-// (128 bits — enough entropy that collisions are not a concern).
-func newID() string {
-	b := make([]byte, 16)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)
+// handleUpdateTag handles PATCH /tags/{id}. Any team member may update the
+// tag's name or color after confirming membership in the tag's team.
+func (s *Server) handleUpdateTag(w http.ResponseWriter, r *http.Request) {
+	tagID := r.PathValue("id")
+
+	tag, err := s.tags.GetByID(tagID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "tag not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update tag")
+		return
+	}
+
+	// Return 404 (not 403) for non-members so callers cannot probe tag existence.
+	if !s.hasTeamAccess(r, tag.TeamID) {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "tag not found")
+		return
+	}
+
+	var req struct {
+		Name  *string `json:"name,omitempty"`
+		Color *string `json:"color,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+	if req.Name != nil {
+		if *req.Name == "" {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name must not be empty")
+			return
+		}
+		if len(*req.Name) > tagNameMaxLen {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name must be 50 characters or fewer")
+			return
+		}
+		tag.Name = *req.Name
+	}
+	if req.Color != nil {
+		tag.Color = req.Color
+	}
+
+	if err := s.tags.Update(tag); err != nil {
+		if isUniqueConstraintError(err) {
+			writeError(w, http.StatusConflict, "TAG_NAME_EXISTS", "a tag with this name already exists in the team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update tag")
+		return
+	}
+	writeJSON(w, http.StatusOK, tag)
 }
 
-// isUniqueConstraintError reports whether err came from a UNIQUE constraint
-// violation in SQLite. The driver surfaces these as plain errors whose message
-// contains "UNIQUE constraint failed".
-func isUniqueConstraintError(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed")
+// handleDeleteTag handles DELETE /tags/{id}. Any team member may delete a tag;
+// the cascade removes all activity_tags rows referencing it.
+func (s *Server) handleDeleteTag(w http.ResponseWriter, r *http.Request) {
+	tagID := r.PathValue("id")
+
+	tag, err := s.tags.GetByID(tagID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "tag not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete tag")
+		return
+	}
+
+	// Return 404 (not 403) for non-members so callers cannot probe tag existence.
+	if !s.hasTeamAccess(r, tag.TeamID) {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "tag not found")
+		return
+	}
+
+	if err := s.tags.Delete(tagID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete tag")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
-
-// newToken returns a 64-character hex token derived from 32 random bytes
-// (256 bits). Use for invite tokens and other secrets; newID is for record IDs.
-// The longer length makes tokens visually distinct from IDs and raises the
-// brute-force bar.
-func newToken() string {
-	b := make([]byte, 32)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)
-}
-````
-
-## File: packages/api/internal/db/migrations/017_tags_and_activity_tags.sql
-````sql
--- Team-scoped tags table: enables colored pills, autocomplete, rename-all,
--- and name-based filter matching across timelines.
-CREATE TABLE IF NOT EXISTS tags (
-    id         TEXT PRIMARY KEY,
-    team_id    TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
-    name       TEXT NOT NULL,
-    color      TEXT,
-    created_by TEXT NOT NULL REFERENCES users(id),
-    created_at DATETIME NOT NULL DEFAULT (datetime('now')),
-    UNIQUE(team_id, name)
-);
-
-CREATE INDEX IF NOT EXISTS idx_tags_team_id ON tags(team_id);
-
--- The original activity_tags table (migration 001, renamed in 005) used
--- (activity_id, tag TEXT) — a simple text junction. No Go code, handler,
--- or API endpoint has ever referenced it. Safe to drop and recreate with
--- normalized FK references.
-DROP TABLE IF EXISTS activity_tags;
-
-CREATE TABLE activity_tags (
-    activity_id TEXT NOT NULL REFERENCES activities(id) ON DELETE CASCADE,
-    tag_id      TEXT NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
-    PRIMARY KEY (activity_id, tag_id)
-);
 ````
 
 ## File: packages/api/internal/db/migrations/018_saved_filters_team_scope.sql
@@ -25365,6 +26314,113 @@ WHERE t.share_token IS NOT NULL
 -- Migration 020: add name column to shares.
 -- Nullable — existing shares and shares created without a name stay unnamed.
 ALTER TABLE shares ADD COLUMN name TEXT;
+````
+
+## File: packages/api/internal/db/tag_repo.go
+````go
+package db
+
+import (
+	"errors"
+	"fmt"
+
+	"github.com/jmoiron/sqlx"
+
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// ErrTagOwnership is returned by ValidateTeamOwnership when one or more tag
+// IDs belong to a different team (or do not exist).
+var ErrTagOwnership = errors.New("tag belongs to another team")
+
+// TagRepo is the persistence layer for Tag records.
+type TagRepo struct {
+	db *sqlx.DB
+}
+
+// NewTagRepo returns a TagRepo backed by db.
+func NewTagRepo(db *sqlx.DB) *TagRepo {
+	return &TagRepo{db: db}
+}
+
+// Create inserts a new Tag row.
+func (r *TagRepo) Create(tag *models.Tag) error {
+	_, err := r.db.NamedExec(`
+		INSERT INTO tags (id, team_id, name, color, created_by, created_at)
+		VALUES (:id, :team_id, :name, :color, :created_by, :created_at)
+	`, tag)
+	if err != nil {
+		return fmt.Errorf("creating tag: %w", err)
+	}
+	return nil
+}
+
+// GetByID fetches a Tag by primary key. Returns sql.ErrNoRows (wrapped) when
+// no row matches.
+func (r *TagRepo) GetByID(id string) (*models.Tag, error) {
+	var t models.Tag
+	err := r.db.Get(&t, `SELECT * FROM tags WHERE id = ?`, id)
+	if err != nil {
+		return nil, fmt.Errorf("getting tag: %w", err)
+	}
+	return &t, nil
+}
+
+// ListByTeam returns all tags for the given team, ordered by name ascending.
+func (r *TagRepo) ListByTeam(teamID string) ([]*models.Tag, error) {
+	tags := make([]*models.Tag, 0)
+	err := r.db.Select(&tags,
+		`SELECT * FROM tags WHERE team_id = ? ORDER BY name ASC`,
+		teamID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("listing tags: %w", err)
+	}
+	return tags, nil
+}
+
+// Update writes name and color for an existing tag row.
+func (r *TagRepo) Update(tag *models.Tag) error {
+	_, err := r.db.NamedExec(`
+		UPDATE tags SET name = :name, color = :color WHERE id = :id
+	`, tag)
+	if err != nil {
+		return fmt.Errorf("updating tag: %w", err)
+	}
+	return nil
+}
+
+// Delete removes a tag row. Cascade deletes matching activity_tags rows.
+func (r *TagRepo) Delete(id string) error {
+	_, err := r.db.Exec(`DELETE FROM tags WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("deleting tag: %w", err)
+	}
+	return nil
+}
+
+// ValidateTeamOwnership confirms that every ID in tagIDs belongs to teamID.
+// Returns ErrTagOwnership if any ID is missing or owned by another team.
+func (r *TagRepo) ValidateTeamOwnership(teamID string, tagIDs []string) error {
+	if len(tagIDs) == 0 {
+		return nil
+	}
+	query, args, err := sqlx.In(
+		`SELECT COUNT(*) FROM tags WHERE id IN (?) AND team_id = ?`,
+		tagIDs, teamID,
+	)
+	if err != nil {
+		return fmt.Errorf("building ownership query: %w", err)
+	}
+	var count int
+	if err := r.db.Get(&count, query, args...); err != nil {
+		return fmt.Errorf("checking tag ownership: %w", err)
+	}
+	if count != len(tagIDs) {
+		return ErrTagOwnership
+	}
+	return nil
+}
 ````
 
 ## File: packages/api/internal/filters/engine.go
@@ -25840,6 +26896,115 @@ INSERT INTO activities (id, timeline_id, title, description, color, icon, start_
   ('a-reb-13', 'tl-mcf-rebrand', 'Redirect map and 301 plan',           'Map all old URLs to new structure; configure redirects.',             '#78716C', 'link',         datetime('now', '+15 days'), datetime('now', '+35 days'), 's-reb-planning',   NULL,         0, 'u-rick-s',           datetime('now', '-1 days'),  datetime('now', '-1 days')),
   ('a-reb-14', 'tl-mcf-rebrand', 'Launch readiness checklist',          'Pre-launch verification: performance, SEO, analytics, redirects.',   '#288C9B', 'check-circle', datetime('now', '+30 days'), datetime('now', '+40 days'), 's-reb-planning',   NULL,         0, 'u-scott-fitzgerald', datetime('now', '-1 days'),  datetime('now', '-1 days')),
   ('a-reb-15', 'tl-mcf-rebrand', 'Post-launch monitoring plan',         'Week-1 monitoring: traffic, errors, search console, conversions.',   '#F97316', 'activity',     datetime('now', '+40 days'), datetime('now', '+50 days'), 's-reb-planning',   NULL,         0, 'u-rick-s',           datetime('now', '-1 days'),  datetime('now', '-1 days'));
+````
+
+## File: packages/api/sample_data/10_tags.sql
+````sql
+-- Tags: team-scoped labels for activities.
+-- Each team gets 6-8 tags reflecting its domain vocabulary.
+
+-- ── Product Marketing tags ────────────────────────────────────────────────────
+
+INSERT INTO tags (id, team_id, name, color, created_by, created_at) VALUES
+  ('tag-pm-urgent',      't-product-marketing', 'urgent',      'red',    'u-brian-rieb', datetime('now', '-30 days')),
+  ('tag-pm-design',      't-product-marketing', 'design',      'violet', 'u-brian-rieb', datetime('now', '-30 days')),
+  ('tag-pm-content',     't-product-marketing', 'content',     'teal',   'u-brian-rieb', datetime('now', '-28 days')),
+  ('tag-pm-research',    't-product-marketing', 'research',    'blue',   'u-brian-rieb', datetime('now', '-27 days')),
+  ('tag-pm-launch',      't-product-marketing', 'launch',      'green',  'u-brian-rieb', datetime('now', '-26 days')),
+  ('tag-pm-competitive', 't-product-marketing', 'competitive', 'amber',  'u-brian-rieb', datetime('now', '-25 days')),
+  ('tag-pm-review',      't-product-marketing', 'review',      'indigo', 'u-brian-rieb', datetime('now', '-24 days')),
+  ('tag-pm-blocked',     't-product-marketing', 'blocked',     'red',    'u-brian-rieb', datetime('now', '-20 days'));
+
+-- ── P&B Tiger Team tags ───────────────────────────────────────────────────────
+
+INSERT INTO tags (id, team_id, name, color, created_by, created_at) VALUES
+  ('tag-pb-positioning', 't-pb-tiger-team', 'positioning', 'amber',  'u-brian-rieb', datetime('now', '-140 days')),
+  ('tag-pb-strategy',    't-pb-tiger-team', 'strategy',    'indigo', 'u-brian-rieb', datetime('now', '-140 days')),
+  ('tag-pb-research',    't-pb-tiger-team', 'research',    'blue',   'u-brian-rieb', datetime('now', '-138 days')),
+  ('tag-pb-competitive', 't-pb-tiger-team', 'competitive', 'red',    'u-brian-rieb', datetime('now', '-137 days')),
+  ('tag-pb-enablement',  't-pb-tiger-team', 'enablement',  'green',  'u-codi-k',     datetime('now', '-135 days')),
+  ('tag-pb-executive',   't-pb-tiger-team', 'executive',   'violet', 'u-codi-k',     datetime('now', '-134 days'));
+
+-- ── Marketing Cross Functional tags ──────────────────────────────────────────
+
+INSERT INTO tags (id, team_id, name, color, created_by, created_at) VALUES
+  ('tag-mcf-design',     't-marketing-cross-func', 'design',     'violet', 'u-scott-fitzgerald', datetime('now', '-60 days')),
+  ('tag-mcf-seo',        't-marketing-cross-func', 'seo',        'teal',   'u-scott-fitzgerald', datetime('now', '-60 days')),
+  ('tag-mcf-analytics',  't-marketing-cross-func', 'analytics',  'blue',   'u-scott-fitzgerald', datetime('now', '-58 days')),
+  ('tag-mcf-brand',      't-marketing-cross-func', 'brand',      'purple', 'u-paula-h',          datetime('now', '-57 days')),
+  ('tag-mcf-content',    't-marketing-cross-func', 'content',    'green',  'u-paula-h',          datetime('now', '-56 days')),
+  ('tag-mcf-launch',     't-marketing-cross-func', 'launch',     'rose',   'u-scott-fitzgerald', datetime('now', '-55 days'));
+
+-- ── Activity-tag associations ─────────────────────────────────────────────────
+
+-- Product Marketing: Q1 Workload
+INSERT INTO activity_tags (activity_id, tag_id) VALUES
+  ('a-q1-01', 'tag-pm-research'),
+  ('a-q1-01', 'tag-pm-competitive'),
+  ('a-q1-02', 'tag-pm-competitive'),
+  ('a-q1-02', 'tag-pm-review'),
+  ('a-q1-03', 'tag-pm-content'),
+  ('a-q1-04', 'tag-pm-review'),
+  ('a-q1-05', 'tag-pm-review'),
+  ('a-q1-06', 'tag-pm-launch'),
+  ('a-q1-06', 'tag-pm-review'),
+  ('a-q1-08', 'tag-pm-urgent'),
+  ('a-q1-09', 'tag-pm-design'),
+  ('a-q1-09', 'tag-pm-content'),
+  ('a-q1-11', 'tag-pm-content'),
+  ('a-q1-13', 'tag-pm-content'),
+  ('a-q1-14', 'tag-pm-launch'),
+  ('a-q1-17', 'tag-pm-blocked'),
+  ('a-q1-17', 'tag-pm-urgent'),
+  ('a-q1-18', 'tag-pm-competitive'),
+  ('a-q1-18', 'tag-pm-research');
+
+-- Product Marketing: Sales Kick Off
+INSERT INTO activity_tags (activity_id, tag_id) VALUES
+  ('a-sko-01', 'tag-pm-design'),
+  ('a-sko-01', 'tag-pm-launch'),
+  ('a-sko-02', 'tag-pm-competitive'),
+  ('a-sko-04', 'tag-pm-content'),
+  ('a-sko-05', 'tag-pm-content'),
+  ('a-sko-07', 'tag-pm-review');
+
+-- P&B Tiger Team: Right to Win Initiative
+INSERT INTO activity_tags (activity_id, tag_id) VALUES
+  ('a-rtw-01', 'tag-pb-research'),
+  ('a-rtw-01', 'tag-pb-competitive'),
+  ('a-rtw-02', 'tag-pb-research'),
+  ('a-rtw-03', 'tag-pb-positioning'),
+  ('a-rtw-03', 'tag-pb-strategy'),
+  ('a-rtw-04', 'tag-pb-executive'),
+  ('a-rtw-04', 'tag-pb-strategy');
+
+-- P&B Tiger Team: Displacement GTM
+INSERT INTO activity_tags (activity_id, tag_id) VALUES
+  ('a-gtm-01', 'tag-pb-strategy'),
+  ('a-gtm-01', 'tag-pb-competitive'),
+  ('a-gtm-01', 'tag-pb-enablement'),
+  ('a-gtm-02', 'tag-pb-competitive'),
+  ('a-gtm-03', 'tag-pb-enablement'),
+  ('a-gtm-04', 'tag-pb-strategy');
+
+-- Marketing Cross Functional: Web Site Rebrand
+INSERT INTO activity_tags (activity_id, tag_id) VALUES
+  ('a-reb-01', 'tag-mcf-brand'),
+  ('a-reb-02', 'tag-mcf-design'),
+  ('a-reb-02', 'tag-mcf-brand'),
+  ('a-reb-03', 'tag-mcf-design'),
+  ('a-reb-04', 'tag-mcf-seo'),
+  ('a-reb-05', 'tag-mcf-content'),
+  ('a-reb-05', 'tag-mcf-seo'),
+  ('a-reb-06', 'tag-mcf-analytics'),
+  ('a-reb-07', 'tag-mcf-design'),
+  ('a-reb-08', 'tag-mcf-content'),
+  ('a-reb-09', 'tag-mcf-design'),
+  ('a-reb-09', 'tag-mcf-content'),
+  ('a-reb-12', 'tag-mcf-design'),
+  ('a-reb-14', 'tag-mcf-launch'),
+  ('a-reb-15', 'tag-mcf-analytics'),
+  ('a-reb-15', 'tag-mcf-launch');
 ````
 
 ## File: packages/shared/testdata/filter-fixtures.json
@@ -27995,6 +29160,257 @@ export function ActivityFieldsBody(props: ActivityFieldsBodyProps) {
 }
 ````
 
+## File: packages/web/src/components/TagInput.tsx
+````typescript
+/**
+ * TagInput — combobox for selecting and creating activity tags.
+ *
+ * Selected tags render as colored pill badges with an × remove button.
+ * Typing filters the team's existing tags; if no exact match exists a
+ * "Create '<text>'" option appears at the bottom of the dropdown.
+ */
+
+import { useState, useRef, useEffect } from 'react'
+import { X, Tag as TagIcon, Plus } from 'lucide-react'
+import type { Tag } from '@/hooks/useTags'
+import { useCreateTag } from '@/hooks/useTags'
+import { resolveColorHex } from '@/components/identity/identity-constants'
+
+// Cycle through identity palette colors for auto-created tags.
+const DEFAULT_COLORS = ['teal', 'blue', 'violet', 'amber', 'green', 'red', 'indigo', 'pink']
+
+interface Props {
+  teamId: string
+  tags: Tag[]
+  selectedTagIds: string[]
+  onChange: (ids: string[]) => void
+}
+
+export default function TagInput({ teamId, tags, selectedTagIds, onChange }: Props) {
+  const [query, setQuery] = useState('')
+  const [open, setOpen] = useState(false)
+  const inputRef = useRef<HTMLInputElement>(null)
+  const containerRef = useRef<HTMLDivElement>(null)
+  const createTag = useCreateTag(teamId)
+
+  const selectedTags = selectedTagIds
+    .map(id => tags.find(t => t.id === id))
+    .filter(Boolean) as Tag[]
+
+  const filtered = tags
+    .filter(t => !selectedTagIds.includes(t.id))
+    .filter(t => t.name.toLowerCase().includes(query.toLowerCase()))
+
+  const exactMatch = tags.some(t => t.name.toLowerCase() === query.toLowerCase())
+  const showCreate = query.trim().length > 0 && !exactMatch
+
+  useEffect(() => {
+    function onDown(e: MouseEvent) {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        setOpen(false)
+        setQuery('')
+      }
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [])
+
+  function removeTag(id: string) {
+    onChange(selectedTagIds.filter(tid => tid !== id))
+  }
+
+  function selectTag(id: string) {
+    onChange([...selectedTagIds, id])
+    setQuery('')
+    inputRef.current?.focus()
+  }
+
+  /**
+   * Keyboard shortcuts inside the text field:
+   *   Enter     → select an exact-name match if one exists, else create the tag
+   *   Backspace → remove the last selected pill when the field is empty
+   */
+  function handleKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
+    if (e.key === 'Enter') {
+      const trimmed = query.trim()
+      if (!trimmed) return
+      e.preventDefault()
+      const exact = tags.find(
+        t => t.name.toLowerCase() === trimmed.toLowerCase() && !selectedTagIds.includes(t.id),
+      )
+      if (exact) selectTag(exact.id)
+      else if (showCreate) handleCreateTag()
+    } else if (e.key === 'Backspace' && query === '' && selectedTags.length > 0) {
+      removeTag(selectedTags[selectedTags.length - 1].id)
+    }
+  }
+
+  function handleCreateTag() {
+    const name = query.trim()
+    if (!name) return
+    const colorIdx = tags.length % DEFAULT_COLORS.length
+    createTag.mutate(
+      { name, color: DEFAULT_COLORS[colorIdx] },
+      {
+        onSuccess: (newTag) => {
+          onChange([...selectedTagIds, newTag.id])
+          setQuery('')
+          inputRef.current?.focus()
+        },
+      }
+    )
+  }
+
+  function tagColor(tag: Tag): string {
+    if (!tag.color) return 'var(--muted-foreground)'
+    return resolveColorHex(tag.color) ?? tag.color
+  }
+
+  return (
+    <div ref={containerRef} style={{ flex: 1, position: 'relative' }}>
+      {/* Selected pills + text input */}
+      <div
+        onClick={() => { setOpen(true); inputRef.current?.focus() }}
+        style={{
+          display: 'flex',
+          flexWrap: 'wrap',
+          gap: 4,
+          alignItems: 'center',
+          minHeight: 28,
+          padding: '3px 6px',
+          border: '1px solid var(--border)',
+          borderRadius: 'var(--radius-md)',
+          background: 'var(--background)',
+          cursor: 'text',
+        }}
+      >
+        {selectedTags.map(tag => (
+          <span
+            key={tag.id}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 3,
+              fontSize: 11,
+              padding: '1px 6px',
+              borderRadius: 100,
+              background: tagColor(tag) + '22',
+              border: `1px solid ${tagColor(tag)}66`,
+              color: 'var(--foreground)',
+            }}
+          >
+            <span
+              style={{
+                width: 6,
+                height: 6,
+                borderRadius: '50%',
+                background: tagColor(tag),
+                flexShrink: 0,
+              }}
+            />
+            {tag.name}
+            <button
+              onMouseDown={e => { e.stopPropagation(); removeTag(tag.id) }}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                padding: 0,
+                border: 'none',
+                background: 'none',
+                cursor: 'pointer',
+                color: 'var(--muted-foreground)',
+                lineHeight: 1,
+              }}
+            >
+              <X size={9} strokeWidth={2.5} />
+            </button>
+          </span>
+        ))}
+        <input
+          ref={inputRef}
+          value={query}
+          onChange={e => { setQuery(e.target.value); setOpen(true) }}
+          onFocus={() => setOpen(true)}
+          onKeyDown={handleKeyDown}
+          placeholder={selectedTags.length === 0 ? 'Add tags…' : ''}
+          style={{
+            border: 'none',
+            outline: 'none',
+            background: 'none',
+            fontSize: 12,
+            color: 'var(--foreground)',
+            fontFamily: 'var(--font-sans)',
+            flexGrow: 1,
+            minWidth: 60,
+            padding: '1px 2px',
+          }}
+        />
+      </div>
+
+      {/* Dropdown */}
+      {open && (filtered.length > 0 || showCreate) && (
+        <div
+          style={{
+            position: 'absolute',
+            top: 'calc(100% + 4px)',
+            left: 0,
+            right: 0,
+            background: 'var(--card)',
+            border: '1px solid var(--border)',
+            borderRadius: 6,
+            boxShadow: '0 4px 12px rgba(0,0,0,.12)',
+            zIndex: 200,
+            overflow: 'hidden',
+            maxHeight: 160,
+            overflowY: 'auto',
+          }}
+        >
+          {filtered.map(tag => (
+            <div
+              key={tag.id}
+              onMouseDown={e => { e.preventDefault(); selectTag(tag.id) }}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                padding: '5px 10px',
+                fontSize: 12,
+                cursor: 'pointer',
+              }}
+              onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+              onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+            >
+              <TagIcon size={11} style={{ color: tagColor(tag), flexShrink: 0 }} />
+              <span style={{ flex: 1 }}>{tag.name}</span>
+            </div>
+          ))}
+          {showCreate && (
+            <div
+              onMouseDown={e => { e.preventDefault(); handleCreateTag() }}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                padding: '5px 10px',
+                fontSize: 12,
+                cursor: 'pointer',
+                borderTop: filtered.length > 0 ? '1px solid var(--border)' : 'none',
+                color: 'var(--primary)',
+              }}
+              onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+              onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+            >
+              <Plus size={11} strokeWidth={2.5} style={{ flexShrink: 0 }} />
+              <span>Create &quot;{query.trim()}&quot;</span>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+````
+
 ## File: packages/web/src/contexts/FilterContext.tsx
 ````typescript
 /**
@@ -28185,95 +29601,6 @@ describe('useDeleteTag', () => {
     )
   })
 })
-````
-
-## File: packages/web/src/hooks/useTags.ts
-````typescript
-/**
- * TanStack Query hooks for Tag CRUD. Tags are team-scoped and can be applied
- * to activities across any timeline in the team.
- */
-
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { createAuthFetch } from '@/lib/api'
-import { useAuth } from '@/contexts/AuthContext'
-
-export interface Tag {
-  id: string
-  teamId: string
-  name: string
-  color?: string | null
-  createdBy: string
-  createdAt: string
-}
-
-const tagsKey = (teamId: string) => ['teams', teamId, 'tags'] as const
-
-/** Fetches all tags for a team, ordered by name. */
-export function useTags(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  return useQuery({
-    queryKey: tagsKey(teamId),
-    queryFn: () => authFetch<Tag[]>(`/teams/${teamId}/tags`),
-    enabled: Boolean(teamId),
-  })
-}
-
-interface CreateTagInput {
-  name: string
-  color?: string
-}
-
-/** Creates a new tag and invalidates the list. */
-export function useCreateTag(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: (input: CreateTagInput) =>
-      authFetch<Tag>(`/teams/${teamId}/tags`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(input),
-      }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: tagsKey(teamId) }),
-  })
-}
-
-interface UpdateTagInput {
-  id: string
-  name?: string
-  color?: string | null
-}
-
-/** Updates a tag's name or color and invalidates the list. */
-export function useUpdateTag(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: ({ id, ...patch }: UpdateTagInput) =>
-      authFetch<Tag>(`/tags/${id}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(patch),
-      }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: tagsKey(teamId) }),
-  })
-}
-
-/** Deletes a tag (cascades activity_tags) and invalidates the list. */
-export function useDeleteTag(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: (id: string) =>
-      authFetch<void>(`/tags/${id}`, { method: 'DELETE' }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: tagsKey(teamId) }),
-  })
-}
 ````
 
 ## File: packages/web/src/lib/activityColor.test.ts
@@ -29911,37 +31238,6 @@ draba is currently under active development. The core backend API foundation (au
 Check out the `docs/` folder for our architecture decisions, roadmap, and design patterns.
 ````
 
-## File: .claude/commands/build-phase.md
-````markdown
-Read docs/ROADMAP.md and identify the phase specified in $ARGUMENTS (e.g. "1" or "Phase 1").
-
-1. Read the phase's scope and exit criteria from ROADMAP.md.
-2. Find the corresponding tasks in docs/TASKS.md.
-3. Read any referenced docs (ARCHITECTURE.md, CONVENTIONS.md, REQUIREMENTS.md) relevant to this phase before writing any code.
-4. Update the phase status in ROADMAP.md from ⬜ to 🔄 before starting work.
-5. Implement every task in the phase's scope, following CONVENTIONS.md throughout.
-6. After implementation, run all of the following checks in order — all must pass before marking the phase done:
-   - **Go:** `golangci-lint run` then `go test ./...`
-   - **Web lint:** `pnpm --filter web lint` (runs `tsc --noEmit` — catches type errors in isolation)
-   - **Web build:** `pnpm --filter web build` (runs `tsc -b && vite build` — catches additional errors that `--noEmit` misses, such as missing fields on exported interfaces, composite project reference issues, and import graph problems). This is the same build CI runs; skipping it is the most common source of "passes locally, fails in CI" build errors.
-   - Fix any errors found before proceeding, even if they're in files you didn't directly touch.
-   Suggest running `/test-phase <N>` and `/review-phase <N>` to fan the verification out across subagents in parallel.
-7. Check off completed items in TASKS.md.
-8. Update the phase status in ROADMAP.md:
-   - If all exit criteria pass: ✅ Done, add the completion date.
-   - If any exit criterion fails or needs manual verification: mark 🔄 In Progress and add a note listing what still needs review.
-9. Update `docs/log.md` (mandatory — this is the durable per-phase record):
-   - Prepend a dated entry at the top, matching the format of existing entries (Goal, then Backend / Frontend / Tests sections as relevant).
-   - This is the place for full implementation detail. Do **not** put that detail in session-state.md.
-10. Refresh `docs/ai-context/session-state.md` so it stays a *current-state snapshot*, never an append-log:
-   - Update the **Last updated** line.
-   - In **Phase Status**: if the phase passed all checks, leave it as the just-built phase awaiting manual verification; if a *previously* built phase has since been Docker-verified, collapse it into the "all phases through X.Y complete and verified" sentence and delete its detail (the detail already lives in log.md).
-   - Update **Open Issues** — add anything new this phase surfaced, remove anything now resolved.
-   - Point **Next phase** at the next ROADMAP item and its plan file.
-   - Keep the whole file short. If it grows past ~60 lines you are duplicating log.md — move detail out. The top-of-file contract ("per-phase detail lives in log.md; this is a snapshot only") is the rule; honor it.
-11. Summarize what was built and which exit criteria were verified vs. which need manual testing by the user.
-````
-
 ## File: docs/REQUIREMENTS.md
 ````markdown
 # Requirements
@@ -30146,832 +31442,304 @@ Two flavors: **tabular** (data round-trips — CSV / xlsx in and out) and **visu
 - CLI binary (parking lot — token auth system is designed to support it when ready)
 ````
 
-## File: packages/api/cmd/draba/main.go
+## File: packages/api/internal/api/server.go
 ````go
-// Command draba is the API server entry point. It wires repositories,
-// the auth token service, and tier configuration into the HTTP server,
-// then listens for requests until the process is killed.
-package main
+// Package api hosts the HTTP handlers, routing, and middleware for the
+// draba REST API. Handlers are intentionally thin: they decode requests,
+// delegate to repositories and services, and write responses. Business
+// logic belongs in the domain packages, not here.
+package api
 
 import (
 	"fmt"
 	"io/fs"
-	"log/slog"
 	"net/http"
-	"os"
 	"strings"
+	"time"
 
-	"github.com/I0-1O/draba/packages/api/internal/api"
 	"github.com/I0-1O/draba/packages/api/internal/auth"
 	"github.com/I0-1O/draba/packages/api/internal/db"
 	"github.com/I0-1O/draba/packages/api/internal/events"
 	"github.com/I0-1O/draba/packages/api/internal/mailer"
+	"github.com/I0-1O/draba/packages/api/internal/models"
 	"github.com/I0-1O/draba/packages/api/internal/tier"
 	"github.com/I0-1O/draba/packages/api/internal/ws"
-	drabui "github.com/I0-1O/draba/packages/api/ui"
 )
 
-const banner = "\n" +
-	"      _           _\n" +
-	"     | |         | |\n" +
-	"   __| |_ __ __ _| |__   __ _\n" +
-	"  / _` | '__/ _` | '_ \\ / _` |\n" +
-	" | (_| | | | (_| | |_) | (_| |\n" +
-	"  \\__,_|_|  \\__,_|_.__/ \\__,_|\n" +
-	"\n" +
-	"  see who's doing what, when.\n\n"
+// TimelineStore is the persistence interface required by timeline handlers.
+// The concrete implementation is *db.TimelineRepo; tests may substitute a fake.
+type TimelineStore interface {
+	Create(t *models.Timeline) error
+	GetByID(id string) (*models.Timeline, error)
+	GetByShareToken(token string) (*models.Timeline, error)
+	ListByTeam(teamID string, includeArchived bool) ([]*models.Timeline, error)
+	HasAccess(timelineID, teamMemberID string) (bool, error)
+	GrantAccess(timelineID, teamMemberID, role string) error
+	RevokeAccess(timelineID, teamMemberID string) error
+	GetAccessRole(timelineID, teamMemberID string) (string, error)
+	ListAccess(timelineID string) ([]*models.TimelineAccessEntry, error)
+	SetArchived(id string, at *time.Time) error
+	Update(t *models.Timeline) error
+	Delete(id string) error
+}
 
-func main() {
-	if len(os.Args) > 1 && os.Args[1] == "reset-password" {
-		runResetPassword(os.Args[2:])
-		return
+// Server holds shared dependencies for all HTTP handlers.
+type Server struct {
+	users          *db.UserRepo
+	invites        *db.InviteRepo
+	teams          *db.TeamRepo
+	activities     *db.ActivityRepo
+	timelines      TimelineStore
+	savedFilters   *db.SavedFilterRepo
+	preferences    *db.UserPreferenceRepo
+	apiTokens      *db.APITokenRepo
+	instanceSets   *db.InstanceSettingsRepo
+	passwordTokens *db.PasswordResetTokenRepo
+	statuses       *db.StatusRepo
+	tags           *db.TagRepo
+	shares         *db.ShareRepo
+	shareCache     *shareCache
+	mailer         *mailer.Mailer
+	tokens         *auth.TokenService
+	tier           tier.Tier
+	bus            *events.Bus
+	hub            *ws.Hub
+	uiFS           fs.FS
+}
+
+// NewServer constructs a Server with its required dependencies. It does not
+// touch the network; call Routes to obtain the http.Handler to serve.
+func NewServer(
+	users *db.UserRepo,
+	invites *db.InviteRepo,
+	teams *db.TeamRepo,
+	activitiesRepo *db.ActivityRepo,
+	timelinesRepo TimelineStore,
+	savedFiltersRepo *db.SavedFilterRepo,
+	preferencesRepo *db.UserPreferenceRepo,
+	apiTokensRepo *db.APITokenRepo,
+	instanceSetsRepo *db.InstanceSettingsRepo,
+	passwordTokensRepo *db.PasswordResetTokenRepo,
+	statusesRepo *db.StatusRepo,
+	tagsRepo *db.TagRepo,
+	sharesRepo *db.ShareRepo,
+	m *mailer.Mailer,
+	tokens *auth.TokenService,
+	t tier.Tier,
+	bus *events.Bus,
+	hub *ws.Hub,
+) *Server {
+	return &Server{
+		users:          users,
+		invites:        invites,
+		teams:          teams,
+		activities:     activitiesRepo,
+		timelines:      timelinesRepo,
+		savedFilters:   savedFiltersRepo,
+		preferences:    preferencesRepo,
+		apiTokens:      apiTokensRepo,
+		instanceSets:   instanceSetsRepo,
+		passwordTokens: passwordTokensRepo,
+		statuses:       statusesRepo,
+		tags:           tagsRepo,
+		shares:         sharesRepo,
+		shareCache:     newShareCache(),
+		mailer:         m,
+		tokens:         tokens,
+		tier:           t,
+		bus:            bus,
+		hub:            hub,
 	}
+}
 
-	setupLogger()
-	fmt.Print(banner)
+// WithUI registers an embedded React SPA to be served at GET /. The FS must
+// be rooted at the build output directory (i.e. contain index.html directly).
+// When called, all unmatched GET paths fall back to index.html so React Router
+// handles client-side navigation. Safe to skip in dev (no-op when not called).
+func (s *Server) WithUI(uiFS fs.FS) *Server {
+	s.uiFS = uiFS
+	return s
+}
 
-	port := getenv("DRABA_PORT", "8080")
-	dsn := getenv("DRABA_DB_DSN", "/data/draba.db")
-	jwtSecret := os.Getenv("DRABA_JWT_SECRET")
-	if jwtSecret == "" {
-		slog.Error("DRABA_JWT_SECRET must be set")
-		os.Exit(1)
-	}
+// Routes returns the fully-wired HTTP handler for the API, including all
+// core routes plus any routes added by registered tier modules.
+func (s *Server) Routes() http.Handler {
+	mux := http.NewServeMux()
 
-	t, err := tier.Load()
-	if err != nil {
-		slog.Error("tier load failed", "err", err)
-		os.Exit(1)
-	}
-	l := t.Limits()
-	if l.MaxUsers == 0 {
-		slog.Info("tier", "tier", t)
-	} else {
-		slog.Info("tier", "tier", t, "maxUsers", l.MaxUsers, "maxTeams", l.MaxTeams)
-	}
+	mux.HandleFunc("GET /setup/status", s.handleSetupStatus)
 
-	database, err := db.Open(dsn)
-	if err != nil {
-		slog.Error("db: open failed", "err", err)
-		os.Exit(1)
-	}
-	slog.Info("db: opened", "dsn", dsn)
+	mux.HandleFunc("POST /auth/register", s.handleRegister)
+	mux.HandleFunc("POST /auth/login", s.handleLogin)
+	mux.HandleFunc("POST /auth/refresh", s.handleRefresh)
+	mux.HandleFunc("GET /auth/me", chain(s.handleMe, s.authMiddleware))
+	mux.HandleFunc("POST /auth/forgot-password", s.handleForgotPassword)
+	mux.HandleFunc("POST /auth/reset-password", s.handleResetPassword)
 
-	if err := db.Migrate(database); err != nil {
-		slog.Error("db: migrate failed", "err", err)
-		os.Exit(1)
-	}
-	slog.Info("db: migrations applied")
+	mux.HandleFunc("GET /users/me/preferences", chain(s.handleGetPreferences, s.authMiddleware))
+	mux.HandleFunc("PUT /users/me/preferences", chain(s.handleUpsertPreference, s.authMiddleware))
+	mux.HandleFunc("GET /users/me/stats", chain(s.handleGetMyStats, s.authMiddleware))
+	mux.HandleFunc("PATCH /users/me", chain(s.handleUpdateProfile, s.authMiddleware))
+	mux.HandleFunc("PUT /users/me/password", chain(s.handleChangePassword, s.authMiddleware))
 
-	users := db.NewUserRepo(database)
-	invites := db.NewInviteRepo(database)
-	teams := db.NewTeamRepo(database)
-	activityRepo := db.NewActivityRepo(database)
-	timelineRepo := db.NewTimelineRepo(database)
-	savedFilterRepo := db.NewSavedFilterRepo(database)
-	preferenceRepo := db.NewUserPreferenceRepo(database)
-	apiTokenRepo := db.NewAPITokenRepo(database)
-	instanceSetsRepo := db.NewInstanceSettingsRepo(database)
-	passwordTokensRepo := db.NewPasswordResetTokenRepo(database)
-	statusRepo := db.NewStatusRepo(database)
-	tagRepo := db.NewTagRepo(database)
-	shareRepo := db.NewShareRepo(database)
-	m := mailer.New(instanceSetsRepo, []byte(jwtSecret))
-	tokens := auth.NewTokenService(jwtSecret)
+	mux.HandleFunc("GET /admin/smtp", chain(s.handleGetSMTP, s.authMiddleware))
+	mux.HandleFunc("PUT /admin/smtp", chain(s.handlePutSMTP, s.authMiddleware))
+	mux.HandleFunc("POST /admin/smtp/test", chain(s.handleTestSMTP, s.authMiddleware))
+	mux.HandleFunc("DELETE /admin/smtp", chain(s.handleDeleteSMTP, s.authMiddleware))
+	mux.HandleFunc("GET /admin/settings", chain(s.handleGetAdminSettings, s.authMiddleware))
+	mux.HandleFunc("PATCH /admin/settings", chain(s.handlePatchAdminSettings, s.authMiddleware))
+	mux.HandleFunc("GET /admin/users", chain(s.handleListAdminUsers, s.authMiddleware))
 
-	bus := events.NewBus()
-	hub := ws.NewHub(bus, tokens, func(teamID, userID string) error {
-		_, err := teams.GetMember(teamID, userID)
-		return err
+	// Public — no auth required; used by the login page and shared views.
+	mux.HandleFunc("GET /settings/branding", s.handleGetPublicBranding)
+
+	mux.HandleFunc("POST /tokens", chain(s.handleCreateAPIToken, s.authMiddleware))
+	mux.HandleFunc("GET /tokens", chain(s.handleListAPITokens, s.authMiddleware))
+	mux.HandleFunc("DELETE /tokens/{id}", chain(s.handleDeleteAPIToken, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams", chain(s.handleListTeams, s.authMiddleware))
+	mux.HandleFunc("POST /teams", chain(s.handleCreateTeam, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}", chain(s.handleGetTeam, s.authMiddleware))
+	mux.HandleFunc("PATCH /teams/{id}", chain(s.handleUpdateTeam, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/archive", chain(s.handleArchiveTeam, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/unarchive", chain(s.handleUnarchiveTeam, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/invites", chain(s.handleCreateInvite, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/invites", chain(s.handleListInvites, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/invites/{inviteId}", chain(s.handleDeleteInvite, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/invite-link", chain(s.handleCreateInviteLink, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/invite-link/reset", chain(s.handleResetInviteLink, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/invite-link", chain(s.handleGetInviteLink, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/invite-link", chain(s.handleDeleteInviteLink, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/members", chain(s.handleListMembers, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/members/{memberId}", chain(s.handleGetMember, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/members/{memberId}/stats", chain(s.handleGetMemberStats, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/members", chain(s.handleAddMember, s.authMiddleware))
+	mux.HandleFunc("PATCH /teams/{id}/members/{memberId}", chain(s.handleUpdateMember, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/members/{memberId}", chain(s.handleDeleteMember, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/members/{memberId}/archive", chain(s.handleArchiveMember, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/members/{memberId}/unarchive", chain(s.handleUnarchiveMember, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/participants", chain(s.handleCreateParticipant, s.authMiddleware))
+	mux.HandleFunc("GET /users/search", chain(s.handleSearchUsers, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/promote", chain(s.handlePromoteUser, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/archive", chain(s.handleArchiveUser, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/unarchive", chain(s.handleUnarchiveUser, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/revoke", chain(s.handleRevokeUser, s.authMiddleware))
+	mux.HandleFunc("DELETE /users/{id}", chain(s.handleDeleteUser, s.authMiddleware))
+	// Activity routes use the team-scoped prefix (GET /teams/{id}/timelines/{timelineId}/...)
+	// to avoid a Go 1.22 mux conflict with GET /timelines/share/{token}: both are
+	// 3-segment GET paths and neither is more specific when the third segment differs.
+	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/activities", chain(s.handleCreateActivity, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/activities", chain(s.handleListActivities, s.authMiddleware))
+	mux.HandleFunc("PATCH /activities/{id}", chain(s.handleUpdateActivity, s.authMiddleware))
+	mux.HandleFunc("DELETE /activities/{id}", chain(s.handleDeleteActivity, s.authMiddleware))
+	mux.HandleFunc("POST /activities/{id}/archive", chain(s.handleArchiveActivity, s.authMiddleware))
+	mux.HandleFunc("POST /activities/{id}/unarchive", chain(s.handleUnarchiveActivity, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/tags", chain(s.handleListTags, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/tags", chain(s.handleCreateTag, s.authMiddleware))
+	mux.HandleFunc("PATCH /tags/{id}", chain(s.handleUpdateTag, s.authMiddleware))
+	mux.HandleFunc("DELETE /tags/{id}", chain(s.handleDeleteTag, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/saved_filters/all", chain(s.handleListAllTeamSavedFilters, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/saved_filters", chain(s.handleListSavedFilters, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/saved_filters", chain(s.handleCreateSavedFilter, s.authMiddleware))
+	mux.HandleFunc("PATCH /saved_filters/{id}", chain(s.handleUpdateSavedFilter, s.authMiddleware))
+	mux.HandleFunc("DELETE /saved_filters/{id}", chain(s.handleDeleteSavedFilter, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/status-templates", chain(s.handleListStatusTemplates, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/status-templates", chain(s.handleCreateStatusTemplate, s.authMiddleware))
+	mux.HandleFunc("PATCH /status-templates/{id}", chain(s.handleUpdateStatusTemplate, s.authMiddleware))
+	mux.HandleFunc("DELETE /status-templates/{id}", chain(s.handleDeleteStatusTemplate, s.authMiddleware))
+	mux.HandleFunc("POST /status-templates/{id}/items", chain(s.handleCreateTemplateItem, s.authMiddleware))
+	mux.HandleFunc("PATCH /status-template-items/{id}", chain(s.handleUpdateTemplateItem, s.authMiddleware))
+	mux.HandleFunc("DELETE /status-template-items/{id}", chain(s.handleDeleteTemplateItem, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/timelines", chain(s.handleListTimelines, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/timelines", chain(s.handleCreateTimeline, s.authMiddleware))
+	// GET /timelines/share/{token} must be registered before GET /timelines/{id} so
+	// the more-specific literal "share" segment takes precedence.
+	mux.HandleFunc("GET /timelines/share/{token}", s.handleGetTimelineByShareToken)
+	mux.HandleFunc("GET /timelines/{id}", chain(s.handleGetTimeline, s.authMiddleware))
+	// Timeline statuses are placed under /teams/{id}/timelines/{timelineId}/statuses
+	// rather than /timelines/{id}/statuses to avoid a Go 1.22 mux pattern conflict
+	// with GET /timelines/share/{token} (both are 3-segment paths and conflict on
+	// paths like /timelines/share/statuses).
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleListTimelineStatuses, s.authMiddleware))
+	mux.HandleFunc("POST /timelines/{id}/archive", chain(s.handleArchiveTimeline, s.authMiddleware))
+	mux.HandleFunc("POST /timelines/{id}/unarchive", chain(s.handleUnarchiveTimeline, s.authMiddleware))
+
+	mux.HandleFunc("PATCH /timelines/{id}", chain(s.handleUpdateTimeline, s.authMiddleware))
+	mux.HandleFunc("DELETE /timelines/{id}", chain(s.handleDeleteTimeline, s.authMiddleware))
+	// Access list routes use the team-scoped prefix to avoid a Go 1.22 mux
+	// conflict with GET /timelines/share/{token} on 3-segment GET paths.
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/access", chain(s.handleListTimelineAccess, s.authMiddleware))
+	mux.HandleFunc("PUT /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleGrantTimelineAccess, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleRevokeTimelineAccess, s.authMiddleware))
+	// Timeline status CRUD — POST shares the team-scoped prefix with GET statuses.
+	// PATCH and DELETE use a flat /statuses/{id} prefix (2 segments, no conflict).
+	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleCreateTimelineStatus, s.authMiddleware))
+	mux.HandleFunc("PATCH /statuses/{id}", chain(s.handleUpdateStatus, s.authMiddleware))
+	mux.HandleFunc("DELETE /statuses/{id}", chain(s.handleDeleteStatus, s.authMiddleware))
+
+	// Share routes.
+	// GET /shares/{token} is public — no auth. The token is the credential.
+	// POST /timelines/{id}/shares uses the same /timelines/{id}/... prefix
+	// as archive/unarchive so it avoids the Go 1.22 mux pattern conflict with
+	// GET /timelines/share/{token} (only GET-method paths conflict).
+	// GET /teams/{id}/timelines/{timelineId}/shares uses the team-scoped prefix
+	// to avoid the GET conflict described above.
+	mux.HandleFunc("GET /shares/{token}", s.handleGetShareProjection)
+	mux.HandleFunc("POST /timelines/{id}/shares", chain(s.handleCreateShare, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/shares", chain(s.handleListShares, s.authMiddleware))
+	mux.HandleFunc("PATCH /shares/{id}", chain(s.handleUpdateShare, s.authMiddleware))
+	mux.HandleFunc("DELETE /shares/{id}", chain(s.handleDeleteShare, s.authMiddleware))
+
+	// GET /ws is intentionally outside authMiddleware — ServeWS validates the
+	// JWT itself before upgrading, because WebSocket clients can't set headers.
+	mux.HandleFunc("GET /ws", s.hub.ServeWS)
+
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
-	go hub.Run()
-	slog.Info("ws: hub running")
 
-	if mods := tier.Registered(); len(mods) > 0 {
-		slog.Info("modules loaded", "count", len(mods))
+	if s.uiFS != nil {
+		mux.Handle("GET /", spaHandler(s.uiFS))
 	}
 
-	srv := api.NewServer(users, invites, teams, activityRepo, timelineRepo, savedFilterRepo, preferenceRepo, apiTokenRepo, instanceSetsRepo, passwordTokensRepo, statusRepo, tagRepo, shareRepo, m, tokens, t, bus, hub)
-
-	// Wire up the embedded React SPA when a production build is present.
-	// In dev the static/ directory only has .gitkeep so this is a no-op.
-	if sub, err := fs.Sub(drabui.FS, "static"); err == nil {
-		if _, err := sub.Open("index.html"); err == nil {
-			srv.WithUI(sub)
-			slog.Info("ui: serving embedded SPA")
+	ctx := &tier.ModuleContext{Mux: mux, Tier: s.tier}
+	for _, m := range tier.Registered() {
+		if err := m.Register(ctx); err != nil {
+			// Module registration is a startup invariant — a failure here is a programming error.
+			panic(fmt.Sprintf("tier module %q failed to register: %v", m.Name(), err))
 		}
 	}
 
-	slog.Info("listening", "port", port)
-	if err := http.ListenAndServe(":"+port, srv.Routes()); err != nil {
-		slog.Error("server error", "err", err)
-		os.Exit(1)
-	}
+	return requestLogger(mux)
 }
 
-// setupLogger initialises the global slog logger. Level is controlled by
-// DRABA_LOG_LEVEL (debug | info | warn | error); default is info.
-// All output goes to stdout so Docker captures it in `docker logs`.
-func setupLogger() {
-	level := slog.LevelInfo
-	switch strings.ToLower(os.Getenv("DRABA_LOG_LEVEL")) {
-	case "debug":
-		level = slog.LevelDebug
-	case "warn":
-		level = slog.LevelWarn
-	case "error":
-		level = slog.LevelError
-	}
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level})))
+// chain applies a single middleware to a handler function.
+func chain(h http.HandlerFunc, m func(http.Handler) http.Handler) http.HandlerFunc {
+	return m(h).ServeHTTP
 }
 
-// getenv returns the env var value or fallback when unset/empty.
-func getenv(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
-}
-````
-
-## File: packages/api/internal/api/api_types.gen.go
-````go
-// Package api provides primitives to interact with the openapi HTTP API.
-//
-// Code generated by github.com/oapi-codegen/oapi-codegen/v2 version v2.7.0 DO NOT EDIT.
-package api
-
-import (
-	"time"
-
-	openapi_types "github.com/oapi-codegen/runtime/types"
-)
-
-const (
-	BearerAuthScopes bearerAuthContextKey = "bearerAuth.Scopes"
-)
-
-// Defines values for HealthResponseStatus.
-const (
-	Ok HealthResponseStatus = "ok"
-)
-
-// Valid indicates whether the value is a known member of the HealthResponseStatus enum.
-func (e HealthResponseStatus) Valid() bool {
-	switch e {
-	case Ok:
-		return true
-	default:
-		return false
-	}
-}
-
-// Defines values for InviteRole.
-const (
-	InviteRoleAdmin  InviteRole = "admin"
-	InviteRoleMember InviteRole = "member"
-)
-
-// Valid indicates whether the value is a known member of the InviteRole enum.
-func (e InviteRole) Valid() bool {
-	switch e {
-	case InviteRoleAdmin:
-		return true
-	case InviteRoleMember:
-		return true
-	default:
-		return false
-	}
-}
-
-// Defines values for TeamMemberRole.
-const (
-	TeamMemberRoleAdmin  TeamMemberRole = "admin"
-	TeamMemberRoleMember TeamMemberRole = "member"
-	TeamMemberRoleOwner  TeamMemberRole = "owner"
-)
-
-// Valid indicates whether the value is a known member of the TeamMemberRole enum.
-func (e TeamMemberRole) Valid() bool {
-	switch e {
-	case TeamMemberRoleAdmin:
-		return true
-	case TeamMemberRoleMember:
-		return true
-	case TeamMemberRoleOwner:
-		return true
-	default:
-		return false
-	}
-}
-
-// Defines values for TeamMemberWithUserRole.
-const (
-	TeamMemberWithUserRoleAdmin  TeamMemberWithUserRole = "admin"
-	TeamMemberWithUserRoleMember TeamMemberWithUserRole = "member"
-	TeamMemberWithUserRoleOwner  TeamMemberWithUserRole = "owner"
-)
-
-// Valid indicates whether the value is a known member of the TeamMemberWithUserRole enum.
-func (e TeamMemberWithUserRole) Valid() bool {
-	switch e {
-	case TeamMemberWithUserRoleAdmin:
-		return true
-	case TeamMemberWithUserRoleMember:
-		return true
-	case TeamMemberWithUserRoleOwner:
-		return true
-	default:
-		return false
-	}
-}
-
-// Defines values for TimelineVisibility.
-const (
-	TimelineVisibilityPublic     TimelineVisibility = "public"
-	TimelineVisibilityRestricted TimelineVisibility = "restricted"
-)
-
-// Valid indicates whether the value is a known member of the TimelineVisibility enum.
-func (e TimelineVisibility) Valid() bool {
-	switch e {
-	case TimelineVisibilityPublic:
-		return true
-	case TimelineVisibilityRestricted:
-		return true
-	default:
-		return false
-	}
-}
-
-// Defines values for CreateInviteJSONBodyRole.
-const (
-	CreateInviteJSONBodyRoleAdmin  CreateInviteJSONBodyRole = "admin"
-	CreateInviteJSONBodyRoleMember CreateInviteJSONBodyRole = "member"
-)
-
-// Valid indicates whether the value is a known member of the CreateInviteJSONBodyRole enum.
-func (e CreateInviteJSONBodyRole) Valid() bool {
-	switch e {
-	case CreateInviteJSONBodyRoleAdmin:
-		return true
-	case CreateInviteJSONBodyRoleMember:
-		return true
-	default:
-		return false
-	}
-}
-
-// Defines values for CreateTimelineJSONBodyVisibility.
-const (
-	CreateTimelineJSONBodyVisibilityPublic     CreateTimelineJSONBodyVisibility = "public"
-	CreateTimelineJSONBodyVisibilityRestricted CreateTimelineJSONBodyVisibility = "restricted"
-)
-
-// Valid indicates whether the value is a known member of the CreateTimelineJSONBodyVisibility enum.
-func (e CreateTimelineJSONBodyVisibility) Valid() bool {
-	switch e {
-	case CreateTimelineJSONBodyVisibilityPublic:
-		return true
-	case CreateTimelineJSONBodyVisibilityRestricted:
-		return true
-	default:
-		return false
-	}
-}
-
-// ApiError defines model for ApiError.
-type ApiError struct {
-	Error struct {
-		Code    string `json:"code"`
-		Message string `json:"message"`
-	} `json:"error"`
-}
-
-// AuthResponse defines model for AuthResponse.
-type AuthResponse struct {
-	AccessToken  string `json:"accessToken"`
-	RefreshToken string `json:"refreshToken"`
-	User         User   `json:"user"`
-}
-
-// Activity defines model for Activity.
-type Activity struct {
-	AllDay           bool       `json:"allDay"`
-	ArchivedAt       *time.Time `json:"archivedAt,omitempty"`
-	CaldavUid        *string    `json:"caldavUid,omitempty"`
-	Color            *string    `json:"color,omitempty"`
-	CreatedAt        time.Time  `json:"createdAt"`
-	CreatedBy        string     `json:"createdBy"`
-	Description      *string    `json:"description,omitempty"`
-	EndAt            time.Time  `json:"endAt"`
-	GoogleEventId    *string    `json:"googleEventId,omitempty"`
-	Icon             *string    `json:"icon,omitempty"`
-	Id               string     `json:"id"`
-	Location         *string    `json:"location,omitempty"`
-	ParentActivityId *string    `json:"parentActivityId,omitempty"`
-	PercentComplete  *int       `json:"percentComplete,omitempty"`
-	Rrule            *string    `json:"rrule,omitempty"`
-	StartAt          time.Time  `json:"startAt"`
-	StatusId         *string    `json:"statusId,omitempty"`
-	TeamId           string     `json:"teamId"`
-	Title            string     `json:"title"`
-	UpdatedAt        time.Time  `json:"updatedAt"`
-	Url              *string    `json:"url,omitempty"`
-}
-
-// HealthResponse defines model for HealthResponse.
-type HealthResponse struct {
-	Status HealthResponseStatus `json:"status"`
-}
-
-// HealthResponseStatus defines model for HealthResponse.Status.
-type HealthResponseStatus string
-
-// Invite defines model for Invite.
-type Invite struct {
-	AcceptedAt *time.Time `json:"acceptedAt,omitempty"`
-	CreatedAt  time.Time  `json:"createdAt"`
-	Email      string     `json:"email"`
-	ExpiresAt  time.Time  `json:"expiresAt"`
-	Id         string     `json:"id"`
-	InvitedBy  string     `json:"invitedBy"`
-	Role       InviteRole `json:"role"`
-	TeamId     string     `json:"teamId"`
-	Token      string     `json:"token"`
-}
-
-// InviteRole defines model for Invite.Role.
-type InviteRole string
-
-// RefreshResponse defines model for RefreshResponse.
-type RefreshResponse struct {
-	AccessToken string `json:"accessToken"`
-}
-
-// UserPreference defines model for UserPreference.
-type UserPreference struct {
-	Id         string    `json:"id"`
-	UserId     string    `json:"userId"`
-	TimelineId string    `json:"timelineId,omitempty"`
-	Key        string    `json:"key"`
-	Value      string    `json:"value"`
-	UpdatedAt  time.Time `json:"updatedAt"`
-}
-
-// UpsertPreferenceJSONBody defines parameters for UpsertPreference.
-type UpsertPreferenceJSONBody struct {
-	// Key Preference key (e.g. group_by, sort_by, zoom_granularity, theme).
-	Key string `json:"key"`
-
-	// Value JSON-encoded preference value.
-	Value string `json:"value"`
-
-	// TimelineId Optional timeline scope. Omit or pass "" for a global preference.
-	TimelineId *string `json:"timelineId,omitempty"`
-}
-
-// UpsertPreferenceJSONRequestBody defines body for UpsertPreference for application/json ContentType.
-type UpsertPreferenceJSONRequestBody UpsertPreferenceJSONBody
-
-// SavedFilter defines model for SavedFilter.
-type SavedFilter struct {
-	CreatedAt time.Time `json:"createdAt"`
-
-	// Definition Opaque JSON filter spec (validated client-side).
-	Definition string `json:"definition"`
-	Id         string `json:"id"`
-
-	// IsTeamFilter When true, the filter is visible to all team members (set by admins only).
-	IsTeamFilter bool      `json:"isTeamFilter"`
-	Name         string    `json:"name"`
-	TeamId       string    `json:"teamId"`
-	UpdatedAt    time.Time `json:"updatedAt"`
-	UserId       string    `json:"userId"`
-}
-
-// Team defines model for Team.
-type Team struct {
-	ArchivedAt  *time.Time `json:"archivedAt,omitempty"`
-	Color       *string    `json:"color,omitempty"`
-	CreatedAt   time.Time  `json:"createdAt"`
-	Description *string    `json:"description,omitempty"`
-	Icon        *string    `json:"icon,omitempty"`
-	Id          string     `json:"id"`
-	Name        string     `json:"name"`
-	Notes       *string    `json:"notes,omitempty"`
-	Slug        string     `json:"slug"`
-	UpdatedAt   time.Time  `json:"updatedAt"`
-}
-
-// TeamMember defines model for TeamMember.
-type TeamMember struct {
-	Color    *string        `json:"color,omitempty"`
-	JoinedAt time.Time      `json:"joinedAt"`
-	Role     TeamMemberRole `json:"role"`
-	TeamId   string         `json:"teamId"`
-	UserId   string         `json:"userId"`
-}
-
-// TeamMemberRole defines model for TeamMember.Role.
-type TeamMemberRole string
-
-// TeamMemberWithUser defines model for TeamMemberWithUser.
-type TeamMemberWithUser struct {
-	AvatarUrl   *string                `json:"avatarUrl,omitempty"`
-	Color       *string                `json:"color,omitempty"`
-	DisplayName string                 `json:"displayName"`
-	Email       openapi_types.Email    `json:"email"`
-	JoinedAt    time.Time              `json:"joinedAt"`
-	Role        TeamMemberWithUserRole `json:"role"`
-	TeamId      string                 `json:"teamId"`
-	UserId      string                 `json:"userId"`
-}
-
-// TeamMemberWithUserRole defines model for TeamMemberWithUser.Role.
-type TeamMemberWithUserRole string
-
-// Timeline defines model for Timeline.
-type Timeline struct {
-	ArchivedAt *time.Time         `json:"archivedAt,omitempty"`
-	CreatedAt  time.Time          `json:"createdAt"`
-	CreatedBy  string             `json:"createdBy"`
-	EndDate    openapi_types.Date `json:"endDate"`
-	IcalToken  string             `json:"icalToken"`
-	Id         string             `json:"id"`
-	Name       string             `json:"name"`
-	ShareToken string             `json:"shareToken"`
-	StartDate  openapi_types.Date `json:"startDate"`
-	TeamId     string             `json:"teamId"`
-	UpdatedAt  time.Time          `json:"updatedAt"`
-	Visibility TimelineVisibility `json:"visibility"`
-}
-
-// TimelineVisibility defines model for Timeline.Visibility.
-type TimelineVisibility string
-
-// User defines model for User.
-type User struct {
-	AvatarUrl   *string             `json:"avatarUrl,omitempty"`
-	CreatedAt   time.Time           `json:"createdAt"`
-	DisplayName string              `json:"displayName"`
-	Email       openapi_types.Email `json:"email"`
-	Id          string              `json:"id"`
-	UpdatedAt   time.Time           `json:"updatedAt"`
-}
-
-// ActivityId defines model for activityId.
-type ActivityId = string
-
-// SavedFilterId defines model for savedFilterId.
-type SavedFilterId = string
-
-// ShareToken defines model for shareToken.
-type ShareToken = string
-
-// TeamId defines model for teamId.
-type TeamId = string
-
-// TimelineId defines model for timelineId.
-type TimelineId = string
-
-// BadRequest defines model for BadRequest.
-type BadRequest = ApiError
-
-// Forbidden defines model for Forbidden.
-type Forbidden = ApiError
-
-// InternalError defines model for InternalError.
-type InternalError = ApiError
-
-// NotFound defines model for NotFound.
-type NotFound = ApiError
-
-// PaymentRequired defines model for PaymentRequired.
-type PaymentRequired = ApiError
-
-// Unauthorized defines model for Unauthorized.
-type Unauthorized = ApiError
-
-// bearerAuthContextKey is the context key for bearerAuth security scheme
-type bearerAuthContextKey string
-
-// LoginJSONBody defines parameters for Login.
-type LoginJSONBody struct {
-	Email    openapi_types.Email `json:"email"`
-	Password string              `json:"password"`
-}
-
-// RefreshTokenJSONBody defines parameters for RefreshToken.
-type RefreshTokenJSONBody struct {
-	RefreshToken string `json:"refreshToken"`
-}
-
-// RegisterJSONBody defines parameters for Register.
-type RegisterJSONBody struct {
-	DisplayName string              `json:"displayName"`
-	Email       openapi_types.Email `json:"email"`
-	InviteToken *string             `json:"inviteToken,omitempty"`
-	Password    string              `json:"password"`
-}
-
-// UpdateActivityJSONBody defines parameters for UpdateActivity.
-type UpdateActivityJSONBody struct {
-	AllDay           *bool      `json:"allDay,omitempty"`
-	Color            *string    `json:"color,omitempty"`
-	Description      *string    `json:"description,omitempty"`
-	EndAt            *time.Time `json:"endAt,omitempty"`
-	Icon             *string    `json:"icon,omitempty"`
-	Location         *string    `json:"location,omitempty"`
-	ParentActivityId *string    `json:"parentActivityId,omitempty"`
-	PercentComplete  *int       `json:"percentComplete,omitempty"`
-	Rrule            *string    `json:"rrule,omitempty"`
-	StartAt          *time.Time `json:"startAt,omitempty"`
-	StatusId         *string    `json:"statusId,omitempty"`
-	Title            *string    `json:"title,omitempty"`
-	Url              *string    `json:"url,omitempty"`
-}
-
-// UpdateSavedFilterJSONBody defines parameters for UpdateSavedFilter.
-type UpdateSavedFilterJSONBody struct {
-	Definition   *string `json:"definition,omitempty"`
-	IsTeamFilter *bool   `json:"isTeamFilter,omitempty"`
-	Name         *string `json:"name,omitempty"`
-}
-
-// CreateTeamJSONBody defines parameters for CreateTeam.
-type CreateTeamJSONBody struct {
-	Name        string  `json:"name"`
-	Description *string `json:"description,omitempty"`
-	Notes       *string `json:"notes,omitempty"`
-	Color       *string `json:"color,omitempty"`
-	Icon        *string `json:"icon,omitempty"`
-}
-
-// UpdateTeamJSONBody defines parameters for UpdateTeam.
-type UpdateTeamJSONBody struct {
-	Name        *string `json:"name,omitempty"`
-	Description *string `json:"description,omitempty"`
-	Notes       *string `json:"notes,omitempty"`
-	Color       *string `json:"color,omitempty"`
-	Icon        *string `json:"icon,omitempty"`
-}
-
-// ListActivitiesParams defines parameters for ListActivities.
-type ListActivitiesParams struct {
-	// From Only return activities where startAt >= from (RFC 3339).
-	From *time.Time `form:"from,omitempty" json:"from,omitempty"`
-
-	// To Only return activities where startAt <= to (RFC 3339).
-	To *time.Time `form:"to,omitempty" json:"to,omitempty"`
-}
-
-// CreateActivityJSONBody defines parameters for CreateActivity.
-type CreateActivityJSONBody struct {
-	AllDay            *bool     `json:"allDay,omitempty"`
-	AssignedMemberIds *[]string `json:"assignedMemberIds,omitempty"`
-	TagIds            *[]string `json:"tagIds,omitempty"`
-	Color             *string   `json:"color,omitempty"`
-	Description       *string   `json:"description,omitempty"`
-	EndAt             time.Time `json:"endAt"`
-	Icon              *string   `json:"icon,omitempty"`
-	Location          *string   `json:"location,omitempty"`
-	Notes             *string   `json:"notes,omitempty"`
-	ParentActivityId  *string   `json:"parentActivityId,omitempty"`
-	PercentComplete   *int      `json:"percentComplete,omitempty"`
-	Rrule             *string   `json:"rrule,omitempty"`
-	StartAt           time.Time `json:"startAt"`
-	StatusId          *string   `json:"statusId,omitempty"`
-	Title             string    `json:"title"`
-	Url               *string   `json:"url,omitempty"`
-}
-
-// CreateInviteJSONBody defines parameters for CreateInvite.
-type CreateInviteJSONBody struct {
-	// Email If provided, the invite is scoped to this email address.
-	Email *openapi_types.Email      `json:"email,omitempty"`
-	Role  *CreateInviteJSONBodyRole `json:"role,omitempty"`
-}
-
-// CreateInviteJSONBodyRole defines parameters for CreateInvite.
-type CreateInviteJSONBodyRole string
-
-// CreateSavedFilterJSONBody defines parameters for CreateSavedFilter.
-type CreateSavedFilterJSONBody struct {
-	// Definition Opaque JSON filter spec (validated client-side).
-	Definition   string `json:"definition"`
-	IsTeamFilter *bool  `json:"isTeamFilter,omitempty"`
-	Name         string `json:"name"`
-}
-
-// CreateTimelineJSONBody defines parameters for CreateTimeline.
-type CreateTimelineJSONBody struct {
-	EndDate    openapi_types.Date                `json:"endDate"`
-	Name       string                            `json:"name"`
-	StartDate  openapi_types.Date                `json:"startDate"`
-	Visibility *CreateTimelineJSONBodyVisibility `json:"visibility,omitempty"`
-}
-
-// CreateTimelineJSONBodyVisibility defines parameters for CreateTimeline.
-type CreateTimelineJSONBodyVisibility string
-
-// LoginJSONRequestBody defines body for Login for application/json ContentType.
-type LoginJSONRequestBody LoginJSONBody
-
-// RefreshTokenJSONRequestBody defines body for RefreshToken for application/json ContentType.
-type RefreshTokenJSONRequestBody RefreshTokenJSONBody
-
-// RegisterJSONRequestBody defines body for Register for application/json ContentType.
-type RegisterJSONRequestBody RegisterJSONBody
-
-// UpdateActivityJSONRequestBody defines body for UpdateActivity for application/json ContentType.
-type UpdateActivityJSONRequestBody UpdateActivityJSONBody
-
-// UpdateSavedFilterJSONRequestBody defines body for UpdateSavedFilter for application/json ContentType.
-type UpdateSavedFilterJSONRequestBody UpdateSavedFilterJSONBody
-
-// CreateTeamJSONRequestBody defines body for CreateTeam for application/json ContentType.
-type CreateTeamJSONRequestBody CreateTeamJSONBody
-
-// UpdateTeamJSONRequestBody defines body for UpdateTeam for application/json ContentType.
-type UpdateTeamJSONRequestBody UpdateTeamJSONBody
-
-// CreateActivityJSONRequestBody defines body for CreateActivity for application/json ContentType.
-type CreateActivityJSONRequestBody CreateActivityJSONBody
-
-// CreateInviteJSONRequestBody defines body for CreateInvite for application/json ContentType.
-type CreateInviteJSONRequestBody CreateInviteJSONBody
-
-// CreateSavedFilterJSONRequestBody defines body for CreateSavedFilter for application/json ContentType.
-type CreateSavedFilterJSONRequestBody CreateSavedFilterJSONBody
-
-// CreateTimelineJSONRequestBody defines body for CreateTimeline for application/json ContentType.
-type CreateTimelineJSONRequestBody CreateTimelineJSONBody
-````
-
-## File: packages/api/internal/api/tag_handler.go
-````go
-package api
-
-import (
-	"database/sql"
-	"encoding/json"
-	"errors"
-	"net/http"
-	"time"
-
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// handleListTags handles GET /teams/{id}/tags. Returns all tags for the team,
-// ordered by name.
-func (s *Server) handleListTags(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-
-	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
-		return
-	}
-
-	tags, err := s.tags.ListByTeam(teamID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list tags")
-		return
-	}
-	writeJSON(w, http.StatusOK, tags)
-}
-
-// tagNameMaxLen is the maximum byte length accepted for a tag name.
-const tagNameMaxLen = 50
-
-// handleCreateTag handles POST /teams/{id}/tags. Any team member may create a
-// tag; they become the creator. Returns 409 when a tag with the same name
-// already exists in the team.
-func (s *Server) handleCreateTag(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
-		return
-	}
-
-	var req struct {
-		Name  string  `json:"name"`
-		Color *string `json:"color,omitempty"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-	if req.Name == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name is required")
-		return
-	}
-	if len(req.Name) > tagNameMaxLen {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name must be 50 characters or fewer")
-		return
-	}
-
-	tag := &models.Tag{
-		ID:        newID(),
-		TeamID:    teamID,
-		Name:      req.Name,
-		Color:     req.Color,
-		CreatedBy: claims.UserID,
-		CreatedAt: time.Now().UTC(),
-	}
-	if err := s.tags.Create(tag); err != nil {
-		// SQLite unique constraint violation message contains "UNIQUE constraint failed"
-		if isUniqueConstraintError(err) {
-			writeError(w, http.StatusConflict, "TAG_NAME_EXISTS", "a tag with this name already exists in the team")
+// spaHandler serves the embedded React SPA. Known static assets are served
+// directly; any unrecognised path falls back to index.html so React Router
+// handles client-side navigation.
+func spaHandler(uiFS fs.FS) http.Handler {
+	fserver := http.FileServer(http.FS(uiFS))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := strings.TrimPrefix(r.URL.Path, "/")
+		if path == "" {
+			path = "index.html"
+		}
+		if _, err := uiFS.Open(path); err != nil {
+			// Unknown path — serve index.html and let React Router handle it.
+			r = r.Clone(r.Context())
+			r.URL.Path = "/"
+			fserver.ServeHTTP(w, r)
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create tag")
-		return
-	}
-	writeJSON(w, http.StatusCreated, tag)
-}
-
-// handleUpdateTag handles PATCH /tags/{id}. Any team member may update the
-// tag's name or color after confirming membership in the tag's team.
-func (s *Server) handleUpdateTag(w http.ResponseWriter, r *http.Request) {
-	tagID := r.PathValue("id")
-
-	tag, err := s.tags.GetByID(tagID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "tag not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update tag")
-		return
-	}
-
-	// Return 404 (not 403) for non-members so callers cannot probe tag existence.
-	if !s.hasTeamAccess(r, tag.TeamID) {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "tag not found")
-		return
-	}
-
-	var req struct {
-		Name  *string `json:"name,omitempty"`
-		Color *string `json:"color,omitempty"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-	if req.Name != nil {
-		if *req.Name == "" {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name must not be empty")
-			return
-		}
-		if len(*req.Name) > tagNameMaxLen {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name must be 50 characters or fewer")
-			return
-		}
-		tag.Name = *req.Name
-	}
-	if req.Color != nil {
-		tag.Color = req.Color
-	}
-
-	if err := s.tags.Update(tag); err != nil {
-		if isUniqueConstraintError(err) {
-			writeError(w, http.StatusConflict, "TAG_NAME_EXISTS", "a tag with this name already exists in the team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update tag")
-		return
-	}
-	writeJSON(w, http.StatusOK, tag)
-}
-
-// handleDeleteTag handles DELETE /tags/{id}. Any team member may delete a tag;
-// the cascade removes all activity_tags rows referencing it.
-func (s *Server) handleDeleteTag(w http.ResponseWriter, r *http.Request) {
-	tagID := r.PathValue("id")
-
-	tag, err := s.tags.GetByID(tagID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "tag not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete tag")
-		return
-	}
-
-	// Return 404 (not 403) for non-members so callers cannot probe tag existence.
-	if !s.hasTeamAccess(r, tag.TeamID) {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "tag not found")
-		return
-	}
-
-	if err := s.tags.Delete(tagID); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete tag")
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
+		fserver.ServeHTTP(w, r)
+	})
 }
 ````
 
@@ -32118,222 +32886,6 @@ func (r *ShareRepo) RecordView(id string) error {
 	}
 	return nil
 }
-````
-
-## File: packages/api/internal/db/tag_repo.go
-````go
-package db
-
-import (
-	"errors"
-	"fmt"
-
-	"github.com/jmoiron/sqlx"
-
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// ErrTagOwnership is returned by ValidateTeamOwnership when one or more tag
-// IDs belong to a different team (or do not exist).
-var ErrTagOwnership = errors.New("tag belongs to another team")
-
-// TagRepo is the persistence layer for Tag records.
-type TagRepo struct {
-	db *sqlx.DB
-}
-
-// NewTagRepo returns a TagRepo backed by db.
-func NewTagRepo(db *sqlx.DB) *TagRepo {
-	return &TagRepo{db: db}
-}
-
-// Create inserts a new Tag row.
-func (r *TagRepo) Create(tag *models.Tag) error {
-	_, err := r.db.NamedExec(`
-		INSERT INTO tags (id, team_id, name, color, created_by, created_at)
-		VALUES (:id, :team_id, :name, :color, :created_by, :created_at)
-	`, tag)
-	if err != nil {
-		return fmt.Errorf("creating tag: %w", err)
-	}
-	return nil
-}
-
-// GetByID fetches a Tag by primary key. Returns sql.ErrNoRows (wrapped) when
-// no row matches.
-func (r *TagRepo) GetByID(id string) (*models.Tag, error) {
-	var t models.Tag
-	err := r.db.Get(&t, `SELECT * FROM tags WHERE id = ?`, id)
-	if err != nil {
-		return nil, fmt.Errorf("getting tag: %w", err)
-	}
-	return &t, nil
-}
-
-// ListByTeam returns all tags for the given team, ordered by name ascending.
-func (r *TagRepo) ListByTeam(teamID string) ([]*models.Tag, error) {
-	tags := make([]*models.Tag, 0)
-	err := r.db.Select(&tags,
-		`SELECT * FROM tags WHERE team_id = ? ORDER BY name ASC`,
-		teamID,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("listing tags: %w", err)
-	}
-	return tags, nil
-}
-
-// Update writes name and color for an existing tag row.
-func (r *TagRepo) Update(tag *models.Tag) error {
-	_, err := r.db.NamedExec(`
-		UPDATE tags SET name = :name, color = :color WHERE id = :id
-	`, tag)
-	if err != nil {
-		return fmt.Errorf("updating tag: %w", err)
-	}
-	return nil
-}
-
-// Delete removes a tag row. Cascade deletes matching activity_tags rows.
-func (r *TagRepo) Delete(id string) error {
-	_, err := r.db.Exec(`DELETE FROM tags WHERE id = ?`, id)
-	if err != nil {
-		return fmt.Errorf("deleting tag: %w", err)
-	}
-	return nil
-}
-
-// ValidateTeamOwnership confirms that every ID in tagIDs belongs to teamID.
-// Returns ErrTagOwnership if any ID is missing or owned by another team.
-func (r *TagRepo) ValidateTeamOwnership(teamID string, tagIDs []string) error {
-	if len(tagIDs) == 0 {
-		return nil
-	}
-	query, args, err := sqlx.In(
-		`SELECT COUNT(*) FROM tags WHERE id IN (?) AND team_id = ?`,
-		tagIDs, teamID,
-	)
-	if err != nil {
-		return fmt.Errorf("building ownership query: %w", err)
-	}
-	var count int
-	if err := r.db.Get(&count, query, args...); err != nil {
-		return fmt.Errorf("checking tag ownership: %w", err)
-	}
-	if count != len(tagIDs) {
-		return ErrTagOwnership
-	}
-	return nil
-}
-````
-
-## File: packages/api/sample_data/10_tags.sql
-````sql
--- Tags: team-scoped labels for activities.
--- Each team gets 6-8 tags reflecting its domain vocabulary.
-
--- ── Product Marketing tags ────────────────────────────────────────────────────
-
-INSERT INTO tags (id, team_id, name, color, created_by, created_at) VALUES
-  ('tag-pm-urgent',      't-product-marketing', 'urgent',      'red',    'u-brian-rieb', datetime('now', '-30 days')),
-  ('tag-pm-design',      't-product-marketing', 'design',      'violet', 'u-brian-rieb', datetime('now', '-30 days')),
-  ('tag-pm-content',     't-product-marketing', 'content',     'teal',   'u-brian-rieb', datetime('now', '-28 days')),
-  ('tag-pm-research',    't-product-marketing', 'research',    'blue',   'u-brian-rieb', datetime('now', '-27 days')),
-  ('tag-pm-launch',      't-product-marketing', 'launch',      'green',  'u-brian-rieb', datetime('now', '-26 days')),
-  ('tag-pm-competitive', 't-product-marketing', 'competitive', 'amber',  'u-brian-rieb', datetime('now', '-25 days')),
-  ('tag-pm-review',      't-product-marketing', 'review',      'indigo', 'u-brian-rieb', datetime('now', '-24 days')),
-  ('tag-pm-blocked',     't-product-marketing', 'blocked',     'red',    'u-brian-rieb', datetime('now', '-20 days'));
-
--- ── P&B Tiger Team tags ───────────────────────────────────────────────────────
-
-INSERT INTO tags (id, team_id, name, color, created_by, created_at) VALUES
-  ('tag-pb-positioning', 't-pb-tiger-team', 'positioning', 'amber',  'u-brian-rieb', datetime('now', '-140 days')),
-  ('tag-pb-strategy',    't-pb-tiger-team', 'strategy',    'indigo', 'u-brian-rieb', datetime('now', '-140 days')),
-  ('tag-pb-research',    't-pb-tiger-team', 'research',    'blue',   'u-brian-rieb', datetime('now', '-138 days')),
-  ('tag-pb-competitive', 't-pb-tiger-team', 'competitive', 'red',    'u-brian-rieb', datetime('now', '-137 days')),
-  ('tag-pb-enablement',  't-pb-tiger-team', 'enablement',  'green',  'u-codi-k',     datetime('now', '-135 days')),
-  ('tag-pb-executive',   't-pb-tiger-team', 'executive',   'violet', 'u-codi-k',     datetime('now', '-134 days'));
-
--- ── Marketing Cross Functional tags ──────────────────────────────────────────
-
-INSERT INTO tags (id, team_id, name, color, created_by, created_at) VALUES
-  ('tag-mcf-design',     't-marketing-cross-func', 'design',     'violet', 'u-scott-fitzgerald', datetime('now', '-60 days')),
-  ('tag-mcf-seo',        't-marketing-cross-func', 'seo',        'teal',   'u-scott-fitzgerald', datetime('now', '-60 days')),
-  ('tag-mcf-analytics',  't-marketing-cross-func', 'analytics',  'blue',   'u-scott-fitzgerald', datetime('now', '-58 days')),
-  ('tag-mcf-brand',      't-marketing-cross-func', 'brand',      'purple', 'u-paula-h',          datetime('now', '-57 days')),
-  ('tag-mcf-content',    't-marketing-cross-func', 'content',    'green',  'u-paula-h',          datetime('now', '-56 days')),
-  ('tag-mcf-launch',     't-marketing-cross-func', 'launch',     'rose',   'u-scott-fitzgerald', datetime('now', '-55 days'));
-
--- ── Activity-tag associations ─────────────────────────────────────────────────
-
--- Product Marketing: Q1 Workload
-INSERT INTO activity_tags (activity_id, tag_id) VALUES
-  ('a-q1-01', 'tag-pm-research'),
-  ('a-q1-01', 'tag-pm-competitive'),
-  ('a-q1-02', 'tag-pm-competitive'),
-  ('a-q1-02', 'tag-pm-review'),
-  ('a-q1-03', 'tag-pm-content'),
-  ('a-q1-04', 'tag-pm-review'),
-  ('a-q1-05', 'tag-pm-review'),
-  ('a-q1-06', 'tag-pm-launch'),
-  ('a-q1-06', 'tag-pm-review'),
-  ('a-q1-08', 'tag-pm-urgent'),
-  ('a-q1-09', 'tag-pm-design'),
-  ('a-q1-09', 'tag-pm-content'),
-  ('a-q1-11', 'tag-pm-content'),
-  ('a-q1-13', 'tag-pm-content'),
-  ('a-q1-14', 'tag-pm-launch'),
-  ('a-q1-17', 'tag-pm-blocked'),
-  ('a-q1-17', 'tag-pm-urgent'),
-  ('a-q1-18', 'tag-pm-competitive'),
-  ('a-q1-18', 'tag-pm-research');
-
--- Product Marketing: Sales Kick Off
-INSERT INTO activity_tags (activity_id, tag_id) VALUES
-  ('a-sko-01', 'tag-pm-design'),
-  ('a-sko-01', 'tag-pm-launch'),
-  ('a-sko-02', 'tag-pm-competitive'),
-  ('a-sko-04', 'tag-pm-content'),
-  ('a-sko-05', 'tag-pm-content'),
-  ('a-sko-07', 'tag-pm-review');
-
--- P&B Tiger Team: Right to Win Initiative
-INSERT INTO activity_tags (activity_id, tag_id) VALUES
-  ('a-rtw-01', 'tag-pb-research'),
-  ('a-rtw-01', 'tag-pb-competitive'),
-  ('a-rtw-02', 'tag-pb-research'),
-  ('a-rtw-03', 'tag-pb-positioning'),
-  ('a-rtw-03', 'tag-pb-strategy'),
-  ('a-rtw-04', 'tag-pb-executive'),
-  ('a-rtw-04', 'tag-pb-strategy');
-
--- P&B Tiger Team: Displacement GTM
-INSERT INTO activity_tags (activity_id, tag_id) VALUES
-  ('a-gtm-01', 'tag-pb-strategy'),
-  ('a-gtm-01', 'tag-pb-competitive'),
-  ('a-gtm-01', 'tag-pb-enablement'),
-  ('a-gtm-02', 'tag-pb-competitive'),
-  ('a-gtm-03', 'tag-pb-enablement'),
-  ('a-gtm-04', 'tag-pb-strategy');
-
--- Marketing Cross Functional: Web Site Rebrand
-INSERT INTO activity_tags (activity_id, tag_id) VALUES
-  ('a-reb-01', 'tag-mcf-brand'),
-  ('a-reb-02', 'tag-mcf-design'),
-  ('a-reb-02', 'tag-mcf-brand'),
-  ('a-reb-03', 'tag-mcf-design'),
-  ('a-reb-04', 'tag-mcf-seo'),
-  ('a-reb-05', 'tag-mcf-content'),
-  ('a-reb-05', 'tag-mcf-seo'),
-  ('a-reb-06', 'tag-mcf-analytics'),
-  ('a-reb-07', 'tag-mcf-design'),
-  ('a-reb-08', 'tag-mcf-content'),
-  ('a-reb-09', 'tag-mcf-design'),
-  ('a-reb-09', 'tag-mcf-content'),
-  ('a-reb-12', 'tag-mcf-design'),
-  ('a-reb-14', 'tag-mcf-launch'),
-  ('a-reb-15', 'tag-mcf-analytics'),
-  ('a-reb-15', 'tag-mcf-launch');
 ````
 
 ## File: packages/web/src/components/calendar/CalendarToolbar.tsx
@@ -34038,6 +34590,240 @@ export default function FilterManageModal({
 }
 ````
 
+## File: packages/web/src/components/gantt/ActivityCreatePanel.tsx
+````typescript
+/**
+ * ActivityCreatePanel — right-side slide-in panel for creating a new Gantt activity.
+ *
+ * Shares its field stack with ActivityDetailPanel via ActivityFieldsBody
+ * (see shared/activityPanelFields.tsx) so the create and edit forms show an identical
+ * field set and order. Unlike the detail panel, every change buffers in local
+ * state; nothing persists until the user clicks "Create activity", which
+ * submits the whole form via POST /timelines/:id/activities.
+ *
+ * Defaults come from the drag selection: start/end date and the lane member.
+ */
+
+import { useState, useEffect } from 'react'
+import { X, Loader2 } from 'lucide-react'
+import type { Identity } from '@/components/identity/identity-constants'
+import { useCreateActivity, useTimelineActivities } from '@/hooks/useTeamActivities'
+import { useTags } from '@/hooks/useTags'
+import type { Member } from '@/types'
+import type { components } from '@draba/shared'
+import { ActivityFieldsBody, PANEL_WIDTH } from '@/components/shared/activityPanelFields'
+
+type Status = components['schemas']['Status']
+
+interface Props {
+  open: boolean
+  teamId: string
+  timelineId: string
+  members: Member[]
+  timelineStatuses?: Status[]
+  defaultStart: string
+  defaultEnd: string
+  defaultMemberId?: string | null
+  defaultStatusId?: string | null
+  onClose: () => void
+}
+
+export default function ActivityCreatePanel({
+  open,
+  teamId,
+  timelineId,
+  members,
+  timelineStatuses = [],
+  defaultStart,
+  defaultEnd,
+  defaultMemberId,
+  defaultStatusId,
+  onClose,
+}: Props) {
+  const createMutation = useCreateActivity(teamId, timelineId)
+  const { data: teamTags = [] } = useTags(teamId)
+  const { data: allActivities = [] } = useTimelineActivities(teamId, timelineId)
+
+  const [title, setTitle] = useState('')
+  const [description, setDescription] = useState('')
+  const [notes, setNotes] = useState('')
+  const [startDate, setStartDate] = useState(defaultStart)
+  const [endDate, setEndDate] = useState(defaultEnd)
+  const [identity, setIdentity] = useState<Identity>({ color: '#288C9B', icon: '__none__' })
+  const [assignedIds, setAssignedIds] = useState<string[]>(
+    defaultMemberId ? [defaultMemberId] : [],
+  )
+  const [statusId, setStatusId] = useState<string | null>(defaultStatusId ?? null)
+  const [tagIds, setTagIds] = useState<string[]>([])
+  const [parentId, setParentId] = useState<string | null>(null)
+  const [progress, setProgress] = useState(0)
+  const [location, setLocation] = useState('')
+  const [url, setUrl] = useState('')
+
+  // Reset all fields to defaults each time the panel opens so re-opening
+  // the panel always shows a blank form rather than the previous session's data.
+  useEffect(() => {
+    if (!open) return
+    setTitle('')
+    setDescription('')
+    setNotes('')
+    setStartDate(defaultStart)
+    setEndDate(defaultEnd)
+    setIdentity({ color: '#288C9B', icon: '__none__' })
+    setAssignedIds(defaultMemberId ? [defaultMemberId] : [])
+    setStatusId(defaultStatusId ?? null)
+    setTagIds([])
+    setParentId(null)
+    setProgress(0)
+    setLocation('')
+    setUrl('')
+  }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const creating = createMutation.isPending
+  const titleTrimmed = title.trim()
+
+  function toggleAssignee(memberId: string) {
+    setAssignedIds(prev =>
+      prev.includes(memberId) ? prev.filter(id => id !== memberId) : [...prev, memberId],
+    )
+  }
+
+  // Keep the end date from drifting before the start date.
+  function handleStartDateChange(val: string) {
+    setStartDate(val)
+    if (val > endDate) setEndDate(val)
+  }
+
+  function handleSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    if (!titleTrimmed) return
+    createMutation.mutate(
+      {
+        title: titleTrimmed,
+        startAt: `${startDate}T00:00:00Z`,
+        endAt: `${endDate}T00:00:00Z`,
+        description: description.trim() || null,
+        notes: notes.trim() || null,
+        color: identity.color,
+        icon: identity.icon,
+        assignedMemberIds: assignedIds,
+        statusId: statusId ?? undefined,
+        tagIds,
+        parentActivityId: parentId,
+        percentComplete: progress,
+        location: location.trim() || null,
+        url: url.trim() || null,
+      },
+      { onSuccess: onClose },
+    )
+  }
+
+  return (
+    <div
+      style={{
+        width: open ? PANEL_WIDTH : 0,
+        flexShrink: 0,
+        borderLeft: open ? '1px solid var(--border)' : 'none',
+        background: 'var(--card)',
+        display: 'flex',
+        flexDirection: 'column',
+        overflow: 'hidden',
+        transition: 'width 0.2s ease',
+      }}
+    >
+    <div style={{ width: PANEL_WIDTH, display: 'flex', flexDirection: 'column', height: '100%' }}>
+      {/* Header */}
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          padding: '0 12px',
+          height: 'var(--topbar-h, 40px)',
+          borderBottom: '1px solid var(--border)',
+          flexShrink: 0,
+        }}
+      >
+        <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)' }}>New activity</span>
+        <button
+          onClick={onClose}
+          style={{
+            width: 24, height: 24, border: 'none', background: 'none', borderRadius: 4,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            cursor: 'pointer', color: 'var(--muted-foreground)',
+          }}
+          onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+          onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+        >
+          <X size={14} strokeWidth={2} />
+        </button>
+      </div>
+
+      {/* Body (shared with detail panel) */}
+      <ActivityFieldsBody
+        identity={identity}
+        onIdentityChange={setIdentity}
+        title={title}
+        onTitleChange={setTitle}
+        titlePlaceholder="Activity title…"
+        titleAutoFocus
+        titleFallbackName="New Activity"
+        startDate={startDate}
+        endDate={endDate}
+        onStartDateChange={handleStartDateChange}
+        onEndDateChange={setEndDate}
+        description={description}
+        onDescriptionChange={setDescription}
+        members={members}
+        assignedIds={assignedIds}
+        onToggleAssignee={toggleAssignee}
+        statuses={timelineStatuses}
+        statusId={statusId}
+        onStatusChange={setStatusId}
+        teamId={teamId}
+        teamTags={teamTags}
+        tagIds={tagIds}
+        onTagsChange={setTagIds}
+        parentActivities={allActivities}
+        parentId={parentId}
+        onParentChange={setParentId}
+        progress={progress}
+        onProgressCommit={setProgress}
+        location={location}
+        onLocationChange={setLocation}
+        url={url}
+        onUrlChange={setUrl}
+        notes={notes}
+        onNotesChange={setNotes}
+      />
+
+      {/* Footer */}
+      <div style={{ padding: '10px 14px', borderTop: '1px solid var(--border)', flexShrink: 0 }}>
+        <button
+          type="button"
+          onClick={handleSubmit}
+          disabled={!titleTrimmed || creating}
+          style={{
+            width: '100%', fontSize: 13, fontWeight: 600, padding: 8,
+            borderRadius: 'var(--radius-md)', border: 'none',
+            background: titleTrimmed && !creating ? 'var(--primary)' : 'var(--muted)',
+            color: titleTrimmed && !creating ? 'white' : 'var(--muted-foreground)',
+            cursor: titleTrimmed && !creating ? 'pointer' : 'not-allowed',
+            fontFamily: 'var(--font-sans)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+            transition: 'background 0.1s',
+          }}
+        >
+          {creating && <Loader2 size={13} className="animate-spin" />}
+          Create activity
+        </button>
+      </div>
+    </div>
+    </div>
+  )
+}
+````
+
 ## File: packages/web/src/components/kanban/KanbanCard.tsx
 ````typescript
 /**
@@ -35095,257 +35881,6 @@ export default function KanbanToolbar({
       </div>
     </div>
   );
-}
-````
-
-## File: packages/web/src/components/TagInput.tsx
-````typescript
-/**
- * TagInput — combobox for selecting and creating activity tags.
- *
- * Selected tags render as colored pill badges with an × remove button.
- * Typing filters the team's existing tags; if no exact match exists a
- * "Create '<text>'" option appears at the bottom of the dropdown.
- */
-
-import { useState, useRef, useEffect } from 'react'
-import { X, Tag as TagIcon, Plus } from 'lucide-react'
-import type { Tag } from '@/hooks/useTags'
-import { useCreateTag } from '@/hooks/useTags'
-import { resolveColorHex } from '@/components/identity/identity-constants'
-
-// Cycle through identity palette colors for auto-created tags.
-const DEFAULT_COLORS = ['teal', 'blue', 'violet', 'amber', 'green', 'red', 'indigo', 'pink']
-
-interface Props {
-  teamId: string
-  tags: Tag[]
-  selectedTagIds: string[]
-  onChange: (ids: string[]) => void
-}
-
-export default function TagInput({ teamId, tags, selectedTagIds, onChange }: Props) {
-  const [query, setQuery] = useState('')
-  const [open, setOpen] = useState(false)
-  const inputRef = useRef<HTMLInputElement>(null)
-  const containerRef = useRef<HTMLDivElement>(null)
-  const createTag = useCreateTag(teamId)
-
-  const selectedTags = selectedTagIds
-    .map(id => tags.find(t => t.id === id))
-    .filter(Boolean) as Tag[]
-
-  const filtered = tags
-    .filter(t => !selectedTagIds.includes(t.id))
-    .filter(t => t.name.toLowerCase().includes(query.toLowerCase()))
-
-  const exactMatch = tags.some(t => t.name.toLowerCase() === query.toLowerCase())
-  const showCreate = query.trim().length > 0 && !exactMatch
-
-  useEffect(() => {
-    function onDown(e: MouseEvent) {
-      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
-        setOpen(false)
-        setQuery('')
-      }
-    }
-    document.addEventListener('mousedown', onDown)
-    return () => document.removeEventListener('mousedown', onDown)
-  }, [])
-
-  function removeTag(id: string) {
-    onChange(selectedTagIds.filter(tid => tid !== id))
-  }
-
-  function selectTag(id: string) {
-    onChange([...selectedTagIds, id])
-    setQuery('')
-    inputRef.current?.focus()
-  }
-
-  /**
-   * Keyboard shortcuts inside the text field:
-   *   Enter     → select an exact-name match if one exists, else create the tag
-   *   Backspace → remove the last selected pill when the field is empty
-   */
-  function handleKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
-    if (e.key === 'Enter') {
-      const trimmed = query.trim()
-      if (!trimmed) return
-      e.preventDefault()
-      const exact = tags.find(
-        t => t.name.toLowerCase() === trimmed.toLowerCase() && !selectedTagIds.includes(t.id),
-      )
-      if (exact) selectTag(exact.id)
-      else if (showCreate) handleCreateTag()
-    } else if (e.key === 'Backspace' && query === '' && selectedTags.length > 0) {
-      removeTag(selectedTags[selectedTags.length - 1].id)
-    }
-  }
-
-  function handleCreateTag() {
-    const name = query.trim()
-    if (!name) return
-    const colorIdx = tags.length % DEFAULT_COLORS.length
-    createTag.mutate(
-      { name, color: DEFAULT_COLORS[colorIdx] },
-      {
-        onSuccess: (newTag) => {
-          onChange([...selectedTagIds, newTag.id])
-          setQuery('')
-          inputRef.current?.focus()
-        },
-      }
-    )
-  }
-
-  function tagColor(tag: Tag): string {
-    if (!tag.color) return 'var(--muted-foreground)'
-    return resolveColorHex(tag.color) ?? tag.color
-  }
-
-  return (
-    <div ref={containerRef} style={{ flex: 1, position: 'relative' }}>
-      {/* Selected pills + text input */}
-      <div
-        onClick={() => { setOpen(true); inputRef.current?.focus() }}
-        style={{
-          display: 'flex',
-          flexWrap: 'wrap',
-          gap: 4,
-          alignItems: 'center',
-          minHeight: 28,
-          padding: '3px 6px',
-          border: '1px solid var(--border)',
-          borderRadius: 'var(--radius-md)',
-          background: 'var(--background)',
-          cursor: 'text',
-        }}
-      >
-        {selectedTags.map(tag => (
-          <span
-            key={tag.id}
-            style={{
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: 3,
-              fontSize: 11,
-              padding: '1px 6px',
-              borderRadius: 100,
-              background: tagColor(tag) + '22',
-              border: `1px solid ${tagColor(tag)}66`,
-              color: 'var(--foreground)',
-            }}
-          >
-            <span
-              style={{
-                width: 6,
-                height: 6,
-                borderRadius: '50%',
-                background: tagColor(tag),
-                flexShrink: 0,
-              }}
-            />
-            {tag.name}
-            <button
-              onMouseDown={e => { e.stopPropagation(); removeTag(tag.id) }}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                padding: 0,
-                border: 'none',
-                background: 'none',
-                cursor: 'pointer',
-                color: 'var(--muted-foreground)',
-                lineHeight: 1,
-              }}
-            >
-              <X size={9} strokeWidth={2.5} />
-            </button>
-          </span>
-        ))}
-        <input
-          ref={inputRef}
-          value={query}
-          onChange={e => { setQuery(e.target.value); setOpen(true) }}
-          onFocus={() => setOpen(true)}
-          onKeyDown={handleKeyDown}
-          placeholder={selectedTags.length === 0 ? 'Add tags…' : ''}
-          style={{
-            border: 'none',
-            outline: 'none',
-            background: 'none',
-            fontSize: 12,
-            color: 'var(--foreground)',
-            fontFamily: 'var(--font-sans)',
-            flexGrow: 1,
-            minWidth: 60,
-            padding: '1px 2px',
-          }}
-        />
-      </div>
-
-      {/* Dropdown */}
-      {open && (filtered.length > 0 || showCreate) && (
-        <div
-          style={{
-            position: 'absolute',
-            top: 'calc(100% + 4px)',
-            left: 0,
-            right: 0,
-            background: 'var(--card)',
-            border: '1px solid var(--border)',
-            borderRadius: 6,
-            boxShadow: '0 4px 12px rgba(0,0,0,.12)',
-            zIndex: 200,
-            overflow: 'hidden',
-            maxHeight: 160,
-            overflowY: 'auto',
-          }}
-        >
-          {filtered.map(tag => (
-            <div
-              key={tag.id}
-              onMouseDown={e => { e.preventDefault(); selectTag(tag.id) }}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 8,
-                padding: '5px 10px',
-                fontSize: 12,
-                cursor: 'pointer',
-              }}
-              onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-              onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-            >
-              <TagIcon size={11} style={{ color: tagColor(tag), flexShrink: 0 }} />
-              <span style={{ flex: 1 }}>{tag.name}</span>
-            </div>
-          ))}
-          {showCreate && (
-            <div
-              onMouseDown={e => { e.preventDefault(); handleCreateTag() }}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 8,
-                padding: '5px 10px',
-                fontSize: 12,
-                cursor: 'pointer',
-                borderTop: filtered.length > 0 ? '1px solid var(--border)' : 'none',
-                color: 'var(--primary)',
-              }}
-              onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-              onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-            >
-              <Plus size={11} strokeWidth={2.5} style={{ flexShrink: 0 }} />
-              <span>Create &quot;{query.trim()}&quot;</span>
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  )
 }
 ````
 
@@ -36514,6 +37049,66 @@ export function applyActiveFilter(
 }
 ````
 
+## File: packages/web/vite.config.ts
+````typescript
+/// <reference types="vitest" />
+import path from 'path'
+import { defineConfig, loadEnv } from 'vite'
+import react from '@vitejs/plugin-react'
+import tailwindcss from '@tailwindcss/vite'
+
+export default defineConfig(({ mode }) => {
+  const env = loadEnv(mode, process.cwd(), '')
+  const apiTarget = env.VITE_API_TARGET ?? 'http://localhost:8080'
+
+  return {
+    plugins: [
+      react(),
+      tailwindcss(),
+    ],
+    resolve: {
+      alias: {
+        '@': path.resolve(__dirname, './src'),
+      },
+    },
+    test: {
+      environment: 'jsdom',
+      globals: true,
+      alias: {
+        '@': path.resolve(__dirname, './src'),
+      },
+    },
+    server: {
+      proxy: {
+        '/setup': { target: apiTarget, changeOrigin: true },
+        '/auth': { target: apiTarget, changeOrigin: true },
+        '/users': { target: apiTarget, changeOrigin: true },
+        '/admin': { target: apiTarget, changeOrigin: true },
+        '/settings': { target: apiTarget, changeOrigin: true },
+        '/tokens': { target: apiTarget, changeOrigin: true },
+        '/teams': { target: apiTarget, changeOrigin: true },
+        '/timelines': { target: apiTarget, changeOrigin: true },
+        '/status-templates': { target: apiTarget, changeOrigin: true },
+        '/status-template-items': { target: apiTarget, changeOrigin: true },
+        '/statuses': { target: apiTarget, changeOrigin: true },
+        '/activities': { target: apiTarget, changeOrigin: true },
+        '/tags': { target: apiTarget, changeOrigin: true },
+        '/saved_filters': { target: apiTarget, changeOrigin: true },
+        '/shares': { target: apiTarget, changeOrigin: true },
+        '/events': { target: apiTarget, changeOrigin: true },
+        '/health': { target: apiTarget, changeOrigin: true },
+        '/ws': {
+          target: apiTarget.replace(/^http/, 'ws'),
+          changeOrigin: true,
+          ws: true,
+          rewriteWsOrigin: true,
+        },
+      },
+    },
+  }
+})
+````
+
 ## File: docs/TESTING.md
 ````markdown
 # Testing & Review Procedures
@@ -36741,6 +37336,503 @@ No Vitest / Testing Library setup exists yet. Components (`TimelineGrid`, `Event
 4. That's it — `/test-phase` will pick it up on the next run.
 ````
 
+## File: packages/api/internal/api/activity_handler.go
+````go
+package api
+
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/db"
+	"github.com/I0-1O/draba/packages/api/internal/events"
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// handleCreateActivity handles POST /teams/{id}/timelines/{timelineId}/activities.
+// The authenticated user must be a member of the team.
+func (s *Server) handleCreateActivity(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	timelineID := r.PathValue("timelineId")
+
+	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
+		return
+	}
+
+	claims := claimsFromContext(r.Context())
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create activity")
+		return
+	}
+	if timeline.TeamID != teamID {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+		return
+	}
+
+	var req CreateActivityJSONBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	if req.Title == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "title is required")
+		return
+	}
+	if req.StartAt.IsZero() || req.EndAt.IsZero() {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "startAt and endAt are required")
+		return
+	}
+	if req.EndAt.Before(req.StartAt) {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "endAt must not be before startAt")
+		return
+	}
+
+	allDay := false
+	if req.AllDay != nil {
+		allDay = *req.AllDay
+	}
+
+	now := time.Now()
+	activity := &models.Activity{
+		ID:               newID(),
+		TimelineID:       timelineID,
+		Title:            req.Title,
+		Description:      req.Description,
+		Notes:            req.Notes,
+		Icon:             req.Icon,
+		Color:            req.Color,
+		StartAt:          req.StartAt,
+		EndAt:            req.EndAt,
+		AllDay:           allDay,
+		StatusID:         req.StatusId,
+		ParentActivityID: req.ParentActivityId,
+		PercentComplete:  req.PercentComplete,
+		Location:         req.Location,
+		URL:              req.Url,
+		Rrule:            req.Rrule,
+		CreatedBy:        claims.UserID,
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}
+	if err := s.activities.Create(activity); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create activity")
+		return
+	}
+
+	if req.AssignedMemberIds != nil {
+		if err := s.activities.SetAssignments(activity.ID, *req.AssignedMemberIds); err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity assignments")
+			return
+		}
+		activity.AssignedMemberIDs = *req.AssignedMemberIds
+	} else {
+		activity.AssignedMemberIDs = []string{}
+	}
+
+	if req.TagIds != nil {
+		if err := s.tags.ValidateTeamOwnership(timeline.TeamID, *req.TagIds); err != nil {
+			if errors.Is(err, db.ErrTagOwnership) {
+				writeError(w, http.StatusBadRequest, "INVALID_TAGS", "one or more tag IDs do not belong to this team")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to validate tags")
+			return
+		}
+		if err := s.activities.SetTags(activity.ID, *req.TagIds); err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity tags")
+			return
+		}
+		activity.TagIDs = *req.TagIds
+	} else {
+		activity.TagIDs = []string{}
+	}
+
+	s.bus.Publish(events.Message{Type: events.ActivityCreated, TeamID: timeline.TeamID, Payload: activity})
+	writeJSON(w, http.StatusCreated, activity)
+}
+
+// handleListActivities handles GET /teams/{id}/timelines/{timelineId}/activities.
+// Optional query params ?from=<RFC3339> and ?to=<RFC3339> bound the result by start_at.
+func (s *Server) handleListActivities(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	timelineID := r.PathValue("timelineId")
+
+	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
+		return
+	}
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list activities")
+		return
+	}
+	if timeline.TeamID != teamID {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+		return
+	}
+
+	var from, to *time.Time
+	if v := r.URL.Query().Get("from"); v != "" {
+		t, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "from must be RFC3339 (e.g. 2006-01-02T15:04:05Z)")
+			return
+		}
+		from = &t
+	}
+	if v := r.URL.Query().Get("to"); v != "" {
+		t, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "to must be RFC3339 (e.g. 2006-01-02T15:04:05Z)")
+			return
+		}
+		to = &t
+	}
+
+	includeArchived := r.URL.Query().Get("archived") == "true"
+	acts, err := s.activities.ListByTimeline(timelineID, from, to, includeArchived)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list activities")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, acts)
+}
+
+// handleUpdateActivity handles PATCH /activities/{id}. Only fields present in
+// the request body are applied; the caller must be a member of the activity's team.
+func (s *Server) handleUpdateActivity(w http.ResponseWriter, r *http.Request) {
+	activityID := r.PathValue("id")
+
+	activity, err := s.activities.GetByID(activityID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "activity not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update activity")
+		return
+	}
+
+	timeline, err := s.timelines.GetByID(activity.TimelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update activity")
+		return
+	}
+
+	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
+		return
+	}
+
+	// Decode into a map so we can detect which fields the caller provided.
+	var patch map[string]json.RawMessage
+	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	if v, ok := patch["title"]; ok {
+		if err := json.Unmarshal(v, &activity.Title); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid title")
+			return
+		}
+	}
+	if v, ok := patch["description"]; ok {
+		if err := json.Unmarshal(v, &activity.Description); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid description")
+			return
+		}
+	}
+	if v, ok := patch["notes"]; ok {
+		if err := json.Unmarshal(v, &activity.Notes); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid notes")
+			return
+		}
+	}
+	if v, ok := patch["icon"]; ok {
+		if err := json.Unmarshal(v, &activity.Icon); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid icon")
+			return
+		}
+	}
+	if v, ok := patch["color"]; ok {
+		if err := json.Unmarshal(v, &activity.Color); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid color")
+			return
+		}
+	}
+	if v, ok := patch["startAt"]; ok {
+		if err := json.Unmarshal(v, &activity.StartAt); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid startAt")
+			return
+		}
+	}
+	if v, ok := patch["endAt"]; ok {
+		if err := json.Unmarshal(v, &activity.EndAt); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid endAt")
+			return
+		}
+	}
+	if v, ok := patch["allDay"]; ok {
+		if err := json.Unmarshal(v, &activity.AllDay); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid allDay")
+			return
+		}
+	}
+	if v, ok := patch["statusId"]; ok {
+		if err := json.Unmarshal(v, &activity.StatusID); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid statusId")
+			return
+		}
+	}
+	if v, ok := patch["parentActivityId"]; ok {
+		if err := json.Unmarshal(v, &activity.ParentActivityID); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid parentActivityId")
+			return
+		}
+	}
+	if v, ok := patch["percentComplete"]; ok {
+		if err := json.Unmarshal(v, &activity.PercentComplete); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid percentComplete")
+			return
+		}
+	}
+	if v, ok := patch["location"]; ok {
+		if err := json.Unmarshal(v, &activity.Location); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid location")
+			return
+		}
+	}
+	if v, ok := patch["url"]; ok {
+		if err := json.Unmarshal(v, &activity.URL); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid url")
+			return
+		}
+	}
+	if v, ok := patch["rrule"]; ok {
+		if err := json.Unmarshal(v, &activity.Rrule); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid rrule")
+			return
+		}
+	}
+
+	var newAssignees *[]string
+	if v, ok := patch["assignedMemberIds"]; ok {
+		var ids []string
+		if err := json.Unmarshal(v, &ids); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid assignedMemberIds")
+			return
+		}
+		newAssignees = &ids
+	}
+
+	var newTagIDs *[]string
+	if v, ok := patch["tagIds"]; ok {
+		var ids []string
+		if err := json.Unmarshal(v, &ids); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid tagIds")
+			return
+		}
+		newTagIDs = &ids
+	}
+
+	if activity.Title == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "title must not be empty")
+		return
+	}
+	if activity.EndAt.Before(activity.StartAt) {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "endAt must not be before startAt")
+		return
+	}
+
+	activity.UpdatedAt = time.Now()
+	if err := s.activities.Update(activity); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update activity")
+		return
+	}
+
+	if newAssignees != nil {
+		if err := s.activities.SetAssignments(activity.ID, *newAssignees); err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity assignments")
+			return
+		}
+		activity.AssignedMemberIDs = *newAssignees
+	} else {
+		// Populate current assignments so the response always includes them.
+		existing, err := s.activities.GetAssignments(activity.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get activity assignments")
+			return
+		}
+		activity.AssignedMemberIDs = existing
+	}
+
+	if newTagIDs != nil {
+		if err := s.tags.ValidateTeamOwnership(timeline.TeamID, *newTagIDs); err != nil {
+			if errors.Is(err, db.ErrTagOwnership) {
+				writeError(w, http.StatusBadRequest, "INVALID_TAGS", "one or more tag IDs do not belong to this team")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to validate tags")
+			return
+		}
+		if err := s.activities.SetTags(activity.ID, *newTagIDs); err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity tags")
+			return
+		}
+		activity.TagIDs = *newTagIDs
+	} else {
+		existing, err := s.activities.GetTags(activity.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get activity tags")
+			return
+		}
+		activity.TagIDs = existing
+	}
+
+	s.bus.Publish(events.Message{Type: events.ActivityUpdated, TeamID: timeline.TeamID, Payload: activity})
+	writeJSON(w, http.StatusOK, activity)
+}
+
+// handleArchiveActivity handles POST /activities/{id}/archive. Any team member
+// may archive an activity; the row is soft-deleted (archived_at set) so it is
+// hidden from list responses by default but can be restored.
+func (s *Server) handleArchiveActivity(w http.ResponseWriter, r *http.Request) {
+	s.setActivityArchive(w, r, true)
+}
+
+// handleUnarchiveActivity handles POST /activities/{id}/unarchive.
+func (s *Server) handleUnarchiveActivity(w http.ResponseWriter, r *http.Request) {
+	s.setActivityArchive(w, r, false)
+}
+
+// setActivityArchive is the shared implementation for the archive/unarchive
+// endpoints. When archive is true, archived_at is set to now; otherwise it
+// is cleared.
+func (s *Server) setActivityArchive(w http.ResponseWriter, r *http.Request, archive bool) {
+	activityID := r.PathValue("id")
+
+	activity, err := s.activities.GetByID(activityID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "activity not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
+		return
+	}
+
+	timeline, err := s.timelines.GetByID(activity.TimelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
+		return
+	}
+
+	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
+		return
+	}
+
+	var at *time.Time
+	if archive {
+		now := time.Now().UTC()
+		at = &now
+		if err := s.activities.ClearParentRefs(activityID); err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
+			return
+		}
+	}
+	if err := s.activities.SetArchived(activityID, at); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
+		return
+	}
+	activity.ArchivedAt = at
+	activity.UpdatedAt = time.Now().UTC()
+
+	// Re-populate assignments and tags for a stable response shape.
+	if ids, err := s.activities.GetAssignments(activity.ID); err == nil {
+		activity.AssignedMemberIDs = ids
+	} else {
+		activity.AssignedMemberIDs = []string{}
+	}
+	if ids, err := s.activities.GetTags(activity.ID); err == nil {
+		activity.TagIDs = ids
+	} else {
+		activity.TagIDs = []string{}
+	}
+
+	s.bus.Publish(events.Message{Type: events.ActivityUpdated, TeamID: timeline.TeamID, Payload: activity})
+	writeJSON(w, http.StatusOK, activity)
+}
+
+// handleDeleteActivity handles DELETE /activities/{id}. Any member of the
+// activity's team may delete it.
+func (s *Server) handleDeleteActivity(w http.ResponseWriter, r *http.Request) {
+	activityID := r.PathValue("id")
+
+	activity, err := s.activities.GetByID(activityID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "activity not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
+		return
+	}
+
+	timeline, err := s.timelines.GetByID(activity.TimelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
+		return
+	}
+
+	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
+		return
+	}
+
+	if err := s.activities.ClearParentRefs(activityID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
+		return
+	}
+	if err := s.activities.Delete(activityID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
+		return
+	}
+
+	s.bus.Publish(events.Message{
+		Type:    events.ActivityDeleted,
+		TeamID:  timeline.TeamID,
+		Payload: map[string]string{"id": activityID},
+	})
+	w.WriteHeader(http.StatusNoContent)
+}
+````
+
 ## File: packages/api/internal/api/saved_filter_handler.go
 ````go
 package api
@@ -36965,804 +38057,312 @@ func (s *Server) handleDeleteSavedFilter(w http.ResponseWriter, r *http.Request)
 }
 ````
 
-## File: packages/api/internal/api/server.go
+## File: packages/api/internal/db/activity_repo.go
 ````go
-// Package api hosts the HTTP handlers, routing, and middleware for the
-// draba REST API. Handlers are intentionally thin: they decode requests,
-// delegate to repositories and services, and write responses. Business
-// logic belongs in the domain packages, not here.
-package api
+package db
 
 import (
 	"fmt"
-	"io/fs"
-	"net/http"
-	"strings"
 	"time"
 
-	"github.com/I0-1O/draba/packages/api/internal/auth"
-	"github.com/I0-1O/draba/packages/api/internal/db"
-	"github.com/I0-1O/draba/packages/api/internal/events"
-	"github.com/I0-1O/draba/packages/api/internal/mailer"
-	"github.com/I0-1O/draba/packages/api/internal/models"
-	"github.com/I0-1O/draba/packages/api/internal/tier"
-	"github.com/I0-1O/draba/packages/api/internal/ws"
-)
+	"github.com/jmoiron/sqlx"
 
-// TimelineStore is the persistence interface required by timeline handlers.
-// The concrete implementation is *db.TimelineRepo; tests may substitute a fake.
-type TimelineStore interface {
-	Create(t *models.Timeline) error
-	GetByID(id string) (*models.Timeline, error)
-	GetByShareToken(token string) (*models.Timeline, error)
-	ListByTeam(teamID string, includeArchived bool) ([]*models.Timeline, error)
-	HasAccess(timelineID, teamMemberID string) (bool, error)
-	GrantAccess(timelineID, teamMemberID, role string) error
-	RevokeAccess(timelineID, teamMemberID string) error
-	GetAccessRole(timelineID, teamMemberID string) (string, error)
-	ListAccess(timelineID string) ([]*models.TimelineAccessEntry, error)
-	SetArchived(id string, at *time.Time) error
-	Update(t *models.Timeline) error
-	Delete(id string) error
-}
-
-// Server holds shared dependencies for all HTTP handlers.
-type Server struct {
-	users          *db.UserRepo
-	invites        *db.InviteRepo
-	teams          *db.TeamRepo
-	activities     *db.ActivityRepo
-	timelines      TimelineStore
-	savedFilters   *db.SavedFilterRepo
-	preferences    *db.UserPreferenceRepo
-	apiTokens      *db.APITokenRepo
-	instanceSets   *db.InstanceSettingsRepo
-	passwordTokens *db.PasswordResetTokenRepo
-	statuses       *db.StatusRepo
-	tags           *db.TagRepo
-	shares         *db.ShareRepo
-	shareCache     *shareCache
-	mailer         *mailer.Mailer
-	tokens         *auth.TokenService
-	tier           tier.Tier
-	bus            *events.Bus
-	hub            *ws.Hub
-	uiFS           fs.FS
-}
-
-// NewServer constructs a Server with its required dependencies. It does not
-// touch the network; call Routes to obtain the http.Handler to serve.
-func NewServer(
-	users *db.UserRepo,
-	invites *db.InviteRepo,
-	teams *db.TeamRepo,
-	activitiesRepo *db.ActivityRepo,
-	timelinesRepo TimelineStore,
-	savedFiltersRepo *db.SavedFilterRepo,
-	preferencesRepo *db.UserPreferenceRepo,
-	apiTokensRepo *db.APITokenRepo,
-	instanceSetsRepo *db.InstanceSettingsRepo,
-	passwordTokensRepo *db.PasswordResetTokenRepo,
-	statusesRepo *db.StatusRepo,
-	tagsRepo *db.TagRepo,
-	sharesRepo *db.ShareRepo,
-	m *mailer.Mailer,
-	tokens *auth.TokenService,
-	t tier.Tier,
-	bus *events.Bus,
-	hub *ws.Hub,
-) *Server {
-	return &Server{
-		users:          users,
-		invites:        invites,
-		teams:          teams,
-		activities:     activitiesRepo,
-		timelines:      timelinesRepo,
-		savedFilters:   savedFiltersRepo,
-		preferences:    preferencesRepo,
-		apiTokens:      apiTokensRepo,
-		instanceSets:   instanceSetsRepo,
-		passwordTokens: passwordTokensRepo,
-		statuses:       statusesRepo,
-		tags:           tagsRepo,
-		shares:         sharesRepo,
-		shareCache:     newShareCache(),
-		mailer:         m,
-		tokens:         tokens,
-		tier:           t,
-		bus:            bus,
-		hub:            hub,
-	}
-}
-
-// WithUI registers an embedded React SPA to be served at GET /. The FS must
-// be rooted at the build output directory (i.e. contain index.html directly).
-// When called, all unmatched GET paths fall back to index.html so React Router
-// handles client-side navigation. Safe to skip in dev (no-op when not called).
-func (s *Server) WithUI(uiFS fs.FS) *Server {
-	s.uiFS = uiFS
-	return s
-}
-
-// Routes returns the fully-wired HTTP handler for the API, including all
-// core routes plus any routes added by registered tier modules.
-func (s *Server) Routes() http.Handler {
-	mux := http.NewServeMux()
-
-	mux.HandleFunc("GET /setup/status", s.handleSetupStatus)
-
-	mux.HandleFunc("POST /auth/register", s.handleRegister)
-	mux.HandleFunc("POST /auth/login", s.handleLogin)
-	mux.HandleFunc("POST /auth/refresh", s.handleRefresh)
-	mux.HandleFunc("GET /auth/me", chain(s.handleMe, s.authMiddleware))
-	mux.HandleFunc("POST /auth/forgot-password", s.handleForgotPassword)
-	mux.HandleFunc("POST /auth/reset-password", s.handleResetPassword)
-
-	mux.HandleFunc("GET /users/me/preferences", chain(s.handleGetPreferences, s.authMiddleware))
-	mux.HandleFunc("PUT /users/me/preferences", chain(s.handleUpsertPreference, s.authMiddleware))
-	mux.HandleFunc("GET /users/me/stats", chain(s.handleGetMyStats, s.authMiddleware))
-	mux.HandleFunc("PATCH /users/me", chain(s.handleUpdateProfile, s.authMiddleware))
-	mux.HandleFunc("PUT /users/me/password", chain(s.handleChangePassword, s.authMiddleware))
-
-	mux.HandleFunc("GET /admin/smtp", chain(s.handleGetSMTP, s.authMiddleware))
-	mux.HandleFunc("PUT /admin/smtp", chain(s.handlePutSMTP, s.authMiddleware))
-	mux.HandleFunc("POST /admin/smtp/test", chain(s.handleTestSMTP, s.authMiddleware))
-	mux.HandleFunc("DELETE /admin/smtp", chain(s.handleDeleteSMTP, s.authMiddleware))
-	mux.HandleFunc("GET /admin/settings", chain(s.handleGetAdminSettings, s.authMiddleware))
-	mux.HandleFunc("PATCH /admin/settings", chain(s.handlePatchAdminSettings, s.authMiddleware))
-	mux.HandleFunc("GET /admin/users", chain(s.handleListAdminUsers, s.authMiddleware))
-
-	// Public — no auth required; used by the login page and shared views.
-	mux.HandleFunc("GET /settings/branding", s.handleGetPublicBranding)
-
-	mux.HandleFunc("POST /tokens", chain(s.handleCreateAPIToken, s.authMiddleware))
-	mux.HandleFunc("GET /tokens", chain(s.handleListAPITokens, s.authMiddleware))
-	mux.HandleFunc("DELETE /tokens/{id}", chain(s.handleDeleteAPIToken, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams", chain(s.handleListTeams, s.authMiddleware))
-	mux.HandleFunc("POST /teams", chain(s.handleCreateTeam, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}", chain(s.handleGetTeam, s.authMiddleware))
-	mux.HandleFunc("PATCH /teams/{id}", chain(s.handleUpdateTeam, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/archive", chain(s.handleArchiveTeam, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/unarchive", chain(s.handleUnarchiveTeam, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/invites", chain(s.handleCreateInvite, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/invites", chain(s.handleListInvites, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/invites/{inviteId}", chain(s.handleDeleteInvite, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/invite-link", chain(s.handleCreateInviteLink, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/invite-link/reset", chain(s.handleResetInviteLink, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/invite-link", chain(s.handleGetInviteLink, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/invite-link", chain(s.handleDeleteInviteLink, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/members", chain(s.handleListMembers, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/members/{memberId}", chain(s.handleGetMember, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/members/{memberId}/stats", chain(s.handleGetMemberStats, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/members", chain(s.handleAddMember, s.authMiddleware))
-	mux.HandleFunc("PATCH /teams/{id}/members/{memberId}", chain(s.handleUpdateMember, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/members/{memberId}", chain(s.handleDeleteMember, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/members/{memberId}/archive", chain(s.handleArchiveMember, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/members/{memberId}/unarchive", chain(s.handleUnarchiveMember, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/participants", chain(s.handleCreateParticipant, s.authMiddleware))
-	mux.HandleFunc("GET /users/search", chain(s.handleSearchUsers, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/promote", chain(s.handlePromoteUser, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/archive", chain(s.handleArchiveUser, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/unarchive", chain(s.handleUnarchiveUser, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/revoke", chain(s.handleRevokeUser, s.authMiddleware))
-	mux.HandleFunc("DELETE /users/{id}", chain(s.handleDeleteUser, s.authMiddleware))
-	// Activity routes use the team-scoped prefix (GET /teams/{id}/timelines/{timelineId}/...)
-	// to avoid a Go 1.22 mux conflict with GET /timelines/share/{token}: both are
-	// 3-segment GET paths and neither is more specific when the third segment differs.
-	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/activities", chain(s.handleCreateActivity, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/activities", chain(s.handleListActivities, s.authMiddleware))
-	mux.HandleFunc("PATCH /activities/{id}", chain(s.handleUpdateActivity, s.authMiddleware))
-	mux.HandleFunc("DELETE /activities/{id}", chain(s.handleDeleteActivity, s.authMiddleware))
-	mux.HandleFunc("POST /activities/{id}/archive", chain(s.handleArchiveActivity, s.authMiddleware))
-	mux.HandleFunc("POST /activities/{id}/unarchive", chain(s.handleUnarchiveActivity, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/tags", chain(s.handleListTags, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/tags", chain(s.handleCreateTag, s.authMiddleware))
-	mux.HandleFunc("PATCH /tags/{id}", chain(s.handleUpdateTag, s.authMiddleware))
-	mux.HandleFunc("DELETE /tags/{id}", chain(s.handleDeleteTag, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/saved_filters/all", chain(s.handleListAllTeamSavedFilters, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/saved_filters", chain(s.handleListSavedFilters, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/saved_filters", chain(s.handleCreateSavedFilter, s.authMiddleware))
-	mux.HandleFunc("PATCH /saved_filters/{id}", chain(s.handleUpdateSavedFilter, s.authMiddleware))
-	mux.HandleFunc("DELETE /saved_filters/{id}", chain(s.handleDeleteSavedFilter, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/status-templates", chain(s.handleListStatusTemplates, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/status-templates", chain(s.handleCreateStatusTemplate, s.authMiddleware))
-	mux.HandleFunc("PATCH /status-templates/{id}", chain(s.handleUpdateStatusTemplate, s.authMiddleware))
-	mux.HandleFunc("DELETE /status-templates/{id}", chain(s.handleDeleteStatusTemplate, s.authMiddleware))
-	mux.HandleFunc("POST /status-templates/{id}/items", chain(s.handleCreateTemplateItem, s.authMiddleware))
-	mux.HandleFunc("PATCH /status-template-items/{id}", chain(s.handleUpdateTemplateItem, s.authMiddleware))
-	mux.HandleFunc("DELETE /status-template-items/{id}", chain(s.handleDeleteTemplateItem, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/timelines", chain(s.handleListTimelines, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/timelines", chain(s.handleCreateTimeline, s.authMiddleware))
-	// GET /timelines/share/{token} must be registered before GET /timelines/{id} so
-	// the more-specific literal "share" segment takes precedence.
-	mux.HandleFunc("GET /timelines/share/{token}", s.handleGetTimelineByShareToken)
-	mux.HandleFunc("GET /timelines/{id}", chain(s.handleGetTimeline, s.authMiddleware))
-	// Timeline statuses are placed under /teams/{id}/timelines/{timelineId}/statuses
-	// rather than /timelines/{id}/statuses to avoid a Go 1.22 mux pattern conflict
-	// with GET /timelines/share/{token} (both are 3-segment paths and conflict on
-	// paths like /timelines/share/statuses).
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleListTimelineStatuses, s.authMiddleware))
-	mux.HandleFunc("POST /timelines/{id}/archive", chain(s.handleArchiveTimeline, s.authMiddleware))
-	mux.HandleFunc("POST /timelines/{id}/unarchive", chain(s.handleUnarchiveTimeline, s.authMiddleware))
-
-	mux.HandleFunc("PATCH /timelines/{id}", chain(s.handleUpdateTimeline, s.authMiddleware))
-	mux.HandleFunc("DELETE /timelines/{id}", chain(s.handleDeleteTimeline, s.authMiddleware))
-	// Access list routes use the team-scoped prefix to avoid a Go 1.22 mux
-	// conflict with GET /timelines/share/{token} on 3-segment GET paths.
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/access", chain(s.handleListTimelineAccess, s.authMiddleware))
-	mux.HandleFunc("PUT /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleGrantTimelineAccess, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleRevokeTimelineAccess, s.authMiddleware))
-	// Timeline status CRUD — POST shares the team-scoped prefix with GET statuses.
-	// PATCH and DELETE use a flat /statuses/{id} prefix (2 segments, no conflict).
-	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleCreateTimelineStatus, s.authMiddleware))
-	mux.HandleFunc("PATCH /statuses/{id}", chain(s.handleUpdateStatus, s.authMiddleware))
-	mux.HandleFunc("DELETE /statuses/{id}", chain(s.handleDeleteStatus, s.authMiddleware))
-
-	// Share routes.
-	// GET /shares/{token} is public — no auth. The token is the credential.
-	// POST /timelines/{id}/shares uses the same /timelines/{id}/... prefix
-	// as archive/unarchive so it avoids the Go 1.22 mux pattern conflict with
-	// GET /timelines/share/{token} (only GET-method paths conflict).
-	// GET /teams/{id}/timelines/{timelineId}/shares uses the team-scoped prefix
-	// to avoid the GET conflict described above.
-	mux.HandleFunc("GET /shares/{token}", s.handleGetShareProjection)
-	mux.HandleFunc("POST /timelines/{id}/shares", chain(s.handleCreateShare, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/shares", chain(s.handleListShares, s.authMiddleware))
-	mux.HandleFunc("PATCH /shares/{id}", chain(s.handleUpdateShare, s.authMiddleware))
-	mux.HandleFunc("DELETE /shares/{id}", chain(s.handleDeleteShare, s.authMiddleware))
-
-	// GET /ws is intentionally outside authMiddleware — ServeWS validates the
-	// JWT itself before upgrading, because WebSocket clients can't set headers.
-	mux.HandleFunc("GET /ws", s.hub.ServeWS)
-
-	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-	})
-
-	if s.uiFS != nil {
-		mux.Handle("GET /", spaHandler(s.uiFS))
-	}
-
-	ctx := &tier.ModuleContext{Mux: mux, Tier: s.tier}
-	for _, m := range tier.Registered() {
-		if err := m.Register(ctx); err != nil {
-			// Module registration is a startup invariant — a failure here is a programming error.
-			panic(fmt.Sprintf("tier module %q failed to register: %v", m.Name(), err))
-		}
-	}
-
-	return requestLogger(mux)
-}
-
-// chain applies a single middleware to a handler function.
-func chain(h http.HandlerFunc, m func(http.Handler) http.Handler) http.HandlerFunc {
-	return m(h).ServeHTTP
-}
-
-// spaHandler serves the embedded React SPA. Known static assets are served
-// directly; any unrecognised path falls back to index.html so React Router
-// handles client-side navigation.
-func spaHandler(uiFS fs.FS) http.Handler {
-	fserver := http.FileServer(http.FS(uiFS))
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		path := strings.TrimPrefix(r.URL.Path, "/")
-		if path == "" {
-			path = "index.html"
-		}
-		if _, err := uiFS.Open(path); err != nil {
-			// Unknown path — serve index.html and let React Router handle it.
-			r = r.Clone(r.Context())
-			r.URL.Path = "/"
-			fserver.ServeHTTP(w, r)
-			return
-		}
-		fserver.ServeHTTP(w, r)
-	})
-}
-````
-
-## File: packages/api/internal/api/share_handler.go
-````go
-package api
-
-import (
-	"database/sql"
-	"encoding/json"
-	"errors"
-	"net/http"
-	"os"
-	"sync"
-	"time"
-
-	"github.com/I0-1O/draba/packages/api/internal/filters"
 	"github.com/I0-1O/draba/packages/api/internal/models"
 )
 
-// ── In-memory share cache ─────────────────────────────────────────────────────
-
-type shareCacheEntry struct {
-	builtAt time.Time
-	payload models.ShareProjection
+// ActivityRepo is the persistence layer for Activity records.
+type ActivityRepo struct {
+	db *sqlx.DB
 }
 
-// shareCache is a lightweight TTL cache keyed by share token. It avoids a DB
-// hit on every warm request. The TTL is read from DRABA_SHARE_CACHE_TTL at
-// startup (default 60s); a PATCH or DELETE invalidates the entry immediately.
-type shareCache struct {
-	mu      sync.RWMutex
-	entries map[string]*shareCacheEntry
-	ttl     time.Duration
+// NewActivityRepo returns an ActivityRepo backed by db.
+func NewActivityRepo(db *sqlx.DB) *ActivityRepo {
+	return &ActivityRepo{db: db}
 }
 
-func newShareCache() *shareCache {
-	ttl := 60 * time.Second
-	if v := os.Getenv("DRABA_SHARE_CACHE_TTL"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			ttl = d
-		}
+// Create inserts a new Activity row.
+func (r *ActivityRepo) Create(activity *models.Activity) error {
+	_, err := r.db.NamedExec(`
+		INSERT INTO activities (
+			id, timeline_id, title, description, icon, color,
+			start_at, end_at, all_day, status_id, parent_activity_id,
+			percent_complete, location, url, rrule,
+			caldav_uid, google_event_id,
+			created_by, created_at, updated_at
+		) VALUES (
+			:id, :timeline_id, :title, :description, :icon, :color,
+			:start_at, :end_at, :all_day, :status_id, :parent_activity_id,
+			:percent_complete, :location, :url, :rrule,
+			:caldav_uid, :google_event_id,
+			:created_by, :created_at, :updated_at
+		)
+	`, activity)
+	if err != nil {
+		return fmt.Errorf("creating activity: %w", err)
 	}
-	return &shareCache{entries: make(map[string]*shareCacheEntry), ttl: ttl}
+	return nil
 }
 
-func (c *shareCache) get(token string) (*models.ShareProjection, bool) {
-	c.mu.RLock()
-	e, ok := c.entries[token]
-	c.mu.RUnlock()
-	if !ok {
-		return nil, false
+// GetByID fetches an Activity by primary key. Returns sql.ErrNoRows (wrapped)
+// when no row matches.
+func (r *ActivityRepo) GetByID(id string) (*models.Activity, error) {
+	var a models.Activity
+	err := r.db.Get(&a, `SELECT * FROM activities WHERE id = ?`, id)
+	if err != nil {
+		return nil, fmt.Errorf("getting activity: %w", err)
 	}
-	if time.Since(e.builtAt) > c.ttl {
-		return nil, false
-	}
-	p := e.payload
-	return &p, true
+	return &a, nil
 }
 
-func (c *shareCache) set(token string, p *models.ShareProjection) {
-	c.mu.Lock()
-	c.entries[token] = &shareCacheEntry{builtAt: time.Now(), payload: *p}
-	c.mu.Unlock()
+// Update replaces all mutable fields on an existing Activity row.
+func (r *ActivityRepo) Update(activity *models.Activity) error {
+	_, err := r.db.NamedExec(`
+		UPDATE activities SET
+			title              = :title,
+			description        = :description,
+			notes              = :notes,
+			icon               = :icon,
+			color              = :color,
+			start_at           = :start_at,
+			end_at             = :end_at,
+			all_day            = :all_day,
+			status_id          = :status_id,
+			parent_activity_id = :parent_activity_id,
+			percent_complete   = :percent_complete,
+			location           = :location,
+			url                = :url,
+			rrule              = :rrule,
+			updated_at         = :updated_at
+		WHERE id = :id
+	`, activity)
+	if err != nil {
+		return fmt.Errorf("updating activity: %w", err)
+	}
+	return nil
 }
 
-func (c *shareCache) invalidate(token string) {
-	c.mu.Lock()
-	delete(c.entries, token)
-	c.mu.Unlock()
+// Delete permanently removes an activity row.
+func (r *ActivityRepo) Delete(id string) error {
+	_, err := r.db.Exec(`DELETE FROM activities WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("deleting activity: %w", err)
+	}
+	return nil
 }
 
-// ── viewConfig sub-types ──────────────────────────────────────────────────────
-
-// viewConfigJSON is the shape stored in shares.view_config. The filter field
-// is evaluated server-side by the Go filter engine; the other fields are
-// forwarded to the client as-is so the public viewer can apply them.
-type viewConfigJSON struct {
-	Filter *filters.FilterDefinition `json:"filter,omitempty"`
+// ClearParentRefs clears parent_activity_id on all activities that reference id
+// as their parent. Called before deleting or archiving the parent so children
+// do not retain a dangling reference.
+func (r *ActivityRepo) ClearParentRefs(id string) error {
+	_, err := r.db.Exec(
+		`UPDATE activities SET parent_activity_id = NULL, updated_at = ? WHERE parent_activity_id = ?`,
+		time.Now().UTC(), id,
+	)
+	if err != nil {
+		return fmt.Errorf("clearing parent refs for %s: %w", id, err)
+	}
+	return nil
 }
 
-// ── Handlers ──────────────────────────────────────────────────────────────────
-
-// handleGetShareProjection handles GET /shares/{token}. No authentication is
-// required. It is the public data gateway: the scope is hard-locked to the
-// single timeline referenced by the share row; no client-supplied selector can
-// widen it.
-func (s *Server) handleGetShareProjection(w http.ResponseWriter, r *http.Request) {
-	token := r.PathValue("token")
-
-	// ── 1. Resolve the share row ──────────────────────────────────────────────
-	share, err := s.shares.GetByToken(token)
+// SetArchived sets or clears archived_at on an activity. Pass a non-nil time
+// to archive; pass nil to unarchive.
+func (r *ActivityRepo) SetArchived(id string, at *time.Time) error {
+	_, err := r.db.Exec(
+		`UPDATE activities SET archived_at = ?, updated_at = ? WHERE id = ?`,
+		at, time.Now().UTC(), id,
+	)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load share")
-		return
+		return fmt.Errorf("setting activity archived_at: %w", err)
 	}
-
-	// Phase 13.4 — revocation / expiry handled here (fields exist in schema now).
-	if share.RevokedAt != nil {
-		writeError(w, http.StatusGone, "GONE", "this share has been revoked")
-		return
-	}
-	if share.ExpiresAt != nil && time.Now().After(*share.ExpiresAt) {
-		writeError(w, http.StatusGone, "GONE", "this share has expired")
-		return
-	}
-
-	// Phase 13.3 — password gate handled here.
-	if share.PasswordHash != nil {
-		writeError(w, http.StatusUnauthorized, "PASSWORD_REQUIRED", "password required")
-		return
-	}
-
-	// ── 2. Serve from cache if warm ───────────────────────────────────────────
-	if proj, ok := s.shareCache.get(token); ok {
-		go func() { _ = s.shares.RecordView(share.ID) }()
-		writeJSON(w, http.StatusOK, proj)
-		return
-	}
-
-	// ── 3. Build projection (cache miss) ─────────────────────────────────────
-	proj, err := s.buildShareProjection(share)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to build share projection")
-		return
-	}
-
-	s.shareCache.set(token, proj)
-	go func() { _ = s.shares.RecordView(share.ID) }()
-	writeJSON(w, http.StatusOK, proj)
+	return nil
 }
 
-// buildShareProjection assembles the full ShareProjection for a share.
-// The scope is hard-locked to share.TimelineID; the caller cannot supply a
-// different timeline ID. Filter evaluation runs in Go before any data leaves
-// the server.
-func (s *Server) buildShareProjection(share *models.Share) (*models.ShareProjection, error) {
-	// Get timeline — using the share's TimelineID, never a client-supplied value.
-	timeline, err := s.timelines.GetByID(share.TimelineID)
+// SetAssignments replaces all activity_assignments for an activity with the
+// provided member IDs. An empty slice removes all assignments.
+func (r *ActivityRepo) SetAssignments(activityID string, memberIDs []string) error {
+	tx, err := r.db.Beginx()
 	if err != nil {
-		return nil, err
+		return fmt.Errorf("beginning assignment transaction: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	if _, err = tx.Exec(`DELETE FROM activity_assignments WHERE activity_id = ?`, activityID); err != nil {
+		return fmt.Errorf("clearing activity assignments: %w", err)
 	}
 
-	// Get all non-archived activities for this timeline.
-	acts, err := s.activities.ListByTimeline(share.TimelineID, nil, nil, false)
-	if err != nil {
-		return nil, err
-	}
-
-	// Get statuses and tags for filter context + projection.
-	statuses, err := s.statuses.ListStatuses(share.TimelineID)
-	if err != nil {
-		return nil, err
-	}
-	tags, err := s.tags.ListByTeam(timeline.TeamID)
-	if err != nil {
-		return nil, err
-	}
-	members, err := s.teams.ListMembers(timeline.TeamID)
-	if err != nil {
-		return nil, err
-	}
-	team, err := s.teams.GetByID(timeline.TeamID)
-	if err != nil {
-		return nil, err
-	}
-
-	// Parse the frozen filter from view_config and evaluate it server-side.
-	var vc viewConfigJSON
-	if share.ViewConfig != "" && share.ViewConfig != "{}" {
-		_ = json.Unmarshal([]byte(share.ViewConfig), &vc)
-	}
-
-	var filteredActs []*models.Activity
-	if vc.Filter != nil && len(vc.Filter.Conditions) > 0 {
-		// Build filter context.
-		statusesByTL := map[string][]models.Status{share.TimelineID: {}}
-		for _, st := range statuses {
-			statusesByTL[share.TimelineID] = append(statusesByTL[share.TimelineID], *st)
-		}
-		modelTags := make([]models.Tag, 0, len(tags))
-		for _, t := range tags {
-			modelTags = append(modelTags, *t)
-		}
-		ctx := &filters.FilterContext{
-			StatusesByTimelineID: statusesByTL,
-			Tags:                 modelTags,
-		}
-		for _, a := range acts {
-			if filters.MatchesFilter(a, vc.Filter, ctx) {
-				filteredActs = append(filteredActs, a)
-			}
-		}
-	} else {
-		filteredActs = acts
-	}
-
-	// Build referenced-entity sets (prune to what surviving activities reference).
-	usedMemberIDs := make(map[string]bool)
-	usedStatusIDs := make(map[string]bool)
-	usedTagIDs := make(map[string]bool)
-	for _, a := range filteredActs {
-		for _, id := range a.AssignedMemberIDs {
-			usedMemberIDs[id] = true
-		}
-		if a.StatusID != nil {
-			usedStatusIDs[*a.StatusID] = true
-		}
-		for _, id := range a.TagIDs {
-			usedTagIDs[id] = true
+	for _, memberID := range memberIDs {
+		if _, err = tx.Exec(
+			`INSERT INTO activity_assignments (activity_id, team_member_id) VALUES (?, ?)`,
+			activityID, memberID,
+		); err != nil {
+			return fmt.Errorf("inserting activity assignment: %w", err)
 		}
 	}
 
-	// Build PublicActivity slice — notes omitted unless this is a list share
-	// with notes enabled (Phase 13.2+ handles that nuance; for now always omit).
-	pubActivities := make([]models.PublicActivity, 0, len(filteredActs))
-	for _, a := range filteredActs {
-		pub := models.PublicActivity{
-			ID:                a.ID,
-			Title:             a.Title,
-			Description:       a.Description,
-			Icon:              a.Icon,
-			Color:             a.Color,
-			StartAt:           a.StartAt,
-			EndAt:             a.EndAt,
-			AllDay:            a.AllDay,
-			StatusID:          a.StatusID,
-			ParentActivityID:  a.ParentActivityID,
-			PercentComplete:   a.PercentComplete,
-			AssignedMemberIDs: a.AssignedMemberIDs,
-			TagIDs:            a.TagIDs,
-		}
-		if pub.AssignedMemberIDs == nil {
-			pub.AssignedMemberIDs = []string{}
-		}
-		if pub.TagIDs == nil {
-			pub.TagIDs = []string{}
-		}
-		pubActivities = append(pubActivities, pub)
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("committing activity assignments: %w", err)
 	}
-
-	// Build PublicMember slice — never email/role/userId.
-	pubMembers := make([]models.PublicMember, 0)
-	for _, m := range members {
-		if !usedMemberIDs[m.ID] {
-			continue
-		}
-		name := m.DisplayName
-		if name == "" {
-			name = m.Email
-		}
-		pubMembers = append(pubMembers, models.PublicMember{
-			ID:          m.ID,
-			DisplayName: name,
-			Color:       m.Color,
-			Icon:        m.Icon,
-		})
-	}
-
-	// Prune statuses to referenced ones.
-	pubStatuses := make([]models.Status, 0)
-	for _, st := range statuses {
-		if usedStatusIDs[st.ID] {
-			pubStatuses = append(pubStatuses, *st)
-		}
-	}
-
-	// Prune tags to referenced ones.
-	pubTags := make([]models.Tag, 0)
-	for _, tg := range tags {
-		if usedTagIDs[tg.ID] {
-			pubTags = append(pubTags, *tg)
-		}
-	}
-
-	// Strip password hash before including share in the public projection.
-	safeShare := *share
-	safeShare.PasswordHash = nil
-	proj := &models.ShareProjection{
-		Share:    safeShare,
-		TeamName: team.Name,
-		Timeline: models.PublicTimeline{
-			ID:        timeline.ID,
-			Name:      timeline.Name,
-			Color:     timeline.Color,
-			Icon:      timeline.Icon,
-			StartDate: timeline.StartDate,
-			EndDate:   timeline.EndDate,
-		},
-		Members:    pubMembers,
-		Statuses:   pubStatuses,
-		Tags:       pubTags,
-		Activities: pubActivities,
-	}
-	return proj, nil
+	return nil
 }
 
-// handleCreateShare handles POST /timelines/{id}/shares. The caller must be a
-// member of the timeline's team. The share captures the current view config.
-func (s *Server) handleCreateShare(w http.ResponseWriter, r *http.Request) {
-	timelineID := r.PathValue("id")
-
-	timeline, err := s.timelines.GetByID(timelineID)
+// GetAssignments returns the team_member_ids assigned to an activity.
+func (r *ActivityRepo) GetAssignments(activityID string) ([]string, error) {
+	var ids []string
+	err := r.db.Select(&ids,
+		`SELECT team_member_id FROM activity_assignments WHERE activity_id = ?`, activityID,
+	)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
+		return nil, fmt.Errorf("getting activity assignments: %w", err)
+	}
+	if ids == nil {
+		ids = []string{}
+	}
+	return ids, nil
+}
+
+// SetTags replaces all activity_tags for an activity with the provided tag
+// IDs. An empty slice removes all tag associations.
+func (r *ActivityRepo) SetTags(activityID string, tagIDs []string) error {
+	tx, err := r.db.Beginx()
+	if err != nil {
+		return fmt.Errorf("beginning tag transaction: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
 		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
-		return
-	}
-	if timeline.ArchivedAt != nil {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-		return
+	}()
+
+	if _, err = tx.Exec(`DELETE FROM activity_tags WHERE activity_id = ?`, activityID); err != nil {
+		return fmt.Errorf("clearing activity tags: %w", err)
 	}
 
-	member, ok := s.requireTeamMember(w, r, timeline.TeamID)
-	if !ok {
-		return
-	}
-
-	var req createShareBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-	if req.ViewType == "" {
-		req.ViewType = "gantt"
-	}
-	if req.ViewConfig == "" {
-		req.ViewConfig = "{}"
-	}
-
-	now := time.Now().UTC()
-	share := &models.Share{
-		ID:         newID(),
-		TimelineID: timelineID,
-		Token:      newToken(),
-		Name:       req.Name,
-		ViewType:   req.ViewType,
-		ViewConfig: req.ViewConfig,
-		CreatedBy:  member.ID,
-		CreatedAt:  now,
-		ViewCount:  0,
-	}
-
-	if err := s.shares.Create(share); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create share")
-		return
-	}
-
-	writeJSON(w, http.StatusCreated, share)
-}
-
-// handleListShares handles GET /teams/{id}/timelines/{timelineId}/shares.
-// Only team members with access to the timeline may list its shares.
-func (s *Server) handleListShares(w http.ResponseWriter, r *http.Request) {
-	timelineID := r.PathValue("timelineId")
-
-	timeline, err := s.timelines.GetByID(timelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
+	for _, tagID := range tagIDs {
+		if _, err = tx.Exec(
+			`INSERT INTO activity_tags (activity_id, tag_id) VALUES (?, ?)`,
+			activityID, tagID,
+		); err != nil {
+			return fmt.Errorf("inserting activity tag: %w", err)
 		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
-		return
 	}
 
-	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
-		return
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("committing activity tags: %w", err)
 	}
-
-	shares, err := s.shares.ListByTimeline(timelineID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list shares")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, shares)
+	return nil
 }
 
-// handleUpdateShare handles PATCH /shares/{id}. Only the share creator or a
-// team admin may update it.
-func (s *Server) handleUpdateShare(w http.ResponseWriter, r *http.Request) {
-	shareID := r.PathValue("id")
-
-	share, err := s.shares.GetByID(shareID)
+// GetTags returns the tag IDs associated with an activity.
+func (r *ActivityRepo) GetTags(activityID string) ([]string, error) {
+	var ids []string
+	err := r.db.Select(&ids,
+		`SELECT tag_id FROM activity_tags WHERE activity_id = ?`, activityID,
+	)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
-			return
+		return nil, fmt.Errorf("getting activity tags: %w", err)
+	}
+	if ids == nil {
+		ids = []string{}
+	}
+	return ids, nil
+}
+
+// ListByTimeline returns activities for a specific timeline. When
+// includeArchived is false archived rows are excluded. The bounds use overlap
+// semantics: from filters on end_at >= from (so a multi-week activity that
+// starts before the window still appears if it crosses it), and to filters on
+// start_at <= to.
+// AssignedMemberIDs is populated via a second query.
+func (r *ActivityRepo) ListByTimeline(timelineID string, from, to *time.Time, includeArchived bool) ([]*models.Activity, error) {
+	query := `SELECT * FROM activities WHERE timeline_id = ?`
+	args := []any{timelineID}
+	if !includeArchived {
+		query += ` AND archived_at IS NULL`
+	}
+
+	if from != nil {
+		// Overlap semantics: include any activity whose end_at is at or after from.
+		// This catches multi-week/multi-month activities that START before the
+		// visible range but still cross it.
+		query += ` AND end_at >= ?`
+		args = append(args, from)
+	}
+	if to != nil {
+		query += ` AND start_at <= ?`
+		args = append(args, to)
+	}
+	query += ` ORDER BY start_at ASC`
+
+	acts := make([]*models.Activity, 0)
+	if err := r.db.Select(&acts, query, args...); err != nil {
+		return nil, fmt.Errorf("listing activities: %w", err)
+	}
+	if len(acts) == 0 {
+		return acts, nil
+	}
+
+	// Initialise AssignedMemberIDs and TagIDs to empty slices so JSON fields are
+	// always arrays (never null) even when an activity has no assignments or tags.
+	ids := make([]string, len(acts))
+	byID := make(map[string]*models.Activity, len(acts))
+	for i, a := range acts {
+		a.AssignedMemberIDs = []string{}
+		a.TagIDs = []string{}
+		ids[i] = a.ID
+		byID[a.ID] = a
+	}
+
+	asnQuery, asnArgs, err := sqlx.In(
+		`SELECT activity_id, team_member_id FROM activity_assignments WHERE activity_id IN (?)`,
+		ids,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("building assignments query: %w", err)
+	}
+	asnQuery = r.db.Rebind(asnQuery)
+
+	type assignment struct {
+		ActivityID   string `db:"activity_id"`
+		TeamMemberID string `db:"team_member_id"`
+	}
+	var assignments []assignment
+	if err := r.db.Select(&assignments, asnQuery, asnArgs...); err != nil {
+		return nil, fmt.Errorf("listing activity assignments: %w", err)
+	}
+	for _, a := range assignments {
+		if act, ok := byID[a.ActivityID]; ok {
+			act.AssignedMemberIDs = append(act.AssignedMemberIDs, a.TeamMemberID)
 		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
-		return
 	}
 
-	timeline, err := s.timelines.GetByID(share.TimelineID)
+	tagQuery, tagArgs, err := sqlx.In(
+		`SELECT activity_id, tag_id FROM activity_tags WHERE activity_id IN (?)`,
+		ids,
+	)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
-		return
+		return nil, fmt.Errorf("building tags query: %w", err)
 	}
+	tagQuery = r.db.Rebind(tagQuery)
 
-	member, ok := s.requireTeamMember(w, r, timeline.TeamID)
-	if !ok {
-		return
+	type activityTag struct {
+		ActivityID string `db:"activity_id"`
+		TagID      string `db:"tag_id"`
 	}
-	if !s.canManageShare(member, share) {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "only the share creator or a team admin may update this share")
-		return
+	var actTags []activityTag
+	if err := r.db.Select(&actTags, tagQuery, tagArgs...); err != nil {
+		return nil, fmt.Errorf("listing activity tags: %w", err)
 	}
-
-	var req patchShareBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	if req.Name != nil {
-		share.Name = req.Name
-	}
-	if req.ViewType != nil {
-		share.ViewType = *req.ViewType
-	}
-	if req.ViewConfig != nil {
-		share.ViewConfig = *req.ViewConfig
-	}
-
-	if err := s.shares.Update(share); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update share")
-		return
-	}
-
-	// Invalidate cache so the next public request picks up the new config.
-	s.shareCache.invalidate(share.Token)
-
-	writeJSON(w, http.StatusOK, share)
-}
-
-// handleDeleteShare handles DELETE /shares/{id}. Only the share creator or a
-// team admin may delete it.
-func (s *Server) handleDeleteShare(w http.ResponseWriter, r *http.Request) {
-	shareID := r.PathValue("id")
-
-	share, err := s.shares.GetByID(shareID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
-			return
+	for _, at := range actTags {
+		if act, ok := byID[at.ActivityID]; ok {
+			act.TagIDs = append(act.TagIDs, at.TagID)
 		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
-		return
 	}
 
-	timeline, err := s.timelines.GetByID(share.TimelineID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
-		return
-	}
-
-	member, ok := s.requireTeamMember(w, r, timeline.TeamID)
-	if !ok {
-		return
-	}
-	if !s.canManageShare(member, share) {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "only the share creator or a team admin may delete this share")
-		return
-	}
-
-	if err := s.shares.Delete(shareID); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete share")
-		return
-	}
-
-	s.shareCache.invalidate(share.Token)
-	w.WriteHeader(http.StatusNoContent)
-}
-
-// canManageShare reports whether a team member may update or delete a share.
-// Team admins always pass; non-admins must be the share's creator.
-func (s *Server) canManageShare(member *models.TeamMember, share *models.Share) bool {
-	return member.Role == "admin" || member.ID == share.CreatedBy
-}
-
-// ── Request bodies ────────────────────────────────────────────────────────────
-
-type createShareBody struct {
-	Name       *string `json:"name,omitempty"`
-	ViewType   string  `json:"viewType"`
-	ViewConfig string  `json:"viewConfig"`
-}
-
-type patchShareBody struct {
-	Name       *string `json:"name,omitempty"`
-	ViewType   *string `json:"viewType,omitempty"`
-	ViewConfig *string `json:"viewConfig,omitempty"`
+	return acts, nil
 }
 ````
 
@@ -38541,240 +39141,6 @@ export default function CalendarGrid({
       </div>
     </div>
   );
-}
-````
-
-## File: packages/web/src/components/gantt/ActivityCreatePanel.tsx
-````typescript
-/**
- * ActivityCreatePanel — right-side slide-in panel for creating a new Gantt activity.
- *
- * Shares its field stack with ActivityDetailPanel via ActivityFieldsBody
- * (see shared/activityPanelFields.tsx) so the create and edit forms show an identical
- * field set and order. Unlike the detail panel, every change buffers in local
- * state; nothing persists until the user clicks "Create activity", which
- * submits the whole form via POST /timelines/:id/activities.
- *
- * Defaults come from the drag selection: start/end date and the lane member.
- */
-
-import { useState, useEffect } from 'react'
-import { X, Loader2 } from 'lucide-react'
-import type { Identity } from '@/components/identity/identity-constants'
-import { useCreateActivity, useTimelineActivities } from '@/hooks/useTeamActivities'
-import { useTags } from '@/hooks/useTags'
-import type { Member } from '@/types'
-import type { components } from '@draba/shared'
-import { ActivityFieldsBody, PANEL_WIDTH } from '@/components/shared/activityPanelFields'
-
-type Status = components['schemas']['Status']
-
-interface Props {
-  open: boolean
-  teamId: string
-  timelineId: string
-  members: Member[]
-  timelineStatuses?: Status[]
-  defaultStart: string
-  defaultEnd: string
-  defaultMemberId?: string | null
-  defaultStatusId?: string | null
-  onClose: () => void
-}
-
-export default function ActivityCreatePanel({
-  open,
-  teamId,
-  timelineId,
-  members,
-  timelineStatuses = [],
-  defaultStart,
-  defaultEnd,
-  defaultMemberId,
-  defaultStatusId,
-  onClose,
-}: Props) {
-  const createMutation = useCreateActivity(teamId, timelineId)
-  const { data: teamTags = [] } = useTags(teamId)
-  const { data: allActivities = [] } = useTimelineActivities(teamId, timelineId)
-
-  const [title, setTitle] = useState('')
-  const [description, setDescription] = useState('')
-  const [notes, setNotes] = useState('')
-  const [startDate, setStartDate] = useState(defaultStart)
-  const [endDate, setEndDate] = useState(defaultEnd)
-  const [identity, setIdentity] = useState<Identity>({ color: '#288C9B', icon: '__none__' })
-  const [assignedIds, setAssignedIds] = useState<string[]>(
-    defaultMemberId ? [defaultMemberId] : [],
-  )
-  const [statusId, setStatusId] = useState<string | null>(defaultStatusId ?? null)
-  const [tagIds, setTagIds] = useState<string[]>([])
-  const [parentId, setParentId] = useState<string | null>(null)
-  const [progress, setProgress] = useState(0)
-  const [location, setLocation] = useState('')
-  const [url, setUrl] = useState('')
-
-  // Reset all fields to defaults each time the panel opens so re-opening
-  // the panel always shows a blank form rather than the previous session's data.
-  useEffect(() => {
-    if (!open) return
-    setTitle('')
-    setDescription('')
-    setNotes('')
-    setStartDate(defaultStart)
-    setEndDate(defaultEnd)
-    setIdentity({ color: '#288C9B', icon: '__none__' })
-    setAssignedIds(defaultMemberId ? [defaultMemberId] : [])
-    setStatusId(defaultStatusId ?? null)
-    setTagIds([])
-    setParentId(null)
-    setProgress(0)
-    setLocation('')
-    setUrl('')
-  }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  const creating = createMutation.isPending
-  const titleTrimmed = title.trim()
-
-  function toggleAssignee(memberId: string) {
-    setAssignedIds(prev =>
-      prev.includes(memberId) ? prev.filter(id => id !== memberId) : [...prev, memberId],
-    )
-  }
-
-  // Keep the end date from drifting before the start date.
-  function handleStartDateChange(val: string) {
-    setStartDate(val)
-    if (val > endDate) setEndDate(val)
-  }
-
-  function handleSubmit(e: React.FormEvent) {
-    e.preventDefault()
-    if (!titleTrimmed) return
-    createMutation.mutate(
-      {
-        title: titleTrimmed,
-        startAt: `${startDate}T00:00:00Z`,
-        endAt: `${endDate}T00:00:00Z`,
-        description: description.trim() || null,
-        notes: notes.trim() || null,
-        color: identity.color,
-        icon: identity.icon,
-        assignedMemberIds: assignedIds,
-        statusId: statusId ?? undefined,
-        tagIds,
-        parentActivityId: parentId,
-        percentComplete: progress,
-        location: location.trim() || null,
-        url: url.trim() || null,
-      },
-      { onSuccess: onClose },
-    )
-  }
-
-  return (
-    <div
-      style={{
-        width: open ? PANEL_WIDTH : 0,
-        flexShrink: 0,
-        borderLeft: open ? '1px solid var(--border)' : 'none',
-        background: 'var(--card)',
-        display: 'flex',
-        flexDirection: 'column',
-        overflow: 'hidden',
-        transition: 'width 0.2s ease',
-      }}
-    >
-    <div style={{ width: PANEL_WIDTH, display: 'flex', flexDirection: 'column', height: '100%' }}>
-      {/* Header */}
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          padding: '0 12px',
-          height: 'var(--topbar-h, 40px)',
-          borderBottom: '1px solid var(--border)',
-          flexShrink: 0,
-        }}
-      >
-        <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)' }}>New activity</span>
-        <button
-          onClick={onClose}
-          style={{
-            width: 24, height: 24, border: 'none', background: 'none', borderRadius: 4,
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            cursor: 'pointer', color: 'var(--muted-foreground)',
-          }}
-          onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-          onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-        >
-          <X size={14} strokeWidth={2} />
-        </button>
-      </div>
-
-      {/* Body (shared with detail panel) */}
-      <ActivityFieldsBody
-        identity={identity}
-        onIdentityChange={setIdentity}
-        title={title}
-        onTitleChange={setTitle}
-        titlePlaceholder="Activity title…"
-        titleAutoFocus
-        titleFallbackName="New Activity"
-        startDate={startDate}
-        endDate={endDate}
-        onStartDateChange={handleStartDateChange}
-        onEndDateChange={setEndDate}
-        description={description}
-        onDescriptionChange={setDescription}
-        members={members}
-        assignedIds={assignedIds}
-        onToggleAssignee={toggleAssignee}
-        statuses={timelineStatuses}
-        statusId={statusId}
-        onStatusChange={setStatusId}
-        teamId={teamId}
-        teamTags={teamTags}
-        tagIds={tagIds}
-        onTagsChange={setTagIds}
-        parentActivities={allActivities}
-        parentId={parentId}
-        onParentChange={setParentId}
-        progress={progress}
-        onProgressCommit={setProgress}
-        location={location}
-        onLocationChange={setLocation}
-        url={url}
-        onUrlChange={setUrl}
-        notes={notes}
-        onNotesChange={setNotes}
-      />
-
-      {/* Footer */}
-      <div style={{ padding: '10px 14px', borderTop: '1px solid var(--border)', flexShrink: 0 }}>
-        <button
-          type="button"
-          onClick={handleSubmit}
-          disabled={!titleTrimmed || creating}
-          style={{
-            width: '100%', fontSize: 13, fontWeight: 600, padding: 8,
-            borderRadius: 'var(--radius-md)', border: 'none',
-            background: titleTrimmed && !creating ? 'var(--primary)' : 'var(--muted)',
-            color: titleTrimmed && !creating ? 'white' : 'var(--muted-foreground)',
-            cursor: titleTrimmed && !creating ? 'pointer' : 'not-allowed',
-            fontFamily: 'var(--font-sans)',
-            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
-            transition: 'background 0.1s',
-          }}
-        >
-          {creating && <Loader2 size={13} className="animate-spin" />}
-          Create activity
-        </button>
-      </div>
-    </div>
-    </div>
-  )
 }
 ````
 
@@ -41730,67 +42096,7 @@ export default function ShareViewPage() {
 }
 ````
 
-## File: packages/web/vite.config.ts
-````typescript
-/// <reference types="vitest" />
-import path from 'path'
-import { defineConfig, loadEnv } from 'vite'
-import react from '@vitejs/plugin-react'
-import tailwindcss from '@tailwindcss/vite'
-
-export default defineConfig(({ mode }) => {
-  const env = loadEnv(mode, process.cwd(), '')
-  const apiTarget = env.VITE_API_TARGET ?? 'http://localhost:8080'
-
-  return {
-    plugins: [
-      react(),
-      tailwindcss(),
-    ],
-    resolve: {
-      alias: {
-        '@': path.resolve(__dirname, './src'),
-      },
-    },
-    test: {
-      environment: 'jsdom',
-      globals: true,
-      alias: {
-        '@': path.resolve(__dirname, './src'),
-      },
-    },
-    server: {
-      proxy: {
-        '/setup': { target: apiTarget, changeOrigin: true },
-        '/auth': { target: apiTarget, changeOrigin: true },
-        '/users': { target: apiTarget, changeOrigin: true },
-        '/admin': { target: apiTarget, changeOrigin: true },
-        '/settings': { target: apiTarget, changeOrigin: true },
-        '/tokens': { target: apiTarget, changeOrigin: true },
-        '/teams': { target: apiTarget, changeOrigin: true },
-        '/timelines': { target: apiTarget, changeOrigin: true },
-        '/status-templates': { target: apiTarget, changeOrigin: true },
-        '/status-template-items': { target: apiTarget, changeOrigin: true },
-        '/statuses': { target: apiTarget, changeOrigin: true },
-        '/activities': { target: apiTarget, changeOrigin: true },
-        '/tags': { target: apiTarget, changeOrigin: true },
-        '/saved_filters': { target: apiTarget, changeOrigin: true },
-        '/shares': { target: apiTarget, changeOrigin: true },
-        '/events': { target: apiTarget, changeOrigin: true },
-        '/health': { target: apiTarget, changeOrigin: true },
-        '/ws': {
-          target: apiTarget.replace(/^http/, 'ws'),
-          changeOrigin: true,
-          ws: true,
-          rewriteWsOrigin: true,
-        },
-      },
-    },
-  }
-})
-````
-
-## File: packages/api/internal/api/activity_handler.go
+## File: packages/api/internal/api/share_handler.go
 ````go
 package api
 
@@ -41799,24 +42105,303 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"os"
+	"sync"
 	"time"
 
-	"github.com/I0-1O/draba/packages/api/internal/db"
-	"github.com/I0-1O/draba/packages/api/internal/events"
+	"github.com/I0-1O/draba/packages/api/internal/filters"
 	"github.com/I0-1O/draba/packages/api/internal/models"
 )
 
-// handleCreateActivity handles POST /teams/{id}/timelines/{timelineId}/activities.
-// The authenticated user must be a member of the team.
-func (s *Server) handleCreateActivity(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-	timelineID := r.PathValue("timelineId")
+// ── In-memory share cache ─────────────────────────────────────────────────────
 
-	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
+type shareCacheEntry struct {
+	builtAt time.Time
+	payload models.ShareProjection
+}
+
+// shareCache is a lightweight TTL cache keyed by share token. It avoids a DB
+// hit on every warm request. The TTL is read from DRABA_SHARE_CACHE_TTL at
+// startup (default 60s); a PATCH or DELETE invalidates the entry immediately.
+type shareCache struct {
+	mu      sync.RWMutex
+	entries map[string]*shareCacheEntry
+	ttl     time.Duration
+}
+
+func newShareCache() *shareCache {
+	ttl := 60 * time.Second
+	if v := os.Getenv("DRABA_SHARE_CACHE_TTL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			ttl = d
+		}
+	}
+	return &shareCache{entries: make(map[string]*shareCacheEntry), ttl: ttl}
+}
+
+func (c *shareCache) get(token string) (*models.ShareProjection, bool) {
+	c.mu.RLock()
+	e, ok := c.entries[token]
+	c.mu.RUnlock()
+	if !ok {
+		return nil, false
+	}
+	if time.Since(e.builtAt) > c.ttl {
+		return nil, false
+	}
+	p := e.payload
+	return &p, true
+}
+
+func (c *shareCache) set(token string, p *models.ShareProjection) {
+	c.mu.Lock()
+	c.entries[token] = &shareCacheEntry{builtAt: time.Now(), payload: *p}
+	c.mu.Unlock()
+}
+
+func (c *shareCache) invalidate(token string) {
+	c.mu.Lock()
+	delete(c.entries, token)
+	c.mu.Unlock()
+}
+
+// ── viewConfig sub-types ──────────────────────────────────────────────────────
+
+// viewConfigJSON is the shape stored in shares.view_config. The filter field
+// is evaluated server-side by the Go filter engine; the other fields are
+// forwarded to the client as-is so the public viewer can apply them.
+type viewConfigJSON struct {
+	Filter *filters.FilterDefinition `json:"filter,omitempty"`
+}
+
+// ── Handlers ──────────────────────────────────────────────────────────────────
+
+// handleGetShareProjection handles GET /shares/{token}. No authentication is
+// required. It is the public data gateway: the scope is hard-locked to the
+// single timeline referenced by the share row; no client-supplied selector can
+// widen it.
+func (s *Server) handleGetShareProjection(w http.ResponseWriter, r *http.Request) {
+	token := r.PathValue("token")
+
+	// ── 1. Resolve the share row ──────────────────────────────────────────────
+	share, err := s.shares.GetByToken(token)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load share")
 		return
 	}
 
-	claims := claimsFromContext(r.Context())
+	// Phase 13.4 — revocation / expiry handled here (fields exist in schema now).
+	if share.RevokedAt != nil {
+		writeError(w, http.StatusGone, "GONE", "this share has been revoked")
+		return
+	}
+	if share.ExpiresAt != nil && time.Now().After(*share.ExpiresAt) {
+		writeError(w, http.StatusGone, "GONE", "this share has expired")
+		return
+	}
+
+	// Phase 13.3 — password gate handled here.
+	if share.PasswordHash != nil {
+		writeError(w, http.StatusUnauthorized, "PASSWORD_REQUIRED", "password required")
+		return
+	}
+
+	// ── 2. Serve from cache if warm ───────────────────────────────────────────
+	if proj, ok := s.shareCache.get(token); ok {
+		go func() { _ = s.shares.RecordView(share.ID) }()
+		writeJSON(w, http.StatusOK, proj)
+		return
+	}
+
+	// ── 3. Build projection (cache miss) ─────────────────────────────────────
+	proj, err := s.buildShareProjection(share)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to build share projection")
+		return
+	}
+
+	s.shareCache.set(token, proj)
+	go func() { _ = s.shares.RecordView(share.ID) }()
+	writeJSON(w, http.StatusOK, proj)
+}
+
+// buildShareProjection assembles the full ShareProjection for a share.
+// The scope is hard-locked to share.TimelineID; the caller cannot supply a
+// different timeline ID. Filter evaluation runs in Go before any data leaves
+// the server.
+func (s *Server) buildShareProjection(share *models.Share) (*models.ShareProjection, error) {
+	// Get timeline — using the share's TimelineID, never a client-supplied value.
+	timeline, err := s.timelines.GetByID(share.TimelineID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Get all non-archived activities for this timeline.
+	acts, err := s.activities.ListByTimeline(share.TimelineID, nil, nil, false)
+	if err != nil {
+		return nil, err
+	}
+
+	// Get statuses and tags for filter context + projection.
+	statuses, err := s.statuses.ListStatuses(share.TimelineID)
+	if err != nil {
+		return nil, err
+	}
+	tags, err := s.tags.ListByTeam(timeline.TeamID)
+	if err != nil {
+		return nil, err
+	}
+	members, err := s.teams.ListMembers(timeline.TeamID)
+	if err != nil {
+		return nil, err
+	}
+	team, err := s.teams.GetByID(timeline.TeamID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Parse the frozen filter from view_config and evaluate it server-side.
+	var vc viewConfigJSON
+	if share.ViewConfig != "" && share.ViewConfig != "{}" {
+		_ = json.Unmarshal([]byte(share.ViewConfig), &vc)
+	}
+
+	var filteredActs []*models.Activity
+	if vc.Filter != nil && len(vc.Filter.Conditions) > 0 {
+		// Build filter context.
+		statusesByTL := map[string][]models.Status{share.TimelineID: {}}
+		for _, st := range statuses {
+			statusesByTL[share.TimelineID] = append(statusesByTL[share.TimelineID], *st)
+		}
+		modelTags := make([]models.Tag, 0, len(tags))
+		for _, t := range tags {
+			modelTags = append(modelTags, *t)
+		}
+		ctx := &filters.FilterContext{
+			StatusesByTimelineID: statusesByTL,
+			Tags:                 modelTags,
+		}
+		for _, a := range acts {
+			if filters.MatchesFilter(a, vc.Filter, ctx) {
+				filteredActs = append(filteredActs, a)
+			}
+		}
+	} else {
+		filteredActs = acts
+	}
+
+	// Build referenced-entity sets (prune to what surviving activities reference).
+	usedMemberIDs := make(map[string]bool)
+	usedStatusIDs := make(map[string]bool)
+	usedTagIDs := make(map[string]bool)
+	for _, a := range filteredActs {
+		for _, id := range a.AssignedMemberIDs {
+			usedMemberIDs[id] = true
+		}
+		if a.StatusID != nil {
+			usedStatusIDs[*a.StatusID] = true
+		}
+		for _, id := range a.TagIDs {
+			usedTagIDs[id] = true
+		}
+	}
+
+	// Build PublicActivity slice — notes omitted unless this is a list share
+	// with notes enabled (Phase 13.2+ handles that nuance; for now always omit).
+	pubActivities := make([]models.PublicActivity, 0, len(filteredActs))
+	for _, a := range filteredActs {
+		pub := models.PublicActivity{
+			ID:                a.ID,
+			Title:             a.Title,
+			Description:       a.Description,
+			Icon:              a.Icon,
+			Color:             a.Color,
+			StartAt:           a.StartAt,
+			EndAt:             a.EndAt,
+			AllDay:            a.AllDay,
+			StatusID:          a.StatusID,
+			ParentActivityID:  a.ParentActivityID,
+			PercentComplete:   a.PercentComplete,
+			AssignedMemberIDs: a.AssignedMemberIDs,
+			TagIDs:            a.TagIDs,
+		}
+		if pub.AssignedMemberIDs == nil {
+			pub.AssignedMemberIDs = []string{}
+		}
+		if pub.TagIDs == nil {
+			pub.TagIDs = []string{}
+		}
+		pubActivities = append(pubActivities, pub)
+	}
+
+	// Build PublicMember slice — never email/role/userId.
+	pubMembers := make([]models.PublicMember, 0)
+	for _, m := range members {
+		if !usedMemberIDs[m.ID] {
+			continue
+		}
+		name := m.DisplayName
+		if name == "" {
+			// The register endpoint requires a non-empty displayName, so this
+			// branch only fires for rows migrated from older data. Never fall
+			// back to the email address — this response is public and
+			// unauthenticated.
+			name = "Team member"
+		}
+		pubMembers = append(pubMembers, models.PublicMember{
+			ID:          m.ID,
+			DisplayName: name,
+			Color:       m.Color,
+			Icon:        m.Icon,
+		})
+	}
+
+	// Prune statuses to referenced ones.
+	pubStatuses := make([]models.Status, 0)
+	for _, st := range statuses {
+		if usedStatusIDs[st.ID] {
+			pubStatuses = append(pubStatuses, *st)
+		}
+	}
+
+	// Prune tags to referenced ones.
+	pubTags := make([]models.Tag, 0)
+	for _, tg := range tags {
+		if usedTagIDs[tg.ID] {
+			pubTags = append(pubTags, *tg)
+		}
+	}
+
+	// Strip password hash before including share in the public projection.
+	safeShare := *share
+	safeShare.PasswordHash = nil
+	proj := &models.ShareProjection{
+		Share:    safeShare,
+		TeamName: team.Name,
+		Timeline: models.PublicTimeline{
+			ID:        timeline.ID,
+			Name:      timeline.Name,
+			Color:     timeline.Color,
+			Icon:      timeline.Icon,
+			StartDate: timeline.StartDate,
+			EndDate:   timeline.EndDate,
+		},
+		Members:    pubMembers,
+		Statuses:   pubStatuses,
+		Tags:       pubTags,
+		Activities: pubActivities,
+	}
+	return proj, nil
+}
+
+// handleCreateShare handles POST /timelines/{id}/shares. The caller must be a
+// member of the timeline's team. The share captures the current view config.
+func (s *Server) handleCreateShare(w http.ResponseWriter, r *http.Request) {
+	timelineID := r.PathValue("id")
 
 	timeline, err := s.timelines.GetByID(timelineID)
 	if err != nil {
@@ -41824,775 +42409,589 @@ func (s *Server) handleCreateActivity(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create activity")
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
 		return
 	}
-	if timeline.TeamID != teamID {
+	if timeline.ArchivedAt != nil {
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
 		return
 	}
 
-	var req CreateActivityJSONBody
+	member, ok := s.requireTeamMember(w, r, timeline.TeamID)
+	if !ok {
+		return
+	}
+
+	var req createShareBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+	if req.ViewType == "" {
+		req.ViewType = "gantt"
+	}
+	if req.ViewConfig == "" {
+		req.ViewConfig = "{}"
+	}
+
+	now := time.Now().UTC()
+	share := &models.Share{
+		ID:         newID(),
+		TimelineID: timelineID,
+		Token:      newToken(),
+		Name:       req.Name,
+		ViewType:   req.ViewType,
+		ViewConfig: req.ViewConfig,
+		CreatedBy:  member.ID,
+		CreatedAt:  now,
+		ViewCount:  0,
+	}
+
+	if err := s.shares.Create(share); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create share")
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, share)
+}
+
+// handleListShares handles GET /teams/{id}/timelines/{timelineId}/shares.
+// Only team members with access to the timeline may list its shares.
+func (s *Server) handleListShares(w http.ResponseWriter, r *http.Request) {
+	timelineID := r.PathValue("timelineId")
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
+		return
+	}
+
+	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
+		return
+	}
+
+	shares, err := s.shares.ListByTimeline(timelineID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list shares")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, shares)
+}
+
+// handleUpdateShare handles PATCH /shares/{id}. Only the share creator or a
+// team admin may update it.
+func (s *Server) handleUpdateShare(w http.ResponseWriter, r *http.Request) {
+	shareID := r.PathValue("id")
+
+	share, err := s.shares.GetByID(shareID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
+		return
+	}
+
+	timeline, err := s.timelines.GetByID(share.TimelineID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
+		return
+	}
+
+	member, ok := s.requireTeamMember(w, r, timeline.TeamID)
+	if !ok {
+		return
+	}
+	if !s.canManageShare(member, share) {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "only the share creator or a team admin may update this share")
+		return
+	}
+
+	var req patchShareBody
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
 		return
 	}
 
-	if req.Title == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "title is required")
-		return
+	if req.Name != nil {
+		share.Name = req.Name
 	}
-	if req.StartAt.IsZero() || req.EndAt.IsZero() {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "startAt and endAt are required")
-		return
+	if req.ViewType != nil {
+		share.ViewType = *req.ViewType
 	}
-	if req.EndAt.Before(req.StartAt) {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "endAt must not be before startAt")
-		return
+	if req.ViewConfig != nil {
+		share.ViewConfig = *req.ViewConfig
 	}
 
-	allDay := false
-	if req.AllDay != nil {
-		allDay = *req.AllDay
-	}
-
-	now := time.Now()
-	activity := &models.Activity{
-		ID:               newID(),
-		TimelineID:       timelineID,
-		Title:            req.Title,
-		Description:      req.Description,
-		Notes:            req.Notes,
-		Icon:             req.Icon,
-		Color:            req.Color,
-		StartAt:          req.StartAt,
-		EndAt:            req.EndAt,
-		AllDay:           allDay,
-		StatusID:         req.StatusId,
-		ParentActivityID: req.ParentActivityId,
-		PercentComplete:  req.PercentComplete,
-		Location:         req.Location,
-		URL:              req.Url,
-		Rrule:            req.Rrule,
-		CreatedBy:        claims.UserID,
-		CreatedAt:        now,
-		UpdatedAt:        now,
-	}
-	if err := s.activities.Create(activity); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create activity")
+	if err := s.shares.Update(share); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update share")
 		return
 	}
 
-	if req.AssignedMemberIds != nil {
-		if err := s.activities.SetAssignments(activity.ID, *req.AssignedMemberIds); err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity assignments")
-			return
-		}
-		activity.AssignedMemberIDs = *req.AssignedMemberIds
-	} else {
-		activity.AssignedMemberIDs = []string{}
-	}
+	// Invalidate cache so the next public request picks up the new config.
+	s.shareCache.invalidate(share.Token)
 
-	if req.TagIds != nil {
-		if err := s.tags.ValidateTeamOwnership(timeline.TeamID, *req.TagIds); err != nil {
-			if errors.Is(err, db.ErrTagOwnership) {
-				writeError(w, http.StatusBadRequest, "INVALID_TAGS", "one or more tag IDs do not belong to this team")
-				return
-			}
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to validate tags")
-			return
-		}
-		if err := s.activities.SetTags(activity.ID, *req.TagIds); err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity tags")
-			return
-		}
-		activity.TagIDs = *req.TagIds
-	} else {
-		activity.TagIDs = []string{}
-	}
-
-	s.bus.Publish(events.Message{Type: events.ActivityCreated, TeamID: timeline.TeamID, Payload: activity})
-	writeJSON(w, http.StatusCreated, activity)
+	writeJSON(w, http.StatusOK, share)
 }
 
-// handleListActivities handles GET /teams/{id}/timelines/{timelineId}/activities.
-// Optional query params ?from=<RFC3339> and ?to=<RFC3339> bound the result by start_at.
-func (s *Server) handleListActivities(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-	timelineID := r.PathValue("timelineId")
+// handleDeleteShare handles DELETE /shares/{id}. Only the share creator or a
+// team admin may delete it.
+func (s *Server) handleDeleteShare(w http.ResponseWriter, r *http.Request) {
+	shareID := r.PathValue("id")
 
-	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
-		return
-	}
-
-	timeline, err := s.timelines.GetByID(timelineID)
+	share, err := s.shares.GetByID(shareID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list activities")
-		return
-	}
-	if timeline.TeamID != teamID {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
 		return
 	}
 
-	var from, to *time.Time
-	if v := r.URL.Query().Get("from"); v != "" {
-		t, err := time.Parse(time.RFC3339, v)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "from must be RFC3339 (e.g. 2006-01-02T15:04:05Z)")
-			return
-		}
-		from = &t
-	}
-	if v := r.URL.Query().Get("to"); v != "" {
-		t, err := time.Parse(time.RFC3339, v)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "to must be RFC3339 (e.g. 2006-01-02T15:04:05Z)")
-			return
-		}
-		to = &t
-	}
-
-	includeArchived := r.URL.Query().Get("archived") == "true"
-	acts, err := s.activities.ListByTimeline(timelineID, from, to, includeArchived)
+	timeline, err := s.timelines.GetByID(share.TimelineID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list activities")
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
 		return
 	}
 
-	writeJSON(w, http.StatusOK, acts)
-}
-
-// handleUpdateActivity handles PATCH /activities/{id}. Only fields present in
-// the request body are applied; the caller must be a member of the activity's team.
-func (s *Server) handleUpdateActivity(w http.ResponseWriter, r *http.Request) {
-	activityID := r.PathValue("id")
-
-	activity, err := s.activities.GetByID(activityID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "activity not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update activity")
+	member, ok := s.requireTeamMember(w, r, timeline.TeamID)
+	if !ok {
+		return
+	}
+	if !s.canManageShare(member, share) {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "only the share creator or a team admin may delete this share")
 		return
 	}
 
-	timeline, err := s.timelines.GetByID(activity.TimelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update activity")
+	if err := s.shares.Delete(shareID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete share")
 		return
 	}
 
-	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
-		return
-	}
-
-	// Decode into a map so we can detect which fields the caller provided.
-	var patch map[string]json.RawMessage
-	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	if v, ok := patch["title"]; ok {
-		if err := json.Unmarshal(v, &activity.Title); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid title")
-			return
-		}
-	}
-	if v, ok := patch["description"]; ok {
-		if err := json.Unmarshal(v, &activity.Description); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid description")
-			return
-		}
-	}
-	if v, ok := patch["notes"]; ok {
-		if err := json.Unmarshal(v, &activity.Notes); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid notes")
-			return
-		}
-	}
-	if v, ok := patch["icon"]; ok {
-		if err := json.Unmarshal(v, &activity.Icon); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid icon")
-			return
-		}
-	}
-	if v, ok := patch["color"]; ok {
-		if err := json.Unmarshal(v, &activity.Color); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid color")
-			return
-		}
-	}
-	if v, ok := patch["startAt"]; ok {
-		if err := json.Unmarshal(v, &activity.StartAt); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid startAt")
-			return
-		}
-	}
-	if v, ok := patch["endAt"]; ok {
-		if err := json.Unmarshal(v, &activity.EndAt); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid endAt")
-			return
-		}
-	}
-	if v, ok := patch["allDay"]; ok {
-		if err := json.Unmarshal(v, &activity.AllDay); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid allDay")
-			return
-		}
-	}
-	if v, ok := patch["statusId"]; ok {
-		if err := json.Unmarshal(v, &activity.StatusID); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid statusId")
-			return
-		}
-	}
-	if v, ok := patch["parentActivityId"]; ok {
-		if err := json.Unmarshal(v, &activity.ParentActivityID); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid parentActivityId")
-			return
-		}
-	}
-	if v, ok := patch["percentComplete"]; ok {
-		if err := json.Unmarshal(v, &activity.PercentComplete); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid percentComplete")
-			return
-		}
-	}
-	if v, ok := patch["location"]; ok {
-		if err := json.Unmarshal(v, &activity.Location); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid location")
-			return
-		}
-	}
-	if v, ok := patch["url"]; ok {
-		if err := json.Unmarshal(v, &activity.URL); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid url")
-			return
-		}
-	}
-	if v, ok := patch["rrule"]; ok {
-		if err := json.Unmarshal(v, &activity.Rrule); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid rrule")
-			return
-		}
-	}
-
-	var newAssignees *[]string
-	if v, ok := patch["assignedMemberIds"]; ok {
-		var ids []string
-		if err := json.Unmarshal(v, &ids); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid assignedMemberIds")
-			return
-		}
-		newAssignees = &ids
-	}
-
-	var newTagIDs *[]string
-	if v, ok := patch["tagIds"]; ok {
-		var ids []string
-		if err := json.Unmarshal(v, &ids); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid tagIds")
-			return
-		}
-		newTagIDs = &ids
-	}
-
-	if activity.Title == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "title must not be empty")
-		return
-	}
-	if activity.EndAt.Before(activity.StartAt) {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "endAt must not be before startAt")
-		return
-	}
-
-	activity.UpdatedAt = time.Now()
-	if err := s.activities.Update(activity); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update activity")
-		return
-	}
-
-	if newAssignees != nil {
-		if err := s.activities.SetAssignments(activity.ID, *newAssignees); err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity assignments")
-			return
-		}
-		activity.AssignedMemberIDs = *newAssignees
-	} else {
-		// Populate current assignments so the response always includes them.
-		existing, err := s.activities.GetAssignments(activity.ID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get activity assignments")
-			return
-		}
-		activity.AssignedMemberIDs = existing
-	}
-
-	if newTagIDs != nil {
-		if err := s.tags.ValidateTeamOwnership(timeline.TeamID, *newTagIDs); err != nil {
-			if errors.Is(err, db.ErrTagOwnership) {
-				writeError(w, http.StatusBadRequest, "INVALID_TAGS", "one or more tag IDs do not belong to this team")
-				return
-			}
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to validate tags")
-			return
-		}
-		if err := s.activities.SetTags(activity.ID, *newTagIDs); err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity tags")
-			return
-		}
-		activity.TagIDs = *newTagIDs
-	} else {
-		existing, err := s.activities.GetTags(activity.ID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get activity tags")
-			return
-		}
-		activity.TagIDs = existing
-	}
-
-	s.bus.Publish(events.Message{Type: events.ActivityUpdated, TeamID: timeline.TeamID, Payload: activity})
-	writeJSON(w, http.StatusOK, activity)
-}
-
-// handleArchiveActivity handles POST /activities/{id}/archive. Any team member
-// may archive an activity; the row is soft-deleted (archived_at set) so it is
-// hidden from list responses by default but can be restored.
-func (s *Server) handleArchiveActivity(w http.ResponseWriter, r *http.Request) {
-	s.setActivityArchive(w, r, true)
-}
-
-// handleUnarchiveActivity handles POST /activities/{id}/unarchive.
-func (s *Server) handleUnarchiveActivity(w http.ResponseWriter, r *http.Request) {
-	s.setActivityArchive(w, r, false)
-}
-
-// setActivityArchive is the shared implementation for the archive/unarchive
-// endpoints. When archive is true, archived_at is set to now; otherwise it
-// is cleared.
-func (s *Server) setActivityArchive(w http.ResponseWriter, r *http.Request, archive bool) {
-	activityID := r.PathValue("id")
-
-	activity, err := s.activities.GetByID(activityID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "activity not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
-		return
-	}
-
-	timeline, err := s.timelines.GetByID(activity.TimelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
-		return
-	}
-
-	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
-		return
-	}
-
-	var at *time.Time
-	if archive {
-		now := time.Now().UTC()
-		at = &now
-		if err := s.activities.ClearParentRefs(activityID); err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
-			return
-		}
-	}
-	if err := s.activities.SetArchived(activityID, at); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
-		return
-	}
-	activity.ArchivedAt = at
-	activity.UpdatedAt = time.Now().UTC()
-
-	// Re-populate assignments and tags for a stable response shape.
-	if ids, err := s.activities.GetAssignments(activity.ID); err == nil {
-		activity.AssignedMemberIDs = ids
-	} else {
-		activity.AssignedMemberIDs = []string{}
-	}
-	if ids, err := s.activities.GetTags(activity.ID); err == nil {
-		activity.TagIDs = ids
-	} else {
-		activity.TagIDs = []string{}
-	}
-
-	s.bus.Publish(events.Message{Type: events.ActivityUpdated, TeamID: timeline.TeamID, Payload: activity})
-	writeJSON(w, http.StatusOK, activity)
-}
-
-// handleDeleteActivity handles DELETE /activities/{id}. Any member of the
-// activity's team may delete it.
-func (s *Server) handleDeleteActivity(w http.ResponseWriter, r *http.Request) {
-	activityID := r.PathValue("id")
-
-	activity, err := s.activities.GetByID(activityID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "activity not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
-		return
-	}
-
-	timeline, err := s.timelines.GetByID(activity.TimelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
-		return
-	}
-
-	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
-		return
-	}
-
-	if err := s.activities.ClearParentRefs(activityID); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
-		return
-	}
-	if err := s.activities.Delete(activityID); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
-		return
-	}
-
-	s.bus.Publish(events.Message{
-		Type:    events.ActivityDeleted,
-		TeamID:  timeline.TeamID,
-		Payload: map[string]string{"id": activityID},
-	})
+	s.shareCache.invalidate(share.Token)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// canManageShare reports whether a team member may update or delete a share.
+// Team admins always pass; non-admins must be the share's creator.
+func (s *Server) canManageShare(member *models.TeamMember, share *models.Share) bool {
+	return member.Role == "admin" || member.ID == share.CreatedBy
+}
+
+// ── Request bodies ────────────────────────────────────────────────────────────
+
+type createShareBody struct {
+	Name       *string `json:"name,omitempty"`
+	ViewType   string  `json:"viewType"`
+	ViewConfig string  `json:"viewConfig"`
+}
+
+type patchShareBody struct {
+	Name       *string `json:"name,omitempty"`
+	ViewType   *string `json:"viewType,omitempty"`
+	ViewConfig *string `json:"viewConfig,omitempty"`
 }
 ````
 
-## File: packages/api/internal/db/activity_repo.go
+## File: packages/api/internal/models/models.go
 ````go
-package db
+// Package models holds the domain types shared across the API, db,
+// and event-bus packages. These types are persisted directly via sqlx
+// (db tags) and serialised on the wire (json tags); changing tags is a
+// schema change.
+package models
 
-import (
-	"fmt"
-	"time"
+import "time"
 
-	"github.com/jmoiron/sqlx"
-
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// ActivityRepo is the persistence layer for Activity records.
-type ActivityRepo struct {
-	db *sqlx.DB
+// Activity is a scheduled item of work belonging to a Timeline. ArchivedAt is
+// non-nil when the activity is soft-deleted; list endpoints exclude archived
+// activities by default.
+//
+// AssignedMemberIDs is not stored on the activities table; it is populated by
+// the repository from activity_assignments after every list query.
+//
+// GoogleEventID and CaldavUID are preserved as-is — they identify the
+// corresponding records in external calendar systems (VEVENT identifiers).
+type Activity struct {
+	ID                string     `db:"id"                  json:"id"`
+	TimelineID        string     `db:"timeline_id"         json:"timelineId"`
+	Title             string     `db:"title"               json:"title"`
+	Description       *string    `db:"description"         json:"description,omitempty"`
+	Notes             *string    `db:"notes"               json:"notes,omitempty"`
+	Icon              *string    `db:"icon"                json:"icon,omitempty"`
+	Color             *string    `db:"color"               json:"color,omitempty"`
+	StartAt           time.Time  `db:"start_at"            json:"startAt"`
+	EndAt             time.Time  `db:"end_at"              json:"endAt"`
+	AllDay            bool       `db:"all_day"             json:"allDay"`
+	StatusID          *string    `db:"status_id"           json:"statusId,omitempty"`
+	ParentActivityID  *string    `db:"parent_activity_id"  json:"parentActivityId,omitempty"`
+	PercentComplete   *int       `db:"percent_complete"    json:"percentComplete,omitempty"`
+	Location          *string    `db:"location"            json:"location,omitempty"`
+	URL               *string    `db:"url"                 json:"url,omitempty"`
+	Rrule             *string    `db:"rrule"               json:"rrule,omitempty"`
+	CaldavUID         *string    `db:"caldav_uid"          json:"caldavUid,omitempty"`
+	GoogleEventID     *string    `db:"google_event_id"     json:"googleEventId,omitempty"`
+	CreatedBy         string     `db:"created_by"          json:"createdBy"`
+	CreatedAt         time.Time  `db:"created_at"          json:"createdAt"`
+	UpdatedAt         time.Time  `db:"updated_at"          json:"updatedAt"`
+	ArchivedAt        *time.Time `db:"archived_at"         json:"archivedAt,omitempty"`
+	AssignedMemberIDs []string   `db:"-"                   json:"assignedMemberIds"`
+	TagIDs            []string   `db:"-"                   json:"tagIds"`
 }
 
-// NewActivityRepo returns an ActivityRepo backed by db.
-func NewActivityRepo(db *sqlx.DB) *ActivityRepo {
-	return &ActivityRepo{db: db}
+// TeamMemberWithUser joins a TeamMember row with its associated User so
+// callers receive display names and emails in a single query. Participants
+// (no user account) have empty email and avatar; their display_name comes
+// from team_members.display_name via COALESCE in the query.
+type TeamMemberWithUser struct {
+	TeamMember
+	Email       string  `db:"email"        json:"email"`
+	DisplayName string  `db:"display_name" json:"displayName"`
+	AvatarURL   *string `db:"avatar_url"   json:"avatarUrl,omitempty"`
 }
 
-// Create inserts a new Activity row.
-func (r *ActivityRepo) Create(activity *models.Activity) error {
-	_, err := r.db.NamedExec(`
-		INSERT INTO activities (
-			id, timeline_id, title, description, icon, color,
-			start_at, end_at, all_day, status_id, parent_activity_id,
-			percent_complete, location, url, rrule,
-			caldav_uid, google_event_id,
-			created_by, created_at, updated_at
-		) VALUES (
-			:id, :timeline_id, :title, :description, :icon, :color,
-			:start_at, :end_at, :all_day, :status_id, :parent_activity_id,
-			:percent_complete, :location, :url, :rrule,
-			:caldav_uid, :google_event_id,
-			:created_by, :created_at, :updated_at
-		)
-	`, activity)
-	if err != nil {
-		return fmt.Errorf("creating activity: %w", err)
-	}
-	return nil
+// User is an authenticated account. PasswordHash is omitted from JSON
+// to avoid leaking it through any handler that returns a User.
+// ArchivedAt is non-nil when the account is inactivated; login is rejected
+// for archived users. Color and Icon are user-level identity fields (migration
+// 010); they propagate to team_members rows for the user when changed.
+type User struct {
+	ID           string     `db:"id"             json:"id"`
+	Email        string     `db:"email"          json:"email"`
+	PasswordHash string     `db:"password_hash"  json:"-"`
+	DisplayName  string     `db:"display_name"   json:"displayName"`
+	AvatarURL    *string    `db:"avatar_url"     json:"avatarUrl,omitempty"`
+	Color        *string    `db:"color"          json:"color,omitempty"`
+	Icon         *string    `db:"icon"           json:"icon,omitempty"`
+	IsSuperadmin bool       `db:"is_superadmin"  json:"isSuperadmin"`
+	CreatedAt    time.Time  `db:"created_at"     json:"createdAt"`
+	UpdatedAt    time.Time  `db:"updated_at"     json:"updatedAt"`
+	ArchivedAt   *time.Time `db:"archived_at"    json:"archivedAt,omitempty"`
 }
 
-// GetByID fetches an Activity by primary key. Returns sql.ErrNoRows (wrapped)
-// when no row matches.
-func (r *ActivityRepo) GetByID(id string) (*models.Activity, error) {
-	var a models.Activity
-	err := r.db.Get(&a, `SELECT * FROM activities WHERE id = ?`, id)
-	if err != nil {
-		return nil, fmt.Errorf("getting activity: %w", err)
-	}
-	return &a, nil
+// Team is a workspace that groups users and their scheduled work. Color and
+// Icon are identity fields added in migration 006; both are nullable until
+// explicitly set by an admin. Description, Notes, and ArchivedAt are added in
+// migration 008; ArchivedAt is non-nil when the team is soft-deleted.
+// InviteLinkToken is a stable, reusable token added in migration 009; when
+// non-nil it can be used by anyone to join the team during registration.
+type Team struct {
+	ID              string     `db:"id"                  json:"id"`
+	Name            string     `db:"name"                json:"name"`
+	Slug            string     `db:"slug"                json:"slug"`
+	Description     *string    `db:"description"         json:"description,omitempty"`
+	Notes           *string    `db:"notes"               json:"notes,omitempty"`
+	Color           *string    `db:"color"               json:"color,omitempty"`
+	Icon            *string    `db:"icon"                json:"icon,omitempty"`
+	InviteLinkToken *string    `db:"invite_link_token"   json:"inviteLinkToken,omitempty"`
+	CreatedAt       time.Time  `db:"created_at"          json:"createdAt"`
+	UpdatedAt       time.Time  `db:"updated_at"          json:"updatedAt"`
+	ArchivedAt      *time.Time `db:"archived_at"         json:"archivedAt,omitempty"`
 }
 
-// Update replaces all mutable fields on an existing Activity row.
-func (r *ActivityRepo) Update(activity *models.Activity) error {
-	_, err := r.db.NamedExec(`
-		UPDATE activities SET
-			title              = :title,
-			description        = :description,
-			notes              = :notes,
-			icon               = :icon,
-			color              = :color,
-			start_at           = :start_at,
-			end_at             = :end_at,
-			all_day            = :all_day,
-			status_id          = :status_id,
-			parent_activity_id = :parent_activity_id,
-			percent_complete   = :percent_complete,
-			location           = :location,
-			url                = :url,
-			rrule              = :rrule,
-			updated_at         = :updated_at
-		WHERE id = :id
-	`, activity)
-	if err != nil {
-		return fmt.Errorf("updating activity: %w", err)
-	}
-	return nil
+// TeamMember is the join row that puts a person in a Team. UserID is nil
+// for login-less Participants; DisplayName is populated for them instead.
+// Role is the team-level role: "admin" or "member". Color and Icon are
+// identity fields (migration 006); Color stores a color ID (e.g. "teal").
+// ArchivedAt is non-nil when the member is inactivated (migration 009);
+// inactivated members lose access but their data and assignments are preserved.
+type TeamMember struct {
+	ID          string     `db:"id"           json:"id"`
+	TeamID      string     `db:"team_id"      json:"teamId"`
+	UserID      *string    `db:"user_id"      json:"userId,omitempty"`
+	DisplayName *string    `db:"display_name" json:"displayName,omitempty"`
+	Role        string     `db:"role"         json:"role"`
+	Color       *string    `db:"color"        json:"color,omitempty"`
+	Icon        *string    `db:"icon"         json:"icon,omitempty"`
+	JoinedAt    time.Time  `db:"joined_at"    json:"joinedAt"`
+	ArchivedAt  *time.Time `db:"archived_at"  json:"archivedAt,omitempty"`
 }
 
-// Delete permanently removes an activity row.
-func (r *ActivityRepo) Delete(id string) error {
-	_, err := r.db.Exec(`DELETE FROM activities WHERE id = ?`, id)
-	if err != nil {
-		return fmt.Errorf("deleting activity: %w", err)
-	}
-	return nil
+// MemberStats holds computed activity and timeline counts for a member.
+// All counts are date-relative and scoped to activities the member is assigned to.
+type MemberStats struct {
+	ActiveTimelines    int `json:"activeTimelines"`
+	ArchivedTimelines  int `json:"archivedTimelines"`
+	PastDue            int `json:"pastDue"`
+	Running            int `json:"running"`
+	Upcoming           int `json:"upcoming"`
+	Unscheduled        int `json:"unscheduled"`
+	ArchivedActivities int `json:"archivedActivities"`
 }
 
-// ClearParentRefs clears parent_activity_id on all activities that reference id
-// as their parent. Called before deleting or archiving the parent so children
-// do not retain a dangling reference.
-func (r *ActivityRepo) ClearParentRefs(id string) error {
-	_, err := r.db.Exec(
-		`UPDATE activities SET parent_activity_id = NULL, updated_at = ? WHERE parent_activity_id = ?`,
-		time.Now().UTC(), id,
-	)
-	if err != nil {
-		return fmt.Errorf("clearing parent refs for %s: %w", id, err)
-	}
-	return nil
+// MemberDetail combines a TeamMemberWithUser with computed stats and the
+// member's full list of team memberships. Returned by GET /teams/:id/members/:memberId.
+// UserArchivedAt reflects users.archived_at (account-level deactivation), distinct
+// from ArchivedAt which is team_members.archived_at (membership-level inactivation).
+type MemberDetail struct {
+	TeamMemberWithUser
+	Stats          MemberStats          `json:"stats"`
+	Teams          []TeamMemberWithUser `json:"teams"`
+	Deletable      bool                 `json:"deletable"`
+	UserArchivedAt *time.Time           `json:"userArchivedAt,omitempty"`
 }
 
-// SetArchived sets or clears archived_at on an activity. Pass a non-nil time
-// to archive; pass nil to unarchive.
-func (r *ActivityRepo) SetArchived(id string, at *time.Time) error {
-	_, err := r.db.Exec(
-		`UPDATE activities SET archived_at = ?, updated_at = ? WHERE id = ?`,
-		at, time.Now().UTC(), id,
-	)
-	if err != nil {
-		return fmt.Errorf("setting activity archived_at: %w", err)
-	}
-	return nil
+// Timeline is a named date range over a team's events. It is not a data
+// container — it is a view over a team's events for a given date window.
+// Access is governed by timeline_access + team role; share_token allows
+// unauthenticated read access via a stable public URL. Color and Icon are
+// identity fields (migration 006). Description and Notes are free-text fields
+// added in migration 013.
+type Timeline struct {
+	ID          string     `db:"id"          json:"id"`
+	TeamID      string     `db:"team_id"     json:"teamId"`
+	Name        string     `db:"name"        json:"name"`
+	Description *string    `db:"description" json:"description,omitempty"`
+	Notes       *string    `db:"notes"       json:"notes,omitempty"`
+	StartDate   string     `db:"start_date"  json:"startDate"`
+	EndDate     string     `db:"end_date"    json:"endDate"`
+	Color       *string    `db:"color"       json:"color,omitempty"`
+	Icon        *string    `db:"icon"        json:"icon,omitempty"`
+	ShareToken  string     `db:"share_token" json:"shareToken"`
+	IcalToken   string     `db:"ical_token"  json:"icalToken"`
+	CreatedBy   string     `db:"created_by"  json:"createdBy"`
+	CreatedAt   time.Time  `db:"created_at"  json:"createdAt"`
+	UpdatedAt   time.Time  `db:"updated_at"  json:"updatedAt"`
+	ArchivedAt  *time.Time `db:"archived_at" json:"archivedAt,omitempty"`
 }
 
-// SetAssignments replaces all activity_assignments for an activity with the
-// provided member IDs. An empty slice removes all assignments.
-func (r *ActivityRepo) SetAssignments(activityID string, memberIDs []string) error {
-	tx, err := r.db.Beginx()
-	if err != nil {
-		return fmt.Errorf("beginning assignment transaction: %w", err)
-	}
-	defer func() {
-		if err != nil {
-			_ = tx.Rollback()
-		}
-	}()
-
-	if _, err = tx.Exec(`DELETE FROM activity_assignments WHERE activity_id = ?`, activityID); err != nil {
-		return fmt.Errorf("clearing activity assignments: %w", err)
-	}
-
-	for _, memberID := range memberIDs {
-		if _, err = tx.Exec(
-			`INSERT INTO activity_assignments (activity_id, team_member_id) VALUES (?, ?)`,
-			activityID, memberID,
-		); err != nil {
-			return fmt.Errorf("inserting activity assignment: %w", err)
-		}
-	}
-
-	if err = tx.Commit(); err != nil {
-		return fmt.Errorf("committing activity assignments: %w", err)
-	}
-	return nil
+// SavedFilter is a user-owned, team-scoped named filter spec. Definition is
+// an opaque JSON string interpreted by the client; the server treats it as
+// arbitrary text and only validates that it parses as JSON.
+type SavedFilter struct {
+	ID           string    `db:"id"             json:"id"`
+	TeamID       string    `db:"team_id"        json:"teamId"`
+	UserID       string    `db:"user_id"        json:"userId"`
+	Name         string    `db:"name"           json:"name"`
+	Definition   string    `db:"definition"     json:"definition"`
+	IsTeamFilter bool      `db:"is_team_filter" json:"isTeamFilter"`
+	CreatedAt    time.Time `db:"created_at"     json:"createdAt"`
+	UpdatedAt    time.Time `db:"updated_at"     json:"updatedAt"`
 }
 
-// GetAssignments returns the team_member_ids assigned to an activity.
-func (r *ActivityRepo) GetAssignments(activityID string) ([]string, error) {
-	var ids []string
-	err := r.db.Select(&ids,
-		`SELECT team_member_id FROM activity_assignments WHERE activity_id = ?`, activityID,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("getting activity assignments: %w", err)
-	}
-	if ids == nil {
-		ids = []string{}
-	}
-	return ids, nil
+// UserPreference stores a single key/value setting for a user, optionally
+// scoped to a timeline. TimelineID is “” for global preferences so the
+// UNIQUE(user_id, timeline_id, key) DB constraint works without NULL handling.
+// Serialised JSON omits TimelineID when empty so callers see null for global prefs.
+type UserPreference struct {
+	ID         string    `db:"id"          json:"id"`
+	UserID     string    `db:"user_id"     json:"userId"`
+	TimelineID string    `db:"timeline_id" json:"timelineId,omitempty"`
+	Key        string    `db:"key"         json:"key"`
+	Value      string    `db:"value"       json:"value"`
+	UpdatedAt  time.Time `db:"updated_at"  json:"updatedAt"`
 }
 
-// SetTags replaces all activity_tags for an activity with the provided tag
-// IDs. An empty slice removes all tag associations.
-func (r *ActivityRepo) SetTags(activityID string, tagIDs []string) error {
-	tx, err := r.db.Beginx()
-	if err != nil {
-		return fmt.Errorf("beginning tag transaction: %w", err)
-	}
-	defer func() {
-		if err != nil {
-			_ = tx.Rollback()
-		}
-	}()
-
-	if _, err = tx.Exec(`DELETE FROM activity_tags WHERE activity_id = ?`, activityID); err != nil {
-		return fmt.Errorf("clearing activity tags: %w", err)
-	}
-
-	for _, tagID := range tagIDs {
-		if _, err = tx.Exec(
-			`INSERT INTO activity_tags (activity_id, tag_id) VALUES (?, ?)`,
-			activityID, tagID,
-		); err != nil {
-			return fmt.Errorf("inserting activity tag: %w", err)
-		}
-	}
-
-	if err = tx.Commit(); err != nil {
-		return fmt.Errorf("committing activity tags: %w", err)
-	}
-	return nil
+// APIToken is a long-lived Bearer credential a user issues for programmatic
+// access. token_hash stores SHA-256(rawToken); the raw value is shown to the
+// caller only once on creation. RevokedAt is non-nil when the token has been
+// revoked; revoked tokens are not deleted so listing remains stable.
+type APIToken struct {
+	ID         string     `db:"id"           json:"id"`
+	UserID     string     `db:"user_id"      json:"userId"`
+	Name       string     `db:"name"         json:"name"`
+	TokenHash  string     `db:"token_hash"   json:"-"`
+	Scope      string     `db:"scope"        json:"scope"`
+	LastUsedAt *time.Time `db:"last_used_at" json:"lastUsedAt,omitempty"`
+	CreatedAt  time.Time  `db:"created_at"   json:"createdAt"`
+	RevokedAt  *time.Time `db:"revoked_at"   json:"revokedAt,omitempty"`
 }
 
-// GetTags returns the tag IDs associated with an activity.
-func (r *ActivityRepo) GetTags(activityID string) ([]string, error) {
-	var ids []string
-	err := r.db.Select(&ids,
-		`SELECT tag_id FROM activity_tags WHERE activity_id = ?`, activityID,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("getting activity tags: %w", err)
-	}
-	if ids == nil {
-		ids = []string{}
-	}
-	return ids, nil
+// InstanceSetting stores a single instance-level configuration value.
+// SMTP config and defaults live here. The value column is plain text;
+// the mailer package handles decryption of the SMTP password field.
+type InstanceSetting struct {
+	Key       string    `db:"key"        json:"key"`
+	Value     string    `db:"value"      json:"value"`
+	UpdatedAt time.Time `db:"updated_at" json:"updatedAt"`
 }
 
-// ListByTimeline returns activities for a specific timeline. When
-// includeArchived is false archived rows are excluded. The bounds use overlap
-// semantics: from filters on end_at >= from (so a multi-week activity that
-// starts before the window still appears if it crosses it), and to filters on
-// start_at <= to.
-// AssignedMemberIDs is populated via a second query.
-func (r *ActivityRepo) ListByTimeline(timelineID string, from, to *time.Time, includeArchived bool) ([]*models.Activity, error) {
-	query := `SELECT * FROM activities WHERE timeline_id = ?`
-	args := []any{timelineID}
-	if !includeArchived {
-		query += ` AND archived_at IS NULL`
-	}
+// PasswordResetToken is a single-use token for the forgot-password flow.
+// TokenHash stores SHA-256 of the raw token; the raw value is sent by email
+// and never stored. UsedAt is set when the token is consumed.
+type PasswordResetToken struct {
+	ID        string     `db:"id"         json:"id"`
+	UserID    string     `db:"user_id"    json:"userId"`
+	TokenHash string     `db:"token_hash" json:"-"`
+	ExpiresAt time.Time  `db:"expires_at" json:"expiresAt"`
+	UsedAt    *time.Time `db:"used_at"    json:"usedAt,omitempty"`
+	CreatedAt time.Time  `db:"created_at" json:"createdAt"`
+}
 
-	if from != nil {
-		// Overlap semantics: include any activity whose end_at is at or after from.
-		// This catches multi-week/multi-month activities that START before the
-		// visible range but still cross it.
-		query += ` AND end_at >= ?`
-		args = append(args, from)
-	}
-	if to != nil {
-		query += ` AND start_at <= ?`
-		args = append(args, to)
-	}
-	query += ` ORDER BY start_at ASC`
+// AdminUserRow is a flat view of a user for the admin users list. It includes
+// the user's fields plus the count of active team memberships.
+type AdminUserRow struct {
+	User
+	TeamCount int `db:"team_count" json:"teamCount"`
+}
 
-	acts := make([]*models.Activity, 0)
-	if err := r.db.Select(&acts, query, args...); err != nil {
-		return nil, fmt.Errorf("listing activities: %w", err)
-	}
-	if len(acts) == 0 {
-		return acts, nil
-	}
+// Share is a public read-only link to a specific view of a timeline. One
+// timeline may have many shares, each freezing a different view configuration.
+// Token is an unguessable URL-safe string; PasswordHash is set only when the
+// share requires a password (Phase 13.3); ExpiresAt and RevokedAt support
+// lifecycle management (Phase 13.4).
+type Share struct {
+	ID           string     `db:"id"             json:"id"`
+	TimelineID   string     `db:"timeline_id"    json:"timelineId"`
+	Token        string     `db:"token"          json:"token"`
+	Name         *string    `db:"name"           json:"name,omitempty"`
+	ViewType     string     `db:"view_type"      json:"viewType"`
+	ViewConfig   string     `db:"view_config"    json:"viewConfig"`
+	PasswordHash *string    `db:"password_hash"  json:"-"`
+	ExpiresAt    *time.Time `db:"expires_at"     json:"expiresAt,omitempty"`
+	CreatedBy    string     `db:"created_by"     json:"createdBy"`
+	CreatedAt    time.Time  `db:"created_at"     json:"createdAt"`
+	LastViewedAt *time.Time `db:"last_viewed_at" json:"lastViewedAt,omitempty"`
+	ViewCount    int        `db:"view_count"     json:"viewCount"`
+	RevokedAt    *time.Time `db:"revoked_at"     json:"revokedAt,omitempty"`
+}
 
-	// Initialise AssignedMemberIDs and TagIDs to empty slices so JSON fields are
-	// always arrays (never null) even when an activity has no assignments or tags.
-	ids := make([]string, len(acts))
-	byID := make(map[string]*models.Activity, len(acts))
-	for i, a := range acts {
-		a.AssignedMemberIDs = []string{}
-		a.TagIDs = []string{}
-		ids[i] = a.ID
-		byID[a.ID] = a
-	}
+// PublicMember is the safe projection of a team member for public share
+// responses. It exposes only display fields — never email, role, or user_id.
+type PublicMember struct {
+	ID          string  `json:"id"`
+	DisplayName string  `json:"displayName"`
+	Color       *string `json:"color,omitempty"`
+	Icon        *string `json:"icon,omitempty"`
+}
 
-	asnQuery, asnArgs, err := sqlx.In(
-		`SELECT activity_id, team_member_id FROM activity_assignments WHERE activity_id IN (?)`,
-		ids,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("building assignments query: %w", err)
-	}
-	asnQuery = r.db.Rebind(asnQuery)
+// PublicActivity is the safe projection of an activity for public share
+// responses. It includes standard display fields but omits notes (unless
+// explicitly included for List shares with Notes enabled), caldav/google
+// identifiers, and any internal fields.
+type PublicActivity struct {
+	ID                string    `json:"id"`
+	Title             string    `json:"title"`
+	Description       *string   `json:"description,omitempty"`
+	Notes             *string   `json:"notes,omitempty"`
+	Icon              *string   `json:"icon,omitempty"`
+	Color             *string   `json:"color,omitempty"`
+	StartAt           time.Time `json:"startAt"`
+	EndAt             time.Time `json:"endAt"`
+	AllDay            bool      `json:"allDay"`
+	StatusID          *string   `json:"statusId,omitempty"`
+	ParentActivityID  *string   `json:"parentActivityId,omitempty"`
+	PercentComplete   *int      `json:"percentComplete,omitempty"`
+	AssignedMemberIDs []string  `json:"assignedMemberIds"`
+	TagIDs            []string  `json:"tagIds"`
+}
 
-	type assignment struct {
-		ActivityID   string `db:"activity_id"`
-		TeamMemberID string `db:"team_member_id"`
-	}
-	var assignments []assignment
-	if err := r.db.Select(&assignments, asnQuery, asnArgs...); err != nil {
-		return nil, fmt.Errorf("listing activity assignments: %w", err)
-	}
-	for _, a := range assignments {
-		if act, ok := byID[a.ActivityID]; ok {
-			act.AssignedMemberIDs = append(act.AssignedMemberIDs, a.TeamMemberID)
-		}
-	}
+// PublicTimeline is the safe timeline projection for share responses.
+type PublicTimeline struct {
+	ID        string  `json:"id"`
+	Name      string  `json:"name"`
+	Color     *string `json:"color,omitempty"`
+	Icon      *string `json:"icon,omitempty"`
+	StartDate string  `json:"startDate"`
+	EndDate   string  `json:"endDate"`
+}
 
-	tagQuery, tagArgs, err := sqlx.In(
-		`SELECT activity_id, tag_id FROM activity_tags WHERE activity_id IN (?)`,
-		ids,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("building tags query: %w", err)
-	}
-	tagQuery = r.db.Rebind(tagQuery)
+// ShareProjection is the full aggregate returned by GET /shares/{token}.
+// It contains all data the public viewer needs to render the configured view.
+type ShareProjection struct {
+	Share      Share            `json:"share"`
+	Timeline   PublicTimeline   `json:"timeline"`
+	TeamName   string           `json:"teamName"`
+	Members    []PublicMember   `json:"members"`
+	Statuses   []Status         `json:"statuses"`
+	Tags       []Tag            `json:"tags"`
+	Activities []PublicActivity `json:"activities"`
+}
 
-	type activityTag struct {
-		ActivityID string `db:"activity_id"`
-		TagID      string `db:"tag_id"`
-	}
-	var actTags []activityTag
-	if err := r.db.Select(&actTags, tagQuery, tagArgs...); err != nil {
-		return nil, fmt.Errorf("listing activity tags: %w", err)
-	}
-	for _, at := range actTags {
-		if act, ok := byID[at.ActivityID]; ok {
-			act.TagIDs = append(act.TagIDs, at.TagID)
-		}
-	}
+// RevokeUserResult summarizes the outcome of POST /users/:id/revoke.
+// The three counters let the caller show a meaningful summary in the UI.
+type RevokeUserResult struct {
+	AccountDeactivated     bool `json:"accountDeactivated"`
+	MembershipsInactivated int  `json:"membershipsInactivated"`
+	MembershipsRemoved     int  `json:"membershipsRemoved"`
+}
 
-	return acts, nil
+// StatusTemplate is a reusable named preset of statuses owned by a team.
+// When a timeline is created the team's chosen template's items are copied
+// into live Status rows for that timeline.
+type StatusTemplate struct {
+	ID          string    `db:"id"          json:"id"`
+	TeamID      string    `db:"team_id"     json:"teamId"`
+	Name        string    `db:"name"        json:"name"`
+	Description *string   `db:"description" json:"description,omitempty"`
+	Position    int       `db:"position"    json:"position"`
+	CreatedBy   string    `db:"created_by"  json:"createdBy"`
+	CreatedAt   time.Time `db:"created_at"  json:"createdAt"`
+	UpdatedAt   time.Time `db:"updated_at"  json:"updatedAt"`
+	// Items is populated by the repository when listing templates.
+	Items []StatusTemplateItem `db:"-" json:"items"`
+}
+
+// StatusTemplateItem is one status value within a StatusTemplate.
+type StatusTemplateItem struct {
+	ID         string  `db:"id"          json:"id"`
+	TemplateID string  `db:"template_id" json:"templateId"`
+	Name       string  `db:"name"        json:"name"`
+	Color      string  `db:"color"       json:"color"`
+	Icon       *string `db:"icon"        json:"icon,omitempty"`
+	IsClosed   bool    `db:"is_closed"   json:"isClosed"`
+	Position   int     `db:"position"    json:"position"`
+}
+
+// Status is a live status value on a specific timeline. Rows are copied from a
+// StatusTemplate's items when the timeline is created and then evolve independently.
+type Status struct {
+	ID         string    `db:"id"          json:"id"`
+	TimelineID string    `db:"timeline_id" json:"timelineId"`
+	Name       string    `db:"name"        json:"name"`
+	Color      string    `db:"color"       json:"color"`
+	Icon       *string   `db:"icon"        json:"icon,omitempty"`
+	IsClosed   bool      `db:"is_closed"   json:"isClosed"`
+	Position   int       `db:"position"    json:"position"`
+	CreatedAt  time.Time `db:"created_at"  json:"createdAt"`
+	UpdatedAt  time.Time `db:"updated_at"  json:"updatedAt"`
+}
+
+// TimelineAccessEntry is a single timeline access grant joined with the team
+// member's display info. Returned by GET /teams/:id/timelines/:timelineId/access.
+type TimelineAccessEntry struct {
+	TimelineID   string  `db:"timeline_id"    json:"timelineId"`
+	TeamMemberID string  `db:"team_member_id" json:"teamMemberId"`
+	Role         string  `db:"role"           json:"role"`
+	DisplayName  string  `db:"display_name"   json:"displayName"`
+	Email        string  `db:"email"          json:"email"`
+	Color        *string `db:"color"          json:"color,omitempty"`
+	Icon         *string `db:"icon"           json:"icon,omitempty"`
+	UserID       *string `db:"user_id"        json:"userId,omitempty"`
+}
+
+// Tag is a team-scoped label that can be applied to activities. Tags are
+// normalized: a team_id+name pair is unique, enabling rename-all and
+// name-based filter matching across timelines.
+type Tag struct {
+	ID        string    `db:"id"         json:"id"`
+	TeamID    string    `db:"team_id"    json:"teamId"`
+	Name      string    `db:"name"       json:"name"`
+	Color     *string   `db:"color"      json:"color,omitempty"`
+	CreatedBy string    `db:"created_by" json:"createdBy"`
+	CreatedAt time.Time `db:"created_at" json:"createdAt"`
+}
+
+// Invite is a single-use token that grants an email address the right to
+// join a Team. AcceptedAt is non-nil once consumed; expired or accepted
+// invites are rejected by the registration handler.
+type Invite struct {
+	ID         string     `db:"id"          json:"id"`
+	TeamID     string     `db:"team_id"     json:"teamId"`
+	Email      string     `db:"email"       json:"email"`
+	Token      string     `db:"token"       json:"token"`
+	Role       string     `db:"role"        json:"role"`
+	InvitedBy  string     `db:"invited_by"  json:"invitedBy"`
+	ExpiresAt  time.Time  `db:"expires_at"  json:"expiresAt"`
+	AcceptedAt *time.Time `db:"accepted_at" json:"acceptedAt,omitempty"`
+	CreatedAt  time.Time  `db:"created_at"  json:"createdAt"`
 }
 ````
 
@@ -43393,398 +43792,1983 @@ export default function ShareModal({ teamId, timelineId, viewType, viewConfig, o
 }
 ````
 
-## File: packages/api/internal/models/models.go
-````go
-// Package models holds the domain types shared across the API, db,
-// and event-bus packages. These types are persisted directly via sqlx
-// (db tags) and serialised on the wire (json tags); changing tags is a
-// schema change.
-package models
+## File: packages/web/src/hooks/useTeamActivities.ts
+````typescript
+/**
+ * TanStack Query hooks for team-scoped data.
+ *
+ * All hooks call createAuthFetch to inject the current access token at
+ * query-time so stale closures never send an expired token.
+ */
 
-import "time"
+import { useCallback } from 'react'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import type { components } from '@draba/shared'
+import { createAuthFetch } from '@/lib/api'
+import { useAuth } from '@/contexts/AuthContext'
+import { useWebSocket } from '@/hooks/useWebSocket'
 
-// Activity is a scheduled item of work belonging to a Timeline. ArchivedAt is
-// non-nil when the activity is soft-deleted; list endpoints exclude archived
-// activities by default.
-//
-// AssignedMemberIDs is not stored on the activities table; it is populated by
-// the repository from activity_assignments after every list query.
-//
-// GoogleEventID and CaldavUID are preserved as-is — they identify the
-// corresponding records in external calendar systems (VEVENT identifiers).
-type Activity struct {
-	ID                string     `db:"id"                  json:"id"`
-	TimelineID        string     `db:"timeline_id"         json:"timelineId"`
-	Title             string     `db:"title"               json:"title"`
-	Description       *string    `db:"description"         json:"description,omitempty"`
-	Notes             *string    `db:"notes"               json:"notes,omitempty"`
-	Icon              *string    `db:"icon"                json:"icon,omitempty"`
-	Color             *string    `db:"color"               json:"color,omitempty"`
-	StartAt           time.Time  `db:"start_at"            json:"startAt"`
-	EndAt             time.Time  `db:"end_at"              json:"endAt"`
-	AllDay            bool       `db:"all_day"             json:"allDay"`
-	StatusID          *string    `db:"status_id"           json:"statusId,omitempty"`
-	ParentActivityID  *string    `db:"parent_activity_id"  json:"parentActivityId,omitempty"`
-	PercentComplete   *int       `db:"percent_complete"    json:"percentComplete,omitempty"`
-	Location          *string    `db:"location"            json:"location,omitempty"`
-	URL               *string    `db:"url"                 json:"url,omitempty"`
-	Rrule             *string    `db:"rrule"               json:"rrule,omitempty"`
-	CaldavUID         *string    `db:"caldav_uid"          json:"caldavUid,omitempty"`
-	GoogleEventID     *string    `db:"google_event_id"     json:"googleEventId,omitempty"`
-	CreatedBy         string     `db:"created_by"          json:"createdBy"`
-	CreatedAt         time.Time  `db:"created_at"          json:"createdAt"`
-	UpdatedAt         time.Time  `db:"updated_at"          json:"updatedAt"`
-	ArchivedAt        *time.Time `db:"archived_at"         json:"archivedAt,omitempty"`
-	AssignedMemberIDs []string   `db:"-"                   json:"assignedMemberIds"`
-	TagIDs            []string   `db:"-"                   json:"tagIds"`
+type Activity = components['schemas']['Activity']
+type Team = components['schemas']['Team']
+type Timeline = components['schemas']['Timeline']
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
+type TimelineAccessEntry = components['schemas']['TimelineAccessEntry']
+type PatchTimelineInput = components['schemas']['PatchTimelineInput']
+
+/** Query key factory — centralises cache key strings. */
+export const keys = {
+  myTeams: () => ['teams'] as const,
+  timelineActivities: (timelineId: string, from?: string, to?: string) =>
+    ['timelines', timelineId, 'activities', { from, to }] as const,
+  teamMembers: (teamId: string) =>
+    ['teams', teamId, 'members'] as const,
+  teamTimelines: (teamId: string) =>
+    ['teams', teamId, 'timelines'] as const,
 }
 
-// TeamMemberWithUser joins a TeamMember row with its associated User so
-// callers receive display names and emails in a single query. Participants
-// (no user account) have empty email and avatar; their display_name comes
-// from team_members.display_name via COALESCE in the query.
-type TeamMemberWithUser struct {
-	TeamMember
-	Email       string  `db:"email"        json:"email"`
-	DisplayName string  `db:"display_name" json:"displayName"`
-	AvatarURL   *string `db:"avatar_url"   json:"avatarUrl,omitempty"`
+/** Fetches all teams the authenticated user belongs to. */
+export function useMyTeams(includeArchived = false) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: [...keys.myTeams(), { includeArchived }],
+    queryFn: async () => (await authFetch<Team[] | null>(includeArchived ? '/teams?archived=true' : '/teams')) ?? [],
+  })
 }
 
-// User is an authenticated account. PasswordHash is omitted from JSON
-// to avoid leaking it through any handler that returns a User.
-// ArchivedAt is non-nil when the account is inactivated; login is rejected
-// for archived users. Color and Icon are user-level identity fields (migration
-// 010); they propagate to team_members rows for the user when changed.
-type User struct {
-	ID           string     `db:"id"             json:"id"`
-	Email        string     `db:"email"          json:"email"`
-	PasswordHash string     `db:"password_hash"  json:"-"`
-	DisplayName  string     `db:"display_name"   json:"displayName"`
-	AvatarURL    *string    `db:"avatar_url"     json:"avatarUrl,omitempty"`
-	Color        *string    `db:"color"          json:"color,omitempty"`
-	Icon         *string    `db:"icon"           json:"icon,omitempty"`
-	IsSuperadmin bool       `db:"is_superadmin"  json:"isSuperadmin"`
-	CreatedAt    time.Time  `db:"created_at"     json:"createdAt"`
-	UpdatedAt    time.Time  `db:"updated_at"     json:"updatedAt"`
-	ArchivedAt   *time.Time `db:"archived_at"    json:"archivedAt,omitempty"`
+/** Fetches a single team by ID. */
+export function useTeam(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: ['teams', teamId],
+    queryFn: () => authFetch<Team>(`/teams/${teamId}`),
+    enabled: Boolean(teamId),
+  })
 }
 
-// Team is a workspace that groups users and their scheduled work. Color and
-// Icon are identity fields added in migration 006; both are nullable until
-// explicitly set by an admin. Description, Notes, and ArchivedAt are added in
-// migration 008; ArchivedAt is non-nil when the team is soft-deleted.
-// InviteLinkToken is a stable, reusable token added in migration 009; when
-// non-nil it can be used by anyone to join the team during registration.
-type Team struct {
-	ID              string     `db:"id"                  json:"id"`
-	Name            string     `db:"name"                json:"name"`
-	Slug            string     `db:"slug"                json:"slug"`
-	Description     *string    `db:"description"         json:"description,omitempty"`
-	Notes           *string    `db:"notes"               json:"notes,omitempty"`
-	Color           *string    `db:"color"               json:"color,omitempty"`
-	Icon            *string    `db:"icon"                json:"icon,omitempty"`
-	InviteLinkToken *string    `db:"invite_link_token"   json:"inviteLinkToken,omitempty"`
-	CreatedAt       time.Time  `db:"created_at"          json:"createdAt"`
-	UpdatedAt       time.Time  `db:"updated_at"          json:"updatedAt"`
-	ArchivedAt      *time.Time `db:"archived_at"         json:"archivedAt,omitempty"`
+/** Fetches all non-archived timelines for a team. */
+export function useTeamTimelines(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: keys.teamTimelines(teamId),
+    queryFn: async () => (await authFetch<Timeline[] | null>(`/teams/${teamId}/timelines`)) ?? [],
+    enabled: Boolean(teamId),
+  })
 }
 
-// TeamMember is the join row that puts a person in a Team. UserID is nil
-// for login-less Participants; DisplayName is populated for them instead.
-// Role is the team-level role: "admin" or "member". Color and Icon are
-// identity fields (migration 006); Color stores a color ID (e.g. "teal").
-// ArchivedAt is non-nil when the member is inactivated (migration 009);
-// inactivated members lose access but their data and assignments are preserved.
-type TeamMember struct {
-	ID          string     `db:"id"           json:"id"`
-	TeamID      string     `db:"team_id"      json:"teamId"`
-	UserID      *string    `db:"user_id"      json:"userId,omitempty"`
-	DisplayName *string    `db:"display_name" json:"displayName,omitempty"`
-	Role        string     `db:"role"         json:"role"`
-	Color       *string    `db:"color"        json:"color,omitempty"`
-	Icon        *string    `db:"icon"         json:"icon,omitempty"`
-	JoinedAt    time.Time  `db:"joined_at"    json:"joinedAt"`
-	ArchivedAt  *time.Time `db:"archived_at"  json:"archivedAt,omitempty"`
+/** Fetches activities for a timeline, optionally bounded by date range. */
+export function useTimelineActivities(teamId: string, timelineId: string, from?: string, to?: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: keys.timelineActivities(timelineId, from, to),
+    queryFn: async () => {
+      const params = new URLSearchParams()
+      if (from) params.set('from', from)
+      if (to) params.set('to', to)
+      const qs = params.toString()
+      return (await authFetch<Activity[] | null>(`/teams/${teamId}/timelines/${timelineId}/activities${qs ? `?${qs}` : ''}`)) ?? []
+    },
+    enabled: Boolean(teamId) && Boolean(timelineId),
+  })
 }
 
-// MemberStats holds computed activity and timeline counts for a member.
-// All counts are date-relative and scoped to activities the member is assigned to.
-type MemberStats struct {
-	ActiveTimelines    int `json:"activeTimelines"`
-	ArchivedTimelines  int `json:"archivedTimelines"`
-	PastDue            int `json:"pastDue"`
-	Running            int `json:"running"`
-	Upcoming           int `json:"upcoming"`
-	Unscheduled        int `json:"unscheduled"`
-	ArchivedActivities int `json:"archivedActivities"`
+/** Fetches the member list for a team. */
+export function useTeamMembers(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: keys.teamMembers(teamId),
+    queryFn: async () => (await authFetch<TeamMemberWithUser[] | null>(`/teams/${teamId}/members`)) ?? [],
+    enabled: Boolean(teamId),
+  })
 }
 
-// MemberDetail combines a TeamMemberWithUser with computed stats and the
-// member's full list of team memberships. Returned by GET /teams/:id/members/:memberId.
-// UserArchivedAt reflects users.archived_at (account-level deactivation), distinct
-// from ArchivedAt which is team_members.archived_at (membership-level inactivation).
-type MemberDetail struct {
-	TeamMemberWithUser
-	Stats          MemberStats          `json:"stats"`
-	Teams          []TeamMemberWithUser `json:"teams"`
-	Deletable      bool                 `json:"deletable"`
-	UserArchivedAt *time.Time           `json:"userArchivedAt,omitempty"`
+/**
+ * Subscribes to the team's WebSocket feed and applies surgical cache updates
+ * for activity.created / activity.updated / activity.deleted deltas.
+ *
+ * Conflict strategy: for activity.updated, incoming deltas are only applied
+ * when their updatedAt timestamp is strictly newer than the cached version.
+ * This prevents self-echo (our own PATCH broadcast arriving back) and handles
+ * the last-writer-wins case where a concurrent remote edit arrives while our
+ * mutation is in-flight — the server-returned updatedAt on our onSuccess will
+ * always win if our PATCH was truly last.
+ */
+export function useTeamActivitySync(
+  teamId: string,
+  accessToken: string | null | undefined,
+) {
+  const client = useQueryClient()
+
+  const handleMessage = useCallback(
+    (msg: { type: string; payload?: unknown }) => {
+      if (!teamId || !msg.payload) return
+
+      if (msg.type === 'activity.created') {
+        const incoming = msg.payload as Activity
+        // Target all timeline-scoped activity cache entries by using the
+        // timelineId from the incoming activity payload.
+        if (!incoming.timelineId) return
+        client.setQueriesData<Activity[]>(
+          { queryKey: ['timelines', incoming.timelineId, 'activities'] },
+          (old) => {
+            if (!old) return old
+            // Guard against duplicate delivery.
+            if (old.some((a) => a.id === incoming.id)) return old
+            return [...old, incoming]
+          },
+        )
+      } else if (msg.type === 'activity.updated') {
+        const incoming = msg.payload as Activity
+        if (!incoming.timelineId) return
+        client.setQueriesData<Activity[]>(
+          { queryKey: ['timelines', incoming.timelineId, 'activities'] },
+          (old) => {
+            if (!old) return old
+            return old.map((a) => {
+              if (a.id !== incoming.id) return a
+              // Skip if the cache already holds the same or a newer version.
+              const cachedMs = new Date(a.updatedAt).getTime()
+              const incomingMs = new Date(incoming.updatedAt).getTime()
+              return incomingMs > cachedMs ? incoming : a
+            })
+          },
+        )
+      } else if (msg.type === 'activity.deleted') {
+        const { id } = msg.payload as { id: string }
+        // activity.deleted payload only has id — scope invalidation to this
+        // team's timelines so we don't flush unrelated team caches when
+        // multiple teams are active in the same session.
+        const teamTimelines = client.getQueryData<Timeline[]>(keys.teamTimelines(teamId)) ?? []
+        if (teamTimelines.length > 0) {
+          for (const tl of teamTimelines) {
+            client.invalidateQueries({ queryKey: ['timelines', tl.id] })
+            client.setQueriesData<Activity[]>(
+              { queryKey: ['timelines', tl.id, 'activities'] },
+              (old) => old?.filter((a) => a.id !== id),
+            )
+          }
+        } else {
+          // Fallback when the team's timelines aren't cached yet.
+          client.invalidateQueries({ queryKey: ['timelines'] })
+          client.setQueriesData<Activity[]>(
+            { queryKey: ['timelines'] },
+            (old) => old?.filter((a) => a.id !== id),
+          )
+        }
+      }
+    },
+    [client, teamId],
+  )
+
+  useWebSocket({
+    token: accessToken,
+    teamIds: teamId ? [teamId] : [],
+    onMessage: handleMessage,
+  })
 }
 
-// Timeline is a named date range over a team's events. It is not a data
-// container — it is a view over a team's events for a given date window.
-// Access is governed by timeline_access + team role; share_token allows
-// unauthenticated read access via a stable public URL. Color and Icon are
-// identity fields (migration 006). Description and Notes are free-text fields
-// added in migration 013.
-type Timeline struct {
-	ID          string     `db:"id"          json:"id"`
-	TeamID      string     `db:"team_id"     json:"teamId"`
-	Name        string     `db:"name"        json:"name"`
-	Description *string    `db:"description" json:"description,omitempty"`
-	Notes       *string    `db:"notes"       json:"notes,omitempty"`
-	StartDate   string     `db:"start_date"  json:"startDate"`
-	EndDate     string     `db:"end_date"    json:"endDate"`
-	Color       *string    `db:"color"       json:"color,omitempty"`
-	Icon        *string    `db:"icon"        json:"icon,omitempty"`
-	ShareToken  string     `db:"share_token" json:"shareToken"`
-	IcalToken   string     `db:"ical_token"  json:"icalToken"`
-	CreatedBy   string     `db:"created_by"  json:"createdBy"`
-	CreatedAt   time.Time  `db:"created_at"  json:"createdAt"`
-	UpdatedAt   time.Time  `db:"updated_at"  json:"updatedAt"`
-	ArchivedAt  *time.Time `db:"archived_at" json:"archivedAt,omitempty"`
+interface CreateActivityInput {
+  title: string
+  startAt: string
+  endAt: string
+  description?: string | null
+  notes?: string | null
+  color?: string | null
+  icon?: string | null
+  assignedMemberIds?: string[]
+  tagIds?: string[]
+  statusId?: string | null
+  parentActivityId?: string | null
+  percentComplete?: number | null
+  location?: string | null
+  url?: string | null
+  /** Client-only: if set, replace this placeholder ID in the cache instead of appending. */
+  _tempId?: string
 }
 
-// SavedFilter is a user-owned, team-scoped named filter spec. Definition is
-// an opaque JSON string interpreted by the client; the server treats it as
-// arbitrary text and only validates that it parses as JSON.
-type SavedFilter struct {
-	ID           string    `db:"id"             json:"id"`
-	TeamID       string    `db:"team_id"        json:"teamId"`
-	UserID       string    `db:"user_id"        json:"userId"`
-	Name         string    `db:"name"           json:"name"`
-	Definition   string    `db:"definition"     json:"definition"`
-	IsTeamFilter bool      `db:"is_team_filter" json:"isTeamFilter"`
-	CreatedAt    time.Time `db:"created_at"     json:"createdAt"`
-	UpdatedAt    time.Time `db:"updated_at"     json:"updatedAt"`
+interface UpdateActivityInput {
+  activityId: string
+  patch: {
+    title?: string
+    description?: string | null
+    notes?: string | null
+    startAt?: string
+    endAt?: string
+    allDay?: boolean
+    color?: string | null
+    icon?: string | null
+    location?: string | null
+    url?: string | null
+    statusId?: string | null
+    parentActivityId?: string | null
+    percentComplete?: number | null
+    assignedMemberIds?: string[]
+    tagIds?: string[]
+  }
 }
 
-// UserPreference stores a single key/value setting for a user, optionally
-// scoped to a timeline. TimelineID is “” for global preferences so the
-// UNIQUE(user_id, timeline_id, key) DB constraint works without NULL handling.
-// Serialised JSON omits TimelineID when empty so callers see null for global prefs.
-type UserPreference struct {
-	ID         string    `db:"id"          json:"id"`
-	UserID     string    `db:"user_id"     json:"userId"`
-	TimelineID string    `db:"timeline_id" json:"timelineId,omitempty"`
-	Key        string    `db:"key"         json:"key"`
-	Value      string    `db:"value"       json:"value"`
-	UpdatedAt  time.Time `db:"updated_at"  json:"updatedAt"`
+/** Creates an activity in a timeline and inserts it directly into the cache. */
+export function useCreateActivity(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({ _tempId: _, ...input }: CreateActivityInput) =>
+      authFetch<Activity>(`/teams/${teamId}/timelines/${timelineId}/activities`, {
+        method: 'POST',
+        body: JSON.stringify(input),
+      }),
+    onSuccess: (created, variables) => {
+      const tempId = variables._tempId
+      client.setQueriesData<Activity[]>(
+        { queryKey: ['timelines', timelineId, 'activities'] },
+        (old) => {
+          if (!old) return [created]
+          const hasReal = old.some((a) => a.id === created.id)
+          const hasTemp = tempId ? old.some((a) => a.id === tempId) : false
+          // The WS activity.created self-echo may win the race and append the
+          // real record before this onSuccess runs. In that case we must still
+          // drop the optimistic placeholder, otherwise it lingers as a duplicate
+          // "New Activity" row (and inline edits keep targeting the dead temp id).
+          if (hasReal) {
+            return hasTemp ? old.filter((a) => a.id !== tempId) : old
+          }
+          // Replace optimistic placeholder in-place to avoid a position flash.
+          if (hasTemp) {
+            return old.map((a) => (a.id === tempId ? created : a))
+          }
+          return [...old, created]
+        },
+      )
+    },
+  })
 }
 
-// APIToken is a long-lived Bearer credential a user issues for programmatic
-// access. token_hash stores SHA-256(rawToken); the raw value is shown to the
-// caller only once on creation. RevokedAt is non-nil when the token has been
-// revoked; revoked tokens are not deleted so listing remains stable.
-type APIToken struct {
-	ID         string     `db:"id"           json:"id"`
-	UserID     string     `db:"user_id"      json:"userId"`
-	Name       string     `db:"name"         json:"name"`
-	TokenHash  string     `db:"token_hash"   json:"-"`
-	Scope      string     `db:"scope"        json:"scope"`
-	LastUsedAt *time.Time `db:"last_used_at" json:"lastUsedAt,omitempty"`
-	CreatedAt  time.Time  `db:"created_at"   json:"createdAt"`
-	RevokedAt  *time.Time `db:"revoked_at"   json:"revokedAt,omitempty"`
+/** PATCHes an activity and optimistically updates the cache. */
+export function useUpdateActivity(timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({ activityId, patch }: UpdateActivityInput) =>
+      authFetch<Activity>(`/activities/${activityId}`, {
+        method: 'PATCH',
+        body: JSON.stringify(patch),
+      }),
+    onMutate: async ({ activityId, patch }) => {
+      await client.cancelQueries({ queryKey: ['timelines', timelineId, 'activities'] })
+      const snapshot = client.getQueriesData<Activity[]>({ queryKey: ['timelines', timelineId, 'activities'] })
+      client.setQueriesData<Activity[]>(
+        { queryKey: ['timelines', timelineId, 'activities'] },
+        (old) => old?.map((a) => (a.id === activityId ? { ...a, ...patch } : a)),
+      )
+      return { snapshot }
+    },
+    onError: (_err, _vars, context) => {
+      if (context?.snapshot) {
+        for (const [key, data] of context.snapshot) {
+          client.setQueryData(key, data)
+        }
+      }
+    },
+    onSuccess: (updated) => {
+      client.setQueriesData<Activity[]>(
+        { queryKey: ['timelines', timelineId, 'activities'] },
+        (old) => old?.map((a) => (a.id === updated.id ? updated : a)),
+      )
+    },
+  })
 }
 
-// InstanceSetting stores a single instance-level configuration value.
-// SMTP config and defaults live here. The value column is plain text;
-// the mailer package handles decryption of the SMTP password field.
-type InstanceSetting struct {
-	Key       string    `db:"key"        json:"key"`
-	Value     string    `db:"value"      json:"value"`
-	UpdatedAt time.Time `db:"updated_at" json:"updatedAt"`
+interface CreateTeamInput {
+  name: string
+  description?: string | null
+  notes?: string | null
+  color?: string | null
+  icon?: string | null
 }
 
-// PasswordResetToken is a single-use token for the forgot-password flow.
-// TokenHash stores SHA-256 of the raw token; the raw value is sent by email
-// and never stored. UsedAt is set when the token is consumed.
-type PasswordResetToken struct {
-	ID        string     `db:"id"         json:"id"`
-	UserID    string     `db:"user_id"    json:"userId"`
-	TokenHash string     `db:"token_hash" json:"-"`
-	ExpiresAt time.Time  `db:"expires_at" json:"expiresAt"`
-	UsedAt    *time.Time `db:"used_at"    json:"usedAt,omitempty"`
-	CreatedAt time.Time  `db:"created_at" json:"createdAt"`
+interface UpdateTeamInput {
+  teamId: string
+  patch: {
+    name?: string
+    description?: string | null
+    notes?: string | null
+    color?: string | null
+    icon?: string | null
+  }
 }
 
-// AdminUserRow is a flat view of a user for the admin users list. It includes
-// the user's fields plus the count of active team memberships.
-type AdminUserRow struct {
-	User
-	TeamCount int `db:"team_count" json:"teamCount"`
+/** Creates a team and inserts it into the active-teams cache. */
+export function useCreateTeam() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (input: CreateTeamInput) =>
+      authFetch<Team>('/teams', {
+        method: 'POST',
+        body: JSON.stringify(input),
+      }),
+    onSuccess: () => {
+      // Invalidate both active and archived team lists.
+      client.invalidateQueries({ queryKey: ['teams'] })
+    },
+  })
 }
 
-// Share is a public read-only link to a specific view of a timeline. One
-// timeline may have many shares, each freezing a different view configuration.
-// Token is an unguessable URL-safe string; PasswordHash is set only when the
-// share requires a password (Phase 13.3); ExpiresAt and RevokedAt support
-// lifecycle management (Phase 13.4).
-type Share struct {
-	ID           string     `db:"id"             json:"id"`
-	TimelineID   string     `db:"timeline_id"    json:"timelineId"`
-	Token        string     `db:"token"          json:"token"`
-	Name         *string    `db:"name"           json:"name,omitempty"`
-	ViewType     string     `db:"view_type"      json:"viewType"`
-	ViewConfig   string     `db:"view_config"    json:"viewConfig"`
-	PasswordHash *string    `db:"password_hash"  json:"-"`
-	ExpiresAt    *time.Time `db:"expires_at"     json:"expiresAt,omitempty"`
-	CreatedBy    string     `db:"created_by"     json:"createdBy"`
-	CreatedAt    time.Time  `db:"created_at"     json:"createdAt"`
-	LastViewedAt *time.Time `db:"last_viewed_at" json:"lastViewedAt,omitempty"`
-	ViewCount    int        `db:"view_count"     json:"viewCount"`
-	RevokedAt    *time.Time `db:"revoked_at"     json:"revokedAt,omitempty"`
+/** PATCHes a team's mutable fields and refreshes the cache. */
+export function useUpdateTeam() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({ teamId, patch }: UpdateTeamInput) =>
+      authFetch<Team>(`/teams/${teamId}`, {
+        method: 'PATCH',
+        body: JSON.stringify(patch),
+      }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ['teams'] })
+    },
+  })
 }
 
-// PublicMember is the safe projection of a team member for public share
-// responses. It exposes only display fields — never email, role, or user_id.
-type PublicMember struct {
-	ID          string  `json:"id"`
-	DisplayName string  `json:"displayName"`
-	Color       *string `json:"color,omitempty"`
-	Icon        *string `json:"icon,omitempty"`
+/** Archives a team (soft delete). */
+export function useArchiveTeam() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (teamId: string) =>
+      authFetch<Team>(`/teams/${teamId}/archive`, { method: 'POST' }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ['teams'] })
+    },
+  })
 }
 
-// PublicActivity is the safe projection of an activity for public share
-// responses. It includes standard display fields but omits notes (unless
-// explicitly included for List shares with Notes enabled), caldav/google
-// identifiers, and any internal fields.
-type PublicActivity struct {
-	ID                string    `json:"id"`
-	Title             string    `json:"title"`
-	Description       *string   `json:"description,omitempty"`
-	Notes             *string   `json:"notes,omitempty"`
-	Icon              *string   `json:"icon,omitempty"`
-	Color             *string   `json:"color,omitempty"`
-	StartAt           time.Time `json:"startAt"`
-	EndAt             time.Time `json:"endAt"`
-	AllDay            bool      `json:"allDay"`
-	StatusID          *string   `json:"statusId,omitempty"`
-	ParentActivityID  *string   `json:"parentActivityId,omitempty"`
-	PercentComplete   *int      `json:"percentComplete,omitempty"`
-	AssignedMemberIDs []string  `json:"assignedMemberIds"`
-	TagIDs            []string  `json:"tagIds"`
+/** Restores an archived team. */
+export function useUnarchiveTeam() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (teamId: string) =>
+      authFetch<Team>(`/teams/${teamId}/unarchive`, { method: 'POST' }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ['teams'] })
+    },
+  })
 }
 
-// PublicTimeline is the safe timeline projection for share responses.
-type PublicTimeline struct {
-	ID        string  `json:"id"`
-	Name      string  `json:"name"`
-	Color     *string `json:"color,omitempty"`
-	Icon      *string `json:"icon,omitempty"`
-	StartDate string  `json:"startDate"`
-	EndDate   string  `json:"endDate"`
+/** Archives an activity (soft-delete). Removes it from the active-list cache. */
+export function useArchiveActivity(timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (activityId: string) =>
+      authFetch<Activity>(`/activities/${activityId}/archive`, { method: 'POST' }),
+    onSuccess: (_data, activityId) => {
+      client.setQueriesData<Activity[]>(
+        { queryKey: ['timelines', timelineId, 'activities'] },
+        (old) => old?.filter((a) => a.id !== activityId),
+      )
+    },
+  })
 }
 
-// ShareProjection is the full aggregate returned by GET /shares/{token}.
-// It contains all data the public viewer needs to render the configured view.
-type ShareProjection struct {
-	Share      Share            `json:"share"`
-	Timeline   PublicTimeline   `json:"timeline"`
-	TeamName   string           `json:"teamName"`
-	Members    []PublicMember   `json:"members"`
-	Statuses   []Status         `json:"statuses"`
-	Tags       []Tag            `json:"tags"`
-	Activities []PublicActivity `json:"activities"`
+/** Deletes an activity and removes it from the cache. */
+export function useDeleteActivity(timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (activityId: string) =>
+      authFetch<void>(`/activities/${activityId}`, { method: 'DELETE' }),
+    onSuccess: (_data, activityId) => {
+      client.setQueriesData<Activity[]>(
+        { queryKey: ['timelines', timelineId, 'activities'] },
+        (old) => old?.filter((a) => a.id !== activityId),
+      )
+    },
+  })
 }
 
-// RevokeUserResult summarizes the outcome of POST /users/:id/revoke.
-// The three counters let the caller show a meaningful summary in the UI.
-type RevokeUserResult struct {
-	AccountDeactivated     bool `json:"accountDeactivated"`
-	MembershipsInactivated int  `json:"membershipsInactivated"`
-	MembershipsRemoved     int  `json:"membershipsRemoved"`
+// ── Timeline CRUD (Phase 10.3) ────────────────────────────────────────────────
+
+/** Fetches all timelines for a team, optionally including archived ones. */
+export function useTeamTimelinesWithArchived(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: [...keys.teamTimelines(teamId), { includeArchived: true }],
+    queryFn: async () =>
+      (await authFetch<Timeline[] | null>(`/teams/${teamId}/timelines?archived=true`)) ?? [],
+    enabled: Boolean(teamId),
+  })
 }
 
-// StatusTemplate is a reusable named preset of statuses owned by a team.
-// When a timeline is created the team's chosen template's items are copied
-// into live Status rows for that timeline.
-type StatusTemplate struct {
-	ID          string    `db:"id"          json:"id"`
-	TeamID      string    `db:"team_id"     json:"teamId"`
-	Name        string    `db:"name"        json:"name"`
-	Description *string   `db:"description" json:"description,omitempty"`
-	Position    int       `db:"position"    json:"position"`
-	CreatedBy   string    `db:"created_by"  json:"createdBy"`
-	CreatedAt   time.Time `db:"created_at"  json:"createdAt"`
-	UpdatedAt   time.Time `db:"updated_at"  json:"updatedAt"`
-	// Items is populated by the repository when listing templates.
-	Items []StatusTemplateItem `db:"-" json:"items"`
+/** Creates a new timeline for a team. */
+export function useCreateTimeline(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (input: { name: string; startDate: string; endDate: string; color?: string | null; icon?: string | null; description?: string | null; notes?: string | null; templateId?: string | null }) =>
+      authFetch<Timeline>(`/teams/${teamId}/timelines`, {
+        method: 'POST',
+        body: JSON.stringify(input),
+      }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
+    },
+  })
 }
 
-// StatusTemplateItem is one status value within a StatusTemplate.
-type StatusTemplateItem struct {
-	ID         string  `db:"id"          json:"id"`
-	TemplateID string  `db:"template_id" json:"templateId"`
-	Name       string  `db:"name"        json:"name"`
-	Color      string  `db:"color"       json:"color"`
-	Icon       *string `db:"icon"        json:"icon,omitempty"`
-	IsClosed   bool    `db:"is_closed"   json:"isClosed"`
-	Position   int     `db:"position"    json:"position"`
+/** PATCHes a timeline's mutable fields. */
+export function useUpdateTimeline(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({ timelineId, patch }: { timelineId: string; patch: PatchTimelineInput }) =>
+      authFetch<Timeline>(`/timelines/${timelineId}`, {
+        method: 'PATCH',
+        body: JSON.stringify(patch),
+      }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
+    },
+  })
 }
 
-// Status is a live status value on a specific timeline. Rows are copied from a
-// StatusTemplate's items when the timeline is created and then evolve independently.
-type Status struct {
-	ID         string    `db:"id"          json:"id"`
-	TimelineID string    `db:"timeline_id" json:"timelineId"`
-	Name       string    `db:"name"        json:"name"`
-	Color      string    `db:"color"       json:"color"`
-	Icon       *string   `db:"icon"        json:"icon,omitempty"`
-	IsClosed   bool      `db:"is_closed"   json:"isClosed"`
-	Position   int       `db:"position"    json:"position"`
-	CreatedAt  time.Time `db:"created_at"  json:"createdAt"`
-	UpdatedAt  time.Time `db:"updated_at"  json:"updatedAt"`
+/** Hard-deletes a timeline. */
+export function useDeleteTimeline(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (timelineId: string) =>
+      authFetch<void>(`/timelines/${timelineId}`, { method: 'DELETE' }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
+    },
+  })
 }
 
-// TimelineAccessEntry is a single timeline access grant joined with the team
-// member's display info. Returned by GET /teams/:id/timelines/:timelineId/access.
-type TimelineAccessEntry struct {
-	TimelineID   string  `db:"timeline_id"    json:"timelineId"`
-	TeamMemberID string  `db:"team_member_id" json:"teamMemberId"`
-	Role         string  `db:"role"           json:"role"`
-	DisplayName  string  `db:"display_name"   json:"displayName"`
-	Email        string  `db:"email"          json:"email"`
-	Color        *string `db:"color"          json:"color,omitempty"`
-	Icon         *string `db:"icon"           json:"icon,omitempty"`
-	UserID       *string `db:"user_id"        json:"userId,omitempty"`
+/** Archives a timeline. */
+export function useArchiveTimeline(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (timelineId: string) =>
+      authFetch<Timeline>(`/timelines/${timelineId}/archive`, { method: 'POST' }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
+    },
+  })
 }
 
-// Tag is a team-scoped label that can be applied to activities. Tags are
-// normalized: a team_id+name pair is unique, enabling rename-all and
-// name-based filter matching across timelines.
-type Tag struct {
-	ID        string    `db:"id"         json:"id"`
-	TeamID    string    `db:"team_id"    json:"teamId"`
-	Name      string    `db:"name"       json:"name"`
-	Color     *string   `db:"color"      json:"color,omitempty"`
-	CreatedBy string    `db:"created_by" json:"createdBy"`
-	CreatedAt time.Time `db:"created_at" json:"createdAt"`
+/** Restores an archived timeline. */
+export function useUnarchiveTimeline(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (timelineId: string) =>
+      authFetch<Timeline>(`/timelines/${timelineId}/unarchive`, { method: 'POST' }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
+    },
+  })
 }
 
-// Invite is a single-use token that grants an email address the right to
-// join a Team. AcceptedAt is non-nil once consumed; expired or accepted
-// invites are rejected by the registration handler.
-type Invite struct {
-	ID         string     `db:"id"          json:"id"`
-	TeamID     string     `db:"team_id"     json:"teamId"`
-	Email      string     `db:"email"       json:"email"`
-	Token      string     `db:"token"       json:"token"`
-	Role       string     `db:"role"        json:"role"`
-	InvitedBy  string     `db:"invited_by"  json:"invitedBy"`
-	ExpiresAt  time.Time  `db:"expires_at"  json:"expiresAt"`
-	AcceptedAt *time.Time `db:"accepted_at" json:"acceptedAt,omitempty"`
-	CreatedAt  time.Time  `db:"created_at"  json:"createdAt"`
+/** Fetches the access grant list for a timeline. */
+export function useTimelineAccess(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: ['teams', teamId, 'timelines', timelineId, 'access'],
+    queryFn: async () =>
+      (await authFetch<TimelineAccessEntry[]>(
+        `/teams/${teamId}/timelines/${timelineId}/access`,
+      )) ?? [],
+    enabled: Boolean(teamId) && Boolean(timelineId),
+  })
+}
+
+/** Grants or updates a member's access to a timeline. */
+export function useGrantTimelineAccess(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({ memberId, role }: { memberId: string; role: 'admin' | 'member' }) =>
+      authFetch<TimelineAccessEntry[]>(
+        `/teams/${teamId}/timelines/${timelineId}/access/${memberId}`,
+        { method: 'PUT', body: JSON.stringify({ role }) },
+      ),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ['teams', teamId, 'timelines', timelineId, 'access'] })
+    },
+  })
+}
+
+/** Revokes a member's access to a timeline. */
+export function useRevokeTimelineAccess(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (memberId: string) =>
+      authFetch<void>(`/teams/${teamId}/timelines/${timelineId}/access/${memberId}`, {
+        method: 'DELETE',
+      }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ['teams', teamId, 'timelines', timelineId, 'access'] })
+    },
+  })
+}
+````
+
+## File: packages/web/src/components/gantt/ActivityDetailPanel.tsx
+````typescript
+/**
+ * ActivityDetailPanel — right-side slide-in panel for a selected Gantt activity.
+ *
+ * Shares its field stack with ActivityCreatePanel via ActivityFieldsBody
+ * (see shared/activityPanelFields.tsx) — header bar, footer, and save behavior live
+ * here, the fields themselves are shared. Field order is fixed by the shared
+ * body: Identity+Title → When → Description → Assigned to → Classify
+ * (Status, Tags) → Advanced (Parent, Progress, Location, URL) → Notes.
+ *
+ * All functional fields save on change/blur via PATCH /activities/:id.
+ * liveDragStart / liveDragEnd display live dates during bar drag without
+ * triggering saves.
+ */
+
+import { useState, useEffect } from 'react'
+import { X, Trash2, Archive, Loader2 } from 'lucide-react'
+import type { Identity } from '@/components/identity/identity-constants'
+import { useUpdateActivity, useDeleteActivity, useArchiveActivity, useTimelineActivities } from '@/hooks/useTeamActivities'
+import { useTimelineStatuses } from '@/hooks/useStatusTemplates'
+import { useTags } from '@/hooks/useTags'
+import type { components } from '@draba/shared'
+import type { Member } from '@/types'
+import { ActivityFieldsBody, PANEL_WIDTH, toDateInput, toISODate } from '@/components/shared/activityPanelFields'
+
+type ApiActivity = components['schemas']['Activity']
+
+interface Props {
+  event: ApiActivity | null
+  open: boolean
+  members: Member[]
+  teamId: string
+  timelineId: string
+  onClose: () => void
+  /** Display-only start date override during bar drag (YYYY-MM-DD). Does not trigger a save. */
+  liveDragStart?: string
+  /** Display-only end date override during bar drag (YYYY-MM-DD). Does not trigger a save. */
+  liveDragEnd?: string
+}
+
+export default function ActivityDetailPanel({
+  event, open, members, teamId, timelineId, onClose, liveDragStart, liveDragEnd,
+}: Props) {
+  const updateMutation = useUpdateActivity(timelineId)
+  const deleteMutation = useDeleteActivity(timelineId)
+  const archiveMutation = useArchiveActivity(timelineId)
+  const { data: statuses = [] } = useTimelineStatuses(teamId, timelineId)
+  const { data: teamTags = [] } = useTags(teamId)
+  const { data: allActivities = [] } = useTimelineActivities(teamId, timelineId)
+
+  const [title, setTitle] = useState(event?.title ?? '')
+  const [description, setDescription] = useState(event?.description ?? '')
+  const [notes, setNotes] = useState(event?.notes ?? '')
+  const [startDate, setStartDate] = useState(event ? toDateInput(event.startAt) : '')
+  const [endDate, setEndDate] = useState(event ? toDateInput(event.endAt) : '')
+  const [identity, setIdentity] = useState<Identity>({
+    color: event?.color ?? '#288C9B',
+    icon: event?.icon ?? '__none__',
+  })
+  const [assignedIds, setAssignedIds] = useState<string[]>(event?.assignedMemberIds ?? [])
+  const [tagIds, setTagIds] = useState<string[]>((event?.tagIds as string[] | undefined) ?? [])
+  const [location, setLocation] = useState(event?.location ?? '')
+  const [url, setUrl] = useState(event?.url ?? '')
+  const [progressValue, setProgressValue] = useState(event?.percentComplete ?? 0)
+  // Parent and status are mirrored locally so the picker reflects a change
+  // immediately — the `event` prop is a snapshot taken at selection time and
+  // doesn't refresh until the activity is reselected.
+  const [parentId, setParentId] = useState<string | null>(event?.parentActivityId ?? null)
+  const [statusId, setStatusId] = useState<string | null>(event?.statusId ?? null)
+  const [confirmDelete, setConfirmDelete] = useState(false)
+
+  // Re-sync when the selected activity changes.
+  useEffect(() => {
+    if (!event) return
+    setTitle(event.title)
+    setDescription(event.description ?? '')
+    setNotes(event.notes ?? '')
+    setStartDate(toDateInput(event.startAt))
+    setEndDate(toDateInput(event.endAt))
+    setIdentity({ color: event.color ?? '#288C9B', icon: event.icon ?? '__none__' })
+    setAssignedIds(event.assignedMemberIds ?? [])
+    setTagIds((event.tagIds as string[] | undefined) ?? [])
+    setLocation(event.location ?? '')
+    setUrl(event.url ?? '')
+    setProgressValue(event.percentComplete ?? 0)
+    setParentId(event.parentActivityId ?? null)
+    setStatusId(event.statusId ?? null)
+    setConfirmDelete(false)
+  }, [event?.id]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Sync local date state when the event's dates change (e.g. after a Gantt bar drag).
+  const eventStartAt = event?.startAt
+  const eventEndAt = event?.endAt
+  useEffect(() => {
+    if (eventStartAt) setStartDate(toDateInput(eventStartAt))
+    if (eventEndAt) setEndDate(toDateInput(eventEndAt))
+  }, [eventStartAt, eventEndAt])
+
+  // Sync status when changed externally on the same activity (e.g. after a Kanban
+  // drag-to-column). The main sync effect only fires on id change, so we need a
+  // separate effect keyed on statusId.
+  const eventStatusId = event?.statusId
+  useEffect(() => {
+    setStatusId(eventStatusId ?? null)
+  }, [eventStatusId])
+
+  // Sync assigned members when changed externally (e.g. after a Kanban drag to a
+  // member column). Arrays compare by reference, so use a stable string key.
+  const eventAssignedKey = (event?.assignedMemberIds ?? []).join(',')
+  useEffect(() => {
+    setAssignedIds(event?.assignedMemberIds ?? [])
+  }, [eventAssignedKey]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const saving = updateMutation.isPending
+  const deleting = deleteMutation.isPending
+  const archiving = archiveMutation.isPending
+
+  // Display dates: live drag overrides take precedence while dragging.
+  const displayStart = liveDragStart ?? startDate
+  const displayEnd = liveDragEnd ?? endDate
+
+  function save(patch: Parameters<typeof updateMutation.mutate>[0]['patch']) {
+    if (!event) return
+    updateMutation.mutate({ activityId: event.id, patch })
+  }
+
+  function handleTitleBlur() {
+    if (title.trim() && title !== event?.title) save({ title: title.trim() })
+  }
+
+  function handleDescriptionBlur() {
+    if (description !== (event?.description ?? '')) save({ description: description || null })
+  }
+
+  function handleNotesBlur() {
+    if (notes !== (event?.notes ?? '')) save({ notes: notes || null } as Parameters<typeof save>[0])
+  }
+
+  function handleLocationBlur() {
+    if (location !== (event?.location ?? '')) save({ location: location || null })
+  }
+
+  function handleUrlBlur() {
+    if (url !== (event?.url ?? '')) save({ url: url || null })
+  }
+
+  function handleStartDateChange(val: string) {
+    setStartDate(val)
+    if (val && val <= endDate) save({ startAt: toISODate(val) })
+  }
+
+  function handleEndDateChange(val: string) {
+    setEndDate(val)
+    if (val && val >= startDate) save({ endAt: toISODate(val) })
+  }
+
+  function handleIdentityChange(next: Identity) {
+    setIdentity(next)
+    save({ color: next.color, icon: next.icon })
+  }
+
+  function toggleAssignee(memberId: string) {
+    const next = assignedIds.includes(memberId)
+      ? assignedIds.filter(id => id !== memberId)
+      : [...assignedIds, memberId]
+    setAssignedIds(next)
+    save({ assignedMemberIds: next })
+  }
+
+  function handleTagsChange(ids: string[]) {
+    setTagIds(ids)
+    save({ tagIds: ids } as Parameters<typeof save>[0])
+  }
+
+  // Saves only on a real change. The shared ProgressRow already clamps to 0–100.
+  function handleProgressCommit(clamped: number) {
+    setProgressValue(clamped)
+    if (clamped !== (event?.percentComplete ?? 0)) {
+      save({ percentComplete: clamped } as Parameters<typeof save>[0])
+    }
+  }
+
+  function handleDelete() {
+    if (!event) return
+    deleteMutation.mutate(event.id, { onSuccess: onClose })
+  }
+
+  function handleArchive() {
+    if (!event) return
+    archiveMutation.mutate(event.id, { onSuccess: onClose })
+  }
+
+  return (
+    <div
+      style={{
+        width: open ? PANEL_WIDTH : 0,
+        flexShrink: 0,
+        borderLeft: open ? '1px solid var(--border)' : 'none',
+        background: 'var(--card)',
+        display: 'flex',
+        flexDirection: 'column',
+        overflow: 'hidden',
+        transition: 'width 0.2s ease',
+      }}
+    >
+      <div style={{ width: PANEL_WIDTH, display: 'flex', flexDirection: 'column', height: '100%' }}>
+        {!event ? null : (<>
+
+        {/* ── Header bar ── */}
+        <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          padding: '0 12px', height: 'var(--topbar-h, 40px)',
+          borderBottom: '1px solid var(--border)', flexShrink: 0,
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+            <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)' }}>Activity detail</span>
+            {saving && <Loader2 size={11} style={{ opacity: 0.5 }} className="animate-spin" />}
+          </div>
+          <button
+            onClick={onClose}
+            style={{
+              width: 24, height: 24, border: 'none', background: 'none', borderRadius: 4,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              cursor: 'pointer', color: 'var(--muted-foreground)',
+            }}
+            onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+            onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+          >
+            <X size={14} strokeWidth={2} />
+          </button>
+        </div>
+
+        {/* ── Scrollable body (shared with create panel) ── */}
+        <ActivityFieldsBody
+          identity={identity}
+          onIdentityChange={handleIdentityChange}
+          title={title}
+          onTitleChange={setTitle}
+          onTitleBlur={handleTitleBlur}
+          titleFallbackName={event.title || ''}
+          startDate={displayStart}
+          endDate={displayEnd}
+          onStartDateChange={handleStartDateChange}
+          onEndDateChange={handleEndDateChange}
+          description={description}
+          onDescriptionChange={setDescription}
+          onDescriptionBlur={handleDescriptionBlur}
+          members={members}
+          assignedIds={assignedIds}
+          onToggleAssignee={toggleAssignee}
+          statuses={statuses}
+          statusId={statusId}
+          onStatusChange={id => { setStatusId(id); save({ statusId: id } as Parameters<typeof save>[0]) }}
+          teamId={teamId}
+          teamTags={teamTags}
+          tagIds={tagIds}
+          onTagsChange={handleTagsChange}
+          parentActivities={allActivities.filter(a => a.id !== event.id)}
+          parentId={parentId}
+          onParentChange={id => { setParentId(id); save({ parentActivityId: id } as Parameters<typeof save>[0]) }}
+          progress={progressValue}
+          onProgressCommit={handleProgressCommit}
+          location={location}
+          onLocationChange={setLocation}
+          onLocationBlur={handleLocationBlur}
+          url={url}
+          onUrlChange={setUrl}
+          onUrlBlur={handleUrlBlur}
+          notes={notes}
+          onNotesChange={setNotes}
+          onNotesBlur={handleNotesBlur}
+        />
+
+        {/* ── Footer — Archive + Delete buttons ── */}
+        <div style={{ padding: '10px 14px', borderTop: '1px solid var(--border)', flexShrink: 0 }}>
+          {confirmDelete ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <p style={{ fontSize: 12, color: 'var(--muted-foreground)', margin: 0, lineHeight: 1.4 }}>
+                Delete <strong style={{ color: 'var(--foreground)' }}>{event?.title}</strong>? This cannot be undone.
+              </p>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <button
+                  onClick={() => setConfirmDelete(false)}
+                  disabled={deleting}
+                  style={{
+                    flex: 1, fontSize: 12, fontWeight: 600, padding: 7,
+                    borderRadius: 'var(--radius-md)', border: '1px solid var(--border)',
+                    background: 'var(--card)', color: 'var(--foreground)',
+                    cursor: 'pointer', fontFamily: 'var(--font-sans)',
+                  }}
+                >Cancel</button>
+                <button
+                  onClick={handleDelete}
+                  disabled={deleting}
+                  style={{
+                    flex: 1, fontSize: 12, fontWeight: 600, padding: 7,
+                    borderRadius: 'var(--radius-md)', border: 'none',
+                    background: 'var(--destructive)', color: 'white',
+                    cursor: deleting ? 'not-allowed' : 'pointer',
+                    fontFamily: 'var(--font-sans)',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
+                  }}
+                >
+                  {deleting ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />}
+                  Delete
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div style={{ display: 'flex', gap: 6 }}>
+              <button
+                onClick={handleArchive}
+                disabled={archiving}
+                style={{
+                  flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
+                  fontSize: 12, fontWeight: 600, padding: 7,
+                  borderRadius: 'var(--radius-md)', border: '1px solid var(--border)',
+                  background: 'var(--card)', color: 'var(--muted-foreground)',
+                  cursor: archiving ? 'not-allowed' : 'pointer', fontFamily: 'var(--font-sans)',
+                }}
+              >
+                {archiving ? <Loader2 size={12} className="animate-spin" /> : <Archive size={12} strokeWidth={2} />}
+                Archive
+              </button>
+              <button
+                onClick={() => setConfirmDelete(true)}
+                style={{
+                  flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
+                  fontSize: 12, fontWeight: 600, padding: 7,
+                  borderRadius: 'var(--radius-md)', border: 'none',
+                  background: 'hsl(0 72% 95%)', color: 'var(--destructive)',
+                  cursor: 'pointer', fontFamily: 'var(--font-sans)',
+                }}
+              >
+                <Trash2 size={12} strokeWidth={2} />
+                Delete
+              </button>
+            </div>
+          )}
+        </div>
+
+        </>)}
+      </div>
+    </div>
+  )
+}
+````
+
+## File: packages/web/src/components/gantt/GanttGrid.tsx
+````typescript
+/**
+ * GanttGrid — presentational Gantt chart.
+ *
+ * Renders a sticky header row of column labels, then one row per GanttRow
+ * entry. Rows are either group-header dividers or event bars. All data
+ * preparation (grouping, sorting, date math) lives in the parent GanttView.
+ *
+ * Drag on an empty lane cell to select a date range; onLaneDrag fires on
+ * mouseup with the resolved start/end dates and the lane's memberId.
+ *
+ * Drag on an event bar's left/right 8px edge to resize it, or on its body to
+ * move it. onBarDrag fires on mouseup with the resolved new dates.
+ *
+ * When findState is provided with a non-empty query, non-matching event rows
+ * are dimmed to 0.3 opacity; matching rows get an amber outline on their bar;
+ * the active (parked) match gets a stronger amber outline with a pulse
+ * animation. Stepping to a new active match auto-scrolls both axes to center
+ * the bar in the viewport.
+ */
+
+import { useRef, useState, useCallback, useEffect, useMemo } from 'react';
+import { ChevronDown, ChevronRight } from 'lucide-react';
+import MemberAvatar from '../MemberAvatar';
+import { Badge } from '../identity/Badge';
+import EmptyState from '../shared/EmptyState';
+import type { Member } from '../../types';
+import type { ColumnDef, TimeGranularity } from './granularity';
+import { addDays, snapDivisorFor } from './granularity';
+
+export const DEFAULT_LABEL_COL_W = 240;
+const MIN_LABEL_COL_W = 140;
+const MAX_LABEL_COL_W = 400;
+const HEADER_H = 36;
+const ROW_H = 44;
+const GROUP_H = 30;
+const COL_W = 80;
+const EDGE_W = 8; // px hit zone for resize handles
+
+/** A positioned activity bar ready for rendering. */
+export interface GanttActivity {
+  id: string;
+  title: string;
+  /** Fractional column start (0-based). */
+  startCol: number;
+  /** Fractional column span. */
+  span: number;
+  /** Hex color for bar background and badge. */
+  color: string;
+  /** Icon ID from the activity's identity, if set. */
+  icon?: string;
+  members: Member[];
+  isChild: boolean;
+  /** Nesting depth in the parent→child tree (0 = root). Drives left indent. */
+  depth?: number;
+  /** True when this activity has child activities nested beneath it. */
+  hasChildren?: boolean;
+  /** True when this activity's subtree is currently collapsed (children hidden). */
+  collapsed?: boolean;
+  percentComplete?: number | null;
+}
+
+export type GanttRow =
+  | { kind: 'group'; id: string; label: string; color: string; memberColors?: string[]; count: number; collapsed?: boolean }
+  | { kind: 'activity'; event: GanttActivity };
+
+/** Visual state for the in-view Find feature. Passed from GanttView. */
+export interface FindState {
+  hasQuery: boolean;
+  matchedIds: Set<string>;
+  activeMatchId: string | null;
+  /** Per-event match reasons for "why matched" tooltip (non-title reasons only). */
+  matchReasons: Map<string, string[]>;
+  filtersActive: boolean;
+  matchCount: number;
+}
+
+interface DragState {
+  rowIdx: number;
+  memberId: string | null;
+  startCol: number;
+  currentCol: number;
+}
+
+type BarDragZone = 'left' | 'right' | 'body';
+
+interface BarDragState {
+  eventId: string;
+  zone: BarDragZone;
+  /** Fractional column of the event's visual start when drag began. */
+  initStartCol: number;
+  /** Fractional column of the event's visual end (startCol + span) when drag began. */
+  initEndCol: number;
+  /** Lane-relative x of the mouse when drag began. */
+  initMouseX: number;
+  /** Page-relative left edge of the lane div. */
+  laneLeft: number;
+  /** Current snapped start column (integer). */
+  snapStartCol: number;
+  /** Current snapped end column (integer, exclusive — col after last occupied). */
+  snapEndCol: number;
+}
+
+interface TooltipState {
+  text: string;
+  /** Viewport-relative x for tooltip positioning. */
+  x: number;
+  /** Viewport-relative y for tooltip positioning. */
+  y: number;
+}
+
+/** Tooltip shown when hovering a matched event bar that matched on a non-title field. */
+interface MatchTooltipState {
+  reasons: string[];
+  x: number;
+  y: number;
+}
+
+interface Props {
+  rows: GanttRow[];
+  columns: ColumnDef[];
+  /** Fractional column index of today (-1 if outside range). */
+  todayIndex: number;
+  selectedActivityId: string | null;
+  onSelectActivity: (id: string | null) => void;
+  /** Called when the user drags on an empty lane cell to create an activity. */
+  onLaneDrag?: (startDate: Date, endDate: Date, memberId: string | null) => void;
+  /** Called when the user drags a bar edge or body to resize/move it. */
+  onBarDrag?: (activityId: string, newStartDate: Date, newEndDate: Date) => void;
+  /** Called during a bar drag with the current snapped dates — for live sidebar update. */
+  onBarDragProgress?: (activityId: string, newStartDate: Date, newEndDate: Date) => void;
+  /** Resolved granularity — used to compute the finer snap divisor during drag. */
+  resolvedGranularity?: TimeGranularity | 'auto';
+  /** Find state from GanttView; absent when the find bar is closed/idle. */
+  findState?: FindState;
+  /** Called when the user clicks "Clear filters" in the no-matches callout. */
+  onClearFilters?: () => void;
+  /** Current label column width in px — lifts state to the parent so it survives view switches. */
+  labelColW?: number;
+  /** Called when the user drags the column resize handle. */
+  onLabelColWChange?: (w: number) => void;
+  /** Toggles the collapsed state of an activity's child subtree (parent grouping). */
+  onToggleActivity?: (id: string) => void;
+  /** Toggles the collapsed state of a group header (member grouping). */
+  onToggleGroup?: (id: string) => void;
+  /**
+   * When false, all click and drag interactions are suppressed — bars, lane
+   * drags, and group toggles become inert. Used by the public share viewer.
+   * Default: true.
+   */
+  interactive?: boolean;
+}
+
+// ── Bar drag helpers ─────────────────────────────────────────────────────────
+
+function tooltipText(zone: BarDragZone, startDate: Date, endDate: Date): string {
+  if (zone === 'left') return `Start: ${formatDragDate(startDate)}`;
+  if (zone === 'right') return `End: ${formatDragDate(endDate)}`;
+  return `${formatDragDate(startDate)} → ${formatDragDate(endDate)}`;
+}
+
+// ── Date helpers (support fractional column positions) ───────────────────────
+
+// Maps a fractional column position to a calendar Date by interpolating within
+// the column's day range. Uses the full period length (start→end) rather than
+// the clamped `days` field so boundary columns still produce correct dates.
+function colFracToDate(colFrac: number, columns: ColumnDef[]): Date {
+  let remaining = Math.max(0, colFrac);
+  for (const col of columns) {
+    if (remaining < 1) {
+      const periodDays = Math.round((col.end.getTime() - col.start.getTime()) / 86_400_000);
+      return addDays(col.start, Math.round(remaining * periodDays));
+    }
+    remaining -= 1;
+  }
+  return columns[columns.length - 1].end;
+}
+
+function colToStartDate(colFrac: number, columns: ColumnDef[]): Date {
+  return colFracToDate(Math.max(0, colFrac), columns);
+}
+
+// endColFrac is exclusive (the fractional col just past the last occupied day).
+function colToEndDate(endColFrac: number, columns: ColumnDef[]): Date {
+  // The last included date is 1 day before the date at the exclusive end.
+  return addDays(colFracToDate(Math.max(0, endColFrac), columns), -1);
+}
+
+
+export function formatDragDate(d: Date): string {
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
+}
+
+export default function GanttGrid({
+  rows,
+  columns,
+  todayIndex,
+  selectedActivityId,
+  onSelectActivity,
+  onLaneDrag,
+  onBarDrag,
+  onBarDragProgress,
+  resolvedGranularity,
+  findState,
+  onClearFilters,
+  labelColW: labelColWProp,
+  onLabelColWChange,
+  onToggleActivity,
+  onToggleGroup,
+  interactive = true,
+}: Props) {
+  // ── Resizable label column ─────────────────────────────────────────────────
+  // When the parent passes labelColW + onLabelColWChange the column is
+  // controlled, so the width survives view switches (e.g. Gantt ↔ List).
+  // When neither is provided we fall back to internal state.
+  const [internalLabelColW, setInternalLabelColW] = useState(DEFAULT_LABEL_COL_W);
+  const labelColW = labelColWProp ?? internalLabelColW;
+  const setLabelColW = onLabelColWChange ?? setInternalLabelColW;
+
+  const totalW = useMemo(
+    () => labelColW + columns.length * COL_W,
+    [labelColW, columns.length],
+  );
+
+  const labelColWRef = useRef(labelColW);
+  useEffect(() => { labelColWRef.current = labelColW; }, [labelColW]);
+
+  const handleColumnResizeMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = labelColWRef.current;
+
+    function onMouseMove(mv: MouseEvent) {
+      const next = Math.max(MIN_LABEL_COL_W, Math.min(MAX_LABEL_COL_W, startW + (mv.clientX - startX)));
+      setLabelColW(next);
+    }
+    function onMouseUp() {
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+    }
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+  // setLabelColW is either a stable setter from useState or a stable callback from the parent.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Integer column index that contains today (for background highlight)
+  const todayCol = todayIndex >= 0 ? Math.floor(todayIndex) : -1;
+
+  // ── Scroll container ref (needed for find auto-scroll) ────────────────────
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+
+  // Always-current rows ref so the active-match scroll effect doesn't go stale
+  const rowsRef = useRef(rows);
+  useEffect(() => { rowsRef.current = rows; });
+
+  // ── Drag-to-create state ──────────────────────────────────────────────────
+  const [drag, setDrag] = useState<DragState | null>(null);
+  const dragRef = useRef<DragState | null>(null);
+
+  // ── Bar drag state ────────────────────────────────────────────────────────
+  const [barDrag, setBarDrag] = useState<BarDragState | null>(null);
+  const barDragRef = useRef<BarDragState | null>(null);
+  const [dragTooltip, setDragTooltip] = useState<TooltipState | null>(null);
+
+  // ── "Why matched" hover tooltip ───────────────────────────────────────────
+  const [matchTooltip, setMatchTooltip] = useState<MatchTooltipState | null>(null);
+
+  const colFromX = useCallback((laneX: number) => {
+    return Math.max(0, Math.min(columns.length - 1, Math.floor(laneX / COL_W)));
+  }, [columns.length]);
+
+  // ── Auto-scroll to active find match ─────────────────────────────────────
+  useEffect(() => {
+    const activeId = findState?.activeMatchId;
+    if (!activeId || !scrollContainerRef.current) return;
+    const container = scrollContainerRef.current;
+    const currentRows = rowsRef.current;
+
+    let y = HEADER_H;
+    let matchedActivity: GanttActivity | null = null;
+    for (const row of currentRows) {
+      if (row.kind === 'activity' && row.event.id === activeId) {
+        matchedActivity = row.event;
+        break;
+      }
+      y += row.kind === 'group' ? GROUP_H : ROW_H;
+    }
+    if (!matchedActivity) return;
+
+    const viewH = container.clientHeight;
+    const viewW = container.clientWidth;
+    const scrollTop = Math.max(0, y - viewH / 2 + ROW_H / 2);
+    const eventCenterX = labelColWRef.current + (matchedActivity.startCol + matchedActivity.span / 2) * COL_W;
+    const scrollLeft = Math.max(0, eventCenterX - viewW / 2);
+
+    container.scrollTo({ left: scrollLeft, top: scrollTop, behavior: 'smooth' });
+  // Only re-run when the active match changes, not when rows or columns change.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [findState?.activeMatchId]);
+
+  const handleLaneMouseDown = useCallback((
+    e: React.MouseEvent<HTMLDivElement>,
+    rowIdx: number,
+    memberId: string | null,
+  ) => {
+    if (!interactive || !onLaneDrag) return;
+    e.preventDefault();
+    const rect = e.currentTarget.getBoundingClientRect();
+    const col = colFromX(e.clientX - rect.left);
+    const state: DragState = { rowIdx, memberId, startCol: col, currentCol: col };
+    dragRef.current = state;
+    setDrag(state);
+
+    function onMouseMove(mv: MouseEvent) {
+      if (!dragRef.current) return;
+      const col2 = colFromX(mv.clientX - rect.left);
+      const next = { ...dragRef.current, currentCol: col2 };
+      dragRef.current = next;
+      setDrag({ ...next });
+    }
+
+    function onMouseUp() {
+      const s = dragRef.current;
+      if (s && onLaneDrag && columns.length > 0) {
+        const lo = Math.min(s.startCol, s.currentCol);
+        const hi = Math.max(s.startCol, s.currentCol);
+        const startDate = columns[lo]?.start ?? columns[0].start;
+        const endDate = columns[hi]?.start ?? columns[hi > 0 ? hi : 0].start;
+        onLaneDrag(startDate, endDate, s.memberId);
+      }
+      dragRef.current = null;
+      setDrag(null);
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+    }
+
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+  }, [colFromX, columns, onLaneDrag]);
+
+  // ── Bar drag handler ──────────────────────────────────────────────────────
+
+  const handleBarMouseDown = useCallback((
+    e: React.MouseEvent<HTMLDivElement>,
+    ev: GanttActivity,
+    zone: BarDragZone,
+  ) => {
+    if (!onBarDrag) return;
+    // Only allow drag/resize when the bar is already selected.
+    if (ev.id !== selectedActivityId) return;
+    e.preventDefault();
+    e.stopPropagation(); // prevent lane-drag from firing
+
+    // The bar's parent is the lane div (position: relative, flex: 1).
+    const laneEl = e.currentTarget.parentElement;
+    if (!laneEl) return;
+    const laneRect = laneEl.getBoundingClientRect();
+
+    const initStartCol = ev.startCol;
+    const initEndCol = ev.startCol + ev.span;
+    const initMouseX = e.clientX - laneRect.left;
+    const state: BarDragState = {
+      eventId: ev.id,
+      zone,
+      initStartCol,
+      initEndCol,
+      initMouseX,
+      laneLeft: laneRect.left,
+      snapStartCol: initStartCol,
+      snapEndCol: initEndCol,
+    };
+    barDragRef.current = state;
+    setBarDrag(state);
+
+    // Initial tooltip
+    const startDate = colToStartDate(state.snapStartCol, columns);
+    const endDate = colToEndDate(state.snapEndCol, columns);
+    setDragTooltip({
+      text: tooltipText(zone, startDate, endDate),
+      x: e.clientX,
+      y: e.clientY,
+    });
+
+    function onMouseMove(mv: MouseEvent) {
+      const s = barDragRef.current;
+      if (!s) return;
+
+      const deltaCol = (mv.clientX - (s.laneLeft + s.initMouseX)) / COL_W;
+      const n = columns.length;
+      // Finer snap: snap one granularity level below the active zoom.
+      const div = snapDivisorFor(resolvedGranularity ?? 'auto');
+      const step = 1 / div;
+      const snap = (x: number) => Math.round(x / step) * step;
+
+      let nextStart = s.snapStartCol;
+      let nextEnd = s.snapEndCol;
+
+      if (s.zone === 'left') {
+        nextStart = Math.max(0, Math.min(snap(s.initStartCol + deltaCol), s.initEndCol - step));
+        nextEnd = s.initEndCol;
+      } else if (s.zone === 'right') {
+        nextStart = s.initStartCol;
+        nextEnd = Math.max(s.initStartCol + step, Math.min(snap(s.initEndCol + deltaCol), n));
+      } else {
+        // body: preserve exact span, shift both by snapped delta
+        const span = s.initEndCol - s.initStartCol;
+        const shift = snap(deltaCol);
+        nextStart = Math.max(0, Math.min(s.initStartCol + shift, n - span));
+        nextEnd = nextStart + span;
+      }
+
+      const next: BarDragState = { ...s, snapStartCol: nextStart, snapEndCol: nextEnd };
+      barDragRef.current = next;
+      setBarDrag(next);
+
+      const sd = colToStartDate(nextStart, columns);
+      const ed = colToEndDate(nextEnd, columns);
+      setDragTooltip({ text: tooltipText(s.zone, sd, ed), x: mv.clientX, y: mv.clientY });
+      onBarDragProgress?.(s.eventId, sd, ed);
+    }
+
+    function onMouseUp() {
+      const s = barDragRef.current;
+      if (s && onBarDrag) {
+        const sd = colToStartDate(s.snapStartCol, columns);
+        const ed = colToEndDate(s.snapEndCol, columns);
+        onBarDrag(s.eventId, sd, ed); // eventId field preserved in BarDragState
+      }
+      barDragRef.current = null;
+      setBarDrag(null);
+      setDragTooltip(null);
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+    }
+
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+  }, [columns, onBarDrag]);
+
+  // Header cells are shared between the empty-state path and the unified scroll path.
+  const headerContent = (
+    <>
+      <div
+        style={{
+          width: labelColW,
+          flexShrink: 0,
+          padding: '0 16px',
+          display: 'flex',
+          alignItems: 'center',
+          borderRight: '1px solid var(--border)',
+          fontSize: 11,
+          fontWeight: 600,
+          color: 'var(--muted-foreground)',
+          textTransform: 'uppercase' as const,
+          letterSpacing: '0.06em',
+          position: 'sticky' as const,
+          left: 0,
+          zIndex: 6,
+          background: 'var(--card)',
+          userSelect: 'none',
+        }}
+      >
+        Activity
+        {/* Drag handle — resize the label column */}
+        <div
+          onMouseDown={handleColumnResizeMouseDown}
+          style={{
+            position: 'absolute',
+            right: 0,
+            top: 0,
+            bottom: 0,
+            width: 6,
+            cursor: 'col-resize',
+            zIndex: 10,
+          }}
+        />
+      </div>
+
+      {columns.map((col, i) => {
+        const isToday = i === todayCol;
+        return (
+          <div
+            key={i}
+            style={{
+              width: COL_W,
+              flexShrink: 0,
+              height: HEADER_H,
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              justifyContent: 'center',
+              padding: '0 4px 8px',
+              gap: 2,
+              borderRight: i < columns.length - 1 ? '1px solid var(--border)' : 'none',
+              position: 'relative',
+              overflow: 'hidden',
+            }}
+          >
+            <span style={{
+              fontSize: col.sublabel ? 10 : 11,
+              fontWeight: isToday ? 700 : 600,
+              color: isToday ? 'var(--primary)' : 'var(--muted-foreground)',
+              lineHeight: 1.2,
+              textAlign: 'center',
+            }}>
+              {col.label}
+            </span>
+            {col.sublabel && (
+              <span style={{
+                fontSize: 9,
+                fontWeight: 500,
+                color: 'var(--muted-foreground)',
+                lineHeight: 1,
+                opacity: isToday ? 1 : 0.75,
+              }}>
+                {col.sublabel}
+              </span>
+            )}
+            {isToday && (
+              <div
+                style={{
+                  position: 'absolute',
+                  bottom: 2,
+                  left: `${((todayIndex - todayCol) * 100)}%`,
+                  transform: 'translateX(-50%)',
+                  width: 6,
+                  height: 6,
+                  borderRadius: '50%',
+                  background: 'var(--secondary)',
+                }}
+              />
+            )}
+          </div>
+        );
+      })}
+    </>
+  );
+
+  // ── Find helpers ──────────────────────────────────────────────────────────
+
+  const { hasQuery = false, matchedIds: matchSet, activeMatchId, matchReasons: reasons } = findState ?? {};
+
+  function isMatch(id: string) { return matchSet?.has(id) ?? false; }
+  function isActive(id: string) { return activeMatchId === id; }
+
+  // Non-title reasons to surface in the "why matched" tooltip
+  function nonTitleReasons(id: string): string[] {
+    return (reasons?.get(id) ?? []).filter(r => r !== 'title');
+  }
+
+  // ── Empty state: header + centered placeholder ──────────────────────────────
+  if (rows.length === 0) {
+    const showNoMatchCallout = hasQuery && findState && findState.matchCount === 0;
+    return (
+      <div style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+        <div style={{ overflowX: 'auto', overflowY: 'hidden', flexShrink: 0 }}>
+          <div style={{ width: totalW, display: 'flex', height: HEADER_H, background: 'var(--card)', borderBottom: '1px solid var(--border)' }}>
+            {headerContent}
+          </div>
+        </div>
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12 }}>
+          <EmptyState message="No viewable activities" />
+          {showNoMatchCallout && findState.filtersActive && (
+            <p style={{ fontSize: 12, color: 'var(--muted-foreground)', textAlign: 'center' }}>
+              No matches in current view.{' '}
+              {onClearFilters && (
+                <button
+                  onClick={onClearFilters}
+                  style={{ color: 'var(--primary)', background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, padding: 0, fontFamily: 'inherit' }}
+                >
+                  Clear filters
+                </button>
+              )}
+            </p>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // ── Unified scroll: header sticky inside the single container ──────────────
+  return (
+    <div style={{ height: '100%', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+      <div ref={scrollContainerRef} style={{ flex: 1, overflow: 'auto' }}>
+        <div style={{ width: totalW }}>
+
+          {/* Sticky header row — scrolls horizontally with the grid, pins to top vertically */}
+          <div style={{ position: 'sticky', top: 0, zIndex: 5, display: 'flex', height: HEADER_H, background: 'var(--card)', borderBottom: '1px solid var(--border)' }}>
+            {headerContent}
+          </div>
+
+          {rows.map((row, rowIdx) => {
+            if (row.kind === 'group') {
+              return (
+                <div
+                  key={row.id}
+                  style={{
+                    display: 'flex',
+                    height: GROUP_H,
+                    background: 'var(--muted)',
+                    borderBottom: '1px solid var(--border)',
+                  }}
+                >
+                  <div
+                    onClick={onToggleGroup ? () => onToggleGroup(row.id) : undefined}
+                    style={{
+                      width: labelColW,
+                      flexShrink: 0,
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 6,
+                      padding: '0 14px',
+                      position: 'sticky',
+                      left: 0,
+                      background: 'var(--muted)',
+                      zIndex: 3,
+                      borderRight: '1px solid var(--border)',
+                      cursor: onToggleGroup ? 'pointer' : 'default',
+                      userSelect: 'none',
+                    }}
+                  >
+                    {onToggleGroup ? (
+                      row.collapsed
+                        ? <ChevronRight size={14} strokeWidth={2.5} style={{ flexShrink: 0, color: 'var(--muted-foreground)' }} />
+                        : <ChevronDown size={14} strokeWidth={2.5} style={{ flexShrink: 0, color: 'var(--muted-foreground)' }} />
+                    ) : null}
+                    {row.memberColors && row.memberColors.length > 0 ? (
+                      // Stacked color dots for member-combination groups
+                      <div style={{ display: 'flex', flexShrink: 0 }}>
+                        {row.memberColors.map((c, i) => (
+                          <div
+                            key={i}
+                            style={{
+                              width: 9,
+                              height: 9,
+                              borderRadius: '50%',
+                              background: c,
+                              marginLeft: i === 0 ? 0 : -3,
+                              outline: '1.5px solid var(--muted)',
+                            }}
+                          />
+                        ))}
+                      </div>
+                    ) : (
+                      <div
+                        style={{
+                          width: 9,
+                          height: 9,
+                          borderRadius: 2,
+                          background: row.color,
+                          flexShrink: 0,
+                        }}
+                      />
+                    )}
+                    <span
+                      style={{
+                        fontSize: 11,
+                        fontWeight: 700,
+                        color: 'var(--foreground)',
+                        textTransform: 'uppercase',
+                        letterSpacing: '0.05em',
+                        flex: 1,
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                        fontFamily: 'var(--font-sans)',
+                      }}
+                    >
+                      {row.label}
+                    </span>
+                    <span
+                      style={{
+                        fontSize: 10,
+                        color: 'var(--muted-foreground)',
+                        flexShrink: 0,
+                        fontFamily: 'var(--font-sans)',
+                      }}
+                    >
+                      {row.count}
+                    </span>
+                  </div>
+                  <div style={{ flex: 1 }} />
+                </div>
+              );
+            }
+
+            const ev = row.event;
+            const selected = selectedActivityId === ev.id;
+            const indent = (ev.depth ?? (ev.isChild ? 1 : 0)) * 18;
+            const evIsMatch = isMatch(ev.id);
+            const evIsActive = isActive(ev.id);
+            const dimmed = hasQuery && !evIsMatch;
+            const extraReasons = nonTitleReasons(ev.id);
+
+            return (
+              <div
+                key={`${ev.id}-${rowIdx}`}
+                style={{
+                  display: 'flex',
+                  height: ROW_H,
+                  borderBottom: '1px solid var(--border)',
+                  position: 'relative',
+                  background: selected ? 'hsl(188 59% 38% / .04)' : 'transparent',
+                  opacity: dimmed ? 0.3 : 1,
+                  transition: 'opacity 0.15s',
+                }}
+              >
+                {/* Sticky label cell */}
+                <div
+                  style={{
+                    width: labelColW,
+                    flexShrink: 0,
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 7,
+                    paddingLeft: 14 + indent,
+                    paddingRight: 10,
+                    position: 'sticky',
+                    left: 0,
+                    background: selected ? 'var(--muted)' : 'var(--card)',
+                    zIndex: 6,
+                    borderRight: '1px solid var(--border)',
+                    cursor: 'pointer',
+                    transition: 'background 0.1s',
+                  }}
+                  onClick={() => interactive && onSelectActivity(ev.id === selectedActivityId ? null : ev.id)}
+                  onMouseEnter={e => {
+                    e.currentTarget.style.background = 'var(--muted)';
+                  }}
+                  onMouseLeave={e => {
+                    e.currentTarget.style.background = selected ? 'var(--muted)' : 'var(--card)';
+                  }}
+                >
+                  {/* Expand/collapse chevron slot — reserved (empty for leaves) so
+                      sibling badges stay aligned within a tree level. */}
+                  {onToggleActivity && (
+                    <div style={{ width: 16, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                      {ev.hasChildren && (
+                        <button
+                          onClick={e => { e.stopPropagation(); onToggleActivity(ev.id); }}
+                          title={ev.collapsed ? 'Expand' : 'Collapse'}
+                          aria-label={ev.collapsed ? 'Expand children' : 'Collapse children'}
+                          style={{
+                            display: 'flex', alignItems: 'center', justifyContent: 'center',
+                            width: 16, height: 16, padding: 0, border: 'none', borderRadius: 3,
+                            background: 'none', cursor: 'pointer', color: 'var(--muted-foreground)',
+                          }}
+                          onMouseEnter={e => (e.currentTarget.style.background = 'var(--border)')}
+                          onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                        >
+                          {ev.collapsed
+                            ? <ChevronRight size={13} strokeWidth={2.5} />
+                            : <ChevronDown size={13} strokeWidth={2.5} />}
+                        </button>
+                      )}
+                    </div>
+                  )}
+                  <Badge
+                    identity={{ color: ev.color, icon: ev.icon ?? '__none__' }}
+                    name={ev.title}
+                    shape="square"
+                    size={20}
+                  />
+                  <span
+                    style={{
+                      fontSize: 12,
+                      fontWeight: 500,
+                      color: 'var(--foreground)',
+                      flex: 1,
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                      fontFamily: 'var(--font-sans)',
+                    }}
+                  >
+                    {ev.title}
+                  </span>
+                  {ev.members.length > 0 && (
+                    <div style={{ display: 'flex', flexShrink: 0 }}>
+                      {ev.members.slice(0, 3).map((m, i) => (
+                        <div
+                          key={m.id}
+                          style={{ marginLeft: i === 0 ? 0 : -5 }}
+                          title={m.name}
+                        >
+                          <MemberAvatar member={m} size={20} />
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* Lane — background columns + today line + event bar */}
+                <div
+                  style={{ position: 'relative', flex: 1, display: 'flex', cursor: (interactive && onLaneDrag) ? 'crosshair' : 'default' }}
+                  onMouseDown={e => handleLaneMouseDown(e, rowIdx, ev.members[0]?.id ?? null)}
+                >
+                  {columns.map((_, i) => (
+                    <div
+                      key={i}
+                      style={{
+                        width: COL_W,
+                        height: '100%',
+                        flexShrink: 0,
+                        borderRight: i < columns.length - 1 ? '1px solid var(--border)' : 'none',
+                        background:
+                          i === todayCol && !selected ? 'hsl(188 59% 38% / .04)' : 'transparent',
+                      }}
+                    />
+                  ))}
+
+                  {/* Drag selection highlight */}
+                  {drag && drag.rowIdx === rowIdx && (() => {
+                    const lo = Math.min(drag.startCol, drag.currentCol);
+                    const hi = Math.max(drag.startCol, drag.currentCol);
+                    return (
+                      <div
+                        style={{
+                          position: 'absolute',
+                          top: 4,
+                          bottom: 4,
+                          left: lo * COL_W,
+                          width: (hi - lo + 1) * COL_W,
+                          background: 'hsl(188 59% 38% / .18)',
+                          border: '1.5px dashed var(--primary)',
+                          borderRadius: 4,
+                          pointerEvents: 'none',
+                          zIndex: 3,
+                        }}
+                      />
+                    );
+                  })()}
+
+                  {/* Today vertical line */}
+                  {todayIndex >= 0 && (
+                    <div
+                      style={{
+                        position: 'absolute',
+                        top: 0,
+                        bottom: 0,
+                        left: todayIndex * COL_W,
+                        width: 2,
+                        background: 'var(--secondary)',
+                        opacity: 0.5,
+                        zIndex: 2,
+                        pointerEvents: 'none',
+                      }}
+                    />
+                  )}
+
+                  {/* Event bar — live position overridden while dragging */}
+                  {(() => {
+                    const isDragging = barDrag?.eventId === ev.id;
+                    const startCol = isDragging ? barDrag!.snapStartCol : ev.startCol;
+                    const endCol = isDragging ? barDrag!.snapEndCol : ev.startCol + ev.span;
+                    const left = startCol * COL_W + 2;
+                    const width = Math.max((endCol - startCol) * COL_W - 4, COL_W * 0.3);
+                    // Only selected bars show grab/move cursors; unselected bars show pointer
+                    // to prevent accidental date changes when the user just wants to inspect.
+                    const grabCursor = isDragging
+                      ? 'grabbing'
+                      : (selected && onBarDrag) ? 'grab' : 'pointer';
+
+                    // Box shadow: find states take precedence over selection ring.
+                    // CSS classes (.find-active-bar, .find-match-bar) provide the
+                    // amber outline; we only set inline boxShadow for the selected ring.
+                    const boxShadow = (evIsActive || evIsMatch)
+                      ? undefined
+                      : selected
+                        ? `0 0 0 2px white, 0 0 0 4px ${ev.color}`
+                        : 'var(--shadow-sm)';
+
+                    return (
+                      <div
+                        onClick={() => {
+                          // Bar click always selects — use the label cell to deselect.
+                          if (interactive && !isDragging) onSelectActivity(ev.id);
+                        }}
+                        onMouseDown={e => {
+                          if (!interactive || !onBarDrag) { e.stopPropagation(); return; }
+                          const barRect = e.currentTarget.getBoundingClientRect();
+                          const xInBar = e.clientX - barRect.left;
+                          let zone: BarDragZone;
+                          if (xInBar <= EDGE_W) zone = 'left';
+                          else if (xInBar >= barRect.width - EDGE_W) zone = 'right';
+                          else zone = 'body';
+                          handleBarMouseDown(e, ev, zone);
+                        }}
+                        onMouseEnter={e => {
+                          if (!isDragging) e.currentTarget.style.filter = 'brightness(1.08)';
+                          // Show "why matched" tooltip for non-title matches
+                          if (extraReasons.length > 0) {
+                            setMatchTooltip({ reasons: extraReasons, x: e.clientX, y: e.clientY });
+                          }
+                        }}
+                        onMouseMove={e => {
+                          if (matchTooltip) {
+                            setMatchTooltip(t => t ? { ...t, x: e.clientX, y: e.clientY } : null);
+                          }
+                        }}
+                        onMouseLeave={e => {
+                          e.currentTarget.style.filter = '';
+                          setMatchTooltip(null);
+                        }}
+                        className={evIsActive ? 'find-active-bar' : evIsMatch ? 'find-match-bar' : undefined}
+                        style={{
+                          position: 'absolute',
+                          top: 9,
+                          bottom: 9,
+                          left,
+                          width,
+                          background: ev.color,
+                          borderRadius: 5,
+                          display: 'flex',
+                          alignItems: 'center',
+                          padding: `0 ${EDGE_W + 2}px`,
+                          fontSize: 11,
+                          fontWeight: 600,
+                          color: 'white',
+                          overflow: 'hidden',
+                          whiteSpace: 'nowrap',
+                          textOverflow: 'ellipsis',
+                          cursor: grabCursor,
+                          zIndex: 4,
+                          boxShadow,
+                          opacity: isDragging ? 0.85 : 1,
+                          transition: isDragging ? 'none' : 'box-shadow 0.12s, opacity 0.1s',
+                          fontFamily: 'var(--font-sans)',
+                          userSelect: 'none',
+                        }}
+                      >
+                        {/* Progress fill overlay — subtle darker shade showing % complete */}
+                        {(ev.percentComplete ?? 0) > 0 && (
+                          <div
+                            style={{
+                              position: 'absolute',
+                              left: 0,
+                              top: 0,
+                              bottom: 0,
+                              width: `${ev.percentComplete}%`,
+                              background: 'rgba(0,0,0,0.18)',
+                              borderRadius: 5,
+                              pointerEvents: 'none',
+                            }}
+                          />
+                        )}
+                        {/* Left resize handle — only shown on selected bars */}
+                        {onBarDrag && selected && (
+                          <div
+                            style={{
+                              position: 'absolute',
+                              left: 0,
+                              top: 0,
+                              bottom: 0,
+                              width: EDGE_W,
+                              cursor: 'ew-resize',
+                              borderRadius: '5px 0 0 5px',
+                            }}
+                          />
+                        )}
+                        {ev.title}
+                        {/* Right resize handle — only shown on selected bars */}
+                        {onBarDrag && selected && (
+                          <div
+                            style={{
+                              position: 'absolute',
+                              right: 0,
+                              top: 0,
+                              bottom: 0,
+                              width: EDGE_W,
+                              cursor: 'ew-resize',
+                              borderRadius: '0 5px 5px 0',
+                            }}
+                          />
+                        )}
+                      </div>
+                    );
+                  })()}
+                </div>
+              </div>
+            );
+          })}
+
+          {/* No-matches-in-view callout — rendered inside the scroll container */}
+          {hasQuery && findState && findState.matchCount === 0 && rows.length > 0 && findState.filtersActive && (
+            <div style={{
+              padding: '12px 16px',
+              fontSize: 12,
+              color: 'var(--muted-foreground)',
+              borderTop: '1px solid var(--border)',
+            }}>
+              No matches in current view.{' '}
+              {onClearFilters && (
+                <button
+                  onClick={onClearFilters}
+                  style={{ color: 'var(--primary)', background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, padding: 0, fontFamily: 'inherit' }}
+                >
+                  Clear filters
+                </button>
+              )}
+            </div>
+          )}
+
+        </div>
+      </div>
+
+      {/* Drag tooltip — fixed position follows the mouse during bar drag */}
+      {dragTooltip && (
+        <div
+          style={{
+            position: 'fixed',
+            left: dragTooltip.x + 14,
+            top: dragTooltip.y - 28,
+            background: 'var(--popover)',
+            color: 'var(--popover-foreground)',
+            border: '1px solid var(--border)',
+            borderRadius: 6,
+            padding: '4px 10px',
+            fontSize: 11,
+            fontWeight: 600,
+            fontFamily: 'var(--font-sans)',
+            pointerEvents: 'none',
+            zIndex: 9999,
+            whiteSpace: 'nowrap',
+            boxShadow: 'var(--shadow-md)',
+          }}
+        >
+          {dragTooltip.text}
+        </div>
+      )}
+
+      {/* "Why matched" tooltip — shown on hover for non-title match reasons */}
+      {matchTooltip && (
+        <div
+          style={{
+            position: 'fixed',
+            left: matchTooltip.x + 12,
+            top: matchTooltip.y - 36,
+            background: 'var(--popover)',
+            color: 'var(--popover-foreground)',
+            border: '1px solid var(--border)',
+            borderRadius: 6,
+            padding: '4px 10px',
+            fontSize: 11,
+            fontFamily: 'var(--font-sans)',
+            pointerEvents: 'none',
+            zIndex: 9999,
+            whiteSpace: 'nowrap',
+            boxShadow: 'var(--shadow-md)',
+          }}
+        >
+          {matchTooltip.reasons.map(r => (
+            <div key={r} style={{ lineHeight: 1.6 }}>matched {r}</div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 ````
 
@@ -44952,923 +46936,6 @@ export default function Sidebar({ collapsed, onToggle, onNewActivity, onBulkImpo
       )}
     </div>
   );
-}
-````
-
-## File: packages/web/src/hooks/useTeamActivities.ts
-````typescript
-/**
- * TanStack Query hooks for team-scoped data.
- *
- * All hooks call createAuthFetch to inject the current access token at
- * query-time so stale closures never send an expired token.
- */
-
-import { useCallback } from 'react'
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import type { components } from '@draba/shared'
-import { createAuthFetch } from '@/lib/api'
-import { useAuth } from '@/contexts/AuthContext'
-import { useWebSocket } from '@/hooks/useWebSocket'
-
-type Activity = components['schemas']['Activity']
-type Team = components['schemas']['Team']
-type Timeline = components['schemas']['Timeline']
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
-type TimelineAccessEntry = components['schemas']['TimelineAccessEntry']
-type PatchTimelineInput = components['schemas']['PatchTimelineInput']
-
-/** Query key factory — centralises cache key strings. */
-export const keys = {
-  myTeams: () => ['teams'] as const,
-  timelineActivities: (timelineId: string, from?: string, to?: string) =>
-    ['timelines', timelineId, 'activities', { from, to }] as const,
-  teamMembers: (teamId: string) =>
-    ['teams', teamId, 'members'] as const,
-  teamTimelines: (teamId: string) =>
-    ['teams', teamId, 'timelines'] as const,
-}
-
-/** Fetches all teams the authenticated user belongs to. */
-export function useMyTeams(includeArchived = false) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: [...keys.myTeams(), { includeArchived }],
-    queryFn: async () => (await authFetch<Team[] | null>(includeArchived ? '/teams?archived=true' : '/teams')) ?? [],
-  })
-}
-
-/** Fetches a single team by ID. */
-export function useTeam(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: ['teams', teamId],
-    queryFn: () => authFetch<Team>(`/teams/${teamId}`),
-    enabled: Boolean(teamId),
-  })
-}
-
-/** Fetches all non-archived timelines for a team. */
-export function useTeamTimelines(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: keys.teamTimelines(teamId),
-    queryFn: async () => (await authFetch<Timeline[] | null>(`/teams/${teamId}/timelines`)) ?? [],
-    enabled: Boolean(teamId),
-  })
-}
-
-/** Fetches activities for a timeline, optionally bounded by date range. */
-export function useTimelineActivities(teamId: string, timelineId: string, from?: string, to?: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: keys.timelineActivities(timelineId, from, to),
-    queryFn: async () => {
-      const params = new URLSearchParams()
-      if (from) params.set('from', from)
-      if (to) params.set('to', to)
-      const qs = params.toString()
-      return (await authFetch<Activity[] | null>(`/teams/${teamId}/timelines/${timelineId}/activities${qs ? `?${qs}` : ''}`)) ?? []
-    },
-    enabled: Boolean(teamId) && Boolean(timelineId),
-  })
-}
-
-/** Fetches the member list for a team. */
-export function useTeamMembers(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: keys.teamMembers(teamId),
-    queryFn: async () => (await authFetch<TeamMemberWithUser[] | null>(`/teams/${teamId}/members`)) ?? [],
-    enabled: Boolean(teamId),
-  })
-}
-
-/**
- * Subscribes to the team's WebSocket feed and applies surgical cache updates
- * for activity.created / activity.updated / activity.deleted deltas.
- *
- * Conflict strategy: for activity.updated, incoming deltas are only applied
- * when their updatedAt timestamp is strictly newer than the cached version.
- * This prevents self-echo (our own PATCH broadcast arriving back) and handles
- * the last-writer-wins case where a concurrent remote edit arrives while our
- * mutation is in-flight — the server-returned updatedAt on our onSuccess will
- * always win if our PATCH was truly last.
- */
-export function useTeamActivitySync(
-  teamId: string,
-  accessToken: string | null | undefined,
-) {
-  const client = useQueryClient()
-
-  const handleMessage = useCallback(
-    (msg: { type: string; payload?: unknown }) => {
-      if (!teamId || !msg.payload) return
-
-      if (msg.type === 'activity.created') {
-        const incoming = msg.payload as Activity
-        // Target all timeline-scoped activity cache entries by using the
-        // timelineId from the incoming activity payload.
-        if (!incoming.timelineId) return
-        client.setQueriesData<Activity[]>(
-          { queryKey: ['timelines', incoming.timelineId, 'activities'] },
-          (old) => {
-            if (!old) return old
-            // Guard against duplicate delivery.
-            if (old.some((a) => a.id === incoming.id)) return old
-            return [...old, incoming]
-          },
-        )
-      } else if (msg.type === 'activity.updated') {
-        const incoming = msg.payload as Activity
-        if (!incoming.timelineId) return
-        client.setQueriesData<Activity[]>(
-          { queryKey: ['timelines', incoming.timelineId, 'activities'] },
-          (old) => {
-            if (!old) return old
-            return old.map((a) => {
-              if (a.id !== incoming.id) return a
-              // Skip if the cache already holds the same or a newer version.
-              const cachedMs = new Date(a.updatedAt).getTime()
-              const incomingMs = new Date(incoming.updatedAt).getTime()
-              return incomingMs > cachedMs ? incoming : a
-            })
-          },
-        )
-      } else if (msg.type === 'activity.deleted') {
-        const { id } = msg.payload as { id: string }
-        // activity.deleted payload only has id — scope invalidation to this
-        // team's timelines so we don't flush unrelated team caches when
-        // multiple teams are active in the same session.
-        const teamTimelines = client.getQueryData<Timeline[]>(keys.teamTimelines(teamId)) ?? []
-        if (teamTimelines.length > 0) {
-          for (const tl of teamTimelines) {
-            client.invalidateQueries({ queryKey: ['timelines', tl.id] })
-            client.setQueriesData<Activity[]>(
-              { queryKey: ['timelines', tl.id, 'activities'] },
-              (old) => old?.filter((a) => a.id !== id),
-            )
-          }
-        } else {
-          // Fallback when the team's timelines aren't cached yet.
-          client.invalidateQueries({ queryKey: ['timelines'] })
-          client.setQueriesData<Activity[]>(
-            { queryKey: ['timelines'] },
-            (old) => old?.filter((a) => a.id !== id),
-          )
-        }
-      }
-    },
-    [client, teamId],
-  )
-
-  useWebSocket({
-    token: accessToken,
-    teamIds: teamId ? [teamId] : [],
-    onMessage: handleMessage,
-  })
-}
-
-interface CreateActivityInput {
-  title: string
-  startAt: string
-  endAt: string
-  description?: string | null
-  notes?: string | null
-  color?: string | null
-  icon?: string | null
-  assignedMemberIds?: string[]
-  tagIds?: string[]
-  statusId?: string | null
-  parentActivityId?: string | null
-  percentComplete?: number | null
-  location?: string | null
-  url?: string | null
-  /** Client-only: if set, replace this placeholder ID in the cache instead of appending. */
-  _tempId?: string
-}
-
-interface UpdateActivityInput {
-  activityId: string
-  patch: {
-    title?: string
-    description?: string | null
-    notes?: string | null
-    startAt?: string
-    endAt?: string
-    allDay?: boolean
-    color?: string | null
-    icon?: string | null
-    location?: string | null
-    url?: string | null
-    statusId?: string | null
-    parentActivityId?: string | null
-    percentComplete?: number | null
-    assignedMemberIds?: string[]
-    tagIds?: string[]
-  }
-}
-
-/** Creates an activity in a timeline and inserts it directly into the cache. */
-export function useCreateActivity(teamId: string, timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: ({ _tempId: _, ...input }: CreateActivityInput) =>
-      authFetch<Activity>(`/teams/${teamId}/timelines/${timelineId}/activities`, {
-        method: 'POST',
-        body: JSON.stringify(input),
-      }),
-    onSuccess: (created, variables) => {
-      const tempId = variables._tempId
-      client.setQueriesData<Activity[]>(
-        { queryKey: ['timelines', timelineId, 'activities'] },
-        (old) => {
-          if (!old) return [created]
-          const hasReal = old.some((a) => a.id === created.id)
-          const hasTemp = tempId ? old.some((a) => a.id === tempId) : false
-          // The WS activity.created self-echo may win the race and append the
-          // real record before this onSuccess runs. In that case we must still
-          // drop the optimistic placeholder, otherwise it lingers as a duplicate
-          // "New Activity" row (and inline edits keep targeting the dead temp id).
-          if (hasReal) {
-            return hasTemp ? old.filter((a) => a.id !== tempId) : old
-          }
-          // Replace optimistic placeholder in-place to avoid a position flash.
-          if (hasTemp) {
-            return old.map((a) => (a.id === tempId ? created : a))
-          }
-          return [...old, created]
-        },
-      )
-    },
-  })
-}
-
-/** PATCHes an activity and optimistically updates the cache. */
-export function useUpdateActivity(timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: ({ activityId, patch }: UpdateActivityInput) =>
-      authFetch<Activity>(`/activities/${activityId}`, {
-        method: 'PATCH',
-        body: JSON.stringify(patch),
-      }),
-    onMutate: async ({ activityId, patch }) => {
-      await client.cancelQueries({ queryKey: ['timelines', timelineId, 'activities'] })
-      const snapshot = client.getQueriesData<Activity[]>({ queryKey: ['timelines', timelineId, 'activities'] })
-      client.setQueriesData<Activity[]>(
-        { queryKey: ['timelines', timelineId, 'activities'] },
-        (old) => old?.map((a) => (a.id === activityId ? { ...a, ...patch } : a)),
-      )
-      return { snapshot }
-    },
-    onError: (_err, _vars, context) => {
-      if (context?.snapshot) {
-        for (const [key, data] of context.snapshot) {
-          client.setQueryData(key, data)
-        }
-      }
-    },
-    onSuccess: (updated) => {
-      client.setQueriesData<Activity[]>(
-        { queryKey: ['timelines', timelineId, 'activities'] },
-        (old) => old?.map((a) => (a.id === updated.id ? updated : a)),
-      )
-    },
-  })
-}
-
-interface CreateTeamInput {
-  name: string
-  description?: string | null
-  notes?: string | null
-  color?: string | null
-  icon?: string | null
-}
-
-interface UpdateTeamInput {
-  teamId: string
-  patch: {
-    name?: string
-    description?: string | null
-    notes?: string | null
-    color?: string | null
-    icon?: string | null
-  }
-}
-
-/** Creates a team and inserts it into the active-teams cache. */
-export function useCreateTeam() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (input: CreateTeamInput) =>
-      authFetch<Team>('/teams', {
-        method: 'POST',
-        body: JSON.stringify(input),
-      }),
-    onSuccess: () => {
-      // Invalidate both active and archived team lists.
-      client.invalidateQueries({ queryKey: ['teams'] })
-    },
-  })
-}
-
-/** PATCHes a team's mutable fields and refreshes the cache. */
-export function useUpdateTeam() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: ({ teamId, patch }: UpdateTeamInput) =>
-      authFetch<Team>(`/teams/${teamId}`, {
-        method: 'PATCH',
-        body: JSON.stringify(patch),
-      }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: ['teams'] })
-    },
-  })
-}
-
-/** Archives a team (soft delete). */
-export function useArchiveTeam() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (teamId: string) =>
-      authFetch<Team>(`/teams/${teamId}/archive`, { method: 'POST' }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: ['teams'] })
-    },
-  })
-}
-
-/** Restores an archived team. */
-export function useUnarchiveTeam() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (teamId: string) =>
-      authFetch<Team>(`/teams/${teamId}/unarchive`, { method: 'POST' }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: ['teams'] })
-    },
-  })
-}
-
-/** Archives an activity (soft-delete). Removes it from the active-list cache. */
-export function useArchiveActivity(timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (activityId: string) =>
-      authFetch<Activity>(`/activities/${activityId}/archive`, { method: 'POST' }),
-    onSuccess: (_data, activityId) => {
-      client.setQueriesData<Activity[]>(
-        { queryKey: ['timelines', timelineId, 'activities'] },
-        (old) => old?.filter((a) => a.id !== activityId),
-      )
-    },
-  })
-}
-
-/** Deletes an activity and removes it from the cache. */
-export function useDeleteActivity(timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (activityId: string) =>
-      authFetch<void>(`/activities/${activityId}`, { method: 'DELETE' }),
-    onSuccess: (_data, activityId) => {
-      client.setQueriesData<Activity[]>(
-        { queryKey: ['timelines', timelineId, 'activities'] },
-        (old) => old?.filter((a) => a.id !== activityId),
-      )
-    },
-  })
-}
-
-// ── Timeline CRUD (Phase 10.3) ────────────────────────────────────────────────
-
-/** Fetches all timelines for a team, optionally including archived ones. */
-export function useTeamTimelinesWithArchived(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: [...keys.teamTimelines(teamId), { includeArchived: true }],
-    queryFn: async () =>
-      (await authFetch<Timeline[] | null>(`/teams/${teamId}/timelines?archived=true`)) ?? [],
-    enabled: Boolean(teamId),
-  })
-}
-
-/** Creates a new timeline for a team. */
-export function useCreateTimeline(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (input: { name: string; startDate: string; endDate: string; color?: string | null; icon?: string | null; description?: string | null; notes?: string | null; templateId?: string | null }) =>
-      authFetch<Timeline>(`/teams/${teamId}/timelines`, {
-        method: 'POST',
-        body: JSON.stringify(input),
-      }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
-    },
-  })
-}
-
-/** PATCHes a timeline's mutable fields. */
-export function useUpdateTimeline(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: ({ timelineId, patch }: { timelineId: string; patch: PatchTimelineInput }) =>
-      authFetch<Timeline>(`/timelines/${timelineId}`, {
-        method: 'PATCH',
-        body: JSON.stringify(patch),
-      }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
-    },
-  })
-}
-
-/** Hard-deletes a timeline. */
-export function useDeleteTimeline(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (timelineId: string) =>
-      authFetch<void>(`/timelines/${timelineId}`, { method: 'DELETE' }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
-    },
-  })
-}
-
-/** Archives a timeline. */
-export function useArchiveTimeline(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (timelineId: string) =>
-      authFetch<Timeline>(`/timelines/${timelineId}/archive`, { method: 'POST' }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
-    },
-  })
-}
-
-/** Restores an archived timeline. */
-export function useUnarchiveTimeline(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (timelineId: string) =>
-      authFetch<Timeline>(`/timelines/${timelineId}/unarchive`, { method: 'POST' }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
-    },
-  })
-}
-
-/** Fetches the access grant list for a timeline. */
-export function useTimelineAccess(teamId: string, timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: ['teams', teamId, 'timelines', timelineId, 'access'],
-    queryFn: async () =>
-      (await authFetch<TimelineAccessEntry[]>(
-        `/teams/${teamId}/timelines/${timelineId}/access`,
-      )) ?? [],
-    enabled: Boolean(teamId) && Boolean(timelineId),
-  })
-}
-
-/** Grants or updates a member's access to a timeline. */
-export function useGrantTimelineAccess(teamId: string, timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: ({ memberId, role }: { memberId: string; role: 'admin' | 'member' }) =>
-      authFetch<TimelineAccessEntry[]>(
-        `/teams/${teamId}/timelines/${timelineId}/access/${memberId}`,
-        { method: 'PUT', body: JSON.stringify({ role }) },
-      ),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: ['teams', teamId, 'timelines', timelineId, 'access'] })
-    },
-  })
-}
-
-/** Revokes a member's access to a timeline. */
-export function useRevokeTimelineAccess(teamId: string, timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (memberId: string) =>
-      authFetch<void>(`/teams/${teamId}/timelines/${timelineId}/access/${memberId}`, {
-        method: 'DELETE',
-      }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: ['teams', teamId, 'timelines', timelineId, 'access'] })
-    },
-  })
-}
-````
-
-## File: packages/web/src/components/gantt/ActivityDetailPanel.tsx
-````typescript
-/**
- * ActivityDetailPanel — right-side slide-in panel for a selected Gantt activity.
- *
- * Shares its field stack with ActivityCreatePanel via ActivityFieldsBody
- * (see shared/activityPanelFields.tsx) — header bar, footer, and save behavior live
- * here, the fields themselves are shared. Field order is fixed by the shared
- * body: Identity+Title → When → Description → Assigned to → Classify
- * (Status, Tags) → Advanced (Parent, Progress, Location, URL) → Notes.
- *
- * All functional fields save on change/blur via PATCH /activities/:id.
- * liveDragStart / liveDragEnd display live dates during bar drag without
- * triggering saves.
- */
-
-import { useState, useEffect } from 'react'
-import { X, Trash2, Archive, Loader2 } from 'lucide-react'
-import type { Identity } from '@/components/identity/identity-constants'
-import { useUpdateActivity, useDeleteActivity, useArchiveActivity, useTimelineActivities } from '@/hooks/useTeamActivities'
-import { useTimelineStatuses } from '@/hooks/useStatusTemplates'
-import { useTags } from '@/hooks/useTags'
-import type { components } from '@draba/shared'
-import type { Member } from '@/types'
-import { ActivityFieldsBody, PANEL_WIDTH, toDateInput, toISODate } from '@/components/shared/activityPanelFields'
-
-type ApiActivity = components['schemas']['Activity']
-
-interface Props {
-  event: ApiActivity | null
-  open: boolean
-  members: Member[]
-  teamId: string
-  timelineId: string
-  onClose: () => void
-  /** Display-only start date override during bar drag (YYYY-MM-DD). Does not trigger a save. */
-  liveDragStart?: string
-  /** Display-only end date override during bar drag (YYYY-MM-DD). Does not trigger a save. */
-  liveDragEnd?: string
-}
-
-export default function ActivityDetailPanel({
-  event, open, members, teamId, timelineId, onClose, liveDragStart, liveDragEnd,
-}: Props) {
-  const updateMutation = useUpdateActivity(timelineId)
-  const deleteMutation = useDeleteActivity(timelineId)
-  const archiveMutation = useArchiveActivity(timelineId)
-  const { data: statuses = [] } = useTimelineStatuses(teamId, timelineId)
-  const { data: teamTags = [] } = useTags(teamId)
-  const { data: allActivities = [] } = useTimelineActivities(teamId, timelineId)
-
-  const [title, setTitle] = useState(event?.title ?? '')
-  const [description, setDescription] = useState(event?.description ?? '')
-  const [notes, setNotes] = useState(event?.notes ?? '')
-  const [startDate, setStartDate] = useState(event ? toDateInput(event.startAt) : '')
-  const [endDate, setEndDate] = useState(event ? toDateInput(event.endAt) : '')
-  const [identity, setIdentity] = useState<Identity>({
-    color: event?.color ?? '#288C9B',
-    icon: event?.icon ?? '__none__',
-  })
-  const [assignedIds, setAssignedIds] = useState<string[]>(event?.assignedMemberIds ?? [])
-  const [tagIds, setTagIds] = useState<string[]>((event?.tagIds as string[] | undefined) ?? [])
-  const [location, setLocation] = useState(event?.location ?? '')
-  const [url, setUrl] = useState(event?.url ?? '')
-  const [progressValue, setProgressValue] = useState(event?.percentComplete ?? 0)
-  // Parent and status are mirrored locally so the picker reflects a change
-  // immediately — the `event` prop is a snapshot taken at selection time and
-  // doesn't refresh until the activity is reselected.
-  const [parentId, setParentId] = useState<string | null>(event?.parentActivityId ?? null)
-  const [statusId, setStatusId] = useState<string | null>(event?.statusId ?? null)
-  const [confirmDelete, setConfirmDelete] = useState(false)
-
-  // Re-sync when the selected activity changes.
-  useEffect(() => {
-    if (!event) return
-    setTitle(event.title)
-    setDescription(event.description ?? '')
-    setNotes(event.notes ?? '')
-    setStartDate(toDateInput(event.startAt))
-    setEndDate(toDateInput(event.endAt))
-    setIdentity({ color: event.color ?? '#288C9B', icon: event.icon ?? '__none__' })
-    setAssignedIds(event.assignedMemberIds ?? [])
-    setTagIds((event.tagIds as string[] | undefined) ?? [])
-    setLocation(event.location ?? '')
-    setUrl(event.url ?? '')
-    setProgressValue(event.percentComplete ?? 0)
-    setParentId(event.parentActivityId ?? null)
-    setStatusId(event.statusId ?? null)
-    setConfirmDelete(false)
-  }, [event?.id]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Sync local date state when the event's dates change (e.g. after a Gantt bar drag).
-  const eventStartAt = event?.startAt
-  const eventEndAt = event?.endAt
-  useEffect(() => {
-    if (eventStartAt) setStartDate(toDateInput(eventStartAt))
-    if (eventEndAt) setEndDate(toDateInput(eventEndAt))
-  }, [eventStartAt, eventEndAt])
-
-  // Sync status when changed externally on the same activity (e.g. after a Kanban
-  // drag-to-column). The main sync effect only fires on id change, so we need a
-  // separate effect keyed on statusId.
-  const eventStatusId = event?.statusId
-  useEffect(() => {
-    setStatusId(eventStatusId ?? null)
-  }, [eventStatusId])
-
-  // Sync assigned members when changed externally (e.g. after a Kanban drag to a
-  // member column). Arrays compare by reference, so use a stable string key.
-  const eventAssignedKey = (event?.assignedMemberIds ?? []).join(',')
-  useEffect(() => {
-    setAssignedIds(event?.assignedMemberIds ?? [])
-  }, [eventAssignedKey]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  const saving = updateMutation.isPending
-  const deleting = deleteMutation.isPending
-  const archiving = archiveMutation.isPending
-
-  // Display dates: live drag overrides take precedence while dragging.
-  const displayStart = liveDragStart ?? startDate
-  const displayEnd = liveDragEnd ?? endDate
-
-  function save(patch: Parameters<typeof updateMutation.mutate>[0]['patch']) {
-    if (!event) return
-    updateMutation.mutate({ activityId: event.id, patch })
-  }
-
-  function handleTitleBlur() {
-    if (title.trim() && title !== event?.title) save({ title: title.trim() })
-  }
-
-  function handleDescriptionBlur() {
-    if (description !== (event?.description ?? '')) save({ description: description || null })
-  }
-
-  function handleNotesBlur() {
-    if (notes !== (event?.notes ?? '')) save({ notes: notes || null } as Parameters<typeof save>[0])
-  }
-
-  function handleLocationBlur() {
-    if (location !== (event?.location ?? '')) save({ location: location || null })
-  }
-
-  function handleUrlBlur() {
-    if (url !== (event?.url ?? '')) save({ url: url || null })
-  }
-
-  function handleStartDateChange(val: string) {
-    setStartDate(val)
-    if (val && val <= endDate) save({ startAt: toISODate(val) })
-  }
-
-  function handleEndDateChange(val: string) {
-    setEndDate(val)
-    if (val && val >= startDate) save({ endAt: toISODate(val) })
-  }
-
-  function handleIdentityChange(next: Identity) {
-    setIdentity(next)
-    save({ color: next.color, icon: next.icon })
-  }
-
-  function toggleAssignee(memberId: string) {
-    const next = assignedIds.includes(memberId)
-      ? assignedIds.filter(id => id !== memberId)
-      : [...assignedIds, memberId]
-    setAssignedIds(next)
-    save({ assignedMemberIds: next })
-  }
-
-  function handleTagsChange(ids: string[]) {
-    setTagIds(ids)
-    save({ tagIds: ids } as Parameters<typeof save>[0])
-  }
-
-  // Saves only on a real change. The shared ProgressRow already clamps to 0–100.
-  function handleProgressCommit(clamped: number) {
-    setProgressValue(clamped)
-    if (clamped !== (event?.percentComplete ?? 0)) {
-      save({ percentComplete: clamped } as Parameters<typeof save>[0])
-    }
-  }
-
-  function handleDelete() {
-    if (!event) return
-    deleteMutation.mutate(event.id, { onSuccess: onClose })
-  }
-
-  function handleArchive() {
-    if (!event) return
-    archiveMutation.mutate(event.id, { onSuccess: onClose })
-  }
-
-  return (
-    <div
-      style={{
-        width: open ? PANEL_WIDTH : 0,
-        flexShrink: 0,
-        borderLeft: open ? '1px solid var(--border)' : 'none',
-        background: 'var(--card)',
-        display: 'flex',
-        flexDirection: 'column',
-        overflow: 'hidden',
-        transition: 'width 0.2s ease',
-      }}
-    >
-      <div style={{ width: PANEL_WIDTH, display: 'flex', flexDirection: 'column', height: '100%' }}>
-        {!event ? null : (<>
-
-        {/* ── Header bar ── */}
-        <div style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-          padding: '0 12px', height: 'var(--topbar-h, 40px)',
-          borderBottom: '1px solid var(--border)', flexShrink: 0,
-        }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-            <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)' }}>Activity detail</span>
-            {saving && <Loader2 size={11} style={{ opacity: 0.5 }} className="animate-spin" />}
-          </div>
-          <button
-            onClick={onClose}
-            style={{
-              width: 24, height: 24, border: 'none', background: 'none', borderRadius: 4,
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              cursor: 'pointer', color: 'var(--muted-foreground)',
-            }}
-            onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-            onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-          >
-            <X size={14} strokeWidth={2} />
-          </button>
-        </div>
-
-        {/* ── Scrollable body (shared with create panel) ── */}
-        <ActivityFieldsBody
-          identity={identity}
-          onIdentityChange={handleIdentityChange}
-          title={title}
-          onTitleChange={setTitle}
-          onTitleBlur={handleTitleBlur}
-          titleFallbackName={event.title || ''}
-          startDate={displayStart}
-          endDate={displayEnd}
-          onStartDateChange={handleStartDateChange}
-          onEndDateChange={handleEndDateChange}
-          description={description}
-          onDescriptionChange={setDescription}
-          onDescriptionBlur={handleDescriptionBlur}
-          members={members}
-          assignedIds={assignedIds}
-          onToggleAssignee={toggleAssignee}
-          statuses={statuses}
-          statusId={statusId}
-          onStatusChange={id => { setStatusId(id); save({ statusId: id } as Parameters<typeof save>[0]) }}
-          teamId={teamId}
-          teamTags={teamTags}
-          tagIds={tagIds}
-          onTagsChange={handleTagsChange}
-          parentActivities={allActivities.filter(a => a.id !== event.id)}
-          parentId={parentId}
-          onParentChange={id => { setParentId(id); save({ parentActivityId: id } as Parameters<typeof save>[0]) }}
-          progress={progressValue}
-          onProgressCommit={handleProgressCommit}
-          location={location}
-          onLocationChange={setLocation}
-          onLocationBlur={handleLocationBlur}
-          url={url}
-          onUrlChange={setUrl}
-          onUrlBlur={handleUrlBlur}
-          notes={notes}
-          onNotesChange={setNotes}
-          onNotesBlur={handleNotesBlur}
-        />
-
-        {/* ── Footer — Archive + Delete buttons ── */}
-        <div style={{ padding: '10px 14px', borderTop: '1px solid var(--border)', flexShrink: 0 }}>
-          {confirmDelete ? (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              <p style={{ fontSize: 12, color: 'var(--muted-foreground)', margin: 0, lineHeight: 1.4 }}>
-                Delete <strong style={{ color: 'var(--foreground)' }}>{event?.title}</strong>? This cannot be undone.
-              </p>
-              <div style={{ display: 'flex', gap: 6 }}>
-                <button
-                  onClick={() => setConfirmDelete(false)}
-                  disabled={deleting}
-                  style={{
-                    flex: 1, fontSize: 12, fontWeight: 600, padding: 7,
-                    borderRadius: 'var(--radius-md)', border: '1px solid var(--border)',
-                    background: 'var(--card)', color: 'var(--foreground)',
-                    cursor: 'pointer', fontFamily: 'var(--font-sans)',
-                  }}
-                >Cancel</button>
-                <button
-                  onClick={handleDelete}
-                  disabled={deleting}
-                  style={{
-                    flex: 1, fontSize: 12, fontWeight: 600, padding: 7,
-                    borderRadius: 'var(--radius-md)', border: 'none',
-                    background: 'var(--destructive)', color: 'white',
-                    cursor: deleting ? 'not-allowed' : 'pointer',
-                    fontFamily: 'var(--font-sans)',
-                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
-                  }}
-                >
-                  {deleting ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />}
-                  Delete
-                </button>
-              </div>
-            </div>
-          ) : (
-            <div style={{ display: 'flex', gap: 6 }}>
-              <button
-                onClick={handleArchive}
-                disabled={archiving}
-                style={{
-                  flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
-                  fontSize: 12, fontWeight: 600, padding: 7,
-                  borderRadius: 'var(--radius-md)', border: '1px solid var(--border)',
-                  background: 'var(--card)', color: 'var(--muted-foreground)',
-                  cursor: archiving ? 'not-allowed' : 'pointer', fontFamily: 'var(--font-sans)',
-                }}
-              >
-                {archiving ? <Loader2 size={12} className="animate-spin" /> : <Archive size={12} strokeWidth={2} />}
-                Archive
-              </button>
-              <button
-                onClick={() => setConfirmDelete(true)}
-                style={{
-                  flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
-                  fontSize: 12, fontWeight: 600, padding: 7,
-                  borderRadius: 'var(--radius-md)', border: 'none',
-                  background: 'hsl(0 72% 95%)', color: 'var(--destructive)',
-                  cursor: 'pointer', fontFamily: 'var(--font-sans)',
-                }}
-              >
-                <Trash2 size={12} strokeWidth={2} />
-                Delete
-              </button>
-            </div>
-          )}
-        </div>
-
-        </>)}
-      </div>
-    </div>
-  )
 }
 ````
 
@@ -53952,1069 +55019,6 @@ paths:
           $ref: "#/components/responses/InternalError"
 ````
 
-## File: packages/web/src/components/gantt/GanttGrid.tsx
-````typescript
-/**
- * GanttGrid — presentational Gantt chart.
- *
- * Renders a sticky header row of column labels, then one row per GanttRow
- * entry. Rows are either group-header dividers or event bars. All data
- * preparation (grouping, sorting, date math) lives in the parent GanttView.
- *
- * Drag on an empty lane cell to select a date range; onLaneDrag fires on
- * mouseup with the resolved start/end dates and the lane's memberId.
- *
- * Drag on an event bar's left/right 8px edge to resize it, or on its body to
- * move it. onBarDrag fires on mouseup with the resolved new dates.
- *
- * When findState is provided with a non-empty query, non-matching event rows
- * are dimmed to 0.3 opacity; matching rows get an amber outline on their bar;
- * the active (parked) match gets a stronger amber outline with a pulse
- * animation. Stepping to a new active match auto-scrolls both axes to center
- * the bar in the viewport.
- */
-
-import { useRef, useState, useCallback, useEffect, useMemo } from 'react';
-import { ChevronDown, ChevronRight } from 'lucide-react';
-import MemberAvatar from '../MemberAvatar';
-import { Badge } from '../identity/Badge';
-import EmptyState from '../shared/EmptyState';
-import type { Member } from '../../types';
-import type { ColumnDef, TimeGranularity } from './granularity';
-import { addDays, snapDivisorFor } from './granularity';
-
-export const DEFAULT_LABEL_COL_W = 240;
-const MIN_LABEL_COL_W = 140;
-const MAX_LABEL_COL_W = 400;
-const HEADER_H = 36;
-const ROW_H = 44;
-const GROUP_H = 30;
-const COL_W = 80;
-const EDGE_W = 8; // px hit zone for resize handles
-
-/** A positioned activity bar ready for rendering. */
-export interface GanttActivity {
-  id: string;
-  title: string;
-  /** Fractional column start (0-based). */
-  startCol: number;
-  /** Fractional column span. */
-  span: number;
-  /** Hex color for bar background and badge. */
-  color: string;
-  /** Icon ID from the activity's identity, if set. */
-  icon?: string;
-  members: Member[];
-  isChild: boolean;
-  /** Nesting depth in the parent→child tree (0 = root). Drives left indent. */
-  depth?: number;
-  /** True when this activity has child activities nested beneath it. */
-  hasChildren?: boolean;
-  /** True when this activity's subtree is currently collapsed (children hidden). */
-  collapsed?: boolean;
-  percentComplete?: number | null;
-}
-
-export type GanttRow =
-  | { kind: 'group'; id: string; label: string; color: string; memberColors?: string[]; count: number; collapsed?: boolean }
-  | { kind: 'activity'; event: GanttActivity };
-
-/** Visual state for the in-view Find feature. Passed from GanttView. */
-export interface FindState {
-  hasQuery: boolean;
-  matchedIds: Set<string>;
-  activeMatchId: string | null;
-  /** Per-event match reasons for "why matched" tooltip (non-title reasons only). */
-  matchReasons: Map<string, string[]>;
-  filtersActive: boolean;
-  matchCount: number;
-}
-
-interface DragState {
-  rowIdx: number;
-  memberId: string | null;
-  startCol: number;
-  currentCol: number;
-}
-
-type BarDragZone = 'left' | 'right' | 'body';
-
-interface BarDragState {
-  eventId: string;
-  zone: BarDragZone;
-  /** Fractional column of the event's visual start when drag began. */
-  initStartCol: number;
-  /** Fractional column of the event's visual end (startCol + span) when drag began. */
-  initEndCol: number;
-  /** Lane-relative x of the mouse when drag began. */
-  initMouseX: number;
-  /** Page-relative left edge of the lane div. */
-  laneLeft: number;
-  /** Current snapped start column (integer). */
-  snapStartCol: number;
-  /** Current snapped end column (integer, exclusive — col after last occupied). */
-  snapEndCol: number;
-}
-
-interface TooltipState {
-  text: string;
-  /** Viewport-relative x for tooltip positioning. */
-  x: number;
-  /** Viewport-relative y for tooltip positioning. */
-  y: number;
-}
-
-/** Tooltip shown when hovering a matched event bar that matched on a non-title field. */
-interface MatchTooltipState {
-  reasons: string[];
-  x: number;
-  y: number;
-}
-
-interface Props {
-  rows: GanttRow[];
-  columns: ColumnDef[];
-  /** Fractional column index of today (-1 if outside range). */
-  todayIndex: number;
-  selectedActivityId: string | null;
-  onSelectActivity: (id: string | null) => void;
-  /** Called when the user drags on an empty lane cell to create an activity. */
-  onLaneDrag?: (startDate: Date, endDate: Date, memberId: string | null) => void;
-  /** Called when the user drags a bar edge or body to resize/move it. */
-  onBarDrag?: (activityId: string, newStartDate: Date, newEndDate: Date) => void;
-  /** Called during a bar drag with the current snapped dates — for live sidebar update. */
-  onBarDragProgress?: (activityId: string, newStartDate: Date, newEndDate: Date) => void;
-  /** Resolved granularity — used to compute the finer snap divisor during drag. */
-  resolvedGranularity?: TimeGranularity | 'auto';
-  /** Find state from GanttView; absent when the find bar is closed/idle. */
-  findState?: FindState;
-  /** Called when the user clicks "Clear filters" in the no-matches callout. */
-  onClearFilters?: () => void;
-  /** Current label column width in px — lifts state to the parent so it survives view switches. */
-  labelColW?: number;
-  /** Called when the user drags the column resize handle. */
-  onLabelColWChange?: (w: number) => void;
-  /** Toggles the collapsed state of an activity's child subtree (parent grouping). */
-  onToggleActivity?: (id: string) => void;
-  /** Toggles the collapsed state of a group header (member grouping). */
-  onToggleGroup?: (id: string) => void;
-  /**
-   * When false, all click and drag interactions are suppressed — bars, lane
-   * drags, and group toggles become inert. Used by the public share viewer.
-   * Default: true.
-   */
-  interactive?: boolean;
-}
-
-// ── Bar drag helpers ─────────────────────────────────────────────────────────
-
-function tooltipText(zone: BarDragZone, startDate: Date, endDate: Date): string {
-  if (zone === 'left') return `Start: ${formatDragDate(startDate)}`;
-  if (zone === 'right') return `End: ${formatDragDate(endDate)}`;
-  return `${formatDragDate(startDate)} → ${formatDragDate(endDate)}`;
-}
-
-// ── Date helpers (support fractional column positions) ───────────────────────
-
-// Maps a fractional column position to a calendar Date by interpolating within
-// the column's day range. Uses the full period length (start→end) rather than
-// the clamped `days` field so boundary columns still produce correct dates.
-function colFracToDate(colFrac: number, columns: ColumnDef[]): Date {
-  let remaining = Math.max(0, colFrac);
-  for (const col of columns) {
-    if (remaining < 1) {
-      const periodDays = Math.round((col.end.getTime() - col.start.getTime()) / 86_400_000);
-      return addDays(col.start, Math.round(remaining * periodDays));
-    }
-    remaining -= 1;
-  }
-  return columns[columns.length - 1].end;
-}
-
-function colToStartDate(colFrac: number, columns: ColumnDef[]): Date {
-  return colFracToDate(Math.max(0, colFrac), columns);
-}
-
-// endColFrac is exclusive (the fractional col just past the last occupied day).
-function colToEndDate(endColFrac: number, columns: ColumnDef[]): Date {
-  // The last included date is 1 day before the date at the exclusive end.
-  return addDays(colFracToDate(Math.max(0, endColFrac), columns), -1);
-}
-
-
-export function formatDragDate(d: Date): string {
-  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
-}
-
-export default function GanttGrid({
-  rows,
-  columns,
-  todayIndex,
-  selectedActivityId,
-  onSelectActivity,
-  onLaneDrag,
-  onBarDrag,
-  onBarDragProgress,
-  resolvedGranularity,
-  findState,
-  onClearFilters,
-  labelColW: labelColWProp,
-  onLabelColWChange,
-  onToggleActivity,
-  onToggleGroup,
-  interactive = true,
-}: Props) {
-  // ── Resizable label column ─────────────────────────────────────────────────
-  // When the parent passes labelColW + onLabelColWChange the column is
-  // controlled, so the width survives view switches (e.g. Gantt ↔ List).
-  // When neither is provided we fall back to internal state.
-  const [internalLabelColW, setInternalLabelColW] = useState(DEFAULT_LABEL_COL_W);
-  const labelColW = labelColWProp ?? internalLabelColW;
-  const setLabelColW = onLabelColWChange ?? setInternalLabelColW;
-
-  const totalW = useMemo(
-    () => labelColW + columns.length * COL_W,
-    [labelColW, columns.length],
-  );
-
-  const labelColWRef = useRef(labelColW);
-  useEffect(() => { labelColWRef.current = labelColW; }, [labelColW]);
-
-  const handleColumnResizeMouseDown = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    const startX = e.clientX;
-    const startW = labelColWRef.current;
-
-    function onMouseMove(mv: MouseEvent) {
-      const next = Math.max(MIN_LABEL_COL_W, Math.min(MAX_LABEL_COL_W, startW + (mv.clientX - startX)));
-      setLabelColW(next);
-    }
-    function onMouseUp() {
-      window.removeEventListener('mousemove', onMouseMove);
-      window.removeEventListener('mouseup', onMouseUp);
-    }
-    window.addEventListener('mousemove', onMouseMove);
-    window.addEventListener('mouseup', onMouseUp);
-  // setLabelColW is either a stable setter from useState or a stable callback from the parent.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // Integer column index that contains today (for background highlight)
-  const todayCol = todayIndex >= 0 ? Math.floor(todayIndex) : -1;
-
-  // ── Scroll container ref (needed for find auto-scroll) ────────────────────
-  const scrollContainerRef = useRef<HTMLDivElement>(null);
-
-  // Always-current rows ref so the active-match scroll effect doesn't go stale
-  const rowsRef = useRef(rows);
-  useEffect(() => { rowsRef.current = rows; });
-
-  // ── Drag-to-create state ──────────────────────────────────────────────────
-  const [drag, setDrag] = useState<DragState | null>(null);
-  const dragRef = useRef<DragState | null>(null);
-
-  // ── Bar drag state ────────────────────────────────────────────────────────
-  const [barDrag, setBarDrag] = useState<BarDragState | null>(null);
-  const barDragRef = useRef<BarDragState | null>(null);
-  const [dragTooltip, setDragTooltip] = useState<TooltipState | null>(null);
-
-  // ── "Why matched" hover tooltip ───────────────────────────────────────────
-  const [matchTooltip, setMatchTooltip] = useState<MatchTooltipState | null>(null);
-
-  const colFromX = useCallback((laneX: number) => {
-    return Math.max(0, Math.min(columns.length - 1, Math.floor(laneX / COL_W)));
-  }, [columns.length]);
-
-  // ── Auto-scroll to active find match ─────────────────────────────────────
-  useEffect(() => {
-    const activeId = findState?.activeMatchId;
-    if (!activeId || !scrollContainerRef.current) return;
-    const container = scrollContainerRef.current;
-    const currentRows = rowsRef.current;
-
-    let y = HEADER_H;
-    let matchedActivity: GanttActivity | null = null;
-    for (const row of currentRows) {
-      if (row.kind === 'activity' && row.event.id === activeId) {
-        matchedActivity = row.event;
-        break;
-      }
-      y += row.kind === 'group' ? GROUP_H : ROW_H;
-    }
-    if (!matchedActivity) return;
-
-    const viewH = container.clientHeight;
-    const viewW = container.clientWidth;
-    const scrollTop = Math.max(0, y - viewH / 2 + ROW_H / 2);
-    const eventCenterX = labelColWRef.current + (matchedActivity.startCol + matchedActivity.span / 2) * COL_W;
-    const scrollLeft = Math.max(0, eventCenterX - viewW / 2);
-
-    container.scrollTo({ left: scrollLeft, top: scrollTop, behavior: 'smooth' });
-  // Only re-run when the active match changes, not when rows or columns change.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [findState?.activeMatchId]);
-
-  const handleLaneMouseDown = useCallback((
-    e: React.MouseEvent<HTMLDivElement>,
-    rowIdx: number,
-    memberId: string | null,
-  ) => {
-    if (!interactive || !onLaneDrag) return;
-    e.preventDefault();
-    const rect = e.currentTarget.getBoundingClientRect();
-    const col = colFromX(e.clientX - rect.left);
-    const state: DragState = { rowIdx, memberId, startCol: col, currentCol: col };
-    dragRef.current = state;
-    setDrag(state);
-
-    function onMouseMove(mv: MouseEvent) {
-      if (!dragRef.current) return;
-      const col2 = colFromX(mv.clientX - rect.left);
-      const next = { ...dragRef.current, currentCol: col2 };
-      dragRef.current = next;
-      setDrag({ ...next });
-    }
-
-    function onMouseUp() {
-      const s = dragRef.current;
-      if (s && onLaneDrag && columns.length > 0) {
-        const lo = Math.min(s.startCol, s.currentCol);
-        const hi = Math.max(s.startCol, s.currentCol);
-        const startDate = columns[lo]?.start ?? columns[0].start;
-        const endDate = columns[hi]?.start ?? columns[hi > 0 ? hi : 0].start;
-        onLaneDrag(startDate, endDate, s.memberId);
-      }
-      dragRef.current = null;
-      setDrag(null);
-      window.removeEventListener('mousemove', onMouseMove);
-      window.removeEventListener('mouseup', onMouseUp);
-    }
-
-    window.addEventListener('mousemove', onMouseMove);
-    window.addEventListener('mouseup', onMouseUp);
-  }, [colFromX, columns, onLaneDrag]);
-
-  // ── Bar drag handler ──────────────────────────────────────────────────────
-
-  const handleBarMouseDown = useCallback((
-    e: React.MouseEvent<HTMLDivElement>,
-    ev: GanttActivity,
-    zone: BarDragZone,
-  ) => {
-    if (!onBarDrag) return;
-    // Only allow drag/resize when the bar is already selected.
-    if (ev.id !== selectedActivityId) return;
-    e.preventDefault();
-    e.stopPropagation(); // prevent lane-drag from firing
-
-    // The bar's parent is the lane div (position: relative, flex: 1).
-    const laneEl = e.currentTarget.parentElement;
-    if (!laneEl) return;
-    const laneRect = laneEl.getBoundingClientRect();
-
-    const initStartCol = ev.startCol;
-    const initEndCol = ev.startCol + ev.span;
-    const initMouseX = e.clientX - laneRect.left;
-    const state: BarDragState = {
-      eventId: ev.id,
-      zone,
-      initStartCol,
-      initEndCol,
-      initMouseX,
-      laneLeft: laneRect.left,
-      snapStartCol: initStartCol,
-      snapEndCol: initEndCol,
-    };
-    barDragRef.current = state;
-    setBarDrag(state);
-
-    // Initial tooltip
-    const startDate = colToStartDate(state.snapStartCol, columns);
-    const endDate = colToEndDate(state.snapEndCol, columns);
-    setDragTooltip({
-      text: tooltipText(zone, startDate, endDate),
-      x: e.clientX,
-      y: e.clientY,
-    });
-
-    function onMouseMove(mv: MouseEvent) {
-      const s = barDragRef.current;
-      if (!s) return;
-
-      const deltaCol = (mv.clientX - (s.laneLeft + s.initMouseX)) / COL_W;
-      const n = columns.length;
-      // Finer snap: snap one granularity level below the active zoom.
-      const div = snapDivisorFor(resolvedGranularity ?? 'auto');
-      const step = 1 / div;
-      const snap = (x: number) => Math.round(x / step) * step;
-
-      let nextStart = s.snapStartCol;
-      let nextEnd = s.snapEndCol;
-
-      if (s.zone === 'left') {
-        nextStart = Math.max(0, Math.min(snap(s.initStartCol + deltaCol), s.initEndCol - step));
-        nextEnd = s.initEndCol;
-      } else if (s.zone === 'right') {
-        nextStart = s.initStartCol;
-        nextEnd = Math.max(s.initStartCol + step, Math.min(snap(s.initEndCol + deltaCol), n));
-      } else {
-        // body: preserve exact span, shift both by snapped delta
-        const span = s.initEndCol - s.initStartCol;
-        const shift = snap(deltaCol);
-        nextStart = Math.max(0, Math.min(s.initStartCol + shift, n - span));
-        nextEnd = nextStart + span;
-      }
-
-      const next: BarDragState = { ...s, snapStartCol: nextStart, snapEndCol: nextEnd };
-      barDragRef.current = next;
-      setBarDrag(next);
-
-      const sd = colToStartDate(nextStart, columns);
-      const ed = colToEndDate(nextEnd, columns);
-      setDragTooltip({ text: tooltipText(s.zone, sd, ed), x: mv.clientX, y: mv.clientY });
-      onBarDragProgress?.(s.eventId, sd, ed);
-    }
-
-    function onMouseUp() {
-      const s = barDragRef.current;
-      if (s && onBarDrag) {
-        const sd = colToStartDate(s.snapStartCol, columns);
-        const ed = colToEndDate(s.snapEndCol, columns);
-        onBarDrag(s.eventId, sd, ed); // eventId field preserved in BarDragState
-      }
-      barDragRef.current = null;
-      setBarDrag(null);
-      setDragTooltip(null);
-      window.removeEventListener('mousemove', onMouseMove);
-      window.removeEventListener('mouseup', onMouseUp);
-    }
-
-    window.addEventListener('mousemove', onMouseMove);
-    window.addEventListener('mouseup', onMouseUp);
-  }, [columns, onBarDrag]);
-
-  // Header cells are shared between the empty-state path and the unified scroll path.
-  const headerContent = (
-    <>
-      <div
-        style={{
-          width: labelColW,
-          flexShrink: 0,
-          padding: '0 16px',
-          display: 'flex',
-          alignItems: 'center',
-          borderRight: '1px solid var(--border)',
-          fontSize: 11,
-          fontWeight: 600,
-          color: 'var(--muted-foreground)',
-          textTransform: 'uppercase' as const,
-          letterSpacing: '0.06em',
-          position: 'sticky' as const,
-          left: 0,
-          zIndex: 6,
-          background: 'var(--card)',
-          userSelect: 'none',
-        }}
-      >
-        Activity
-        {/* Drag handle — resize the label column */}
-        <div
-          onMouseDown={handleColumnResizeMouseDown}
-          style={{
-            position: 'absolute',
-            right: 0,
-            top: 0,
-            bottom: 0,
-            width: 6,
-            cursor: 'col-resize',
-            zIndex: 10,
-          }}
-        />
-      </div>
-
-      {columns.map((col, i) => {
-        const isToday = i === todayCol;
-        return (
-          <div
-            key={i}
-            style={{
-              width: COL_W,
-              flexShrink: 0,
-              height: HEADER_H,
-              display: 'flex',
-              flexDirection: 'column',
-              alignItems: 'center',
-              justifyContent: 'center',
-              padding: '0 4px 8px',
-              gap: 2,
-              borderRight: i < columns.length - 1 ? '1px solid var(--border)' : 'none',
-              position: 'relative',
-              overflow: 'hidden',
-            }}
-          >
-            <span style={{
-              fontSize: col.sublabel ? 10 : 11,
-              fontWeight: isToday ? 700 : 600,
-              color: isToday ? 'var(--primary)' : 'var(--muted-foreground)',
-              lineHeight: 1.2,
-              textAlign: 'center',
-            }}>
-              {col.label}
-            </span>
-            {col.sublabel && (
-              <span style={{
-                fontSize: 9,
-                fontWeight: 500,
-                color: 'var(--muted-foreground)',
-                lineHeight: 1,
-                opacity: isToday ? 1 : 0.75,
-              }}>
-                {col.sublabel}
-              </span>
-            )}
-            {isToday && (
-              <div
-                style={{
-                  position: 'absolute',
-                  bottom: 2,
-                  left: `${((todayIndex - todayCol) * 100)}%`,
-                  transform: 'translateX(-50%)',
-                  width: 6,
-                  height: 6,
-                  borderRadius: '50%',
-                  background: 'var(--secondary)',
-                }}
-              />
-            )}
-          </div>
-        );
-      })}
-    </>
-  );
-
-  // ── Find helpers ──────────────────────────────────────────────────────────
-
-  const { hasQuery = false, matchedIds: matchSet, activeMatchId, matchReasons: reasons } = findState ?? {};
-
-  function isMatch(id: string) { return matchSet?.has(id) ?? false; }
-  function isActive(id: string) { return activeMatchId === id; }
-
-  // Non-title reasons to surface in the "why matched" tooltip
-  function nonTitleReasons(id: string): string[] {
-    return (reasons?.get(id) ?? []).filter(r => r !== 'title');
-  }
-
-  // ── Empty state: header + centered placeholder ──────────────────────────────
-  if (rows.length === 0) {
-    const showNoMatchCallout = hasQuery && findState && findState.matchCount === 0;
-    return (
-      <div style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-        <div style={{ overflowX: 'auto', overflowY: 'hidden', flexShrink: 0 }}>
-          <div style={{ width: totalW, display: 'flex', height: HEADER_H, background: 'var(--card)', borderBottom: '1px solid var(--border)' }}>
-            {headerContent}
-          </div>
-        </div>
-        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12 }}>
-          <EmptyState message="No viewable activities" />
-          {showNoMatchCallout && findState.filtersActive && (
-            <p style={{ fontSize: 12, color: 'var(--muted-foreground)', textAlign: 'center' }}>
-              No matches in current view.{' '}
-              {onClearFilters && (
-                <button
-                  onClick={onClearFilters}
-                  style={{ color: 'var(--primary)', background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, padding: 0, fontFamily: 'inherit' }}
-                >
-                  Clear filters
-                </button>
-              )}
-            </p>
-          )}
-        </div>
-      </div>
-    );
-  }
-
-  // ── Unified scroll: header sticky inside the single container ──────────────
-  return (
-    <div style={{ height: '100%', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-      <div ref={scrollContainerRef} style={{ flex: 1, overflow: 'auto' }}>
-        <div style={{ width: totalW }}>
-
-          {/* Sticky header row — scrolls horizontally with the grid, pins to top vertically */}
-          <div style={{ position: 'sticky', top: 0, zIndex: 5, display: 'flex', height: HEADER_H, background: 'var(--card)', borderBottom: '1px solid var(--border)' }}>
-            {headerContent}
-          </div>
-
-          {rows.map((row, rowIdx) => {
-            if (row.kind === 'group') {
-              return (
-                <div
-                  key={row.id}
-                  style={{
-                    display: 'flex',
-                    height: GROUP_H,
-                    background: 'var(--muted)',
-                    borderBottom: '1px solid var(--border)',
-                  }}
-                >
-                  <div
-                    onClick={onToggleGroup ? () => onToggleGroup(row.id) : undefined}
-                    style={{
-                      width: labelColW,
-                      flexShrink: 0,
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 6,
-                      padding: '0 14px',
-                      position: 'sticky',
-                      left: 0,
-                      background: 'var(--muted)',
-                      zIndex: 3,
-                      borderRight: '1px solid var(--border)',
-                      cursor: onToggleGroup ? 'pointer' : 'default',
-                      userSelect: 'none',
-                    }}
-                  >
-                    {onToggleGroup ? (
-                      row.collapsed
-                        ? <ChevronRight size={14} strokeWidth={2.5} style={{ flexShrink: 0, color: 'var(--muted-foreground)' }} />
-                        : <ChevronDown size={14} strokeWidth={2.5} style={{ flexShrink: 0, color: 'var(--muted-foreground)' }} />
-                    ) : null}
-                    {row.memberColors && row.memberColors.length > 0 ? (
-                      // Stacked color dots for member-combination groups
-                      <div style={{ display: 'flex', flexShrink: 0 }}>
-                        {row.memberColors.map((c, i) => (
-                          <div
-                            key={i}
-                            style={{
-                              width: 9,
-                              height: 9,
-                              borderRadius: '50%',
-                              background: c,
-                              marginLeft: i === 0 ? 0 : -3,
-                              outline: '1.5px solid var(--muted)',
-                            }}
-                          />
-                        ))}
-                      </div>
-                    ) : (
-                      <div
-                        style={{
-                          width: 9,
-                          height: 9,
-                          borderRadius: 2,
-                          background: row.color,
-                          flexShrink: 0,
-                        }}
-                      />
-                    )}
-                    <span
-                      style={{
-                        fontSize: 11,
-                        fontWeight: 700,
-                        color: 'var(--foreground)',
-                        textTransform: 'uppercase',
-                        letterSpacing: '0.05em',
-                        flex: 1,
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis',
-                        whiteSpace: 'nowrap',
-                        fontFamily: 'var(--font-sans)',
-                      }}
-                    >
-                      {row.label}
-                    </span>
-                    <span
-                      style={{
-                        fontSize: 10,
-                        color: 'var(--muted-foreground)',
-                        flexShrink: 0,
-                        fontFamily: 'var(--font-sans)',
-                      }}
-                    >
-                      {row.count}
-                    </span>
-                  </div>
-                  <div style={{ flex: 1 }} />
-                </div>
-              );
-            }
-
-            const ev = row.event;
-            const selected = selectedActivityId === ev.id;
-            const indent = (ev.depth ?? (ev.isChild ? 1 : 0)) * 18;
-            const evIsMatch = isMatch(ev.id);
-            const evIsActive = isActive(ev.id);
-            const dimmed = hasQuery && !evIsMatch;
-            const extraReasons = nonTitleReasons(ev.id);
-
-            return (
-              <div
-                key={`${ev.id}-${rowIdx}`}
-                style={{
-                  display: 'flex',
-                  height: ROW_H,
-                  borderBottom: '1px solid var(--border)',
-                  position: 'relative',
-                  background: selected ? 'hsl(188 59% 38% / .04)' : 'transparent',
-                  opacity: dimmed ? 0.3 : 1,
-                  transition: 'opacity 0.15s',
-                }}
-              >
-                {/* Sticky label cell */}
-                <div
-                  style={{
-                    width: labelColW,
-                    flexShrink: 0,
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 7,
-                    paddingLeft: 14 + indent,
-                    paddingRight: 10,
-                    position: 'sticky',
-                    left: 0,
-                    background: selected ? 'var(--muted)' : 'var(--card)',
-                    zIndex: 6,
-                    borderRight: '1px solid var(--border)',
-                    cursor: 'pointer',
-                    transition: 'background 0.1s',
-                  }}
-                  onClick={() => interactive && onSelectActivity(ev.id === selectedActivityId ? null : ev.id)}
-                  onMouseEnter={e => {
-                    e.currentTarget.style.background = 'var(--muted)';
-                  }}
-                  onMouseLeave={e => {
-                    e.currentTarget.style.background = selected ? 'var(--muted)' : 'var(--card)';
-                  }}
-                >
-                  {/* Expand/collapse chevron slot — reserved (empty for leaves) so
-                      sibling badges stay aligned within a tree level. */}
-                  {onToggleActivity && (
-                    <div style={{ width: 16, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                      {ev.hasChildren && (
-                        <button
-                          onClick={e => { e.stopPropagation(); onToggleActivity(ev.id); }}
-                          title={ev.collapsed ? 'Expand' : 'Collapse'}
-                          aria-label={ev.collapsed ? 'Expand children' : 'Collapse children'}
-                          style={{
-                            display: 'flex', alignItems: 'center', justifyContent: 'center',
-                            width: 16, height: 16, padding: 0, border: 'none', borderRadius: 3,
-                            background: 'none', cursor: 'pointer', color: 'var(--muted-foreground)',
-                          }}
-                          onMouseEnter={e => (e.currentTarget.style.background = 'var(--border)')}
-                          onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-                        >
-                          {ev.collapsed
-                            ? <ChevronRight size={13} strokeWidth={2.5} />
-                            : <ChevronDown size={13} strokeWidth={2.5} />}
-                        </button>
-                      )}
-                    </div>
-                  )}
-                  <Badge
-                    identity={{ color: ev.color, icon: ev.icon ?? '__none__' }}
-                    name={ev.title}
-                    shape="square"
-                    size={20}
-                  />
-                  <span
-                    style={{
-                      fontSize: 12,
-                      fontWeight: 500,
-                      color: 'var(--foreground)',
-                      flex: 1,
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                      whiteSpace: 'nowrap',
-                      fontFamily: 'var(--font-sans)',
-                    }}
-                  >
-                    {ev.title}
-                  </span>
-                  {ev.members.length > 0 && (
-                    <div style={{ display: 'flex', flexShrink: 0 }}>
-                      {ev.members.slice(0, 3).map((m, i) => (
-                        <div
-                          key={m.id}
-                          style={{ marginLeft: i === 0 ? 0 : -5 }}
-                          title={m.name}
-                        >
-                          <MemberAvatar member={m} size={20} />
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-
-                {/* Lane — background columns + today line + event bar */}
-                <div
-                  style={{ position: 'relative', flex: 1, display: 'flex', cursor: (interactive && onLaneDrag) ? 'crosshair' : 'default' }}
-                  onMouseDown={e => handleLaneMouseDown(e, rowIdx, ev.members[0]?.id ?? null)}
-                >
-                  {columns.map((_, i) => (
-                    <div
-                      key={i}
-                      style={{
-                        width: COL_W,
-                        height: '100%',
-                        flexShrink: 0,
-                        borderRight: i < columns.length - 1 ? '1px solid var(--border)' : 'none',
-                        background:
-                          i === todayCol && !selected ? 'hsl(188 59% 38% / .04)' : 'transparent',
-                      }}
-                    />
-                  ))}
-
-                  {/* Drag selection highlight */}
-                  {drag && drag.rowIdx === rowIdx && (() => {
-                    const lo = Math.min(drag.startCol, drag.currentCol);
-                    const hi = Math.max(drag.startCol, drag.currentCol);
-                    return (
-                      <div
-                        style={{
-                          position: 'absolute',
-                          top: 4,
-                          bottom: 4,
-                          left: lo * COL_W,
-                          width: (hi - lo + 1) * COL_W,
-                          background: 'hsl(188 59% 38% / .18)',
-                          border: '1.5px dashed var(--primary)',
-                          borderRadius: 4,
-                          pointerEvents: 'none',
-                          zIndex: 3,
-                        }}
-                      />
-                    );
-                  })()}
-
-                  {/* Today vertical line */}
-                  {todayIndex >= 0 && (
-                    <div
-                      style={{
-                        position: 'absolute',
-                        top: 0,
-                        bottom: 0,
-                        left: todayIndex * COL_W,
-                        width: 2,
-                        background: 'var(--secondary)',
-                        opacity: 0.5,
-                        zIndex: 2,
-                        pointerEvents: 'none',
-                      }}
-                    />
-                  )}
-
-                  {/* Event bar — live position overridden while dragging */}
-                  {(() => {
-                    const isDragging = barDrag?.eventId === ev.id;
-                    const startCol = isDragging ? barDrag!.snapStartCol : ev.startCol;
-                    const endCol = isDragging ? barDrag!.snapEndCol : ev.startCol + ev.span;
-                    const left = startCol * COL_W + 2;
-                    const width = Math.max((endCol - startCol) * COL_W - 4, COL_W * 0.3);
-                    // Only selected bars show grab/move cursors; unselected bars show pointer
-                    // to prevent accidental date changes when the user just wants to inspect.
-                    const grabCursor = isDragging
-                      ? 'grabbing'
-                      : (selected && onBarDrag) ? 'grab' : 'pointer';
-
-                    // Box shadow: find states take precedence over selection ring.
-                    // CSS classes (.find-active-bar, .find-match-bar) provide the
-                    // amber outline; we only set inline boxShadow for the selected ring.
-                    const boxShadow = (evIsActive || evIsMatch)
-                      ? undefined
-                      : selected
-                        ? `0 0 0 2px white, 0 0 0 4px ${ev.color}`
-                        : 'var(--shadow-sm)';
-
-                    return (
-                      <div
-                        onClick={() => {
-                          // Bar click always selects — use the label cell to deselect.
-                          if (interactive && !isDragging) onSelectActivity(ev.id);
-                        }}
-                        onMouseDown={e => {
-                          if (!interactive || !onBarDrag) { e.stopPropagation(); return; }
-                          const barRect = e.currentTarget.getBoundingClientRect();
-                          const xInBar = e.clientX - barRect.left;
-                          let zone: BarDragZone;
-                          if (xInBar <= EDGE_W) zone = 'left';
-                          else if (xInBar >= barRect.width - EDGE_W) zone = 'right';
-                          else zone = 'body';
-                          handleBarMouseDown(e, ev, zone);
-                        }}
-                        onMouseEnter={e => {
-                          if (!isDragging) e.currentTarget.style.filter = 'brightness(1.08)';
-                          // Show "why matched" tooltip for non-title matches
-                          if (extraReasons.length > 0) {
-                            setMatchTooltip({ reasons: extraReasons, x: e.clientX, y: e.clientY });
-                          }
-                        }}
-                        onMouseMove={e => {
-                          if (matchTooltip) {
-                            setMatchTooltip(t => t ? { ...t, x: e.clientX, y: e.clientY } : null);
-                          }
-                        }}
-                        onMouseLeave={e => {
-                          e.currentTarget.style.filter = '';
-                          setMatchTooltip(null);
-                        }}
-                        className={evIsActive ? 'find-active-bar' : evIsMatch ? 'find-match-bar' : undefined}
-                        style={{
-                          position: 'absolute',
-                          top: 9,
-                          bottom: 9,
-                          left,
-                          width,
-                          background: ev.color,
-                          borderRadius: 5,
-                          display: 'flex',
-                          alignItems: 'center',
-                          padding: `0 ${EDGE_W + 2}px`,
-                          fontSize: 11,
-                          fontWeight: 600,
-                          color: 'white',
-                          overflow: 'hidden',
-                          whiteSpace: 'nowrap',
-                          textOverflow: 'ellipsis',
-                          cursor: grabCursor,
-                          zIndex: 4,
-                          boxShadow,
-                          opacity: isDragging ? 0.85 : 1,
-                          transition: isDragging ? 'none' : 'box-shadow 0.12s, opacity 0.1s',
-                          fontFamily: 'var(--font-sans)',
-                          userSelect: 'none',
-                        }}
-                      >
-                        {/* Progress fill overlay — subtle darker shade showing % complete */}
-                        {(ev.percentComplete ?? 0) > 0 && (
-                          <div
-                            style={{
-                              position: 'absolute',
-                              left: 0,
-                              top: 0,
-                              bottom: 0,
-                              width: `${ev.percentComplete}%`,
-                              background: 'rgba(0,0,0,0.18)',
-                              borderRadius: 5,
-                              pointerEvents: 'none',
-                            }}
-                          />
-                        )}
-                        {/* Left resize handle — only shown on selected bars */}
-                        {onBarDrag && selected && (
-                          <div
-                            style={{
-                              position: 'absolute',
-                              left: 0,
-                              top: 0,
-                              bottom: 0,
-                              width: EDGE_W,
-                              cursor: 'ew-resize',
-                              borderRadius: '5px 0 0 5px',
-                            }}
-                          />
-                        )}
-                        {ev.title}
-                        {/* Right resize handle — only shown on selected bars */}
-                        {onBarDrag && selected && (
-                          <div
-                            style={{
-                              position: 'absolute',
-                              right: 0,
-                              top: 0,
-                              bottom: 0,
-                              width: EDGE_W,
-                              cursor: 'ew-resize',
-                              borderRadius: '0 5px 5px 0',
-                            }}
-                          />
-                        )}
-                      </div>
-                    );
-                  })()}
-                </div>
-              </div>
-            );
-          })}
-
-          {/* No-matches-in-view callout — rendered inside the scroll container */}
-          {hasQuery && findState && findState.matchCount === 0 && rows.length > 0 && findState.filtersActive && (
-            <div style={{
-              padding: '12px 16px',
-              fontSize: 12,
-              color: 'var(--muted-foreground)',
-              borderTop: '1px solid var(--border)',
-            }}>
-              No matches in current view.{' '}
-              {onClearFilters && (
-                <button
-                  onClick={onClearFilters}
-                  style={{ color: 'var(--primary)', background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, padding: 0, fontFamily: 'inherit' }}
-                >
-                  Clear filters
-                </button>
-              )}
-            </div>
-          )}
-
-        </div>
-      </div>
-
-      {/* Drag tooltip — fixed position follows the mouse during bar drag */}
-      {dragTooltip && (
-        <div
-          style={{
-            position: 'fixed',
-            left: dragTooltip.x + 14,
-            top: dragTooltip.y - 28,
-            background: 'var(--popover)',
-            color: 'var(--popover-foreground)',
-            border: '1px solid var(--border)',
-            borderRadius: 6,
-            padding: '4px 10px',
-            fontSize: 11,
-            fontWeight: 600,
-            fontFamily: 'var(--font-sans)',
-            pointerEvents: 'none',
-            zIndex: 9999,
-            whiteSpace: 'nowrap',
-            boxShadow: 'var(--shadow-md)',
-          }}
-        >
-          {dragTooltip.text}
-        </div>
-      )}
-
-      {/* "Why matched" tooltip — shown on hover for non-title match reasons */}
-      {matchTooltip && (
-        <div
-          style={{
-            position: 'fixed',
-            left: matchTooltip.x + 12,
-            top: matchTooltip.y - 36,
-            background: 'var(--popover)',
-            color: 'var(--popover-foreground)',
-            border: '1px solid var(--border)',
-            borderRadius: 6,
-            padding: '4px 10px',
-            fontSize: 11,
-            fontFamily: 'var(--font-sans)',
-            pointerEvents: 'none',
-            zIndex: 9999,
-            whiteSpace: 'nowrap',
-            boxShadow: 'var(--shadow-md)',
-          }}
-        >
-          {matchTooltip.reasons.map(r => (
-            <div key={r} style={{ lineHeight: 1.6 }}>matched {r}</div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-````
-
 ## File: docs/TASKS.md
 ````markdown
 # Tasks
@@ -60485,6 +60489,15 @@ export default function DashboardPage() {
 ## File: docs/log.md
 ````markdown
 # Development Log
+
+---
+
+## 2026-06-05 — /test-phase 13.1
+
+- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
+- Result: 6 pass, 2 pass-with-skips (ws-smoke: heartbeat skipped per TESTING.md; web-e2e: live browser skipped, static assertions pass)
+- Smoke target: http://epcot.lan:8081
+- Note: security-review flagged a non-blocking PII concern — `share_handler.go:249` falls back to email as display name when `DisplayName` is unset, which can expose member emails in public share responses
 
 ---
 
