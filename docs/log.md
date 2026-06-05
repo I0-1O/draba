@@ -2,6 +2,15 @@
 
 ---
 
+## 2026-06-05 — /test-phase 13.1
+
+- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
+- Result: 6 pass, 2 pass-with-skips (ws-smoke: heartbeat skipped per TESTING.md; web-e2e: live browser skipped, static assertions pass)
+- Smoke target: http://epcot.lan:8081
+- Note: security-review flagged a non-blocking PII concern — `share_handler.go:249` falls back to email as display name when `DisplayName` is unset, which can expose member emails in public share responses
+
+---
+
 ## 2026-06-04 — Phase 13.1: Shares MVP — Foundation, Public Gateway, Gantt Viewer
 
 **Goal:** First-class Share entity with a scope-locked public data gateway, Go filter engine, golden parity fixtures, Gantt read-only mode, "Share this view" action, and the `/s/:token` public viewer route.

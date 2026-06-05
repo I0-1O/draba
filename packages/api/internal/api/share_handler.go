@@ -246,7 +246,11 @@ func (s *Server) buildShareProjection(share *models.Share) (*models.ShareProject
 		}
 		name := m.DisplayName
 		if name == "" {
-			name = m.Email
+			// The register endpoint requires a non-empty displayName, so this
+			// branch only fires for rows migrated from older data. Never fall
+			// back to the email address — this response is public and
+			// unauthenticated.
+			name = "Team member"
 		}
 		pubMembers = append(pubMembers, models.PublicMember{
 			ID:          m.ID,
