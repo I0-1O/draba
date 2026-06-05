@@ -791,7 +791,7 @@ components:
 
     Share:
       type: object
-      required: [id, timelineId, token, viewType, viewConfig, createdBy, createdAt, viewCount]
+      required: [id, timelineId, token, viewType, viewConfig, createdBy, createdAt, viewCount, protected]
       properties:
         id:
           type: string
@@ -803,12 +803,21 @@ components:
           type: string
           nullable: true
           description: Optional human-readable label for this share link.
+        description:
+          type: string
+          nullable: true
+          description: Optional free-text describing what the link is for.
         viewType:
           type: string
           enum: [gantt, list, calendar, kanban]
         viewConfig:
           type: string
           description: JSON-encoded view configuration snapshot.
+        protected:
+          type: boolean
+          description: >
+            True when the share requires a password. Derived from the
+            (never-exposed) password hash so clients can show a lock indicator.
         createdBy:
           type: string
           description: Team member ID of the creator.
@@ -868,17 +877,7 @@ components:
         name:
           type: string
           nullable: true
-        viewType:
-          type: string
-          enum: [gantt, list, calendar, kanban]
-        viewConfig:
-          type: string
-          description: JSON-encoded view configuration.
-
-    PatchShareInput:
-      type: object
-      properties:
-        name:
+        description:
           type: string
           nullable: true
         viewType:
@@ -886,6 +885,37 @@ components:
           enum: [gantt, list, calendar, kanban]
         viewConfig:
           type: string
+          description: JSON-encoded view configuration.
+        password:
+          type: string
+          nullable: true
+          writeOnly: true
+          description: >
+            Optional password. When set, the share is locked and requires
+            unlocking via POST /shares/{token}/unlock. Never returned in any
+            response.
+
+    PatchShareInput:
+      type: object
+      properties:
+        name:
+          type: string
+          nullable: true
+        description:
+          type: string
+          nullable: true
+        viewType:
+          type: string
+          enum: [gantt, list, calendar, kanban]
+        viewConfig:
+          type: string
+        password:
+          type: string
+          nullable: true
+          writeOnly: true
+          description: >
+            Set a non-empty value to add/replace the password; an empty string
+            clears it; omit the field to leave it unchanged.
 
     PublicMember:
       type: object
@@ -3722,7 +3752,74 @@ paths:
               schema:
                 $ref: "#/components/schemas/ShareProjection"
         "401":
-          description: Password required.
+          description: >
+            Password required. The body carries only `{ "passwordRequired": true }`
+            — no projection data. Exchange the password at
+            POST /shares/{token}/unlock for a view token, then resend with an
+            `Authorization: Bearer <viewToken>` header.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  passwordRequired:
+                    type: boolean
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "410":
+          description: Share revoked or expired.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /shares/{token}/unlock:
+    post:
+      operationId: unlockShare
+      summary: Exchange a share password for a short-lived view token
+      description: >
+        No authentication required. Validates the password for a
+        password-protected share and returns a short-lived view token scoped to
+        that share. Attempts are rate-limited per client IP.
+      security: []
+      tags: [shares]
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password]
+              properties:
+                password:
+                  type: string
+      responses:
+        "200":
+          description: Unlock succeeded; view token issued.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token:
+                    type: string
+                    description: Short-lived view token, scoped to this share.
+        "400":
+          description: Malformed body, or the share is not password protected.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          description: Incorrect password.
           content:
             application/json:
               schema:
@@ -3731,6 +3828,12 @@ paths:
           $ref: "#/components/responses/NotFound"
         "410":
           description: Share revoked or expired.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "429":
+          description: Too many unlock attempts from this client.
           content:
             application/json:
               schema:

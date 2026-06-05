@@ -6,12 +6,19 @@ import (
 	"errors"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/I0-1O/draba/packages/api/internal/auth"
 	"github.com/I0-1O/draba/packages/api/internal/filters"
 	"github.com/I0-1O/draba/packages/api/internal/models"
 )
+
+// unlockMaxAttempts caps password-unlock attempts per client IP per hour. The
+// limit is per-share-independent (keyed on IP only) so cycling tokens cannot
+// multiply an attacker's budget.
+const unlockMaxAttempts = 10
 
 // ── In-memory share cache ─────────────────────────────────────────────────────
 
@@ -104,14 +111,19 @@ func (s *Server) handleGetShareProjection(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Phase 13.3 — password gate handled here.
+	// Password gate (Phase 13.2). A locked share serves no data without a valid
+	// view token — obtained by exchanging the password at POST /shares/{token}/unlock.
 	// NOTE: this check must stay above the cache read. PATCH invalidates the cache
 	// entry immediately (see handleUpdateShare), so a newly-added password_hash is
 	// never served from a stale cache. Moving the check below the cache read would
-	// silently bypass the password gate for the TTL window.
+	// silently bypass the password gate for the TTL window. The 401 body carries no
+	// projection data — only the passwordRequired signal the viewer needs.
 	if share.PasswordHash != nil {
-		writeError(w, http.StatusUnauthorized, "PASSWORD_REQUIRED", "password required")
-		return
+		vt := bearerToken(r)
+		if vt == "" || s.tokens.ValidateShareViewToken(vt, share.ID) != nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]bool{"passwordRequired": true})
+			return
+		}
 	}
 
 	// ── 2. Serve from cache if warm ───────────────────────────────────────────
@@ -350,15 +362,27 @@ func (s *Server) handleCreateShare(w http.ResponseWriter, r *http.Request) {
 
 	now := time.Now().UTC()
 	share := &models.Share{
-		ID:         newID(),
-		TimelineID: timelineID,
-		Token:      newToken(),
-		Name:       req.Name,
-		ViewType:   req.ViewType,
-		ViewConfig: req.ViewConfig,
-		CreatedBy:  member.ID,
-		CreatedAt:  now,
-		ViewCount:  0,
+		ID:          newID(),
+		TimelineID:  timelineID,
+		Token:       newToken(),
+		Name:        req.Name,
+		Description: req.Description,
+		ViewType:    req.ViewType,
+		ViewConfig:  req.ViewConfig,
+		CreatedBy:   member.ID,
+		CreatedAt:   now,
+		ViewCount:   0,
+	}
+
+	// Optional password protection. An empty/whitespace string means "no
+	// password" — the field stays NULL and the share is open.
+	if req.Password != nil && strings.TrimSpace(*req.Password) != "" {
+		hash, err := auth.HashPassword(*req.Password)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to secure share")
+			return
+		}
+		share.PasswordHash = &hash
 	}
 
 	if err := s.shares.Create(share); err != nil {
@@ -366,6 +390,8 @@ func (s *Server) handleCreateShare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Surface the derived flag in the create response (the repo sets it on reads).
+	share.Protected = share.PasswordHash != nil
 	writeJSON(w, http.StatusCreated, share)
 }
 
@@ -397,8 +423,8 @@ func (s *Server) handleListShares(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, shares)
 }
 
-// handleUpdateShare handles PATCH /shares/{id}. Only the share creator or a
-// team admin may update it.
+// handleUpdateShare handles PATCH /shares/{id}. Any member of the timeline's
+// team may update it (shares are read-only projections — no creator/admin gate).
 func (s *Server) handleUpdateShare(w http.ResponseWriter, r *http.Request) {
 	shareID := r.PathValue("id")
 
@@ -418,12 +444,10 @@ func (s *Server) handleUpdateShare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	member, ok := s.requireTeamMember(w, r, timeline.TeamID)
-	if !ok {
-		return
-	}
-	if !s.canManageShare(member, share) {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "only the share creator or a team admin may update this share")
+	// Any member of the timeline's team may manage its shares. A share is a
+	// read-only projection that can never mutate app data, so there is no
+	// creator/admin gate (Phase 13.2 re-sequencing decision).
+	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
 		return
 	}
 
@@ -436,11 +460,28 @@ func (s *Server) handleUpdateShare(w http.ResponseWriter, r *http.Request) {
 	if req.Name != nil {
 		share.Name = req.Name
 	}
+	if req.Description != nil {
+		share.Description = req.Description
+	}
 	if req.ViewType != nil {
 		share.ViewType = *req.ViewType
 	}
 	if req.ViewConfig != nil {
 		share.ViewConfig = *req.ViewConfig
+	}
+	// Password: nil leaves it unchanged; an empty string clears protection; a
+	// non-empty string sets/replaces it.
+	if req.Password != nil {
+		if strings.TrimSpace(*req.Password) == "" {
+			share.PasswordHash = nil
+		} else {
+			hash, err := auth.HashPassword(*req.Password)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to secure share")
+				return
+			}
+			share.PasswordHash = &hash
+		}
 	}
 
 	if err := s.shares.Update(share); err != nil {
@@ -451,11 +492,13 @@ func (s *Server) handleUpdateShare(w http.ResponseWriter, r *http.Request) {
 	// Invalidate cache so the next public request picks up the new config.
 	s.shareCache.invalidate(share.Token)
 
+	// Refresh the derived flag — the password may have just been set/cleared.
+	share.Protected = share.PasswordHash != nil
 	writeJSON(w, http.StatusOK, share)
 }
 
-// handleDeleteShare handles DELETE /shares/{id}. Only the share creator or a
-// team admin may delete it.
+// handleDeleteShare handles DELETE /shares/{id}. Any member of the timeline's
+// team may delete it (see handleUpdateShare).
 func (s *Server) handleDeleteShare(w http.ResponseWriter, r *http.Request) {
 	shareID := r.PathValue("id")
 
@@ -475,12 +518,9 @@ func (s *Server) handleDeleteShare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	member, ok := s.requireTeamMember(w, r, timeline.TeamID)
-	if !ok {
-		return
-	}
-	if !s.canManageShare(member, share) {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "only the share creator or a team admin may delete this share")
+	// Any member of the timeline's team may delete its shares — no creator/admin
+	// gate (see handleUpdateShare).
+	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
 		return
 	}
 
@@ -493,22 +533,89 @@ func (s *Server) handleDeleteShare(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// canManageShare reports whether a team member may update or delete a share.
-// Team admins always pass; non-admins must be the share's creator.
-func (s *Server) canManageShare(member *models.TeamMember, share *models.Share) bool {
-	return member.Role == "admin" || member.ID == share.CreatedBy
+// handleUnlockShare handles POST /shares/{token}/unlock. It is public (no auth
+// middleware): an anonymous viewer exchanges the share password for a
+// short-lived view token, which they then present on GET /shares/{token}.
+// Attempts are rate-limited per client IP to blunt brute-force guessing.
+func (s *Server) handleUnlockShare(w http.ResponseWriter, r *http.Request) {
+	if !s.unlockLimiter.allow(clientIP(r)) {
+		writeError(w, http.StatusTooManyRequests, "RATE_LIMITED", "too many unlock attempts; try again later")
+		return
+	}
+
+	token := r.PathValue("token")
+
+	share, err := s.shares.GetByToken(token)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load share")
+		return
+	}
+
+	// Mirror the GET gateway's revocation/expiry checks so a dead share cannot
+	// be unlocked.
+	if share.RevokedAt != nil {
+		writeError(w, http.StatusGone, "GONE", "this share has been revoked")
+		return
+	}
+	if share.ExpiresAt != nil && time.Now().After(*share.ExpiresAt) {
+		writeError(w, http.StatusGone, "GONE", "this share has expired")
+		return
+	}
+	if share.PasswordHash == nil {
+		writeError(w, http.StatusBadRequest, "NOT_PROTECTED", "this share is not password protected")
+		return
+	}
+
+	var req unlockShareBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+	if auth.CheckPassword(*share.PasswordHash, req.Password) != nil {
+		writeError(w, http.StatusUnauthorized, "INVALID_PASSWORD", "incorrect password")
+		return
+	}
+
+	viewToken, err := s.tokens.IssueShareViewToken(share.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to issue view token")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"token": viewToken})
+}
+
+// bearerToken extracts a Bearer credential from the Authorization header, or
+// returns "" when absent or malformed.
+func bearerToken(r *http.Request) string {
+	header := r.Header.Get("Authorization")
+	if !strings.HasPrefix(header, "Bearer ") {
+		return ""
+	}
+	return strings.TrimPrefix(header, "Bearer ")
 }
 
 // ── Request bodies ────────────────────────────────────────────────────────────
 
 type createShareBody struct {
-	Name       *string `json:"name,omitempty"`
-	ViewType   string  `json:"viewType"`
-	ViewConfig string  `json:"viewConfig"`
+	Name        *string `json:"name,omitempty"`
+	Description *string `json:"description,omitempty"`
+	ViewType    string  `json:"viewType"`
+	ViewConfig  string  `json:"viewConfig"`
+	Password    *string `json:"password,omitempty"`
 }
 
 type patchShareBody struct {
-	Name       *string `json:"name,omitempty"`
-	ViewType   *string `json:"viewType,omitempty"`
-	ViewConfig *string `json:"viewConfig,omitempty"`
+	Name        *string `json:"name,omitempty"`
+	Description *string `json:"description,omitempty"`
+	ViewType    *string `json:"viewType,omitempty"`
+	ViewConfig  *string `json:"viewConfig,omitempty"`
+	Password    *string `json:"password,omitempty"`
+}
+
+type unlockShareBody struct {
+	Password string `json:"password"`
 }

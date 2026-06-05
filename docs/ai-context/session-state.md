@@ -2,7 +2,7 @@
 
 _Updated after each significant work session. Read this first to orient — it is intentionally short. Per-phase implementation detail lives in [docs/log.md](../log.md); this file is a current-state snapshot only._
 
-**Last updated:** 2026-06-05 (Phase 13 back-half re-sequenced: 13.2 share-modal overhaul + password, 13.3 List+Kanban, 13.4 Calendar ICS feed, 13.5 lifecycle tail; handoff design committed to docs/design/handoffs/share-modal/)
+**Last updated:** 2026-06-05 (Phase 13.2 complete — 13.2a password backend + 13.2b share-modal overhaul & public unlock prompt; all automated checks pass. Awaiting Docker verification.)
 
 ---
 
@@ -10,19 +10,13 @@ _Updated after each significant work session. Read this first to orient — it i
 
 **All phases through 10.4.6 are complete and automated-checks-pass.** That covers Identity (9.6), Teams/Members/Settings (10.1.x), Status Templates (10.2), Timelines CRUD (10.3), 10.4.1–10.4.5 polish, and 10.4.6 Filter Implementation. Phases through 10.4.5 are Docker-verified; 10.4.6, 11.1, 11.1.1, 11.1.2, 11.2, 11.3, and 12 are awaiting Docker verification.
 
-**Phase 13.1 — Shares MVP:** automated checks pass (2026-06-04). Awaiting Docker verification.
-- Migration 019: `shares` table + token migration (existing `timelines.share_token` rows → `shares` rows)
-- `internal/filters` package: Go port of `matchesFilter`; 27 golden fixtures in `packages/shared/testdata/filter-fixtures.json` pass both the Go test and the new TS golden-fixture section
-- `GET /shares/{token}` scope-locked public gateway (TTL cache, filter-first, no-PII projection)
-- Share CRUD: `POST /timelines/{id}/shares`, `GET /teams/{id}/timelines/{timelineId}/shares`, `PATCH/DELETE /shares/{id}`
-- GanttGrid + GanttView: `interactive={false}` prop suppresses all clicks/drag
-- ShareModal: create link, snapshot view config, copy URL to clipboard
-- ShareViewPage at `/s/:token` (public, outside ProtectedRoute) + branding strip
-- filterEngine.ts: fixed `is_empty`/`is_not_empty` null-value guard (golden fixture surfaced it)
+**Phase 13.1 — Shares MVP** (gateway, Go filter engine + golden fixtures, Gantt `interactive=false`, ShareModal create-link, `/s/:token` viewer) and **Phase 13.2a — password backend** both pass automated checks. Awaiting Docker verification. Detail in [log.md](../log.md).
+
+**Phase 13.2 — share module overhaul + password (2026-06-05):** backend (13.2a) — bcrypt password on create/PATCH; locked `GET /shares/{token}` → `401 { passwordRequired: true }`; `POST /shares/{token}/unlock` → 30-min share-scoped `share_view` JWT (not replayable across shares); 10/IP/hour in-memory rate limit; PATCH/DELETE gate **dropped** (any team member manages shares); `viewCount` in list response. Frontend (13.2b) — `ShareModal.tsx` rebuilt to the handoff (active-links list, create form w/ password toggle, copy, inline delete-confirm, empty state, per-row creator/date/views), public `UnlockPrompt` at `/s/:token`. Backend gained `description` (migration 021) + derived `protected` flag. No migration needed for password (cols existed in 019).
 
 | Next phase | Scope | Plan |
 |------------|-------|------|
-| **13.2** | Share module overhaul + password protection (modal rebuild to the handoff design, fused with bcrypt password/unlock; view counts in-modal; delete no longer permission-gated) | [plan](../plans/phase-13-shares.md#132--share-module-overhaul--password-protection) · [ROADMAP §13.2](../ROADMAP.md#phase-132--share-module-overhaul--password-protection) |
+| **13.3** | List + Kanban read-only: `interactive=false` + public mounting for List and Kanban, "Share this view" in both toolbars, List `notes`/enabled-columns projection nuance | [plan §13.3](../plans/phase-13-shares.md#133--list--kanban-read-only) · [ROADMAP §13.3](../ROADMAP.md#phase-133--list--kanban-read-only) |
 
 **Phase 13 back-half re-sequenced (2026-06-05):** 13.2 = share-modal overhaul + password (pulled forward); 13.3 = List + Kanban read-only; 13.4 = Calendar **ICS feed** sharing (whole-timeline or per-member, token-as-secret, no password/filter — a different model from view-shares); 13.5 = lifecycle tail (expiry, tile chip). The handoff design lives in [`docs/design/handoffs/share-modal/`](../design/handoffs/share-modal/design_handoff_share_modal/README.md). See [ROADMAP re-sequencing note](../ROADMAP.md#phase-13--shares--multi-share-views-with-passwords) and [plan §13.2 overhaul](../plans/phase-13-shares.md#the-share-module-overhaul-132).
 

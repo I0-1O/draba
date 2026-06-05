@@ -2,6 +2,63 @@
 
 ---
 
+## 2026-06-05 — Phase 13.2b: Share module overhaul (frontend) + supporting backend
+
+**Goal:** Second half of Phase 13.2 — rebuild the "Share this view" modal to the design handoff (`docs/design/handoffs/share-modal/`) wired to real data, and add the public unlock prompt that consumes the 13.2a password backend.
+
+**Backend (`packages/api`) — design-driven additions:**
+- **Migration 021** (`021_share_description.sql`): adds nullable `description` to `shares` (the handoff shows a per-row description; we had no column for it).
+- **`models.Share`**: added `Description *string` and a derived, read-only `Protected bool` (`db:"-"`, set from `password_hash != nil` by the repo). `password_hash` stays `json:"-"` — `protected` lets the client show a lock badge without ever seeing the hash.
+- **`share_repo.go`**: `Create`/`Update` now persist `description`; `GetByID`/`GetByToken`/`ListByTimeline` set `Protected` after scan.
+- **`share_handler.go`**: `description` on create/patch bodies; `Protected` set on the create + patch responses.
+- **OpenAPI**: `description` on `Share`/`CreateShareInput`/`PatchShareInput`, `protected` (required) on `Share`. TS types regenerated.
+
+**Frontend (`packages/web`):**
+- **`hooks/useShares.ts`**: `useUnlockShare(token)` (POST `/unlock` → view token); `useShareProjection(token, viewToken?)` now sends `Authorization: Bearer <viewToken>` and maps a `401 { passwordRequired }` to an `ApiError` with code `PASSWORD_REQUIRED` (also `retry: false`); `CreateShareInput` gained `description` + `password`.
+- **`components/ShareModal.tsx`** (full rebuild): modal shell (link-tile header + dynamic timeline-name subtitle + close), "ACTIVE LINKS" section bar (count chip + New share), scrollable body, footer (read-only hint + Done). `ShareRow`: lock/link type tile, title + "password" badge, description, mono URL + Copy (1.6s success state), creator `Badge` + name (+ "· you") + date + view count, inline delete-confirm overlay. `AddShareForm`: title (required), description, password-protect toggle + show/hide password field, Create disabled until valid. Dashed empty state. Built from existing design tokens (all `--radius-*`/`--shadow-*`/`--secondary`/`--success`/`--input` already in `index.css`), not ported inline styles. **Delete is shown on every row** (no creator/admin gate — matches the 13.2 decision; the handoff's `canDelete` was dropped).
+- **`pages/ShareViewPage.tsx`**: `UnlockPrompt` (key icon, password field + show/hide, error copy for wrong password vs `429` rate limit) rendered when the projection errors with `PASSWORD_REQUIRED`; on success stores the view token in state and the projection refetches with it. Light-mode-forced surface, consistent with the viewer.
+- **`pages/DashboardPage.tsx`**: passes `timelineName={activeTimelineName}` to the modal.
+
+**Tests:** `useShares.test.ts` — updated the public-fetch test for the new options arg; added view-token Bearer header, `PASSWORD_REQUIRED` mapping, and two `useUnlockShare` cases (success returns token + POSTs password; wrong password rejects with status 401). 292 web tests pass.
+
+**Checks:** `golangci-lint run` ✅ · `go test ./...` ✅ · `pnpm --filter web lint` ✅ · `pnpm --filter web build` ✅ · `pnpm --filter web test` ✅ (292).
+
+**Not browser-verified yet:** the running Docker instance (`epcot.lan:8081`) predates this work, so it can't exercise the new gateway; deferred to the Docker rebuild pass along with the other unverified phases.
+
+---
+
+## 2026-06-05 — Phase 13.2a: Password backend + view counts (Go-only checkpoint)
+
+**Goal:** First half of the re-sequenced Phase 13.2. Land the password-protection backend and view-count exposure as a self-contained, fully-tested Go checkpoint, deliberately stopping before the frontend share-modal overhaul (13.2b). Schema needed no migration — `password_hash`, `view_count`, `last_viewed_at`, `expires_at`, `revoked_at` already exist from migration 019, and `RecordView` already existed.
+
+**Backend (`packages/api`):**
+
+- **`internal/auth/jwt.go`**: added `IssueShareViewToken(shareID)` / `ValidateShareViewToken(tokenStr, shareID)` — a `share_view`-type JWT (30-min TTL) carrying the share ID in the JWT `Subject`. Validation rejects a token whose subject ≠ the requested share, so a valid unlock for one share cannot be replayed against another. Reuses the existing HS256 secret + alg-confusion guard.
+- **`internal/api/ratelimit.go`** (new): dependency-free in-memory fixed-window `rateLimiter` keyed by client IP (opportunistic prune past 10k keys), plus `clientIP(r)` using transport `RemoteAddr` (not spoofable `X-Forwarded-For`; behind a proxy it fails closed/stricter). Avoids pulling in `golang.org/x/time/rate` (keeps go.mod lean / pinned).
+- **`internal/api/share_handler.go`**:
+  - Password gate on `GET /shares/{token}`: a locked share now returns `401 { passwordRequired: true }` with **no projection data**, unless a valid `Authorization: Bearer <viewToken>` is presented (gate stays above the cache read so a freshly-PATCHed password is never bypassed via stale cache).
+  - `handleCreateShare` / `handleUpdateShare`: optional `password` field — non-empty sets/replaces (bcrypt via existing `auth.HashPassword`), empty string clears on PATCH, omitted leaves unchanged.
+  - `handleUnlockShare` (new, public `POST /shares/{token}/unlock`): IP rate-limited (10/IP/hour → `429`), mirrors revoke/expiry `410` checks, `400` when the share is unprotected, `401` on wrong password, `200 { token }` on success.
+  - **Dropped the `canManageShare` (admin-or-creator) gate** on PATCH and DELETE per the 13.2 re-sequencing decision — any member of the timeline's team may manage shares (a share can't mutate app data). Function removed; doc comments updated.
+  - Added `bearerToken(r)` helper and `unlockMaxAttempts = 10` const.
+- **`internal/api/server.go`**: added `unlockLimiter *rateLimiter` to Server (init `newRateLimiter(10, time.Hour)`); registered public `POST /shares/{token}/unlock` route.
+- **`internal/db/share_repo.go`**: `Create` now inserts `password_hash`; `Update` now writes `password_hash` (load-mutate-save preserves it on password-untouched PATCHes).
+- **View counts:** `viewCount` was already populated by `RecordView` and present on `models.Share`; the authenticated list response surfaces it for the 13.2b per-row display. Added a test asserting its presence/shape.
+- **OpenAPI** (`packages/shared/openapi.yaml`): `password` (writeOnly, nullable) on `CreateShareInput`/`PatchShareInput`; `401` body of `GET /shares/{token}` changed to `{ passwordRequired: boolean }`; new `POST /shares/{token}/unlock` path (200/400/401/404/410/429). TS types regenerated.
+
+**Tests (`internal/api/share_handler_test.go`):**
+- Renamed `TestShareUpdate_Forbidden` → `TestShareUpdate_AnyTeamMember` (now asserts a non-creator member gets `200`, reflecting the dropped gate).
+- Added: locked share returns `passwordRequired` with no data + no hash leak; wrong password `401`; full unlock→view-token→render flow; token-not-replayable-across-shares; rate-limit `429`; PATCH password on/off toggle locks/unlocks the gateway; list response exposes `viewCount`. Added local `jsonBody` test helper.
+
+**Checks:**
+- `golangci-lint run` ✅ (fixed a `gocritic` builtin-shadow on `max` → `limit`)
+- `go test ./...` ✅
+- `pnpm --filter web lint` ✅ (tsc --noEmit) · `pnpm --filter web build` ✅
+
+**Deferred to 13.2b (frontend):** share-modal rebuild to the handoff design, per-row meta display, and the public unlock prompt UI at `/s/:token`.
+
+---
+
 ## 2026-06-05 — /test-phase 13.1
 
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e

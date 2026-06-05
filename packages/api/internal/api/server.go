@@ -53,6 +53,7 @@ type Server struct {
 	tags           *db.TagRepo
 	shares         *db.ShareRepo
 	shareCache     *shareCache
+	unlockLimiter  *rateLimiter
 	mailer         *mailer.Mailer
 	tokens         *auth.TokenService
 	tier           tier.Tier
@@ -98,6 +99,7 @@ func NewServer(
 		tags:           tagsRepo,
 		shares:         sharesRepo,
 		shareCache:     newShareCache(),
+		unlockLimiter:  newRateLimiter(unlockMaxAttempts, time.Hour),
 		mailer:         m,
 		tokens:         tokens,
 		tier:           t,
@@ -242,6 +244,7 @@ func (s *Server) Routes() http.Handler {
 	// GET /teams/{id}/timelines/{timelineId}/shares uses the team-scoped prefix
 	// to avoid the GET conflict described above.
 	mux.HandleFunc("GET /shares/{token}", s.handleGetShareProjection)
+	mux.HandleFunc("POST /shares/{token}/unlock", s.handleUnlockShare)
 	mux.HandleFunc("POST /timelines/{id}/shares", chain(s.handleCreateShare, s.authMiddleware))
 	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/shares", chain(s.handleListShares, s.authMiddleware))
 	mux.HandleFunc("PATCH /shares/{id}", chain(s.handleUpdateShare, s.authMiddleware))

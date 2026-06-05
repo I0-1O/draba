@@ -24,11 +24,11 @@ func NewShareRepo(db *sqlx.DB) *ShareRepo {
 func (r *ShareRepo) Create(s *models.Share) error {
 	_, err := r.db.NamedExec(`
 		INSERT INTO shares (
-			id, timeline_id, token, name, view_type, view_config,
-			created_by, created_at, view_count
+			id, timeline_id, token, name, description, view_type, view_config,
+			password_hash, created_by, created_at, view_count
 		) VALUES (
-			:id, :timeline_id, :token, :name, :view_type, :view_config,
-			:created_by, :created_at, :view_count
+			:id, :timeline_id, :token, :name, :description, :view_type, :view_config,
+			:password_hash, :created_by, :created_at, :view_count
 		)
 	`, s)
 	if err != nil {
@@ -44,6 +44,7 @@ func (r *ShareRepo) GetByID(id string) (*models.Share, error) {
 	if err := r.db.Get(&s, `SELECT * FROM shares WHERE id = ?`, id); err != nil {
 		return nil, fmt.Errorf("getting share: %w", err)
 	}
+	s.Protected = s.PasswordHash != nil
 	return &s, nil
 }
 
@@ -54,6 +55,7 @@ func (r *ShareRepo) GetByToken(token string) (*models.Share, error) {
 	if err := r.db.Get(&s, `SELECT * FROM shares WHERE token = ?`, token); err != nil {
 		return nil, fmt.Errorf("getting share by token: %w", err)
 	}
+	s.Protected = s.PasswordHash != nil
 	return &s, nil
 }
 
@@ -67,6 +69,9 @@ func (r *ShareRepo) ListByTimeline(timelineID string) ([]*models.Share, error) {
 	); err != nil {
 		return nil, fmt.Errorf("listing shares: %w", err)
 	}
+	for _, s := range out {
+		s.Protected = s.PasswordHash != nil
+	}
 	return out, nil
 }
 
@@ -74,9 +79,11 @@ func (r *ShareRepo) ListByTimeline(timelineID string) ([]*models.Share, error) {
 func (r *ShareRepo) Update(s *models.Share) error {
 	_, err := r.db.NamedExec(`
 		UPDATE shares SET
-			name        = :name,
-			view_type   = :view_type,
-			view_config = :view_config
+			name          = :name,
+			description   = :description,
+			view_type     = :view_type,
+			view_config   = :view_config,
+			password_hash = :password_hash
 		WHERE id = :id
 	`, s)
 	if err != nil {

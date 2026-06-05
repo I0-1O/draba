@@ -1106,6 +1106,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/shares/{token}/unlock": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Exchange a share password for a short-lived view token
+         * @description No authentication required. Validates the password for a password-protected share and returns a short-lived view token scoped to that share. Attempts are rate-limited per client IP.
+         */
+        post: operations["unlockShare"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/timelines/share/{token}": {
         parameters: {
             query?: never;
@@ -1510,10 +1530,14 @@ export interface components {
             token: string;
             /** @description Optional human-readable label for this share link. */
             name?: string | null;
+            /** @description Optional free-text describing what the link is for. */
+            description?: string | null;
             /** @enum {string} */
             viewType: "gantt" | "list" | "calendar" | "kanban";
             /** @description JSON-encoded view configuration snapshot. */
             viewConfig: string;
+            /** @description True when the share requires a password. Derived from the (never-exposed) password hash so clients can show a lock indicator. */
+            protected: boolean;
             /** @description Team member ID of the creator. */
             createdBy: string;
             /** Format: date-time */
@@ -1544,16 +1568,22 @@ export interface components {
         };
         CreateShareInput: {
             name?: string | null;
+            description?: string | null;
             /** @enum {string} */
             viewType?: "gantt" | "list" | "calendar" | "kanban";
             /** @description JSON-encoded view configuration. */
             viewConfig?: string;
+            /** @description Optional password. When set, the share is locked and requires unlocking via POST /shares/{token}/unlock. Never returned in any response. */
+            password?: string | null;
         };
         PatchShareInput: {
             name?: string | null;
+            description?: string | null;
             /** @enum {string} */
             viewType?: "gantt" | "list" | "calendar" | "kanban";
             viewConfig?: string;
+            /** @description Set a non-empty value to add/replace the password; an empty string clears it; omit the field to leave it unchanged. */
+            password?: string | null;
         };
         PublicMember: {
             id: string;
@@ -4310,7 +4340,69 @@ export interface operations {
                     "application/json": components["schemas"]["ShareProjection"];
                 };
             };
-            /** @description Password required. */
+            /** @description Password required. The body carries only `{ "passwordRequired": true }` — no projection data. Exchange the password at POST /shares/{token}/unlock for a view token, then resend with an `Authorization: Bearer <viewToken>` header. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        passwordRequired?: boolean;
+                    };
+                };
+            };
+            404: components["responses"]["NotFound"];
+            /** @description Share revoked or expired. */
+            410: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            500: components["responses"]["InternalError"];
+        };
+    };
+    unlockShare: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                token: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    password: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Unlock succeeded; view token issued. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @description Short-lived view token, scoped to this share. */
+                        token?: string;
+                    };
+                };
+            };
+            /** @description Malformed body, or the share is not password protected. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Incorrect password. */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -4322,6 +4414,15 @@ export interface operations {
             404: components["responses"]["NotFound"];
             /** @description Share revoked or expired. */
             410: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Too many unlock attempts from this client. */
+            429: {
                 headers: {
                     [name: string]: unknown;
                 };

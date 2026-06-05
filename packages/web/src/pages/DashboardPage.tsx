@@ -852,6 +852,7 @@ function DashboardShell() {
           teamId={teamId}
           timelineId={activeTimelineId}
           viewType="gantt"
+          timelineName={activeTimelineName}
           viewConfig={{
             groupBy,
             sortBy,

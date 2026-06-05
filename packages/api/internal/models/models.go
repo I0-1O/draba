@@ -238,6 +238,7 @@ type Share struct {
 	TimelineID   string     `db:"timeline_id"    json:"timelineId"`
 	Token        string     `db:"token"          json:"token"`
 	Name         *string    `db:"name"           json:"name,omitempty"`
+	Description  *string    `db:"description"    json:"description,omitempty"`
 	ViewType     string     `db:"view_type"      json:"viewType"`
 	ViewConfig   string     `db:"view_config"    json:"viewConfig"`
 	PasswordHash *string    `db:"password_hash"  json:"-"`
@@ -247,6 +248,10 @@ type Share struct {
 	LastViewedAt *time.Time `db:"last_viewed_at" json:"lastViewedAt,omitempty"`
 	ViewCount    int        `db:"view_count"     json:"viewCount"`
 	RevokedAt    *time.Time `db:"revoked_at"     json:"revokedAt,omitempty"`
+	// Protected is a derived, read-only flag (password_hash is never serialized).
+	// It is populated by the repo read methods so clients can show a lock badge
+	// without ever seeing the hash.
+	Protected bool `db:"-" json:"protected"`
 }
 
 // PublicMember is the safe projection of a team member for public share

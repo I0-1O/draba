@@ -32,8 +32,11 @@ export function useListShares(teamId: string, timelineId: string) {
 
 interface CreateShareInput {
   name?: string | null
+  description?: string | null
   viewType: string
   viewConfig: string
+  /** When set, the share is locked and requires unlocking to view. */
+  password?: string
 }
 
 /** Creates a share and invalidates the list. */
@@ -64,21 +67,55 @@ export function useDeleteShare(teamId: string, timelineId: string) {
   })
 }
 
-// ── Public hook (no auth) ─────────────────────────────────────────────────────
+// ── Public hooks (no auth) ────────────────────────────────────────────────────
 
-/** Fetches a public share projection. No authentication required. */
-export function useShareProjection(token: string | undefined) {
+/**
+ * Fetches a public share projection. No authentication required.
+ *
+ * For password-protected shares, pass the `viewToken` obtained from
+ * {@link useUnlockShare}; it is sent as a Bearer credential. Without a valid
+ * token a locked share responds 401 — surfaced here as an ApiError with code
+ * `PASSWORD_REQUIRED` so the viewer can render an unlock prompt.
+ */
+export function useShareProjection(token: string | undefined, viewToken?: string | null) {
   return useQuery({
-    queryKey: ['shares', token] as const,
+    queryKey: ['shares', token, viewToken ?? null] as const,
     queryFn: async () => {
-      const res = await fetch(`${API_BASE}/shares/${token}`)
+      const headers: HeadersInit = viewToken ? { Authorization: `Bearer ${viewToken}` } : {}
+      const res = await fetch(`${API_BASE}/shares/${token}`, { headers })
       if (!res.ok) {
         const body = await res.json().catch(() => ({}))
+        // A locked share returns { passwordRequired: true } (no error envelope).
+        if (res.status === 401 && body?.passwordRequired) {
+          throw new ApiError(401, 'PASSWORD_REQUIRED', 'password required')
+        }
         throw new ApiError(res.status, body?.error?.code ?? 'ERROR', body?.error?.message ?? res.statusText)
       }
       return res.json() as Promise<ShareProjection>
     },
     enabled: Boolean(token),
     staleTime: 60_000,
+    retry: false,
+  })
+}
+
+/**
+ * Exchanges a share password for a short-lived view token. No authentication
+ * required. The returned token is scoped to this share and expires server-side.
+ */
+export function useUnlockShare(token: string | undefined) {
+  return useMutation({
+    mutationFn: async (password: string): Promise<string> => {
+      const res = await fetch(`${API_BASE}/shares/${token}/unlock`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password }),
+      })
+      const body = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        throw new ApiError(res.status, body?.error?.code ?? 'ERROR', body?.error?.message ?? res.statusText)
+      }
+      return (body as { token: string }).token
+    },
   })
 }

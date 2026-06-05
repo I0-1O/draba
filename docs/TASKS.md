@@ -1296,12 +1296,19 @@ Includes both the webhook backend and the per-timeline connector sidebar UI (pre
 - [x] Scope-isolation test: token reaches exactly its timeline's filtered records; tampering (other timeline/activity/team id, scope-widening params) cannot widen; no share-reachable by-id/list endpoint
 - [x] Verify payload: filtered-out activities + member email/`user_id`/role + access list + other timelines all absent (automated test)
 
-**13.2 — Share module overhaul + password protection:**
-- [ ] Rebuild the "Share this view" modal to the handoff design (active-links list, create form, copy w/ success state, inline delete-confirm, empty state) using existing components + tokens
-- [ ] Per-row meta: creator avatar + name, created date, view count
-- [ ] `password_hash` (bcrypt) on create/patch; `GET /shares/{token}` → `401 { passwordRequired: true }` when locked (no data)
-- [ ] `POST /shares/{token}/unlock` → short-lived view JWT scoped to the share; rate-limit unlock attempts (N/IP/hour); public unlock prompt at `/s/:token`
-- [ ] Drop the `canDelete = isAdmin || creator` gate — any timeline manager may delete any share (shares can't mutate data)
+**13.2a — Password backend + view counts (Go, done 2026-06-05):**
+- [x] `password_hash` (bcrypt) on create/patch; `GET /shares/{token}` → `401 { passwordRequired: true }` when locked (no data); valid view token bypasses the gate
+- [x] `POST /shares/{token}/unlock` → short-lived view JWT (`share_view` type, share-scoped subject — not replayable across shares); rate-limit unlock attempts (10/IP/hour, in-memory limiter)
+- [x] Drop the `canManageShare = isAdmin || creator` gate on PATCH+DELETE — any timeline-team member may manage any share (shares can't mutate data)
+- [x] View counts: `viewCount` surfaced in the authenticated list response (per-row display backing)
+- [x] OpenAPI: `password` (writeOnly) on Create/Patch inputs, `passwordRequired` 401 body, `/shares/{token}/unlock` path; TS types regenerated
+
+**13.2b — Share module overhaul (frontend, done 2026-06-05):**
+- [x] Rebuilt `ShareModal.tsx` to the handoff design (header w/ link tile + timeline-name subtitle, "ACTIVE LINKS" section bar + count chip + New share, inline `AddShareForm` with title/description/password-toggle + show-hide, share rows, dashed empty state, footer + Done) using existing tokens/components
+- [x] Per-row meta: creator `Badge` + name (+ "· you"), created date, view count, lock/link type tile + "password" badge; copy w/ 1.6s success state; inline delete-confirm overlay
+- [x] Public unlock prompt at `/s/:token` (`UnlockPrompt` → `useUnlockShare` → store view token → `useShareProjection` resends GET with `Authorization: Bearer`); 401-`passwordRequired` mapped to `PASSWORD_REQUIRED`; 429 → "too many attempts" copy
+- [x] Backend support for the design: `description` column (migration 021) + derived `protected` flag on `Share` (never exposes the hash); plumbed through create/patch bodies, repo, OpenAPI; TS types regenerated
+- [x] `useShares`: `useUnlockShare`, view-token param on `useShareProjection`, `description`/`password` on create input; 6 new/updated hook tests
 
 **13.3 — List + Kanban read-only:**
 - [ ] `interactive=false` + public mounting for List and Kanban (clicks inert)
