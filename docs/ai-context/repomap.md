@@ -122,6 +122,7 @@ packages/
         saved_filter_handler.go
         server.go
         setup_handler.go
+        share_handler.go
         status_handler.go
         status_types.go
         tag_handler.go
@@ -154,6 +155,7 @@ packages/
           016_activity_notes.sql
           017_tags_and_activity_tags.sql
           018_saved_filters_team_scope.sql
+          019_shares.sql
         activity_repo.go
         api_token_repo.go
         db.go
@@ -162,6 +164,7 @@ packages/
         migrations.go
         password_reset_token_repo.go
         saved_filter_repo.go
+        share_repo.go
         status_repo.go
         tag_repo.go
         team_repo.go
@@ -170,6 +173,8 @@ packages/
         user_repo.go
       events/
         bus.go
+      filters/
+        engine.go
       mailer/
         mailer.go
       models/
@@ -206,6 +211,8 @@ packages/
   shared/
     src/
       index.ts
+    testdata/
+      filter-fixtures.json
     CLAUDE.md
     openapi.yaml
     package.json
@@ -273,6 +280,7 @@ packages/
         MemberModal.tsx
         ProtectedRoute.tsx
         RoleDropdown.tsx
+        ShareModal.tsx
         StatusTemplatesTab.tsx
         TagInput.tsx
         TeamModal.tsx
@@ -291,6 +299,7 @@ packages/
         usePublicSettings.ts
         useSavedFilters.ts
         useSettings.ts
+        useShares.ts
         useStatusTemplates.ts
         useTags.test.ts
         useTags.ts
@@ -332,6 +341,7 @@ packages/
         ResetPasswordPage.tsx
         SettingsPage.tsx
         SetupPage.tsx
+        ShareViewPage.tsx
       types/
         api.ts
         index.ts
@@ -13439,6 +13449,53 @@ import type { Activity, Team, Timeline } from '@draba/shared'
 }
 ````
 
+## File: packages/web/src/components/gantt/GanttView.filter.test.ts
+````typescript
+import { describe, it, expect } from 'vitest'
+import { filterOpenActivities } from './GanttView'
+
+// ── filterOpenActivities — 'open' preset logic ────────────────────────────────
+
+describe('filterOpenActivities', () => {
+  const activities = [
+    { id: '1', statusId: 'closed-a' },
+    { id: '2', statusId: 'open-b' },
+    { id: '3', statusId: null },
+    { id: '4', statusId: undefined },
+    { id: '5', statusId: 'closed-c' },
+  ]
+
+  it('removes activities whose statusId is in the closed set', () => {
+    const closed = new Set(['closed-a', 'closed-c'])
+    const result = filterOpenActivities(activities, closed)
+    expect(result.map(a => a.id)).toEqual(['2', '3', '4'])
+  })
+
+  it('keeps activities with no status (null or undefined)', () => {
+    const closed = new Set(['closed-a'])
+    const result = filterOpenActivities(activities, closed)
+    const noStatusIds = result.filter(a => !a.statusId).map(a => a.id)
+    expect(noStatusIds).toContain('3')
+    expect(noStatusIds).toContain('4')
+  })
+
+  it('returns all activities unchanged when closed set is empty', () => {
+    const result = filterOpenActivities(activities, new Set())
+    expect(result).toHaveLength(activities.length)
+  })
+
+  it('returns empty array when all activities are closed', () => {
+    const closed = new Set(['closed-a', 'open-b', 'closed-c'])
+    const onlyClosed = [
+      { id: '1', statusId: 'closed-a' },
+      { id: '5', statusId: 'closed-c' },
+    ]
+    const result = filterOpenActivities(onlyClosed, closed)
+    expect(result).toHaveLength(0)
+  })
+})
+````
+
 ## File: packages/web/src/components/identity/Badge.tsx
 ````typescript
 /**
@@ -20954,65 +21011,6 @@ export const STATUS_LABELS: Record<ActivityStatus, string> = {
 };
 ````
 
-## File: packages/web/src/App.tsx
-````typescript
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { AuthProvider } from '@/contexts/AuthContext'
-import ProtectedRoute from '@/components/ProtectedRoute'
-import ThemeSync from '@/components/ThemeSync'
-import BrandingSync from '@/components/BrandingSync'
-import LoginPage from '@/pages/LoginPage'
-import RegisterPage from '@/pages/RegisterPage'
-import DashboardPage from '@/pages/DashboardPage'
-import SetupPage from '@/pages/SetupPage'
-import SettingsPage from '@/pages/SettingsPage'
-import ForgotPasswordPage from '@/pages/ForgotPasswordPage'
-import ResetPasswordPage from '@/pages/ResetPasswordPage'
-
-const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: {
-      staleTime: 30_000,
-      retry: 1,
-    },
-  },
-})
-
-export default function App() {
-  return (
-    <QueryClientProvider client={queryClient}>
-      <BrowserRouter>
-        <AuthProvider>
-          {/* Side-effect components — render nothing but apply global state. */}
-          <ThemeSync />
-          <BrandingSync />
-          <Routes>
-            {/* First-run setup — public, shown before any users exist */}
-            <Route path="/setup" element={<SetupPage />} />
-
-            {/* Public routes */}
-            <Route path="/login" element={<LoginPage />} />
-            <Route path="/register" element={<RegisterPage />} />
-            <Route path="/forgot-password" element={<ForgotPasswordPage />} />
-            <Route path="/reset-password" element={<ResetPasswordPage />} />
-
-            {/* Protected routes */}
-            <Route element={<ProtectedRoute />}>
-              <Route path="/" element={<DashboardPage />} />
-              <Route path="/settings/*" element={<SettingsPage />} />
-            </Route>
-
-            {/* Fallback */}
-            <Route path="*" element={<Navigate to="/" replace />} />
-          </Routes>
-        </AuthProvider>
-      </BrowserRouter>
-    </QueryClientProvider>
-  )
-}
-````
-
 ## File: packages/web/src/index.css
 ````css
 @import "tailwindcss";
@@ -21408,38 +21406,6 @@ COPY packages/shared packages/shared
 WORKDIR /app/packages/web
 EXPOSE 5173
 CMD ["pnpm", "dev", "--host"]
-````
-
-## File: packages/web/tsconfig.app.json
-````json
-{
-  "compilerOptions": {
-    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.app.tsbuildinfo",
-    "target": "ES2020",
-    "useDefineForClassFields": true,
-    "lib": ["ES2020", "DOM", "DOM.Iterable"],
-    "module": "ESNext",
-    "skipLibCheck": true,
-
-    "moduleResolution": "bundler",
-    "allowImportingTsExtensions": true,
-    "isolatedModules": true,
-    "moduleDetection": "force",
-    "noEmit": true,
-    "jsx": "react-jsx",
-
-    "strict": true,
-    "noUnusedLocals": true,
-    "noUnusedParameters": true,
-    "noFallthroughCasesInSwitch": true,
-    "noUncheckedSideEffectImports": true,
-    "paths": {
-      "@draba/shared": ["../shared/src/index.ts"],
-      "@/*": ["./src/*"]
-    }
-  },
-  "include": ["src"]
-}
 ````
 
 ## File: packages/web/tsconfig.json
@@ -25110,153 +25076,6 @@ user_preferences — set by users at runtime
 ```
 ````
 
-## File: packages/api/cmd/draba/main.go
-````go
-// Command draba is the API server entry point. It wires repositories,
-// the auth token service, and tier configuration into the HTTP server,
-// then listens for requests until the process is killed.
-package main
-
-import (
-	"fmt"
-	"io/fs"
-	"log/slog"
-	"net/http"
-	"os"
-	"strings"
-
-	"github.com/I0-1O/draba/packages/api/internal/api"
-	"github.com/I0-1O/draba/packages/api/internal/auth"
-	"github.com/I0-1O/draba/packages/api/internal/db"
-	"github.com/I0-1O/draba/packages/api/internal/events"
-	"github.com/I0-1O/draba/packages/api/internal/mailer"
-	"github.com/I0-1O/draba/packages/api/internal/tier"
-	"github.com/I0-1O/draba/packages/api/internal/ws"
-	drabui "github.com/I0-1O/draba/packages/api/ui"
-)
-
-const banner = "\n" +
-	"      _           _\n" +
-	"     | |         | |\n" +
-	"   __| |_ __ __ _| |__   __ _\n" +
-	"  / _` | '__/ _` | '_ \\ / _` |\n" +
-	" | (_| | | | (_| | |_) | (_| |\n" +
-	"  \\__,_|_|  \\__,_|_.__/ \\__,_|\n" +
-	"\n" +
-	"  see who's doing what, when.\n\n"
-
-func main() {
-	if len(os.Args) > 1 && os.Args[1] == "reset-password" {
-		runResetPassword(os.Args[2:])
-		return
-	}
-
-	setupLogger()
-	fmt.Print(banner)
-
-	port := getenv("DRABA_PORT", "8080")
-	dsn := getenv("DRABA_DB_DSN", "/data/draba.db")
-	jwtSecret := os.Getenv("DRABA_JWT_SECRET")
-	if jwtSecret == "" {
-		slog.Error("DRABA_JWT_SECRET must be set")
-		os.Exit(1)
-	}
-
-	t, err := tier.Load()
-	if err != nil {
-		slog.Error("tier load failed", "err", err)
-		os.Exit(1)
-	}
-	l := t.Limits()
-	if l.MaxUsers == 0 {
-		slog.Info("tier", "tier", t)
-	} else {
-		slog.Info("tier", "tier", t, "maxUsers", l.MaxUsers, "maxTeams", l.MaxTeams)
-	}
-
-	database, err := db.Open(dsn)
-	if err != nil {
-		slog.Error("db: open failed", "err", err)
-		os.Exit(1)
-	}
-	slog.Info("db: opened", "dsn", dsn)
-
-	if err := db.Migrate(database); err != nil {
-		slog.Error("db: migrate failed", "err", err)
-		os.Exit(1)
-	}
-	slog.Info("db: migrations applied")
-
-	users := db.NewUserRepo(database)
-	invites := db.NewInviteRepo(database)
-	teams := db.NewTeamRepo(database)
-	activityRepo := db.NewActivityRepo(database)
-	timelineRepo := db.NewTimelineRepo(database)
-	savedFilterRepo := db.NewSavedFilterRepo(database)
-	preferenceRepo := db.NewUserPreferenceRepo(database)
-	apiTokenRepo := db.NewAPITokenRepo(database)
-	instanceSetsRepo := db.NewInstanceSettingsRepo(database)
-	passwordTokensRepo := db.NewPasswordResetTokenRepo(database)
-	statusRepo := db.NewStatusRepo(database)
-	tagRepo := db.NewTagRepo(database)
-	m := mailer.New(instanceSetsRepo, []byte(jwtSecret))
-	tokens := auth.NewTokenService(jwtSecret)
-
-	bus := events.NewBus()
-	hub := ws.NewHub(bus, tokens, func(teamID, userID string) error {
-		_, err := teams.GetMember(teamID, userID)
-		return err
-	})
-	go hub.Run()
-	slog.Info("ws: hub running")
-
-	if mods := tier.Registered(); len(mods) > 0 {
-		slog.Info("modules loaded", "count", len(mods))
-	}
-
-	srv := api.NewServer(users, invites, teams, activityRepo, timelineRepo, savedFilterRepo, preferenceRepo, apiTokenRepo, instanceSetsRepo, passwordTokensRepo, statusRepo, tagRepo, m, tokens, t, bus, hub)
-
-	// Wire up the embedded React SPA when a production build is present.
-	// In dev the static/ directory only has .gitkeep so this is a no-op.
-	if sub, err := fs.Sub(drabui.FS, "static"); err == nil {
-		if _, err := sub.Open("index.html"); err == nil {
-			srv.WithUI(sub)
-			slog.Info("ui: serving embedded SPA")
-		}
-	}
-
-	slog.Info("listening", "port", port)
-	if err := http.ListenAndServe(":"+port, srv.Routes()); err != nil {
-		slog.Error("server error", "err", err)
-		os.Exit(1)
-	}
-}
-
-// setupLogger initialises the global slog logger. Level is controlled by
-// DRABA_LOG_LEVEL (debug | info | warn | error); default is info.
-// All output goes to stdout so Docker captures it in `docker logs`.
-func setupLogger() {
-	level := slog.LevelInfo
-	switch strings.ToLower(os.Getenv("DRABA_LOG_LEVEL")) {
-	case "debug":
-		level = slog.LevelDebug
-	case "warn":
-		level = slog.LevelWarn
-	case "error":
-		level = slog.LevelError
-	}
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level})))
-}
-
-// getenv returns the env var value or fallback when unset/empty.
-func getenv(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
-}
-````
-
 ## File: packages/api/internal/api/authz.go
 ````go
 package api
@@ -25402,6 +25221,492 @@ func newToken() string {
 }
 ````
 
+## File: packages/api/internal/api/share_handler.go
+````go
+package api
+
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"os"
+	"sync"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/filters"
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// ── In-memory share cache ─────────────────────────────────────────────────────
+
+type shareCacheEntry struct {
+	builtAt time.Time
+	payload models.ShareProjection
+}
+
+// shareCache is a lightweight TTL cache keyed by share token. It avoids a DB
+// hit on every warm request. The TTL is read from DRABA_SHARE_CACHE_TTL at
+// startup (default 60s); a PATCH or DELETE invalidates the entry immediately.
+type shareCache struct {
+	mu      sync.RWMutex
+	entries map[string]*shareCacheEntry
+	ttl     time.Duration
+}
+
+func newShareCache() *shareCache {
+	ttl := 60 * time.Second
+	if v := os.Getenv("DRABA_SHARE_CACHE_TTL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			ttl = d
+		}
+	}
+	return &shareCache{entries: make(map[string]*shareCacheEntry), ttl: ttl}
+}
+
+func (c *shareCache) get(token string) (*models.ShareProjection, bool) {
+	c.mu.RLock()
+	e, ok := c.entries[token]
+	c.mu.RUnlock()
+	if !ok {
+		return nil, false
+	}
+	if time.Since(e.builtAt) > c.ttl {
+		return nil, false
+	}
+	p := e.payload
+	return &p, true
+}
+
+func (c *shareCache) set(token string, p *models.ShareProjection) {
+	c.mu.Lock()
+	c.entries[token] = &shareCacheEntry{builtAt: time.Now(), payload: *p}
+	c.mu.Unlock()
+}
+
+func (c *shareCache) invalidate(token string) {
+	c.mu.Lock()
+	delete(c.entries, token)
+	c.mu.Unlock()
+}
+
+// ── viewConfig sub-types ──────────────────────────────────────────────────────
+
+// viewConfigJSON is the shape stored in shares.view_config. The filter field
+// is evaluated server-side by the Go filter engine; the other fields are
+// forwarded to the client as-is so the public viewer can apply them.
+type viewConfigJSON struct {
+	Filter *filters.FilterDefinition `json:"filter,omitempty"`
+}
+
+// ── Handlers ──────────────────────────────────────────────────────────────────
+
+// handleGetShareProjection handles GET /shares/{token}. No authentication is
+// required. It is the public data gateway: the scope is hard-locked to the
+// single timeline referenced by the share row; no client-supplied selector can
+// widen it.
+func (s *Server) handleGetShareProjection(w http.ResponseWriter, r *http.Request) {
+	token := r.PathValue("token")
+
+	// ── 1. Resolve the share row ──────────────────────────────────────────────
+	share, err := s.shares.GetByToken(token)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load share")
+		return
+	}
+
+	// Phase 13.4 — revocation / expiry handled here (fields exist in schema now).
+	if share.RevokedAt != nil {
+		writeError(w, http.StatusGone, "GONE", "this share has been revoked")
+		return
+	}
+	if share.ExpiresAt != nil && time.Now().After(*share.ExpiresAt) {
+		writeError(w, http.StatusGone, "GONE", "this share has expired")
+		return
+	}
+
+	// Phase 13.3 — password gate handled here.
+	if share.PasswordHash != nil {
+		writeError(w, http.StatusUnauthorized, "PASSWORD_REQUIRED", "password required")
+		return
+	}
+
+	// ── 2. Serve from cache if warm ───────────────────────────────────────────
+	if proj, ok := s.shareCache.get(token); ok {
+		go func() { _ = s.shares.RecordView(share.ID) }()
+		writeJSON(w, http.StatusOK, proj)
+		return
+	}
+
+	// ── 3. Build projection (cache miss) ─────────────────────────────────────
+	proj, err := s.buildShareProjection(share)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to build share projection")
+		return
+	}
+
+	s.shareCache.set(token, proj)
+	go func() { _ = s.shares.RecordView(share.ID) }()
+	writeJSON(w, http.StatusOK, proj)
+}
+
+// buildShareProjection assembles the full ShareProjection for a share.
+// The scope is hard-locked to share.TimelineID; the caller cannot supply a
+// different timeline ID. Filter evaluation runs in Go before any data leaves
+// the server.
+func (s *Server) buildShareProjection(share *models.Share) (*models.ShareProjection, error) {
+	// Get timeline — using the share's TimelineID, never a client-supplied value.
+	timeline, err := s.timelines.GetByID(share.TimelineID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Get all non-archived activities for this timeline.
+	acts, err := s.activities.ListByTimeline(share.TimelineID, nil, nil, false)
+	if err != nil {
+		return nil, err
+	}
+
+	// Get statuses and tags for filter context + projection.
+	statuses, err := s.statuses.ListStatuses(share.TimelineID)
+	if err != nil {
+		return nil, err
+	}
+	tags, err := s.tags.ListByTeam(timeline.TeamID)
+	if err != nil {
+		return nil, err
+	}
+	members, err := s.teams.ListMembers(timeline.TeamID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Parse the frozen filter from view_config and evaluate it server-side.
+	var vc viewConfigJSON
+	if share.ViewConfig != "" && share.ViewConfig != "{}" {
+		_ = json.Unmarshal([]byte(share.ViewConfig), &vc)
+	}
+
+	var filteredActs []*models.Activity
+	if vc.Filter != nil && len(vc.Filter.Conditions) > 0 {
+		// Build filter context.
+		statusesByTL := map[string][]models.Status{share.TimelineID: {}}
+		for _, st := range statuses {
+			statusesByTL[share.TimelineID] = append(statusesByTL[share.TimelineID], *st)
+		}
+		modelTags := make([]models.Tag, 0, len(tags))
+		for _, t := range tags {
+			modelTags = append(modelTags, *t)
+		}
+		ctx := &filters.FilterContext{
+			StatusesByTimelineID: statusesByTL,
+			Tags:                 modelTags,
+		}
+		for _, a := range acts {
+			if filters.MatchesFilter(a, vc.Filter, ctx) {
+				filteredActs = append(filteredActs, a)
+			}
+		}
+	} else {
+		filteredActs = acts
+	}
+
+	// Build referenced-entity sets (prune to what surviving activities reference).
+	usedMemberIDs := make(map[string]bool)
+	usedStatusIDs := make(map[string]bool)
+	usedTagIDs := make(map[string]bool)
+	for _, a := range filteredActs {
+		for _, id := range a.AssignedMemberIDs {
+			usedMemberIDs[id] = true
+		}
+		if a.StatusID != nil {
+			usedStatusIDs[*a.StatusID] = true
+		}
+		for _, id := range a.TagIDs {
+			usedTagIDs[id] = true
+		}
+	}
+
+	// Build PublicActivity slice — notes omitted unless this is a list share
+	// with notes enabled (Phase 13.2+ handles that nuance; for now always omit).
+	pubActivities := make([]models.PublicActivity, 0, len(filteredActs))
+	for _, a := range filteredActs {
+		pub := models.PublicActivity{
+			ID:                a.ID,
+			Title:             a.Title,
+			Description:       a.Description,
+			Icon:              a.Icon,
+			Color:             a.Color,
+			StartAt:           a.StartAt,
+			EndAt:             a.EndAt,
+			AllDay:            a.AllDay,
+			StatusID:          a.StatusID,
+			ParentActivityID:  a.ParentActivityID,
+			PercentComplete:   a.PercentComplete,
+			AssignedMemberIDs: a.AssignedMemberIDs,
+			TagIDs:            a.TagIDs,
+		}
+		if pub.AssignedMemberIDs == nil {
+			pub.AssignedMemberIDs = []string{}
+		}
+		if pub.TagIDs == nil {
+			pub.TagIDs = []string{}
+		}
+		pubActivities = append(pubActivities, pub)
+	}
+
+	// Build PublicMember slice — never email/role/userId.
+	pubMembers := make([]models.PublicMember, 0)
+	for _, m := range members {
+		if !usedMemberIDs[m.ID] {
+			continue
+		}
+		name := m.DisplayName
+		if name == "" {
+			name = m.Email
+		}
+		pubMembers = append(pubMembers, models.PublicMember{
+			ID:          m.ID,
+			DisplayName: name,
+			Color:       m.Color,
+			Icon:        m.Icon,
+		})
+	}
+
+	// Prune statuses to referenced ones.
+	pubStatuses := make([]models.Status, 0)
+	for _, st := range statuses {
+		if usedStatusIDs[st.ID] {
+			pubStatuses = append(pubStatuses, *st)
+		}
+	}
+
+	// Prune tags to referenced ones.
+	pubTags := make([]models.Tag, 0)
+	for _, tg := range tags {
+		if usedTagIDs[tg.ID] {
+			pubTags = append(pubTags, *tg)
+		}
+	}
+
+	proj := &models.ShareProjection{
+		Share: *share,
+		Timeline: models.PublicTimeline{
+			ID:        timeline.ID,
+			Name:      timeline.Name,
+			Color:     timeline.Color,
+			Icon:      timeline.Icon,
+			StartDate: timeline.StartDate,
+			EndDate:   timeline.EndDate,
+		},
+		Members:    pubMembers,
+		Statuses:   pubStatuses,
+		Tags:       pubTags,
+		Activities: pubActivities,
+	}
+	return proj, nil
+}
+
+// handleCreateShare handles POST /timelines/{id}/shares. The caller must be a
+// member of the timeline's team. The share captures the current view config.
+func (s *Server) handleCreateShare(w http.ResponseWriter, r *http.Request) {
+	timelineID := r.PathValue("id")
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
+		return
+	}
+	if timeline.ArchivedAt != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+		return
+	}
+
+	member, ok := s.requireTeamMember(w, r, timeline.TeamID)
+	if !ok {
+		return
+	}
+
+	var req createShareBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+	if req.ViewType == "" {
+		req.ViewType = "gantt"
+	}
+	if req.ViewConfig == "" {
+		req.ViewConfig = "{}"
+	}
+
+	now := time.Now().UTC()
+	share := &models.Share{
+		ID:         newID(),
+		TimelineID: timelineID,
+		Token:      newToken(),
+		ViewType:   req.ViewType,
+		ViewConfig: req.ViewConfig,
+		CreatedBy:  member.ID,
+		CreatedAt:  now,
+		ViewCount:  0,
+	}
+
+	if err := s.shares.Create(share); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create share")
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, share)
+}
+
+// handleListShares handles GET /teams/{id}/timelines/{timelineId}/shares.
+// Only team members with access to the timeline may list its shares.
+func (s *Server) handleListShares(w http.ResponseWriter, r *http.Request) {
+	timelineID := r.PathValue("timelineId")
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
+		return
+	}
+
+	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
+		return
+	}
+
+	shares, err := s.shares.ListByTimeline(timelineID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list shares")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, shares)
+}
+
+// handleUpdateShare handles PATCH /shares/{id}. Only the share creator or a
+// team admin may update it.
+func (s *Server) handleUpdateShare(w http.ResponseWriter, r *http.Request) {
+	shareID := r.PathValue("id")
+
+	share, err := s.shares.GetByID(shareID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
+		return
+	}
+
+	timeline, err := s.timelines.GetByID(share.TimelineID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
+		return
+	}
+
+	member, ok := s.requireTeamMember(w, r, timeline.TeamID)
+	if !ok {
+		return
+	}
+	if !s.canManageShare(member, share) {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "only the share creator or a team admin may update this share")
+		return
+	}
+
+	var req patchShareBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	if req.ViewType != nil {
+		share.ViewType = *req.ViewType
+	}
+	if req.ViewConfig != nil {
+		share.ViewConfig = *req.ViewConfig
+	}
+
+	if err := s.shares.Update(share); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update share")
+		return
+	}
+
+	// Invalidate cache so the next public request picks up the new config.
+	s.shareCache.invalidate(share.Token)
+
+	writeJSON(w, http.StatusOK, share)
+}
+
+// handleDeleteShare handles DELETE /shares/{id}. Only the share creator or a
+// team admin may delete it.
+func (s *Server) handleDeleteShare(w http.ResponseWriter, r *http.Request) {
+	shareID := r.PathValue("id")
+
+	share, err := s.shares.GetByID(shareID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
+		return
+	}
+
+	timeline, err := s.timelines.GetByID(share.TimelineID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
+		return
+	}
+
+	member, ok := s.requireTeamMember(w, r, timeline.TeamID)
+	if !ok {
+		return
+	}
+	if !s.canManageShare(member, share) {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "only the share creator or a team admin may delete this share")
+		return
+	}
+
+	if err := s.shares.Delete(shareID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete share")
+		return
+	}
+
+	s.shareCache.invalidate(share.Token)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// canManageShare reports whether a team member may update or delete a share.
+// Team admins always pass; non-admins must be the share's creator.
+func (s *Server) canManageShare(member *models.TeamMember, share *models.Share) bool {
+	return member.Role == "admin" || member.ID == share.CreatedBy
+}
+
+// ── Request bodies ────────────────────────────────────────────────────────────
+
+type createShareBody struct {
+	ViewType   string `json:"viewType"`
+	ViewConfig string `json:"viewConfig"`
+}
+
+type patchShareBody struct {
+	ViewType   *string `json:"viewType,omitempty"`
+	ViewConfig *string `json:"viewConfig,omitempty"`
+}
+````
+
 ## File: packages/api/internal/db/migrations/017_tags_and_activity_tags.sql
 ````sql
 -- Team-scoped tags table: enables colored pills, autocomplete, rename-all,
@@ -25434,6 +25739,515 @@ CREATE TABLE activity_tags (
 ## File: packages/api/internal/db/migrations/018_saved_filters_team_scope.sql
 ````sql
 ALTER TABLE saved_filters ADD COLUMN is_team_filter BOOLEAN NOT NULL DEFAULT 0;
+````
+
+## File: packages/api/internal/db/migrations/019_shares.sql
+````sql
+-- Migration 019: shares table + token migration.
+--
+-- Each timeline can have many shares (one per configured view). The existing
+-- timelines.share_token rows are migrated into shares rows so that any links
+-- already in circulation continue to work. The share_token column on timelines
+-- is left in place until all code references are removed (a follow-up migration
+-- will drop it once it is no longer used by the legacy handler).
+
+CREATE TABLE shares (
+  id             TEXT PRIMARY KEY,
+  timeline_id    TEXT NOT NULL REFERENCES timelines(id) ON DELETE CASCADE,
+  token          TEXT NOT NULL UNIQUE,
+  view_type      TEXT NOT NULL DEFAULT 'gantt',
+  view_config    TEXT NOT NULL DEFAULT '{}',
+  password_hash  TEXT,
+  expires_at     DATETIME,
+  created_by     TEXT NOT NULL REFERENCES team_members(id),
+  created_at     DATETIME NOT NULL,
+  last_viewed_at DATETIME,
+  view_count     INTEGER NOT NULL DEFAULT 0,
+  revoked_at     DATETIME
+);
+
+CREATE INDEX idx_shares_timeline_id ON shares(timeline_id);
+CREATE INDEX idx_shares_token       ON shares(token);
+
+-- Migrate every existing timeline's share_token into a shares row so that
+-- any existing share links keep working. We pick the first team_member row
+-- for the timeline's team as created_by (a stable stand-in for the original
+-- creator, which was not recorded).
+INSERT INTO shares (id, timeline_id, token, view_type, view_config, created_by, created_at)
+SELECT
+  lower(hex(randomblob(16))),
+  t.id,
+  t.share_token,
+  'gantt',
+  '{}',
+  (SELECT tm.id FROM team_members tm WHERE tm.team_id = t.team_id AND tm.archived_at IS NULL ORDER BY tm.joined_at LIMIT 1),
+  datetime('now')
+FROM timelines t
+WHERE t.share_token IS NOT NULL
+  AND t.share_token != ''
+  AND EXISTS (
+    SELECT 1 FROM team_members tm
+    WHERE tm.team_id = t.team_id AND tm.archived_at IS NULL
+  );
+````
+
+## File: packages/api/internal/db/share_repo.go
+````go
+// Package db contains the persistence layer for draba.
+package db
+
+import (
+	"fmt"
+	"time"
+
+	"github.com/jmoiron/sqlx"
+
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// ShareRepo is the persistence layer for Share records.
+type ShareRepo struct {
+	db *sqlx.DB
+}
+
+// NewShareRepo returns a ShareRepo backed by db.
+func NewShareRepo(db *sqlx.DB) *ShareRepo {
+	return &ShareRepo{db: db}
+}
+
+// Create inserts a new Share row.
+func (r *ShareRepo) Create(s *models.Share) error {
+	_, err := r.db.NamedExec(`
+		INSERT INTO shares (
+			id, timeline_id, token, view_type, view_config,
+			created_by, created_at, view_count
+		) VALUES (
+			:id, :timeline_id, :token, :view_type, :view_config,
+			:created_by, :created_at, :view_count
+		)
+	`, s)
+	if err != nil {
+		return fmt.Errorf("creating share: %w", err)
+	}
+	return nil
+}
+
+// GetByID fetches a Share by primary key. Returns sql.ErrNoRows (wrapped) when
+// no row matches.
+func (r *ShareRepo) GetByID(id string) (*models.Share, error) {
+	var s models.Share
+	if err := r.db.Get(&s, `SELECT * FROM shares WHERE id = ?`, id); err != nil {
+		return nil, fmt.Errorf("getting share: %w", err)
+	}
+	return &s, nil
+}
+
+// GetByToken fetches a Share by its public token. Returns sql.ErrNoRows
+// (wrapped) when no row matches.
+func (r *ShareRepo) GetByToken(token string) (*models.Share, error) {
+	var s models.Share
+	if err := r.db.Get(&s, `SELECT * FROM shares WHERE token = ?`, token); err != nil {
+		return nil, fmt.Errorf("getting share by token: %w", err)
+	}
+	return &s, nil
+}
+
+// ListByTimeline returns all non-revoked shares for a timeline, ordered by
+// creation time ascending.
+func (r *ShareRepo) ListByTimeline(timelineID string) ([]*models.Share, error) {
+	out := make([]*models.Share, 0)
+	if err := r.db.Select(&out,
+		`SELECT * FROM shares WHERE timeline_id = ? ORDER BY created_at ASC`,
+		timelineID,
+	); err != nil {
+		return nil, fmt.Errorf("listing shares: %w", err)
+	}
+	return out, nil
+}
+
+// Update writes view_config and updated fields for an existing share.
+func (r *ShareRepo) Update(s *models.Share) error {
+	_, err := r.db.NamedExec(`
+		UPDATE shares SET
+			view_type   = :view_type,
+			view_config = :view_config
+		WHERE id = :id
+	`, s)
+	if err != nil {
+		return fmt.Errorf("updating share: %w", err)
+	}
+	return nil
+}
+
+// Delete permanently removes a share row.
+func (r *ShareRepo) Delete(id string) error {
+	if _, err := r.db.Exec(`DELETE FROM shares WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("deleting share: %w", err)
+	}
+	return nil
+}
+
+// RecordView increments view_count and sets last_viewed_at to now for a share.
+func (r *ShareRepo) RecordView(id string) error {
+	_, err := r.db.Exec(
+		`UPDATE shares SET view_count = view_count + 1, last_viewed_at = ? WHERE id = ?`,
+		time.Now().UTC(), id,
+	)
+	if err != nil {
+		return fmt.Errorf("recording share view: %w", err)
+	}
+	return nil
+}
+````
+
+## File: packages/api/internal/filters/engine.go
+````go
+// Package filters provides the server-side activity filter evaluator.
+//
+// It is a Go port of the TypeScript matchesFilter function in
+// packages/web/src/lib/filterEngine.ts. Both implementations must agree on
+// every test case in packages/shared/testdata/filter-fixtures.json — that file
+// is the single source of truth for expected behaviour.
+package filters
+
+import (
+	"strings"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// FilterLogic controls how conditions in a FilterDefinition are combined.
+type FilterLogic string
+
+const (
+	LogicAnd FilterLogic = "and"
+	LogicOr  FilterLogic = "or"
+)
+
+// FilterDefinition is the top-level filter object, matching the TypeScript type
+// of the same name. Conditions are evaluated with the specified Logic.
+type FilterDefinition struct {
+	Logic      FilterLogic `json:"logic"`
+	Conditions []Condition `json:"conditions"`
+}
+
+// Condition is a single filter rule. Field determines which activity field is
+// tested; Op and Value carry the operator and operand(s). The exact types mirror
+// the TypeScript FilterCondition union.
+type Condition struct {
+	Field string `json:"field"`
+	Op    string `json:"op"`
+	// Value is the raw JSON value for the condition's operand. Its concrete Go
+	// type depends on the field: string, []string, float64, or []string pair.
+	// We unmarshal as interface{} and interpret per-field below.
+	Value interface{} `json:"value,omitempty"`
+}
+
+// FilterContext carries the reference data needed to evaluate status-name and
+// tag-name conditions without performing additional DB lookups.
+type FilterContext struct {
+	// StatusesByTimelineID maps timeline_id → that timeline's live statuses.
+	StatusesByTimelineID map[string][]models.Status
+	// Tags holds all team tags (for resolving tagIds → names).
+	Tags []models.Tag
+}
+
+// MatchesFilter reports whether activity satisfies def given ctx.
+// An empty conditions slice always matches (no filtering applied).
+func MatchesFilter(activity *models.Activity, def *FilterDefinition, ctx *FilterContext) bool {
+	if len(def.Conditions) == 0 {
+		return true
+	}
+
+	results := make([]bool, len(def.Conditions))
+	for i, c := range def.Conditions {
+		results[i] = evalCondition(&c, activity, ctx)
+	}
+
+	if def.Logic == LogicOr {
+		for _, r := range results {
+			if r {
+				return true
+			}
+		}
+		return false
+	}
+	// default: "and"
+	for _, r := range results {
+		if !r {
+			return false
+		}
+	}
+	return true
+}
+
+// ── Condition evaluation ──────────────────────────────────────────────────────
+
+func evalCondition(c *Condition, a *models.Activity, ctx *FilterContext) bool {
+	switch c.Field {
+	case "status":
+		statuses := ctx.StatusesByTimelineID[a.TimelineID]
+		statusName := ""
+		if a.StatusID != nil {
+			for i := range statuses {
+				if statuses[i].ID == *a.StatusID {
+					statusName = strings.ToLower(statuses[i].Name)
+					break
+				}
+			}
+		}
+		var haystack []string
+		if statusName != "" {
+			haystack = []string{statusName}
+		}
+		needles := toLowerStrings(toStringSlice(c.Value))
+		return evalSetOp(c.Op, haystack, needles)
+
+	case "tag":
+		tagMap := make(map[string]string, len(ctx.Tags))
+		for _, t := range ctx.Tags {
+			tagMap[t.ID] = strings.ToLower(t.Name)
+		}
+		actTagNames := make([]string, 0, len(a.TagIDs))
+		for _, id := range a.TagIDs {
+			if name, ok := tagMap[id]; ok {
+				actTagNames = append(actTagNames, name)
+			} else {
+				actTagNames = append(actTagNames, strings.ToLower(id))
+			}
+		}
+		needles := toLowerStrings(toStringSlice(c.Value))
+		return evalSetOp(c.Op, actTagNames, needles)
+
+	case "assignee":
+		needles := toStringSlice(c.Value)
+		return evalSetOp(c.Op, a.AssignedMemberIDs, needles)
+
+	case "title":
+		return evalStringOp(c.Op, a.Title, toString(c.Value))
+
+	case "progress":
+		var v *float64
+		if a.PercentComplete != nil {
+			f := float64(*a.PercentComplete)
+			v = &f
+		}
+		return evalNumberOp(c.Op, v, toFloat(c.Value))
+
+	case "hasParent":
+		return evalBoolOp(c.Op, a.ParentActivityID != nil)
+
+	case "startDate":
+		return evalDateOp(c.Op, a.StartAt.Format(time.RFC3339), c.Value)
+
+	case "endDate":
+		return evalDateOp(c.Op, a.EndAt.Format(time.RFC3339), c.Value)
+	}
+	return false
+}
+
+// ── Operator helpers ──────────────────────────────────────────────────────────
+
+func evalSetOp(op string, haystack, needles []string) bool {
+	switch op {
+	case "in":
+		for _, n := range needles {
+			for _, h := range haystack {
+				if h == n {
+					return true
+				}
+			}
+		}
+		return false
+	case "not_in":
+		for _, n := range needles {
+			for _, h := range haystack {
+				if h == n {
+					return false
+				}
+			}
+		}
+		return true
+	case "is_empty":
+		return len(haystack) == 0
+	case "is_not_empty":
+		return len(haystack) > 0
+	}
+	return false
+}
+
+func evalStringOp(op, value, target string) bool {
+	v := strings.ToLower(strings.TrimSpace(value))
+	t := strings.ToLower(target)
+	switch op {
+	case "equals":
+		return v == t
+	case "not_equals":
+		return v != t
+	case "contains":
+		return strings.Contains(v, t)
+	case "not_contains":
+		return !strings.Contains(v, t)
+	case "is_empty":
+		return strings.TrimSpace(v) == ""
+	case "is_not_empty":
+		return strings.TrimSpace(v) != ""
+	}
+	return false
+}
+
+func evalNumberOp(op string, value *float64, target float64) bool {
+	if op == "is_empty" {
+		return value == nil
+	}
+	if op == "is_not_empty" {
+		return value != nil
+	}
+	if value == nil {
+		return false
+	}
+	v := *value
+	switch op {
+	case "equals":
+		return v == target
+	case "not_equals":
+		return v != target
+	case "gt":
+		return v > target
+	case "gte":
+		return v >= target
+	case "lt":
+		return v < target
+	case "lte":
+		return v <= target
+	}
+	return false
+}
+
+func evalBoolOp(op string, value bool) bool {
+	return (op == "is_true") == value
+}
+
+func evalDateOp(op, dateStr string, target interface{}) bool {
+	if op == "is_empty" {
+		return dateStr == ""
+	}
+	if op == "is_not_empty" {
+		return dateStr != ""
+	}
+	if dateStr == "" || target == nil {
+		return false
+	}
+
+	date, err := parseDate(dateStr)
+	if err != nil {
+		return false
+	}
+
+	if op == "between" {
+		pair, ok := toStringPair(target)
+		if !ok {
+			return false
+		}
+		from, err1 := parseDate(pair[0])
+		to, err2 := parseDate(pair[1])
+		if err1 != nil || err2 != nil {
+			return false
+		}
+		return !date.Before(from) && !date.After(to)
+	}
+
+	targetDate, err := parseDate(toString(target))
+	if err != nil {
+		return false
+	}
+	switch op {
+	case "before":
+		return date.Before(targetDate)
+	case "after":
+		return date.After(targetDate)
+	}
+	return false
+}
+
+// ── Type coercion helpers ─────────────────────────────────────────────────────
+
+func toString(v interface{}) string {
+	if v == nil {
+		return ""
+	}
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return ""
+}
+
+func toFloat(v interface{}) float64 {
+	if v == nil {
+		return 0
+	}
+	switch n := v.(type) {
+	case float64:
+		return n
+	case int:
+		return float64(n)
+	case int64:
+		return float64(n)
+	}
+	return 0
+}
+
+func toStringSlice(v interface{}) []string {
+	if v == nil {
+		return nil
+	}
+	if s, ok := v.(string); ok {
+		return []string{s}
+	}
+	if arr, ok := v.([]interface{}); ok {
+		out := make([]string, 0, len(arr))
+		for _, el := range arr {
+			if s, ok := el.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	if ss, ok := v.([]string); ok {
+		return ss
+	}
+	return nil
+}
+
+func toStringPair(v interface{}) ([2]string, bool) {
+	arr, ok := v.([]interface{})
+	if !ok || len(arr) != 2 {
+		return [2]string{}, false
+	}
+	a, ok1 := arr[0].(string)
+	b, ok2 := arr[1].(string)
+	if !ok1 || !ok2 {
+		return [2]string{}, false
+	}
+	return [2]string{a, b}, true
+}
+
+func toLowerStrings(ss []string) []string {
+	out := make([]string, len(ss))
+	for i, s := range ss {
+		out[i] = strings.ToLower(s)
+	}
+	return out
+}
+
+func parseDate(s string) (time.Time, error) {
+	// Try RFC3339 first (e.g. "2026-05-01T00:00:00Z"), then date-only.
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t, nil
+	}
+	return time.Parse("2006-01-02", s)
+}
 ````
 
 ## File: packages/api/sample_data/00_flush.sql
@@ -25613,6 +26427,317 @@ WORKDIR /data
 USER draba
 EXPOSE 8080
 CMD ["draba"]
+````
+
+## File: packages/shared/testdata/filter-fixtures.json
+````json
+{
+  "_comment": "Golden fixtures for the filter evaluator. Both the TypeScript filterEngine.test.ts and the Go filters/engine_test.go must pass every case here. Each fixture has a filter definition, a set of activities (with reference data), and the expected match result for each activity.",
+  "statuses": [
+    { "id": "s1", "name": "In Progress", "color": "#3b82f6", "isClosed": false, "position": 0, "timelineId": "tl1" },
+    { "id": "s2", "name": "Done",        "color": "#10b981", "isClosed": true,  "position": 1, "timelineId": "tl1" },
+    { "id": "s3", "name": "Blocked",     "color": "#ef4444", "isClosed": false, "position": 2, "timelineId": "tl1" }
+  ],
+  "tags": [
+    { "id": "t1", "name": "frontend", "teamId": "team1", "createdBy": "m1", "createdAt": "2026-01-01T00:00:00Z" },
+    { "id": "t2", "name": "backend",  "teamId": "team1", "createdBy": "m1", "createdAt": "2026-01-01T00:00:00Z" },
+    { "id": "t3", "name": "urgent",   "teamId": "team1", "createdBy": "m1", "createdAt": "2026-01-01T00:00:00Z" }
+  ],
+  "activities": [
+    {
+      "id": "a1",
+      "timelineId": "tl1",
+      "title": "Design new UI",
+      "description": "Revamp the dashboard",
+      "startAt": "2026-05-01T00:00:00Z",
+      "endAt":   "2026-05-15T00:00:00Z",
+      "allDay": true,
+      "statusId": "s1",
+      "parentActivityId": null,
+      "percentComplete": 40,
+      "assignedMemberIds": ["m1", "m2"],
+      "tagIds": ["t1"],
+      "createdBy": "m1",
+      "createdAt": "2026-01-01T00:00:00Z",
+      "updatedAt": "2026-01-01T00:00:00Z"
+    },
+    {
+      "id": "a2",
+      "timelineId": "tl1",
+      "title": "API refactor",
+      "description": null,
+      "startAt": "2026-05-10T00:00:00Z",
+      "endAt":   "2026-05-25T00:00:00Z",
+      "allDay": true,
+      "statusId": "s2",
+      "parentActivityId": "a1",
+      "percentComplete": 100,
+      "assignedMemberIds": ["m3"],
+      "tagIds": ["t2", "t3"],
+      "createdBy": "m1",
+      "createdAt": "2026-01-01T00:00:00Z",
+      "updatedAt": "2026-01-01T00:00:00Z"
+    },
+    {
+      "id": "a3",
+      "timelineId": "tl1",
+      "title": "Deploy hotfix",
+      "description": "Critical production fix",
+      "startAt": "2026-06-01T00:00:00Z",
+      "endAt":   "2026-06-02T00:00:00Z",
+      "allDay": true,
+      "statusId": "s3",
+      "parentActivityId": null,
+      "percentComplete": null,
+      "assignedMemberIds": [],
+      "tagIds": ["t3"],
+      "createdBy": "m1",
+      "createdAt": "2026-01-01T00:00:00Z",
+      "updatedAt": "2026-01-01T00:00:00Z"
+    },
+    {
+      "id": "a4",
+      "timelineId": "tl1",
+      "title": "Write docs",
+      "description": null,
+      "startAt": "2026-07-01T00:00:00Z",
+      "endAt":   "2026-07-10T00:00:00Z",
+      "allDay": true,
+      "statusId": null,
+      "parentActivityId": null,
+      "percentComplete": null,
+      "assignedMemberIds": ["m2"],
+      "tagIds": [],
+      "createdBy": "m1",
+      "createdAt": "2026-01-01T00:00:00Z",
+      "updatedAt": "2026-01-01T00:00:00Z"
+    }
+  ],
+  "fixtures": [
+    {
+      "name": "empty filter matches all",
+      "filter": { "logic": "and", "conditions": [] },
+      "expected": { "a1": true, "a2": true, "a3": true, "a4": true }
+    },
+    {
+      "name": "status in [In Progress]",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "status", "op": "in", "value": ["In Progress"] }]
+      },
+      "expected": { "a1": true, "a2": false, "a3": false, "a4": false }
+    },
+    {
+      "name": "status in [Done, Blocked]",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "status", "op": "in", "value": ["Done", "Blocked"] }]
+      },
+      "expected": { "a1": false, "a2": true, "a3": true, "a4": false }
+    },
+    {
+      "name": "status is_empty",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "status", "op": "is_empty" }]
+      },
+      "expected": { "a1": false, "a2": false, "a3": false, "a4": true }
+    },
+    {
+      "name": "status is_not_empty",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "status", "op": "is_not_empty" }]
+      },
+      "expected": { "a1": true, "a2": true, "a3": true, "a4": false }
+    },
+    {
+      "name": "status not_in [In Progress]",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "status", "op": "not_in", "value": ["In Progress"] }]
+      },
+      "expected": { "a1": false, "a2": true, "a3": true, "a4": true }
+    },
+    {
+      "name": "tag in [frontend]",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "tag", "op": "in", "value": ["frontend"] }]
+      },
+      "expected": { "a1": true, "a2": false, "a3": false, "a4": false }
+    },
+    {
+      "name": "tag in [urgent]",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "tag", "op": "in", "value": ["urgent"] }]
+      },
+      "expected": { "a1": false, "a2": true, "a3": true, "a4": false }
+    },
+    {
+      "name": "tag is_empty",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "tag", "op": "is_empty" }]
+      },
+      "expected": { "a1": false, "a2": false, "a3": false, "a4": true }
+    },
+    {
+      "name": "tag is_not_empty",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "tag", "op": "is_not_empty" }]
+      },
+      "expected": { "a1": true, "a2": true, "a3": true, "a4": false }
+    },
+    {
+      "name": "assignee in [m1]",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "assignee", "op": "in", "value": ["m1"] }]
+      },
+      "expected": { "a1": true, "a2": false, "a3": false, "a4": false }
+    },
+    {
+      "name": "assignee is_empty",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "assignee", "op": "is_empty" }]
+      },
+      "expected": { "a1": false, "a2": false, "a3": true, "a4": false }
+    },
+    {
+      "name": "title contains 'design'",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "title", "op": "contains", "value": "design" }]
+      },
+      "expected": { "a1": true, "a2": false, "a3": false, "a4": false }
+    },
+    {
+      "name": "title equals 'Write docs'",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "title", "op": "equals", "value": "Write docs" }]
+      },
+      "expected": { "a1": false, "a2": false, "a3": false, "a4": true }
+    },
+    {
+      "name": "title not_contains 'api'",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "title", "op": "not_contains", "value": "api" }]
+      },
+      "expected": { "a1": true, "a2": false, "a3": true, "a4": true }
+    },
+    {
+      "name": "progress gte 50",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "progress", "op": "gte", "value": 50 }]
+      },
+      "expected": { "a1": false, "a2": true, "a3": false, "a4": false }
+    },
+    {
+      "name": "progress is_empty",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "progress", "op": "is_empty" }]
+      },
+      "expected": { "a1": false, "a2": false, "a3": true, "a4": true }
+    },
+    {
+      "name": "progress is_not_empty",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "progress", "op": "is_not_empty" }]
+      },
+      "expected": { "a1": true, "a2": true, "a3": false, "a4": false }
+    },
+    {
+      "name": "hasParent is_true",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "hasParent", "op": "is_true" }]
+      },
+      "expected": { "a1": false, "a2": true, "a3": false, "a4": false }
+    },
+    {
+      "name": "hasParent is_false",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "hasParent", "op": "is_false" }]
+      },
+      "expected": { "a1": true, "a2": false, "a3": true, "a4": true }
+    },
+    {
+      "name": "startDate before 2026-05-05",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "startDate", "op": "before", "value": "2026-05-05" }]
+      },
+      "expected": { "a1": true, "a2": false, "a3": false, "a4": false }
+    },
+    {
+      "name": "startDate after 2026-05-15",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "startDate", "op": "after", "value": "2026-05-15" }]
+      },
+      "expected": { "a1": false, "a2": false, "a3": true, "a4": true }
+    },
+    {
+      "name": "startDate between 2026-05-01 and 2026-05-31",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "startDate", "op": "between", "value": ["2026-05-01", "2026-05-31"] }]
+      },
+      "expected": { "a1": true, "a2": true, "a3": false, "a4": false }
+    },
+    {
+      "name": "endDate before 2026-05-20",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "endDate", "op": "before", "value": "2026-05-20" }]
+      },
+      "expected": { "a1": true, "a2": false, "a3": false, "a4": false }
+    },
+    {
+      "name": "OR: status Done OR tag frontend",
+      "filter": {
+        "logic": "or",
+        "conditions": [
+          { "field": "status", "op": "in", "value": ["Done"] },
+          { "field": "tag",    "op": "in", "value": ["frontend"] }
+        ]
+      },
+      "expected": { "a1": true, "a2": true, "a3": false, "a4": false }
+    },
+    {
+      "name": "AND: status In Progress AND assignee m1",
+      "filter": {
+        "logic": "and",
+        "conditions": [
+          { "field": "status",   "op": "in", "value": ["In Progress"] },
+          { "field": "assignee", "op": "in", "value": ["m1"] }
+        ]
+      },
+      "expected": { "a1": true, "a2": false, "a3": false, "a4": false }
+    },
+    {
+      "name": "AND: progress gt 0 AND hasParent is_true",
+      "filter": {
+        "logic": "and",
+        "conditions": [
+          { "field": "progress",  "op": "gt",      "value": 0 },
+          { "field": "hasParent", "op": "is_true"             }
+        ]
+      },
+      "expected": { "a1": false, "a2": true, "a3": false, "a4": false }
+    }
+  ]
+}
 ````
 
 ## File: packages/web/src/components/filters/FilterConditionRow.tsx
@@ -26246,51 +27371,414 @@ export default function GanttToolbar({
 }
 ````
 
-## File: packages/web/src/components/gantt/GanttView.filter.test.ts
+## File: packages/web/src/components/gantt/granularity.test.ts
 ````typescript
 import { describe, it, expect } from 'vitest'
-import { filterOpenActivities } from './GanttView'
+import { generateColumns, positionInColumns, snapDivisorFor } from './granularity'
 
-// ── filterOpenActivities — 'open' preset logic ────────────────────────────────
+// ── generateColumns — weekStart option ───────────────────────────────────────
+//
+// Jan 2026 layout:
+//   Mon Jan  5 (ISO week start)
+//   Sun Jan  4 (Sunday week start)
+//
+// Jan 1 2026 is a Thursday.
+//
+// Input dates use Date.UTC to produce stable UTC-midnight values that give the
+// same result regardless of the test runner's local timezone.
 
-describe('filterOpenActivities', () => {
-  const activities = [
-    { id: '1', statusId: 'closed-a' },
-    { id: '2', statusId: 'open-b' },
-    { id: '3', statusId: null },
-    { id: '4', statusId: undefined },
-    { id: '5', statusId: 'closed-c' },
-  ]
+const JAN1  = new Date(Date.UTC(2026, 0, 1))  // Thu
+const JAN31 = new Date(Date.UTC(2026, 0, 31)) // Sat
 
-  it('removes activities whose statusId is in the closed set', () => {
-    const closed = new Set(['closed-a', 'closed-c'])
-    const result = filterOpenActivities(activities, closed)
-    expect(result.map(a => a.id)).toEqual(['2', '3', '4'])
+describe('generateColumns — weekStart', () => {
+  it('monday week start: first week column begins on Monday Dec 29', () => {
+    const cols = generateColumns(JAN1, JAN31, 'week', { weekStart: 'monday' })
+    // Jan 1 is Thursday; Monday ISO week start = Dec 29 2025
+    expect(cols[0].start.getUTCDay()).toBe(1) // 1 = Monday
+    expect(cols[0].start.getUTCDate()).toBe(29)
   })
 
-  it('keeps activities with no status (null or undefined)', () => {
-    const closed = new Set(['closed-a'])
-    const result = filterOpenActivities(activities, closed)
-    const noStatusIds = result.filter(a => !a.statusId).map(a => a.id)
-    expect(noStatusIds).toContain('3')
-    expect(noStatusIds).toContain('4')
+  it('sunday week start: first week column begins on Sunday Dec 28', () => {
+    const cols = generateColumns(JAN1, JAN31, 'week', { weekStart: 'sunday' })
+    // Jan 1 is Thursday; Sunday week start = Dec 28 2025
+    expect(cols[0].start.getUTCDay()).toBe(0) // 0 = Sunday
+    expect(cols[0].start.getUTCDate()).toBe(28)
   })
 
-  it('returns all activities unchanged when closed set is empty', () => {
-    const result = filterOpenActivities(activities, new Set())
-    expect(result).toHaveLength(activities.length)
-  })
-
-  it('returns empty array when all activities are closed', () => {
-    const closed = new Set(['closed-a', 'open-b', 'closed-c'])
-    const onlyClosed = [
-      { id: '1', statusId: 'closed-a' },
-      { id: '5', statusId: 'closed-c' },
-    ]
-    const result = filterOpenActivities(onlyClosed, closed)
-    expect(result).toHaveLength(0)
+  it('default (no option) behaves like monday', () => {
+    const defaultCols = generateColumns(JAN1, JAN31, 'week')
+    const mondayCols  = generateColumns(JAN1, JAN31, 'week', { weekStart: 'monday' })
+    expect(defaultCols[0].start.getTime()).toBe(mondayCols[0].start.getTime())
   })
 })
+
+// ── generateColumns — locale option ──────────────────────────────────────────
+
+describe('generateColumns — locale', () => {
+  it('en-US: month column label contains English month name', () => {
+    const cols = generateColumns(JAN1, JAN31, 'month', { locale: 'en-US' })
+    expect(cols[0].label).toMatch(/Jan/)
+  })
+
+  it('en-GB: day column label shows day-first ordering (e.g. "1 Jan")', () => {
+    const cols = generateColumns(JAN1, JAN31, 'day', { locale: 'en-GB' })
+    // en-GB {month:'short', day:'numeric', timeZone:'UTC'} → "1 Jan"
+    expect(cols[0].label).toMatch(/Jan/)
+    // The day should come first in en-GB
+    expect(cols[0].label).toMatch(/^1/)
+  })
+
+  it('default locale behaves like en-US', () => {
+    const defaultCols = generateColumns(JAN1, JAN31, 'month')
+    const usCols      = generateColumns(JAN1, JAN31, 'month', { locale: 'en-US' })
+    expect(defaultCols[0].label).toBe(usCols[0].label)
+  })
+})
+
+// ── snapDivisorFor ────────────────────────────────────────────────────────────
+
+describe('snapDivisorFor', () => {
+  it('week → 7 (snap to day within week)', () => {
+    expect(snapDivisorFor('week')).toBe(7)
+  })
+
+  it('month → 4 (snap to week within month)', () => {
+    expect(snapDivisorFor('month')).toBe(4)
+  })
+
+  it('quarter → 3 (snap to month within quarter)', () => {
+    expect(snapDivisorFor('quarter')).toBe(3)
+  })
+
+  it('year → 4 (snap to quarter within year)', () => {
+    expect(snapDivisorFor('year')).toBe(4)
+  })
+
+  it('day → 1 (no finer snap at day granularity)', () => {
+    expect(snapDivisorFor('day')).toBe(1)
+  })
+
+  it('auto → 1 (no finer snap for auto)', () => {
+    expect(snapDivisorFor('auto')).toBe(1)
+  })
+})
+
+// ── Timezone-safety: midnight-UTC dates ───────────────────────────────────────
+//
+// An activity stored as "2026-05-31T00:00:00Z" must display as May 31 and
+// land in the May 31 column regardless of local timezone.  This suite uses
+// Date.UTC inputs to reproduce the condition that would cause a regression
+// when TZ=America/Denver (UTC-6).
+
+describe('positionInColumns — midnight-UTC activity dates land on correct day', () => {
+  // May 2026: generate day-granularity columns for the whole month
+  const MAY1  = new Date(Date.UTC(2026, 4,  1))
+  const MAY31 = new Date(Date.UTC(2026, 4, 31))
+  const cols  = generateColumns(MAY1, MAY31, 'day')
+
+  it('May 31 column label is "May 31"', () => {
+    const mayThirtyFirst = cols.find(c => c.start.getUTCDate() === 31 && c.start.getUTCMonth() === 4)
+    expect(mayThirtyFirst?.label).toMatch(/31/)
+  })
+
+  it('activity on 2026-05-31 lands in May 31 column (startCol ≥ 30)', () => {
+    // "2026-05-31T00:00:00Z" — midnight UTC; same value the API emits
+    const actStart = new Date('2026-05-31T00:00:00Z')
+    const actEnd   = new Date('2026-05-31T00:00:00Z')
+    const { startCol } = positionInColumns(actStart, actEnd, cols)
+    // May 31 is the 31st day (0-indexed = 30)
+    expect(Math.floor(startCol)).toBe(30)
+  })
+
+  it('activity on 2026-05-01 lands in May 1 column (startCol = 0)', () => {
+    const actStart = new Date('2026-05-01T00:00:00Z')
+    const actEnd   = new Date('2026-05-01T00:00:00Z')
+    const { startCol } = positionInColumns(actStart, actEnd, cols)
+    expect(Math.floor(startCol)).toBe(0)
+  })
+
+  it('formatLabel for May 31 day column shows "May 31" (UTC read-out)', () => {
+    const mayThirtyFirst = cols.find(c => c.start.getUTCDate() === 31 && c.start.getUTCMonth() === 4)
+    expect(mayThirtyFirst).toBeDefined()
+    // Label must show May 31, not May 30 (which would happen with local-time formatting in UTC-6)
+    expect(mayThirtyFirst!.label).toContain('31')
+    expect(mayThirtyFirst!.label).not.toContain('30')
+  })
+})
+````
+
+## File: packages/web/src/components/gantt/granularity.ts
+````typescript
+/**
+ * Time-granularity helpers for the Gantt view.
+ *
+ * Generates column definitions and maps event date ranges to fractional
+ * column positions at any granularity (day → year).
+ */
+
+export type TimeGranularity = 'day' | 'week' | 'month' | 'quarter' | 'year';
+
+export interface ColumnDef {
+  label: string;
+  /** Secondary label rendered on a second line (used for week numbers). */
+  sublabel?: string;
+  start: Date;
+  end: Date;
+  /** Calendar days this column spans (varies for months, quarters, years). */
+  days: number;
+}
+
+// ── Date helpers ────────────────────────────────────────────────────────────
+//
+// All helpers operate in UTC so that all-day activity dates stored as
+// midnight-UTC strings (e.g. "2026-05-31T00:00:00Z") land on the correct
+// calendar day regardless of the viewer's local timezone.
+//
+// TODO: branch on allDay when timed events ship (Phase 15 calendar sync).
+
+function daysBetween(a: Date, b: Date): number {
+  return Math.round((b.getTime() - a.getTime()) / 86_400_000);
+}
+
+function startOfDay(d: Date): Date {
+  const r = new Date(d);
+  r.setUTCHours(0, 0, 0, 0);
+  return r;
+}
+
+function startOfWeek(d: Date, weekStart: 'monday' | 'sunday' = 'monday'): Date {
+  const r = startOfDay(d);
+  const day = r.getUTCDay(); // 0=Sun, 1=Mon, …, 6=Sat
+  if (weekStart === 'sunday') {
+    r.setUTCDate(r.getUTCDate() - day);
+  } else {
+    // Monday = ISO week start
+    r.setUTCDate(r.getUTCDate() - ((day + 6) % 7));
+  }
+  return r;
+}
+
+function startOfMonth(d: Date): Date {
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1));
+}
+
+function startOfQuarter(d: Date): Date {
+  const q = Math.floor(d.getUTCMonth() / 3) * 3;
+  return new Date(Date.UTC(d.getUTCFullYear(), q, 1));
+}
+
+function startOfYear(d: Date): Date {
+  return new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+}
+
+export function addDays(d: Date, n: number): Date {
+  const r = new Date(d);
+  r.setUTCDate(r.getUTCDate() + n);
+  return r;
+}
+
+function addMonths(d: Date, n: number): Date {
+  const r = new Date(d);
+  r.setUTCMonth(r.getUTCMonth() + n);
+  return r;
+}
+
+function endOfPeriod(start: Date, gran: TimeGranularity): Date {
+  switch (gran) {
+    case 'day':     return addDays(start, 1);
+    case 'week':    return addDays(start, 7);
+    case 'month':   return addMonths(start, 1);
+    case 'quarter': return addMonths(start, 3);
+    case 'year':    return addMonths(start, 12);
+  }
+}
+
+function periodStart(d: Date, gran: TimeGranularity, weekStart: 'monday' | 'sunday' = 'monday'): Date {
+  switch (gran) {
+    case 'day':     return startOfDay(d);
+    case 'week':    return startOfWeek(d, weekStart);
+    case 'month':   return startOfMonth(d);
+    case 'quarter': return startOfQuarter(d);
+    case 'year':    return startOfYear(d);
+  }
+}
+
+// ── Label formatting ────────────────────────────────────────────────────────
+
+/** ISO 8601 week number (1–53). Week 1 contains Jan 4; weeks start Monday. */
+function isoWeekNumber(d: Date): number {
+  const date = new Date(d);
+  date.setUTCHours(0, 0, 0, 0);
+  date.setUTCDate(date.getUTCDate() + 3 - ((date.getUTCDay() + 6) % 7));
+  const week1 = new Date(Date.UTC(date.getUTCFullYear(), 0, 4));
+  return 1 + Math.round(
+    ((date.getTime() - week1.getTime()) / 86_400_000 - 3 + ((week1.getUTCDay() + 6) % 7)) / 7,
+  );
+}
+
+function formatLabel(start: Date, gran: TimeGranularity, locale = 'en-US'): string {
+  switch (gran) {
+    case 'day':
+      return start.toLocaleDateString(locale, { month: 'short', day: 'numeric', timeZone: 'UTC' });
+    case 'week': {
+      const end = addDays(start, 6);
+      const sameMonth = start.getUTCMonth() === end.getUTCMonth();
+      const s = start.toLocaleDateString(locale, { month: 'short', day: 'numeric', timeZone: 'UTC' });
+      const e = sameMonth
+        ? end.getUTCDate().toString()
+        : end.toLocaleDateString(locale, { month: 'short', day: 'numeric', timeZone: 'UTC' });
+      return `${s}–${e}`;
+    }
+    case 'month':
+      return start.toLocaleDateString(locale, { month: 'short', year: 'numeric', timeZone: 'UTC' });
+    case 'quarter': {
+      const q = Math.floor(start.getUTCMonth() / 3) + 1;
+      return `Q${q} ${start.getUTCFullYear()}`;
+    }
+    case 'year':
+      return start.getUTCFullYear().toString();
+  }
+}
+
+// ── Column generation ───────────────────────────────────────────────────────
+
+export interface GenerateColumnsOptions {
+  /** Which day the week grid starts on. Defaults to 'monday' (ISO). */
+  weekStart?: 'monday' | 'sunday';
+  /** BCP 47 locale tag for month name formatting. Defaults to 'en-US'. */
+  locale?: string;
+}
+
+export function generateColumns(
+  viewStart: Date,
+  viewEnd: Date,
+  granularity: TimeGranularity,
+  options?: GenerateColumnsOptions,
+): ColumnDef[] {
+  const weekStart = options?.weekStart ?? 'monday';
+  const locale = options?.locale ?? 'en-US';
+  const columns: ColumnDef[] = [];
+  let cur = periodStart(viewStart, granularity, weekStart);
+
+  while (cur <= viewEnd) {
+    const next = endOfPeriod(cur, granularity);
+    // Clamp to view bounds for the first and last columns
+    const colStart = cur < viewStart ? viewStart : cur;
+    const colEnd = next > addDays(viewEnd, 1) ? addDays(viewEnd, 1) : next;
+    columns.push({
+      label: formatLabel(cur, granularity, locale),
+      sublabel: granularity === 'week' ? `W${isoWeekNumber(cur)}` : undefined,
+      start: cur,
+      end: next,
+      days: daysBetween(colStart, colEnd),
+    });
+    cur = next;
+  }
+
+  return columns;
+}
+
+// ── Event positioning ───────────────────────────────────────────────────────
+
+/** Fractional position within the column array. */
+export function positionInColumns(
+  eventStart: Date,
+  eventEnd: Date,
+  columns: ColumnDef[],
+): { startCol: number; span: number } {
+  if (columns.length === 0) return { startCol: 0, span: 0 };
+
+  const evStartMs = eventStart.getTime();
+  const evEndMs = eventEnd.getTime();
+
+  let startCol = 0;
+  let endCol = columns.length;
+
+  for (let i = 0; i < columns.length; i++) {
+    const col = columns[i];
+    const colStartMs = col.start.getTime();
+    const colEndMs = col.end.getTime();
+    const colSpanMs = colEndMs - colStartMs;
+
+    if (evStartMs >= colStartMs && evStartMs < colEndMs) {
+      startCol = i + (colSpanMs > 0 ? (evStartMs - colStartMs) / colSpanMs : 0);
+    }
+    // End is inclusive day, so add 1 day for positioning
+    const evEndNextDayMs = evEndMs + 86_400_000;
+    if (evEndNextDayMs > colStartMs && evEndNextDayMs <= colEndMs) {
+      endCol = i + (colSpanMs > 0 ? (evEndNextDayMs - colStartMs) / colSpanMs : 1);
+    }
+  }
+
+  const span = Math.max(endCol - startCol, 0.15);
+  return { startCol, span };
+}
+
+// ── Snap divisor ────────────────────────────────────────────────────────────
+
+// Number of snap divisions per column at the given zoom granularity.
+// Higher divisor → finer snap (e.g. week columns snap to individual days).
+export function snapDivisorFor(granularity: TimeGranularity | 'auto'): number {
+  switch (granularity) {
+    case 'week':    return 7;  // snap to day within week
+    case 'month':   return 4;  // snap to week within month
+    case 'quarter': return 3;  // snap to month within quarter
+    case 'year':    return 4;  // snap to quarter within year
+    default:        return 1;  // day or auto → no finer snap
+  }
+}
+
+// ── Today position ──────────────────────────────────────────────────────────
+
+export function todayColumnPosition(columns: ColumnDef[]): number {
+  const now = startOfDay(new Date()); // startOfDay uses setUTCHours → UTC midnight
+  const nowMs = now.getTime();
+
+  for (let i = 0; i < columns.length; i++) {
+    const col = columns[i];
+    const colStartMs = col.start.getTime();
+    const colEndMs = col.end.getTime();
+    if (nowMs >= colStartMs && nowMs < colEndMs) {
+      const colSpanMs = colEndMs - colStartMs;
+      return i + (colSpanMs > 0 ? (nowMs - colStartMs) / colSpanMs : 0.5);
+    }
+  }
+  return -1;
+}
+
+// ── Auto-fit ────────────────────────────────────────────────────────────────
+
+const GRANULARITIES: TimeGranularity[] = ['day', 'week', 'month', 'quarter', 'year'];
+const BASE_COL_WIDTH = 80;
+
+export function autoFitGranularity(
+  viewStart: Date,
+  viewEnd: Date,
+  viewportWidth: number,
+): TimeGranularity {
+  const targetCols = Math.max(viewportWidth / BASE_COL_WIDTH, 2);
+
+  let best: TimeGranularity = 'month';
+  let bestDiff = Infinity;
+
+  for (const gran of GRANULARITIES) {
+    const cols = generateColumns(viewStart, viewEnd, gran).length;
+    if (cols < 2) continue;
+    // Prefer the finest granularity that fits within 50-150% of viewport
+    const ratio = cols / targetCols;
+    if (ratio >= 0.4 && ratio <= 1.5) {
+      // Within range — prefer finest (earliest in array)
+      return gran;
+    }
+    const diff = Math.abs(ratio - 1);
+    if (diff < bestDiff) {
+      bestDiff = diff;
+      best = gran;
+    }
+  }
+
+  return best;
+}
 ````
 
 ## File: packages/web/src/components/list/ListView.format.test.ts
@@ -27094,6 +28582,175 @@ export function ActivityFieldsBody(props: ActivityFieldsBodyProps) {
 }
 ````
 
+## File: packages/web/src/components/ShareModal.tsx
+````typescript
+/**
+ * ShareModal — create a share link for the current Gantt view.
+ *
+ * Captures the live toolbar state (groupBy, sortBy, colorBy, granularity,
+ * and the resolved active filter definition) into a view_config snapshot,
+ * calls POST /timelines/{id}/shares, and copies the resulting /s/:token URL
+ * to the clipboard.
+ */
+
+import { useState } from 'react'
+import { createPortal } from 'react-dom'
+import { Copy, Check, Share2, X, Loader2 } from 'lucide-react'
+import { useCreateShare } from '@/hooks/useShares'
+import type { FilterDefinition } from '@/lib/filterTypes'
+
+export interface ShareViewConfig {
+  groupBy: string
+  sortBy: string
+  colorBy: string
+  granularity: string
+  /** The resolved FilterDefinition at the moment "Share this view" was clicked. */
+  filter: FilterDefinition | null
+}
+
+interface Props {
+  teamId: string
+  timelineId: string
+  viewType: 'gantt' | 'list' | 'calendar' | 'kanban'
+  viewConfig: ShareViewConfig
+  onClose: () => void
+}
+
+export default function ShareModal({ teamId, timelineId, viewType, viewConfig, onClose }: Props) {
+  const [shareUrl, setShareUrl] = useState<string | null>(null)
+  const [copied, setCopied] = useState(false)
+  const createShare = useCreateShare(teamId, timelineId)
+
+  const configString = JSON.stringify({
+    groupBy: viewConfig.groupBy,
+    sortBy: viewConfig.sortBy,
+    colorBy: viewConfig.colorBy,
+    granularity: viewConfig.granularity,
+    filter: viewConfig.filter ?? { logic: 'and', conditions: [] },
+  })
+
+  const handleCreate = () => {
+    createShare.mutate(
+      { viewType, viewConfig: configString },
+      {
+        onSuccess: (share) => {
+          const url = `${window.location.origin}/s/${share.token}`
+          setShareUrl(url)
+          copyToClipboard(url)
+        },
+      },
+    )
+  }
+
+  const copyToClipboard = (url: string) => {
+    void navigator.clipboard.writeText(url).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    })
+  }
+
+  return createPortal(
+    <div
+      style={{
+        position: 'fixed', inset: 0, zIndex: 1000,
+        background: 'rgba(0,0,0,0.45)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+      }}
+      onClick={(e) => { if (e.target === e.currentTarget) onClose() }}
+    >
+      <div
+        style={{
+          background: 'var(--card)',
+          border: '1px solid var(--border)',
+          borderRadius: 10,
+          width: 420,
+          padding: '20px 24px',
+          boxShadow: '0 8px 32px rgba(0,0,0,0.18)',
+          position: 'relative',
+        }}
+      >
+        {/* Header */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16 }}>
+          <Share2 size={16} style={{ color: 'var(--primary)' }} />
+          <span style={{ fontWeight: 600, fontSize: 14, color: 'var(--foreground)' }}>
+            Share this view
+          </span>
+          <button
+            onClick={onClose}
+            style={{ marginLeft: 'auto', background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 2 }}
+          >
+            <X size={16} />
+          </button>
+        </div>
+
+        <p style={{ fontSize: 12, color: 'var(--muted-foreground)', marginBottom: 16, lineHeight: 1.5 }}>
+          Creates a read-only link showing exactly this view — same grouping, sorting, and filter.
+          Anyone with the link can view it without logging in.
+        </p>
+
+        {shareUrl ? (
+          <>
+            <div style={{ display: 'flex', gap: 6, marginBottom: 12 }}>
+              <input
+                readOnly
+                value={shareUrl}
+                onClick={(e) => (e.target as HTMLInputElement).select()}
+                style={{
+                  flex: 1, fontSize: 11, padding: '6px 8px',
+                  border: '1px solid var(--border)', borderRadius: 6,
+                  background: 'var(--muted)', color: 'var(--foreground)',
+                  fontFamily: 'var(--font-mono)',
+                }}
+              />
+              <button
+                onClick={() => copyToClipboard(shareUrl)}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 4,
+                  padding: '6px 10px', borderRadius: 6,
+                  background: copied ? 'var(--primary)' : 'var(--muted)',
+                  border: '1px solid var(--border)',
+                  color: copied ? 'var(--primary-foreground)' : 'var(--foreground)',
+                  fontSize: 12, cursor: 'pointer', fontWeight: 500, whiteSpace: 'nowrap',
+                }}
+              >
+                {copied ? <Check size={13} /> : <Copy size={13} />}
+                {copied ? 'Copied!' : 'Copy'}
+              </button>
+            </div>
+            <p style={{ fontSize: 11, color: 'var(--muted-foreground)' }}>
+              Link copied to clipboard. The view is live — changes to activities will appear within ~60 seconds.
+            </p>
+          </>
+        ) : (
+          <button
+            onClick={handleCreate}
+            disabled={createShare.isPending}
+            style={{
+              display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+              width: '100%', padding: '8px 0',
+              background: 'var(--primary)', color: 'var(--primary-foreground)',
+              border: 'none', borderRadius: 6, fontSize: 13, fontWeight: 600,
+              cursor: createShare.isPending ? 'not-allowed' : 'pointer',
+              opacity: createShare.isPending ? 0.7 : 1,
+            }}
+          >
+            {createShare.isPending ? <Loader2 size={14} className="animate-spin" /> : <Share2 size={14} />}
+            {createShare.isPending ? 'Creating link…' : 'Create share link'}
+          </button>
+        )}
+
+        {createShare.isError && (
+          <p style={{ fontSize: 11, color: 'var(--destructive)', marginTop: 8 }}>
+            Failed to create share. Please try again.
+          </p>
+        )}
+      </div>
+    </div>,
+    document.body,
+  )
+}
+````
+
 ## File: packages/web/src/contexts/FilterContext.tsx
 ````typescript
 /**
@@ -27129,6 +28786,93 @@ export function useFilter(): FilterContextValue {
   const ctx = useContext(FilterContext)
   if (!ctx) throw new Error('useFilter must be used inside FilterProvider')
   return ctx
+}
+````
+
+## File: packages/web/src/hooks/useShares.ts
+````typescript
+/**
+ * TanStack Query hooks for Share CRUD and the public share projection.
+ *
+ * Authenticated hooks (useCreateShare, useListShares, useDeleteShare) require
+ * an auth token. useShareProjection is public and uses a plain fetch.
+ */
+
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import type { components } from '@draba/shared'
+import { createAuthFetch, API_BASE, ApiError } from '@/lib/api'
+import { useAuth } from '@/contexts/AuthContext'
+
+type Share = components['schemas']['Share']
+type ShareProjection = components['schemas']['ShareProjection']
+
+const sharesKey = (teamId: string, timelineId: string) =>
+  ['teams', teamId, 'timelines', timelineId, 'shares'] as const
+
+// ── Authenticated hooks ───────────────────────────────────────────────────────
+
+/** Lists all shares for a timeline. */
+export function useListShares(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  return useQuery({
+    queryKey: sharesKey(teamId, timelineId),
+    queryFn: () =>
+      authFetch<Share[]>(`/teams/${teamId}/timelines/${timelineId}/shares`),
+    enabled: Boolean(teamId) && Boolean(timelineId),
+  })
+}
+
+interface CreateShareInput {
+  viewType: string
+  viewConfig: string
+}
+
+/** Creates a share and invalidates the list. */
+export function useCreateShare(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (input: CreateShareInput) =>
+      authFetch<Share>(`/timelines/${timelineId}/shares`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(input),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: sharesKey(teamId, timelineId) }),
+  })
+}
+
+/** Deletes a share and invalidates the list. */
+export function useDeleteShare(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (shareId: string) =>
+      authFetch<void>(`/shares/${shareId}`, { method: 'DELETE' }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: sharesKey(teamId, timelineId) }),
+  })
+}
+
+// ── Public hook (no auth) ─────────────────────────────────────────────────────
+
+/** Fetches a public share projection. No authentication required. */
+export function useShareProjection(token: string | undefined) {
+  return useQuery({
+    queryKey: ['shares', token] as const,
+    queryFn: async () => {
+      const res = await fetch(`${API_BASE}/shares/${token}`)
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}))
+        throw new ApiError(res.status, body?.error?.code ?? 'ERROR', body?.error?.message ?? res.statusText)
+      }
+      return res.json() as Promise<ShareProjection>
+    },
+    enabled: Boolean(token),
+    staleTime: 60_000,
+  })
 }
 ````
 
@@ -27799,493 +29543,6 @@ export function filterColor(id: string): string {
     h = (h * 31 + id.charCodeAt(i)) >>> 0
   }
   return PALETTE[h % PALETTE.length]
-}
-````
-
-## File: packages/web/src/lib/filterEngine.test.ts
-````typescript
-/**
- * filterEngine.test.ts — unit tests for matchesFilter.
- *
- * Covers: each field type, each operator, AND/OR logic, edge cases
- * (empty conditions, null/missing fields, case-insensitive status/tag matching).
- */
-
-import { describe, it, expect } from 'vitest'
-import { matchesFilter, type FilterContext } from './filterEngine'
-import type { components } from '@draba/shared'
-
-type Activity = components['schemas']['Activity']
-type Status = components['schemas']['Status']
-type Tag = components['schemas']['Tag']
-
-// ── Fixtures ──────────────────────────────────────────────────────────────────
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function makeActivity(overrides: Record<string, any> = {}): Activity {
-  return {
-    id: 'act-1',
-    title: 'Test activity',
-    timelineId: 'tl-1',
-    startAt: '2026-01-10T00:00:00Z',
-    endAt: '2026-01-20T00:00:00Z',
-    allDay: false,
-    statusId: 'status-open',
-    tagIds: ['tag-1'],
-    assignedMemberIds: ['member-1'],
-    percentComplete: 50,
-    parentActivityId: null,
-    color: null,
-    icon: null,
-    description: null,
-    notes: null,
-    location: null,
-    url: null,
-    createdAt: '2026-01-01T00:00:00Z',
-    updatedAt: '2026-01-01T00:00:00Z',
-    archivedAt: null,
-    createdBy: 'user-1',
-    ...overrides,
-  } as Activity
-}
-
-function makeStatus(id: string, name: string, isClosed = false): Status {
-  return { id, name, color: '#3B82F6', icon: null, isClosed, position: 0, timelineId: 'tl-1', createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' }
-}
-
-function makeTag(id: string, name: string): Tag {
-  return { id, name, color: null, teamId: 'team-1', createdAt: '2026-01-01T00:00:00Z', createdBy: 'user-1' }
-}
-
-const statusOpen = makeStatus('status-open', 'In Progress')
-const statusClosed = makeStatus('status-closed', 'Done', true)
-
-const tagBug = makeTag('tag-1', 'bug')
-const tagFeat = makeTag('tag-2', 'feature')
-
-const ctx: FilterContext = {
-  statusesByTimeline: new Map([['tl-1', [statusOpen, statusClosed]]]),
-  tags: [tagBug, tagFeat],
-}
-
-// ── Empty conditions ──────────────────────────────────────────────────────────
-
-describe('empty conditions', () => {
-  it('matches all activities when conditions list is empty', () => {
-    const activity = makeActivity()
-    expect(matchesFilter(activity, { logic: 'and', conditions: [] }, ctx)).toBe(true)
-    expect(matchesFilter(activity, { logic: 'or', conditions: [] }, ctx)).toBe(true)
-  })
-})
-
-// ── AND / OR logic ────────────────────────────────────────────────────────────
-
-describe('AND / OR logic', () => {
-  it('AND requires all conditions to pass', () => {
-    const activity = makeActivity({ title: 'Hello world' })
-    expect(matchesFilter(activity, {
-      logic: 'and',
-      conditions: [
-        { field: 'title', op: 'contains', value: 'Hello' },
-        { field: 'title', op: 'contains', value: 'world' },
-      ],
-    }, ctx)).toBe(true)
-
-    expect(matchesFilter(activity, {
-      logic: 'and',
-      conditions: [
-        { field: 'title', op: 'contains', value: 'Hello' },
-        { field: 'title', op: 'contains', value: 'missing' },
-      ],
-    }, ctx)).toBe(false)
-  })
-
-  it('OR requires at least one condition to pass', () => {
-    const activity = makeActivity({ title: 'Hello world' })
-    expect(matchesFilter(activity, {
-      logic: 'or',
-      conditions: [
-        { field: 'title', op: 'contains', value: 'missing' },
-        { field: 'title', op: 'contains', value: 'world' },
-      ],
-    }, ctx)).toBe(true)
-
-    expect(matchesFilter(activity, {
-      logic: 'or',
-      conditions: [
-        { field: 'title', op: 'contains', value: 'nope' },
-        { field: 'title', op: 'contains', value: 'nada' },
-      ],
-    }, ctx)).toBe(false)
-  })
-})
-
-// ── Status field ──────────────────────────────────────────────────────────────
-
-describe('status field', () => {
-  it('in: matches when status name is in the set (case-insensitive)', () => {
-    const activity = makeActivity({ statusId: 'status-open' })
-    expect(matchesFilter(activity, {
-      logic: 'and',
-      conditions: [{ field: 'status', op: 'in', value: ['in progress'] }],
-    }, ctx)).toBe(true)
-  })
-
-  it('in: no match when status name not in set', () => {
-    const activity = makeActivity({ statusId: 'status-open' })
-    expect(matchesFilter(activity, {
-      logic: 'and',
-      conditions: [{ field: 'status', op: 'in', value: ['done'] }],
-    }, ctx)).toBe(false)
-  })
-
-  it('not_in: matches when status name is NOT in the set', () => {
-    const activity = makeActivity({ statusId: 'status-open' })
-    expect(matchesFilter(activity, {
-      logic: 'and',
-      conditions: [{ field: 'status', op: 'not_in', value: ['done'] }],
-    }, ctx)).toBe(true)
-  })
-
-  it('is_empty: matches when activity has no status', () => {
-    const activity = makeActivity({ statusId: null })
-    expect(matchesFilter(activity, {
-      logic: 'and',
-      conditions: [{ field: 'status', op: 'is_empty', value: [] }],
-    }, ctx)).toBe(true)
-  })
-
-  it('is_not_empty: matches when activity has a status', () => {
-    const activity = makeActivity({ statusId: 'status-open' })
-    expect(matchesFilter(activity, {
-      logic: 'and',
-      conditions: [{ field: 'status', op: 'is_not_empty', value: [] }],
-    }, ctx)).toBe(true)
-  })
-})
-
-// ── Tag field ─────────────────────────────────────────────────────────────────
-
-describe('tag field', () => {
-  it('in: matches by tag name (case-insensitive)', () => {
-    const activity = makeActivity({ tagIds: ['tag-1'] }) // tag-1 = 'bug'
-    expect(matchesFilter(activity, {
-      logic: 'and',
-      conditions: [{ field: 'tag', op: 'in', value: ['BUG'] }],
-    }, ctx)).toBe(true)
-  })
-
-  it('not_in: matches when none of the tag names match', () => {
-    const activity = makeActivity({ tagIds: ['tag-1'] }) // 'bug'
-    expect(matchesFilter(activity, {
-      logic: 'and',
-      conditions: [{ field: 'tag', op: 'not_in', value: ['feature'] }],
-    }, ctx)).toBe(true)
-  })
-
-  it('is_empty: matches when activity has no tags', () => {
-    const activity = makeActivity({ tagIds: [] })
-    expect(matchesFilter(activity, {
-      logic: 'and',
-      conditions: [{ field: 'tag', op: 'is_empty', value: [] }],
-    }, ctx)).toBe(true)
-  })
-})
-
-// ── Assignee field ────────────────────────────────────────────────────────────
-
-describe('assignee field', () => {
-  it('in: matches when member ID is assigned', () => {
-    const activity = makeActivity({ assignedMemberIds: ['member-1'] })
-    expect(matchesFilter(activity, {
-      logic: 'and',
-      conditions: [{ field: 'assignee', op: 'in', value: ['member-1'] }],
-    }, ctx)).toBe(true)
-  })
-
-  it('not_in: matches when member is not assigned', () => {
-    const activity = makeActivity({ assignedMemberIds: ['member-2'] })
-    expect(matchesFilter(activity, {
-      logic: 'and',
-      conditions: [{ field: 'assignee', op: 'not_in', value: ['member-1'] }],
-    }, ctx)).toBe(true)
-  })
-
-  it('is_empty: matches when no assignees', () => {
-    const activity = makeActivity({ assignedMemberIds: [] })
-    expect(matchesFilter(activity, {
-      logic: 'and',
-      conditions: [{ field: 'assignee', op: 'is_empty', value: [] }],
-    }, ctx)).toBe(true)
-  })
-})
-
-// ── Title field ───────────────────────────────────────────────────────────────
-
-describe('title field', () => {
-  it('contains: case-insensitive substring match', () => {
-    const activity = makeActivity({ title: 'Fix the login bug' })
-    expect(matchesFilter(activity, {
-      logic: 'and',
-      conditions: [{ field: 'title', op: 'contains', value: 'LOGIN' }],
-    }, ctx)).toBe(true)
-  })
-
-  it('not_contains: true when substring absent', () => {
-    const activity = makeActivity({ title: 'Fix the login bug' })
-    expect(matchesFilter(activity, {
-      logic: 'and',
-      conditions: [{ field: 'title', op: 'not_contains', value: 'dashboard' }],
-    }, ctx)).toBe(true)
-  })
-
-  it('equals: exact case-insensitive match', () => {
-    const activity = makeActivity({ title: 'Hello World' })
-    expect(matchesFilter(activity, {
-      logic: 'and',
-      conditions: [{ field: 'title', op: 'equals', value: 'hello world' }],
-    }, ctx)).toBe(true)
-  })
-
-  it('is_empty: matches when title is empty string', () => {
-    const activity = makeActivity({ title: '' })
-    expect(matchesFilter(activity, {
-      logic: 'and',
-      conditions: [{ field: 'title', op: 'is_empty', value: '' }],
-    }, ctx)).toBe(true)
-  })
-})
-
-// ── Progress field ────────────────────────────────────────────────────────────
-
-describe('progress field', () => {
-  it('gte: matches when progress is at or above threshold', () => {
-    const activity = makeActivity({ percentComplete: 75 })
-    expect(matchesFilter(activity, {
-      logic: 'and',
-      conditions: [{ field: 'progress', op: 'gte', value: 50 }],
-    }, ctx)).toBe(true)
-  })
-
-  it('lt: matches when progress is below threshold', () => {
-    const activity = makeActivity({ percentComplete: 25 })
-    expect(matchesFilter(activity, {
-      logic: 'and',
-      conditions: [{ field: 'progress', op: 'lt', value: 50 }],
-    }, ctx)).toBe(true)
-  })
-
-  it('is_empty: matches when percentComplete is null/undefined', () => {
-    const activity = makeActivity({ percentComplete: undefined })
-    expect(matchesFilter(activity, {
-      logic: 'and',
-      conditions: [{ field: 'progress', op: 'is_empty', value: 0 }],
-    }, ctx)).toBe(true)
-  })
-})
-
-// ── hasParent field ───────────────────────────────────────────────────────────
-
-describe('hasParent field', () => {
-  it('is_true: matches activities with a parent', () => {
-    const activity = makeActivity({ parentActivityId: 'parent-1' })
-    expect(matchesFilter(activity, {
-      logic: 'and',
-      conditions: [{ field: 'hasParent', op: 'is_true' }],
-    }, ctx)).toBe(true)
-  })
-
-  it('is_false: matches activities without a parent', () => {
-    const activity = makeActivity({ parentActivityId: null })
-    expect(matchesFilter(activity, {
-      logic: 'and',
-      conditions: [{ field: 'hasParent', op: 'is_false' }],
-    }, ctx)).toBe(true)
-  })
-})
-
-// ── Date fields ───────────────────────────────────────────────────────────────
-
-describe('date fields', () => {
-  it('startDate before: matches when start is before the given date', () => {
-    const activity = makeActivity({ startAt: '2026-01-05T00:00:00Z' })
-    expect(matchesFilter(activity, {
-      logic: 'and',
-      conditions: [{ field: 'startDate', op: 'before', value: '2026-01-10' }],
-    }, ctx)).toBe(true)
-  })
-
-  it('endDate after: matches when end is after the given date', () => {
-    const activity = makeActivity({ endAt: '2026-03-01T00:00:00Z' })
-    expect(matchesFilter(activity, {
-      logic: 'and',
-      conditions: [{ field: 'endDate', op: 'after', value: '2026-02-01' }],
-    }, ctx)).toBe(true)
-  })
-
-  it('startDate between: matches when start is within range', () => {
-    const activity = makeActivity({ startAt: '2026-06-15T00:00:00Z' })
-    expect(matchesFilter(activity, {
-      logic: 'and',
-      conditions: [{ field: 'startDate', op: 'between', value: ['2026-06-01', '2026-06-30'] }],
-    }, ctx)).toBe(true)
-  })
-
-  it('is_empty: matches when date is null/undefined', () => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const activity = makeActivity({ startAt: null as any })
-    expect(matchesFilter(activity, {
-      logic: 'and',
-      conditions: [{ field: 'startDate', op: 'is_empty' }],
-    }, ctx)).toBe(true)
-  })
-})
-````
-
-## File: packages/web/src/lib/filterEngine.ts
-````typescript
-/**
- * Client-side filter evaluation engine.
- *
- * matchesFilter is a pure function that evaluates a FilterDefinition against
- * a single activity. It resolves status names and tag names via context objects
- * so callers supply the data; the engine does no fetching.
- */
-
-import type { components } from '@draba/shared'
-import type { FilterDefinition, FilterCondition, SetOp, StringOp, NumberOp, BoolOp, DateOp } from './filterTypes'
-
-type Activity = components['schemas']['Activity']
-type Status = components['schemas']['Status']
-type Tag = components['schemas']['Tag']
-
-export interface FilterContext {
-  /** Maps timeline_id → that timeline's statuses (for resolving statusId → name). */
-  statusesByTimeline: Map<string, Status[]>
-  /** All tags for the team (for resolving tagIds → names). */
-  tags: Tag[]
-}
-
-// ── Operator helpers ──────────────────────────────────────────────────────────
-
-function evalSetOp(op: SetOp, haystack: string[], needles: string[]): boolean {
-  switch (op) {
-    case 'in':
-      return needles.some(n => haystack.includes(n))
-    case 'not_in':
-      return needles.every(n => !haystack.includes(n))
-    case 'is_empty':
-      return haystack.length === 0
-    case 'is_not_empty':
-      return haystack.length > 0
-  }
-}
-
-function evalStringOp(op: StringOp, value: string | null | undefined, target: string): boolean {
-  const v = (value ?? '').toLowerCase()
-  const t = target.toLowerCase()
-  switch (op) {
-    case 'equals':       return v === t
-    case 'not_equals':   return v !== t
-    case 'contains':     return v.includes(t)
-    case 'not_contains': return !v.includes(t)
-    case 'is_empty':     return v.trim() === ''
-    case 'is_not_empty': return v.trim() !== ''
-  }
-}
-
-function evalNumberOp(op: NumberOp, value: number | null | undefined, target: number): boolean {
-  if (op === 'is_empty')     return value == null
-  if (op === 'is_not_empty') return value != null
-  if (value == null) return false
-  switch (op) {
-    case 'equals':     return value === target
-    case 'not_equals': return value !== target
-    case 'gt':         return value > target
-    case 'gte':        return value >= target
-    case 'lt':         return value < target
-    case 'lte':        return value <= target
-  }
-}
-
-function evalBoolOp(op: BoolOp, value: boolean): boolean {
-  return op === 'is_true' ? value : !value
-}
-
-function evalDateOp(op: DateOp, dateStr: string | null | undefined, target: string | [string, string] | undefined): boolean {
-  if (op === 'is_empty')     return !dateStr
-  if (op === 'is_not_empty') return Boolean(dateStr)
-  if (!dateStr || !target) return false
-
-  const date = new Date(dateStr).getTime()
-  if (op === 'between') {
-    const [from, to] = target as [string, string]
-    return date >= new Date(from).getTime() && date <= new Date(to).getTime()
-  }
-  const targetDate = new Date(target as string).getTime()
-  if (op === 'before') return date < targetDate
-  if (op === 'after')  return date > targetDate
-  return false
-}
-
-// ── Condition evaluation ──────────────────────────────────────────────────────
-
-function evalCondition(condition: FilterCondition, activity: Activity, ctx: FilterContext): boolean {
-  switch (condition.field) {
-    case 'status': {
-      const statuses = ctx.statusesByTimeline.get(activity.timelineId) ?? []
-      const statusName = statuses.find(s => s.id === activity.statusId)?.name ?? null
-      const haystack = statusName ? [statusName.toLowerCase()] : []
-      const needles = condition.value.map(v => v.toLowerCase())
-      return evalSetOp(condition.op, haystack, needles)
-    }
-
-    case 'tag': {
-      const tagMap = new Map(ctx.tags.map(t => [t.id, t.name.toLowerCase()]))
-      const activityTagNames = (activity.tagIds ?? []).map(id => tagMap.get(id) ?? id)
-      const needles = condition.value.map(v => v.toLowerCase())
-      return evalSetOp(condition.op, activityTagNames, needles)
-    }
-
-    case 'assignee': {
-      const haystack = activity.assignedMemberIds ?? []
-      return evalSetOp(condition.op, haystack, condition.value)
-    }
-
-    case 'title':
-      return evalStringOp(condition.op, activity.title, condition.value)
-
-    case 'progress':
-      return evalNumberOp(condition.op, activity.percentComplete ?? null, condition.value)
-
-    case 'hasParent':
-      return evalBoolOp(condition.op, Boolean(activity.parentActivityId))
-
-    case 'startDate':
-      return evalDateOp(condition.op, activity.startAt ?? null, condition.value)
-
-    case 'endDate':
-      return evalDateOp(condition.op, activity.endAt ?? null, condition.value)
-  }
-}
-
-// ── Main export ───────────────────────────────────────────────────────────────
-
-/**
- * Returns true when activity matches the given FilterDefinition.
- * An empty conditions array always matches (no filtering).
- */
-export function matchesFilter(
-  activity: Activity,
-  filter: FilterDefinition,
-  ctx: FilterContext,
-): boolean {
-  if (filter.conditions.length === 0) return true
-
-  const results = filter.conditions.map(c => evalCondition(c, activity, ctx))
-  return filter.logic === 'and'
-    ? results.every(Boolean)
-    : results.some(Boolean)
 }
 ````
 
@@ -29229,6 +30486,297 @@ export default function SetupPage() {
 }
 ````
 
+## File: packages/web/src/pages/ShareViewPage.tsx
+````typescript
+/**
+ * ShareViewPage — public read-only view for a share link.
+ *
+ * Mounted at /s/:token outside ProtectedRoute. Fetches the ShareProjection
+ * from the public gateway, then renders the Gantt (or other view in future
+ * phases) in interactive=false mode with the frozen view config applied.
+ * Theme is forced to light.
+ */
+
+import { useMemo } from 'react'
+import { useParams } from 'react-router-dom'
+import { useShareProjection } from '@/hooks/useShares'
+import GanttGrid, { type GanttRow } from '@/components/gantt/GanttGrid'
+import { resolveColorHex } from '@/components/identity/identity-constants'
+import { MEMBER_COLORS, ACTIVITY_COLORS } from '@/types'
+import {
+  generateColumns,
+  positionInColumns,
+  todayColumnPosition,
+  autoFitGranularity,
+} from '@/components/gantt/granularity'
+import type { components } from '@draba/shared'
+import type { GroupBy, SortBy, ColorBy, TimeGranularity } from '@/components/gantt/GanttToolbar'
+import type { Member } from '@/types'
+import { Share2, AlertCircle, Loader2 } from 'lucide-react'
+
+type PublicActivity = components['schemas']['PublicActivity']
+type PublicMember = components['schemas']['PublicMember']
+type Status = components['schemas']['Status']
+
+// ── View config parsing ───────────────────────────────────────────────────────
+
+interface ParsedViewConfig {
+  groupBy: GroupBy
+  sortBy: SortBy
+  colorBy: ColorBy
+  granularity: TimeGranularity | 'auto'
+}
+
+function parseViewConfig(raw: string): ParsedViewConfig {
+  try {
+    const c = JSON.parse(raw) as Partial<ParsedViewConfig>
+    return {
+      groupBy: (c.groupBy as GroupBy) ?? 'none',
+      sortBy: (c.sortBy as SortBy) ?? 'startDate',
+      colorBy: (c.colorBy as ColorBy) ?? 'activity',
+      granularity: c.granularity ?? 'auto',
+    }
+  } catch {
+    return { groupBy: 'none', sortBy: 'startDate', colorBy: 'activity', granularity: 'auto' }
+  }
+}
+
+// ── Data helpers (mirrors GanttView's toRichActivity logic) ──────────────────
+
+function initialsFrom(name: string): string {
+  return name.split(/\s+/).map(w => w[0] ?? '').slice(0, 2).join('').toUpperCase()
+}
+
+function toMember(m: PublicMember, index: number): Member {
+  const fallback = MEMBER_COLORS[index % MEMBER_COLORS.length]
+  return {
+    id: m.id,
+    name: m.displayName,
+    initials: initialsFrom(m.displayName),
+    color: resolveColorHex(m.color) || fallback,
+  }
+}
+
+// ── ShareViewPage ─────────────────────────────────────────────────────────────
+
+export default function ShareViewPage() {
+  const { token } = useParams<{ token: string }>()
+  const { data: proj, isLoading, isError, error } = useShareProjection(token)
+
+  // Parse view config from the frozen share config.
+  const vc = useMemo(
+    () => parseViewConfig(proj?.share.viewConfig ?? '{}'),
+    [proj?.share.viewConfig],
+  )
+
+  // Build columns for the timeline's date range.
+  const { columns, resolvedGranularity } = useMemo(() => {
+    if (!proj) return { columns: [], resolvedGranularity: 'week' as TimeGranularity }
+    const start = new Date(proj.timeline.startDate)
+    const end = new Date(proj.timeline.endDate)
+    if (vc.granularity === 'auto') {
+      const gr = autoFitGranularity(start, end, window.innerWidth || 1000)
+      return { columns: generateColumns(start, end, gr), resolvedGranularity: gr }
+    }
+    return {
+      columns: generateColumns(start, end, vc.granularity as TimeGranularity),
+      resolvedGranularity: vc.granularity as TimeGranularity,
+    }
+  }, [proj, vc.granularity])
+
+  const todayIdx = useMemo(() => todayColumnPosition(columns), [columns])
+
+  // Build member lookup.
+  const memberById = useMemo(() => {
+    if (!proj) return {} as Record<string, Member>
+    return Object.fromEntries(
+      proj.members.map((m, i) => [m.id, toMember(m, i)])
+    )
+  }, [proj])
+
+  // Build status color lookup.
+  const statusColorById = useMemo(() => {
+    const m = new Map<string, string>()
+    proj?.statuses.forEach((s: Status) => m.set(s.id, s.color))
+    return m
+  }, [proj])
+
+  // Build GanttRow list from PublicActivity array.
+  const rows = useMemo((): GanttRow[] => {
+    if (!proj || columns.length === 0) return []
+    const viewStart = columns[0].start
+    const viewEnd = columns[columns.length - 1].end
+
+    const richActivities = proj.activities.flatMap((a: PublicActivity, i: number) => {
+      const start = new Date(a.startAt)
+      const end = new Date(a.endAt)
+      if (end < viewStart || start > viewEnd) return []
+
+      const clampedStart = start < viewStart ? viewStart : start
+      const clampedEnd = end > viewEnd ? viewEnd : end
+      const { startCol, span } = positionInColumns(clampedStart, clampedEnd, columns)
+
+      const members = (a.assignedMemberIds ?? [])
+        .map(id => memberById[id])
+        .filter((m): m is Member => Boolean(m))
+
+      let color: string
+      if (vc.colorBy === 'member') {
+        color = members[0]?.color ?? a.color ?? ACTIVITY_COLORS[i % ACTIVITY_COLORS.length]
+      } else if (vc.colorBy === 'status') {
+        color = statusColorById.get(a.statusId ?? '') ?? '#6b7280'
+      } else {
+        color = a.color ?? ACTIVITY_COLORS[i % ACTIVITY_COLORS.length]
+      }
+
+      return [{
+        id: a.id,
+        title: a.title,
+        startCol,
+        span,
+        color,
+        icon: a.icon ?? undefined,
+        members,
+        isChild: Boolean(a.parentActivityId),
+        depth: 0,
+      }]
+    })
+
+    // Simple unsorted flat list — groupBy is a future enhancement for read-only mode.
+    return richActivities.map(ev => ({ kind: 'activity' as const, event: ev }))
+  }, [proj, columns, memberById, statusColorById, vc.colorBy])
+
+  // Force light mode for public viewer.
+  // The document class is reset on unmount so authenticated users retain their preference.
+  useMemo(() => {
+    document.documentElement.classList.remove('dark')
+  }, [])
+
+  // ── Render ────────────────────────────────────────────────────────────────
+
+  if (isLoading) {
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh', gap: 10, color: '#6b7280', fontFamily: 'var(--font-sans)' }}>
+        <Loader2 size={20} className="animate-spin" />
+        <span>Loading shared view…</span>
+      </div>
+    )
+  }
+
+  if (isError) {
+    const apiErr = error as { status?: number; message?: string } | null
+    const is404 = apiErr?.status === 404
+    const is410 = apiErr?.status === 410
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100vh', gap: 12, color: '#374151', fontFamily: 'var(--font-sans)', padding: 24 }}>
+        <AlertCircle size={32} style={{ color: '#ef4444' }} />
+        <h1 style={{ fontSize: 18, fontWeight: 600, margin: 0 }}>
+          {is404 ? 'Share not found' : is410 ? 'This share has expired or been revoked' : 'Could not load this view'}
+        </h1>
+        <p style={{ fontSize: 13, color: '#6b7280', margin: 0, textAlign: 'center' }}>
+          {is404 || is410 ? 'The link may have been removed or may never have existed.' : 'Please try again later.'}
+        </p>
+      </div>
+    )
+  }
+
+  if (!proj) return null
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: '#ffffff' }}>
+      {/* Branding strip */}
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 8, padding: '0 16px', height: 40,
+        background: '#f9fafb', borderBottom: '1px solid #e5e7eb', flexShrink: 0,
+      }}>
+        <Share2 size={14} style={{ color: '#9ca3af' }} />
+        <span style={{ fontSize: 12, fontWeight: 600, color: '#111827' }}>{proj.timeline.name}</span>
+        <span style={{ fontSize: 12, color: '#9ca3af' }}>·</span>
+        <span style={{ fontSize: 12, color: '#6b7280' }}>Shared view</span>
+        <span style={{ marginLeft: 'auto', fontSize: 11, color: '#9ca3af' }}>
+          {proj.activities.length} {proj.activities.length === 1 ? 'activity' : 'activities'}
+        </span>
+      </div>
+
+      {/* Gantt grid — interactive=false */}
+      <div style={{ flex: 1, minHeight: 0 }}>
+        <GanttGrid
+          rows={rows}
+          columns={columns}
+          todayIndex={todayIdx}
+          selectedActivityId={null}
+          onSelectActivity={() => {}}
+          resolvedGranularity={resolvedGranularity}
+          interactive={false}
+        />
+      </div>
+    </div>
+  )
+}
+````
+
+## File: packages/web/src/App.tsx
+````typescript
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { AuthProvider } from '@/contexts/AuthContext'
+import ProtectedRoute from '@/components/ProtectedRoute'
+import ThemeSync from '@/components/ThemeSync'
+import BrandingSync from '@/components/BrandingSync'
+import LoginPage from '@/pages/LoginPage'
+import RegisterPage from '@/pages/RegisterPage'
+import DashboardPage from '@/pages/DashboardPage'
+import SetupPage from '@/pages/SetupPage'
+import SettingsPage from '@/pages/SettingsPage'
+import ForgotPasswordPage from '@/pages/ForgotPasswordPage'
+import ResetPasswordPage from '@/pages/ResetPasswordPage'
+import ShareViewPage from '@/pages/ShareViewPage'
+
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      staleTime: 30_000,
+      retry: 1,
+    },
+  },
+})
+
+export default function App() {
+  return (
+    <QueryClientProvider client={queryClient}>
+      <BrowserRouter>
+        <AuthProvider>
+          {/* Side-effect components — render nothing but apply global state. */}
+          <ThemeSync />
+          <BrandingSync />
+          <Routes>
+            {/* First-run setup — public, shown before any users exist */}
+            <Route path="/setup" element={<SetupPage />} />
+
+            {/* Public routes */}
+            <Route path="/login" element={<LoginPage />} />
+            <Route path="/register" element={<RegisterPage />} />
+            <Route path="/forgot-password" element={<ForgotPasswordPage />} />
+            <Route path="/reset-password" element={<ResetPasswordPage />} />
+            {/* Public share viewer — no auth required */}
+            <Route path="/s/:token" element={<ShareViewPage />} />
+
+            {/* Protected routes */}
+            <Route element={<ProtectedRoute />}>
+              <Route path="/" element={<DashboardPage />} />
+              <Route path="/settings/*" element={<SettingsPage />} />
+            </Route>
+
+            {/* Fallback */}
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </AuthProvider>
+      </BrowserRouter>
+    </QueryClientProvider>
+  )
+}
+````
+
 ## File: packages/web/index.html
 ````html
 <!DOCTYPE html>
@@ -29297,6 +30845,39 @@ export default function SetupPage() {
     "vite": "^6.3.0",
     "vitest": "^4.1.7"
   }
+}
+````
+
+## File: packages/web/tsconfig.app.json
+````json
+{
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.app.tsbuildinfo",
+    "target": "ES2020",
+    "useDefineForClassFields": true,
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "jsx": "react-jsx",
+
+    "resolveJsonModule": true,
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedSideEffectImports": true,
+    "paths": {
+      "@draba/shared": ["../shared/src/index.ts"],
+      "@/*": ["./src/*"]
+    }
+  },
+  "include": ["src"]
 }
 ````
 
@@ -29637,287 +31218,667 @@ Two flavors: **tabular** (data round-trips — CSV / xlsx in and out) and **visu
 - CLI binary (parking lot — token auth system is designed to support it when ready)
 ````
 
-## File: packages/api/internal/api/server.go
+## File: packages/api/cmd/draba/main.go
 ````go
-// Package api hosts the HTTP handlers, routing, and middleware for the
-// draba REST API. Handlers are intentionally thin: they decode requests,
-// delegate to repositories and services, and write responses. Business
-// logic belongs in the domain packages, not here.
-package api
+// Command draba is the API server entry point. It wires repositories,
+// the auth token service, and tier configuration into the HTTP server,
+// then listens for requests until the process is killed.
+package main
 
 import (
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"net/http"
+	"os"
 	"strings"
-	"time"
 
+	"github.com/I0-1O/draba/packages/api/internal/api"
 	"github.com/I0-1O/draba/packages/api/internal/auth"
 	"github.com/I0-1O/draba/packages/api/internal/db"
 	"github.com/I0-1O/draba/packages/api/internal/events"
 	"github.com/I0-1O/draba/packages/api/internal/mailer"
-	"github.com/I0-1O/draba/packages/api/internal/models"
 	"github.com/I0-1O/draba/packages/api/internal/tier"
 	"github.com/I0-1O/draba/packages/api/internal/ws"
+	drabui "github.com/I0-1O/draba/packages/api/ui"
 )
 
-// TimelineStore is the persistence interface required by timeline handlers.
-// The concrete implementation is *db.TimelineRepo; tests may substitute a fake.
-type TimelineStore interface {
-	Create(t *models.Timeline) error
-	GetByID(id string) (*models.Timeline, error)
-	GetByShareToken(token string) (*models.Timeline, error)
-	ListByTeam(teamID string, includeArchived bool) ([]*models.Timeline, error)
-	HasAccess(timelineID, teamMemberID string) (bool, error)
-	GrantAccess(timelineID, teamMemberID, role string) error
-	RevokeAccess(timelineID, teamMemberID string) error
-	GetAccessRole(timelineID, teamMemberID string) (string, error)
-	ListAccess(timelineID string) ([]*models.TimelineAccessEntry, error)
-	SetArchived(id string, at *time.Time) error
-	Update(t *models.Timeline) error
-	Delete(id string) error
-}
+const banner = "\n" +
+	"      _           _\n" +
+	"     | |         | |\n" +
+	"   __| |_ __ __ _| |__   __ _\n" +
+	"  / _` | '__/ _` | '_ \\ / _` |\n" +
+	" | (_| | | | (_| | |_) | (_| |\n" +
+	"  \\__,_|_|  \\__,_|_.__/ \\__,_|\n" +
+	"\n" +
+	"  see who's doing what, when.\n\n"
 
-// Server holds shared dependencies for all HTTP handlers.
-type Server struct {
-	users          *db.UserRepo
-	invites        *db.InviteRepo
-	teams          *db.TeamRepo
-	activities     *db.ActivityRepo
-	timelines      TimelineStore
-	savedFilters   *db.SavedFilterRepo
-	preferences    *db.UserPreferenceRepo
-	apiTokens      *db.APITokenRepo
-	instanceSets   *db.InstanceSettingsRepo
-	passwordTokens *db.PasswordResetTokenRepo
-	statuses       *db.StatusRepo
-	tags           *db.TagRepo
-	mailer         *mailer.Mailer
-	tokens         *auth.TokenService
-	tier           tier.Tier
-	bus            *events.Bus
-	hub            *ws.Hub
-	uiFS           fs.FS
-}
-
-// NewServer constructs a Server with its required dependencies. It does not
-// touch the network; call Routes to obtain the http.Handler to serve.
-func NewServer(
-	users *db.UserRepo,
-	invites *db.InviteRepo,
-	teams *db.TeamRepo,
-	activitiesRepo *db.ActivityRepo,
-	timelinesRepo TimelineStore,
-	savedFiltersRepo *db.SavedFilterRepo,
-	preferencesRepo *db.UserPreferenceRepo,
-	apiTokensRepo *db.APITokenRepo,
-	instanceSetsRepo *db.InstanceSettingsRepo,
-	passwordTokensRepo *db.PasswordResetTokenRepo,
-	statusesRepo *db.StatusRepo,
-	tagsRepo *db.TagRepo,
-	m *mailer.Mailer,
-	tokens *auth.TokenService,
-	t tier.Tier,
-	bus *events.Bus,
-	hub *ws.Hub,
-) *Server {
-	return &Server{
-		users:          users,
-		invites:        invites,
-		teams:          teams,
-		activities:     activitiesRepo,
-		timelines:      timelinesRepo,
-		savedFilters:   savedFiltersRepo,
-		preferences:    preferencesRepo,
-		apiTokens:      apiTokensRepo,
-		instanceSets:   instanceSetsRepo,
-		passwordTokens: passwordTokensRepo,
-		statuses:       statusesRepo,
-		tags:           tagsRepo,
-		mailer:         m,
-		tokens:         tokens,
-		tier:           t,
-		bus:            bus,
-		hub:            hub,
+func main() {
+	if len(os.Args) > 1 && os.Args[1] == "reset-password" {
+		runResetPassword(os.Args[2:])
+		return
 	}
-}
 
-// WithUI registers an embedded React SPA to be served at GET /. The FS must
-// be rooted at the build output directory (i.e. contain index.html directly).
-// When called, all unmatched GET paths fall back to index.html so React Router
-// handles client-side navigation. Safe to skip in dev (no-op when not called).
-func (s *Server) WithUI(uiFS fs.FS) *Server {
-	s.uiFS = uiFS
-	return s
-}
+	setupLogger()
+	fmt.Print(banner)
 
-// Routes returns the fully-wired HTTP handler for the API, including all
-// core routes plus any routes added by registered tier modules.
-func (s *Server) Routes() http.Handler {
-	mux := http.NewServeMux()
+	port := getenv("DRABA_PORT", "8080")
+	dsn := getenv("DRABA_DB_DSN", "/data/draba.db")
+	jwtSecret := os.Getenv("DRABA_JWT_SECRET")
+	if jwtSecret == "" {
+		slog.Error("DRABA_JWT_SECRET must be set")
+		os.Exit(1)
+	}
 
-	mux.HandleFunc("GET /setup/status", s.handleSetupStatus)
+	t, err := tier.Load()
+	if err != nil {
+		slog.Error("tier load failed", "err", err)
+		os.Exit(1)
+	}
+	l := t.Limits()
+	if l.MaxUsers == 0 {
+		slog.Info("tier", "tier", t)
+	} else {
+		slog.Info("tier", "tier", t, "maxUsers", l.MaxUsers, "maxTeams", l.MaxTeams)
+	}
 
-	mux.HandleFunc("POST /auth/register", s.handleRegister)
-	mux.HandleFunc("POST /auth/login", s.handleLogin)
-	mux.HandleFunc("POST /auth/refresh", s.handleRefresh)
-	mux.HandleFunc("GET /auth/me", chain(s.handleMe, s.authMiddleware))
-	mux.HandleFunc("POST /auth/forgot-password", s.handleForgotPassword)
-	mux.HandleFunc("POST /auth/reset-password", s.handleResetPassword)
+	database, err := db.Open(dsn)
+	if err != nil {
+		slog.Error("db: open failed", "err", err)
+		os.Exit(1)
+	}
+	slog.Info("db: opened", "dsn", dsn)
 
-	mux.HandleFunc("GET /users/me/preferences", chain(s.handleGetPreferences, s.authMiddleware))
-	mux.HandleFunc("PUT /users/me/preferences", chain(s.handleUpsertPreference, s.authMiddleware))
-	mux.HandleFunc("GET /users/me/stats", chain(s.handleGetMyStats, s.authMiddleware))
-	mux.HandleFunc("PATCH /users/me", chain(s.handleUpdateProfile, s.authMiddleware))
-	mux.HandleFunc("PUT /users/me/password", chain(s.handleChangePassword, s.authMiddleware))
+	if err := db.Migrate(database); err != nil {
+		slog.Error("db: migrate failed", "err", err)
+		os.Exit(1)
+	}
+	slog.Info("db: migrations applied")
 
-	mux.HandleFunc("GET /admin/smtp", chain(s.handleGetSMTP, s.authMiddleware))
-	mux.HandleFunc("PUT /admin/smtp", chain(s.handlePutSMTP, s.authMiddleware))
-	mux.HandleFunc("POST /admin/smtp/test", chain(s.handleTestSMTP, s.authMiddleware))
-	mux.HandleFunc("DELETE /admin/smtp", chain(s.handleDeleteSMTP, s.authMiddleware))
-	mux.HandleFunc("GET /admin/settings", chain(s.handleGetAdminSettings, s.authMiddleware))
-	mux.HandleFunc("PATCH /admin/settings", chain(s.handlePatchAdminSettings, s.authMiddleware))
-	mux.HandleFunc("GET /admin/users", chain(s.handleListAdminUsers, s.authMiddleware))
+	users := db.NewUserRepo(database)
+	invites := db.NewInviteRepo(database)
+	teams := db.NewTeamRepo(database)
+	activityRepo := db.NewActivityRepo(database)
+	timelineRepo := db.NewTimelineRepo(database)
+	savedFilterRepo := db.NewSavedFilterRepo(database)
+	preferenceRepo := db.NewUserPreferenceRepo(database)
+	apiTokenRepo := db.NewAPITokenRepo(database)
+	instanceSetsRepo := db.NewInstanceSettingsRepo(database)
+	passwordTokensRepo := db.NewPasswordResetTokenRepo(database)
+	statusRepo := db.NewStatusRepo(database)
+	tagRepo := db.NewTagRepo(database)
+	shareRepo := db.NewShareRepo(database)
+	m := mailer.New(instanceSetsRepo, []byte(jwtSecret))
+	tokens := auth.NewTokenService(jwtSecret)
 
-	// Public — no auth required; used by the login page and shared views.
-	mux.HandleFunc("GET /settings/branding", s.handleGetPublicBranding)
-
-	mux.HandleFunc("POST /tokens", chain(s.handleCreateAPIToken, s.authMiddleware))
-	mux.HandleFunc("GET /tokens", chain(s.handleListAPITokens, s.authMiddleware))
-	mux.HandleFunc("DELETE /tokens/{id}", chain(s.handleDeleteAPIToken, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams", chain(s.handleListTeams, s.authMiddleware))
-	mux.HandleFunc("POST /teams", chain(s.handleCreateTeam, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}", chain(s.handleGetTeam, s.authMiddleware))
-	mux.HandleFunc("PATCH /teams/{id}", chain(s.handleUpdateTeam, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/archive", chain(s.handleArchiveTeam, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/unarchive", chain(s.handleUnarchiveTeam, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/invites", chain(s.handleCreateInvite, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/invites", chain(s.handleListInvites, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/invites/{inviteId}", chain(s.handleDeleteInvite, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/invite-link", chain(s.handleCreateInviteLink, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/invite-link/reset", chain(s.handleResetInviteLink, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/invite-link", chain(s.handleGetInviteLink, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/invite-link", chain(s.handleDeleteInviteLink, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/members", chain(s.handleListMembers, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/members/{memberId}", chain(s.handleGetMember, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/members/{memberId}/stats", chain(s.handleGetMemberStats, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/members", chain(s.handleAddMember, s.authMiddleware))
-	mux.HandleFunc("PATCH /teams/{id}/members/{memberId}", chain(s.handleUpdateMember, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/members/{memberId}", chain(s.handleDeleteMember, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/members/{memberId}/archive", chain(s.handleArchiveMember, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/members/{memberId}/unarchive", chain(s.handleUnarchiveMember, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/participants", chain(s.handleCreateParticipant, s.authMiddleware))
-	mux.HandleFunc("GET /users/search", chain(s.handleSearchUsers, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/promote", chain(s.handlePromoteUser, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/archive", chain(s.handleArchiveUser, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/unarchive", chain(s.handleUnarchiveUser, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/revoke", chain(s.handleRevokeUser, s.authMiddleware))
-	mux.HandleFunc("DELETE /users/{id}", chain(s.handleDeleteUser, s.authMiddleware))
-	// Activity routes use the team-scoped prefix (GET /teams/{id}/timelines/{timelineId}/...)
-	// to avoid a Go 1.22 mux conflict with GET /timelines/share/{token}: both are
-	// 3-segment GET paths and neither is more specific when the third segment differs.
-	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/activities", chain(s.handleCreateActivity, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/activities", chain(s.handleListActivities, s.authMiddleware))
-	mux.HandleFunc("PATCH /activities/{id}", chain(s.handleUpdateActivity, s.authMiddleware))
-	mux.HandleFunc("DELETE /activities/{id}", chain(s.handleDeleteActivity, s.authMiddleware))
-	mux.HandleFunc("POST /activities/{id}/archive", chain(s.handleArchiveActivity, s.authMiddleware))
-	mux.HandleFunc("POST /activities/{id}/unarchive", chain(s.handleUnarchiveActivity, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/tags", chain(s.handleListTags, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/tags", chain(s.handleCreateTag, s.authMiddleware))
-	mux.HandleFunc("PATCH /tags/{id}", chain(s.handleUpdateTag, s.authMiddleware))
-	mux.HandleFunc("DELETE /tags/{id}", chain(s.handleDeleteTag, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/saved_filters/all", chain(s.handleListAllTeamSavedFilters, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/saved_filters", chain(s.handleListSavedFilters, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/saved_filters", chain(s.handleCreateSavedFilter, s.authMiddleware))
-	mux.HandleFunc("PATCH /saved_filters/{id}", chain(s.handleUpdateSavedFilter, s.authMiddleware))
-	mux.HandleFunc("DELETE /saved_filters/{id}", chain(s.handleDeleteSavedFilter, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/status-templates", chain(s.handleListStatusTemplates, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/status-templates", chain(s.handleCreateStatusTemplate, s.authMiddleware))
-	mux.HandleFunc("PATCH /status-templates/{id}", chain(s.handleUpdateStatusTemplate, s.authMiddleware))
-	mux.HandleFunc("DELETE /status-templates/{id}", chain(s.handleDeleteStatusTemplate, s.authMiddleware))
-	mux.HandleFunc("POST /status-templates/{id}/items", chain(s.handleCreateTemplateItem, s.authMiddleware))
-	mux.HandleFunc("PATCH /status-template-items/{id}", chain(s.handleUpdateTemplateItem, s.authMiddleware))
-	mux.HandleFunc("DELETE /status-template-items/{id}", chain(s.handleDeleteTemplateItem, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/timelines", chain(s.handleListTimelines, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/timelines", chain(s.handleCreateTimeline, s.authMiddleware))
-	// GET /timelines/share/{token} must be registered before GET /timelines/{id} so
-	// the more-specific literal "share" segment takes precedence.
-	mux.HandleFunc("GET /timelines/share/{token}", s.handleGetTimelineByShareToken)
-	mux.HandleFunc("GET /timelines/{id}", chain(s.handleGetTimeline, s.authMiddleware))
-	// Timeline statuses are placed under /teams/{id}/timelines/{timelineId}/statuses
-	// rather than /timelines/{id}/statuses to avoid a Go 1.22 mux pattern conflict
-	// with GET /timelines/share/{token} (both are 3-segment paths and conflict on
-	// paths like /timelines/share/statuses).
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleListTimelineStatuses, s.authMiddleware))
-	mux.HandleFunc("POST /timelines/{id}/archive", chain(s.handleArchiveTimeline, s.authMiddleware))
-	mux.HandleFunc("POST /timelines/{id}/unarchive", chain(s.handleUnarchiveTimeline, s.authMiddleware))
-
-	mux.HandleFunc("PATCH /timelines/{id}", chain(s.handleUpdateTimeline, s.authMiddleware))
-	mux.HandleFunc("DELETE /timelines/{id}", chain(s.handleDeleteTimeline, s.authMiddleware))
-	// Access list routes use the team-scoped prefix to avoid a Go 1.22 mux
-	// conflict with GET /timelines/share/{token} on 3-segment GET paths.
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/access", chain(s.handleListTimelineAccess, s.authMiddleware))
-	mux.HandleFunc("PUT /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleGrantTimelineAccess, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleRevokeTimelineAccess, s.authMiddleware))
-	// Timeline status CRUD — POST shares the team-scoped prefix with GET statuses.
-	// PATCH and DELETE use a flat /statuses/{id} prefix (2 segments, no conflict).
-	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleCreateTimelineStatus, s.authMiddleware))
-	mux.HandleFunc("PATCH /statuses/{id}", chain(s.handleUpdateStatus, s.authMiddleware))
-	mux.HandleFunc("DELETE /statuses/{id}", chain(s.handleDeleteStatus, s.authMiddleware))
-
-	// GET /ws is intentionally outside authMiddleware — ServeWS validates the
-	// JWT itself before upgrading, because WebSocket clients can't set headers.
-	mux.HandleFunc("GET /ws", s.hub.ServeWS)
-
-	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	bus := events.NewBus()
+	hub := ws.NewHub(bus, tokens, func(teamID, userID string) error {
+		_, err := teams.GetMember(teamID, userID)
+		return err
 	})
+	go hub.Run()
+	slog.Info("ws: hub running")
 
-	if s.uiFS != nil {
-		mux.Handle("GET /", spaHandler(s.uiFS))
+	if mods := tier.Registered(); len(mods) > 0 {
+		slog.Info("modules loaded", "count", len(mods))
 	}
 
-	ctx := &tier.ModuleContext{Mux: mux, Tier: s.tier}
-	for _, m := range tier.Registered() {
-		if err := m.Register(ctx); err != nil {
-			// Module registration is a startup invariant — a failure here is a programming error.
-			panic(fmt.Sprintf("tier module %q failed to register: %v", m.Name(), err))
+	srv := api.NewServer(users, invites, teams, activityRepo, timelineRepo, savedFilterRepo, preferenceRepo, apiTokenRepo, instanceSetsRepo, passwordTokensRepo, statusRepo, tagRepo, shareRepo, m, tokens, t, bus, hub)
+
+	// Wire up the embedded React SPA when a production build is present.
+	// In dev the static/ directory only has .gitkeep so this is a no-op.
+	if sub, err := fs.Sub(drabui.FS, "static"); err == nil {
+		if _, err := sub.Open("index.html"); err == nil {
+			srv.WithUI(sub)
+			slog.Info("ui: serving embedded SPA")
 		}
 	}
 
-	return requestLogger(mux)
+	slog.Info("listening", "port", port)
+	if err := http.ListenAndServe(":"+port, srv.Routes()); err != nil {
+		slog.Error("server error", "err", err)
+		os.Exit(1)
+	}
 }
 
-// chain applies a single middleware to a handler function.
-func chain(h http.HandlerFunc, m func(http.Handler) http.Handler) http.HandlerFunc {
-	return m(h).ServeHTTP
+// setupLogger initialises the global slog logger. Level is controlled by
+// DRABA_LOG_LEVEL (debug | info | warn | error); default is info.
+// All output goes to stdout so Docker captures it in `docker logs`.
+func setupLogger() {
+	level := slog.LevelInfo
+	switch strings.ToLower(os.Getenv("DRABA_LOG_LEVEL")) {
+	case "debug":
+		level = slog.LevelDebug
+	case "warn":
+		level = slog.LevelWarn
+	case "error":
+		level = slog.LevelError
+	}
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level})))
 }
 
-// spaHandler serves the embedded React SPA. Known static assets are served
-// directly; any unrecognised path falls back to index.html so React Router
-// handles client-side navigation.
-func spaHandler(uiFS fs.FS) http.Handler {
-	fserver := http.FileServer(http.FS(uiFS))
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		path := strings.TrimPrefix(r.URL.Path, "/")
-		if path == "" {
-			path = "index.html"
-		}
-		if _, err := uiFS.Open(path); err != nil {
-			// Unknown path — serve index.html and let React Router handle it.
-			r = r.Clone(r.Context())
-			r.URL.Path = "/"
-			fserver.ServeHTTP(w, r)
-			return
-		}
-		fserver.ServeHTTP(w, r)
-	})
+// getenv returns the env var value or fallback when unset/empty.
+func getenv(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
 }
+````
+
+## File: packages/api/internal/api/api_types.gen.go
+````go
+// Package api provides primitives to interact with the openapi HTTP API.
+//
+// Code generated by github.com/oapi-codegen/oapi-codegen/v2 version v2.7.0 DO NOT EDIT.
+package api
+
+import (
+	"time"
+
+	openapi_types "github.com/oapi-codegen/runtime/types"
+)
+
+const (
+	BearerAuthScopes bearerAuthContextKey = "bearerAuth.Scopes"
+)
+
+// Defines values for HealthResponseStatus.
+const (
+	Ok HealthResponseStatus = "ok"
+)
+
+// Valid indicates whether the value is a known member of the HealthResponseStatus enum.
+func (e HealthResponseStatus) Valid() bool {
+	switch e {
+	case Ok:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for InviteRole.
+const (
+	InviteRoleAdmin  InviteRole = "admin"
+	InviteRoleMember InviteRole = "member"
+)
+
+// Valid indicates whether the value is a known member of the InviteRole enum.
+func (e InviteRole) Valid() bool {
+	switch e {
+	case InviteRoleAdmin:
+		return true
+	case InviteRoleMember:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for TeamMemberRole.
+const (
+	TeamMemberRoleAdmin  TeamMemberRole = "admin"
+	TeamMemberRoleMember TeamMemberRole = "member"
+	TeamMemberRoleOwner  TeamMemberRole = "owner"
+)
+
+// Valid indicates whether the value is a known member of the TeamMemberRole enum.
+func (e TeamMemberRole) Valid() bool {
+	switch e {
+	case TeamMemberRoleAdmin:
+		return true
+	case TeamMemberRoleMember:
+		return true
+	case TeamMemberRoleOwner:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for TeamMemberWithUserRole.
+const (
+	TeamMemberWithUserRoleAdmin  TeamMemberWithUserRole = "admin"
+	TeamMemberWithUserRoleMember TeamMemberWithUserRole = "member"
+	TeamMemberWithUserRoleOwner  TeamMemberWithUserRole = "owner"
+)
+
+// Valid indicates whether the value is a known member of the TeamMemberWithUserRole enum.
+func (e TeamMemberWithUserRole) Valid() bool {
+	switch e {
+	case TeamMemberWithUserRoleAdmin:
+		return true
+	case TeamMemberWithUserRoleMember:
+		return true
+	case TeamMemberWithUserRoleOwner:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for TimelineVisibility.
+const (
+	TimelineVisibilityPublic     TimelineVisibility = "public"
+	TimelineVisibilityRestricted TimelineVisibility = "restricted"
+)
+
+// Valid indicates whether the value is a known member of the TimelineVisibility enum.
+func (e TimelineVisibility) Valid() bool {
+	switch e {
+	case TimelineVisibilityPublic:
+		return true
+	case TimelineVisibilityRestricted:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for CreateInviteJSONBodyRole.
+const (
+	CreateInviteJSONBodyRoleAdmin  CreateInviteJSONBodyRole = "admin"
+	CreateInviteJSONBodyRoleMember CreateInviteJSONBodyRole = "member"
+)
+
+// Valid indicates whether the value is a known member of the CreateInviteJSONBodyRole enum.
+func (e CreateInviteJSONBodyRole) Valid() bool {
+	switch e {
+	case CreateInviteJSONBodyRoleAdmin:
+		return true
+	case CreateInviteJSONBodyRoleMember:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for CreateTimelineJSONBodyVisibility.
+const (
+	CreateTimelineJSONBodyVisibilityPublic     CreateTimelineJSONBodyVisibility = "public"
+	CreateTimelineJSONBodyVisibilityRestricted CreateTimelineJSONBodyVisibility = "restricted"
+)
+
+// Valid indicates whether the value is a known member of the CreateTimelineJSONBodyVisibility enum.
+func (e CreateTimelineJSONBodyVisibility) Valid() bool {
+	switch e {
+	case CreateTimelineJSONBodyVisibilityPublic:
+		return true
+	case CreateTimelineJSONBodyVisibilityRestricted:
+		return true
+	default:
+		return false
+	}
+}
+
+// ApiError defines model for ApiError.
+type ApiError struct {
+	Error struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
+// AuthResponse defines model for AuthResponse.
+type AuthResponse struct {
+	AccessToken  string `json:"accessToken"`
+	RefreshToken string `json:"refreshToken"`
+	User         User   `json:"user"`
+}
+
+// Activity defines model for Activity.
+type Activity struct {
+	AllDay           bool       `json:"allDay"`
+	ArchivedAt       *time.Time `json:"archivedAt,omitempty"`
+	CaldavUid        *string    `json:"caldavUid,omitempty"`
+	Color            *string    `json:"color,omitempty"`
+	CreatedAt        time.Time  `json:"createdAt"`
+	CreatedBy        string     `json:"createdBy"`
+	Description      *string    `json:"description,omitempty"`
+	EndAt            time.Time  `json:"endAt"`
+	GoogleEventId    *string    `json:"googleEventId,omitempty"`
+	Icon             *string    `json:"icon,omitempty"`
+	Id               string     `json:"id"`
+	Location         *string    `json:"location,omitempty"`
+	ParentActivityId *string    `json:"parentActivityId,omitempty"`
+	PercentComplete  *int       `json:"percentComplete,omitempty"`
+	Rrule            *string    `json:"rrule,omitempty"`
+	StartAt          time.Time  `json:"startAt"`
+	StatusId         *string    `json:"statusId,omitempty"`
+	TeamId           string     `json:"teamId"`
+	Title            string     `json:"title"`
+	UpdatedAt        time.Time  `json:"updatedAt"`
+	Url              *string    `json:"url,omitempty"`
+}
+
+// HealthResponse defines model for HealthResponse.
+type HealthResponse struct {
+	Status HealthResponseStatus `json:"status"`
+}
+
+// HealthResponseStatus defines model for HealthResponse.Status.
+type HealthResponseStatus string
+
+// Invite defines model for Invite.
+type Invite struct {
+	AcceptedAt *time.Time `json:"acceptedAt,omitempty"`
+	CreatedAt  time.Time  `json:"createdAt"`
+	Email      string     `json:"email"`
+	ExpiresAt  time.Time  `json:"expiresAt"`
+	Id         string     `json:"id"`
+	InvitedBy  string     `json:"invitedBy"`
+	Role       InviteRole `json:"role"`
+	TeamId     string     `json:"teamId"`
+	Token      string     `json:"token"`
+}
+
+// InviteRole defines model for Invite.Role.
+type InviteRole string
+
+// RefreshResponse defines model for RefreshResponse.
+type RefreshResponse struct {
+	AccessToken string `json:"accessToken"`
+}
+
+// UserPreference defines model for UserPreference.
+type UserPreference struct {
+	Id         string    `json:"id"`
+	UserId     string    `json:"userId"`
+	TimelineId string    `json:"timelineId,omitempty"`
+	Key        string    `json:"key"`
+	Value      string    `json:"value"`
+	UpdatedAt  time.Time `json:"updatedAt"`
+}
+
+// UpsertPreferenceJSONBody defines parameters for UpsertPreference.
+type UpsertPreferenceJSONBody struct {
+	// Key Preference key (e.g. group_by, sort_by, zoom_granularity, theme).
+	Key string `json:"key"`
+
+	// Value JSON-encoded preference value.
+	Value string `json:"value"`
+
+	// TimelineId Optional timeline scope. Omit or pass "" for a global preference.
+	TimelineId *string `json:"timelineId,omitempty"`
+}
+
+// UpsertPreferenceJSONRequestBody defines body for UpsertPreference for application/json ContentType.
+type UpsertPreferenceJSONRequestBody UpsertPreferenceJSONBody
+
+// SavedFilter defines model for SavedFilter.
+type SavedFilter struct {
+	CreatedAt time.Time `json:"createdAt"`
+
+	// Definition Opaque JSON filter spec (validated client-side).
+	Definition string `json:"definition"`
+	Id         string `json:"id"`
+
+	// IsTeamFilter When true, the filter is visible to all team members (set by admins only).
+	IsTeamFilter bool      `json:"isTeamFilter"`
+	Name         string    `json:"name"`
+	TeamId       string    `json:"teamId"`
+	UpdatedAt    time.Time `json:"updatedAt"`
+	UserId       string    `json:"userId"`
+}
+
+// Team defines model for Team.
+type Team struct {
+	ArchivedAt  *time.Time `json:"archivedAt,omitempty"`
+	Color       *string    `json:"color,omitempty"`
+	CreatedAt   time.Time  `json:"createdAt"`
+	Description *string    `json:"description,omitempty"`
+	Icon        *string    `json:"icon,omitempty"`
+	Id          string     `json:"id"`
+	Name        string     `json:"name"`
+	Notes       *string    `json:"notes,omitempty"`
+	Slug        string     `json:"slug"`
+	UpdatedAt   time.Time  `json:"updatedAt"`
+}
+
+// TeamMember defines model for TeamMember.
+type TeamMember struct {
+	Color    *string        `json:"color,omitempty"`
+	JoinedAt time.Time      `json:"joinedAt"`
+	Role     TeamMemberRole `json:"role"`
+	TeamId   string         `json:"teamId"`
+	UserId   string         `json:"userId"`
+}
+
+// TeamMemberRole defines model for TeamMember.Role.
+type TeamMemberRole string
+
+// TeamMemberWithUser defines model for TeamMemberWithUser.
+type TeamMemberWithUser struct {
+	AvatarUrl   *string                `json:"avatarUrl,omitempty"`
+	Color       *string                `json:"color,omitempty"`
+	DisplayName string                 `json:"displayName"`
+	Email       openapi_types.Email    `json:"email"`
+	JoinedAt    time.Time              `json:"joinedAt"`
+	Role        TeamMemberWithUserRole `json:"role"`
+	TeamId      string                 `json:"teamId"`
+	UserId      string                 `json:"userId"`
+}
+
+// TeamMemberWithUserRole defines model for TeamMemberWithUser.Role.
+type TeamMemberWithUserRole string
+
+// Timeline defines model for Timeline.
+type Timeline struct {
+	ArchivedAt *time.Time         `json:"archivedAt,omitempty"`
+	CreatedAt  time.Time          `json:"createdAt"`
+	CreatedBy  string             `json:"createdBy"`
+	EndDate    openapi_types.Date `json:"endDate"`
+	IcalToken  string             `json:"icalToken"`
+	Id         string             `json:"id"`
+	Name       string             `json:"name"`
+	ShareToken string             `json:"shareToken"`
+	StartDate  openapi_types.Date `json:"startDate"`
+	TeamId     string             `json:"teamId"`
+	UpdatedAt  time.Time          `json:"updatedAt"`
+	Visibility TimelineVisibility `json:"visibility"`
+}
+
+// TimelineVisibility defines model for Timeline.Visibility.
+type TimelineVisibility string
+
+// User defines model for User.
+type User struct {
+	AvatarUrl   *string             `json:"avatarUrl,omitempty"`
+	CreatedAt   time.Time           `json:"createdAt"`
+	DisplayName string              `json:"displayName"`
+	Email       openapi_types.Email `json:"email"`
+	Id          string              `json:"id"`
+	UpdatedAt   time.Time           `json:"updatedAt"`
+}
+
+// ActivityId defines model for activityId.
+type ActivityId = string
+
+// SavedFilterId defines model for savedFilterId.
+type SavedFilterId = string
+
+// ShareToken defines model for shareToken.
+type ShareToken = string
+
+// TeamId defines model for teamId.
+type TeamId = string
+
+// TimelineId defines model for timelineId.
+type TimelineId = string
+
+// BadRequest defines model for BadRequest.
+type BadRequest = ApiError
+
+// Forbidden defines model for Forbidden.
+type Forbidden = ApiError
+
+// InternalError defines model for InternalError.
+type InternalError = ApiError
+
+// NotFound defines model for NotFound.
+type NotFound = ApiError
+
+// PaymentRequired defines model for PaymentRequired.
+type PaymentRequired = ApiError
+
+// Unauthorized defines model for Unauthorized.
+type Unauthorized = ApiError
+
+// bearerAuthContextKey is the context key for bearerAuth security scheme
+type bearerAuthContextKey string
+
+// LoginJSONBody defines parameters for Login.
+type LoginJSONBody struct {
+	Email    openapi_types.Email `json:"email"`
+	Password string              `json:"password"`
+}
+
+// RefreshTokenJSONBody defines parameters for RefreshToken.
+type RefreshTokenJSONBody struct {
+	RefreshToken string `json:"refreshToken"`
+}
+
+// RegisterJSONBody defines parameters for Register.
+type RegisterJSONBody struct {
+	DisplayName string              `json:"displayName"`
+	Email       openapi_types.Email `json:"email"`
+	InviteToken *string             `json:"inviteToken,omitempty"`
+	Password    string              `json:"password"`
+}
+
+// UpdateActivityJSONBody defines parameters for UpdateActivity.
+type UpdateActivityJSONBody struct {
+	AllDay           *bool      `json:"allDay,omitempty"`
+	Color            *string    `json:"color,omitempty"`
+	Description      *string    `json:"description,omitempty"`
+	EndAt            *time.Time `json:"endAt,omitempty"`
+	Icon             *string    `json:"icon,omitempty"`
+	Location         *string    `json:"location,omitempty"`
+	ParentActivityId *string    `json:"parentActivityId,omitempty"`
+	PercentComplete  *int       `json:"percentComplete,omitempty"`
+	Rrule            *string    `json:"rrule,omitempty"`
+	StartAt          *time.Time `json:"startAt,omitempty"`
+	StatusId         *string    `json:"statusId,omitempty"`
+	Title            *string    `json:"title,omitempty"`
+	Url              *string    `json:"url,omitempty"`
+}
+
+// UpdateSavedFilterJSONBody defines parameters for UpdateSavedFilter.
+type UpdateSavedFilterJSONBody struct {
+	Definition   *string `json:"definition,omitempty"`
+	IsTeamFilter *bool   `json:"isTeamFilter,omitempty"`
+	Name         *string `json:"name,omitempty"`
+}
+
+// CreateTeamJSONBody defines parameters for CreateTeam.
+type CreateTeamJSONBody struct {
+	Name        string  `json:"name"`
+	Description *string `json:"description,omitempty"`
+	Notes       *string `json:"notes,omitempty"`
+	Color       *string `json:"color,omitempty"`
+	Icon        *string `json:"icon,omitempty"`
+}
+
+// UpdateTeamJSONBody defines parameters for UpdateTeam.
+type UpdateTeamJSONBody struct {
+	Name        *string `json:"name,omitempty"`
+	Description *string `json:"description,omitempty"`
+	Notes       *string `json:"notes,omitempty"`
+	Color       *string `json:"color,omitempty"`
+	Icon        *string `json:"icon,omitempty"`
+}
+
+// ListActivitiesParams defines parameters for ListActivities.
+type ListActivitiesParams struct {
+	// From Only return activities where startAt >= from (RFC 3339).
+	From *time.Time `form:"from,omitempty" json:"from,omitempty"`
+
+	// To Only return activities where startAt <= to (RFC 3339).
+	To *time.Time `form:"to,omitempty" json:"to,omitempty"`
+}
+
+// CreateActivityJSONBody defines parameters for CreateActivity.
+type CreateActivityJSONBody struct {
+	AllDay            *bool     `json:"allDay,omitempty"`
+	AssignedMemberIds *[]string `json:"assignedMemberIds,omitempty"`
+	TagIds            *[]string `json:"tagIds,omitempty"`
+	Color             *string   `json:"color,omitempty"`
+	Description       *string   `json:"description,omitempty"`
+	EndAt             time.Time `json:"endAt"`
+	Icon              *string   `json:"icon,omitempty"`
+	Location          *string   `json:"location,omitempty"`
+	Notes             *string   `json:"notes,omitempty"`
+	ParentActivityId  *string   `json:"parentActivityId,omitempty"`
+	PercentComplete   *int      `json:"percentComplete,omitempty"`
+	Rrule             *string   `json:"rrule,omitempty"`
+	StartAt           time.Time `json:"startAt"`
+	StatusId          *string   `json:"statusId,omitempty"`
+	Title             string    `json:"title"`
+	Url               *string   `json:"url,omitempty"`
+}
+
+// CreateInviteJSONBody defines parameters for CreateInvite.
+type CreateInviteJSONBody struct {
+	// Email If provided, the invite is scoped to this email address.
+	Email *openapi_types.Email      `json:"email,omitempty"`
+	Role  *CreateInviteJSONBodyRole `json:"role,omitempty"`
+}
+
+// CreateInviteJSONBodyRole defines parameters for CreateInvite.
+type CreateInviteJSONBodyRole string
+
+// CreateSavedFilterJSONBody defines parameters for CreateSavedFilter.
+type CreateSavedFilterJSONBody struct {
+	// Definition Opaque JSON filter spec (validated client-side).
+	Definition   string `json:"definition"`
+	IsTeamFilter *bool  `json:"isTeamFilter,omitempty"`
+	Name         string `json:"name"`
+}
+
+// CreateTimelineJSONBody defines parameters for CreateTimeline.
+type CreateTimelineJSONBody struct {
+	EndDate    openapi_types.Date                `json:"endDate"`
+	Name       string                            `json:"name"`
+	StartDate  openapi_types.Date                `json:"startDate"`
+	Visibility *CreateTimelineJSONBodyVisibility `json:"visibility,omitempty"`
+}
+
+// CreateTimelineJSONBodyVisibility defines parameters for CreateTimeline.
+type CreateTimelineJSONBodyVisibility string
+
+// LoginJSONRequestBody defines body for Login for application/json ContentType.
+type LoginJSONRequestBody LoginJSONBody
+
+// RefreshTokenJSONRequestBody defines body for RefreshToken for application/json ContentType.
+type RefreshTokenJSONRequestBody RefreshTokenJSONBody
+
+// RegisterJSONRequestBody defines body for Register for application/json ContentType.
+type RegisterJSONRequestBody RegisterJSONBody
+
+// UpdateActivityJSONRequestBody defines body for UpdateActivity for application/json ContentType.
+type UpdateActivityJSONRequestBody UpdateActivityJSONBody
+
+// UpdateSavedFilterJSONRequestBody defines body for UpdateSavedFilter for application/json ContentType.
+type UpdateSavedFilterJSONRequestBody UpdateSavedFilterJSONBody
+
+// CreateTeamJSONRequestBody defines body for CreateTeam for application/json ContentType.
+type CreateTeamJSONRequestBody CreateTeamJSONBody
+
+// UpdateTeamJSONRequestBody defines body for UpdateTeam for application/json ContentType.
+type UpdateTeamJSONRequestBody UpdateTeamJSONBody
+
+// CreateActivityJSONRequestBody defines body for CreateActivity for application/json ContentType.
+type CreateActivityJSONRequestBody CreateActivityJSONBody
+
+// CreateInviteJSONRequestBody defines body for CreateInvite for application/json ContentType.
+type CreateInviteJSONRequestBody CreateInviteJSONBody
+
+// CreateSavedFilterJSONRequestBody defines body for CreateSavedFilter for application/json ContentType.
+type CreateSavedFilterJSONRequestBody CreateSavedFilterJSONBody
+
+// CreateTimelineJSONRequestBody defines body for CreateTimeline for application/json ContentType.
+type CreateTimelineJSONRequestBody CreateTimelineJSONBody
 ````
 
 ## File: packages/api/internal/api/tag_handler.go
@@ -31225,328 +33186,6 @@ func (r *TagRepo) ValidateTeamOwnership(teamID string, tagIDs []string) error {
 		return ErrTagOwnership
 	}
 	return nil
-}
-````
-
-## File: packages/api/internal/models/models.go
-````go
-// Package models holds the domain types shared across the API, db,
-// and event-bus packages. These types are persisted directly via sqlx
-// (db tags) and serialised on the wire (json tags); changing tags is a
-// schema change.
-package models
-
-import "time"
-
-// Activity is a scheduled item of work belonging to a Timeline. ArchivedAt is
-// non-nil when the activity is soft-deleted; list endpoints exclude archived
-// activities by default.
-//
-// AssignedMemberIDs is not stored on the activities table; it is populated by
-// the repository from activity_assignments after every list query.
-//
-// GoogleEventID and CaldavUID are preserved as-is — they identify the
-// corresponding records in external calendar systems (VEVENT identifiers).
-type Activity struct {
-	ID                string     `db:"id"                  json:"id"`
-	TimelineID        string     `db:"timeline_id"         json:"timelineId"`
-	Title             string     `db:"title"               json:"title"`
-	Description       *string    `db:"description"         json:"description,omitempty"`
-	Notes             *string    `db:"notes"               json:"notes,omitempty"`
-	Icon              *string    `db:"icon"                json:"icon,omitempty"`
-	Color             *string    `db:"color"               json:"color,omitempty"`
-	StartAt           time.Time  `db:"start_at"            json:"startAt"`
-	EndAt             time.Time  `db:"end_at"              json:"endAt"`
-	AllDay            bool       `db:"all_day"             json:"allDay"`
-	StatusID          *string    `db:"status_id"           json:"statusId,omitempty"`
-	ParentActivityID  *string    `db:"parent_activity_id"  json:"parentActivityId,omitempty"`
-	PercentComplete   *int       `db:"percent_complete"    json:"percentComplete,omitempty"`
-	Location          *string    `db:"location"            json:"location,omitempty"`
-	URL               *string    `db:"url"                 json:"url,omitempty"`
-	Rrule             *string    `db:"rrule"               json:"rrule,omitempty"`
-	CaldavUID         *string    `db:"caldav_uid"          json:"caldavUid,omitempty"`
-	GoogleEventID     *string    `db:"google_event_id"     json:"googleEventId,omitempty"`
-	CreatedBy         string     `db:"created_by"          json:"createdBy"`
-	CreatedAt         time.Time  `db:"created_at"          json:"createdAt"`
-	UpdatedAt         time.Time  `db:"updated_at"          json:"updatedAt"`
-	ArchivedAt        *time.Time `db:"archived_at"         json:"archivedAt,omitempty"`
-	AssignedMemberIDs []string   `db:"-"                   json:"assignedMemberIds"`
-	TagIDs            []string   `db:"-"                   json:"tagIds"`
-}
-
-// TeamMemberWithUser joins a TeamMember row with its associated User so
-// callers receive display names and emails in a single query. Participants
-// (no user account) have empty email and avatar; their display_name comes
-// from team_members.display_name via COALESCE in the query.
-type TeamMemberWithUser struct {
-	TeamMember
-	Email       string  `db:"email"        json:"email"`
-	DisplayName string  `db:"display_name" json:"displayName"`
-	AvatarURL   *string `db:"avatar_url"   json:"avatarUrl,omitempty"`
-}
-
-// User is an authenticated account. PasswordHash is omitted from JSON
-// to avoid leaking it through any handler that returns a User.
-// ArchivedAt is non-nil when the account is inactivated; login is rejected
-// for archived users. Color and Icon are user-level identity fields (migration
-// 010); they propagate to team_members rows for the user when changed.
-type User struct {
-	ID           string     `db:"id"             json:"id"`
-	Email        string     `db:"email"          json:"email"`
-	PasswordHash string     `db:"password_hash"  json:"-"`
-	DisplayName  string     `db:"display_name"   json:"displayName"`
-	AvatarURL    *string    `db:"avatar_url"     json:"avatarUrl,omitempty"`
-	Color        *string    `db:"color"          json:"color,omitempty"`
-	Icon         *string    `db:"icon"           json:"icon,omitempty"`
-	IsSuperadmin bool       `db:"is_superadmin"  json:"isSuperadmin"`
-	CreatedAt    time.Time  `db:"created_at"     json:"createdAt"`
-	UpdatedAt    time.Time  `db:"updated_at"     json:"updatedAt"`
-	ArchivedAt   *time.Time `db:"archived_at"    json:"archivedAt,omitempty"`
-}
-
-// Team is a workspace that groups users and their scheduled work. Color and
-// Icon are identity fields added in migration 006; both are nullable until
-// explicitly set by an admin. Description, Notes, and ArchivedAt are added in
-// migration 008; ArchivedAt is non-nil when the team is soft-deleted.
-// InviteLinkToken is a stable, reusable token added in migration 009; when
-// non-nil it can be used by anyone to join the team during registration.
-type Team struct {
-	ID              string     `db:"id"                  json:"id"`
-	Name            string     `db:"name"                json:"name"`
-	Slug            string     `db:"slug"                json:"slug"`
-	Description     *string    `db:"description"         json:"description,omitempty"`
-	Notes           *string    `db:"notes"               json:"notes,omitempty"`
-	Color           *string    `db:"color"               json:"color,omitempty"`
-	Icon            *string    `db:"icon"                json:"icon,omitempty"`
-	InviteLinkToken *string    `db:"invite_link_token"   json:"inviteLinkToken,omitempty"`
-	CreatedAt       time.Time  `db:"created_at"          json:"createdAt"`
-	UpdatedAt       time.Time  `db:"updated_at"          json:"updatedAt"`
-	ArchivedAt      *time.Time `db:"archived_at"         json:"archivedAt,omitempty"`
-}
-
-// TeamMember is the join row that puts a person in a Team. UserID is nil
-// for login-less Participants; DisplayName is populated for them instead.
-// Role is the team-level role: "admin" or "member". Color and Icon are
-// identity fields (migration 006); Color stores a color ID (e.g. "teal").
-// ArchivedAt is non-nil when the member is inactivated (migration 009);
-// inactivated members lose access but their data and assignments are preserved.
-type TeamMember struct {
-	ID          string     `db:"id"           json:"id"`
-	TeamID      string     `db:"team_id"      json:"teamId"`
-	UserID      *string    `db:"user_id"      json:"userId,omitempty"`
-	DisplayName *string    `db:"display_name" json:"displayName,omitempty"`
-	Role        string     `db:"role"         json:"role"`
-	Color       *string    `db:"color"        json:"color,omitempty"`
-	Icon        *string    `db:"icon"         json:"icon,omitempty"`
-	JoinedAt    time.Time  `db:"joined_at"    json:"joinedAt"`
-	ArchivedAt  *time.Time `db:"archived_at"  json:"archivedAt,omitempty"`
-}
-
-// MemberStats holds computed activity and timeline counts for a member.
-// All counts are date-relative and scoped to activities the member is assigned to.
-type MemberStats struct {
-	ActiveTimelines    int `json:"activeTimelines"`
-	ArchivedTimelines  int `json:"archivedTimelines"`
-	PastDue            int `json:"pastDue"`
-	Running            int `json:"running"`
-	Upcoming           int `json:"upcoming"`
-	Unscheduled        int `json:"unscheduled"`
-	ArchivedActivities int `json:"archivedActivities"`
-}
-
-// MemberDetail combines a TeamMemberWithUser with computed stats and the
-// member's full list of team memberships. Returned by GET /teams/:id/members/:memberId.
-// UserArchivedAt reflects users.archived_at (account-level deactivation), distinct
-// from ArchivedAt which is team_members.archived_at (membership-level inactivation).
-type MemberDetail struct {
-	TeamMemberWithUser
-	Stats          MemberStats          `json:"stats"`
-	Teams          []TeamMemberWithUser `json:"teams"`
-	Deletable      bool                 `json:"deletable"`
-	UserArchivedAt *time.Time           `json:"userArchivedAt,omitempty"`
-}
-
-// Timeline is a named date range over a team's events. It is not a data
-// container — it is a view over a team's events for a given date window.
-// Access is governed by timeline_access + team role; share_token allows
-// unauthenticated read access via a stable public URL. Color and Icon are
-// identity fields (migration 006). Description and Notes are free-text fields
-// added in migration 013.
-type Timeline struct {
-	ID          string     `db:"id"          json:"id"`
-	TeamID      string     `db:"team_id"     json:"teamId"`
-	Name        string     `db:"name"        json:"name"`
-	Description *string    `db:"description" json:"description,omitempty"`
-	Notes       *string    `db:"notes"       json:"notes,omitempty"`
-	StartDate   string     `db:"start_date"  json:"startDate"`
-	EndDate     string     `db:"end_date"    json:"endDate"`
-	Color       *string    `db:"color"       json:"color,omitempty"`
-	Icon        *string    `db:"icon"        json:"icon,omitempty"`
-	ShareToken  string     `db:"share_token" json:"shareToken"`
-	IcalToken   string     `db:"ical_token"  json:"icalToken"`
-	CreatedBy   string     `db:"created_by"  json:"createdBy"`
-	CreatedAt   time.Time  `db:"created_at"  json:"createdAt"`
-	UpdatedAt   time.Time  `db:"updated_at"  json:"updatedAt"`
-	ArchivedAt  *time.Time `db:"archived_at" json:"archivedAt,omitempty"`
-}
-
-// SavedFilter is a user-owned, team-scoped named filter spec. Definition is
-// an opaque JSON string interpreted by the client; the server treats it as
-// arbitrary text and only validates that it parses as JSON.
-type SavedFilter struct {
-	ID           string    `db:"id"             json:"id"`
-	TeamID       string    `db:"team_id"        json:"teamId"`
-	UserID       string    `db:"user_id"        json:"userId"`
-	Name         string    `db:"name"           json:"name"`
-	Definition   string    `db:"definition"     json:"definition"`
-	IsTeamFilter bool      `db:"is_team_filter" json:"isTeamFilter"`
-	CreatedAt    time.Time `db:"created_at"     json:"createdAt"`
-	UpdatedAt    time.Time `db:"updated_at"     json:"updatedAt"`
-}
-
-// UserPreference stores a single key/value setting for a user, optionally
-// scoped to a timeline. TimelineID is “” for global preferences so the
-// UNIQUE(user_id, timeline_id, key) DB constraint works without NULL handling.
-// Serialised JSON omits TimelineID when empty so callers see null for global prefs.
-type UserPreference struct {
-	ID         string    `db:"id"          json:"id"`
-	UserID     string    `db:"user_id"     json:"userId"`
-	TimelineID string    `db:"timeline_id" json:"timelineId,omitempty"`
-	Key        string    `db:"key"         json:"key"`
-	Value      string    `db:"value"       json:"value"`
-	UpdatedAt  time.Time `db:"updated_at"  json:"updatedAt"`
-}
-
-// APIToken is a long-lived Bearer credential a user issues for programmatic
-// access. token_hash stores SHA-256(rawToken); the raw value is shown to the
-// caller only once on creation. RevokedAt is non-nil when the token has been
-// revoked; revoked tokens are not deleted so listing remains stable.
-type APIToken struct {
-	ID         string     `db:"id"           json:"id"`
-	UserID     string     `db:"user_id"      json:"userId"`
-	Name       string     `db:"name"         json:"name"`
-	TokenHash  string     `db:"token_hash"   json:"-"`
-	Scope      string     `db:"scope"        json:"scope"`
-	LastUsedAt *time.Time `db:"last_used_at" json:"lastUsedAt,omitempty"`
-	CreatedAt  time.Time  `db:"created_at"   json:"createdAt"`
-	RevokedAt  *time.Time `db:"revoked_at"   json:"revokedAt,omitempty"`
-}
-
-// InstanceSetting stores a single instance-level configuration value.
-// SMTP config and defaults live here. The value column is plain text;
-// the mailer package handles decryption of the SMTP password field.
-type InstanceSetting struct {
-	Key       string    `db:"key"        json:"key"`
-	Value     string    `db:"value"      json:"value"`
-	UpdatedAt time.Time `db:"updated_at" json:"updatedAt"`
-}
-
-// PasswordResetToken is a single-use token for the forgot-password flow.
-// TokenHash stores SHA-256 of the raw token; the raw value is sent by email
-// and never stored. UsedAt is set when the token is consumed.
-type PasswordResetToken struct {
-	ID        string     `db:"id"         json:"id"`
-	UserID    string     `db:"user_id"    json:"userId"`
-	TokenHash string     `db:"token_hash" json:"-"`
-	ExpiresAt time.Time  `db:"expires_at" json:"expiresAt"`
-	UsedAt    *time.Time `db:"used_at"    json:"usedAt,omitempty"`
-	CreatedAt time.Time  `db:"created_at" json:"createdAt"`
-}
-
-// AdminUserRow is a flat view of a user for the admin users list. It includes
-// the user's fields plus the count of active team memberships.
-type AdminUserRow struct {
-	User
-	TeamCount int `db:"team_count" json:"teamCount"`
-}
-
-// RevokeUserResult summarizes the outcome of POST /users/:id/revoke.
-// The three counters let the caller show a meaningful summary in the UI.
-type RevokeUserResult struct {
-	AccountDeactivated     bool `json:"accountDeactivated"`
-	MembershipsInactivated int  `json:"membershipsInactivated"`
-	MembershipsRemoved     int  `json:"membershipsRemoved"`
-}
-
-// StatusTemplate is a reusable named preset of statuses owned by a team.
-// When a timeline is created the team's chosen template's items are copied
-// into live Status rows for that timeline.
-type StatusTemplate struct {
-	ID          string    `db:"id"          json:"id"`
-	TeamID      string    `db:"team_id"     json:"teamId"`
-	Name        string    `db:"name"        json:"name"`
-	Description *string   `db:"description" json:"description,omitempty"`
-	Position    int       `db:"position"    json:"position"`
-	CreatedBy   string    `db:"created_by"  json:"createdBy"`
-	CreatedAt   time.Time `db:"created_at"  json:"createdAt"`
-	UpdatedAt   time.Time `db:"updated_at"  json:"updatedAt"`
-	// Items is populated by the repository when listing templates.
-	Items []StatusTemplateItem `db:"-" json:"items"`
-}
-
-// StatusTemplateItem is one status value within a StatusTemplate.
-type StatusTemplateItem struct {
-	ID         string  `db:"id"          json:"id"`
-	TemplateID string  `db:"template_id" json:"templateId"`
-	Name       string  `db:"name"        json:"name"`
-	Color      string  `db:"color"       json:"color"`
-	Icon       *string `db:"icon"        json:"icon,omitempty"`
-	IsClosed   bool    `db:"is_closed"   json:"isClosed"`
-	Position   int     `db:"position"    json:"position"`
-}
-
-// Status is a live status value on a specific timeline. Rows are copied from a
-// StatusTemplate's items when the timeline is created and then evolve independently.
-type Status struct {
-	ID         string    `db:"id"          json:"id"`
-	TimelineID string    `db:"timeline_id" json:"timelineId"`
-	Name       string    `db:"name"        json:"name"`
-	Color      string    `db:"color"       json:"color"`
-	Icon       *string   `db:"icon"        json:"icon,omitempty"`
-	IsClosed   bool      `db:"is_closed"   json:"isClosed"`
-	Position   int       `db:"position"    json:"position"`
-	CreatedAt  time.Time `db:"created_at"  json:"createdAt"`
-	UpdatedAt  time.Time `db:"updated_at"  json:"updatedAt"`
-}
-
-// TimelineAccessEntry is a single timeline access grant joined with the team
-// member's display info. Returned by GET /teams/:id/timelines/:timelineId/access.
-type TimelineAccessEntry struct {
-	TimelineID   string  `db:"timeline_id"    json:"timelineId"`
-	TeamMemberID string  `db:"team_member_id" json:"teamMemberId"`
-	Role         string  `db:"role"           json:"role"`
-	DisplayName  string  `db:"display_name"   json:"displayName"`
-	Email        string  `db:"email"          json:"email"`
-	Color        *string `db:"color"          json:"color,omitempty"`
-	Icon         *string `db:"icon"           json:"icon,omitempty"`
-	UserID       *string `db:"user_id"        json:"userId,omitempty"`
-}
-
-// Tag is a team-scoped label that can be applied to activities. Tags are
-// normalized: a team_id+name pair is unique, enabling rename-all and
-// name-based filter matching across timelines.
-type Tag struct {
-	ID        string    `db:"id"         json:"id"`
-	TeamID    string    `db:"team_id"    json:"teamId"`
-	Name      string    `db:"name"       json:"name"`
-	Color     *string   `db:"color"      json:"color,omitempty"`
-	CreatedBy string    `db:"created_by" json:"createdBy"`
-	CreatedAt time.Time `db:"created_at" json:"createdAt"`
-}
-
-// Invite is a single-use token that grants an email address the right to
-// join a Team. AcceptedAt is non-nil once consumed; expired or accepted
-// invites are rejected by the registration handler.
-type Invite struct {
-	ID         string     `db:"id"          json:"id"`
-	TeamID     string     `db:"team_id"     json:"teamId"`
-	Email      string     `db:"email"       json:"email"`
-	Token      string     `db:"token"       json:"token"`
-	Role       string     `db:"role"        json:"role"`
-	InvitedBy  string     `db:"invited_by"  json:"invitedBy"`
-	ExpiresAt  time.Time  `db:"expires_at"  json:"expiresAt"`
-	AcceptedAt *time.Time `db:"accepted_at" json:"acceptedAt,omitempty"`
-	CreatedAt  time.Time  `db:"created_at"  json:"createdAt"`
 }
 ````
 
@@ -33361,416 +35000,6 @@ export default function FilterManageModal({
 }
 ````
 
-## File: packages/web/src/components/gantt/granularity.test.ts
-````typescript
-import { describe, it, expect } from 'vitest'
-import { generateColumns, positionInColumns, snapDivisorFor } from './granularity'
-
-// ── generateColumns — weekStart option ───────────────────────────────────────
-//
-// Jan 2026 layout:
-//   Mon Jan  5 (ISO week start)
-//   Sun Jan  4 (Sunday week start)
-//
-// Jan 1 2026 is a Thursday.
-//
-// Input dates use Date.UTC to produce stable UTC-midnight values that give the
-// same result regardless of the test runner's local timezone.
-
-const JAN1  = new Date(Date.UTC(2026, 0, 1))  // Thu
-const JAN31 = new Date(Date.UTC(2026, 0, 31)) // Sat
-
-describe('generateColumns — weekStart', () => {
-  it('monday week start: first week column begins on Monday Dec 29', () => {
-    const cols = generateColumns(JAN1, JAN31, 'week', { weekStart: 'monday' })
-    // Jan 1 is Thursday; Monday ISO week start = Dec 29 2025
-    expect(cols[0].start.getUTCDay()).toBe(1) // 1 = Monday
-    expect(cols[0].start.getUTCDate()).toBe(29)
-  })
-
-  it('sunday week start: first week column begins on Sunday Dec 28', () => {
-    const cols = generateColumns(JAN1, JAN31, 'week', { weekStart: 'sunday' })
-    // Jan 1 is Thursday; Sunday week start = Dec 28 2025
-    expect(cols[0].start.getUTCDay()).toBe(0) // 0 = Sunday
-    expect(cols[0].start.getUTCDate()).toBe(28)
-  })
-
-  it('default (no option) behaves like monday', () => {
-    const defaultCols = generateColumns(JAN1, JAN31, 'week')
-    const mondayCols  = generateColumns(JAN1, JAN31, 'week', { weekStart: 'monday' })
-    expect(defaultCols[0].start.getTime()).toBe(mondayCols[0].start.getTime())
-  })
-})
-
-// ── generateColumns — locale option ──────────────────────────────────────────
-
-describe('generateColumns — locale', () => {
-  it('en-US: month column label contains English month name', () => {
-    const cols = generateColumns(JAN1, JAN31, 'month', { locale: 'en-US' })
-    expect(cols[0].label).toMatch(/Jan/)
-  })
-
-  it('en-GB: day column label shows day-first ordering (e.g. "1 Jan")', () => {
-    const cols = generateColumns(JAN1, JAN31, 'day', { locale: 'en-GB' })
-    // en-GB {month:'short', day:'numeric', timeZone:'UTC'} → "1 Jan"
-    expect(cols[0].label).toMatch(/Jan/)
-    // The day should come first in en-GB
-    expect(cols[0].label).toMatch(/^1/)
-  })
-
-  it('default locale behaves like en-US', () => {
-    const defaultCols = generateColumns(JAN1, JAN31, 'month')
-    const usCols      = generateColumns(JAN1, JAN31, 'month', { locale: 'en-US' })
-    expect(defaultCols[0].label).toBe(usCols[0].label)
-  })
-})
-
-// ── snapDivisorFor ────────────────────────────────────────────────────────────
-
-describe('snapDivisorFor', () => {
-  it('week → 7 (snap to day within week)', () => {
-    expect(snapDivisorFor('week')).toBe(7)
-  })
-
-  it('month → 4 (snap to week within month)', () => {
-    expect(snapDivisorFor('month')).toBe(4)
-  })
-
-  it('quarter → 3 (snap to month within quarter)', () => {
-    expect(snapDivisorFor('quarter')).toBe(3)
-  })
-
-  it('year → 4 (snap to quarter within year)', () => {
-    expect(snapDivisorFor('year')).toBe(4)
-  })
-
-  it('day → 1 (no finer snap at day granularity)', () => {
-    expect(snapDivisorFor('day')).toBe(1)
-  })
-
-  it('auto → 1 (no finer snap for auto)', () => {
-    expect(snapDivisorFor('auto')).toBe(1)
-  })
-})
-
-// ── Timezone-safety: midnight-UTC dates ───────────────────────────────────────
-//
-// An activity stored as "2026-05-31T00:00:00Z" must display as May 31 and
-// land in the May 31 column regardless of local timezone.  This suite uses
-// Date.UTC inputs to reproduce the condition that would cause a regression
-// when TZ=America/Denver (UTC-6).
-
-describe('positionInColumns — midnight-UTC activity dates land on correct day', () => {
-  // May 2026: generate day-granularity columns for the whole month
-  const MAY1  = new Date(Date.UTC(2026, 4,  1))
-  const MAY31 = new Date(Date.UTC(2026, 4, 31))
-  const cols  = generateColumns(MAY1, MAY31, 'day')
-
-  it('May 31 column label is "May 31"', () => {
-    const mayThirtyFirst = cols.find(c => c.start.getUTCDate() === 31 && c.start.getUTCMonth() === 4)
-    expect(mayThirtyFirst?.label).toMatch(/31/)
-  })
-
-  it('activity on 2026-05-31 lands in May 31 column (startCol ≥ 30)', () => {
-    // "2026-05-31T00:00:00Z" — midnight UTC; same value the API emits
-    const actStart = new Date('2026-05-31T00:00:00Z')
-    const actEnd   = new Date('2026-05-31T00:00:00Z')
-    const { startCol } = positionInColumns(actStart, actEnd, cols)
-    // May 31 is the 31st day (0-indexed = 30)
-    expect(Math.floor(startCol)).toBe(30)
-  })
-
-  it('activity on 2026-05-01 lands in May 1 column (startCol = 0)', () => {
-    const actStart = new Date('2026-05-01T00:00:00Z')
-    const actEnd   = new Date('2026-05-01T00:00:00Z')
-    const { startCol } = positionInColumns(actStart, actEnd, cols)
-    expect(Math.floor(startCol)).toBe(0)
-  })
-
-  it('formatLabel for May 31 day column shows "May 31" (UTC read-out)', () => {
-    const mayThirtyFirst = cols.find(c => c.start.getUTCDate() === 31 && c.start.getUTCMonth() === 4)
-    expect(mayThirtyFirst).toBeDefined()
-    // Label must show May 31, not May 30 (which would happen with local-time formatting in UTC-6)
-    expect(mayThirtyFirst!.label).toContain('31')
-    expect(mayThirtyFirst!.label).not.toContain('30')
-  })
-})
-````
-
-## File: packages/web/src/components/gantt/granularity.ts
-````typescript
-/**
- * Time-granularity helpers for the Gantt view.
- *
- * Generates column definitions and maps event date ranges to fractional
- * column positions at any granularity (day → year).
- */
-
-export type TimeGranularity = 'day' | 'week' | 'month' | 'quarter' | 'year';
-
-export interface ColumnDef {
-  label: string;
-  /** Secondary label rendered on a second line (used for week numbers). */
-  sublabel?: string;
-  start: Date;
-  end: Date;
-  /** Calendar days this column spans (varies for months, quarters, years). */
-  days: number;
-}
-
-// ── Date helpers ────────────────────────────────────────────────────────────
-//
-// All helpers operate in UTC so that all-day activity dates stored as
-// midnight-UTC strings (e.g. "2026-05-31T00:00:00Z") land on the correct
-// calendar day regardless of the viewer's local timezone.
-//
-// TODO: branch on allDay when timed events ship (Phase 15 calendar sync).
-
-function daysBetween(a: Date, b: Date): number {
-  return Math.round((b.getTime() - a.getTime()) / 86_400_000);
-}
-
-function startOfDay(d: Date): Date {
-  const r = new Date(d);
-  r.setUTCHours(0, 0, 0, 0);
-  return r;
-}
-
-function startOfWeek(d: Date, weekStart: 'monday' | 'sunday' = 'monday'): Date {
-  const r = startOfDay(d);
-  const day = r.getUTCDay(); // 0=Sun, 1=Mon, …, 6=Sat
-  if (weekStart === 'sunday') {
-    r.setUTCDate(r.getUTCDate() - day);
-  } else {
-    // Monday = ISO week start
-    r.setUTCDate(r.getUTCDate() - ((day + 6) % 7));
-  }
-  return r;
-}
-
-function startOfMonth(d: Date): Date {
-  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1));
-}
-
-function startOfQuarter(d: Date): Date {
-  const q = Math.floor(d.getUTCMonth() / 3) * 3;
-  return new Date(Date.UTC(d.getUTCFullYear(), q, 1));
-}
-
-function startOfYear(d: Date): Date {
-  return new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
-}
-
-export function addDays(d: Date, n: number): Date {
-  const r = new Date(d);
-  r.setUTCDate(r.getUTCDate() + n);
-  return r;
-}
-
-function addMonths(d: Date, n: number): Date {
-  const r = new Date(d);
-  r.setUTCMonth(r.getUTCMonth() + n);
-  return r;
-}
-
-function endOfPeriod(start: Date, gran: TimeGranularity): Date {
-  switch (gran) {
-    case 'day':     return addDays(start, 1);
-    case 'week':    return addDays(start, 7);
-    case 'month':   return addMonths(start, 1);
-    case 'quarter': return addMonths(start, 3);
-    case 'year':    return addMonths(start, 12);
-  }
-}
-
-function periodStart(d: Date, gran: TimeGranularity, weekStart: 'monday' | 'sunday' = 'monday'): Date {
-  switch (gran) {
-    case 'day':     return startOfDay(d);
-    case 'week':    return startOfWeek(d, weekStart);
-    case 'month':   return startOfMonth(d);
-    case 'quarter': return startOfQuarter(d);
-    case 'year':    return startOfYear(d);
-  }
-}
-
-// ── Label formatting ────────────────────────────────────────────────────────
-
-/** ISO 8601 week number (1–53). Week 1 contains Jan 4; weeks start Monday. */
-function isoWeekNumber(d: Date): number {
-  const date = new Date(d);
-  date.setUTCHours(0, 0, 0, 0);
-  date.setUTCDate(date.getUTCDate() + 3 - ((date.getUTCDay() + 6) % 7));
-  const week1 = new Date(Date.UTC(date.getUTCFullYear(), 0, 4));
-  return 1 + Math.round(
-    ((date.getTime() - week1.getTime()) / 86_400_000 - 3 + ((week1.getUTCDay() + 6) % 7)) / 7,
-  );
-}
-
-function formatLabel(start: Date, gran: TimeGranularity, locale = 'en-US'): string {
-  switch (gran) {
-    case 'day':
-      return start.toLocaleDateString(locale, { month: 'short', day: 'numeric', timeZone: 'UTC' });
-    case 'week': {
-      const end = addDays(start, 6);
-      const sameMonth = start.getUTCMonth() === end.getUTCMonth();
-      const s = start.toLocaleDateString(locale, { month: 'short', day: 'numeric', timeZone: 'UTC' });
-      const e = sameMonth
-        ? end.getUTCDate().toString()
-        : end.toLocaleDateString(locale, { month: 'short', day: 'numeric', timeZone: 'UTC' });
-      return `${s}–${e}`;
-    }
-    case 'month':
-      return start.toLocaleDateString(locale, { month: 'short', year: 'numeric', timeZone: 'UTC' });
-    case 'quarter': {
-      const q = Math.floor(start.getUTCMonth() / 3) + 1;
-      return `Q${q} ${start.getUTCFullYear()}`;
-    }
-    case 'year':
-      return start.getUTCFullYear().toString();
-  }
-}
-
-// ── Column generation ───────────────────────────────────────────────────────
-
-export interface GenerateColumnsOptions {
-  /** Which day the week grid starts on. Defaults to 'monday' (ISO). */
-  weekStart?: 'monday' | 'sunday';
-  /** BCP 47 locale tag for month name formatting. Defaults to 'en-US'. */
-  locale?: string;
-}
-
-export function generateColumns(
-  viewStart: Date,
-  viewEnd: Date,
-  granularity: TimeGranularity,
-  options?: GenerateColumnsOptions,
-): ColumnDef[] {
-  const weekStart = options?.weekStart ?? 'monday';
-  const locale = options?.locale ?? 'en-US';
-  const columns: ColumnDef[] = [];
-  let cur = periodStart(viewStart, granularity, weekStart);
-
-  while (cur <= viewEnd) {
-    const next = endOfPeriod(cur, granularity);
-    // Clamp to view bounds for the first and last columns
-    const colStart = cur < viewStart ? viewStart : cur;
-    const colEnd = next > addDays(viewEnd, 1) ? addDays(viewEnd, 1) : next;
-    columns.push({
-      label: formatLabel(cur, granularity, locale),
-      sublabel: granularity === 'week' ? `W${isoWeekNumber(cur)}` : undefined,
-      start: cur,
-      end: next,
-      days: daysBetween(colStart, colEnd),
-    });
-    cur = next;
-  }
-
-  return columns;
-}
-
-// ── Event positioning ───────────────────────────────────────────────────────
-
-/** Fractional position within the column array. */
-export function positionInColumns(
-  eventStart: Date,
-  eventEnd: Date,
-  columns: ColumnDef[],
-): { startCol: number; span: number } {
-  if (columns.length === 0) return { startCol: 0, span: 0 };
-
-  const evStartMs = eventStart.getTime();
-  const evEndMs = eventEnd.getTime();
-
-  let startCol = 0;
-  let endCol = columns.length;
-
-  for (let i = 0; i < columns.length; i++) {
-    const col = columns[i];
-    const colStartMs = col.start.getTime();
-    const colEndMs = col.end.getTime();
-    const colSpanMs = colEndMs - colStartMs;
-
-    if (evStartMs >= colStartMs && evStartMs < colEndMs) {
-      startCol = i + (colSpanMs > 0 ? (evStartMs - colStartMs) / colSpanMs : 0);
-    }
-    // End is inclusive day, so add 1 day for positioning
-    const evEndNextDayMs = evEndMs + 86_400_000;
-    if (evEndNextDayMs > colStartMs && evEndNextDayMs <= colEndMs) {
-      endCol = i + (colSpanMs > 0 ? (evEndNextDayMs - colStartMs) / colSpanMs : 1);
-    }
-  }
-
-  const span = Math.max(endCol - startCol, 0.15);
-  return { startCol, span };
-}
-
-// ── Snap divisor ────────────────────────────────────────────────────────────
-
-// Number of snap divisions per column at the given zoom granularity.
-// Higher divisor → finer snap (e.g. week columns snap to individual days).
-export function snapDivisorFor(granularity: TimeGranularity | 'auto'): number {
-  switch (granularity) {
-    case 'week':    return 7;  // snap to day within week
-    case 'month':   return 4;  // snap to week within month
-    case 'quarter': return 3;  // snap to month within quarter
-    case 'year':    return 4;  // snap to quarter within year
-    default:        return 1;  // day or auto → no finer snap
-  }
-}
-
-// ── Today position ──────────────────────────────────────────────────────────
-
-export function todayColumnPosition(columns: ColumnDef[]): number {
-  const now = startOfDay(new Date()); // startOfDay uses setUTCHours → UTC midnight
-  const nowMs = now.getTime();
-
-  for (let i = 0; i < columns.length; i++) {
-    const col = columns[i];
-    const colStartMs = col.start.getTime();
-    const colEndMs = col.end.getTime();
-    if (nowMs >= colStartMs && nowMs < colEndMs) {
-      const colSpanMs = colEndMs - colStartMs;
-      return i + (colSpanMs > 0 ? (nowMs - colStartMs) / colSpanMs : 0.5);
-    }
-  }
-  return -1;
-}
-
-// ── Auto-fit ────────────────────────────────────────────────────────────────
-
-const GRANULARITIES: TimeGranularity[] = ['day', 'week', 'month', 'quarter', 'year'];
-const BASE_COL_WIDTH = 80;
-
-export function autoFitGranularity(
-  viewStart: Date,
-  viewEnd: Date,
-  viewportWidth: number,
-): TimeGranularity {
-  const targetCols = Math.max(viewportWidth / BASE_COL_WIDTH, 2);
-
-  let best: TimeGranularity = 'month';
-  let bestDiff = Infinity;
-
-  for (const gran of GRANULARITIES) {
-    const cols = generateColumns(viewStart, viewEnd, gran).length;
-    if (cols < 2) continue;
-    // Prefer the finest granularity that fits within 50-150% of viewport
-    const ratio = cols / targetCols;
-    if (ratio >= 0.4 && ratio <= 1.5) {
-      // Within range — prefer finest (earliest in array)
-      return gran;
-    }
-    const diff = Math.abs(ratio - 1);
-    if (diff < bestDiff) {
-      bestDiff = diff;
-      best = gran;
-    }
-  }
-
-  return best;
-}
-````
-
 ## File: packages/web/src/components/kanban/KanbanCard.tsx
 ````typescript
 /**
@@ -35402,6 +36631,562 @@ export function segmentsForDay(row: WeekRow, col: number): CalendarSegment[] {
 }
 ````
 
+## File: packages/web/src/lib/filterEngine.test.ts
+````typescript
+/**
+ * filterEngine.test.ts — unit tests for matchesFilter.
+ *
+ * Covers: each field type, each operator, AND/OR logic, edge cases
+ * (empty conditions, null/missing fields, case-insensitive status/tag matching),
+ * and the golden fixture suite shared with the Go filter engine.
+ */
+
+import { describe, it, expect } from 'vitest'
+import { matchesFilter, type FilterContext } from './filterEngine'
+import type { components } from '@draba/shared'
+import type { FilterDefinition } from './filterTypes'
+// Golden fixtures shared with the Go filter evaluator (packages/api/internal/filters).
+// Both implementations must produce the same result for every case here.
+import goldenFixtures from '../../../shared/testdata/filter-fixtures.json'
+
+type Activity = components['schemas']['Activity']
+type Status = components['schemas']['Status']
+type Tag = components['schemas']['Tag']
+
+// ── Fixtures ──────────────────────────────────────────────────────────────────
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function makeActivity(overrides: Record<string, any> = {}): Activity {
+  return {
+    id: 'act-1',
+    title: 'Test activity',
+    timelineId: 'tl-1',
+    startAt: '2026-01-10T00:00:00Z',
+    endAt: '2026-01-20T00:00:00Z',
+    allDay: false,
+    statusId: 'status-open',
+    tagIds: ['tag-1'],
+    assignedMemberIds: ['member-1'],
+    percentComplete: 50,
+    parentActivityId: null,
+    color: null,
+    icon: null,
+    description: null,
+    notes: null,
+    location: null,
+    url: null,
+    createdAt: '2026-01-01T00:00:00Z',
+    updatedAt: '2026-01-01T00:00:00Z',
+    archivedAt: null,
+    createdBy: 'user-1',
+    ...overrides,
+  } as Activity
+}
+
+function makeStatus(id: string, name: string, isClosed = false): Status {
+  return { id, name, color: '#3B82F6', icon: null, isClosed, position: 0, timelineId: 'tl-1', createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' }
+}
+
+function makeTag(id: string, name: string): Tag {
+  return { id, name, color: null, teamId: 'team-1', createdAt: '2026-01-01T00:00:00Z', createdBy: 'user-1' }
+}
+
+const statusOpen = makeStatus('status-open', 'In Progress')
+const statusClosed = makeStatus('status-closed', 'Done', true)
+
+const tagBug = makeTag('tag-1', 'bug')
+const tagFeat = makeTag('tag-2', 'feature')
+
+const ctx: FilterContext = {
+  statusesByTimeline: new Map([['tl-1', [statusOpen, statusClosed]]]),
+  tags: [tagBug, tagFeat],
+}
+
+// ── Empty conditions ──────────────────────────────────────────────────────────
+
+describe('empty conditions', () => {
+  it('matches all activities when conditions list is empty', () => {
+    const activity = makeActivity()
+    expect(matchesFilter(activity, { logic: 'and', conditions: [] }, ctx)).toBe(true)
+    expect(matchesFilter(activity, { logic: 'or', conditions: [] }, ctx)).toBe(true)
+  })
+})
+
+// ── AND / OR logic ────────────────────────────────────────────────────────────
+
+describe('AND / OR logic', () => {
+  it('AND requires all conditions to pass', () => {
+    const activity = makeActivity({ title: 'Hello world' })
+    expect(matchesFilter(activity, {
+      logic: 'and',
+      conditions: [
+        { field: 'title', op: 'contains', value: 'Hello' },
+        { field: 'title', op: 'contains', value: 'world' },
+      ],
+    }, ctx)).toBe(true)
+
+    expect(matchesFilter(activity, {
+      logic: 'and',
+      conditions: [
+        { field: 'title', op: 'contains', value: 'Hello' },
+        { field: 'title', op: 'contains', value: 'missing' },
+      ],
+    }, ctx)).toBe(false)
+  })
+
+  it('OR requires at least one condition to pass', () => {
+    const activity = makeActivity({ title: 'Hello world' })
+    expect(matchesFilter(activity, {
+      logic: 'or',
+      conditions: [
+        { field: 'title', op: 'contains', value: 'missing' },
+        { field: 'title', op: 'contains', value: 'world' },
+      ],
+    }, ctx)).toBe(true)
+
+    expect(matchesFilter(activity, {
+      logic: 'or',
+      conditions: [
+        { field: 'title', op: 'contains', value: 'nope' },
+        { field: 'title', op: 'contains', value: 'nada' },
+      ],
+    }, ctx)).toBe(false)
+  })
+})
+
+// ── Status field ──────────────────────────────────────────────────────────────
+
+describe('status field', () => {
+  it('in: matches when status name is in the set (case-insensitive)', () => {
+    const activity = makeActivity({ statusId: 'status-open' })
+    expect(matchesFilter(activity, {
+      logic: 'and',
+      conditions: [{ field: 'status', op: 'in', value: ['in progress'] }],
+    }, ctx)).toBe(true)
+  })
+
+  it('in: no match when status name not in set', () => {
+    const activity = makeActivity({ statusId: 'status-open' })
+    expect(matchesFilter(activity, {
+      logic: 'and',
+      conditions: [{ field: 'status', op: 'in', value: ['done'] }],
+    }, ctx)).toBe(false)
+  })
+
+  it('not_in: matches when status name is NOT in the set', () => {
+    const activity = makeActivity({ statusId: 'status-open' })
+    expect(matchesFilter(activity, {
+      logic: 'and',
+      conditions: [{ field: 'status', op: 'not_in', value: ['done'] }],
+    }, ctx)).toBe(true)
+  })
+
+  it('is_empty: matches when activity has no status', () => {
+    const activity = makeActivity({ statusId: null })
+    expect(matchesFilter(activity, {
+      logic: 'and',
+      conditions: [{ field: 'status', op: 'is_empty', value: [] }],
+    }, ctx)).toBe(true)
+  })
+
+  it('is_not_empty: matches when activity has a status', () => {
+    const activity = makeActivity({ statusId: 'status-open' })
+    expect(matchesFilter(activity, {
+      logic: 'and',
+      conditions: [{ field: 'status', op: 'is_not_empty', value: [] }],
+    }, ctx)).toBe(true)
+  })
+})
+
+// ── Tag field ─────────────────────────────────────────────────────────────────
+
+describe('tag field', () => {
+  it('in: matches by tag name (case-insensitive)', () => {
+    const activity = makeActivity({ tagIds: ['tag-1'] }) // tag-1 = 'bug'
+    expect(matchesFilter(activity, {
+      logic: 'and',
+      conditions: [{ field: 'tag', op: 'in', value: ['BUG'] }],
+    }, ctx)).toBe(true)
+  })
+
+  it('not_in: matches when none of the tag names match', () => {
+    const activity = makeActivity({ tagIds: ['tag-1'] }) // 'bug'
+    expect(matchesFilter(activity, {
+      logic: 'and',
+      conditions: [{ field: 'tag', op: 'not_in', value: ['feature'] }],
+    }, ctx)).toBe(true)
+  })
+
+  it('is_empty: matches when activity has no tags', () => {
+    const activity = makeActivity({ tagIds: [] })
+    expect(matchesFilter(activity, {
+      logic: 'and',
+      conditions: [{ field: 'tag', op: 'is_empty', value: [] }],
+    }, ctx)).toBe(true)
+  })
+})
+
+// ── Assignee field ────────────────────────────────────────────────────────────
+
+describe('assignee field', () => {
+  it('in: matches when member ID is assigned', () => {
+    const activity = makeActivity({ assignedMemberIds: ['member-1'] })
+    expect(matchesFilter(activity, {
+      logic: 'and',
+      conditions: [{ field: 'assignee', op: 'in', value: ['member-1'] }],
+    }, ctx)).toBe(true)
+  })
+
+  it('not_in: matches when member is not assigned', () => {
+    const activity = makeActivity({ assignedMemberIds: ['member-2'] })
+    expect(matchesFilter(activity, {
+      logic: 'and',
+      conditions: [{ field: 'assignee', op: 'not_in', value: ['member-1'] }],
+    }, ctx)).toBe(true)
+  })
+
+  it('is_empty: matches when no assignees', () => {
+    const activity = makeActivity({ assignedMemberIds: [] })
+    expect(matchesFilter(activity, {
+      logic: 'and',
+      conditions: [{ field: 'assignee', op: 'is_empty', value: [] }],
+    }, ctx)).toBe(true)
+  })
+})
+
+// ── Title field ───────────────────────────────────────────────────────────────
+
+describe('title field', () => {
+  it('contains: case-insensitive substring match', () => {
+    const activity = makeActivity({ title: 'Fix the login bug' })
+    expect(matchesFilter(activity, {
+      logic: 'and',
+      conditions: [{ field: 'title', op: 'contains', value: 'LOGIN' }],
+    }, ctx)).toBe(true)
+  })
+
+  it('not_contains: true when substring absent', () => {
+    const activity = makeActivity({ title: 'Fix the login bug' })
+    expect(matchesFilter(activity, {
+      logic: 'and',
+      conditions: [{ field: 'title', op: 'not_contains', value: 'dashboard' }],
+    }, ctx)).toBe(true)
+  })
+
+  it('equals: exact case-insensitive match', () => {
+    const activity = makeActivity({ title: 'Hello World' })
+    expect(matchesFilter(activity, {
+      logic: 'and',
+      conditions: [{ field: 'title', op: 'equals', value: 'hello world' }],
+    }, ctx)).toBe(true)
+  })
+
+  it('is_empty: matches when title is empty string', () => {
+    const activity = makeActivity({ title: '' })
+    expect(matchesFilter(activity, {
+      logic: 'and',
+      conditions: [{ field: 'title', op: 'is_empty', value: '' }],
+    }, ctx)).toBe(true)
+  })
+})
+
+// ── Progress field ────────────────────────────────────────────────────────────
+
+describe('progress field', () => {
+  it('gte: matches when progress is at or above threshold', () => {
+    const activity = makeActivity({ percentComplete: 75 })
+    expect(matchesFilter(activity, {
+      logic: 'and',
+      conditions: [{ field: 'progress', op: 'gte', value: 50 }],
+    }, ctx)).toBe(true)
+  })
+
+  it('lt: matches when progress is below threshold', () => {
+    const activity = makeActivity({ percentComplete: 25 })
+    expect(matchesFilter(activity, {
+      logic: 'and',
+      conditions: [{ field: 'progress', op: 'lt', value: 50 }],
+    }, ctx)).toBe(true)
+  })
+
+  it('is_empty: matches when percentComplete is null/undefined', () => {
+    const activity = makeActivity({ percentComplete: undefined })
+    expect(matchesFilter(activity, {
+      logic: 'and',
+      conditions: [{ field: 'progress', op: 'is_empty', value: 0 }],
+    }, ctx)).toBe(true)
+  })
+})
+
+// ── hasParent field ───────────────────────────────────────────────────────────
+
+describe('hasParent field', () => {
+  it('is_true: matches activities with a parent', () => {
+    const activity = makeActivity({ parentActivityId: 'parent-1' })
+    expect(matchesFilter(activity, {
+      logic: 'and',
+      conditions: [{ field: 'hasParent', op: 'is_true' }],
+    }, ctx)).toBe(true)
+  })
+
+  it('is_false: matches activities without a parent', () => {
+    const activity = makeActivity({ parentActivityId: null })
+    expect(matchesFilter(activity, {
+      logic: 'and',
+      conditions: [{ field: 'hasParent', op: 'is_false' }],
+    }, ctx)).toBe(true)
+  })
+})
+
+// ── Date fields ───────────────────────────────────────────────────────────────
+
+describe('date fields', () => {
+  it('startDate before: matches when start is before the given date', () => {
+    const activity = makeActivity({ startAt: '2026-01-05T00:00:00Z' })
+    expect(matchesFilter(activity, {
+      logic: 'and',
+      conditions: [{ field: 'startDate', op: 'before', value: '2026-01-10' }],
+    }, ctx)).toBe(true)
+  })
+
+  it('endDate after: matches when end is after the given date', () => {
+    const activity = makeActivity({ endAt: '2026-03-01T00:00:00Z' })
+    expect(matchesFilter(activity, {
+      logic: 'and',
+      conditions: [{ field: 'endDate', op: 'after', value: '2026-02-01' }],
+    }, ctx)).toBe(true)
+  })
+
+  it('startDate between: matches when start is within range', () => {
+    const activity = makeActivity({ startAt: '2026-06-15T00:00:00Z' })
+    expect(matchesFilter(activity, {
+      logic: 'and',
+      conditions: [{ field: 'startDate', op: 'between', value: ['2026-06-01', '2026-06-30'] }],
+    }, ctx)).toBe(true)
+  })
+
+  it('is_empty: matches when date is null/undefined', () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const activity = makeActivity({ startAt: null as any })
+    expect(matchesFilter(activity, {
+      logic: 'and',
+      conditions: [{ field: 'startDate', op: 'is_empty' }],
+    }, ctx)).toBe(true)
+  })
+})
+
+// ── Golden fixtures (parity with Go filter engine) ────────────────────────────
+
+describe('golden fixtures — parity with Go filter engine', () => {
+  // Build context from the shared fixture reference data.
+  const fixtureCtx: FilterContext = {
+    statusesByTimeline: new Map([
+      [
+        'tl1',
+        goldenFixtures.statuses.map(s => ({
+          id: s.id,
+          name: s.name,
+          color: s.color,
+          isClosed: s.isClosed,
+          position: s.position,
+          timelineId: s.timelineId,
+          createdAt: '2026-01-01T00:00:00Z',
+          updatedAt: '2026-01-01T00:00:00Z',
+        })),
+      ],
+    ]),
+    tags: goldenFixtures.tags.map(t => ({
+      id: t.id,
+      name: t.name,
+      color: null,
+      teamId: t.teamId,
+      createdAt: t.createdAt,
+      createdBy: t.createdBy,
+    })),
+  }
+
+  // Build activity lookup.
+  const actByID = Object.fromEntries(
+    goldenFixtures.activities.map(a => [
+      a.id,
+      {
+        ...a,
+        description: null,
+        notes: null,
+        icon: null,
+        color: null,
+        location: null,
+        url: null,
+        rrule: null,
+        caldavUid: null,
+        googleEventId: null,
+        archivedAt: null,
+        updatedAt: '2026-01-01T00:00:00Z',
+      } as Activity,
+    ])
+  )
+
+  for (const fix of goldenFixtures.fixtures) {
+    it(fix.name, () => {
+      for (const [actID, want] of Object.entries(fix.expected)) {
+        const act = actByID[actID]
+        expect(act, `activity ${actID} missing`).toBeDefined()
+        const got = matchesFilter(act, fix.filter as FilterDefinition, fixtureCtx)
+        expect(got, `activity ${actID}`).toBe(want)
+      }
+    })
+  }
+})
+````
+
+## File: packages/web/src/lib/filterEngine.ts
+````typescript
+/**
+ * Client-side filter evaluation engine.
+ *
+ * matchesFilter is a pure function that evaluates a FilterDefinition against
+ * a single activity. It resolves status names and tag names via context objects
+ * so callers supply the data; the engine does no fetching.
+ */
+
+import type { components } from '@draba/shared'
+import type { FilterDefinition, FilterCondition, SetOp, StringOp, NumberOp, BoolOp, DateOp } from './filterTypes'
+
+type Activity = components['schemas']['Activity']
+type Status = components['schemas']['Status']
+type Tag = components['schemas']['Tag']
+
+export interface FilterContext {
+  /** Maps timeline_id → that timeline's statuses (for resolving statusId → name). */
+  statusesByTimeline: Map<string, Status[]>
+  /** All tags for the team (for resolving tagIds → names). */
+  tags: Tag[]
+}
+
+// ── Operator helpers ──────────────────────────────────────────────────────────
+
+function evalSetOp(op: SetOp, haystack: string[], needles: string[]): boolean {
+  switch (op) {
+    case 'in':
+      return needles.some(n => haystack.includes(n))
+    case 'not_in':
+      return needles.every(n => !haystack.includes(n))
+    case 'is_empty':
+      return haystack.length === 0
+    case 'is_not_empty':
+      return haystack.length > 0
+  }
+}
+
+function evalStringOp(op: StringOp, value: string | null | undefined, target: string): boolean {
+  const v = (value ?? '').toLowerCase()
+  const t = target.toLowerCase()
+  switch (op) {
+    case 'equals':       return v === t
+    case 'not_equals':   return v !== t
+    case 'contains':     return v.includes(t)
+    case 'not_contains': return !v.includes(t)
+    case 'is_empty':     return v.trim() === ''
+    case 'is_not_empty': return v.trim() !== ''
+  }
+}
+
+function evalNumberOp(op: NumberOp, value: number | null | undefined, target: number): boolean {
+  if (op === 'is_empty')     return value == null
+  if (op === 'is_not_empty') return value != null
+  if (value == null) return false
+  switch (op) {
+    case 'equals':     return value === target
+    case 'not_equals': return value !== target
+    case 'gt':         return value > target
+    case 'gte':        return value >= target
+    case 'lt':         return value < target
+    case 'lte':        return value <= target
+  }
+}
+
+function evalBoolOp(op: BoolOp, value: boolean): boolean {
+  return op === 'is_true' ? value : !value
+}
+
+function evalDateOp(op: DateOp, dateStr: string | null | undefined, target: string | [string, string] | undefined): boolean {
+  if (op === 'is_empty')     return !dateStr
+  if (op === 'is_not_empty') return Boolean(dateStr)
+  if (!dateStr || !target) return false
+
+  const date = new Date(dateStr).getTime()
+  if (op === 'between') {
+    const [from, to] = target as [string, string]
+    return date >= new Date(from).getTime() && date <= new Date(to).getTime()
+  }
+  const targetDate = new Date(target as string).getTime()
+  if (op === 'before') return date < targetDate
+  if (op === 'after')  return date > targetDate
+  return false
+}
+
+// ── Condition evaluation ──────────────────────────────────────────────────────
+
+function evalCondition(condition: FilterCondition, activity: Activity, ctx: FilterContext): boolean {
+  switch (condition.field) {
+    case 'status': {
+      const statuses = ctx.statusesByTimeline.get(activity.timelineId) ?? []
+      const statusName = statuses.find(s => s.id === activity.statusId)?.name ?? null
+      const haystack = statusName ? [statusName.toLowerCase()] : []
+      // is_empty / is_not_empty don't use needles — guard before .map()
+      const needles = (condition.value ?? []).map(v => v.toLowerCase())
+      return evalSetOp(condition.op, haystack, needles)
+    }
+
+    case 'tag': {
+      const tagMap = new Map(ctx.tags.map(t => [t.id, t.name.toLowerCase()]))
+      const activityTagNames = (activity.tagIds ?? []).map(id => tagMap.get(id) ?? id)
+      const needles = (condition.value ?? []).map(v => v.toLowerCase())
+      return evalSetOp(condition.op, activityTagNames, needles)
+    }
+
+    case 'assignee': {
+      const haystack = activity.assignedMemberIds ?? []
+      return evalSetOp(condition.op, haystack, condition.value ?? [])
+    }
+
+    case 'title':
+      return evalStringOp(condition.op, activity.title, condition.value)
+
+    case 'progress':
+      return evalNumberOp(condition.op, activity.percentComplete ?? null, condition.value)
+
+    case 'hasParent':
+      return evalBoolOp(condition.op, Boolean(activity.parentActivityId))
+
+    case 'startDate':
+      return evalDateOp(condition.op, activity.startAt ?? null, condition.value)
+
+    case 'endDate':
+      return evalDateOp(condition.op, activity.endAt ?? null, condition.value)
+  }
+}
+
+// ── Main export ───────────────────────────────────────────────────────────────
+
+/**
+ * Returns true when activity matches the given FilterDefinition.
+ * An empty conditions array always matches (no filtering).
+ */
+export function matchesFilter(
+  activity: Activity,
+  filter: FilterDefinition,
+  ctx: FilterContext,
+): boolean {
+  if (filter.conditions.length === 0) return true
+
+  const results = filter.conditions.map(c => evalCondition(c, activity, ctx))
+  return filter.logic === 'and'
+    ? results.every(Boolean)
+    : results.some(Boolean)
+}
+````
+
 ## File: packages/web/src/lib/memberGroups.ts
 ````typescript
 /**
@@ -35601,65 +37386,6 @@ export function applyActiveFilter(
 
   return activities
 }
-````
-
-## File: packages/web/vite.config.ts
-````typescript
-/// <reference types="vitest" />
-import path from 'path'
-import { defineConfig, loadEnv } from 'vite'
-import react from '@vitejs/plugin-react'
-import tailwindcss from '@tailwindcss/vite'
-
-export default defineConfig(({ mode }) => {
-  const env = loadEnv(mode, process.cwd(), '')
-  const apiTarget = env.VITE_API_TARGET ?? 'http://localhost:8080'
-
-  return {
-    plugins: [
-      react(),
-      tailwindcss(),
-    ],
-    resolve: {
-      alias: {
-        '@': path.resolve(__dirname, './src'),
-      },
-    },
-    test: {
-      environment: 'jsdom',
-      globals: true,
-      alias: {
-        '@': path.resolve(__dirname, './src'),
-      },
-    },
-    server: {
-      proxy: {
-        '/setup': { target: apiTarget, changeOrigin: true },
-        '/auth': { target: apiTarget, changeOrigin: true },
-        '/users': { target: apiTarget, changeOrigin: true },
-        '/admin': { target: apiTarget, changeOrigin: true },
-        '/settings': { target: apiTarget, changeOrigin: true },
-        '/tokens': { target: apiTarget, changeOrigin: true },
-        '/teams': { target: apiTarget, changeOrigin: true },
-        '/timelines': { target: apiTarget, changeOrigin: true },
-        '/status-templates': { target: apiTarget, changeOrigin: true },
-        '/status-template-items': { target: apiTarget, changeOrigin: true },
-        '/statuses': { target: apiTarget, changeOrigin: true },
-        '/activities': { target: apiTarget, changeOrigin: true },
-        '/tags': { target: apiTarget, changeOrigin: true },
-        '/saved_filters': { target: apiTarget, changeOrigin: true },
-        '/events': { target: apiTarget, changeOrigin: true },
-        '/health': { target: apiTarget, changeOrigin: true },
-        '/ws': {
-          target: apiTarget.replace(/^http/, 'ws'),
-          changeOrigin: true,
-          ws: true,
-          rewriteWsOrigin: true,
-        },
-      },
-    },
-  }
-})
 ````
 
 ## File: docs/TESTING.md
@@ -35889,521 +37615,6 @@ No Vitest / Testing Library setup exists yet. Components (`TimelineGrid`, `Event
 4. That's it — `/test-phase` will pick it up on the next run.
 ````
 
-## File: packages/api/internal/api/api_types.gen.go
-````go
-// Package api provides primitives to interact with the openapi HTTP API.
-//
-// Code generated by github.com/oapi-codegen/oapi-codegen/v2 version v2.7.0 DO NOT EDIT.
-package api
-
-import (
-	"time"
-
-	openapi_types "github.com/oapi-codegen/runtime/types"
-)
-
-const (
-	BearerAuthScopes bearerAuthContextKey = "bearerAuth.Scopes"
-)
-
-// Defines values for HealthResponseStatus.
-const (
-	Ok HealthResponseStatus = "ok"
-)
-
-// Valid indicates whether the value is a known member of the HealthResponseStatus enum.
-func (e HealthResponseStatus) Valid() bool {
-	switch e {
-	case Ok:
-		return true
-	default:
-		return false
-	}
-}
-
-// Defines values for InviteRole.
-const (
-	InviteRoleAdmin  InviteRole = "admin"
-	InviteRoleMember InviteRole = "member"
-)
-
-// Valid indicates whether the value is a known member of the InviteRole enum.
-func (e InviteRole) Valid() bool {
-	switch e {
-	case InviteRoleAdmin:
-		return true
-	case InviteRoleMember:
-		return true
-	default:
-		return false
-	}
-}
-
-// Defines values for TeamMemberRole.
-const (
-	TeamMemberRoleAdmin  TeamMemberRole = "admin"
-	TeamMemberRoleMember TeamMemberRole = "member"
-	TeamMemberRoleOwner  TeamMemberRole = "owner"
-)
-
-// Valid indicates whether the value is a known member of the TeamMemberRole enum.
-func (e TeamMemberRole) Valid() bool {
-	switch e {
-	case TeamMemberRoleAdmin:
-		return true
-	case TeamMemberRoleMember:
-		return true
-	case TeamMemberRoleOwner:
-		return true
-	default:
-		return false
-	}
-}
-
-// Defines values for TeamMemberWithUserRole.
-const (
-	TeamMemberWithUserRoleAdmin  TeamMemberWithUserRole = "admin"
-	TeamMemberWithUserRoleMember TeamMemberWithUserRole = "member"
-	TeamMemberWithUserRoleOwner  TeamMemberWithUserRole = "owner"
-)
-
-// Valid indicates whether the value is a known member of the TeamMemberWithUserRole enum.
-func (e TeamMemberWithUserRole) Valid() bool {
-	switch e {
-	case TeamMemberWithUserRoleAdmin:
-		return true
-	case TeamMemberWithUserRoleMember:
-		return true
-	case TeamMemberWithUserRoleOwner:
-		return true
-	default:
-		return false
-	}
-}
-
-// Defines values for TimelineVisibility.
-const (
-	TimelineVisibilityPublic     TimelineVisibility = "public"
-	TimelineVisibilityRestricted TimelineVisibility = "restricted"
-)
-
-// Valid indicates whether the value is a known member of the TimelineVisibility enum.
-func (e TimelineVisibility) Valid() bool {
-	switch e {
-	case TimelineVisibilityPublic:
-		return true
-	case TimelineVisibilityRestricted:
-		return true
-	default:
-		return false
-	}
-}
-
-// Defines values for CreateInviteJSONBodyRole.
-const (
-	CreateInviteJSONBodyRoleAdmin  CreateInviteJSONBodyRole = "admin"
-	CreateInviteJSONBodyRoleMember CreateInviteJSONBodyRole = "member"
-)
-
-// Valid indicates whether the value is a known member of the CreateInviteJSONBodyRole enum.
-func (e CreateInviteJSONBodyRole) Valid() bool {
-	switch e {
-	case CreateInviteJSONBodyRoleAdmin:
-		return true
-	case CreateInviteJSONBodyRoleMember:
-		return true
-	default:
-		return false
-	}
-}
-
-// Defines values for CreateTimelineJSONBodyVisibility.
-const (
-	CreateTimelineJSONBodyVisibilityPublic     CreateTimelineJSONBodyVisibility = "public"
-	CreateTimelineJSONBodyVisibilityRestricted CreateTimelineJSONBodyVisibility = "restricted"
-)
-
-// Valid indicates whether the value is a known member of the CreateTimelineJSONBodyVisibility enum.
-func (e CreateTimelineJSONBodyVisibility) Valid() bool {
-	switch e {
-	case CreateTimelineJSONBodyVisibilityPublic:
-		return true
-	case CreateTimelineJSONBodyVisibilityRestricted:
-		return true
-	default:
-		return false
-	}
-}
-
-// ApiError defines model for ApiError.
-type ApiError struct {
-	Error struct {
-		Code    string `json:"code"`
-		Message string `json:"message"`
-	} `json:"error"`
-}
-
-// AuthResponse defines model for AuthResponse.
-type AuthResponse struct {
-	AccessToken  string `json:"accessToken"`
-	RefreshToken string `json:"refreshToken"`
-	User         User   `json:"user"`
-}
-
-// Activity defines model for Activity.
-type Activity struct {
-	AllDay           bool       `json:"allDay"`
-	ArchivedAt       *time.Time `json:"archivedAt,omitempty"`
-	CaldavUid        *string    `json:"caldavUid,omitempty"`
-	Color            *string    `json:"color,omitempty"`
-	CreatedAt        time.Time  `json:"createdAt"`
-	CreatedBy        string     `json:"createdBy"`
-	Description      *string    `json:"description,omitempty"`
-	EndAt            time.Time  `json:"endAt"`
-	GoogleEventId    *string    `json:"googleEventId,omitempty"`
-	Icon             *string    `json:"icon,omitempty"`
-	Id               string     `json:"id"`
-	Location         *string    `json:"location,omitempty"`
-	ParentActivityId *string    `json:"parentActivityId,omitempty"`
-	PercentComplete  *int       `json:"percentComplete,omitempty"`
-	Rrule            *string    `json:"rrule,omitempty"`
-	StartAt          time.Time  `json:"startAt"`
-	StatusId         *string    `json:"statusId,omitempty"`
-	TeamId           string     `json:"teamId"`
-	Title            string     `json:"title"`
-	UpdatedAt        time.Time  `json:"updatedAt"`
-	Url              *string    `json:"url,omitempty"`
-}
-
-// HealthResponse defines model for HealthResponse.
-type HealthResponse struct {
-	Status HealthResponseStatus `json:"status"`
-}
-
-// HealthResponseStatus defines model for HealthResponse.Status.
-type HealthResponseStatus string
-
-// Invite defines model for Invite.
-type Invite struct {
-	AcceptedAt *time.Time `json:"acceptedAt,omitempty"`
-	CreatedAt  time.Time  `json:"createdAt"`
-	Email      string     `json:"email"`
-	ExpiresAt  time.Time  `json:"expiresAt"`
-	Id         string     `json:"id"`
-	InvitedBy  string     `json:"invitedBy"`
-	Role       InviteRole `json:"role"`
-	TeamId     string     `json:"teamId"`
-	Token      string     `json:"token"`
-}
-
-// InviteRole defines model for Invite.Role.
-type InviteRole string
-
-// RefreshResponse defines model for RefreshResponse.
-type RefreshResponse struct {
-	AccessToken string `json:"accessToken"`
-}
-
-// UserPreference defines model for UserPreference.
-type UserPreference struct {
-	Id         string    `json:"id"`
-	UserId     string    `json:"userId"`
-	TimelineId string    `json:"timelineId,omitempty"`
-	Key        string    `json:"key"`
-	Value      string    `json:"value"`
-	UpdatedAt  time.Time `json:"updatedAt"`
-}
-
-// UpsertPreferenceJSONBody defines parameters for UpsertPreference.
-type UpsertPreferenceJSONBody struct {
-	// Key Preference key (e.g. group_by, sort_by, zoom_granularity, theme).
-	Key string `json:"key"`
-
-	// Value JSON-encoded preference value.
-	Value string `json:"value"`
-
-	// TimelineId Optional timeline scope. Omit or pass "" for a global preference.
-	TimelineId *string `json:"timelineId,omitempty"`
-}
-
-// UpsertPreferenceJSONRequestBody defines body for UpsertPreference for application/json ContentType.
-type UpsertPreferenceJSONRequestBody UpsertPreferenceJSONBody
-
-// SavedFilter defines model for SavedFilter.
-type SavedFilter struct {
-	CreatedAt time.Time `json:"createdAt"`
-
-	// Definition Opaque JSON filter spec (validated client-side).
-	Definition string `json:"definition"`
-	Id         string `json:"id"`
-
-	// IsTeamFilter When true, the filter is visible to all team members (set by admins only).
-	IsTeamFilter bool      `json:"isTeamFilter"`
-	Name         string    `json:"name"`
-	TeamId       string    `json:"teamId"`
-	UpdatedAt    time.Time `json:"updatedAt"`
-	UserId       string    `json:"userId"`
-}
-
-// Team defines model for Team.
-type Team struct {
-	ArchivedAt  *time.Time `json:"archivedAt,omitempty"`
-	Color       *string    `json:"color,omitempty"`
-	CreatedAt   time.Time  `json:"createdAt"`
-	Description *string    `json:"description,omitempty"`
-	Icon        *string    `json:"icon,omitempty"`
-	Id          string     `json:"id"`
-	Name        string     `json:"name"`
-	Notes       *string    `json:"notes,omitempty"`
-	Slug        string     `json:"slug"`
-	UpdatedAt   time.Time  `json:"updatedAt"`
-}
-
-// TeamMember defines model for TeamMember.
-type TeamMember struct {
-	Color    *string        `json:"color,omitempty"`
-	JoinedAt time.Time      `json:"joinedAt"`
-	Role     TeamMemberRole `json:"role"`
-	TeamId   string         `json:"teamId"`
-	UserId   string         `json:"userId"`
-}
-
-// TeamMemberRole defines model for TeamMember.Role.
-type TeamMemberRole string
-
-// TeamMemberWithUser defines model for TeamMemberWithUser.
-type TeamMemberWithUser struct {
-	AvatarUrl   *string                `json:"avatarUrl,omitempty"`
-	Color       *string                `json:"color,omitempty"`
-	DisplayName string                 `json:"displayName"`
-	Email       openapi_types.Email    `json:"email"`
-	JoinedAt    time.Time              `json:"joinedAt"`
-	Role        TeamMemberWithUserRole `json:"role"`
-	TeamId      string                 `json:"teamId"`
-	UserId      string                 `json:"userId"`
-}
-
-// TeamMemberWithUserRole defines model for TeamMemberWithUser.Role.
-type TeamMemberWithUserRole string
-
-// Timeline defines model for Timeline.
-type Timeline struct {
-	ArchivedAt *time.Time         `json:"archivedAt,omitempty"`
-	CreatedAt  time.Time          `json:"createdAt"`
-	CreatedBy  string             `json:"createdBy"`
-	EndDate    openapi_types.Date `json:"endDate"`
-	IcalToken  string             `json:"icalToken"`
-	Id         string             `json:"id"`
-	Name       string             `json:"name"`
-	ShareToken string             `json:"shareToken"`
-	StartDate  openapi_types.Date `json:"startDate"`
-	TeamId     string             `json:"teamId"`
-	UpdatedAt  time.Time          `json:"updatedAt"`
-	Visibility TimelineVisibility `json:"visibility"`
-}
-
-// TimelineVisibility defines model for Timeline.Visibility.
-type TimelineVisibility string
-
-// User defines model for User.
-type User struct {
-	AvatarUrl   *string             `json:"avatarUrl,omitempty"`
-	CreatedAt   time.Time           `json:"createdAt"`
-	DisplayName string              `json:"displayName"`
-	Email       openapi_types.Email `json:"email"`
-	Id          string              `json:"id"`
-	UpdatedAt   time.Time           `json:"updatedAt"`
-}
-
-// ActivityId defines model for activityId.
-type ActivityId = string
-
-// SavedFilterId defines model for savedFilterId.
-type SavedFilterId = string
-
-// ShareToken defines model for shareToken.
-type ShareToken = string
-
-// TeamId defines model for teamId.
-type TeamId = string
-
-// TimelineId defines model for timelineId.
-type TimelineId = string
-
-// BadRequest defines model for BadRequest.
-type BadRequest = ApiError
-
-// Forbidden defines model for Forbidden.
-type Forbidden = ApiError
-
-// InternalError defines model for InternalError.
-type InternalError = ApiError
-
-// NotFound defines model for NotFound.
-type NotFound = ApiError
-
-// PaymentRequired defines model for PaymentRequired.
-type PaymentRequired = ApiError
-
-// Unauthorized defines model for Unauthorized.
-type Unauthorized = ApiError
-
-// bearerAuthContextKey is the context key for bearerAuth security scheme
-type bearerAuthContextKey string
-
-// LoginJSONBody defines parameters for Login.
-type LoginJSONBody struct {
-	Email    openapi_types.Email `json:"email"`
-	Password string              `json:"password"`
-}
-
-// RefreshTokenJSONBody defines parameters for RefreshToken.
-type RefreshTokenJSONBody struct {
-	RefreshToken string `json:"refreshToken"`
-}
-
-// RegisterJSONBody defines parameters for Register.
-type RegisterJSONBody struct {
-	DisplayName string              `json:"displayName"`
-	Email       openapi_types.Email `json:"email"`
-	InviteToken *string             `json:"inviteToken,omitempty"`
-	Password    string              `json:"password"`
-}
-
-// UpdateActivityJSONBody defines parameters for UpdateActivity.
-type UpdateActivityJSONBody struct {
-	AllDay           *bool      `json:"allDay,omitempty"`
-	Color            *string    `json:"color,omitempty"`
-	Description      *string    `json:"description,omitempty"`
-	EndAt            *time.Time `json:"endAt,omitempty"`
-	Icon             *string    `json:"icon,omitempty"`
-	Location         *string    `json:"location,omitempty"`
-	ParentActivityId *string    `json:"parentActivityId,omitempty"`
-	PercentComplete  *int       `json:"percentComplete,omitempty"`
-	Rrule            *string    `json:"rrule,omitempty"`
-	StartAt          *time.Time `json:"startAt,omitempty"`
-	StatusId         *string    `json:"statusId,omitempty"`
-	Title            *string    `json:"title,omitempty"`
-	Url              *string    `json:"url,omitempty"`
-}
-
-// UpdateSavedFilterJSONBody defines parameters for UpdateSavedFilter.
-type UpdateSavedFilterJSONBody struct {
-	Definition   *string `json:"definition,omitempty"`
-	IsTeamFilter *bool   `json:"isTeamFilter,omitempty"`
-	Name         *string `json:"name,omitempty"`
-}
-
-// CreateTeamJSONBody defines parameters for CreateTeam.
-type CreateTeamJSONBody struct {
-	Name        string  `json:"name"`
-	Description *string `json:"description,omitempty"`
-	Notes       *string `json:"notes,omitempty"`
-	Color       *string `json:"color,omitempty"`
-	Icon        *string `json:"icon,omitempty"`
-}
-
-// UpdateTeamJSONBody defines parameters for UpdateTeam.
-type UpdateTeamJSONBody struct {
-	Name        *string `json:"name,omitempty"`
-	Description *string `json:"description,omitempty"`
-	Notes       *string `json:"notes,omitempty"`
-	Color       *string `json:"color,omitempty"`
-	Icon        *string `json:"icon,omitempty"`
-}
-
-// ListActivitiesParams defines parameters for ListActivities.
-type ListActivitiesParams struct {
-	// From Only return activities where startAt >= from (RFC 3339).
-	From *time.Time `form:"from,omitempty" json:"from,omitempty"`
-
-	// To Only return activities where startAt <= to (RFC 3339).
-	To *time.Time `form:"to,omitempty" json:"to,omitempty"`
-}
-
-// CreateActivityJSONBody defines parameters for CreateActivity.
-type CreateActivityJSONBody struct {
-	AllDay            *bool     `json:"allDay,omitempty"`
-	AssignedMemberIds *[]string `json:"assignedMemberIds,omitempty"`
-	TagIds            *[]string `json:"tagIds,omitempty"`
-	Color             *string   `json:"color,omitempty"`
-	Description       *string   `json:"description,omitempty"`
-	EndAt             time.Time `json:"endAt"`
-	Icon              *string   `json:"icon,omitempty"`
-	Location          *string   `json:"location,omitempty"`
-	Notes             *string   `json:"notes,omitempty"`
-	ParentActivityId  *string   `json:"parentActivityId,omitempty"`
-	PercentComplete   *int      `json:"percentComplete,omitempty"`
-	Rrule             *string   `json:"rrule,omitempty"`
-	StartAt           time.Time `json:"startAt"`
-	StatusId          *string   `json:"statusId,omitempty"`
-	Title             string    `json:"title"`
-	Url               *string   `json:"url,omitempty"`
-}
-
-// CreateInviteJSONBody defines parameters for CreateInvite.
-type CreateInviteJSONBody struct {
-	// Email If provided, the invite is scoped to this email address.
-	Email *openapi_types.Email      `json:"email,omitempty"`
-	Role  *CreateInviteJSONBodyRole `json:"role,omitempty"`
-}
-
-// CreateInviteJSONBodyRole defines parameters for CreateInvite.
-type CreateInviteJSONBodyRole string
-
-// CreateSavedFilterJSONBody defines parameters for CreateSavedFilter.
-type CreateSavedFilterJSONBody struct {
-	// Definition Opaque JSON filter spec (validated client-side).
-	Definition   string `json:"definition"`
-	IsTeamFilter *bool  `json:"isTeamFilter,omitempty"`
-	Name         string `json:"name"`
-}
-
-// CreateTimelineJSONBody defines parameters for CreateTimeline.
-type CreateTimelineJSONBody struct {
-	EndDate    openapi_types.Date                `json:"endDate"`
-	Name       string                            `json:"name"`
-	StartDate  openapi_types.Date                `json:"startDate"`
-	Visibility *CreateTimelineJSONBodyVisibility `json:"visibility,omitempty"`
-}
-
-// CreateTimelineJSONBodyVisibility defines parameters for CreateTimeline.
-type CreateTimelineJSONBodyVisibility string
-
-// LoginJSONRequestBody defines body for Login for application/json ContentType.
-type LoginJSONRequestBody LoginJSONBody
-
-// RefreshTokenJSONRequestBody defines body for RefreshToken for application/json ContentType.
-type RefreshTokenJSONRequestBody RefreshTokenJSONBody
-
-// RegisterJSONRequestBody defines body for Register for application/json ContentType.
-type RegisterJSONRequestBody RegisterJSONBody
-
-// UpdateActivityJSONRequestBody defines body for UpdateActivity for application/json ContentType.
-type UpdateActivityJSONRequestBody UpdateActivityJSONBody
-
-// UpdateSavedFilterJSONRequestBody defines body for UpdateSavedFilter for application/json ContentType.
-type UpdateSavedFilterJSONRequestBody UpdateSavedFilterJSONBody
-
-// CreateTeamJSONRequestBody defines body for CreateTeam for application/json ContentType.
-type CreateTeamJSONRequestBody CreateTeamJSONBody
-
-// UpdateTeamJSONRequestBody defines body for UpdateTeam for application/json ContentType.
-type UpdateTeamJSONRequestBody UpdateTeamJSONBody
-
-// CreateActivityJSONRequestBody defines body for CreateActivity for application/json ContentType.
-type CreateActivityJSONRequestBody CreateActivityJSONBody
-
-// CreateInviteJSONRequestBody defines body for CreateInvite for application/json ContentType.
-type CreateInviteJSONRequestBody CreateInviteJSONBody
-
-// CreateSavedFilterJSONRequestBody defines body for CreateSavedFilter for application/json ContentType.
-type CreateSavedFilterJSONRequestBody CreateSavedFilterJSONBody
-
-// CreateTimelineJSONRequestBody defines body for CreateTimeline for application/json ContentType.
-type CreateTimelineJSONRequestBody CreateTimelineJSONBody
-````
-
 ## File: packages/api/internal/api/saved_filter_handler.go
 ````go
 package api
@@ -36625,6 +37836,700 @@ func (s *Server) handleDeleteSavedFilter(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+````
+
+## File: packages/api/internal/api/server.go
+````go
+// Package api hosts the HTTP handlers, routing, and middleware for the
+// draba REST API. Handlers are intentionally thin: they decode requests,
+// delegate to repositories and services, and write responses. Business
+// logic belongs in the domain packages, not here.
+package api
+
+import (
+	"fmt"
+	"io/fs"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/auth"
+	"github.com/I0-1O/draba/packages/api/internal/db"
+	"github.com/I0-1O/draba/packages/api/internal/events"
+	"github.com/I0-1O/draba/packages/api/internal/mailer"
+	"github.com/I0-1O/draba/packages/api/internal/models"
+	"github.com/I0-1O/draba/packages/api/internal/tier"
+	"github.com/I0-1O/draba/packages/api/internal/ws"
+)
+
+// TimelineStore is the persistence interface required by timeline handlers.
+// The concrete implementation is *db.TimelineRepo; tests may substitute a fake.
+type TimelineStore interface {
+	Create(t *models.Timeline) error
+	GetByID(id string) (*models.Timeline, error)
+	GetByShareToken(token string) (*models.Timeline, error)
+	ListByTeam(teamID string, includeArchived bool) ([]*models.Timeline, error)
+	HasAccess(timelineID, teamMemberID string) (bool, error)
+	GrantAccess(timelineID, teamMemberID, role string) error
+	RevokeAccess(timelineID, teamMemberID string) error
+	GetAccessRole(timelineID, teamMemberID string) (string, error)
+	ListAccess(timelineID string) ([]*models.TimelineAccessEntry, error)
+	SetArchived(id string, at *time.Time) error
+	Update(t *models.Timeline) error
+	Delete(id string) error
+}
+
+// Server holds shared dependencies for all HTTP handlers.
+type Server struct {
+	users          *db.UserRepo
+	invites        *db.InviteRepo
+	teams          *db.TeamRepo
+	activities     *db.ActivityRepo
+	timelines      TimelineStore
+	savedFilters   *db.SavedFilterRepo
+	preferences    *db.UserPreferenceRepo
+	apiTokens      *db.APITokenRepo
+	instanceSets   *db.InstanceSettingsRepo
+	passwordTokens *db.PasswordResetTokenRepo
+	statuses       *db.StatusRepo
+	tags           *db.TagRepo
+	shares         *db.ShareRepo
+	shareCache     *shareCache
+	mailer         *mailer.Mailer
+	tokens         *auth.TokenService
+	tier           tier.Tier
+	bus            *events.Bus
+	hub            *ws.Hub
+	uiFS           fs.FS
+}
+
+// NewServer constructs a Server with its required dependencies. It does not
+// touch the network; call Routes to obtain the http.Handler to serve.
+func NewServer(
+	users *db.UserRepo,
+	invites *db.InviteRepo,
+	teams *db.TeamRepo,
+	activitiesRepo *db.ActivityRepo,
+	timelinesRepo TimelineStore,
+	savedFiltersRepo *db.SavedFilterRepo,
+	preferencesRepo *db.UserPreferenceRepo,
+	apiTokensRepo *db.APITokenRepo,
+	instanceSetsRepo *db.InstanceSettingsRepo,
+	passwordTokensRepo *db.PasswordResetTokenRepo,
+	statusesRepo *db.StatusRepo,
+	tagsRepo *db.TagRepo,
+	sharesRepo *db.ShareRepo,
+	m *mailer.Mailer,
+	tokens *auth.TokenService,
+	t tier.Tier,
+	bus *events.Bus,
+	hub *ws.Hub,
+) *Server {
+	return &Server{
+		users:          users,
+		invites:        invites,
+		teams:          teams,
+		activities:     activitiesRepo,
+		timelines:      timelinesRepo,
+		savedFilters:   savedFiltersRepo,
+		preferences:    preferencesRepo,
+		apiTokens:      apiTokensRepo,
+		instanceSets:   instanceSetsRepo,
+		passwordTokens: passwordTokensRepo,
+		statuses:       statusesRepo,
+		tags:           tagsRepo,
+		shares:         sharesRepo,
+		shareCache:     newShareCache(),
+		mailer:         m,
+		tokens:         tokens,
+		tier:           t,
+		bus:            bus,
+		hub:            hub,
+	}
+}
+
+// WithUI registers an embedded React SPA to be served at GET /. The FS must
+// be rooted at the build output directory (i.e. contain index.html directly).
+// When called, all unmatched GET paths fall back to index.html so React Router
+// handles client-side navigation. Safe to skip in dev (no-op when not called).
+func (s *Server) WithUI(uiFS fs.FS) *Server {
+	s.uiFS = uiFS
+	return s
+}
+
+// Routes returns the fully-wired HTTP handler for the API, including all
+// core routes plus any routes added by registered tier modules.
+func (s *Server) Routes() http.Handler {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("GET /setup/status", s.handleSetupStatus)
+
+	mux.HandleFunc("POST /auth/register", s.handleRegister)
+	mux.HandleFunc("POST /auth/login", s.handleLogin)
+	mux.HandleFunc("POST /auth/refresh", s.handleRefresh)
+	mux.HandleFunc("GET /auth/me", chain(s.handleMe, s.authMiddleware))
+	mux.HandleFunc("POST /auth/forgot-password", s.handleForgotPassword)
+	mux.HandleFunc("POST /auth/reset-password", s.handleResetPassword)
+
+	mux.HandleFunc("GET /users/me/preferences", chain(s.handleGetPreferences, s.authMiddleware))
+	mux.HandleFunc("PUT /users/me/preferences", chain(s.handleUpsertPreference, s.authMiddleware))
+	mux.HandleFunc("GET /users/me/stats", chain(s.handleGetMyStats, s.authMiddleware))
+	mux.HandleFunc("PATCH /users/me", chain(s.handleUpdateProfile, s.authMiddleware))
+	mux.HandleFunc("PUT /users/me/password", chain(s.handleChangePassword, s.authMiddleware))
+
+	mux.HandleFunc("GET /admin/smtp", chain(s.handleGetSMTP, s.authMiddleware))
+	mux.HandleFunc("PUT /admin/smtp", chain(s.handlePutSMTP, s.authMiddleware))
+	mux.HandleFunc("POST /admin/smtp/test", chain(s.handleTestSMTP, s.authMiddleware))
+	mux.HandleFunc("DELETE /admin/smtp", chain(s.handleDeleteSMTP, s.authMiddleware))
+	mux.HandleFunc("GET /admin/settings", chain(s.handleGetAdminSettings, s.authMiddleware))
+	mux.HandleFunc("PATCH /admin/settings", chain(s.handlePatchAdminSettings, s.authMiddleware))
+	mux.HandleFunc("GET /admin/users", chain(s.handleListAdminUsers, s.authMiddleware))
+
+	// Public — no auth required; used by the login page and shared views.
+	mux.HandleFunc("GET /settings/branding", s.handleGetPublicBranding)
+
+	mux.HandleFunc("POST /tokens", chain(s.handleCreateAPIToken, s.authMiddleware))
+	mux.HandleFunc("GET /tokens", chain(s.handleListAPITokens, s.authMiddleware))
+	mux.HandleFunc("DELETE /tokens/{id}", chain(s.handleDeleteAPIToken, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams", chain(s.handleListTeams, s.authMiddleware))
+	mux.HandleFunc("POST /teams", chain(s.handleCreateTeam, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}", chain(s.handleGetTeam, s.authMiddleware))
+	mux.HandleFunc("PATCH /teams/{id}", chain(s.handleUpdateTeam, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/archive", chain(s.handleArchiveTeam, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/unarchive", chain(s.handleUnarchiveTeam, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/invites", chain(s.handleCreateInvite, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/invites", chain(s.handleListInvites, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/invites/{inviteId}", chain(s.handleDeleteInvite, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/invite-link", chain(s.handleCreateInviteLink, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/invite-link/reset", chain(s.handleResetInviteLink, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/invite-link", chain(s.handleGetInviteLink, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/invite-link", chain(s.handleDeleteInviteLink, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/members", chain(s.handleListMembers, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/members/{memberId}", chain(s.handleGetMember, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/members/{memberId}/stats", chain(s.handleGetMemberStats, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/members", chain(s.handleAddMember, s.authMiddleware))
+	mux.HandleFunc("PATCH /teams/{id}/members/{memberId}", chain(s.handleUpdateMember, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/members/{memberId}", chain(s.handleDeleteMember, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/members/{memberId}/archive", chain(s.handleArchiveMember, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/members/{memberId}/unarchive", chain(s.handleUnarchiveMember, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/participants", chain(s.handleCreateParticipant, s.authMiddleware))
+	mux.HandleFunc("GET /users/search", chain(s.handleSearchUsers, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/promote", chain(s.handlePromoteUser, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/archive", chain(s.handleArchiveUser, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/unarchive", chain(s.handleUnarchiveUser, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/revoke", chain(s.handleRevokeUser, s.authMiddleware))
+	mux.HandleFunc("DELETE /users/{id}", chain(s.handleDeleteUser, s.authMiddleware))
+	// Activity routes use the team-scoped prefix (GET /teams/{id}/timelines/{timelineId}/...)
+	// to avoid a Go 1.22 mux conflict with GET /timelines/share/{token}: both are
+	// 3-segment GET paths and neither is more specific when the third segment differs.
+	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/activities", chain(s.handleCreateActivity, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/activities", chain(s.handleListActivities, s.authMiddleware))
+	mux.HandleFunc("PATCH /activities/{id}", chain(s.handleUpdateActivity, s.authMiddleware))
+	mux.HandleFunc("DELETE /activities/{id}", chain(s.handleDeleteActivity, s.authMiddleware))
+	mux.HandleFunc("POST /activities/{id}/archive", chain(s.handleArchiveActivity, s.authMiddleware))
+	mux.HandleFunc("POST /activities/{id}/unarchive", chain(s.handleUnarchiveActivity, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/tags", chain(s.handleListTags, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/tags", chain(s.handleCreateTag, s.authMiddleware))
+	mux.HandleFunc("PATCH /tags/{id}", chain(s.handleUpdateTag, s.authMiddleware))
+	mux.HandleFunc("DELETE /tags/{id}", chain(s.handleDeleteTag, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/saved_filters/all", chain(s.handleListAllTeamSavedFilters, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/saved_filters", chain(s.handleListSavedFilters, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/saved_filters", chain(s.handleCreateSavedFilter, s.authMiddleware))
+	mux.HandleFunc("PATCH /saved_filters/{id}", chain(s.handleUpdateSavedFilter, s.authMiddleware))
+	mux.HandleFunc("DELETE /saved_filters/{id}", chain(s.handleDeleteSavedFilter, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/status-templates", chain(s.handleListStatusTemplates, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/status-templates", chain(s.handleCreateStatusTemplate, s.authMiddleware))
+	mux.HandleFunc("PATCH /status-templates/{id}", chain(s.handleUpdateStatusTemplate, s.authMiddleware))
+	mux.HandleFunc("DELETE /status-templates/{id}", chain(s.handleDeleteStatusTemplate, s.authMiddleware))
+	mux.HandleFunc("POST /status-templates/{id}/items", chain(s.handleCreateTemplateItem, s.authMiddleware))
+	mux.HandleFunc("PATCH /status-template-items/{id}", chain(s.handleUpdateTemplateItem, s.authMiddleware))
+	mux.HandleFunc("DELETE /status-template-items/{id}", chain(s.handleDeleteTemplateItem, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/timelines", chain(s.handleListTimelines, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/timelines", chain(s.handleCreateTimeline, s.authMiddleware))
+	// GET /timelines/share/{token} must be registered before GET /timelines/{id} so
+	// the more-specific literal "share" segment takes precedence.
+	mux.HandleFunc("GET /timelines/share/{token}", s.handleGetTimelineByShareToken)
+	mux.HandleFunc("GET /timelines/{id}", chain(s.handleGetTimeline, s.authMiddleware))
+	// Timeline statuses are placed under /teams/{id}/timelines/{timelineId}/statuses
+	// rather than /timelines/{id}/statuses to avoid a Go 1.22 mux pattern conflict
+	// with GET /timelines/share/{token} (both are 3-segment paths and conflict on
+	// paths like /timelines/share/statuses).
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleListTimelineStatuses, s.authMiddleware))
+	mux.HandleFunc("POST /timelines/{id}/archive", chain(s.handleArchiveTimeline, s.authMiddleware))
+	mux.HandleFunc("POST /timelines/{id}/unarchive", chain(s.handleUnarchiveTimeline, s.authMiddleware))
+
+	mux.HandleFunc("PATCH /timelines/{id}", chain(s.handleUpdateTimeline, s.authMiddleware))
+	mux.HandleFunc("DELETE /timelines/{id}", chain(s.handleDeleteTimeline, s.authMiddleware))
+	// Access list routes use the team-scoped prefix to avoid a Go 1.22 mux
+	// conflict with GET /timelines/share/{token} on 3-segment GET paths.
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/access", chain(s.handleListTimelineAccess, s.authMiddleware))
+	mux.HandleFunc("PUT /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleGrantTimelineAccess, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleRevokeTimelineAccess, s.authMiddleware))
+	// Timeline status CRUD — POST shares the team-scoped prefix with GET statuses.
+	// PATCH and DELETE use a flat /statuses/{id} prefix (2 segments, no conflict).
+	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleCreateTimelineStatus, s.authMiddleware))
+	mux.HandleFunc("PATCH /statuses/{id}", chain(s.handleUpdateStatus, s.authMiddleware))
+	mux.HandleFunc("DELETE /statuses/{id}", chain(s.handleDeleteStatus, s.authMiddleware))
+
+	// Share routes.
+	// GET /shares/{token} is public — no auth. The token is the credential.
+	// POST /timelines/{id}/shares uses the same /timelines/{id}/... prefix
+	// as archive/unarchive so it avoids the Go 1.22 mux pattern conflict with
+	// GET /timelines/share/{token} (only GET-method paths conflict).
+	// GET /teams/{id}/timelines/{timelineId}/shares uses the team-scoped prefix
+	// to avoid the GET conflict described above.
+	mux.HandleFunc("GET /shares/{token}", s.handleGetShareProjection)
+	mux.HandleFunc("POST /timelines/{id}/shares", chain(s.handleCreateShare, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/shares", chain(s.handleListShares, s.authMiddleware))
+	mux.HandleFunc("PATCH /shares/{id}", chain(s.handleUpdateShare, s.authMiddleware))
+	mux.HandleFunc("DELETE /shares/{id}", chain(s.handleDeleteShare, s.authMiddleware))
+
+	// GET /ws is intentionally outside authMiddleware — ServeWS validates the
+	// JWT itself before upgrading, because WebSocket clients can't set headers.
+	mux.HandleFunc("GET /ws", s.hub.ServeWS)
+
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	})
+
+	if s.uiFS != nil {
+		mux.Handle("GET /", spaHandler(s.uiFS))
+	}
+
+	ctx := &tier.ModuleContext{Mux: mux, Tier: s.tier}
+	for _, m := range tier.Registered() {
+		if err := m.Register(ctx); err != nil {
+			// Module registration is a startup invariant — a failure here is a programming error.
+			panic(fmt.Sprintf("tier module %q failed to register: %v", m.Name(), err))
+		}
+	}
+
+	return requestLogger(mux)
+}
+
+// chain applies a single middleware to a handler function.
+func chain(h http.HandlerFunc, m func(http.Handler) http.Handler) http.HandlerFunc {
+	return m(h).ServeHTTP
+}
+
+// spaHandler serves the embedded React SPA. Known static assets are served
+// directly; any unrecognised path falls back to index.html so React Router
+// handles client-side navigation.
+func spaHandler(uiFS fs.FS) http.Handler {
+	fserver := http.FileServer(http.FS(uiFS))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := strings.TrimPrefix(r.URL.Path, "/")
+		if path == "" {
+			path = "index.html"
+		}
+		if _, err := uiFS.Open(path); err != nil {
+			// Unknown path — serve index.html and let React Router handle it.
+			r = r.Clone(r.Context())
+			r.URL.Path = "/"
+			fserver.ServeHTTP(w, r)
+			return
+		}
+		fserver.ServeHTTP(w, r)
+	})
+}
+````
+
+## File: packages/api/internal/models/models.go
+````go
+// Package models holds the domain types shared across the API, db,
+// and event-bus packages. These types are persisted directly via sqlx
+// (db tags) and serialised on the wire (json tags); changing tags is a
+// schema change.
+package models
+
+import "time"
+
+// Activity is a scheduled item of work belonging to a Timeline. ArchivedAt is
+// non-nil when the activity is soft-deleted; list endpoints exclude archived
+// activities by default.
+//
+// AssignedMemberIDs is not stored on the activities table; it is populated by
+// the repository from activity_assignments after every list query.
+//
+// GoogleEventID and CaldavUID are preserved as-is — they identify the
+// corresponding records in external calendar systems (VEVENT identifiers).
+type Activity struct {
+	ID                string     `db:"id"                  json:"id"`
+	TimelineID        string     `db:"timeline_id"         json:"timelineId"`
+	Title             string     `db:"title"               json:"title"`
+	Description       *string    `db:"description"         json:"description,omitempty"`
+	Notes             *string    `db:"notes"               json:"notes,omitempty"`
+	Icon              *string    `db:"icon"                json:"icon,omitempty"`
+	Color             *string    `db:"color"               json:"color,omitempty"`
+	StartAt           time.Time  `db:"start_at"            json:"startAt"`
+	EndAt             time.Time  `db:"end_at"              json:"endAt"`
+	AllDay            bool       `db:"all_day"             json:"allDay"`
+	StatusID          *string    `db:"status_id"           json:"statusId,omitempty"`
+	ParentActivityID  *string    `db:"parent_activity_id"  json:"parentActivityId,omitempty"`
+	PercentComplete   *int       `db:"percent_complete"    json:"percentComplete,omitempty"`
+	Location          *string    `db:"location"            json:"location,omitempty"`
+	URL               *string    `db:"url"                 json:"url,omitempty"`
+	Rrule             *string    `db:"rrule"               json:"rrule,omitempty"`
+	CaldavUID         *string    `db:"caldav_uid"          json:"caldavUid,omitempty"`
+	GoogleEventID     *string    `db:"google_event_id"     json:"googleEventId,omitempty"`
+	CreatedBy         string     `db:"created_by"          json:"createdBy"`
+	CreatedAt         time.Time  `db:"created_at"          json:"createdAt"`
+	UpdatedAt         time.Time  `db:"updated_at"          json:"updatedAt"`
+	ArchivedAt        *time.Time `db:"archived_at"         json:"archivedAt,omitempty"`
+	AssignedMemberIDs []string   `db:"-"                   json:"assignedMemberIds"`
+	TagIDs            []string   `db:"-"                   json:"tagIds"`
+}
+
+// TeamMemberWithUser joins a TeamMember row with its associated User so
+// callers receive display names and emails in a single query. Participants
+// (no user account) have empty email and avatar; their display_name comes
+// from team_members.display_name via COALESCE in the query.
+type TeamMemberWithUser struct {
+	TeamMember
+	Email       string  `db:"email"        json:"email"`
+	DisplayName string  `db:"display_name" json:"displayName"`
+	AvatarURL   *string `db:"avatar_url"   json:"avatarUrl,omitempty"`
+}
+
+// User is an authenticated account. PasswordHash is omitted from JSON
+// to avoid leaking it through any handler that returns a User.
+// ArchivedAt is non-nil when the account is inactivated; login is rejected
+// for archived users. Color and Icon are user-level identity fields (migration
+// 010); they propagate to team_members rows for the user when changed.
+type User struct {
+	ID           string     `db:"id"             json:"id"`
+	Email        string     `db:"email"          json:"email"`
+	PasswordHash string     `db:"password_hash"  json:"-"`
+	DisplayName  string     `db:"display_name"   json:"displayName"`
+	AvatarURL    *string    `db:"avatar_url"     json:"avatarUrl,omitempty"`
+	Color        *string    `db:"color"          json:"color,omitempty"`
+	Icon         *string    `db:"icon"           json:"icon,omitempty"`
+	IsSuperadmin bool       `db:"is_superadmin"  json:"isSuperadmin"`
+	CreatedAt    time.Time  `db:"created_at"     json:"createdAt"`
+	UpdatedAt    time.Time  `db:"updated_at"     json:"updatedAt"`
+	ArchivedAt   *time.Time `db:"archived_at"    json:"archivedAt,omitempty"`
+}
+
+// Team is a workspace that groups users and their scheduled work. Color and
+// Icon are identity fields added in migration 006; both are nullable until
+// explicitly set by an admin. Description, Notes, and ArchivedAt are added in
+// migration 008; ArchivedAt is non-nil when the team is soft-deleted.
+// InviteLinkToken is a stable, reusable token added in migration 009; when
+// non-nil it can be used by anyone to join the team during registration.
+type Team struct {
+	ID              string     `db:"id"                  json:"id"`
+	Name            string     `db:"name"                json:"name"`
+	Slug            string     `db:"slug"                json:"slug"`
+	Description     *string    `db:"description"         json:"description,omitempty"`
+	Notes           *string    `db:"notes"               json:"notes,omitempty"`
+	Color           *string    `db:"color"               json:"color,omitempty"`
+	Icon            *string    `db:"icon"                json:"icon,omitempty"`
+	InviteLinkToken *string    `db:"invite_link_token"   json:"inviteLinkToken,omitempty"`
+	CreatedAt       time.Time  `db:"created_at"          json:"createdAt"`
+	UpdatedAt       time.Time  `db:"updated_at"          json:"updatedAt"`
+	ArchivedAt      *time.Time `db:"archived_at"         json:"archivedAt,omitempty"`
+}
+
+// TeamMember is the join row that puts a person in a Team. UserID is nil
+// for login-less Participants; DisplayName is populated for them instead.
+// Role is the team-level role: "admin" or "member". Color and Icon are
+// identity fields (migration 006); Color stores a color ID (e.g. "teal").
+// ArchivedAt is non-nil when the member is inactivated (migration 009);
+// inactivated members lose access but their data and assignments are preserved.
+type TeamMember struct {
+	ID          string     `db:"id"           json:"id"`
+	TeamID      string     `db:"team_id"      json:"teamId"`
+	UserID      *string    `db:"user_id"      json:"userId,omitempty"`
+	DisplayName *string    `db:"display_name" json:"displayName,omitempty"`
+	Role        string     `db:"role"         json:"role"`
+	Color       *string    `db:"color"        json:"color,omitempty"`
+	Icon        *string    `db:"icon"         json:"icon,omitempty"`
+	JoinedAt    time.Time  `db:"joined_at"    json:"joinedAt"`
+	ArchivedAt  *time.Time `db:"archived_at"  json:"archivedAt,omitempty"`
+}
+
+// MemberStats holds computed activity and timeline counts for a member.
+// All counts are date-relative and scoped to activities the member is assigned to.
+type MemberStats struct {
+	ActiveTimelines    int `json:"activeTimelines"`
+	ArchivedTimelines  int `json:"archivedTimelines"`
+	PastDue            int `json:"pastDue"`
+	Running            int `json:"running"`
+	Upcoming           int `json:"upcoming"`
+	Unscheduled        int `json:"unscheduled"`
+	ArchivedActivities int `json:"archivedActivities"`
+}
+
+// MemberDetail combines a TeamMemberWithUser with computed stats and the
+// member's full list of team memberships. Returned by GET /teams/:id/members/:memberId.
+// UserArchivedAt reflects users.archived_at (account-level deactivation), distinct
+// from ArchivedAt which is team_members.archived_at (membership-level inactivation).
+type MemberDetail struct {
+	TeamMemberWithUser
+	Stats          MemberStats          `json:"stats"`
+	Teams          []TeamMemberWithUser `json:"teams"`
+	Deletable      bool                 `json:"deletable"`
+	UserArchivedAt *time.Time           `json:"userArchivedAt,omitempty"`
+}
+
+// Timeline is a named date range over a team's events. It is not a data
+// container — it is a view over a team's events for a given date window.
+// Access is governed by timeline_access + team role; share_token allows
+// unauthenticated read access via a stable public URL. Color and Icon are
+// identity fields (migration 006). Description and Notes are free-text fields
+// added in migration 013.
+type Timeline struct {
+	ID          string     `db:"id"          json:"id"`
+	TeamID      string     `db:"team_id"     json:"teamId"`
+	Name        string     `db:"name"        json:"name"`
+	Description *string    `db:"description" json:"description,omitempty"`
+	Notes       *string    `db:"notes"       json:"notes,omitempty"`
+	StartDate   string     `db:"start_date"  json:"startDate"`
+	EndDate     string     `db:"end_date"    json:"endDate"`
+	Color       *string    `db:"color"       json:"color,omitempty"`
+	Icon        *string    `db:"icon"        json:"icon,omitempty"`
+	ShareToken  string     `db:"share_token" json:"shareToken"`
+	IcalToken   string     `db:"ical_token"  json:"icalToken"`
+	CreatedBy   string     `db:"created_by"  json:"createdBy"`
+	CreatedAt   time.Time  `db:"created_at"  json:"createdAt"`
+	UpdatedAt   time.Time  `db:"updated_at"  json:"updatedAt"`
+	ArchivedAt  *time.Time `db:"archived_at" json:"archivedAt,omitempty"`
+}
+
+// SavedFilter is a user-owned, team-scoped named filter spec. Definition is
+// an opaque JSON string interpreted by the client; the server treats it as
+// arbitrary text and only validates that it parses as JSON.
+type SavedFilter struct {
+	ID           string    `db:"id"             json:"id"`
+	TeamID       string    `db:"team_id"        json:"teamId"`
+	UserID       string    `db:"user_id"        json:"userId"`
+	Name         string    `db:"name"           json:"name"`
+	Definition   string    `db:"definition"     json:"definition"`
+	IsTeamFilter bool      `db:"is_team_filter" json:"isTeamFilter"`
+	CreatedAt    time.Time `db:"created_at"     json:"createdAt"`
+	UpdatedAt    time.Time `db:"updated_at"     json:"updatedAt"`
+}
+
+// UserPreference stores a single key/value setting for a user, optionally
+// scoped to a timeline. TimelineID is “” for global preferences so the
+// UNIQUE(user_id, timeline_id, key) DB constraint works without NULL handling.
+// Serialised JSON omits TimelineID when empty so callers see null for global prefs.
+type UserPreference struct {
+	ID         string    `db:"id"          json:"id"`
+	UserID     string    `db:"user_id"     json:"userId"`
+	TimelineID string    `db:"timeline_id" json:"timelineId,omitempty"`
+	Key        string    `db:"key"         json:"key"`
+	Value      string    `db:"value"       json:"value"`
+	UpdatedAt  time.Time `db:"updated_at"  json:"updatedAt"`
+}
+
+// APIToken is a long-lived Bearer credential a user issues for programmatic
+// access. token_hash stores SHA-256(rawToken); the raw value is shown to the
+// caller only once on creation. RevokedAt is non-nil when the token has been
+// revoked; revoked tokens are not deleted so listing remains stable.
+type APIToken struct {
+	ID         string     `db:"id"           json:"id"`
+	UserID     string     `db:"user_id"      json:"userId"`
+	Name       string     `db:"name"         json:"name"`
+	TokenHash  string     `db:"token_hash"   json:"-"`
+	Scope      string     `db:"scope"        json:"scope"`
+	LastUsedAt *time.Time `db:"last_used_at" json:"lastUsedAt,omitempty"`
+	CreatedAt  time.Time  `db:"created_at"   json:"createdAt"`
+	RevokedAt  *time.Time `db:"revoked_at"   json:"revokedAt,omitempty"`
+}
+
+// InstanceSetting stores a single instance-level configuration value.
+// SMTP config and defaults live here. The value column is plain text;
+// the mailer package handles decryption of the SMTP password field.
+type InstanceSetting struct {
+	Key       string    `db:"key"        json:"key"`
+	Value     string    `db:"value"      json:"value"`
+	UpdatedAt time.Time `db:"updated_at" json:"updatedAt"`
+}
+
+// PasswordResetToken is a single-use token for the forgot-password flow.
+// TokenHash stores SHA-256 of the raw token; the raw value is sent by email
+// and never stored. UsedAt is set when the token is consumed.
+type PasswordResetToken struct {
+	ID        string     `db:"id"         json:"id"`
+	UserID    string     `db:"user_id"    json:"userId"`
+	TokenHash string     `db:"token_hash" json:"-"`
+	ExpiresAt time.Time  `db:"expires_at" json:"expiresAt"`
+	UsedAt    *time.Time `db:"used_at"    json:"usedAt,omitempty"`
+	CreatedAt time.Time  `db:"created_at" json:"createdAt"`
+}
+
+// AdminUserRow is a flat view of a user for the admin users list. It includes
+// the user's fields plus the count of active team memberships.
+type AdminUserRow struct {
+	User
+	TeamCount int `db:"team_count" json:"teamCount"`
+}
+
+// Share is a public read-only link to a specific view of a timeline. One
+// timeline may have many shares, each freezing a different view configuration.
+// Token is an unguessable URL-safe string; PasswordHash is set only when the
+// share requires a password (Phase 13.3); ExpiresAt and RevokedAt support
+// lifecycle management (Phase 13.4).
+type Share struct {
+	ID           string     `db:"id"             json:"id"`
+	TimelineID   string     `db:"timeline_id"    json:"timelineId"`
+	Token        string     `db:"token"          json:"token"`
+	ViewType     string     `db:"view_type"      json:"viewType"`
+	ViewConfig   string     `db:"view_config"    json:"viewConfig"`
+	PasswordHash *string    `db:"password_hash"  json:"-"`
+	ExpiresAt    *time.Time `db:"expires_at"     json:"expiresAt,omitempty"`
+	CreatedBy    string     `db:"created_by"     json:"createdBy"`
+	CreatedAt    time.Time  `db:"created_at"     json:"createdAt"`
+	LastViewedAt *time.Time `db:"last_viewed_at" json:"lastViewedAt,omitempty"`
+	ViewCount    int        `db:"view_count"     json:"viewCount"`
+	RevokedAt    *time.Time `db:"revoked_at"     json:"revokedAt,omitempty"`
+}
+
+// PublicMember is the safe projection of a team member for public share
+// responses. It exposes only display fields — never email, role, or user_id.
+type PublicMember struct {
+	ID          string  `json:"id"`
+	DisplayName string  `json:"displayName"`
+	Color       *string `json:"color,omitempty"`
+	Icon        *string `json:"icon,omitempty"`
+}
+
+// PublicActivity is the safe projection of an activity for public share
+// responses. It includes standard display fields but omits notes (unless
+// explicitly included for List shares with Notes enabled), caldav/google
+// identifiers, and any internal fields.
+type PublicActivity struct {
+	ID                string    `json:"id"`
+	Title             string    `json:"title"`
+	Description       *string   `json:"description,omitempty"`
+	Notes             *string   `json:"notes,omitempty"`
+	Icon              *string   `json:"icon,omitempty"`
+	Color             *string   `json:"color,omitempty"`
+	StartAt           time.Time `json:"startAt"`
+	EndAt             time.Time `json:"endAt"`
+	AllDay            bool      `json:"allDay"`
+	StatusID          *string   `json:"statusId,omitempty"`
+	ParentActivityID  *string   `json:"parentActivityId,omitempty"`
+	PercentComplete   *int      `json:"percentComplete,omitempty"`
+	AssignedMemberIDs []string  `json:"assignedMemberIds"`
+	TagIDs            []string  `json:"tagIds"`
+}
+
+// PublicTimeline is the safe timeline projection for share responses.
+type PublicTimeline struct {
+	ID        string  `json:"id"`
+	Name      string  `json:"name"`
+	Color     *string `json:"color,omitempty"`
+	Icon      *string `json:"icon,omitempty"`
+	StartDate string  `json:"startDate"`
+	EndDate   string  `json:"endDate"`
+}
+
+// ShareProjection is the full aggregate returned by GET /shares/{token}.
+// It contains all data the public viewer needs to render the configured view.
+type ShareProjection struct {
+	Share      Share            `json:"share"`
+	Timeline   PublicTimeline   `json:"timeline"`
+	Members    []PublicMember   `json:"members"`
+	Statuses   []Status         `json:"statuses"`
+	Tags       []Tag            `json:"tags"`
+	Activities []PublicActivity `json:"activities"`
+}
+
+// RevokeUserResult summarizes the outcome of POST /users/:id/revoke.
+// The three counters let the caller show a meaningful summary in the UI.
+type RevokeUserResult struct {
+	AccountDeactivated     bool `json:"accountDeactivated"`
+	MembershipsInactivated int  `json:"membershipsInactivated"`
+	MembershipsRemoved     int  `json:"membershipsRemoved"`
+}
+
+// StatusTemplate is a reusable named preset of statuses owned by a team.
+// When a timeline is created the team's chosen template's items are copied
+// into live Status rows for that timeline.
+type StatusTemplate struct {
+	ID          string    `db:"id"          json:"id"`
+	TeamID      string    `db:"team_id"     json:"teamId"`
+	Name        string    `db:"name"        json:"name"`
+	Description *string   `db:"description" json:"description,omitempty"`
+	Position    int       `db:"position"    json:"position"`
+	CreatedBy   string    `db:"created_by"  json:"createdBy"`
+	CreatedAt   time.Time `db:"created_at"  json:"createdAt"`
+	UpdatedAt   time.Time `db:"updated_at"  json:"updatedAt"`
+	// Items is populated by the repository when listing templates.
+	Items []StatusTemplateItem `db:"-" json:"items"`
+}
+
+// StatusTemplateItem is one status value within a StatusTemplate.
+type StatusTemplateItem struct {
+	ID         string  `db:"id"          json:"id"`
+	TemplateID string  `db:"template_id" json:"templateId"`
+	Name       string  `db:"name"        json:"name"`
+	Color      string  `db:"color"       json:"color"`
+	Icon       *string `db:"icon"        json:"icon,omitempty"`
+	IsClosed   bool    `db:"is_closed"   json:"isClosed"`
+	Position   int     `db:"position"    json:"position"`
+}
+
+// Status is a live status value on a specific timeline. Rows are copied from a
+// StatusTemplate's items when the timeline is created and then evolve independently.
+type Status struct {
+	ID         string    `db:"id"          json:"id"`
+	TimelineID string    `db:"timeline_id" json:"timelineId"`
+	Name       string    `db:"name"        json:"name"`
+	Color      string    `db:"color"       json:"color"`
+	Icon       *string   `db:"icon"        json:"icon,omitempty"`
+	IsClosed   bool      `db:"is_closed"   json:"isClosed"`
+	Position   int       `db:"position"    json:"position"`
+	CreatedAt  time.Time `db:"created_at"  json:"createdAt"`
+	UpdatedAt  time.Time `db:"updated_at"  json:"updatedAt"`
+}
+
+// TimelineAccessEntry is a single timeline access grant joined with the team
+// member's display info. Returned by GET /teams/:id/timelines/:timelineId/access.
+type TimelineAccessEntry struct {
+	TimelineID   string  `db:"timeline_id"    json:"timelineId"`
+	TeamMemberID string  `db:"team_member_id" json:"teamMemberId"`
+	Role         string  `db:"role"           json:"role"`
+	DisplayName  string  `db:"display_name"   json:"displayName"`
+	Email        string  `db:"email"          json:"email"`
+	Color        *string `db:"color"          json:"color,omitempty"`
+	Icon         *string `db:"icon"           json:"icon,omitempty"`
+	UserID       *string `db:"user_id"        json:"userId,omitempty"`
+}
+
+// Tag is a team-scoped label that can be applied to activities. Tags are
+// normalized: a team_id+name pair is unique, enabling rename-all and
+// name-based filter matching across timelines.
+type Tag struct {
+	ID        string    `db:"id"         json:"id"`
+	TeamID    string    `db:"team_id"    json:"teamId"`
+	Name      string    `db:"name"       json:"name"`
+	Color     *string   `db:"color"      json:"color,omitempty"`
+	CreatedBy string    `db:"created_by" json:"createdBy"`
+	CreatedAt time.Time `db:"created_at" json:"createdAt"`
+}
+
+// Invite is a single-use token that grants an email address the right to
+// join a Team. AcceptedAt is non-nil once consumed; expired or accepted
+// invites are rejected by the registration handler.
+type Invite struct {
+	ID         string     `db:"id"          json:"id"`
+	TeamID     string     `db:"team_id"     json:"teamId"`
+	Email      string     `db:"email"       json:"email"`
+	Token      string     `db:"token"       json:"token"`
+	Role       string     `db:"role"        json:"role"`
+	InvitedBy  string     `db:"invited_by"  json:"invitedBy"`
+	ExpiresAt  time.Time  `db:"expires_at"  json:"expiresAt"`
+	AcceptedAt *time.Time `db:"accepted_at" json:"acceptedAt,omitempty"`
+	CreatedAt  time.Time  `db:"created_at"  json:"createdAt"`
 }
 ````
 
@@ -40328,6 +42233,563 @@ export default function RegisterPage() {
 }
 ````
 
+## File: packages/web/vite.config.ts
+````typescript
+/// <reference types="vitest" />
+import path from 'path'
+import { defineConfig, loadEnv } from 'vite'
+import react from '@vitejs/plugin-react'
+import tailwindcss from '@tailwindcss/vite'
+
+export default defineConfig(({ mode }) => {
+  const env = loadEnv(mode, process.cwd(), '')
+  const apiTarget = env.VITE_API_TARGET ?? 'http://localhost:8080'
+
+  return {
+    plugins: [
+      react(),
+      tailwindcss(),
+    ],
+    resolve: {
+      alias: {
+        '@': path.resolve(__dirname, './src'),
+      },
+    },
+    test: {
+      environment: 'jsdom',
+      globals: true,
+      alias: {
+        '@': path.resolve(__dirname, './src'),
+      },
+    },
+    server: {
+      proxy: {
+        '/setup': { target: apiTarget, changeOrigin: true },
+        '/auth': { target: apiTarget, changeOrigin: true },
+        '/users': { target: apiTarget, changeOrigin: true },
+        '/admin': { target: apiTarget, changeOrigin: true },
+        '/settings': { target: apiTarget, changeOrigin: true },
+        '/tokens': { target: apiTarget, changeOrigin: true },
+        '/teams': { target: apiTarget, changeOrigin: true },
+        '/timelines': { target: apiTarget, changeOrigin: true },
+        '/status-templates': { target: apiTarget, changeOrigin: true },
+        '/status-template-items': { target: apiTarget, changeOrigin: true },
+        '/statuses': { target: apiTarget, changeOrigin: true },
+        '/activities': { target: apiTarget, changeOrigin: true },
+        '/tags': { target: apiTarget, changeOrigin: true },
+        '/saved_filters': { target: apiTarget, changeOrigin: true },
+        '/shares': { target: apiTarget, changeOrigin: true },
+        '/events': { target: apiTarget, changeOrigin: true },
+        '/health': { target: apiTarget, changeOrigin: true },
+        '/ws': {
+          target: apiTarget.replace(/^http/, 'ws'),
+          changeOrigin: true,
+          ws: true,
+          rewriteWsOrigin: true,
+        },
+      },
+    },
+  }
+})
+````
+
+## File: packages/api/internal/api/activity_handler.go
+````go
+package api
+
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/db"
+	"github.com/I0-1O/draba/packages/api/internal/events"
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// handleCreateActivity handles POST /teams/{id}/timelines/{timelineId}/activities.
+// The authenticated user must be a member of the team.
+func (s *Server) handleCreateActivity(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	timelineID := r.PathValue("timelineId")
+
+	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
+		return
+	}
+
+	claims := claimsFromContext(r.Context())
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create activity")
+		return
+	}
+	if timeline.TeamID != teamID {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+		return
+	}
+
+	var req CreateActivityJSONBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	if req.Title == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "title is required")
+		return
+	}
+	if req.StartAt.IsZero() || req.EndAt.IsZero() {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "startAt and endAt are required")
+		return
+	}
+	if req.EndAt.Before(req.StartAt) {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "endAt must not be before startAt")
+		return
+	}
+
+	allDay := false
+	if req.AllDay != nil {
+		allDay = *req.AllDay
+	}
+
+	now := time.Now()
+	activity := &models.Activity{
+		ID:               newID(),
+		TimelineID:       timelineID,
+		Title:            req.Title,
+		Description:      req.Description,
+		Notes:            req.Notes,
+		Icon:             req.Icon,
+		Color:            req.Color,
+		StartAt:          req.StartAt,
+		EndAt:            req.EndAt,
+		AllDay:           allDay,
+		StatusID:         req.StatusId,
+		ParentActivityID: req.ParentActivityId,
+		PercentComplete:  req.PercentComplete,
+		Location:         req.Location,
+		URL:              req.Url,
+		Rrule:            req.Rrule,
+		CreatedBy:        claims.UserID,
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}
+	if err := s.activities.Create(activity); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create activity")
+		return
+	}
+
+	if req.AssignedMemberIds != nil {
+		if err := s.activities.SetAssignments(activity.ID, *req.AssignedMemberIds); err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity assignments")
+			return
+		}
+		activity.AssignedMemberIDs = *req.AssignedMemberIds
+	} else {
+		activity.AssignedMemberIDs = []string{}
+	}
+
+	if req.TagIds != nil {
+		if err := s.tags.ValidateTeamOwnership(timeline.TeamID, *req.TagIds); err != nil {
+			if errors.Is(err, db.ErrTagOwnership) {
+				writeError(w, http.StatusBadRequest, "INVALID_TAGS", "one or more tag IDs do not belong to this team")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to validate tags")
+			return
+		}
+		if err := s.activities.SetTags(activity.ID, *req.TagIds); err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity tags")
+			return
+		}
+		activity.TagIDs = *req.TagIds
+	} else {
+		activity.TagIDs = []string{}
+	}
+
+	s.bus.Publish(events.Message{Type: events.ActivityCreated, TeamID: timeline.TeamID, Payload: activity})
+	writeJSON(w, http.StatusCreated, activity)
+}
+
+// handleListActivities handles GET /teams/{id}/timelines/{timelineId}/activities.
+// Optional query params ?from=<RFC3339> and ?to=<RFC3339> bound the result by start_at.
+func (s *Server) handleListActivities(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	timelineID := r.PathValue("timelineId")
+
+	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
+		return
+	}
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list activities")
+		return
+	}
+	if timeline.TeamID != teamID {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+		return
+	}
+
+	var from, to *time.Time
+	if v := r.URL.Query().Get("from"); v != "" {
+		t, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "from must be RFC3339 (e.g. 2006-01-02T15:04:05Z)")
+			return
+		}
+		from = &t
+	}
+	if v := r.URL.Query().Get("to"); v != "" {
+		t, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "to must be RFC3339 (e.g. 2006-01-02T15:04:05Z)")
+			return
+		}
+		to = &t
+	}
+
+	includeArchived := r.URL.Query().Get("archived") == "true"
+	acts, err := s.activities.ListByTimeline(timelineID, from, to, includeArchived)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list activities")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, acts)
+}
+
+// handleUpdateActivity handles PATCH /activities/{id}. Only fields present in
+// the request body are applied; the caller must be a member of the activity's team.
+func (s *Server) handleUpdateActivity(w http.ResponseWriter, r *http.Request) {
+	activityID := r.PathValue("id")
+
+	activity, err := s.activities.GetByID(activityID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "activity not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update activity")
+		return
+	}
+
+	timeline, err := s.timelines.GetByID(activity.TimelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update activity")
+		return
+	}
+
+	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
+		return
+	}
+
+	// Decode into a map so we can detect which fields the caller provided.
+	var patch map[string]json.RawMessage
+	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	if v, ok := patch["title"]; ok {
+		if err := json.Unmarshal(v, &activity.Title); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid title")
+			return
+		}
+	}
+	if v, ok := patch["description"]; ok {
+		if err := json.Unmarshal(v, &activity.Description); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid description")
+			return
+		}
+	}
+	if v, ok := patch["notes"]; ok {
+		if err := json.Unmarshal(v, &activity.Notes); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid notes")
+			return
+		}
+	}
+	if v, ok := patch["icon"]; ok {
+		if err := json.Unmarshal(v, &activity.Icon); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid icon")
+			return
+		}
+	}
+	if v, ok := patch["color"]; ok {
+		if err := json.Unmarshal(v, &activity.Color); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid color")
+			return
+		}
+	}
+	if v, ok := patch["startAt"]; ok {
+		if err := json.Unmarshal(v, &activity.StartAt); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid startAt")
+			return
+		}
+	}
+	if v, ok := patch["endAt"]; ok {
+		if err := json.Unmarshal(v, &activity.EndAt); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid endAt")
+			return
+		}
+	}
+	if v, ok := patch["allDay"]; ok {
+		if err := json.Unmarshal(v, &activity.AllDay); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid allDay")
+			return
+		}
+	}
+	if v, ok := patch["statusId"]; ok {
+		if err := json.Unmarshal(v, &activity.StatusID); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid statusId")
+			return
+		}
+	}
+	if v, ok := patch["parentActivityId"]; ok {
+		if err := json.Unmarshal(v, &activity.ParentActivityID); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid parentActivityId")
+			return
+		}
+	}
+	if v, ok := patch["percentComplete"]; ok {
+		if err := json.Unmarshal(v, &activity.PercentComplete); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid percentComplete")
+			return
+		}
+	}
+	if v, ok := patch["location"]; ok {
+		if err := json.Unmarshal(v, &activity.Location); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid location")
+			return
+		}
+	}
+	if v, ok := patch["url"]; ok {
+		if err := json.Unmarshal(v, &activity.URL); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid url")
+			return
+		}
+	}
+	if v, ok := patch["rrule"]; ok {
+		if err := json.Unmarshal(v, &activity.Rrule); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid rrule")
+			return
+		}
+	}
+
+	var newAssignees *[]string
+	if v, ok := patch["assignedMemberIds"]; ok {
+		var ids []string
+		if err := json.Unmarshal(v, &ids); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid assignedMemberIds")
+			return
+		}
+		newAssignees = &ids
+	}
+
+	var newTagIDs *[]string
+	if v, ok := patch["tagIds"]; ok {
+		var ids []string
+		if err := json.Unmarshal(v, &ids); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid tagIds")
+			return
+		}
+		newTagIDs = &ids
+	}
+
+	if activity.Title == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "title must not be empty")
+		return
+	}
+	if activity.EndAt.Before(activity.StartAt) {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "endAt must not be before startAt")
+		return
+	}
+
+	activity.UpdatedAt = time.Now()
+	if err := s.activities.Update(activity); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update activity")
+		return
+	}
+
+	if newAssignees != nil {
+		if err := s.activities.SetAssignments(activity.ID, *newAssignees); err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity assignments")
+			return
+		}
+		activity.AssignedMemberIDs = *newAssignees
+	} else {
+		// Populate current assignments so the response always includes them.
+		existing, err := s.activities.GetAssignments(activity.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get activity assignments")
+			return
+		}
+		activity.AssignedMemberIDs = existing
+	}
+
+	if newTagIDs != nil {
+		if err := s.tags.ValidateTeamOwnership(timeline.TeamID, *newTagIDs); err != nil {
+			if errors.Is(err, db.ErrTagOwnership) {
+				writeError(w, http.StatusBadRequest, "INVALID_TAGS", "one or more tag IDs do not belong to this team")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to validate tags")
+			return
+		}
+		if err := s.activities.SetTags(activity.ID, *newTagIDs); err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity tags")
+			return
+		}
+		activity.TagIDs = *newTagIDs
+	} else {
+		existing, err := s.activities.GetTags(activity.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get activity tags")
+			return
+		}
+		activity.TagIDs = existing
+	}
+
+	s.bus.Publish(events.Message{Type: events.ActivityUpdated, TeamID: timeline.TeamID, Payload: activity})
+	writeJSON(w, http.StatusOK, activity)
+}
+
+// handleArchiveActivity handles POST /activities/{id}/archive. Any team member
+// may archive an activity; the row is soft-deleted (archived_at set) so it is
+// hidden from list responses by default but can be restored.
+func (s *Server) handleArchiveActivity(w http.ResponseWriter, r *http.Request) {
+	s.setActivityArchive(w, r, true)
+}
+
+// handleUnarchiveActivity handles POST /activities/{id}/unarchive.
+func (s *Server) handleUnarchiveActivity(w http.ResponseWriter, r *http.Request) {
+	s.setActivityArchive(w, r, false)
+}
+
+// setActivityArchive is the shared implementation for the archive/unarchive
+// endpoints. When archive is true, archived_at is set to now; otherwise it
+// is cleared.
+func (s *Server) setActivityArchive(w http.ResponseWriter, r *http.Request, archive bool) {
+	activityID := r.PathValue("id")
+
+	activity, err := s.activities.GetByID(activityID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "activity not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
+		return
+	}
+
+	timeline, err := s.timelines.GetByID(activity.TimelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
+		return
+	}
+
+	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
+		return
+	}
+
+	var at *time.Time
+	if archive {
+		now := time.Now().UTC()
+		at = &now
+		if err := s.activities.ClearParentRefs(activityID); err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
+			return
+		}
+	}
+	if err := s.activities.SetArchived(activityID, at); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
+		return
+	}
+	activity.ArchivedAt = at
+	activity.UpdatedAt = time.Now().UTC()
+
+	// Re-populate assignments and tags for a stable response shape.
+	if ids, err := s.activities.GetAssignments(activity.ID); err == nil {
+		activity.AssignedMemberIDs = ids
+	} else {
+		activity.AssignedMemberIDs = []string{}
+	}
+	if ids, err := s.activities.GetTags(activity.ID); err == nil {
+		activity.TagIDs = ids
+	} else {
+		activity.TagIDs = []string{}
+	}
+
+	s.bus.Publish(events.Message{Type: events.ActivityUpdated, TeamID: timeline.TeamID, Payload: activity})
+	writeJSON(w, http.StatusOK, activity)
+}
+
+// handleDeleteActivity handles DELETE /activities/{id}. Any member of the
+// activity's team may delete it.
+func (s *Server) handleDeleteActivity(w http.ResponseWriter, r *http.Request) {
+	activityID := r.PathValue("id")
+
+	activity, err := s.activities.GetByID(activityID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "activity not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
+		return
+	}
+
+	timeline, err := s.timelines.GetByID(activity.TimelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
+		return
+	}
+
+	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
+		return
+	}
+
+	if err := s.activities.ClearParentRefs(activityID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
+		return
+	}
+	if err := s.activities.Delete(activityID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
+		return
+	}
+
+	s.bus.Publish(events.Message{
+		Type:    events.ActivityDeleted,
+		TeamID:  timeline.TeamID,
+		Payload: map[string]string{"id": activityID},
+	})
+	w.WriteHeader(http.StatusNoContent)
+}
+````
+
 ## File: packages/api/internal/db/activity_repo.go
 ````go
 package db
@@ -41178,503 +43640,6 @@ export default function TopBar({
       </div>
     </div>
   );
-}
-````
-
-## File: packages/api/internal/api/activity_handler.go
-````go
-package api
-
-import (
-	"database/sql"
-	"encoding/json"
-	"errors"
-	"net/http"
-	"time"
-
-	"github.com/I0-1O/draba/packages/api/internal/db"
-	"github.com/I0-1O/draba/packages/api/internal/events"
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// handleCreateActivity handles POST /teams/{id}/timelines/{timelineId}/activities.
-// The authenticated user must be a member of the team.
-func (s *Server) handleCreateActivity(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-	timelineID := r.PathValue("timelineId")
-
-	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
-		return
-	}
-
-	claims := claimsFromContext(r.Context())
-
-	timeline, err := s.timelines.GetByID(timelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create activity")
-		return
-	}
-	if timeline.TeamID != teamID {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-		return
-	}
-
-	var req CreateActivityJSONBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	if req.Title == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "title is required")
-		return
-	}
-	if req.StartAt.IsZero() || req.EndAt.IsZero() {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "startAt and endAt are required")
-		return
-	}
-	if req.EndAt.Before(req.StartAt) {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "endAt must not be before startAt")
-		return
-	}
-
-	allDay := false
-	if req.AllDay != nil {
-		allDay = *req.AllDay
-	}
-
-	now := time.Now()
-	activity := &models.Activity{
-		ID:               newID(),
-		TimelineID:       timelineID,
-		Title:            req.Title,
-		Description:      req.Description,
-		Notes:            req.Notes,
-		Icon:             req.Icon,
-		Color:            req.Color,
-		StartAt:          req.StartAt,
-		EndAt:            req.EndAt,
-		AllDay:           allDay,
-		StatusID:         req.StatusId,
-		ParentActivityID: req.ParentActivityId,
-		PercentComplete:  req.PercentComplete,
-		Location:         req.Location,
-		URL:              req.Url,
-		Rrule:            req.Rrule,
-		CreatedBy:        claims.UserID,
-		CreatedAt:        now,
-		UpdatedAt:        now,
-	}
-	if err := s.activities.Create(activity); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create activity")
-		return
-	}
-
-	if req.AssignedMemberIds != nil {
-		if err := s.activities.SetAssignments(activity.ID, *req.AssignedMemberIds); err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity assignments")
-			return
-		}
-		activity.AssignedMemberIDs = *req.AssignedMemberIds
-	} else {
-		activity.AssignedMemberIDs = []string{}
-	}
-
-	if req.TagIds != nil {
-		if err := s.tags.ValidateTeamOwnership(timeline.TeamID, *req.TagIds); err != nil {
-			if errors.Is(err, db.ErrTagOwnership) {
-				writeError(w, http.StatusBadRequest, "INVALID_TAGS", "one or more tag IDs do not belong to this team")
-				return
-			}
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to validate tags")
-			return
-		}
-		if err := s.activities.SetTags(activity.ID, *req.TagIds); err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity tags")
-			return
-		}
-		activity.TagIDs = *req.TagIds
-	} else {
-		activity.TagIDs = []string{}
-	}
-
-	s.bus.Publish(events.Message{Type: events.ActivityCreated, TeamID: timeline.TeamID, Payload: activity})
-	writeJSON(w, http.StatusCreated, activity)
-}
-
-// handleListActivities handles GET /teams/{id}/timelines/{timelineId}/activities.
-// Optional query params ?from=<RFC3339> and ?to=<RFC3339> bound the result by start_at.
-func (s *Server) handleListActivities(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-	timelineID := r.PathValue("timelineId")
-
-	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
-		return
-	}
-
-	timeline, err := s.timelines.GetByID(timelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list activities")
-		return
-	}
-	if timeline.TeamID != teamID {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-		return
-	}
-
-	var from, to *time.Time
-	if v := r.URL.Query().Get("from"); v != "" {
-		t, err := time.Parse(time.RFC3339, v)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "from must be RFC3339 (e.g. 2006-01-02T15:04:05Z)")
-			return
-		}
-		from = &t
-	}
-	if v := r.URL.Query().Get("to"); v != "" {
-		t, err := time.Parse(time.RFC3339, v)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "to must be RFC3339 (e.g. 2006-01-02T15:04:05Z)")
-			return
-		}
-		to = &t
-	}
-
-	includeArchived := r.URL.Query().Get("archived") == "true"
-	acts, err := s.activities.ListByTimeline(timelineID, from, to, includeArchived)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list activities")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, acts)
-}
-
-// handleUpdateActivity handles PATCH /activities/{id}. Only fields present in
-// the request body are applied; the caller must be a member of the activity's team.
-func (s *Server) handleUpdateActivity(w http.ResponseWriter, r *http.Request) {
-	activityID := r.PathValue("id")
-
-	activity, err := s.activities.GetByID(activityID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "activity not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update activity")
-		return
-	}
-
-	timeline, err := s.timelines.GetByID(activity.TimelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update activity")
-		return
-	}
-
-	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
-		return
-	}
-
-	// Decode into a map so we can detect which fields the caller provided.
-	var patch map[string]json.RawMessage
-	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	if v, ok := patch["title"]; ok {
-		if err := json.Unmarshal(v, &activity.Title); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid title")
-			return
-		}
-	}
-	if v, ok := patch["description"]; ok {
-		if err := json.Unmarshal(v, &activity.Description); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid description")
-			return
-		}
-	}
-	if v, ok := patch["notes"]; ok {
-		if err := json.Unmarshal(v, &activity.Notes); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid notes")
-			return
-		}
-	}
-	if v, ok := patch["icon"]; ok {
-		if err := json.Unmarshal(v, &activity.Icon); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid icon")
-			return
-		}
-	}
-	if v, ok := patch["color"]; ok {
-		if err := json.Unmarshal(v, &activity.Color); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid color")
-			return
-		}
-	}
-	if v, ok := patch["startAt"]; ok {
-		if err := json.Unmarshal(v, &activity.StartAt); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid startAt")
-			return
-		}
-	}
-	if v, ok := patch["endAt"]; ok {
-		if err := json.Unmarshal(v, &activity.EndAt); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid endAt")
-			return
-		}
-	}
-	if v, ok := patch["allDay"]; ok {
-		if err := json.Unmarshal(v, &activity.AllDay); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid allDay")
-			return
-		}
-	}
-	if v, ok := patch["statusId"]; ok {
-		if err := json.Unmarshal(v, &activity.StatusID); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid statusId")
-			return
-		}
-	}
-	if v, ok := patch["parentActivityId"]; ok {
-		if err := json.Unmarshal(v, &activity.ParentActivityID); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid parentActivityId")
-			return
-		}
-	}
-	if v, ok := patch["percentComplete"]; ok {
-		if err := json.Unmarshal(v, &activity.PercentComplete); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid percentComplete")
-			return
-		}
-	}
-	if v, ok := patch["location"]; ok {
-		if err := json.Unmarshal(v, &activity.Location); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid location")
-			return
-		}
-	}
-	if v, ok := patch["url"]; ok {
-		if err := json.Unmarshal(v, &activity.URL); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid url")
-			return
-		}
-	}
-	if v, ok := patch["rrule"]; ok {
-		if err := json.Unmarshal(v, &activity.Rrule); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid rrule")
-			return
-		}
-	}
-
-	var newAssignees *[]string
-	if v, ok := patch["assignedMemberIds"]; ok {
-		var ids []string
-		if err := json.Unmarshal(v, &ids); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid assignedMemberIds")
-			return
-		}
-		newAssignees = &ids
-	}
-
-	var newTagIDs *[]string
-	if v, ok := patch["tagIds"]; ok {
-		var ids []string
-		if err := json.Unmarshal(v, &ids); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid tagIds")
-			return
-		}
-		newTagIDs = &ids
-	}
-
-	if activity.Title == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "title must not be empty")
-		return
-	}
-	if activity.EndAt.Before(activity.StartAt) {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "endAt must not be before startAt")
-		return
-	}
-
-	activity.UpdatedAt = time.Now()
-	if err := s.activities.Update(activity); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update activity")
-		return
-	}
-
-	if newAssignees != nil {
-		if err := s.activities.SetAssignments(activity.ID, *newAssignees); err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity assignments")
-			return
-		}
-		activity.AssignedMemberIDs = *newAssignees
-	} else {
-		// Populate current assignments so the response always includes them.
-		existing, err := s.activities.GetAssignments(activity.ID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get activity assignments")
-			return
-		}
-		activity.AssignedMemberIDs = existing
-	}
-
-	if newTagIDs != nil {
-		if err := s.tags.ValidateTeamOwnership(timeline.TeamID, *newTagIDs); err != nil {
-			if errors.Is(err, db.ErrTagOwnership) {
-				writeError(w, http.StatusBadRequest, "INVALID_TAGS", "one or more tag IDs do not belong to this team")
-				return
-			}
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to validate tags")
-			return
-		}
-		if err := s.activities.SetTags(activity.ID, *newTagIDs); err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity tags")
-			return
-		}
-		activity.TagIDs = *newTagIDs
-	} else {
-		existing, err := s.activities.GetTags(activity.ID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get activity tags")
-			return
-		}
-		activity.TagIDs = existing
-	}
-
-	s.bus.Publish(events.Message{Type: events.ActivityUpdated, TeamID: timeline.TeamID, Payload: activity})
-	writeJSON(w, http.StatusOK, activity)
-}
-
-// handleArchiveActivity handles POST /activities/{id}/archive. Any team member
-// may archive an activity; the row is soft-deleted (archived_at set) so it is
-// hidden from list responses by default but can be restored.
-func (s *Server) handleArchiveActivity(w http.ResponseWriter, r *http.Request) {
-	s.setActivityArchive(w, r, true)
-}
-
-// handleUnarchiveActivity handles POST /activities/{id}/unarchive.
-func (s *Server) handleUnarchiveActivity(w http.ResponseWriter, r *http.Request) {
-	s.setActivityArchive(w, r, false)
-}
-
-// setActivityArchive is the shared implementation for the archive/unarchive
-// endpoints. When archive is true, archived_at is set to now; otherwise it
-// is cleared.
-func (s *Server) setActivityArchive(w http.ResponseWriter, r *http.Request, archive bool) {
-	activityID := r.PathValue("id")
-
-	activity, err := s.activities.GetByID(activityID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "activity not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
-		return
-	}
-
-	timeline, err := s.timelines.GetByID(activity.TimelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
-		return
-	}
-
-	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
-		return
-	}
-
-	var at *time.Time
-	if archive {
-		now := time.Now().UTC()
-		at = &now
-		if err := s.activities.ClearParentRefs(activityID); err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
-			return
-		}
-	}
-	if err := s.activities.SetArchived(activityID, at); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
-		return
-	}
-	activity.ArchivedAt = at
-	activity.UpdatedAt = time.Now().UTC()
-
-	// Re-populate assignments and tags for a stable response shape.
-	if ids, err := s.activities.GetAssignments(activity.ID); err == nil {
-		activity.AssignedMemberIDs = ids
-	} else {
-		activity.AssignedMemberIDs = []string{}
-	}
-	if ids, err := s.activities.GetTags(activity.ID); err == nil {
-		activity.TagIDs = ids
-	} else {
-		activity.TagIDs = []string{}
-	}
-
-	s.bus.Publish(events.Message{Type: events.ActivityUpdated, TeamID: timeline.TeamID, Payload: activity})
-	writeJSON(w, http.StatusOK, activity)
-}
-
-// handleDeleteActivity handles DELETE /activities/{id}. Any member of the
-// activity's team may delete it.
-func (s *Server) handleDeleteActivity(w http.ResponseWriter, r *http.Request) {
-	activityID := r.PathValue("id")
-
-	activity, err := s.activities.GetByID(activityID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "activity not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
-		return
-	}
-
-	timeline, err := s.timelines.GetByID(activity.TimelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
-		return
-	}
-
-	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
-		return
-	}
-
-	if err := s.activities.ClearParentRefs(activityID); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
-		return
-	}
-	if err := s.activities.Delete(activityID); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
-		return
-	}
-
-	s.bus.Publish(events.Message{
-		Type:    events.ActivityDeleted,
-		TeamID:  timeline.TeamID,
-		Payload: map[string]string{"id": activityID},
-	})
-	w.WriteHeader(http.StatusNoContent)
 }
 ````
 
@@ -42716,6 +44681,78 @@ export interface paths {
         patch: operations["updateStatus"];
         trace?: never;
     };
+    "/timelines/{id}/shares": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Create a share for a timeline */
+        post: operations["createShare"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/teams/{id}/timelines/{timelineId}/shares": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List shares for a timeline */
+        get: operations["listShares"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/shares/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Delete a share */
+        delete: operations["deleteShare"];
+        options?: never;
+        head?: never;
+        /** Update a share */
+        patch: operations["updateShare"];
+        trace?: never;
+    };
+    "/shares/{token}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Fetch a public share projection
+         * @description No authentication required. Returns the full read-only projection for the given share token. The scope is locked server-side to the share's timeline; client-supplied scope params are ignored.
+         */
+        get: operations["getShareProjection"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/timelines/share/{token}": {
         parameters: {
             query?: never;
@@ -43114,6 +45151,78 @@ export interface components {
             /** @description Required when activities reference the deleted status. */
             replacementStatusId?: string | null;
         };
+        Share: {
+            id: string;
+            timelineId: string;
+            token: string;
+            /** @enum {string} */
+            viewType: "gantt" | "list" | "calendar" | "kanban";
+            /** @description JSON-encoded view configuration snapshot. */
+            viewConfig: string;
+            /** @description Team member ID of the creator. */
+            createdBy: string;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            lastViewedAt?: string | null;
+            viewCount: number;
+            /** Format: date-time */
+            expiresAt?: string | null;
+            /** Format: date-time */
+            revokedAt?: string | null;
+        };
+        CreateShareInput: {
+            /** @enum {string} */
+            viewType?: "gantt" | "list" | "calendar" | "kanban";
+            /** @description JSON-encoded view configuration. */
+            viewConfig?: string;
+        };
+        PatchShareInput: {
+            /** @enum {string} */
+            viewType?: "gantt" | "list" | "calendar" | "kanban";
+            viewConfig?: string;
+        };
+        PublicMember: {
+            id: string;
+            displayName: string;
+            color?: string | null;
+            icon?: string | null;
+        };
+        PublicActivity: {
+            id: string;
+            title: string;
+            description?: string | null;
+            icon?: string | null;
+            color?: string | null;
+            /** Format: date-time */
+            startAt: string;
+            /** Format: date-time */
+            endAt: string;
+            allDay: boolean;
+            statusId?: string | null;
+            parentActivityId?: string | null;
+            percentComplete?: number | null;
+            assignedMemberIds: string[];
+            tagIds: string[];
+        };
+        PublicTimeline: {
+            id: string;
+            name: string;
+            color?: string | null;
+            icon?: string | null;
+            /** Format: date */
+            startDate: string;
+            /** Format: date */
+            endDate: string;
+        };
+        ShareProjection: {
+            share: components["schemas"]["Share"];
+            timeline: components["schemas"]["PublicTimeline"];
+            members: components["schemas"]["PublicMember"][];
+            statuses: components["schemas"]["Status"][];
+            tags: components["schemas"]["Tag"][];
+            activities: components["schemas"]["PublicActivity"][];
+        };
     };
     responses: {
         /** @description Invalid request body or parameters. */
@@ -43186,6 +45295,10 @@ export interface components {
         id: string;
         /** @description Public share token for a timeline. */
         shareToken: string;
+        /** @description Share ID. */
+        shareId: string;
+        /** @description Timeline ID (nested under team). */
+        timelineIdNested: string;
     };
     requestBodies: never;
     headers: never;
@@ -45686,6 +47799,165 @@ export interface operations {
             500: components["responses"]["InternalError"];
         };
     };
+    createShare: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Timeline ID. */
+                id: components["parameters"]["timelineId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateShareInput"];
+            };
+        };
+        responses: {
+            /** @description Share created. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Share"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listShares: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Team ID. */
+                id: components["parameters"]["teamId"];
+                /** @description Timeline ID (nested under team). */
+                timelineId: components["parameters"]["timelineIdNested"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description List of shares. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Share"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    deleteShare: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Share ID. */
+                id: components["parameters"]["shareId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    updateShare: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Share ID. */
+                id: components["parameters"]["shareId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PatchShareInput"];
+            };
+        };
+        responses: {
+            /** @description Updated share. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Share"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getShareProjection: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                token: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Share projection. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ShareProjection"];
+                };
+            };
+            /** @description Password required. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            404: components["responses"]["NotFound"];
+            /** @description Share revoked or expired. */
+            410: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            500: components["responses"]["InternalError"];
+        };
+    };
     getTimelineByShareToken: {
         parameters: {
             query?: never;
@@ -46505,6 +48777,168 @@ components:
           nullable: true
           description: Required when activities reference the deleted status.
 
+    # ── Share schemas ────────────────────────────────────────────────────────────
+
+    Share:
+      type: object
+      required: [id, timelineId, token, viewType, viewConfig, createdBy, createdAt, viewCount]
+      properties:
+        id:
+          type: string
+        timelineId:
+          type: string
+        token:
+          type: string
+        viewType:
+          type: string
+          enum: [gantt, list, calendar, kanban]
+        viewConfig:
+          type: string
+          description: JSON-encoded view configuration snapshot.
+        createdBy:
+          type: string
+          description: Team member ID of the creator.
+        createdAt:
+          type: string
+          format: date-time
+        lastViewedAt:
+          type: string
+          nullable: true
+          format: date-time
+        viewCount:
+          type: integer
+        expiresAt:
+          type: string
+          nullable: true
+          format: date-time
+        revokedAt:
+          type: string
+          nullable: true
+          format: date-time
+
+    CreateShareInput:
+      type: object
+      properties:
+        viewType:
+          type: string
+          enum: [gantt, list, calendar, kanban]
+        viewConfig:
+          type: string
+          description: JSON-encoded view configuration.
+
+    PatchShareInput:
+      type: object
+      properties:
+        viewType:
+          type: string
+          enum: [gantt, list, calendar, kanban]
+        viewConfig:
+          type: string
+
+    PublicMember:
+      type: object
+      required: [id, displayName]
+      properties:
+        id:
+          type: string
+        displayName:
+          type: string
+        color:
+          type: string
+          nullable: true
+        icon:
+          type: string
+          nullable: true
+
+    PublicActivity:
+      type: object
+      required: [id, title, startAt, endAt, allDay, assignedMemberIds, tagIds]
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        description:
+          type: string
+          nullable: true
+        icon:
+          type: string
+          nullable: true
+        color:
+          type: string
+          nullable: true
+        startAt:
+          type: string
+          format: date-time
+        endAt:
+          type: string
+          format: date-time
+        allDay:
+          type: boolean
+        statusId:
+          type: string
+          nullable: true
+        parentActivityId:
+          type: string
+          nullable: true
+        percentComplete:
+          type: integer
+          nullable: true
+        assignedMemberIds:
+          type: array
+          items:
+            type: string
+        tagIds:
+          type: array
+          items:
+            type: string
+
+    PublicTimeline:
+      type: object
+      required: [id, name, startDate, endDate]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        color:
+          type: string
+          nullable: true
+        icon:
+          type: string
+          nullable: true
+        startDate:
+          type: string
+          format: date
+        endDate:
+          type: string
+          format: date
+
+    ShareProjection:
+      type: object
+      required: [share, timeline, members, statuses, tags, activities]
+      properties:
+        share:
+          $ref: "#/components/schemas/Share"
+        timeline:
+          $ref: "#/components/schemas/PublicTimeline"
+        members:
+          type: array
+          items:
+            $ref: "#/components/schemas/PublicMember"
+        statuses:
+          type: array
+          items:
+            $ref: "#/components/schemas/Status"
+        tags:
+          type: array
+          items:
+            $ref: "#/components/schemas/Tag"
+        activities:
+          type: array
+          items:
+            $ref: "#/components/schemas/PublicActivity"
+
   # ────────────────────────────────────────────────────────────
   # Reusable responses
   # ────────────────────────────────────────────────────────────
@@ -46608,6 +49042,22 @@ components:
       in: path
       required: true
       description: Public share token for a timeline.
+      schema:
+        type: string
+
+    shareId:
+      name: id
+      in: path
+      required: true
+      description: Share ID.
+      schema:
+        type: string
+
+    timelineIdNested:
+      name: timelineId
+      in: path
+      required: true
+      description: Timeline ID (nested under team).
       schema:
         type: string
 
@@ -49089,6 +51539,151 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  # ── Shares ──────────────────────────────────────────────────────────────────
+
+  /timelines/{id}/shares:
+    post:
+      operationId: createShare
+      summary: Create a share for a timeline
+      tags: [shares]
+      parameters:
+        - $ref: "#/components/parameters/timelineId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateShareInput"
+      responses:
+        "201":
+          description: Share created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Share"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /teams/{id}/timelines/{timelineId}/shares:
+    get:
+      operationId: listShares
+      summary: List shares for a timeline
+      tags: [shares]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+        - $ref: "#/components/parameters/timelineIdNested"
+      responses:
+        "200":
+          description: List of shares.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Share"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /shares/{id}:
+    patch:
+      operationId: updateShare
+      summary: Update a share
+      tags: [shares]
+      parameters:
+        - $ref: "#/components/parameters/shareId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PatchShareInput"
+      responses:
+        "200":
+          description: Updated share.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Share"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    delete:
+      operationId: deleteShare
+      summary: Delete a share
+      tags: [shares]
+      parameters:
+        - $ref: "#/components/parameters/shareId"
+      responses:
+        "204":
+          description: Deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /shares/{token}:
+    get:
+      operationId: getShareProjection
+      summary: Fetch a public share projection
+      description: >
+        No authentication required. Returns the full read-only projection for the
+        given share token. The scope is locked server-side to the share's timeline;
+        client-supplied scope params are ignored.
+      security: []
+      tags: [shares]
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Share projection.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ShareProjection"
+        "401":
+          description: Password required.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "410":
+          description: Share revoked or expired.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
   /timelines/share/{token}:
     get:
       operationId: getTimelineByShareToken
@@ -51341,6 +53936,12 @@ interface Props {
   onToggleActivity?: (id: string) => void;
   /** Toggles the collapsed state of a group header (member grouping). */
   onToggleGroup?: (id: string) => void;
+  /**
+   * When false, all click and drag interactions are suppressed — bars, lane
+   * drags, and group toggles become inert. Used by the public share viewer.
+   * Default: true.
+   */
+  interactive?: boolean;
 }
 
 // ── Bar drag helpers ─────────────────────────────────────────────────────────
@@ -51399,6 +54000,7 @@ export default function GanttGrid({
   onLabelColWChange,
   onToggleActivity,
   onToggleGroup,
+  interactive = true,
 }: Props) {
   // ── Resizable label column ─────────────────────────────────────────────────
   // When the parent passes labelColW + onLabelColWChange the column is
@@ -51495,7 +54097,7 @@ export default function GanttGrid({
     rowIdx: number,
     memberId: string | null,
   ) => {
-    if (!onLaneDrag) return;
+    if (!interactive || !onLaneDrag) return;
     e.preventDefault();
     const rect = e.currentTarget.getBoundingClientRect();
     const col = colFromX(e.clientX - rect.left);
@@ -51915,7 +54517,7 @@ export default function GanttGrid({
                     cursor: 'pointer',
                     transition: 'background 0.1s',
                   }}
-                  onClick={() => onSelectActivity(ev.id === selectedActivityId ? null : ev.id)}
+                  onClick={() => interactive && onSelectActivity(ev.id === selectedActivityId ? null : ev.id)}
                   onMouseEnter={e => {
                     e.currentTarget.style.background = 'var(--muted)';
                   }}
@@ -51984,7 +54586,7 @@ export default function GanttGrid({
 
                 {/* Lane — background columns + today line + event bar */}
                 <div
-                  style={{ position: 'relative', flex: 1, display: 'flex', cursor: onLaneDrag ? 'crosshair' : 'default' }}
+                  style={{ position: 'relative', flex: 1, display: 'flex', cursor: (interactive && onLaneDrag) ? 'crosshair' : 'default' }}
                   onMouseDown={e => handleLaneMouseDown(e, rowIdx, ev.members[0]?.id ?? null)}
                 >
                   {columns.map((_, i) => (
@@ -52066,10 +54668,10 @@ export default function GanttGrid({
                       <div
                         onClick={() => {
                           // Bar click always selects — use the label cell to deselect.
-                          if (!isDragging) onSelectActivity(ev.id);
+                          if (interactive && !isDragging) onSelectActivity(ev.id);
                         }}
                         onMouseDown={e => {
-                          if (!onBarDrag) { e.stopPropagation(); return; }
+                          if (!interactive || !onBarDrag) { e.stopPropagation(); return; }
                           const barRect = e.currentTarget.getBoundingClientRect();
                           const xInBar = e.clientX - barRect.left;
                           let zone: BarDragZone;
@@ -53537,19 +56139,19 @@ Includes both the webhook backend and the per-timeline connector sidebar UI (pre
 
 **Next up.** Full design in [docs/plans/phase-13-shares.md](plans/phase-13-shares.md). Decision: live cached data + read-only SPA, server-side (Go) filter, view-driven field projection. No Chromium.
 
-**13.1 — Foundation, public gateway, Gantt viewer (MVP):**
-- [ ] Migration: `shares` table (`id`, `timeline_id`, `token` UNIQUE, `view_type`, `view_config` JSON, `password_hash?`, `expires_at?`, `created_by`, `created_at`, `last_viewed_at`, `view_count`, `revoked_at`)
-- [ ] Token migration: insert one `shares` row per existing timeline reusing `timelines.share_token` (keep the column for now; drop in a later migration)
-- [ ] Go filter evaluator (`internal/filters`) mirroring `lib/filterEngine.ts` `matchesFilter`
-- [ ] Shared golden-fixture suite (`packages/shared/testdata/filter-fixtures.json`) run by both `filterEngine.test.ts` and a Go test (drift guard)
-- [ ] `GET /shares/{token}` gateway: scope-locked query (token → server-derived `timeline_id`, **no client selector**) → evaluate frozen filter in Go → fixed display projection → prune referenced members/statuses/tags → TTL cache (`DRABA_SHARE_CACHE_TTL`, default 60s)
-- [ ] `POST /timelines/{id}/shares`, `GET /timelines/{id}/shares`, `PATCH /shares/{id}`, `DELETE /shares/{id}`
-- [ ] OpenAPI: `Share`, `ShareViewConfig`, `CreateShareInput`, `PatchShareInput`, `PublicShareProjection`; regenerate TS types
-- [ ] Gantt `interactive=false` mode (no toolbar/menus/drag/edit; clicks inert; forced light theme)
-- [ ] "Share this view" action in Gantt toolbar → snapshot live toolbar state incl. resolved `FilterDefinition` → create share → copy URL
-- [ ] `/s/:token` public route (outside `ProtectedRoute`) + branding strip (team name · "Shared view" · last-updated)
-- [ ] Scope-isolation test: token reaches exactly its timeline's filtered records; tampering (other timeline/activity/team id, scope-widening params) cannot widen; no share-reachable by-id/list endpoint
-- [ ] Verify payload: filtered-out activities + member email/`user_id`/role + access list + other timelines all absent
+**13.1 — Foundation, public gateway, Gantt viewer (MVP):** — ✅ 2026-06-04
+- [x] Migration: `shares` table (`id`, `timeline_id`, `token` UNIQUE, `view_type`, `view_config` JSON, `password_hash?`, `expires_at?`, `created_by`, `created_at`, `last_viewed_at`, `view_count`, `revoked_at`)
+- [x] Token migration: insert one `shares` row per existing timeline reusing `timelines.share_token` (keep the column for now; drop in a later migration)
+- [x] Go filter evaluator (`internal/filters`) mirroring `lib/filterEngine.ts` `matchesFilter`
+- [x] Shared golden-fixture suite (`packages/shared/testdata/filter-fixtures.json`) run by both `filterEngine.test.ts` and a Go test (drift guard)
+- [x] `GET /shares/{token}` gateway: scope-locked query (token → server-derived `timeline_id`, **no client selector**) → evaluate frozen filter in Go → fixed display projection → prune referenced members/statuses/tags → TTL cache (`DRABA_SHARE_CACHE_TTL`, default 60s)
+- [x] `POST /timelines/{id}/shares`, `GET /teams/{id}/timelines/{timelineId}/shares`, `PATCH /shares/{id}`, `DELETE /shares/{id}`
+- [x] OpenAPI: `Share`, `CreateShareInput`, `PatchShareInput`, `PublicActivity`, `PublicMember`, `PublicTimeline`, `ShareProjection`; regenerate TS types
+- [x] Gantt `interactive=false` mode (clicks inert in GanttGrid + GanttView; no drag/select)
+- [x] "Share this view" action in Gantt toolbar → snapshot live toolbar state incl. resolved `FilterDefinition` → create share → copy URL
+- [x] `/s/:token` public route (outside `ProtectedRoute`) + branding strip (timeline name · "Shared view" · activity count)
+- [x] Scope-isolation test: token reaches exactly its timeline's filtered records; tampering (other timeline/activity/team id, scope-widening params) cannot widen; no share-reachable by-id/list endpoint
+- [x] Verify payload: filtered-out activities + member email/`user_id`/role + access list + other timelines all absent (automated test)
 
 **13.2 — Remaining views read-only (List, Calendar, Kanban):**
 - [ ] `interactive=false` + public mounting for List, Calendar, Kanban (clicks inert)
@@ -53662,6 +56264,12 @@ interface Props {
   labelColW?: number;
   /** Called when the user drags the label column resize handle. */
   onLabelColWChange?: (w: number) => void;
+  /**
+   * When false, all click and drag interactions are suppressed — bars, lane
+   * drags, and group toggles are inert. Used by the public share viewer.
+   * Default: true.
+   */
+  interactive?: boolean;
 }
 
 
@@ -53946,6 +56554,7 @@ export default function GanttView({
   onSelectApiActivity,
   labelColW,
   onLabelColWChange,
+  interactive = true,
 }: Props) {
   const queryClient = useQueryClient();
   const updateActivity = useUpdateActivity(timelineId);
@@ -54197,15 +56806,16 @@ export default function GanttView({
             onSelectApiActivity(found);
           }
         }}
-        onLaneDrag={onLaneDrag}
-        onBarDrag={handleBarDrag}
-        onBarDragProgress={onBarDragProgress}
+        onLaneDrag={interactive ? onLaneDrag : undefined}
+        onBarDrag={interactive ? handleBarDrag : undefined}
+        onBarDragProgress={interactive ? onBarDragProgress : undefined}
         resolvedGranularity={resolvedGranularity}
         onClearFilters={filtersActive ? () => {} : undefined}
         labelColW={labelColW}
         onLabelColWChange={onLabelColWChange}
         onToggleActivity={groupBy === 'parent' ? toggleParent : undefined}
         onToggleGroup={groupBy === 'member' || groupBy === 'status' ? toggleGroup : undefined}
+        interactive={interactive}
       />
     </div>
   );
@@ -56850,6 +59460,7 @@ import TeamModal from '@/components/TeamModal'
 import MemberModal from '@/components/MemberModal'
 import TimelineModal from '@/components/TimelineModal'
 import FilterManageModal from '@/components/filters/FilterManageModal'
+import ShareModal from '@/components/ShareModal'
 import { useNavigate } from 'react-router-dom'
 import type { components } from '@draba/shared'
 import type { Member } from '@/types'
@@ -56893,6 +59504,7 @@ function DashboardShell() {
   const [ganttMembers, setGanttMembers] = useState<Member[]>([])
   const [createDefaults, setCreateDefaults] = useState<{ start: string; end: string; memberId: string | null; statusId?: string | null } | null>(null)
   const [filterModalOpen, setFilterModalOpen] = useState(false)
+  const [shareModalOpen, setShareModalOpen] = useState(false)
   const [liveDragDates, setLiveDragDates] = useState<{ activityId: string; start: string; end: string } | null>(null)
   // Gantt toolbar state
   const [groupBy, setGroupBy] = useState<GroupBy>('none')
@@ -57390,7 +60002,7 @@ function DashboardShell() {
             colorBy={colorBy}
             onColorByChange={setColorBy}
             onExport={() => {}}
-            onShare={() => {}}
+            onShare={() => setShareModalOpen(true)}
           />
         )}
 
@@ -57658,6 +60270,29 @@ function DashboardShell() {
         />
       )}
 
+      {/* Share modal — create a Gantt share link */}
+      {shareModalOpen && activeTimelineId && teamId && (
+        <ShareModal
+          teamId={teamId}
+          timelineId={activeTimelineId}
+          viewType="gantt"
+          viewConfig={{
+            groupBy,
+            sortBy,
+            colorBy,
+            granularity: String(granularity),
+            filter: activeFilter.kind === 'saved'
+              ? (() => {
+                  const sf = savedFilters.find(f => f.id === activeFilter.id)
+                  if (!sf) return null
+                  try { return JSON.parse(sf.definition) as import('@/lib/filterTypes').FilterDefinition } catch { return null }
+                })()
+              : null,
+          }}
+          onClose={() => setShareModalOpen(false)}
+        />
+      )}
+
       {/* Timeline modal — create or edit */}
       {timelineModalMode && (
         <TimelineModal
@@ -57688,6 +60323,45 @@ export default function DashboardPage() {
 ## File: docs/log.md
 ````markdown
 # Development Log
+
+---
+
+## 2026-06-04 — Phase 13.1: Shares MVP — Foundation, Public Gateway, Gantt Viewer
+
+**Goal:** First-class Share entity with a scope-locked public data gateway, Go filter engine, golden parity fixtures, Gantt read-only mode, "Share this view" action, and the `/s/:token` public viewer route.
+
+**Backend (`packages/api`):**
+
+- **Migration 019** (`internal/db/migrations/019_shares.sql`): creates the `shares` table (`id`, `timeline_id`, `token UNIQUE`, `view_type`, `view_config`, `password_hash?`, `expires_at?`, `created_by`, `created_at`, `last_viewed_at`, `view_count`, `revoked_at`); migrates every existing `timelines.share_token` into a `shares` row so existing links keep working (the legacy `share_token` column is left in place — the old `GET /timelines/share/{token}` handler still resolves it).
+- **`internal/filters/engine.go`** (new package): Go port of `lib/filterEngine.ts → matchesFilter`. Mirrors every field type (status, tag, assignee, title, progress, hasParent, startDate, endDate), all operators, AND/OR logic, and the same type-coercion edge-cases as the TS original.
+- **`packages/shared/testdata/filter-fixtures.json`** (new): 27 golden test cases — statuses, tags, and activities reference data plus fixture definitions with expected results. Run by both the Go test (`TestGoldenFixtures`) and a new golden-fixture section in `filterEngine.test.ts`. All 27 pass on both sides.
+- **`internal/db/share_repo.go`** (new): Create, GetByID, GetByToken, ListByTimeline, Update, Delete, RecordView.
+- **`internal/models/models.go`**: added Share, PublicMember, PublicActivity, PublicTimeline, ShareProjection model types.
+- **`internal/api/share_handler.go`** (new): `handleGetShareProjection` (public gateway: resolves share row, checks revoke/expiry/password stubs for future phases, serves from TTL cache or builds fresh projection with Go filter applied, calls `RecordView` async), `buildShareProjection` (scope-locked: derives `timeline_id` from share row server-side — no client selector — then filter-next, fixed display projection, referenced-entity pruning), `handleCreateShare`, `handleListShares`, `handleUpdateShare`, `handleDeleteShare`, in-memory `shareCache` (TTL from `DRABA_SHARE_CACHE_TTL`, default 60s; invalidated on PATCH/DELETE).
+- **`internal/api/server.go`**: added `shares *db.ShareRepo` + `shareCache *shareCache` to Server; `NewServer` takes new `sharesRepo` param; routes: `GET /shares/{token}` (public), `POST /timelines/{id}/shares`, `GET /teams/{id}/timelines/{timelineId}/shares`, `PATCH /shares/{id}`, `DELETE /shares/{id}`.
+- **Tests**: `internal/api/share_handler_test.go` (new) — create/list/delete CRUD, gateway 200, unknown token 404, no-email-in-response scope check, scope-isolation (param injection rejected), filtered-activities-absent (server-side filter removes "Beta" from a share filtered to title="Alpha"). All pass.
+- **OpenAPI** (`packages/shared/openapi.yaml`): added Share, CreateShareInput, PatchShareInput, PublicMember, PublicActivity, PublicTimeline, ShareProjection schemas + all share paths; regenerated TS types.
+
+**Frontend (`packages/web`):**
+
+- **`src/hooks/useShares.ts`** (new): useListShares, useCreateShare, useDeleteShare (authenticated), useShareProjection (public, no auth, 60s stale time).
+- **`GanttGrid.tsx`**: added `interactive?: boolean` prop (default true); when false, bar clicks, bar drag mouseDown, lane mouseDown, and cursor are all suppressed — the grid is visually unchanged but clicks are inert.
+- **`GanttView.tsx`**: added `interactive?: boolean` prop threaded to GanttGrid; when false, onLaneDrag/onBarDrag/onBarDragProgress are also suppressed at the GanttView level.
+- **`ShareModal.tsx`** (new): create-link modal — serialises live toolbar state (groupBy, sortBy, colorBy, granularity, resolved FilterDefinition) into `view_config`, calls `useCreateShare`, shows the `/s/:token` URL and a copy button.
+- **`pages/ShareViewPage.tsx`** (new): public route at `/s/:token` (outside ProtectedRoute); fetches `useShareProjection`, forces light mode, applies parsed `view_config` (groupBy/sortBy/colorBy/granularity), builds GanttRow list from PublicActivity data, renders GanttGrid with `interactive={false}` + a branding strip (timeline name, "Shared view", activity count). Error states: 404 "not found", 410 "expired/revoked", generic fallback.
+- **`App.tsx`**: added `<Route path="/s/:token" element={<ShareViewPage />} />` outside ProtectedRoute.
+- **`DashboardPage.tsx`**: wires Gantt toolbar `onShare` → `setShareModalOpen(true)`; renders ShareModal when open; resolves active saved-filter definition into view_config.
+- **`vite.config.ts`**: added `/shares` proxy entry.
+- **`tsconfig.app.json`**: added `"resolveJsonModule": true` to enable JSON imports in tests.
+- **`filterEngine.ts`**: fixed `is_empty`/`is_not_empty` ops for set fields to guard against missing `value` (`condition.value ?? []`) — matches Go engine's behaviour and fixes 4 newly-surfaced golden-fixture failures.
+- **`filterEngine.test.ts`**: added 27-case golden-fixture test section that imports from `packages/shared/testdata/filter-fixtures.json`; all pass.
+
+**Checks:**
+- `golangci-lint run` ✅
+- `go test ./...` ✅ (all packages including new api/share + filters/golden)
+- `pnpm --filter web lint` ✅ (tsc --noEmit)
+- `pnpm --filter web build` ✅ (tsc -b + vite build)
+- `pnpm --filter web test` ✅ (280 tests, 22 test files including new golden-fixture suite)
 
 ---
 
@@ -61213,7 +63887,7 @@ A first-class **Share** entity: one timeline can have many shares, each a frozen
 ---
 
 ### Phase 13.1 — Foundation, Public Gateway, Gantt Viewer (MVP)
-**Status:** ⬜ | **Effort:** M–L
+**Status:** 🔄 In Progress — automated checks pass, awaiting Docker verification | **Effort:** M–L
 
 The whole data-leak surface is confronted here so 13.2–13.4 ride on a proven-safe gateway. Ships: `shares` schema + repo + **token migration** (each timeline's existing `share_token` becomes a `shares` row, so current links keep working; the `NOT NULL UNIQUE` column is dropped only in a later migration); a **Go filter evaluator** (`internal/filters` mirroring `matchesFilter`) + **shared golden fixtures** (`packages/shared/testdata/filter-fixtures.json`) run by both `filterEngine.test.ts` and a Go test; the **`GET /shares/{token}` gateway** (filter-first, view-driven field projection, referenced-entity pruning, TTL cache via `DRABA_SHARE_CACHE_TTL`); `POST/GET /timelines/{id}/shares` + `PATCH/DELETE /shares/{id}`; **Gantt `interactive=false` mode** (no chrome/drag/edit, forced light); "Share this view" in the Gantt toolbar (snapshots live toolbar state incl. the resolved filter definition); `/s/:token` public route + branding strip.
 
