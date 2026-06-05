@@ -1508,6 +1508,8 @@ export interface components {
             id: string;
             timelineId: string;
             token: string;
+            /** @description Optional human-readable label for this share link. */
+            name?: string | null;
             /** @enum {string} */
             viewType: "gantt" | "list" | "calendar" | "kanban";
             /** @description JSON-encoded view configuration snapshot. */
@@ -1525,12 +1527,14 @@ export interface components {
             revokedAt?: string | null;
         };
         CreateShareInput: {
+            name?: string | null;
             /** @enum {string} */
             viewType?: "gantt" | "list" | "calendar" | "kanban";
             /** @description JSON-encoded view configuration. */
             viewConfig?: string;
         };
         PatchShareInput: {
+            name?: string | null;
             /** @enum {string} */
             viewType?: "gantt" | "list" | "calendar" | "kanban";
             viewConfig?: string;

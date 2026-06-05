@@ -24,10 +24,10 @@ func NewShareRepo(db *sqlx.DB) *ShareRepo {
 func (r *ShareRepo) Create(s *models.Share) error {
 	_, err := r.db.NamedExec(`
 		INSERT INTO shares (
-			id, timeline_id, token, view_type, view_config,
+			id, timeline_id, token, name, view_type, view_config,
 			created_by, created_at, view_count
 		) VALUES (
-			:id, :timeline_id, :token, :view_type, :view_config,
+			:id, :timeline_id, :token, :name, :view_type, :view_config,
 			:created_by, :created_at, :view_count
 		)
 	`, s)
@@ -70,10 +70,11 @@ func (r *ShareRepo) ListByTimeline(timelineID string) ([]*models.Share, error) {
 	return out, nil
 }
 
-// Update writes view_config and updated fields for an existing share.
+// Update writes mutable fields for an existing share.
 func (r *ShareRepo) Update(s *models.Share) error {
 	_, err := r.db.NamedExec(`
 		UPDATE shares SET
+			name        = :name,
 			view_type   = :view_type,
 			view_config = :view_config
 		WHERE id = :id

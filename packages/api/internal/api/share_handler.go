@@ -272,8 +272,11 @@ func (s *Server) buildShareProjection(share *models.Share) (*models.ShareProject
 		}
 	}
 
+	// Strip password hash before including share in the public projection.
+	safeShare := *share
+	safeShare.PasswordHash = nil
 	proj := &models.ShareProjection{
-		Share:    *share,
+		Share:    safeShare,
 		TeamName: team.Name,
 		Timeline: models.PublicTimeline{
 			ID:        timeline.ID,
@@ -332,6 +335,7 @@ func (s *Server) handleCreateShare(w http.ResponseWriter, r *http.Request) {
 		ID:         newID(),
 		TimelineID: timelineID,
 		Token:      newToken(),
+		Name:       req.Name,
 		ViewType:   req.ViewType,
 		ViewConfig: req.ViewConfig,
 		CreatedBy:  member.ID,
@@ -411,6 +415,9 @@ func (s *Server) handleUpdateShare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if req.Name != nil {
+		share.Name = req.Name
+	}
 	if req.ViewType != nil {
 		share.ViewType = *req.ViewType
 	}
@@ -477,11 +484,13 @@ func (s *Server) canManageShare(member *models.TeamMember, share *models.Share) 
 // ── Request bodies ────────────────────────────────────────────────────────────
 
 type createShareBody struct {
-	ViewType   string `json:"viewType"`
-	ViewConfig string `json:"viewConfig"`
+	Name       *string `json:"name,omitempty"`
+	ViewType   string  `json:"viewType"`
+	ViewConfig string  `json:"viewConfig"`
 }
 
 type patchShareBody struct {
+	Name       *string `json:"name,omitempty"`
 	ViewType   *string `json:"viewType,omitempty"`
 	ViewConfig *string `json:"viewConfig,omitempty"`
 }

@@ -31,6 +31,7 @@ export function useListShares(teamId: string, timelineId: string) {
 }
 
 interface CreateShareInput {
+  name?: string | null
   viewType: string
   viewConfig: string
 }

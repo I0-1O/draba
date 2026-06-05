@@ -24,7 +24,8 @@ import {
 import type { components } from '@draba/shared'
 import type { GroupBy, SortBy, ColorBy, TimeGranularity } from '@/components/gantt/GanttToolbar'
 import type { Member } from '@/types'
-import { Share2, AlertCircle, Loader2 } from 'lucide-react'
+import { AlertCircle, Loader2 } from 'lucide-react'
+import { Badge } from '@/components/identity/Badge'
 
 type PublicActivity = components['schemas']['PublicActivity']
 type PublicMember = components['schemas']['PublicMember']
@@ -66,21 +67,6 @@ function toMember(m: PublicMember, index: number): Member {
     initials: initialsFrom(m.displayName),
     color: resolveColorHex(m.color) || MEMBER_COLORS[index % MEMBER_COLORS.length],
   }
-}
-
-// ── Identity badge ────────────────────────────────────────────────────────────
-
-function IdentityDot({ color, icon }: { color?: string | null; icon?: string | null }) {
-  const bg = resolveColorHex(color) || '#6b7280'
-  return (
-    <div style={{
-      width: 18, height: 18, borderRadius: 4, background: bg,
-      display: 'flex', alignItems: 'center', justifyContent: 'center',
-      fontSize: 11, flexShrink: 0,
-    }}>
-      {icon ?? null}
-    </div>
-  )
 }
 
 // ── ShareViewPage ─────────────────────────────────────────────────────────────
@@ -239,17 +225,19 @@ export default function ShareViewPage() {
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: '#ffffff' }}>
       {/* Branding strip */}
       <div style={{
-        display: 'flex', alignItems: 'center', gap: 8, padding: '0 16px', height: 40,
+        display: 'flex', alignItems: 'center', gap: 8, padding: '0 16px', height: 44,
         background: '#f9fafb', borderBottom: '1px solid #e5e7eb', flexShrink: 0,
         color: '#111827',
       }}>
-        <IdentityDot color={proj.timeline.color} icon={proj.timeline.icon} />
-        <span style={{ fontSize: 12, fontWeight: 600 }}>{proj.teamName}</span>
-        <span style={{ fontSize: 12, color: '#d1d5db' }}>›</span>
-        <span style={{ fontSize: 12, fontWeight: 500 }}>{proj.timeline.name}</span>
-        <span style={{ fontSize: 12, color: '#9ca3af' }}>·</span>
-        <Share2 size={12} style={{ color: '#9ca3af' }} />
-        <span style={{ fontSize: 12, color: '#6b7280' }}>Shared view</span>
+        <Badge
+          identity={{ color: proj.timeline.color ?? '#6b7280', icon: proj.timeline.icon ?? '__none__' }}
+          name={proj.timeline.name}
+          size={24}
+        />
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 0, lineHeight: 1.2 }}>
+          <span style={{ fontSize: 13, fontWeight: 700, color: '#111827' }}>{proj.timeline.name}</span>
+          <span style={{ fontSize: 11, color: '#6b7280' }}>{proj.teamName}{proj.share.name ? ` · ${proj.share.name}` : ''}</span>
+        </div>
         <span style={{ marginLeft: 'auto', fontSize: 11, color: '#9ca3af' }}>
           {proj.activities.length} {proj.activities.length === 1 ? 'activity' : 'activities'}
         </span>

@@ -799,6 +799,10 @@ components:
           type: string
         token:
           type: string
+        name:
+          type: string
+          nullable: true
+          description: Optional human-readable label for this share link.
         viewType:
           type: string
           enum: [gantt, list, calendar, kanban]
@@ -829,6 +833,9 @@ components:
     CreateShareInput:
       type: object
       properties:
+        name:
+          type: string
+          nullable: true
         viewType:
           type: string
           enum: [gantt, list, calendar, kanban]
@@ -839,6 +846,9 @@ components:
     PatchShareInput:
       type: object
       properties:
+        name:
+          type: string
+          nullable: true
         viewType:
           type: string
           enum: [gantt, list, calendar, kanban]

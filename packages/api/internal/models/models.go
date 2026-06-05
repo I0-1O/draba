@@ -237,6 +237,7 @@ type Share struct {
 	ID           string     `db:"id"             json:"id"`
 	TimelineID   string     `db:"timeline_id"    json:"timelineId"`
 	Token        string     `db:"token"          json:"token"`
+	Name         *string    `db:"name"           json:"name,omitempty"`
 	ViewType     string     `db:"view_type"      json:"viewType"`
 	ViewConfig   string     `db:"view_config"    json:"viewConfig"`
 	PasswordHash *string    `db:"password_hash"  json:"-"`
