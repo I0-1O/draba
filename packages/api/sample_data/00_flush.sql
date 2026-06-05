@@ -8,6 +8,7 @@ DELETE FROM tags;
 DELETE FROM statuses;
 DELETE FROM status_template_items;
 DELETE FROM status_templates;
+DELETE FROM shares;
 DELETE FROM timeline_access;
 DELETE FROM timelines;
 DELETE FROM team_members;

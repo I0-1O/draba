@@ -18,6 +18,7 @@ import (
 	"github.com/I0-1O/draba/packages/api/internal/mailer"
 	"github.com/I0-1O/draba/packages/api/internal/tier"
 	"github.com/I0-1O/draba/packages/api/internal/ws"
+	sampledata "github.com/I0-1O/draba/packages/api/sample_data"
 	drabui "github.com/I0-1O/draba/packages/api/ui"
 )
 
@@ -72,6 +73,28 @@ func main() {
 		os.Exit(1)
 	}
 	slog.Info("db: migrations applied")
+
+	// Optional pre-launch convenience: seed the canonical sample dataset into an
+	// empty database so a freshly-wiped dev/test instance comes up populated.
+	// Gated by DRABA_SEED_SAMPLE_DATA and a no-op once the DB has any users — it
+	// must stay unset in any real deployment.
+	if os.Getenv("DRABA_SEED_SAMPLE_DATA") == "1" {
+		sql, err := sampledata.SQL()
+		if err != nil {
+			slog.Error("db: reading embedded sample data failed", "err", err)
+			os.Exit(1)
+		}
+		seeded, err := db.SeedSampleDataIfEmpty(database, sql)
+		if err != nil {
+			slog.Error("db: sample-data seed failed", "err", err)
+			os.Exit(1)
+		}
+		if seeded {
+			slog.Info("db: sample data seeded (database was empty)")
+		} else {
+			slog.Info("db: sample-data seed skipped (database already populated)")
+		}
+	}
 
 	users := db.NewUserRepo(database)
 	invites := db.NewInviteRepo(database)

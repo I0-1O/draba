@@ -14,6 +14,8 @@ SQL files that populate the database with realistic test data. Files are numbere
 | `07_activities.sql` | 58 activities |
 | `08_activity_assignments.sql` | Activity → member links |
 | `09_timeline_access.sql` | Timeline → member access |
+| `10_tags.sql` | Tags + activity → tag links |
+| `11_shares.sql` | 6 share links (3 open, 3 password-protected) |
 
 ## Usage
 

@@ -14,6 +14,10 @@ services:
       - DRABA_DB_DSN=./draba.db
       - DRABA_JWT_SECRET=dev-secret-change-in-prod
       - DRABA_LOG_LEVEL=debug
+      # Pre-launch convenience: seed the canonical sample dataset (incl. shares)
+      # into an empty DB on boot. No-op once the DB has users. Turn OFF before
+      # any real users exist. See docs/TESTING.md.
+      - DRABA_SEED_SAMPLE_DATA=1
       # Public base URL used to build links in outbound email (password reset,
       # team invites). MUST be the externally reachable URL in any real
       # deployment — when unset it falls back to http://localhost:8080 and

@@ -9,10 +9,17 @@
 #   2. Wipes the SQLite DB files via a one-off `alpine` container
 #      (so file permissions inside the bind mount don't matter)
 #   3. Starts `draba` — its boot-time migration runner creates the
-#      fresh schema
-#   4. Waits up to 30s for `schema_migrations` to be queryable
-#   5. Stops `draba` again, seeds a bootstrap team + a known invite
-#      token via a one-off `sqlite3` container, then restarts
+#      fresh schema, then (with DRABA_SEED_SAMPLE_DATA=1 on the container)
+#      auto-seeds the canonical sample dataset incl. shares into the empty DB
+#   4. Waits up to 30s for the sample data to load (users table populated)
+#   5. Stops `draba` again, layers a bootstrap team + a known invite
+#      token on top via a one-off `sqlite3` container, then restarts
+#
+# The bootstrap rows (test-admin@local, bootstrap-team, the invite) do NOT
+# collide with the sample dataset, so api-smoke's register/login flow keeps
+# working against a DB that now also holds the rich sample data. Requires
+# DRABA_SEED_SAMPLE_DATA=1 on the container; without it the wait in step 4
+# times out (nothing populates the users table).
 #
 # Required env (sourced from $HOME/.draba-test.env at the top):
 #   DRABA_TEST_INVITE_TOKEN  — known token the api-smoke subagent uses
@@ -55,21 +62,24 @@ docker run --rm -v "$DRABA_DB_DIR:/data" "$ALPINE_IMG" sh -c \
 echo "[3/6] Starting container (migrations run on boot)..."
 docker start "$DRABA_CONTAINER" >/dev/null
 
-echo "[4/6] Waiting for migrations to complete..."
+echo "[4/6] Waiting for migrations + sample-data seed to complete..."
 for i in $(seq 1 30); do
+    # Wait until the seed has populated the users table — not just until the
+    # schema exists — so the bootstrap-seed step below cannot race the seed.
     if docker run --rm -v "$DRABA_DB_DIR:/data:ro" "$SQLITE_IMG" \
          sqlite3 "/data/${DRABA_DB_FILENAME}" \
-         "SELECT 1 FROM schema_migrations LIMIT 1;" >/dev/null 2>&1; then
+         "SELECT 1 FROM users LIMIT 1;" 2>/dev/null | grep -q 1; then
         break
     fi
     sleep 1
     if [[ "$i" -eq 30 ]]; then
-        echo "ERROR: migrations did not complete within 30s" >&2
+        echo "ERROR: sample data did not load within 30s" >&2
+        echo "       (is DRABA_SEED_SAMPLE_DATA=1 set on the '$DRABA_CONTAINER' container?)" >&2
         exit 1
     fi
 done
 
-echo "[5/6] Stopping container to seed exclusively..."
+echo "[5/6] Stopping container to layer bootstrap admin + invite on top of the sample data..."
 docker stop "$DRABA_CONTAINER" >/dev/null
 
 ADMIN_ID="bootstrap-admin"
