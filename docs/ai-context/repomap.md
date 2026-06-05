@@ -63,6 +63,14 @@ docs/
       member-modal/
         Member Edit Modal v2.html
         README.md
+      share-modal/
+        design_handoff_share_modal/
+          Backdrop.jsx
+          colors_and_type.css
+          README.md
+          Share Modal.html
+          ShareModal.jsx
+          tweaks-panel.jsx
       team-modal/
         README.md
         Team Modal.html
@@ -378,6 +386,37 @@ README.md
 ```
 
 # Files
+
+## File: .claude/commands/build-phase.md
+````markdown
+Read docs/ROADMAP.md and identify the phase specified in $ARGUMENTS (e.g. "1" or "Phase 1").
+
+1. Read the phase's scope and exit criteria from ROADMAP.md.
+2. Find the corresponding tasks in docs/TASKS.md.
+3. Read any referenced docs (ARCHITECTURE.md, CONVENTIONS.md, REQUIREMENTS.md) relevant to this phase before writing any code.
+4. Update the phase status in ROADMAP.md from ⬜ to 🔄 before starting work.
+5. Implement every task in the phase's scope, following CONVENTIONS.md throughout.
+6. After implementation, run all of the following checks in order — all must pass before marking the phase done:
+   - **Go:** `golangci-lint run` then `go test ./...`
+   - **Web lint:** `pnpm --filter web lint` (runs `tsc --noEmit` — catches type errors in isolation)
+   - **Web build:** `pnpm --filter web build` (runs `tsc -b && vite build` — catches additional errors that `--noEmit` misses, such as missing fields on exported interfaces, composite project reference issues, and import graph problems). This is the same build CI runs; skipping it is the most common source of "passes locally, fails in CI" build errors.
+   - Fix any errors found before proceeding, even if they're in files you didn't directly touch.
+   Suggest running `/test-phase <N>` and `/review-phase <N>` to fan the verification out across subagents in parallel.
+7. Check off completed items in TASKS.md.
+8. Update the phase status in ROADMAP.md:
+   - If all exit criteria pass: ✅ Done, add the completion date.
+   - If any exit criterion fails or needs manual verification: mark 🔄 In Progress and add a note listing what still needs review.
+9. Update `docs/log.md` (mandatory — this is the durable per-phase record):
+   - Prepend a dated entry at the top, matching the format of existing entries (Goal, then Backend / Frontend / Tests sections as relevant).
+   - This is the place for full implementation detail. Do **not** put that detail in session-state.md.
+10. Refresh `docs/ai-context/session-state.md` so it stays a *current-state snapshot*, never an append-log:
+   - Update the **Last updated** line.
+   - In **Phase Status**: if the phase passed all checks, leave it as the just-built phase awaiting manual verification; if a *previously* built phase has since been Docker-verified, collapse it into the "all phases through X.Y complete and verified" sentence and delete its detail (the detail already lives in log.md).
+   - Update **Open Issues** — add anything new this phase surfaced, remove anything now resolved.
+   - Point **Next phase** at the next ROADMAP item and its plan file.
+   - Keep the whole file short. If it grows past ~60 lines you are duplicating log.md — move detail out. The top-of-file contract ("per-phase detail lives in log.md; this is a snapshot only") is the rule; honor it.
+11. Summarize what was built and which exit criteria were verified vs. which need manual testing by the user.
+````
 
 ## File: .claude/commands/new-feature.md
 ````markdown
@@ -23292,37 +23331,6 @@ packages:
   - "packages/*"
 ````
 
-## File: .claude/commands/build-phase.md
-````markdown
-Read docs/ROADMAP.md and identify the phase specified in $ARGUMENTS (e.g. "1" or "Phase 1").
-
-1. Read the phase's scope and exit criteria from ROADMAP.md.
-2. Find the corresponding tasks in docs/TASKS.md.
-3. Read any referenced docs (ARCHITECTURE.md, CONVENTIONS.md, REQUIREMENTS.md) relevant to this phase before writing any code.
-4. Update the phase status in ROADMAP.md from ⬜ to 🔄 before starting work.
-5. Implement every task in the phase's scope, following CONVENTIONS.md throughout.
-6. After implementation, run all of the following checks in order — all must pass before marking the phase done:
-   - **Go:** `golangci-lint run` then `go test ./...`
-   - **Web lint:** `pnpm --filter web lint` (runs `tsc --noEmit` — catches type errors in isolation)
-   - **Web build:** `pnpm --filter web build` (runs `tsc -b && vite build` — catches additional errors that `--noEmit` misses, such as missing fields on exported interfaces, composite project reference issues, and import graph problems). This is the same build CI runs; skipping it is the most common source of "passes locally, fails in CI" build errors.
-   - Fix any errors found before proceeding, even if they're in files you didn't directly touch.
-   Suggest running `/test-phase <N>` and `/review-phase <N>` to fan the verification out across subagents in parallel.
-7. Check off completed items in TASKS.md.
-8. Update the phase status in ROADMAP.md:
-   - If all exit criteria pass: ✅ Done, add the completion date.
-   - If any exit criterion fails or needs manual verification: mark 🔄 In Progress and add a note listing what still needs review.
-9. Update `docs/log.md` (mandatory — this is the durable per-phase record):
-   - Prepend a dated entry at the top, matching the format of existing entries (Goal, then Backend / Frontend / Tests sections as relevant).
-   - This is the place for full implementation detail. Do **not** put that detail in session-state.md.
-10. Refresh `docs/ai-context/session-state.md` so it stays a *current-state snapshot*, never an append-log:
-   - Update the **Last updated** line.
-   - In **Phase Status**: if the phase passed all checks, leave it as the just-built phase awaiting manual verification; if a *previously* built phase has since been Docker-verified, collapse it into the "all phases through X.Y complete and verified" sentence and delete its detail (the detail already lives in log.md).
-   - Update **Open Issues** — add anything new this phase surfaced, remove anything now resolved.
-   - Point **Next phase** at the next ROADMAP item and its plan file.
-   - Keep the whole file short. If it grows past ~60 lines you are duplicating log.md — move detail out. The top-of-file contract ("per-phase detail lives in log.md; this is a snapshot only") is the rule; honor it.
-11. Summarize what was built and which exit criteria were verified vs. which need manual testing by the user.
-````
-
 ## File: docs/design/handoffs/kanban-view/Kanban View.html
 ````html
 <!doctype html>
@@ -24208,6 +24216,1555 @@ No image assets. Icons are inline SVG (stroke-based, ~1.75px, round caps) — in
 > **Prototype structure note:** the single HTML file contains some superseded scaffolding (`App`, `KanbanCard`, `KanbanColumn`) left from iteration; the **rendered** path is `AppFinal` → `BoardWithDrag`, which is the source of truth for drag behavior and the card/column markup. Implement from `AppFinal`/`BoardWithDrag`; the standalone `KanbanCard`/`KanbanColumn` components are useful as a cleaner reference for the static card/column structure but their drag handlers are stubs.
 ````
 
+## File: docs/design/handoffs/share-modal/design_handoff_share_modal/Backdrop.jsx
+````javascript
+/* Backdrop.jsx — Simplified Draba timeline app chrome behind the share modal */
+
+const BD_MEMBERS = [
+  { id: 1, name: 'Lindsay K.', initials: 'LK', color: '#288C9B' },
+  { id: 2, name: 'Jen M.',     initials: 'JM', color: '#F29E4C' },
+  { id: 3, name: 'Brian R.',   initials: 'BR', color: '#9B59B6' },
+  { id: 4, name: 'Sam T.',     initials: 'ST', color: '#2ECC71' },
+];
+
+const BD_EVENTS = [
+  { id: 1, title: 'Q3 Campaign Launch', memberId: 1, color: '#288C9B', startCol: 0, span: 6 },
+  { id: 2, title: 'Brand Refresh',      memberId: 1, color: '#5BC0DE', startCol: 7, span: 4 },
+  { id: 3, title: 'Project Y',          memberId: 2, color: '#F29E4C', startCol: 3, span: 5 },
+  { id: 4, title: 'Contractor Review',  memberId: 2, color: '#5C6BC0', startCol: 9, span: 3 },
+  { id: 5, title: 'Task A',             memberId: 3, color: '#9B59B6', startCol: 0, span: 2 },
+  { id: 6, title: 'Task B',             memberId: 3, color: '#9B59B6', startCol: 5, span: 5 },
+  { id: 7, title: 'Onboarding',         memberId: 4, color: '#2ECC71', startCol: 1, span: 3 },
+  { id: 8, title: 'Integration Work',   memberId: 4, color: '#2ECC71', startCol: 6, span: 6 },
+];
+
+const BD_DAYS = ['Apr 28','Apr 29','Apr 30','May 1','May 2','May 5','May 6','May 7','May 8','May 9','May 12','May 13'];
+
+function BackdropIcon({ name, size = 18, color = 'currentColor', strokeWidth = 2 }) {
+  return <i data-lucide={name} style={{ width: size, height: size, color, strokeWidth }}></i>;
+}
+
+function Backdrop({ onShare }) {
+  const navItems = [
+    { icon: 'calendar-range', label: 'Timeline', active: true },
+    { icon: 'columns-3', label: 'Board', active: false },
+    { icon: 'calendar', label: 'Calendar', active: false },
+    { icon: 'users', label: 'Team', active: false },
+    { icon: 'settings', label: 'Settings', active: false },
+  ];
+
+  const COL_W = 92;
+  const ROW_H = 56;
+  const NAME_W = 150;
+
+  return (
+    <div style={{ display: 'flex', height: '100vh', overflow: 'hidden', background: 'var(--background)' }}>
+      {/* Sidebar */}
+      <aside style={{ width: 220, flexShrink: 0, background: 'var(--card)', borderRight: '1px solid var(--border)',
+        display: 'flex', flexDirection: 'column', padding: '18px 14px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 9, padding: '4px 6px', marginBottom: 22 }}>
+          <img src="assets/icon-teal.svg" alt="" style={{ width: 24, height: 24 }} />
+          <span style={{ fontSize: 18, fontWeight: 700, color: 'var(--foreground)', letterSpacing: '-0.01em' }}>Draba</span>
+        </div>
+        <nav style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+          {navItems.map(n => (
+            <div key={n.label} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 10px',
+              borderRadius: 'var(--radius-md)', cursor: 'pointer',
+              background: n.active ? 'var(--muted)' : 'transparent',
+              color: n.active ? 'var(--foreground)' : 'var(--muted-foreground)',
+              fontWeight: n.active ? 600 : 400, fontSize: 13.5 }}>
+              <BackdropIcon name={n.icon} size={17} strokeWidth={n.active ? 2.2 : 1.8} />
+              {n.label}
+            </div>
+          ))}
+        </nav>
+        <div style={{ marginTop: 'auto', display: 'flex', alignItems: 'center', gap: 9, padding: '8px 6px',
+          borderTop: '1px solid var(--border)', paddingTop: 14 }}>
+          <div style={{ width: 28, height: 28, borderRadius: '50%', background: '#F29E4C', color: '#fff',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontWeight: 700 }}>JM</div>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--foreground)' }}>Jen M.</div>
+            <div style={{ fontSize: 11, color: 'var(--muted-foreground)' }}>jen@acme.co</div>
+          </div>
+        </div>
+      </aside>
+
+      {/* Main */}
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+        {/* Top bar */}
+        <header style={{ height: 60, flexShrink: 0, borderBottom: '1px solid var(--border)', background: 'var(--card)',
+          display: 'flex', alignItems: 'center', padding: '0 22px', gap: 16 }}>
+          <div style={{ minWidth: 0 }}>
+            <h1 style={{ fontSize: 17, fontWeight: 700, color: 'var(--foreground)', lineHeight: 1.2 }}>Marketing timeline</h1>
+            <div style={{ fontSize: 11.5, color: 'var(--muted-foreground)', marginTop: 1 }}>Apr 28 – May 13 · 4 people</div>
+          </div>
+          <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 14 }}>
+            <div style={{ display: 'flex' }}>
+              {BD_MEMBERS.map((m, i) => (
+                <div key={m.id} title={m.name} style={{ width: 30, height: 30, borderRadius: '50%', background: m.color,
+                  color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontWeight: 700,
+                  border: '2px solid var(--card)', marginLeft: i === 0 ? 0 : -8 }}>{m.initials}</div>
+              ))}
+            </div>
+            <button onClick={onShare} style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 13.5, fontWeight: 600,
+              padding: '8px 16px', borderRadius: 'var(--radius-md)', border: 'none', cursor: 'pointer',
+              background: 'var(--secondary)', color: 'var(--secondary-foreground)' }}>
+              <BackdropIcon name="link" size={15} strokeWidth={2.2} />
+              Share
+            </button>
+          </div>
+        </header>
+
+        {/* Timeline grid */}
+        <div style={{ flex: 1, overflow: 'hidden', padding: '4px 0 0' }}>
+          <div style={{ minWidth: NAME_W + COL_W * BD_DAYS.length }}>
+            {/* Day header */}
+            <div style={{ display: 'flex', borderBottom: '1px solid var(--border)' }}>
+              <div style={{ width: NAME_W, flexShrink: 0 }}></div>
+              {BD_DAYS.map(d => (
+                <div key={d} style={{ width: COL_W, flexShrink: 0, padding: '10px 0', textAlign: 'center',
+                  fontSize: 11.5, fontWeight: 600, color: 'var(--muted-foreground)' }}>{d}</div>
+              ))}
+            </div>
+            {/* Rows */}
+            {BD_MEMBERS.map(m => (
+              <div key={m.id} style={{ display: 'flex', borderBottom: '1px solid var(--border)', position: 'relative', height: ROW_H }}>
+                <div style={{ width: NAME_W, flexShrink: 0, display: 'flex', alignItems: 'center', gap: 8, padding: '0 16px' }}>
+                  <div style={{ width: 24, height: 24, borderRadius: '50%', background: m.color, color: '#fff',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 9.5, fontWeight: 700, flexShrink: 0 }}>{m.initials}</div>
+                  <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{m.name}</span>
+                </div>
+                {/* grid cells */}
+                <div style={{ position: 'relative', flex: 1 }}>
+                  <div style={{ position: 'absolute', inset: 0, display: 'flex' }}>
+                    {BD_DAYS.map((d, i) => (
+                      <div key={i} style={{ width: COL_W, flexShrink: 0, borderRight: '1px solid var(--border)' }}></div>
+                    ))}
+                  </div>
+                  {BD_EVENTS.filter(e => e.memberId === m.id).map(e => (
+                    <div key={e.id} style={{ position: 'absolute', top: 10, height: ROW_H - 20,
+                      left: e.startCol * COL_W + 4, width: e.span * COL_W - 8,
+                      background: e.color, borderRadius: 'var(--radius-md)', display: 'flex', alignItems: 'center',
+                      padding: '0 10px', color: '#fff', fontSize: 12, fontWeight: 600, whiteSpace: 'nowrap',
+                      overflow: 'hidden', textOverflow: 'ellipsis', boxShadow: 'var(--shadow-sm)' }}>{e.title}</div>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+Object.assign(window, { Backdrop });
+````
+
+## File: docs/design/handoffs/share-modal/design_handoff_share_modal/colors_and_type.css
+````css
+/*
+ * Draba Design System — Colors & Typography
+ * Single source of truth for CSS custom properties.
+ * Framework-agnostic; reference these vars in Tailwind, plain CSS, or inline styles.
+ */
+
+/* ─── Google Fonts ──────────────────────────────────────────────────────────── */
+@import url('https://fonts.googleapis.com/css2?family=Open+Sans:wght@300;400;600;700&display=swap');
+
+/* ─── Base Tokens ───────────────────────────────────────────────────────────── */
+:root {
+  /* Brand palette */
+  --color-teal:       #288C9B;
+  --color-teal-light: #5BC0DE;
+  --color-amber:      #F29E4C;
+  --color-charcoal:   #343A40;
+  --color-off-white:  #F8F9FA;
+
+  /* Member colors (data, not theme tokens) */
+  --member-1-teal:    #288C9B;
+  --member-2-amber:   #F29E4C;
+  --member-3-sky:     #5BC0DE;
+  --member-4-emerald: #2ECC71;
+  --member-5-violet:  #9B59B6;
+  --member-6-rose:    #E74C3C;
+  --member-7-indigo:  #5C6BC0;
+  --member-8-lime:    #8BC34A;
+
+  /* ── Semantic light-mode tokens (shadcn HSL convention) ── */
+  --background:             hsl(210 17% 98%);   /* #F8F9FA */
+  --foreground:             hsl(210 10% 23%);   /* #343A40 */
+
+  --card:                   hsl(0 0% 100%);
+  --card-foreground:        hsl(210 10% 23%);
+
+  --popover:                hsl(0 0% 100%);
+  --popover-foreground:     hsl(210 10% 23%);
+
+  --primary:                hsl(188 59% 38%);   /* #288C9B */
+  --primary-foreground:     hsl(0 0% 100%);
+
+  --secondary:              hsl(30 87% 62%);    /* #F29E4C */
+  --secondary-foreground:   hsl(210 10% 23%);
+
+  --muted:                  hsl(210 14% 93%);
+  --muted-foreground:       hsl(210 10% 45%);
+
+  --accent:                 hsl(194 67% 61%);   /* #5BC0DE */
+  --accent-foreground:      hsl(210 10% 23%);
+
+  --destructive:            hsl(0 72% 51%);
+  --destructive-foreground: hsl(0 0% 100%);
+
+  --success:                hsl(145 63% 42%);
+  --success-foreground:     hsl(0 0% 100%);
+
+  --warning:                hsl(38 92% 50%);
+  --warning-foreground:     hsl(210 10% 23%);
+
+  --border:                 hsl(210 14% 89%);
+  --input:                  hsl(210 14% 89%);
+  --ring:                   hsl(188 59% 38%);
+
+  /* ── Radius ── */
+  --radius-sm:  4px;
+  --radius-md:  6px;
+  --radius-lg:  8px;
+  --radius-xl:  12px;
+  --radius-full: 9999px;
+
+  /* ── Shadows ── */
+  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.06);
+  --shadow-md: 0 4px 8px -1px rgb(0 0 0 / 0.10), 0 2px 4px -1px rgb(0 0 0 / 0.06);
+  --shadow-lg: 0 10px 24px -3px rgb(0 0 0 / 0.12), 0 4px 8px -2px rgb(0 0 0 / 0.06);
+
+  /* ── Spacing scale (4px base grid) ── */
+  --space-1:  4px;
+  --space-2:  8px;
+  --space-3:  12px;
+  --space-4:  16px;
+  --space-5:  20px;
+  --space-6:  24px;
+  --space-8:  32px;
+  --space-10: 40px;
+  --space-12: 48px;
+
+  /* ── Typography ── */
+  --font-sans: 'Open Sans', ui-sans-serif, system-ui, sans-serif;
+  --font-mono: ui-monospace, 'SFMono-Regular', 'Fira Code', monospace;
+
+  --font-weight-light:    300;
+  --font-weight-regular:  400;
+  --font-weight-semibold: 600;
+  --font-weight-bold:     700;
+
+  /* Type scale */
+  --text-xs:   12px;
+  --text-sm:   14px;
+  --text-base: 16px;
+  --text-lg:   18px;
+  --text-xl:   20px;
+  --text-2xl:  24px;
+  --text-3xl:  30px;
+
+  --leading-tight:  1.25;
+  --leading-normal: 1.5;
+  --leading-relaxed: 1.625;
+}
+
+/* ─── Dark Mode Tokens ──────────────────────────────────────────────────────── */
+.dark {
+  --background:             hsl(210 15% 11%);
+  --foreground:             hsl(210 17% 93%);
+
+  --card:                   hsl(210 15% 15%);
+  --card-foreground:        hsl(210 17% 93%);
+
+  --popover:                hsl(210 15% 15%);
+  --popover-foreground:     hsl(210 17% 93%);
+
+  --primary:                hsl(188 55% 52%);
+  --primary-foreground:     hsl(210 15% 10%);
+
+  --secondary:              hsl(30 80% 60%);
+  --secondary-foreground:   hsl(210 15% 10%);
+
+  --muted:                  hsl(210 15% 20%);
+  --muted-foreground:       hsl(210 15% 58%);
+
+  --accent:                 hsl(194 60% 55%);
+  --accent-foreground:      hsl(210 15% 10%);
+
+  --destructive:            hsl(0 63% 45%);
+  --destructive-foreground: hsl(0 0% 100%);
+
+  --success:                hsl(145 55% 40%);
+  --success-foreground:     hsl(0 0% 100%);
+
+  --warning:                hsl(38 85% 55%);
+  --warning-foreground:     hsl(210 15% 10%);
+
+  --border:                 hsl(210 15% 22%);
+  --input:                  hsl(210 15% 22%);
+  --ring:                   hsl(188 55% 52%);
+}
+
+/* ─── Semantic Element Styles ───────────────────────────────────────────────── */
+body {
+  font-family: var(--font-sans);
+  font-size: var(--text-sm);
+  font-weight: var(--font-weight-regular);
+  line-height: var(--leading-normal);
+  color: var(--foreground);
+  background-color: var(--background);
+  -webkit-font-smoothing: antialiased;
+}
+
+h1 {
+  font-size: var(--text-2xl);
+  font-weight: var(--font-weight-bold);
+  line-height: var(--leading-tight);
+  color: var(--foreground);
+}
+
+h2 {
+  font-size: var(--text-lg);
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--leading-tight);
+  color: var(--foreground);
+}
+
+h3 {
+  font-size: var(--text-base);
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--leading-tight);
+  color: var(--foreground);
+}
+
+p {
+  font-size: var(--text-sm);
+  font-weight: var(--font-weight-regular);
+  line-height: var(--leading-relaxed);
+  color: var(--foreground);
+}
+
+small, .caption {
+  font-size: var(--text-xs);
+  font-weight: var(--font-weight-regular);
+  color: var(--muted-foreground);
+}
+
+a {
+  color: var(--primary);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+code, pre {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+
+/* ─── Utility Classes ───────────────────────────────────────────────────────── */
+.text-primary    { color: var(--primary); }
+.text-secondary  { color: var(--secondary); }
+.text-muted      { color: var(--muted-foreground); }
+.text-destructive{ color: var(--destructive); }
+.text-success    { color: var(--success); }
+
+.bg-primary   { background-color: var(--primary); color: var(--primary-foreground); }
+.bg-secondary { background-color: var(--secondary); color: var(--secondary-foreground); }
+.bg-muted     { background-color: var(--muted); }
+.bg-card      { background-color: var(--card); }
+
+.rounded-sm   { border-radius: var(--radius-sm); }
+.rounded-md   { border-radius: var(--radius-md); }
+.rounded-lg   { border-radius: var(--radius-lg); }
+.rounded-full { border-radius: var(--radius-full); }
+
+.shadow-sm { box-shadow: var(--shadow-sm); }
+.shadow-md { box-shadow: var(--shadow-md); }
+.shadow-lg { box-shadow: var(--shadow-lg); }
+
+.border { border: 1px solid var(--border); }
+````
+
+## File: docs/design/handoffs/share-modal/design_handoff_share_modal/README.md
+````markdown
+# Handoff: Share view modal
+
+## Overview
+A "Share this view" modal for **Draba** (a team timeline / coordination tool). Triggered from the **Share** button in any view's top bar. The modal lets a user:
+
+- See all existing share links for the current view, who created each, and metadata (URL, description, date, view count, password state).
+- Create a new share link with a title, optional description, and optional password protection.
+- Copy a link to the clipboard.
+- Delete a share link — **admins can delete any share; regular members can delete only their own**.
+
+The prototype renders the modal over a simplified Draba timeline so it reads in context.
+
+---
+
+## About the Design Files
+The files in this bundle are **design references created in HTML/React (via in-browser Babel)** — prototypes that show the intended look and behavior. They are **not production code to copy directly.**
+
+Your task is to **recreate this design in the target codebase using its established environment and patterns.** Draba's stack (per its design system) is **React + Tailwind CSS v4 + shadcn/ui + lucide-react**. Use the codebase's existing components (Dialog, Button, Input, Switch, Avatar, Badge, etc.) and design tokens rather than porting the inline styles. If no front-end environment exists yet, choose the most appropriate framework and implement there.
+
+The prototype's inline styles reference CSS custom properties from `colors_and_type.css` — that file is the **single source of truth for tokens** and maps 1:1 onto the codebase's Tailwind theme.
+
+---
+
+## Fidelity
+**High-fidelity.** Final colors, typography, spacing, radii, and interaction states are all intentional. Recreate the modal UI pixel-accurately using the codebase's existing component library and the tokens in `colors_and_type.css`. The **backdrop** (sidebar + timeline) is contextual scaffolding only — do **not** implement it; it already exists in the app.
+
+---
+
+## Screens / Views
+
+The feature is a single modal with several internal states. All structural values below are from `ShareModal.jsx`.
+
+### 1. Modal shell
+- **Trigger:** top-bar **Share** button (amber `--secondary`, link icon, label "Share").
+- **Overlay:** fixed, full-viewport, `background: rgb(20 28 33 / 0.55)`, `backdrop-filter: blur(2px)`, centered, 24px padding. Click on overlay (outside the card) closes. **Esc** also closes.
+- **Card:** `width: min(580px, 100%)`, `max-height: 88vh`, `background: var(--card)`, `border-radius: var(--radius-xl)` (12px), `box-shadow: var(--shadow-lg)`, `overflow: hidden`, flex column. Entrance animation: fade + `translateY(8px) scale(.98)` → none over 180ms, `cubic-bezier(.2,.7,.3,1)`.
+- **Three fixed regions** (header, section bar, footer) with a **scrollable body** between them.
+
+**Header** (padding 18px 20px, bottom border `1px var(--border)`):
+- Leading icon tile: 38×38, `radius-md` (6px), `background: hsl(188 59% 38% / 0.12)`, `color: var(--primary)`, lucide `link` icon (19px, stroke 2.2).
+- Title `h2`: "Share this view" — 17px / 700 / `var(--foreground)`.
+- Subtitle: 12.5px / `var(--muted-foreground)`, with an 8×8 amber square (`#F29E4C`, radius 2) preceding text: "Marketing timeline · anyone with a link can view". (View name is dynamic; replace "Marketing timeline" with the current view.)
+- Close button: 30×30, `radius-md`, `background: var(--muted)`, lucide `x` (16px), `color: var(--muted-foreground)`.
+
+**Section bar** (padding 13px 20px 11px, flex row):
+- Eyebrow label "ACTIVE LINKS" — 11px / 700 / `--muted-foreground` / uppercase / letter-spacing 0.06em.
+- Count chip: pill, `background: var(--muted)`, 11px / 700, min-width 20, centered — shows number of shares.
+- Right-aligned **New share** button (hidden while the add-form is open): primary, `background: var(--primary)`, `color: var(--primary-foreground)`, 12.5px / 600, padding 6px 13px, `radius-md`, lucide `plus` (14px, stroke 2.4).
+
+**Body** (flex column, `gap: 12px`, padding `0 20px 20px`, `min-height: 120px`, `overflow-y: auto`): contains the add-form (when open) at the top, then the share rows, or the empty state.
+
+**Footer** (padding 13px 20px, top border):
+- Left: role hint — lucide `shield-check` (admin, `--primary`) or `user` (member); text 12px / `--muted-foreground`: "Admin · you can manage every share" OR "Member · you can manage only your own shares".
+- Right: **Done** button — outline (`1px var(--border)`, `background: var(--card)`), 13px / 600, padding 8px 20px, `radius-md`. Closes the modal.
+
+### 2. Share row (list item)
+Card: `border: 1px var(--border)`, `radius-lg` (8px), `background: var(--card)`, padding 14, `box-shadow: var(--shadow-sm)`, `position: relative`.
+
+Structure:
+- **Top row** (flex, gap 10, align flex-start):
+  - Type tile: 32×32, `radius-md`. Protected → `background: hsl(30 87% 62% / 0.16)`, `color: var(--secondary)`, lucide `lock`. Unprotected → `background: hsl(188 59% 38% / 0.12)`, `color: var(--primary)`, lucide `link`. (16px, stroke 2.2.)
+  - Main column (flex 1):
+    - Title 14px / 600 / `--foreground`. If protected, a **password badge** follows: inline pill, 11px / 600, `background: hsl(30 87% 62% / 0.22)`, `radius-full`, lucide `lock` 10px + text "password".
+    - Description `p`: 12.5px / `--muted-foreground` / line-height 1.45, margin-top 3.
+  - **Delete button** (only rendered when the current user may delete this share — see Permissions): 28×28, `radius-md`, transparent, lucide `trash-2` (15px), `color: var(--muted-foreground)`. Hover → `background: hsl(0 72% 51% / 0.1)`, `color: var(--destructive)`.
+- **URL row** (flex, gap 8, margin-top 11):
+  - URL field: flex 1, `background: var(--muted)`, `radius-md`, padding 7px 11px, `font-family: var(--font-mono)`, 12.5px, with a leading lucide `link-2` (13px, `--muted-foreground`). Text ellipsizes. Value pattern: `draba.app/v/<slug>`.
+  - **Copy button**: outline, 12.5px / 600, padding 7px 12px, `radius-md`, lucide `copy` + "Copy". On click → copies `https://<url>` to clipboard and switches for ~1600ms to: `border: var(--success)`, `background: hsl(145 63% 42% / 0.12)`, `color: var(--success)`, lucide `check` + "Copied".
+- **Footer meta** (flex, gap 8, margin-top 11, 12px / `--muted-foreground`): creator avatar (20px circle, member color, white initials) + creator name (600, `--foreground`); if it's the current user's share append " · you" in muted regular; then "•" separators before date and a `eye` icon + "N views".
+
+**Inline delete confirmation** (overlays the row, `position: absolute; inset: 0`): `background: var(--card)`, `border: 1px var(--destructive)`, `radius-lg`, centered content. Trash tile (30×30, `hsl(0 72% 51% / 0.1)`, `--destructive`) + heading "Delete this share?" (13.5px / 600) + body "Anyone with the link will immediately lose access. This can't be undone." (12px / muted). Actions right-aligned: **Cancel** (outline) and **Delete link** (`background: var(--destructive)`, `color: var(--destructive-foreground)`).
+
+### 3. Add-share form (inline, expands at top of body)
+Card: `border: 1.5px solid var(--primary)`, `radius-lg`, `background: var(--card)`, padding 16, plus focus glow `box-shadow: 0 0 0 3px hsl(188 59% 38% / 0.08)`. Auto-focuses the title input on open.
+
+- Header: lucide `plus-circle` (16px, `--primary`) + "New share link" (13.5px / 700).
+- **Title** field (required): label "Title" (11px / 600 / muted). Input: full width, 13px, padding 8px 11px, `border: 1px var(--input)`, `radius-md`, `background: var(--card)`. Focus → `border-color: var(--primary)` + `box-shadow: 0 0 0 2px hsl(188 59% 38% / 0.2)`. Placeholder "e.g. Acme stakeholder view".
+- **Description** field (optional): label "Description · optional". `<textarea rows=2>`, same styling, `resize: vertical`. Placeholder "What's this link for, and who is it shared with?".
+- **Password protect** block: bordered container (`1px var(--border)`, `radius-md`).
+  - Row: lock tile (28×28, `var(--muted)`) + title "Password protect" (13px / 600) + subtext "Require a password to open the link" (11.5px / muted) + a **toggle switch** on the right.
+  - **Switch**: 40×22 pill button, `role="switch"`, `aria-checked`. Off → `background: var(--border)`, knob at left:2. On → `background: var(--primary)`, knob at left:20. Knob: 18×18 white circle, `box-shadow: var(--shadow-sm)`, `transition: left .15s`.
+  - When **on**, a password sub-field appears (top border separator): input group with lucide `key-round` leading icon, `type=password`, placeholder "Set a password", and a trailing show/hide button toggling lucide `eye` / `eye-off`.
+- **Actions row** (margin-top 16):
+  - Left (margin-right auto): "Sharing as <current user>" with a 20px avatar.
+  - **Cancel** (outline) — collapses the form.
+  - **Create link** (primary, lucide `link` + "Create link"). **Disabled** (opacity 0.45, `cursor: not-allowed`) until the title is non-empty AND (password is off OR a password has been entered).
+
+On submit: prepend a new share to the list with `creatorId = current user`, `created = "Today"`, a freshly generated 6-char slug, `views = 0`, then collapse the form and scroll the body to top.
+
+### 4. Empty state (no shares, form closed)
+Centered in body: dashed-border container (`1px dashed var(--border)`, `radius-lg`, padding 36px 20px). 48×48 `--muted` tile with lucide `link` (22px) → heading "No share links yet" (14px / 600) → body "Create a link to let people outside your team view this timeline." (12.5px / muted, max-width 280) → primary **Create share link** button (lucide `plus` + label).
+
+---
+
+## Interactions & Behavior
+- **Open/close:** Share button opens; overlay click, close (×), Done, and **Esc** all close.
+- **Copy:** writes `https://draba.app/v/<slug>` to clipboard (`navigator.clipboard.writeText`), shows success state for 1600ms, then reverts.
+- **Add flow:** New share → inline form (title auto-focused) → Create link validates → prepends row → form collapses → body scrolls to top.
+- **Password toggle:** reveals/hides the password sub-field; show/hide button switches input type between `password` and `text`.
+- **Delete flow:** trash icon → inline confirm overlay on that row → Delete link removes it, or Cancel dismisses.
+- **Validation:** Create link disabled unless `title.trim()` non-empty and (password off OR `password.trim()` non-empty).
+- **Slug generation:** 6 chars from alphabet `abcdefghjkmnpqrstuvwxyz23456789` (ambiguous chars omitted).
+- **Animations:** overlay fade-in 150ms; card pop 180ms `cubic-bezier(.2,.7,.3,1)`; switch knob 150ms; copy state 150ms. Keep functional, no springs/bounces (Draba motion guidance).
+
+## State Management
+Per modal instance:
+- `shares: Share[]` — the list. `Share = { id, title, desc, protected, creatorId, created, slug, views }`.
+- `adding: boolean` — whether the add-form is open.
+- Per row: `copied: boolean` (transient), `confirming: boolean` (delete confirm).
+- Add-form local: `title`, `desc`, `pwOn`, `pw`, `showPw`.
+
+Inputs the modal needs from the app:
+- `currentUserId` (and current user's name/initials/color) — the signed-in member.
+- `isAdmin: boolean` — drives delete permission.
+- Current view name + accent color for the header subtitle.
+- Real data: `GET` shares for the view; `POST` create (returns server-generated slug/url); `DELETE` a share. The prototype mocks all of this in memory.
+
+### Permissions (core requirement)
+`canDelete(share) = isAdmin || share.creatorId === currentUserId`.
+The delete affordance is **not rendered** when `canDelete` is false. Enforce the same rule server-side on the DELETE endpoint — the UI gate is not sufficient.
+
+## Design Tokens
+All defined in `colors_and_type.css` (`:root` + `.dark` overrides). Key ones used here:
+
+- **Colors:** `--primary` (#288C9B teal), `--primary-foreground`; `--secondary` (#F29E4C amber), `--secondary-foreground`; `--success` (hsl 145 63% 42%); `--destructive` (hsl 0 72% 51%), `--destructive-foreground`; `--card`, `--foreground`, `--muted`, `--muted-foreground`, `--border`, `--input`, `--background`.
+- **Translucent fills used inline:** `hsl(188 59% 38% / 0.12)` (teal tint), `hsl(30 87% 62% / 0.16 | 0.22)` (amber tint), `hsl(0 72% 51% / 0.1)` (red tint), `hsl(145 63% 42% / 0.12)` (green tint).
+- **Member colors (data, not theme):** teal `#288C9B`, amber `#F29E4C`, sky `#5BC0DE`, emerald `#2ECC71`, violet `#9B59B6`, rose `#E74C3C`, indigo `#5C6BC0`, lime `#8BC34A`.
+- **Radii:** `--radius-md` 6, `--radius-lg` 8, `--radius-xl` 12, `--radius-full` 9999.
+- **Shadows:** `--shadow-sm`, `--shadow-md`, `--shadow-lg`.
+- **Type:** `--font-sans` Open Sans; `--font-mono` for URLs. Weights 400/600/700. Sizes used: 11, 11.5, 12, 12.5, 13, 13.5, 14, 17px.
+- **Spacing:** 4px base grid (`--space-*`).
+- **Dark mode:** toggling `.dark` on the root flips every token — the modal needs no per-component dark styling.
+
+## Assets
+- **Icons:** [lucide](https://lucide.dev) (`lucide-react` in the app). Used: `link`, `link-2`, `lock`, `key-round`, `copy`, `check`, `eye`, `eye-off`, `trash-2`, `plus`, `plus-circle`, `x`, `shield-check`, `user`. Backdrop only: `calendar-range`, `columns-3`, `calendar`, `users`, `settings`.
+- **Brand logo:** `assets/icon-teal.svg` (and `icon-color.svg`) from the Draba design system — used in the backdrop sidebar only.
+- No raster images.
+
+## Files
+- `Share Modal.html` — entry point; mounts the app, applies dark mode, wires the Tweaks panel (role / state / dark — a prototyping aid, not part of the feature).
+- `ShareModal.jsx` — **the deliverable.** Modal shell, `ShareRow`, `AddShareForm`, empty state, permission logic, mock data (`SM_MEMBERS`, `SHARES_INIT`).
+- `Backdrop.jsx` — contextual Draba timeline behind the modal. **Reference only — do not implement.**
+- `tweaks-panel.jsx` — prototype tooling. Ignore for production.
+- `colors_and_type.css` — design tokens (maps to the codebase's Tailwind theme).
+- `assets/` — brand logo SVGs (backdrop only).
+
+To preview: open `Share Modal.html` in a browser. Use the Tweaks panel (toolbar) to switch role (admin/member), populated/empty, and light/dark.
+````
+
+## File: docs/design/handoffs/share-modal/design_handoff_share_modal/Share Modal.html
+````html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Draba — Share view modal</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="colors_and_type.css">
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/lucide@0.344.0/dist/umd/lucide.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body, #root { height: 100%; }
+  body { font-family: var(--font-sans); background: var(--background); color: var(--foreground); -webkit-font-smoothing: antialiased; }
+  button, input, textarea, select { font-family: var(--font-sans); }
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 99px; }
+  @keyframes sm-fade { from { opacity: 0; } to { opacity: 1; } }
+  @keyframes sm-pop { from { opacity: 0; transform: translateY(8px) scale(.98); } to { opacity: 1; transform: none; } }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" src="tweaks-panel.jsx"></script>
+<script type="text/babel" src="Backdrop.jsx"></script>
+<script type="text/babel" src="ShareModal.jsx"></script>
+<script type="text/babel">
+const { useState, useEffect } = React;
+
+const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
+  "role": "member",
+  "dark": true,
+  "state": "populated"
+}/*EDITMODE-END*/;
+
+function App() {
+  const [t, setTweak] = useTweaks(TWEAK_DEFAULTS);
+  const [open, setOpen] = useState(true);
+
+  // Apply dark mode to the root element
+  useEffect(() => {
+    document.documentElement.classList.toggle('dark', !!t.dark);
+  }, [t.dark]);
+
+  // Re-render lucide icons after each paint
+  useEffect(() => { if (window.lucide) lucide.createIcons(); });
+
+  const isAdmin = t.role === 'admin';
+  const seedEmpty = t.state === 'empty';
+  // current user is always Jen M. (id 2) — owns the "All-hands public link"
+  const currentUserId = 2;
+
+  return (
+    <React.Fragment>
+      <Backdrop onShare={() => setOpen(true)} />
+      {open && (
+        <ShareModal
+          key={(isAdmin ? 'a' : 'm') + seedEmpty}
+          isAdmin={isAdmin}
+          currentUserId={currentUserId}
+          seedEmpty={seedEmpty}
+          onClose={() => setOpen(false)}
+        />
+      )}
+
+      {/* Re-open affordance when closed */}
+      {!open && (
+        <button onClick={() => setOpen(true)} style={{ position: 'fixed', bottom: 24, left: '50%', transform: 'translateX(-50%)',
+          zIndex: 90, display: 'flex', alignItems: 'center', gap: 8, fontSize: 13.5, fontWeight: 600, padding: '10px 20px',
+          borderRadius: 'var(--radius-full)', border: 'none', cursor: 'pointer', background: 'var(--secondary)',
+          color: 'var(--secondary-foreground)', boxShadow: 'var(--shadow-lg)' }}>
+          <i data-lucide="link" style={{ width: 15, height: 15, strokeWidth: 2.2 }}></i> Reopen share modal
+        </button>
+      )}
+
+      <TweaksPanel>
+        <TweakSection label="Permissions" />
+        <TweakRadio label="Your role" value={t.role} options={['admin', 'member']}
+          onChange={(v) => setTweak('role', v)} />
+        <TweakSection label="Content" />
+        <TweakRadio label="Links" value={t.state} options={['populated', 'empty']}
+          onChange={(v) => setTweak('state', v)} />
+        <TweakSection label="Appearance" />
+        <TweakToggle label="Dark mode" value={t.dark} onChange={(v) => setTweak('dark', v)} />
+      </TweaksPanel>
+    </React.Fragment>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
+````
+
+## File: docs/design/handoffs/share-modal/design_handoff_share_modal/ShareModal.jsx
+````javascript
+/* ShareModal.jsx — Draba "Share this view" modal */
+
+const SM_MEMBERS = {
+  1: { id: 1, name: 'Lindsay K.', initials: 'LK', color: '#288C9B' },
+  2: { id: 2, name: 'Jen M.',     initials: 'JM', color: '#F29E4C' },
+  3: { id: 3, name: 'Brian R.',   initials: 'BR', color: '#9B59B6' },
+  4: { id: 4, name: 'Sam T.',     initials: 'ST', color: '#2ECC71' },
+};
+
+const SHARES_INIT = [
+  { id: 'a', title: 'Acme stakeholder view', creatorId: 1, created: 'Apr 22',
+    desc: 'Read-only status for the weekly Acme client review. Updated automatically.',
+    slug: 'k2p9xq', views: 48, protected: true },
+  { id: 'b', title: 'All-hands public link', creatorId: 2, created: 'Apr 28',
+    desc: 'Public link embedded in the company all-hands deck.',
+    slug: 'mktg-q3', views: 126, protected: false },
+  { id: 'c', title: 'Design contractor view', creatorId: 3, created: 'May 1',
+    desc: 'Scoped view for the two external design contractors.',
+    slug: 'c7m4tb', views: 9, protected: true },
+];
+
+const SMIcon = ({ name, size = 16, color = 'currentColor', strokeWidth = 2 }) =>
+  <i data-lucide={name} style={{ width: size, height: size, color, strokeWidth }}></i>;
+
+function makeSlug() {
+  const c = 'abcdefghjkmnpqrstuvwxyz23456789';
+  return Array.from({ length: 6 }, () => c[Math.floor(Math.random() * c.length)]).join('');
+}
+
+function MiniAvatar({ member, size = 22 }) {
+  return (
+    <div style={{ width: size, height: size, borderRadius: '50%', background: member.color, color: '#fff',
+      display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: Math.round(size * 0.4),
+      fontWeight: 700, flexShrink: 0 }}>{member.initials}</div>
+  );
+}
+
+/* ── A single share row ──────────────────────────────────────────────── */
+function ShareRow({ share, canDelete, isOwn, onDelete }) {
+  const [copied, setCopied] = React.useState(false);
+  const [confirming, setConfirming] = React.useState(false);
+  const creator = SM_MEMBERS[share.creatorId];
+  const url = `draba.app/v/${share.slug}`;
+
+  function copy() {
+    setCopied(true);
+    if (navigator.clipboard) navigator.clipboard.writeText('https://' + url).catch(() => {});
+    setTimeout(() => setCopied(false), 1600);
+  }
+
+  return (
+    <div style={{ position: 'relative', border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)',
+      background: 'var(--card)', padding: 14, boxShadow: 'var(--shadow-sm)' }}>
+      {/* Top: title + actions */}
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+        <div style={{ width: 32, height: 32, borderRadius: 'var(--radius-md)', flexShrink: 0,
+          background: share.protected ? 'hsl(30 87% 62% / 0.16)' : 'hsl(188 59% 38% / 0.12)',
+          color: share.protected ? 'var(--secondary)' : 'var(--primary)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <SMIcon name={share.protected ? 'lock' : 'link'} size={16} strokeWidth={2.2} />
+        </div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--foreground)' }}>{share.title}</span>
+            {share.protected && (
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11, fontWeight: 600,
+                color: 'var(--secondary-foreground)', background: 'hsl(30 87% 62% / 0.22)', padding: '1px 8px',
+                borderRadius: 'var(--radius-full)' }}>
+                <SMIcon name="lock" size={10} strokeWidth={2.4} /> password
+              </span>
+            )}
+          </div>
+          <p style={{ fontSize: 12.5, color: 'var(--muted-foreground)', marginTop: 3, lineHeight: 1.45 }}>{share.desc}</p>
+        </div>
+        {canDelete && (
+          <button onClick={() => setConfirming(true)} title="Delete share"
+            style={{ width: 28, height: 28, flexShrink: 0, borderRadius: 'var(--radius-md)', border: 'none',
+              background: 'transparent', color: 'var(--muted-foreground)', cursor: 'pointer',
+              display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+            onMouseEnter={e => { e.currentTarget.style.background = 'hsl(0 72% 51% / 0.1)'; e.currentTarget.style.color = 'var(--destructive)'; }}
+            onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'var(--muted-foreground)'; }}>
+            <SMIcon name="trash-2" size={15} strokeWidth={2} />
+          </button>
+        )}
+      </div>
+
+      {/* URL row */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 11 }}>
+        <div style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: 8, padding: '7px 11px',
+          background: 'var(--muted)', borderRadius: 'var(--radius-md)', fontFamily: 'var(--font-mono)',
+          fontSize: 12.5, color: 'var(--foreground)' }}>
+          <SMIcon name="link-2" size={13} color="var(--muted-foreground)" strokeWidth={2} />
+          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{url}</span>
+        </div>
+        <button onClick={copy} style={{ display: 'flex', alignItems: 'center', gap: 5, flexShrink: 0, fontSize: 12.5,
+          fontWeight: 600, padding: '7px 12px', borderRadius: 'var(--radius-md)', cursor: 'pointer',
+          border: '1px solid ' + (copied ? 'var(--success)' : 'var(--border)'),
+          background: copied ? 'hsl(145 63% 42% / 0.12)' : 'var(--card)',
+          color: copied ? 'var(--success)' : 'var(--foreground)', transition: 'all .15s' }}>
+          <SMIcon name={copied ? 'check' : 'copy'} size={13} strokeWidth={2.2} />
+          {copied ? 'Copied' : 'Copy'}
+        </button>
+      </div>
+
+      {/* Footer meta */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 11, fontSize: 12, color: 'var(--muted-foreground)' }}>
+        <MiniAvatar member={creator} size={20} />
+        <span style={{ color: 'var(--foreground)', fontWeight: 600 }}>{creator.name}{isOwn && <span style={{ color: 'var(--muted-foreground)', fontWeight: 400 }}> · you</span>}</span>
+        <span style={{ opacity: 0.5 }}>•</span>
+        <span>{share.created}</span>
+        <span style={{ opacity: 0.5 }}>•</span>
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+          <SMIcon name="eye" size={12} strokeWidth={2} />{share.views} views
+        </span>
+      </div>
+
+      {/* Inline delete confirm */}
+      {confirming && (
+        <div style={{ position: 'absolute', inset: 0, borderRadius: 'var(--radius-lg)', background: 'var(--card)',
+          border: '1px solid var(--destructive)', display: 'flex', flexDirection: 'column', justifyContent: 'center',
+          padding: '14px 16px', gap: 10 }}>
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+            <div style={{ width: 30, height: 30, flexShrink: 0, borderRadius: 'var(--radius-md)', background: 'hsl(0 72% 51% / 0.1)',
+              color: 'var(--destructive)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <SMIcon name="trash-2" size={15} strokeWidth={2.2} />
+            </div>
+            <div>
+              <div style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--foreground)' }}>Delete this share?</div>
+              <div style={{ fontSize: 12, color: 'var(--muted-foreground)', marginTop: 2 }}>Anyone with the link will immediately lose access. This can't be undone.</div>
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+            <button onClick={() => setConfirming(false)} style={{ fontSize: 12.5, fontWeight: 600, padding: '6px 14px',
+              borderRadius: 'var(--radius-md)', border: '1px solid var(--border)', background: 'var(--card)',
+              color: 'var(--foreground)', cursor: 'pointer' }}>Cancel</button>
+            <button onClick={() => onDelete(share.id)} style={{ fontSize: 12.5, fontWeight: 600, padding: '6px 14px',
+              borderRadius: 'var(--radius-md)', border: 'none', background: 'var(--destructive)',
+              color: 'var(--destructive-foreground)', cursor: 'pointer' }}>Delete link</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ── The add-share inline form ───────────────────────────────────────── */
+function AddShareForm({ currentUser, onCreate, onCancel }) {
+  const [title, setTitle] = React.useState('');
+  const [desc, setDesc] = React.useState('');
+  const [pwOn, setPwOn] = React.useState(false);
+  const [pw, setPw] = React.useState('');
+  const [showPw, setShowPw] = React.useState(false);
+  const titleRef = React.useRef(null);
+
+  React.useEffect(() => { if (titleRef.current) titleRef.current.focus(); }, []);
+
+  const valid = title.trim().length > 0 && (!pwOn || pw.trim().length > 0);
+  const inputBase = { width: '100%', fontSize: 13, color: 'var(--foreground)', padding: '8px 11px',
+    border: '1px solid var(--input)', borderRadius: 'var(--radius-md)', background: 'var(--card)',
+    outline: 'none', fontFamily: 'var(--font-sans)' };
+  const labelStyle = { fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', marginBottom: 5,
+    display: 'block', letterSpacing: '0.02em' };
+
+  function submit() {
+    if (!valid) return;
+    onCreate({ title: title.trim(), desc: desc.trim() || 'No description', protected: pwOn });
+  }
+
+  return (
+    <div style={{ border: '1.5px solid var(--primary)', borderRadius: 'var(--radius-lg)', background: 'var(--card)',
+      padding: 16, boxShadow: '0 0 0 3px hsl(188 59% 38% / 0.08)' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14 }}>
+        <SMIcon name="plus-circle" size={16} color="var(--primary)" strokeWidth={2.2} />
+        <span style={{ fontSize: 13.5, fontWeight: 700, color: 'var(--foreground)' }}>New share link</span>
+      </div>
+
+      <div style={{ marginBottom: 12 }}>
+        <label style={labelStyle}>Title</label>
+        <input ref={titleRef} value={title} onChange={e => setTitle(e.target.value)} placeholder="e.g. Acme stakeholder view"
+          style={inputBase}
+          onFocus={e => { e.target.style.borderColor = 'var(--primary)'; e.target.style.boxShadow = '0 0 0 2px hsl(188 59% 38% / 0.2)'; }}
+          onBlur={e => { e.target.style.borderColor = 'var(--input)'; e.target.style.boxShadow = 'none'; }} />
+      </div>
+
+      <div style={{ marginBottom: 12 }}>
+        <label style={labelStyle}>Description <span style={{ fontWeight: 400, textTransform: 'none' }}>· optional</span></label>
+        <textarea value={desc} onChange={e => setDesc(e.target.value)} rows={2} placeholder="What's this link for, and who is it shared with?"
+          style={{ ...inputBase, resize: 'vertical', lineHeight: 1.5 }}
+          onFocus={e => { e.target.style.borderColor = 'var(--primary)'; e.target.style.boxShadow = '0 0 0 2px hsl(188 59% 38% / 0.2)'; }}
+          onBlur={e => { e.target.style.borderColor = 'var(--input)'; e.target.style.boxShadow = 'none'; }} />
+      </div>
+
+      {/* Password protect */}
+      <div style={{ border: '1px solid var(--border)', borderRadius: 'var(--radius-md)', overflow: 'hidden' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 12px' }}>
+          <div style={{ width: 28, height: 28, flexShrink: 0, borderRadius: 'var(--radius-md)',
+            background: 'var(--muted)', color: 'var(--muted-foreground)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <SMIcon name="lock" size={14} strokeWidth={2} />
+          </div>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)' }}>Password protect</div>
+            <div style={{ fontSize: 11.5, color: 'var(--muted-foreground)' }}>Require a password to open the link</div>
+          </div>
+          {/* toggle */}
+          <button onClick={() => setPwOn(v => !v)} role="switch" aria-checked={pwOn}
+            style={{ width: 40, height: 22, flexShrink: 0, borderRadius: 'var(--radius-full)', border: 'none', cursor: 'pointer',
+              background: pwOn ? 'var(--primary)' : 'var(--border)', position: 'relative', transition: 'background .15s', padding: 0 }}>
+            <span style={{ position: 'absolute', top: 2, left: pwOn ? 20 : 2, width: 18, height: 18, borderRadius: '50%',
+              background: '#fff', transition: 'left .15s', boxShadow: 'var(--shadow-sm)' }}></span>
+          </button>
+        </div>
+        {pwOn && (
+          <div style={{ padding: '0 12px 12px', borderTop: '1px solid var(--border)', paddingTop: 12 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'var(--card)',
+              border: '1px solid var(--input)', borderRadius: 'var(--radius-md)', padding: '0 10px' }}>
+              <SMIcon name="key-round" size={14} color="var(--muted-foreground)" strokeWidth={2} />
+              <input value={pw} onChange={e => setPw(e.target.value)} type={showPw ? 'text' : 'password'} placeholder="Set a password"
+                style={{ flex: 1, fontSize: 13, color: 'var(--foreground)', padding: '8px 0', border: 'none', outline: 'none',
+                  background: 'transparent', fontFamily: 'var(--font-sans)' }} />
+              <button onClick={() => setShowPw(v => !v)} style={{ border: 'none', background: 'transparent', cursor: 'pointer',
+                color: 'var(--muted-foreground)', display: 'flex', padding: 4 }}>
+                <SMIcon name={showPw ? 'eye-off' : 'eye'} size={14} strokeWidth={2} />
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Actions */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 16 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginRight: 'auto', fontSize: 12, color: 'var(--muted-foreground)' }}>
+          <MiniAvatar member={currentUser} size={20} />
+          <span>Sharing as {currentUser.name}</span>
+        </div>
+        <button onClick={onCancel} style={{ fontSize: 13, fontWeight: 600, padding: '8px 16px', borderRadius: 'var(--radius-md)',
+          border: '1px solid var(--border)', background: 'var(--card)', color: 'var(--foreground)', cursor: 'pointer' }}>Cancel</button>
+        <button onClick={submit} disabled={!valid}
+          style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, fontWeight: 600, padding: '8px 18px',
+            borderRadius: 'var(--radius-md)', border: 'none', cursor: valid ? 'pointer' : 'not-allowed',
+            background: 'var(--primary)', color: 'var(--primary-foreground)', opacity: valid ? 1 : 0.45 }}>
+          <SMIcon name="link" size={14} strokeWidth={2.2} /> Create link
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ── The modal shell ─────────────────────────────────────────────────── */
+function ShareModal({ isAdmin, currentUserId, seedEmpty, onClose }) {
+  const currentUser = SM_MEMBERS[currentUserId];
+  const [shares, setShares] = React.useState(seedEmpty ? [] : SHARES_INIT);
+  const [adding, setAdding] = React.useState(seedEmpty);
+  const bodyRef = React.useRef(null);
+
+  // keep shares in sync when seedEmpty tweak flips
+  React.useEffect(() => {
+    setShares(seedEmpty ? [] : SHARES_INIT);
+    setAdding(seedEmpty);
+  }, [seedEmpty]);
+
+  React.useEffect(() => {
+    function onKey(e) { if (e.key === 'Escape') onClose(); }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  function createShare({ title, desc, protected: prot }) {
+    const s = { id: Math.random().toString(36).slice(2), title, desc, protected: prot,
+      creatorId: currentUserId, created: 'Today', slug: makeSlug(), views: 0 };
+    setShares(prev => [s, ...prev]);
+    setAdding(false);
+    setTimeout(() => { if (bodyRef.current) bodyRef.current.scrollTop = 0; }, 0);
+  }
+
+  function deleteShare(id) { setShares(prev => prev.filter(s => s.id !== id)); }
+
+  const canDelete = (s) => isAdmin || s.creatorId === currentUserId;
+
+  return (
+    <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 100,
+      background: 'rgb(20 28 33 / 0.55)', backdropFilter: 'blur(2px)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24, animation: 'sm-fade .15s ease' }}>
+      <div onClick={e => e.stopPropagation()} style={{ width: 'min(580px, 100%)', maxHeight: '88vh',
+        background: 'var(--card)', borderRadius: 'var(--radius-xl)', boxShadow: 'var(--shadow-lg)',
+        display: 'flex', flexDirection: 'column', overflow: 'hidden', animation: 'sm-pop .18s cubic-bezier(.2,.7,.3,1)' }}>
+
+        {/* Header */}
+        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12, padding: '18px 20px',
+          borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
+          <div style={{ width: 38, height: 38, flexShrink: 0, borderRadius: 'var(--radius-md)',
+            background: 'hsl(188 59% 38% / 0.12)', color: 'var(--primary)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <SMIcon name="link" size={19} strokeWidth={2.2} />
+          </div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <h2 style={{ fontSize: 17, fontWeight: 700, color: 'var(--foreground)', lineHeight: 1.25 }}>Share this view</h2>
+            <div style={{ fontSize: 12.5, color: 'var(--muted-foreground)', marginTop: 2, display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ width: 8, height: 8, borderRadius: 2, background: '#F29E4C', display: 'inline-block' }}></span>
+              Marketing timeline · anyone with a link can view
+            </div>
+          </div>
+          <button onClick={onClose} style={{ width: 30, height: 30, flexShrink: 0, border: 'none', background: 'var(--muted)',
+            borderRadius: 'var(--radius-md)', display: 'flex', alignItems: 'center', justifyContent: 'center',
+            cursor: 'pointer', color: 'var(--muted-foreground)' }}>
+            <SMIcon name="x" size={16} strokeWidth={2.2} />
+          </button>
+        </div>
+
+        {/* Section bar */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '13px 20px 11px', flexShrink: 0 }}>
+          <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--muted-foreground)', letterSpacing: '0.06em', textTransform: 'uppercase' }}>
+            Active links
+          </span>
+          <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--muted-foreground)', background: 'var(--muted)',
+            borderRadius: 'var(--radius-full)', padding: '1px 8px', minWidth: 20, textAlign: 'center' }}>{shares.length}</span>
+          <div style={{ marginLeft: 'auto' }}>
+            {!adding && (
+              <button onClick={() => setAdding(true)} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12.5,
+                fontWeight: 600, padding: '6px 13px', borderRadius: 'var(--radius-md)', border: 'none', cursor: 'pointer',
+                background: 'var(--primary)', color: 'var(--primary-foreground)' }}>
+                <SMIcon name="plus" size={14} strokeWidth={2.4} /> New share
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Body */}
+        <div ref={bodyRef} style={{ flex: 1, overflowY: 'auto', padding: '0 20px 20px', minHeight: 120,
+          display: 'flex', flexDirection: 'column', gap: 12 }}>
+          {adding && (
+            <AddShareForm currentUser={currentUser} onCreate={createShare} onCancel={() => setAdding(false)} />
+          )}
+
+          {shares.length === 0 && !adding && (
+            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+              textAlign: 'center', padding: '36px 20px', border: '1px dashed var(--border)', borderRadius: 'var(--radius-lg)' }}>
+              <div style={{ width: 48, height: 48, borderRadius: 'var(--radius-lg)', background: 'var(--muted)',
+                color: 'var(--muted-foreground)', display: 'flex', alignItems: 'center', justifyContent: 'center', marginBottom: 12 }}>
+                <SMIcon name="link" size={22} strokeWidth={1.8} />
+              </div>
+              <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--foreground)' }}>No share links yet</div>
+              <div style={{ fontSize: 12.5, color: 'var(--muted-foreground)', marginTop: 4, maxWidth: 280 }}>
+                Create a link to let people outside your team view this timeline.
+              </div>
+              <button onClick={() => setAdding(true)} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13,
+                fontWeight: 600, padding: '8px 16px', borderRadius: 'var(--radius-md)', border: 'none', cursor: 'pointer',
+                background: 'var(--primary)', color: 'var(--primary-foreground)', marginTop: 16 }}>
+                <SMIcon name="plus" size={14} strokeWidth={2.4} /> Create share link
+              </button>
+            </div>
+          )}
+
+          {shares.map(s => (
+            <ShareRow key={s.id} share={s} canDelete={canDelete(s)} isOwn={s.creatorId === currentUserId} onDelete={deleteShare} />
+          ))}
+        </div>
+
+        {/* Footer */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '13px 20px', borderTop: '1px solid var(--border)', flexShrink: 0 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 12, color: 'var(--muted-foreground)' }}>
+            <SMIcon name={isAdmin ? 'shield-check' : 'user'} size={14} strokeWidth={2} color={isAdmin ? 'var(--primary)' : 'currentColor'} />
+            {isAdmin ? 'Admin · you can manage every share' : 'Member · you can manage only your own shares'}
+          </div>
+          <button onClick={onClose} style={{ marginLeft: 'auto', fontSize: 13, fontWeight: 600, padding: '8px 20px',
+            borderRadius: 'var(--radius-md)', border: '1px solid var(--border)', background: 'var(--card)',
+            color: 'var(--foreground)', cursor: 'pointer' }}>Done</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+Object.assign(window, { ShareModal });
+````
+
+## File: docs/design/handoffs/share-modal/design_handoff_share_modal/tweaks-panel.jsx
+````javascript
+// @ds-adherence-ignore -- omelette starter scaffold (raw elements/hex/px by design)
+
+/* BEGIN USAGE */
+// tweaks-panel.jsx
+// Reusable Tweaks shell + form-control helpers.
+// Exports (to window): useTweaks, TweaksPanel, TweakSection, TweakRow, TweakSlider,
+//   TweakToggle, TweakRadio, TweakSelect, TweakText, TweakNumber, TweakColor, TweakButton.
+//
+// Owns the host protocol (listens for __activate_edit_mode / __deactivate_edit_mode,
+// posts __edit_mode_available / __edit_mode_set_keys / __edit_mode_dismissed) so
+// individual prototypes don't re-roll it. Ships a consistent set of controls so you
+// don't hand-draw <input type="range">, segmented radios, steppers, etc.
+//
+// Usage (in an HTML file that loads React + Babel):
+//
+//   const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
+//     "primaryColor": "#D97757",
+//     "palette": ["#D97757", "#29261b", "#f6f4ef"],
+//     "fontSize": 16,
+//     "density": "regular",
+//     "dark": false
+//   }/*EDITMODE-END*/;
+//
+//   function App() {
+//     const [t, setTweak] = useTweaks(TWEAK_DEFAULTS);
+//     return (
+//       <div style={{ fontSize: t.fontSize, color: t.primaryColor }}>
+//         Hello
+//         <TweaksPanel>
+//           <TweakSection label="Typography" />
+//           <TweakSlider label="Font size" value={t.fontSize} min={10} max={32} unit="px"
+//                        onChange={(v) => setTweak('fontSize', v)} />
+//           <TweakRadio  label="Density" value={t.density}
+//                        options={['compact', 'regular', 'comfy']}
+//                        onChange={(v) => setTweak('density', v)} />
+//           <TweakSection label="Theme" />
+//           <TweakColor  label="Primary" value={t.primaryColor}
+//                        options={['#D97757', '#2A6FDB', '#1F8A5B', '#7A5AE0']}
+//                        onChange={(v) => setTweak('primaryColor', v)} />
+//           <TweakColor  label="Palette" value={t.palette}
+//                        options={[['#D97757', '#29261b', '#f6f4ef'],
+//                                  ['#475569', '#0f172a', '#f1f5f9']]}
+//                        onChange={(v) => setTweak('palette', v)} />
+//           <TweakToggle label="Dark mode" value={t.dark}
+//                        onChange={(v) => setTweak('dark', v)} />
+//         </TweaksPanel>
+//       </div>
+//     );
+//   }
+//
+// TweakRadio is the segmented control for 2–3 short options (auto-falls-back to
+// TweakSelect past ~16/~10 chars per label); reach for TweakSelect directly when
+// options are many or long. For color tweaks always curate 3-4 options rather than
+// a free picker; an option can also be a whole 2–5 color palette (the stored value
+// is the array). The Tweak* controls are a floor, not a ceiling — build custom
+// controls inside the panel if a tweak calls for UI they don't cover.
+/* END USAGE */
+// ─────────────────────────────────────────────────────────────────────────────
+
+const __TWEAKS_STYLE = `
+  .twk-panel{position:fixed;right:16px;bottom:16px;z-index:2147483646;width:280px;
+    max-height:calc(100vh - 32px);display:flex;flex-direction:column;
+    transform:scale(var(--dc-inv-zoom,1));transform-origin:bottom right;
+    background:rgba(250,249,247,.78);color:#29261b;
+    -webkit-backdrop-filter:blur(24px) saturate(160%);backdrop-filter:blur(24px) saturate(160%);
+    border:.5px solid rgba(255,255,255,.6);border-radius:14px;
+    box-shadow:0 1px 0 rgba(255,255,255,.5) inset,0 12px 40px rgba(0,0,0,.18);
+    font:11.5px/1.4 ui-sans-serif,system-ui,-apple-system,sans-serif;overflow:hidden}
+  .twk-hd{display:flex;align-items:center;justify-content:space-between;
+    padding:10px 8px 10px 14px;cursor:move;user-select:none}
+  .twk-hd b{font-size:12px;font-weight:600;letter-spacing:.01em}
+  .twk-x{appearance:none;border:0;background:transparent;color:rgba(41,38,27,.55);
+    width:22px;height:22px;border-radius:6px;cursor:default;font-size:13px;line-height:1}
+  .twk-x:hover{background:rgba(0,0,0,.06);color:#29261b}
+  .twk-body{padding:2px 14px 14px;display:flex;flex-direction:column;gap:10px;
+    overflow-y:auto;overflow-x:hidden;min-height:0;
+    scrollbar-width:thin;scrollbar-color:rgba(0,0,0,.15) transparent}
+  .twk-body::-webkit-scrollbar{width:8px}
+  .twk-body::-webkit-scrollbar-track{background:transparent;margin:2px}
+  .twk-body::-webkit-scrollbar-thumb{background:rgba(0,0,0,.15);border-radius:4px;
+    border:2px solid transparent;background-clip:content-box}
+  .twk-body::-webkit-scrollbar-thumb:hover{background:rgba(0,0,0,.25);
+    border:2px solid transparent;background-clip:content-box}
+  .twk-row{display:flex;flex-direction:column;gap:5px}
+  .twk-row-h{flex-direction:row;align-items:center;justify-content:space-between;gap:10px}
+  .twk-lbl{display:flex;justify-content:space-between;align-items:baseline;
+    color:rgba(41,38,27,.72)}
+  .twk-lbl>span:first-child{font-weight:500}
+  .twk-val{color:rgba(41,38,27,.5);font-variant-numeric:tabular-nums}
+
+  .twk-sect{font-size:10px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;
+    color:rgba(41,38,27,.45);padding:10px 0 0}
+  .twk-sect:first-child{padding-top:0}
+
+  .twk-field{appearance:none;box-sizing:border-box;width:100%;min-width:0;height:26px;padding:0 8px;
+    border:.5px solid rgba(0,0,0,.1);border-radius:7px;
+    background:rgba(255,255,255,.6);color:inherit;font:inherit;outline:none}
+  .twk-field:focus{border-color:rgba(0,0,0,.25);background:rgba(255,255,255,.85)}
+  select.twk-field{padding-right:22px;
+    background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path fill='rgba(0,0,0,.5)' d='M0 0h10L5 6z'/></svg>");
+    background-repeat:no-repeat;background-position:right 8px center}
+
+  .twk-slider{appearance:none;-webkit-appearance:none;width:100%;height:4px;margin:6px 0;
+    border-radius:999px;background:rgba(0,0,0,.12);outline:none}
+  .twk-slider::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;
+    width:14px;height:14px;border-radius:50%;background:#fff;
+    border:.5px solid rgba(0,0,0,.12);box-shadow:0 1px 3px rgba(0,0,0,.2);cursor:default}
+  .twk-slider::-moz-range-thumb{width:14px;height:14px;border-radius:50%;
+    background:#fff;border:.5px solid rgba(0,0,0,.12);box-shadow:0 1px 3px rgba(0,0,0,.2);cursor:default}
+
+  .twk-seg{position:relative;display:flex;padding:2px;border-radius:8px;
+    background:rgba(0,0,0,.06);user-select:none}
+  .twk-seg-thumb{position:absolute;top:2px;bottom:2px;border-radius:6px;
+    background:rgba(255,255,255,.9);box-shadow:0 1px 2px rgba(0,0,0,.12);
+    transition:left .15s cubic-bezier(.3,.7,.4,1),width .15s}
+  .twk-seg.dragging .twk-seg-thumb{transition:none}
+  .twk-seg button{appearance:none;position:relative;z-index:1;flex:1;border:0;
+    background:transparent;color:inherit;font:inherit;font-weight:500;min-height:22px;
+    border-radius:6px;cursor:default;padding:4px 6px;line-height:1.2;
+    overflow-wrap:anywhere}
+
+  .twk-toggle{position:relative;width:32px;height:18px;border:0;border-radius:999px;
+    background:rgba(0,0,0,.15);transition:background .15s;cursor:default;padding:0}
+  .twk-toggle[data-on="1"]{background:#34c759}
+  .twk-toggle i{position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;
+    background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.25);transition:transform .15s}
+  .twk-toggle[data-on="1"] i{transform:translateX(14px)}
+
+  .twk-num{display:flex;align-items:center;box-sizing:border-box;min-width:0;height:26px;padding:0 0 0 8px;
+    border:.5px solid rgba(0,0,0,.1);border-radius:7px;background:rgba(255,255,255,.6)}
+  .twk-num-lbl{font-weight:500;color:rgba(41,38,27,.6);cursor:ew-resize;
+    user-select:none;padding-right:8px}
+  .twk-num input{flex:1;min-width:0;height:100%;border:0;background:transparent;
+    font:inherit;font-variant-numeric:tabular-nums;text-align:right;padding:0 8px 0 0;
+    outline:none;color:inherit;-moz-appearance:textfield}
+  .twk-num input::-webkit-inner-spin-button,.twk-num input::-webkit-outer-spin-button{
+    -webkit-appearance:none;margin:0}
+  .twk-num-unit{padding-right:8px;color:rgba(41,38,27,.45)}
+
+  .twk-btn{appearance:none;height:26px;padding:0 12px;border:0;border-radius:7px;
+    background:rgba(0,0,0,.78);color:#fff;font:inherit;font-weight:500;cursor:default}
+  .twk-btn:hover{background:rgba(0,0,0,.88)}
+  .twk-btn.secondary{background:rgba(0,0,0,.06);color:inherit}
+  .twk-btn.secondary:hover{background:rgba(0,0,0,.1)}
+
+  .twk-swatch{appearance:none;-webkit-appearance:none;width:56px;height:22px;
+    border:.5px solid rgba(0,0,0,.1);border-radius:6px;padding:0;cursor:default;
+    background:transparent;flex-shrink:0}
+  .twk-swatch::-webkit-color-swatch-wrapper{padding:0}
+  .twk-swatch::-webkit-color-swatch{border:0;border-radius:5.5px}
+  .twk-swatch::-moz-color-swatch{border:0;border-radius:5.5px}
+
+  .twk-chips{display:flex;gap:6px}
+  .twk-chip{position:relative;appearance:none;flex:1;min-width:0;height:46px;
+    padding:0;border:0;border-radius:6px;overflow:hidden;cursor:default;
+    box-shadow:0 0 0 .5px rgba(0,0,0,.12),0 1px 2px rgba(0,0,0,.06);
+    transition:transform .12s cubic-bezier(.3,.7,.4,1),box-shadow .12s}
+  .twk-chip:hover{transform:translateY(-1px);
+    box-shadow:0 0 0 .5px rgba(0,0,0,.18),0 4px 10px rgba(0,0,0,.12)}
+  .twk-chip[data-on="1"]{box-shadow:0 0 0 1.5px rgba(0,0,0,.85),
+    0 2px 6px rgba(0,0,0,.15)}
+  .twk-chip>span{position:absolute;top:0;bottom:0;right:0;width:34%;
+    display:flex;flex-direction:column;box-shadow:-1px 0 0 rgba(0,0,0,.1)}
+  .twk-chip>span>i{flex:1;box-shadow:0 -1px 0 rgba(0,0,0,.1)}
+  .twk-chip>span>i:first-child{box-shadow:none}
+  .twk-chip svg{position:absolute;top:6px;left:6px;width:13px;height:13px;
+    filter:drop-shadow(0 1px 1px rgba(0,0,0,.3))}
+`;
+
+// ── useTweaks ───────────────────────────────────────────────────────────────
+// Single source of truth for tweak values. setTweak persists via the host
+// (__edit_mode_set_keys → host rewrites the EDITMODE block on disk).
+function useTweaks(defaults) {
+  const [values, setValues] = React.useState(defaults);
+  // Accepts either setTweak('key', value) or setTweak({ key: value, ... }) so a
+  // useState-style call doesn't write a "[object Object]" key into the persisted
+  // JSON block.
+  const setTweak = React.useCallback((keyOrEdits, val) => {
+    const edits = typeof keyOrEdits === 'object' && keyOrEdits !== null
+      ? keyOrEdits : { [keyOrEdits]: val };
+    setValues((prev) => ({ ...prev, ...edits }));
+    window.parent.postMessage({ type: '__edit_mode_set_keys', edits }, '*');
+    // Same-window signal so in-page listeners (deck-stage rail thumbnails)
+    // can react — the parent message only reaches the host, not peers.
+    window.dispatchEvent(new CustomEvent('tweakchange', { detail: edits }));
+  }, []);
+  return [values, setTweak];
+}
+
+// ── TweaksPanel ─────────────────────────────────────────────────────────────
+// Floating shell. Registers the protocol listener BEFORE announcing
+// availability — if the announce ran first, the host's activate could land
+// before our handler exists and the toolbar toggle would silently no-op.
+// The close button posts __edit_mode_dismissed so the host's toolbar toggle
+// flips off in lockstep; the host echoes __deactivate_edit_mode back which
+// is what actually hides the panel.
+function TweaksPanel({ title = 'Tweaks', children }) {
+  const [open, setOpen] = React.useState(false);
+  const dragRef = React.useRef(null);
+  const offsetRef = React.useRef({ x: 16, y: 16 });
+  const PAD = 16;
+
+  const clampToViewport = React.useCallback(() => {
+    const panel = dragRef.current;
+    if (!panel) return;
+    const w = panel.offsetWidth, h = panel.offsetHeight;
+    const maxRight = Math.max(PAD, window.innerWidth - w - PAD);
+    const maxBottom = Math.max(PAD, window.innerHeight - h - PAD);
+    offsetRef.current = {
+      x: Math.min(maxRight, Math.max(PAD, offsetRef.current.x)),
+      y: Math.min(maxBottom, Math.max(PAD, offsetRef.current.y)),
+    };
+    panel.style.right = offsetRef.current.x + 'px';
+    panel.style.bottom = offsetRef.current.y + 'px';
+  }, []);
+
+  React.useEffect(() => {
+    if (!open) return;
+    clampToViewport();
+    if (typeof ResizeObserver === 'undefined') {
+      window.addEventListener('resize', clampToViewport);
+      return () => window.removeEventListener('resize', clampToViewport);
+    }
+    const ro = new ResizeObserver(clampToViewport);
+    ro.observe(document.documentElement);
+    return () => ro.disconnect();
+  }, [open, clampToViewport]);
+
+  React.useEffect(() => {
+    const onMsg = (e) => {
+      const t = e?.data?.type;
+      if (t === '__activate_edit_mode') setOpen(true);
+      else if (t === '__deactivate_edit_mode') setOpen(false);
+    };
+    window.addEventListener('message', onMsg);
+    window.parent.postMessage({ type: '__edit_mode_available' }, '*');
+    return () => window.removeEventListener('message', onMsg);
+  }, []);
+
+  const dismiss = () => {
+    setOpen(false);
+    window.parent.postMessage({ type: '__edit_mode_dismissed' }, '*');
+  };
+
+  const onDragStart = (e) => {
+    const panel = dragRef.current;
+    if (!panel) return;
+    const r = panel.getBoundingClientRect();
+    const sx = e.clientX, sy = e.clientY;
+    const startRight = window.innerWidth - r.right;
+    const startBottom = window.innerHeight - r.bottom;
+    const move = (ev) => {
+      offsetRef.current = {
+        x: startRight - (ev.clientX - sx),
+        y: startBottom - (ev.clientY - sy),
+      };
+      clampToViewport();
+    };
+    const up = () => {
+      window.removeEventListener('mousemove', move);
+      window.removeEventListener('mouseup', up);
+    };
+    window.addEventListener('mousemove', move);
+    window.addEventListener('mouseup', up);
+  };
+
+  if (!open) return null;
+  return (
+    <>
+      <style>{__TWEAKS_STYLE}</style>
+      <div ref={dragRef} className="twk-panel" data-omelette-chrome=""
+           style={{ right: offsetRef.current.x, bottom: offsetRef.current.y }}>
+        <div className="twk-hd" onMouseDown={onDragStart}>
+          <b>{title}</b>
+          <button className="twk-x" aria-label="Close tweaks"
+                  onMouseDown={(e) => e.stopPropagation()}
+                  onClick={dismiss}>✕</button>
+        </div>
+        <div className="twk-body">
+          {children}
+        </div>
+      </div>
+    </>
+  );
+}
+
+// ── Layout helpers ──────────────────────────────────────────────────────────
+
+function TweakSection({ label, children }) {
+  return (
+    <>
+      <div className="twk-sect">{label}</div>
+      {children}
+    </>
+  );
+}
+
+function TweakRow({ label, value, children, inline = false }) {
+  return (
+    <div className={inline ? 'twk-row twk-row-h' : 'twk-row'}>
+      <div className="twk-lbl">
+        <span>{label}</span>
+        {value != null && <span className="twk-val">{value}</span>}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+// ── Controls ────────────────────────────────────────────────────────────────
+
+function TweakSlider({ label, value, min = 0, max = 100, step = 1, unit = '', onChange }) {
+  return (
+    <TweakRow label={label} value={`${value}${unit}`}>
+      <input type="range" className="twk-slider" min={min} max={max} step={step}
+             value={value} onChange={(e) => onChange(Number(e.target.value))} />
+    </TweakRow>
+  );
+}
+
+function TweakToggle({ label, value, onChange }) {
+  return (
+    <div className="twk-row twk-row-h">
+      <div className="twk-lbl"><span>{label}</span></div>
+      <button type="button" className="twk-toggle" data-on={value ? '1' : '0'}
+              role="switch" aria-checked={!!value}
+              onClick={() => onChange(!value)}><i /></button>
+    </div>
+  );
+}
+
+function TweakRadio({ label, value, options, onChange }) {
+  const trackRef = React.useRef(null);
+  const [dragging, setDragging] = React.useState(false);
+  // The active value is read by pointer-move handlers attached for the lifetime
+  // of a drag — ref it so a stale closure doesn't fire onChange for every move.
+  const valueRef = React.useRef(value);
+  valueRef.current = value;
+
+  // Segments wrap mid-word once per-segment width runs out. The track is
+  // ~248px (280 panel − 28 body pad − 4 seg pad), each button loses 12px
+  // to its own padding, and 11.5px system-ui averages ~6.3px/char — so 2
+  // options fit ~16 chars each, 3 fit ~10. Past that (or >3 options), fall
+  // back to a dropdown rather than wrap.
+  const labelLen = (o) => String(typeof o === 'object' ? o.label : o).length;
+  const maxLen = options.reduce((m, o) => Math.max(m, labelLen(o)), 0);
+  const fitsAsSegments = maxLen <= ({ 2: 16, 3: 10 }[options.length] ?? 0);
+  if (!fitsAsSegments) {
+    // <select> emits strings — map back to the original option value so the
+    // fallback stays type-preserving (numbers, booleans) like the segment path.
+    const resolve = (s) => {
+      const m = options.find((o) => String(typeof o === 'object' ? o.value : o) === s);
+      return m === undefined ? s : typeof m === 'object' ? m.value : m;
+    };
+    return <TweakSelect label={label} value={value} options={options}
+                        onChange={(s) => onChange(resolve(s))} />;
+  }
+  const opts = options.map((o) => (typeof o === 'object' ? o : { value: o, label: o }));
+  const idx = Math.max(0, opts.findIndex((o) => o.value === value));
+  const n = opts.length;
+
+  const segAt = (clientX) => {
+    const r = trackRef.current.getBoundingClientRect();
+    const inner = r.width - 4;
+    const i = Math.floor(((clientX - r.left - 2) / inner) * n);
+    return opts[Math.max(0, Math.min(n - 1, i))].value;
+  };
+
+  const onPointerDown = (e) => {
+    setDragging(true);
+    const v0 = segAt(e.clientX);
+    if (v0 !== valueRef.current) onChange(v0);
+    const move = (ev) => {
+      if (!trackRef.current) return;
+      const v = segAt(ev.clientX);
+      if (v !== valueRef.current) onChange(v);
+    };
+    const up = () => {
+      setDragging(false);
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+  };
+
+  return (
+    <TweakRow label={label}>
+      <div ref={trackRef} role="radiogroup" onPointerDown={onPointerDown}
+           className={dragging ? 'twk-seg dragging' : 'twk-seg'}>
+        <div className="twk-seg-thumb"
+             style={{ left: `calc(2px + ${idx} * (100% - 4px) / ${n})`,
+                      width: `calc((100% - 4px) / ${n})` }} />
+        {opts.map((o) => (
+          <button key={o.value} type="button" role="radio" aria-checked={o.value === value}>
+            {o.label}
+          </button>
+        ))}
+      </div>
+    </TweakRow>
+  );
+}
+
+function TweakSelect({ label, value, options, onChange }) {
+  return (
+    <TweakRow label={label}>
+      <select className="twk-field" value={value} onChange={(e) => onChange(e.target.value)}>
+        {options.map((o) => {
+          const v = typeof o === 'object' ? o.value : o;
+          const l = typeof o === 'object' ? o.label : o;
+          return <option key={v} value={v}>{l}</option>;
+        })}
+      </select>
+    </TweakRow>
+  );
+}
+
+function TweakText({ label, value, placeholder, onChange }) {
+  return (
+    <TweakRow label={label}>
+      <input className="twk-field" type="text" value={value} placeholder={placeholder}
+             onChange={(e) => onChange(e.target.value)} />
+    </TweakRow>
+  );
+}
+
+function TweakNumber({ label, value, min, max, step = 1, unit = '', onChange }) {
+  const clamp = (n) => {
+    if (min != null && n < min) return min;
+    if (max != null && n > max) return max;
+    return n;
+  };
+  const startRef = React.useRef({ x: 0, val: 0 });
+  const onScrubStart = (e) => {
+    e.preventDefault();
+    startRef.current = { x: e.clientX, val: value };
+    const decimals = (String(step).split('.')[1] || '').length;
+    const move = (ev) => {
+      const dx = ev.clientX - startRef.current.x;
+      const raw = startRef.current.val + dx * step;
+      const snapped = Math.round(raw / step) * step;
+      onChange(clamp(Number(snapped.toFixed(decimals))));
+    };
+    const up = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+  };
+  return (
+    <div className="twk-num">
+      <span className="twk-num-lbl" onPointerDown={onScrubStart}>{label}</span>
+      <input type="number" value={value} min={min} max={max} step={step}
+             onChange={(e) => onChange(clamp(Number(e.target.value)))} />
+      {unit && <span className="twk-num-unit">{unit}</span>}
+    </div>
+  );
+}
+
+// Relative-luminance contrast pick — checkmarks drawn over a swatch need to
+// read on both #111 and #fafafa without per-option configuration. Hex input
+// only (#rgb / #rrggbb); named or rgb()/hsl() colors fall through to "light".
+function __twkIsLight(hex) {
+  const h = String(hex).replace('#', '');
+  const x = h.length === 3 ? h.replace(/./g, (c) => c + c) : h.padEnd(6, '0');
+  const n = parseInt(x.slice(0, 6), 16);
+  if (Number.isNaN(n)) return true;
+  const r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
+  return r * 299 + g * 587 + b * 114 > 148000;
+}
+
+const __TwkCheck = ({ light }) => (
+  <svg viewBox="0 0 14 14" aria-hidden="true">
+    <path d="M3 7.2 5.8 10 11 4.2" fill="none" strokeWidth="2.2"
+          strokeLinecap="round" strokeLinejoin="round"
+          stroke={light ? 'rgba(0,0,0,.78)' : '#fff'} />
+  </svg>
+);
+
+// TweakColor — curated color/palette picker. Each option is either a single
+// hex string or an array of 1-5 hex strings; the card adapts — a lone color
+// renders solid, a palette renders colors[0] as the hero (left ~2/3) with the
+// rest stacked in a sharp column on the right. onChange emits the
+// option in the shape it was passed (string stays string, array stays array).
+// Without options it falls back to the native color input for back-compat.
+function TweakColor({ label, value, options, onChange }) {
+  if (!options || !options.length) {
+    return (
+      <div className="twk-row twk-row-h">
+        <div className="twk-lbl"><span>{label}</span></div>
+        <input type="color" className="twk-swatch" value={value}
+               onChange={(e) => onChange(e.target.value)} />
+      </div>
+    );
+  }
+  // Native <input type=color> emits lowercase hex per the HTML spec, so
+  // compare case-insensitively. String() guards JSON.stringify(undefined),
+  // which returns the primitive undefined (no .toLowerCase).
+  const key = (o) => String(JSON.stringify(o)).toLowerCase();
+  const cur = key(value);
+  return (
+    <TweakRow label={label}>
+      <div className="twk-chips" role="radiogroup">
+        {options.map((o, i) => {
+          const colors = Array.isArray(o) ? o : [o];
+          const [hero, ...rest] = colors;
+          const sup = rest.slice(0, 4);
+          const on = key(o) === cur;
+          return (
+            <button key={i} type="button" className="twk-chip" role="radio"
+                    aria-checked={on} data-on={on ? '1' : '0'}
+                    aria-label={colors.join(', ')} title={colors.join(' · ')}
+                    style={{ background: hero }}
+                    onClick={() => onChange(o)}>
+              {sup.length > 0 && (
+                <span>
+                  {sup.map((c, j) => <i key={j} style={{ background: c }} />)}
+                </span>
+              )}
+              {on && <__TwkCheck light={__twkIsLight(hero)} />}
+            </button>
+          );
+        })}
+      </div>
+    </TweakRow>
+  );
+}
+
+function TweakButton({ label, onClick, secondary = false }) {
+  return (
+    <button type="button" className={secondary ? 'twk-btn secondary' : 'twk-btn'}
+            onClick={onClick}>{label}</button>
+  );
+}
+
+Object.assign(window, {
+  useTweaks, TweaksPanel, TweakSection, TweakRow,
+  TweakSlider, TweakToggle, TweakRadio, TweakSelect,
+  TweakText, TweakNumber, TweakColor, TweakButton,
+});
+````
+
 ## File: docs/plans/phase-11.1-list-view.md
 ````markdown
 # Phase 11.1 (ALT) — List View
@@ -24847,183 +26404,6 @@ components/kanban/
 3. **Manual within-column order** — deferred (no `Activity` order field). If wanted later: `11.3.1` adds `kanban_order REAL` + persist-on-drop + a "Manual" sort. Cards order by the chosen Sort in v1.
 4. **Group by: Tag** — not included (tags are multi-valued, so a card would appear in N columns; dragging is ambiguous). Could be added as a **read-only** (non-droppable) grouping later if useful.
 5. **Configure pencil vs. full-card click** — v1 uses full-card click to open the edit panel; the hover pencil is optional polish, not required.
-````
-
-## File: docs/plans/phase-13-shares.md
-````markdown
-# Phase 13 — Shares — Public Read-Only View Links
-
-**UI name:** "Share" (toolbar action in every view, alongside Export).
-
-**Status:** 🟢 Reviewed — scope settled (2026-06-04). This plan supersedes the ROADMAP §13 summary and the original "Phase 16 — Shares" umbrella spec. The product decision is **read-only public links over live (cached) data**, not point-in-time snapshots and not pixel renders.
-
----
-
-## What we're actually building
-
-A **Share** is a first-class entity: one timeline can have many shares, each one a frozen pairing of `{ view type + view config + optional password + optional expiry }`. Visiting a share's link drops a **non-logged-in** viewer into **exactly the view the sharer was looking at** — same group-by, sort, color-by, and filter — rendered **read-only** (no toolbars, menus, drag, reorder, recolor, or edit) and **forced to light mode**. They can scroll/pan the view and open nothing else.
-
-The core mental model: *"share what I'm seeing, as a link, that anyone can open and look at but not touch."*
-
-### Decisions locked in the design discussion (2026-06-04)
-
-1. **Live data, cached — not snapshots, not pixels.** The viewer renders the real React view from a JSON projection that is rebuilt at most every TTL (default 60s, configurable to a couple minutes). No websockets on the public path; no headless-browser/Chromium rendering (that conversation is deferred to Phase 14 Export).
-2. **The primary boundary is record *scope*, not field-level minimization.** The risk we harden against is a viewer reaching records *outside the shared view* — another timeline, another team, archived rows, or anything reachable by tampering. The gateway derives `timeline_id` from the share row **server-side** and accepts **no client selector** (no timeline/activity/team id, no scope-widening query params); the activity query is hard-scoped to that one timeline + the frozen filter. Within a record we ship a **fixed display projection** of the standard activity fields (incl. description). The one **conditional** field is `notes`: included only when the view actually renders it — i.e. a **List share whose `view_config` has the Notes column enabled** — and omitted everywhere else. The constant exclusion is **cross-entity PII / internals**: member email/role/`user_id`, the timeline access list, other timelines, team internals. Members always project to `{ id, displayName, color, icon }`.
-3. **The frozen filter is evaluated server-side, in Go, at projection-build time.** Because the projection must contain *only visible* activities, filtered-out rows must never reach the browser — so the filter runs before the JSON is built. This requires a Go port of `matchesFilter`. Drift between the TS and Go evaluators is neutralized by a **shared golden-fixture suite** both must pass in CI (one source of truth, two executors). *(Considered and shelved: embedding the TS engine via `goja` — pure-Go, single implementation, zero drift — but a bounded pure-function port + parity fixtures is simpler to own. Revisit if the filter grammar grows.)*
-4. **The filter is snapshotted as a resolved `FilterDefinition`, not a reference.** At share-creation the active filter (preset / member / saved) is resolved into a concrete definition stored in `view_config`. A later edit or deletion of the source saved filter must **not** mutate or break existing shares — the whole point is a frozen presentation.
-5. **Read-only = the real view components in `interactive=false` mode**, not separate viewer components (which would visually drift from "exactly what I'm seeing"). The cost is per-view chrome-stripping — accepted. **Clicking an activity is inert in every view** — no detail popover, no drill-down. Shares are static web snapshots: you scroll and look, nothing opens.
-6. **Password is a fast-follow (13.3), not v1.** An unguessable token is the v1 floor.
-
----
-
-## Reused infrastructure (do not rebuild)
-
-| Concern | Existing asset | Notes |
-|---|---|---|
-| Existing public token | `timelines.share_token` (NOT NULL UNIQUE), `handleGetTimelineByShareToken` (`GET /timelines/share/{token}`), `TimelineRepo.GetByShareToken` | Returns the timeline row only — no activities/members. We **migrate** each timeline's existing token into a `shares` row, then deprecate the column. |
-| Filter evaluation (TS) | `matchesFilter` (`lib/filterEngine.ts`), `applyActiveFilter` (`lib/presetFilters.ts`) | The Go port mirrors `matchesFilter`; the golden fixtures pin parity. |
-| View components | `GanttView`, `ListView`, `CalendarView`, `KanbanView` | Rendered in `interactive=false` mode by the public viewer. |
-| Color resolution | `resolveActivityColor` (`lib/activityColor.ts`) | Identical hues to authed views. |
-| Member-combination grouping | `lib/memberGroups.ts` | Reused for group-by member-combination in shared views. |
-| Identity display | `Badge`, `resolveColorHex` (`components/identity/`) | Member/status/tag chips in the read-only surface. |
-| View-config source | per-timeline preference map (group/sort/color/filter/visible-columns) | "Share this view" snapshots the **current live toolbar state** into `view_config`. |
-| Theme | existing theme provider | Public viewer forces `light` regardless of system/localStorage. |
-
----
-
-## The public data gateway (the heart of 13.1)
-
-`GET /shares/{token}` → a single aggregate, built in Go, cached per-token with a TTL:
-
-```jsonc
-{
-  "share":    { "viewType": "gantt", "viewConfig": { … }, "createdAt": "…" },
-  "timeline": { "id", "name", "color", "icon", "startDate", "endDate" },
-  "members":  [ { "id", "displayName", "color", "icon" } ],   // never email/role/userId
-  "statuses": [ { "id", "name", "color", "icon", "isClosed", "position" } ],
-  "tags":     [ { "id", "name", "color" } ],
-  "activities": [ /* only rows passing the frozen filter; only view-rendered fields */ ]
-}
-```
-
-**Build rules:**
-- **Scope-locked, no client selector (the primary boundary).** The endpoint takes *only* the share `token`. `timeline_id` is read from the share row server-side; the client cannot pass a timeline/activity/team id or any scope-widening query param. The activity query is hard-scoped: `WHERE timeline_id = <share.timeline_id> AND archived_at IS NULL`. No share-reachable endpoint returns a record by arbitrary id, lists timelines, or resolves other tokens. A share token can reach **exactly one timeline's filtered records and nothing else** — that invariant is the thing the tests defend.
-- **Filter next.** Resolve `view_config.filter` (a frozen `FilterDefinition`) and evaluate it in Go against that timeline's non-archived activities. Only passing rows continue.
-- **Fixed display projection.** Emit the standard user-facing activity fields (title, dates, description, `statusId`, `assignedMemberIds`, `tagIds`, `parentActivityId`, progress). `notes` is the one **conditional** field — included only for a **List share with the Notes column enabled** in `view_config`, omitted otherwise. The FK references (`statusId` etc.) point into the already-projected `members`/`statuses`/`tags`, which carry no PII.
-- **Members/statuses/tags are pruned to those referenced** by the surviving activities (smaller payload, less incidental exposure). Members project to `{ id, displayName, color, icon }` only — never email/role/`user_id`.
-- **Cache:** in-memory `map[token]{ builtAt, payload }`; rebuild when `now - builtAt > TTL`. TTL via `DRABA_SHARE_CACHE_TTL` (default `60s`). Invalidate on share `PATCH`/`DELETE`. No DB hit on a warm cache.
-- **Status codes:** `200` payload · `404` unknown token · `410 Gone` revoked/expired (13.4) · `401 { passwordRequired: true }` locked (13.3, no data leakage).
-
----
-
-## Schema
-
-New migration (next available number — **018 was the last**, in Phase 10.4.6; confirm before writing):
-
-```sql
-CREATE TABLE shares (
-  id            TEXT PRIMARY KEY,
-  timeline_id   TEXT NOT NULL REFERENCES timelines(id) ON DELETE CASCADE,
-  token         TEXT NOT NULL UNIQUE,          -- unguessable, URL-safe
-  view_type     TEXT NOT NULL,                 -- gantt | list | calendar | kanban
-  view_config   TEXT NOT NULL,                 -- JSON: group/sort/color/filter(def)/visible-columns/card-fields
-  password_hash TEXT,                          -- nullable (13.3)
-  expires_at    DATETIME,                      -- nullable (13.4)
-  created_by    TEXT NOT NULL REFERENCES team_members(id),
-  created_at    DATETIME NOT NULL,
-  last_viewed_at DATETIME,
-  view_count    INTEGER NOT NULL DEFAULT 0,
-  revoked_at    DATETIME                       -- nullable (13.4)
-);
-```
-
-**Token migration:** for every existing timeline, insert one `shares` row `{ view_type: 'gantt', view_config: <defaults>, token: timelines.share_token }` so existing links keep working. `timelines.share_token` is `NOT NULL UNIQUE`, so it can only be **dropped in a follow-up migration** once all UI/handler references move to `shares`; until then keep it and stop minting new per-timeline tokens.
-
----
-
-## API
-
-| Method + path | Auth | Purpose |
-|---|---|---|
-| `POST /timelines/{id}/shares` | member | Create share; body = `{ viewType, viewConfig, password?, expiresAt? }` |
-| `GET /timelines/{id}/shares` | creator + admins | List shares for a timeline |
-| `PATCH /shares/{id}` | creator + admins | Rename / set-clear password / extend expiry / revoke |
-| `DELETE /shares/{id}` | creator + admins | Hard delete |
-| `GET /shares/{token}` | **public** | The gateway above |
-| `POST /shares/{token}/unlock` | **public** | (13.3) password → short-lived view JWT |
-
-OpenAPI: add `Share`, `ShareViewConfig`, `CreateShareInput`, `PatchShareInput`, `PublicShareProjection` schemas; regenerate TS types.
-
----
-
-## Read-only view mode
-
-Thread an `interactive: boolean` (default `true`) through each view + its toolbar, sourced from a `ShareViewContext` when mounted under `/s/:token`. When `false`:
-- Toolbar, menus, and the "Share"/"Export" actions are not rendered.
-- Bars/cards/rows are non-draggable; **clicks are inert in every view** — no `ActivityPanel`, no read-only popover, no drill-down. Static snapshots.
-- No create affordances ("+ Add", empty-cell create, drag-to-create).
-- Theme forced to light.
-
-The public viewer route `/s/:token` lives **outside** `ProtectedRoute`: fetch `GET /shares/{token}`, mount the matching view in `interactive=false` with `view_config` applied, render a slim branding strip (team name · "Shared view" · last-updated). Find/keyboard-nav are out of scope for the public surface in v1.
-
----
-
-## Sub-phases
-
-### 13.1 — Foundation, public gateway, Gantt viewer (MVP)
-The whole data-leak surface is confronted here so 13.2–13.4 ride on a proven-safe gateway.
-- `shares` schema + repo + token migration (existing per-timeline tokens preserved).
-- Go filter evaluator (`internal/filters` mirroring `matchesFilter`) + **shared golden-fixture suite** (`packages/shared/testdata/filter-fixtures.json`) run by both `filterEngine.test.ts` and a Go test.
-- `GET /shares/{token}` gateway: scope-locked query (token → server-derived `timeline_id`, no client selector), filter-next, fixed display projection, referenced-entity pruning, TTL cache.
-- `POST/GET /timelines/{id}/shares`, `PATCH/DELETE /shares/{id}`.
-- Gantt `interactive=false` mode (no chrome, no drag, no edit, forced light).
-- "Share this view" in the Gantt toolbar → snapshot live toolbar state (incl. resolved filter definition) → create → copy URL.
-- `/s/:token` public route + branding strip.
-
-**Exit criteria:**
-- Create a share from a filtered/grouped/colored/sorted Gantt; open `/s/:token` in a fresh/incognito session (no login) and see **exactly** that configuration, read-only, light mode, with **inert clicks**.
-- **Scope isolation holds:** a share token resolves to exactly its timeline's filtered records; tampering (passing another timeline/activity/team id, or scope-widening params) cannot widen the result; there is no share-reachable by-id or list-timelines endpoint.
-- Filtered-out activities are **absent from the network payload** (verified in devtools), as are member emails, `user_id`s, roles, the access list, and other timelines.
-- The Go and TS filter evaluators agree on every golden fixture (CI).
-- Existing `timelines.share_token` links still resolve (migrated into `shares`).
-- Warm-cache requests hit no DB; TTL refresh picks up an activity edit within the window.
-- `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` + `test` pass.
-
-### 13.2 — Remaining views read-only (List, Calendar, Kanban)
-- `interactive=false` for the other three views + public mounting per `view_type`.
-- Per-view read-only polish (the "little uplift" each view needs to read cleanly without chrome); clicks inert here too.
-- "Share this view" in each toolbar.
-
-**Exit:** a share created from any of the four views renders faithfully, read-only, with inert clicks; the same scope-locked gateway serves all four `view_type`s with no per-view data path.
-
-### 13.3 — Password protection + unlock
-- `password_hash` (bcrypt) on create/patch; `GET /shares/{token}` returns `401 { passwordRequired: true }` when locked (no data).
-- `POST /shares/{token}/unlock` → short-lived view JWT scoped to that share's `view_config` snapshot.
-- Rate-limit unlock attempts (N/IP/hour).
-
-**Exit:** wrong password rejected and rate-limited; correct password yields the view; the unlock token cannot be replayed against a different share.
-
-### 13.4 — Lifecycle + management
-- Expiry → `410 Gone` after `expires_at`; revocation → `410 Gone` immediately.
-- "Manage shares" UI per timeline: list, view counts, last-viewed, edit (rename/password/expiry), revoke. View counts visible to the creator **and** team admins.
-- Active-share-count chip on the timeline tile.
-
-**Exit:** revoked/expired links are dead immediately; one timeline hosts ≥3 independent shares with different view types/configs; counts and last-viewed update.
-
----
-
-## Open questions
-None outstanding for v1. Resolved 2026-06-04:
-- **`notes`** — shown only when a List share has the Notes column enabled; omitted otherwise.
-- **View counts** — visible to the creator **and** team admins (not creator-private).
-- **TTL** — fixed at **60s** (`DRABA_SHARE_CACHE_TTL` default).
-
-## Non-goals (v1)
-- **Click-to-detail / drill-down on the public surface** — clicks are inert; shares are static snapshots.
-- Websocket/live updates on the public surface (cache TTL only).
-- Find / global search / keyboard nav on the public viewer.
-- Pixel/PDF snapshot shares (that's the Chromium conversation, deferred to Phase 14).
-- Editing or any mutation through a share link.
 ````
 
 ## File: docs/SAMPLE_DATA.md
@@ -31452,6 +32832,217 @@ docker pull mewcus/draba
 draba is currently under active development. The core backend API foundation (authentication, teams, events, websockets) is complete, and active development is focused on building out the React frontend.
 
 Check out the `docs/` folder for our architecture decisions, roadmap, and design patterns.
+````
+
+## File: docs/plans/phase-13-shares.md
+````markdown
+# Phase 13 — Shares — Public Read-Only View Links
+
+**UI name:** "Share" (toolbar action in every view, alongside Export).
+
+**Status:** 🟢 Reviewed — scope settled (2026-06-04). This plan supersedes the ROADMAP §13 summary and the original "Phase 16 — Shares" umbrella spec. The product decision is **read-only public links over live (cached) data**, not point-in-time snapshots and not pixel renders.
+
+---
+
+## What we're actually building
+
+A **Share** is a first-class entity: one timeline can have many shares, each one a frozen pairing of `{ view type + view config + optional password + optional expiry }`. Visiting a share's link drops a **non-logged-in** viewer into **exactly the view the sharer was looking at** — same group-by, sort, color-by, and filter — rendered **read-only** (no toolbars, menus, drag, reorder, recolor, or edit) and **forced to light mode**. They can scroll/pan the view and open nothing else.
+
+The core mental model: *"share what I'm seeing, as a link, that anyone can open and look at but not touch."*
+
+### Decisions locked in the design discussion (2026-06-04)
+
+1. **Live data, cached — not snapshots, not pixels.** The viewer renders the real React view from a JSON projection that is rebuilt at most every TTL (default 60s, configurable to a couple minutes). No websockets on the public path; no headless-browser/Chromium rendering (that conversation is deferred to Phase 14 Export).
+2. **The primary boundary is record *scope*, not field-level minimization.** The risk we harden against is a viewer reaching records *outside the shared view* — another timeline, another team, archived rows, or anything reachable by tampering. The gateway derives `timeline_id` from the share row **server-side** and accepts **no client selector** (no timeline/activity/team id, no scope-widening query params); the activity query is hard-scoped to that one timeline + the frozen filter. Within a record we ship a **fixed display projection** of the standard activity fields (incl. description). The one **conditional** field is `notes`: included only when the view actually renders it — i.e. a **List share whose `view_config` has the Notes column enabled** — and omitted everywhere else. The constant exclusion is **cross-entity PII / internals**: member email/role/`user_id`, the timeline access list, other timelines, team internals. Members always project to `{ id, displayName, color, icon }`.
+3. **The frozen filter is evaluated server-side, in Go, at projection-build time.** Because the projection must contain *only visible* activities, filtered-out rows must never reach the browser — so the filter runs before the JSON is built. This requires a Go port of `matchesFilter`. Drift between the TS and Go evaluators is neutralized by a **shared golden-fixture suite** both must pass in CI (one source of truth, two executors). *(Considered and shelved: embedding the TS engine via `goja` — pure-Go, single implementation, zero drift — but a bounded pure-function port + parity fixtures is simpler to own. Revisit if the filter grammar grows.)*
+4. **The filter is snapshotted as a resolved `FilterDefinition`, not a reference.** At share-creation the active filter (preset / member / saved) is resolved into a concrete definition stored in `view_config`. A later edit or deletion of the source saved filter must **not** mutate or break existing shares — the whole point is a frozen presentation.
+5. **Read-only = the real view components in `interactive=false` mode**, not separate viewer components (which would visually drift from "exactly what I'm seeing"). The cost is per-view chrome-stripping — accepted. **Clicking an activity is inert in every view** — no detail popover, no drill-down. Shares are static web snapshots: you scroll and look, nothing opens.
+6. **Password is a fast-follow, not v1.** An unguessable token is the v1 floor. (Re-sequenced 2026-06-05: pulled forward into 13.2, fused with the share-module overhaul — see sub-phases.)
+
+---
+
+## Reused infrastructure (do not rebuild)
+
+| Concern | Existing asset | Notes |
+|---|---|---|
+| Existing public token | `timelines.share_token` (NOT NULL UNIQUE), `handleGetTimelineByShareToken` (`GET /timelines/share/{token}`), `TimelineRepo.GetByShareToken` | Returns the timeline row only — no activities/members. We **migrate** each timeline's existing token into a `shares` row, then deprecate the column. |
+| Filter evaluation (TS) | `matchesFilter` (`lib/filterEngine.ts`), `applyActiveFilter` (`lib/presetFilters.ts`) | The Go port mirrors `matchesFilter`; the golden fixtures pin parity. |
+| View components | `GanttView`, `ListView`, `CalendarView`, `KanbanView` | Rendered in `interactive=false` mode by the public viewer. |
+| Color resolution | `resolveActivityColor` (`lib/activityColor.ts`) | Identical hues to authed views. |
+| Member-combination grouping | `lib/memberGroups.ts` | Reused for group-by member-combination in shared views. |
+| Identity display | `Badge`, `resolveColorHex` (`components/identity/`) | Member/status/tag chips in the read-only surface. |
+| View-config source | per-timeline preference map (group/sort/color/filter/visible-columns) | "Share this view" snapshots the **current live toolbar state** into `view_config`. |
+| Theme | existing theme provider | Public viewer forces `light` regardless of system/localStorage. |
+
+---
+
+## The public data gateway (the heart of 13.1)
+
+`GET /shares/{token}` → a single aggregate, built in Go, cached per-token with a TTL:
+
+```jsonc
+{
+  "share":    { "viewType": "gantt", "viewConfig": { … }, "createdAt": "…" },
+  "timeline": { "id", "name", "color", "icon", "startDate", "endDate" },
+  "members":  [ { "id", "displayName", "color", "icon" } ],   // never email/role/userId
+  "statuses": [ { "id", "name", "color", "icon", "isClosed", "position" } ],
+  "tags":     [ { "id", "name", "color" } ],
+  "activities": [ /* only rows passing the frozen filter; only view-rendered fields */ ]
+}
+```
+
+**Build rules:**
+- **Scope-locked, no client selector (the primary boundary).** The endpoint takes *only* the share `token`. `timeline_id` is read from the share row server-side; the client cannot pass a timeline/activity/team id or any scope-widening query param. The activity query is hard-scoped: `WHERE timeline_id = <share.timeline_id> AND archived_at IS NULL`. No share-reachable endpoint returns a record by arbitrary id, lists timelines, or resolves other tokens. A share token can reach **exactly one timeline's filtered records and nothing else** — that invariant is the thing the tests defend.
+- **Filter next.** Resolve `view_config.filter` (a frozen `FilterDefinition`) and evaluate it in Go against that timeline's non-archived activities. Only passing rows continue.
+- **Fixed display projection.** Emit the standard user-facing activity fields (title, dates, description, `statusId`, `assignedMemberIds`, `tagIds`, `parentActivityId`, progress). `notes` is the one **conditional** field — included only for a **List share with the Notes column enabled** in `view_config`, omitted otherwise. The FK references (`statusId` etc.) point into the already-projected `members`/`statuses`/`tags`, which carry no PII.
+- **Members/statuses/tags are pruned to those referenced** by the surviving activities (smaller payload, less incidental exposure). Members project to `{ id, displayName, color, icon }` only — never email/role/`user_id`.
+- **Cache:** in-memory `map[token]{ builtAt, payload }`; rebuild when `now - builtAt > TTL`. TTL via `DRABA_SHARE_CACHE_TTL` (default `60s`). Invalidate on share `PATCH`/`DELETE`. No DB hit on a warm cache.
+- **Status codes:** `200` payload · `404` unknown token · `410 Gone` revoked/expired (13.4) · `401 { passwordRequired: true }` locked (13.3, no data leakage).
+
+---
+
+## Schema
+
+New migration (next available number — **018 was the last**, in Phase 10.4.6; confirm before writing):
+
+```sql
+CREATE TABLE shares (
+  id            TEXT PRIMARY KEY,
+  timeline_id   TEXT NOT NULL REFERENCES timelines(id) ON DELETE CASCADE,
+  token         TEXT NOT NULL UNIQUE,          -- unguessable, URL-safe
+  view_type     TEXT NOT NULL,                 -- gantt | list | calendar | kanban
+  view_config   TEXT NOT NULL,                 -- JSON: group/sort/color/filter(def)/visible-columns/card-fields
+  password_hash TEXT,                          -- nullable (13.3)
+  expires_at    DATETIME,                      -- nullable (13.4)
+  created_by    TEXT NOT NULL REFERENCES team_members(id),
+  created_at    DATETIME NOT NULL,
+  last_viewed_at DATETIME,
+  view_count    INTEGER NOT NULL DEFAULT 0,
+  revoked_at    DATETIME                       -- nullable (13.4)
+);
+```
+
+**Token migration:** for every existing timeline, insert one `shares` row `{ view_type: 'gantt', view_config: <defaults>, token: timelines.share_token }` so existing links keep working. `timelines.share_token` is `NOT NULL UNIQUE`, so it can only be **dropped in a follow-up migration** once all UI/handler references move to `shares`; until then keep it and stop minting new per-timeline tokens.
+
+---
+
+## API
+
+| Method + path | Auth | Purpose |
+|---|---|---|
+| `POST /timelines/{id}/shares` | member | Create share; body = `{ viewType, viewConfig, password?, expiresAt? }` |
+| `GET /timelines/{id}/shares` | creator + admins | List shares for a timeline |
+| `PATCH /shares/{id}` | creator + admins | Rename / set-clear password / extend expiry / revoke |
+| `DELETE /shares/{id}` | creator + admins | Hard delete |
+| `GET /shares/{token}` | **public** | The gateway above |
+| `POST /shares/{token}/unlock` | **public** | (13.2) password → short-lived view JWT |
+
+OpenAPI: add `Share`, `ShareViewConfig`, `CreateShareInput`, `PatchShareInput`, `PublicShareProjection` schemas; regenerate TS types.
+
+---
+
+## Read-only view mode
+
+Thread an `interactive: boolean` (default `true`) through each view + its toolbar, sourced from a `ShareViewContext` when mounted under `/s/:token`. When `false`:
+- Toolbar, menus, and the "Share"/"Export" actions are not rendered.
+- Bars/cards/rows are non-draggable; **clicks are inert in every view** — no `ActivityPanel`, no read-only popover, no drill-down. Static snapshots.
+- No create affordances ("+ Add", empty-cell create, drag-to-create).
+- Theme forced to light.
+
+The public viewer route `/s/:token` lives **outside** `ProtectedRoute`: fetch `GET /shares/{token}`, mount the matching view in `interactive=false` with `view_config` applied, render a slim branding strip (team name · "Shared view" · last-updated). Find/keyboard-nav are out of scope for the public surface in v1.
+
+---
+
+## Sub-phases
+
+### 13.1 — Foundation, public gateway, Gantt viewer (MVP)
+The whole data-leak surface is confronted here so 13.2–13.4 ride on a proven-safe gateway.
+- `shares` schema + repo + token migration (existing per-timeline tokens preserved).
+- Go filter evaluator (`internal/filters` mirroring `matchesFilter`) + **shared golden-fixture suite** (`packages/shared/testdata/filter-fixtures.json`) run by both `filterEngine.test.ts` and a Go test.
+- `GET /shares/{token}` gateway: scope-locked query (token → server-derived `timeline_id`, no client selector), filter-next, fixed display projection, referenced-entity pruning, TTL cache.
+- `POST/GET /timelines/{id}/shares`, `PATCH/DELETE /shares/{id}`.
+- Gantt `interactive=false` mode (no chrome, no drag, no edit, forced light).
+- "Share this view" in the Gantt toolbar → snapshot live toolbar state (incl. resolved filter definition) → create → copy URL.
+- `/s/:token` public route + branding strip.
+
+**Exit criteria:**
+- Create a share from a filtered/grouped/colored/sorted Gantt; open `/s/:token` in a fresh/incognito session (no login) and see **exactly** that configuration, read-only, light mode, with **inert clicks**.
+- **Scope isolation holds:** a share token resolves to exactly its timeline's filtered records; tampering (passing another timeline/activity/team id, or scope-widening params) cannot widen the result; there is no share-reachable by-id or list-timelines endpoint.
+- Filtered-out activities are **absent from the network payload** (verified in devtools), as are member emails, `user_id`s, roles, the access list, and other timelines.
+- The Go and TS filter evaluators agree on every golden fixture (CI).
+- Existing `timelines.share_token` links still resolve (migrated into `shares`).
+- Warm-cache requests hit no DB; TTL refresh picks up an activity edit within the window.
+- `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` + `test` pass.
+
+### 13.2 — Share module overhaul + password protection
+> **Re-sequenced 2026-06-05.** Password (formerly 13.3) is pulled forward and fused with the modal rebuild because the [handoff design](#the-share-module-overhaul-132) bakes a password toggle into its create form. The modal is also the management surface, so it absorbs most of the old 13.4 "Manage shares" work.
+
+- Rebuild the "Share this view" modal to the handoff (active-links list, create form with title / optional description / optional password toggle, copy with success state, inline delete-confirm, empty state, footer hint). Build from existing components + design tokens — do **not** port the prototype's inline styles.
+- Per-row meta: creator avatar + name, created date, **view count**.
+- `password_hash` (bcrypt) on create/patch; `GET /shares/{token}` returns `401 { passwordRequired: true }` when locked (no data).
+- `POST /shares/{token}/unlock` → short-lived view JWT scoped to that share's `view_config` snapshot; rate-limit unlock attempts (N/IP/hour); public unlock prompt at `/s/:token`.
+- **Delete is not permission-gated** — a share is a read-only projection that can't mutate app data, so the handoff's `canDelete = isAdmin || creator` rule is dropped; any team member who can manage the timeline may remove any of its shares.
+
+**Exit:** modal matches the handoff; one timeline hosts multiple named shares each showing creator/date/view-count; wrong password rejected + rate-limited; correct password yields the view; the unlock token cannot be replayed against a different share; a locked share leaks no data; delete kills the link immediately.
+
+### 13.3 — List + Kanban read-only
+- `interactive=false` for List and Kanban + public mounting per `view_type`.
+- Per-view read-only polish (the "little uplift" each view needs to read cleanly without chrome); clicks inert here too.
+- "Share this view" (the 13.2 modal) in both toolbars.
+- Projection nuance: `notes` included only when a List share has the Notes column enabled.
+
+**Exit:** a share created from List or Kanban renders faithfully, read-only, with inert clicks; a List share exposes exactly its enabled columns; the same scope-locked gateway serves both with no per-view data path. (Calendar is **not** here — see 13.4.)
+
+### 13.4 — Calendar — ICS feed sharing
+> **A different model from the other views.** A Calendar share is not a frozen view config — it's a **subscribable ICS feed**. People consume a shared calendar by subscribing in their own app, which is also the product's native posture (the app is the source of truth; calendars are read projections). This is the on-ramp to Phase 20 Calendar Sync.
+
+- **Share unit = a calendar feed**, scoped to the **whole timeline** (every activity → VEVENT) or a **single member's timeline** (their assigned activities). Both ship here.
+- **No view semantics** — no filter / group-by / color-by. "Give me the whole timeline (I'll slice it in my calendar app) or just person X."
+- **Token is the secret; no password.** Calendar clients can't do interactive unlock on a subscription URL. Revocation = regenerate the link (rotate token) or toggle public access off.
+- **A distinct modal** (not the active-links list): public-access On/Off toggle, scope selector (whole timeline vs. a member), feed URL, Copy, one-click Add to Google / Apple / Outlook, Regenerate link.
+- **Live data, all-day events.** Served current (short cache, no frozen snapshot — apps poll on their own cadence). All-day VEVENTs via `DTSTART;VALUE=DATE` start→end (Phase 11.1.1 dates). No PII beyond member display name.
+- **Schema lean:** reuse `shares` with a `kind` discriminator (`view` | `ics`); ICS rows carry `scope` (`timeline` | `member`) + nullable `member_id`, no `view_config` / filter / password. Serve via `GET /shares/{token}.ics` (`text/calendar`) + a `webcal://` variant.
+
+**Exit:** subscribing to a timeline feed in a real calendar app shows its activities as all-day events; a per-member feed shows only that member's; toggling off / regenerating immediately invalidates the old URL; the `.ics` payload carries no email / `user_id` / role and no other timelines.
+
+### 13.5 — Lifecycle tail
+- Optional expiry → `410 Gone` after `expires_at`.
+- Active-share-count chip on the timeline tile.
+- Last-viewed timestamps surfaced in the 13.2 modal.
+
+**Exit:** an expired link is dead immediately; the timeline tile shows an accurate active-share count; last-viewed updates on access.
+
+---
+
+## The share module overhaul (13.2)
+Source design: [`docs/design/handoffs/share-modal/`](../design/handoffs/share-modal/design_handoff_share_modal/README.md) (design reference, **not** production code — recreate with the codebase's React + Tailwind v4 + shadcn/ui + lucide-react and existing tokens). Single modal, several internal states:
+- **Shell:** header (link-icon tile, "Share this view", dynamic timeline-name subtitle, close), section bar ("ACTIVE LINKS" eyebrow + count chip + "New share"), scrollable body, footer (role hint + Done).
+- **Share row:** type tile (lock if protected / link if not), title (+ "password" badge), description, mono URL field + Copy (1.6s success state), creator avatar + name + date + view count; inline delete-confirm overlay.
+- **Add form (inline):** title (required), description (optional), password-protect block with a toggle switch + show/hide password sub-field; Create disabled until title non-empty AND (password off OR password set).
+- **Empty state:** dashed container + "Create share link".
+- **Divergence from the handoff:** drop the `canDelete = isAdmin || creator` permission gate (see 13.2). Wire to the real API (`POST` create, `DELETE`, `GET` list) instead of the prototype's in-memory mocks.
+
+---
+
+## Open questions
+None outstanding for v1. Resolved 2026-06-04:
+- **`notes`** — shown only when a List share has the Notes column enabled; omitted otherwise.
+- **View counts** — visible to the creator **and** team admins (not creator-private).
+- **TTL** — fixed at **60s** (`DRABA_SHARE_CACHE_TTL` default).
+
+Resolved 2026-06-05 (re-sequencing):
+- **Password ordering** — pulled forward into 13.2 (fused with the modal overhaul), no longer a standalone 13.3.
+- **Delete permissions** — not gated; shares can't mutate data, so any timeline manager may delete any share.
+- **Calendar shares** — ICS feed (whole-timeline or per-member), not a view-share; token-as-secret, no password, no filter/group-by/color-by.
+
+## Non-goals (v1)
+- **Click-to-detail / drill-down on the public surface** — clicks are inert; shares are static snapshots.
+- Websocket/live updates on the public surface (cache TTL only).
+- Find / global search / keyboard nav on the public viewer.
+- Pixel/PDF snapshot shares (that's the Chromium conversation, deferred to Phase 14).
+- Editing or any mutation through a share link.
+- **Calendar view-shares** — Calendar is ICS-only (13.4); there is no `interactive=false` Calendar web-share.
+- **Password on ICS feeds** — calendar clients can't unlock interactively; the token is the secret.
 ````
 
 ## File: docs/REQUIREMENTS.md
@@ -56611,19 +58202,27 @@ Includes both the webhook backend and the per-timeline connector sidebar UI (pre
 - [x] Scope-isolation test: token reaches exactly its timeline's filtered records; tampering (other timeline/activity/team id, scope-widening params) cannot widen; no share-reachable by-id/list endpoint
 - [x] Verify payload: filtered-out activities + member email/`user_id`/role + access list + other timelines all absent (automated test)
 
-**13.2 — Remaining views read-only (List, Calendar, Kanban):**
-- [ ] `interactive=false` + public mounting for List, Calendar, Kanban (clicks inert)
+**13.2 — Share module overhaul + password protection:**
+- [ ] Rebuild the "Share this view" modal to the handoff design (active-links list, create form, copy w/ success state, inline delete-confirm, empty state) using existing components + tokens
+- [ ] Per-row meta: creator avatar + name, created date, view count
+- [ ] `password_hash` (bcrypt) on create/patch; `GET /shares/{token}` → `401 { passwordRequired: true }` when locked (no data)
+- [ ] `POST /shares/{token}/unlock` → short-lived view JWT scoped to the share; rate-limit unlock attempts (N/IP/hour); public unlock prompt at `/s/:token`
+- [ ] Drop the `canDelete = isAdmin || creator` gate — any timeline manager may delete any share (shares can't mutate data)
+
+**13.3 — List + Kanban read-only:**
+- [ ] `interactive=false` + public mounting for List and Kanban (clicks inert)
 - [ ] Projection: include `notes` only when a List share has the Notes column enabled in `view_config`
-- [ ] Per-view read-only polish
-- [ ] "Share this view" in each toolbar
+- [ ] Per-view read-only polish + "Share this view" (13.2 modal) in both toolbars
 
-**13.3 — Password protection + unlock:**
-- [ ] `password_hash` (bcrypt) on create/patch; `GET /shares/{token}` → `401 { passwordRequired: true }` when locked
-- [ ] `POST /shares/{token}/unlock` → short-lived view JWT scoped to the share; rate-limit unlock attempts (N/IP/hour)
+**13.4 — Calendar — ICS feed sharing:**
+- [ ] `shares.kind` discriminator (`view` | `ics`); ICS rows carry `scope` (`timeline` | `member`) + nullable `member_id`, no `view_config`/filter/password
+- [ ] `GET /shares/{token}.ics` (`text/calendar`) + `webcal://` variant; all-day VEVENTs (`DTSTART;VALUE=DATE` start→end); live data, short cache
+- [ ] Distinct Calendar share modal: public On/Off toggle, scope selector (timeline vs. member), feed URL, Copy, Add-to-Google/Apple/Outlook, Regenerate link
+- [ ] Whole-timeline AND per-member feeds; payload carries no email/`user_id`/role/other-timelines
 
-**13.4 — Lifecycle & management:**
-- [ ] Expiry + revocation → `410 Gone`
-- [ ] "Manage shares" UI per timeline (list, view counts, last-viewed, edit, revoke) + active-share-count chip — counts visible to creator + team admins
+**13.5 — Lifecycle tail:**
+- [ ] Optional expiry → `410 Gone` after `expires_at`
+- [ ] Active-share-count chip on the timeline tile; last-viewed surfaced in the 13.2 modal
 
 ## Done
 - [x] Initialize repo scaffold — 2026-04-27
@@ -62892,9 +64491,10 @@ This document organizes development into discrete phases with effort estimates a
 | 12 | [Communications Testing](#phase-12--communications-testing) | S — 1 day | ✅ |
 | 13 | [Shares — Public Read-Only View Links](#phase-13--shares--multi-share-views-with-passwords) (sub-phased) | L | ⬜ |
 | 13.1 | [Foundation, Public Gateway, Gantt Viewer (MVP)](#phase-131--foundation-public-gateway-gantt-viewer-mvp) | M–L | ✅ |
-| 13.2 | [Remaining Views Read-Only](#phase-132--remaining-views-read-only) | M | ⬜ |
-| 13.3 | [Password Protection + Unlock](#phase-133--password-protection--unlock) | S–M | ⬜ |
-| 13.4 | [Lifecycle & Management](#phase-134--lifecycle--management) | S–M | ⬜ |
+| 13.2 | [Share Module Overhaul + Password Protection](#phase-132--share-module-overhaul--password-protection) | M–L | ⬜ |
+| 13.3 | [List + Kanban Read-Only](#phase-133--list--kanban-read-only) | M | ⬜ |
+| 13.4 | [Calendar — ICS Feed Sharing](#phase-134--calendar--ics-feed-sharing) | M | ⬜ |
+| 13.5 | [Lifecycle Tail](#phase-135--lifecycle-tail) | S | ⬜ |
 | 14 | [Export — Tabular & Per-View](#phase-14--export--tabular--per-view) | M — 3–5 days | ⬜ |
 | 15 | [Import — Tabular](#phase-15--import--tabular) | M — 2–3 days | ⬜ |
 | 16 | [Backup & Restore](#phase-16--backup--restore) | M — 2–3 days | ⬜ |
@@ -64349,7 +65949,9 @@ A first-class **Share** entity: one timeline can have many shares, each a frozen
 - **The frozen filter is evaluated server-side, in Go, at build time**, so filtered-out activities never reach the browser. Requires a Go port of `matchesFilter`, with a **shared golden-fixture suite** both the TS and Go evaluators must pass in CI (drift guard).
 - **The filter is snapshotted as a resolved `FilterDefinition`**, not a saved-filter reference — editing/deleting the source filter must not mutate existing shares.
 - **Read-only = the real view components in `interactive=false` mode**, not separate viewer components (preserves "exactly what I'm seeing" fidelity). **Clicks are inert in every view** — shares are static web snapshots; no detail popover, no drill-down.
-- **Password is a fast-follow (13.3), not v1** — an unguessable token is the v1 floor.
+- **Password is a fast-follow, not v1** — an unguessable token is the v1 floor. After the 13.1 MVP shipped, password was pulled forward and fused with the share-module overhaul (now 13.2); see the re-sequencing note below.
+
+**Re-sequencing (2026-06-05):** after 13.1 shipped, the back half of Phase 13 was re-cut around three insights. (1) The [share-modal handoff design](plans/phase-13-shares.md#the-share-module-overhaul-132) bakes a password toggle into its create form, so password protection (formerly 13.3) and the modal overhaul are one phase — **13.2**. The modal is also the management surface (active-links list, view counts, delete), so it absorbs most of the old "Lifecycle & management" phase; **delete is no longer permission-gated** — a share can never mutate app data, so any team member managing the timeline may remove a link. (2) The old "remaining views" phase splits because **Calendar shares are a different animal** — see (3). List + Kanban stay view-shares (**13.3**). (3) A Calendar share is not a frozen view config; it is a **subscribable ICS feed** — whole-timeline or a single member's timeline, public on/off, token-as-secret (no password, no filter/group-by/color-by) — its own phase, **13.4**. Lifecycle's thin remainder (expiry, tile chip) becomes **13.5**.
 
 ---
 
@@ -64369,39 +65971,66 @@ The whole data-leak surface is confronted here so 13.2–13.4 ride on a proven-s
 
 ---
 
-### Phase 13.2 — Remaining Views Read-Only
-**Status:** ⬜ | **Effort:** M
+### Phase 13.2 — Share Module Overhaul + Password Protection
+**Status:** ⬜ | **Effort:** M–L
 
-Extends `interactive=false` + public mounting to **List, Calendar, and Kanban** (clicks inert here too), plus the per-view visual polish each needs to read cleanly without chrome. "Share this view" added to each toolbar. The same scope-locked gateway serves all four view types — the only projection nuance is `notes`, included only when a List share has the Notes column enabled.
+Rebuilds the "Share this view" modal to the [design handoff](plans/phase-13-shares.md#the-share-module-overhaul-132) and pulls **password protection** forward to ride alongside it (the handoff's create form has a password toggle, so the two are inseparable). The modal becomes the per-view share manager: an active-links list (one timeline → many named shares), a create form (title, optional description, optional password), copy-to-clipboard with a success state, an inline delete-confirm, and an empty state. Each row shows creator, created date, and **view count**. This absorbs most of the old Lifecycle phase's "Manage shares" surface.
+
+**Backend (password):** `password_hash` (bcrypt) on create/patch; `GET /shares/{token}` returns `401 { passwordRequired: true }` (no data) when locked; `POST /shares/{token}/unlock` exchanges the password for a short-lived view JWT scoped to that share's `view_config`; unlock attempts are rate-limited (N/IP/hour). A public unlock prompt renders at `/s/:token` before the view.
+
+**Delete is not permission-gated.** A share is a read-only projection that can never mutate app data, so the old admin-vs-creator `canDelete` rule is dropped — any team member who can manage the timeline may remove any of its shares.
 
 **Exit criteria — safe to pause when:**
-- A share created from any of the four views renders faithfully and read-only
-- A List share exposes exactly its enabled columns; no payload over-exposure in any view
+- The modal matches the handoff design, built from existing components + design tokens (no ported inline styles)
+- One timeline hosts multiple named shares in the list; each row shows creator, date, and a live view count
+- A wrong password is rejected and rate-limited; a correct password renders the view; the unlock token cannot be replayed against a different share; a locked share leaks no data in the `passwordRequired` response
+- Deleting a share kills the link immediately
+- `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` + `test` pass
+
+---
+
+### Phase 13.3 — List + Kanban Read-Only
+**Status:** ⬜ | **Effort:** M
+
+Extends `interactive=false` + public mounting to **List and Kanban** (clicks inert here too), plus the per-view polish each needs to read cleanly without chrome. "Share this view" (the 13.2 modal) added to both toolbars. The same scope-locked gateway serves these as view-shares — the only projection nuance is `notes`, included only when a List share has the Notes column enabled. (Calendar is intentionally *not* here — see 13.4.)
+
+**Exit criteria — safe to pause when:**
+- A share created from List or Kanban renders faithfully and read-only
+- A List share exposes exactly its enabled columns; no payload over-exposure in either view
 - `pnpm --filter web lint` + `test` pass
 
 ---
 
-### Phase 13.3 — Password Protection + Unlock
-**Status:** ⬜ | **Effort:** S–M
+### Phase 13.4 — Calendar — ICS Feed Sharing
+**Status:** ⬜ | **Effort:** M
 
-Optional per-share password. `password_hash` (bcrypt) on create/patch; `GET /shares/{token}` returns `401 { passwordRequired: true }` (no data) when locked; `POST /shares/{token}/unlock` exchanges the password for a short-lived view JWT scoped to that share's `view_config`. Unlock attempts are rate-limited (N/IP/hour).
+Calendar diverges from the other views by design. What people want from a shared calendar isn't a frozen web rendering — it's a **feed they subscribe to** in Google / Apple / Outlook. This is also the product's native model: *the app is the source of truth; calendars are read projections.* So a Calendar share is a **subscribable ICS feed**, not a view-share.
+
+**Model:**
+- **Share unit = a calendar feed.** Scope is either the **whole timeline** (every activity → VEVENT) or a **single member's timeline** (their assigned activities). Both ship in this phase.
+- **No view semantics.** No filter, no group-by, no color-by — "give me the whole thing and I'll slice it in my own calendar app, or give me just person X." That simplicity is the whole point of the divergence.
+- **Token is the secret — no password.** Calendar clients can't do interactive unlock on a subscription URL, so password protection (13.2) does not apply here. The revocation story is **regenerate the link** (rotates the token) or toggle public access off.
+- **A distinct modal.** Calendar's "Share" button opens a different surface than the view-share modal: a public-access **On/Off** toggle, a scope selector (whole timeline vs. a member), the feed URL, **Copy**, one-click **Add to Google / Apple / Outlook**, and **Regenerate link**.
+- **Live data, all-day events.** Served current (short cache, no frozen snapshot — calendar apps poll on their own cadence). Activities are all-day calendar dates (Phase 11.1.1), so VEVENTs use `DTSTART;VALUE=DATE` spanning start→end. No PII beyond member display name.
+
+**Implementation lean:** reuse the `shares` table with a `kind` discriminator (`view` | `ics`); ICS rows carry `scope` (`timeline` | `member`) + nullable `member_id` and no `view_config` / filter / password. Serve via `GET /shares/{token}.ics` (`text/calendar`) with a `webcal://` convenience variant.
 
 **Exit criteria — safe to pause when:**
-- A wrong password is rejected and rate-limited; a correct password renders the view
-- The unlock token cannot be replayed against a different share
-- A locked share leaks no data in the `passwordRequired` response
+- Subscribing to a timeline feed in a real calendar app (Google or Apple) shows the timeline's activities as all-day events; a per-member feed shows only that member's activities
+- Toggling public access off, or regenerating the link, immediately invalidates the old URL
+- The `.ics` payload contains no member email / `user_id` / role and no other timelines
+- `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` + `test` pass
 
 ---
 
-### Phase 13.4 — Lifecycle & Management
-**Status:** ⬜ | **Effort:** S–M
+### Phase 13.5 — Lifecycle Tail
+**Status:** ⬜ | **Effort:** S
 
-Expiry and revocation (`expires_at` / `revoked_at` → `410 Gone`), plus a "Manage shares" surface per timeline: list, view counts, last-viewed, edit (rename / password / expiry), revoke; and an active-share-count chip on the timeline tile.
+The thin remainder after the 13.2 modal absorbed share management: optional **expiry** (`expires_at` → `410 Gone` once past), an **active-share-count chip** on the timeline tile, and **last-viewed** timestamps surfaced in the modal.
 
 **Exit criteria — safe to pause when:**
-- An expired or revoked link returns `410 Gone` immediately and is no longer usable
-- One timeline hosts ≥3 independent shares with different view types and configurations
-- View counts and last-viewed timestamps update on access; admins can manage shares they don't own
+- An expired link returns `410 Gone` immediately and is no longer usable
+- The timeline tile shows an accurate active-share count; last-viewed updates on access
 
 ---
 
