@@ -140,10 +140,13 @@ packages/
         timeline_types.go
         user_handler.go
         user_preference_handler.go
+        version_handler.go
       auth/
         api_token.go
         jwt.go
         password.go
+      buildinfo/
+        buildinfo.go
       db/
         migrations/
           001_initial_schema.sql
@@ -524,46 +527,6 @@ jobs:
 
       - name: Build
         run: pnpm --filter @draba/web build
-````
-
-## File: .github/workflows/docker-publish.yml
-````yaml
-name: Publish Docker Image
-
-on:
-  push:
-    branches: [master]
-
-jobs:
-  publish:
-    name: Build & Push to Docker Hub
-    runs-on: ubuntu-latest
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build and push
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: packages/api/Dockerfile
-          target: prod
-          push: true
-          tags: |
-            mewcus/draba:latest
-            mewcus/draba:${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
 ````
 
 ## File: .github/workflows/repomap.yml
@@ -8391,6 +8354,92 @@ func isValidPassword(p string) bool {
 }
 ````
 
+## File: packages/api/internal/api/authz.go
+````go
+package api
+
+import (
+	"database/sql"
+	"errors"
+	"net/http"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// requireTeamMember returns the caller's TeamMember for the given team.
+// Superadmins who are not explicit members receive a synthetic member with
+// role "admin" so downstream code works without special-casing.
+func (s *Server) requireTeamMember(w http.ResponseWriter, r *http.Request, teamID string) (*models.TeamMember, bool) {
+	claims := claimsFromContext(r.Context())
+	member, err := s.teams.GetMember(teamID, claims.UserID)
+	if err == nil {
+		return member, true
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to verify team membership")
+		return nil, false
+	}
+
+	// Not a member — check superadmin.
+	caller, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to verify permissions")
+		return nil, false
+	}
+	if !caller.IsSuperadmin {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
+		return nil, false
+	}
+
+	return superadminMember(teamID, claims.UserID), true
+}
+
+// requireTeamAdmin is like requireTeamMember but also enforces admin role.
+// Superadmins always pass; regular members must have role "admin".
+func (s *Server) requireTeamAdmin(w http.ResponseWriter, r *http.Request, teamID string) (*models.TeamMember, bool) {
+	member, ok := s.requireTeamMember(w, r, teamID)
+	if !ok {
+		return nil, false
+	}
+	if member.Role != "admin" {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "admin role required")
+		return nil, false
+	}
+	return member, true
+}
+
+// hasTeamAccess reports whether the authenticated caller may access the given
+// team without writing a response. Use when the correct failure status is
+// NOT_FOUND rather than FORBIDDEN — e.g. resource-scoped endpoints where
+// revealing a resource exists via a 403 is undesirable.
+func (s *Server) hasTeamAccess(r *http.Request, teamID string) bool {
+	claims := claimsFromContext(r.Context())
+	_, err := s.teams.GetMember(teamID, claims.UserID)
+	if err == nil {
+		return true
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return false
+	}
+	caller, err := s.users.GetByID(claims.UserID)
+	return err == nil && caller.IsSuperadmin
+}
+
+// superadminMember returns a synthetic TeamMember for superadmins who are
+// not explicit members of a team. The ID is empty (no real row exists) and
+// the role is "admin" so all admin-gated checks pass.
+func superadminMember(teamID, userID string) *models.TeamMember {
+	return &models.TeamMember{
+		ID:       "",
+		TeamID:   teamID,
+		UserID:   &userID,
+		Role:     "admin",
+		JoinedAt: time.Now(),
+	}
+}
+````
+
 ## File: packages/api/internal/api/helpers.go
 ````go
 package api
@@ -9238,6 +9287,172 @@ type PatchStatusTemplateItemJSONBody struct {
 	Icon     *string `json:"icon,omitempty"`
 	IsClosed *bool   `json:"isClosed,omitempty"`
 	Position *int    `json:"position,omitempty"`
+}
+````
+
+## File: packages/api/internal/api/tag_handler.go
+````go
+package api
+
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// handleListTags handles GET /teams/{id}/tags. Returns all tags for the team,
+// ordered by name.
+func (s *Server) handleListTags(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+
+	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
+		return
+	}
+
+	tags, err := s.tags.ListByTeam(teamID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list tags")
+		return
+	}
+	writeJSON(w, http.StatusOK, tags)
+}
+
+// tagNameMaxLen is the maximum byte length accepted for a tag name.
+const tagNameMaxLen = 50
+
+// handleCreateTag handles POST /teams/{id}/tags. Any team member may create a
+// tag; they become the creator. Returns 409 when a tag with the same name
+// already exists in the team.
+func (s *Server) handleCreateTag(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
+		return
+	}
+
+	var req struct {
+		Name  string  `json:"name"`
+		Color *string `json:"color,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+	if req.Name == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name is required")
+		return
+	}
+	if len(req.Name) > tagNameMaxLen {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name must be 50 characters or fewer")
+		return
+	}
+
+	tag := &models.Tag{
+		ID:        newID(),
+		TeamID:    teamID,
+		Name:      req.Name,
+		Color:     req.Color,
+		CreatedBy: claims.UserID,
+		CreatedAt: time.Now().UTC(),
+	}
+	if err := s.tags.Create(tag); err != nil {
+		// SQLite unique constraint violation message contains "UNIQUE constraint failed"
+		if isUniqueConstraintError(err) {
+			writeError(w, http.StatusConflict, "TAG_NAME_EXISTS", "a tag with this name already exists in the team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create tag")
+		return
+	}
+	writeJSON(w, http.StatusCreated, tag)
+}
+
+// handleUpdateTag handles PATCH /tags/{id}. Any team member may update the
+// tag's name or color after confirming membership in the tag's team.
+func (s *Server) handleUpdateTag(w http.ResponseWriter, r *http.Request) {
+	tagID := r.PathValue("id")
+
+	tag, err := s.tags.GetByID(tagID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "tag not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update tag")
+		return
+	}
+
+	// Return 404 (not 403) for non-members so callers cannot probe tag existence.
+	if !s.hasTeamAccess(r, tag.TeamID) {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "tag not found")
+		return
+	}
+
+	var req struct {
+		Name  *string `json:"name,omitempty"`
+		Color *string `json:"color,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+	if req.Name != nil {
+		if *req.Name == "" {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name must not be empty")
+			return
+		}
+		if len(*req.Name) > tagNameMaxLen {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name must be 50 characters or fewer")
+			return
+		}
+		tag.Name = *req.Name
+	}
+	if req.Color != nil {
+		tag.Color = req.Color
+	}
+
+	if err := s.tags.Update(tag); err != nil {
+		if isUniqueConstraintError(err) {
+			writeError(w, http.StatusConflict, "TAG_NAME_EXISTS", "a tag with this name already exists in the team")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update tag")
+		return
+	}
+	writeJSON(w, http.StatusOK, tag)
+}
+
+// handleDeleteTag handles DELETE /tags/{id}. Any team member may delete a tag;
+// the cascade removes all activity_tags rows referencing it.
+func (s *Server) handleDeleteTag(w http.ResponseWriter, r *http.Request) {
+	tagID := r.PathValue("id")
+
+	tag, err := s.tags.GetByID(tagID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "tag not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete tag")
+		return
+	}
+
+	// Return 404 (not 403) for non-members so callers cannot probe tag existence.
+	if !s.hasTeamAccess(r, tag.TeamID) {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "tag not found")
+		return
+	}
+
+	if err := s.tags.Delete(tagID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete tag")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 ````
 
@@ -11863,6 +12078,113 @@ func newRepoID() string {
 	b := make([]byte, 16)
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
+}
+````
+
+## File: packages/api/internal/db/tag_repo.go
+````go
+package db
+
+import (
+	"errors"
+	"fmt"
+
+	"github.com/jmoiron/sqlx"
+
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// ErrTagOwnership is returned by ValidateTeamOwnership when one or more tag
+// IDs belong to a different team (or do not exist).
+var ErrTagOwnership = errors.New("tag belongs to another team")
+
+// TagRepo is the persistence layer for Tag records.
+type TagRepo struct {
+	db *sqlx.DB
+}
+
+// NewTagRepo returns a TagRepo backed by db.
+func NewTagRepo(db *sqlx.DB) *TagRepo {
+	return &TagRepo{db: db}
+}
+
+// Create inserts a new Tag row.
+func (r *TagRepo) Create(tag *models.Tag) error {
+	_, err := r.db.NamedExec(`
+		INSERT INTO tags (id, team_id, name, color, created_by, created_at)
+		VALUES (:id, :team_id, :name, :color, :created_by, :created_at)
+	`, tag)
+	if err != nil {
+		return fmt.Errorf("creating tag: %w", err)
+	}
+	return nil
+}
+
+// GetByID fetches a Tag by primary key. Returns sql.ErrNoRows (wrapped) when
+// no row matches.
+func (r *TagRepo) GetByID(id string) (*models.Tag, error) {
+	var t models.Tag
+	err := r.db.Get(&t, `SELECT * FROM tags WHERE id = ?`, id)
+	if err != nil {
+		return nil, fmt.Errorf("getting tag: %w", err)
+	}
+	return &t, nil
+}
+
+// ListByTeam returns all tags for the given team, ordered by name ascending.
+func (r *TagRepo) ListByTeam(teamID string) ([]*models.Tag, error) {
+	tags := make([]*models.Tag, 0)
+	err := r.db.Select(&tags,
+		`SELECT * FROM tags WHERE team_id = ? ORDER BY name ASC`,
+		teamID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("listing tags: %w", err)
+	}
+	return tags, nil
+}
+
+// Update writes name and color for an existing tag row.
+func (r *TagRepo) Update(tag *models.Tag) error {
+	_, err := r.db.NamedExec(`
+		UPDATE tags SET name = :name, color = :color WHERE id = :id
+	`, tag)
+	if err != nil {
+		return fmt.Errorf("updating tag: %w", err)
+	}
+	return nil
+}
+
+// Delete removes a tag row. Cascade deletes matching activity_tags rows.
+func (r *TagRepo) Delete(id string) error {
+	_, err := r.db.Exec(`DELETE FROM tags WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("deleting tag: %w", err)
+	}
+	return nil
+}
+
+// ValidateTeamOwnership confirms that every ID in tagIDs belongs to teamID.
+// Returns ErrTagOwnership if any ID is missing or owned by another team.
+func (r *TagRepo) ValidateTeamOwnership(teamID string, tagIDs []string) error {
+	if len(tagIDs) == 0 {
+		return nil
+	}
+	query, args, err := sqlx.In(
+		`SELECT COUNT(*) FROM tags WHERE id IN (?) AND team_id = ?`,
+		tagIDs, teamID,
+	)
+	if err != nil {
+		return fmt.Errorf("building ownership query: %w", err)
+	}
+	var count int
+	if err := r.db.Get(&count, query, args...); err != nil {
+		return fmt.Errorf("checking tag ownership: %w", err)
+	}
+	if count != len(tagIDs) {
+		return ErrTagOwnership
+	}
+	return nil
 }
 ````
 
@@ -14493,60 +14815,6 @@ DRABA_BASE_URL=                 # public URL of the server (used for OAuth callb
 ## Conventions
 See `docs/CONVENTIONS.md` for Go patterns, error handling, and testing conventions.
 See `skills/go-comments.md` for comment conventions (package headers, exported doc comments, when to use inline comments). Apply these whenever writing or editing Go code.
-````
-
-## File: packages/api/Dockerfile
-````
-# ── Web builder ──
-FROM node:22-alpine AS web-builder
-RUN corepack enable && corepack prepare pnpm@latest --activate
-WORKDIR /workspace
-COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
-COPY packages/web/package.json packages/web/
-COPY packages/shared/package.json packages/shared/
-RUN pnpm install --frozen-lockfile
-COPY packages/web packages/web
-COPY packages/shared packages/shared
-RUN pnpm --filter @draba/web build
-
-# ── Go dependency cache ──
-FROM golang:1.25-alpine AS go-deps
-WORKDIR /app
-COPY packages/api/go.mod packages/api/go.sum ./
-RUN go mod download
-
-# ── Production builder — embeds web dist into the Go binary ──
-FROM go-deps AS builder
-COPY packages/api/ .
-COPY --from=web-builder /workspace/packages/web/dist ./ui/static
-RUN CGO_ENABLED=0 go build -o /draba ./cmd/draba
-
-# ── Dev stage (used by docker-compose for hot reload) ──
-# Source is provided by the docker-compose volume mount, not baked in here —
-# baking it in caused Air to see a spurious "change" on first mount and restart.
-FROM golang:1.25-alpine AS dev
-ENV LANG=C.UTF-8
-ENV LC_ALL=C.UTF-8
-RUN go install github.com/air-verse/air@latest
-WORKDIR /app
-COPY packages/api/go.mod packages/api/go.sum ./
-RUN go mod download
-CMD ["air", "-c", ".air.toml"]
-
-# ── Production stage ──
-FROM alpine:3.21 AS prod
-RUN apk add --no-cache ca-certificates musl-locales \
-    && addgroup -g 1000 draba \
-    && adduser -u 1000 -G draba -s /bin/sh -D draba \
-    && mkdir -p /data \
-    && chown draba:draba /data
-ENV LANG=C.UTF-8
-ENV LC_ALL=C.UTF-8
-COPY --from=builder /draba /usr/local/bin/draba
-WORKDIR /data
-USER draba
-EXPOSE 8080
-CMD ["draba"]
 ````
 
 ## File: packages/api/go.mod
@@ -20250,6 +20518,160 @@ export function useDeleteTimelineStatus(teamId: string, timelineId: string) {
 }
 ````
 
+## File: packages/web/src/hooks/useTags.test.ts
+````typescript
+/**
+ * useTags hooks — unit tests verifying query keys, mutation endpoints, and
+ * cache invalidation. Uses a real QueryClient with fetch mocked globally.
+ */
+
+import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { renderHook, waitFor } from '@testing-library/react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { createElement } from 'react'
+import { useTags, useCreateTag, useUpdateTag, useDeleteTag } from './useTags'
+
+// ── Auth mock ─────────────────────────────────────────────────────────────────
+
+vi.mock('@/contexts/AuthContext', () => ({
+  useAuth: () => ({ getAccessToken: async () => 'test-token' }),
+}))
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function makeWrapper() {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  return {
+    qc,
+    wrapper: ({ children }: { children: React.ReactNode }) =>
+      createElement(QueryClientProvider, { client: qc }, children),
+  }
+}
+
+const TAG_FIXTURE = {
+  id: 'tag-1',
+  teamId: 'team-1',
+  name: 'urgent',
+  color: 'red',
+  createdBy: 'user-1',
+  createdAt: '2026-01-01T00:00:00Z',
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+describe('useTags', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn())
+  })
+
+  it('fetches tags from the correct URL', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify([TAG_FIXTURE]), { status: 200 }),
+    )
+
+    const { wrapper } = makeWrapper()
+    const { result } = renderHook(() => useTags('team-1'), { wrapper })
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+
+    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+      expect.stringContaining('/teams/team-1/tags'),
+      expect.any(Object),
+    )
+    expect(result.current.data).toHaveLength(1)
+    expect(result.current.data![0].name).toBe('urgent')
+  })
+
+  it('does not fetch when teamId is empty', () => {
+    const { wrapper } = makeWrapper()
+    renderHook(() => useTags(''), { wrapper })
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled()
+  })
+})
+
+describe('useCreateTag', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn())
+  })
+
+  it('POSTs to the correct URL and invalidates the tag list', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify(TAG_FIXTURE), { status: 201 }),
+    )
+
+    const { wrapper, qc } = makeWrapper()
+    const invalidate = vi.spyOn(qc, 'invalidateQueries')
+
+    const { result } = renderHook(() => useCreateTag('team-1'), { wrapper })
+    result.current.mutate({ name: 'urgent', color: 'red' })
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+
+    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+      expect.stringContaining('/teams/team-1/tags'),
+      expect.objectContaining({ method: 'POST' }),
+    )
+    expect(invalidate).toHaveBeenCalledWith(
+      expect.objectContaining({ queryKey: ['teams', 'team-1', 'tags'] }),
+    )
+  })
+})
+
+describe('useUpdateTag', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn())
+  })
+
+  it('PATCHes the correct tag URL and invalidates the list', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ ...TAG_FIXTURE, name: 'critical' }), { status: 200 }),
+    )
+
+    const { wrapper, qc } = makeWrapper()
+    const invalidate = vi.spyOn(qc, 'invalidateQueries')
+
+    const { result } = renderHook(() => useUpdateTag('team-1'), { wrapper })
+    result.current.mutate({ id: 'tag-1', name: 'critical' })
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+
+    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+      expect.stringContaining('/tags/tag-1'),
+      expect.objectContaining({ method: 'PATCH' }),
+    )
+    expect(invalidate).toHaveBeenCalledWith(
+      expect.objectContaining({ queryKey: ['teams', 'team-1', 'tags'] }),
+    )
+  })
+})
+
+describe('useDeleteTag', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn())
+  })
+
+  it('DELETEs the correct URL and invalidates the list', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(new Response(null, { status: 204 }))
+
+    const { wrapper, qc } = makeWrapper()
+    const invalidate = vi.spyOn(qc, 'invalidateQueries')
+
+    const { result } = renderHook(() => useDeleteTag('team-1'), { wrapper })
+    result.current.mutate('tag-1')
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+
+    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+      expect.stringContaining('/tags/tag-1'),
+      expect.objectContaining({ method: 'DELETE' }),
+    )
+    expect(invalidate).toHaveBeenCalledWith(
+      expect.objectContaining({ queryKey: ['teams', 'team-1', 'tags'] }),
+    )
+  })
+})
+````
+
 ## File: packages/web/src/hooks/useTags.ts
 ````typescript
 /**
@@ -23866,6 +24288,52 @@ Run the automated test suite for the phase specified in $ARGUMENTS (e.g. "2" or 
 7. Report the table back to the user. Do not modify any source code.
 ````
 
+## File: .github/workflows/docker-publish.yml
+````yaml
+name: Publish Docker Image
+
+on:
+  push:
+    branches: [master]
+
+jobs:
+  publish:
+    name: Build & Push to Docker Hub
+    runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Compute build time
+        run: echo "BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: packages/api/Dockerfile
+          target: prod
+          push: true
+          tags: |
+            mewcus/draba:latest
+            mewcus/draba:${{ github.sha }}
+          build-args: |
+            GIT_COMMIT=${{ github.sha }}
+            BUILD_TIME=${{ env.BUILD_TIME }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+````
+
 ## File: docs/design/handoffs/kanban-view/Kanban View.html
 ````html
 <!doctype html>
@@ -27456,92 +27924,6 @@ type CreateSavedFilterJSONRequestBody CreateSavedFilterJSONBody
 type CreateTimelineJSONRequestBody CreateTimelineJSONBody
 ````
 
-## File: packages/api/internal/api/authz.go
-````go
-package api
-
-import (
-	"database/sql"
-	"errors"
-	"net/http"
-	"time"
-
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// requireTeamMember returns the caller's TeamMember for the given team.
-// Superadmins who are not explicit members receive a synthetic member with
-// role "admin" so downstream code works without special-casing.
-func (s *Server) requireTeamMember(w http.ResponseWriter, r *http.Request, teamID string) (*models.TeamMember, bool) {
-	claims := claimsFromContext(r.Context())
-	member, err := s.teams.GetMember(teamID, claims.UserID)
-	if err == nil {
-		return member, true
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to verify team membership")
-		return nil, false
-	}
-
-	// Not a member — check superadmin.
-	caller, err := s.users.GetByID(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to verify permissions")
-		return nil, false
-	}
-	if !caller.IsSuperadmin {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "not a member of this team")
-		return nil, false
-	}
-
-	return superadminMember(teamID, claims.UserID), true
-}
-
-// requireTeamAdmin is like requireTeamMember but also enforces admin role.
-// Superadmins always pass; regular members must have role "admin".
-func (s *Server) requireTeamAdmin(w http.ResponseWriter, r *http.Request, teamID string) (*models.TeamMember, bool) {
-	member, ok := s.requireTeamMember(w, r, teamID)
-	if !ok {
-		return nil, false
-	}
-	if member.Role != "admin" {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "admin role required")
-		return nil, false
-	}
-	return member, true
-}
-
-// hasTeamAccess reports whether the authenticated caller may access the given
-// team without writing a response. Use when the correct failure status is
-// NOT_FOUND rather than FORBIDDEN — e.g. resource-scoped endpoints where
-// revealing a resource exists via a 403 is undesirable.
-func (s *Server) hasTeamAccess(r *http.Request, teamID string) bool {
-	claims := claimsFromContext(r.Context())
-	_, err := s.teams.GetMember(teamID, claims.UserID)
-	if err == nil {
-		return true
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return false
-	}
-	caller, err := s.users.GetByID(claims.UserID)
-	return err == nil && caller.IsSuperadmin
-}
-
-// superadminMember returns a synthetic TeamMember for superadmins who are
-// not explicit members of a team. The ID is empty (no real row exists) and
-// the role is "admin" so all admin-gated checks pass.
-func superadminMember(teamID, userID string) *models.TeamMember {
-	return &models.TeamMember{
-		ID:       "",
-		TeamID:   teamID,
-		UserID:   &userID,
-		Role:     "admin",
-		JoinedAt: time.Now(),
-	}
-}
-````
-
 ## File: packages/api/internal/api/ratelimit.go
 ````go
 package api
@@ -27622,169 +28004,24 @@ func clientIP(r *http.Request) string {
 }
 ````
 
-## File: packages/api/internal/api/tag_handler.go
+## File: packages/api/internal/api/version_handler.go
 ````go
 package api
 
 import (
-	"database/sql"
-	"encoding/json"
-	"errors"
 	"net/http"
-	"time"
 
-	"github.com/I0-1O/draba/packages/api/internal/models"
+	"github.com/I0-1O/draba/packages/api/internal/buildinfo"
 )
 
-// handleListTags handles GET /teams/{id}/tags. Returns all tags for the team,
-// ordered by name.
-func (s *Server) handleListTags(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-
-	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
-		return
-	}
-
-	tags, err := s.tags.ListByTeam(teamID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list tags")
-		return
-	}
-	writeJSON(w, http.StatusOK, tags)
-}
-
-// tagNameMaxLen is the maximum byte length accepted for a tag name.
-const tagNameMaxLen = 50
-
-// handleCreateTag handles POST /teams/{id}/tags. Any team member may create a
-// tag; they become the creator. Returns 409 when a tag with the same name
-// already exists in the team.
-func (s *Server) handleCreateTag(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
-		return
-	}
-
-	var req struct {
-		Name  string  `json:"name"`
-		Color *string `json:"color,omitempty"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-	if req.Name == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name is required")
-		return
-	}
-	if len(req.Name) > tagNameMaxLen {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name must be 50 characters or fewer")
-		return
-	}
-
-	tag := &models.Tag{
-		ID:        newID(),
-		TeamID:    teamID,
-		Name:      req.Name,
-		Color:     req.Color,
-		CreatedBy: claims.UserID,
-		CreatedAt: time.Now().UTC(),
-	}
-	if err := s.tags.Create(tag); err != nil {
-		// SQLite unique constraint violation message contains "UNIQUE constraint failed"
-		if isUniqueConstraintError(err) {
-			writeError(w, http.StatusConflict, "TAG_NAME_EXISTS", "a tag with this name already exists in the team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create tag")
-		return
-	}
-	writeJSON(w, http.StatusCreated, tag)
-}
-
-// handleUpdateTag handles PATCH /tags/{id}. Any team member may update the
-// tag's name or color after confirming membership in the tag's team.
-func (s *Server) handleUpdateTag(w http.ResponseWriter, r *http.Request) {
-	tagID := r.PathValue("id")
-
-	tag, err := s.tags.GetByID(tagID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "tag not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update tag")
-		return
-	}
-
-	// Return 404 (not 403) for non-members so callers cannot probe tag existence.
-	if !s.hasTeamAccess(r, tag.TeamID) {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "tag not found")
-		return
-	}
-
-	var req struct {
-		Name  *string `json:"name,omitempty"`
-		Color *string `json:"color,omitempty"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-	if req.Name != nil {
-		if *req.Name == "" {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name must not be empty")
-			return
-		}
-		if len(*req.Name) > tagNameMaxLen {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name must be 50 characters or fewer")
-			return
-		}
-		tag.Name = *req.Name
-	}
-	if req.Color != nil {
-		tag.Color = req.Color
-	}
-
-	if err := s.tags.Update(tag); err != nil {
-		if isUniqueConstraintError(err) {
-			writeError(w, http.StatusConflict, "TAG_NAME_EXISTS", "a tag with this name already exists in the team")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update tag")
-		return
-	}
-	writeJSON(w, http.StatusOK, tag)
-}
-
-// handleDeleteTag handles DELETE /tags/{id}. Any team member may delete a tag;
-// the cascade removes all activity_tags rows referencing it.
-func (s *Server) handleDeleteTag(w http.ResponseWriter, r *http.Request) {
-	tagID := r.PathValue("id")
-
-	tag, err := s.tags.GetByID(tagID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "tag not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete tag")
-		return
-	}
-
-	// Return 404 (not 403) for non-members so callers cannot probe tag existence.
-	if !s.hasTeamAccess(r, tag.TeamID) {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "tag not found")
-		return
-	}
-
-	if err := s.tags.Delete(tagID); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete tag")
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
+// handleVersion reports the running build's git commit and build time. It is
+// public (no auth) so a deploy can be identified with a single curl — e.g.
+// confirming which commit a "latest" image actually contains.
+func (s *Server) handleVersion(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{
+		"commit": buildinfo.Short(),
+		"built":  buildinfo.Built,
+	})
 }
 ````
 
@@ -27923,6 +28160,67 @@ func (s *TokenService) Validate(tokenStr, expectedType string) (*Claims, error) 
 }
 ````
 
+## File: packages/api/internal/buildinfo/buildinfo.go
+````go
+// Package buildinfo exposes the build's git commit and timestamp so they can be
+// logged at startup and served at GET /version. Values are injected at link time
+// via -ldflags "-X .../buildinfo.Commit=<sha> -X .../buildinfo.Built=<ts>"; when
+// not injected (e.g. a local `go build`/`go run` from a checkout) they fall back
+// to Go's embedded VCS stamp.
+package buildinfo
+
+import "runtime/debug"
+
+// Injected via -ldflags. Leave as the zero value to fall back to the VCS stamp.
+var (
+	Commit string
+	Built  string
+)
+
+var dirty bool
+
+func init() {
+	if Commit != "" && Built != "" {
+		return
+	}
+	bi, ok := debug.ReadBuildInfo()
+	if !ok {
+		return
+	}
+	for _, s := range bi.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			if Commit == "" {
+				Commit = s.Value
+			}
+		case "vcs.time":
+			if Built == "" {
+				Built = s.Value
+			}
+		case "vcs.modified":
+			dirty = s.Value == "true"
+		}
+	}
+}
+
+// Short returns the commit shortened to 12 chars, suffixed with "-dirty" when
+// the working tree had uncommitted changes at build time. Returns "unknown"
+// when no commit is available.
+func Short() string {
+	c := Commit
+	if c == "" {
+		return "unknown"
+	}
+	if len(c) > 12 {
+		c = c[:12]
+	}
+	if dirty {
+		c += "-dirty"
+	}
+	return c
+}
+````
+
 ## File: packages/api/internal/db/migrations/018_saved_filters_team_scope.sql
 ````sql
 ALTER TABLE saved_filters ADD COLUMN is_team_filter BOOLEAN NOT NULL DEFAULT 0;
@@ -28022,113 +28320,6 @@ func SeedSampleDataIfEmpty(database *sqlx.DB, sql string) (bool, error) {
 		return false, fmt.Errorf("seeding sample data: %w", err)
 	}
 	return true, nil
-}
-````
-
-## File: packages/api/internal/db/tag_repo.go
-````go
-package db
-
-import (
-	"errors"
-	"fmt"
-
-	"github.com/jmoiron/sqlx"
-
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// ErrTagOwnership is returned by ValidateTeamOwnership when one or more tag
-// IDs belong to a different team (or do not exist).
-var ErrTagOwnership = errors.New("tag belongs to another team")
-
-// TagRepo is the persistence layer for Tag records.
-type TagRepo struct {
-	db *sqlx.DB
-}
-
-// NewTagRepo returns a TagRepo backed by db.
-func NewTagRepo(db *sqlx.DB) *TagRepo {
-	return &TagRepo{db: db}
-}
-
-// Create inserts a new Tag row.
-func (r *TagRepo) Create(tag *models.Tag) error {
-	_, err := r.db.NamedExec(`
-		INSERT INTO tags (id, team_id, name, color, created_by, created_at)
-		VALUES (:id, :team_id, :name, :color, :created_by, :created_at)
-	`, tag)
-	if err != nil {
-		return fmt.Errorf("creating tag: %w", err)
-	}
-	return nil
-}
-
-// GetByID fetches a Tag by primary key. Returns sql.ErrNoRows (wrapped) when
-// no row matches.
-func (r *TagRepo) GetByID(id string) (*models.Tag, error) {
-	var t models.Tag
-	err := r.db.Get(&t, `SELECT * FROM tags WHERE id = ?`, id)
-	if err != nil {
-		return nil, fmt.Errorf("getting tag: %w", err)
-	}
-	return &t, nil
-}
-
-// ListByTeam returns all tags for the given team, ordered by name ascending.
-func (r *TagRepo) ListByTeam(teamID string) ([]*models.Tag, error) {
-	tags := make([]*models.Tag, 0)
-	err := r.db.Select(&tags,
-		`SELECT * FROM tags WHERE team_id = ? ORDER BY name ASC`,
-		teamID,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("listing tags: %w", err)
-	}
-	return tags, nil
-}
-
-// Update writes name and color for an existing tag row.
-func (r *TagRepo) Update(tag *models.Tag) error {
-	_, err := r.db.NamedExec(`
-		UPDATE tags SET name = :name, color = :color WHERE id = :id
-	`, tag)
-	if err != nil {
-		return fmt.Errorf("updating tag: %w", err)
-	}
-	return nil
-}
-
-// Delete removes a tag row. Cascade deletes matching activity_tags rows.
-func (r *TagRepo) Delete(id string) error {
-	_, err := r.db.Exec(`DELETE FROM tags WHERE id = ?`, id)
-	if err != nil {
-		return fmt.Errorf("deleting tag: %w", err)
-	}
-	return nil
-}
-
-// ValidateTeamOwnership confirms that every ID in tagIDs belongs to teamID.
-// Returns ErrTagOwnership if any ID is missing or owned by another team.
-func (r *TagRepo) ValidateTeamOwnership(teamID string, tagIDs []string) error {
-	if len(tagIDs) == 0 {
-		return nil
-	}
-	query, args, err := sqlx.In(
-		`SELECT COUNT(*) FROM tags WHERE id IN (?) AND team_id = ?`,
-		tagIDs, teamID,
-	)
-	if err != nil {
-		return fmt.Errorf("building ownership query: %w", err)
-	}
-	var count int
-	if err := r.db.Get(&count, query, args...); err != nil {
-		return fmt.Errorf("checking tag ownership: %w", err)
-	}
-	if count != len(tagIDs) {
-		return ErrTagOwnership
-	}
-	return nil
 }
 ````
 
@@ -28640,6 +28831,66 @@ func SQL() (string, error) {
 	}
 	return b.String(), nil
 }
+````
+
+## File: packages/api/Dockerfile
+````
+# ── Web builder ──
+FROM node:22-alpine AS web-builder
+RUN corepack enable && corepack prepare pnpm@latest --activate
+WORKDIR /workspace
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
+COPY packages/web/package.json packages/web/
+COPY packages/shared/package.json packages/shared/
+RUN pnpm install --frozen-lockfile
+COPY packages/web packages/web
+COPY packages/shared packages/shared
+RUN pnpm --filter @draba/web build
+
+# ── Go dependency cache ──
+FROM golang:1.25-alpine AS go-deps
+WORKDIR /app
+COPY packages/api/go.mod packages/api/go.sum ./
+RUN go mod download
+
+# ── Production builder — embeds web dist into the Go binary ──
+FROM go-deps AS builder
+# Build metadata, injected by CI (docker-publish.yml). Defaults keep a local
+# `docker build` working; when left empty the binary falls back to Go's VCS stamp.
+ARG GIT_COMMIT=""
+ARG BUILD_TIME=""
+COPY packages/api/ .
+COPY --from=web-builder /workspace/packages/web/dist ./ui/static
+RUN CGO_ENABLED=0 go build \
+    -ldflags "-X github.com/I0-1O/draba/packages/api/internal/buildinfo.Commit=${GIT_COMMIT} -X github.com/I0-1O/draba/packages/api/internal/buildinfo.Built=${BUILD_TIME}" \
+    -o /draba ./cmd/draba
+
+# ── Dev stage (used by docker-compose for hot reload) ──
+# Source is provided by the docker-compose volume mount, not baked in here —
+# baking it in caused Air to see a spurious "change" on first mount and restart.
+FROM golang:1.25-alpine AS dev
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8
+RUN go install github.com/air-verse/air@latest
+WORKDIR /app
+COPY packages/api/go.mod packages/api/go.sum ./
+RUN go mod download
+CMD ["air", "-c", ".air.toml"]
+
+# ── Production stage ──
+FROM alpine:3.21 AS prod
+RUN apk add --no-cache ca-certificates musl-locales \
+    && addgroup -g 1000 draba \
+    && adduser -u 1000 -G draba -s /bin/sh -D draba \
+    && mkdir -p /data \
+    && chown draba:draba /data
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8
+COPY --from=builder /draba /usr/local/bin/draba
+WORKDIR /data
+USER draba
+EXPOSE 8080
+CMD ["draba"]
 ````
 
 ## File: packages/shared/testdata/filter-fixtures.json
@@ -30833,160 +31084,6 @@ export function useFilter(): FilterContextValue {
 }
 ````
 
-## File: packages/web/src/hooks/useTags.test.ts
-````typescript
-/**
- * useTags hooks — unit tests verifying query keys, mutation endpoints, and
- * cache invalidation. Uses a real QueryClient with fetch mocked globally.
- */
-
-import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { renderHook, waitFor } from '@testing-library/react'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { createElement } from 'react'
-import { useTags, useCreateTag, useUpdateTag, useDeleteTag } from './useTags'
-
-// ── Auth mock ─────────────────────────────────────────────────────────────────
-
-vi.mock('@/contexts/AuthContext', () => ({
-  useAuth: () => ({ getAccessToken: async () => 'test-token' }),
-}))
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-function makeWrapper() {
-  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-  return {
-    qc,
-    wrapper: ({ children }: { children: React.ReactNode }) =>
-      createElement(QueryClientProvider, { client: qc }, children),
-  }
-}
-
-const TAG_FIXTURE = {
-  id: 'tag-1',
-  teamId: 'team-1',
-  name: 'urgent',
-  color: 'red',
-  createdBy: 'user-1',
-  createdAt: '2026-01-01T00:00:00Z',
-}
-
-// ── Tests ─────────────────────────────────────────────────────────────────────
-
-describe('useTags', () => {
-  beforeEach(() => {
-    vi.stubGlobal('fetch', vi.fn())
-  })
-
-  it('fetches tags from the correct URL', async () => {
-    vi.mocked(fetch).mockResolvedValueOnce(
-      new Response(JSON.stringify([TAG_FIXTURE]), { status: 200 }),
-    )
-
-    const { wrapper } = makeWrapper()
-    const { result } = renderHook(() => useTags('team-1'), { wrapper })
-
-    await waitFor(() => expect(result.current.isSuccess).toBe(true))
-
-    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
-      expect.stringContaining('/teams/team-1/tags'),
-      expect.any(Object),
-    )
-    expect(result.current.data).toHaveLength(1)
-    expect(result.current.data![0].name).toBe('urgent')
-  })
-
-  it('does not fetch when teamId is empty', () => {
-    const { wrapper } = makeWrapper()
-    renderHook(() => useTags(''), { wrapper })
-    expect(vi.mocked(fetch)).not.toHaveBeenCalled()
-  })
-})
-
-describe('useCreateTag', () => {
-  beforeEach(() => {
-    vi.stubGlobal('fetch', vi.fn())
-  })
-
-  it('POSTs to the correct URL and invalidates the tag list', async () => {
-    vi.mocked(fetch).mockResolvedValueOnce(
-      new Response(JSON.stringify(TAG_FIXTURE), { status: 201 }),
-    )
-
-    const { wrapper, qc } = makeWrapper()
-    const invalidate = vi.spyOn(qc, 'invalidateQueries')
-
-    const { result } = renderHook(() => useCreateTag('team-1'), { wrapper })
-    result.current.mutate({ name: 'urgent', color: 'red' })
-
-    await waitFor(() => expect(result.current.isSuccess).toBe(true))
-
-    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
-      expect.stringContaining('/teams/team-1/tags'),
-      expect.objectContaining({ method: 'POST' }),
-    )
-    expect(invalidate).toHaveBeenCalledWith(
-      expect.objectContaining({ queryKey: ['teams', 'team-1', 'tags'] }),
-    )
-  })
-})
-
-describe('useUpdateTag', () => {
-  beforeEach(() => {
-    vi.stubGlobal('fetch', vi.fn())
-  })
-
-  it('PATCHes the correct tag URL and invalidates the list', async () => {
-    vi.mocked(fetch).mockResolvedValueOnce(
-      new Response(JSON.stringify({ ...TAG_FIXTURE, name: 'critical' }), { status: 200 }),
-    )
-
-    const { wrapper, qc } = makeWrapper()
-    const invalidate = vi.spyOn(qc, 'invalidateQueries')
-
-    const { result } = renderHook(() => useUpdateTag('team-1'), { wrapper })
-    result.current.mutate({ id: 'tag-1', name: 'critical' })
-
-    await waitFor(() => expect(result.current.isSuccess).toBe(true))
-
-    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
-      expect.stringContaining('/tags/tag-1'),
-      expect.objectContaining({ method: 'PATCH' }),
-    )
-    expect(invalidate).toHaveBeenCalledWith(
-      expect.objectContaining({ queryKey: ['teams', 'team-1', 'tags'] }),
-    )
-  })
-})
-
-describe('useDeleteTag', () => {
-  beforeEach(() => {
-    vi.stubGlobal('fetch', vi.fn())
-  })
-
-  it('DELETEs the correct URL and invalidates the list', async () => {
-    vi.mocked(fetch).mockResolvedValueOnce(new Response(null, { status: 204 }))
-
-    const { wrapper, qc } = makeWrapper()
-    const invalidate = vi.spyOn(qc, 'invalidateQueries')
-
-    const { result } = renderHook(() => useDeleteTag('team-1'), { wrapper })
-    result.current.mutate('tag-1')
-
-    await waitFor(() => expect(result.current.isSuccess).toBe(true))
-
-    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
-      expect.stringContaining('/tags/tag-1'),
-      expect.objectContaining({ method: 'DELETE' }),
-    )
-    expect(invalidate).toHaveBeenCalledWith(
-      expect.objectContaining({ queryKey: ['teams', 'team-1', 'tags'] }),
-    )
-  })
-})
-````
-
 ## File: packages/web/src/lib/activityColor.test.ts
 ````typescript
 /**
@@ -32520,123 +32617,6 @@ export default function App() {
 }
 ````
 
-## File: scripts/reset-test-env.sh
-````bash
-#!/usr/bin/env bash
-#
-# Reset the draba test environment to a known clean state.
-# Run on the docker host (epcot.lan) as the `draba-test` user
-# (which must be in the `docker` group). No sudo required.
-#
-# What it does:
-#   1. Stops the `draba` container
-#   2. Wipes the SQLite DB files via a one-off `alpine` container
-#      (so file permissions inside the bind mount don't matter)
-#   3. Starts `draba` — its boot-time migration runner creates the
-#      fresh schema, then (with DRABA_SEED_SAMPLE_DATA=1 on the container)
-#      auto-seeds the canonical sample dataset incl. shares into the empty DB
-#   4. Waits up to 30s for the sample data to load (users table populated)
-#   5. Stops `draba` again, layers a bootstrap team + a known invite
-#      token on top via a one-off `sqlite3` container, then restarts
-#
-# The bootstrap rows (test-admin@local, bootstrap-team, the invite) do NOT
-# collide with the sample dataset, so api-smoke's register/login flow keeps
-# working against a DB that now also holds the rich sample data. Requires
-# DRABA_SEED_SAMPLE_DATA=1 on the container; without it the wait in step 4
-# times out (nothing populates the users table).
-#
-# Required env (sourced from $HOME/.draba-test.env at the top):
-#   DRABA_TEST_INVITE_TOKEN  — known token the api-smoke subagent uses
-#   DRABA_TEST_ADMIN_EMAIL   — bootstrap admin (invite issuer) email
-#   DRABA_TEST_INVITE_EMAIL  — email the invite is issued to; the
-#                              smoke test registers as this user
-#                              (default: invitee@local)
-#   DRABA_DB_DIR             — host bind-mount dir holding draba.db
-#   DRABA_CONTAINER          — container name (default: draba)
-#   DRABA_DB_FILENAME        — DB filename inside DRABA_DB_DIR
-#                              (default: draba.db)
-
-set -euo pipefail
-
-ENV_FILE="${HOME}/.draba-test.env"
-if [[ -f "$ENV_FILE" ]]; then
-    set -a
-    # shellcheck disable=SC1090
-    source "$ENV_FILE"
-    set +a
-fi
-
-: "${DRABA_TEST_INVITE_TOKEN:?must be set in ~/.draba-test.env}"
-: "${DRABA_TEST_ADMIN_EMAIL:?must be set in ~/.draba-test.env}"
-: "${DRABA_DB_DIR:?must be set in ~/.draba-test.env}"
-DRABA_CONTAINER="${DRABA_CONTAINER:-draba}"
-DRABA_DB_FILENAME="${DRABA_DB_FILENAME:-draba.db}"
-DRABA_TEST_INVITE_EMAIL="${DRABA_TEST_INVITE_EMAIL:-invitee@local}"
-
-SQLITE_IMG="keinos/sqlite3:latest"
-ALPINE_IMG="alpine:latest"
-
-echo "[1/6] Stopping container '$DRABA_CONTAINER'..."
-docker stop "$DRABA_CONTAINER" >/dev/null
-
-echo "[2/6] Wiping DB files in $DRABA_DB_DIR..."
-docker run --rm -v "$DRABA_DB_DIR:/data" "$ALPINE_IMG" sh -c \
-    "rm -f /data/${DRABA_DB_FILENAME} /data/${DRABA_DB_FILENAME}-shm /data/${DRABA_DB_FILENAME}-wal"
-
-echo "[3/6] Starting container (migrations run on boot)..."
-docker start "$DRABA_CONTAINER" >/dev/null
-
-echo "[4/6] Waiting for migrations + sample-data seed to complete..."
-for i in $(seq 1 30); do
-    # Wait until the seed has populated the users table — not just until the
-    # schema exists — so the bootstrap-seed step below cannot race the seed.
-    if docker run --rm -v "$DRABA_DB_DIR:/data:ro" "$SQLITE_IMG" \
-         sqlite3 "/data/${DRABA_DB_FILENAME}" \
-         "SELECT 1 FROM users LIMIT 1;" 2>/dev/null | grep -q 1; then
-        break
-    fi
-    sleep 1
-    if [[ "$i" -eq 30 ]]; then
-        echo "ERROR: sample data did not load within 30s" >&2
-        echo "       (is DRABA_SEED_SAMPLE_DATA=1 set on the '$DRABA_CONTAINER' container?)" >&2
-        exit 1
-    fi
-done
-
-echo "[5/6] Stopping container to layer bootstrap admin + invite on top of the sample data..."
-docker stop "$DRABA_CONTAINER" >/dev/null
-
-ADMIN_ID="bootstrap-admin"
-TEAM_ID="bootstrap-team"
-INVITE_ID="bootstrap-invite"
-EXPIRES=$(date -u -d '+7 days' '+%Y-%m-%d %H:%M:%S')
-
-# DRABA_TEST_ADMIN_PASSWORD_HASH — bcrypt hash of the admin's login password.
-# If not set in ~/.draba-test.env, the admin row is seeded as non-loginable
-# (suitable for CI-only runs where only the invite flow is tested).
-DRABA_TEST_ADMIN_PASSWORD_HASH="${DRABA_TEST_ADMIN_PASSWORD_HASH:-x-not-loginable}"
-
-docker run --rm -i --user 0:0 -v "$DRABA_DB_DIR:/data" "$SQLITE_IMG" \
-    sqlite3 "/data/${DRABA_DB_FILENAME}" <<SQL
-INSERT INTO users (id, email, password_hash, display_name, is_superadmin)
-VALUES ('${ADMIN_ID}', '${DRABA_TEST_ADMIN_EMAIL}', '${DRABA_TEST_ADMIN_PASSWORD_HASH}', 'Test Bootstrap', 1);
-
-INSERT INTO teams (id, name, slug)
-VALUES ('${TEAM_ID}', 'Test Team', 'test-team');
-
-INSERT INTO team_members (id, team_id, user_id, role)
-VALUES ('bootstrap-admin-member', '${TEAM_ID}', '${ADMIN_ID}', 'admin');
-
-INSERT INTO invites (id, team_id, email, token, role, invited_by, expires_at)
-VALUES ('${INVITE_ID}', '${TEAM_ID}', '${DRABA_TEST_INVITE_EMAIL}', '${DRABA_TEST_INVITE_TOKEN}', 'member', '${ADMIN_ID}', '${EXPIRES}');
-SQL
-
-echo "[6/6] Restarting container..."
-docker start "$DRABA_CONTAINER" >/dev/null
-
-echo "Done. Test invite token is ready. The api-smoke subagent can now register against it."
-````
-
 ## File: README.md
 ````markdown
 # draba
@@ -33114,174 +33094,500 @@ Two flavors: **tabular** (data round-trips — CSV / xlsx in and out) and **visu
 - CLI binary (parking lot — token auth system is designed to support it when ready)
 ````
 
-## File: packages/api/cmd/draba/main.go
+## File: packages/api/internal/api/activity_handler.go
 ````go
-// Command draba is the API server entry point. It wires repositories,
-// the auth token service, and tier configuration into the HTTP server,
-// then listens for requests until the process is killed.
-package main
+package api
 
 import (
-	"fmt"
-	"io/fs"
-	"log/slog"
+	"database/sql"
+	"encoding/json"
+	"errors"
 	"net/http"
-	"os"
-	"strings"
+	"time"
 
-	"github.com/I0-1O/draba/packages/api/internal/api"
-	"github.com/I0-1O/draba/packages/api/internal/auth"
 	"github.com/I0-1O/draba/packages/api/internal/db"
 	"github.com/I0-1O/draba/packages/api/internal/events"
-	"github.com/I0-1O/draba/packages/api/internal/mailer"
-	"github.com/I0-1O/draba/packages/api/internal/tier"
-	"github.com/I0-1O/draba/packages/api/internal/ws"
-	sampledata "github.com/I0-1O/draba/packages/api/sample_data"
-	drabui "github.com/I0-1O/draba/packages/api/ui"
+	"github.com/I0-1O/draba/packages/api/internal/models"
 )
 
-const banner = "\n" +
-	"      _           _\n" +
-	"     | |         | |\n" +
-	"   __| |_ __ __ _| |__   __ _\n" +
-	"  / _` | '__/ _` | '_ \\ / _` |\n" +
-	" | (_| | | | (_| | |_) | (_| |\n" +
-	"  \\__,_|_|  \\__,_|_.__/ \\__,_|\n" +
-	"\n" +
-	"  see who's doing what, when.\n\n"
+// handleCreateActivity handles POST /teams/{id}/timelines/{timelineId}/activities.
+// The authenticated user must be a member of the team.
+func (s *Server) handleCreateActivity(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	timelineID := r.PathValue("timelineId")
 
-func main() {
-	if len(os.Args) > 1 && os.Args[1] == "reset-password" {
-		runResetPassword(os.Args[2:])
+	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
 		return
 	}
 
-	setupLogger()
-	fmt.Print(banner)
+	claims := claimsFromContext(r.Context())
 
-	port := getenv("DRABA_PORT", "8080")
-	dsn := getenv("DRABA_DB_DSN", "/data/draba.db")
-	jwtSecret := os.Getenv("DRABA_JWT_SECRET")
-	if jwtSecret == "" {
-		slog.Error("DRABA_JWT_SECRET must be set")
-		os.Exit(1)
-	}
-
-	t, err := tier.Load()
+	timeline, err := s.timelines.GetByID(timelineID)
 	if err != nil {
-		slog.Error("tier load failed", "err", err)
-		os.Exit(1)
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create activity")
+		return
 	}
-	l := t.Limits()
-	if l.MaxUsers == 0 {
-		slog.Info("tier", "tier", t)
+	if timeline.TeamID != teamID {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+		return
+	}
+
+	var req CreateActivityJSONBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	if req.Title == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "title is required")
+		return
+	}
+	if req.StartAt.IsZero() || req.EndAt.IsZero() {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "startAt and endAt are required")
+		return
+	}
+	if req.EndAt.Before(req.StartAt) {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "endAt must not be before startAt")
+		return
+	}
+
+	allDay := false
+	if req.AllDay != nil {
+		allDay = *req.AllDay
+	}
+
+	now := time.Now()
+	activity := &models.Activity{
+		ID:               newID(),
+		TimelineID:       timelineID,
+		Title:            req.Title,
+		Description:      req.Description,
+		Notes:            req.Notes,
+		Icon:             req.Icon,
+		Color:            req.Color,
+		StartAt:          req.StartAt,
+		EndAt:            req.EndAt,
+		AllDay:           allDay,
+		StatusID:         req.StatusId,
+		ParentActivityID: req.ParentActivityId,
+		PercentComplete:  req.PercentComplete,
+		Location:         req.Location,
+		URL:              req.Url,
+		Rrule:            req.Rrule,
+		CreatedBy:        claims.UserID,
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}
+	if err := s.activities.Create(activity); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create activity")
+		return
+	}
+
+	if req.AssignedMemberIds != nil {
+		if err := s.activities.SetAssignments(activity.ID, *req.AssignedMemberIds); err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity assignments")
+			return
+		}
+		activity.AssignedMemberIDs = *req.AssignedMemberIds
 	} else {
-		slog.Info("tier", "tier", t, "maxUsers", l.MaxUsers, "maxTeams", l.MaxTeams)
+		activity.AssignedMemberIDs = []string{}
 	}
 
-	database, err := db.Open(dsn)
+	if req.TagIds != nil {
+		if err := s.tags.ValidateTeamOwnership(timeline.TeamID, *req.TagIds); err != nil {
+			if errors.Is(err, db.ErrTagOwnership) {
+				writeError(w, http.StatusBadRequest, "INVALID_TAGS", "one or more tag IDs do not belong to this team")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to validate tags")
+			return
+		}
+		if err := s.activities.SetTags(activity.ID, *req.TagIds); err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity tags")
+			return
+		}
+		activity.TagIDs = *req.TagIds
+	} else {
+		activity.TagIDs = []string{}
+	}
+
+	s.bus.Publish(events.Message{Type: events.ActivityCreated, TeamID: timeline.TeamID, Payload: activity})
+	writeJSON(w, http.StatusCreated, activity)
+}
+
+// handleListActivities handles GET /teams/{id}/timelines/{timelineId}/activities.
+// Optional query params ?from=<RFC3339> and ?to=<RFC3339> bound the result by start_at.
+func (s *Server) handleListActivities(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	timelineID := r.PathValue("timelineId")
+
+	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
+		return
+	}
+
+	timeline, err := s.timelines.GetByID(timelineID)
 	if err != nil {
-		slog.Error("db: open failed", "err", err)
-		os.Exit(1)
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list activities")
+		return
 	}
-	slog.Info("db: opened", "dsn", dsn)
-
-	if err := db.Migrate(database); err != nil {
-		slog.Error("db: migrate failed", "err", err)
-		os.Exit(1)
+	if timeline.TeamID != teamID {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+		return
 	}
-	slog.Info("db: migrations applied")
 
-	// Optional pre-launch convenience: seed the canonical sample dataset into an
-	// empty database so a freshly-wiped dev/test instance comes up populated.
-	// Gated by DRABA_SEED_SAMPLE_DATA and a no-op once the DB has any users — it
-	// must stay unset in any real deployment.
-	if os.Getenv("DRABA_SEED_SAMPLE_DATA") == "1" {
-		sql, err := sampledata.SQL()
+	var from, to *time.Time
+	if v := r.URL.Query().Get("from"); v != "" {
+		t, err := time.Parse(time.RFC3339, v)
 		if err != nil {
-			slog.Error("db: reading embedded sample data failed", "err", err)
-			os.Exit(1)
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "from must be RFC3339 (e.g. 2006-01-02T15:04:05Z)")
+			return
 		}
-		seeded, err := db.SeedSampleDataIfEmpty(database, sql)
+		from = &t
+	}
+	if v := r.URL.Query().Get("to"); v != "" {
+		t, err := time.Parse(time.RFC3339, v)
 		if err != nil {
-			slog.Error("db: sample-data seed failed", "err", err)
-			os.Exit(1)
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "to must be RFC3339 (e.g. 2006-01-02T15:04:05Z)")
+			return
 		}
-		if seeded {
-			slog.Info("db: sample data seeded (database was empty)")
-		} else {
-			slog.Info("db: sample-data seed skipped (database already populated)")
+		to = &t
+	}
+
+	includeArchived := r.URL.Query().Get("archived") == "true"
+	acts, err := s.activities.ListByTimeline(timelineID, from, to, includeArchived)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list activities")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, acts)
+}
+
+// handleUpdateActivity handles PATCH /activities/{id}. Only fields present in
+// the request body are applied; the caller must be a member of the activity's team.
+func (s *Server) handleUpdateActivity(w http.ResponseWriter, r *http.Request) {
+	activityID := r.PathValue("id")
+
+	activity, err := s.activities.GetByID(activityID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "activity not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update activity")
+		return
+	}
+
+	timeline, err := s.timelines.GetByID(activity.TimelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update activity")
+		return
+	}
+
+	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
+		return
+	}
+
+	// Decode into a map so we can detect which fields the caller provided.
+	var patch map[string]json.RawMessage
+	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	if v, ok := patch["title"]; ok {
+		if err := json.Unmarshal(v, &activity.Title); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid title")
+			return
+		}
+	}
+	if v, ok := patch["description"]; ok {
+		if err := json.Unmarshal(v, &activity.Description); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid description")
+			return
+		}
+	}
+	if v, ok := patch["notes"]; ok {
+		if err := json.Unmarshal(v, &activity.Notes); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid notes")
+			return
+		}
+	}
+	if v, ok := patch["icon"]; ok {
+		if err := json.Unmarshal(v, &activity.Icon); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid icon")
+			return
+		}
+	}
+	if v, ok := patch["color"]; ok {
+		if err := json.Unmarshal(v, &activity.Color); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid color")
+			return
+		}
+	}
+	if v, ok := patch["startAt"]; ok {
+		if err := json.Unmarshal(v, &activity.StartAt); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid startAt")
+			return
+		}
+	}
+	if v, ok := patch["endAt"]; ok {
+		if err := json.Unmarshal(v, &activity.EndAt); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid endAt")
+			return
+		}
+	}
+	if v, ok := patch["allDay"]; ok {
+		if err := json.Unmarshal(v, &activity.AllDay); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid allDay")
+			return
+		}
+	}
+	if v, ok := patch["statusId"]; ok {
+		if err := json.Unmarshal(v, &activity.StatusID); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid statusId")
+			return
+		}
+	}
+	if v, ok := patch["parentActivityId"]; ok {
+		if err := json.Unmarshal(v, &activity.ParentActivityID); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid parentActivityId")
+			return
+		}
+	}
+	if v, ok := patch["percentComplete"]; ok {
+		if err := json.Unmarshal(v, &activity.PercentComplete); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid percentComplete")
+			return
+		}
+	}
+	if v, ok := patch["location"]; ok {
+		if err := json.Unmarshal(v, &activity.Location); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid location")
+			return
+		}
+	}
+	if v, ok := patch["url"]; ok {
+		if err := json.Unmarshal(v, &activity.URL); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid url")
+			return
+		}
+	}
+	if v, ok := patch["rrule"]; ok {
+		if err := json.Unmarshal(v, &activity.Rrule); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid rrule")
+			return
 		}
 	}
 
-	users := db.NewUserRepo(database)
-	invites := db.NewInviteRepo(database)
-	teams := db.NewTeamRepo(database)
-	activityRepo := db.NewActivityRepo(database)
-	timelineRepo := db.NewTimelineRepo(database)
-	savedFilterRepo := db.NewSavedFilterRepo(database)
-	preferenceRepo := db.NewUserPreferenceRepo(database)
-	apiTokenRepo := db.NewAPITokenRepo(database)
-	instanceSetsRepo := db.NewInstanceSettingsRepo(database)
-	passwordTokensRepo := db.NewPasswordResetTokenRepo(database)
-	statusRepo := db.NewStatusRepo(database)
-	tagRepo := db.NewTagRepo(database)
-	shareRepo := db.NewShareRepo(database)
-	m := mailer.New(instanceSetsRepo, []byte(jwtSecret))
-	tokens := auth.NewTokenService(jwtSecret)
+	var newAssignees *[]string
+	if v, ok := patch["assignedMemberIds"]; ok {
+		var ids []string
+		if err := json.Unmarshal(v, &ids); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid assignedMemberIds")
+			return
+		}
+		newAssignees = &ids
+	}
 
-	bus := events.NewBus()
-	hub := ws.NewHub(bus, tokens, func(teamID, userID string) error {
-		_, err := teams.GetMember(teamID, userID)
-		return err
+	var newTagIDs *[]string
+	if v, ok := patch["tagIds"]; ok {
+		var ids []string
+		if err := json.Unmarshal(v, &ids); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid tagIds")
+			return
+		}
+		newTagIDs = &ids
+	}
+
+	if activity.Title == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "title must not be empty")
+		return
+	}
+	if activity.EndAt.Before(activity.StartAt) {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "endAt must not be before startAt")
+		return
+	}
+
+	activity.UpdatedAt = time.Now()
+	if err := s.activities.Update(activity); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update activity")
+		return
+	}
+
+	if newAssignees != nil {
+		if err := s.activities.SetAssignments(activity.ID, *newAssignees); err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity assignments")
+			return
+		}
+		activity.AssignedMemberIDs = *newAssignees
+	} else {
+		// Populate current assignments so the response always includes them.
+		existing, err := s.activities.GetAssignments(activity.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get activity assignments")
+			return
+		}
+		activity.AssignedMemberIDs = existing
+	}
+
+	if newTagIDs != nil {
+		if err := s.tags.ValidateTeamOwnership(timeline.TeamID, *newTagIDs); err != nil {
+			if errors.Is(err, db.ErrTagOwnership) {
+				writeError(w, http.StatusBadRequest, "INVALID_TAGS", "one or more tag IDs do not belong to this team")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to validate tags")
+			return
+		}
+		if err := s.activities.SetTags(activity.ID, *newTagIDs); err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity tags")
+			return
+		}
+		activity.TagIDs = *newTagIDs
+	} else {
+		existing, err := s.activities.GetTags(activity.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get activity tags")
+			return
+		}
+		activity.TagIDs = existing
+	}
+
+	s.bus.Publish(events.Message{Type: events.ActivityUpdated, TeamID: timeline.TeamID, Payload: activity})
+	writeJSON(w, http.StatusOK, activity)
+}
+
+// handleArchiveActivity handles POST /activities/{id}/archive. Any team member
+// may archive an activity; the row is soft-deleted (archived_at set) so it is
+// hidden from list responses by default but can be restored.
+func (s *Server) handleArchiveActivity(w http.ResponseWriter, r *http.Request) {
+	s.setActivityArchive(w, r, true)
+}
+
+// handleUnarchiveActivity handles POST /activities/{id}/unarchive.
+func (s *Server) handleUnarchiveActivity(w http.ResponseWriter, r *http.Request) {
+	s.setActivityArchive(w, r, false)
+}
+
+// setActivityArchive is the shared implementation for the archive/unarchive
+// endpoints. When archive is true, archived_at is set to now; otherwise it
+// is cleared.
+func (s *Server) setActivityArchive(w http.ResponseWriter, r *http.Request, archive bool) {
+	activityID := r.PathValue("id")
+
+	activity, err := s.activities.GetByID(activityID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "activity not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
+		return
+	}
+
+	timeline, err := s.timelines.GetByID(activity.TimelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
+		return
+	}
+
+	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
+		return
+	}
+
+	var at *time.Time
+	if archive {
+		now := time.Now().UTC()
+		at = &now
+		if err := s.activities.ClearParentRefs(activityID); err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
+			return
+		}
+	}
+	if err := s.activities.SetArchived(activityID, at); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
+		return
+	}
+	activity.ArchivedAt = at
+	activity.UpdatedAt = time.Now().UTC()
+
+	// Re-populate assignments and tags for a stable response shape.
+	if ids, err := s.activities.GetAssignments(activity.ID); err == nil {
+		activity.AssignedMemberIDs = ids
+	} else {
+		activity.AssignedMemberIDs = []string{}
+	}
+	if ids, err := s.activities.GetTags(activity.ID); err == nil {
+		activity.TagIDs = ids
+	} else {
+		activity.TagIDs = []string{}
+	}
+
+	s.bus.Publish(events.Message{Type: events.ActivityUpdated, TeamID: timeline.TeamID, Payload: activity})
+	writeJSON(w, http.StatusOK, activity)
+}
+
+// handleDeleteActivity handles DELETE /activities/{id}. Any member of the
+// activity's team may delete it.
+func (s *Server) handleDeleteActivity(w http.ResponseWriter, r *http.Request) {
+	activityID := r.PathValue("id")
+
+	activity, err := s.activities.GetByID(activityID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "activity not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
+		return
+	}
+
+	timeline, err := s.timelines.GetByID(activity.TimelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
+		return
+	}
+
+	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
+		return
+	}
+
+	if err := s.activities.ClearParentRefs(activityID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
+		return
+	}
+	if err := s.activities.Delete(activityID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
+		return
+	}
+
+	s.bus.Publish(events.Message{
+		Type:    events.ActivityDeleted,
+		TeamID:  timeline.TeamID,
+		Payload: map[string]string{"id": activityID},
 	})
-	go hub.Run()
-	slog.Info("ws: hub running")
-
-	if mods := tier.Registered(); len(mods) > 0 {
-		slog.Info("modules loaded", "count", len(mods))
-	}
-
-	srv := api.NewServer(users, invites, teams, activityRepo, timelineRepo, savedFilterRepo, preferenceRepo, apiTokenRepo, instanceSetsRepo, passwordTokensRepo, statusRepo, tagRepo, shareRepo, m, tokens, t, bus, hub)
-
-	// Wire up the embedded React SPA when a production build is present.
-	// In dev the static/ directory only has .gitkeep so this is a no-op.
-	if sub, err := fs.Sub(drabui.FS, "static"); err == nil {
-		if _, err := sub.Open("index.html"); err == nil {
-			srv.WithUI(sub)
-			slog.Info("ui: serving embedded SPA")
-		}
-	}
-
-	slog.Info("listening", "port", port)
-	if err := http.ListenAndServe(":"+port, srv.Routes()); err != nil {
-		slog.Error("server error", "err", err)
-		os.Exit(1)
-	}
-}
-
-// setupLogger initialises the global slog logger. Level is controlled by
-// DRABA_LOG_LEVEL (debug | info | warn | error); default is info.
-// All output goes to stdout so Docker captures it in `docker logs`.
-func setupLogger() {
-	level := slog.LevelInfo
-	switch strings.ToLower(os.Getenv("DRABA_LOG_LEVEL")) {
-	case "debug":
-		level = slog.LevelDebug
-	case "warn":
-		level = slog.LevelWarn
-	case "error":
-		level = slog.LevelError
-	}
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level})))
-}
-
-// getenv returns the env var value or fallback when unset/empty.
-func getenv(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
+	w.WriteHeader(http.StatusNoContent)
 }
 ````
 
@@ -38912,6 +39218,131 @@ export default defineConfig(({ mode }) => {
 })
 ````
 
+## File: scripts/reset-test-env.sh
+````bash
+#!/usr/bin/env bash
+#
+# Reset the draba test environment to a known clean state.
+# Run on the docker host (epcot.lan) as the `draba-test` user
+# (which must be in the `docker` group). No sudo required.
+#
+# What it does:
+#   1. Stops the `draba` container
+#   2. Wipes the SQLite DB files via a one-off `alpine` container
+#      (so file permissions inside the bind mount don't matter)
+#   3. Starts `draba` — its boot-time migration runner creates the
+#      fresh schema, then (with DRABA_SEED_SAMPLE_DATA=1 on the container)
+#      auto-seeds the canonical sample dataset incl. shares into the empty DB
+#   4. Waits up to 30s for the sample data to load (users table populated)
+#   5. Stops `draba` again, layers a bootstrap team + a known invite
+#      token on top via a one-off `sqlite3` container, then restarts
+#
+# The bootstrap rows (test-admin@local, bootstrap-team, the invite) do NOT
+# collide with the sample dataset, so api-smoke's register/login flow keeps
+# working against a DB that now also holds the rich sample data. Requires
+# DRABA_SEED_SAMPLE_DATA=1 on the container; without it the wait in step 4
+# times out (nothing populates the users table).
+#
+# Required env (sourced from $HOME/.draba-test.env at the top):
+#   DRABA_TEST_INVITE_TOKEN  — known token the api-smoke subagent uses
+#   DRABA_TEST_ADMIN_EMAIL   — bootstrap admin (invite issuer) email
+#   DRABA_TEST_INVITE_EMAIL  — email the invite is issued to; the
+#                              smoke test registers as this user
+#                              (default: invitee@local)
+#   DRABA_DB_DIR             — host bind-mount dir holding draba.db
+#   DRABA_CONTAINER          — container name (default: draba)
+#   DRABA_DB_FILENAME        — DB filename inside DRABA_DB_DIR
+#                              (default: draba.db)
+
+set -euo pipefail
+
+ENV_FILE="${HOME}/.draba-test.env"
+if [[ -f "$ENV_FILE" ]]; then
+    set -a
+    # shellcheck disable=SC1090
+    source "$ENV_FILE"
+    set +a
+fi
+
+: "${DRABA_TEST_INVITE_TOKEN:?must be set in ~/.draba-test.env}"
+: "${DRABA_TEST_ADMIN_EMAIL:?must be set in ~/.draba-test.env}"
+: "${DRABA_DB_DIR:?must be set in ~/.draba-test.env}"
+DRABA_CONTAINER="${DRABA_CONTAINER:-draba}"
+DRABA_DB_FILENAME="${DRABA_DB_FILENAME:-draba.db}"
+DRABA_TEST_INVITE_EMAIL="${DRABA_TEST_INVITE_EMAIL:-invitee@local}"
+
+SQLITE_IMG="keinos/sqlite3:latest"
+ALPINE_IMG="alpine:latest"
+
+echo "[1/6] Stopping container '$DRABA_CONTAINER'..."
+docker stop "$DRABA_CONTAINER" >/dev/null
+
+echo "[2/6] Wiping DB files in $DRABA_DB_DIR..."
+docker run --rm -v "$DRABA_DB_DIR:/data" "$ALPINE_IMG" sh -c \
+    "rm -f /data/${DRABA_DB_FILENAME} /data/${DRABA_DB_FILENAME}-shm /data/${DRABA_DB_FILENAME}-wal"
+
+echo "[3/6] Starting container (migrations run on boot)..."
+docker start "$DRABA_CONTAINER" >/dev/null
+
+echo "[4/6] Waiting for migrations + sample-data seed to complete..."
+for i in $(seq 1 30); do
+    # Wait until the seed has populated the users table — not just until the
+    # schema exists — so the bootstrap-seed step below cannot race the seed.
+    if docker run --rm -v "$DRABA_DB_DIR:/data:ro" "$SQLITE_IMG" \
+         sqlite3 "/data/${DRABA_DB_FILENAME}" \
+         "SELECT 1 FROM users LIMIT 1;" 2>/dev/null | grep -q 1; then
+        break
+    fi
+    sleep 1
+    if [[ "$i" -eq 30 ]]; then
+        echo "ERROR: sample data did not load within 30s" >&2
+        echo "       (is DRABA_SEED_SAMPLE_DATA=1 set on the '$DRABA_CONTAINER' container?)" >&2
+        exit 1
+    fi
+done
+
+echo "[5/6] Stopping container to layer bootstrap admin + invite on top of the sample data..."
+docker stop "$DRABA_CONTAINER" >/dev/null
+
+ADMIN_ID="bootstrap-admin"
+TEAM_ID="bootstrap-team"
+INVITE_ID="bootstrap-invite"
+EXPIRES=$(date -u -d '+7 days' '+%Y-%m-%d %H:%M:%S')
+
+# DRABA_TEST_ADMIN_PASSWORD_HASH — bcrypt hash of the admin's login password.
+# If not set in ~/.draba-test.env, the admin row is seeded as non-loginable
+# (suitable for CI-only runs where only the invite flow is tested).
+DRABA_TEST_ADMIN_PASSWORD_HASH="${DRABA_TEST_ADMIN_PASSWORD_HASH:-x-not-loginable}"
+
+# Layer the bootstrap rows idempotently. With sample data loaded, the admin
+# email may already belong to a sample user (e.g. brian@rieb.cc) — so use
+# INSERT OR IGNORE for the admin/team/membership and resolve the admin's *actual*
+# id by email for the FK references. This works whether DRABA_TEST_ADMIN_EMAIL is
+# a sample user (reuses it; its existing password is kept) or a fresh address
+# (creates a dedicated bootstrap admin). The known invite token is always seeded.
+docker run --rm -i --user 0:0 -v "$DRABA_DB_DIR:/data" "$SQLITE_IMG" \
+    sqlite3 "/data/${DRABA_DB_FILENAME}" <<SQL
+INSERT OR IGNORE INTO users (id, email, password_hash, display_name, is_superadmin)
+VALUES ('${ADMIN_ID}', '${DRABA_TEST_ADMIN_EMAIL}', '${DRABA_TEST_ADMIN_PASSWORD_HASH}', 'Test Bootstrap', 1);
+
+INSERT OR IGNORE INTO teams (id, name, slug)
+VALUES ('${TEAM_ID}', 'Test Team', 'test-team');
+
+INSERT OR IGNORE INTO team_members (id, team_id, user_id, role)
+SELECT 'bootstrap-admin-member', '${TEAM_ID}', u.id, 'admin'
+FROM users u WHERE u.email = '${DRABA_TEST_ADMIN_EMAIL}';
+
+INSERT INTO invites (id, team_id, email, token, role, invited_by, expires_at)
+SELECT '${INVITE_ID}', '${TEAM_ID}', '${DRABA_TEST_INVITE_EMAIL}', '${DRABA_TEST_INVITE_TOKEN}', 'member', u.id, '${EXPIRES}'
+FROM users u WHERE u.email = '${DRABA_TEST_ADMIN_EMAIL}';
+SQL
+
+echo "[6/6] Restarting container..."
+docker start "$DRABA_CONTAINER" >/dev/null
+
+echo "Done. Test invite token is ready. The api-smoke subagent can now register against it."
+````
+
 ## File: docker-compose.yml
 ````yaml
 services:
@@ -38956,500 +39387,176 @@ services:
       - api
 ````
 
-## File: packages/api/internal/api/activity_handler.go
+## File: packages/api/cmd/draba/main.go
 ````go
-package api
+// Command draba is the API server entry point. It wires repositories,
+// the auth token service, and tier configuration into the HTTP server,
+// then listens for requests until the process is killed.
+package main
 
 import (
-	"database/sql"
-	"encoding/json"
-	"errors"
+	"fmt"
+	"io/fs"
+	"log/slog"
 	"net/http"
-	"time"
+	"os"
+	"strings"
 
+	"github.com/I0-1O/draba/packages/api/internal/api"
+	"github.com/I0-1O/draba/packages/api/internal/auth"
+	"github.com/I0-1O/draba/packages/api/internal/buildinfo"
 	"github.com/I0-1O/draba/packages/api/internal/db"
 	"github.com/I0-1O/draba/packages/api/internal/events"
-	"github.com/I0-1O/draba/packages/api/internal/models"
+	"github.com/I0-1O/draba/packages/api/internal/mailer"
+	"github.com/I0-1O/draba/packages/api/internal/tier"
+	"github.com/I0-1O/draba/packages/api/internal/ws"
+	sampledata "github.com/I0-1O/draba/packages/api/sample_data"
+	drabui "github.com/I0-1O/draba/packages/api/ui"
 )
 
-// handleCreateActivity handles POST /teams/{id}/timelines/{timelineId}/activities.
-// The authenticated user must be a member of the team.
-func (s *Server) handleCreateActivity(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-	timelineID := r.PathValue("timelineId")
+const banner = "\n" +
+	"      _           _\n" +
+	"     | |         | |\n" +
+	"   __| |_ __ __ _| |__   __ _\n" +
+	"  / _` | '__/ _` | '_ \\ / _` |\n" +
+	" | (_| | | | (_| | |_) | (_| |\n" +
+	"  \\__,_|_|  \\__,_|_.__/ \\__,_|\n" +
+	"\n" +
+	"  see who's doing what, when.\n\n"
 
-	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
+func main() {
+	if len(os.Args) > 1 && os.Args[1] == "reset-password" {
+		runResetPassword(os.Args[2:])
 		return
 	}
 
-	claims := claimsFromContext(r.Context())
+	setupLogger()
+	fmt.Print(banner)
+	slog.Info("build", "commit", buildinfo.Short(), "built", buildinfo.Built)
 
-	timeline, err := s.timelines.GetByID(timelineID)
+	port := getenv("DRABA_PORT", "8080")
+	dsn := getenv("DRABA_DB_DSN", "/data/draba.db")
+	jwtSecret := os.Getenv("DRABA_JWT_SECRET")
+	if jwtSecret == "" {
+		slog.Error("DRABA_JWT_SECRET must be set")
+		os.Exit(1)
+	}
+
+	t, err := tier.Load()
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create activity")
-		return
+		slog.Error("tier load failed", "err", err)
+		os.Exit(1)
 	}
-	if timeline.TeamID != teamID {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-		return
-	}
-
-	var req CreateActivityJSONBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	if req.Title == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "title is required")
-		return
-	}
-	if req.StartAt.IsZero() || req.EndAt.IsZero() {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "startAt and endAt are required")
-		return
-	}
-	if req.EndAt.Before(req.StartAt) {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "endAt must not be before startAt")
-		return
-	}
-
-	allDay := false
-	if req.AllDay != nil {
-		allDay = *req.AllDay
-	}
-
-	now := time.Now()
-	activity := &models.Activity{
-		ID:               newID(),
-		TimelineID:       timelineID,
-		Title:            req.Title,
-		Description:      req.Description,
-		Notes:            req.Notes,
-		Icon:             req.Icon,
-		Color:            req.Color,
-		StartAt:          req.StartAt,
-		EndAt:            req.EndAt,
-		AllDay:           allDay,
-		StatusID:         req.StatusId,
-		ParentActivityID: req.ParentActivityId,
-		PercentComplete:  req.PercentComplete,
-		Location:         req.Location,
-		URL:              req.Url,
-		Rrule:            req.Rrule,
-		CreatedBy:        claims.UserID,
-		CreatedAt:        now,
-		UpdatedAt:        now,
-	}
-	if err := s.activities.Create(activity); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create activity")
-		return
-	}
-
-	if req.AssignedMemberIds != nil {
-		if err := s.activities.SetAssignments(activity.ID, *req.AssignedMemberIds); err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity assignments")
-			return
-		}
-		activity.AssignedMemberIDs = *req.AssignedMemberIds
+	l := t.Limits()
+	if l.MaxUsers == 0 {
+		slog.Info("tier", "tier", t)
 	} else {
-		activity.AssignedMemberIDs = []string{}
+		slog.Info("tier", "tier", t, "maxUsers", l.MaxUsers, "maxTeams", l.MaxTeams)
 	}
 
-	if req.TagIds != nil {
-		if err := s.tags.ValidateTeamOwnership(timeline.TeamID, *req.TagIds); err != nil {
-			if errors.Is(err, db.ErrTagOwnership) {
-				writeError(w, http.StatusBadRequest, "INVALID_TAGS", "one or more tag IDs do not belong to this team")
-				return
-			}
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to validate tags")
-			return
-		}
-		if err := s.activities.SetTags(activity.ID, *req.TagIds); err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity tags")
-			return
-		}
-		activity.TagIDs = *req.TagIds
-	} else {
-		activity.TagIDs = []string{}
-	}
-
-	s.bus.Publish(events.Message{Type: events.ActivityCreated, TeamID: timeline.TeamID, Payload: activity})
-	writeJSON(w, http.StatusCreated, activity)
-}
-
-// handleListActivities handles GET /teams/{id}/timelines/{timelineId}/activities.
-// Optional query params ?from=<RFC3339> and ?to=<RFC3339> bound the result by start_at.
-func (s *Server) handleListActivities(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-	timelineID := r.PathValue("timelineId")
-
-	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
-		return
-	}
-
-	timeline, err := s.timelines.GetByID(timelineID)
+	database, err := db.Open(dsn)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list activities")
-		return
+		slog.Error("db: open failed", "err", err)
+		os.Exit(1)
 	}
-	if timeline.TeamID != teamID {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-		return
-	}
+	slog.Info("db: opened", "dsn", dsn)
 
-	var from, to *time.Time
-	if v := r.URL.Query().Get("from"); v != "" {
-		t, err := time.Parse(time.RFC3339, v)
+	if err := db.Migrate(database); err != nil {
+		slog.Error("db: migrate failed", "err", err)
+		os.Exit(1)
+	}
+	slog.Info("db: migrations applied")
+
+	// Optional pre-launch convenience: seed the canonical sample dataset into an
+	// empty database so a freshly-wiped dev/test instance comes up populated.
+	// Gated by DRABA_SEED_SAMPLE_DATA and a no-op once the DB has any users — it
+	// must stay unset in any real deployment.
+	if os.Getenv("DRABA_SEED_SAMPLE_DATA") == "1" {
+		sql, err := sampledata.SQL()
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "from must be RFC3339 (e.g. 2006-01-02T15:04:05Z)")
-			return
+			slog.Error("db: reading embedded sample data failed", "err", err)
+			os.Exit(1)
 		}
-		from = &t
-	}
-	if v := r.URL.Query().Get("to"); v != "" {
-		t, err := time.Parse(time.RFC3339, v)
+		seeded, err := db.SeedSampleDataIfEmpty(database, sql)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "to must be RFC3339 (e.g. 2006-01-02T15:04:05Z)")
-			return
+			slog.Error("db: sample-data seed failed", "err", err)
+			os.Exit(1)
 		}
-		to = &t
-	}
-
-	includeArchived := r.URL.Query().Get("archived") == "true"
-	acts, err := s.activities.ListByTimeline(timelineID, from, to, includeArchived)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list activities")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, acts)
-}
-
-// handleUpdateActivity handles PATCH /activities/{id}. Only fields present in
-// the request body are applied; the caller must be a member of the activity's team.
-func (s *Server) handleUpdateActivity(w http.ResponseWriter, r *http.Request) {
-	activityID := r.PathValue("id")
-
-	activity, err := s.activities.GetByID(activityID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "activity not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update activity")
-		return
-	}
-
-	timeline, err := s.timelines.GetByID(activity.TimelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update activity")
-		return
-	}
-
-	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
-		return
-	}
-
-	// Decode into a map so we can detect which fields the caller provided.
-	var patch map[string]json.RawMessage
-	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	if v, ok := patch["title"]; ok {
-		if err := json.Unmarshal(v, &activity.Title); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid title")
-			return
-		}
-	}
-	if v, ok := patch["description"]; ok {
-		if err := json.Unmarshal(v, &activity.Description); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid description")
-			return
-		}
-	}
-	if v, ok := patch["notes"]; ok {
-		if err := json.Unmarshal(v, &activity.Notes); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid notes")
-			return
-		}
-	}
-	if v, ok := patch["icon"]; ok {
-		if err := json.Unmarshal(v, &activity.Icon); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid icon")
-			return
-		}
-	}
-	if v, ok := patch["color"]; ok {
-		if err := json.Unmarshal(v, &activity.Color); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid color")
-			return
-		}
-	}
-	if v, ok := patch["startAt"]; ok {
-		if err := json.Unmarshal(v, &activity.StartAt); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid startAt")
-			return
-		}
-	}
-	if v, ok := patch["endAt"]; ok {
-		if err := json.Unmarshal(v, &activity.EndAt); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid endAt")
-			return
-		}
-	}
-	if v, ok := patch["allDay"]; ok {
-		if err := json.Unmarshal(v, &activity.AllDay); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid allDay")
-			return
-		}
-	}
-	if v, ok := patch["statusId"]; ok {
-		if err := json.Unmarshal(v, &activity.StatusID); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid statusId")
-			return
-		}
-	}
-	if v, ok := patch["parentActivityId"]; ok {
-		if err := json.Unmarshal(v, &activity.ParentActivityID); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid parentActivityId")
-			return
-		}
-	}
-	if v, ok := patch["percentComplete"]; ok {
-		if err := json.Unmarshal(v, &activity.PercentComplete); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid percentComplete")
-			return
-		}
-	}
-	if v, ok := patch["location"]; ok {
-		if err := json.Unmarshal(v, &activity.Location); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid location")
-			return
-		}
-	}
-	if v, ok := patch["url"]; ok {
-		if err := json.Unmarshal(v, &activity.URL); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid url")
-			return
-		}
-	}
-	if v, ok := patch["rrule"]; ok {
-		if err := json.Unmarshal(v, &activity.Rrule); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid rrule")
-			return
+		if seeded {
+			slog.Info("db: sample data seeded (database was empty)")
+		} else {
+			slog.Info("db: sample-data seed skipped (database already populated)")
 		}
 	}
 
-	var newAssignees *[]string
-	if v, ok := patch["assignedMemberIds"]; ok {
-		var ids []string
-		if err := json.Unmarshal(v, &ids); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid assignedMemberIds")
-			return
-		}
-		newAssignees = &ids
-	}
+	users := db.NewUserRepo(database)
+	invites := db.NewInviteRepo(database)
+	teams := db.NewTeamRepo(database)
+	activityRepo := db.NewActivityRepo(database)
+	timelineRepo := db.NewTimelineRepo(database)
+	savedFilterRepo := db.NewSavedFilterRepo(database)
+	preferenceRepo := db.NewUserPreferenceRepo(database)
+	apiTokenRepo := db.NewAPITokenRepo(database)
+	instanceSetsRepo := db.NewInstanceSettingsRepo(database)
+	passwordTokensRepo := db.NewPasswordResetTokenRepo(database)
+	statusRepo := db.NewStatusRepo(database)
+	tagRepo := db.NewTagRepo(database)
+	shareRepo := db.NewShareRepo(database)
+	m := mailer.New(instanceSetsRepo, []byte(jwtSecret))
+	tokens := auth.NewTokenService(jwtSecret)
 
-	var newTagIDs *[]string
-	if v, ok := patch["tagIds"]; ok {
-		var ids []string
-		if err := json.Unmarshal(v, &ids); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid tagIds")
-			return
-		}
-		newTagIDs = &ids
-	}
-
-	if activity.Title == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "title must not be empty")
-		return
-	}
-	if activity.EndAt.Before(activity.StartAt) {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "endAt must not be before startAt")
-		return
-	}
-
-	activity.UpdatedAt = time.Now()
-	if err := s.activities.Update(activity); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update activity")
-		return
-	}
-
-	if newAssignees != nil {
-		if err := s.activities.SetAssignments(activity.ID, *newAssignees); err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity assignments")
-			return
-		}
-		activity.AssignedMemberIDs = *newAssignees
-	} else {
-		// Populate current assignments so the response always includes them.
-		existing, err := s.activities.GetAssignments(activity.ID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get activity assignments")
-			return
-		}
-		activity.AssignedMemberIDs = existing
-	}
-
-	if newTagIDs != nil {
-		if err := s.tags.ValidateTeamOwnership(timeline.TeamID, *newTagIDs); err != nil {
-			if errors.Is(err, db.ErrTagOwnership) {
-				writeError(w, http.StatusBadRequest, "INVALID_TAGS", "one or more tag IDs do not belong to this team")
-				return
-			}
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to validate tags")
-			return
-		}
-		if err := s.activities.SetTags(activity.ID, *newTagIDs); err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity tags")
-			return
-		}
-		activity.TagIDs = *newTagIDs
-	} else {
-		existing, err := s.activities.GetTags(activity.ID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get activity tags")
-			return
-		}
-		activity.TagIDs = existing
-	}
-
-	s.bus.Publish(events.Message{Type: events.ActivityUpdated, TeamID: timeline.TeamID, Payload: activity})
-	writeJSON(w, http.StatusOK, activity)
-}
-
-// handleArchiveActivity handles POST /activities/{id}/archive. Any team member
-// may archive an activity; the row is soft-deleted (archived_at set) so it is
-// hidden from list responses by default but can be restored.
-func (s *Server) handleArchiveActivity(w http.ResponseWriter, r *http.Request) {
-	s.setActivityArchive(w, r, true)
-}
-
-// handleUnarchiveActivity handles POST /activities/{id}/unarchive.
-func (s *Server) handleUnarchiveActivity(w http.ResponseWriter, r *http.Request) {
-	s.setActivityArchive(w, r, false)
-}
-
-// setActivityArchive is the shared implementation for the archive/unarchive
-// endpoints. When archive is true, archived_at is set to now; otherwise it
-// is cleared.
-func (s *Server) setActivityArchive(w http.ResponseWriter, r *http.Request, archive bool) {
-	activityID := r.PathValue("id")
-
-	activity, err := s.activities.GetByID(activityID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "activity not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
-		return
-	}
-
-	timeline, err := s.timelines.GetByID(activity.TimelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
-		return
-	}
-
-	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
-		return
-	}
-
-	var at *time.Time
-	if archive {
-		now := time.Now().UTC()
-		at = &now
-		if err := s.activities.ClearParentRefs(activityID); err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
-			return
-		}
-	}
-	if err := s.activities.SetArchived(activityID, at); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
-		return
-	}
-	activity.ArchivedAt = at
-	activity.UpdatedAt = time.Now().UTC()
-
-	// Re-populate assignments and tags for a stable response shape.
-	if ids, err := s.activities.GetAssignments(activity.ID); err == nil {
-		activity.AssignedMemberIDs = ids
-	} else {
-		activity.AssignedMemberIDs = []string{}
-	}
-	if ids, err := s.activities.GetTags(activity.ID); err == nil {
-		activity.TagIDs = ids
-	} else {
-		activity.TagIDs = []string{}
-	}
-
-	s.bus.Publish(events.Message{Type: events.ActivityUpdated, TeamID: timeline.TeamID, Payload: activity})
-	writeJSON(w, http.StatusOK, activity)
-}
-
-// handleDeleteActivity handles DELETE /activities/{id}. Any member of the
-// activity's team may delete it.
-func (s *Server) handleDeleteActivity(w http.ResponseWriter, r *http.Request) {
-	activityID := r.PathValue("id")
-
-	activity, err := s.activities.GetByID(activityID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "activity not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
-		return
-	}
-
-	timeline, err := s.timelines.GetByID(activity.TimelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
-		return
-	}
-
-	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
-		return
-	}
-
-	if err := s.activities.ClearParentRefs(activityID); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
-		return
-	}
-	if err := s.activities.Delete(activityID); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
-		return
-	}
-
-	s.bus.Publish(events.Message{
-		Type:    events.ActivityDeleted,
-		TeamID:  timeline.TeamID,
-		Payload: map[string]string{"id": activityID},
+	bus := events.NewBus()
+	hub := ws.NewHub(bus, tokens, func(teamID, userID string) error {
+		_, err := teams.GetMember(teamID, userID)
+		return err
 	})
-	w.WriteHeader(http.StatusNoContent)
+	go hub.Run()
+	slog.Info("ws: hub running")
+
+	if mods := tier.Registered(); len(mods) > 0 {
+		slog.Info("modules loaded", "count", len(mods))
+	}
+
+	srv := api.NewServer(users, invites, teams, activityRepo, timelineRepo, savedFilterRepo, preferenceRepo, apiTokenRepo, instanceSetsRepo, passwordTokensRepo, statusRepo, tagRepo, shareRepo, m, tokens, t, bus, hub)
+
+	// Wire up the embedded React SPA when a production build is present.
+	// In dev the static/ directory only has .gitkeep so this is a no-op.
+	if sub, err := fs.Sub(drabui.FS, "static"); err == nil {
+		if _, err := sub.Open("index.html"); err == nil {
+			srv.WithUI(sub)
+			slog.Info("ui: serving embedded SPA")
+		}
+	}
+
+	slog.Info("listening", "port", port)
+	if err := http.ListenAndServe(":"+port, srv.Routes()); err != nil {
+		slog.Error("server error", "err", err)
+		os.Exit(1)
+	}
+}
+
+// setupLogger initialises the global slog logger. Level is controlled by
+// DRABA_LOG_LEVEL (debug | info | warn | error); default is info.
+// All output goes to stdout so Docker captures it in `docker logs`.
+func setupLogger() {
+	level := slog.LevelInfo
+	switch strings.ToLower(os.Getenv("DRABA_LOG_LEVEL")) {
+	case "debug":
+		level = slog.LevelDebug
+	case "warn":
+		level = slog.LevelWarn
+	case "error":
+		level = slog.LevelError
+	}
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level})))
+}
+
+// getenv returns the env var value or fallback when unset/empty.
+func getenv(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
 }
 ````
 
@@ -39674,310 +39781,6 @@ func (s *Server) handleDeleteSavedFilter(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
-}
-````
-
-## File: packages/api/internal/api/server.go
-````go
-// Package api hosts the HTTP handlers, routing, and middleware for the
-// draba REST API. Handlers are intentionally thin: they decode requests,
-// delegate to repositories and services, and write responses. Business
-// logic belongs in the domain packages, not here.
-package api
-
-import (
-	"fmt"
-	"io/fs"
-	"net/http"
-	"strings"
-	"time"
-
-	"github.com/I0-1O/draba/packages/api/internal/auth"
-	"github.com/I0-1O/draba/packages/api/internal/db"
-	"github.com/I0-1O/draba/packages/api/internal/events"
-	"github.com/I0-1O/draba/packages/api/internal/mailer"
-	"github.com/I0-1O/draba/packages/api/internal/models"
-	"github.com/I0-1O/draba/packages/api/internal/tier"
-	"github.com/I0-1O/draba/packages/api/internal/ws"
-)
-
-// TimelineStore is the persistence interface required by timeline handlers.
-// The concrete implementation is *db.TimelineRepo; tests may substitute a fake.
-type TimelineStore interface {
-	Create(t *models.Timeline) error
-	GetByID(id string) (*models.Timeline, error)
-	GetByShareToken(token string) (*models.Timeline, error)
-	ListByTeam(teamID string, includeArchived bool) ([]*models.Timeline, error)
-	HasAccess(timelineID, teamMemberID string) (bool, error)
-	GrantAccess(timelineID, teamMemberID, role string) error
-	RevokeAccess(timelineID, teamMemberID string) error
-	GetAccessRole(timelineID, teamMemberID string) (string, error)
-	ListAccess(timelineID string) ([]*models.TimelineAccessEntry, error)
-	SetArchived(id string, at *time.Time) error
-	Update(t *models.Timeline) error
-	Delete(id string) error
-}
-
-// Server holds shared dependencies for all HTTP handlers.
-type Server struct {
-	users          *db.UserRepo
-	invites        *db.InviteRepo
-	teams          *db.TeamRepo
-	activities     *db.ActivityRepo
-	timelines      TimelineStore
-	savedFilters   *db.SavedFilterRepo
-	preferences    *db.UserPreferenceRepo
-	apiTokens      *db.APITokenRepo
-	instanceSets   *db.InstanceSettingsRepo
-	passwordTokens *db.PasswordResetTokenRepo
-	statuses       *db.StatusRepo
-	tags           *db.TagRepo
-	shares         *db.ShareRepo
-	shareCache     *shareCache
-	unlockLimiter  *rateLimiter
-	mailer         *mailer.Mailer
-	tokens         *auth.TokenService
-	tier           tier.Tier
-	bus            *events.Bus
-	hub            *ws.Hub
-	uiFS           fs.FS
-}
-
-// NewServer constructs a Server with its required dependencies. It does not
-// touch the network; call Routes to obtain the http.Handler to serve.
-func NewServer(
-	users *db.UserRepo,
-	invites *db.InviteRepo,
-	teams *db.TeamRepo,
-	activitiesRepo *db.ActivityRepo,
-	timelinesRepo TimelineStore,
-	savedFiltersRepo *db.SavedFilterRepo,
-	preferencesRepo *db.UserPreferenceRepo,
-	apiTokensRepo *db.APITokenRepo,
-	instanceSetsRepo *db.InstanceSettingsRepo,
-	passwordTokensRepo *db.PasswordResetTokenRepo,
-	statusesRepo *db.StatusRepo,
-	tagsRepo *db.TagRepo,
-	sharesRepo *db.ShareRepo,
-	m *mailer.Mailer,
-	tokens *auth.TokenService,
-	t tier.Tier,
-	bus *events.Bus,
-	hub *ws.Hub,
-) *Server {
-	return &Server{
-		users:          users,
-		invites:        invites,
-		teams:          teams,
-		activities:     activitiesRepo,
-		timelines:      timelinesRepo,
-		savedFilters:   savedFiltersRepo,
-		preferences:    preferencesRepo,
-		apiTokens:      apiTokensRepo,
-		instanceSets:   instanceSetsRepo,
-		passwordTokens: passwordTokensRepo,
-		statuses:       statusesRepo,
-		tags:           tagsRepo,
-		shares:         sharesRepo,
-		shareCache:     newShareCache(),
-		unlockLimiter:  newRateLimiter(unlockMaxAttempts, time.Hour),
-		mailer:         m,
-		tokens:         tokens,
-		tier:           t,
-		bus:            bus,
-		hub:            hub,
-	}
-}
-
-// WithUI registers an embedded React SPA to be served at GET /. The FS must
-// be rooted at the build output directory (i.e. contain index.html directly).
-// When called, all unmatched GET paths fall back to index.html so React Router
-// handles client-side navigation. Safe to skip in dev (no-op when not called).
-func (s *Server) WithUI(uiFS fs.FS) *Server {
-	s.uiFS = uiFS
-	return s
-}
-
-// Routes returns the fully-wired HTTP handler for the API, including all
-// core routes plus any routes added by registered tier modules.
-func (s *Server) Routes() http.Handler {
-	mux := http.NewServeMux()
-
-	mux.HandleFunc("GET /setup/status", s.handleSetupStatus)
-
-	mux.HandleFunc("POST /auth/register", s.handleRegister)
-	mux.HandleFunc("POST /auth/login", s.handleLogin)
-	mux.HandleFunc("POST /auth/refresh", s.handleRefresh)
-	mux.HandleFunc("GET /auth/me", chain(s.handleMe, s.authMiddleware))
-	mux.HandleFunc("POST /auth/forgot-password", s.handleForgotPassword)
-	mux.HandleFunc("POST /auth/reset-password", s.handleResetPassword)
-
-	mux.HandleFunc("GET /users/me/preferences", chain(s.handleGetPreferences, s.authMiddleware))
-	mux.HandleFunc("PUT /users/me/preferences", chain(s.handleUpsertPreference, s.authMiddleware))
-	mux.HandleFunc("GET /users/me/stats", chain(s.handleGetMyStats, s.authMiddleware))
-	mux.HandleFunc("PATCH /users/me", chain(s.handleUpdateProfile, s.authMiddleware))
-	mux.HandleFunc("PUT /users/me/password", chain(s.handleChangePassword, s.authMiddleware))
-
-	mux.HandleFunc("GET /admin/smtp", chain(s.handleGetSMTP, s.authMiddleware))
-	mux.HandleFunc("PUT /admin/smtp", chain(s.handlePutSMTP, s.authMiddleware))
-	mux.HandleFunc("POST /admin/smtp/test", chain(s.handleTestSMTP, s.authMiddleware))
-	mux.HandleFunc("DELETE /admin/smtp", chain(s.handleDeleteSMTP, s.authMiddleware))
-	mux.HandleFunc("GET /admin/settings", chain(s.handleGetAdminSettings, s.authMiddleware))
-	mux.HandleFunc("PATCH /admin/settings", chain(s.handlePatchAdminSettings, s.authMiddleware))
-	mux.HandleFunc("GET /admin/users", chain(s.handleListAdminUsers, s.authMiddleware))
-
-	// Public — no auth required; used by the login page and shared views.
-	mux.HandleFunc("GET /settings/branding", s.handleGetPublicBranding)
-
-	mux.HandleFunc("POST /tokens", chain(s.handleCreateAPIToken, s.authMiddleware))
-	mux.HandleFunc("GET /tokens", chain(s.handleListAPITokens, s.authMiddleware))
-	mux.HandleFunc("DELETE /tokens/{id}", chain(s.handleDeleteAPIToken, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams", chain(s.handleListTeams, s.authMiddleware))
-	mux.HandleFunc("POST /teams", chain(s.handleCreateTeam, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}", chain(s.handleGetTeam, s.authMiddleware))
-	mux.HandleFunc("PATCH /teams/{id}", chain(s.handleUpdateTeam, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/archive", chain(s.handleArchiveTeam, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/unarchive", chain(s.handleUnarchiveTeam, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/invites", chain(s.handleCreateInvite, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/invites", chain(s.handleListInvites, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/invites/{inviteId}", chain(s.handleDeleteInvite, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/invite-link", chain(s.handleCreateInviteLink, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/invite-link/reset", chain(s.handleResetInviteLink, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/invite-link", chain(s.handleGetInviteLink, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/invite-link", chain(s.handleDeleteInviteLink, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/members", chain(s.handleListMembers, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/members/{memberId}", chain(s.handleGetMember, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/members/{memberId}/stats", chain(s.handleGetMemberStats, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/members", chain(s.handleAddMember, s.authMiddleware))
-	mux.HandleFunc("PATCH /teams/{id}/members/{memberId}", chain(s.handleUpdateMember, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/members/{memberId}", chain(s.handleDeleteMember, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/members/{memberId}/archive", chain(s.handleArchiveMember, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/members/{memberId}/unarchive", chain(s.handleUnarchiveMember, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/participants", chain(s.handleCreateParticipant, s.authMiddleware))
-	mux.HandleFunc("GET /users/search", chain(s.handleSearchUsers, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/promote", chain(s.handlePromoteUser, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/archive", chain(s.handleArchiveUser, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/unarchive", chain(s.handleUnarchiveUser, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/revoke", chain(s.handleRevokeUser, s.authMiddleware))
-	mux.HandleFunc("DELETE /users/{id}", chain(s.handleDeleteUser, s.authMiddleware))
-	// Activity routes use the team-scoped prefix (GET /teams/{id}/timelines/{timelineId}/...)
-	// to avoid a Go 1.22 mux conflict with GET /timelines/share/{token}: both are
-	// 3-segment GET paths and neither is more specific when the third segment differs.
-	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/activities", chain(s.handleCreateActivity, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/activities", chain(s.handleListActivities, s.authMiddleware))
-	mux.HandleFunc("PATCH /activities/{id}", chain(s.handleUpdateActivity, s.authMiddleware))
-	mux.HandleFunc("DELETE /activities/{id}", chain(s.handleDeleteActivity, s.authMiddleware))
-	mux.HandleFunc("POST /activities/{id}/archive", chain(s.handleArchiveActivity, s.authMiddleware))
-	mux.HandleFunc("POST /activities/{id}/unarchive", chain(s.handleUnarchiveActivity, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/tags", chain(s.handleListTags, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/tags", chain(s.handleCreateTag, s.authMiddleware))
-	mux.HandleFunc("PATCH /tags/{id}", chain(s.handleUpdateTag, s.authMiddleware))
-	mux.HandleFunc("DELETE /tags/{id}", chain(s.handleDeleteTag, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/saved_filters/all", chain(s.handleListAllTeamSavedFilters, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/saved_filters", chain(s.handleListSavedFilters, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/saved_filters", chain(s.handleCreateSavedFilter, s.authMiddleware))
-	mux.HandleFunc("PATCH /saved_filters/{id}", chain(s.handleUpdateSavedFilter, s.authMiddleware))
-	mux.HandleFunc("DELETE /saved_filters/{id}", chain(s.handleDeleteSavedFilter, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/status-templates", chain(s.handleListStatusTemplates, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/status-templates", chain(s.handleCreateStatusTemplate, s.authMiddleware))
-	mux.HandleFunc("PATCH /status-templates/{id}", chain(s.handleUpdateStatusTemplate, s.authMiddleware))
-	mux.HandleFunc("DELETE /status-templates/{id}", chain(s.handleDeleteStatusTemplate, s.authMiddleware))
-	mux.HandleFunc("POST /status-templates/{id}/items", chain(s.handleCreateTemplateItem, s.authMiddleware))
-	mux.HandleFunc("PATCH /status-template-items/{id}", chain(s.handleUpdateTemplateItem, s.authMiddleware))
-	mux.HandleFunc("DELETE /status-template-items/{id}", chain(s.handleDeleteTemplateItem, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/timelines", chain(s.handleListTimelines, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/timelines", chain(s.handleCreateTimeline, s.authMiddleware))
-	// GET /timelines/share/{token} must be registered before GET /timelines/{id} so
-	// the more-specific literal "share" segment takes precedence.
-	mux.HandleFunc("GET /timelines/share/{token}", s.handleGetTimelineByShareToken)
-	mux.HandleFunc("GET /timelines/{id}", chain(s.handleGetTimeline, s.authMiddleware))
-	// Timeline statuses are placed under /teams/{id}/timelines/{timelineId}/statuses
-	// rather than /timelines/{id}/statuses to avoid a Go 1.22 mux pattern conflict
-	// with GET /timelines/share/{token} (both are 3-segment paths and conflict on
-	// paths like /timelines/share/statuses).
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleListTimelineStatuses, s.authMiddleware))
-	mux.HandleFunc("POST /timelines/{id}/archive", chain(s.handleArchiveTimeline, s.authMiddleware))
-	mux.HandleFunc("POST /timelines/{id}/unarchive", chain(s.handleUnarchiveTimeline, s.authMiddleware))
-
-	mux.HandleFunc("PATCH /timelines/{id}", chain(s.handleUpdateTimeline, s.authMiddleware))
-	mux.HandleFunc("DELETE /timelines/{id}", chain(s.handleDeleteTimeline, s.authMiddleware))
-	// Access list routes use the team-scoped prefix to avoid a Go 1.22 mux
-	// conflict with GET /timelines/share/{token} on 3-segment GET paths.
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/access", chain(s.handleListTimelineAccess, s.authMiddleware))
-	mux.HandleFunc("PUT /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleGrantTimelineAccess, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleRevokeTimelineAccess, s.authMiddleware))
-	// Timeline status CRUD — POST shares the team-scoped prefix with GET statuses.
-	// PATCH and DELETE use a flat /statuses/{id} prefix (2 segments, no conflict).
-	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleCreateTimelineStatus, s.authMiddleware))
-	mux.HandleFunc("PATCH /statuses/{id}", chain(s.handleUpdateStatus, s.authMiddleware))
-	mux.HandleFunc("DELETE /statuses/{id}", chain(s.handleDeleteStatus, s.authMiddleware))
-
-	// Share routes.
-	// GET /shares/{token} is public — no auth. The token is the credential.
-	// POST /timelines/{id}/shares uses the same /timelines/{id}/... prefix
-	// as archive/unarchive so it avoids the Go 1.22 mux pattern conflict with
-	// GET /timelines/share/{token} (only GET-method paths conflict).
-	// GET /teams/{id}/timelines/{timelineId}/shares uses the team-scoped prefix
-	// to avoid the GET conflict described above.
-	mux.HandleFunc("GET /shares/{token}", s.handleGetShareProjection)
-	mux.HandleFunc("POST /shares/{token}/unlock", s.handleUnlockShare)
-	mux.HandleFunc("POST /timelines/{id}/shares", chain(s.handleCreateShare, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/shares", chain(s.handleListShares, s.authMiddleware))
-	mux.HandleFunc("PATCH /shares/{id}", chain(s.handleUpdateShare, s.authMiddleware))
-	mux.HandleFunc("DELETE /shares/{id}", chain(s.handleDeleteShare, s.authMiddleware))
-
-	// GET /ws is intentionally outside authMiddleware — ServeWS validates the
-	// JWT itself before upgrading, because WebSocket clients can't set headers.
-	mux.HandleFunc("GET /ws", s.hub.ServeWS)
-
-	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-	})
-
-	if s.uiFS != nil {
-		mux.Handle("GET /", spaHandler(s.uiFS))
-	}
-
-	ctx := &tier.ModuleContext{Mux: mux, Tier: s.tier}
-	for _, m := range tier.Registered() {
-		if err := m.Register(ctx); err != nil {
-			// Module registration is a startup invariant — a failure here is a programming error.
-			panic(fmt.Sprintf("tier module %q failed to register: %v", m.Name(), err))
-		}
-	}
-
-	return requestLogger(mux)
-}
-
-// chain applies a single middleware to a handler function.
-func chain(h http.HandlerFunc, m func(http.Handler) http.Handler) http.HandlerFunc {
-	return m(h).ServeHTTP
-}
-
-// spaHandler serves the embedded React SPA. Known static assets are served
-// directly; any unrecognised path falls back to index.html so React Router
-// handles client-side navigation.
-func spaHandler(uiFS fs.FS) http.Handler {
-	fserver := http.FileServer(http.FS(uiFS))
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		path := strings.TrimPrefix(r.URL.Path, "/")
-		if path == "" {
-			path = "index.html"
-		}
-		if _, err := uiFS.Open(path); err != nil {
-			// Unknown path — serve index.html and let React Router handle it.
-			r = r.Clone(r.Context())
-			r.URL.Path = "/"
-			fserver.ServeHTTP(w, r)
-			return
-		}
-		fserver.ServeHTTP(w, r)
-	})
 }
 ````
 
@@ -44522,6 +44325,311 @@ No Vitest / Testing Library setup exists yet. Components (`TimelineGrid`, `Event
 2. Under the relevant subagent heading, list concrete, runnable assertions tied to the ROADMAP exit criteria.
 3. If a new subagent is needed, add it to the subagent map with an "active from" phase.
 4. That's it — `/test-phase` will pick it up on the next run.
+````
+
+## File: packages/api/internal/api/server.go
+````go
+// Package api hosts the HTTP handlers, routing, and middleware for the
+// draba REST API. Handlers are intentionally thin: they decode requests,
+// delegate to repositories and services, and write responses. Business
+// logic belongs in the domain packages, not here.
+package api
+
+import (
+	"fmt"
+	"io/fs"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/auth"
+	"github.com/I0-1O/draba/packages/api/internal/db"
+	"github.com/I0-1O/draba/packages/api/internal/events"
+	"github.com/I0-1O/draba/packages/api/internal/mailer"
+	"github.com/I0-1O/draba/packages/api/internal/models"
+	"github.com/I0-1O/draba/packages/api/internal/tier"
+	"github.com/I0-1O/draba/packages/api/internal/ws"
+)
+
+// TimelineStore is the persistence interface required by timeline handlers.
+// The concrete implementation is *db.TimelineRepo; tests may substitute a fake.
+type TimelineStore interface {
+	Create(t *models.Timeline) error
+	GetByID(id string) (*models.Timeline, error)
+	GetByShareToken(token string) (*models.Timeline, error)
+	ListByTeam(teamID string, includeArchived bool) ([]*models.Timeline, error)
+	HasAccess(timelineID, teamMemberID string) (bool, error)
+	GrantAccess(timelineID, teamMemberID, role string) error
+	RevokeAccess(timelineID, teamMemberID string) error
+	GetAccessRole(timelineID, teamMemberID string) (string, error)
+	ListAccess(timelineID string) ([]*models.TimelineAccessEntry, error)
+	SetArchived(id string, at *time.Time) error
+	Update(t *models.Timeline) error
+	Delete(id string) error
+}
+
+// Server holds shared dependencies for all HTTP handlers.
+type Server struct {
+	users          *db.UserRepo
+	invites        *db.InviteRepo
+	teams          *db.TeamRepo
+	activities     *db.ActivityRepo
+	timelines      TimelineStore
+	savedFilters   *db.SavedFilterRepo
+	preferences    *db.UserPreferenceRepo
+	apiTokens      *db.APITokenRepo
+	instanceSets   *db.InstanceSettingsRepo
+	passwordTokens *db.PasswordResetTokenRepo
+	statuses       *db.StatusRepo
+	tags           *db.TagRepo
+	shares         *db.ShareRepo
+	shareCache     *shareCache
+	unlockLimiter  *rateLimiter
+	mailer         *mailer.Mailer
+	tokens         *auth.TokenService
+	tier           tier.Tier
+	bus            *events.Bus
+	hub            *ws.Hub
+	uiFS           fs.FS
+}
+
+// NewServer constructs a Server with its required dependencies. It does not
+// touch the network; call Routes to obtain the http.Handler to serve.
+func NewServer(
+	users *db.UserRepo,
+	invites *db.InviteRepo,
+	teams *db.TeamRepo,
+	activitiesRepo *db.ActivityRepo,
+	timelinesRepo TimelineStore,
+	savedFiltersRepo *db.SavedFilterRepo,
+	preferencesRepo *db.UserPreferenceRepo,
+	apiTokensRepo *db.APITokenRepo,
+	instanceSetsRepo *db.InstanceSettingsRepo,
+	passwordTokensRepo *db.PasswordResetTokenRepo,
+	statusesRepo *db.StatusRepo,
+	tagsRepo *db.TagRepo,
+	sharesRepo *db.ShareRepo,
+	m *mailer.Mailer,
+	tokens *auth.TokenService,
+	t tier.Tier,
+	bus *events.Bus,
+	hub *ws.Hub,
+) *Server {
+	return &Server{
+		users:          users,
+		invites:        invites,
+		teams:          teams,
+		activities:     activitiesRepo,
+		timelines:      timelinesRepo,
+		savedFilters:   savedFiltersRepo,
+		preferences:    preferencesRepo,
+		apiTokens:      apiTokensRepo,
+		instanceSets:   instanceSetsRepo,
+		passwordTokens: passwordTokensRepo,
+		statuses:       statusesRepo,
+		tags:           tagsRepo,
+		shares:         sharesRepo,
+		shareCache:     newShareCache(),
+		unlockLimiter:  newRateLimiter(unlockMaxAttempts, time.Hour),
+		mailer:         m,
+		tokens:         tokens,
+		tier:           t,
+		bus:            bus,
+		hub:            hub,
+	}
+}
+
+// WithUI registers an embedded React SPA to be served at GET /. The FS must
+// be rooted at the build output directory (i.e. contain index.html directly).
+// When called, all unmatched GET paths fall back to index.html so React Router
+// handles client-side navigation. Safe to skip in dev (no-op when not called).
+func (s *Server) WithUI(uiFS fs.FS) *Server {
+	s.uiFS = uiFS
+	return s
+}
+
+// Routes returns the fully-wired HTTP handler for the API, including all
+// core routes plus any routes added by registered tier modules.
+func (s *Server) Routes() http.Handler {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("GET /setup/status", s.handleSetupStatus)
+	mux.HandleFunc("GET /version", s.handleVersion)
+
+	mux.HandleFunc("POST /auth/register", s.handleRegister)
+	mux.HandleFunc("POST /auth/login", s.handleLogin)
+	mux.HandleFunc("POST /auth/refresh", s.handleRefresh)
+	mux.HandleFunc("GET /auth/me", chain(s.handleMe, s.authMiddleware))
+	mux.HandleFunc("POST /auth/forgot-password", s.handleForgotPassword)
+	mux.HandleFunc("POST /auth/reset-password", s.handleResetPassword)
+
+	mux.HandleFunc("GET /users/me/preferences", chain(s.handleGetPreferences, s.authMiddleware))
+	mux.HandleFunc("PUT /users/me/preferences", chain(s.handleUpsertPreference, s.authMiddleware))
+	mux.HandleFunc("GET /users/me/stats", chain(s.handleGetMyStats, s.authMiddleware))
+	mux.HandleFunc("PATCH /users/me", chain(s.handleUpdateProfile, s.authMiddleware))
+	mux.HandleFunc("PUT /users/me/password", chain(s.handleChangePassword, s.authMiddleware))
+
+	mux.HandleFunc("GET /admin/smtp", chain(s.handleGetSMTP, s.authMiddleware))
+	mux.HandleFunc("PUT /admin/smtp", chain(s.handlePutSMTP, s.authMiddleware))
+	mux.HandleFunc("POST /admin/smtp/test", chain(s.handleTestSMTP, s.authMiddleware))
+	mux.HandleFunc("DELETE /admin/smtp", chain(s.handleDeleteSMTP, s.authMiddleware))
+	mux.HandleFunc("GET /admin/settings", chain(s.handleGetAdminSettings, s.authMiddleware))
+	mux.HandleFunc("PATCH /admin/settings", chain(s.handlePatchAdminSettings, s.authMiddleware))
+	mux.HandleFunc("GET /admin/users", chain(s.handleListAdminUsers, s.authMiddleware))
+
+	// Public — no auth required; used by the login page and shared views.
+	mux.HandleFunc("GET /settings/branding", s.handleGetPublicBranding)
+
+	mux.HandleFunc("POST /tokens", chain(s.handleCreateAPIToken, s.authMiddleware))
+	mux.HandleFunc("GET /tokens", chain(s.handleListAPITokens, s.authMiddleware))
+	mux.HandleFunc("DELETE /tokens/{id}", chain(s.handleDeleteAPIToken, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams", chain(s.handleListTeams, s.authMiddleware))
+	mux.HandleFunc("POST /teams", chain(s.handleCreateTeam, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}", chain(s.handleGetTeam, s.authMiddleware))
+	mux.HandleFunc("PATCH /teams/{id}", chain(s.handleUpdateTeam, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/archive", chain(s.handleArchiveTeam, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/unarchive", chain(s.handleUnarchiveTeam, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/invites", chain(s.handleCreateInvite, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/invites", chain(s.handleListInvites, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/invites/{inviteId}", chain(s.handleDeleteInvite, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/invite-link", chain(s.handleCreateInviteLink, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/invite-link/reset", chain(s.handleResetInviteLink, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/invite-link", chain(s.handleGetInviteLink, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/invite-link", chain(s.handleDeleteInviteLink, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/members", chain(s.handleListMembers, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/members/{memberId}", chain(s.handleGetMember, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/members/{memberId}/stats", chain(s.handleGetMemberStats, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/members", chain(s.handleAddMember, s.authMiddleware))
+	mux.HandleFunc("PATCH /teams/{id}/members/{memberId}", chain(s.handleUpdateMember, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/members/{memberId}", chain(s.handleDeleteMember, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/members/{memberId}/archive", chain(s.handleArchiveMember, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/members/{memberId}/unarchive", chain(s.handleUnarchiveMember, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/participants", chain(s.handleCreateParticipant, s.authMiddleware))
+	mux.HandleFunc("GET /users/search", chain(s.handleSearchUsers, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/promote", chain(s.handlePromoteUser, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/archive", chain(s.handleArchiveUser, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/unarchive", chain(s.handleUnarchiveUser, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/revoke", chain(s.handleRevokeUser, s.authMiddleware))
+	mux.HandleFunc("DELETE /users/{id}", chain(s.handleDeleteUser, s.authMiddleware))
+	// Activity routes use the team-scoped prefix (GET /teams/{id}/timelines/{timelineId}/...)
+	// to avoid a Go 1.22 mux conflict with GET /timelines/share/{token}: both are
+	// 3-segment GET paths and neither is more specific when the third segment differs.
+	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/activities", chain(s.handleCreateActivity, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/activities", chain(s.handleListActivities, s.authMiddleware))
+	mux.HandleFunc("PATCH /activities/{id}", chain(s.handleUpdateActivity, s.authMiddleware))
+	mux.HandleFunc("DELETE /activities/{id}", chain(s.handleDeleteActivity, s.authMiddleware))
+	mux.HandleFunc("POST /activities/{id}/archive", chain(s.handleArchiveActivity, s.authMiddleware))
+	mux.HandleFunc("POST /activities/{id}/unarchive", chain(s.handleUnarchiveActivity, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/tags", chain(s.handleListTags, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/tags", chain(s.handleCreateTag, s.authMiddleware))
+	mux.HandleFunc("PATCH /tags/{id}", chain(s.handleUpdateTag, s.authMiddleware))
+	mux.HandleFunc("DELETE /tags/{id}", chain(s.handleDeleteTag, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/saved_filters/all", chain(s.handleListAllTeamSavedFilters, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/saved_filters", chain(s.handleListSavedFilters, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/saved_filters", chain(s.handleCreateSavedFilter, s.authMiddleware))
+	mux.HandleFunc("PATCH /saved_filters/{id}", chain(s.handleUpdateSavedFilter, s.authMiddleware))
+	mux.HandleFunc("DELETE /saved_filters/{id}", chain(s.handleDeleteSavedFilter, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/status-templates", chain(s.handleListStatusTemplates, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/status-templates", chain(s.handleCreateStatusTemplate, s.authMiddleware))
+	mux.HandleFunc("PATCH /status-templates/{id}", chain(s.handleUpdateStatusTemplate, s.authMiddleware))
+	mux.HandleFunc("DELETE /status-templates/{id}", chain(s.handleDeleteStatusTemplate, s.authMiddleware))
+	mux.HandleFunc("POST /status-templates/{id}/items", chain(s.handleCreateTemplateItem, s.authMiddleware))
+	mux.HandleFunc("PATCH /status-template-items/{id}", chain(s.handleUpdateTemplateItem, s.authMiddleware))
+	mux.HandleFunc("DELETE /status-template-items/{id}", chain(s.handleDeleteTemplateItem, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/timelines", chain(s.handleListTimelines, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/timelines", chain(s.handleCreateTimeline, s.authMiddleware))
+	// GET /timelines/share/{token} must be registered before GET /timelines/{id} so
+	// the more-specific literal "share" segment takes precedence.
+	mux.HandleFunc("GET /timelines/share/{token}", s.handleGetTimelineByShareToken)
+	mux.HandleFunc("GET /timelines/{id}", chain(s.handleGetTimeline, s.authMiddleware))
+	// Timeline statuses are placed under /teams/{id}/timelines/{timelineId}/statuses
+	// rather than /timelines/{id}/statuses to avoid a Go 1.22 mux pattern conflict
+	// with GET /timelines/share/{token} (both are 3-segment paths and conflict on
+	// paths like /timelines/share/statuses).
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleListTimelineStatuses, s.authMiddleware))
+	mux.HandleFunc("POST /timelines/{id}/archive", chain(s.handleArchiveTimeline, s.authMiddleware))
+	mux.HandleFunc("POST /timelines/{id}/unarchive", chain(s.handleUnarchiveTimeline, s.authMiddleware))
+
+	mux.HandleFunc("PATCH /timelines/{id}", chain(s.handleUpdateTimeline, s.authMiddleware))
+	mux.HandleFunc("DELETE /timelines/{id}", chain(s.handleDeleteTimeline, s.authMiddleware))
+	// Access list routes use the team-scoped prefix to avoid a Go 1.22 mux
+	// conflict with GET /timelines/share/{token} on 3-segment GET paths.
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/access", chain(s.handleListTimelineAccess, s.authMiddleware))
+	mux.HandleFunc("PUT /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleGrantTimelineAccess, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleRevokeTimelineAccess, s.authMiddleware))
+	// Timeline status CRUD — POST shares the team-scoped prefix with GET statuses.
+	// PATCH and DELETE use a flat /statuses/{id} prefix (2 segments, no conflict).
+	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleCreateTimelineStatus, s.authMiddleware))
+	mux.HandleFunc("PATCH /statuses/{id}", chain(s.handleUpdateStatus, s.authMiddleware))
+	mux.HandleFunc("DELETE /statuses/{id}", chain(s.handleDeleteStatus, s.authMiddleware))
+
+	// Share routes.
+	// GET /shares/{token} is public — no auth. The token is the credential.
+	// POST /timelines/{id}/shares uses the same /timelines/{id}/... prefix
+	// as archive/unarchive so it avoids the Go 1.22 mux pattern conflict with
+	// GET /timelines/share/{token} (only GET-method paths conflict).
+	// GET /teams/{id}/timelines/{timelineId}/shares uses the team-scoped prefix
+	// to avoid the GET conflict described above.
+	mux.HandleFunc("GET /shares/{token}", s.handleGetShareProjection)
+	mux.HandleFunc("POST /shares/{token}/unlock", s.handleUnlockShare)
+	mux.HandleFunc("POST /timelines/{id}/shares", chain(s.handleCreateShare, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/shares", chain(s.handleListShares, s.authMiddleware))
+	mux.HandleFunc("PATCH /shares/{id}", chain(s.handleUpdateShare, s.authMiddleware))
+	mux.HandleFunc("DELETE /shares/{id}", chain(s.handleDeleteShare, s.authMiddleware))
+
+	// GET /ws is intentionally outside authMiddleware — ServeWS validates the
+	// JWT itself before upgrading, because WebSocket clients can't set headers.
+	mux.HandleFunc("GET /ws", s.hub.ServeWS)
+
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	})
+
+	if s.uiFS != nil {
+		mux.Handle("GET /", spaHandler(s.uiFS))
+	}
+
+	ctx := &tier.ModuleContext{Mux: mux, Tier: s.tier}
+	for _, m := range tier.Registered() {
+		if err := m.Register(ctx); err != nil {
+			// Module registration is a startup invariant — a failure here is a programming error.
+			panic(fmt.Sprintf("tier module %q failed to register: %v", m.Name(), err))
+		}
+	}
+
+	return requestLogger(mux)
+}
+
+// chain applies a single middleware to a handler function.
+func chain(h http.HandlerFunc, m func(http.Handler) http.Handler) http.HandlerFunc {
+	return m(h).ServeHTTP
+}
+
+// spaHandler serves the embedded React SPA. Known static assets are served
+// directly; any unrecognised path falls back to index.html so React Router
+// handles client-side navigation.
+func spaHandler(uiFS fs.FS) http.Handler {
+	fserver := http.FileServer(http.FS(uiFS))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := strings.TrimPrefix(r.URL.Path, "/")
+		if path == "" {
+			path = "index.html"
+		}
+		if _, err := uiFS.Open(path); err != nil {
+			// Unknown path — serve index.html and let React Router handle it.
+			r = r.Clone(r.Context())
+			r.URL.Path = "/"
+			fserver.ServeHTTP(w, r)
+			return
+		}
+		fserver.ServeHTTP(w, r)
+	})
+}
 ````
 
 ## File: packages/web/src/components/filters/FilterDropdown.tsx
