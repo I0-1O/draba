@@ -13,6 +13,7 @@ import (
 
 	"github.com/I0-1O/draba/packages/api/internal/api"
 	"github.com/I0-1O/draba/packages/api/internal/auth"
+	"github.com/I0-1O/draba/packages/api/internal/buildinfo"
 	"github.com/I0-1O/draba/packages/api/internal/db"
 	"github.com/I0-1O/draba/packages/api/internal/events"
 	"github.com/I0-1O/draba/packages/api/internal/mailer"
@@ -40,6 +41,7 @@ func main() {
 
 	setupLogger()
 	fmt.Print(banner)
+	slog.Info("build", "commit", buildinfo.Short(), "built", buildinfo.Built)
 
 	port := getenv("DRABA_PORT", "8080")
 	dsn := getenv("DRABA_DB_DSN", "/data/draba.db")

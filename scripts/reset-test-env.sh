@@ -92,19 +92,27 @@ EXPIRES=$(date -u -d '+7 days' '+%Y-%m-%d %H:%M:%S')
 # (suitable for CI-only runs where only the invite flow is tested).
 DRABA_TEST_ADMIN_PASSWORD_HASH="${DRABA_TEST_ADMIN_PASSWORD_HASH:-x-not-loginable}"
 
+# Layer the bootstrap rows idempotently. With sample data loaded, the admin
+# email may already belong to a sample user (e.g. brian@rieb.cc) — so use
+# INSERT OR IGNORE for the admin/team/membership and resolve the admin's *actual*
+# id by email for the FK references. This works whether DRABA_TEST_ADMIN_EMAIL is
+# a sample user (reuses it; its existing password is kept) or a fresh address
+# (creates a dedicated bootstrap admin). The known invite token is always seeded.
 docker run --rm -i --user 0:0 -v "$DRABA_DB_DIR:/data" "$SQLITE_IMG" \
     sqlite3 "/data/${DRABA_DB_FILENAME}" <<SQL
-INSERT INTO users (id, email, password_hash, display_name, is_superadmin)
+INSERT OR IGNORE INTO users (id, email, password_hash, display_name, is_superadmin)
 VALUES ('${ADMIN_ID}', '${DRABA_TEST_ADMIN_EMAIL}', '${DRABA_TEST_ADMIN_PASSWORD_HASH}', 'Test Bootstrap', 1);
 
-INSERT INTO teams (id, name, slug)
+INSERT OR IGNORE INTO teams (id, name, slug)
 VALUES ('${TEAM_ID}', 'Test Team', 'test-team');
 
-INSERT INTO team_members (id, team_id, user_id, role)
-VALUES ('bootstrap-admin-member', '${TEAM_ID}', '${ADMIN_ID}', 'admin');
+INSERT OR IGNORE INTO team_members (id, team_id, user_id, role)
+SELECT 'bootstrap-admin-member', '${TEAM_ID}', u.id, 'admin'
+FROM users u WHERE u.email = '${DRABA_TEST_ADMIN_EMAIL}';
 
 INSERT INTO invites (id, team_id, email, token, role, invited_by, expires_at)
-VALUES ('${INVITE_ID}', '${TEAM_ID}', '${DRABA_TEST_INVITE_EMAIL}', '${DRABA_TEST_INVITE_TOKEN}', 'member', '${ADMIN_ID}', '${EXPIRES}');
+SELECT '${INVITE_ID}', '${TEAM_ID}', '${DRABA_TEST_INVITE_EMAIL}', '${DRABA_TEST_INVITE_TOKEN}', 'member', u.id, '${EXPIRES}'
+FROM users u WHERE u.email = '${DRABA_TEST_ADMIN_EMAIL}';
 SQL
 
 echo "[6/6] Restarting container..."

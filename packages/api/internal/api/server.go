@@ -123,6 +123,7 @@ func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /setup/status", s.handleSetupStatus)
+	mux.HandleFunc("GET /version", s.handleVersion)
 
 	mux.HandleFunc("POST /auth/register", s.handleRegister)
 	mux.HandleFunc("POST /auth/login", s.handleLogin)

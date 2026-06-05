@@ -18,9 +18,15 @@ RUN go mod download
 
 # ── Production builder — embeds web dist into the Go binary ──
 FROM go-deps AS builder
+# Build metadata, injected by CI (docker-publish.yml). Defaults keep a local
+# `docker build` working; when left empty the binary falls back to Go's VCS stamp.
+ARG GIT_COMMIT=""
+ARG BUILD_TIME=""
 COPY packages/api/ .
 COPY --from=web-builder /workspace/packages/web/dist ./ui/static
-RUN CGO_ENABLED=0 go build -o /draba ./cmd/draba
+RUN CGO_ENABLED=0 go build \
+    -ldflags "-X github.com/I0-1O/draba/packages/api/internal/buildinfo.Commit=${GIT_COMMIT} -X github.com/I0-1O/draba/packages/api/internal/buildinfo.Built=${BUILD_TIME}" \
+    -o /draba ./cmd/draba
 
 # ── Dev stage (used by docker-compose for hot reload) ──
 # Source is provided by the docker-compose volume mount, not baked in here —
