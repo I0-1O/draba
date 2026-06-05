@@ -1,19 +1,23 @@
 /**
- * ShareModal — manage share links for the current Gantt view.
+ * ShareModal — manage share links for the current view.
  *
- * Shows existing shares for the timeline (with copy + delete per link) and
- * lets the user create a new share that snapshots the live toolbar state.
- * Each share can be given an optional name so it's identifiable in the list.
+ * Shows existing shares for the timeline (name, creator badge, copy, delete)
+ * and lets the user create a new named share that snapshots the live toolbar state.
  */
 
 import { useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Copy, Check, Share2, X, Loader2, Trash2, Plus } from 'lucide-react'
 import { useCreateShare, useListShares, useDeleteShare } from '@/hooks/useShares'
+import { useTeamMembers } from '@/hooks/useTeamActivities'
+import { Badge } from '@/components/identity/Badge'
+import { resolveColorHex } from '@/components/identity/identity-constants'
+import { MEMBER_COLORS } from '@/types'
 import type { FilterDefinition } from '@/lib/filterTypes'
 import type { components } from '@draba/shared'
 
 type Share = components['schemas']['Share']
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
 
 export interface ShareViewConfig {
   groupBy: string
@@ -31,16 +35,35 @@ interface Props {
   onClose: () => void
 }
 
+function MemberBadge({ member, index }: { member: TeamMemberWithUser | undefined; index: number }) {
+  if (!member) return null
+  const name = member.displayName || member.email || '?'
+  const color = resolveColorHex(member.color) || MEMBER_COLORS[index % MEMBER_COLORS.length]
+  return (
+    <Badge
+      identity={{ color, icon: member.icon ?? '__name_1__' }}
+      name={name}
+      size={18}
+      shape="circle"
+    />
+  )
+}
+
 function ShareRow({
   share,
+  memberByID,
   onDelete,
 }: {
   share: Share
+  memberByID: Map<string, TeamMemberWithUser>
   onDelete: (id: string) => void
 }) {
   const url = `${window.location.origin}/s/${share.token}`
   const [copied, setCopied] = useState(false)
   const [confirming, setConfirming] = useState(false)
+
+  const creator = share.createdBy ? memberByID.get(share.createdBy) : undefined
+  const creatorIndex = creator ? [...memberByID.keys()].indexOf(share.createdBy) : 0
 
   const copy = () => {
     void navigator.clipboard.writeText(url).then(() => {
@@ -49,17 +72,16 @@ function ShareRow({
     })
   }
 
-  const label = share.name || 'Untitled link'
-
   return (
     <div style={{
-      display: 'flex', alignItems: 'center', gap: 6,
+      display: 'flex', alignItems: 'center', gap: 8,
       padding: '7px 10px', borderRadius: 6,
       background: 'var(--muted)', border: '1px solid var(--border)',
     }}>
+      <MemberBadge member={creator} index={creatorIndex} />
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ fontSize: 12, fontWeight: 500, color: 'var(--foreground)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {label}
+          {share.name || 'Untitled link'}
         </div>
         <div style={{ fontSize: 10, color: 'var(--muted-foreground)', fontFamily: 'var(--font-mono)', marginTop: 1 }}>
           /s/{share.token.slice(0, 16)}…
@@ -96,11 +118,14 @@ function ShareRow({
 
 export default function ShareModal({ teamId, timelineId, viewType, viewConfig, onClose }: Props) {
   const { data: existingShares = [], isLoading: sharesLoading } = useListShares(teamId, timelineId)
+  const { data: members = [] } = useTeamMembers(teamId)
   const createShare = useCreateShare(teamId, timelineId)
   const deleteShare = useDeleteShare(teamId, timelineId)
   const [shareName, setShareName] = useState('')
   const [newShare, setNewShare] = useState<Share | null>(null)
-  const [copied, setCopied] = useState(false)
+  const [justCopied, setJustCopied] = useState(false)
+
+  const memberByID = new Map(members.map(m => [m.id, m]))
 
   const configString = JSON.stringify({
     groupBy: viewConfig.groupBy,
@@ -112,50 +137,45 @@ export default function ShareModal({ teamId, timelineId, viewType, viewConfig, o
 
   const handleCreate = () => {
     createShare.mutate(
-      {
-        name: shareName.trim() || null,
-        viewType,
-        viewConfig: configString,
-      },
+      { name: shareName.trim() || null, viewType, viewConfig: configString },
       {
         onSuccess: (share) => {
           setNewShare(share)
           setShareName('')
           const url = `${window.location.origin}/s/${share.token}`
           void navigator.clipboard.writeText(url).then(() => {
-            setCopied(true)
-            setTimeout(() => setCopied(false), 2000)
+            setJustCopied(true)
+            setTimeout(() => setJustCopied(false), 2500)
           })
         },
       },
     )
   }
 
-  // Shares to show: existing from server, and any just-created one not yet in the list
+  // Merge newly-created share into the list before invalidation resolves.
   const allShares = newShare && !existingShares.find(s => s.id === newShare.id)
     ? [...existingShares, newShare]
     : existingShares
 
   const hasShares = allShares.length > 0
-  const newShareUrl = newShare ? `${window.location.origin}/s/${newShare.token}` : null
 
   return createPortal(
     <div
       style={{ position: 'fixed', inset: 0, zIndex: 1000, background: 'rgba(0,0,0,0.45)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
       onClick={(e) => { if (e.target === e.currentTarget) onClose() }}
     >
-      <div style={{ background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 10, width: 440, padding: '20px 24px', boxShadow: '0 8px 32px rgba(0,0,0,0.18)', position: 'relative' }}>
+      <div style={{ background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 10, width: 440, padding: '20px 24px', boxShadow: '0 8px 32px rgba(0,0,0,0.18)' }}>
 
         {/* Header */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16 }}>
           <Share2 size={15} style={{ color: 'var(--primary)' }} />
-          <span style={{ fontWeight: 600, fontSize: 14, color: 'var(--foreground)' }}>Share this view</span>
+          <span style={{ fontWeight: 600, fontSize: 14, color: 'var(--foreground)' }}>Share</span>
           <button onClick={onClose} style={{ marginLeft: 'auto', background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-foreground)', padding: 2 }}>
             <X size={16} />
           </button>
         </div>
 
-        {/* Existing shares */}
+        {/* Active link list */}
         {!sharesLoading && hasShares && (
           <div style={{ marginBottom: 16 }}>
             <p style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 8 }}>
@@ -163,35 +183,14 @@ export default function ShareModal({ teamId, timelineId, viewType, viewConfig, o
             </p>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
               {allShares.map(s => (
-                <ShareRow key={s.id} share={s} onDelete={(id) => deleteShare.mutate(id)} />
+                <ShareRow key={s.id} share={s} memberByID={memberByID} onDelete={(id) => deleteShare.mutate(id)} />
               ))}
             </div>
-            {newShareUrl && (
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 8, padding: '7px 10px', borderRadius: 6, background: 'color-mix(in srgb, var(--primary) 8%, transparent)', border: '1px solid color-mix(in srgb, var(--primary) 30%, transparent)' }}>
-                <Check size={13} style={{ color: 'var(--primary)', flexShrink: 0 }} />
-                <span style={{ flex: 1, fontSize: 11, color: 'var(--foreground)', fontFamily: 'var(--font-mono)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {newShareUrl}
-                </span>
-                <button
-                  onClick={() => {
-                    void navigator.clipboard.writeText(newShareUrl).then(() => {
-                      setCopied(true)
-                      setTimeout(() => setCopied(false), 2000)
-                    })
-                  }}
-                  style={{ background: 'none', border: 'none', cursor: 'pointer', color: copied ? 'var(--primary)' : 'var(--muted-foreground)', padding: '2px 4px', display: 'flex', alignItems: 'center', flexShrink: 0 }}
-                >
-                  {copied ? <Check size={13} /> : <Copy size={13} />}
-                </button>
-              </div>
-            )}
           </div>
         )}
 
-        {/* Divider when there are existing shares */}
         {hasShares && <div style={{ height: 1, background: 'var(--border)', marginBottom: 16 }} />}
 
-        {/* Name input + create */}
         {!hasShares && (
           <p style={{ fontSize: 12, color: 'var(--muted-foreground)', marginBottom: 14, lineHeight: 1.5 }}>
             Creates a read-only link that shows exactly this view — same grouping, sorting, and filter.
@@ -199,9 +198,10 @@ export default function ShareModal({ teamId, timelineId, viewType, viewConfig, o
           </p>
         )}
 
+        {/* Name input */}
         <input
           type="text"
-          placeholder={hasShares ? 'New link name (optional)' : 'Link name (optional)'}
+          placeholder="Link name (optional)"
           value={shareName}
           onChange={e => setShareName(e.target.value)}
           onKeyDown={e => { if (e.key === 'Enter') handleCreate() }}
@@ -214,6 +214,7 @@ export default function ShareModal({ teamId, timelineId, viewType, viewConfig, o
           }}
         />
 
+        {/* Create button */}
         <button
           onClick={handleCreate}
           disabled={createShare.isPending}
@@ -230,7 +231,9 @@ export default function ShareModal({ teamId, timelineId, viewType, viewConfig, o
         >
           {createShare.isPending
             ? <><Loader2 size={14} className="animate-spin" /> Creating…</>
-            : <><Plus size={14} /> {hasShares ? 'Create another link' : 'Create share link'}</>
+            : justCopied
+              ? <><Check size={14} /> Link copied to clipboard</>
+              : <><Plus size={14} /> Create link</>
           }
         </button>
 
