@@ -54,9 +54,10 @@ This document organizes development into discrete phases with effort estimates a
 | 12 | [Communications Testing](#phase-12--communications-testing) | S — 1 day | ✅ |
 | 13 | [Shares — Public Read-Only View Links](#phase-13--shares--multi-share-views-with-passwords) (sub-phased) | L | ⬜ |
 | 13.1 | [Foundation, Public Gateway, Gantt Viewer (MVP)](#phase-131--foundation-public-gateway-gantt-viewer-mvp) | M–L | ✅ |
-| 13.2 | [Remaining Views Read-Only](#phase-132--remaining-views-read-only) | M | ⬜ |
-| 13.3 | [Password Protection + Unlock](#phase-133--password-protection--unlock) | S–M | ⬜ |
-| 13.4 | [Lifecycle & Management](#phase-134--lifecycle--management) | S–M | ⬜ |
+| 13.2 | [Share Module Overhaul + Password Protection](#phase-132--share-module-overhaul--password-protection) | M–L | ⬜ |
+| 13.3 | [List + Kanban Read-Only](#phase-133--list--kanban-read-only) | M | ⬜ |
+| 13.4 | [Calendar — ICS Feed Sharing](#phase-134--calendar--ics-feed-sharing) | M | ⬜ |
+| 13.5 | [Lifecycle Tail](#phase-135--lifecycle-tail) | S | ⬜ |
 | 14 | [Export — Tabular & Per-View](#phase-14--export--tabular--per-view) | M — 3–5 days | ⬜ |
 | 15 | [Import — Tabular](#phase-15--import--tabular) | M — 2–3 days | ⬜ |
 | 16 | [Backup & Restore](#phase-16--backup--restore) | M — 2–3 days | ⬜ |
@@ -1511,7 +1512,9 @@ A first-class **Share** entity: one timeline can have many shares, each a frozen
 - **The frozen filter is evaluated server-side, in Go, at build time**, so filtered-out activities never reach the browser. Requires a Go port of `matchesFilter`, with a **shared golden-fixture suite** both the TS and Go evaluators must pass in CI (drift guard).
 - **The filter is snapshotted as a resolved `FilterDefinition`**, not a saved-filter reference — editing/deleting the source filter must not mutate existing shares.
 - **Read-only = the real view components in `interactive=false` mode**, not separate viewer components (preserves "exactly what I'm seeing" fidelity). **Clicks are inert in every view** — shares are static web snapshots; no detail popover, no drill-down.
-- **Password is a fast-follow (13.3), not v1** — an unguessable token is the v1 floor.
+- **Password is a fast-follow, not v1** — an unguessable token is the v1 floor. After the 13.1 MVP shipped, password was pulled forward and fused with the share-module overhaul (now 13.2); see the re-sequencing note below.
+
+**Re-sequencing (2026-06-05):** after 13.1 shipped, the back half of Phase 13 was re-cut around three insights. (1) The [share-modal handoff design](plans/phase-13-shares.md#the-share-module-overhaul-132) bakes a password toggle into its create form, so password protection (formerly 13.3) and the modal overhaul are one phase — **13.2**. The modal is also the management surface (active-links list, view counts, delete), so it absorbs most of the old "Lifecycle & management" phase; **delete is no longer permission-gated** — a share can never mutate app data, so any team member managing the timeline may remove a link. (2) The old "remaining views" phase splits because **Calendar shares are a different animal** — see (3). List + Kanban stay view-shares (**13.3**). (3) A Calendar share is not a frozen view config; it is a **subscribable ICS feed** — whole-timeline or a single member's timeline, public on/off, token-as-secret (no password, no filter/group-by/color-by) — its own phase, **13.4**. Lifecycle's thin remainder (expiry, tile chip) becomes **13.5**.
 
 ---
 
@@ -1531,39 +1534,66 @@ The whole data-leak surface is confronted here so 13.2–13.4 ride on a proven-s
 
 ---
 
-### Phase 13.2 — Remaining Views Read-Only
-**Status:** ⬜ | **Effort:** M
+### Phase 13.2 — Share Module Overhaul + Password Protection
+**Status:** ⬜ | **Effort:** M–L
 
-Extends `interactive=false` + public mounting to **List, Calendar, and Kanban** (clicks inert here too), plus the per-view visual polish each needs to read cleanly without chrome. "Share this view" added to each toolbar. The same scope-locked gateway serves all four view types — the only projection nuance is `notes`, included only when a List share has the Notes column enabled.
+Rebuilds the "Share this view" modal to the [design handoff](plans/phase-13-shares.md#the-share-module-overhaul-132) and pulls **password protection** forward to ride alongside it (the handoff's create form has a password toggle, so the two are inseparable). The modal becomes the per-view share manager: an active-links list (one timeline → many named shares), a create form (title, optional description, optional password), copy-to-clipboard with a success state, an inline delete-confirm, and an empty state. Each row shows creator, created date, and **view count**. This absorbs most of the old Lifecycle phase's "Manage shares" surface.
+
+**Backend (password):** `password_hash` (bcrypt) on create/patch; `GET /shares/{token}` returns `401 { passwordRequired: true }` (no data) when locked; `POST /shares/{token}/unlock` exchanges the password for a short-lived view JWT scoped to that share's `view_config`; unlock attempts are rate-limited (N/IP/hour). A public unlock prompt renders at `/s/:token` before the view.
+
+**Delete is not permission-gated.** A share is a read-only projection that can never mutate app data, so the old admin-vs-creator `canDelete` rule is dropped — any team member who can manage the timeline may remove any of its shares.
 
 **Exit criteria — safe to pause when:**
-- A share created from any of the four views renders faithfully and read-only
-- A List share exposes exactly its enabled columns; no payload over-exposure in any view
+- The modal matches the handoff design, built from existing components + design tokens (no ported inline styles)
+- One timeline hosts multiple named shares in the list; each row shows creator, date, and a live view count
+- A wrong password is rejected and rate-limited; a correct password renders the view; the unlock token cannot be replayed against a different share; a locked share leaks no data in the `passwordRequired` response
+- Deleting a share kills the link immediately
+- `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` + `test` pass
+
+---
+
+### Phase 13.3 — List + Kanban Read-Only
+**Status:** ⬜ | **Effort:** M
+
+Extends `interactive=false` + public mounting to **List and Kanban** (clicks inert here too), plus the per-view polish each needs to read cleanly without chrome. "Share this view" (the 13.2 modal) added to both toolbars. The same scope-locked gateway serves these as view-shares — the only projection nuance is `notes`, included only when a List share has the Notes column enabled. (Calendar is intentionally *not* here — see 13.4.)
+
+**Exit criteria — safe to pause when:**
+- A share created from List or Kanban renders faithfully and read-only
+- A List share exposes exactly its enabled columns; no payload over-exposure in either view
 - `pnpm --filter web lint` + `test` pass
 
 ---
 
-### Phase 13.3 — Password Protection + Unlock
-**Status:** ⬜ | **Effort:** S–M
+### Phase 13.4 — Calendar — ICS Feed Sharing
+**Status:** ⬜ | **Effort:** M
 
-Optional per-share password. `password_hash` (bcrypt) on create/patch; `GET /shares/{token}` returns `401 { passwordRequired: true }` (no data) when locked; `POST /shares/{token}/unlock` exchanges the password for a short-lived view JWT scoped to that share's `view_config`. Unlock attempts are rate-limited (N/IP/hour).
+Calendar diverges from the other views by design. What people want from a shared calendar isn't a frozen web rendering — it's a **feed they subscribe to** in Google / Apple / Outlook. This is also the product's native model: *the app is the source of truth; calendars are read projections.* So a Calendar share is a **subscribable ICS feed**, not a view-share.
+
+**Model:**
+- **Share unit = a calendar feed.** Scope is either the **whole timeline** (every activity → VEVENT) or a **single member's timeline** (their assigned activities). Both ship in this phase.
+- **No view semantics.** No filter, no group-by, no color-by — "give me the whole thing and I'll slice it in my own calendar app, or give me just person X." That simplicity is the whole point of the divergence.
+- **Token is the secret — no password.** Calendar clients can't do interactive unlock on a subscription URL, so password protection (13.2) does not apply here. The revocation story is **regenerate the link** (rotates the token) or toggle public access off.
+- **A distinct modal.** Calendar's "Share" button opens a different surface than the view-share modal: a public-access **On/Off** toggle, a scope selector (whole timeline vs. a member), the feed URL, **Copy**, one-click **Add to Google / Apple / Outlook**, and **Regenerate link**.
+- **Live data, all-day events.** Served current (short cache, no frozen snapshot — calendar apps poll on their own cadence). Activities are all-day calendar dates (Phase 11.1.1), so VEVENTs use `DTSTART;VALUE=DATE` spanning start→end. No PII beyond member display name.
+
+**Implementation lean:** reuse the `shares` table with a `kind` discriminator (`view` | `ics`); ICS rows carry `scope` (`timeline` | `member`) + nullable `member_id` and no `view_config` / filter / password. Serve via `GET /shares/{token}.ics` (`text/calendar`) with a `webcal://` convenience variant.
 
 **Exit criteria — safe to pause when:**
-- A wrong password is rejected and rate-limited; a correct password renders the view
-- The unlock token cannot be replayed against a different share
-- A locked share leaks no data in the `passwordRequired` response
+- Subscribing to a timeline feed in a real calendar app (Google or Apple) shows the timeline's activities as all-day events; a per-member feed shows only that member's activities
+- Toggling public access off, or regenerating the link, immediately invalidates the old URL
+- The `.ics` payload contains no member email / `user_id` / role and no other timelines
+- `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` + `test` pass
 
 ---
 
-### Phase 13.4 — Lifecycle & Management
-**Status:** ⬜ | **Effort:** S–M
+### Phase 13.5 — Lifecycle Tail
+**Status:** ⬜ | **Effort:** S
 
-Expiry and revocation (`expires_at` / `revoked_at` → `410 Gone`), plus a "Manage shares" surface per timeline: list, view counts, last-viewed, edit (rename / password / expiry), revoke; and an active-share-count chip on the timeline tile.
+The thin remainder after the 13.2 modal absorbed share management: optional **expiry** (`expires_at` → `410 Gone` once past), an **active-share-count chip** on the timeline tile, and **last-viewed** timestamps surfaced in the modal.
 
 **Exit criteria — safe to pause when:**
-- An expired or revoked link returns `410 Gone` immediately and is no longer usable
-- One timeline hosts ≥3 independent shares with different view types and configurations
-- View counts and last-viewed timestamps update on access; admins can manage shares they don't own
+- An expired link returns `410 Gone` immediately and is no longer usable
+- The timeline tile shows an accurate active-share count; last-viewed updates on access
 
 ---
 

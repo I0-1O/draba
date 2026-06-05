@@ -2,7 +2,7 @@
 
 _Updated after each significant work session. Read this first to orient — it is intentionally short. Per-phase implementation detail lives in [docs/log.md](../log.md); this file is a current-state snapshot only._
 
-**Last updated:** 2026-06-04 (Phase 13.1 Shares MVP: Go filter engine, public gateway, golden fixtures, Gantt interactive=false, ShareModal, /s/:token route; all automated checks pass)
+**Last updated:** 2026-06-05 (Phase 13 back-half re-sequenced: 13.2 share-modal overhaul + password, 13.3 List+Kanban, 13.4 Calendar ICS feed, 13.5 lifecycle tail; handoff design committed to docs/design/handoffs/share-modal/)
 
 ---
 
@@ -22,7 +22,9 @@ _Updated after each significant work session. Read this first to orient — it i
 
 | Next phase | Scope | Plan |
 |------------|-------|------|
-| **13.2** | Shares — List, Calendar, Kanban read-only | [plan](../plans/phase-13-shares.md#132--remaining-views-read-only-list-calendar-kanban) · [ROADMAP §13.2](../ROADMAP.md#phase-132--remaining-views-read-only) |
+| **13.2** | Share module overhaul + password protection (modal rebuild to the handoff design, fused with bcrypt password/unlock; view counts in-modal; delete no longer permission-gated) | [plan](../plans/phase-13-shares.md#132--share-module-overhaul--password-protection) · [ROADMAP §13.2](../ROADMAP.md#phase-132--share-module-overhaul--password-protection) |
+
+**Phase 13 back-half re-sequenced (2026-06-05):** 13.2 = share-modal overhaul + password (pulled forward); 13.3 = List + Kanban read-only; 13.4 = Calendar **ICS feed** sharing (whole-timeline or per-member, token-as-secret, no password/filter — a different model from view-shares); 13.5 = lifecycle tail (expiry, tile chip). The handoff design lives in [`docs/design/handoffs/share-modal/`](../design/handoffs/share-modal/design_handoff_share_modal/README.md). See [ROADMAP re-sequencing note](../ROADMAP.md#phase-13--shares--multi-share-views-with-passwords) and [plan §13.2 overhaul](../plans/phase-13-shares.md#the-share-module-overhaul-132).
 
 ---
 

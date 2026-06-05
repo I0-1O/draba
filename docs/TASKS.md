@@ -1296,19 +1296,27 @@ Includes both the webhook backend and the per-timeline connector sidebar UI (pre
 - [x] Scope-isolation test: token reaches exactly its timeline's filtered records; tampering (other timeline/activity/team id, scope-widening params) cannot widen; no share-reachable by-id/list endpoint
 - [x] Verify payload: filtered-out activities + member email/`user_id`/role + access list + other timelines all absent (automated test)
 
-**13.2 — Remaining views read-only (List, Calendar, Kanban):**
-- [ ] `interactive=false` + public mounting for List, Calendar, Kanban (clicks inert)
+**13.2 — Share module overhaul + password protection:**
+- [ ] Rebuild the "Share this view" modal to the handoff design (active-links list, create form, copy w/ success state, inline delete-confirm, empty state) using existing components + tokens
+- [ ] Per-row meta: creator avatar + name, created date, view count
+- [ ] `password_hash` (bcrypt) on create/patch; `GET /shares/{token}` → `401 { passwordRequired: true }` when locked (no data)
+- [ ] `POST /shares/{token}/unlock` → short-lived view JWT scoped to the share; rate-limit unlock attempts (N/IP/hour); public unlock prompt at `/s/:token`
+- [ ] Drop the `canDelete = isAdmin || creator` gate — any timeline manager may delete any share (shares can't mutate data)
+
+**13.3 — List + Kanban read-only:**
+- [ ] `interactive=false` + public mounting for List and Kanban (clicks inert)
 - [ ] Projection: include `notes` only when a List share has the Notes column enabled in `view_config`
-- [ ] Per-view read-only polish
-- [ ] "Share this view" in each toolbar
+- [ ] Per-view read-only polish + "Share this view" (13.2 modal) in both toolbars
 
-**13.3 — Password protection + unlock:**
-- [ ] `password_hash` (bcrypt) on create/patch; `GET /shares/{token}` → `401 { passwordRequired: true }` when locked
-- [ ] `POST /shares/{token}/unlock` → short-lived view JWT scoped to the share; rate-limit unlock attempts (N/IP/hour)
+**13.4 — Calendar — ICS feed sharing:**
+- [ ] `shares.kind` discriminator (`view` | `ics`); ICS rows carry `scope` (`timeline` | `member`) + nullable `member_id`, no `view_config`/filter/password
+- [ ] `GET /shares/{token}.ics` (`text/calendar`) + `webcal://` variant; all-day VEVENTs (`DTSTART;VALUE=DATE` start→end); live data, short cache
+- [ ] Distinct Calendar share modal: public On/Off toggle, scope selector (timeline vs. member), feed URL, Copy, Add-to-Google/Apple/Outlook, Regenerate link
+- [ ] Whole-timeline AND per-member feeds; payload carries no email/`user_id`/role/other-timelines
 
-**13.4 — Lifecycle & management:**
-- [ ] Expiry + revocation → `410 Gone`
-- [ ] "Manage shares" UI per timeline (list, view counts, last-viewed, edit, revoke) + active-share-count chip — counts visible to creator + team admins
+**13.5 — Lifecycle tail:**
+- [ ] Optional expiry → `410 Gone` after `expires_at`
+- [ ] Active-share-count chip on the timeline tile; last-viewed surfaced in the 13.2 modal
 
 ## Done
 - [x] Initialize repo scaffold — 2026-04-27
