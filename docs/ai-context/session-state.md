@@ -25,7 +25,9 @@ _Updated after each significant work session. Read this first to orient — it i
 
 | Next phase | Scope | Plan |
 |------------|-------|------|
-| **13** | AI Key Management | [docs/ROADMAP.md §Phase 13](../ROADMAP.md#phase-13--ai-key-management) |
+| **13.1** | Shares MVP — public gateway + read-only Gantt viewer | [plan](../plans/phase-13-shares.md) · [ROADMAP §13.1](../ROADMAP.md#phase-131--foundation-public-gateway-gantt-viewer-mvp) |
+
+**Roadmap rearranged 2026-06-04:** the pre-sharing priorities (Shares → Export → Import) moved to the front of the tail. New order: **13** Shares · **14** Export · **15** Import · **16** Backup & Restore · **17** Global Search · **18** Webhooks · **19** AI Key Management · **20** Calendar Sync · **21** Localization. Phase 13 (Shares) is split into sub-phases **13.1** (foundation + public data gateway + Gantt viewer — the MVP) → **13.2** (other views read-only) → **13.3** (passwords) → **13.4** (lifecycle/management). Full design in [docs/plans/phase-13-shares.md](../plans/phase-13-shares.md). Key decision: **live cached data + read-only SPA, server-side Go filter, view-driven field projection — no Chromium** (the Chromium/PDF question is deferred to Phase 14 Export).
 
 ---
 

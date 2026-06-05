@@ -1278,6 +1278,38 @@ Includes both the webhook backend and the per-timeline connector sidebar UI (pre
 - [ ] Connector row hover → gear icon → config drawer; delete with confirm
 - [ ] Provider icon set (Asana, Aha, Sheets, Excel, generic Plug)
 
+## Phase 13 — Shares (Public Read-Only View Links)
+
+**Next up.** Full design in [docs/plans/phase-13-shares.md](plans/phase-13-shares.md). Decision: live cached data + read-only SPA, server-side (Go) filter, view-driven field projection. No Chromium.
+
+**13.1 — Foundation, public gateway, Gantt viewer (MVP):**
+- [ ] Migration: `shares` table (`id`, `timeline_id`, `token` UNIQUE, `view_type`, `view_config` JSON, `password_hash?`, `expires_at?`, `created_by`, `created_at`, `last_viewed_at`, `view_count`, `revoked_at`)
+- [ ] Token migration: insert one `shares` row per existing timeline reusing `timelines.share_token` (keep the column for now; drop in a later migration)
+- [ ] Go filter evaluator (`internal/filters`) mirroring `lib/filterEngine.ts` `matchesFilter`
+- [ ] Shared golden-fixture suite (`packages/shared/testdata/filter-fixtures.json`) run by both `filterEngine.test.ts` and a Go test (drift guard)
+- [ ] `GET /shares/{token}` gateway: scope-locked query (token → server-derived `timeline_id`, **no client selector**) → evaluate frozen filter in Go → fixed display projection → prune referenced members/statuses/tags → TTL cache (`DRABA_SHARE_CACHE_TTL`, default 60s)
+- [ ] `POST /timelines/{id}/shares`, `GET /timelines/{id}/shares`, `PATCH /shares/{id}`, `DELETE /shares/{id}`
+- [ ] OpenAPI: `Share`, `ShareViewConfig`, `CreateShareInput`, `PatchShareInput`, `PublicShareProjection`; regenerate TS types
+- [ ] Gantt `interactive=false` mode (no toolbar/menus/drag/edit; clicks inert; forced light theme)
+- [ ] "Share this view" action in Gantt toolbar → snapshot live toolbar state incl. resolved `FilterDefinition` → create share → copy URL
+- [ ] `/s/:token` public route (outside `ProtectedRoute`) + branding strip (team name · "Shared view" · last-updated)
+- [ ] Scope-isolation test: token reaches exactly its timeline's filtered records; tampering (other timeline/activity/team id, scope-widening params) cannot widen; no share-reachable by-id/list endpoint
+- [ ] Verify payload: filtered-out activities + member email/`user_id`/role + access list + other timelines all absent
+
+**13.2 — Remaining views read-only (List, Calendar, Kanban):**
+- [ ] `interactive=false` + public mounting for List, Calendar, Kanban (clicks inert)
+- [ ] Projection: include `notes` only when a List share has the Notes column enabled in `view_config`
+- [ ] Per-view read-only polish
+- [ ] "Share this view" in each toolbar
+
+**13.3 — Password protection + unlock:**
+- [ ] `password_hash` (bcrypt) on create/patch; `GET /shares/{token}` → `401 { passwordRequired: true }` when locked
+- [ ] `POST /shares/{token}/unlock` → short-lived view JWT scoped to the share; rate-limit unlock attempts (N/IP/hour)
+
+**13.4 — Lifecycle & management:**
+- [ ] Expiry + revocation → `410 Gone`
+- [ ] "Manage shares" UI per timeline (list, view counts, last-viewed, edit, revoke) + active-share-count chip — counts visible to creator + team admins
+
 ## Done
 - [x] Initialize repo scaffold — 2026-04-27
 - [x] Define requirements, architecture, conventions — 2026-04-27

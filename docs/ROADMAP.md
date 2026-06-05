@@ -51,15 +51,20 @@ This document organizes development into discrete phases with effort estimates a
 | 11.1.2 | [Group by Assignee Combination](#phase-1112--group-by-assignee-combination) | S–M — 0.5–1 day | ✅ |
 | 11.2 | [Web — Calendar View](#phase-112--web--calendar-view) | L — 3–5 days | 🔄 |
 | 11.3 | [Web — Kanban View (Interactive)](#phase-113--web--kanban-view-interactive) | M — 2–3 days | 🔄 |
-| 12 | [Communications Testing](#phase-12--communications-testing) | S — 1 day | ⬜ |
-| 13 | [AI Key Management](#phase-13--ai-key-management) | M — 2–3 days | ⬜ |
-| 14 | [Localization & Language Support](#phase-14--localization--language-support) | L — 3–5 days | ⬜ |
-| 15 | [Calendar Sync — Google & CalDAV](#phase-15-calendar-sync--google--caldav) | XL — 1–2 wks | ⬜ |
-| 16 | [Shares — Multi-Share Views with Passwords](#phase-16-shares--multi-share-views-with-passwords) | M — 3–5 days | ⬜ |
-| 17 | [Data Portability & Exports](#phase-17-data-portability--exports) | L — 1 wk | ⬜ |
-| 18 | [External Connectors (Webhooks)](#phase-18-external-connectors-webhooks) | M — 3–5 days | ⬜ |
-| 19 | [Global Search](#phase-19-global-search) | M — 2–3 days | ⬜ |
-| 20 | [Backup & Restore](#phase-20--backup--restore) | M — 2–3 days | ⬜ |
+| 12 | [Communications Testing](#phase-12--communications-testing) | S — 1 day | ✅ |
+| 13 | [Shares — Public Read-Only View Links](#phase-13--shares--multi-share-views-with-passwords) (sub-phased) | L | ⬜ |
+| 13.1 | [Foundation, Public Gateway, Gantt Viewer (MVP)](#phase-131--foundation-public-gateway-gantt-viewer-mvp) | M–L | ⬜ |
+| 13.2 | [Remaining Views Read-Only](#phase-132--remaining-views-read-only) | M | ⬜ |
+| 13.3 | [Password Protection + Unlock](#phase-133--password-protection--unlock) | S–M | ⬜ |
+| 13.4 | [Lifecycle & Management](#phase-134--lifecycle--management) | S–M | ⬜ |
+| 14 | [Export — Tabular & Per-View](#phase-14--export--tabular--per-view) | M — 3–5 days | ⬜ |
+| 15 | [Import — Tabular](#phase-15--import--tabular) | M — 2–3 days | ⬜ |
+| 16 | [Backup & Restore](#phase-16--backup--restore) | M — 2–3 days | ⬜ |
+| 17 | [Global Search](#phase-17--global-search) | M — 2–3 days | ⬜ |
+| 18 | [External Connectors (Webhooks)](#phase-18--external-connectors-webhooks) | M — 3–5 days | ⬜ |
+| 19 | [AI Key Management](#phase-19--ai-key-management) | M — 2–3 days | ⬜ |
+| 20 | [Calendar Sync — Google & CalDAV](#phase-20--calendar-sync--google--caldav) | XL — 1–2 wks | ⬜ |
+| 21 | [Localization & Language Support](#phase-21--localization--language-support) | L — 3–5 days | ⬜ |
 
 **Parking Lot (v2):** MySQL/Postgres adapters, CLI, MCP server, mobile apps, Microsoft/Outlook sync, multi-tenant hosting, SSO, notifications.
 
@@ -356,10 +361,10 @@ Server-side user preferences so view settings survive login/logout and sync acro
 ### Phase 8.5 — Find (In-View)
 **Status:** ✅ Done — 2026-05-20 | **Effort:** M (1–2 days)
 
-Browser-style "find in page" for the active view. Scoped to events the current view has already loaded; respects active filters. **Global cross-team search is deferred to [Phase 19](#phase-19-global-search).**
+Browser-style "find in page" for the active view. Scoped to events the current view has already loaded; respects active filters. **Global cross-team search is deferred to [Phase 17](#phase-17--global-search).**
 
 **Design rationale:**
-Two distinct tools, not one box. **Find** answers *"highlight what I'm looking at"* — fast, keyboard-driven, walks matches. Global **Search** (Phase 19) answers *"find an event when I don't know where it lives"* — palette-style, navigates across teams/timelines. Mixing them in one input is where these UIs get muddy. With Find + the upcoming List view (Phase 11), we expect ~95% of real-world lookup needs to be covered.
+Two distinct tools, not one box. **Find** answers *"highlight what I'm looking at"* — fast, keyboard-driven, walks matches. Global **Search** (Phase 17) answers *"find an event when I don't know where it lives"* — palette-style, navigates across teams/timelines. Mixing them in one input is where these UIs get muddy. With Find + the upcoming List view (Phase 11), we expect ~95% of real-world lookup needs to be covered.
 
 **Scope:**
 
@@ -386,16 +391,16 @@ Two distinct tools, not one box. **Find** answers *"highlight what I'm looking a
 
 *Empty-state behavior:*
 - Zero matches, no filters active → bar shows `No matches`
-- Zero matches **in view**, but filters are active → soft inline callout: *"No matches in current view. [Clear filters]"*. (We do **not** silently search outside the filters — that's Phase 19's job.)
+- Zero matches **in view**, but filters are active → soft inline callout: *"No matches in current view. [Clear filters]"*. (We do **not** silently search outside the filters — that's Phase 17's job.)
 
 *Persistence:*
 - The query itself is **not** persisted across navigation or reloads — Find is ephemeral by design (matches browser Cmd+F muscle memory)
 - Open/closed state of the bar is also ephemeral
 
 **Out of scope (explicitly):**
-- Cross-team or cross-timeline search → Phase 19
-- Server-side full-text search → Phase 19
-- Saved searches / recent queries → Phase 19
+- Cross-team or cross-timeline search → Phase 17
+- Server-side full-text search → Phase 17
+- Saved searches / recent queries → Phase 17
 - Highlighting matches that aren't in the currently-loaded event set (no dynamic loading exists yet; revisit when/if windowed loading lands)
 
 **Exit criteria — safe to pause when:**
@@ -435,7 +440,7 @@ Two distinct tools, not one box. **Find** answers *"highlight what I'm looking a
 
 Rename the domain entity `Event` → `Activity` end-to-end (DB, Go API, OpenAPI, generated TS, web hooks/components, user-facing copy, docs). The pub/sub bus keeps its `internal/events` package name (correct event-driven-architecture term), but its message-type constants and wire strings move to `activity.*`. Calendar fields (`google_event_id`, `caldav_uid`) are preserved — they map to external VEVENT identifiers.
 
-**Why now:** the name collides with internal pub/sub events and with calendar VEVENTs. Cost of disambiguation grows fast in Phase 15 (Calendar Sync) and Phase 18 (Webhooks). Cheapest to fix while pre-1.0, single LAN test instance, no external API consumers.
+**Why now:** the name collides with internal pub/sub events and with calendar VEVENTs. Cost of disambiguation grows fast in Phase 20 (Calendar Sync) and Phase 18 (Webhooks). Cheapest to fix while pre-1.0, single LAN test instance, no external API consumers.
 
 **Approach:** hard cutover. No `/events` aliases, no dual message types. Single migration via `ALTER TABLE RENAME`. See **[GreatEventToActivity.md](GreatEventToActivity.md)** for the full runbook (token map, per-layer checklist, verification, rollback).
 
@@ -1293,8 +1298,8 @@ Makes the filter system fully operational. Today only the "Open only" preset act
 - `FilterManageModal.tsx` replaces the planned `FilterManagePanel.tsx` sidebar with a single dialog that consolidates create/edit/duplicate/promote/demote flows and an admin "Members" tab for browsing all team members' filters.
 
 *Forward compatibility:*
-- Shared views (Phase 16) will reference saved filters by ID — the `saved_filters` table and team-scoping design support this
-- Exports (Phase 17) will accept a filter ID to scope exported data
+- Shared views (Phase 13) will reference saved filters by ID — the `saved_filters` table and team-scoping design support this
+- Exports (Phase 14) will accept a filter ID to scope exported data
 - New activity fields added in future phases should be added to the `FilterCondition` union and the filter engine
 
 **Exit criteria — safe to pause when:**
@@ -1350,14 +1355,14 @@ Activity start/end dates render one calendar day early for any user in a timezon
 `startAt`/`endAt` are `format: date-time` (RFC3339 instants) in the schema, but the app uses them as **calendar dates** — every write sends `${date}T00:00:00Z` and every edit reads `iso.slice(0,10)`, so the *storage and edit* paths are UTC-consistent. The defect is on the **display and positioning** paths, which do `new Date(iso)` and then read **local** components (`toLocaleDateString`, `getFullYear/Month/Date`, `setHours`). Midnight-UTC collapses to the previous local day for negative-offset zones.
 
 **Approach — Option A (treat all activity dates as all-day / calendar dates):**
-Format and position all activity `startAt`/`endAt` in **UTC** (no local conversion). This matches today's UI, which has no time-of-day editor — every activity is effectively all-day. The schema's `allDay` flag is **not** branched on yet; leave a `// TODO: branch on allDay when timed events ship (Phase 15 calendar sync)` marker where the formatter is chosen. Genuine timestamps (createdAt/updatedAt, member joinedAt, invite dates) stay in local time.
+Format and position all activity `startAt`/`endAt` in **UTC** (no local conversion). This matches today's UI, which has no time-of-day editor — every activity is effectively all-day. The schema's `allDay` flag is **not** branched on yet; leave a `// TODO: branch on allDay when timed events ship (Phase 20 calendar sync)` marker where the formatter is chosen. Genuine timestamps (createdAt/updatedAt, member joinedAt, invite dates) stay in local time.
 
 **Scope:**
 - *Shared date module* (new, e.g. `packages/web/src/lib/activityDates.ts`): single source of truth — `formatActivityDate(iso, fmt)` using UTC components, `parseActivityDateUTC(iso): Date` for positioning math. Keep existing `toDateInput` (slice) / `toISODate` (`T00:00:00Z`) — already correct. Note: `hooks/useFormatDate.ts`'s `formatDate` uses local getters (`getFullYear/getMonth/getDate`) — that's the core defect for activity dates; route activity dates through the UTC formatter rather than changing the timestamp-oriented hook.
 - *List view:* `ListView.tsx` `formatDate` → UTC formatter for **Start/End cells only**. The same helper is reused by the **Created/Updated** cells, which are real timestamps and must stay local — keep those on the local path.
 - *Gantt labels:* `GanttGrid.tsx:184` and `granularity.ts:105–116` (`toLocaleDateString`).
 - *Gantt positioning (highest-risk piece):* events are parsed as UTC midnight (`GanttView.tsx:135–136` `new Date(toDateOnly(...))`) but the column axis is built in **local** time (`granularity.ts` `setHours(0,0,0,0)`, `new Date(y,m,1)`, `getDate()`, `setDate`) and the today marker (`GanttView.tsx:87` `todayMidnight()`) is local — so events map onto a local axis with UTC dates, shifting bars ~a day at boundaries. Pick **one basis (UTC)** for the axis, today marker, and event parsing together.
-- *Not this phase:* `allDay`-branching for timed events (deferred to Phase 15); backend emitting CalDAV `DATE` vs `DATE-TIME` (Phase 15 concern — backend stores/echoes RFC3339 verbatim and needs no change for the display bug).
+- *Not this phase:* `allDay`-branching for timed events (deferred to Phase 20); backend emitting CalDAV `DATE` vs `DATE-TIME` (Phase 20 concern — backend stores/echoes RFC3339 verbatim and needs no change for the display bug).
 - *Bundled side change (commit `04e5c9c`):* "Reimagined new activity button" Sidebar UI redesign — split combo button with bulk-import stub, collapsed-mode portal positioning, and updated keyboard/outside-click handlers. Acknowledged out-of-scope but bundled here rather than a separate branch.
 
 **Exit criteria — safe to pause when:**
@@ -1494,154 +1499,87 @@ Comprehensive automated tests for every outbound email flow. This phase closes t
 
 ---
 
-### Phase 13 — AI Key Management
-**Status:** ⬜ | **Effort:** M (2–3 days)
+### Phase 13 — Shares — Multi-Share Views with Passwords
 
-Ships the AI/LLM key configuration surface stubbed in Phase 10.1.3. Adds encrypted storage, model routing, and a usage log so superadmins can connect AI providers and see which features are consuming tokens.
+**Detailed plan:** [docs/plans/phase-13-shares.md](plans/phase-13-shares.md) — gateway projection rules, field-exposure model, Go filter port + parity fixtures, read-only view mode, schema/API, and per-sub-phase exit criteria all live there. Scope is reviewed and settled (2026-06-04).
 
-**Scope:**
+A first-class **Share** entity: one timeline can have many shares, each a frozen pairing of `{ view type + view config + optional password + optional expiry }`. Visiting a share drops a **non-logged-in** viewer into **exactly the view the sharer configured** (group-by, sort, color-by, filter), rendered **read-only** (no toolbars, menus, drag, reorder, recolor, or edit) and **forced to light mode**. The existing single `timelines.share_token` is too coarse — it shares "the timeline" with no opinion about *which view*. With four view types live, the unit a sharer wants to publish is the *configured view*.
 
-*API:*
-- New table `ai_provider_keys`: id, provider (anthropic | openai | google | custom), api_key (encrypted AES-256-GCM, same pattern as SMTP password), model_override, created_at, updated_at
-- `GET /admin/ai/keys` — list configured providers (key masked); superadmin only
-- `PUT /admin/ai/keys/:provider` — upsert a provider key; validates by making a lightweight test call; superadmin only
-- `DELETE /admin/ai/keys/:provider` — remove a provider key; superadmin only
-
-*Web — `/settings/ai` (replaces current stub):*
-- Real form replacing the placeholder cards: provider selector, API key input (masked), model override field
-- "Test connection" button calls a test endpoint before saving
-- Usage log section (read-only): last 10 AI requests with timestamp, provider, model, token count
-
-*Encryption:*
-- Reuse the AES-256-GCM pattern introduced for SMTP passwords in Phase 10.1.3
-
-**Exit criteria — safe to pause when:**
-- A superadmin can configure an Anthropic key and verify via the test connection button
-- The key is stored encrypted and masked in the GET response
-- Removing a key clears it from the DB
-- `golangci-lint run` clean; `go test ./...` passes
+**Decisions locked (2026-06-04 design discussion):**
+- **Live data, cached — not snapshots, not pixels.** The viewer renders the real React view from a JSON projection rebuilt at most every TTL (default 60s, up to a couple minutes). No websockets on the public path; **no Chromium** (that conversation is deferred to Phase 14 Export).
+- **The primary boundary is record *scope*, not field-level minimization.** The gateway derives `timeline_id` from the share row server-side and accepts **no client selector** (no timeline/activity/team id, no scope-widening params); the query is hard-scoped to that one timeline + the frozen filter, so a token can reach **exactly one timeline's filtered records and nothing else**. Within a record we ship a **fixed display projection** of the standard activity fields (incl. description); `notes` is conditional — shown only when a List share has the Notes column enabled. Constant exclusion: **cross-entity PII/internals** — member email/role/`user_id`, the access list, other timelines, team internals. Members are always just `{ id, displayName, color, icon }`.
+- **The frozen filter is evaluated server-side, in Go, at build time**, so filtered-out activities never reach the browser. Requires a Go port of `matchesFilter`, with a **shared golden-fixture suite** both the TS and Go evaluators must pass in CI (drift guard).
+- **The filter is snapshotted as a resolved `FilterDefinition`**, not a saved-filter reference — editing/deleting the source filter must not mutate existing shares.
+- **Read-only = the real view components in `interactive=false` mode**, not separate viewer components (preserves "exactly what I'm seeing" fidelity). **Clicks are inert in every view** — shares are static web snapshots; no detail popover, no drill-down.
+- **Password is a fast-follow (13.3), not v1** — an unguessable token is the v1 floor.
 
 ---
 
-### Phase 14 — Localization & Language Support
-**Status:** ⬜ | **Effort:** L (3–5 days)
+### Phase 13.1 — Foundation, Public Gateway, Gantt Viewer (MVP)
+**Status:** ⬜ | **Effort:** M–L
 
-Adds i18n infrastructure and ships the first non-English locale. The "Default language" fields in `/settings/preferences` and `/settings/organization` (currently disabled stubs) become functional.
-
-**Scope:**
-
-*Infrastructure:*
-- Adopt `react-i18next` (or equivalent) for the web client
-- Extract all user-facing strings from React components into locale JSON files
-- Add a `language` column to `user_preferences` (per-user) and a `default_language` key to `instance_settings`
-- `PATCH /users/me/preferences` accepts `language` key; `PATCH /admin/settings` accepts `default_language`
-
-*Locales:*
-- `en` — English (extracted from existing strings; the baseline)
-- Ship at least one additional locale to validate the pipeline (e.g. `es` — Spanish, or `fr` — French)
-
-*Web — settings surfaces:*
-- Enable the "Language" dropdown in `/settings/preferences` (user-level)
-- Enable the "Default language" dropdown in `/settings/organization` (instance-level)
-- Language change takes effect on next page load (no hard reload required)
+The whole data-leak surface is confronted here so 13.2–13.4 ride on a proven-safe gateway. Ships: `shares` schema + repo + **token migration** (each timeline's existing `share_token` becomes a `shares` row, so current links keep working; the `NOT NULL UNIQUE` column is dropped only in a later migration); a **Go filter evaluator** (`internal/filters` mirroring `matchesFilter`) + **shared golden fixtures** (`packages/shared/testdata/filter-fixtures.json`) run by both `filterEngine.test.ts` and a Go test; the **`GET /shares/{token}` gateway** (filter-first, view-driven field projection, referenced-entity pruning, TTL cache via `DRABA_SHARE_CACHE_TTL`); `POST/GET /timelines/{id}/shares` + `PATCH/DELETE /shares/{id}`; **Gantt `interactive=false` mode** (no chrome/drag/edit, forced light); "Share this view" in the Gantt toolbar (snapshots live toolbar state incl. the resolved filter definition); `/s/:token` public route + branding strip.
 
 **Exit criteria — safe to pause when:**
-- Switching to the second locale changes all UI strings in the web app
-- User language preference persists across logout/login
-- Instance default language is used when the user has no preference set
-- Adding a new locale requires only a new JSON file (no code changes)
-- `pnpm --filter web lint` clean
+- A share created from a filtered/grouped/colored/sorted Gantt opens at `/s/:token` in a fresh incognito session (no login) showing **exactly** that configuration, read-only, light mode, with inert clicks
+- **Scope isolation holds:** a token resolves to exactly its timeline's filtered records; tampering (another timeline/activity/team id, scope-widening params) cannot widen the result; no share-reachable by-id or list-timelines endpoint exists
+- Filtered-out activities are **absent from the network payload**, as are member emails, `user_id`s, roles, the access list, and other timelines (verified in devtools)
+- The Go and TS filter evaluators agree on every golden fixture (CI)
+- Existing `timelines.share_token` links still resolve (migrated into `shares`)
+- Warm-cache requests hit no DB; a TTL refresh reflects an activity edit within the window
+- `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` + `test` pass
 
 ---
 
-### Phase 15 — Calendar Sync — Google & CalDAV
-**Status:** ⬜ | **Effort:** XL (1–2 wks)
+### Phase 13.2 — Remaining Views Read-Only
+**Status:** ⬜ | **Effort:** M
 
-**Scope:**
-- Google Calendar OAuth connect flow
-- Outbound sync: push draba events to Google on create/update/delete
-- Inbound sync: Google webhook handler → upsert event in draba
-- Built-in CalDAV server (`internal/caldav/`)
-- CalDAV connect flow (user provides URL + credentials)
-- Outbound sync: push draba events to CalDAV on create/update/delete
-- Team iCal feed: `GET /timelines/:ical_token/feed.ics` (public, no private notes)
+Extends `interactive=false` + public mounting to **List, Calendar, and Kanban** (clicks inert here too), plus the per-view visual polish each needs to read cleanly without chrome. "Share this view" added to each toolbar. The same scope-locked gateway serves all four view types — the only projection nuance is `notes`, included only when a List share has the Notes column enabled.
 
 **Exit criteria — safe to pause when:**
-- Connecting Google Calendar and creating a draba event causes it to appear in Google Calendar within 30s
-- Editing that event in Google Calendar updates the draba event within 30s (webhook round-trip)
-- A CalDAV client (e.g., iOS Calendar) can subscribe to a user's feed and see their draba events
-- The iCal feed URL is importable into a calendar app without errors
+- A share created from any of the four views renders faithfully and read-only
+- A List share exposes exactly its enabled columns; no payload over-exposure in any view
+- `pnpm --filter web lint` + `test` pass
 
 ---
 
-### Phase 16 — Shares — Multi-Share Views with Passwords
+### Phase 13.3 — Password Protection + Unlock
+**Status:** ⬜ | **Effort:** S–M
+
+Optional per-share password. `password_hash` (bcrypt) on create/patch; `GET /shares/{token}` returns `401 { passwordRequired: true }` (no data) when locked; `POST /shares/{token}/unlock` exchanges the password for a short-lived view JWT scoped to that share's `view_config`. Unlock attempts are rate-limited (N/IP/hour).
+
+**Exit criteria — safe to pause when:**
+- A wrong password is rejected and rate-limited; a correct password renders the view
+- The unlock token cannot be replayed against a different share
+- A locked share leaks no data in the `passwordRequired` response
+
+---
+
+### Phase 13.4 — Lifecycle & Management
+**Status:** ⬜ | **Effort:** S–M
+
+Expiry and revocation (`expires_at` / `revoked_at` → `410 Gone`), plus a "Manage shares" surface per timeline: list, view counts, last-viewed, edit (rename / password / expiry), revoke; and an active-share-count chip on the timeline tile.
+
+**Exit criteria — safe to pause when:**
+- An expired or revoked link returns `410 Gone` immediately and is no longer usable
+- One timeline hosts ≥3 independent shares with different view types and configurations
+- View counts and last-viewed timestamps update on access; admins can manage shares they don't own
+
+---
+
+### Phase 14 — Export — Tabular & Per-View
 **Status:** ⬜ | **Effort:** M (3–5 days)
 
-A first-class **Share** entity. One timeline can have many shares; each share is a frozen pairing of `{ view type + view config + optional password + optional expiry }`. This is the feature that lets a team publish, e.g., a public Gantt sorted by start date with the "Marketing" filter applied, alongside a password-protected List view of the same data for an external stakeholder.
-
-**Design rationale:**
-The existing single share token on `timelines` is too coarse — it shares "the timeline" with no opinion about which view, filter, sort, or grouping the viewer should land in. With four view types live (Gantt + 11.1 + 11.2 + 11.3), the surface a sharer wants to publish is the *configured view*, not the raw timeline. Multiple shares per timeline also enable stakeholder-specific snapshots (different filters, different views, different passwords) without forcing the team into a one-link compromise.
-
-**Scope:**
-
-*Schema:*
-- New `shares` table: `id`, `timeline_id`, `view_type` (gantt/list/calendar/kanban), `view_config` JSON (filter preset, group_by, sort_by, granularity, visible-columns, etc.), `password_hash` (nullable, bcrypt), `expires_at` (nullable), `created_by`, `created_at`, `last_viewed_at`, `view_count`, `revoked_at`
-- Public-token column on `shares` (unguessable, URL-safe) — the existing single token on `timelines` is migrated to the first share row
-- `timelines.share_token` deprecated and removed in a follow-up migration once UI references are migrated
-
-*API:*
-- `POST /timelines/:id/shares` — create share; body carries `view_type`, `view_config`, optional `password`, optional `expires_at`
-- `GET /timelines/:id/shares` — list shares for a timeline (creator + admins only)
-- `PATCH /shares/:id` — rename / change password / extend expiry / revoke
-- `DELETE /shares/:id` — hard delete
-- `GET /shares/:token` — public lookup; if password-protected returns 401 with a `passwordRequired: true` marker (no data leakage)
-- `POST /shares/:token/unlock` — exchange password for a short-lived view JWT scoped to that share
-
-*Web — creating shares:*
-- "Share this view" button in every view's toolbar slot (Gantt / List / Calendar / Kanban)
-- Click → modal that snapshots the current toolbar state (filter, sort, group, zoom, etc.) into `view_config`, offers password + expiry toggles, then returns the URL with copy button
-- View-config snapshot is **frozen** at creation time — later changes to the live view do not mutate existing shares
-
-*Web — viewing shares:*
-- Public viewer route `/s/:token` — no auth required; if password-protected, gates behind a password prompt; on success, mounts the corresponding view component in read-only mode with `view_config` applied
-- Read-only enforcement: no drag, no inline edit, no create — the same lockdown used for `is_external` events (Phase 18) applied to the whole surface
-- Branding strip at the top: team name, "Shared view," last-updated timestamp
-
-*Web — managing shares:*
-- "Manage shares" section on each timeline (also reachable from `/settings/team/:id` via a Timelines tab if scope allows): list, view counts, revoke, edit
-- Indicator chip on a timeline tile showing active share count
-
-**Open questions (resolve before starting):**
-- Do password-protected shares get a rate limit on unlock attempts? (Probably yes — N attempts per IP per hour.)
-- Should the unlock JWT be tied to the share's `view_config` snapshot, or refetch live? (Snapshot — that's the whole point.)
-- Do we expose share view counts to non-creators with admin access, or keep them creator-private?
-
-**Exit criteria — safe to pause when:**
-- A user can create a share from any of the four views, with the current toolbar state captured in `view_config`
-- Visiting the share URL renders the saved view exactly as it was configured at creation time
-- A password-protected share prompts for the password; wrong password is rejected; correct password renders the view
-- Setting an expiry causes the share to return 410 Gone after that date
-- A revoked share returns 410 Gone immediately and the URL is no longer usable
-- One timeline can host at least three independent shares with different view types and configurations
-- Public viewers cannot mutate any data through the share URL (no edits, no drags, no creates)
-
----
-
-### Phase 17 — Data Portability & Exports
-**Status:** ⬜ | **Effort:** L (1 wk)
-
-Tabular import / export plus view-aware exports (Gantt → PDF, Kanban → PDF, List → Markdown, etc.). Each visual export respects the active filter / sort / group at time of export — the deliverable is "what's on the screen right now," not the raw event list.
+Get data *out* of draba — both raw tabular exports (CSV / xlsx) and view-aware visual exports (Gantt → PDF, Kanban → PDF, List → Markdown, Calendar → PDF, etc.). Each visual export respects the active filter / sort / group at time of export — the deliverable is "what's on the screen right now," not the raw activity list. Split from the former combined "Data Portability" phase so export (an immediate, lower-risk win) can ship ahead of [import](#phase-15--import--tabular).
 
 **Implementation note (PDF engine):**
 PDFs are generated server-side using **gofpdf** (pure-Go, no Chrome dependency in the Docker image). This keeps the binary lean at the cost of reimplementing Gantt / Kanban / Calendar layouts in PDF primitives — accepted tradeoff because the alternative (chromedp) significantly inflates the image size and breaks the "single binary" promise. Visual fidelity for the Gantt PDF will not match the live view pixel-for-pixel; the target is "readable and recognizable," not "screenshot quality."
 
 **Scope:**
 
-*Tabular import / export (was the old Phase 13):*
-- `GET /timelines/:id/export.csv` and `.xlsx`
-- `POST /teams/:id/events/import` — CSV/Excel import with preview + validation step
-- `GET /import-template.csv` and `.xlsx` downloadable template
-- Password reset flow (requires SMTP or transactional email provider) — kept here because import errors / reset emails are the first time we need SMTP
+*Tabular export:*
+- `GET /timelines/:id/export.csv` and `.xlsx` — all visible activities, honoring the active filter
+- Optional `?filter=` to scope the export to a saved filter ID (forward-compat hook from Phase 10.4.6)
 
 *Visual / textual exports (per view):*
 - **Gantt → PDF:** landscape, paginated by date range; columns scale to fit a printable width per page; legend strip with member colors; export current filter/sort/group state. Gantt → PNG as a single-page variant.
@@ -1659,67 +1597,54 @@ PDFs are generated server-side using **gofpdf** (pure-Go, no Chrome dependency i
 - Do exports respect Find highlights or just the filter? (Filter only — Find is ephemeral.)
 
 **Exit criteria — safe to pause when:**
-- Exporting a timeline to CSV and xlsx produces files containing all visible events with the active filter applied
-- Importing the exported CSV back in shows a preview, validates rows, and creates events on confirm
+- Exporting a timeline to CSV and xlsx produces files containing all visible activities with the active filter applied
 - Gantt → PDF renders a recognizable Gantt chart with bars in the correct positions and a member-color legend
 - Kanban → PDF renders the visible columns and cards in the same order shown on screen
 - List → Markdown produces a clean GitHub-flavored table that renders correctly in a Markdown previewer
-- Calendar → PDF in Month layout produces one page per month with events in correct cells
-- Password reset flow sends an email and allows setting a new password
+- Calendar → PDF in Month layout produces one page per month with activities in correct cells
 - All export menus are reachable from their respective view toolbars; format options match the view type
 
 ---
 
-### Phase 18 — External Connectors (Webhooks)
-**Status:** ⬜ | **Effort:** M (3–5 days)
+### Phase 15 — Import — Tabular
+**Status:** ⬜ | **Effort:** M (2–3 days)
+
+Get data *into* draba from a spreadsheet — CSV / Excel import with a mandatory preview + validation step before any rows are written. The natural companion to [Phase 14 export](#phase-14--export--tabular--per-view) (round-trip: export → edit in a spreadsheet → re-import), and the seam through which teams migrate off whatever they're planning in today. Sequenced after export because the preview/validation/conflict surface is meaningfully more complex than a one-way dump.
 
 **Scope:**
-- Schema changes: `event_links`, `team_inbound_webhooks`, `is_external` flag on `events`
-- `POST /teams/:id/webhooks` to generate inbound webhook URLs
-- Generic JSON parsing for inbound webhook payload mapping (e.g. Asana, Aha)
-- Disabling edit UI for `is_external` blocks in the timeline (read-only)
 
-**Exit criteria — safe to pause when:**
-- Generating a webhook creates a unique URL for the team
-- Sending a dummy JSON payload to that URL creates an `is_external` event block mapped to a user
-- Trying to drag or edit that block in the UI is prevented (read-only mode)
+*API:*
+- `POST /teams/:id/activities/import` — accepts a CSV/Excel upload; runs in two passes:
+  - **Preview pass** (`?dryRun=true`): parses + validates every row, returns a per-row result (ok / warning / error) with messages, *without* writing anything
+  - **Commit pass:** writes the validated rows, skipping or rejecting invalid ones per the caller's choice
+- `GET /import-template.csv` and `.xlsx` — downloadable template with the expected column headers and an example row
+- Column mapping: required (title, start, end) + optional (description, status name, assignee names/emails, tags, parent title, progress, location, url); status/assignee/tag resolved by name against the target team (unknown names surface as warnings, not hard errors)
 
----
-
-### Phase 19 — Global Search
-**Status:** ⬜ | **Effort:** M (2–3 days, directional estimate)
-
-Cross-team, cross-timeline event search via a command palette. Complements (does **not** replace) the in-view Find from [Phase 8.5](#phase-85-find-in-view).
-
-**Why a separate phase:**
-By this point we'll have: Find (8.5), List view (11.1), real-time sync (8.3), and likely more events per team than fit in one fetch. Global Search needs server-side full-text and a different UX surface (a palette, not an inline bar), so it earns its own phase. With Find + List already shipped, this should feel like the natural "I genuinely don't know where this event is" escape hatch — used rarely but valued when needed.
-
-**Directional scope (to be firmed up before the phase):**
-- Command palette opened via `Ctrl/Cmd+K` (separate keybinding from Find's `Ctrl/Cmd+F`)
-- Server-side search endpoint: `GET /search/events?q=` — scoped to teams/timelines the caller can access
-- Full-text index over title, description, tags, assignee names (SQLite FTS5 for the default backend; equivalent for MySQL/Postgres adapters when those land)
-- Results grouped by team → timeline, each row showing event title, date range, assignees, and a snippet of the matched field
-- Selecting a result navigates to that timeline and **hands off to Find**, pre-seeding the query so the event is highlighted on arrival (reuses 8.5's scroll-to-match logic)
-- Keyboard-first: arrow keys to move, Enter to navigate, Esc to close
-- Recent searches / pinned searches — stretch goal, evaluate during the phase
+*Web — import flow:*
+- "Import" affordance in the activity-create split button (stub already present from Phase 11.1.1) → opens an import wizard
+- Step 1: pick target timeline + upload file (or download the template)
+- Step 2: preview table — each parsed row with its validation status, inline messages, and a count summary (N ready, M warnings, K errors)
+- Step 3: confirm → commit; show a result toast/summary (created count, skipped count)
+- Date parsing tolerant of common formats; all dates treated as all-day / calendar dates (consistent with Phase 11.1.1)
 
 **Open questions (resolve before starting):**
-- Does Search surface archived events by default, or behind a toggle?
-- Do we index event descriptions in v1, or just title/tags/assignees? (description indexing has size implications for SQLite FTS5)
-- Permission model: do we filter results post-query or push the auth predicate into the FTS query?
+- On a name that doesn't resolve (status / assignee / tag), do we auto-create it or just warn and skip the association? (Lean: warn + skip for v1; auto-create is a later toggle.)
+- Is import idempotent / re-runnable, or always additive? (Lean: additive for v1 — no upsert-by-external-id until Phase 18 webhooks introduce stable external IDs.)
 
-**Exit criteria (placeholder — refine in-phase):**
-- `Ctrl/Cmd+K` opens a palette returning results across every team the user belongs to
-- Selecting a result navigates to the correct timeline and the event is visibly highlighted on arrival
-- Users with no access to a team never see that team's events in results
-- Search returns within ~200ms for a database with 10k events
+**Exit criteria — safe to pause when:**
+- Downloading the template and re-uploading it (filled in) creates the expected activities on the target timeline
+- The preview step reports per-row ok/warning/error without writing any data, and a dry-run leaves the DB unchanged
+- Round-trip holds: a Phase 14 CSV export re-imported reproduces the same activities (modulo server-assigned IDs)
+- Invalid rows (missing title, end-before-start, unparseable date) are flagged in preview and excluded from the commit
+- Status / assignee / tag names resolve against the target team; unknown names warn rather than abort the whole import
+- `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean
 
 ---
 
-### Phase 20 — Backup & Restore
+### Phase 16 — Backup & Restore
 **Status:** ⬜ | **Effort:** M (2–3 days, directional estimate)
 
-Admin tools for database backup visibility, manual backups, and scheduled backup configuration. Self-hosted deployments need a way to know their data is safe without SSH-ing into the container.
+Admin tools for database backup visibility, manual backups, and scheduled backup configuration. Self-hosted deployments need a way to know their data is safe without SSH-ing into the container. **Pulled ahead of the remaining phases** because once real teams start putting real data in (via [import](#phase-15--import--tabular) and [shared](#phase-13--shares--multi-share-views-with-passwords) workflows), data safety stops being optional.
 
 **Directional scope (to be firmed up before the phase):**
 
@@ -1757,6 +1682,132 @@ Admin tools for database backup visibility, manual backups, and scheduled backup
 - A scheduled backup runs at the configured interval and produces a valid backup file
 - Retention policy automatically cleans up old backups beyond the configured limit
 - Backup history shows the last N backups with timestamps and sizes
+
+---
+
+### Phase 17 — Global Search
+**Status:** ⬜ | **Effort:** M (2–3 days, directional estimate)
+
+Cross-team, cross-timeline activity search via a command palette. Complements (does **not** replace) the in-view Find from [Phase 8.5](#phase-85-find-in-view).
+
+**Why a separate phase:**
+By this point we'll have: Find (8.5), List view (11.1), real-time sync (8.3), and likely more activities per team than fit in one fetch. Global Search needs server-side full-text and a different UX surface (a palette, not an inline bar), so it earns its own phase. With Find + List already shipped, this should feel like the natural "I genuinely don't know where this activity is" escape hatch — used rarely but valued when needed.
+
+**Directional scope (to be firmed up before the phase):**
+- Command palette opened via `Ctrl/Cmd+K` (separate keybinding from Find's `Ctrl/Cmd+F`)
+- Server-side search endpoint: `GET /search/activities?q=` — scoped to teams/timelines the caller can access
+- Full-text index over title, description, tags, assignee names (SQLite FTS5 for the default backend; equivalent for MySQL/Postgres adapters when those land)
+- Results grouped by team → timeline, each row showing activity title, date range, assignees, and a snippet of the matched field
+- Selecting a result navigates to that timeline and **hands off to Find**, pre-seeding the query so the activity is highlighted on arrival (reuses 8.5's scroll-to-match logic)
+- Keyboard-first: arrow keys to move, Enter to navigate, Esc to close
+- Recent searches / pinned searches — stretch goal, evaluate during the phase
+
+**Open questions (resolve before starting):**
+- Does Search surface archived activities by default, or behind a toggle?
+- Do we index activity descriptions in v1, or just title/tags/assignees? (description indexing has size implications for SQLite FTS5)
+- Permission model: do we filter results post-query or push the auth predicate into the FTS query?
+
+**Exit criteria (placeholder — refine in-phase):**
+- `Ctrl/Cmd+K` opens a palette returning results across every team the user belongs to
+- Selecting a result navigates to the correct timeline and the activity is visibly highlighted on arrival
+- Users with no access to a team never see that team's activities in results
+- Search returns within ~200ms for a database with 10k activities
+
+---
+
+### Phase 18 — External Connectors (Webhooks)
+**Status:** ⬜ | **Effort:** M (3–5 days)
+
+**Scope:**
+- Schema changes: `activity_links`, `team_inbound_webhooks`, `is_external` flag on `activities`
+- `POST /teams/:id/webhooks` to generate inbound webhook URLs
+- Generic JSON parsing for inbound webhook payload mapping (e.g. Asana, Aha)
+- Disabling edit UI for `is_external` blocks in the timeline (read-only)
+
+**Exit criteria — safe to pause when:**
+- Generating a webhook creates a unique URL for the team
+- Sending a dummy JSON payload to that URL creates an `is_external` activity block mapped to a user
+- Trying to drag or edit that block in the UI is prevented (read-only mode)
+
+---
+
+### Phase 19 — AI Key Management
+**Status:** ⬜ | **Effort:** M (2–3 days)
+
+Ships the AI/LLM key configuration surface stubbed in Phase 10.1.3. Adds encrypted storage, model routing, and a usage log so superadmins can connect AI providers and see which features are consuming tokens.
+
+**Scope:**
+
+*API:*
+- New table `ai_provider_keys`: id, provider (anthropic | openai | google | custom), api_key (encrypted AES-256-GCM, same pattern as SMTP password), model_override, created_at, updated_at
+- `GET /admin/ai/keys` — list configured providers (key masked); superadmin only
+- `PUT /admin/ai/keys/:provider` — upsert a provider key; validates by making a lightweight test call; superadmin only
+- `DELETE /admin/ai/keys/:provider` — remove a provider key; superadmin only
+
+*Web — `/settings/ai` (replaces current stub):*
+- Real form replacing the placeholder cards: provider selector, API key input (masked), model override field
+- "Test connection" button calls a test endpoint before saving
+- Usage log section (read-only): last 10 AI requests with timestamp, provider, model, token count
+
+*Encryption:*
+- Reuse the AES-256-GCM pattern introduced for SMTP passwords in Phase 10.1.3
+
+**Exit criteria — safe to pause when:**
+- A superadmin can configure an Anthropic key and verify via the test connection button
+- The key is stored encrypted and masked in the GET response
+- Removing a key clears it from the DB
+- `golangci-lint run` clean; `go test ./...` passes
+
+---
+
+### Phase 20 — Calendar Sync — Google & CalDAV
+**Status:** ⬜ | **Effort:** XL (1–2 wks)
+
+**Scope:**
+- Google Calendar OAuth connect flow
+- Outbound sync: push draba activities to Google on create/update/delete
+- Inbound sync: Google webhook handler → upsert activity in draba
+- Built-in CalDAV server (`internal/caldav/`)
+- CalDAV connect flow (user provides URL + credentials)
+- Outbound sync: push draba activities to CalDAV on create/update/delete
+- Team iCal feed: `GET /timelines/:ical_token/feed.ics` (public, no private notes)
+
+**Exit criteria — safe to pause when:**
+- Connecting Google Calendar and creating a draba activity causes it to appear in Google Calendar within 30s
+- Editing that activity in Google Calendar updates the draba activity within 30s (webhook round-trip)
+- A CalDAV client (e.g., iOS Calendar) can subscribe to a user's feed and see their draba activities
+- The iCal feed URL is importable into a calendar app without errors
+
+---
+
+### Phase 21 — Localization & Language Support
+**Status:** ⬜ | **Effort:** L (3–5 days)
+
+Adds i18n infrastructure and ships the first non-English locale. The "Default language" fields in `/settings/preferences` and `/settings/organization` (currently disabled stubs) become functional.
+
+**Scope:**
+
+*Infrastructure:*
+- Adopt `react-i18next` (or equivalent) for the web client
+- Extract all user-facing strings from React components into locale JSON files
+- Add a `language` column to `user_preferences` (per-user) and a `default_language` key to `instance_settings`
+- `PATCH /users/me/preferences` accepts `language` key; `PATCH /admin/settings` accepts `default_language`
+
+*Locales:*
+- `en` — English (extracted from existing strings; the baseline)
+- Ship at least one additional locale to validate the pipeline (e.g. `es` — Spanish, or `fr` — French)
+
+*Web — settings surfaces:*
+- Enable the "Language" dropdown in `/settings/preferences` (user-level)
+- Enable the "Default language" dropdown in `/settings/organization` (instance-level)
+- Language change takes effect on next page load (no hard reload required)
+
+**Exit criteria — safe to pause when:**
+- Switching to the second locale changes all UI strings in the web app
+- User language preference persists across logout/login
+- Instance default language is used when the user has no preference set
+- Adding a new locale requires only a new JSON file (no code changes)
+- `pnpm --filter web lint` clean
 
 ---
 
