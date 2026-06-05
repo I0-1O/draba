@@ -92,6 +92,7 @@ docs/
     phase-11.1-list-view.md
     phase-11.2-calendar-view.md
     phase-11.3-kanban-view.md
+    phase-13-shares.md
   ARCHITECTURE.md
   CONVENTIONS.md
   GreatEventToActivity.md
@@ -24616,6 +24617,183 @@ components/kanban/
 3. **Manual within-column order** — deferred (no `Activity` order field). If wanted later: `11.3.1` adds `kanban_order REAL` + persist-on-drop + a "Manual" sort. Cards order by the chosen Sort in v1.
 4. **Group by: Tag** — not included (tags are multi-valued, so a card would appear in N columns; dragging is ambiguous). Could be added as a **read-only** (non-droppable) grouping later if useful.
 5. **Configure pencil vs. full-card click** — v1 uses full-card click to open the edit panel; the hover pencil is optional polish, not required.
+````
+
+## File: docs/plans/phase-13-shares.md
+````markdown
+# Phase 13 — Shares — Public Read-Only View Links
+
+**UI name:** "Share" (toolbar action in every view, alongside Export).
+
+**Status:** 🟢 Reviewed — scope settled (2026-06-04). This plan supersedes the ROADMAP §13 summary and the original "Phase 16 — Shares" umbrella spec. The product decision is **read-only public links over live (cached) data**, not point-in-time snapshots and not pixel renders.
+
+---
+
+## What we're actually building
+
+A **Share** is a first-class entity: one timeline can have many shares, each one a frozen pairing of `{ view type + view config + optional password + optional expiry }`. Visiting a share's link drops a **non-logged-in** viewer into **exactly the view the sharer was looking at** — same group-by, sort, color-by, and filter — rendered **read-only** (no toolbars, menus, drag, reorder, recolor, or edit) and **forced to light mode**. They can scroll/pan the view and open nothing else.
+
+The core mental model: *"share what I'm seeing, as a link, that anyone can open and look at but not touch."*
+
+### Decisions locked in the design discussion (2026-06-04)
+
+1. **Live data, cached — not snapshots, not pixels.** The viewer renders the real React view from a JSON projection that is rebuilt at most every TTL (default 60s, configurable to a couple minutes). No websockets on the public path; no headless-browser/Chromium rendering (that conversation is deferred to Phase 14 Export).
+2. **The primary boundary is record *scope*, not field-level minimization.** The risk we harden against is a viewer reaching records *outside the shared view* — another timeline, another team, archived rows, or anything reachable by tampering. The gateway derives `timeline_id` from the share row **server-side** and accepts **no client selector** (no timeline/activity/team id, no scope-widening query params); the activity query is hard-scoped to that one timeline + the frozen filter. Within a record we ship a **fixed display projection** of the standard activity fields (incl. description). The one **conditional** field is `notes`: included only when the view actually renders it — i.e. a **List share whose `view_config` has the Notes column enabled** — and omitted everywhere else. The constant exclusion is **cross-entity PII / internals**: member email/role/`user_id`, the timeline access list, other timelines, team internals. Members always project to `{ id, displayName, color, icon }`.
+3. **The frozen filter is evaluated server-side, in Go, at projection-build time.** Because the projection must contain *only visible* activities, filtered-out rows must never reach the browser — so the filter runs before the JSON is built. This requires a Go port of `matchesFilter`. Drift between the TS and Go evaluators is neutralized by a **shared golden-fixture suite** both must pass in CI (one source of truth, two executors). *(Considered and shelved: embedding the TS engine via `goja` — pure-Go, single implementation, zero drift — but a bounded pure-function port + parity fixtures is simpler to own. Revisit if the filter grammar grows.)*
+4. **The filter is snapshotted as a resolved `FilterDefinition`, not a reference.** At share-creation the active filter (preset / member / saved) is resolved into a concrete definition stored in `view_config`. A later edit or deletion of the source saved filter must **not** mutate or break existing shares — the whole point is a frozen presentation.
+5. **Read-only = the real view components in `interactive=false` mode**, not separate viewer components (which would visually drift from "exactly what I'm seeing"). The cost is per-view chrome-stripping — accepted. **Clicking an activity is inert in every view** — no detail popover, no drill-down. Shares are static web snapshots: you scroll and look, nothing opens.
+6. **Password is a fast-follow (13.3), not v1.** An unguessable token is the v1 floor.
+
+---
+
+## Reused infrastructure (do not rebuild)
+
+| Concern | Existing asset | Notes |
+|---|---|---|
+| Existing public token | `timelines.share_token` (NOT NULL UNIQUE), `handleGetTimelineByShareToken` (`GET /timelines/share/{token}`), `TimelineRepo.GetByShareToken` | Returns the timeline row only — no activities/members. We **migrate** each timeline's existing token into a `shares` row, then deprecate the column. |
+| Filter evaluation (TS) | `matchesFilter` (`lib/filterEngine.ts`), `applyActiveFilter` (`lib/presetFilters.ts`) | The Go port mirrors `matchesFilter`; the golden fixtures pin parity. |
+| View components | `GanttView`, `ListView`, `CalendarView`, `KanbanView` | Rendered in `interactive=false` mode by the public viewer. |
+| Color resolution | `resolveActivityColor` (`lib/activityColor.ts`) | Identical hues to authed views. |
+| Member-combination grouping | `lib/memberGroups.ts` | Reused for group-by member-combination in shared views. |
+| Identity display | `Badge`, `resolveColorHex` (`components/identity/`) | Member/status/tag chips in the read-only surface. |
+| View-config source | per-timeline preference map (group/sort/color/filter/visible-columns) | "Share this view" snapshots the **current live toolbar state** into `view_config`. |
+| Theme | existing theme provider | Public viewer forces `light` regardless of system/localStorage. |
+
+---
+
+## The public data gateway (the heart of 13.1)
+
+`GET /shares/{token}` → a single aggregate, built in Go, cached per-token with a TTL:
+
+```jsonc
+{
+  "share":    { "viewType": "gantt", "viewConfig": { … }, "createdAt": "…" },
+  "timeline": { "id", "name", "color", "icon", "startDate", "endDate" },
+  "members":  [ { "id", "displayName", "color", "icon" } ],   // never email/role/userId
+  "statuses": [ { "id", "name", "color", "icon", "isClosed", "position" } ],
+  "tags":     [ { "id", "name", "color" } ],
+  "activities": [ /* only rows passing the frozen filter; only view-rendered fields */ ]
+}
+```
+
+**Build rules:**
+- **Scope-locked, no client selector (the primary boundary).** The endpoint takes *only* the share `token`. `timeline_id` is read from the share row server-side; the client cannot pass a timeline/activity/team id or any scope-widening query param. The activity query is hard-scoped: `WHERE timeline_id = <share.timeline_id> AND archived_at IS NULL`. No share-reachable endpoint returns a record by arbitrary id, lists timelines, or resolves other tokens. A share token can reach **exactly one timeline's filtered records and nothing else** — that invariant is the thing the tests defend.
+- **Filter next.** Resolve `view_config.filter` (a frozen `FilterDefinition`) and evaluate it in Go against that timeline's non-archived activities. Only passing rows continue.
+- **Fixed display projection.** Emit the standard user-facing activity fields (title, dates, description, `statusId`, `assignedMemberIds`, `tagIds`, `parentActivityId`, progress). `notes` is the one **conditional** field — included only for a **List share with the Notes column enabled** in `view_config`, omitted otherwise. The FK references (`statusId` etc.) point into the already-projected `members`/`statuses`/`tags`, which carry no PII.
+- **Members/statuses/tags are pruned to those referenced** by the surviving activities (smaller payload, less incidental exposure). Members project to `{ id, displayName, color, icon }` only — never email/role/`user_id`.
+- **Cache:** in-memory `map[token]{ builtAt, payload }`; rebuild when `now - builtAt > TTL`. TTL via `DRABA_SHARE_CACHE_TTL` (default `60s`). Invalidate on share `PATCH`/`DELETE`. No DB hit on a warm cache.
+- **Status codes:** `200` payload · `404` unknown token · `410 Gone` revoked/expired (13.4) · `401 { passwordRequired: true }` locked (13.3, no data leakage).
+
+---
+
+## Schema
+
+New migration (next available number — **018 was the last**, in Phase 10.4.6; confirm before writing):
+
+```sql
+CREATE TABLE shares (
+  id            TEXT PRIMARY KEY,
+  timeline_id   TEXT NOT NULL REFERENCES timelines(id) ON DELETE CASCADE,
+  token         TEXT NOT NULL UNIQUE,          -- unguessable, URL-safe
+  view_type     TEXT NOT NULL,                 -- gantt | list | calendar | kanban
+  view_config   TEXT NOT NULL,                 -- JSON: group/sort/color/filter(def)/visible-columns/card-fields
+  password_hash TEXT,                          -- nullable (13.3)
+  expires_at    DATETIME,                      -- nullable (13.4)
+  created_by    TEXT NOT NULL REFERENCES team_members(id),
+  created_at    DATETIME NOT NULL,
+  last_viewed_at DATETIME,
+  view_count    INTEGER NOT NULL DEFAULT 0,
+  revoked_at    DATETIME                       -- nullable (13.4)
+);
+```
+
+**Token migration:** for every existing timeline, insert one `shares` row `{ view_type: 'gantt', view_config: <defaults>, token: timelines.share_token }` so existing links keep working. `timelines.share_token` is `NOT NULL UNIQUE`, so it can only be **dropped in a follow-up migration** once all UI/handler references move to `shares`; until then keep it and stop minting new per-timeline tokens.
+
+---
+
+## API
+
+| Method + path | Auth | Purpose |
+|---|---|---|
+| `POST /timelines/{id}/shares` | member | Create share; body = `{ viewType, viewConfig, password?, expiresAt? }` |
+| `GET /timelines/{id}/shares` | creator + admins | List shares for a timeline |
+| `PATCH /shares/{id}` | creator + admins | Rename / set-clear password / extend expiry / revoke |
+| `DELETE /shares/{id}` | creator + admins | Hard delete |
+| `GET /shares/{token}` | **public** | The gateway above |
+| `POST /shares/{token}/unlock` | **public** | (13.3) password → short-lived view JWT |
+
+OpenAPI: add `Share`, `ShareViewConfig`, `CreateShareInput`, `PatchShareInput`, `PublicShareProjection` schemas; regenerate TS types.
+
+---
+
+## Read-only view mode
+
+Thread an `interactive: boolean` (default `true`) through each view + its toolbar, sourced from a `ShareViewContext` when mounted under `/s/:token`. When `false`:
+- Toolbar, menus, and the "Share"/"Export" actions are not rendered.
+- Bars/cards/rows are non-draggable; **clicks are inert in every view** — no `ActivityPanel`, no read-only popover, no drill-down. Static snapshots.
+- No create affordances ("+ Add", empty-cell create, drag-to-create).
+- Theme forced to light.
+
+The public viewer route `/s/:token` lives **outside** `ProtectedRoute`: fetch `GET /shares/{token}`, mount the matching view in `interactive=false` with `view_config` applied, render a slim branding strip (team name · "Shared view" · last-updated). Find/keyboard-nav are out of scope for the public surface in v1.
+
+---
+
+## Sub-phases
+
+### 13.1 — Foundation, public gateway, Gantt viewer (MVP)
+The whole data-leak surface is confronted here so 13.2–13.4 ride on a proven-safe gateway.
+- `shares` schema + repo + token migration (existing per-timeline tokens preserved).
+- Go filter evaluator (`internal/filters` mirroring `matchesFilter`) + **shared golden-fixture suite** (`packages/shared/testdata/filter-fixtures.json`) run by both `filterEngine.test.ts` and a Go test.
+- `GET /shares/{token}` gateway: scope-locked query (token → server-derived `timeline_id`, no client selector), filter-next, fixed display projection, referenced-entity pruning, TTL cache.
+- `POST/GET /timelines/{id}/shares`, `PATCH/DELETE /shares/{id}`.
+- Gantt `interactive=false` mode (no chrome, no drag, no edit, forced light).
+- "Share this view" in the Gantt toolbar → snapshot live toolbar state (incl. resolved filter definition) → create → copy URL.
+- `/s/:token` public route + branding strip.
+
+**Exit criteria:**
+- Create a share from a filtered/grouped/colored/sorted Gantt; open `/s/:token` in a fresh/incognito session (no login) and see **exactly** that configuration, read-only, light mode, with **inert clicks**.
+- **Scope isolation holds:** a share token resolves to exactly its timeline's filtered records; tampering (passing another timeline/activity/team id, or scope-widening params) cannot widen the result; there is no share-reachable by-id or list-timelines endpoint.
+- Filtered-out activities are **absent from the network payload** (verified in devtools), as are member emails, `user_id`s, roles, the access list, and other timelines.
+- The Go and TS filter evaluators agree on every golden fixture (CI).
+- Existing `timelines.share_token` links still resolve (migrated into `shares`).
+- Warm-cache requests hit no DB; TTL refresh picks up an activity edit within the window.
+- `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` + `test` pass.
+
+### 13.2 — Remaining views read-only (List, Calendar, Kanban)
+- `interactive=false` for the other three views + public mounting per `view_type`.
+- Per-view read-only polish (the "little uplift" each view needs to read cleanly without chrome); clicks inert here too.
+- "Share this view" in each toolbar.
+
+**Exit:** a share created from any of the four views renders faithfully, read-only, with inert clicks; the same scope-locked gateway serves all four `view_type`s with no per-view data path.
+
+### 13.3 — Password protection + unlock
+- `password_hash` (bcrypt) on create/patch; `GET /shares/{token}` returns `401 { passwordRequired: true }` when locked (no data).
+- `POST /shares/{token}/unlock` → short-lived view JWT scoped to that share's `view_config` snapshot.
+- Rate-limit unlock attempts (N/IP/hour).
+
+**Exit:** wrong password rejected and rate-limited; correct password yields the view; the unlock token cannot be replayed against a different share.
+
+### 13.4 — Lifecycle + management
+- Expiry → `410 Gone` after `expires_at`; revocation → `410 Gone` immediately.
+- "Manage shares" UI per timeline: list, view counts, last-viewed, edit (rename/password/expiry), revoke. View counts visible to the creator **and** team admins.
+- Active-share-count chip on the timeline tile.
+
+**Exit:** revoked/expired links are dead immediately; one timeline hosts ≥3 independent shares with different view types/configs; counts and last-viewed update.
+
+---
+
+## Open questions
+None outstanding for v1. Resolved 2026-06-04:
+- **`notes`** — shown only when a List share has the Notes column enabled; omitted otherwise.
+- **View counts** — visible to the creator **and** team admins (not creator-private).
+- **TTL** — fixed at **60s** (`DRABA_SHARE_CACHE_TTL` default).
+
+## Non-goals (v1)
+- **Click-to-detail / drill-down on the public surface** — clicks are inert; shares are static snapshots.
+- Websocket/live updates on the public surface (cache TTL only).
+- Find / global search / keyboard nav on the public viewer.
+- Pixel/PDF snapshot shares (that's the Chromium conversation, deferred to Phase 14).
+- Editing or any mutation through a share link.
 ````
 
 ## File: docs/SAMPLE_DATA.md
@@ -51017,6 +51195,1062 @@ export default function ActivityDetailPanel({
 }
 ````
 
+## File: packages/web/src/components/gantt/GanttGrid.tsx
+````typescript
+/**
+ * GanttGrid — presentational Gantt chart.
+ *
+ * Renders a sticky header row of column labels, then one row per GanttRow
+ * entry. Rows are either group-header dividers or event bars. All data
+ * preparation (grouping, sorting, date math) lives in the parent GanttView.
+ *
+ * Drag on an empty lane cell to select a date range; onLaneDrag fires on
+ * mouseup with the resolved start/end dates and the lane's memberId.
+ *
+ * Drag on an event bar's left/right 8px edge to resize it, or on its body to
+ * move it. onBarDrag fires on mouseup with the resolved new dates.
+ *
+ * When findState is provided with a non-empty query, non-matching event rows
+ * are dimmed to 0.3 opacity; matching rows get an amber outline on their bar;
+ * the active (parked) match gets a stronger amber outline with a pulse
+ * animation. Stepping to a new active match auto-scrolls both axes to center
+ * the bar in the viewport.
+ */
+
+import { useRef, useState, useCallback, useEffect, useMemo } from 'react';
+import { ChevronDown, ChevronRight } from 'lucide-react';
+import MemberAvatar from '../MemberAvatar';
+import { Badge } from '../identity/Badge';
+import EmptyState from '../shared/EmptyState';
+import type { Member } from '../../types';
+import type { ColumnDef, TimeGranularity } from './granularity';
+import { addDays, snapDivisorFor } from './granularity';
+
+export const DEFAULT_LABEL_COL_W = 240;
+const MIN_LABEL_COL_W = 140;
+const MAX_LABEL_COL_W = 400;
+const HEADER_H = 36;
+const ROW_H = 44;
+const GROUP_H = 30;
+const COL_W = 80;
+const EDGE_W = 8; // px hit zone for resize handles
+
+/** A positioned activity bar ready for rendering. */
+export interface GanttActivity {
+  id: string;
+  title: string;
+  /** Fractional column start (0-based). */
+  startCol: number;
+  /** Fractional column span. */
+  span: number;
+  /** Hex color for bar background and badge. */
+  color: string;
+  /** Icon ID from the activity's identity, if set. */
+  icon?: string;
+  members: Member[];
+  isChild: boolean;
+  /** Nesting depth in the parent→child tree (0 = root). Drives left indent. */
+  depth?: number;
+  /** True when this activity has child activities nested beneath it. */
+  hasChildren?: boolean;
+  /** True when this activity's subtree is currently collapsed (children hidden). */
+  collapsed?: boolean;
+  percentComplete?: number | null;
+}
+
+export type GanttRow =
+  | { kind: 'group'; id: string; label: string; color: string; memberColors?: string[]; count: number; collapsed?: boolean }
+  | { kind: 'activity'; event: GanttActivity };
+
+/** Visual state for the in-view Find feature. Passed from GanttView. */
+export interface FindState {
+  hasQuery: boolean;
+  matchedIds: Set<string>;
+  activeMatchId: string | null;
+  /** Per-event match reasons for "why matched" tooltip (non-title reasons only). */
+  matchReasons: Map<string, string[]>;
+  filtersActive: boolean;
+  matchCount: number;
+}
+
+interface DragState {
+  rowIdx: number;
+  memberId: string | null;
+  startCol: number;
+  currentCol: number;
+}
+
+type BarDragZone = 'left' | 'right' | 'body';
+
+interface BarDragState {
+  eventId: string;
+  zone: BarDragZone;
+  /** Fractional column of the event's visual start when drag began. */
+  initStartCol: number;
+  /** Fractional column of the event's visual end (startCol + span) when drag began. */
+  initEndCol: number;
+  /** Lane-relative x of the mouse when drag began. */
+  initMouseX: number;
+  /** Page-relative left edge of the lane div. */
+  laneLeft: number;
+  /** Current snapped start column (integer). */
+  snapStartCol: number;
+  /** Current snapped end column (integer, exclusive — col after last occupied). */
+  snapEndCol: number;
+}
+
+interface TooltipState {
+  text: string;
+  /** Viewport-relative x for tooltip positioning. */
+  x: number;
+  /** Viewport-relative y for tooltip positioning. */
+  y: number;
+}
+
+/** Tooltip shown when hovering a matched event bar that matched on a non-title field. */
+interface MatchTooltipState {
+  reasons: string[];
+  x: number;
+  y: number;
+}
+
+interface Props {
+  rows: GanttRow[];
+  columns: ColumnDef[];
+  /** Fractional column index of today (-1 if outside range). */
+  todayIndex: number;
+  selectedActivityId: string | null;
+  onSelectActivity: (id: string | null) => void;
+  /** Called when the user drags on an empty lane cell to create an activity. */
+  onLaneDrag?: (startDate: Date, endDate: Date, memberId: string | null) => void;
+  /** Called when the user drags a bar edge or body to resize/move it. */
+  onBarDrag?: (activityId: string, newStartDate: Date, newEndDate: Date) => void;
+  /** Called during a bar drag with the current snapped dates — for live sidebar update. */
+  onBarDragProgress?: (activityId: string, newStartDate: Date, newEndDate: Date) => void;
+  /** Resolved granularity — used to compute the finer snap divisor during drag. */
+  resolvedGranularity?: TimeGranularity | 'auto';
+  /** Find state from GanttView; absent when the find bar is closed/idle. */
+  findState?: FindState;
+  /** Called when the user clicks "Clear filters" in the no-matches callout. */
+  onClearFilters?: () => void;
+  /** Current label column width in px — lifts state to the parent so it survives view switches. */
+  labelColW?: number;
+  /** Called when the user drags the column resize handle. */
+  onLabelColWChange?: (w: number) => void;
+  /** Toggles the collapsed state of an activity's child subtree (parent grouping). */
+  onToggleActivity?: (id: string) => void;
+  /** Toggles the collapsed state of a group header (member grouping). */
+  onToggleGroup?: (id: string) => void;
+}
+
+// ── Bar drag helpers ─────────────────────────────────────────────────────────
+
+function tooltipText(zone: BarDragZone, startDate: Date, endDate: Date): string {
+  if (zone === 'left') return `Start: ${formatDragDate(startDate)}`;
+  if (zone === 'right') return `End: ${formatDragDate(endDate)}`;
+  return `${formatDragDate(startDate)} → ${formatDragDate(endDate)}`;
+}
+
+// ── Date helpers (support fractional column positions) ───────────────────────
+
+// Maps a fractional column position to a calendar Date by interpolating within
+// the column's day range. Uses the full period length (start→end) rather than
+// the clamped `days` field so boundary columns still produce correct dates.
+function colFracToDate(colFrac: number, columns: ColumnDef[]): Date {
+  let remaining = Math.max(0, colFrac);
+  for (const col of columns) {
+    if (remaining < 1) {
+      const periodDays = Math.round((col.end.getTime() - col.start.getTime()) / 86_400_000);
+      return addDays(col.start, Math.round(remaining * periodDays));
+    }
+    remaining -= 1;
+  }
+  return columns[columns.length - 1].end;
+}
+
+function colToStartDate(colFrac: number, columns: ColumnDef[]): Date {
+  return colFracToDate(Math.max(0, colFrac), columns);
+}
+
+// endColFrac is exclusive (the fractional col just past the last occupied day).
+function colToEndDate(endColFrac: number, columns: ColumnDef[]): Date {
+  // The last included date is 1 day before the date at the exclusive end.
+  return addDays(colFracToDate(Math.max(0, endColFrac), columns), -1);
+}
+
+
+export function formatDragDate(d: Date): string {
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
+}
+
+export default function GanttGrid({
+  rows,
+  columns,
+  todayIndex,
+  selectedActivityId,
+  onSelectActivity,
+  onLaneDrag,
+  onBarDrag,
+  onBarDragProgress,
+  resolvedGranularity,
+  findState,
+  onClearFilters,
+  labelColW: labelColWProp,
+  onLabelColWChange,
+  onToggleActivity,
+  onToggleGroup,
+}: Props) {
+  // ── Resizable label column ─────────────────────────────────────────────────
+  // When the parent passes labelColW + onLabelColWChange the column is
+  // controlled, so the width survives view switches (e.g. Gantt ↔ List).
+  // When neither is provided we fall back to internal state.
+  const [internalLabelColW, setInternalLabelColW] = useState(DEFAULT_LABEL_COL_W);
+  const labelColW = labelColWProp ?? internalLabelColW;
+  const setLabelColW = onLabelColWChange ?? setInternalLabelColW;
+
+  const totalW = useMemo(
+    () => labelColW + columns.length * COL_W,
+    [labelColW, columns.length],
+  );
+
+  const labelColWRef = useRef(labelColW);
+  useEffect(() => { labelColWRef.current = labelColW; }, [labelColW]);
+
+  const handleColumnResizeMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = labelColWRef.current;
+
+    function onMouseMove(mv: MouseEvent) {
+      const next = Math.max(MIN_LABEL_COL_W, Math.min(MAX_LABEL_COL_W, startW + (mv.clientX - startX)));
+      setLabelColW(next);
+    }
+    function onMouseUp() {
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+    }
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+  // setLabelColW is either a stable setter from useState or a stable callback from the parent.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Integer column index that contains today (for background highlight)
+  const todayCol = todayIndex >= 0 ? Math.floor(todayIndex) : -1;
+
+  // ── Scroll container ref (needed for find auto-scroll) ────────────────────
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+
+  // Always-current rows ref so the active-match scroll effect doesn't go stale
+  const rowsRef = useRef(rows);
+  useEffect(() => { rowsRef.current = rows; });
+
+  // ── Drag-to-create state ──────────────────────────────────────────────────
+  const [drag, setDrag] = useState<DragState | null>(null);
+  const dragRef = useRef<DragState | null>(null);
+
+  // ── Bar drag state ────────────────────────────────────────────────────────
+  const [barDrag, setBarDrag] = useState<BarDragState | null>(null);
+  const barDragRef = useRef<BarDragState | null>(null);
+  const [dragTooltip, setDragTooltip] = useState<TooltipState | null>(null);
+
+  // ── "Why matched" hover tooltip ───────────────────────────────────────────
+  const [matchTooltip, setMatchTooltip] = useState<MatchTooltipState | null>(null);
+
+  const colFromX = useCallback((laneX: number) => {
+    return Math.max(0, Math.min(columns.length - 1, Math.floor(laneX / COL_W)));
+  }, [columns.length]);
+
+  // ── Auto-scroll to active find match ─────────────────────────────────────
+  useEffect(() => {
+    const activeId = findState?.activeMatchId;
+    if (!activeId || !scrollContainerRef.current) return;
+    const container = scrollContainerRef.current;
+    const currentRows = rowsRef.current;
+
+    let y = HEADER_H;
+    let matchedActivity: GanttActivity | null = null;
+    for (const row of currentRows) {
+      if (row.kind === 'activity' && row.event.id === activeId) {
+        matchedActivity = row.event;
+        break;
+      }
+      y += row.kind === 'group' ? GROUP_H : ROW_H;
+    }
+    if (!matchedActivity) return;
+
+    const viewH = container.clientHeight;
+    const viewW = container.clientWidth;
+    const scrollTop = Math.max(0, y - viewH / 2 + ROW_H / 2);
+    const eventCenterX = labelColWRef.current + (matchedActivity.startCol + matchedActivity.span / 2) * COL_W;
+    const scrollLeft = Math.max(0, eventCenterX - viewW / 2);
+
+    container.scrollTo({ left: scrollLeft, top: scrollTop, behavior: 'smooth' });
+  // Only re-run when the active match changes, not when rows or columns change.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [findState?.activeMatchId]);
+
+  const handleLaneMouseDown = useCallback((
+    e: React.MouseEvent<HTMLDivElement>,
+    rowIdx: number,
+    memberId: string | null,
+  ) => {
+    if (!onLaneDrag) return;
+    e.preventDefault();
+    const rect = e.currentTarget.getBoundingClientRect();
+    const col = colFromX(e.clientX - rect.left);
+    const state: DragState = { rowIdx, memberId, startCol: col, currentCol: col };
+    dragRef.current = state;
+    setDrag(state);
+
+    function onMouseMove(mv: MouseEvent) {
+      if (!dragRef.current) return;
+      const col2 = colFromX(mv.clientX - rect.left);
+      const next = { ...dragRef.current, currentCol: col2 };
+      dragRef.current = next;
+      setDrag({ ...next });
+    }
+
+    function onMouseUp() {
+      const s = dragRef.current;
+      if (s && onLaneDrag && columns.length > 0) {
+        const lo = Math.min(s.startCol, s.currentCol);
+        const hi = Math.max(s.startCol, s.currentCol);
+        const startDate = columns[lo]?.start ?? columns[0].start;
+        const endDate = columns[hi]?.start ?? columns[hi > 0 ? hi : 0].start;
+        onLaneDrag(startDate, endDate, s.memberId);
+      }
+      dragRef.current = null;
+      setDrag(null);
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+    }
+
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+  }, [colFromX, columns, onLaneDrag]);
+
+  // ── Bar drag handler ──────────────────────────────────────────────────────
+
+  const handleBarMouseDown = useCallback((
+    e: React.MouseEvent<HTMLDivElement>,
+    ev: GanttActivity,
+    zone: BarDragZone,
+  ) => {
+    if (!onBarDrag) return;
+    // Only allow drag/resize when the bar is already selected.
+    if (ev.id !== selectedActivityId) return;
+    e.preventDefault();
+    e.stopPropagation(); // prevent lane-drag from firing
+
+    // The bar's parent is the lane div (position: relative, flex: 1).
+    const laneEl = e.currentTarget.parentElement;
+    if (!laneEl) return;
+    const laneRect = laneEl.getBoundingClientRect();
+
+    const initStartCol = ev.startCol;
+    const initEndCol = ev.startCol + ev.span;
+    const initMouseX = e.clientX - laneRect.left;
+    const state: BarDragState = {
+      eventId: ev.id,
+      zone,
+      initStartCol,
+      initEndCol,
+      initMouseX,
+      laneLeft: laneRect.left,
+      snapStartCol: initStartCol,
+      snapEndCol: initEndCol,
+    };
+    barDragRef.current = state;
+    setBarDrag(state);
+
+    // Initial tooltip
+    const startDate = colToStartDate(state.snapStartCol, columns);
+    const endDate = colToEndDate(state.snapEndCol, columns);
+    setDragTooltip({
+      text: tooltipText(zone, startDate, endDate),
+      x: e.clientX,
+      y: e.clientY,
+    });
+
+    function onMouseMove(mv: MouseEvent) {
+      const s = barDragRef.current;
+      if (!s) return;
+
+      const deltaCol = (mv.clientX - (s.laneLeft + s.initMouseX)) / COL_W;
+      const n = columns.length;
+      // Finer snap: snap one granularity level below the active zoom.
+      const div = snapDivisorFor(resolvedGranularity ?? 'auto');
+      const step = 1 / div;
+      const snap = (x: number) => Math.round(x / step) * step;
+
+      let nextStart = s.snapStartCol;
+      let nextEnd = s.snapEndCol;
+
+      if (s.zone === 'left') {
+        nextStart = Math.max(0, Math.min(snap(s.initStartCol + deltaCol), s.initEndCol - step));
+        nextEnd = s.initEndCol;
+      } else if (s.zone === 'right') {
+        nextStart = s.initStartCol;
+        nextEnd = Math.max(s.initStartCol + step, Math.min(snap(s.initEndCol + deltaCol), n));
+      } else {
+        // body: preserve exact span, shift both by snapped delta
+        const span = s.initEndCol - s.initStartCol;
+        const shift = snap(deltaCol);
+        nextStart = Math.max(0, Math.min(s.initStartCol + shift, n - span));
+        nextEnd = nextStart + span;
+      }
+
+      const next: BarDragState = { ...s, snapStartCol: nextStart, snapEndCol: nextEnd };
+      barDragRef.current = next;
+      setBarDrag(next);
+
+      const sd = colToStartDate(nextStart, columns);
+      const ed = colToEndDate(nextEnd, columns);
+      setDragTooltip({ text: tooltipText(s.zone, sd, ed), x: mv.clientX, y: mv.clientY });
+      onBarDragProgress?.(s.eventId, sd, ed);
+    }
+
+    function onMouseUp() {
+      const s = barDragRef.current;
+      if (s && onBarDrag) {
+        const sd = colToStartDate(s.snapStartCol, columns);
+        const ed = colToEndDate(s.snapEndCol, columns);
+        onBarDrag(s.eventId, sd, ed); // eventId field preserved in BarDragState
+      }
+      barDragRef.current = null;
+      setBarDrag(null);
+      setDragTooltip(null);
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+    }
+
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+  }, [columns, onBarDrag]);
+
+  // Header cells are shared between the empty-state path and the unified scroll path.
+  const headerContent = (
+    <>
+      <div
+        style={{
+          width: labelColW,
+          flexShrink: 0,
+          padding: '0 16px',
+          display: 'flex',
+          alignItems: 'center',
+          borderRight: '1px solid var(--border)',
+          fontSize: 11,
+          fontWeight: 600,
+          color: 'var(--muted-foreground)',
+          textTransform: 'uppercase' as const,
+          letterSpacing: '0.06em',
+          position: 'sticky' as const,
+          left: 0,
+          zIndex: 6,
+          background: 'var(--card)',
+          userSelect: 'none',
+        }}
+      >
+        Activity
+        {/* Drag handle — resize the label column */}
+        <div
+          onMouseDown={handleColumnResizeMouseDown}
+          style={{
+            position: 'absolute',
+            right: 0,
+            top: 0,
+            bottom: 0,
+            width: 6,
+            cursor: 'col-resize',
+            zIndex: 10,
+          }}
+        />
+      </div>
+
+      {columns.map((col, i) => {
+        const isToday = i === todayCol;
+        return (
+          <div
+            key={i}
+            style={{
+              width: COL_W,
+              flexShrink: 0,
+              height: HEADER_H,
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              justifyContent: 'center',
+              padding: '0 4px 8px',
+              gap: 2,
+              borderRight: i < columns.length - 1 ? '1px solid var(--border)' : 'none',
+              position: 'relative',
+              overflow: 'hidden',
+            }}
+          >
+            <span style={{
+              fontSize: col.sublabel ? 10 : 11,
+              fontWeight: isToday ? 700 : 600,
+              color: isToday ? 'var(--primary)' : 'var(--muted-foreground)',
+              lineHeight: 1.2,
+              textAlign: 'center',
+            }}>
+              {col.label}
+            </span>
+            {col.sublabel && (
+              <span style={{
+                fontSize: 9,
+                fontWeight: 500,
+                color: 'var(--muted-foreground)',
+                lineHeight: 1,
+                opacity: isToday ? 1 : 0.75,
+              }}>
+                {col.sublabel}
+              </span>
+            )}
+            {isToday && (
+              <div
+                style={{
+                  position: 'absolute',
+                  bottom: 2,
+                  left: `${((todayIndex - todayCol) * 100)}%`,
+                  transform: 'translateX(-50%)',
+                  width: 6,
+                  height: 6,
+                  borderRadius: '50%',
+                  background: 'var(--secondary)',
+                }}
+              />
+            )}
+          </div>
+        );
+      })}
+    </>
+  );
+
+  // ── Find helpers ──────────────────────────────────────────────────────────
+
+  const { hasQuery = false, matchedIds: matchSet, activeMatchId, matchReasons: reasons } = findState ?? {};
+
+  function isMatch(id: string) { return matchSet?.has(id) ?? false; }
+  function isActive(id: string) { return activeMatchId === id; }
+
+  // Non-title reasons to surface in the "why matched" tooltip
+  function nonTitleReasons(id: string): string[] {
+    return (reasons?.get(id) ?? []).filter(r => r !== 'title');
+  }
+
+  // ── Empty state: header + centered placeholder ──────────────────────────────
+  if (rows.length === 0) {
+    const showNoMatchCallout = hasQuery && findState && findState.matchCount === 0;
+    return (
+      <div style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+        <div style={{ overflowX: 'auto', overflowY: 'hidden', flexShrink: 0 }}>
+          <div style={{ width: totalW, display: 'flex', height: HEADER_H, background: 'var(--card)', borderBottom: '1px solid var(--border)' }}>
+            {headerContent}
+          </div>
+        </div>
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12 }}>
+          <EmptyState message="No viewable activities" />
+          {showNoMatchCallout && findState.filtersActive && (
+            <p style={{ fontSize: 12, color: 'var(--muted-foreground)', textAlign: 'center' }}>
+              No matches in current view.{' '}
+              {onClearFilters && (
+                <button
+                  onClick={onClearFilters}
+                  style={{ color: 'var(--primary)', background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, padding: 0, fontFamily: 'inherit' }}
+                >
+                  Clear filters
+                </button>
+              )}
+            </p>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // ── Unified scroll: header sticky inside the single container ──────────────
+  return (
+    <div style={{ height: '100%', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+      <div ref={scrollContainerRef} style={{ flex: 1, overflow: 'auto' }}>
+        <div style={{ width: totalW }}>
+
+          {/* Sticky header row — scrolls horizontally with the grid, pins to top vertically */}
+          <div style={{ position: 'sticky', top: 0, zIndex: 5, display: 'flex', height: HEADER_H, background: 'var(--card)', borderBottom: '1px solid var(--border)' }}>
+            {headerContent}
+          </div>
+
+          {rows.map((row, rowIdx) => {
+            if (row.kind === 'group') {
+              return (
+                <div
+                  key={row.id}
+                  style={{
+                    display: 'flex',
+                    height: GROUP_H,
+                    background: 'var(--muted)',
+                    borderBottom: '1px solid var(--border)',
+                  }}
+                >
+                  <div
+                    onClick={onToggleGroup ? () => onToggleGroup(row.id) : undefined}
+                    style={{
+                      width: labelColW,
+                      flexShrink: 0,
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 6,
+                      padding: '0 14px',
+                      position: 'sticky',
+                      left: 0,
+                      background: 'var(--muted)',
+                      zIndex: 3,
+                      borderRight: '1px solid var(--border)',
+                      cursor: onToggleGroup ? 'pointer' : 'default',
+                      userSelect: 'none',
+                    }}
+                  >
+                    {onToggleGroup ? (
+                      row.collapsed
+                        ? <ChevronRight size={14} strokeWidth={2.5} style={{ flexShrink: 0, color: 'var(--muted-foreground)' }} />
+                        : <ChevronDown size={14} strokeWidth={2.5} style={{ flexShrink: 0, color: 'var(--muted-foreground)' }} />
+                    ) : null}
+                    {row.memberColors && row.memberColors.length > 0 ? (
+                      // Stacked color dots for member-combination groups
+                      <div style={{ display: 'flex', flexShrink: 0 }}>
+                        {row.memberColors.map((c, i) => (
+                          <div
+                            key={i}
+                            style={{
+                              width: 9,
+                              height: 9,
+                              borderRadius: '50%',
+                              background: c,
+                              marginLeft: i === 0 ? 0 : -3,
+                              outline: '1.5px solid var(--muted)',
+                            }}
+                          />
+                        ))}
+                      </div>
+                    ) : (
+                      <div
+                        style={{
+                          width: 9,
+                          height: 9,
+                          borderRadius: 2,
+                          background: row.color,
+                          flexShrink: 0,
+                        }}
+                      />
+                    )}
+                    <span
+                      style={{
+                        fontSize: 11,
+                        fontWeight: 700,
+                        color: 'var(--foreground)',
+                        textTransform: 'uppercase',
+                        letterSpacing: '0.05em',
+                        flex: 1,
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                        fontFamily: 'var(--font-sans)',
+                      }}
+                    >
+                      {row.label}
+                    </span>
+                    <span
+                      style={{
+                        fontSize: 10,
+                        color: 'var(--muted-foreground)',
+                        flexShrink: 0,
+                        fontFamily: 'var(--font-sans)',
+                      }}
+                    >
+                      {row.count}
+                    </span>
+                  </div>
+                  <div style={{ flex: 1 }} />
+                </div>
+              );
+            }
+
+            const ev = row.event;
+            const selected = selectedActivityId === ev.id;
+            const indent = (ev.depth ?? (ev.isChild ? 1 : 0)) * 18;
+            const evIsMatch = isMatch(ev.id);
+            const evIsActive = isActive(ev.id);
+            const dimmed = hasQuery && !evIsMatch;
+            const extraReasons = nonTitleReasons(ev.id);
+
+            return (
+              <div
+                key={`${ev.id}-${rowIdx}`}
+                style={{
+                  display: 'flex',
+                  height: ROW_H,
+                  borderBottom: '1px solid var(--border)',
+                  position: 'relative',
+                  background: selected ? 'hsl(188 59% 38% / .04)' : 'transparent',
+                  opacity: dimmed ? 0.3 : 1,
+                  transition: 'opacity 0.15s',
+                }}
+              >
+                {/* Sticky label cell */}
+                <div
+                  style={{
+                    width: labelColW,
+                    flexShrink: 0,
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 7,
+                    paddingLeft: 14 + indent,
+                    paddingRight: 10,
+                    position: 'sticky',
+                    left: 0,
+                    background: selected ? 'var(--muted)' : 'var(--card)',
+                    zIndex: 6,
+                    borderRight: '1px solid var(--border)',
+                    cursor: 'pointer',
+                    transition: 'background 0.1s',
+                  }}
+                  onClick={() => onSelectActivity(ev.id === selectedActivityId ? null : ev.id)}
+                  onMouseEnter={e => {
+                    e.currentTarget.style.background = 'var(--muted)';
+                  }}
+                  onMouseLeave={e => {
+                    e.currentTarget.style.background = selected ? 'var(--muted)' : 'var(--card)';
+                  }}
+                >
+                  {/* Expand/collapse chevron slot — reserved (empty for leaves) so
+                      sibling badges stay aligned within a tree level. */}
+                  {onToggleActivity && (
+                    <div style={{ width: 16, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                      {ev.hasChildren && (
+                        <button
+                          onClick={e => { e.stopPropagation(); onToggleActivity(ev.id); }}
+                          title={ev.collapsed ? 'Expand' : 'Collapse'}
+                          aria-label={ev.collapsed ? 'Expand children' : 'Collapse children'}
+                          style={{
+                            display: 'flex', alignItems: 'center', justifyContent: 'center',
+                            width: 16, height: 16, padding: 0, border: 'none', borderRadius: 3,
+                            background: 'none', cursor: 'pointer', color: 'var(--muted-foreground)',
+                          }}
+                          onMouseEnter={e => (e.currentTarget.style.background = 'var(--border)')}
+                          onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                        >
+                          {ev.collapsed
+                            ? <ChevronRight size={13} strokeWidth={2.5} />
+                            : <ChevronDown size={13} strokeWidth={2.5} />}
+                        </button>
+                      )}
+                    </div>
+                  )}
+                  <Badge
+                    identity={{ color: ev.color, icon: ev.icon ?? '__none__' }}
+                    name={ev.title}
+                    shape="square"
+                    size={20}
+                  />
+                  <span
+                    style={{
+                      fontSize: 12,
+                      fontWeight: 500,
+                      color: 'var(--foreground)',
+                      flex: 1,
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                      fontFamily: 'var(--font-sans)',
+                    }}
+                  >
+                    {ev.title}
+                  </span>
+                  {ev.members.length > 0 && (
+                    <div style={{ display: 'flex', flexShrink: 0 }}>
+                      {ev.members.slice(0, 3).map((m, i) => (
+                        <div
+                          key={m.id}
+                          style={{ marginLeft: i === 0 ? 0 : -5 }}
+                          title={m.name}
+                        >
+                          <MemberAvatar member={m} size={20} />
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* Lane — background columns + today line + event bar */}
+                <div
+                  style={{ position: 'relative', flex: 1, display: 'flex', cursor: onLaneDrag ? 'crosshair' : 'default' }}
+                  onMouseDown={e => handleLaneMouseDown(e, rowIdx, ev.members[0]?.id ?? null)}
+                >
+                  {columns.map((_, i) => (
+                    <div
+                      key={i}
+                      style={{
+                        width: COL_W,
+                        height: '100%',
+                        flexShrink: 0,
+                        borderRight: i < columns.length - 1 ? '1px solid var(--border)' : 'none',
+                        background:
+                          i === todayCol && !selected ? 'hsl(188 59% 38% / .04)' : 'transparent',
+                      }}
+                    />
+                  ))}
+
+                  {/* Drag selection highlight */}
+                  {drag && drag.rowIdx === rowIdx && (() => {
+                    const lo = Math.min(drag.startCol, drag.currentCol);
+                    const hi = Math.max(drag.startCol, drag.currentCol);
+                    return (
+                      <div
+                        style={{
+                          position: 'absolute',
+                          top: 4,
+                          bottom: 4,
+                          left: lo * COL_W,
+                          width: (hi - lo + 1) * COL_W,
+                          background: 'hsl(188 59% 38% / .18)',
+                          border: '1.5px dashed var(--primary)',
+                          borderRadius: 4,
+                          pointerEvents: 'none',
+                          zIndex: 3,
+                        }}
+                      />
+                    );
+                  })()}
+
+                  {/* Today vertical line */}
+                  {todayIndex >= 0 && (
+                    <div
+                      style={{
+                        position: 'absolute',
+                        top: 0,
+                        bottom: 0,
+                        left: todayIndex * COL_W,
+                        width: 2,
+                        background: 'var(--secondary)',
+                        opacity: 0.5,
+                        zIndex: 2,
+                        pointerEvents: 'none',
+                      }}
+                    />
+                  )}
+
+                  {/* Event bar — live position overridden while dragging */}
+                  {(() => {
+                    const isDragging = barDrag?.eventId === ev.id;
+                    const startCol = isDragging ? barDrag!.snapStartCol : ev.startCol;
+                    const endCol = isDragging ? barDrag!.snapEndCol : ev.startCol + ev.span;
+                    const left = startCol * COL_W + 2;
+                    const width = Math.max((endCol - startCol) * COL_W - 4, COL_W * 0.3);
+                    // Only selected bars show grab/move cursors; unselected bars show pointer
+                    // to prevent accidental date changes when the user just wants to inspect.
+                    const grabCursor = isDragging
+                      ? 'grabbing'
+                      : (selected && onBarDrag) ? 'grab' : 'pointer';
+
+                    // Box shadow: find states take precedence over selection ring.
+                    // CSS classes (.find-active-bar, .find-match-bar) provide the
+                    // amber outline; we only set inline boxShadow for the selected ring.
+                    const boxShadow = (evIsActive || evIsMatch)
+                      ? undefined
+                      : selected
+                        ? `0 0 0 2px white, 0 0 0 4px ${ev.color}`
+                        : 'var(--shadow-sm)';
+
+                    return (
+                      <div
+                        onClick={() => {
+                          // Bar click always selects — use the label cell to deselect.
+                          if (!isDragging) onSelectActivity(ev.id);
+                        }}
+                        onMouseDown={e => {
+                          if (!onBarDrag) { e.stopPropagation(); return; }
+                          const barRect = e.currentTarget.getBoundingClientRect();
+                          const xInBar = e.clientX - barRect.left;
+                          let zone: BarDragZone;
+                          if (xInBar <= EDGE_W) zone = 'left';
+                          else if (xInBar >= barRect.width - EDGE_W) zone = 'right';
+                          else zone = 'body';
+                          handleBarMouseDown(e, ev, zone);
+                        }}
+                        onMouseEnter={e => {
+                          if (!isDragging) e.currentTarget.style.filter = 'brightness(1.08)';
+                          // Show "why matched" tooltip for non-title matches
+                          if (extraReasons.length > 0) {
+                            setMatchTooltip({ reasons: extraReasons, x: e.clientX, y: e.clientY });
+                          }
+                        }}
+                        onMouseMove={e => {
+                          if (matchTooltip) {
+                            setMatchTooltip(t => t ? { ...t, x: e.clientX, y: e.clientY } : null);
+                          }
+                        }}
+                        onMouseLeave={e => {
+                          e.currentTarget.style.filter = '';
+                          setMatchTooltip(null);
+                        }}
+                        className={evIsActive ? 'find-active-bar' : evIsMatch ? 'find-match-bar' : undefined}
+                        style={{
+                          position: 'absolute',
+                          top: 9,
+                          bottom: 9,
+                          left,
+                          width,
+                          background: ev.color,
+                          borderRadius: 5,
+                          display: 'flex',
+                          alignItems: 'center',
+                          padding: `0 ${EDGE_W + 2}px`,
+                          fontSize: 11,
+                          fontWeight: 600,
+                          color: 'white',
+                          overflow: 'hidden',
+                          whiteSpace: 'nowrap',
+                          textOverflow: 'ellipsis',
+                          cursor: grabCursor,
+                          zIndex: 4,
+                          boxShadow,
+                          opacity: isDragging ? 0.85 : 1,
+                          transition: isDragging ? 'none' : 'box-shadow 0.12s, opacity 0.1s',
+                          fontFamily: 'var(--font-sans)',
+                          userSelect: 'none',
+                        }}
+                      >
+                        {/* Progress fill overlay — subtle darker shade showing % complete */}
+                        {(ev.percentComplete ?? 0) > 0 && (
+                          <div
+                            style={{
+                              position: 'absolute',
+                              left: 0,
+                              top: 0,
+                              bottom: 0,
+                              width: `${ev.percentComplete}%`,
+                              background: 'rgba(0,0,0,0.18)',
+                              borderRadius: 5,
+                              pointerEvents: 'none',
+                            }}
+                          />
+                        )}
+                        {/* Left resize handle — only shown on selected bars */}
+                        {onBarDrag && selected && (
+                          <div
+                            style={{
+                              position: 'absolute',
+                              left: 0,
+                              top: 0,
+                              bottom: 0,
+                              width: EDGE_W,
+                              cursor: 'ew-resize',
+                              borderRadius: '5px 0 0 5px',
+                            }}
+                          />
+                        )}
+                        {ev.title}
+                        {/* Right resize handle — only shown on selected bars */}
+                        {onBarDrag && selected && (
+                          <div
+                            style={{
+                              position: 'absolute',
+                              right: 0,
+                              top: 0,
+                              bottom: 0,
+                              width: EDGE_W,
+                              cursor: 'ew-resize',
+                              borderRadius: '0 5px 5px 0',
+                            }}
+                          />
+                        )}
+                      </div>
+                    );
+                  })()}
+                </div>
+              </div>
+            );
+          })}
+
+          {/* No-matches-in-view callout — rendered inside the scroll container */}
+          {hasQuery && findState && findState.matchCount === 0 && rows.length > 0 && findState.filtersActive && (
+            <div style={{
+              padding: '12px 16px',
+              fontSize: 12,
+              color: 'var(--muted-foreground)',
+              borderTop: '1px solid var(--border)',
+            }}>
+              No matches in current view.{' '}
+              {onClearFilters && (
+                <button
+                  onClick={onClearFilters}
+                  style={{ color: 'var(--primary)', background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, padding: 0, fontFamily: 'inherit' }}
+                >
+                  Clear filters
+                </button>
+              )}
+            </div>
+          )}
+
+        </div>
+      </div>
+
+      {/* Drag tooltip — fixed position follows the mouse during bar drag */}
+      {dragTooltip && (
+        <div
+          style={{
+            position: 'fixed',
+            left: dragTooltip.x + 14,
+            top: dragTooltip.y - 28,
+            background: 'var(--popover)',
+            color: 'var(--popover-foreground)',
+            border: '1px solid var(--border)',
+            borderRadius: 6,
+            padding: '4px 10px',
+            fontSize: 11,
+            fontWeight: 600,
+            fontFamily: 'var(--font-sans)',
+            pointerEvents: 'none',
+            zIndex: 9999,
+            whiteSpace: 'nowrap',
+            boxShadow: 'var(--shadow-md)',
+          }}
+        >
+          {dragTooltip.text}
+        </div>
+      )}
+
+      {/* "Why matched" tooltip — shown on hover for non-title match reasons */}
+      {matchTooltip && (
+        <div
+          style={{
+            position: 'fixed',
+            left: matchTooltip.x + 12,
+            top: matchTooltip.y - 36,
+            background: 'var(--popover)',
+            color: 'var(--popover-foreground)',
+            border: '1px solid var(--border)',
+            borderRadius: 6,
+            padding: '4px 10px',
+            fontSize: 11,
+            fontFamily: 'var(--font-sans)',
+            pointerEvents: 'none',
+            zIndex: 9999,
+            whiteSpace: 'nowrap',
+            boxShadow: 'var(--shadow-md)',
+          }}
+        >
+          {matchTooltip.reasons.map(r => (
+            <div key={r} style={{ lineHeight: 1.6 }}>matched {r}</div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+````
+
 ## File: docs/TASKS.md
 ````markdown
 # Tasks
@@ -52299,6 +53533,38 @@ Includes both the webhook backend and the per-timeline connector sidebar UI (pre
 - [ ] Connector row hover → gear icon → config drawer; delete with confirm
 - [ ] Provider icon set (Asana, Aha, Sheets, Excel, generic Plug)
 
+## Phase 13 — Shares (Public Read-Only View Links)
+
+**Next up.** Full design in [docs/plans/phase-13-shares.md](plans/phase-13-shares.md). Decision: live cached data + read-only SPA, server-side (Go) filter, view-driven field projection. No Chromium.
+
+**13.1 — Foundation, public gateway, Gantt viewer (MVP):**
+- [ ] Migration: `shares` table (`id`, `timeline_id`, `token` UNIQUE, `view_type`, `view_config` JSON, `password_hash?`, `expires_at?`, `created_by`, `created_at`, `last_viewed_at`, `view_count`, `revoked_at`)
+- [ ] Token migration: insert one `shares` row per existing timeline reusing `timelines.share_token` (keep the column for now; drop in a later migration)
+- [ ] Go filter evaluator (`internal/filters`) mirroring `lib/filterEngine.ts` `matchesFilter`
+- [ ] Shared golden-fixture suite (`packages/shared/testdata/filter-fixtures.json`) run by both `filterEngine.test.ts` and a Go test (drift guard)
+- [ ] `GET /shares/{token}` gateway: scope-locked query (token → server-derived `timeline_id`, **no client selector**) → evaluate frozen filter in Go → fixed display projection → prune referenced members/statuses/tags → TTL cache (`DRABA_SHARE_CACHE_TTL`, default 60s)
+- [ ] `POST /timelines/{id}/shares`, `GET /timelines/{id}/shares`, `PATCH /shares/{id}`, `DELETE /shares/{id}`
+- [ ] OpenAPI: `Share`, `ShareViewConfig`, `CreateShareInput`, `PatchShareInput`, `PublicShareProjection`; regenerate TS types
+- [ ] Gantt `interactive=false` mode (no toolbar/menus/drag/edit; clicks inert; forced light theme)
+- [ ] "Share this view" action in Gantt toolbar → snapshot live toolbar state incl. resolved `FilterDefinition` → create share → copy URL
+- [ ] `/s/:token` public route (outside `ProtectedRoute`) + branding strip (team name · "Shared view" · last-updated)
+- [ ] Scope-isolation test: token reaches exactly its timeline's filtered records; tampering (other timeline/activity/team id, scope-widening params) cannot widen; no share-reachable by-id/list endpoint
+- [ ] Verify payload: filtered-out activities + member email/`user_id`/role + access list + other timelines all absent
+
+**13.2 — Remaining views read-only (List, Calendar, Kanban):**
+- [ ] `interactive=false` + public mounting for List, Calendar, Kanban (clicks inert)
+- [ ] Projection: include `notes` only when a List share has the Notes column enabled in `view_config`
+- [ ] Per-view read-only polish
+- [ ] "Share this view" in each toolbar
+
+**13.3 — Password protection + unlock:**
+- [ ] `password_hash` (bcrypt) on create/patch; `GET /shares/{token}` → `401 { passwordRequired: true }` when locked
+- [ ] `POST /shares/{token}/unlock` → short-lived view JWT scoped to the share; rate-limit unlock attempts (N/IP/hour)
+
+**13.4 — Lifecycle & management:**
+- [ ] Expiry + revocation → `410 Gone`
+- [ ] "Manage shares" UI per timeline (list, view counts, last-viewed, edit, revoke) + active-share-count chip — counts visible to creator + team admins
+
 ## Done
 - [x] Initialize repo scaffold — 2026-04-27
 - [x] Define requirements, architecture, conventions — 2026-04-27
@@ -52314,1062 +53580,6 @@ Includes both the webhook backend and the per-timeline connector sidebar UI (pre
 - Notifications (email, push)
 - Recurring event UI (RRULE editing)
 - Kanban drag-to-change-status (v2; v1 Kanban is read-only)
-````
-
-## File: packages/web/src/components/gantt/GanttGrid.tsx
-````typescript
-/**
- * GanttGrid — presentational Gantt chart.
- *
- * Renders a sticky header row of column labels, then one row per GanttRow
- * entry. Rows are either group-header dividers or event bars. All data
- * preparation (grouping, sorting, date math) lives in the parent GanttView.
- *
- * Drag on an empty lane cell to select a date range; onLaneDrag fires on
- * mouseup with the resolved start/end dates and the lane's memberId.
- *
- * Drag on an event bar's left/right 8px edge to resize it, or on its body to
- * move it. onBarDrag fires on mouseup with the resolved new dates.
- *
- * When findState is provided with a non-empty query, non-matching event rows
- * are dimmed to 0.3 opacity; matching rows get an amber outline on their bar;
- * the active (parked) match gets a stronger amber outline with a pulse
- * animation. Stepping to a new active match auto-scrolls both axes to center
- * the bar in the viewport.
- */
-
-import { useRef, useState, useCallback, useEffect, useMemo } from 'react';
-import { ChevronDown, ChevronRight } from 'lucide-react';
-import MemberAvatar from '../MemberAvatar';
-import { Badge } from '../identity/Badge';
-import EmptyState from '../shared/EmptyState';
-import type { Member } from '../../types';
-import type { ColumnDef, TimeGranularity } from './granularity';
-import { addDays, snapDivisorFor } from './granularity';
-
-export const DEFAULT_LABEL_COL_W = 240;
-const MIN_LABEL_COL_W = 140;
-const MAX_LABEL_COL_W = 400;
-const HEADER_H = 36;
-const ROW_H = 44;
-const GROUP_H = 30;
-const COL_W = 80;
-const EDGE_W = 8; // px hit zone for resize handles
-
-/** A positioned activity bar ready for rendering. */
-export interface GanttActivity {
-  id: string;
-  title: string;
-  /** Fractional column start (0-based). */
-  startCol: number;
-  /** Fractional column span. */
-  span: number;
-  /** Hex color for bar background and badge. */
-  color: string;
-  /** Icon ID from the activity's identity, if set. */
-  icon?: string;
-  members: Member[];
-  isChild: boolean;
-  /** Nesting depth in the parent→child tree (0 = root). Drives left indent. */
-  depth?: number;
-  /** True when this activity has child activities nested beneath it. */
-  hasChildren?: boolean;
-  /** True when this activity's subtree is currently collapsed (children hidden). */
-  collapsed?: boolean;
-  percentComplete?: number | null;
-}
-
-export type GanttRow =
-  | { kind: 'group'; id: string; label: string; color: string; memberColors?: string[]; count: number; collapsed?: boolean }
-  | { kind: 'activity'; event: GanttActivity };
-
-/** Visual state for the in-view Find feature. Passed from GanttView. */
-export interface FindState {
-  hasQuery: boolean;
-  matchedIds: Set<string>;
-  activeMatchId: string | null;
-  /** Per-event match reasons for "why matched" tooltip (non-title reasons only). */
-  matchReasons: Map<string, string[]>;
-  filtersActive: boolean;
-  matchCount: number;
-}
-
-interface DragState {
-  rowIdx: number;
-  memberId: string | null;
-  startCol: number;
-  currentCol: number;
-}
-
-type BarDragZone = 'left' | 'right' | 'body';
-
-interface BarDragState {
-  eventId: string;
-  zone: BarDragZone;
-  /** Fractional column of the event's visual start when drag began. */
-  initStartCol: number;
-  /** Fractional column of the event's visual end (startCol + span) when drag began. */
-  initEndCol: number;
-  /** Lane-relative x of the mouse when drag began. */
-  initMouseX: number;
-  /** Page-relative left edge of the lane div. */
-  laneLeft: number;
-  /** Current snapped start column (integer). */
-  snapStartCol: number;
-  /** Current snapped end column (integer, exclusive — col after last occupied). */
-  snapEndCol: number;
-}
-
-interface TooltipState {
-  text: string;
-  /** Viewport-relative x for tooltip positioning. */
-  x: number;
-  /** Viewport-relative y for tooltip positioning. */
-  y: number;
-}
-
-/** Tooltip shown when hovering a matched event bar that matched on a non-title field. */
-interface MatchTooltipState {
-  reasons: string[];
-  x: number;
-  y: number;
-}
-
-interface Props {
-  rows: GanttRow[];
-  columns: ColumnDef[];
-  /** Fractional column index of today (-1 if outside range). */
-  todayIndex: number;
-  selectedActivityId: string | null;
-  onSelectActivity: (id: string | null) => void;
-  /** Called when the user drags on an empty lane cell to create an activity. */
-  onLaneDrag?: (startDate: Date, endDate: Date, memberId: string | null) => void;
-  /** Called when the user drags a bar edge or body to resize/move it. */
-  onBarDrag?: (activityId: string, newStartDate: Date, newEndDate: Date) => void;
-  /** Called during a bar drag with the current snapped dates — for live sidebar update. */
-  onBarDragProgress?: (activityId: string, newStartDate: Date, newEndDate: Date) => void;
-  /** Resolved granularity — used to compute the finer snap divisor during drag. */
-  resolvedGranularity?: TimeGranularity | 'auto';
-  /** Find state from GanttView; absent when the find bar is closed/idle. */
-  findState?: FindState;
-  /** Called when the user clicks "Clear filters" in the no-matches callout. */
-  onClearFilters?: () => void;
-  /** Current label column width in px — lifts state to the parent so it survives view switches. */
-  labelColW?: number;
-  /** Called when the user drags the column resize handle. */
-  onLabelColWChange?: (w: number) => void;
-  /** Toggles the collapsed state of an activity's child subtree (parent grouping). */
-  onToggleActivity?: (id: string) => void;
-  /** Toggles the collapsed state of a group header (member grouping). */
-  onToggleGroup?: (id: string) => void;
-}
-
-// ── Bar drag helpers ─────────────────────────────────────────────────────────
-
-function tooltipText(zone: BarDragZone, startDate: Date, endDate: Date): string {
-  if (zone === 'left') return `Start: ${formatDragDate(startDate)}`;
-  if (zone === 'right') return `End: ${formatDragDate(endDate)}`;
-  return `${formatDragDate(startDate)} → ${formatDragDate(endDate)}`;
-}
-
-// ── Date helpers (support fractional column positions) ───────────────────────
-
-// Maps a fractional column position to a calendar Date by interpolating within
-// the column's day range. Uses the full period length (start→end) rather than
-// the clamped `days` field so boundary columns still produce correct dates.
-function colFracToDate(colFrac: number, columns: ColumnDef[]): Date {
-  let remaining = Math.max(0, colFrac);
-  for (const col of columns) {
-    if (remaining < 1) {
-      const periodDays = Math.round((col.end.getTime() - col.start.getTime()) / 86_400_000);
-      return addDays(col.start, Math.round(remaining * periodDays));
-    }
-    remaining -= 1;
-  }
-  return columns[columns.length - 1].end;
-}
-
-function colToStartDate(colFrac: number, columns: ColumnDef[]): Date {
-  return colFracToDate(Math.max(0, colFrac), columns);
-}
-
-// endColFrac is exclusive (the fractional col just past the last occupied day).
-function colToEndDate(endColFrac: number, columns: ColumnDef[]): Date {
-  // The last included date is 1 day before the date at the exclusive end.
-  return addDays(colFracToDate(Math.max(0, endColFrac), columns), -1);
-}
-
-
-export function formatDragDate(d: Date): string {
-  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
-}
-
-export default function GanttGrid({
-  rows,
-  columns,
-  todayIndex,
-  selectedActivityId,
-  onSelectActivity,
-  onLaneDrag,
-  onBarDrag,
-  onBarDragProgress,
-  resolvedGranularity,
-  findState,
-  onClearFilters,
-  labelColW: labelColWProp,
-  onLabelColWChange,
-  onToggleActivity,
-  onToggleGroup,
-}: Props) {
-  // ── Resizable label column ─────────────────────────────────────────────────
-  // When the parent passes labelColW + onLabelColWChange the column is
-  // controlled, so the width survives view switches (e.g. Gantt ↔ List).
-  // When neither is provided we fall back to internal state.
-  const [internalLabelColW, setInternalLabelColW] = useState(DEFAULT_LABEL_COL_W);
-  const labelColW = labelColWProp ?? internalLabelColW;
-  const setLabelColW = onLabelColWChange ?? setInternalLabelColW;
-
-  const totalW = useMemo(
-    () => labelColW + columns.length * COL_W,
-    [labelColW, columns.length],
-  );
-
-  const labelColWRef = useRef(labelColW);
-  useEffect(() => { labelColWRef.current = labelColW; }, [labelColW]);
-
-  const handleColumnResizeMouseDown = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    const startX = e.clientX;
-    const startW = labelColWRef.current;
-
-    function onMouseMove(mv: MouseEvent) {
-      const next = Math.max(MIN_LABEL_COL_W, Math.min(MAX_LABEL_COL_W, startW + (mv.clientX - startX)));
-      setLabelColW(next);
-    }
-    function onMouseUp() {
-      window.removeEventListener('mousemove', onMouseMove);
-      window.removeEventListener('mouseup', onMouseUp);
-    }
-    window.addEventListener('mousemove', onMouseMove);
-    window.addEventListener('mouseup', onMouseUp);
-  // setLabelColW is either a stable setter from useState or a stable callback from the parent.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // Integer column index that contains today (for background highlight)
-  const todayCol = todayIndex >= 0 ? Math.floor(todayIndex) : -1;
-
-  // ── Scroll container ref (needed for find auto-scroll) ────────────────────
-  const scrollContainerRef = useRef<HTMLDivElement>(null);
-
-  // Always-current rows ref so the active-match scroll effect doesn't go stale
-  const rowsRef = useRef(rows);
-  useEffect(() => { rowsRef.current = rows; });
-
-  // ── Drag-to-create state ──────────────────────────────────────────────────
-  const [drag, setDrag] = useState<DragState | null>(null);
-  const dragRef = useRef<DragState | null>(null);
-
-  // ── Bar drag state ────────────────────────────────────────────────────────
-  const [barDrag, setBarDrag] = useState<BarDragState | null>(null);
-  const barDragRef = useRef<BarDragState | null>(null);
-  const [dragTooltip, setDragTooltip] = useState<TooltipState | null>(null);
-
-  // ── "Why matched" hover tooltip ───────────────────────────────────────────
-  const [matchTooltip, setMatchTooltip] = useState<MatchTooltipState | null>(null);
-
-  const colFromX = useCallback((laneX: number) => {
-    return Math.max(0, Math.min(columns.length - 1, Math.floor(laneX / COL_W)));
-  }, [columns.length]);
-
-  // ── Auto-scroll to active find match ─────────────────────────────────────
-  useEffect(() => {
-    const activeId = findState?.activeMatchId;
-    if (!activeId || !scrollContainerRef.current) return;
-    const container = scrollContainerRef.current;
-    const currentRows = rowsRef.current;
-
-    let y = HEADER_H;
-    let matchedActivity: GanttActivity | null = null;
-    for (const row of currentRows) {
-      if (row.kind === 'activity' && row.event.id === activeId) {
-        matchedActivity = row.event;
-        break;
-      }
-      y += row.kind === 'group' ? GROUP_H : ROW_H;
-    }
-    if (!matchedActivity) return;
-
-    const viewH = container.clientHeight;
-    const viewW = container.clientWidth;
-    const scrollTop = Math.max(0, y - viewH / 2 + ROW_H / 2);
-    const eventCenterX = labelColWRef.current + (matchedActivity.startCol + matchedActivity.span / 2) * COL_W;
-    const scrollLeft = Math.max(0, eventCenterX - viewW / 2);
-
-    container.scrollTo({ left: scrollLeft, top: scrollTop, behavior: 'smooth' });
-  // Only re-run when the active match changes, not when rows or columns change.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [findState?.activeMatchId]);
-
-  const handleLaneMouseDown = useCallback((
-    e: React.MouseEvent<HTMLDivElement>,
-    rowIdx: number,
-    memberId: string | null,
-  ) => {
-    if (!onLaneDrag) return;
-    e.preventDefault();
-    const rect = e.currentTarget.getBoundingClientRect();
-    const col = colFromX(e.clientX - rect.left);
-    const state: DragState = { rowIdx, memberId, startCol: col, currentCol: col };
-    dragRef.current = state;
-    setDrag(state);
-
-    function onMouseMove(mv: MouseEvent) {
-      if (!dragRef.current) return;
-      const col2 = colFromX(mv.clientX - rect.left);
-      const next = { ...dragRef.current, currentCol: col2 };
-      dragRef.current = next;
-      setDrag({ ...next });
-    }
-
-    function onMouseUp() {
-      const s = dragRef.current;
-      if (s && onLaneDrag && columns.length > 0) {
-        const lo = Math.min(s.startCol, s.currentCol);
-        const hi = Math.max(s.startCol, s.currentCol);
-        const startDate = columns[lo]?.start ?? columns[0].start;
-        const endDate = columns[hi]?.start ?? columns[hi > 0 ? hi : 0].start;
-        onLaneDrag(startDate, endDate, s.memberId);
-      }
-      dragRef.current = null;
-      setDrag(null);
-      window.removeEventListener('mousemove', onMouseMove);
-      window.removeEventListener('mouseup', onMouseUp);
-    }
-
-    window.addEventListener('mousemove', onMouseMove);
-    window.addEventListener('mouseup', onMouseUp);
-  }, [colFromX, columns, onLaneDrag]);
-
-  // ── Bar drag handler ──────────────────────────────────────────────────────
-
-  const handleBarMouseDown = useCallback((
-    e: React.MouseEvent<HTMLDivElement>,
-    ev: GanttActivity,
-    zone: BarDragZone,
-  ) => {
-    if (!onBarDrag) return;
-    // Only allow drag/resize when the bar is already selected.
-    if (ev.id !== selectedActivityId) return;
-    e.preventDefault();
-    e.stopPropagation(); // prevent lane-drag from firing
-
-    // The bar's parent is the lane div (position: relative, flex: 1).
-    const laneEl = e.currentTarget.parentElement;
-    if (!laneEl) return;
-    const laneRect = laneEl.getBoundingClientRect();
-
-    const initStartCol = ev.startCol;
-    const initEndCol = ev.startCol + ev.span;
-    const initMouseX = e.clientX - laneRect.left;
-    const state: BarDragState = {
-      eventId: ev.id,
-      zone,
-      initStartCol,
-      initEndCol,
-      initMouseX,
-      laneLeft: laneRect.left,
-      snapStartCol: initStartCol,
-      snapEndCol: initEndCol,
-    };
-    barDragRef.current = state;
-    setBarDrag(state);
-
-    // Initial tooltip
-    const startDate = colToStartDate(state.snapStartCol, columns);
-    const endDate = colToEndDate(state.snapEndCol, columns);
-    setDragTooltip({
-      text: tooltipText(zone, startDate, endDate),
-      x: e.clientX,
-      y: e.clientY,
-    });
-
-    function onMouseMove(mv: MouseEvent) {
-      const s = barDragRef.current;
-      if (!s) return;
-
-      const deltaCol = (mv.clientX - (s.laneLeft + s.initMouseX)) / COL_W;
-      const n = columns.length;
-      // Finer snap: snap one granularity level below the active zoom.
-      const div = snapDivisorFor(resolvedGranularity ?? 'auto');
-      const step = 1 / div;
-      const snap = (x: number) => Math.round(x / step) * step;
-
-      let nextStart = s.snapStartCol;
-      let nextEnd = s.snapEndCol;
-
-      if (s.zone === 'left') {
-        nextStart = Math.max(0, Math.min(snap(s.initStartCol + deltaCol), s.initEndCol - step));
-        nextEnd = s.initEndCol;
-      } else if (s.zone === 'right') {
-        nextStart = s.initStartCol;
-        nextEnd = Math.max(s.initStartCol + step, Math.min(snap(s.initEndCol + deltaCol), n));
-      } else {
-        // body: preserve exact span, shift both by snapped delta
-        const span = s.initEndCol - s.initStartCol;
-        const shift = snap(deltaCol);
-        nextStart = Math.max(0, Math.min(s.initStartCol + shift, n - span));
-        nextEnd = nextStart + span;
-      }
-
-      const next: BarDragState = { ...s, snapStartCol: nextStart, snapEndCol: nextEnd };
-      barDragRef.current = next;
-      setBarDrag(next);
-
-      const sd = colToStartDate(nextStart, columns);
-      const ed = colToEndDate(nextEnd, columns);
-      setDragTooltip({ text: tooltipText(s.zone, sd, ed), x: mv.clientX, y: mv.clientY });
-      onBarDragProgress?.(s.eventId, sd, ed);
-    }
-
-    function onMouseUp() {
-      const s = barDragRef.current;
-      if (s && onBarDrag) {
-        const sd = colToStartDate(s.snapStartCol, columns);
-        const ed = colToEndDate(s.snapEndCol, columns);
-        onBarDrag(s.eventId, sd, ed); // eventId field preserved in BarDragState
-      }
-      barDragRef.current = null;
-      setBarDrag(null);
-      setDragTooltip(null);
-      window.removeEventListener('mousemove', onMouseMove);
-      window.removeEventListener('mouseup', onMouseUp);
-    }
-
-    window.addEventListener('mousemove', onMouseMove);
-    window.addEventListener('mouseup', onMouseUp);
-  }, [columns, onBarDrag]);
-
-  // Header cells are shared between the empty-state path and the unified scroll path.
-  const headerContent = (
-    <>
-      <div
-        style={{
-          width: labelColW,
-          flexShrink: 0,
-          padding: '0 16px',
-          display: 'flex',
-          alignItems: 'center',
-          borderRight: '1px solid var(--border)',
-          fontSize: 11,
-          fontWeight: 600,
-          color: 'var(--muted-foreground)',
-          textTransform: 'uppercase' as const,
-          letterSpacing: '0.06em',
-          position: 'sticky' as const,
-          left: 0,
-          zIndex: 6,
-          background: 'var(--card)',
-          userSelect: 'none',
-        }}
-      >
-        Activity
-        {/* Drag handle — resize the label column */}
-        <div
-          onMouseDown={handleColumnResizeMouseDown}
-          style={{
-            position: 'absolute',
-            right: 0,
-            top: 0,
-            bottom: 0,
-            width: 6,
-            cursor: 'col-resize',
-            zIndex: 10,
-          }}
-        />
-      </div>
-
-      {columns.map((col, i) => {
-        const isToday = i === todayCol;
-        return (
-          <div
-            key={i}
-            style={{
-              width: COL_W,
-              flexShrink: 0,
-              height: HEADER_H,
-              display: 'flex',
-              flexDirection: 'column',
-              alignItems: 'center',
-              justifyContent: 'center',
-              padding: '0 4px 8px',
-              gap: 2,
-              borderRight: i < columns.length - 1 ? '1px solid var(--border)' : 'none',
-              position: 'relative',
-              overflow: 'hidden',
-            }}
-          >
-            <span style={{
-              fontSize: col.sublabel ? 10 : 11,
-              fontWeight: isToday ? 700 : 600,
-              color: isToday ? 'var(--primary)' : 'var(--muted-foreground)',
-              lineHeight: 1.2,
-              textAlign: 'center',
-            }}>
-              {col.label}
-            </span>
-            {col.sublabel && (
-              <span style={{
-                fontSize: 9,
-                fontWeight: 500,
-                color: 'var(--muted-foreground)',
-                lineHeight: 1,
-                opacity: isToday ? 1 : 0.75,
-              }}>
-                {col.sublabel}
-              </span>
-            )}
-            {isToday && (
-              <div
-                style={{
-                  position: 'absolute',
-                  bottom: 2,
-                  left: `${((todayIndex - todayCol) * 100)}%`,
-                  transform: 'translateX(-50%)',
-                  width: 6,
-                  height: 6,
-                  borderRadius: '50%',
-                  background: 'var(--secondary)',
-                }}
-              />
-            )}
-          </div>
-        );
-      })}
-    </>
-  );
-
-  // ── Find helpers ──────────────────────────────────────────────────────────
-
-  const { hasQuery = false, matchedIds: matchSet, activeMatchId, matchReasons: reasons } = findState ?? {};
-
-  function isMatch(id: string) { return matchSet?.has(id) ?? false; }
-  function isActive(id: string) { return activeMatchId === id; }
-
-  // Non-title reasons to surface in the "why matched" tooltip
-  function nonTitleReasons(id: string): string[] {
-    return (reasons?.get(id) ?? []).filter(r => r !== 'title');
-  }
-
-  // ── Empty state: header + centered placeholder ──────────────────────────────
-  if (rows.length === 0) {
-    const showNoMatchCallout = hasQuery && findState && findState.matchCount === 0;
-    return (
-      <div style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-        <div style={{ overflowX: 'auto', overflowY: 'hidden', flexShrink: 0 }}>
-          <div style={{ width: totalW, display: 'flex', height: HEADER_H, background: 'var(--card)', borderBottom: '1px solid var(--border)' }}>
-            {headerContent}
-          </div>
-        </div>
-        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12 }}>
-          <EmptyState message="No viewable activities" />
-          {showNoMatchCallout && findState.filtersActive && (
-            <p style={{ fontSize: 12, color: 'var(--muted-foreground)', textAlign: 'center' }}>
-              No matches in current view.{' '}
-              {onClearFilters && (
-                <button
-                  onClick={onClearFilters}
-                  style={{ color: 'var(--primary)', background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, padding: 0, fontFamily: 'inherit' }}
-                >
-                  Clear filters
-                </button>
-              )}
-            </p>
-          )}
-        </div>
-      </div>
-    );
-  }
-
-  // ── Unified scroll: header sticky inside the single container ──────────────
-  return (
-    <div style={{ height: '100%', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-      <div ref={scrollContainerRef} style={{ flex: 1, overflow: 'auto' }}>
-        <div style={{ width: totalW }}>
-
-          {/* Sticky header row — scrolls horizontally with the grid, pins to top vertically */}
-          <div style={{ position: 'sticky', top: 0, zIndex: 5, display: 'flex', height: HEADER_H, background: 'var(--card)', borderBottom: '1px solid var(--border)' }}>
-            {headerContent}
-          </div>
-
-          {rows.map((row, rowIdx) => {
-            if (row.kind === 'group') {
-              return (
-                <div
-                  key={row.id}
-                  style={{
-                    display: 'flex',
-                    height: GROUP_H,
-                    background: 'var(--muted)',
-                    borderBottom: '1px solid var(--border)',
-                  }}
-                >
-                  <div
-                    onClick={onToggleGroup ? () => onToggleGroup(row.id) : undefined}
-                    style={{
-                      width: labelColW,
-                      flexShrink: 0,
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 6,
-                      padding: '0 14px',
-                      position: 'sticky',
-                      left: 0,
-                      background: 'var(--muted)',
-                      zIndex: 3,
-                      borderRight: '1px solid var(--border)',
-                      cursor: onToggleGroup ? 'pointer' : 'default',
-                      userSelect: 'none',
-                    }}
-                  >
-                    {onToggleGroup ? (
-                      row.collapsed
-                        ? <ChevronRight size={14} strokeWidth={2.5} style={{ flexShrink: 0, color: 'var(--muted-foreground)' }} />
-                        : <ChevronDown size={14} strokeWidth={2.5} style={{ flexShrink: 0, color: 'var(--muted-foreground)' }} />
-                    ) : null}
-                    {row.memberColors && row.memberColors.length > 0 ? (
-                      // Stacked color dots for member-combination groups
-                      <div style={{ display: 'flex', flexShrink: 0 }}>
-                        {row.memberColors.map((c, i) => (
-                          <div
-                            key={i}
-                            style={{
-                              width: 9,
-                              height: 9,
-                              borderRadius: '50%',
-                              background: c,
-                              marginLeft: i === 0 ? 0 : -3,
-                              outline: '1.5px solid var(--muted)',
-                            }}
-                          />
-                        ))}
-                      </div>
-                    ) : (
-                      <div
-                        style={{
-                          width: 9,
-                          height: 9,
-                          borderRadius: 2,
-                          background: row.color,
-                          flexShrink: 0,
-                        }}
-                      />
-                    )}
-                    <span
-                      style={{
-                        fontSize: 11,
-                        fontWeight: 700,
-                        color: 'var(--foreground)',
-                        textTransform: 'uppercase',
-                        letterSpacing: '0.05em',
-                        flex: 1,
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis',
-                        whiteSpace: 'nowrap',
-                        fontFamily: 'var(--font-sans)',
-                      }}
-                    >
-                      {row.label}
-                    </span>
-                    <span
-                      style={{
-                        fontSize: 10,
-                        color: 'var(--muted-foreground)',
-                        flexShrink: 0,
-                        fontFamily: 'var(--font-sans)',
-                      }}
-                    >
-                      {row.count}
-                    </span>
-                  </div>
-                  <div style={{ flex: 1 }} />
-                </div>
-              );
-            }
-
-            const ev = row.event;
-            const selected = selectedActivityId === ev.id;
-            const indent = (ev.depth ?? (ev.isChild ? 1 : 0)) * 18;
-            const evIsMatch = isMatch(ev.id);
-            const evIsActive = isActive(ev.id);
-            const dimmed = hasQuery && !evIsMatch;
-            const extraReasons = nonTitleReasons(ev.id);
-
-            return (
-              <div
-                key={`${ev.id}-${rowIdx}`}
-                style={{
-                  display: 'flex',
-                  height: ROW_H,
-                  borderBottom: '1px solid var(--border)',
-                  position: 'relative',
-                  background: selected ? 'hsl(188 59% 38% / .04)' : 'transparent',
-                  opacity: dimmed ? 0.3 : 1,
-                  transition: 'opacity 0.15s',
-                }}
-              >
-                {/* Sticky label cell */}
-                <div
-                  style={{
-                    width: labelColW,
-                    flexShrink: 0,
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 7,
-                    paddingLeft: 14 + indent,
-                    paddingRight: 10,
-                    position: 'sticky',
-                    left: 0,
-                    background: selected ? 'var(--muted)' : 'var(--card)',
-                    zIndex: 6,
-                    borderRight: '1px solid var(--border)',
-                    cursor: 'pointer',
-                    transition: 'background 0.1s',
-                  }}
-                  onClick={() => onSelectActivity(ev.id === selectedActivityId ? null : ev.id)}
-                  onMouseEnter={e => {
-                    e.currentTarget.style.background = 'var(--muted)';
-                  }}
-                  onMouseLeave={e => {
-                    e.currentTarget.style.background = selected ? 'var(--muted)' : 'var(--card)';
-                  }}
-                >
-                  {/* Expand/collapse chevron slot — reserved (empty for leaves) so
-                      sibling badges stay aligned within a tree level. */}
-                  {onToggleActivity && (
-                    <div style={{ width: 16, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                      {ev.hasChildren && (
-                        <button
-                          onClick={e => { e.stopPropagation(); onToggleActivity(ev.id); }}
-                          title={ev.collapsed ? 'Expand' : 'Collapse'}
-                          aria-label={ev.collapsed ? 'Expand children' : 'Collapse children'}
-                          style={{
-                            display: 'flex', alignItems: 'center', justifyContent: 'center',
-                            width: 16, height: 16, padding: 0, border: 'none', borderRadius: 3,
-                            background: 'none', cursor: 'pointer', color: 'var(--muted-foreground)',
-                          }}
-                          onMouseEnter={e => (e.currentTarget.style.background = 'var(--border)')}
-                          onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-                        >
-                          {ev.collapsed
-                            ? <ChevronRight size={13} strokeWidth={2.5} />
-                            : <ChevronDown size={13} strokeWidth={2.5} />}
-                        </button>
-                      )}
-                    </div>
-                  )}
-                  <Badge
-                    identity={{ color: ev.color, icon: ev.icon ?? '__none__' }}
-                    name={ev.title}
-                    shape="square"
-                    size={20}
-                  />
-                  <span
-                    style={{
-                      fontSize: 12,
-                      fontWeight: 500,
-                      color: 'var(--foreground)',
-                      flex: 1,
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                      whiteSpace: 'nowrap',
-                      fontFamily: 'var(--font-sans)',
-                    }}
-                  >
-                    {ev.title}
-                  </span>
-                  {ev.members.length > 0 && (
-                    <div style={{ display: 'flex', flexShrink: 0 }}>
-                      {ev.members.slice(0, 3).map((m, i) => (
-                        <div
-                          key={m.id}
-                          style={{ marginLeft: i === 0 ? 0 : -5 }}
-                          title={m.name}
-                        >
-                          <MemberAvatar member={m} size={20} />
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-
-                {/* Lane — background columns + today line + event bar */}
-                <div
-                  style={{ position: 'relative', flex: 1, display: 'flex', cursor: onLaneDrag ? 'crosshair' : 'default' }}
-                  onMouseDown={e => handleLaneMouseDown(e, rowIdx, ev.members[0]?.id ?? null)}
-                >
-                  {columns.map((_, i) => (
-                    <div
-                      key={i}
-                      style={{
-                        width: COL_W,
-                        height: '100%',
-                        flexShrink: 0,
-                        borderRight: i < columns.length - 1 ? '1px solid var(--border)' : 'none',
-                        background:
-                          i === todayCol && !selected ? 'hsl(188 59% 38% / .04)' : 'transparent',
-                      }}
-                    />
-                  ))}
-
-                  {/* Drag selection highlight */}
-                  {drag && drag.rowIdx === rowIdx && (() => {
-                    const lo = Math.min(drag.startCol, drag.currentCol);
-                    const hi = Math.max(drag.startCol, drag.currentCol);
-                    return (
-                      <div
-                        style={{
-                          position: 'absolute',
-                          top: 4,
-                          bottom: 4,
-                          left: lo * COL_W,
-                          width: (hi - lo + 1) * COL_W,
-                          background: 'hsl(188 59% 38% / .18)',
-                          border: '1.5px dashed var(--primary)',
-                          borderRadius: 4,
-                          pointerEvents: 'none',
-                          zIndex: 3,
-                        }}
-                      />
-                    );
-                  })()}
-
-                  {/* Today vertical line */}
-                  {todayIndex >= 0 && (
-                    <div
-                      style={{
-                        position: 'absolute',
-                        top: 0,
-                        bottom: 0,
-                        left: todayIndex * COL_W,
-                        width: 2,
-                        background: 'var(--secondary)',
-                        opacity: 0.5,
-                        zIndex: 2,
-                        pointerEvents: 'none',
-                      }}
-                    />
-                  )}
-
-                  {/* Event bar — live position overridden while dragging */}
-                  {(() => {
-                    const isDragging = barDrag?.eventId === ev.id;
-                    const startCol = isDragging ? barDrag!.snapStartCol : ev.startCol;
-                    const endCol = isDragging ? barDrag!.snapEndCol : ev.startCol + ev.span;
-                    const left = startCol * COL_W + 2;
-                    const width = Math.max((endCol - startCol) * COL_W - 4, COL_W * 0.3);
-                    // Only selected bars show grab/move cursors; unselected bars show pointer
-                    // to prevent accidental date changes when the user just wants to inspect.
-                    const grabCursor = isDragging
-                      ? 'grabbing'
-                      : (selected && onBarDrag) ? 'grab' : 'pointer';
-
-                    // Box shadow: find states take precedence over selection ring.
-                    // CSS classes (.find-active-bar, .find-match-bar) provide the
-                    // amber outline; we only set inline boxShadow for the selected ring.
-                    const boxShadow = (evIsActive || evIsMatch)
-                      ? undefined
-                      : selected
-                        ? `0 0 0 2px white, 0 0 0 4px ${ev.color}`
-                        : 'var(--shadow-sm)';
-
-                    return (
-                      <div
-                        onClick={() => {
-                          // Bar click always selects — use the label cell to deselect.
-                          if (!isDragging) onSelectActivity(ev.id);
-                        }}
-                        onMouseDown={e => {
-                          if (!onBarDrag) { e.stopPropagation(); return; }
-                          const barRect = e.currentTarget.getBoundingClientRect();
-                          const xInBar = e.clientX - barRect.left;
-                          let zone: BarDragZone;
-                          if (xInBar <= EDGE_W) zone = 'left';
-                          else if (xInBar >= barRect.width - EDGE_W) zone = 'right';
-                          else zone = 'body';
-                          handleBarMouseDown(e, ev, zone);
-                        }}
-                        onMouseEnter={e => {
-                          if (!isDragging) e.currentTarget.style.filter = 'brightness(1.08)';
-                          // Show "why matched" tooltip for non-title matches
-                          if (extraReasons.length > 0) {
-                            setMatchTooltip({ reasons: extraReasons, x: e.clientX, y: e.clientY });
-                          }
-                        }}
-                        onMouseMove={e => {
-                          if (matchTooltip) {
-                            setMatchTooltip(t => t ? { ...t, x: e.clientX, y: e.clientY } : null);
-                          }
-                        }}
-                        onMouseLeave={e => {
-                          e.currentTarget.style.filter = '';
-                          setMatchTooltip(null);
-                        }}
-                        className={evIsActive ? 'find-active-bar' : evIsMatch ? 'find-match-bar' : undefined}
-                        style={{
-                          position: 'absolute',
-                          top: 9,
-                          bottom: 9,
-                          left,
-                          width,
-                          background: ev.color,
-                          borderRadius: 5,
-                          display: 'flex',
-                          alignItems: 'center',
-                          padding: `0 ${EDGE_W + 2}px`,
-                          fontSize: 11,
-                          fontWeight: 600,
-                          color: 'white',
-                          overflow: 'hidden',
-                          whiteSpace: 'nowrap',
-                          textOverflow: 'ellipsis',
-                          cursor: grabCursor,
-                          zIndex: 4,
-                          boxShadow,
-                          opacity: isDragging ? 0.85 : 1,
-                          transition: isDragging ? 'none' : 'box-shadow 0.12s, opacity 0.1s',
-                          fontFamily: 'var(--font-sans)',
-                          userSelect: 'none',
-                        }}
-                      >
-                        {/* Progress fill overlay — subtle darker shade showing % complete */}
-                        {(ev.percentComplete ?? 0) > 0 && (
-                          <div
-                            style={{
-                              position: 'absolute',
-                              left: 0,
-                              top: 0,
-                              bottom: 0,
-                              width: `${ev.percentComplete}%`,
-                              background: 'rgba(0,0,0,0.18)',
-                              borderRadius: 5,
-                              pointerEvents: 'none',
-                            }}
-                          />
-                        )}
-                        {/* Left resize handle — only shown on selected bars */}
-                        {onBarDrag && selected && (
-                          <div
-                            style={{
-                              position: 'absolute',
-                              left: 0,
-                              top: 0,
-                              bottom: 0,
-                              width: EDGE_W,
-                              cursor: 'ew-resize',
-                              borderRadius: '5px 0 0 5px',
-                            }}
-                          />
-                        )}
-                        {ev.title}
-                        {/* Right resize handle — only shown on selected bars */}
-                        {onBarDrag && selected && (
-                          <div
-                            style={{
-                              position: 'absolute',
-                              right: 0,
-                              top: 0,
-                              bottom: 0,
-                              width: EDGE_W,
-                              cursor: 'ew-resize',
-                              borderRadius: '0 5px 5px 0',
-                            }}
-                          />
-                        )}
-                      </div>
-                    );
-                  })()}
-                </div>
-              </div>
-            );
-          })}
-
-          {/* No-matches-in-view callout — rendered inside the scroll container */}
-          {hasQuery && findState && findState.matchCount === 0 && rows.length > 0 && findState.filtersActive && (
-            <div style={{
-              padding: '12px 16px',
-              fontSize: 12,
-              color: 'var(--muted-foreground)',
-              borderTop: '1px solid var(--border)',
-            }}>
-              No matches in current view.{' '}
-              {onClearFilters && (
-                <button
-                  onClick={onClearFilters}
-                  style={{ color: 'var(--primary)', background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, padding: 0, fontFamily: 'inherit' }}
-                >
-                  Clear filters
-                </button>
-              )}
-            </div>
-          )}
-
-        </div>
-      </div>
-
-      {/* Drag tooltip — fixed position follows the mouse during bar drag */}
-      {dragTooltip && (
-        <div
-          style={{
-            position: 'fixed',
-            left: dragTooltip.x + 14,
-            top: dragTooltip.y - 28,
-            background: 'var(--popover)',
-            color: 'var(--popover-foreground)',
-            border: '1px solid var(--border)',
-            borderRadius: 6,
-            padding: '4px 10px',
-            fontSize: 11,
-            fontWeight: 600,
-            fontFamily: 'var(--font-sans)',
-            pointerEvents: 'none',
-            zIndex: 9999,
-            whiteSpace: 'nowrap',
-            boxShadow: 'var(--shadow-md)',
-          }}
-        >
-          {dragTooltip.text}
-        </div>
-      )}
-
-      {/* "Why matched" tooltip — shown on hover for non-title match reasons */}
-      {matchTooltip && (
-        <div
-          style={{
-            position: 'fixed',
-            left: matchTooltip.x + 12,
-            top: matchTooltip.y - 36,
-            background: 'var(--popover)',
-            color: 'var(--popover-foreground)',
-            border: '1px solid var(--border)',
-            borderRadius: 6,
-            padding: '4px 10px',
-            fontSize: 11,
-            fontFamily: 'var(--font-sans)',
-            pointerEvents: 'none',
-            zIndex: 9999,
-            whiteSpace: 'nowrap',
-            boxShadow: 'var(--shadow-md)',
-          }}
-        >
-          {matchTooltip.reasons.map(r => (
-            <div key={r} style={{ lineHeight: 1.6 }}>matched {r}</div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
 ````
 
 ## File: packages/web/src/components/gantt/GanttView.tsx
@@ -59538,15 +59748,20 @@ This document organizes development into discrete phases with effort estimates a
 | 11.1.2 | [Group by Assignee Combination](#phase-1112--group-by-assignee-combination) | S–M — 0.5–1 day | ✅ |
 | 11.2 | [Web — Calendar View](#phase-112--web--calendar-view) | L — 3–5 days | 🔄 |
 | 11.3 | [Web — Kanban View (Interactive)](#phase-113--web--kanban-view-interactive) | M — 2–3 days | 🔄 |
-| 12 | [Communications Testing](#phase-12--communications-testing) | S — 1 day | ⬜ |
-| 13 | [AI Key Management](#phase-13--ai-key-management) | M — 2–3 days | ⬜ |
-| 14 | [Localization & Language Support](#phase-14--localization--language-support) | L — 3–5 days | ⬜ |
-| 15 | [Calendar Sync — Google & CalDAV](#phase-15-calendar-sync--google--caldav) | XL — 1–2 wks | ⬜ |
-| 16 | [Shares — Multi-Share Views with Passwords](#phase-16-shares--multi-share-views-with-passwords) | M — 3–5 days | ⬜ |
-| 17 | [Data Portability & Exports](#phase-17-data-portability--exports) | L — 1 wk | ⬜ |
-| 18 | [External Connectors (Webhooks)](#phase-18-external-connectors-webhooks) | M — 3–5 days | ⬜ |
-| 19 | [Global Search](#phase-19-global-search) | M — 2–3 days | ⬜ |
-| 20 | [Backup & Restore](#phase-20--backup--restore) | M — 2–3 days | ⬜ |
+| 12 | [Communications Testing](#phase-12--communications-testing) | S — 1 day | ✅ |
+| 13 | [Shares — Public Read-Only View Links](#phase-13--shares--multi-share-views-with-passwords) (sub-phased) | L | ⬜ |
+| 13.1 | [Foundation, Public Gateway, Gantt Viewer (MVP)](#phase-131--foundation-public-gateway-gantt-viewer-mvp) | M–L | ⬜ |
+| 13.2 | [Remaining Views Read-Only](#phase-132--remaining-views-read-only) | M | ⬜ |
+| 13.3 | [Password Protection + Unlock](#phase-133--password-protection--unlock) | S–M | ⬜ |
+| 13.4 | [Lifecycle & Management](#phase-134--lifecycle--management) | S–M | ⬜ |
+| 14 | [Export — Tabular & Per-View](#phase-14--export--tabular--per-view) | M — 3–5 days | ⬜ |
+| 15 | [Import — Tabular](#phase-15--import--tabular) | M — 2–3 days | ⬜ |
+| 16 | [Backup & Restore](#phase-16--backup--restore) | M — 2–3 days | ⬜ |
+| 17 | [Global Search](#phase-17--global-search) | M — 2–3 days | ⬜ |
+| 18 | [External Connectors (Webhooks)](#phase-18--external-connectors-webhooks) | M — 3–5 days | ⬜ |
+| 19 | [AI Key Management](#phase-19--ai-key-management) | M — 2–3 days | ⬜ |
+| 20 | [Calendar Sync — Google & CalDAV](#phase-20--calendar-sync--google--caldav) | XL — 1–2 wks | ⬜ |
+| 21 | [Localization & Language Support](#phase-21--localization--language-support) | L — 3–5 days | ⬜ |
 
 **Parking Lot (v2):** MySQL/Postgres adapters, CLI, MCP server, mobile apps, Microsoft/Outlook sync, multi-tenant hosting, SSO, notifications.
 
@@ -59843,10 +60058,10 @@ Server-side user preferences so view settings survive login/logout and sync acro
 ### Phase 8.5 — Find (In-View)
 **Status:** ✅ Done — 2026-05-20 | **Effort:** M (1–2 days)
 
-Browser-style "find in page" for the active view. Scoped to events the current view has already loaded; respects active filters. **Global cross-team search is deferred to [Phase 19](#phase-19-global-search).**
+Browser-style "find in page" for the active view. Scoped to events the current view has already loaded; respects active filters. **Global cross-team search is deferred to [Phase 17](#phase-17--global-search).**
 
 **Design rationale:**
-Two distinct tools, not one box. **Find** answers *"highlight what I'm looking at"* — fast, keyboard-driven, walks matches. Global **Search** (Phase 19) answers *"find an event when I don't know where it lives"* — palette-style, navigates across teams/timelines. Mixing them in one input is where these UIs get muddy. With Find + the upcoming List view (Phase 11), we expect ~95% of real-world lookup needs to be covered.
+Two distinct tools, not one box. **Find** answers *"highlight what I'm looking at"* — fast, keyboard-driven, walks matches. Global **Search** (Phase 17) answers *"find an event when I don't know where it lives"* — palette-style, navigates across teams/timelines. Mixing them in one input is where these UIs get muddy. With Find + the upcoming List view (Phase 11), we expect ~95% of real-world lookup needs to be covered.
 
 **Scope:**
 
@@ -59873,16 +60088,16 @@ Two distinct tools, not one box. **Find** answers *"highlight what I'm looking a
 
 *Empty-state behavior:*
 - Zero matches, no filters active → bar shows `No matches`
-- Zero matches **in view**, but filters are active → soft inline callout: *"No matches in current view. [Clear filters]"*. (We do **not** silently search outside the filters — that's Phase 19's job.)
+- Zero matches **in view**, but filters are active → soft inline callout: *"No matches in current view. [Clear filters]"*. (We do **not** silently search outside the filters — that's Phase 17's job.)
 
 *Persistence:*
 - The query itself is **not** persisted across navigation or reloads — Find is ephemeral by design (matches browser Cmd+F muscle memory)
 - Open/closed state of the bar is also ephemeral
 
 **Out of scope (explicitly):**
-- Cross-team or cross-timeline search → Phase 19
-- Server-side full-text search → Phase 19
-- Saved searches / recent queries → Phase 19
+- Cross-team or cross-timeline search → Phase 17
+- Server-side full-text search → Phase 17
+- Saved searches / recent queries → Phase 17
 - Highlighting matches that aren't in the currently-loaded event set (no dynamic loading exists yet; revisit when/if windowed loading lands)
 
 **Exit criteria — safe to pause when:**
@@ -59922,7 +60137,7 @@ Two distinct tools, not one box. **Find** answers *"highlight what I'm looking a
 
 Rename the domain entity `Event` → `Activity` end-to-end (DB, Go API, OpenAPI, generated TS, web hooks/components, user-facing copy, docs). The pub/sub bus keeps its `internal/events` package name (correct event-driven-architecture term), but its message-type constants and wire strings move to `activity.*`. Calendar fields (`google_event_id`, `caldav_uid`) are preserved — they map to external VEVENT identifiers.
 
-**Why now:** the name collides with internal pub/sub events and with calendar VEVENTs. Cost of disambiguation grows fast in Phase 15 (Calendar Sync) and Phase 18 (Webhooks). Cheapest to fix while pre-1.0, single LAN test instance, no external API consumers.
+**Why now:** the name collides with internal pub/sub events and with calendar VEVENTs. Cost of disambiguation grows fast in Phase 20 (Calendar Sync) and Phase 18 (Webhooks). Cheapest to fix while pre-1.0, single LAN test instance, no external API consumers.
 
 **Approach:** hard cutover. No `/events` aliases, no dual message types. Single migration via `ALTER TABLE RENAME`. See **[GreatEventToActivity.md](GreatEventToActivity.md)** for the full runbook (token map, per-layer checklist, verification, rollback).
 
@@ -60780,8 +60995,8 @@ Makes the filter system fully operational. Today only the "Open only" preset act
 - `FilterManageModal.tsx` replaces the planned `FilterManagePanel.tsx` sidebar with a single dialog that consolidates create/edit/duplicate/promote/demote flows and an admin "Members" tab for browsing all team members' filters.
 
 *Forward compatibility:*
-- Shared views (Phase 16) will reference saved filters by ID — the `saved_filters` table and team-scoping design support this
-- Exports (Phase 17) will accept a filter ID to scope exported data
+- Shared views (Phase 13) will reference saved filters by ID — the `saved_filters` table and team-scoping design support this
+- Exports (Phase 14) will accept a filter ID to scope exported data
 - New activity fields added in future phases should be added to the `FilterCondition` union and the filter engine
 
 **Exit criteria — safe to pause when:**
@@ -60837,14 +61052,14 @@ Activity start/end dates render one calendar day early for any user in a timezon
 `startAt`/`endAt` are `format: date-time` (RFC3339 instants) in the schema, but the app uses them as **calendar dates** — every write sends `${date}T00:00:00Z` and every edit reads `iso.slice(0,10)`, so the *storage and edit* paths are UTC-consistent. The defect is on the **display and positioning** paths, which do `new Date(iso)` and then read **local** components (`toLocaleDateString`, `getFullYear/Month/Date`, `setHours`). Midnight-UTC collapses to the previous local day for negative-offset zones.
 
 **Approach — Option A (treat all activity dates as all-day / calendar dates):**
-Format and position all activity `startAt`/`endAt` in **UTC** (no local conversion). This matches today's UI, which has no time-of-day editor — every activity is effectively all-day. The schema's `allDay` flag is **not** branched on yet; leave a `// TODO: branch on allDay when timed events ship (Phase 15 calendar sync)` marker where the formatter is chosen. Genuine timestamps (createdAt/updatedAt, member joinedAt, invite dates) stay in local time.
+Format and position all activity `startAt`/`endAt` in **UTC** (no local conversion). This matches today's UI, which has no time-of-day editor — every activity is effectively all-day. The schema's `allDay` flag is **not** branched on yet; leave a `// TODO: branch on allDay when timed events ship (Phase 20 calendar sync)` marker where the formatter is chosen. Genuine timestamps (createdAt/updatedAt, member joinedAt, invite dates) stay in local time.
 
 **Scope:**
 - *Shared date module* (new, e.g. `packages/web/src/lib/activityDates.ts`): single source of truth — `formatActivityDate(iso, fmt)` using UTC components, `parseActivityDateUTC(iso): Date` for positioning math. Keep existing `toDateInput` (slice) / `toISODate` (`T00:00:00Z`) — already correct. Note: `hooks/useFormatDate.ts`'s `formatDate` uses local getters (`getFullYear/getMonth/getDate`) — that's the core defect for activity dates; route activity dates through the UTC formatter rather than changing the timestamp-oriented hook.
 - *List view:* `ListView.tsx` `formatDate` → UTC formatter for **Start/End cells only**. The same helper is reused by the **Created/Updated** cells, which are real timestamps and must stay local — keep those on the local path.
 - *Gantt labels:* `GanttGrid.tsx:184` and `granularity.ts:105–116` (`toLocaleDateString`).
 - *Gantt positioning (highest-risk piece):* events are parsed as UTC midnight (`GanttView.tsx:135–136` `new Date(toDateOnly(...))`) but the column axis is built in **local** time (`granularity.ts` `setHours(0,0,0,0)`, `new Date(y,m,1)`, `getDate()`, `setDate`) and the today marker (`GanttView.tsx:87` `todayMidnight()`) is local — so events map onto a local axis with UTC dates, shifting bars ~a day at boundaries. Pick **one basis (UTC)** for the axis, today marker, and event parsing together.
-- *Not this phase:* `allDay`-branching for timed events (deferred to Phase 15); backend emitting CalDAV `DATE` vs `DATE-TIME` (Phase 15 concern — backend stores/echoes RFC3339 verbatim and needs no change for the display bug).
+- *Not this phase:* `allDay`-branching for timed events (deferred to Phase 20); backend emitting CalDAV `DATE` vs `DATE-TIME` (Phase 20 concern — backend stores/echoes RFC3339 verbatim and needs no change for the display bug).
 - *Bundled side change (commit `04e5c9c`):* "Reimagined new activity button" Sidebar UI redesign — split combo button with bulk-import stub, collapsed-mode portal positioning, and updated keyboard/outside-click handlers. Acknowledged out-of-scope but bundled here rather than a separate branch.
 
 **Exit criteria — safe to pause when:**
@@ -60981,154 +61196,87 @@ Comprehensive automated tests for every outbound email flow. This phase closes t
 
 ---
 
-### Phase 13 — AI Key Management
-**Status:** ⬜ | **Effort:** M (2–3 days)
+### Phase 13 — Shares — Multi-Share Views with Passwords
 
-Ships the AI/LLM key configuration surface stubbed in Phase 10.1.3. Adds encrypted storage, model routing, and a usage log so superadmins can connect AI providers and see which features are consuming tokens.
+**Detailed plan:** [docs/plans/phase-13-shares.md](plans/phase-13-shares.md) — gateway projection rules, field-exposure model, Go filter port + parity fixtures, read-only view mode, schema/API, and per-sub-phase exit criteria all live there. Scope is reviewed and settled (2026-06-04).
 
-**Scope:**
+A first-class **Share** entity: one timeline can have many shares, each a frozen pairing of `{ view type + view config + optional password + optional expiry }`. Visiting a share drops a **non-logged-in** viewer into **exactly the view the sharer configured** (group-by, sort, color-by, filter), rendered **read-only** (no toolbars, menus, drag, reorder, recolor, or edit) and **forced to light mode**. The existing single `timelines.share_token` is too coarse — it shares "the timeline" with no opinion about *which view*. With four view types live, the unit a sharer wants to publish is the *configured view*.
 
-*API:*
-- New table `ai_provider_keys`: id, provider (anthropic | openai | google | custom), api_key (encrypted AES-256-GCM, same pattern as SMTP password), model_override, created_at, updated_at
-- `GET /admin/ai/keys` — list configured providers (key masked); superadmin only
-- `PUT /admin/ai/keys/:provider` — upsert a provider key; validates by making a lightweight test call; superadmin only
-- `DELETE /admin/ai/keys/:provider` — remove a provider key; superadmin only
-
-*Web — `/settings/ai` (replaces current stub):*
-- Real form replacing the placeholder cards: provider selector, API key input (masked), model override field
-- "Test connection" button calls a test endpoint before saving
-- Usage log section (read-only): last 10 AI requests with timestamp, provider, model, token count
-
-*Encryption:*
-- Reuse the AES-256-GCM pattern introduced for SMTP passwords in Phase 10.1.3
-
-**Exit criteria — safe to pause when:**
-- A superadmin can configure an Anthropic key and verify via the test connection button
-- The key is stored encrypted and masked in the GET response
-- Removing a key clears it from the DB
-- `golangci-lint run` clean; `go test ./...` passes
+**Decisions locked (2026-06-04 design discussion):**
+- **Live data, cached — not snapshots, not pixels.** The viewer renders the real React view from a JSON projection rebuilt at most every TTL (default 60s, up to a couple minutes). No websockets on the public path; **no Chromium** (that conversation is deferred to Phase 14 Export).
+- **The primary boundary is record *scope*, not field-level minimization.** The gateway derives `timeline_id` from the share row server-side and accepts **no client selector** (no timeline/activity/team id, no scope-widening params); the query is hard-scoped to that one timeline + the frozen filter, so a token can reach **exactly one timeline's filtered records and nothing else**. Within a record we ship a **fixed display projection** of the standard activity fields (incl. description); `notes` is conditional — shown only when a List share has the Notes column enabled. Constant exclusion: **cross-entity PII/internals** — member email/role/`user_id`, the access list, other timelines, team internals. Members are always just `{ id, displayName, color, icon }`.
+- **The frozen filter is evaluated server-side, in Go, at build time**, so filtered-out activities never reach the browser. Requires a Go port of `matchesFilter`, with a **shared golden-fixture suite** both the TS and Go evaluators must pass in CI (drift guard).
+- **The filter is snapshotted as a resolved `FilterDefinition`**, not a saved-filter reference — editing/deleting the source filter must not mutate existing shares.
+- **Read-only = the real view components in `interactive=false` mode**, not separate viewer components (preserves "exactly what I'm seeing" fidelity). **Clicks are inert in every view** — shares are static web snapshots; no detail popover, no drill-down.
+- **Password is a fast-follow (13.3), not v1** — an unguessable token is the v1 floor.
 
 ---
 
-### Phase 14 — Localization & Language Support
-**Status:** ⬜ | **Effort:** L (3–5 days)
+### Phase 13.1 — Foundation, Public Gateway, Gantt Viewer (MVP)
+**Status:** ⬜ | **Effort:** M–L
 
-Adds i18n infrastructure and ships the first non-English locale. The "Default language" fields in `/settings/preferences` and `/settings/organization` (currently disabled stubs) become functional.
-
-**Scope:**
-
-*Infrastructure:*
-- Adopt `react-i18next` (or equivalent) for the web client
-- Extract all user-facing strings from React components into locale JSON files
-- Add a `language` column to `user_preferences` (per-user) and a `default_language` key to `instance_settings`
-- `PATCH /users/me/preferences` accepts `language` key; `PATCH /admin/settings` accepts `default_language`
-
-*Locales:*
-- `en` — English (extracted from existing strings; the baseline)
-- Ship at least one additional locale to validate the pipeline (e.g. `es` — Spanish, or `fr` — French)
-
-*Web — settings surfaces:*
-- Enable the "Language" dropdown in `/settings/preferences` (user-level)
-- Enable the "Default language" dropdown in `/settings/organization` (instance-level)
-- Language change takes effect on next page load (no hard reload required)
+The whole data-leak surface is confronted here so 13.2–13.4 ride on a proven-safe gateway. Ships: `shares` schema + repo + **token migration** (each timeline's existing `share_token` becomes a `shares` row, so current links keep working; the `NOT NULL UNIQUE` column is dropped only in a later migration); a **Go filter evaluator** (`internal/filters` mirroring `matchesFilter`) + **shared golden fixtures** (`packages/shared/testdata/filter-fixtures.json`) run by both `filterEngine.test.ts` and a Go test; the **`GET /shares/{token}` gateway** (filter-first, view-driven field projection, referenced-entity pruning, TTL cache via `DRABA_SHARE_CACHE_TTL`); `POST/GET /timelines/{id}/shares` + `PATCH/DELETE /shares/{id}`; **Gantt `interactive=false` mode** (no chrome/drag/edit, forced light); "Share this view" in the Gantt toolbar (snapshots live toolbar state incl. the resolved filter definition); `/s/:token` public route + branding strip.
 
 **Exit criteria — safe to pause when:**
-- Switching to the second locale changes all UI strings in the web app
-- User language preference persists across logout/login
-- Instance default language is used when the user has no preference set
-- Adding a new locale requires only a new JSON file (no code changes)
-- `pnpm --filter web lint` clean
+- A share created from a filtered/grouped/colored/sorted Gantt opens at `/s/:token` in a fresh incognito session (no login) showing **exactly** that configuration, read-only, light mode, with inert clicks
+- **Scope isolation holds:** a token resolves to exactly its timeline's filtered records; tampering (another timeline/activity/team id, scope-widening params) cannot widen the result; no share-reachable by-id or list-timelines endpoint exists
+- Filtered-out activities are **absent from the network payload**, as are member emails, `user_id`s, roles, the access list, and other timelines (verified in devtools)
+- The Go and TS filter evaluators agree on every golden fixture (CI)
+- Existing `timelines.share_token` links still resolve (migrated into `shares`)
+- Warm-cache requests hit no DB; a TTL refresh reflects an activity edit within the window
+- `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` + `test` pass
 
 ---
 
-### Phase 15 — Calendar Sync — Google & CalDAV
-**Status:** ⬜ | **Effort:** XL (1–2 wks)
+### Phase 13.2 — Remaining Views Read-Only
+**Status:** ⬜ | **Effort:** M
 
-**Scope:**
-- Google Calendar OAuth connect flow
-- Outbound sync: push draba events to Google on create/update/delete
-- Inbound sync: Google webhook handler → upsert event in draba
-- Built-in CalDAV server (`internal/caldav/`)
-- CalDAV connect flow (user provides URL + credentials)
-- Outbound sync: push draba events to CalDAV on create/update/delete
-- Team iCal feed: `GET /timelines/:ical_token/feed.ics` (public, no private notes)
+Extends `interactive=false` + public mounting to **List, Calendar, and Kanban** (clicks inert here too), plus the per-view visual polish each needs to read cleanly without chrome. "Share this view" added to each toolbar. The same scope-locked gateway serves all four view types — the only projection nuance is `notes`, included only when a List share has the Notes column enabled.
 
 **Exit criteria — safe to pause when:**
-- Connecting Google Calendar and creating a draba event causes it to appear in Google Calendar within 30s
-- Editing that event in Google Calendar updates the draba event within 30s (webhook round-trip)
-- A CalDAV client (e.g., iOS Calendar) can subscribe to a user's feed and see their draba events
-- The iCal feed URL is importable into a calendar app without errors
+- A share created from any of the four views renders faithfully and read-only
+- A List share exposes exactly its enabled columns; no payload over-exposure in any view
+- `pnpm --filter web lint` + `test` pass
 
 ---
 
-### Phase 16 — Shares — Multi-Share Views with Passwords
+### Phase 13.3 — Password Protection + Unlock
+**Status:** ⬜ | **Effort:** S–M
+
+Optional per-share password. `password_hash` (bcrypt) on create/patch; `GET /shares/{token}` returns `401 { passwordRequired: true }` (no data) when locked; `POST /shares/{token}/unlock` exchanges the password for a short-lived view JWT scoped to that share's `view_config`. Unlock attempts are rate-limited (N/IP/hour).
+
+**Exit criteria — safe to pause when:**
+- A wrong password is rejected and rate-limited; a correct password renders the view
+- The unlock token cannot be replayed against a different share
+- A locked share leaks no data in the `passwordRequired` response
+
+---
+
+### Phase 13.4 — Lifecycle & Management
+**Status:** ⬜ | **Effort:** S–M
+
+Expiry and revocation (`expires_at` / `revoked_at` → `410 Gone`), plus a "Manage shares" surface per timeline: list, view counts, last-viewed, edit (rename / password / expiry), revoke; and an active-share-count chip on the timeline tile.
+
+**Exit criteria — safe to pause when:**
+- An expired or revoked link returns `410 Gone` immediately and is no longer usable
+- One timeline hosts ≥3 independent shares with different view types and configurations
+- View counts and last-viewed timestamps update on access; admins can manage shares they don't own
+
+---
+
+### Phase 14 — Export — Tabular & Per-View
 **Status:** ⬜ | **Effort:** M (3–5 days)
 
-A first-class **Share** entity. One timeline can have many shares; each share is a frozen pairing of `{ view type + view config + optional password + optional expiry }`. This is the feature that lets a team publish, e.g., a public Gantt sorted by start date with the "Marketing" filter applied, alongside a password-protected List view of the same data for an external stakeholder.
-
-**Design rationale:**
-The existing single share token on `timelines` is too coarse — it shares "the timeline" with no opinion about which view, filter, sort, or grouping the viewer should land in. With four view types live (Gantt + 11.1 + 11.2 + 11.3), the surface a sharer wants to publish is the *configured view*, not the raw timeline. Multiple shares per timeline also enable stakeholder-specific snapshots (different filters, different views, different passwords) without forcing the team into a one-link compromise.
-
-**Scope:**
-
-*Schema:*
-- New `shares` table: `id`, `timeline_id`, `view_type` (gantt/list/calendar/kanban), `view_config` JSON (filter preset, group_by, sort_by, granularity, visible-columns, etc.), `password_hash` (nullable, bcrypt), `expires_at` (nullable), `created_by`, `created_at`, `last_viewed_at`, `view_count`, `revoked_at`
-- Public-token column on `shares` (unguessable, URL-safe) — the existing single token on `timelines` is migrated to the first share row
-- `timelines.share_token` deprecated and removed in a follow-up migration once UI references are migrated
-
-*API:*
-- `POST /timelines/:id/shares` — create share; body carries `view_type`, `view_config`, optional `password`, optional `expires_at`
-- `GET /timelines/:id/shares` — list shares for a timeline (creator + admins only)
-- `PATCH /shares/:id` — rename / change password / extend expiry / revoke
-- `DELETE /shares/:id` — hard delete
-- `GET /shares/:token` — public lookup; if password-protected returns 401 with a `passwordRequired: true` marker (no data leakage)
-- `POST /shares/:token/unlock` — exchange password for a short-lived view JWT scoped to that share
-
-*Web — creating shares:*
-- "Share this view" button in every view's toolbar slot (Gantt / List / Calendar / Kanban)
-- Click → modal that snapshots the current toolbar state (filter, sort, group, zoom, etc.) into `view_config`, offers password + expiry toggles, then returns the URL with copy button
-- View-config snapshot is **frozen** at creation time — later changes to the live view do not mutate existing shares
-
-*Web — viewing shares:*
-- Public viewer route `/s/:token` — no auth required; if password-protected, gates behind a password prompt; on success, mounts the corresponding view component in read-only mode with `view_config` applied
-- Read-only enforcement: no drag, no inline edit, no create — the same lockdown used for `is_external` events (Phase 18) applied to the whole surface
-- Branding strip at the top: team name, "Shared view," last-updated timestamp
-
-*Web — managing shares:*
-- "Manage shares" section on each timeline (also reachable from `/settings/team/:id` via a Timelines tab if scope allows): list, view counts, revoke, edit
-- Indicator chip on a timeline tile showing active share count
-
-**Open questions (resolve before starting):**
-- Do password-protected shares get a rate limit on unlock attempts? (Probably yes — N attempts per IP per hour.)
-- Should the unlock JWT be tied to the share's `view_config` snapshot, or refetch live? (Snapshot — that's the whole point.)
-- Do we expose share view counts to non-creators with admin access, or keep them creator-private?
-
-**Exit criteria — safe to pause when:**
-- A user can create a share from any of the four views, with the current toolbar state captured in `view_config`
-- Visiting the share URL renders the saved view exactly as it was configured at creation time
-- A password-protected share prompts for the password; wrong password is rejected; correct password renders the view
-- Setting an expiry causes the share to return 410 Gone after that date
-- A revoked share returns 410 Gone immediately and the URL is no longer usable
-- One timeline can host at least three independent shares with different view types and configurations
-- Public viewers cannot mutate any data through the share URL (no edits, no drags, no creates)
-
----
-
-### Phase 17 — Data Portability & Exports
-**Status:** ⬜ | **Effort:** L (1 wk)
-
-Tabular import / export plus view-aware exports (Gantt → PDF, Kanban → PDF, List → Markdown, etc.). Each visual export respects the active filter / sort / group at time of export — the deliverable is "what's on the screen right now," not the raw event list.
+Get data *out* of draba — both raw tabular exports (CSV / xlsx) and view-aware visual exports (Gantt → PDF, Kanban → PDF, List → Markdown, Calendar → PDF, etc.). Each visual export respects the active filter / sort / group at time of export — the deliverable is "what's on the screen right now," not the raw activity list. Split from the former combined "Data Portability" phase so export (an immediate, lower-risk win) can ship ahead of [import](#phase-15--import--tabular).
 
 **Implementation note (PDF engine):**
 PDFs are generated server-side using **gofpdf** (pure-Go, no Chrome dependency in the Docker image). This keeps the binary lean at the cost of reimplementing Gantt / Kanban / Calendar layouts in PDF primitives — accepted tradeoff because the alternative (chromedp) significantly inflates the image size and breaks the "single binary" promise. Visual fidelity for the Gantt PDF will not match the live view pixel-for-pixel; the target is "readable and recognizable," not "screenshot quality."
 
 **Scope:**
 
-*Tabular import / export (was the old Phase 13):*
-- `GET /timelines/:id/export.csv` and `.xlsx`
-- `POST /teams/:id/events/import` — CSV/Excel import with preview + validation step
-- `GET /import-template.csv` and `.xlsx` downloadable template
-- Password reset flow (requires SMTP or transactional email provider) — kept here because import errors / reset emails are the first time we need SMTP
+*Tabular export:*
+- `GET /timelines/:id/export.csv` and `.xlsx` — all visible activities, honoring the active filter
+- Optional `?filter=` to scope the export to a saved filter ID (forward-compat hook from Phase 10.4.6)
 
 *Visual / textual exports (per view):*
 - **Gantt → PDF:** landscape, paginated by date range; columns scale to fit a printable width per page; legend strip with member colors; export current filter/sort/group state. Gantt → PNG as a single-page variant.
@@ -61146,67 +61294,54 @@ PDFs are generated server-side using **gofpdf** (pure-Go, no Chrome dependency i
 - Do exports respect Find highlights or just the filter? (Filter only — Find is ephemeral.)
 
 **Exit criteria — safe to pause when:**
-- Exporting a timeline to CSV and xlsx produces files containing all visible events with the active filter applied
-- Importing the exported CSV back in shows a preview, validates rows, and creates events on confirm
+- Exporting a timeline to CSV and xlsx produces files containing all visible activities with the active filter applied
 - Gantt → PDF renders a recognizable Gantt chart with bars in the correct positions and a member-color legend
 - Kanban → PDF renders the visible columns and cards in the same order shown on screen
 - List → Markdown produces a clean GitHub-flavored table that renders correctly in a Markdown previewer
-- Calendar → PDF in Month layout produces one page per month with events in correct cells
-- Password reset flow sends an email and allows setting a new password
+- Calendar → PDF in Month layout produces one page per month with activities in correct cells
 - All export menus are reachable from their respective view toolbars; format options match the view type
 
 ---
 
-### Phase 18 — External Connectors (Webhooks)
-**Status:** ⬜ | **Effort:** M (3–5 days)
+### Phase 15 — Import — Tabular
+**Status:** ⬜ | **Effort:** M (2–3 days)
+
+Get data *into* draba from a spreadsheet — CSV / Excel import with a mandatory preview + validation step before any rows are written. The natural companion to [Phase 14 export](#phase-14--export--tabular--per-view) (round-trip: export → edit in a spreadsheet → re-import), and the seam through which teams migrate off whatever they're planning in today. Sequenced after export because the preview/validation/conflict surface is meaningfully more complex than a one-way dump.
 
 **Scope:**
-- Schema changes: `event_links`, `team_inbound_webhooks`, `is_external` flag on `events`
-- `POST /teams/:id/webhooks` to generate inbound webhook URLs
-- Generic JSON parsing for inbound webhook payload mapping (e.g. Asana, Aha)
-- Disabling edit UI for `is_external` blocks in the timeline (read-only)
 
-**Exit criteria — safe to pause when:**
-- Generating a webhook creates a unique URL for the team
-- Sending a dummy JSON payload to that URL creates an `is_external` event block mapped to a user
-- Trying to drag or edit that block in the UI is prevented (read-only mode)
+*API:*
+- `POST /teams/:id/activities/import` — accepts a CSV/Excel upload; runs in two passes:
+  - **Preview pass** (`?dryRun=true`): parses + validates every row, returns a per-row result (ok / warning / error) with messages, *without* writing anything
+  - **Commit pass:** writes the validated rows, skipping or rejecting invalid ones per the caller's choice
+- `GET /import-template.csv` and `.xlsx` — downloadable template with the expected column headers and an example row
+- Column mapping: required (title, start, end) + optional (description, status name, assignee names/emails, tags, parent title, progress, location, url); status/assignee/tag resolved by name against the target team (unknown names surface as warnings, not hard errors)
 
----
-
-### Phase 19 — Global Search
-**Status:** ⬜ | **Effort:** M (2–3 days, directional estimate)
-
-Cross-team, cross-timeline event search via a command palette. Complements (does **not** replace) the in-view Find from [Phase 8.5](#phase-85-find-in-view).
-
-**Why a separate phase:**
-By this point we'll have: Find (8.5), List view (11.1), real-time sync (8.3), and likely more events per team than fit in one fetch. Global Search needs server-side full-text and a different UX surface (a palette, not an inline bar), so it earns its own phase. With Find + List already shipped, this should feel like the natural "I genuinely don't know where this event is" escape hatch — used rarely but valued when needed.
-
-**Directional scope (to be firmed up before the phase):**
-- Command palette opened via `Ctrl/Cmd+K` (separate keybinding from Find's `Ctrl/Cmd+F`)
-- Server-side search endpoint: `GET /search/events?q=` — scoped to teams/timelines the caller can access
-- Full-text index over title, description, tags, assignee names (SQLite FTS5 for the default backend; equivalent for MySQL/Postgres adapters when those land)
-- Results grouped by team → timeline, each row showing event title, date range, assignees, and a snippet of the matched field
-- Selecting a result navigates to that timeline and **hands off to Find**, pre-seeding the query so the event is highlighted on arrival (reuses 8.5's scroll-to-match logic)
-- Keyboard-first: arrow keys to move, Enter to navigate, Esc to close
-- Recent searches / pinned searches — stretch goal, evaluate during the phase
+*Web — import flow:*
+- "Import" affordance in the activity-create split button (stub already present from Phase 11.1.1) → opens an import wizard
+- Step 1: pick target timeline + upload file (or download the template)
+- Step 2: preview table — each parsed row with its validation status, inline messages, and a count summary (N ready, M warnings, K errors)
+- Step 3: confirm → commit; show a result toast/summary (created count, skipped count)
+- Date parsing tolerant of common formats; all dates treated as all-day / calendar dates (consistent with Phase 11.1.1)
 
 **Open questions (resolve before starting):**
-- Does Search surface archived events by default, or behind a toggle?
-- Do we index event descriptions in v1, or just title/tags/assignees? (description indexing has size implications for SQLite FTS5)
-- Permission model: do we filter results post-query or push the auth predicate into the FTS query?
+- On a name that doesn't resolve (status / assignee / tag), do we auto-create it or just warn and skip the association? (Lean: warn + skip for v1; auto-create is a later toggle.)
+- Is import idempotent / re-runnable, or always additive? (Lean: additive for v1 — no upsert-by-external-id until Phase 18 webhooks introduce stable external IDs.)
 
-**Exit criteria (placeholder — refine in-phase):**
-- `Ctrl/Cmd+K` opens a palette returning results across every team the user belongs to
-- Selecting a result navigates to the correct timeline and the event is visibly highlighted on arrival
-- Users with no access to a team never see that team's events in results
-- Search returns within ~200ms for a database with 10k events
+**Exit criteria — safe to pause when:**
+- Downloading the template and re-uploading it (filled in) creates the expected activities on the target timeline
+- The preview step reports per-row ok/warning/error without writing any data, and a dry-run leaves the DB unchanged
+- Round-trip holds: a Phase 14 CSV export re-imported reproduces the same activities (modulo server-assigned IDs)
+- Invalid rows (missing title, end-before-start, unparseable date) are flagged in preview and excluded from the commit
+- Status / assignee / tag names resolve against the target team; unknown names warn rather than abort the whole import
+- `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean
 
 ---
 
-### Phase 20 — Backup & Restore
+### Phase 16 — Backup & Restore
 **Status:** ⬜ | **Effort:** M (2–3 days, directional estimate)
 
-Admin tools for database backup visibility, manual backups, and scheduled backup configuration. Self-hosted deployments need a way to know their data is safe without SSH-ing into the container.
+Admin tools for database backup visibility, manual backups, and scheduled backup configuration. Self-hosted deployments need a way to know their data is safe without SSH-ing into the container. **Pulled ahead of the remaining phases** because once real teams start putting real data in (via [import](#phase-15--import--tabular) and [shared](#phase-13--shares--multi-share-views-with-passwords) workflows), data safety stops being optional.
 
 **Directional scope (to be firmed up before the phase):**
 
@@ -61244,6 +61379,132 @@ Admin tools for database backup visibility, manual backups, and scheduled backup
 - A scheduled backup runs at the configured interval and produces a valid backup file
 - Retention policy automatically cleans up old backups beyond the configured limit
 - Backup history shows the last N backups with timestamps and sizes
+
+---
+
+### Phase 17 — Global Search
+**Status:** ⬜ | **Effort:** M (2–3 days, directional estimate)
+
+Cross-team, cross-timeline activity search via a command palette. Complements (does **not** replace) the in-view Find from [Phase 8.5](#phase-85-find-in-view).
+
+**Why a separate phase:**
+By this point we'll have: Find (8.5), List view (11.1), real-time sync (8.3), and likely more activities per team than fit in one fetch. Global Search needs server-side full-text and a different UX surface (a palette, not an inline bar), so it earns its own phase. With Find + List already shipped, this should feel like the natural "I genuinely don't know where this activity is" escape hatch — used rarely but valued when needed.
+
+**Directional scope (to be firmed up before the phase):**
+- Command palette opened via `Ctrl/Cmd+K` (separate keybinding from Find's `Ctrl/Cmd+F`)
+- Server-side search endpoint: `GET /search/activities?q=` — scoped to teams/timelines the caller can access
+- Full-text index over title, description, tags, assignee names (SQLite FTS5 for the default backend; equivalent for MySQL/Postgres adapters when those land)
+- Results grouped by team → timeline, each row showing activity title, date range, assignees, and a snippet of the matched field
+- Selecting a result navigates to that timeline and **hands off to Find**, pre-seeding the query so the activity is highlighted on arrival (reuses 8.5's scroll-to-match logic)
+- Keyboard-first: arrow keys to move, Enter to navigate, Esc to close
+- Recent searches / pinned searches — stretch goal, evaluate during the phase
+
+**Open questions (resolve before starting):**
+- Does Search surface archived activities by default, or behind a toggle?
+- Do we index activity descriptions in v1, or just title/tags/assignees? (description indexing has size implications for SQLite FTS5)
+- Permission model: do we filter results post-query or push the auth predicate into the FTS query?
+
+**Exit criteria (placeholder — refine in-phase):**
+- `Ctrl/Cmd+K` opens a palette returning results across every team the user belongs to
+- Selecting a result navigates to the correct timeline and the activity is visibly highlighted on arrival
+- Users with no access to a team never see that team's activities in results
+- Search returns within ~200ms for a database with 10k activities
+
+---
+
+### Phase 18 — External Connectors (Webhooks)
+**Status:** ⬜ | **Effort:** M (3–5 days)
+
+**Scope:**
+- Schema changes: `activity_links`, `team_inbound_webhooks`, `is_external` flag on `activities`
+- `POST /teams/:id/webhooks` to generate inbound webhook URLs
+- Generic JSON parsing for inbound webhook payload mapping (e.g. Asana, Aha)
+- Disabling edit UI for `is_external` blocks in the timeline (read-only)
+
+**Exit criteria — safe to pause when:**
+- Generating a webhook creates a unique URL for the team
+- Sending a dummy JSON payload to that URL creates an `is_external` activity block mapped to a user
+- Trying to drag or edit that block in the UI is prevented (read-only mode)
+
+---
+
+### Phase 19 — AI Key Management
+**Status:** ⬜ | **Effort:** M (2–3 days)
+
+Ships the AI/LLM key configuration surface stubbed in Phase 10.1.3. Adds encrypted storage, model routing, and a usage log so superadmins can connect AI providers and see which features are consuming tokens.
+
+**Scope:**
+
+*API:*
+- New table `ai_provider_keys`: id, provider (anthropic | openai | google | custom), api_key (encrypted AES-256-GCM, same pattern as SMTP password), model_override, created_at, updated_at
+- `GET /admin/ai/keys` — list configured providers (key masked); superadmin only
+- `PUT /admin/ai/keys/:provider` — upsert a provider key; validates by making a lightweight test call; superadmin only
+- `DELETE /admin/ai/keys/:provider` — remove a provider key; superadmin only
+
+*Web — `/settings/ai` (replaces current stub):*
+- Real form replacing the placeholder cards: provider selector, API key input (masked), model override field
+- "Test connection" button calls a test endpoint before saving
+- Usage log section (read-only): last 10 AI requests with timestamp, provider, model, token count
+
+*Encryption:*
+- Reuse the AES-256-GCM pattern introduced for SMTP passwords in Phase 10.1.3
+
+**Exit criteria — safe to pause when:**
+- A superadmin can configure an Anthropic key and verify via the test connection button
+- The key is stored encrypted and masked in the GET response
+- Removing a key clears it from the DB
+- `golangci-lint run` clean; `go test ./...` passes
+
+---
+
+### Phase 20 — Calendar Sync — Google & CalDAV
+**Status:** ⬜ | **Effort:** XL (1–2 wks)
+
+**Scope:**
+- Google Calendar OAuth connect flow
+- Outbound sync: push draba activities to Google on create/update/delete
+- Inbound sync: Google webhook handler → upsert activity in draba
+- Built-in CalDAV server (`internal/caldav/`)
+- CalDAV connect flow (user provides URL + credentials)
+- Outbound sync: push draba activities to CalDAV on create/update/delete
+- Team iCal feed: `GET /timelines/:ical_token/feed.ics` (public, no private notes)
+
+**Exit criteria — safe to pause when:**
+- Connecting Google Calendar and creating a draba activity causes it to appear in Google Calendar within 30s
+- Editing that activity in Google Calendar updates the draba activity within 30s (webhook round-trip)
+- A CalDAV client (e.g., iOS Calendar) can subscribe to a user's feed and see their draba activities
+- The iCal feed URL is importable into a calendar app without errors
+
+---
+
+### Phase 21 — Localization & Language Support
+**Status:** ⬜ | **Effort:** L (3–5 days)
+
+Adds i18n infrastructure and ships the first non-English locale. The "Default language" fields in `/settings/preferences` and `/settings/organization` (currently disabled stubs) become functional.
+
+**Scope:**
+
+*Infrastructure:*
+- Adopt `react-i18next` (or equivalent) for the web client
+- Extract all user-facing strings from React components into locale JSON files
+- Add a `language` column to `user_preferences` (per-user) and a `default_language` key to `instance_settings`
+- `PATCH /users/me/preferences` accepts `language` key; `PATCH /admin/settings` accepts `default_language`
+
+*Locales:*
+- `en` — English (extracted from existing strings; the baseline)
+- Ship at least one additional locale to validate the pipeline (e.g. `es` — Spanish, or `fr` — French)
+
+*Web — settings surfaces:*
+- Enable the "Language" dropdown in `/settings/preferences` (user-level)
+- Enable the "Default language" dropdown in `/settings/organization` (instance-level)
+- Language change takes effect on next page load (no hard reload required)
+
+**Exit criteria — safe to pause when:**
+- Switching to the second locale changes all UI strings in the web app
+- User language preference persists across logout/login
+- Instance default language is used when the user has no preference set
+- Adding a new locale requires only a new JSON file (no code changes)
+- `pnpm --filter web lint` clean
 
 ---
 
