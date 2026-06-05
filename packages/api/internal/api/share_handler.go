@@ -159,6 +159,10 @@ func (s *Server) buildShareProjection(share *models.Share) (*models.ShareProject
 	if err != nil {
 		return nil, err
 	}
+	team, err := s.teams.GetByID(timeline.TeamID)
+	if err != nil {
+		return nil, err
+	}
 
 	// Parse the frozen filter from view_config and evaluate it server-side.
 	var vc viewConfigJSON
@@ -269,7 +273,8 @@ func (s *Server) buildShareProjection(share *models.Share) (*models.ShareProject
 	}
 
 	proj := &models.ShareProjection{
-		Share: *share,
+		Share:    *share,
+		TeamName: team.Name,
 		Timeline: models.PublicTimeline{
 			ID:        timeline.ID,
 			Name:      timeline.Name,

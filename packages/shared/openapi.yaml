@@ -926,10 +926,12 @@ components:
 
     ShareProjection:
       type: object
-      required: [share, timeline, members, statuses, tags, activities]
+      required: [share, timeline, teamName, members, statuses, tags, activities]
       properties:
         share:
           $ref: "#/components/schemas/Share"
+        teamName:
+          type: string
         timeline:
           $ref: "#/components/schemas/PublicTimeline"
         members:

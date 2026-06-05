@@ -293,6 +293,7 @@ type PublicTimeline struct {
 type ShareProjection struct {
 	Share      Share            `json:"share"`
 	Timeline   PublicTimeline   `json:"timeline"`
+	TeamName   string           `json:"teamName"`
 	Members    []PublicMember   `json:"members"`
 	Statuses   []Status         `json:"statuses"`
 	Tags       []Tag            `json:"tags"`

@@ -1570,6 +1570,7 @@ export interface components {
         };
         ShareProjection: {
             share: components["schemas"]["Share"];
+            teamName: string;
             timeline: components["schemas"]["PublicTimeline"];
             members: components["schemas"]["PublicMember"][];
             statuses: components["schemas"]["Status"][];

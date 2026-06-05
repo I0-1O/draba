@@ -119,7 +119,7 @@ function toMember(m: TeamMemberWithUser, index: number): Member {
   };
 }
 
-/** Intermediate type that carries original API fields alongside view-state. */
+/** Intermediate activity type that carries API fields alongside computed view-state. Exported for use by the public share viewer. */
 export interface RichActivity extends GanttActivity {
   startAtMs: number;
   endAtMs: number;

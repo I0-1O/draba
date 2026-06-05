@@ -2,15 +2,17 @@
  * ShareViewPage — public read-only view for a share link.
  *
  * Mounted at /s/:token outside ProtectedRoute. Fetches the ShareProjection
- * from the public gateway, then renders the Gantt (or other view in future
- * phases) in interactive=false mode with the frozen view config applied.
- * Theme is forced to light.
+ * from the public gateway, then renders the Gantt in interactive=false mode
+ * with the frozen view config (groupBy, sortBy, colorBy, granularity) applied.
+ * Theme is forced to light — useLayoutEffect runs synchronously before paint so
+ * it beats any dark-class applied from localStorage by useDarkMode.
  */
 
-import { useMemo } from 'react'
+import { useMemo, useLayoutEffect, useEffect } from 'react'
 import { useParams } from 'react-router-dom'
 import { useShareProjection } from '@/hooks/useShares'
-import GanttGrid, { type GanttRow } from '@/components/gantt/GanttGrid'
+import GanttGrid from '@/components/gantt/GanttGrid'
+import { buildRows, type RichActivity } from '@/components/gantt/GanttView'
 import { resolveColorHex } from '@/components/identity/identity-constants'
 import { MEMBER_COLORS, ACTIVITY_COLORS } from '@/types'
 import {
@@ -51,20 +53,34 @@ function parseViewConfig(raw: string): ParsedViewConfig {
   }
 }
 
-// ── Data helpers (mirrors GanttView's toRichActivity logic) ──────────────────
+// ── Data helpers ──────────────────────────────────────────────────────────────
 
 function initialsFrom(name: string): string {
   return name.split(/\s+/).map(w => w[0] ?? '').slice(0, 2).join('').toUpperCase()
 }
 
 function toMember(m: PublicMember, index: number): Member {
-  const fallback = MEMBER_COLORS[index % MEMBER_COLORS.length]
   return {
     id: m.id,
     name: m.displayName,
     initials: initialsFrom(m.displayName),
-    color: resolveColorHex(m.color) || fallback,
+    color: resolveColorHex(m.color) || MEMBER_COLORS[index % MEMBER_COLORS.length],
   }
+}
+
+// ── Identity badge ────────────────────────────────────────────────────────────
+
+function IdentityDot({ color, icon }: { color?: string | null; icon?: string | null }) {
+  const bg = resolveColorHex(color) || '#6b7280'
+  return (
+    <div style={{
+      width: 18, height: 18, borderRadius: 4, background: bg,
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      fontSize: 11, flexShrink: 0,
+    }}>
+      {icon ?? null}
+    </div>
+  )
 }
 
 // ── ShareViewPage ─────────────────────────────────────────────────────────────
@@ -73,13 +89,28 @@ export default function ShareViewPage() {
   const { token } = useParams<{ token: string }>()
   const { data: proj, isLoading, isError, error } = useShareProjection(token)
 
-  // Parse view config from the frozen share config.
+  // Force light mode synchronously before first paint.
+  // useLayoutEffect runs before the browser paints, beating any dark class set
+  // from localStorage by useDarkMode during the same render cycle.
+  useLayoutEffect(() => {
+    const root = document.documentElement
+    const hadDark = root.classList.contains('dark')
+    root.classList.remove('dark')
+    return () => {
+      if (hadDark) root.classList.add('dark')
+    }
+  }, [])
+
+  // Re-apply whenever the component re-renders (e.g. ThemeSync fires later).
+  useEffect(() => {
+    document.documentElement.classList.remove('dark')
+  })
+
   const vc = useMemo(
     () => parseViewConfig(proj?.share.viewConfig ?? '{}'),
     [proj?.share.viewConfig],
   )
 
-  // Build columns for the timeline's date range.
   const { columns, resolvedGranularity } = useMemo(() => {
     if (!proj) return { columns: [], resolvedGranularity: 'week' as TimeGranularity }
     const start = new Date(proj.timeline.startDate)
@@ -96,28 +127,29 @@ export default function ShareViewPage() {
 
   const todayIdx = useMemo(() => todayColumnPosition(columns), [columns])
 
-  // Build member lookup.
-  const memberById = useMemo(() => {
-    if (!proj) return {} as Record<string, Member>
-    return Object.fromEntries(
-      proj.members.map((m, i) => [m.id, toMember(m, i)])
-    )
-  }, [proj])
+  const memberArray = useMemo<Member[]>(
+    () => (proj?.members ?? []).map((m, i) => toMember(m, i)),
+    [proj],
+  )
 
-  // Build status color lookup.
+  const memberById = useMemo(
+    () => Object.fromEntries(memberArray.map(m => [m.id, m])),
+    [memberArray],
+  )
+
   const statusColorById = useMemo(() => {
     const m = new Map<string, string>()
     proj?.statuses.forEach((s: Status) => m.set(s.id, s.color))
     return m
   }, [proj])
 
-  // Build GanttRow list from PublicActivity array.
-  const rows = useMemo((): GanttRow[] => {
+  // Build RichActivity array (mirrors GanttView's toRichActivity).
+  const richActivities = useMemo((): RichActivity[] => {
     if (!proj || columns.length === 0) return []
     const viewStart = columns[0].start
     const viewEnd = columns[columns.length - 1].end
 
-    const richActivities = proj.activities.flatMap((a: PublicActivity, i: number) => {
+    return proj.activities.flatMap((a: PublicActivity, i: number) => {
       const start = new Date(a.startAt)
       const end = new Date(a.endAt)
       if (end < viewStart || start > viewEnd) return []
@@ -149,18 +181,29 @@ export default function ShareViewPage() {
         members,
         isChild: Boolean(a.parentActivityId),
         depth: 0,
-      }]
+        startAtMs: start.getTime(),
+        endAtMs: end.getTime(),
+        parentActivityId: a.parentActivityId ?? null,
+        primaryMemberId: members[0]?.id ?? null,
+        assignedMemberIds: a.assignedMemberIds ?? [],
+        statusId: a.statusId ?? null,
+      } satisfies RichActivity]
     })
-
-    // Simple unsorted flat list — groupBy is a future enhancement for read-only mode.
-    return richActivities.map(ev => ({ kind: 'activity' as const, event: ev }))
   }, [proj, columns, memberById, statusColorById, vc.colorBy])
 
-  // Force light mode for public viewer.
-  // The document class is reset on unmount so authenticated users retain their preference.
-  useMemo(() => {
-    document.documentElement.classList.remove('dark')
-  }, [])
+  // Apply groupBy + sortBy via the same buildRows used by GanttView.
+  const rows = useMemo(
+    () => buildRows(
+      richActivities,
+      memberArray,
+      vc.groupBy,
+      vc.sortBy,
+      new Set<string>(),
+      new Set<string>(),
+      proj?.statuses,
+    ),
+    [richActivities, memberArray, vc.groupBy, vc.sortBy, proj?.statuses],
+  )
 
   // ── Render ────────────────────────────────────────────────────────────────
 
@@ -174,7 +217,7 @@ export default function ShareViewPage() {
   }
 
   if (isError) {
-    const apiErr = error as { status?: number; message?: string } | null
+    const apiErr = error as { status?: number } | null
     const is404 = apiErr?.status === 404
     const is410 = apiErr?.status === 410
     return (
@@ -198,10 +241,14 @@ export default function ShareViewPage() {
       <div style={{
         display: 'flex', alignItems: 'center', gap: 8, padding: '0 16px', height: 40,
         background: '#f9fafb', borderBottom: '1px solid #e5e7eb', flexShrink: 0,
+        color: '#111827',
       }}>
-        <Share2 size={14} style={{ color: '#9ca3af' }} />
-        <span style={{ fontSize: 12, fontWeight: 600, color: '#111827' }}>{proj.timeline.name}</span>
+        <IdentityDot color={proj.timeline.color} icon={proj.timeline.icon} />
+        <span style={{ fontSize: 12, fontWeight: 600 }}>{proj.teamName}</span>
+        <span style={{ fontSize: 12, color: '#d1d5db' }}>›</span>
+        <span style={{ fontSize: 12, fontWeight: 500 }}>{proj.timeline.name}</span>
         <span style={{ fontSize: 12, color: '#9ca3af' }}>·</span>
+        <Share2 size={12} style={{ color: '#9ca3af' }} />
         <span style={{ fontSize: 12, color: '#6b7280' }}>Shared view</span>
         <span style={{ marginLeft: 'auto', fontSize: 11, color: '#9ca3af' }}>
           {proj.activities.length} {proj.activities.length === 1 ? 'activity' : 'activities'}
