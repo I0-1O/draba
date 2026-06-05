@@ -300,6 +300,7 @@ packages/
         usePublicSettings.ts
         useSavedFilters.ts
         useSettings.ts
+        useShares.test.ts
         useShares.ts
         useStatusTemplates.ts
         useTags.test.ts
@@ -29449,6 +29450,221 @@ export function useFilter(): FilterContextValue {
 }
 ````
 
+## File: packages/web/src/hooks/useShares.test.ts
+````typescript
+/**
+ * useShares hooks — unit tests verifying query keys, mutation endpoints,
+ * cache invalidation, and the public share projection fetch.
+ * Uses a real QueryClient with fetch mocked globally.
+ */
+
+import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { renderHook, waitFor } from '@testing-library/react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { createElement } from 'react'
+import {
+  useListShares,
+  useCreateShare,
+  useDeleteShare,
+  useShareProjection,
+} from './useShares'
+
+// ── Auth mock ─────────────────────────────────────────────────────────────────
+
+vi.mock('@/contexts/AuthContext', () => ({
+  useAuth: () => ({ getAccessToken: async () => 'test-token' }),
+}))
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function makeWrapper() {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  return {
+    qc,
+    wrapper: ({ children }: { children: React.ReactNode }) =>
+      createElement(QueryClientProvider, { client: qc }, children),
+  }
+}
+
+const SHARE_FIXTURE = {
+  id: 'share-1',
+  timelineId: 'tl-1',
+  token: 'abc123',
+  viewType: 'gantt',
+  viewConfig: '{}',
+  createdBy: 'member-1',
+  createdAt: '2026-01-01T00:00:00Z',
+  viewCount: 0,
+}
+
+// ── useListShares ─────────────────────────────────────────────────────────────
+
+describe('useListShares', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn())
+  })
+
+  it('fetches shares from the correct URL', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify([SHARE_FIXTURE]), { status: 200 }),
+    )
+
+    const { wrapper } = makeWrapper()
+    const { result } = renderHook(() => useListShares('team-1', 'tl-1'), { wrapper })
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+
+    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+      expect.stringContaining('/teams/team-1/timelines/tl-1/shares'),
+      expect.any(Object),
+    )
+    expect(result.current.data).toHaveLength(1)
+  })
+
+  it('does not fetch when teamId is empty', () => {
+    const { wrapper } = makeWrapper()
+    renderHook(() => useListShares('', 'tl-1'), { wrapper })
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled()
+  })
+
+  it('does not fetch when timelineId is empty', () => {
+    const { wrapper } = makeWrapper()
+    renderHook(() => useListShares('team-1', ''), { wrapper })
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled()
+  })
+})
+
+// ── useCreateShare ────────────────────────────────────────────────────────────
+
+describe('useCreateShare', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn())
+  })
+
+  it('POSTs to the correct URL and invalidates the share list', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify(SHARE_FIXTURE), { status: 201 }),
+    )
+
+    const { wrapper, qc } = makeWrapper()
+    const invalidate = vi.spyOn(qc, 'invalidateQueries')
+
+    const { result } = renderHook(() => useCreateShare('team-1', 'tl-1'), { wrapper })
+    result.current.mutate({ viewType: 'gantt', viewConfig: '{}' })
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+
+    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+      expect.stringContaining('/timelines/tl-1/shares'),
+      expect.objectContaining({ method: 'POST' }),
+    )
+    expect(invalidate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        queryKey: ['teams', 'team-1', 'timelines', 'tl-1', 'shares'],
+      }),
+    )
+  })
+})
+
+// ── useDeleteShare ────────────────────────────────────────────────────────────
+
+describe('useDeleteShare', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn())
+  })
+
+  it('DELETEs the correct URL and invalidates the share list', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(new Response(null, { status: 204 }))
+
+    const { wrapper, qc } = makeWrapper()
+    const invalidate = vi.spyOn(qc, 'invalidateQueries')
+
+    const { result } = renderHook(() => useDeleteShare('team-1', 'tl-1'), { wrapper })
+    result.current.mutate('share-1')
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+
+    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+      expect.stringContaining('/shares/share-1'),
+      expect.objectContaining({ method: 'DELETE' }),
+    )
+    expect(invalidate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        queryKey: ['teams', 'team-1', 'timelines', 'tl-1', 'shares'],
+      }),
+    )
+  })
+})
+
+// ── useShareProjection ────────────────────────────────────────────────────────
+
+const PROJECTION_FIXTURE = {
+  share: {
+    id: 'share-1',
+    timelineId: 'tl-1',
+    token: 'abc123',
+    viewType: 'gantt',
+    viewConfig: '{}',
+    createdAt: '2026-01-01T00:00:00Z',
+  },
+  teamName: 'Test Team',
+  timeline: { id: 'tl-1', name: 'Q1 Plan', startDate: '2026-01-01', endDate: '2026-12-31' },
+  members: [],
+  statuses: [],
+  tags: [],
+  activities: [],
+}
+
+describe('useShareProjection', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn())
+  })
+
+  it('fetches the public projection without an auth header', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify(PROJECTION_FIXTURE), { status: 200 }),
+    )
+
+    const { wrapper } = makeWrapper()
+    const { result } = renderHook(() => useShareProjection('abc123'), { wrapper })
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+
+    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+      expect.stringContaining('/shares/abc123'),
+    )
+    // No Authorization header — this is a public endpoint.
+    const callArgs = vi.mocked(fetch).mock.calls[0]
+    expect(callArgs).toHaveLength(1)
+    expect(result.current.data?.teamName).toBe('Test Team')
+  })
+
+  it('does not fetch when token is undefined', () => {
+    const { wrapper } = makeWrapper()
+    renderHook(() => useShareProjection(undefined), { wrapper })
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled()
+  })
+
+  it('throws an ApiError with the response status on non-200', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({ error: { code: 'NOT_FOUND', message: 'share not found' } }),
+        { status: 404 },
+      ),
+    )
+
+    const { wrapper } = makeWrapper()
+    const { result } = renderHook(() => useShareProjection('bad-token'), { wrapper })
+
+    await waitFor(() => expect(result.current.isError).toBe(true))
+
+    const err = result.current.error as { status?: number; code?: string }
+    expect(err.status).toBe(404)
+    expect(err.code).toBe('NOT_FOUND')
+  })
+})
+````
+
 ## File: packages/web/src/hooks/useTags.test.ts
 ````typescript
 /**
@@ -41832,1169 +42048,6 @@ export default function RegisterPage() {
 }
 ````
 
-## File: packages/web/src/pages/ShareViewPage.tsx
-````typescript
-/**
- * ShareViewPage — public read-only view for a share link.
- *
- * Mounted at /s/:token outside ProtectedRoute. Fetches the ShareProjection
- * from the public gateway, then renders the Gantt in interactive=false mode
- * with the frozen view config (groupBy, sortBy, colorBy, granularity) applied.
- * Theme is forced to light — useLayoutEffect runs synchronously before paint so
- * it beats any dark-class applied from localStorage by useDarkMode.
- */
-
-import { useMemo, useLayoutEffect, useEffect } from 'react'
-import { useParams } from 'react-router-dom'
-import { useShareProjection } from '@/hooks/useShares'
-import GanttGrid from '@/components/gantt/GanttGrid'
-import { buildRows, type RichActivity } from '@/components/gantt/GanttView'
-import { resolveColorHex } from '@/components/identity/identity-constants'
-import { MEMBER_COLORS, ACTIVITY_COLORS } from '@/types'
-import {
-  generateColumns,
-  positionInColumns,
-  todayColumnPosition,
-  autoFitGranularity,
-} from '@/components/gantt/granularity'
-import type { components } from '@draba/shared'
-import type { GroupBy, SortBy, ColorBy, TimeGranularity } from '@/components/gantt/GanttToolbar'
-import type { Member } from '@/types'
-import { AlertCircle, Loader2 } from 'lucide-react'
-import { Badge } from '@/components/identity/Badge'
-
-type PublicActivity = components['schemas']['PublicActivity']
-type PublicMember = components['schemas']['PublicMember']
-type Status = components['schemas']['Status']
-
-// ── View config parsing ───────────────────────────────────────────────────────
-
-interface ParsedViewConfig {
-  groupBy: GroupBy
-  sortBy: SortBy
-  colorBy: ColorBy
-  granularity: TimeGranularity | 'auto'
-}
-
-function parseViewConfig(raw: string): ParsedViewConfig {
-  try {
-    const c = JSON.parse(raw) as Partial<ParsedViewConfig>
-    return {
-      groupBy: (c.groupBy as GroupBy) ?? 'none',
-      sortBy: (c.sortBy as SortBy) ?? 'startDate',
-      colorBy: (c.colorBy as ColorBy) ?? 'activity',
-      granularity: c.granularity ?? 'auto',
-    }
-  } catch {
-    return { groupBy: 'none', sortBy: 'startDate', colorBy: 'activity', granularity: 'auto' }
-  }
-}
-
-// ── Data helpers ──────────────────────────────────────────────────────────────
-
-function initialsFrom(name: string): string {
-  return name.split(/\s+/).map(w => w[0] ?? '').slice(0, 2).join('').toUpperCase()
-}
-
-function toMember(m: PublicMember, index: number): Member {
-  return {
-    id: m.id,
-    name: m.displayName,
-    initials: initialsFrom(m.displayName),
-    color: resolveColorHex(m.color) || MEMBER_COLORS[index % MEMBER_COLORS.length],
-  }
-}
-
-// ── ShareViewPage ─────────────────────────────────────────────────────────────
-
-export default function ShareViewPage() {
-  const { token } = useParams<{ token: string }>()
-  const { data: proj, isLoading, isError, error } = useShareProjection(token)
-
-  // Force light mode synchronously before first paint.
-  // useLayoutEffect runs before the browser paints, beating any dark class set
-  // from localStorage by useDarkMode during the same render cycle.
-  useLayoutEffect(() => {
-    const root = document.documentElement
-    const hadDark = root.classList.contains('dark')
-    root.classList.remove('dark')
-    return () => {
-      if (hadDark) root.classList.add('dark')
-    }
-  }, [])
-
-  // Re-apply whenever the component re-renders (e.g. ThemeSync fires later).
-  useEffect(() => {
-    document.documentElement.classList.remove('dark')
-  })
-
-  const vc = useMemo(
-    () => parseViewConfig(proj?.share.viewConfig ?? '{}'),
-    [proj?.share.viewConfig],
-  )
-
-  const { columns, resolvedGranularity } = useMemo(() => {
-    if (!proj) return { columns: [], resolvedGranularity: 'week' as TimeGranularity }
-    const start = new Date(proj.timeline.startDate)
-    const end = new Date(proj.timeline.endDate)
-    if (vc.granularity === 'auto') {
-      const gr = autoFitGranularity(start, end, window.innerWidth || 1000)
-      return { columns: generateColumns(start, end, gr), resolvedGranularity: gr }
-    }
-    return {
-      columns: generateColumns(start, end, vc.granularity as TimeGranularity),
-      resolvedGranularity: vc.granularity as TimeGranularity,
-    }
-  }, [proj, vc.granularity])
-
-  const todayIdx = useMemo(() => todayColumnPosition(columns), [columns])
-
-  const memberArray = useMemo<Member[]>(
-    () => (proj?.members ?? []).map((m, i) => toMember(m, i)),
-    [proj],
-  )
-
-  const memberById = useMemo(
-    () => Object.fromEntries(memberArray.map(m => [m.id, m])),
-    [memberArray],
-  )
-
-  const statusColorById = useMemo(() => {
-    const m = new Map<string, string>()
-    proj?.statuses.forEach((s: Status) => m.set(s.id, s.color))
-    return m
-  }, [proj])
-
-  // Build RichActivity array (mirrors GanttView's toRichActivity).
-  const richActivities = useMemo((): RichActivity[] => {
-    if (!proj || columns.length === 0) return []
-    const viewStart = columns[0].start
-    const viewEnd = columns[columns.length - 1].end
-
-    return proj.activities.flatMap((a: PublicActivity, i: number) => {
-      const start = new Date(a.startAt)
-      const end = new Date(a.endAt)
-      if (end < viewStart || start > viewEnd) return []
-
-      const clampedStart = start < viewStart ? viewStart : start
-      const clampedEnd = end > viewEnd ? viewEnd : end
-      const { startCol, span } = positionInColumns(clampedStart, clampedEnd, columns)
-
-      const members = (a.assignedMemberIds ?? [])
-        .map(id => memberById[id])
-        .filter((m): m is Member => Boolean(m))
-
-      let color: string
-      if (vc.colorBy === 'member') {
-        color = members[0]?.color ?? a.color ?? ACTIVITY_COLORS[i % ACTIVITY_COLORS.length]
-      } else if (vc.colorBy === 'status') {
-        color = statusColorById.get(a.statusId ?? '') ?? '#6b7280'
-      } else {
-        color = a.color ?? ACTIVITY_COLORS[i % ACTIVITY_COLORS.length]
-      }
-
-      return [{
-        id: a.id,
-        title: a.title,
-        startCol,
-        span,
-        color,
-        icon: a.icon ?? undefined,
-        members,
-        isChild: Boolean(a.parentActivityId),
-        depth: 0,
-        startAtMs: start.getTime(),
-        endAtMs: end.getTime(),
-        parentActivityId: a.parentActivityId ?? null,
-        primaryMemberId: members[0]?.id ?? null,
-        assignedMemberIds: a.assignedMemberIds ?? [],
-        statusId: a.statusId ?? null,
-      } satisfies RichActivity]
-    })
-  }, [proj, columns, memberById, statusColorById, vc.colorBy])
-
-  // Apply groupBy + sortBy via the same buildRows used by GanttView.
-  const rows = useMemo(
-    () => buildRows(
-      richActivities,
-      memberArray,
-      vc.groupBy,
-      vc.sortBy,
-      new Set<string>(),
-      new Set<string>(),
-      proj?.statuses,
-    ),
-    [richActivities, memberArray, vc.groupBy, vc.sortBy, proj?.statuses],
-  )
-
-  // ── Render ────────────────────────────────────────────────────────────────
-
-  if (isLoading) {
-    return (
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh', gap: 10, color: '#6b7280', fontFamily: 'var(--font-sans)' }}>
-        <Loader2 size={20} className="animate-spin" />
-        <span>Loading shared view…</span>
-      </div>
-    )
-  }
-
-  if (isError) {
-    const apiErr = error as { status?: number } | null
-    const is404 = apiErr?.status === 404
-    const is410 = apiErr?.status === 410
-    return (
-      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100vh', gap: 12, color: '#374151', fontFamily: 'var(--font-sans)', padding: 24 }}>
-        <AlertCircle size={32} style={{ color: '#ef4444' }} />
-        <h1 style={{ fontSize: 18, fontWeight: 600, margin: 0 }}>
-          {is404 ? 'Share not found' : is410 ? 'This share has expired or been revoked' : 'Could not load this view'}
-        </h1>
-        <p style={{ fontSize: 13, color: '#6b7280', margin: 0, textAlign: 'center' }}>
-          {is404 || is410 ? 'The link may have been removed or may never have existed.' : 'Please try again later.'}
-        </p>
-      </div>
-    )
-  }
-
-  if (!proj) return null
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: '#ffffff' }}>
-      {/* Branding strip */}
-      <div style={{
-        display: 'flex', alignItems: 'center', gap: 8, padding: '0 16px', height: 44,
-        background: '#f9fafb', borderBottom: '1px solid #e5e7eb', flexShrink: 0,
-        color: '#111827',
-      }}>
-        <Badge
-          identity={{ color: proj.timeline.color ?? '#6b7280', icon: proj.timeline.icon ?? '__none__' }}
-          name={proj.timeline.name}
-          size={24}
-        />
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 0, lineHeight: 1.2 }}>
-          <span style={{ fontSize: 13, fontWeight: 700, color: '#111827' }}>{proj.timeline.name}</span>
-          <span style={{ fontSize: 11, color: '#6b7280' }}>{proj.teamName}{proj.share.name ? ` · ${proj.share.name}` : ''}</span>
-        </div>
-        <span style={{ marginLeft: 'auto', fontSize: 11, color: '#9ca3af' }}>
-          {proj.activities.length} {proj.activities.length === 1 ? 'activity' : 'activities'}
-        </span>
-      </div>
-
-      {/* Gantt grid — interactive=false */}
-      <div style={{ flex: 1, minHeight: 0 }}>
-        <GanttGrid
-          rows={rows}
-          columns={columns}
-          todayIndex={todayIdx}
-          selectedActivityId={null}
-          onSelectActivity={() => {}}
-          resolvedGranularity={resolvedGranularity}
-          interactive={false}
-        />
-      </div>
-    </div>
-  )
-}
-````
-
-## File: packages/api/internal/api/share_handler.go
-````go
-package api
-
-import (
-	"database/sql"
-	"encoding/json"
-	"errors"
-	"net/http"
-	"os"
-	"sync"
-	"time"
-
-	"github.com/I0-1O/draba/packages/api/internal/filters"
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// ── In-memory share cache ─────────────────────────────────────────────────────
-
-type shareCacheEntry struct {
-	builtAt time.Time
-	payload models.ShareProjection
-}
-
-// shareCache is a lightweight TTL cache keyed by share token. It avoids a DB
-// hit on every warm request. The TTL is read from DRABA_SHARE_CACHE_TTL at
-// startup (default 60s); a PATCH or DELETE invalidates the entry immediately.
-type shareCache struct {
-	mu      sync.RWMutex
-	entries map[string]*shareCacheEntry
-	ttl     time.Duration
-}
-
-func newShareCache() *shareCache {
-	ttl := 60 * time.Second
-	if v := os.Getenv("DRABA_SHARE_CACHE_TTL"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			ttl = d
-		}
-	}
-	return &shareCache{entries: make(map[string]*shareCacheEntry), ttl: ttl}
-}
-
-func (c *shareCache) get(token string) (*models.ShareProjection, bool) {
-	c.mu.RLock()
-	e, ok := c.entries[token]
-	c.mu.RUnlock()
-	if !ok {
-		return nil, false
-	}
-	if time.Since(e.builtAt) > c.ttl {
-		return nil, false
-	}
-	p := e.payload
-	return &p, true
-}
-
-func (c *shareCache) set(token string, p *models.ShareProjection) {
-	c.mu.Lock()
-	c.entries[token] = &shareCacheEntry{builtAt: time.Now(), payload: *p}
-	c.mu.Unlock()
-}
-
-func (c *shareCache) invalidate(token string) {
-	c.mu.Lock()
-	delete(c.entries, token)
-	c.mu.Unlock()
-}
-
-// ── viewConfig sub-types ──────────────────────────────────────────────────────
-
-// viewConfigJSON is the shape stored in shares.view_config. The filter field
-// is evaluated server-side by the Go filter engine; the other fields are
-// forwarded to the client as-is so the public viewer can apply them.
-type viewConfigJSON struct {
-	Filter *filters.FilterDefinition `json:"filter,omitempty"`
-}
-
-// ── Handlers ──────────────────────────────────────────────────────────────────
-
-// handleGetShareProjection handles GET /shares/{token}. No authentication is
-// required. It is the public data gateway: the scope is hard-locked to the
-// single timeline referenced by the share row; no client-supplied selector can
-// widen it.
-func (s *Server) handleGetShareProjection(w http.ResponseWriter, r *http.Request) {
-	token := r.PathValue("token")
-
-	// ── 1. Resolve the share row ──────────────────────────────────────────────
-	share, err := s.shares.GetByToken(token)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load share")
-		return
-	}
-
-	// Phase 13.4 — revocation / expiry handled here (fields exist in schema now).
-	if share.RevokedAt != nil {
-		writeError(w, http.StatusGone, "GONE", "this share has been revoked")
-		return
-	}
-	if share.ExpiresAt != nil && time.Now().After(*share.ExpiresAt) {
-		writeError(w, http.StatusGone, "GONE", "this share has expired")
-		return
-	}
-
-	// Phase 13.3 — password gate handled here.
-	if share.PasswordHash != nil {
-		writeError(w, http.StatusUnauthorized, "PASSWORD_REQUIRED", "password required")
-		return
-	}
-
-	// ── 2. Serve from cache if warm ───────────────────────────────────────────
-	if proj, ok := s.shareCache.get(token); ok {
-		go func() { _ = s.shares.RecordView(share.ID) }()
-		writeJSON(w, http.StatusOK, proj)
-		return
-	}
-
-	// ── 3. Build projection (cache miss) ─────────────────────────────────────
-	proj, err := s.buildShareProjection(share)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to build share projection")
-		return
-	}
-
-	s.shareCache.set(token, proj)
-	go func() { _ = s.shares.RecordView(share.ID) }()
-	writeJSON(w, http.StatusOK, proj)
-}
-
-// buildShareProjection assembles the full ShareProjection for a share.
-// The scope is hard-locked to share.TimelineID; the caller cannot supply a
-// different timeline ID. Filter evaluation runs in Go before any data leaves
-// the server.
-func (s *Server) buildShareProjection(share *models.Share) (*models.ShareProjection, error) {
-	// Get timeline — using the share's TimelineID, never a client-supplied value.
-	timeline, err := s.timelines.GetByID(share.TimelineID)
-	if err != nil {
-		return nil, err
-	}
-
-	// Get all non-archived activities for this timeline.
-	acts, err := s.activities.ListByTimeline(share.TimelineID, nil, nil, false)
-	if err != nil {
-		return nil, err
-	}
-
-	// Get statuses and tags for filter context + projection.
-	statuses, err := s.statuses.ListStatuses(share.TimelineID)
-	if err != nil {
-		return nil, err
-	}
-	tags, err := s.tags.ListByTeam(timeline.TeamID)
-	if err != nil {
-		return nil, err
-	}
-	members, err := s.teams.ListMembers(timeline.TeamID)
-	if err != nil {
-		return nil, err
-	}
-	team, err := s.teams.GetByID(timeline.TeamID)
-	if err != nil {
-		return nil, err
-	}
-
-	// Parse the frozen filter from view_config and evaluate it server-side.
-	var vc viewConfigJSON
-	if share.ViewConfig != "" && share.ViewConfig != "{}" {
-		_ = json.Unmarshal([]byte(share.ViewConfig), &vc)
-	}
-
-	var filteredActs []*models.Activity
-	if vc.Filter != nil && len(vc.Filter.Conditions) > 0 {
-		// Build filter context.
-		statusesByTL := map[string][]models.Status{share.TimelineID: {}}
-		for _, st := range statuses {
-			statusesByTL[share.TimelineID] = append(statusesByTL[share.TimelineID], *st)
-		}
-		modelTags := make([]models.Tag, 0, len(tags))
-		for _, t := range tags {
-			modelTags = append(modelTags, *t)
-		}
-		ctx := &filters.FilterContext{
-			StatusesByTimelineID: statusesByTL,
-			Tags:                 modelTags,
-		}
-		for _, a := range acts {
-			if filters.MatchesFilter(a, vc.Filter, ctx) {
-				filteredActs = append(filteredActs, a)
-			}
-		}
-	} else {
-		filteredActs = acts
-	}
-
-	// Build referenced-entity sets (prune to what surviving activities reference).
-	usedMemberIDs := make(map[string]bool)
-	usedStatusIDs := make(map[string]bool)
-	usedTagIDs := make(map[string]bool)
-	for _, a := range filteredActs {
-		for _, id := range a.AssignedMemberIDs {
-			usedMemberIDs[id] = true
-		}
-		if a.StatusID != nil {
-			usedStatusIDs[*a.StatusID] = true
-		}
-		for _, id := range a.TagIDs {
-			usedTagIDs[id] = true
-		}
-	}
-
-	// Build PublicActivity slice — notes omitted unless this is a list share
-	// with notes enabled (Phase 13.2+ handles that nuance; for now always omit).
-	pubActivities := make([]models.PublicActivity, 0, len(filteredActs))
-	for _, a := range filteredActs {
-		pub := models.PublicActivity{
-			ID:                a.ID,
-			Title:             a.Title,
-			Description:       a.Description,
-			Icon:              a.Icon,
-			Color:             a.Color,
-			StartAt:           a.StartAt,
-			EndAt:             a.EndAt,
-			AllDay:            a.AllDay,
-			StatusID:          a.StatusID,
-			ParentActivityID:  a.ParentActivityID,
-			PercentComplete:   a.PercentComplete,
-			AssignedMemberIDs: a.AssignedMemberIDs,
-			TagIDs:            a.TagIDs,
-		}
-		if pub.AssignedMemberIDs == nil {
-			pub.AssignedMemberIDs = []string{}
-		}
-		if pub.TagIDs == nil {
-			pub.TagIDs = []string{}
-		}
-		pubActivities = append(pubActivities, pub)
-	}
-
-	// Build PublicMember slice — never email/role/userId.
-	pubMembers := make([]models.PublicMember, 0)
-	for _, m := range members {
-		if !usedMemberIDs[m.ID] {
-			continue
-		}
-		name := m.DisplayName
-		if name == "" {
-			// The register endpoint requires a non-empty displayName, so this
-			// branch only fires for rows migrated from older data. Never fall
-			// back to the email address — this response is public and
-			// unauthenticated.
-			name = "Team member"
-		}
-		pubMembers = append(pubMembers, models.PublicMember{
-			ID:          m.ID,
-			DisplayName: name,
-			Color:       m.Color,
-			Icon:        m.Icon,
-		})
-	}
-
-	// Prune statuses to referenced ones.
-	pubStatuses := make([]models.Status, 0)
-	for _, st := range statuses {
-		if usedStatusIDs[st.ID] {
-			pubStatuses = append(pubStatuses, *st)
-		}
-	}
-
-	// Prune tags to referenced ones.
-	pubTags := make([]models.Tag, 0)
-	for _, tg := range tags {
-		if usedTagIDs[tg.ID] {
-			pubTags = append(pubTags, *tg)
-		}
-	}
-
-	// Strip password hash before including share in the public projection.
-	safeShare := *share
-	safeShare.PasswordHash = nil
-	proj := &models.ShareProjection{
-		Share:    safeShare,
-		TeamName: team.Name,
-		Timeline: models.PublicTimeline{
-			ID:        timeline.ID,
-			Name:      timeline.Name,
-			Color:     timeline.Color,
-			Icon:      timeline.Icon,
-			StartDate: timeline.StartDate,
-			EndDate:   timeline.EndDate,
-		},
-		Members:    pubMembers,
-		Statuses:   pubStatuses,
-		Tags:       pubTags,
-		Activities: pubActivities,
-	}
-	return proj, nil
-}
-
-// handleCreateShare handles POST /timelines/{id}/shares. The caller must be a
-// member of the timeline's team. The share captures the current view config.
-func (s *Server) handleCreateShare(w http.ResponseWriter, r *http.Request) {
-	timelineID := r.PathValue("id")
-
-	timeline, err := s.timelines.GetByID(timelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
-		return
-	}
-	if timeline.ArchivedAt != nil {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-		return
-	}
-
-	member, ok := s.requireTeamMember(w, r, timeline.TeamID)
-	if !ok {
-		return
-	}
-
-	var req createShareBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-	if req.ViewType == "" {
-		req.ViewType = "gantt"
-	}
-	if req.ViewConfig == "" {
-		req.ViewConfig = "{}"
-	}
-
-	now := time.Now().UTC()
-	share := &models.Share{
-		ID:         newID(),
-		TimelineID: timelineID,
-		Token:      newToken(),
-		Name:       req.Name,
-		ViewType:   req.ViewType,
-		ViewConfig: req.ViewConfig,
-		CreatedBy:  member.ID,
-		CreatedAt:  now,
-		ViewCount:  0,
-	}
-
-	if err := s.shares.Create(share); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create share")
-		return
-	}
-
-	writeJSON(w, http.StatusCreated, share)
-}
-
-// handleListShares handles GET /teams/{id}/timelines/{timelineId}/shares.
-// Only team members with access to the timeline may list its shares.
-func (s *Server) handleListShares(w http.ResponseWriter, r *http.Request) {
-	timelineID := r.PathValue("timelineId")
-
-	timeline, err := s.timelines.GetByID(timelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
-		return
-	}
-
-	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
-		return
-	}
-
-	shares, err := s.shares.ListByTimeline(timelineID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list shares")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, shares)
-}
-
-// handleUpdateShare handles PATCH /shares/{id}. Only the share creator or a
-// team admin may update it.
-func (s *Server) handleUpdateShare(w http.ResponseWriter, r *http.Request) {
-	shareID := r.PathValue("id")
-
-	share, err := s.shares.GetByID(shareID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
-		return
-	}
-
-	timeline, err := s.timelines.GetByID(share.TimelineID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
-		return
-	}
-
-	member, ok := s.requireTeamMember(w, r, timeline.TeamID)
-	if !ok {
-		return
-	}
-	if !s.canManageShare(member, share) {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "only the share creator or a team admin may update this share")
-		return
-	}
-
-	var req patchShareBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	if req.Name != nil {
-		share.Name = req.Name
-	}
-	if req.ViewType != nil {
-		share.ViewType = *req.ViewType
-	}
-	if req.ViewConfig != nil {
-		share.ViewConfig = *req.ViewConfig
-	}
-
-	if err := s.shares.Update(share); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update share")
-		return
-	}
-
-	// Invalidate cache so the next public request picks up the new config.
-	s.shareCache.invalidate(share.Token)
-
-	writeJSON(w, http.StatusOK, share)
-}
-
-// handleDeleteShare handles DELETE /shares/{id}. Only the share creator or a
-// team admin may delete it.
-func (s *Server) handleDeleteShare(w http.ResponseWriter, r *http.Request) {
-	shareID := r.PathValue("id")
-
-	share, err := s.shares.GetByID(shareID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
-		return
-	}
-
-	timeline, err := s.timelines.GetByID(share.TimelineID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
-		return
-	}
-
-	member, ok := s.requireTeamMember(w, r, timeline.TeamID)
-	if !ok {
-		return
-	}
-	if !s.canManageShare(member, share) {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "only the share creator or a team admin may delete this share")
-		return
-	}
-
-	if err := s.shares.Delete(shareID); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete share")
-		return
-	}
-
-	s.shareCache.invalidate(share.Token)
-	w.WriteHeader(http.StatusNoContent)
-}
-
-// canManageShare reports whether a team member may update or delete a share.
-// Team admins always pass; non-admins must be the share's creator.
-func (s *Server) canManageShare(member *models.TeamMember, share *models.Share) bool {
-	return member.Role == "admin" || member.ID == share.CreatedBy
-}
-
-// ── Request bodies ────────────────────────────────────────────────────────────
-
-type createShareBody struct {
-	Name       *string `json:"name,omitempty"`
-	ViewType   string  `json:"viewType"`
-	ViewConfig string  `json:"viewConfig"`
-}
-
-type patchShareBody struct {
-	Name       *string `json:"name,omitempty"`
-	ViewType   *string `json:"viewType,omitempty"`
-	ViewConfig *string `json:"viewConfig,omitempty"`
-}
-````
-
-## File: packages/api/internal/models/models.go
-````go
-// Package models holds the domain types shared across the API, db,
-// and event-bus packages. These types are persisted directly via sqlx
-// (db tags) and serialised on the wire (json tags); changing tags is a
-// schema change.
-package models
-
-import "time"
-
-// Activity is a scheduled item of work belonging to a Timeline. ArchivedAt is
-// non-nil when the activity is soft-deleted; list endpoints exclude archived
-// activities by default.
-//
-// AssignedMemberIDs is not stored on the activities table; it is populated by
-// the repository from activity_assignments after every list query.
-//
-// GoogleEventID and CaldavUID are preserved as-is — they identify the
-// corresponding records in external calendar systems (VEVENT identifiers).
-type Activity struct {
-	ID                string     `db:"id"                  json:"id"`
-	TimelineID        string     `db:"timeline_id"         json:"timelineId"`
-	Title             string     `db:"title"               json:"title"`
-	Description       *string    `db:"description"         json:"description,omitempty"`
-	Notes             *string    `db:"notes"               json:"notes,omitempty"`
-	Icon              *string    `db:"icon"                json:"icon,omitempty"`
-	Color             *string    `db:"color"               json:"color,omitempty"`
-	StartAt           time.Time  `db:"start_at"            json:"startAt"`
-	EndAt             time.Time  `db:"end_at"              json:"endAt"`
-	AllDay            bool       `db:"all_day"             json:"allDay"`
-	StatusID          *string    `db:"status_id"           json:"statusId,omitempty"`
-	ParentActivityID  *string    `db:"parent_activity_id"  json:"parentActivityId,omitempty"`
-	PercentComplete   *int       `db:"percent_complete"    json:"percentComplete,omitempty"`
-	Location          *string    `db:"location"            json:"location,omitempty"`
-	URL               *string    `db:"url"                 json:"url,omitempty"`
-	Rrule             *string    `db:"rrule"               json:"rrule,omitempty"`
-	CaldavUID         *string    `db:"caldav_uid"          json:"caldavUid,omitempty"`
-	GoogleEventID     *string    `db:"google_event_id"     json:"googleEventId,omitempty"`
-	CreatedBy         string     `db:"created_by"          json:"createdBy"`
-	CreatedAt         time.Time  `db:"created_at"          json:"createdAt"`
-	UpdatedAt         time.Time  `db:"updated_at"          json:"updatedAt"`
-	ArchivedAt        *time.Time `db:"archived_at"         json:"archivedAt,omitempty"`
-	AssignedMemberIDs []string   `db:"-"                   json:"assignedMemberIds"`
-	TagIDs            []string   `db:"-"                   json:"tagIds"`
-}
-
-// TeamMemberWithUser joins a TeamMember row with its associated User so
-// callers receive display names and emails in a single query. Participants
-// (no user account) have empty email and avatar; their display_name comes
-// from team_members.display_name via COALESCE in the query.
-type TeamMemberWithUser struct {
-	TeamMember
-	Email       string  `db:"email"        json:"email"`
-	DisplayName string  `db:"display_name" json:"displayName"`
-	AvatarURL   *string `db:"avatar_url"   json:"avatarUrl,omitempty"`
-}
-
-// User is an authenticated account. PasswordHash is omitted from JSON
-// to avoid leaking it through any handler that returns a User.
-// ArchivedAt is non-nil when the account is inactivated; login is rejected
-// for archived users. Color and Icon are user-level identity fields (migration
-// 010); they propagate to team_members rows for the user when changed.
-type User struct {
-	ID           string     `db:"id"             json:"id"`
-	Email        string     `db:"email"          json:"email"`
-	PasswordHash string     `db:"password_hash"  json:"-"`
-	DisplayName  string     `db:"display_name"   json:"displayName"`
-	AvatarURL    *string    `db:"avatar_url"     json:"avatarUrl,omitempty"`
-	Color        *string    `db:"color"          json:"color,omitempty"`
-	Icon         *string    `db:"icon"           json:"icon,omitempty"`
-	IsSuperadmin bool       `db:"is_superadmin"  json:"isSuperadmin"`
-	CreatedAt    time.Time  `db:"created_at"     json:"createdAt"`
-	UpdatedAt    time.Time  `db:"updated_at"     json:"updatedAt"`
-	ArchivedAt   *time.Time `db:"archived_at"    json:"archivedAt,omitempty"`
-}
-
-// Team is a workspace that groups users and their scheduled work. Color and
-// Icon are identity fields added in migration 006; both are nullable until
-// explicitly set by an admin. Description, Notes, and ArchivedAt are added in
-// migration 008; ArchivedAt is non-nil when the team is soft-deleted.
-// InviteLinkToken is a stable, reusable token added in migration 009; when
-// non-nil it can be used by anyone to join the team during registration.
-type Team struct {
-	ID              string     `db:"id"                  json:"id"`
-	Name            string     `db:"name"                json:"name"`
-	Slug            string     `db:"slug"                json:"slug"`
-	Description     *string    `db:"description"         json:"description,omitempty"`
-	Notes           *string    `db:"notes"               json:"notes,omitempty"`
-	Color           *string    `db:"color"               json:"color,omitempty"`
-	Icon            *string    `db:"icon"                json:"icon,omitempty"`
-	InviteLinkToken *string    `db:"invite_link_token"   json:"inviteLinkToken,omitempty"`
-	CreatedAt       time.Time  `db:"created_at"          json:"createdAt"`
-	UpdatedAt       time.Time  `db:"updated_at"          json:"updatedAt"`
-	ArchivedAt      *time.Time `db:"archived_at"         json:"archivedAt,omitempty"`
-}
-
-// TeamMember is the join row that puts a person in a Team. UserID is nil
-// for login-less Participants; DisplayName is populated for them instead.
-// Role is the team-level role: "admin" or "member". Color and Icon are
-// identity fields (migration 006); Color stores a color ID (e.g. "teal").
-// ArchivedAt is non-nil when the member is inactivated (migration 009);
-// inactivated members lose access but their data and assignments are preserved.
-type TeamMember struct {
-	ID          string     `db:"id"           json:"id"`
-	TeamID      string     `db:"team_id"      json:"teamId"`
-	UserID      *string    `db:"user_id"      json:"userId,omitempty"`
-	DisplayName *string    `db:"display_name" json:"displayName,omitempty"`
-	Role        string     `db:"role"         json:"role"`
-	Color       *string    `db:"color"        json:"color,omitempty"`
-	Icon        *string    `db:"icon"         json:"icon,omitempty"`
-	JoinedAt    time.Time  `db:"joined_at"    json:"joinedAt"`
-	ArchivedAt  *time.Time `db:"archived_at"  json:"archivedAt,omitempty"`
-}
-
-// MemberStats holds computed activity and timeline counts for a member.
-// All counts are date-relative and scoped to activities the member is assigned to.
-type MemberStats struct {
-	ActiveTimelines    int `json:"activeTimelines"`
-	ArchivedTimelines  int `json:"archivedTimelines"`
-	PastDue            int `json:"pastDue"`
-	Running            int `json:"running"`
-	Upcoming           int `json:"upcoming"`
-	Unscheduled        int `json:"unscheduled"`
-	ArchivedActivities int `json:"archivedActivities"`
-}
-
-// MemberDetail combines a TeamMemberWithUser with computed stats and the
-// member's full list of team memberships. Returned by GET /teams/:id/members/:memberId.
-// UserArchivedAt reflects users.archived_at (account-level deactivation), distinct
-// from ArchivedAt which is team_members.archived_at (membership-level inactivation).
-type MemberDetail struct {
-	TeamMemberWithUser
-	Stats          MemberStats          `json:"stats"`
-	Teams          []TeamMemberWithUser `json:"teams"`
-	Deletable      bool                 `json:"deletable"`
-	UserArchivedAt *time.Time           `json:"userArchivedAt,omitempty"`
-}
-
-// Timeline is a named date range over a team's events. It is not a data
-// container — it is a view over a team's events for a given date window.
-// Access is governed by timeline_access + team role; share_token allows
-// unauthenticated read access via a stable public URL. Color and Icon are
-// identity fields (migration 006). Description and Notes are free-text fields
-// added in migration 013.
-type Timeline struct {
-	ID          string     `db:"id"          json:"id"`
-	TeamID      string     `db:"team_id"     json:"teamId"`
-	Name        string     `db:"name"        json:"name"`
-	Description *string    `db:"description" json:"description,omitempty"`
-	Notes       *string    `db:"notes"       json:"notes,omitempty"`
-	StartDate   string     `db:"start_date"  json:"startDate"`
-	EndDate     string     `db:"end_date"    json:"endDate"`
-	Color       *string    `db:"color"       json:"color,omitempty"`
-	Icon        *string    `db:"icon"        json:"icon,omitempty"`
-	ShareToken  string     `db:"share_token" json:"shareToken"`
-	IcalToken   string     `db:"ical_token"  json:"icalToken"`
-	CreatedBy   string     `db:"created_by"  json:"createdBy"`
-	CreatedAt   time.Time  `db:"created_at"  json:"createdAt"`
-	UpdatedAt   time.Time  `db:"updated_at"  json:"updatedAt"`
-	ArchivedAt  *time.Time `db:"archived_at" json:"archivedAt,omitempty"`
-}
-
-// SavedFilter is a user-owned, team-scoped named filter spec. Definition is
-// an opaque JSON string interpreted by the client; the server treats it as
-// arbitrary text and only validates that it parses as JSON.
-type SavedFilter struct {
-	ID           string    `db:"id"             json:"id"`
-	TeamID       string    `db:"team_id"        json:"teamId"`
-	UserID       string    `db:"user_id"        json:"userId"`
-	Name         string    `db:"name"           json:"name"`
-	Definition   string    `db:"definition"     json:"definition"`
-	IsTeamFilter bool      `db:"is_team_filter" json:"isTeamFilter"`
-	CreatedAt    time.Time `db:"created_at"     json:"createdAt"`
-	UpdatedAt    time.Time `db:"updated_at"     json:"updatedAt"`
-}
-
-// UserPreference stores a single key/value setting for a user, optionally
-// scoped to a timeline. TimelineID is “” for global preferences so the
-// UNIQUE(user_id, timeline_id, key) DB constraint works without NULL handling.
-// Serialised JSON omits TimelineID when empty so callers see null for global prefs.
-type UserPreference struct {
-	ID         string    `db:"id"          json:"id"`
-	UserID     string    `db:"user_id"     json:"userId"`
-	TimelineID string    `db:"timeline_id" json:"timelineId,omitempty"`
-	Key        string    `db:"key"         json:"key"`
-	Value      string    `db:"value"       json:"value"`
-	UpdatedAt  time.Time `db:"updated_at"  json:"updatedAt"`
-}
-
-// APIToken is a long-lived Bearer credential a user issues for programmatic
-// access. token_hash stores SHA-256(rawToken); the raw value is shown to the
-// caller only once on creation. RevokedAt is non-nil when the token has been
-// revoked; revoked tokens are not deleted so listing remains stable.
-type APIToken struct {
-	ID         string     `db:"id"           json:"id"`
-	UserID     string     `db:"user_id"      json:"userId"`
-	Name       string     `db:"name"         json:"name"`
-	TokenHash  string     `db:"token_hash"   json:"-"`
-	Scope      string     `db:"scope"        json:"scope"`
-	LastUsedAt *time.Time `db:"last_used_at" json:"lastUsedAt,omitempty"`
-	CreatedAt  time.Time  `db:"created_at"   json:"createdAt"`
-	RevokedAt  *time.Time `db:"revoked_at"   json:"revokedAt,omitempty"`
-}
-
-// InstanceSetting stores a single instance-level configuration value.
-// SMTP config and defaults live here. The value column is plain text;
-// the mailer package handles decryption of the SMTP password field.
-type InstanceSetting struct {
-	Key       string    `db:"key"        json:"key"`
-	Value     string    `db:"value"      json:"value"`
-	UpdatedAt time.Time `db:"updated_at" json:"updatedAt"`
-}
-
-// PasswordResetToken is a single-use token for the forgot-password flow.
-// TokenHash stores SHA-256 of the raw token; the raw value is sent by email
-// and never stored. UsedAt is set when the token is consumed.
-type PasswordResetToken struct {
-	ID        string     `db:"id"         json:"id"`
-	UserID    string     `db:"user_id"    json:"userId"`
-	TokenHash string     `db:"token_hash" json:"-"`
-	ExpiresAt time.Time  `db:"expires_at" json:"expiresAt"`
-	UsedAt    *time.Time `db:"used_at"    json:"usedAt,omitempty"`
-	CreatedAt time.Time  `db:"created_at" json:"createdAt"`
-}
-
-// AdminUserRow is a flat view of a user for the admin users list. It includes
-// the user's fields plus the count of active team memberships.
-type AdminUserRow struct {
-	User
-	TeamCount int `db:"team_count" json:"teamCount"`
-}
-
-// Share is a public read-only link to a specific view of a timeline. One
-// timeline may have many shares, each freezing a different view configuration.
-// Token is an unguessable URL-safe string; PasswordHash is set only when the
-// share requires a password (Phase 13.3); ExpiresAt and RevokedAt support
-// lifecycle management (Phase 13.4).
-type Share struct {
-	ID           string     `db:"id"             json:"id"`
-	TimelineID   string     `db:"timeline_id"    json:"timelineId"`
-	Token        string     `db:"token"          json:"token"`
-	Name         *string    `db:"name"           json:"name,omitempty"`
-	ViewType     string     `db:"view_type"      json:"viewType"`
-	ViewConfig   string     `db:"view_config"    json:"viewConfig"`
-	PasswordHash *string    `db:"password_hash"  json:"-"`
-	ExpiresAt    *time.Time `db:"expires_at"     json:"expiresAt,omitempty"`
-	CreatedBy    string     `db:"created_by"     json:"createdBy"`
-	CreatedAt    time.Time  `db:"created_at"     json:"createdAt"`
-	LastViewedAt *time.Time `db:"last_viewed_at" json:"lastViewedAt,omitempty"`
-	ViewCount    int        `db:"view_count"     json:"viewCount"`
-	RevokedAt    *time.Time `db:"revoked_at"     json:"revokedAt,omitempty"`
-}
-
-// PublicMember is the safe projection of a team member for public share
-// responses. It exposes only display fields — never email, role, or user_id.
-type PublicMember struct {
-	ID          string  `json:"id"`
-	DisplayName string  `json:"displayName"`
-	Color       *string `json:"color,omitempty"`
-	Icon        *string `json:"icon,omitempty"`
-}
-
-// PublicActivity is the safe projection of an activity for public share
-// responses. It includes standard display fields but omits notes (unless
-// explicitly included for List shares with Notes enabled), caldav/google
-// identifiers, and any internal fields.
-type PublicActivity struct {
-	ID                string    `json:"id"`
-	Title             string    `json:"title"`
-	Description       *string   `json:"description,omitempty"`
-	Notes             *string   `json:"notes,omitempty"`
-	Icon              *string   `json:"icon,omitempty"`
-	Color             *string   `json:"color,omitempty"`
-	StartAt           time.Time `json:"startAt"`
-	EndAt             time.Time `json:"endAt"`
-	AllDay            bool      `json:"allDay"`
-	StatusID          *string   `json:"statusId,omitempty"`
-	ParentActivityID  *string   `json:"parentActivityId,omitempty"`
-	PercentComplete   *int      `json:"percentComplete,omitempty"`
-	AssignedMemberIDs []string  `json:"assignedMemberIds"`
-	TagIDs            []string  `json:"tagIds"`
-}
-
-// PublicTimeline is the safe timeline projection for share responses.
-type PublicTimeline struct {
-	ID        string  `json:"id"`
-	Name      string  `json:"name"`
-	Color     *string `json:"color,omitempty"`
-	Icon      *string `json:"icon,omitempty"`
-	StartDate string  `json:"startDate"`
-	EndDate   string  `json:"endDate"`
-}
-
-// ShareProjection is the full aggregate returned by GET /shares/{token}.
-// It contains all data the public viewer needs to render the configured view.
-type ShareProjection struct {
-	Share      Share            `json:"share"`
-	Timeline   PublicTimeline   `json:"timeline"`
-	TeamName   string           `json:"teamName"`
-	Members    []PublicMember   `json:"members"`
-	Statuses   []Status         `json:"statuses"`
-	Tags       []Tag            `json:"tags"`
-	Activities []PublicActivity `json:"activities"`
-}
-
-// RevokeUserResult summarizes the outcome of POST /users/:id/revoke.
-// The three counters let the caller show a meaningful summary in the UI.
-type RevokeUserResult struct {
-	AccountDeactivated     bool `json:"accountDeactivated"`
-	MembershipsInactivated int  `json:"membershipsInactivated"`
-	MembershipsRemoved     int  `json:"membershipsRemoved"`
-}
-
-// StatusTemplate is a reusable named preset of statuses owned by a team.
-// When a timeline is created the team's chosen template's items are copied
-// into live Status rows for that timeline.
-type StatusTemplate struct {
-	ID          string    `db:"id"          json:"id"`
-	TeamID      string    `db:"team_id"     json:"teamId"`
-	Name        string    `db:"name"        json:"name"`
-	Description *string   `db:"description" json:"description,omitempty"`
-	Position    int       `db:"position"    json:"position"`
-	CreatedBy   string    `db:"created_by"  json:"createdBy"`
-	CreatedAt   time.Time `db:"created_at"  json:"createdAt"`
-	UpdatedAt   time.Time `db:"updated_at"  json:"updatedAt"`
-	// Items is populated by the repository when listing templates.
-	Items []StatusTemplateItem `db:"-" json:"items"`
-}
-
-// StatusTemplateItem is one status value within a StatusTemplate.
-type StatusTemplateItem struct {
-	ID         string  `db:"id"          json:"id"`
-	TemplateID string  `db:"template_id" json:"templateId"`
-	Name       string  `db:"name"        json:"name"`
-	Color      string  `db:"color"       json:"color"`
-	Icon       *string `db:"icon"        json:"icon,omitempty"`
-	IsClosed   bool    `db:"is_closed"   json:"isClosed"`
-	Position   int     `db:"position"    json:"position"`
-}
-
-// Status is a live status value on a specific timeline. Rows are copied from a
-// StatusTemplate's items when the timeline is created and then evolve independently.
-type Status struct {
-	ID         string    `db:"id"          json:"id"`
-	TimelineID string    `db:"timeline_id" json:"timelineId"`
-	Name       string    `db:"name"        json:"name"`
-	Color      string    `db:"color"       json:"color"`
-	Icon       *string   `db:"icon"        json:"icon,omitempty"`
-	IsClosed   bool      `db:"is_closed"   json:"isClosed"`
-	Position   int       `db:"position"    json:"position"`
-	CreatedAt  time.Time `db:"created_at"  json:"createdAt"`
-	UpdatedAt  time.Time `db:"updated_at"  json:"updatedAt"`
-}
-
-// TimelineAccessEntry is a single timeline access grant joined with the team
-// member's display info. Returned by GET /teams/:id/timelines/:timelineId/access.
-type TimelineAccessEntry struct {
-	TimelineID   string  `db:"timeline_id"    json:"timelineId"`
-	TeamMemberID string  `db:"team_member_id" json:"teamMemberId"`
-	Role         string  `db:"role"           json:"role"`
-	DisplayName  string  `db:"display_name"   json:"displayName"`
-	Email        string  `db:"email"          json:"email"`
-	Color        *string `db:"color"          json:"color,omitempty"`
-	Icon         *string `db:"icon"           json:"icon,omitempty"`
-	UserID       *string `db:"user_id"        json:"userId,omitempty"`
-}
-
-// Tag is a team-scoped label that can be applied to activities. Tags are
-// normalized: a team_id+name pair is unique, enabling rename-all and
-// name-based filter matching across timelines.
-type Tag struct {
-	ID        string    `db:"id"         json:"id"`
-	TeamID    string    `db:"team_id"    json:"teamId"`
-	Name      string    `db:"name"       json:"name"`
-	Color     *string   `db:"color"      json:"color,omitempty"`
-	CreatedBy string    `db:"created_by" json:"createdBy"`
-	CreatedAt time.Time `db:"created_at" json:"createdAt"`
-}
-
-// Invite is a single-use token that grants an email address the right to
-// join a Team. AcceptedAt is non-nil once consumed; expired or accepted
-// invites are rejected by the registration handler.
-type Invite struct {
-	ID         string     `db:"id"          json:"id"`
-	TeamID     string     `db:"team_id"     json:"teamId"`
-	Email      string     `db:"email"       json:"email"`
-	Token      string     `db:"token"       json:"token"`
-	Role       string     `db:"role"        json:"role"`
-	InvitedBy  string     `db:"invited_by"  json:"invitedBy"`
-	ExpiresAt  time.Time  `db:"expires_at"  json:"expiresAt"`
-	AcceptedAt *time.Time `db:"accepted_at" json:"acceptedAt,omitempty"`
-	CreatedAt  time.Time  `db:"created_at"  json:"createdAt"`
-}
-````
-
 ## File: packages/web/src/components/filters/FilterDropdown.tsx
 ````typescript
 /**
@@ -44357,6 +43410,1197 @@ export function useRevokeTimelineAccess(teamId: string, timelineId: string) {
       client.invalidateQueries({ queryKey: ['teams', teamId, 'timelines', timelineId, 'access'] })
     },
   })
+}
+````
+
+## File: packages/web/src/pages/ShareViewPage.tsx
+````typescript
+/**
+ * ShareViewPage — public read-only view for a share link.
+ *
+ * Mounted at /s/:token outside ProtectedRoute. Fetches the ShareProjection
+ * from the public gateway, then renders the Gantt in interactive=false mode
+ * with the frozen view config (groupBy, sortBy, colorBy, granularity) applied.
+ * Theme is forced to light — useLayoutEffect runs synchronously before paint so
+ * it beats any dark-class applied from localStorage by useDarkMode.
+ */
+
+import { useMemo, useLayoutEffect, useEffect } from 'react'
+import { useParams } from 'react-router-dom'
+import { useShareProjection } from '@/hooks/useShares'
+import GanttGrid from '@/components/gantt/GanttGrid'
+import { buildRows, type RichActivity } from '@/components/gantt/GanttView'
+import { resolveColorHex } from '@/components/identity/identity-constants'
+import { MEMBER_COLORS, ACTIVITY_COLORS } from '@/types'
+import {
+  generateColumns,
+  positionInColumns,
+  todayColumnPosition,
+  autoFitGranularity,
+} from '@/components/gantt/granularity'
+import type { components } from '@draba/shared'
+import type { GroupBy, SortBy, ColorBy, TimeGranularity } from '@/components/gantt/GanttToolbar'
+import type { Member } from '@/types'
+import { AlertCircle, Loader2 } from 'lucide-react'
+import { Badge } from '@/components/identity/Badge'
+
+type PublicActivity = components['schemas']['PublicActivity']
+type PublicMember = components['schemas']['PublicMember']
+type Status = components['schemas']['Status']
+
+// ── View config parsing ───────────────────────────────────────────────────────
+
+interface ParsedViewConfig {
+  groupBy: GroupBy
+  sortBy: SortBy
+  colorBy: ColorBy
+  granularity: TimeGranularity | 'auto'
+}
+
+function parseViewConfig(raw: string): ParsedViewConfig {
+  try {
+    const c = JSON.parse(raw) as Partial<ParsedViewConfig>
+    return {
+      groupBy: (c.groupBy as GroupBy) ?? 'none',
+      sortBy: (c.sortBy as SortBy) ?? 'startDate',
+      colorBy: (c.colorBy as ColorBy) ?? 'activity',
+      granularity: c.granularity ?? 'auto',
+    }
+  } catch {
+    return { groupBy: 'none', sortBy: 'startDate', colorBy: 'activity', granularity: 'auto' }
+  }
+}
+
+// ── Data helpers ──────────────────────────────────────────────────────────────
+
+function initialsFrom(name: string): string {
+  return name.split(/\s+/).map(w => w[0] ?? '').slice(0, 2).join('').toUpperCase()
+}
+
+function toMember(m: PublicMember, index: number): Member {
+  return {
+    id: m.id,
+    name: m.displayName,
+    initials: initialsFrom(m.displayName),
+    color: resolveColorHex(m.color) || MEMBER_COLORS[index % MEMBER_COLORS.length],
+  }
+}
+
+// ── ShareViewPage ─────────────────────────────────────────────────────────────
+
+export default function ShareViewPage() {
+  const { token } = useParams<{ token: string }>()
+  const { data: proj, isLoading, isError, error } = useShareProjection(token)
+
+  // Force light mode synchronously before first paint.
+  // useLayoutEffect runs before the browser paints, beating any dark class set
+  // from localStorage by useDarkMode during the same render cycle.
+  useLayoutEffect(() => {
+    const root = document.documentElement
+    const hadDark = root.classList.contains('dark')
+    root.classList.remove('dark')
+    return () => {
+      if (hadDark) root.classList.add('dark')
+    }
+  }, [])
+
+  // Re-apply on mount in case ThemeSync fires after useLayoutEffect.
+  useEffect(() => {
+    document.documentElement.classList.remove('dark')
+  }, [])
+
+  const vc = useMemo(
+    () => parseViewConfig(proj?.share.viewConfig ?? '{}'),
+    [proj?.share.viewConfig],
+  )
+
+  const { columns, resolvedGranularity } = useMemo(() => {
+    if (!proj) return { columns: [], resolvedGranularity: 'week' as TimeGranularity }
+    const start = new Date(proj.timeline.startDate)
+    const end = new Date(proj.timeline.endDate)
+    if (vc.granularity === 'auto') {
+      const gr = autoFitGranularity(start, end, window.innerWidth || 1000)
+      return { columns: generateColumns(start, end, gr), resolvedGranularity: gr }
+    }
+    return {
+      columns: generateColumns(start, end, vc.granularity as TimeGranularity),
+      resolvedGranularity: vc.granularity as TimeGranularity,
+    }
+  }, [proj, vc.granularity])
+
+  const todayIdx = useMemo(() => todayColumnPosition(columns), [columns])
+
+  const memberArray = useMemo<Member[]>(
+    () => (proj?.members ?? []).map((m, i) => toMember(m, i)),
+    [proj],
+  )
+
+  const memberById = useMemo(
+    () => Object.fromEntries(memberArray.map(m => [m.id, m])),
+    [memberArray],
+  )
+
+  const statusColorById = useMemo(() => {
+    const m = new Map<string, string>()
+    proj?.statuses.forEach((s: Status) => m.set(s.id, s.color))
+    return m
+  }, [proj])
+
+  // Build RichActivity array (mirrors GanttView's toRichActivity).
+  const richActivities = useMemo((): RichActivity[] => {
+    if (!proj || columns.length === 0) return []
+    const viewStart = columns[0].start
+    const viewEnd = columns[columns.length - 1].end
+
+    return proj.activities.flatMap((a: PublicActivity, i: number) => {
+      const start = new Date(a.startAt)
+      const end = new Date(a.endAt)
+      if (end < viewStart || start > viewEnd) return []
+
+      const clampedStart = start < viewStart ? viewStart : start
+      const clampedEnd = end > viewEnd ? viewEnd : end
+      const { startCol, span } = positionInColumns(clampedStart, clampedEnd, columns)
+
+      const members = (a.assignedMemberIds ?? [])
+        .map(id => memberById[id])
+        .filter((m): m is Member => Boolean(m))
+
+      let color: string
+      if (vc.colorBy === 'member') {
+        color = members[0]?.color ?? a.color ?? ACTIVITY_COLORS[i % ACTIVITY_COLORS.length]
+      } else if (vc.colorBy === 'status') {
+        color = statusColorById.get(a.statusId ?? '') ?? '#6b7280'
+      } else {
+        color = a.color ?? ACTIVITY_COLORS[i % ACTIVITY_COLORS.length]
+      }
+
+      return [{
+        id: a.id,
+        title: a.title,
+        startCol,
+        span,
+        color,
+        icon: a.icon ?? undefined,
+        members,
+        isChild: Boolean(a.parentActivityId),
+        depth: 0,
+        startAtMs: start.getTime(),
+        endAtMs: end.getTime(),
+        parentActivityId: a.parentActivityId ?? null,
+        primaryMemberId: members[0]?.id ?? null,
+        assignedMemberIds: a.assignedMemberIds ?? [],
+        statusId: a.statusId ?? null,
+      } satisfies RichActivity]
+    })
+  }, [proj, columns, memberById, statusColorById, vc.colorBy])
+
+  // Apply groupBy + sortBy via the same buildRows used by GanttView.
+  const rows = useMemo(
+    () => buildRows(
+      richActivities,
+      memberArray,
+      vc.groupBy,
+      vc.sortBy,
+      new Set<string>(),
+      new Set<string>(),
+      proj?.statuses,
+    ),
+    [richActivities, memberArray, vc.groupBy, vc.sortBy, proj?.statuses],
+  )
+
+  // ── Render ────────────────────────────────────────────────────────────────
+
+  if (isLoading) {
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh', gap: 10, color: '#6b7280', fontFamily: 'var(--font-sans)' }}>
+        <Loader2 size={20} className="animate-spin" />
+        <span>Loading shared view…</span>
+      </div>
+    )
+  }
+
+  if (isError) {
+    const apiErr = error as { status?: number } | null
+    const is404 = apiErr?.status === 404
+    const is410 = apiErr?.status === 410
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100vh', gap: 12, color: '#374151', fontFamily: 'var(--font-sans)', padding: 24 }}>
+        <AlertCircle size={32} style={{ color: '#ef4444' }} />
+        <h1 style={{ fontSize: 18, fontWeight: 600, margin: 0 }}>
+          {is404 ? 'Share not found' : is410 ? 'This share has expired or been revoked' : 'Could not load this view'}
+        </h1>
+        <p style={{ fontSize: 13, color: '#6b7280', margin: 0, textAlign: 'center' }}>
+          {is404 || is410 ? 'The link may have been removed or may never have existed.' : 'Please try again later.'}
+        </p>
+      </div>
+    )
+  }
+
+  if (!proj) return null
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: '#ffffff' }}>
+      {/* Branding strip */}
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 8, padding: '0 16px', height: 44,
+        background: '#f9fafb', borderBottom: '1px solid #e5e7eb', flexShrink: 0,
+        color: '#111827',
+      }}>
+        <Badge
+          identity={{ color: proj.timeline.color ?? '#6b7280', icon: proj.timeline.icon ?? '__none__' }}
+          name={proj.timeline.name}
+          size={24}
+        />
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 0, lineHeight: 1.2 }}>
+          <span style={{ fontSize: 13, fontWeight: 700, color: '#111827' }}>{proj.timeline.name}</span>
+          <span style={{ fontSize: 11, color: '#6b7280' }}>{proj.teamName}{proj.share.name ? ` · ${proj.share.name}` : ''}</span>
+        </div>
+        <span style={{ marginLeft: 'auto', fontSize: 11, color: '#9ca3af' }}>
+          {proj.activities.length} {proj.activities.length === 1 ? 'activity' : 'activities'}
+        </span>
+      </div>
+
+      {/* Gantt grid — interactive=false */}
+      <div style={{ flex: 1, minHeight: 0 }}>
+        <GanttGrid
+          rows={rows}
+          columns={columns}
+          todayIndex={todayIdx}
+          selectedActivityId={null}
+          onSelectActivity={() => {}}
+          resolvedGranularity={resolvedGranularity}
+          interactive={false}
+        />
+      </div>
+    </div>
+  )
+}
+````
+
+## File: packages/api/internal/api/share_handler.go
+````go
+package api
+
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"os"
+	"sync"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/filters"
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// ── In-memory share cache ─────────────────────────────────────────────────────
+
+type shareCacheEntry struct {
+	builtAt time.Time
+	payload models.ShareProjection
+}
+
+// shareCache is a lightweight TTL cache keyed by share token. It avoids a DB
+// hit on every warm request. The TTL is read from DRABA_SHARE_CACHE_TTL at
+// startup (default 60s); a PATCH or DELETE invalidates the entry immediately.
+type shareCache struct {
+	mu      sync.RWMutex
+	entries map[string]*shareCacheEntry
+	ttl     time.Duration
+}
+
+func newShareCache() *shareCache {
+	ttl := 60 * time.Second
+	if v := os.Getenv("DRABA_SHARE_CACHE_TTL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			ttl = d
+		}
+	}
+	return &shareCache{entries: make(map[string]*shareCacheEntry), ttl: ttl}
+}
+
+func (c *shareCache) get(token string) (*models.ShareProjection, bool) {
+	c.mu.RLock()
+	e, ok := c.entries[token]
+	c.mu.RUnlock()
+	if !ok {
+		return nil, false
+	}
+	if time.Since(e.builtAt) > c.ttl {
+		return nil, false
+	}
+	p := e.payload
+	return &p, true
+}
+
+func (c *shareCache) set(token string, p *models.ShareProjection) {
+	c.mu.Lock()
+	c.entries[token] = &shareCacheEntry{builtAt: time.Now(), payload: *p}
+	c.mu.Unlock()
+}
+
+func (c *shareCache) invalidate(token string) {
+	c.mu.Lock()
+	delete(c.entries, token)
+	c.mu.Unlock()
+}
+
+// ── viewConfig sub-types ──────────────────────────────────────────────────────
+
+// viewConfigJSON is the shape stored in shares.view_config. The filter field
+// is evaluated server-side by the Go filter engine; the other fields are
+// forwarded to the client as-is so the public viewer can apply them.
+type viewConfigJSON struct {
+	Filter *filters.FilterDefinition `json:"filter,omitempty"`
+}
+
+// ── Handlers ──────────────────────────────────────────────────────────────────
+
+// handleGetShareProjection handles GET /shares/{token}. No authentication is
+// required. It is the public data gateway: the scope is hard-locked to the
+// single timeline referenced by the share row; no client-supplied selector can
+// widen it.
+func (s *Server) handleGetShareProjection(w http.ResponseWriter, r *http.Request) {
+	token := r.PathValue("token")
+
+	// ── 1. Resolve the share row ──────────────────────────────────────────────
+	share, err := s.shares.GetByToken(token)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load share")
+		return
+	}
+
+	// Phase 13.4 — revocation / expiry handled here (fields exist in schema now).
+	if share.RevokedAt != nil {
+		writeError(w, http.StatusGone, "GONE", "this share has been revoked")
+		return
+	}
+	if share.ExpiresAt != nil && time.Now().After(*share.ExpiresAt) {
+		writeError(w, http.StatusGone, "GONE", "this share has expired")
+		return
+	}
+
+	// Phase 13.3 — password gate handled here.
+	// NOTE: this check must stay above the cache read. PATCH invalidates the cache
+	// entry immediately (see handleUpdateShare), so a newly-added password_hash is
+	// never served from a stale cache. Moving the check below the cache read would
+	// silently bypass the password gate for the TTL window.
+	if share.PasswordHash != nil {
+		writeError(w, http.StatusUnauthorized, "PASSWORD_REQUIRED", "password required")
+		return
+	}
+
+	// ── 2. Serve from cache if warm ───────────────────────────────────────────
+	if proj, ok := s.shareCache.get(token); ok {
+		go func() { _ = s.shares.RecordView(share.ID) }()
+		writeJSON(w, http.StatusOK, proj)
+		return
+	}
+
+	// ── 3. Build projection (cache miss) ─────────────────────────────────────
+	proj, err := s.buildShareProjection(share)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to build share projection")
+		return
+	}
+
+	s.shareCache.set(token, proj)
+	go func() { _ = s.shares.RecordView(share.ID) }()
+	writeJSON(w, http.StatusOK, proj)
+}
+
+// buildShareProjection assembles the full ShareProjection for a share.
+// The scope is hard-locked to share.TimelineID; the caller cannot supply a
+// different timeline ID. Filter evaluation runs in Go before any data leaves
+// the server.
+func (s *Server) buildShareProjection(share *models.Share) (*models.ShareProjection, error) {
+	// Get timeline — using the share's TimelineID, never a client-supplied value.
+	timeline, err := s.timelines.GetByID(share.TimelineID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Get all non-archived activities for this timeline.
+	acts, err := s.activities.ListByTimeline(share.TimelineID, nil, nil, false)
+	if err != nil {
+		return nil, err
+	}
+
+	// Get statuses and tags for filter context + projection.
+	statuses, err := s.statuses.ListStatuses(share.TimelineID)
+	if err != nil {
+		return nil, err
+	}
+	tags, err := s.tags.ListByTeam(timeline.TeamID)
+	if err != nil {
+		return nil, err
+	}
+	members, err := s.teams.ListMembers(timeline.TeamID)
+	if err != nil {
+		return nil, err
+	}
+	team, err := s.teams.GetByID(timeline.TeamID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Parse the frozen filter from view_config and evaluate it server-side.
+	var vc viewConfigJSON
+	if share.ViewConfig != "" && share.ViewConfig != "{}" {
+		_ = json.Unmarshal([]byte(share.ViewConfig), &vc)
+	}
+
+	var filteredActs []*models.Activity
+	if vc.Filter != nil && len(vc.Filter.Conditions) > 0 {
+		// Build filter context.
+		statusesByTL := map[string][]models.Status{share.TimelineID: {}}
+		for _, st := range statuses {
+			statusesByTL[share.TimelineID] = append(statusesByTL[share.TimelineID], *st)
+		}
+		modelTags := make([]models.Tag, 0, len(tags))
+		for _, t := range tags {
+			modelTags = append(modelTags, *t)
+		}
+		ctx := &filters.FilterContext{
+			StatusesByTimelineID: statusesByTL,
+			Tags:                 modelTags,
+		}
+		for _, a := range acts {
+			if filters.MatchesFilter(a, vc.Filter, ctx) {
+				filteredActs = append(filteredActs, a)
+			}
+		}
+	} else {
+		filteredActs = acts
+	}
+
+	// Build referenced-entity sets (prune to what surviving activities reference).
+	usedMemberIDs := make(map[string]bool)
+	usedStatusIDs := make(map[string]bool)
+	usedTagIDs := make(map[string]bool)
+	for _, a := range filteredActs {
+		for _, id := range a.AssignedMemberIDs {
+			usedMemberIDs[id] = true
+		}
+		if a.StatusID != nil {
+			usedStatusIDs[*a.StatusID] = true
+		}
+		for _, id := range a.TagIDs {
+			usedTagIDs[id] = true
+		}
+	}
+
+	// Build PublicActivity slice — notes omitted unless this is a list share
+	// with notes enabled (Phase 13.2+ handles that nuance; for now always omit).
+	pubActivities := make([]models.PublicActivity, 0, len(filteredActs))
+	for _, a := range filteredActs {
+		pub := models.PublicActivity{
+			ID:                a.ID,
+			Title:             a.Title,
+			Description:       a.Description,
+			Icon:              a.Icon,
+			Color:             a.Color,
+			StartAt:           a.StartAt,
+			EndAt:             a.EndAt,
+			AllDay:            a.AllDay,
+			StatusID:          a.StatusID,
+			ParentActivityID:  a.ParentActivityID,
+			PercentComplete:   a.PercentComplete,
+			AssignedMemberIDs: a.AssignedMemberIDs,
+			TagIDs:            a.TagIDs,
+		}
+		if pub.AssignedMemberIDs == nil {
+			pub.AssignedMemberIDs = []string{}
+		}
+		if pub.TagIDs == nil {
+			pub.TagIDs = []string{}
+		}
+		pubActivities = append(pubActivities, pub)
+	}
+
+	// Build PublicMember slice — never email/role/userId.
+	pubMembers := make([]models.PublicMember, 0)
+	for _, m := range members {
+		if !usedMemberIDs[m.ID] {
+			continue
+		}
+		name := m.DisplayName
+		if name == "" {
+			// The register endpoint requires a non-empty displayName, so this
+			// branch only fires for rows migrated from older data. Never fall
+			// back to the email address — this response is public and
+			// unauthenticated.
+			name = "Team member"
+		}
+		pubMembers = append(pubMembers, models.PublicMember{
+			ID:          m.ID,
+			DisplayName: name,
+			Color:       m.Color,
+			Icon:        m.Icon,
+		})
+	}
+
+	// Prune statuses to referenced ones.
+	pubStatuses := make([]models.Status, 0)
+	for _, st := range statuses {
+		if usedStatusIDs[st.ID] {
+			pubStatuses = append(pubStatuses, *st)
+		}
+	}
+
+	// Prune tags to referenced ones.
+	pubTags := make([]models.Tag, 0)
+	for _, tg := range tags {
+		if usedTagIDs[tg.ID] {
+			pubTags = append(pubTags, *tg)
+		}
+	}
+
+	// Build the public share — only the fields anonymous callers need.
+	// Operational telemetry (view_count, last_viewed_at) and internal fields
+	// (created_by, revoked_at) are excluded from the public response.
+	pubShare := models.PublicShare{
+		ID:         share.ID,
+		TimelineID: share.TimelineID,
+		Token:      share.Token,
+		Name:       share.Name,
+		ViewType:   share.ViewType,
+		ViewConfig: share.ViewConfig,
+		CreatedAt:  share.CreatedAt,
+		ExpiresAt:  share.ExpiresAt,
+	}
+	proj := &models.ShareProjection{
+		Share:    pubShare,
+		TeamName: team.Name,
+		Timeline: models.PublicTimeline{
+			ID:        timeline.ID,
+			Name:      timeline.Name,
+			Color:     timeline.Color,
+			Icon:      timeline.Icon,
+			StartDate: timeline.StartDate,
+			EndDate:   timeline.EndDate,
+		},
+		Members:    pubMembers,
+		Statuses:   pubStatuses,
+		Tags:       pubTags,
+		Activities: pubActivities,
+	}
+	return proj, nil
+}
+
+// handleCreateShare handles POST /timelines/{id}/shares. The caller must be a
+// member of the timeline's team. The share captures the current view config.
+func (s *Server) handleCreateShare(w http.ResponseWriter, r *http.Request) {
+	timelineID := r.PathValue("id")
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
+		return
+	}
+	if timeline.ArchivedAt != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+		return
+	}
+
+	member, ok := s.requireTeamMember(w, r, timeline.TeamID)
+	if !ok {
+		return
+	}
+
+	var req createShareBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+	if req.ViewType == "" {
+		req.ViewType = "gantt"
+	}
+	if req.ViewConfig == "" {
+		req.ViewConfig = "{}"
+	}
+
+	now := time.Now().UTC()
+	share := &models.Share{
+		ID:         newID(),
+		TimelineID: timelineID,
+		Token:      newToken(),
+		Name:       req.Name,
+		ViewType:   req.ViewType,
+		ViewConfig: req.ViewConfig,
+		CreatedBy:  member.ID,
+		CreatedAt:  now,
+		ViewCount:  0,
+	}
+
+	if err := s.shares.Create(share); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create share")
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, share)
+}
+
+// handleListShares handles GET /teams/{id}/timelines/{timelineId}/shares.
+// Only team members with access to the timeline may list its shares.
+func (s *Server) handleListShares(w http.ResponseWriter, r *http.Request) {
+	timelineID := r.PathValue("timelineId")
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
+		return
+	}
+
+	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
+		return
+	}
+
+	shares, err := s.shares.ListByTimeline(timelineID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list shares")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, shares)
+}
+
+// handleUpdateShare handles PATCH /shares/{id}. Only the share creator or a
+// team admin may update it.
+func (s *Server) handleUpdateShare(w http.ResponseWriter, r *http.Request) {
+	shareID := r.PathValue("id")
+
+	share, err := s.shares.GetByID(shareID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
+		return
+	}
+
+	timeline, err := s.timelines.GetByID(share.TimelineID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
+		return
+	}
+
+	member, ok := s.requireTeamMember(w, r, timeline.TeamID)
+	if !ok {
+		return
+	}
+	if !s.canManageShare(member, share) {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "only the share creator or a team admin may update this share")
+		return
+	}
+
+	var req patchShareBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	if req.Name != nil {
+		share.Name = req.Name
+	}
+	if req.ViewType != nil {
+		share.ViewType = *req.ViewType
+	}
+	if req.ViewConfig != nil {
+		share.ViewConfig = *req.ViewConfig
+	}
+
+	if err := s.shares.Update(share); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update share")
+		return
+	}
+
+	// Invalidate cache so the next public request picks up the new config.
+	s.shareCache.invalidate(share.Token)
+
+	writeJSON(w, http.StatusOK, share)
+}
+
+// handleDeleteShare handles DELETE /shares/{id}. Only the share creator or a
+// team admin may delete it.
+func (s *Server) handleDeleteShare(w http.ResponseWriter, r *http.Request) {
+	shareID := r.PathValue("id")
+
+	share, err := s.shares.GetByID(shareID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
+		return
+	}
+
+	timeline, err := s.timelines.GetByID(share.TimelineID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
+		return
+	}
+
+	member, ok := s.requireTeamMember(w, r, timeline.TeamID)
+	if !ok {
+		return
+	}
+	if !s.canManageShare(member, share) {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "only the share creator or a team admin may delete this share")
+		return
+	}
+
+	if err := s.shares.Delete(shareID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete share")
+		return
+	}
+
+	s.shareCache.invalidate(share.Token)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// canManageShare reports whether a team member may update or delete a share.
+// Team admins always pass; non-admins must be the share's creator.
+func (s *Server) canManageShare(member *models.TeamMember, share *models.Share) bool {
+	return member.Role == "admin" || member.ID == share.CreatedBy
+}
+
+// ── Request bodies ────────────────────────────────────────────────────────────
+
+type createShareBody struct {
+	Name       *string `json:"name,omitempty"`
+	ViewType   string  `json:"viewType"`
+	ViewConfig string  `json:"viewConfig"`
+}
+
+type patchShareBody struct {
+	Name       *string `json:"name,omitempty"`
+	ViewType   *string `json:"viewType,omitempty"`
+	ViewConfig *string `json:"viewConfig,omitempty"`
+}
+````
+
+## File: packages/api/internal/models/models.go
+````go
+// Package models holds the domain types shared across the API, db,
+// and event-bus packages. These types are persisted directly via sqlx
+// (db tags) and serialised on the wire (json tags); changing tags is a
+// schema change.
+package models
+
+import "time"
+
+// Activity is a scheduled item of work belonging to a Timeline. ArchivedAt is
+// non-nil when the activity is soft-deleted; list endpoints exclude archived
+// activities by default.
+//
+// AssignedMemberIDs is not stored on the activities table; it is populated by
+// the repository from activity_assignments after every list query.
+//
+// GoogleEventID and CaldavUID are preserved as-is — they identify the
+// corresponding records in external calendar systems (VEVENT identifiers).
+type Activity struct {
+	ID                string     `db:"id"                  json:"id"`
+	TimelineID        string     `db:"timeline_id"         json:"timelineId"`
+	Title             string     `db:"title"               json:"title"`
+	Description       *string    `db:"description"         json:"description,omitempty"`
+	Notes             *string    `db:"notes"               json:"notes,omitempty"`
+	Icon              *string    `db:"icon"                json:"icon,omitempty"`
+	Color             *string    `db:"color"               json:"color,omitempty"`
+	StartAt           time.Time  `db:"start_at"            json:"startAt"`
+	EndAt             time.Time  `db:"end_at"              json:"endAt"`
+	AllDay            bool       `db:"all_day"             json:"allDay"`
+	StatusID          *string    `db:"status_id"           json:"statusId,omitempty"`
+	ParentActivityID  *string    `db:"parent_activity_id"  json:"parentActivityId,omitempty"`
+	PercentComplete   *int       `db:"percent_complete"    json:"percentComplete,omitempty"`
+	Location          *string    `db:"location"            json:"location,omitempty"`
+	URL               *string    `db:"url"                 json:"url,omitempty"`
+	Rrule             *string    `db:"rrule"               json:"rrule,omitempty"`
+	CaldavUID         *string    `db:"caldav_uid"          json:"caldavUid,omitempty"`
+	GoogleEventID     *string    `db:"google_event_id"     json:"googleEventId,omitempty"`
+	CreatedBy         string     `db:"created_by"          json:"createdBy"`
+	CreatedAt         time.Time  `db:"created_at"          json:"createdAt"`
+	UpdatedAt         time.Time  `db:"updated_at"          json:"updatedAt"`
+	ArchivedAt        *time.Time `db:"archived_at"         json:"archivedAt,omitempty"`
+	AssignedMemberIDs []string   `db:"-"                   json:"assignedMemberIds"`
+	TagIDs            []string   `db:"-"                   json:"tagIds"`
+}
+
+// TeamMemberWithUser joins a TeamMember row with its associated User so
+// callers receive display names and emails in a single query. Participants
+// (no user account) have empty email and avatar; their display_name comes
+// from team_members.display_name via COALESCE in the query.
+type TeamMemberWithUser struct {
+	TeamMember
+	Email       string  `db:"email"        json:"email"`
+	DisplayName string  `db:"display_name" json:"displayName"`
+	AvatarURL   *string `db:"avatar_url"   json:"avatarUrl,omitempty"`
+}
+
+// User is an authenticated account. PasswordHash is omitted from JSON
+// to avoid leaking it through any handler that returns a User.
+// ArchivedAt is non-nil when the account is inactivated; login is rejected
+// for archived users. Color and Icon are user-level identity fields (migration
+// 010); they propagate to team_members rows for the user when changed.
+type User struct {
+	ID           string     `db:"id"             json:"id"`
+	Email        string     `db:"email"          json:"email"`
+	PasswordHash string     `db:"password_hash"  json:"-"`
+	DisplayName  string     `db:"display_name"   json:"displayName"`
+	AvatarURL    *string    `db:"avatar_url"     json:"avatarUrl,omitempty"`
+	Color        *string    `db:"color"          json:"color,omitempty"`
+	Icon         *string    `db:"icon"           json:"icon,omitempty"`
+	IsSuperadmin bool       `db:"is_superadmin"  json:"isSuperadmin"`
+	CreatedAt    time.Time  `db:"created_at"     json:"createdAt"`
+	UpdatedAt    time.Time  `db:"updated_at"     json:"updatedAt"`
+	ArchivedAt   *time.Time `db:"archived_at"    json:"archivedAt,omitempty"`
+}
+
+// Team is a workspace that groups users and their scheduled work. Color and
+// Icon are identity fields added in migration 006; both are nullable until
+// explicitly set by an admin. Description, Notes, and ArchivedAt are added in
+// migration 008; ArchivedAt is non-nil when the team is soft-deleted.
+// InviteLinkToken is a stable, reusable token added in migration 009; when
+// non-nil it can be used by anyone to join the team during registration.
+type Team struct {
+	ID              string     `db:"id"                  json:"id"`
+	Name            string     `db:"name"                json:"name"`
+	Slug            string     `db:"slug"                json:"slug"`
+	Description     *string    `db:"description"         json:"description,omitempty"`
+	Notes           *string    `db:"notes"               json:"notes,omitempty"`
+	Color           *string    `db:"color"               json:"color,omitempty"`
+	Icon            *string    `db:"icon"                json:"icon,omitempty"`
+	InviteLinkToken *string    `db:"invite_link_token"   json:"inviteLinkToken,omitempty"`
+	CreatedAt       time.Time  `db:"created_at"          json:"createdAt"`
+	UpdatedAt       time.Time  `db:"updated_at"          json:"updatedAt"`
+	ArchivedAt      *time.Time `db:"archived_at"         json:"archivedAt,omitempty"`
+}
+
+// TeamMember is the join row that puts a person in a Team. UserID is nil
+// for login-less Participants; DisplayName is populated for them instead.
+// Role is the team-level role: "admin" or "member". Color and Icon are
+// identity fields (migration 006); Color stores a color ID (e.g. "teal").
+// ArchivedAt is non-nil when the member is inactivated (migration 009);
+// inactivated members lose access but their data and assignments are preserved.
+type TeamMember struct {
+	ID          string     `db:"id"           json:"id"`
+	TeamID      string     `db:"team_id"      json:"teamId"`
+	UserID      *string    `db:"user_id"      json:"userId,omitempty"`
+	DisplayName *string    `db:"display_name" json:"displayName,omitempty"`
+	Role        string     `db:"role"         json:"role"`
+	Color       *string    `db:"color"        json:"color,omitempty"`
+	Icon        *string    `db:"icon"         json:"icon,omitempty"`
+	JoinedAt    time.Time  `db:"joined_at"    json:"joinedAt"`
+	ArchivedAt  *time.Time `db:"archived_at"  json:"archivedAt,omitempty"`
+}
+
+// MemberStats holds computed activity and timeline counts for a member.
+// All counts are date-relative and scoped to activities the member is assigned to.
+type MemberStats struct {
+	ActiveTimelines    int `json:"activeTimelines"`
+	ArchivedTimelines  int `json:"archivedTimelines"`
+	PastDue            int `json:"pastDue"`
+	Running            int `json:"running"`
+	Upcoming           int `json:"upcoming"`
+	Unscheduled        int `json:"unscheduled"`
+	ArchivedActivities int `json:"archivedActivities"`
+}
+
+// MemberDetail combines a TeamMemberWithUser with computed stats and the
+// member's full list of team memberships. Returned by GET /teams/:id/members/:memberId.
+// UserArchivedAt reflects users.archived_at (account-level deactivation), distinct
+// from ArchivedAt which is team_members.archived_at (membership-level inactivation).
+type MemberDetail struct {
+	TeamMemberWithUser
+	Stats          MemberStats          `json:"stats"`
+	Teams          []TeamMemberWithUser `json:"teams"`
+	Deletable      bool                 `json:"deletable"`
+	UserArchivedAt *time.Time           `json:"userArchivedAt,omitempty"`
+}
+
+// Timeline is a named date range over a team's events. It is not a data
+// container — it is a view over a team's events for a given date window.
+// Access is governed by timeline_access + team role; share_token allows
+// unauthenticated read access via a stable public URL. Color and Icon are
+// identity fields (migration 006). Description and Notes are free-text fields
+// added in migration 013.
+type Timeline struct {
+	ID          string     `db:"id"          json:"id"`
+	TeamID      string     `db:"team_id"     json:"teamId"`
+	Name        string     `db:"name"        json:"name"`
+	Description *string    `db:"description" json:"description,omitempty"`
+	Notes       *string    `db:"notes"       json:"notes,omitempty"`
+	StartDate   string     `db:"start_date"  json:"startDate"`
+	EndDate     string     `db:"end_date"    json:"endDate"`
+	Color       *string    `db:"color"       json:"color,omitempty"`
+	Icon        *string    `db:"icon"        json:"icon,omitempty"`
+	ShareToken  string     `db:"share_token" json:"shareToken"`
+	IcalToken   string     `db:"ical_token"  json:"icalToken"`
+	CreatedBy   string     `db:"created_by"  json:"createdBy"`
+	CreatedAt   time.Time  `db:"created_at"  json:"createdAt"`
+	UpdatedAt   time.Time  `db:"updated_at"  json:"updatedAt"`
+	ArchivedAt  *time.Time `db:"archived_at" json:"archivedAt,omitempty"`
+}
+
+// SavedFilter is a user-owned, team-scoped named filter spec. Definition is
+// an opaque JSON string interpreted by the client; the server treats it as
+// arbitrary text and only validates that it parses as JSON.
+type SavedFilter struct {
+	ID           string    `db:"id"             json:"id"`
+	TeamID       string    `db:"team_id"        json:"teamId"`
+	UserID       string    `db:"user_id"        json:"userId"`
+	Name         string    `db:"name"           json:"name"`
+	Definition   string    `db:"definition"     json:"definition"`
+	IsTeamFilter bool      `db:"is_team_filter" json:"isTeamFilter"`
+	CreatedAt    time.Time `db:"created_at"     json:"createdAt"`
+	UpdatedAt    time.Time `db:"updated_at"     json:"updatedAt"`
+}
+
+// UserPreference stores a single key/value setting for a user, optionally
+// scoped to a timeline. TimelineID is “” for global preferences so the
+// UNIQUE(user_id, timeline_id, key) DB constraint works without NULL handling.
+// Serialised JSON omits TimelineID when empty so callers see null for global prefs.
+type UserPreference struct {
+	ID         string    `db:"id"          json:"id"`
+	UserID     string    `db:"user_id"     json:"userId"`
+	TimelineID string    `db:"timeline_id" json:"timelineId,omitempty"`
+	Key        string    `db:"key"         json:"key"`
+	Value      string    `db:"value"       json:"value"`
+	UpdatedAt  time.Time `db:"updated_at"  json:"updatedAt"`
+}
+
+// APIToken is a long-lived Bearer credential a user issues for programmatic
+// access. token_hash stores SHA-256(rawToken); the raw value is shown to the
+// caller only once on creation. RevokedAt is non-nil when the token has been
+// revoked; revoked tokens are not deleted so listing remains stable.
+type APIToken struct {
+	ID         string     `db:"id"           json:"id"`
+	UserID     string     `db:"user_id"      json:"userId"`
+	Name       string     `db:"name"         json:"name"`
+	TokenHash  string     `db:"token_hash"   json:"-"`
+	Scope      string     `db:"scope"        json:"scope"`
+	LastUsedAt *time.Time `db:"last_used_at" json:"lastUsedAt,omitempty"`
+	CreatedAt  time.Time  `db:"created_at"   json:"createdAt"`
+	RevokedAt  *time.Time `db:"revoked_at"   json:"revokedAt,omitempty"`
+}
+
+// InstanceSetting stores a single instance-level configuration value.
+// SMTP config and defaults live here. The value column is plain text;
+// the mailer package handles decryption of the SMTP password field.
+type InstanceSetting struct {
+	Key       string    `db:"key"        json:"key"`
+	Value     string    `db:"value"      json:"value"`
+	UpdatedAt time.Time `db:"updated_at" json:"updatedAt"`
+}
+
+// PasswordResetToken is a single-use token for the forgot-password flow.
+// TokenHash stores SHA-256 of the raw token; the raw value is sent by email
+// and never stored. UsedAt is set when the token is consumed.
+type PasswordResetToken struct {
+	ID        string     `db:"id"         json:"id"`
+	UserID    string     `db:"user_id"    json:"userId"`
+	TokenHash string     `db:"token_hash" json:"-"`
+	ExpiresAt time.Time  `db:"expires_at" json:"expiresAt"`
+	UsedAt    *time.Time `db:"used_at"    json:"usedAt,omitempty"`
+	CreatedAt time.Time  `db:"created_at" json:"createdAt"`
+}
+
+// AdminUserRow is a flat view of a user for the admin users list. It includes
+// the user's fields plus the count of active team memberships.
+type AdminUserRow struct {
+	User
+	TeamCount int `db:"team_count" json:"teamCount"`
+}
+
+// Share is a public read-only link to a specific view of a timeline. One
+// timeline may have many shares, each freezing a different view configuration.
+// Token is an unguessable URL-safe string; PasswordHash is set only when the
+// share requires a password (Phase 13.3); ExpiresAt and RevokedAt support
+// lifecycle management (Phase 13.4).
+type Share struct {
+	ID           string     `db:"id"             json:"id"`
+	TimelineID   string     `db:"timeline_id"    json:"timelineId"`
+	Token        string     `db:"token"          json:"token"`
+	Name         *string    `db:"name"           json:"name,omitempty"`
+	ViewType     string     `db:"view_type"      json:"viewType"`
+	ViewConfig   string     `db:"view_config"    json:"viewConfig"`
+	PasswordHash *string    `db:"password_hash"  json:"-"`
+	ExpiresAt    *time.Time `db:"expires_at"     json:"expiresAt,omitempty"`
+	CreatedBy    string     `db:"created_by"     json:"createdBy"`
+	CreatedAt    time.Time  `db:"created_at"     json:"createdAt"`
+	LastViewedAt *time.Time `db:"last_viewed_at" json:"lastViewedAt,omitempty"`
+	ViewCount    int        `db:"view_count"     json:"viewCount"`
+	RevokedAt    *time.Time `db:"revoked_at"     json:"revokedAt,omitempty"`
+}
+
+// PublicMember is the safe projection of a team member for public share
+// responses. It exposes only display fields — never email, role, or user_id.
+type PublicMember struct {
+	ID          string  `json:"id"`
+	DisplayName string  `json:"displayName"`
+	Color       *string `json:"color,omitempty"`
+	Icon        *string `json:"icon,omitempty"`
+}
+
+// PublicActivity is the safe projection of an activity for public share
+// responses. It includes standard display fields but omits notes (unless
+// explicitly included for List shares with Notes enabled), caldav/google
+// identifiers, and any internal fields.
+type PublicActivity struct {
+	ID                string    `json:"id"`
+	Title             string    `json:"title"`
+	Description       *string   `json:"description,omitempty"`
+	Notes             *string   `json:"notes,omitempty"`
+	Icon              *string   `json:"icon,omitempty"`
+	Color             *string   `json:"color,omitempty"`
+	StartAt           time.Time `json:"startAt"`
+	EndAt             time.Time `json:"endAt"`
+	AllDay            bool      `json:"allDay"`
+	StatusID          *string   `json:"statusId,omitempty"`
+	ParentActivityID  *string   `json:"parentActivityId,omitempty"`
+	PercentComplete   *int      `json:"percentComplete,omitempty"`
+	AssignedMemberIDs []string  `json:"assignedMemberIds"`
+	TagIDs            []string  `json:"tagIds"`
+}
+
+// PublicTimeline is the safe timeline projection for share responses.
+type PublicTimeline struct {
+	ID        string  `json:"id"`
+	Name      string  `json:"name"`
+	Color     *string `json:"color,omitempty"`
+	Icon      *string `json:"icon,omitempty"`
+	StartDate string  `json:"startDate"`
+	EndDate   string  `json:"endDate"`
+}
+
+// PublicShare is the safe projection of a share row for the unauthenticated
+// gateway response. It omits operational telemetry (view_count, last_viewed_at)
+// and internal fields (created_by, revoked_at) that must not reach anonymous callers.
+type PublicShare struct {
+	ID         string     `json:"id"`
+	TimelineID string     `json:"timelineId"`
+	Token      string     `json:"token"`
+	Name       *string    `json:"name,omitempty"`
+	ViewType   string     `json:"viewType"`
+	ViewConfig string     `json:"viewConfig"`
+	CreatedAt  time.Time  `json:"createdAt"`
+	ExpiresAt  *time.Time `json:"expiresAt,omitempty"`
+}
+
+// ShareProjection is the full aggregate returned by GET /shares/{token}.
+// It contains all data the public viewer needs to render the configured view.
+type ShareProjection struct {
+	Share      PublicShare      `json:"share"`
+	Timeline   PublicTimeline   `json:"timeline"`
+	TeamName   string           `json:"teamName"`
+	Members    []PublicMember   `json:"members"`
+	Statuses   []Status         `json:"statuses"`
+	Tags       []Tag            `json:"tags"`
+	Activities []PublicActivity `json:"activities"`
+}
+
+// RevokeUserResult summarizes the outcome of POST /users/:id/revoke.
+// The three counters let the caller show a meaningful summary in the UI.
+type RevokeUserResult struct {
+	AccountDeactivated     bool `json:"accountDeactivated"`
+	MembershipsInactivated int  `json:"membershipsInactivated"`
+	MembershipsRemoved     int  `json:"membershipsRemoved"`
+}
+
+// StatusTemplate is a reusable named preset of statuses owned by a team.
+// When a timeline is created the team's chosen template's items are copied
+// into live Status rows for that timeline.
+type StatusTemplate struct {
+	ID          string    `db:"id"          json:"id"`
+	TeamID      string    `db:"team_id"     json:"teamId"`
+	Name        string    `db:"name"        json:"name"`
+	Description *string   `db:"description" json:"description,omitempty"`
+	Position    int       `db:"position"    json:"position"`
+	CreatedBy   string    `db:"created_by"  json:"createdBy"`
+	CreatedAt   time.Time `db:"created_at"  json:"createdAt"`
+	UpdatedAt   time.Time `db:"updated_at"  json:"updatedAt"`
+	// Items is populated by the repository when listing templates.
+	Items []StatusTemplateItem `db:"-" json:"items"`
+}
+
+// StatusTemplateItem is one status value within a StatusTemplate.
+type StatusTemplateItem struct {
+	ID         string  `db:"id"          json:"id"`
+	TemplateID string  `db:"template_id" json:"templateId"`
+	Name       string  `db:"name"        json:"name"`
+	Color      string  `db:"color"       json:"color"`
+	Icon       *string `db:"icon"        json:"icon,omitempty"`
+	IsClosed   bool    `db:"is_closed"   json:"isClosed"`
+	Position   int     `db:"position"    json:"position"`
+}
+
+// Status is a live status value on a specific timeline. Rows are copied from a
+// StatusTemplate's items when the timeline is created and then evolve independently.
+type Status struct {
+	ID         string    `db:"id"          json:"id"`
+	TimelineID string    `db:"timeline_id" json:"timelineId"`
+	Name       string    `db:"name"        json:"name"`
+	Color      string    `db:"color"       json:"color"`
+	Icon       *string   `db:"icon"        json:"icon,omitempty"`
+	IsClosed   bool      `db:"is_closed"   json:"isClosed"`
+	Position   int       `db:"position"    json:"position"`
+	CreatedAt  time.Time `db:"created_at"  json:"createdAt"`
+	UpdatedAt  time.Time `db:"updated_at"  json:"updatedAt"`
+}
+
+// TimelineAccessEntry is a single timeline access grant joined with the team
+// member's display info. Returned by GET /teams/:id/timelines/:timelineId/access.
+type TimelineAccessEntry struct {
+	TimelineID   string  `db:"timeline_id"    json:"timelineId"`
+	TeamMemberID string  `db:"team_member_id" json:"teamMemberId"`
+	Role         string  `db:"role"           json:"role"`
+	DisplayName  string  `db:"display_name"   json:"displayName"`
+	Email        string  `db:"email"          json:"email"`
+	Color        *string `db:"color"          json:"color,omitempty"`
+	Icon         *string `db:"icon"           json:"icon,omitempty"`
+	UserID       *string `db:"user_id"        json:"userId,omitempty"`
+}
+
+// Tag is a team-scoped label that can be applied to activities. Tags are
+// normalized: a team_id+name pair is unique, enabling rename-all and
+// name-based filter matching across timelines.
+type Tag struct {
+	ID        string    `db:"id"         json:"id"`
+	TeamID    string    `db:"team_id"    json:"teamId"`
+	Name      string    `db:"name"       json:"name"`
+	Color     *string   `db:"color"      json:"color,omitempty"`
+	CreatedBy string    `db:"created_by" json:"createdBy"`
+	CreatedAt time.Time `db:"created_at" json:"createdAt"`
+}
+
+// Invite is a single-use token that grants an email address the right to
+// join a Team. AcceptedAt is non-nil once consumed; expired or accepted
+// invites are rejected by the registration handler.
+type Invite struct {
+	ID         string     `db:"id"          json:"id"`
+	TeamID     string     `db:"team_id"     json:"teamId"`
+	Email      string     `db:"email"       json:"email"`
+	Token      string     `db:"token"       json:"token"`
+	Role       string     `db:"role"        json:"role"`
+	InvitedBy  string     `db:"invited_by"  json:"invitedBy"`
+	ExpiresAt  time.Time  `db:"expires_at"  json:"expiresAt"`
+	AcceptedAt *time.Time `db:"accepted_at" json:"acceptedAt,omitempty"`
+	CreatedAt  time.Time  `db:"created_at"  json:"createdAt"`
 }
 ````
 
@@ -48469,6 +48713,22 @@ export interface components {
             /** Format: date-time */
             revokedAt?: string | null;
         };
+        /** @description Safe projection of a Share for unauthenticated callers. Omits operational telemetry (viewCount, lastViewedAt) and internal fields (createdBy, revokedAt) that must not reach anonymous callers. */
+        PublicShare: {
+            id: string;
+            timelineId: string;
+            token: string;
+            /** @description Optional human-readable label for this share link. */
+            name?: string | null;
+            /** @enum {string} */
+            viewType: "gantt" | "list" | "calendar" | "kanban";
+            /** @description JSON-encoded view configuration snapshot. */
+            viewConfig: string;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            expiresAt?: string | null;
+        };
         CreateShareInput: {
             name?: string | null;
             /** @enum {string} */
@@ -48516,7 +48776,7 @@ export interface components {
             endDate: string;
         };
         ShareProjection: {
-            share: components["schemas"]["Share"];
+            share: components["schemas"]["PublicShare"];
             teamName: string;
             timeline: components["schemas"]["PublicTimeline"];
             members: components["schemas"]["PublicMember"][];
@@ -52121,6 +52381,38 @@ components:
           nullable: true
           format: date-time
 
+    PublicShare:
+      description: >
+        Safe projection of a Share for unauthenticated callers.
+        Omits operational telemetry (viewCount, lastViewedAt) and internal
+        fields (createdBy, revokedAt) that must not reach anonymous callers.
+      type: object
+      required: [id, timelineId, token, viewType, viewConfig, createdAt]
+      properties:
+        id:
+          type: string
+        timelineId:
+          type: string
+        token:
+          type: string
+        name:
+          type: string
+          nullable: true
+          description: Optional human-readable label for this share link.
+        viewType:
+          type: string
+          enum: [gantt, list, calendar, kanban]
+        viewConfig:
+          type: string
+          description: JSON-encoded view configuration snapshot.
+        createdAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          nullable: true
+          format: date-time
+
     CreateShareInput:
       type: object
       properties:
@@ -52230,7 +52522,7 @@ components:
       required: [share, timeline, teamName, members, statuses, tags, activities]
       properties:
         share:
-          $ref: "#/components/schemas/Share"
+          $ref: "#/components/schemas/PublicShare"
         teamName:
           type: string
         timeline:
@@ -62599,7 +62891,7 @@ This document organizes development into discrete phases with effort estimates a
 | 11.3 | [Web — Kanban View (Interactive)](#phase-113--web--kanban-view-interactive) | M — 2–3 days | 🔄 |
 | 12 | [Communications Testing](#phase-12--communications-testing) | S — 1 day | ✅ |
 | 13 | [Shares — Public Read-Only View Links](#phase-13--shares--multi-share-views-with-passwords) (sub-phased) | L | ⬜ |
-| 13.1 | [Foundation, Public Gateway, Gantt Viewer (MVP)](#phase-131--foundation-public-gateway-gantt-viewer-mvp) | M–L | ⬜ |
+| 13.1 | [Foundation, Public Gateway, Gantt Viewer (MVP)](#phase-131--foundation-public-gateway-gantt-viewer-mvp) | M–L | ✅ |
 | 13.2 | [Remaining Views Read-Only](#phase-132--remaining-views-read-only) | M | ⬜ |
 | 13.3 | [Password Protection + Unlock](#phase-133--password-protection--unlock) | S–M | ⬜ |
 | 13.4 | [Lifecycle & Management](#phase-134--lifecycle--management) | S–M | ⬜ |
@@ -64062,7 +64354,7 @@ A first-class **Share** entity: one timeline can have many shares, each a frozen
 ---
 
 ### Phase 13.1 — Foundation, Public Gateway, Gantt Viewer (MVP)
-**Status:** 🔄 In Progress — automated checks pass, awaiting Docker verification | **Effort:** M–L
+**Status:** ✅ Complete (2026-06-05) — review findings addressed | **Effort:** M–L
 
 The whole data-leak surface is confronted here so 13.2–13.4 ride on a proven-safe gateway. Ships: `shares` schema + repo + **token migration** (each timeline's existing `share_token` becomes a `shares` row, so current links keep working; the `NOT NULL UNIQUE` column is dropped only in a later migration); a **Go filter evaluator** (`internal/filters` mirroring `matchesFilter`) + **shared golden fixtures** (`packages/shared/testdata/filter-fixtures.json`) run by both `filterEngine.test.ts` and a Go test; the **`GET /shares/{token}` gateway** (filter-first, view-driven field projection, referenced-entity pruning, TTL cache via `DRABA_SHARE_CACHE_TTL`); `POST/GET /timelines/{id}/shares` + `PATCH/DELETE /shares/{id}`; **Gantt `interactive=false` mode** (no chrome/drag/edit, forced light); "Share this view" in the Gantt toolbar (snapshots live toolbar state incl. the resolved filter definition); `/s/:token` public route + branding strip.
 
