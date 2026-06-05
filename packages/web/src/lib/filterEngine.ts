@@ -90,20 +90,21 @@ function evalCondition(condition: FilterCondition, activity: Activity, ctx: Filt
       const statuses = ctx.statusesByTimeline.get(activity.timelineId) ?? []
       const statusName = statuses.find(s => s.id === activity.statusId)?.name ?? null
       const haystack = statusName ? [statusName.toLowerCase()] : []
-      const needles = condition.value.map(v => v.toLowerCase())
+      // is_empty / is_not_empty don't use needles — guard before .map()
+      const needles = (condition.value ?? []).map(v => v.toLowerCase())
       return evalSetOp(condition.op, haystack, needles)
     }
 
     case 'tag': {
       const tagMap = new Map(ctx.tags.map(t => [t.id, t.name.toLowerCase()]))
       const activityTagNames = (activity.tagIds ?? []).map(id => tagMap.get(id) ?? id)
-      const needles = condition.value.map(v => v.toLowerCase())
+      const needles = (condition.value ?? []).map(v => v.toLowerCase())
       return evalSetOp(condition.op, activityTagNames, needles)
     }
 
     case 'assignee': {
       const haystack = activity.assignedMemberIds ?? []
-      return evalSetOp(condition.op, haystack, condition.value)
+      return evalSetOp(condition.op, haystack, condition.value ?? [])
     }
 
     case 'title':

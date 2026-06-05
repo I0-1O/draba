@@ -2,12 +2,17 @@
  * filterEngine.test.ts — unit tests for matchesFilter.
  *
  * Covers: each field type, each operator, AND/OR logic, edge cases
- * (empty conditions, null/missing fields, case-insensitive status/tag matching).
+ * (empty conditions, null/missing fields, case-insensitive status/tag matching),
+ * and the golden fixture suite shared with the Go filter engine.
  */
 
 import { describe, it, expect } from 'vitest'
 import { matchesFilter, type FilterContext } from './filterEngine'
 import type { components } from '@draba/shared'
+import type { FilterDefinition } from './filterTypes'
+// Golden fixtures shared with the Go filter evaluator (packages/api/internal/filters).
+// Both implementations must produce the same result for every case here.
+import goldenFixtures from '../../../shared/testdata/filter-fixtures.json'
 
 type Activity = components['schemas']['Activity']
 type Status = components['schemas']['Status']
@@ -333,4 +338,67 @@ describe('date fields', () => {
       conditions: [{ field: 'startDate', op: 'is_empty' }],
     }, ctx)).toBe(true)
   })
+})
+
+// ── Golden fixtures (parity with Go filter engine) ────────────────────────────
+
+describe('golden fixtures — parity with Go filter engine', () => {
+  // Build context from the shared fixture reference data.
+  const fixtureCtx: FilterContext = {
+    statusesByTimeline: new Map([
+      [
+        'tl1',
+        goldenFixtures.statuses.map(s => ({
+          id: s.id,
+          name: s.name,
+          color: s.color,
+          isClosed: s.isClosed,
+          position: s.position,
+          timelineId: s.timelineId,
+          createdAt: '2026-01-01T00:00:00Z',
+          updatedAt: '2026-01-01T00:00:00Z',
+        })),
+      ],
+    ]),
+    tags: goldenFixtures.tags.map(t => ({
+      id: t.id,
+      name: t.name,
+      color: null,
+      teamId: t.teamId,
+      createdAt: t.createdAt,
+      createdBy: t.createdBy,
+    })),
+  }
+
+  // Build activity lookup.
+  const actByID = Object.fromEntries(
+    goldenFixtures.activities.map(a => [
+      a.id,
+      {
+        ...a,
+        description: null,
+        notes: null,
+        icon: null,
+        color: null,
+        location: null,
+        url: null,
+        rrule: null,
+        caldavUid: null,
+        googleEventId: null,
+        archivedAt: null,
+        updatedAt: '2026-01-01T00:00:00Z',
+      } as Activity,
+    ])
+  )
+
+  for (const fix of goldenFixtures.fixtures) {
+    it(fix.name, () => {
+      for (const [actID, want] of Object.entries(fix.expected)) {
+        const act = actByID[actID]
+        expect(act, `activity ${actID} missing`).toBeDefined()
+        const got = matchesFilter(act, fix.filter as FilterDefinition, fixtureCtx)
+        expect(got, `activity ${actID}`).toBe(want)
+      }
+    })
+  }
 })

@@ -2,6 +2,45 @@
 
 ---
 
+## 2026-06-04 — Phase 13.1: Shares MVP — Foundation, Public Gateway, Gantt Viewer
+
+**Goal:** First-class Share entity with a scope-locked public data gateway, Go filter engine, golden parity fixtures, Gantt read-only mode, "Share this view" action, and the `/s/:token` public viewer route.
+
+**Backend (`packages/api`):**
+
+- **Migration 019** (`internal/db/migrations/019_shares.sql`): creates the `shares` table (`id`, `timeline_id`, `token UNIQUE`, `view_type`, `view_config`, `password_hash?`, `expires_at?`, `created_by`, `created_at`, `last_viewed_at`, `view_count`, `revoked_at`); migrates every existing `timelines.share_token` into a `shares` row so existing links keep working (the legacy `share_token` column is left in place — the old `GET /timelines/share/{token}` handler still resolves it).
+- **`internal/filters/engine.go`** (new package): Go port of `lib/filterEngine.ts → matchesFilter`. Mirrors every field type (status, tag, assignee, title, progress, hasParent, startDate, endDate), all operators, AND/OR logic, and the same type-coercion edge-cases as the TS original.
+- **`packages/shared/testdata/filter-fixtures.json`** (new): 27 golden test cases — statuses, tags, and activities reference data plus fixture definitions with expected results. Run by both the Go test (`TestGoldenFixtures`) and a new golden-fixture section in `filterEngine.test.ts`. All 27 pass on both sides.
+- **`internal/db/share_repo.go`** (new): Create, GetByID, GetByToken, ListByTimeline, Update, Delete, RecordView.
+- **`internal/models/models.go`**: added Share, PublicMember, PublicActivity, PublicTimeline, ShareProjection model types.
+- **`internal/api/share_handler.go`** (new): `handleGetShareProjection` (public gateway: resolves share row, checks revoke/expiry/password stubs for future phases, serves from TTL cache or builds fresh projection with Go filter applied, calls `RecordView` async), `buildShareProjection` (scope-locked: derives `timeline_id` from share row server-side — no client selector — then filter-next, fixed display projection, referenced-entity pruning), `handleCreateShare`, `handleListShares`, `handleUpdateShare`, `handleDeleteShare`, in-memory `shareCache` (TTL from `DRABA_SHARE_CACHE_TTL`, default 60s; invalidated on PATCH/DELETE).
+- **`internal/api/server.go`**: added `shares *db.ShareRepo` + `shareCache *shareCache` to Server; `NewServer` takes new `sharesRepo` param; routes: `GET /shares/{token}` (public), `POST /timelines/{id}/shares`, `GET /teams/{id}/timelines/{timelineId}/shares`, `PATCH /shares/{id}`, `DELETE /shares/{id}`.
+- **Tests**: `internal/api/share_handler_test.go` (new) — create/list/delete CRUD, gateway 200, unknown token 404, no-email-in-response scope check, scope-isolation (param injection rejected), filtered-activities-absent (server-side filter removes "Beta" from a share filtered to title="Alpha"). All pass.
+- **OpenAPI** (`packages/shared/openapi.yaml`): added Share, CreateShareInput, PatchShareInput, PublicMember, PublicActivity, PublicTimeline, ShareProjection schemas + all share paths; regenerated TS types.
+
+**Frontend (`packages/web`):**
+
+- **`src/hooks/useShares.ts`** (new): useListShares, useCreateShare, useDeleteShare (authenticated), useShareProjection (public, no auth, 60s stale time).
+- **`GanttGrid.tsx`**: added `interactive?: boolean` prop (default true); when false, bar clicks, bar drag mouseDown, lane mouseDown, and cursor are all suppressed — the grid is visually unchanged but clicks are inert.
+- **`GanttView.tsx`**: added `interactive?: boolean` prop threaded to GanttGrid; when false, onLaneDrag/onBarDrag/onBarDragProgress are also suppressed at the GanttView level.
+- **`ShareModal.tsx`** (new): create-link modal — serialises live toolbar state (groupBy, sortBy, colorBy, granularity, resolved FilterDefinition) into `view_config`, calls `useCreateShare`, shows the `/s/:token` URL and a copy button.
+- **`pages/ShareViewPage.tsx`** (new): public route at `/s/:token` (outside ProtectedRoute); fetches `useShareProjection`, forces light mode, applies parsed `view_config` (groupBy/sortBy/colorBy/granularity), builds GanttRow list from PublicActivity data, renders GanttGrid with `interactive={false}` + a branding strip (timeline name, "Shared view", activity count). Error states: 404 "not found", 410 "expired/revoked", generic fallback.
+- **`App.tsx`**: added `<Route path="/s/:token" element={<ShareViewPage />} />` outside ProtectedRoute.
+- **`DashboardPage.tsx`**: wires Gantt toolbar `onShare` → `setShareModalOpen(true)`; renders ShareModal when open; resolves active saved-filter definition into view_config.
+- **`vite.config.ts`**: added `/shares` proxy entry.
+- **`tsconfig.app.json`**: added `"resolveJsonModule": true` to enable JSON imports in tests.
+- **`filterEngine.ts`**: fixed `is_empty`/`is_not_empty` ops for set fields to guard against missing `value` (`condition.value ?? []`) — matches Go engine's behaviour and fixes 4 newly-surfaced golden-fixture failures.
+- **`filterEngine.test.ts`**: added 27-case golden-fixture test section that imports from `packages/shared/testdata/filter-fixtures.json`; all pass.
+
+**Checks:**
+- `golangci-lint run` ✅
+- `go test ./...` ✅ (all packages including new api/share + filters/golden)
+- `pnpm --filter web lint` ✅ (tsc --noEmit)
+- `pnpm --filter web build` ✅ (tsc -b + vite build)
+- `pnpm --filter web test` ✅ (280 tests, 22 test files including new golden-fixture suite)
+
+---
+
 ## 2026-06-04 — Phase 12: Communications Testing
 
 **Goal:** Automated coverage for every outbound email flow, then live end-to-end validation against Docker (`epcot.lan:8081`) with a real Gmail SMTP account.

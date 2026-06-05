@@ -66,6 +66,7 @@ func TestSetupStatus_NoSetupNeeded(t *testing.T) {
 		db.NewPasswordResetTokenRepo(database),
 		db.NewStatusRepo(database),
 		db.NewTagRepo(database),
+		db.NewShareRepo(database),
 		mailer.New(isrSetup, nil),
 		toks, tier.Unlimited, bus, hub,
 	).Routes()

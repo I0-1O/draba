@@ -142,6 +142,12 @@ interface Props {
   onToggleActivity?: (id: string) => void;
   /** Toggles the collapsed state of a group header (member grouping). */
   onToggleGroup?: (id: string) => void;
+  /**
+   * When false, all click and drag interactions are suppressed — bars, lane
+   * drags, and group toggles become inert. Used by the public share viewer.
+   * Default: true.
+   */
+  interactive?: boolean;
 }
 
 // ── Bar drag helpers ─────────────────────────────────────────────────────────
@@ -200,6 +206,7 @@ export default function GanttGrid({
   onLabelColWChange,
   onToggleActivity,
   onToggleGroup,
+  interactive = true,
 }: Props) {
   // ── Resizable label column ─────────────────────────────────────────────────
   // When the parent passes labelColW + onLabelColWChange the column is
@@ -296,7 +303,7 @@ export default function GanttGrid({
     rowIdx: number,
     memberId: string | null,
   ) => {
-    if (!onLaneDrag) return;
+    if (!interactive || !onLaneDrag) return;
     e.preventDefault();
     const rect = e.currentTarget.getBoundingClientRect();
     const col = colFromX(e.clientX - rect.left);
@@ -716,7 +723,7 @@ export default function GanttGrid({
                     cursor: 'pointer',
                     transition: 'background 0.1s',
                   }}
-                  onClick={() => onSelectActivity(ev.id === selectedActivityId ? null : ev.id)}
+                  onClick={() => interactive && onSelectActivity(ev.id === selectedActivityId ? null : ev.id)}
                   onMouseEnter={e => {
                     e.currentTarget.style.background = 'var(--muted)';
                   }}
@@ -785,7 +792,7 @@ export default function GanttGrid({
 
                 {/* Lane — background columns + today line + event bar */}
                 <div
-                  style={{ position: 'relative', flex: 1, display: 'flex', cursor: onLaneDrag ? 'crosshair' : 'default' }}
+                  style={{ position: 'relative', flex: 1, display: 'flex', cursor: (interactive && onLaneDrag) ? 'crosshair' : 'default' }}
                   onMouseDown={e => handleLaneMouseDown(e, rowIdx, ev.members[0]?.id ?? null)}
                 >
                   {columns.map((_, i) => (
@@ -867,10 +874,10 @@ export default function GanttGrid({
                       <div
                         onClick={() => {
                           // Bar click always selects — use the label cell to deselect.
-                          if (!isDragging) onSelectActivity(ev.id);
+                          if (interactive && !isDragging) onSelectActivity(ev.id);
                         }}
                         onMouseDown={e => {
-                          if (!onBarDrag) { e.stopPropagation(); return; }
+                          if (!interactive || !onBarDrag) { e.stopPropagation(); return; }
                           const barRect = e.currentTarget.getBoundingClientRect();
                           const xInBar = e.clientX - barRect.left;
                           let zone: BarDragZone;

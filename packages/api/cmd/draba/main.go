@@ -85,6 +85,7 @@ func main() {
 	passwordTokensRepo := db.NewPasswordResetTokenRepo(database)
 	statusRepo := db.NewStatusRepo(database)
 	tagRepo := db.NewTagRepo(database)
+	shareRepo := db.NewShareRepo(database)
 	m := mailer.New(instanceSetsRepo, []byte(jwtSecret))
 	tokens := auth.NewTokenService(jwtSecret)
 
@@ -100,7 +101,7 @@ func main() {
 		slog.Info("modules loaded", "count", len(mods))
 	}
 
-	srv := api.NewServer(users, invites, teams, activityRepo, timelineRepo, savedFilterRepo, preferenceRepo, apiTokenRepo, instanceSetsRepo, passwordTokensRepo, statusRepo, tagRepo, m, tokens, t, bus, hub)
+	srv := api.NewServer(users, invites, teams, activityRepo, timelineRepo, savedFilterRepo, preferenceRepo, apiTokenRepo, instanceSetsRepo, passwordTokensRepo, statusRepo, tagRepo, shareRepo, m, tokens, t, bus, hub)
 
 	// Wire up the embedded React SPA when a production build is present.
 	// In dev the static/ directory only has .gitkeep so this is a no-op.

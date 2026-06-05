@@ -1,0 +1,307 @@
+{
+  "_comment": "Golden fixtures for the filter evaluator. Both the TypeScript filterEngine.test.ts and the Go filters/engine_test.go must pass every case here. Each fixture has a filter definition, a set of activities (with reference data), and the expected match result for each activity.",
+  "statuses": [
+    { "id": "s1", "name": "In Progress", "color": "#3b82f6", "isClosed": false, "position": 0, "timelineId": "tl1" },
+    { "id": "s2", "name": "Done",        "color": "#10b981", "isClosed": true,  "position": 1, "timelineId": "tl1" },
+    { "id": "s3", "name": "Blocked",     "color": "#ef4444", "isClosed": false, "position": 2, "timelineId": "tl1" }
+  ],
+  "tags": [
+    { "id": "t1", "name": "frontend", "teamId": "team1", "createdBy": "m1", "createdAt": "2026-01-01T00:00:00Z" },
+    { "id": "t2", "name": "backend",  "teamId": "team1", "createdBy": "m1", "createdAt": "2026-01-01T00:00:00Z" },
+    { "id": "t3", "name": "urgent",   "teamId": "team1", "createdBy": "m1", "createdAt": "2026-01-01T00:00:00Z" }
+  ],
+  "activities": [
+    {
+      "id": "a1",
+      "timelineId": "tl1",
+      "title": "Design new UI",
+      "description": "Revamp the dashboard",
+      "startAt": "2026-05-01T00:00:00Z",
+      "endAt":   "2026-05-15T00:00:00Z",
+      "allDay": true,
+      "statusId": "s1",
+      "parentActivityId": null,
+      "percentComplete": 40,
+      "assignedMemberIds": ["m1", "m2"],
+      "tagIds": ["t1"],
+      "createdBy": "m1",
+      "createdAt": "2026-01-01T00:00:00Z",
+      "updatedAt": "2026-01-01T00:00:00Z"
+    },
+    {
+      "id": "a2",
+      "timelineId": "tl1",
+      "title": "API refactor",
+      "description": null,
+      "startAt": "2026-05-10T00:00:00Z",
+      "endAt":   "2026-05-25T00:00:00Z",
+      "allDay": true,
+      "statusId": "s2",
+      "parentActivityId": "a1",
+      "percentComplete": 100,
+      "assignedMemberIds": ["m3"],
+      "tagIds": ["t2", "t3"],
+      "createdBy": "m1",
+      "createdAt": "2026-01-01T00:00:00Z",
+      "updatedAt": "2026-01-01T00:00:00Z"
+    },
+    {
+      "id": "a3",
+      "timelineId": "tl1",
+      "title": "Deploy hotfix",
+      "description": "Critical production fix",
+      "startAt": "2026-06-01T00:00:00Z",
+      "endAt":   "2026-06-02T00:00:00Z",
+      "allDay": true,
+      "statusId": "s3",
+      "parentActivityId": null,
+      "percentComplete": null,
+      "assignedMemberIds": [],
+      "tagIds": ["t3"],
+      "createdBy": "m1",
+      "createdAt": "2026-01-01T00:00:00Z",
+      "updatedAt": "2026-01-01T00:00:00Z"
+    },
+    {
+      "id": "a4",
+      "timelineId": "tl1",
+      "title": "Write docs",
+      "description": null,
+      "startAt": "2026-07-01T00:00:00Z",
+      "endAt":   "2026-07-10T00:00:00Z",
+      "allDay": true,
+      "statusId": null,
+      "parentActivityId": null,
+      "percentComplete": null,
+      "assignedMemberIds": ["m2"],
+      "tagIds": [],
+      "createdBy": "m1",
+      "createdAt": "2026-01-01T00:00:00Z",
+      "updatedAt": "2026-01-01T00:00:00Z"
+    }
+  ],
+  "fixtures": [
+    {
+      "name": "empty filter matches all",
+      "filter": { "logic": "and", "conditions": [] },
+      "expected": { "a1": true, "a2": true, "a3": true, "a4": true }
+    },
+    {
+      "name": "status in [In Progress]",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "status", "op": "in", "value": ["In Progress"] }]
+      },
+      "expected": { "a1": true, "a2": false, "a3": false, "a4": false }
+    },
+    {
+      "name": "status in [Done, Blocked]",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "status", "op": "in", "value": ["Done", "Blocked"] }]
+      },
+      "expected": { "a1": false, "a2": true, "a3": true, "a4": false }
+    },
+    {
+      "name": "status is_empty",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "status", "op": "is_empty" }]
+      },
+      "expected": { "a1": false, "a2": false, "a3": false, "a4": true }
+    },
+    {
+      "name": "status is_not_empty",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "status", "op": "is_not_empty" }]
+      },
+      "expected": { "a1": true, "a2": true, "a3": true, "a4": false }
+    },
+    {
+      "name": "status not_in [In Progress]",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "status", "op": "not_in", "value": ["In Progress"] }]
+      },
+      "expected": { "a1": false, "a2": true, "a3": true, "a4": true }
+    },
+    {
+      "name": "tag in [frontend]",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "tag", "op": "in", "value": ["frontend"] }]
+      },
+      "expected": { "a1": true, "a2": false, "a3": false, "a4": false }
+    },
+    {
+      "name": "tag in [urgent]",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "tag", "op": "in", "value": ["urgent"] }]
+      },
+      "expected": { "a1": false, "a2": true, "a3": true, "a4": false }
+    },
+    {
+      "name": "tag is_empty",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "tag", "op": "is_empty" }]
+      },
+      "expected": { "a1": false, "a2": false, "a3": false, "a4": true }
+    },
+    {
+      "name": "tag is_not_empty",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "tag", "op": "is_not_empty" }]
+      },
+      "expected": { "a1": true, "a2": true, "a3": true, "a4": false }
+    },
+    {
+      "name": "assignee in [m1]",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "assignee", "op": "in", "value": ["m1"] }]
+      },
+      "expected": { "a1": true, "a2": false, "a3": false, "a4": false }
+    },
+    {
+      "name": "assignee is_empty",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "assignee", "op": "is_empty" }]
+      },
+      "expected": { "a1": false, "a2": false, "a3": true, "a4": false }
+    },
+    {
+      "name": "title contains 'design'",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "title", "op": "contains", "value": "design" }]
+      },
+      "expected": { "a1": true, "a2": false, "a3": false, "a4": false }
+    },
+    {
+      "name": "title equals 'Write docs'",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "title", "op": "equals", "value": "Write docs" }]
+      },
+      "expected": { "a1": false, "a2": false, "a3": false, "a4": true }
+    },
+    {
+      "name": "title not_contains 'api'",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "title", "op": "not_contains", "value": "api" }]
+      },
+      "expected": { "a1": true, "a2": false, "a3": true, "a4": true }
+    },
+    {
+      "name": "progress gte 50",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "progress", "op": "gte", "value": 50 }]
+      },
+      "expected": { "a1": false, "a2": true, "a3": false, "a4": false }
+    },
+    {
+      "name": "progress is_empty",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "progress", "op": "is_empty" }]
+      },
+      "expected": { "a1": false, "a2": false, "a3": true, "a4": true }
+    },
+    {
+      "name": "progress is_not_empty",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "progress", "op": "is_not_empty" }]
+      },
+      "expected": { "a1": true, "a2": true, "a3": false, "a4": false }
+    },
+    {
+      "name": "hasParent is_true",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "hasParent", "op": "is_true" }]
+      },
+      "expected": { "a1": false, "a2": true, "a3": false, "a4": false }
+    },
+    {
+      "name": "hasParent is_false",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "hasParent", "op": "is_false" }]
+      },
+      "expected": { "a1": true, "a2": false, "a3": true, "a4": true }
+    },
+    {
+      "name": "startDate before 2026-05-05",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "startDate", "op": "before", "value": "2026-05-05" }]
+      },
+      "expected": { "a1": true, "a2": false, "a3": false, "a4": false }
+    },
+    {
+      "name": "startDate after 2026-05-15",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "startDate", "op": "after", "value": "2026-05-15" }]
+      },
+      "expected": { "a1": false, "a2": false, "a3": true, "a4": true }
+    },
+    {
+      "name": "startDate between 2026-05-01 and 2026-05-31",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "startDate", "op": "between", "value": ["2026-05-01", "2026-05-31"] }]
+      },
+      "expected": { "a1": true, "a2": true, "a3": false, "a4": false }
+    },
+    {
+      "name": "endDate before 2026-05-20",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "endDate", "op": "before", "value": "2026-05-20" }]
+      },
+      "expected": { "a1": true, "a2": false, "a3": false, "a4": false }
+    },
+    {
+      "name": "OR: status Done OR tag frontend",
+      "filter": {
+        "logic": "or",
+        "conditions": [
+          { "field": "status", "op": "in", "value": ["Done"] },
+          { "field": "tag",    "op": "in", "value": ["frontend"] }
+        ]
+      },
+      "expected": { "a1": true, "a2": true, "a3": false, "a4": false }
+    },
+    {
+      "name": "AND: status In Progress AND assignee m1",
+      "filter": {
+        "logic": "and",
+        "conditions": [
+          { "field": "status",   "op": "in", "value": ["In Progress"] },
+          { "field": "assignee", "op": "in", "value": ["m1"] }
+        ]
+      },
+      "expected": { "a1": true, "a2": false, "a3": false, "a4": false }
+    },
+    {
+      "name": "AND: progress gt 0 AND hasParent is_true",
+      "filter": {
+        "logic": "and",
+        "conditions": [
+          { "field": "progress",  "op": "gt",      "value": 0 },
+          { "field": "hasParent", "op": "is_true"             }
+        ]
+      },
+      "expected": { "a1": false, "a2": true, "a3": false, "a4": false }
+    }
+  ]
+}

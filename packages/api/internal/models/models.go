@@ -228,6 +228,77 @@ type AdminUserRow struct {
 	TeamCount int `db:"team_count" json:"teamCount"`
 }
 
+// Share is a public read-only link to a specific view of a timeline. One
+// timeline may have many shares, each freezing a different view configuration.
+// Token is an unguessable URL-safe string; PasswordHash is set only when the
+// share requires a password (Phase 13.3); ExpiresAt and RevokedAt support
+// lifecycle management (Phase 13.4).
+type Share struct {
+	ID           string     `db:"id"             json:"id"`
+	TimelineID   string     `db:"timeline_id"    json:"timelineId"`
+	Token        string     `db:"token"          json:"token"`
+	ViewType     string     `db:"view_type"      json:"viewType"`
+	ViewConfig   string     `db:"view_config"    json:"viewConfig"`
+	PasswordHash *string    `db:"password_hash"  json:"-"`
+	ExpiresAt    *time.Time `db:"expires_at"     json:"expiresAt,omitempty"`
+	CreatedBy    string     `db:"created_by"     json:"createdBy"`
+	CreatedAt    time.Time  `db:"created_at"     json:"createdAt"`
+	LastViewedAt *time.Time `db:"last_viewed_at" json:"lastViewedAt,omitempty"`
+	ViewCount    int        `db:"view_count"     json:"viewCount"`
+	RevokedAt    *time.Time `db:"revoked_at"     json:"revokedAt,omitempty"`
+}
+
+// PublicMember is the safe projection of a team member for public share
+// responses. It exposes only display fields — never email, role, or user_id.
+type PublicMember struct {
+	ID          string  `json:"id"`
+	DisplayName string  `json:"displayName"`
+	Color       *string `json:"color,omitempty"`
+	Icon        *string `json:"icon,omitempty"`
+}
+
+// PublicActivity is the safe projection of an activity for public share
+// responses. It includes standard display fields but omits notes (unless
+// explicitly included for List shares with Notes enabled), caldav/google
+// identifiers, and any internal fields.
+type PublicActivity struct {
+	ID                string    `json:"id"`
+	Title             string    `json:"title"`
+	Description       *string   `json:"description,omitempty"`
+	Notes             *string   `json:"notes,omitempty"`
+	Icon              *string   `json:"icon,omitempty"`
+	Color             *string   `json:"color,omitempty"`
+	StartAt           time.Time `json:"startAt"`
+	EndAt             time.Time `json:"endAt"`
+	AllDay            bool      `json:"allDay"`
+	StatusID          *string   `json:"statusId,omitempty"`
+	ParentActivityID  *string   `json:"parentActivityId,omitempty"`
+	PercentComplete   *int      `json:"percentComplete,omitempty"`
+	AssignedMemberIDs []string  `json:"assignedMemberIds"`
+	TagIDs            []string  `json:"tagIds"`
+}
+
+// PublicTimeline is the safe timeline projection for share responses.
+type PublicTimeline struct {
+	ID        string  `json:"id"`
+	Name      string  `json:"name"`
+	Color     *string `json:"color,omitempty"`
+	Icon      *string `json:"icon,omitempty"`
+	StartDate string  `json:"startDate"`
+	EndDate   string  `json:"endDate"`
+}
+
+// ShareProjection is the full aggregate returned by GET /shares/{token}.
+// It contains all data the public viewer needs to render the configured view.
+type ShareProjection struct {
+	Share      Share            `json:"share"`
+	Timeline   PublicTimeline   `json:"timeline"`
+	Members    []PublicMember   `json:"members"`
+	Statuses   []Status         `json:"statuses"`
+	Tags       []Tag            `json:"tags"`
+	Activities []PublicActivity `json:"activities"`
+}
+
 // RevokeUserResult summarizes the outcome of POST /users/:id/revoke.
 // The three counters let the caller show a meaningful summary in the UI.
 type RevokeUserResult struct {

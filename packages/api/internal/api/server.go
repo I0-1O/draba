@@ -51,6 +51,8 @@ type Server struct {
 	passwordTokens *db.PasswordResetTokenRepo
 	statuses       *db.StatusRepo
 	tags           *db.TagRepo
+	shares         *db.ShareRepo
+	shareCache     *shareCache
 	mailer         *mailer.Mailer
 	tokens         *auth.TokenService
 	tier           tier.Tier
@@ -74,6 +76,7 @@ func NewServer(
 	passwordTokensRepo *db.PasswordResetTokenRepo,
 	statusesRepo *db.StatusRepo,
 	tagsRepo *db.TagRepo,
+	sharesRepo *db.ShareRepo,
 	m *mailer.Mailer,
 	tokens *auth.TokenService,
 	t tier.Tier,
@@ -93,6 +96,8 @@ func NewServer(
 		passwordTokens: passwordTokensRepo,
 		statuses:       statusesRepo,
 		tags:           tagsRepo,
+		shares:         sharesRepo,
+		shareCache:     newShareCache(),
 		mailer:         m,
 		tokens:         tokens,
 		tier:           t,
@@ -228,6 +233,19 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleCreateTimelineStatus, s.authMiddleware))
 	mux.HandleFunc("PATCH /statuses/{id}", chain(s.handleUpdateStatus, s.authMiddleware))
 	mux.HandleFunc("DELETE /statuses/{id}", chain(s.handleDeleteStatus, s.authMiddleware))
+
+	// Share routes.
+	// GET /shares/{token} is public — no auth. The token is the credential.
+	// POST /timelines/{id}/shares uses the same /timelines/{id}/... prefix
+	// as archive/unarchive so it avoids the Go 1.22 mux pattern conflict with
+	// GET /timelines/share/{token} (only GET-method paths conflict).
+	// GET /teams/{id}/timelines/{timelineId}/shares uses the team-scoped prefix
+	// to avoid the GET conflict described above.
+	mux.HandleFunc("GET /shares/{token}", s.handleGetShareProjection)
+	mux.HandleFunc("POST /timelines/{id}/shares", chain(s.handleCreateShare, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/shares", chain(s.handleListShares, s.authMiddleware))
+	mux.HandleFunc("PATCH /shares/{id}", chain(s.handleUpdateShare, s.authMiddleware))
+	mux.HandleFunc("DELETE /shares/{id}", chain(s.handleDeleteShare, s.authMiddleware))
 
 	// GET /ws is intentionally outside authMiddleware — ServeWS validates the
 	// JWT itself before upgrading, because WebSocket clients can't set headers.

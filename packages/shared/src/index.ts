@@ -1034,6 +1034,78 @@ export interface paths {
         patch: operations["updateStatus"];
         trace?: never;
     };
+    "/timelines/{id}/shares": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Create a share for a timeline */
+        post: operations["createShare"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/teams/{id}/timelines/{timelineId}/shares": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List shares for a timeline */
+        get: operations["listShares"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/shares/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Delete a share */
+        delete: operations["deleteShare"];
+        options?: never;
+        head?: never;
+        /** Update a share */
+        patch: operations["updateShare"];
+        trace?: never;
+    };
+    "/shares/{token}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Fetch a public share projection
+         * @description No authentication required. Returns the full read-only projection for the given share token. The scope is locked server-side to the share's timeline; client-supplied scope params are ignored.
+         */
+        get: operations["getShareProjection"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/timelines/share/{token}": {
         parameters: {
             query?: never;
@@ -1432,6 +1504,78 @@ export interface components {
             /** @description Required when activities reference the deleted status. */
             replacementStatusId?: string | null;
         };
+        Share: {
+            id: string;
+            timelineId: string;
+            token: string;
+            /** @enum {string} */
+            viewType: "gantt" | "list" | "calendar" | "kanban";
+            /** @description JSON-encoded view configuration snapshot. */
+            viewConfig: string;
+            /** @description Team member ID of the creator. */
+            createdBy: string;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            lastViewedAt?: string | null;
+            viewCount: number;
+            /** Format: date-time */
+            expiresAt?: string | null;
+            /** Format: date-time */
+            revokedAt?: string | null;
+        };
+        CreateShareInput: {
+            /** @enum {string} */
+            viewType?: "gantt" | "list" | "calendar" | "kanban";
+            /** @description JSON-encoded view configuration. */
+            viewConfig?: string;
+        };
+        PatchShareInput: {
+            /** @enum {string} */
+            viewType?: "gantt" | "list" | "calendar" | "kanban";
+            viewConfig?: string;
+        };
+        PublicMember: {
+            id: string;
+            displayName: string;
+            color?: string | null;
+            icon?: string | null;
+        };
+        PublicActivity: {
+            id: string;
+            title: string;
+            description?: string | null;
+            icon?: string | null;
+            color?: string | null;
+            /** Format: date-time */
+            startAt: string;
+            /** Format: date-time */
+            endAt: string;
+            allDay: boolean;
+            statusId?: string | null;
+            parentActivityId?: string | null;
+            percentComplete?: number | null;
+            assignedMemberIds: string[];
+            tagIds: string[];
+        };
+        PublicTimeline: {
+            id: string;
+            name: string;
+            color?: string | null;
+            icon?: string | null;
+            /** Format: date */
+            startDate: string;
+            /** Format: date */
+            endDate: string;
+        };
+        ShareProjection: {
+            share: components["schemas"]["Share"];
+            timeline: components["schemas"]["PublicTimeline"];
+            members: components["schemas"]["PublicMember"][];
+            statuses: components["schemas"]["Status"][];
+            tags: components["schemas"]["Tag"][];
+            activities: components["schemas"]["PublicActivity"][];
+        };
     };
     responses: {
         /** @description Invalid request body or parameters. */
@@ -1504,6 +1648,10 @@ export interface components {
         id: string;
         /** @description Public share token for a timeline. */
         shareToken: string;
+        /** @description Share ID. */
+        shareId: string;
+        /** @description Timeline ID (nested under team). */
+        timelineIdNested: string;
     };
     requestBodies: never;
     headers: never;
@@ -4001,6 +4149,165 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    createShare: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Timeline ID. */
+                id: components["parameters"]["timelineId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateShareInput"];
+            };
+        };
+        responses: {
+            /** @description Share created. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Share"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listShares: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Team ID. */
+                id: components["parameters"]["teamId"];
+                /** @description Timeline ID (nested under team). */
+                timelineId: components["parameters"]["timelineIdNested"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description List of shares. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Share"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    deleteShare: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Share ID. */
+                id: components["parameters"]["shareId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    updateShare: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Share ID. */
+                id: components["parameters"]["shareId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PatchShareInput"];
+            };
+        };
+        responses: {
+            /** @description Updated share. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Share"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getShareProjection: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                token: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Share projection. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ShareProjection"];
+                };
+            };
+            /** @description Password required. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            404: components["responses"]["NotFound"];
+            /** @description Share revoked or expired. */
+            410: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
             500: components["responses"]["InternalError"];
         };
     };

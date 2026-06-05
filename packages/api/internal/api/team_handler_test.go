@@ -40,7 +40,7 @@ func newTeamTestServer(t *testing.T) (http.Handler, *auth.TokenService) {
 	hub := ws.NewHub(bus, tokens, func(_, _ string) error { return nil })
 
 	isr := db.NewInstanceSettingsRepo(database)
-	srv := api.NewServer(users, invites, teams, activitiesRepo, timelinesRepo, db.NewSavedFilterRepo(database), db.NewUserPreferenceRepo(database), db.NewAPITokenRepo(database), isr, db.NewPasswordResetTokenRepo(database), db.NewStatusRepo(database), db.NewTagRepo(database), mailer.New(isr, nil), tokens, tier.Unlimited, bus, hub).Routes()
+	srv := api.NewServer(users, invites, teams, activitiesRepo, timelinesRepo, db.NewSavedFilterRepo(database), db.NewUserPreferenceRepo(database), db.NewAPITokenRepo(database), isr, db.NewPasswordResetTokenRepo(database), db.NewStatusRepo(database), db.NewTagRepo(database), db.NewShareRepo(database), mailer.New(isr, nil), tokens, tier.Unlimited, bus, hub).Routes()
 	return srv, tokens
 }
 
@@ -71,7 +71,7 @@ func newTeamTestServerFull(t *testing.T) *testServerEnv {
 
 	isr := db.NewInstanceSettingsRepo(database)
 	pwr := db.NewPasswordResetTokenRepo(database)
-	srv := api.NewServer(users, invites, teams, activitiesRepo, timelinesRepo, db.NewSavedFilterRepo(database), db.NewUserPreferenceRepo(database), db.NewAPITokenRepo(database), isr, pwr, db.NewStatusRepo(database), db.NewTagRepo(database), mailer.New(isr, nil), tokens, tier.Unlimited, bus, hub).Routes()
+	srv := api.NewServer(users, invites, teams, activitiesRepo, timelinesRepo, db.NewSavedFilterRepo(database), db.NewUserPreferenceRepo(database), db.NewAPITokenRepo(database), isr, pwr, db.NewStatusRepo(database), db.NewTagRepo(database), db.NewShareRepo(database), mailer.New(isr, nil), tokens, tier.Unlimited, bus, hub).Routes()
 	return &testServerEnv{srv: srv, toks: tokens, passwordTokens: pwr}
 }
 
@@ -534,7 +534,7 @@ func TestTierTeamLimit(t *testing.T) {
 	srv := api.NewServer(
 		users, db.NewInviteRepo(database), teamsRepo, db.NewActivityRepo(database), db.NewTimelineRepo(database),
 		db.NewSavedFilterRepo(database), db.NewUserPreferenceRepo(database), db.NewAPITokenRepo(database),
-		isr2, db.NewPasswordResetTokenRepo(database), db.NewStatusRepo(database), db.NewTagRepo(database), mailer.New(isr2, nil), toks2, tier.Team, bus2, hub2,
+		isr2, db.NewPasswordResetTokenRepo(database), db.NewStatusRepo(database), db.NewTagRepo(database), db.NewShareRepo(database), mailer.New(isr2, nil), toks2, tier.Team, bus2, hub2,
 	).Routes()
 
 	// Register first user (no invite needed).

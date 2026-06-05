@@ -36,6 +36,7 @@ import TeamModal from '@/components/TeamModal'
 import MemberModal from '@/components/MemberModal'
 import TimelineModal from '@/components/TimelineModal'
 import FilterManageModal from '@/components/filters/FilterManageModal'
+import ShareModal from '@/components/ShareModal'
 import { useNavigate } from 'react-router-dom'
 import type { components } from '@draba/shared'
 import type { Member } from '@/types'
@@ -79,6 +80,7 @@ function DashboardShell() {
   const [ganttMembers, setGanttMembers] = useState<Member[]>([])
   const [createDefaults, setCreateDefaults] = useState<{ start: string; end: string; memberId: string | null; statusId?: string | null } | null>(null)
   const [filterModalOpen, setFilterModalOpen] = useState(false)
+  const [shareModalOpen, setShareModalOpen] = useState(false)
   const [liveDragDates, setLiveDragDates] = useState<{ activityId: string; start: string; end: string } | null>(null)
   // Gantt toolbar state
   const [groupBy, setGroupBy] = useState<GroupBy>('none')
@@ -576,7 +578,7 @@ function DashboardShell() {
             colorBy={colorBy}
             onColorByChange={setColorBy}
             onExport={() => {}}
-            onShare={() => {}}
+            onShare={() => setShareModalOpen(true)}
           />
         )}
 
@@ -841,6 +843,29 @@ function DashboardShell() {
           isAdmin={canEditTeam}
           isSuperadmin={isSuperadmin}
           onClose={() => setEditingMember(null)}
+        />
+      )}
+
+      {/* Share modal — create a Gantt share link */}
+      {shareModalOpen && activeTimelineId && teamId && (
+        <ShareModal
+          teamId={teamId}
+          timelineId={activeTimelineId}
+          viewType="gantt"
+          viewConfig={{
+            groupBy,
+            sortBy,
+            colorBy,
+            granularity: String(granularity),
+            filter: activeFilter.kind === 'saved'
+              ? (() => {
+                  const sf = savedFilters.find(f => f.id === activeFilter.id)
+                  if (!sf) return null
+                  try { return JSON.parse(sf.definition) as import('@/lib/filterTypes').FilterDefinition } catch { return null }
+                })()
+              : null,
+          }}
+          onClose={() => setShareModalOpen(false)}
         />
       )}
 

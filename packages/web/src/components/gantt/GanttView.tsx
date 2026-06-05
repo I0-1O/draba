@@ -76,6 +76,12 @@ interface Props {
   labelColW?: number;
   /** Called when the user drags the label column resize handle. */
   onLabelColWChange?: (w: number) => void;
+  /**
+   * When false, all click and drag interactions are suppressed — bars, lane
+   * drags, and group toggles are inert. Used by the public share viewer.
+   * Default: true.
+   */
+  interactive?: boolean;
 }
 
 
@@ -360,6 +366,7 @@ export default function GanttView({
   onSelectApiActivity,
   labelColW,
   onLabelColWChange,
+  interactive = true,
 }: Props) {
   const queryClient = useQueryClient();
   const updateActivity = useUpdateActivity(timelineId);
@@ -611,15 +618,16 @@ export default function GanttView({
             onSelectApiActivity(found);
           }
         }}
-        onLaneDrag={onLaneDrag}
-        onBarDrag={handleBarDrag}
-        onBarDragProgress={onBarDragProgress}
+        onLaneDrag={interactive ? onLaneDrag : undefined}
+        onBarDrag={interactive ? handleBarDrag : undefined}
+        onBarDragProgress={interactive ? onBarDragProgress : undefined}
         resolvedGranularity={resolvedGranularity}
         onClearFilters={filtersActive ? () => {} : undefined}
         labelColW={labelColW}
         onLabelColWChange={onLabelColWChange}
         onToggleActivity={groupBy === 'parent' ? toggleParent : undefined}
         onToggleGroup={groupBy === 'member' || groupBy === 'status' ? toggleGroup : undefined}
+        interactive={interactive}
       />
     </div>
   );

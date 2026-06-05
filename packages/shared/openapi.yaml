@@ -787,6 +787,168 @@ components:
           nullable: true
           description: Required when activities reference the deleted status.
 
+    # ── Share schemas ────────────────────────────────────────────────────────────
+
+    Share:
+      type: object
+      required: [id, timelineId, token, viewType, viewConfig, createdBy, createdAt, viewCount]
+      properties:
+        id:
+          type: string
+        timelineId:
+          type: string
+        token:
+          type: string
+        viewType:
+          type: string
+          enum: [gantt, list, calendar, kanban]
+        viewConfig:
+          type: string
+          description: JSON-encoded view configuration snapshot.
+        createdBy:
+          type: string
+          description: Team member ID of the creator.
+        createdAt:
+          type: string
+          format: date-time
+        lastViewedAt:
+          type: string
+          nullable: true
+          format: date-time
+        viewCount:
+          type: integer
+        expiresAt:
+          type: string
+          nullable: true
+          format: date-time
+        revokedAt:
+          type: string
+          nullable: true
+          format: date-time
+
+    CreateShareInput:
+      type: object
+      properties:
+        viewType:
+          type: string
+          enum: [gantt, list, calendar, kanban]
+        viewConfig:
+          type: string
+          description: JSON-encoded view configuration.
+
+    PatchShareInput:
+      type: object
+      properties:
+        viewType:
+          type: string
+          enum: [gantt, list, calendar, kanban]
+        viewConfig:
+          type: string
+
+    PublicMember:
+      type: object
+      required: [id, displayName]
+      properties:
+        id:
+          type: string
+        displayName:
+          type: string
+        color:
+          type: string
+          nullable: true
+        icon:
+          type: string
+          nullable: true
+
+    PublicActivity:
+      type: object
+      required: [id, title, startAt, endAt, allDay, assignedMemberIds, tagIds]
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        description:
+          type: string
+          nullable: true
+        icon:
+          type: string
+          nullable: true
+        color:
+          type: string
+          nullable: true
+        startAt:
+          type: string
+          format: date-time
+        endAt:
+          type: string
+          format: date-time
+        allDay:
+          type: boolean
+        statusId:
+          type: string
+          nullable: true
+        parentActivityId:
+          type: string
+          nullable: true
+        percentComplete:
+          type: integer
+          nullable: true
+        assignedMemberIds:
+          type: array
+          items:
+            type: string
+        tagIds:
+          type: array
+          items:
+            type: string
+
+    PublicTimeline:
+      type: object
+      required: [id, name, startDate, endDate]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        color:
+          type: string
+          nullable: true
+        icon:
+          type: string
+          nullable: true
+        startDate:
+          type: string
+          format: date
+        endDate:
+          type: string
+          format: date
+
+    ShareProjection:
+      type: object
+      required: [share, timeline, members, statuses, tags, activities]
+      properties:
+        share:
+          $ref: "#/components/schemas/Share"
+        timeline:
+          $ref: "#/components/schemas/PublicTimeline"
+        members:
+          type: array
+          items:
+            $ref: "#/components/schemas/PublicMember"
+        statuses:
+          type: array
+          items:
+            $ref: "#/components/schemas/Status"
+        tags:
+          type: array
+          items:
+            $ref: "#/components/schemas/Tag"
+        activities:
+          type: array
+          items:
+            $ref: "#/components/schemas/PublicActivity"
+
   # ────────────────────────────────────────────────────────────
   # Reusable responses
   # ────────────────────────────────────────────────────────────
@@ -890,6 +1052,22 @@ components:
       in: path
       required: true
       description: Public share token for a timeline.
+      schema:
+        type: string
+
+    shareId:
+      name: id
+      in: path
+      required: true
+      description: Share ID.
+      schema:
+        type: string
+
+    timelineIdNested:
+      name: timelineId
+      in: path
+      required: true
+      description: Timeline ID (nested under team).
       schema:
         type: string
 
@@ -3364,6 +3542,151 @@ paths:
           $ref: "#/components/responses/NotFound"
         "409":
           description: Last status or activities reference it without a replacement.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ── Shares ──────────────────────────────────────────────────────────────────
+
+  /timelines/{id}/shares:
+    post:
+      operationId: createShare
+      summary: Create a share for a timeline
+      tags: [shares]
+      parameters:
+        - $ref: "#/components/parameters/timelineId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateShareInput"
+      responses:
+        "201":
+          description: Share created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Share"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /teams/{id}/timelines/{timelineId}/shares:
+    get:
+      operationId: listShares
+      summary: List shares for a timeline
+      tags: [shares]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+        - $ref: "#/components/parameters/timelineIdNested"
+      responses:
+        "200":
+          description: List of shares.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Share"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /shares/{id}:
+    patch:
+      operationId: updateShare
+      summary: Update a share
+      tags: [shares]
+      parameters:
+        - $ref: "#/components/parameters/shareId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PatchShareInput"
+      responses:
+        "200":
+          description: Updated share.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Share"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    delete:
+      operationId: deleteShare
+      summary: Delete a share
+      tags: [shares]
+      parameters:
+        - $ref: "#/components/parameters/shareId"
+      responses:
+        "204":
+          description: Deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /shares/{token}:
+    get:
+      operationId: getShareProjection
+      summary: Fetch a public share projection
+      description: >
+        No authentication required. Returns the full read-only projection for the
+        given share token. The scope is locked server-side to the share's timeline;
+        client-supplied scope params are ignored.
+      security: []
+      tags: [shares]
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Share projection.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ShareProjection"
+        "401":
+          description: Password required.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "410":
+          description: Share revoked or expired.
           content:
             application/json:
               schema:

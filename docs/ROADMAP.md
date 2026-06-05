@@ -1516,7 +1516,7 @@ A first-class **Share** entity: one timeline can have many shares, each a frozen
 ---
 
 ### Phase 13.1 — Foundation, Public Gateway, Gantt Viewer (MVP)
-**Status:** ⬜ | **Effort:** M–L
+**Status:** 🔄 In Progress — automated checks pass, awaiting Docker verification | **Effort:** M–L
 
 The whole data-leak surface is confronted here so 13.2–13.4 ride on a proven-safe gateway. Ships: `shares` schema + repo + **token migration** (each timeline's existing `share_token` becomes a `shares` row, so current links keep working; the `NOT NULL UNIQUE` column is dropped only in a later migration); a **Go filter evaluator** (`internal/filters` mirroring `matchesFilter`) + **shared golden fixtures** (`packages/shared/testdata/filter-fixtures.json`) run by both `filterEngine.test.ts` and a Go test; the **`GET /shares/{token}` gateway** (filter-first, view-driven field projection, referenced-entity pruning, TTL cache via `DRABA_SHARE_CACHE_TTL`); `POST/GET /timelines/{id}/shares` + `PATCH/DELETE /shares/{id}`; **Gantt `interactive=false` mode** (no chrome/drag/edit, forced light); "Share this view" in the Gantt toolbar (snapshots live toolbar state incl. the resolved filter definition); `/s/:token` public route + branding strip.
 
