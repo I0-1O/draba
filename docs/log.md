@@ -2,6 +2,14 @@
 
 ---
 
+## 2026-06-05 — /test-phase 13.2
+
+- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
+- Result: 8 pass (ws-smoke: 3 assertions skipped — no websocat on Windows dev box; broadcast/isolation/full-heartbeat covered by unit tests)
+- Smoke target: http://epcot.lan:8081
+
+---
+
 ## 2026-06-05 — Phase 13.2b: Share module overhaul (frontend) + supporting backend
 
 **Goal:** Second half of Phase 13.2 — rebuild the "Share this view" modal to the design handoff (`docs/design/handoffs/share-modal/`) wired to real data, and add the public unlock prompt that consumes the 13.2a password backend.
