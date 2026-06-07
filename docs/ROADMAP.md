@@ -54,7 +54,7 @@ This document organizes development into discrete phases with effort estimates a
 | 12 | [Communications Testing](#phase-12--communications-testing) | S — 1 day | ✅ |
 | 13 | [Shares — Public Read-Only View Links](#phase-13--shares--multi-share-views-with-passwords) (sub-phased) | L | ⬜ |
 | 13.1 | [Foundation, Public Gateway, Gantt Viewer (MVP)](#phase-131--foundation-public-gateway-gantt-viewer-mvp) | M–L | ✅ |
-| 13.2 | [Share Module Overhaul + Password Protection](#phase-132--share-module-overhaul--password-protection) | M–L | ⬜ |
+| 13.2 | [Share Module Overhaul + Password Protection](#phase-132--share-module-overhaul--password-protection) | M–L | ✅ |
 | 13.3 | [List + Kanban Read-Only](#phase-133--list--kanban-read-only) | M | ⬜ |
 | 13.4 | [Calendar — ICS Feed Sharing](#phase-134--calendar--ics-feed-sharing) | M | ⬜ |
 | 13.5 | [Lifecycle Tail](#phase-135--lifecycle-tail) | S | ⬜ |
@@ -1535,7 +1535,7 @@ The whole data-leak surface is confronted here so 13.2–13.4 ride on a proven-s
 ---
 
 ### Phase 13.2 — Share Module Overhaul + Password Protection
-**Status:** 🔄 Automated checks pass (2026-06-05) — awaiting Docker verification | **Effort:** M–L
+**Status:** ✅ Done (2026-06-07) — Docker-verified | **Effort:** M–L
 
 Rebuilds the "Share this view" modal to the [design handoff](plans/phase-13-shares.md#the-share-module-overhaul-132) and pulls **password protection** forward to ride alongside it (the handoff's create form has a password toggle, so the two are inseparable). The modal becomes the per-view share manager: an active-links list (one timeline → many named shares), a create form (title, optional description, optional password), copy-to-clipboard with a success state, an inline delete-confirm, and an empty state. Each row shows creator, created date, and **view count**. This absorbs most of the old Lifecycle phase's "Manage shares" surface.
 
