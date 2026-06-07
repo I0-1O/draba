@@ -12217,6 +12217,106 @@ func (r *PasswordResetTokenRepo) MarkUsed(id string) error {
 }
 ````
 
+## File: packages/api/internal/db/saved_filter_repo.go
+````go
+package db
+
+import (
+	"fmt"
+
+	"github.com/jmoiron/sqlx"
+
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// SavedFilterRepo is the persistence layer for SavedFilter records.
+type SavedFilterRepo struct {
+	db *sqlx.DB
+}
+
+// NewSavedFilterRepo returns a SavedFilterRepo backed by db.
+func NewSavedFilterRepo(db *sqlx.DB) *SavedFilterRepo {
+	return &SavedFilterRepo{db: db}
+}
+
+// Create inserts a new SavedFilter row.
+func (r *SavedFilterRepo) Create(f *models.SavedFilter) error {
+	_, err := r.db.NamedExec(`
+		INSERT INTO saved_filters (
+			id, team_id, user_id, name, definition, is_team_filter, created_at, updated_at
+		) VALUES (
+			:id, :team_id, :user_id, :name, :definition, :is_team_filter, :created_at, :updated_at
+		)
+	`, f)
+	if err != nil {
+		return fmt.Errorf("creating saved filter: %w", err)
+	}
+	return nil
+}
+
+// GetByID fetches a SavedFilter by primary key. Returns sql.ErrNoRows
+// (wrapped) when no row matches.
+func (r *SavedFilterRepo) GetByID(id string) (*models.SavedFilter, error) {
+	var f models.SavedFilter
+	err := r.db.Get(&f, `SELECT * FROM saved_filters WHERE id = ?`, id)
+	if err != nil {
+		return nil, fmt.Errorf("getting saved filter: %w", err)
+	}
+	return &f, nil
+}
+
+// ListByTeamUser returns all saved filters owned by userID within teamID,
+// plus all team-promoted filters (is_team_filter = 1) regardless of owner,
+// ordered by creation time ascending.
+func (r *SavedFilterRepo) ListByTeamUser(teamID, userID string) ([]*models.SavedFilter, error) {
+	fs := make([]*models.SavedFilter, 0)
+	err := r.db.Select(&fs,
+		`SELECT * FROM saved_filters WHERE team_id = ? AND (user_id = ? OR is_team_filter = 1) ORDER BY created_at ASC`,
+		teamID, userID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("listing saved filters: %w", err)
+	}
+	return fs, nil
+}
+
+// Update writes name, definition, is_team_filter, and updated_at for an existing row.
+func (r *SavedFilterRepo) Update(f *models.SavedFilter) error {
+	_, err := r.db.NamedExec(`
+		UPDATE saved_filters
+		SET name = :name, definition = :definition, is_team_filter = :is_team_filter, updated_at = :updated_at
+		WHERE id = :id
+	`, f)
+	if err != nil {
+		return fmt.Errorf("updating saved filter: %w", err)
+	}
+	return nil
+}
+
+// ListAllByTeam returns every saved filter in the team, including private
+// filters from all members. Admin-only; callers must enforce access.
+func (r *SavedFilterRepo) ListAllByTeam(teamID string) ([]*models.SavedFilter, error) {
+	fs := make([]*models.SavedFilter, 0)
+	err := r.db.Select(&fs,
+		`SELECT * FROM saved_filters WHERE team_id = ? ORDER BY user_id, created_at ASC`,
+		teamID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("listing all team saved filters: %w", err)
+	}
+	return fs, nil
+}
+
+// Delete removes the row with the given id. No-op when the row is absent.
+func (r *SavedFilterRepo) Delete(id string) error {
+	_, err := r.db.Exec(`DELETE FROM saved_filters WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("deleting saved filter: %w", err)
+	}
+	return nil
+}
+````
+
 ## File: packages/api/internal/db/status_repo.go
 ````go
 // Package db — StatusRepo manages status templates, template items,
@@ -20333,6 +20433,44 @@ export function useAuth(): AuthContextValue {
 }
 ````
 
+## File: packages/web/src/contexts/FilterContext.tsx
+````typescript
+/**
+ * Holds the dashboard-wide active filter selection. UI-only this round —
+ * the selected filter is not yet applied to the events list (real views
+ * land in Phase 8).
+ */
+
+import { createContext, useContext, useState } from 'react'
+
+export type ActiveFilter =
+  | { kind: 'preset'; id: 'all' | 'upcoming' | 'overdue' | 'noassign' | 'open' }
+  | { kind: 'member'; userId: string }
+  | { kind: 'saved'; id: string }
+
+interface FilterContextValue {
+  activeFilter: ActiveFilter
+  setActiveFilter: (f: ActiveFilter) => void
+}
+
+const FilterContext = createContext<FilterContextValue | null>(null)
+
+export function FilterProvider({ children }: { children: React.ReactNode }) {
+  const [activeFilter, setActiveFilter] = useState<ActiveFilter>({ kind: 'preset', id: 'all' })
+  return (
+    <FilterContext.Provider value={{ activeFilter, setActiveFilter }}>
+      {children}
+    </FilterContext.Provider>
+  )
+}
+
+export function useFilter(): FilterContextValue {
+  const ctx = useContext(FilterContext)
+  if (!ctx) throw new Error('useFilter must be used inside FilterProvider')
+  return ctx
+}
+````
+
 ## File: packages/web/src/contexts/FindContext.tsx
 ````typescript
 /**
@@ -20994,6 +21132,101 @@ export function usePublicSettings() {
     queryKey: ['settings', 'branding'],
     queryFn: () => apiFetch<PublicBranding>('/settings/branding'),
     staleTime: 5 * 60 * 1000,
+  })
+}
+````
+
+## File: packages/web/src/hooks/useSavedFilters.ts
+````typescript
+/**
+ * TanStack Query hooks for SavedFilter CRUD. Filters are user-private and
+ * team-scoped; mutations invalidate the list key for that team.
+ */
+
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import type { components } from '@draba/shared'
+import { createAuthFetch } from '@/lib/api'
+import { useAuth } from '@/contexts/AuthContext'
+
+type SavedFilter = components['schemas']['SavedFilter']
+
+const savedFiltersKey = (teamId: string) => ['teams', teamId, 'saved_filters'] as const
+
+/** Fetches saved filters for the calling user within a team. */
+export function useSavedFilters(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  return useQuery({
+    queryKey: savedFiltersKey(teamId),
+    queryFn: () => authFetch<SavedFilter[]>(`/teams/${teamId}/saved_filters`),
+    enabled: Boolean(teamId),
+  })
+}
+
+interface CreateSavedFilterInput {
+  name: string
+  definition: string
+}
+
+/** Creates a new saved filter and invalidates the list. */
+export function useCreateSavedFilter(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (input: CreateSavedFilterInput) =>
+      authFetch<SavedFilter>(`/teams/${teamId}/saved_filters`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(input),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: savedFiltersKey(teamId) }),
+  })
+}
+
+interface UpdateSavedFilterInput {
+  id: string
+  name?: string
+  definition?: string
+  isTeamFilter?: boolean
+}
+
+/** Updates an existing saved filter (owner-only) and invalidates the list. */
+export function useUpdateSavedFilter(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, ...patch }: UpdateSavedFilterInput) =>
+      authFetch<SavedFilter>(`/saved_filters/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(patch),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: savedFiltersKey(teamId) }),
+  })
+}
+
+/** Fetches all saved filters in a team (private + team). Admin-only endpoint. */
+export function useAllTeamSavedFilters(teamId: string, enabled: boolean) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  return useQuery({
+    queryKey: [...savedFiltersKey(teamId), 'all'] as const,
+    queryFn: () => authFetch<SavedFilter[]>(`/teams/${teamId}/saved_filters/all`),
+    enabled: Boolean(teamId) && enabled,
+  })
+}
+
+/** Deletes a saved filter (owner-only) and invalidates the list. */
+export function useDeleteSavedFilter(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) =>
+      authFetch<void>(`/saved_filters/${id}`, { method: 'DELETE' }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: savedFiltersKey(teamId) }),
   })
 }
 ````
@@ -22435,6 +22668,129 @@ describe('IDENTITY_COLORS', () => {
     }
   });
 });
+````
+
+## File: packages/web/src/lib/presetFilters.ts
+````typescript
+/**
+ * Unified filter application for all filter kinds (presets, member, saved).
+ *
+ * applyActiveFilter is the single entry point used by GanttView (and future
+ * List/Calendar/Kanban views). All preset logic lives here so it's testable
+ * in isolation and reusable across views.
+ */
+
+import type { components } from '@draba/shared'
+import type { ActiveFilter } from '@/contexts/FilterContext'
+import { matchesFilter } from './filterEngine'
+import type { FilterContext as EngineCtx } from './filterEngine'
+import { parseFilterDefinition } from './filterTypes'
+
+type Activity = components['schemas']['Activity']
+type SavedFilter = components['schemas']['SavedFilter']
+type Status = components['schemas']['Status']
+type Tag = components['schemas']['Tag']
+
+export interface ApplyFilterContext {
+  /** Status IDs whose is_closed flag is true — used by 'open' and 'overdue'. */
+  closedStatusIds: Set<string>
+  /** All saved filters (user's own + team filters) for the active team. */
+  savedFilters: SavedFilter[]
+  /** For saved filter engine: timeline_id → statuses map. */
+  statuses: Map<string, Status[]>
+  /** For saved filter engine: all team tags. */
+  tags: Tag[]
+}
+
+// ── Preset implementations ────────────────────────────────────────────────────
+
+function filterAll(activities: Activity[]): Activity[] {
+  return activities
+}
+
+function filterOpen(activities: Activity[], closedStatusIds: Set<string>): Activity[] {
+  return activities.filter(a => !a.statusId || !closedStatusIds.has(a.statusId))
+}
+
+function filterUpcoming(activities: Activity[]): Activity[] {
+  const now = Date.now()
+  const sevenDays = 7 * 24 * 60 * 60 * 1000
+  const cutoff = now + sevenDays
+  return activities.filter(a => {
+    const start = a.startAt ? new Date(a.startAt).getTime() : null
+    const end = a.endAt ? new Date(a.endAt).getTime() : null
+    // Either starts or ends within the next 7 days (and hasn't already ended)
+    const startsWithin = start !== null && start >= now && start <= cutoff
+    const endsWithin = end !== null && end >= now && end <= cutoff
+    return startsWithin || endsWithin
+  })
+}
+
+function filterOverdue(activities: Activity[], closedStatusIds: Set<string>): Activity[] {
+  const now = Date.now()
+  return activities.filter(a => {
+    if (!a.endAt) return false
+    const end = new Date(a.endAt).getTime()
+    if (end >= now) return false
+    // Not closed
+    return !a.statusId || !closedStatusIds.has(a.statusId)
+  })
+}
+
+function filterNoAssign(activities: Activity[]): Activity[] {
+  return activities.filter(a => (a.assignedMemberIds ?? []).length === 0)
+}
+
+// ── Main entry point ──────────────────────────────────────────────────────────
+
+/**
+ * Apply the active filter to a list of activities. Returns the filtered subset.
+ *
+ * @param activities - All activities to filter (already fetched for the timeline).
+ * @param activeFilter - The currently selected filter from FilterContext.
+ * @param memberIdsByUserId - Map of userId → team_member_id[] for the team.
+ *   Used to resolve the 'member' filter kind.
+ * @param ctx - Context data needed by presets and the saved filter engine.
+ */
+export function applyActiveFilter(
+  activities: Activity[],
+  activeFilter: ActiveFilter,
+  memberIdsByUserId: Map<string, string[]>,
+  ctx: ApplyFilterContext,
+): Activity[] {
+  if (activeFilter.kind === 'preset') {
+    switch (activeFilter.id) {
+      case 'all':       return filterAll(activities)
+      case 'open':      return filterOpen(activities, ctx.closedStatusIds)
+      case 'upcoming':  return filterUpcoming(activities)
+      case 'overdue':   return filterOverdue(activities, ctx.closedStatusIds)
+      case 'noassign':  return filterNoAssign(activities)
+    }
+  }
+
+  if (activeFilter.kind === 'member') {
+    const memberIds = memberIdsByUserId.get(activeFilter.userId) ?? []
+    if (memberIds.length === 0) return []
+    const idSet = new Set(memberIds)
+    return activities.filter(a =>
+      (a.assignedMemberIds ?? []).some(mid => idSet.has(mid))
+    )
+  }
+
+  if (activeFilter.kind === 'saved') {
+    const saved = ctx.savedFilters.find(f => f.id === activeFilter.id)
+    if (!saved) return activities // filter not found — show all
+    const def = parseFilterDefinition(saved.definition)
+    if (!def) return activities // invalid definition — show all
+    const engineCtx: EngineCtx = {
+      statusesByTimeline: ctx.statuses,
+      tags: ctx.tags,
+    }
+    return activities.filter(a => matchesFilter(a, def, engineCtx))
+  }
+
+  return activities
+}
 ````
 
 ## File: packages/web/src/lib/utils.ts
@@ -28508,6 +28864,230 @@ func clientIP(r *http.Request) string {
 }
 ````
 
+## File: packages/api/internal/api/saved_filter_handler.go
+````go
+package api
+
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// handleListSavedFilters handles GET /teams/{id}/saved_filters. Returns
+// only filters owned by the calling user within the given team.
+func (s *Server) handleListSavedFilters(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
+		return
+	}
+
+	filters, err := s.savedFilters.ListByTeamUser(teamID, claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list saved filters")
+		return
+	}
+	writeJSON(w, http.StatusOK, filters)
+}
+
+// handleListAllTeamSavedFilters handles GET /teams/{id}/saved_filters/all.
+// Returns every saved filter in the team (private + team). Admin-only.
+func (s *Server) handleListAllTeamSavedFilters(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+
+	member, ok := s.requireTeamMember(w, r, teamID)
+	if !ok {
+		return
+	}
+	if member.Role != "admin" {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "only team admins can list all team filters")
+		return
+	}
+
+	filters, err := s.savedFilters.ListAllByTeam(teamID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list saved filters")
+		return
+	}
+	writeJSON(w, http.StatusOK, filters)
+}
+
+// handleCreateSavedFilter handles POST /teams/{id}/saved_filters. The
+// authenticated user must be a member of the team and becomes the owner.
+// Setting isTeamFilter=true at creation time requires admin role.
+func (s *Server) handleCreateSavedFilter(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	member, ok := s.requireTeamMember(w, r, teamID)
+	if !ok {
+		return
+	}
+
+	var req CreateSavedFilterJSONBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+	if req.Name == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name is required")
+		return
+	}
+	if !json.Valid([]byte(req.Definition)) {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "definition must be valid JSON")
+		return
+	}
+
+	isTeamFilter := false
+	if req.IsTeamFilter != nil && *req.IsTeamFilter {
+		if member.Role != "admin" {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "only team admins can create team filters")
+			return
+		}
+		isTeamFilter = true
+	}
+
+	now := time.Now()
+	filter := &models.SavedFilter{
+		ID:           newID(),
+		TeamID:       teamID,
+		UserID:       claims.UserID,
+		Name:         req.Name,
+		Definition:   req.Definition,
+		IsTeamFilter: isTeamFilter,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+	if err := s.savedFilters.Create(filter); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create saved filter")
+		return
+	}
+	writeJSON(w, http.StatusCreated, filter)
+}
+
+// handleUpdateSavedFilter handles PATCH /saved_filters/{id}. Owners may
+// update name and definition. Setting isTeamFilter=true is admin-only;
+// admins may also update filters they don't own when the filter is already
+// a team filter.
+func (s *Server) handleUpdateSavedFilter(w http.ResponseWriter, r *http.Request) {
+	filterID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	filter, err := s.savedFilters.GetByID(filterID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "saved filter not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update saved filter")
+		return
+	}
+
+	var req UpdateSavedFilterJSONBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	// Determine whether the caller is a team admin for permission checks.
+	isAdmin := false
+	if adminMember, ok := s.requireTeamMember(w, r, filter.TeamID); ok {
+		isAdmin = adminMember.Role == "admin"
+	} else {
+		return
+	}
+
+	isOwner := filter.UserID == claims.UserID
+
+	// Name and definition can be updated by the owner or by a team admin, but
+	// only after the filter has been promoted. This prevents admins from silently
+	// editing a member's private filter before they decide to share it — promotion
+	// is the explicit consent step.
+	wantsNameOrDef := req.Name != nil || req.Definition != nil
+	if wantsNameOrDef && !isOwner {
+		if !isAdmin || !filter.IsTeamFilter {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not the owner of this saved filter")
+			return
+		}
+	}
+
+	if req.Name != nil {
+		if *req.Name == "" {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name must not be empty")
+			return
+		}
+		filter.Name = *req.Name
+	}
+	if req.Definition != nil {
+		if !json.Valid([]byte(*req.Definition)) {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "definition must be valid JSON")
+			return
+		}
+		filter.Definition = *req.Definition
+	}
+	// Only admins may promote or demote isTeamFilter — setting it back to false
+	// is just as impactful as promoting, since it silently removes the filter
+	// from all members' views.
+	if req.IsTeamFilter != nil {
+		if !isAdmin {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "only team admins can change team filter status")
+			return
+		}
+		filter.IsTeamFilter = *req.IsTeamFilter
+	}
+	filter.UpdatedAt = time.Now()
+
+	if err := s.savedFilters.Update(filter); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update saved filter")
+		return
+	}
+	writeJSON(w, http.StatusOK, filter)
+}
+
+// handleDeleteSavedFilter handles DELETE /saved_filters/{id}. The owner may
+// always delete their own filter. Team admins may additionally delete any
+// team filter (is_team_filter = true) even if they aren't the owner.
+func (s *Server) handleDeleteSavedFilter(w http.ResponseWriter, r *http.Request) {
+	filterID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	filter, err := s.savedFilters.GetByID(filterID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "saved filter not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete saved filter")
+		return
+	}
+
+	// Check membership to determine admin status.
+	adminMember, ok := s.requireTeamMember(w, r, filter.TeamID)
+	if !ok {
+		return
+	}
+	isAdmin := adminMember.Role == "admin"
+
+	// Owner can always delete; admin can delete team filters they don't own.
+	if filter.UserID != claims.UserID && !(isAdmin && filter.IsTeamFilter) {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "not the owner of this saved filter")
+		return
+	}
+
+	if err := s.savedFilters.Delete(filterID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete saved filter")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+````
+
 ## File: packages/api/internal/api/version_handler.go
 ````go
 package api
@@ -28788,106 +29368,6 @@ ALTER TABLE shares ADD COLUMN name TEXT;
 -- Optional free-text shown in the share-management modal (Phase 13.2b). Nullable;
 -- existing and description-less shares stay empty.
 ALTER TABLE shares ADD COLUMN description TEXT;
-````
-
-## File: packages/api/internal/db/saved_filter_repo.go
-````go
-package db
-
-import (
-	"fmt"
-
-	"github.com/jmoiron/sqlx"
-
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// SavedFilterRepo is the persistence layer for SavedFilter records.
-type SavedFilterRepo struct {
-	db *sqlx.DB
-}
-
-// NewSavedFilterRepo returns a SavedFilterRepo backed by db.
-func NewSavedFilterRepo(db *sqlx.DB) *SavedFilterRepo {
-	return &SavedFilterRepo{db: db}
-}
-
-// Create inserts a new SavedFilter row.
-func (r *SavedFilterRepo) Create(f *models.SavedFilter) error {
-	_, err := r.db.NamedExec(`
-		INSERT INTO saved_filters (
-			id, team_id, user_id, name, definition, is_team_filter, created_at, updated_at
-		) VALUES (
-			:id, :team_id, :user_id, :name, :definition, :is_team_filter, :created_at, :updated_at
-		)
-	`, f)
-	if err != nil {
-		return fmt.Errorf("creating saved filter: %w", err)
-	}
-	return nil
-}
-
-// GetByID fetches a SavedFilter by primary key. Returns sql.ErrNoRows
-// (wrapped) when no row matches.
-func (r *SavedFilterRepo) GetByID(id string) (*models.SavedFilter, error) {
-	var f models.SavedFilter
-	err := r.db.Get(&f, `SELECT * FROM saved_filters WHERE id = ?`, id)
-	if err != nil {
-		return nil, fmt.Errorf("getting saved filter: %w", err)
-	}
-	return &f, nil
-}
-
-// ListByTeamUser returns all saved filters owned by userID within teamID,
-// plus all team-promoted filters (is_team_filter = 1) regardless of owner,
-// ordered by creation time ascending.
-func (r *SavedFilterRepo) ListByTeamUser(teamID, userID string) ([]*models.SavedFilter, error) {
-	fs := make([]*models.SavedFilter, 0)
-	err := r.db.Select(&fs,
-		`SELECT * FROM saved_filters WHERE team_id = ? AND (user_id = ? OR is_team_filter = 1) ORDER BY created_at ASC`,
-		teamID, userID,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("listing saved filters: %w", err)
-	}
-	return fs, nil
-}
-
-// Update writes name, definition, is_team_filter, and updated_at for an existing row.
-func (r *SavedFilterRepo) Update(f *models.SavedFilter) error {
-	_, err := r.db.NamedExec(`
-		UPDATE saved_filters
-		SET name = :name, definition = :definition, is_team_filter = :is_team_filter, updated_at = :updated_at
-		WHERE id = :id
-	`, f)
-	if err != nil {
-		return fmt.Errorf("updating saved filter: %w", err)
-	}
-	return nil
-}
-
-// ListAllByTeam returns every saved filter in the team, including private
-// filters from all members. Admin-only; callers must enforce access.
-func (r *SavedFilterRepo) ListAllByTeam(teamID string) ([]*models.SavedFilter, error) {
-	fs := make([]*models.SavedFilter, 0)
-	err := r.db.Select(&fs,
-		`SELECT * FROM saved_filters WHERE team_id = ? ORDER BY user_id, created_at ASC`,
-		teamID,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("listing all team saved filters: %w", err)
-	}
-	return fs, nil
-}
-
-// Delete removes the row with the given id. No-op when the row is absent.
-func (r *SavedFilterRepo) Delete(id string) error {
-	_, err := r.db.Exec(`DELETE FROM saved_filters WHERE id = ?`, id)
-	if err != nil {
-		return fmt.Errorf("deleting saved filter: %w", err)
-	}
-	return nil
-}
 ````
 
 ## File: packages/api/internal/db/seed.go
@@ -29803,6 +30283,1180 @@ CMD ["draba"]
 }
 ````
 
+## File: packages/web/src/components/filters/FilterManageModal.tsx
+````typescript
+/**
+ * Unified filter management modal. Replaces the FilterManagePanel and
+ * FilterEditor sidebars with a single dialog for creating, editing,
+ * duplicating, promoting, and demoting saved filters.
+ */
+
+import { useState, useMemo, useEffect } from 'react'
+import { createPortal } from 'react-dom'
+import type { components } from '@draba/shared'
+import type { FilterCondition, FilterDefinition } from '@/lib/filterTypes'
+import {
+  useSavedFilters,
+  useAllTeamSavedFilters,
+  useCreateSavedFilter,
+  useUpdateSavedFilter,
+  useDeleteSavedFilter,
+} from '@/hooks/useSavedFilters'
+import { useTeamMembers } from '@/hooks/useTeamActivities'
+import { useTimelineStatuses } from '@/hooks/useStatusTemplates'
+import { useTags } from '@/hooks/useTags'
+import { useAuth } from '@/contexts/AuthContext'
+import FilterConditionRow from './FilterConditionRow'
+import {
+  Filter, X, Plus, ArrowLeft, Eye, Pencil, Trash2, Copy,
+  Globe, Lock, Users, AlertCircle, ArrowUp, Search, Check,
+} from 'lucide-react'
+import { filterColor } from '@/lib/filterColors'
+
+type SavedFilter = components['schemas']['SavedFilter']
+
+// ── Types ─────────────────────────────────────────────────────────────────────
+
+type TabId = 'mine' | 'team' | 'members'
+type EditorMode = 'new' | 'edit' | 'view'
+
+interface EditorState {
+  mode: EditorMode
+  filter?: SavedFilter
+  readOnly: boolean
+}
+
+// ���─ Helpers ───────────────────────────────────────────────────────────────────
+
+function makeBlank(): FilterCondition {
+  return { field: 'title', op: 'contains', value: '' }
+}
+
+
+function parseDraft(filter: SavedFilter): { logic: 'and' | 'or'; conditions: FilterCondition[] } {
+  try {
+    const def = JSON.parse(filter.definition) as FilterDefinition
+    return {
+      logic: def.logic ?? 'and',
+      conditions: def.conditions?.length ? def.conditions : [makeBlank()],
+    }
+  } catch {
+    return { logic: 'and', conditions: [makeBlank()] }
+  }
+}
+
+// ─��� Shared styles ─────────────────────────────────────────────────────────────
+
+const ICON_BTN: React.CSSProperties = {
+  display: 'inline-flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  width: 28,
+  height: 28,
+  border: '1px solid var(--border)',
+  borderRadius: 6,
+  background: 'transparent',
+  cursor: 'pointer',
+  color: 'var(--muted-foreground)',
+  flexShrink: 0,
+  fontFamily: 'var(--font-sans)',
+}
+
+const BTN: React.CSSProperties = {
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: 5,
+  padding: '5px 12px',
+  border: '1px solid var(--border)',
+  borderRadius: 6,
+  fontSize: 12,
+  fontWeight: 500,
+  cursor: 'pointer',
+  fontFamily: 'var(--font-sans)',
+  background: 'transparent',
+  color: 'var(--foreground)',
+  transition: 'all 0.1s',
+}
+
+const BTN_PRIMARY: React.CSSProperties = {
+  ...BTN,
+  background: 'var(--primary)',
+  color: 'white',
+  border: 'none',
+}
+
+const BTN_DANGER: React.CSSProperties = {
+  ...BTN,
+  color: 'var(--destructive)',
+  borderColor: 'rgba(239,68,68,.4)',
+}
+
+const BTN_PROMOTE: React.CSSProperties = {
+  ...BTN,
+  color: '#5B69E0',
+  borderColor: 'rgba(91,105,224,.35)',
+}
+
+// ── ScopePill ─────────────────────────────────────────────────────────────────
+
+function ScopePill({ isTeam }: { isTeam: boolean }) {
+  return (
+    <span style={{
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 3,
+      padding: '2px 7px',
+      borderRadius: 99,
+      fontSize: 10,
+      fontWeight: 700,
+      background: isTeam ? 'rgba(40,140,155,.1)' : 'var(--muted)',
+      color: isTeam ? 'var(--primary)' : 'var(--muted-foreground)',
+      border: `1px solid ${isTeam ? 'rgba(40,140,155,.28)' : 'var(--border)'}`,
+      flexShrink: 0,
+    }}>
+      {isTeam
+        ? <Globe size={9} strokeWidth={2} />
+        : <Lock size={9} strokeWidth={2} />}
+      {isTeam ? 'Team' : 'Private'}
+    </span>
+  )
+}
+
+// ── FilterRow ─────────────────────────────────────────────────────────────────
+
+interface FilterRowProps {
+  filter: SavedFilter
+  currentUserId: string
+  isAdmin: boolean
+  /** Determines which action set to show. */
+  context: 'mine' | 'team' | 'member-admin'
+  onEdit?: () => void
+  onView?: () => void
+  onDuplicate?: () => void
+  onDelete?: () => void
+  onPromote?: () => void
+  onDemote?: () => void
+  ownerLabel?: string
+}
+
+function FilterRow({
+  filter, currentUserId, isAdmin, context,
+  onEdit, onView, onDuplicate, onDelete, onPromote, onDemote,
+  ownerLabel,
+}: FilterRowProps) {
+  const [hovered, setHovered] = useState(false)
+  const [confirmDel, setConfirmDel] = useState(false)
+  const color = filterColor(filter.id)
+  // member-admin always shows actions; others reveal on hover
+  const showActions = context === 'member-admin' || hovered
+
+  return (
+    <div
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => { setHovered(false); setConfirmDel(false) }}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 10,
+        padding: '10px 12px',
+        borderRadius: 8,
+        background: 'var(--card)',
+        border: `1px solid ${hovered ? 'rgba(0,0,0,.1)' : 'var(--border)'}`,
+        transition: 'background 0.08s, border-color 0.08s',
+      }}
+    >
+      {/* Icon tile — color derived from filter ID */}
+      <div style={{
+        width: 28,
+        height: 28,
+        borderRadius: 6,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        flexShrink: 0,
+        background: `${color}20`,
+        border: `1px solid ${color}50`,
+        color,
+      }}>
+        <Filter size={12} strokeWidth={1.8} />
+      </div>
+
+      {/* Name + pill */}
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+          <span style={{
+            fontSize: 13,
+            fontWeight: 600,
+            color: 'var(--foreground)',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+          }}>
+            {filter.name}
+          </span>
+          <ScopePill isTeam={filter.isTeamFilter} />
+          {ownerLabel && (
+            <span style={{ fontSize: 11, color: 'var(--muted-foreground)' }}>
+              by {filter.userId === currentUserId ? 'you' : ownerLabel}
+            </span>
+          )}
+        </div>
+      </div>
+
+      {/* Right-side actions — revealed on hover */}
+      {confirmDel ? (
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexShrink: 0 }}>
+          <button onClick={() => setConfirmDel(false)} style={BTN}>Cancel</button>
+          <button
+            onClick={() => { setConfirmDel(false); onDelete?.() }}
+            style={{ ...BTN, background: 'var(--destructive)', color: 'white', border: 'none' }}
+          >
+            Delete
+          </button>
+        </div>
+      ) : (
+        <div style={{
+          display: 'flex',
+          gap: 5,
+          flexShrink: 0,
+          alignItems: 'center',
+          opacity: showActions ? 1 : 0,
+          transition: 'opacity 0.1s',
+        }}>
+          {context === 'member-admin' && (
+            <>
+              <button onClick={onView} style={ICON_BTN} title="View filter">
+                <Eye size={12} strokeWidth={1.8} />
+              </button>
+              <button onClick={onPromote} style={BTN_PROMOTE}>
+                <ArrowUp size={11} strokeWidth={2} />
+                Promote to team
+              </button>
+            </>
+          )}
+          {context === 'team' && (
+            isAdmin ? (
+              <>
+                <button onClick={onEdit} style={ICON_BTN} title="Edit">
+                  <Pencil size={12} strokeWidth={1.8} />
+                </button>
+                <button onClick={onDemote} style={ICON_BTN} title="Remove from team">
+                  <Lock size={12} strokeWidth={1.8} />
+                </button>
+                <button
+                  onClick={() => setConfirmDel(true)}
+                  style={{ ...ICON_BTN, color: 'var(--destructive)' }}
+                  title="Delete"
+                >
+                  <Trash2 size={12} strokeWidth={1.8} />
+                </button>
+              </>
+            ) : (
+              <button onClick={onView} style={ICON_BTN} title="View filter">
+                <Eye size={12} strokeWidth={1.8} />
+              </button>
+            )
+          )}
+          {context === 'mine' && (
+            <>
+              <button onClick={onDuplicate} style={ICON_BTN} title="Duplicate">
+                <Copy size={12} strokeWidth={1.8} />
+              </button>
+              <button onClick={onEdit} style={ICON_BTN} title="Edit">
+                <Pencil size={12} strokeWidth={1.8} />
+              </button>
+              {isAdmin && (
+                <button onClick={onPromote} style={BTN_PROMOTE}>
+                  <ArrowUp size={11} strokeWidth={2} />
+                  Promote
+                </button>
+              )}
+              <button
+                onClick={() => setConfirmDel(true)}
+                style={{ ...ICON_BTN, color: 'var(--destructive)' }}
+                title="Delete"
+              >
+                <Trash2 size={12} strokeWidth={1.8} />
+              </button>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── EmptyState ────────────────────────────────────────────────────────────────
+
+function EmptyState({ icon, title, body, onAction, actionLabel }: {
+  icon: React.ReactNode
+  title: string
+  body: string
+  onAction?: () => void
+  actionLabel?: string
+}) {
+  return (
+    <div style={{
+      display: 'flex',
+      flexDirection: 'column',
+      alignItems: 'center',
+      padding: '32px 24px',
+      border: '1px dashed var(--border)',
+      borderRadius: 10,
+      textAlign: 'center',
+      gap: 8,
+      color: 'var(--muted-foreground)',
+    }}>
+      <div style={{ marginBottom: 4 }}>{icon}</div>
+      <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)' }}>{title}</div>
+      <div style={{ fontSize: 12, maxWidth: 280 }}>{body}</div>
+      {onAction && actionLabel && (
+        <button onClick={onAction} style={{ ...BTN_PRIMARY, marginTop: 4 }}>
+          {actionLabel}
+        </button>
+      )}
+    </div>
+  )
+}
+
+// ── Main component ────────────────────────────────────────────────────────────
+
+export interface FilterManageModalProps {
+  open: boolean
+  onClose: () => void
+  teamId: string
+  timelineId: string
+  isAdmin: boolean
+}
+
+export default function FilterManageModal({
+  open,
+  onClose,
+  teamId,
+  timelineId,
+  isAdmin,
+}: FilterManageModalProps) {
+  const { user } = useAuth()
+  const currentUserId = (user as { id?: string } | null)?.id ?? ''
+
+  // Data
+  const { data: filters = [] } = useSavedFilters(teamId)
+  const { data: allFilters = [] } = useAllTeamSavedFilters(teamId, isAdmin && open)
+  const { data: members = [] } = useTeamMembers(teamId)
+  const { data: tags = [] } = useTags(teamId)
+  const { data: statuses = [] } = useTimelineStatuses(teamId, timelineId)
+
+  const statusOptions = useMemo(() => {
+    const seen = new Set<string>()
+    return statuses
+      .filter(s => {
+        const k = s.name.toLowerCase()
+        if (seen.has(k)) return false
+        seen.add(k)
+        return true
+      })
+      .map(s => ({ value: s.name, label: s.name }))
+  }, [statuses])
+
+  // Mutations
+  const createFilter = useCreateSavedFilter(teamId)
+  const updateFilter = useUpdateSavedFilter(teamId)
+  const deleteFilter = useDeleteSavedFilter(teamId)
+
+  // Modal state
+  const [tab, setTab] = useState<TabId>('mine')
+  const [editor, setEditor] = useState<EditorState | null>(null)
+  const [search, setSearch] = useState('')
+  const [toast, setToast] = useState<string | null>(null)
+  const [editorError, setEditorError] = useState<string | null>(null)
+
+  // Editor draft state
+  const [draftName, setDraftName] = useState('')
+  const [draftLogic, setDraftLogic] = useState<'and' | 'or'>('and')
+  const [draftConditions, setDraftConditions] = useState<FilterCondition[]>([makeBlank()])
+
+  // Derived filter lists
+  const myFilters = filters.filter(f => f.userId === currentUserId && !f.isTeamFilter)
+  const teamFilters = filters.filter(f => f.isTeamFilter)
+  const memberPrivateFilters = allFilters.filter(f => !f.isTeamFilter)
+
+  // Group member filters by owner
+  const memberGroups = useMemo(() => {
+    const groups = new Map<string, SavedFilter[]>()
+    memberPrivateFilters.forEach(f => {
+      const g = groups.get(f.userId) ?? []
+      g.push(f)
+      groups.set(f.userId, g)
+    })
+    return groups
+  }, [memberPrivateFilters])
+
+  // Build userId → display name map
+  const memberNameById = useMemo(() => {
+    const map = new Map<string, string>()
+    members.forEach(m => {
+      if (m.userId) map.set(m.userId, m.displayName || m.email || 'Unknown')
+    })
+    return map
+  }, [members])
+
+  // Toast auto-dismiss
+  useEffect(() => {
+    if (!toast) return
+    const t = setTimeout(() => setToast(null), 2400)
+    return () => clearTimeout(t)
+  }, [toast])
+
+  // Escape key: close editor first, then modal
+  useEffect(() => {
+    if (!open) return
+    function onKey(e: KeyboardEvent) {
+      if (e.key !== 'Escape') return
+      if (editor) setEditor(null)
+      else onClose()
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [open, editor, onClose])
+
+  // ── Editor helpers ──────────────────────────────────────────────────────────
+
+  function openNew() {
+    setDraftName('')
+    setDraftLogic('and')
+    setDraftConditions([makeBlank()])
+    setEditorError(null)
+    setEditor({ mode: 'new', readOnly: false })
+  }
+
+  function openEdit(filter: SavedFilter) {
+    const { logic, conditions } = parseDraft(filter)
+    setDraftName(filter.name)
+    setDraftLogic(logic)
+    setDraftConditions(conditions)
+    setEditorError(null)
+    setEditor({ mode: 'edit', filter, readOnly: false })
+  }
+
+  function openView(filter: SavedFilter) {
+    const { logic, conditions } = parseDraft(filter)
+    setDraftName(filter.name)
+    setDraftLogic(logic)
+    setDraftConditions(conditions)
+    setEditorError(null)
+    setEditor({ mode: 'view', filter, readOnly: true })
+  }
+
+  async function handleSave() {
+    if (!draftName.trim()) { setEditorError('Filter name is required.'); return }
+    setEditorError(null)
+    const definition = JSON.stringify({ logic: draftLogic, conditions: draftConditions } as FilterDefinition)
+    try {
+      if (editor?.mode === 'edit' && editor.filter) {
+        await updateFilter.mutateAsync({ id: editor.filter.id, name: draftName.trim(), definition })
+        setToast(`"${draftName.trim()}" updated.`)
+      } else {
+        await createFilter.mutateAsync({ name: draftName.trim(), definition })
+        setToast(`"${draftName.trim()}" created.`)
+      }
+      setEditor(null)
+    } catch {
+      setEditorError('Failed to save. Please try again.')
+    }
+  }
+
+  async function handleDelete(filter: SavedFilter) {
+    try {
+      await deleteFilter.mutateAsync(filter.id)
+      setToast(`"${filter.name}" deleted.`)
+    } catch {
+      setToast('Delete failed.')
+    }
+  }
+
+  async function handleDuplicate(filter: SavedFilter) {
+    try {
+      await createFilter.mutateAsync({
+        name: `${filter.name} copy`,
+        definition: filter.definition,
+      })
+      setToast(`Duplicated "${filter.name}".`)
+    } catch {
+      setToast('Duplicate failed.')
+    }
+  }
+
+  async function handlePromote(filter: SavedFilter) {
+    try {
+      await updateFilter.mutateAsync({ id: filter.id, isTeamFilter: true })
+      setToast(`"${filter.name}" promoted to Team filters.`)
+      setEditor(null)
+      setTab('team')
+    } catch {
+      setToast('Promote failed.')
+    }
+  }
+
+  async function handleDemote(filter: SavedFilter) {
+    try {
+      await updateFilter.mutateAsync({ id: filter.id, isTeamFilter: false })
+      setToast(`"${filter.name}" removed from Team filters.`)
+      setEditor(null)
+    } catch {
+      setToast('Failed to remove from team.')
+    }
+  }
+
+  const isSaving = createFilter.isPending || updateFilter.isPending
+
+  if (!open) return null
+
+  return createPortal(
+    <div
+      style={{
+        position: 'fixed',
+        inset: 0,
+        background: 'rgba(0,0,0,.55)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        zIndex: 1000,
+        padding: 24,
+      }}
+    >
+      <div
+        style={{
+          position: 'relative',
+          width: 700,
+          maxWidth: '100%',
+          maxHeight: '88vh',
+          display: 'flex',
+          flexDirection: 'column',
+          background: 'var(--card)',
+          border: '1px solid var(--border)',
+          borderRadius: 12,
+          boxShadow: '0 24px 64px rgba(0,0,0,.2)',
+        }}
+        onClick={e => e.stopPropagation()}
+      >
+        {/* ── Header ──────────────────────────────────────────────────────── */}
+        <div style={{
+          padding: '14px 18px',
+          borderBottom: '1px solid var(--border)',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 10,
+          flexShrink: 0,
+        }}>
+          <div style={{
+            width: 32,
+            height: 32,
+            borderRadius: 8,
+            background: 'rgba(40,140,155,.1)',
+            border: '1px solid rgba(40,140,155,.25)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            flexShrink: 0,
+          }}>
+            <Filter size={15} strokeWidth={1.8} color="var(--primary)" />
+          </div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--foreground)' }}>Filters</div>
+            <div style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 1 }}>
+              Manage, build, and share your timeline filters
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            style={{ ...ICON_BTN, border: 'none' }}
+            title="Close"
+          >
+            <X size={16} strokeWidth={1.8} />
+          </button>
+        </div>
+
+        {/* ── Tab bar (list mode only) ─────────────────────────────────────── */}
+        {!editor && (
+          <div style={{
+            padding: '0 18px',
+            borderBottom: '1px solid var(--border)',
+            display: 'flex',
+            flexShrink: 0,
+          }}>
+            {([
+              { id: 'mine' as TabId, label: 'My filters' },
+              { id: 'team' as TabId, label: 'Team filters', teamBadge: true },
+              ...(isAdmin ? [{ id: 'members' as TabId, label: "Members' filters", count: memberPrivateFilters.length }] : []),
+            ]).map(t => (
+              <button
+                key={t.id}
+                onClick={() => setTab(t.id)}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 5,
+                  padding: '10px 12px',
+                  background: 'transparent',
+                  border: 'none',
+                  borderBottom: tab === t.id ? '2px solid var(--primary)' : '2px solid transparent',
+                  cursor: 'pointer',
+                  fontSize: 12,
+                  fontWeight: tab === t.id ? 600 : 400,
+                  color: tab === t.id ? 'var(--foreground)' : 'var(--muted-foreground)',
+                  fontFamily: 'var(--font-sans)',
+                  marginBottom: -1,
+                  whiteSpace: 'nowrap',
+                  transition: 'color 0.1s, border-color 0.1s',
+                }}
+              >
+                {t.label}
+                {'teamBadge' in t && t.teamBadge && (
+                  <span style={{
+                    fontSize: 9,
+                    fontWeight: 700,
+                    color: 'var(--primary)',
+                    background: 'rgba(40,140,155,.1)',
+                    border: '1px solid rgba(40,140,155,.25)',
+                    borderRadius: 99,
+                    padding: '1px 5px',
+                  }}>
+                    Team
+                  </span>
+                )}
+                {'count' in t && typeof t.count === 'number' && t.count > 0 && (
+                  <span style={{
+                    fontSize: 10,
+                    fontWeight: 600,
+                    background: 'var(--muted)',
+                    borderRadius: 99,
+                    padding: '1px 6px',
+                    color: 'var(--muted-foreground)',
+                  }}>
+                    {t.count}
+                  </span>
+                )}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {/* ── Editor sub-header ────────────────────────────────────────────── */}
+        {editor && (
+          <div style={{
+            padding: '10px 18px',
+            borderBottom: '1px solid var(--border)',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 10,
+            flexShrink: 0,
+          }}>
+            <button onClick={() => setEditor(null)} style={ICON_BTN} title="Back">
+              <ArrowLeft size={14} strokeWidth={2} />
+            </button>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{
+                fontSize: 10,
+                fontWeight: 700,
+                color: 'var(--muted-foreground)',
+                letterSpacing: '0.6px',
+                textTransform: 'uppercase',
+              }}>
+                {editor.mode === 'new' ? 'New filter' : editor.mode === 'edit' ? 'Edit filter' : 'Filter details'}
+              </div>
+              {editor.filter && (
+                <div style={{
+                  fontSize: 13,
+                  fontWeight: 600,
+                  color: 'var(--foreground)',
+                  marginTop: 1,
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                }}>
+                  {editor.filter.name}
+                </div>
+              )}
+            </div>
+            <ScopePill isTeam={Boolean(editor.filter?.isTeamFilter)} />
+          </div>
+        )}
+
+        {/* ── Body ──────────────────────────────────────────────────────────── */}
+        <div style={{ flex: 1, overflowY: 'auto', padding: '20px' }}>
+
+          {/* List mode */}
+          {!editor && tab === 'mine' && (
+            <div>
+              <div style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                marginBottom: 12,
+                gap: 12,
+              }}>
+                <p style={{ fontSize: 12, color: 'var(--muted-foreground)', margin: 0 }}>
+                  Private filters only you can see.
+                </p>
+                <button onClick={openNew} style={BTN_PRIMARY}>
+                  <Plus size={12} strokeWidth={2} />
+                  New filter
+                </button>
+              </div>
+              {myFilters.length === 0 ? (
+                <EmptyState
+                  icon={<Filter size={32} strokeWidth={1.2} />}
+                  title="No filters yet"
+                  body="Create a filter to quickly focus on the activities that matter to you."
+                  onAction={openNew}
+                  actionLabel="Create your first filter"
+                />
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  {myFilters.map(f => (
+                    <FilterRow
+                      key={f.id}
+                      filter={f}
+                      currentUserId={currentUserId}
+                      isAdmin={isAdmin}
+                      context="mine"
+                      onEdit={() => openEdit(f)}
+                      onView={() => openView(f)}
+                      onDuplicate={() => handleDuplicate(f)}
+                      onDelete={() => handleDelete(f)}
+                      onPromote={() => handlePromote(f)}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {!editor && tab === 'team' && (
+            <div>
+              <p style={{ fontSize: 12, color: 'var(--muted-foreground)', marginBottom: 12 }}>
+                Shared with everyone — these appear in every member's filter dropdown.{' '}
+                {isAdmin
+                  ? 'As an admin you can edit, demote, or remove them.'
+                  : 'Only team admins can change them.'}
+              </p>
+              {teamFilters.length === 0 ? (
+                <EmptyState
+                  icon={<Globe size={32} strokeWidth={1.2} />}
+                  title="No team filters"
+                  body={
+                    isAdmin
+                      ? 'Promote a member filter to make it available to everyone.'
+                      : 'Team admins can promote filters to share them here.'
+                  }
+                />
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  {teamFilters.map(f => (
+                    <FilterRow
+                      key={f.id}
+                      filter={f}
+                      currentUserId={currentUserId}
+                      isAdmin={isAdmin}
+                      context="team"
+                      onEdit={() => openEdit(f)}
+                      onView={() => openView(f)}
+                      onDelete={() => handleDelete(f)}
+                      onDemote={() => handleDemote(f)}
+                      ownerLabel={memberNameById.get(f.userId)}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {!editor && tab === 'members' && isAdmin && (
+            <div>
+              <p style={{ fontSize: 12, color: 'var(--muted-foreground)', marginBottom: 10 }}>
+                Every member's private filters. Promote any to a{' '}
+                <strong>Team filter</strong> to share it with the whole team.
+              </p>
+
+              <div style={{ position: 'relative', marginBottom: 12 }}>
+                <Search
+                  size={13}
+                  strokeWidth={1.8}
+                  style={{
+                    position: 'absolute',
+                    left: 9,
+                    top: '50%',
+                    transform: 'translateY(-50%)',
+                    color: 'var(--muted-foreground)',
+                    pointerEvents: 'none',
+                  }}
+                />
+                <input
+                  value={search}
+                  onChange={e => setSearch(e.target.value)}
+                  placeholder="Search by member or filter name…"
+                  style={{
+                    width: '100%',
+                    padding: '6px 8px 6px 28px',
+                    border: '1px solid var(--border)',
+                    borderRadius: 7,
+                    background: 'var(--background)',
+                    color: 'var(--foreground)',
+                    fontSize: 12,
+                    fontFamily: 'var(--font-sans)',
+                    boxSizing: 'border-box',
+                  }}
+                />
+              </div>
+
+              {memberGroups.size === 0 ? (
+                <EmptyState
+                  icon={<Users size={32} strokeWidth={1.2} />}
+                  title="No private filters"
+                  body="Members haven't created any private filters yet."
+                />
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                  {Array.from(memberGroups.entries()).map(([userId, filts]) => {
+                    const name = memberNameById.get(userId) ?? 'Unknown member'
+                    const q = search.toLowerCase()
+                    const visible = filts.filter(f =>
+                      !q || name.toLowerCase().includes(q) || f.name.toLowerCase().includes(q),
+                    )
+                    if (visible.length === 0) return null
+                    return (
+                      <div key={userId}>
+                        <div style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 6,
+                          marginBottom: 6,
+                          fontSize: 12,
+                          fontWeight: 600,
+                          color: 'var(--foreground)',
+                        }}>
+                          <div style={{
+                            width: 20,
+                            height: 20,
+                            borderRadius: 99,
+                            background: 'var(--primary)',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            fontSize: 10,
+                            fontWeight: 700,
+                            color: 'white',
+                            flexShrink: 0,
+                          }}>
+                            {(name[0] ?? '?').toUpperCase()}
+                          </div>
+                          {userId === currentUserId ? `${name} (you)` : name}
+                          <span style={{
+                            fontSize: 10,
+                            fontWeight: 600,
+                            background: 'var(--muted)',
+                            borderRadius: 99,
+                            padding: '1px 6px',
+                            color: 'var(--muted-foreground)',
+                          }}>
+                            {visible.length}
+                          </span>
+                        </div>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+                          {visible.map(f => (
+                            <FilterRow
+                              key={f.id}
+                              filter={f}
+                              currentUserId={currentUserId}
+                              isAdmin={isAdmin}
+                              context="member-admin"
+                              onView={() => openView(f)}
+                              onPromote={() => handlePromote(f)}
+                              onDelete={() => handleDelete(f)}
+                            />
+                          ))}
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+
+              {memberPrivateFilters.length > 0 && (
+                <div style={{
+                  display: 'flex',
+                  alignItems: 'flex-start',
+                  gap: 7,
+                  marginTop: 16,
+                  padding: '9px 12px',
+                  background: 'var(--muted)',
+                  borderRadius: 7,
+                  fontSize: 11,
+                  color: 'var(--muted-foreground)',
+                }}>
+                  <AlertCircle size={13} strokeWidth={1.8} style={{ flexShrink: 0, marginTop: 1 }} />
+                  <span>
+                    {memberPrivateFilters.length} private filter
+                    {memberPrivateFilters.length !== 1 ? 's' : ''} across the team.
+                    Promoting moves a filter into Team filters for everyone; you can remove it any time.
+                  </span>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Editor mode */}
+          {editor && (
+            <div>
+              {editor.readOnly && (
+                <div style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  padding: '8px 12px',
+                  background: 'var(--muted)',
+                  borderRadius: 7,
+                  marginBottom: 16,
+                  fontSize: 12,
+                  color: 'var(--muted-foreground)',
+                }}>
+                  <Eye size={13} strokeWidth={1.8} style={{ flexShrink: 0 }} />
+                  Read-only —{' '}
+                  {editor.filter?.isTeamFilter
+                    ? 'only team admins can edit team filters.'
+                    : 'this filter belongs to another member.'}
+                </div>
+              )}
+
+              <div style={{
+                pointerEvents: editor.readOnly ? 'none' : undefined,
+                opacity: editor.readOnly ? 0.85 : 1,
+              }}>
+                {/* Name */}
+                <div style={{ marginBottom: 14 }}>
+                  <label style={{
+                    display: 'block',
+                    fontSize: 10,
+                    fontWeight: 700,
+                    color: 'var(--muted-foreground)',
+                    letterSpacing: '0.6px',
+                    textTransform: 'uppercase',
+                    marginBottom: 5,
+                  }}>
+                    Filter name
+                  </label>
+                  <input
+                    value={draftName}
+                    onChange={e => setDraftName(e.target.value)}
+                    placeholder="e.g. My open tasks"
+                    // eslint-disable-next-line jsx-a11y/no-autofocus
+                    autoFocus={!editor.readOnly}
+                    style={{
+                      width: '100%',
+                      padding: '8px 10px',
+                      border: '1px solid var(--border)',
+                      borderRadius: 6,
+                      background: 'var(--background)',
+                      color: 'var(--foreground)',
+                      fontSize: 13,
+                      fontFamily: 'var(--font-sans)',
+                      boxSizing: 'border-box',
+                    }}
+                  />
+                </div>
+
+                {/* Match toggle */}
+                <div style={{ marginBottom: 14, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                  <span style={{ fontSize: 12, color: 'var(--muted-foreground)' }}>Match</span>
+                  <div style={{
+                    display: 'flex',
+                    background: 'var(--muted)',
+                    borderRadius: 6,
+                    padding: 2,
+                    border: '1px solid var(--border)',
+                  }}>
+                    {(['and', 'or'] as const).map(l => (
+                      <button
+                        key={l}
+                        type="button"
+                        onClick={() => setDraftLogic(l)}
+                        style={{
+                          padding: '3px 10px',
+                          border: 'none',
+                          borderRadius: 4,
+                          fontSize: 12,
+                          fontWeight: 600,
+                          cursor: 'pointer',
+                          fontFamily: 'var(--font-sans)',
+                          background: draftLogic === l ? 'var(--primary)' : 'transparent',
+                          color: draftLogic === l ? 'white' : 'var(--muted-foreground)',
+                          transition: 'all 0.1s',
+                        }}
+                      >
+                        {l === 'and' ? 'All' : 'Any'}
+                      </button>
+                    ))}
+                  </div>
+                  <span style={{ fontSize: 12, color: 'var(--muted-foreground)' }}>of the following conditions</span>
+                </div>
+
+                {/* Conditions */}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 12 }}>
+                  {draftConditions.map((c, i) => (
+                    <FilterConditionRow
+                      key={i}
+                      condition={c}
+                      statusOptions={statusOptions}
+                      tags={tags}
+                      members={members}
+                      onChange={next =>
+                        setDraftConditions(prev => prev.map((x, j) => j === i ? next : x))
+                      }
+                      onRemove={() =>
+                        setDraftConditions(prev => {
+                          const next = prev.filter((_, j) => j !== i)
+                          return next.length ? next : [makeBlank()]
+                        })
+                      }
+                    />
+                  ))}
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setDraftConditions(prev => [...prev, makeBlank()])}
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 5,
+                    padding: '6px 12px',
+                    border: '1px dashed var(--border)',
+                    borderRadius: 6,
+                    background: 'transparent',
+                    color: 'var(--muted-foreground)',
+                    cursor: 'pointer',
+                    fontSize: 12,
+                    fontFamily: 'var(--font-sans)',
+                  }}
+                >
+                  <Plus size={12} strokeWidth={2} />
+                  Add condition
+                </button>
+              </div>
+
+              {editorError && (
+                <div style={{ fontSize: 12, color: 'var(--destructive)', marginTop: 10 }}>
+                  {editorError}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* ── Footer ──────────────────────────────────────────────────────── */}
+        <div style={{
+          padding: '12px 18px',
+          borderTop: '1px solid var(--border)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          flexShrink: 0,
+          gap: 8,
+        }}>
+          {!editor ? (
+            <>
+              <span style={{ fontSize: 11, color: 'var(--muted-foreground)' }}>
+                {teamFilters.length} team · {myFilters.length} private
+              </span>
+              <button onClick={onClose} style={BTN_PRIMARY}>Done</button>
+            </>
+          ) : (
+            <>
+              {/* Left cluster — destructive / scope actions */}
+              <div style={{ display: 'flex', gap: 8 }}>
+                {editor.mode === 'edit' && editor.filter && !editor.readOnly && (
+                  <button
+                    onClick={async () => {
+                      if (!editor.filter) return
+                      await handleDelete(editor.filter)
+                      setEditor(null)
+                    }}
+                    style={BTN_DANGER}
+                  >
+                    <Trash2 size={11} strokeWidth={2} />
+                    Delete
+                  </button>
+                )}
+                {editor.mode === 'edit' && editor.filter && isAdmin && !editor.filter.isTeamFilter && (
+                  <button onClick={() => editor.filter && handlePromote(editor.filter)} style={BTN_PROMOTE}>
+                    <ArrowUp size={11} strokeWidth={2} />
+                    Promote to team
+                  </button>
+                )}
+                {editor.mode === 'edit' && editor.filter?.isTeamFilter && isAdmin && (
+                  <button onClick={() => editor.filter && handleDemote(editor.filter)} style={BTN}>
+                    <Lock size={11} strokeWidth={2} />
+                    Remove from team
+                  </button>
+                )}
+              </div>
+
+              {/* Right cluster */}
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button onClick={() => setEditor(null)} style={BTN}>
+                  {editor.readOnly ? 'Back' : 'Cancel'}
+                </button>
+                {!editor.readOnly && (
+                  <button
+                    onClick={handleSave}
+                    disabled={isSaving || !draftName.trim()}
+                    style={{
+                      ...BTN_PRIMARY,
+                      opacity: isSaving || !draftName.trim() ? 0.6 : 1,
+                      cursor: isSaving || !draftName.trim() ? 'not-allowed' : 'pointer',
+                    }}
+                  >
+                    <Check size={12} strokeWidth={2.5} />
+                    {isSaving ? 'Saving…' : editor.mode === 'new' ? 'Create filter' : 'Save changes'}
+                  </button>
+                )}
+              </div>
+            </>
+          )}
+        </div>
+
+        {/* ── Toast ───────────────────────────────────────────────────────── */}
+        {toast && (
+          <div style={{
+            position: 'fixed',
+            bottom: 24,
+            left: '50%',
+            transform: 'translateX(-50%)',
+            background: 'var(--card)',
+            border: '1px solid var(--border)',
+            borderRadius: 99,
+            padding: '7px 16px',
+            fontSize: 12,
+            color: 'var(--foreground)',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 7,
+            boxShadow: '0 4px 16px rgba(0,0,0,.12)',
+            whiteSpace: 'nowrap',
+            pointerEvents: 'none',
+            zIndex: 1001,
+          }}>
+            <Check size={13} strokeWidth={2.5} color="var(--primary)" />
+            {toast}
+          </div>
+        )}
+      </div>
+    </div>,
+    document.body,
+  )
+}
+````
+
 ## File: packages/web/src/components/gantt/GanttGrid.format.test.ts
 ````typescript
 import { describe, it, expect } from 'vitest'
@@ -30457,6 +32111,125 @@ export function autoFitGranularity(
   }
 
   return best;
+}
+````
+
+## File: packages/web/src/components/layout/TopBar.tsx
+````typescript
+/**
+ * Top toolbar above the active view. Left side: global app navigation
+ * (view switcher) and global object actions (Share). Right side: global
+ * cross-view actions: Find bar (or Search icon trigger), Filter dropdown,
+ * then whatever the parent injects into `rightSlot` (typically the profile menu).
+ *
+ * View-specific controls (date nav, zoom) intentionally live elsewhere —
+ * a context-sensitive sub-toolbar hosts them.
+ */
+
+import { Search, CalendarDays, GanttChart, Columns3, List } from 'lucide-react';
+import FilterDropdown from '@/components/filters/FilterDropdown';
+import FindBar from '@/components/layout/FindBar';
+import { Badge } from '@/components/identity/Badge';
+import { useFind } from '@/contexts/FindContext';
+import { cn } from '@/lib/utils';
+import type { Identity } from '@/components/identity/identity-constants';
+import { DEFAULT_TIMELINE_IDENTITY } from '@/components/identity/identity-constants';
+
+export type ViewMode = 'calendar' | 'gantt' | 'kanban' | 'list';
+
+interface Props {
+  view: ViewMode;
+  teamId?: string;
+  timelineName?: string;
+  timelineIdentity?: Identity;
+  onViewChange: (view: ViewMode) => void;
+  onOpenFilterManager: () => void;
+  rightSlot?: React.ReactNode;
+}
+
+const VIEWS: { id: ViewMode; icon: React.ReactNode; label: string }[] = [
+  { id: 'list',     icon: <List size={13} strokeWidth={1.8} />,        label: 'List' },
+  { id: 'calendar', icon: <CalendarDays size={13} strokeWidth={1.8} />, label: 'Calendar' },
+  { id: 'gantt',    icon: <GanttChart size={13} strokeWidth={1.8} />,  label: 'Gantt' },
+  { id: 'kanban',   icon: <Columns3 size={13} strokeWidth={1.8} />,    label: 'Kanban' },
+];
+
+export default function TopBar({
+  view,
+  teamId,
+  timelineName,
+  timelineIdentity,
+  onViewChange,
+  onOpenFilterManager,
+  rightSlot,
+}: Props) {
+  const { findBarOpen, setFindBarOpen } = useFind();
+
+  return (
+    <div className="flex items-center px-3 h-[var(--topbar-h)] bg-card border-b border-border shrink-0 z-40">
+      {/* Left zone: view switcher */}
+      <div className="flex items-center justify-start shrink-0">
+        <div className="flex items-center gap-px bg-muted rounded-md p-0.5 shrink-0">
+          {VIEWS.map(v => (
+            <button
+              key={v.id}
+              onClick={() => onViewChange(v.id)}
+              className={cn(
+                'flex items-center justify-center gap-[5px]',
+                'text-xs font-semibold px-2.5 py-1 rounded-[5px]',
+                'border-none cursor-pointer',
+                view === v.id
+                  ? 'bg-card text-foreground shadow-sm'
+                  : 'bg-transparent text-muted-foreground',
+              )}
+            >
+              {v.icon}
+              {v.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Center zone: timeline identity badge + name */}
+      <div className="flex-1 min-w-0 flex items-center justify-center gap-1.5 px-3">
+        <Badge
+          identity={timelineIdentity ?? DEFAULT_TIMELINE_IDENTITY}
+          name={timelineName ?? ''}
+          shape="square"
+          size={18}
+          className="shrink-0"
+        />
+        <span
+          title={timelineName}
+          className="text-xs font-medium text-muted-foreground truncate select-none"
+        >
+          {timelineName}
+        </span>
+      </div>
+
+      {/* Right zone: Find bar / trigger, Filter, profile slot */}
+      <div className="flex items-center justify-end gap-1.5 shrink-0 min-w-0">
+        {findBarOpen ? (
+          <FindBar />
+        ) : (
+          <button
+            onClick={() => setFindBarOpen(true)}
+            title="Find in view (Ctrl+F)"
+            className={cn(
+              'flex items-center justify-center w-7 h-7',
+              'border border-border rounded-md bg-card',
+              'cursor-pointer text-muted-foreground hover:text-foreground hover:bg-muted',
+              'transition-colors shrink-0',
+            )}
+          >
+            <Search size={13} strokeWidth={1.8} />
+          </button>
+        )}
+        <FilterDropdown teamId={teamId} onOpenManager={onOpenFilterManager} />
+        {rightSlot}
+      </div>
+    </div>
+  );
 }
 ````
 
@@ -31258,139 +33031,6 @@ export function ActivityFieldsBody(props: ActivityFieldsBodyProps) {
 
     </div>
   )
-}
-````
-
-## File: packages/web/src/contexts/FilterContext.tsx
-````typescript
-/**
- * Holds the dashboard-wide active filter selection. UI-only this round —
- * the selected filter is not yet applied to the events list (real views
- * land in Phase 8).
- */
-
-import { createContext, useContext, useState } from 'react'
-
-export type ActiveFilter =
-  | { kind: 'preset'; id: 'all' | 'upcoming' | 'overdue' | 'noassign' | 'open' }
-  | { kind: 'member'; userId: string }
-  | { kind: 'saved'; id: string }
-
-interface FilterContextValue {
-  activeFilter: ActiveFilter
-  setActiveFilter: (f: ActiveFilter) => void
-}
-
-const FilterContext = createContext<FilterContextValue | null>(null)
-
-export function FilterProvider({ children }: { children: React.ReactNode }) {
-  const [activeFilter, setActiveFilter] = useState<ActiveFilter>({ kind: 'preset', id: 'all' })
-  return (
-    <FilterContext.Provider value={{ activeFilter, setActiveFilter }}>
-      {children}
-    </FilterContext.Provider>
-  )
-}
-
-export function useFilter(): FilterContextValue {
-  const ctx = useContext(FilterContext)
-  if (!ctx) throw new Error('useFilter must be used inside FilterProvider')
-  return ctx
-}
-````
-
-## File: packages/web/src/hooks/useSavedFilters.ts
-````typescript
-/**
- * TanStack Query hooks for SavedFilter CRUD. Filters are user-private and
- * team-scoped; mutations invalidate the list key for that team.
- */
-
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import type { components } from '@draba/shared'
-import { createAuthFetch } from '@/lib/api'
-import { useAuth } from '@/contexts/AuthContext'
-
-type SavedFilter = components['schemas']['SavedFilter']
-
-const savedFiltersKey = (teamId: string) => ['teams', teamId, 'saved_filters'] as const
-
-/** Fetches saved filters for the calling user within a team. */
-export function useSavedFilters(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  return useQuery({
-    queryKey: savedFiltersKey(teamId),
-    queryFn: () => authFetch<SavedFilter[]>(`/teams/${teamId}/saved_filters`),
-    enabled: Boolean(teamId),
-  })
-}
-
-interface CreateSavedFilterInput {
-  name: string
-  definition: string
-}
-
-/** Creates a new saved filter and invalidates the list. */
-export function useCreateSavedFilter(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: (input: CreateSavedFilterInput) =>
-      authFetch<SavedFilter>(`/teams/${teamId}/saved_filters`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(input),
-      }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: savedFiltersKey(teamId) }),
-  })
-}
-
-interface UpdateSavedFilterInput {
-  id: string
-  name?: string
-  definition?: string
-  isTeamFilter?: boolean
-}
-
-/** Updates an existing saved filter (owner-only) and invalidates the list. */
-export function useUpdateSavedFilter(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: ({ id, ...patch }: UpdateSavedFilterInput) =>
-      authFetch<SavedFilter>(`/saved_filters/${id}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(patch),
-      }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: savedFiltersKey(teamId) }),
-  })
-}
-
-/** Fetches all saved filters in a team (private + team). Admin-only endpoint. */
-export function useAllTeamSavedFilters(teamId: string, enabled: boolean) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  return useQuery({
-    queryKey: [...savedFiltersKey(teamId), 'all'] as const,
-    queryFn: () => authFetch<SavedFilter[]>(`/teams/${teamId}/saved_filters/all`),
-    enabled: Boolean(teamId) && enabled,
-  })
-}
-
-/** Deletes a saved filter (owner-only) and invalidates the list. */
-export function useDeleteSavedFilter(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: (id: string) =>
-      authFetch<void>(`/saved_filters/${id}`, { method: 'DELETE' }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: savedFiltersKey(teamId) }),
-  })
 }
 ````
 
@@ -32524,127 +34164,239 @@ describe('comboSortComparator', () => {
 })
 ````
 
-## File: packages/web/src/lib/presetFilters.ts
+## File: packages/web/src/lib/presetFilters.test.ts
 ````typescript
 /**
- * Unified filter application for all filter kinds (presets, member, saved).
+ * presetFilters.test.ts — unit tests for applyActiveFilter.
  *
- * applyActiveFilter is the single entry point used by GanttView (and future
- * List/Calendar/Kanban views). All preset logic lives here so it's testable
- * in isolation and reusable across views.
+ * Covers each preset, the member filter kind, and saved filter delegation.
  */
 
-import type { components } from '@draba/shared'
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest'
+import { applyActiveFilter } from './presetFilters'
 import type { ActiveFilter } from '@/contexts/FilterContext'
-import { matchesFilter } from './filterEngine'
-import type { FilterContext as EngineCtx } from './filterEngine'
-import { parseFilterDefinition } from './filterTypes'
+import type { components } from '@draba/shared'
 
 type Activity = components['schemas']['Activity']
 type SavedFilter = components['schemas']['SavedFilter']
 type Status = components['schemas']['Status']
 type Tag = components['schemas']['Tag']
 
-export interface ApplyFilterContext {
-  /** Status IDs whose is_closed flag is true — used by 'open' and 'overdue'. */
-  closedStatusIds: Set<string>
-  /** All saved filters (user's own + team filters) for the active team. */
-  savedFilters: SavedFilter[]
-  /** For saved filter engine: timeline_id → statuses map. */
-  statuses: Map<string, Status[]>
-  /** For saved filter engine: all team tags. */
-  tags: Tag[]
+// ── Fixtures ──────────────────────────────────────────────────────────────────
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function makeActivity(overrides: Record<string, any> = {}): Activity {
+  return {
+    id: 'act-1',
+    title: 'Default',
+    timelineId: 'tl-1',
+    startAt: '2026-06-01T00:00:00Z',
+    endAt: '2026-06-30T00:00:00Z',
+    allDay: false,
+    statusId: null,
+    tagIds: [],
+    assignedMemberIds: [],
+    percentComplete: null,
+    parentActivityId: null,
+    color: null,
+    icon: null,
+    description: null,
+    notes: null,
+    location: null,
+    url: null,
+    createdAt: '2026-01-01T00:00:00Z',
+    updatedAt: '2026-01-01T00:00:00Z',
+    archivedAt: null,
+    createdBy: 'user-1',
+    ...overrides,
+  } as Activity
 }
 
-// ── Preset implementations ────────────────────────────────────────────────────
-
-function filterAll(activities: Activity[]): Activity[] {
-  return activities
+function makeStatus(id: string, name: string, isClosed = false): Status {
+  return { id, name, color: '#3B82F6', icon: null, isClosed, position: 0, timelineId: 'tl-1', createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' }
 }
 
-function filterOpen(activities: Activity[], closedStatusIds: Set<string>): Activity[] {
-  return activities.filter(a => !a.statusId || !closedStatusIds.has(a.statusId))
+function makeTag(id: string, name: string): Tag {
+  return { id, name, color: null, teamId: 'team-1', createdAt: '2026-01-01T00:00:00Z', createdBy: 'user-1' }
 }
 
-function filterUpcoming(activities: Activity[]): Activity[] {
-  const now = Date.now()
-  const sevenDays = 7 * 24 * 60 * 60 * 1000
-  const cutoff = now + sevenDays
-  return activities.filter(a => {
-    const start = a.startAt ? new Date(a.startAt).getTime() : null
-    const end = a.endAt ? new Date(a.endAt).getTime() : null
-    // Either starts or ends within the next 7 days (and hasn't already ended)
-    const startsWithin = start !== null && start >= now && start <= cutoff
-    const endsWithin = end !== null && end >= now && end <= cutoff
-    return startsWithin || endsWithin
+// Fake the current date to a known value for date-relative tests
+const FAKE_NOW = new Date('2026-06-01T00:00:00Z').getTime()
+beforeAll(() => {
+  vi.spyOn(Date, 'now').mockReturnValue(FAKE_NOW)
+})
+afterAll(() => {
+  vi.restoreAllMocks()
+})
+
+const closedStatusId = 'status-closed'
+const openStatusId = 'status-open'
+const otherMemberId = 'member-other'
+
+const baseCtx = {
+  closedStatusIds: new Set([closedStatusId]),
+  savedFilters: [] as SavedFilter[],
+  statuses: new Map<string, Status[]>([['tl-1', [makeStatus(openStatusId, 'Open'), makeStatus(closedStatusId, 'Done', true)]]]),
+  tags: [makeTag('tag-1', 'urgent')] as Tag[],
+}
+
+const emptyMemberIds = new Map<string, string[]>()
+
+// ── all preset ────────────────────────────────────────────────────────────────
+
+describe("preset 'all'", () => {
+  it('returns all activities unchanged', () => {
+    const activities = [makeActivity({ id: '1' }), makeActivity({ id: '2' })]
+    const filter: ActiveFilter = { kind: 'preset', id: 'all' }
+    expect(applyActiveFilter(activities, filter, emptyMemberIds, baseCtx)).toHaveLength(2)
   })
-}
+})
 
-function filterOverdue(activities: Activity[], closedStatusIds: Set<string>): Activity[] {
-  const now = Date.now()
-  return activities.filter(a => {
-    if (!a.endAt) return false
-    const end = new Date(a.endAt).getTime()
-    if (end >= now) return false
-    // Not closed
-    return !a.statusId || !closedStatusIds.has(a.statusId)
+// ── open preset ───────────────────────────────────────────────────────────────
+
+describe("preset 'open'", () => {
+  it('removes activities with a closed status', () => {
+    const activities = [
+      makeActivity({ id: 'a', statusId: openStatusId }),
+      makeActivity({ id: 'b', statusId: closedStatusId }),
+      makeActivity({ id: 'c', statusId: null }),
+    ]
+    const filter: ActiveFilter = { kind: 'preset', id: 'open' }
+    const result = applyActiveFilter(activities, filter, emptyMemberIds, baseCtx)
+    expect(result.map(a => a.id)).toEqual(['a', 'c'])
   })
-}
+})
 
-function filterNoAssign(activities: Activity[]): Activity[] {
-  return activities.filter(a => (a.assignedMemberIds ?? []).length === 0)
-}
+// ── upcoming preset ───────────────────────────────────────────────────────────
 
-// ── Main entry point ──────────────────────────────────────────────────────────
+describe("preset 'upcoming'", () => {
+  // FAKE_NOW = 2026-06-01. 7 days = until 2026-06-08.
+  it('includes activities starting within 7 days', () => {
+    const activities = [
+      makeActivity({ id: 'soon', startAt: '2026-06-05T00:00:00Z', endAt: '2026-06-06T00:00:00Z' }),  // within 7d
+      makeActivity({ id: 'far',  startAt: '2026-07-01T00:00:00Z', endAt: '2026-07-15T00:00:00Z' }),  // beyond 7d
+      makeActivity({ id: 'past', startAt: '2026-05-01T00:00:00Z', endAt: '2026-05-10T00:00:00Z' }),  // in past
+    ]
+    const filter: ActiveFilter = { kind: 'preset', id: 'upcoming' }
+    const result = applyActiveFilter(activities, filter, emptyMemberIds, baseCtx)
+    expect(result.map(a => a.id)).toContain('soon')
+    expect(result.map(a => a.id)).not.toContain('far')
+    expect(result.map(a => a.id)).not.toContain('past')
+  })
 
-/**
- * Apply the active filter to a list of activities. Returns the filtered subset.
- *
- * @param activities - All activities to filter (already fetched for the timeline).
- * @param activeFilter - The currently selected filter from FilterContext.
- * @param memberIdsByUserId - Map of userId → team_member_id[] for the team.
- *   Used to resolve the 'member' filter kind.
- * @param ctx - Context data needed by presets and the saved filter engine.
- */
-export function applyActiveFilter(
-  activities: Activity[],
-  activeFilter: ActiveFilter,
-  memberIdsByUserId: Map<string, string[]>,
-  ctx: ApplyFilterContext,
-): Activity[] {
-  if (activeFilter.kind === 'preset') {
-    switch (activeFilter.id) {
-      case 'all':       return filterAll(activities)
-      case 'open':      return filterOpen(activities, ctx.closedStatusIds)
-      case 'upcoming':  return filterUpcoming(activities)
-      case 'overdue':   return filterOverdue(activities, ctx.closedStatusIds)
-      case 'noassign':  return filterNoAssign(activities)
+  it('includes activities ending within 7 days (even if already started)', () => {
+    const activities = [
+      makeActivity({ id: 'ending-soon', endAt: '2026-06-04T00:00:00Z', startAt: '2026-05-01T00:00:00Z' }),
+    ]
+    const filter: ActiveFilter = { kind: 'preset', id: 'upcoming' }
+    const result = applyActiveFilter(activities, filter, emptyMemberIds, baseCtx)
+    expect(result[0].id).toBe('ending-soon')
+  })
+})
+
+// ── overdue preset ────────────────────────────────────────────────────────────
+
+describe("preset 'overdue'", () => {
+  it('returns past-due activities that are not closed', () => {
+    const activities = [
+      makeActivity({ id: 'overdue',    endAt: '2026-05-01T00:00:00Z', statusId: openStatusId }),
+      makeActivity({ id: 'closed-old', endAt: '2026-05-01T00:00:00Z', statusId: closedStatusId }),
+      makeActivity({ id: 'future',     endAt: '2026-07-01T00:00:00Z', statusId: openStatusId }),
+    ]
+    const filter: ActiveFilter = { kind: 'preset', id: 'overdue' }
+    const result = applyActiveFilter(activities, filter, emptyMemberIds, baseCtx)
+    expect(result.map(a => a.id)).toEqual(['overdue'])
+  })
+})
+
+// ── noassign preset ───────────────────────────────────────────────────────────
+
+describe("preset 'noassign'", () => {
+  it('returns only activities with no assignees', () => {
+    const activities = [
+      makeActivity({ id: 'assigned', assignedMemberIds: [otherMemberId] }),
+      makeActivity({ id: 'free',     assignedMemberIds: [] }),
+    ]
+    const filter: ActiveFilter = { kind: 'preset', id: 'noassign' }
+    const result = applyActiveFilter(activities, filter, emptyMemberIds, baseCtx)
+    expect(result.map(a => a.id)).toEqual(['free'])
+  })
+})
+
+// ── member filter kind ────────────────────────────────────────────────────────
+
+describe("filter kind 'member'", () => {
+  it('filters by the resolved member IDs for the userId', () => {
+    const activities = [
+      makeActivity({ id: 'a', assignedMemberIds: ['mbr-alice-1'] }),
+      makeActivity({ id: 'b', assignedMemberIds: ['mbr-bob'] }),
+    ]
+    const memberIds = new Map([['user-alice', ['mbr-alice-1', 'mbr-alice-2']]])
+    const filter: ActiveFilter = { kind: 'member', userId: 'user-alice' }
+    const result = applyActiveFilter(activities, filter, memberIds, baseCtx)
+    expect(result.map(a => a.id)).toEqual(['a'])
+  })
+
+  it('returns empty when user has no member IDs', () => {
+    const activities = [makeActivity()]
+    const filter: ActiveFilter = { kind: 'member', userId: 'unknown-user' }
+    const result = applyActiveFilter(activities, filter, emptyMemberIds, baseCtx)
+    expect(result).toHaveLength(0)
+  })
+})
+
+// ── saved filter kind ─────────────────────────────────────────────────────────
+
+describe("filter kind 'saved'", () => {
+  it('evaluates a saved filter definition against activities', () => {
+    const savedFilter: SavedFilter = {
+      id: 'sf-1',
+      teamId: 'team-1',
+      userId: 'user-1',
+      name: 'Urgent bugs',
+      isTeamFilter: false,
+      definition: JSON.stringify({
+        logic: 'and',
+        conditions: [{ field: 'title', op: 'contains', value: 'urgent' }],
+      }),
+      createdAt: '2026-01-01T00:00:00Z',
+      updatedAt: '2026-01-01T00:00:00Z',
     }
-  }
+    const activities = [
+      makeActivity({ id: 'a', title: 'Fix urgent bug' }),
+      makeActivity({ id: 'b', title: 'Refactor component' }),
+    ]
+    const ctx = { ...baseCtx, savedFilters: [savedFilter] }
+    const filter: ActiveFilter = { kind: 'saved', id: 'sf-1' }
+    const result = applyActiveFilter(activities, filter, emptyMemberIds, ctx)
+    expect(result.map(a => a.id)).toEqual(['a'])
+  })
 
-  if (activeFilter.kind === 'member') {
-    const memberIds = memberIdsByUserId.get(activeFilter.userId) ?? []
-    if (memberIds.length === 0) return []
-    const idSet = new Set(memberIds)
-    return activities.filter(a =>
-      (a.assignedMemberIds ?? []).some(mid => idSet.has(mid))
-    )
-  }
+  it('returns all activities when saved filter is not found', () => {
+    const activities = [makeActivity({ id: 'a' }), makeActivity({ id: 'b' })]
+    const filter: ActiveFilter = { kind: 'saved', id: 'nonexistent' }
+    const result = applyActiveFilter(activities, filter, emptyMemberIds, baseCtx)
+    expect(result).toHaveLength(2)
+  })
 
-  if (activeFilter.kind === 'saved') {
-    const saved = ctx.savedFilters.find(f => f.id === activeFilter.id)
-    if (!saved) return activities // filter not found — show all
-    const def = parseFilterDefinition(saved.definition)
-    if (!def) return activities // invalid definition — show all
-    const engineCtx: EngineCtx = {
-      statusesByTimeline: ctx.statuses,
-      tags: ctx.tags,
+  it('returns all activities when saved filter definition is invalid JSON', () => {
+    const badFilter: SavedFilter = {
+      id: 'sf-bad',
+      teamId: 'team-1',
+      userId: 'user-1',
+      name: 'Broken',
+      isTeamFilter: false,
+      definition: 'NOT VALID JSON }{',
+      createdAt: '2026-01-01T00:00:00Z',
+      updatedAt: '2026-01-01T00:00:00Z',
     }
-    return activities.filter(a => matchesFilter(a, def, engineCtx))
-  }
-
-  return activities
-}
+    const activities = [makeActivity({ id: 'a' }), makeActivity({ id: 'b' })]
+    const ctx = { ...baseCtx, savedFilters: [badFilter] }
+    const filter: ActiveFilter = { kind: 'saved', id: 'sf-bad' }
+    const result = applyActiveFilter(activities, filter, emptyMemberIds, ctx)
+    expect(result).toHaveLength(2)
+  })
+})
 ````
 
 ## File: packages/web/src/pages/ForgotPasswordPage.tsx
@@ -34465,230 +36217,6 @@ func (s *Server) handleDeleteActivity(w http.ResponseWriter, r *http.Request) {
 }
 ````
 
-## File: packages/api/internal/api/saved_filter_handler.go
-````go
-package api
-
-import (
-	"database/sql"
-	"encoding/json"
-	"errors"
-	"net/http"
-	"time"
-
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// handleListSavedFilters handles GET /teams/{id}/saved_filters. Returns
-// only filters owned by the calling user within the given team.
-func (s *Server) handleListSavedFilters(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
-		return
-	}
-
-	filters, err := s.savedFilters.ListByTeamUser(teamID, claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list saved filters")
-		return
-	}
-	writeJSON(w, http.StatusOK, filters)
-}
-
-// handleListAllTeamSavedFilters handles GET /teams/{id}/saved_filters/all.
-// Returns every saved filter in the team (private + team). Admin-only.
-func (s *Server) handleListAllTeamSavedFilters(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-
-	member, ok := s.requireTeamMember(w, r, teamID)
-	if !ok {
-		return
-	}
-	if member.Role != "admin" {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "only team admins can list all team filters")
-		return
-	}
-
-	filters, err := s.savedFilters.ListAllByTeam(teamID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list saved filters")
-		return
-	}
-	writeJSON(w, http.StatusOK, filters)
-}
-
-// handleCreateSavedFilter handles POST /teams/{id}/saved_filters. The
-// authenticated user must be a member of the team and becomes the owner.
-// Setting isTeamFilter=true at creation time requires admin role.
-func (s *Server) handleCreateSavedFilter(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	member, ok := s.requireTeamMember(w, r, teamID)
-	if !ok {
-		return
-	}
-
-	var req CreateSavedFilterJSONBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-	if req.Name == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name is required")
-		return
-	}
-	if !json.Valid([]byte(req.Definition)) {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "definition must be valid JSON")
-		return
-	}
-
-	isTeamFilter := false
-	if req.IsTeamFilter != nil && *req.IsTeamFilter {
-		if member.Role != "admin" {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "only team admins can create team filters")
-			return
-		}
-		isTeamFilter = true
-	}
-
-	now := time.Now()
-	filter := &models.SavedFilter{
-		ID:           newID(),
-		TeamID:       teamID,
-		UserID:       claims.UserID,
-		Name:         req.Name,
-		Definition:   req.Definition,
-		IsTeamFilter: isTeamFilter,
-		CreatedAt:    now,
-		UpdatedAt:    now,
-	}
-	if err := s.savedFilters.Create(filter); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create saved filter")
-		return
-	}
-	writeJSON(w, http.StatusCreated, filter)
-}
-
-// handleUpdateSavedFilter handles PATCH /saved_filters/{id}. Owners may
-// update name and definition. Setting isTeamFilter=true is admin-only;
-// admins may also update filters they don't own when the filter is already
-// a team filter.
-func (s *Server) handleUpdateSavedFilter(w http.ResponseWriter, r *http.Request) {
-	filterID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	filter, err := s.savedFilters.GetByID(filterID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "saved filter not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update saved filter")
-		return
-	}
-
-	var req UpdateSavedFilterJSONBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	// Determine whether the caller is a team admin for permission checks.
-	isAdmin := false
-	if adminMember, ok := s.requireTeamMember(w, r, filter.TeamID); ok {
-		isAdmin = adminMember.Role == "admin"
-	} else {
-		return
-	}
-
-	isOwner := filter.UserID == claims.UserID
-
-	// Name and definition can be updated by the owner or by a team admin, but
-	// only after the filter has been promoted. This prevents admins from silently
-	// editing a member's private filter before they decide to share it — promotion
-	// is the explicit consent step.
-	wantsNameOrDef := req.Name != nil || req.Definition != nil
-	if wantsNameOrDef && !isOwner {
-		if !isAdmin || !filter.IsTeamFilter {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not the owner of this saved filter")
-			return
-		}
-	}
-
-	if req.Name != nil {
-		if *req.Name == "" {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name must not be empty")
-			return
-		}
-		filter.Name = *req.Name
-	}
-	if req.Definition != nil {
-		if !json.Valid([]byte(*req.Definition)) {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "definition must be valid JSON")
-			return
-		}
-		filter.Definition = *req.Definition
-	}
-	// Only admins may promote or demote isTeamFilter — setting it back to false
-	// is just as impactful as promoting, since it silently removes the filter
-	// from all members' views.
-	if req.IsTeamFilter != nil {
-		if !isAdmin {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "only team admins can change team filter status")
-			return
-		}
-		filter.IsTeamFilter = *req.IsTeamFilter
-	}
-	filter.UpdatedAt = time.Now()
-
-	if err := s.savedFilters.Update(filter); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update saved filter")
-		return
-	}
-	writeJSON(w, http.StatusOK, filter)
-}
-
-// handleDeleteSavedFilter handles DELETE /saved_filters/{id}. The owner may
-// always delete their own filter. Team admins may additionally delete any
-// team filter (is_team_filter = true) even if they aren't the owner.
-func (s *Server) handleDeleteSavedFilter(w http.ResponseWriter, r *http.Request) {
-	filterID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	filter, err := s.savedFilters.GetByID(filterID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "saved filter not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete saved filter")
-		return
-	}
-
-	// Check membership to determine admin status.
-	adminMember, ok := s.requireTeamMember(w, r, filter.TeamID)
-	if !ok {
-		return
-	}
-	isAdmin := adminMember.Role == "admin"
-
-	// Owner can always delete; admin can delete team filters they don't own.
-	if filter.UserID != claims.UserID && !(isAdmin && filter.IsTeamFilter) {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "not the owner of this saved filter")
-		return
-	}
-
-	if err := s.savedFilters.Delete(filterID); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete saved filter")
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-````
-
 ## File: packages/api/internal/api/team_handler.go
 ````go
 package api
@@ -36152,1176 +37680,427 @@ export default function CalendarView({
 }
 ````
 
-## File: packages/web/src/components/filters/FilterManageModal.tsx
+## File: packages/web/src/components/filters/FilterDropdown.tsx
 ````typescript
 /**
- * Unified filter management modal. Replaces the FilterManagePanel and
- * FilterEditor sidebars with a single dialog for creating, editing,
- * duplicating, promoting, and demoting saved filters.
+ * Top-bar filter selector. Surfaces presets, a per-member section,
+ * team-promoted filters, and the user's saved filters. Selection is
+ * stored in FilterContext and evaluated by applyActiveFilter in GanttView.
  */
 
-import { useState, useMemo, useEffect } from 'react'
-import { createPortal } from 'react-dom'
-import type { components } from '@draba/shared'
-import type { FilterCondition, FilterDefinition } from '@/lib/filterTypes'
+import { useEffect, useRef, useState } from 'react'
 import {
-  useSavedFilters,
-  useAllTeamSavedFilters,
-  useCreateSavedFilter,
-  useUpdateSavedFilter,
-  useDeleteSavedFilter,
-} from '@/hooks/useSavedFilters'
-import { useTeamMembers } from '@/hooks/useTeamActivities'
-import { useTimelineStatuses } from '@/hooks/useStatusTemplates'
-import { useTags } from '@/hooks/useTags'
-import { useAuth } from '@/contexts/AuthContext'
-import FilterConditionRow from './FilterConditionRow'
-import {
-  Filter, X, Plus, ArrowLeft, Eye, Pencil, Trash2, Copy,
-  Globe, Lock, Users, AlertCircle, ArrowUp, Search, Check,
+  Layers, Clock, AlertCircle, UserX, CheckCircle,
+  ChevronDown, Check, List,
 } from 'lucide-react'
+import { useFilter, type ActiveFilter } from '@/contexts/FilterContext'
+import { useTeamMembers } from '@/hooks/useTeamActivities'
+import { useSavedFilters } from '@/hooks/useSavedFilters'
+import { useAuth } from '@/contexts/AuthContext'
 import { filterColor } from '@/lib/filterColors'
 
-type SavedFilter = components['schemas']['SavedFilter']
-
-// ── Types ─────────────────────────────────────────────────────────────────────
-
-type TabId = 'mine' | 'team' | 'members'
-type EditorMode = 'new' | 'edit' | 'view'
-
-interface EditorState {
-  mode: EditorMode
-  filter?: SavedFilter
-  readOnly: boolean
+interface Props {
+  teamId?: string
+  onOpenManager: () => void
 }
 
-// ���─ Helpers ───────────────────────────────────────────────────────────────────
+// ── Preset definitions ───────────────────────────────────────────────────────
 
-function makeBlank(): FilterCondition {
-  return { field: 'title', op: 'contains', value: '' }
+type PresetId = 'all' | 'upcoming' | 'overdue' | 'noassign' | 'open'
+
+interface Preset {
+  id: PresetId
+  label: string
+  icon: React.ReactNode
+  subtitle?: string
 }
 
+const ICON_PRESET = { size: 14, strokeWidth: 1.8 } as const
 
-function parseDraft(filter: SavedFilter): { logic: 'and' | 'or'; conditions: FilterCondition[] } {
-  try {
-    const def = JSON.parse(filter.definition) as FilterDefinition
-    return {
-      logic: def.logic ?? 'and',
-      conditions: def.conditions?.length ? def.conditions : [makeBlank()],
-    }
-  } catch {
-    return { logic: 'and', conditions: [makeBlank()] }
+const PRESETS: Preset[] = [
+  { id: 'all',      label: 'All activities',  icon: <Layers      {...ICON_PRESET} /> },
+  { id: 'open',     label: 'Open only',       icon: <CheckCircle {...ICON_PRESET} />, subtitle: 'Hide activities with a closed status' },
+  { id: 'upcoming', label: 'Upcoming',         icon: <Clock       {...ICON_PRESET} />, subtitle: 'Starting or ending in 7 days' },
+  { id: 'overdue',  label: 'Overdue',          icon: <AlertCircle {...ICON_PRESET} /> },
+  { id: 'noassign', label: 'No one assigned',   icon: <UserX       {...ICON_PRESET} /> },
+]
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+/** Narrow TeamMemberWithUser to only those with a real user account. */
+function hasUserId<T extends { userId?: string | null }>(m: T): m is T & { userId: string } {
+  return typeof m.userId === 'string' && m.userId.length > 0
+}
+
+function activeLabel(
+  active: ActiveFilter,
+  members: { userId: string; displayName: string }[],
+  saved: { id: string; name: string }[],
+): string {
+  if (active.kind === 'preset') return PRESETS.find(p => p.id === active.id)?.label ?? 'Filter'
+  if (active.kind === 'member') return members.find(m => m.userId === active.userId)?.displayName ?? 'Member'
+  return saved.find(s => s.id === active.id)?.name ?? 'Saved filter'
+}
+
+function activeDotColor(
+  active: ActiveFilter,
+  members: { userId: string; color?: string | null }[],
+  saved: { id: string }[],
+): string | null {
+  if (active.kind === 'member') return members.find(m => m.userId === active.userId)?.color ?? null
+  if (active.kind === 'saved') {
+    const s = saved.find(f => f.id === active.id)
+    return s ? filterColor(s.id) : null
   }
+  return null
 }
 
-// ─��� Shared styles ─────────────────────────────────────────────────────────────
+// ── Sub-components ───────────────────────────────────────────────────────────
 
-const ICON_BTN: React.CSSProperties = {
-  display: 'inline-flex',
-  alignItems: 'center',
-  justifyContent: 'center',
-  width: 28,
-  height: 28,
-  border: '1px solid var(--border)',
-  borderRadius: 6,
-  background: 'transparent',
-  cursor: 'pointer',
-  color: 'var(--muted-foreground)',
-  flexShrink: 0,
-  fontFamily: 'var(--font-sans)',
+interface ItemRowProps {
+  icon?: React.ReactNode
+  /** Rendered in the 8px-dot slot when provided (overrides icon). */
+  dotColor?: string
+  label: string
+  subtitle?: string
+  active: boolean
+  onClick: () => void
 }
 
-const BTN: React.CSSProperties = {
-  display: 'inline-flex',
-  alignItems: 'center',
-  gap: 5,
-  padding: '5px 12px',
-  border: '1px solid var(--border)',
-  borderRadius: 6,
-  fontSize: 12,
-  fontWeight: 500,
-  cursor: 'pointer',
-  fontFamily: 'var(--font-sans)',
-  background: 'transparent',
-  color: 'var(--foreground)',
-  transition: 'all 0.1s',
-}
-
-const BTN_PRIMARY: React.CSSProperties = {
-  ...BTN,
-  background: 'var(--primary)',
-  color: 'white',
-  border: 'none',
-}
-
-const BTN_DANGER: React.CSSProperties = {
-  ...BTN,
-  color: 'var(--destructive)',
-  borderColor: 'rgba(239,68,68,.4)',
-}
-
-const BTN_PROMOTE: React.CSSProperties = {
-  ...BTN,
-  color: '#5B69E0',
-  borderColor: 'rgba(91,105,224,.35)',
-}
-
-// ── ScopePill ─────────────────────────────────────────────────────────────────
-
-function ScopePill({ isTeam }: { isTeam: boolean }) {
-  return (
-    <span style={{
-      display: 'inline-flex',
-      alignItems: 'center',
-      gap: 3,
-      padding: '2px 7px',
-      borderRadius: 99,
-      fontSize: 10,
-      fontWeight: 700,
-      background: isTeam ? 'rgba(40,140,155,.1)' : 'var(--muted)',
-      color: isTeam ? 'var(--primary)' : 'var(--muted-foreground)',
-      border: `1px solid ${isTeam ? 'rgba(40,140,155,.28)' : 'var(--border)'}`,
-      flexShrink: 0,
-    }}>
-      {isTeam
-        ? <Globe size={9} strokeWidth={2} />
-        : <Lock size={9} strokeWidth={2} />}
-      {isTeam ? 'Team' : 'Private'}
-    </span>
-  )
-}
-
-// ── FilterRow ─────────────────────────────────────────────────────────────────
-
-interface FilterRowProps {
-  filter: SavedFilter
-  currentUserId: string
-  isAdmin: boolean
-  /** Determines which action set to show. */
-  context: 'mine' | 'team' | 'member-admin'
-  onEdit?: () => void
-  onView?: () => void
-  onDuplicate?: () => void
-  onDelete?: () => void
-  onPromote?: () => void
-  onDemote?: () => void
-  ownerLabel?: string
-}
-
-function FilterRow({
-  filter, currentUserId, isAdmin, context,
-  onEdit, onView, onDuplicate, onDelete, onPromote, onDemote,
-  ownerLabel,
-}: FilterRowProps) {
+function ItemRow({ icon, dotColor, label, subtitle, active, onClick }: ItemRowProps) {
   const [hovered, setHovered] = useState(false)
-  const [confirmDel, setConfirmDel] = useState(false)
-  const color = filterColor(filter.id)
-  // member-admin always shows actions; others reveal on hover
-  const showActions = context === 'member-admin' || hovered
+
+  const rowBg = active
+    ? 'rgba(40,140,155,.09)'
+    : hovered
+    ? 'var(--muted)'
+    : 'transparent'
+
+  const labelColor = active ? 'var(--primary)' : 'var(--foreground)'
+  const labelWeight = active ? 600 : 400
 
   return (
     <div
       onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => { setHovered(false); setConfirmDel(false) }}
+      onMouseLeave={() => setHovered(false)}
       style={{
         display: 'flex',
         alignItems: 'center',
-        gap: 10,
-        padding: '10px 12px',
-        borderRadius: 8,
-        background: 'var(--card)',
-        border: `1px solid ${hovered ? 'rgba(0,0,0,.1)' : 'var(--border)'}`,
-        transition: 'background 0.08s, border-color 0.08s',
+        padding: '5px 10px 5px 14px',
+        background: rowBg,
+        cursor: 'pointer',
+        transition: 'background 0.08s',
       }}
+      onClick={onClick}
     >
-      {/* Icon tile — color derived from filter ID */}
-      <div style={{
-        width: 28,
-        height: 28,
-        borderRadius: 6,
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        flexShrink: 0,
-        background: `${color}20`,
-        border: `1px solid ${color}50`,
-        color,
-      }}>
-        <Filter size={12} strokeWidth={1.8} />
+      {/* 16px icon / dot slot */}
+      <div style={{ width: 16, height: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, color: active ? 'var(--primary)' : 'var(--muted-foreground)' }}>
+        {dotColor ? (
+          <div style={{ width: 8, height: 8, borderRadius: '50%', background: dotColor }} />
+        ) : (
+          icon
+        )}
       </div>
 
-      {/* Name + pill */}
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-          <span style={{
-            fontSize: 13,
-            fontWeight: 600,
-            color: 'var(--foreground)',
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            whiteSpace: 'nowrap',
-          }}>
-            {filter.name}
-          </span>
-          <ScopePill isTeam={filter.isTeamFilter} />
-          {ownerLabel && (
-            <span style={{ fontSize: 11, color: 'var(--muted-foreground)' }}>
-              by {filter.userId === currentUserId ? 'you' : ownerLabel}
-            </span>
-          )}
-        </div>
-      </div>
-
-      {/* Right-side actions — revealed on hover */}
-      {confirmDel ? (
-        <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexShrink: 0 }}>
-          <button onClick={() => setConfirmDel(false)} style={BTN}>Cancel</button>
-          <button
-            onClick={() => { setConfirmDel(false); onDelete?.() }}
-            style={{ ...BTN, background: 'var(--destructive)', color: 'white', border: 'none' }}
-          >
-            Delete
-          </button>
-        </div>
-      ) : (
+      {/* Label + subtitle */}
+      <div style={{ flex: 1, minWidth: 0, marginLeft: 8 }}>
         <div style={{
-          display: 'flex',
-          gap: 5,
-          flexShrink: 0,
-          alignItems: 'center',
-          opacity: showActions ? 1 : 0,
-          transition: 'opacity 0.1s',
-        }}>
-          {context === 'member-admin' && (
-            <>
-              <button onClick={onView} style={ICON_BTN} title="View filter">
-                <Eye size={12} strokeWidth={1.8} />
-              </button>
-              <button onClick={onPromote} style={BTN_PROMOTE}>
-                <ArrowUp size={11} strokeWidth={2} />
-                Promote to team
-              </button>
-            </>
-          )}
-          {context === 'team' && (
-            isAdmin ? (
-              <>
-                <button onClick={onEdit} style={ICON_BTN} title="Edit">
-                  <Pencil size={12} strokeWidth={1.8} />
-                </button>
-                <button onClick={onDemote} style={ICON_BTN} title="Remove from team">
-                  <Lock size={12} strokeWidth={1.8} />
-                </button>
-                <button
-                  onClick={() => setConfirmDel(true)}
-                  style={{ ...ICON_BTN, color: 'var(--destructive)' }}
-                  title="Delete"
-                >
-                  <Trash2 size={12} strokeWidth={1.8} />
-                </button>
-              </>
-            ) : (
-              <button onClick={onView} style={ICON_BTN} title="View filter">
-                <Eye size={12} strokeWidth={1.8} />
-              </button>
-            )
-          )}
-          {context === 'mine' && (
-            <>
-              <button onClick={onDuplicate} style={ICON_BTN} title="Duplicate">
-                <Copy size={12} strokeWidth={1.8} />
-              </button>
-              <button onClick={onEdit} style={ICON_BTN} title="Edit">
-                <Pencil size={12} strokeWidth={1.8} />
-              </button>
-              {isAdmin && (
-                <button onClick={onPromote} style={BTN_PROMOTE}>
-                  <ArrowUp size={11} strokeWidth={2} />
-                  Promote
-                </button>
-              )}
-              <button
-                onClick={() => setConfirmDel(true)}
-                style={{ ...ICON_BTN, color: 'var(--destructive)' }}
-                title="Delete"
-              >
-                <Trash2 size={12} strokeWidth={1.8} />
-              </button>
-            </>
-          )}
+          fontSize: 13,
+          fontWeight: labelWeight,
+          color: labelColor,
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+        }}
+          title={label}
+        >
+          {label}
         </div>
-      )}
+        {subtitle && (
+          <div style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {subtitle}
+          </div>
+        )}
+      </div>
+
+      {/* 24px right slot — checkmark when active */}
+      <div style={{ width: 24, height: 24, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+        {active && <Check size={13} strokeWidth={2.5} color="var(--primary)" />}
+      </div>
     </div>
   )
 }
 
-// ── EmptyState ────────────────────────────────────────────────────────────────
+// ── Section header ───────────────────────────────────────────────────────────
 
-function EmptyState({ icon, title, body, onAction, actionLabel }: {
-  icon: React.ReactNode
-  title: string
-  body: string
-  onAction?: () => void
-  actionLabel?: string
-}) {
+interface SectionHeaderProps {
+  label: string
+  teamBadge?: boolean
+}
+
+function SectionHeader({ label, teamBadge }: SectionHeaderProps) {
   return (
     <div style={{
-      display: 'flex',
-      flexDirection: 'column',
-      alignItems: 'center',
-      padding: '32px 24px',
-      border: '1px dashed var(--border)',
-      borderRadius: 10,
-      textAlign: 'center',
-      gap: 8,
+      padding: '10px 14px 3px',
+      fontSize: 10,
+      fontWeight: 700,
+      letterSpacing: '0.8px',
+      textTransform: 'uppercase',
       color: 'var(--muted-foreground)',
+      display: 'flex',
+      alignItems: 'center',
+      gap: 6,
     }}>
-      <div style={{ marginBottom: 4 }}>{icon}</div>
-      <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)' }}>{title}</div>
-      <div style={{ fontSize: 12, maxWidth: 280 }}>{body}</div>
-      {onAction && actionLabel && (
-        <button onClick={onAction} style={{ ...BTN_PRIMARY, marginTop: 4 }}>
-          {actionLabel}
-        </button>
+      {label}
+      {teamBadge && (
+        <span style={{
+          fontSize: 9,
+          fontWeight: 700,
+          color: 'var(--primary)',
+          background: 'rgba(40,140,155,.1)',
+          border: '1px solid rgba(40,140,155,.25)',
+          borderRadius: 99,
+          padding: '1px 5px',
+          letterSpacing: 0,
+          textTransform: 'none',
+        }}>
+          Team
+        </span>
       )}
     </div>
   )
 }
 
-// ── Main component ────────────────────────────────────────────────────────────
-
-export interface FilterManageModalProps {
-  open: boolean
-  onClose: () => void
-  teamId: string
-  timelineId: string
-  isAdmin: boolean
+function Divider() {
+  return <div style={{ height: 1, background: 'var(--border)', margin: '4px 0' }} />
 }
 
-export default function FilterManageModal({
-  open,
-  onClose,
-  teamId,
-  timelineId,
-  isAdmin,
-}: FilterManageModalProps) {
+// ── Main component ───────────────────────────────────────────────────────────
+
+export default function FilterDropdown({ teamId = '', onOpenManager }: Props) {
+  const { activeFilter, setActiveFilter } = useFilter()
   const { user } = useAuth()
+  const { data: members = [] } = useTeamMembers(teamId)
+  const { data: saved = [] } = useSavedFilters(teamId)
+
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    function onDown(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') setOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [])
+
+  const membersWithUser = members.filter(hasUserId)
+  const label = activeLabel(activeFilter, membersWithUser, saved)
+  const triggerDotColor = activeDotColor(activeFilter, membersWithUser, saved)
   const currentUserId = (user as { id?: string } | null)?.id ?? ''
 
-  // Data
-  const { data: filters = [] } = useSavedFilters(teamId)
-  const { data: allFilters = [] } = useAllTeamSavedFilters(teamId, isAdmin && open)
-  const { data: members = [] } = useTeamMembers(teamId)
-  const { data: tags = [] } = useTags(teamId)
-  const { data: statuses = [] } = useTimelineStatuses(teamId, timelineId)
+  // Partition saved filters: team-promoted vs. user's own personal
+  const teamFilters = saved.filter(f => f.isTeamFilter)
+  const myFilters = saved.filter(f => !f.isTeamFilter)
 
-  const statusOptions = useMemo(() => {
-    const seen = new Set<string>()
-    return statuses
-      .filter(s => {
-        const k = s.name.toLowerCase()
-        if (seen.has(k)) return false
-        seen.add(k)
-        return true
-      })
-      .map(s => ({ value: s.name, label: s.name }))
-  }, [statuses])
+  const isDefaultFilter = activeFilter.kind === 'preset' && activeFilter.id === 'all'
 
-  // Mutations
-  const createFilter = useCreateSavedFilter(teamId)
-  const updateFilter = useUpdateSavedFilter(teamId)
-  const deleteFilter = useDeleteSavedFilter(teamId)
-
-  // Modal state
-  const [tab, setTab] = useState<TabId>('mine')
-  const [editor, setEditor] = useState<EditorState | null>(null)
-  const [search, setSearch] = useState('')
-  const [toast, setToast] = useState<string | null>(null)
-  const [editorError, setEditorError] = useState<string | null>(null)
-
-  // Editor draft state
-  const [draftName, setDraftName] = useState('')
-  const [draftLogic, setDraftLogic] = useState<'and' | 'or'>('and')
-  const [draftConditions, setDraftConditions] = useState<FilterCondition[]>([makeBlank()])
-
-  // Derived filter lists
-  const myFilters = filters.filter(f => f.userId === currentUserId && !f.isTeamFilter)
-  const teamFilters = filters.filter(f => f.isTeamFilter)
-  const memberPrivateFilters = allFilters.filter(f => !f.isTeamFilter)
-
-  // Group member filters by owner
-  const memberGroups = useMemo(() => {
-    const groups = new Map<string, SavedFilter[]>()
-    memberPrivateFilters.forEach(f => {
-      const g = groups.get(f.userId) ?? []
-      g.push(f)
-      groups.set(f.userId, g)
-    })
-    return groups
-  }, [memberPrivateFilters])
-
-  // Build userId → display name map
-  const memberNameById = useMemo(() => {
-    const map = new Map<string, string>()
-    members.forEach(m => {
-      if (m.userId) map.set(m.userId, m.displayName || m.email || 'Unknown')
-    })
-    return map
-  }, [members])
-
-  // Toast auto-dismiss
-  useEffect(() => {
-    if (!toast) return
-    const t = setTimeout(() => setToast(null), 2400)
-    return () => clearTimeout(t)
-  }, [toast])
-
-  // Escape key: close editor first, then modal
-  useEffect(() => {
-    if (!open) return
-    function onKey(e: KeyboardEvent) {
-      if (e.key !== 'Escape') return
-      if (editor) setEditor(null)
-      else onClose()
-    }
-    document.addEventListener('keydown', onKey)
-    return () => document.removeEventListener('keydown', onKey)
-  }, [open, editor, onClose])
-
-  // ── Editor helpers ──────────────────────────────────────────────────────────
-
-  function openNew() {
-    setDraftName('')
-    setDraftLogic('and')
-    setDraftConditions([makeBlank()])
-    setEditorError(null)
-    setEditor({ mode: 'new', readOnly: false })
+  function select(f: ActiveFilter) {
+    setActiveFilter(f)
+    setOpen(false)
   }
 
-  function openEdit(filter: SavedFilter) {
-    const { logic, conditions } = parseDraft(filter)
-    setDraftName(filter.name)
-    setDraftLogic(logic)
-    setDraftConditions(conditions)
-    setEditorError(null)
-    setEditor({ mode: 'edit', filter, readOnly: false })
+  function isSelected(f: ActiveFilter): boolean {
+    if (f.kind !== activeFilter.kind) return false
+    if (f.kind === 'preset' && activeFilter.kind === 'preset') return f.id === activeFilter.id
+    if (f.kind === 'member' && activeFilter.kind === 'member') return f.userId === activeFilter.userId
+    if (f.kind === 'saved' && activeFilter.kind === 'saved') return f.id === activeFilter.id
+    return false
   }
 
-  function openView(filter: SavedFilter) {
-    const { logic, conditions } = parseDraft(filter)
-    setDraftName(filter.name)
-    setDraftLogic(logic)
-    setDraftConditions(conditions)
-    setEditorError(null)
-    setEditor({ mode: 'view', filter, readOnly: true })
-  }
+  // Trigger appearance — teal tint when a non-default filter is active.
+  const triggerBg = isDefaultFilter ? 'transparent' : 'rgba(40,140,155,.09)'
+  const triggerBorder = isDefaultFilter ? 'var(--border)' : 'rgba(40,140,155,.22)'
+  const triggerColor = isDefaultFilter ? 'var(--foreground)' : 'var(--primary)'
+  const triggerWeight = isDefaultFilter ? 400 : 600
 
-  async function handleSave() {
-    if (!draftName.trim()) { setEditorError('Filter name is required.'); return }
-    setEditorError(null)
-    const definition = JSON.stringify({ logic: draftLogic, conditions: draftConditions } as FilterDefinition)
-    try {
-      if (editor?.mode === 'edit' && editor.filter) {
-        await updateFilter.mutateAsync({ id: editor.filter.id, name: draftName.trim(), definition })
-        setToast(`"${draftName.trim()}" updated.`)
-      } else {
-        await createFilter.mutateAsync({ name: draftName.trim(), definition })
-        setToast(`"${draftName.trim()}" created.`)
-      }
-      setEditor(null)
-    } catch {
-      setEditorError('Failed to save. Please try again.')
-    }
-  }
-
-  async function handleDelete(filter: SavedFilter) {
-    try {
-      await deleteFilter.mutateAsync(filter.id)
-      setToast(`"${filter.name}" deleted.`)
-    } catch {
-      setToast('Delete failed.')
-    }
-  }
-
-  async function handleDuplicate(filter: SavedFilter) {
-    try {
-      await createFilter.mutateAsync({
-        name: `${filter.name} copy`,
-        definition: filter.definition,
-      })
-      setToast(`Duplicated "${filter.name}".`)
-    } catch {
-      setToast('Duplicate failed.')
-    }
-  }
-
-  async function handlePromote(filter: SavedFilter) {
-    try {
-      await updateFilter.mutateAsync({ id: filter.id, isTeamFilter: true })
-      setToast(`"${filter.name}" promoted to Team filters.`)
-      setEditor(null)
-      setTab('team')
-    } catch {
-      setToast('Promote failed.')
-    }
-  }
-
-  async function handleDemote(filter: SavedFilter) {
-    try {
-      await updateFilter.mutateAsync({ id: filter.id, isTeamFilter: false })
-      setToast(`"${filter.name}" removed from Team filters.`)
-      setEditor(null)
-    } catch {
-      setToast('Failed to remove from team.')
-    }
-  }
-
-  const isSaving = createFilter.isPending || updateFilter.isPending
-
-  if (!open) return null
-
-  return createPortal(
-    <div
-      style={{
-        position: 'fixed',
-        inset: 0,
-        background: 'rgba(0,0,0,.55)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        zIndex: 1000,
-        padding: 24,
-      }}
-    >
-      <div
+  return (
+    <div ref={ref} style={{ position: 'relative' }}>
+      {/* Trigger */}
+      <button
+        onClick={() => setOpen(o => !o)}
+        title="Filter"
         style={{
-          position: 'relative',
-          width: 700,
-          maxWidth: '100%',
-          maxHeight: '88vh',
           display: 'flex',
-          flexDirection: 'column',
-          background: 'var(--card)',
-          border: '1px solid var(--border)',
-          borderRadius: 12,
-          boxShadow: '0 24px 64px rgba(0,0,0,.2)',
+          alignItems: 'center',
+          gap: 6,
+          cursor: 'pointer',
+          fontFamily: 'var(--font-sans)',
+          border: `1px solid ${triggerBorder}`,
+          borderRadius: 6,
+          background: triggerBg,
+          color: triggerColor,
+          padding: '5px 9px 5px 8px',
+          height: 30,
+          fontSize: 13,
+          fontWeight: triggerWeight,
+          maxWidth: 220,
+          transition: 'all 0.12s',
         }}
-        onClick={e => e.stopPropagation()}
       >
-        {/* ── Header ──────────────────────────────────────────────────────── */}
-        <div style={{
-          padding: '14px 18px',
-          borderBottom: '1px solid var(--border)',
-          display: 'flex',
-          alignItems: 'center',
-          gap: 10,
-          flexShrink: 0,
-        }}>
-          <div style={{
-            width: 32,
-            height: 32,
-            borderRadius: 8,
-            background: 'rgba(40,140,155,.1)',
-            border: '1px solid rgba(40,140,155,.25)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            flexShrink: 0,
-          }}>
-            <Filter size={15} strokeWidth={1.8} color="var(--primary)" />
-          </div>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--foreground)' }}>Filters</div>
-            <div style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 1 }}>
-              Manage, build, and share your timeline filters
-            </div>
-          </div>
-          <button
-            onClick={onClose}
-            style={{ ...ICON_BTN, border: 'none' }}
-            title="Close"
-          >
-            <X size={16} strokeWidth={1.8} />
-          </button>
-        </div>
-
-        {/* ── Tab bar (list mode only) ─────────────────────────────────────── */}
-        {!editor && (
-          <div style={{
-            padding: '0 18px',
-            borderBottom: '1px solid var(--border)',
-            display: 'flex',
-            flexShrink: 0,
-          }}>
-            {([
-              { id: 'mine' as TabId, label: 'My filters' },
-              { id: 'team' as TabId, label: 'Team filters', teamBadge: true },
-              ...(isAdmin ? [{ id: 'members' as TabId, label: "Members' filters", count: memberPrivateFilters.length }] : []),
-            ]).map(t => (
-              <button
-                key={t.id}
-                onClick={() => setTab(t.id)}
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 5,
-                  padding: '10px 12px',
-                  background: 'transparent',
-                  border: 'none',
-                  borderBottom: tab === t.id ? '2px solid var(--primary)' : '2px solid transparent',
-                  cursor: 'pointer',
-                  fontSize: 12,
-                  fontWeight: tab === t.id ? 600 : 400,
-                  color: tab === t.id ? 'var(--foreground)' : 'var(--muted-foreground)',
-                  fontFamily: 'var(--font-sans)',
-                  marginBottom: -1,
-                  whiteSpace: 'nowrap',
-                  transition: 'color 0.1s, border-color 0.1s',
-                }}
-              >
-                {t.label}
-                {'teamBadge' in t && t.teamBadge && (
-                  <span style={{
-                    fontSize: 9,
-                    fontWeight: 700,
-                    color: 'var(--primary)',
-                    background: 'rgba(40,140,155,.1)',
-                    border: '1px solid rgba(40,140,155,.25)',
-                    borderRadius: 99,
-                    padding: '1px 5px',
-                  }}>
-                    Team
-                  </span>
-                )}
-                {'count' in t && typeof t.count === 'number' && t.count > 0 && (
-                  <span style={{
-                    fontSize: 10,
-                    fontWeight: 600,
-                    background: 'var(--muted)',
-                    borderRadius: 99,
-                    padding: '1px 6px',
-                    color: 'var(--muted-foreground)',
-                  }}>
-                    {t.count}
-                  </span>
-                )}
-              </button>
-            ))}
-          </div>
+        {/* Icon: colored dot when a non-preset filter is active, otherwise Filter icon */}
+        {triggerDotColor && !isDefaultFilter ? (
+          <div style={{ width: 8, height: 8, borderRadius: '50%', background: triggerDotColor, flexShrink: 0 }} />
+        ) : (
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, color: 'var(--muted-foreground)' }}>
+            <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3" />
+          </svg>
         )}
+        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
+          {label}
+        </span>
+        <ChevronDown size={12} strokeWidth={2} style={{ flexShrink: 0, color: 'var(--muted-foreground)' }} />
+      </button>
 
-        {/* ── Editor sub-header ────────────────────────────────────────────── */}
-        {editor && (
-          <div style={{
-            padding: '10px 18px',
-            borderBottom: '1px solid var(--border)',
-            display: 'flex',
-            alignItems: 'center',
-            gap: 10,
-            flexShrink: 0,
-          }}>
-            <button onClick={() => setEditor(null)} style={ICON_BTN} title="Back">
-              <ArrowLeft size={14} strokeWidth={2} />
-            </button>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{
-                fontSize: 10,
-                fontWeight: 700,
-                color: 'var(--muted-foreground)',
-                letterSpacing: '0.6px',
-                textTransform: 'uppercase',
-              }}>
-                {editor.mode === 'new' ? 'New filter' : editor.mode === 'edit' ? 'Edit filter' : 'Filter details'}
-              </div>
-              {editor.filter && (
-                <div style={{
-                  fontSize: 13,
-                  fontWeight: 600,
-                  color: 'var(--foreground)',
-                  marginTop: 1,
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap',
-                }}>
-                  {editor.filter.name}
-                </div>
-              )}
-            </div>
-            <ScopePill isTeam={Boolean(editor.filter?.isTeamFilter)} />
-          </div>
-        )}
-
-        {/* ── Body ──────────────────────────────────────────────────────────── */}
-        <div style={{ flex: 1, overflowY: 'auto', padding: '20px' }}>
-
-          {/* List mode */}
-          {!editor && tab === 'mine' && (
-            <div>
-              <div style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                marginBottom: 12,
-                gap: 12,
-              }}>
-                <p style={{ fontSize: 12, color: 'var(--muted-foreground)', margin: 0 }}>
-                  Private filters only you can see.
-                </p>
-                <button onClick={openNew} style={BTN_PRIMARY}>
-                  <Plus size={12} strokeWidth={2} />
-                  New filter
-                </button>
-              </div>
-              {myFilters.length === 0 ? (
-                <EmptyState
-                  icon={<Filter size={32} strokeWidth={1.2} />}
-                  title="No filters yet"
-                  body="Create a filter to quickly focus on the activities that matter to you."
-                  onAction={openNew}
-                  actionLabel="Create your first filter"
-                />
-              ) : (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                  {myFilters.map(f => (
-                    <FilterRow
-                      key={f.id}
-                      filter={f}
-                      currentUserId={currentUserId}
-                      isAdmin={isAdmin}
-                      context="mine"
-                      onEdit={() => openEdit(f)}
-                      onView={() => openView(f)}
-                      onDuplicate={() => handleDuplicate(f)}
-                      onDelete={() => handleDelete(f)}
-                      onPromote={() => handlePromote(f)}
-                    />
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-
-          {!editor && tab === 'team' && (
-            <div>
-              <p style={{ fontSize: 12, color: 'var(--muted-foreground)', marginBottom: 12 }}>
-                Shared with everyone — these appear in every member's filter dropdown.{' '}
-                {isAdmin
-                  ? 'As an admin you can edit, demote, or remove them.'
-                  : 'Only team admins can change them.'}
-              </p>
-              {teamFilters.length === 0 ? (
-                <EmptyState
-                  icon={<Globe size={32} strokeWidth={1.2} />}
-                  title="No team filters"
-                  body={
-                    isAdmin
-                      ? 'Promote a member filter to make it available to everyone.'
-                      : 'Team admins can promote filters to share them here.'
-                  }
-                />
-              ) : (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                  {teamFilters.map(f => (
-                    <FilterRow
-                      key={f.id}
-                      filter={f}
-                      currentUserId={currentUserId}
-                      isAdmin={isAdmin}
-                      context="team"
-                      onEdit={() => openEdit(f)}
-                      onView={() => openView(f)}
-                      onDelete={() => handleDelete(f)}
-                      onDemote={() => handleDemote(f)}
-                      ownerLabel={memberNameById.get(f.userId)}
-                    />
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-
-          {!editor && tab === 'members' && isAdmin && (
-            <div>
-              <p style={{ fontSize: 12, color: 'var(--muted-foreground)', marginBottom: 10 }}>
-                Every member's private filters. Promote any to a{' '}
-                <strong>Team filter</strong> to share it with the whole team.
-              </p>
-
-              <div style={{ position: 'relative', marginBottom: 12 }}>
-                <Search
-                  size={13}
-                  strokeWidth={1.8}
-                  style={{
-                    position: 'absolute',
-                    left: 9,
-                    top: '50%',
-                    transform: 'translateY(-50%)',
-                    color: 'var(--muted-foreground)',
-                    pointerEvents: 'none',
-                  }}
-                />
-                <input
-                  value={search}
-                  onChange={e => setSearch(e.target.value)}
-                  placeholder="Search by member or filter name…"
-                  style={{
-                    width: '100%',
-                    padding: '6px 8px 6px 28px',
-                    border: '1px solid var(--border)',
-                    borderRadius: 7,
-                    background: 'var(--background)',
-                    color: 'var(--foreground)',
-                    fontSize: 12,
-                    fontFamily: 'var(--font-sans)',
-                    boxSizing: 'border-box',
-                  }}
-                />
-              </div>
-
-              {memberGroups.size === 0 ? (
-                <EmptyState
-                  icon={<Users size={32} strokeWidth={1.2} />}
-                  title="No private filters"
-                  body="Members haven't created any private filters yet."
-                />
-              ) : (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-                  {Array.from(memberGroups.entries()).map(([userId, filts]) => {
-                    const name = memberNameById.get(userId) ?? 'Unknown member'
-                    const q = search.toLowerCase()
-                    const visible = filts.filter(f =>
-                      !q || name.toLowerCase().includes(q) || f.name.toLowerCase().includes(q),
-                    )
-                    if (visible.length === 0) return null
-                    return (
-                      <div key={userId}>
-                        <div style={{
-                          display: 'flex',
-                          alignItems: 'center',
-                          gap: 6,
-                          marginBottom: 6,
-                          fontSize: 12,
-                          fontWeight: 600,
-                          color: 'var(--foreground)',
-                        }}>
-                          <div style={{
-                            width: 20,
-                            height: 20,
-                            borderRadius: 99,
-                            background: 'var(--primary)',
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            fontSize: 10,
-                            fontWeight: 700,
-                            color: 'white',
-                            flexShrink: 0,
-                          }}>
-                            {(name[0] ?? '?').toUpperCase()}
-                          </div>
-                          {userId === currentUserId ? `${name} (you)` : name}
-                          <span style={{
-                            fontSize: 10,
-                            fontWeight: 600,
-                            background: 'var(--muted)',
-                            borderRadius: 99,
-                            padding: '1px 6px',
-                            color: 'var(--muted-foreground)',
-                          }}>
-                            {visible.length}
-                          </span>
-                        </div>
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
-                          {visible.map(f => (
-                            <FilterRow
-                              key={f.id}
-                              filter={f}
-                              currentUserId={currentUserId}
-                              isAdmin={isAdmin}
-                              context="member-admin"
-                              onView={() => openView(f)}
-                              onPromote={() => handlePromote(f)}
-                              onDelete={() => handleDelete(f)}
-                            />
-                          ))}
-                        </div>
-                      </div>
-                    )
-                  })}
-                </div>
-              )}
-
-              {memberPrivateFilters.length > 0 && (
-                <div style={{
-                  display: 'flex',
-                  alignItems: 'flex-start',
-                  gap: 7,
-                  marginTop: 16,
-                  padding: '9px 12px',
-                  background: 'var(--muted)',
-                  borderRadius: 7,
-                  fontSize: 11,
-                  color: 'var(--muted-foreground)',
-                }}>
-                  <AlertCircle size={13} strokeWidth={1.8} style={{ flexShrink: 0, marginTop: 1 }} />
-                  <span>
-                    {memberPrivateFilters.length} private filter
-                    {memberPrivateFilters.length !== 1 ? 's' : ''} across the team.
-                    Promoting moves a filter into Team filters for everyone; you can remove it any time.
-                  </span>
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Editor mode */}
-          {editor && (
-            <div>
-              {editor.readOnly && (
-                <div style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 8,
-                  padding: '8px 12px',
-                  background: 'var(--muted)',
-                  borderRadius: 7,
-                  marginBottom: 16,
-                  fontSize: 12,
-                  color: 'var(--muted-foreground)',
-                }}>
-                  <Eye size={13} strokeWidth={1.8} style={{ flexShrink: 0 }} />
-                  Read-only —{' '}
-                  {editor.filter?.isTeamFilter
-                    ? 'only team admins can edit team filters.'
-                    : 'this filter belongs to another member.'}
-                </div>
-              )}
-
-              <div style={{
-                pointerEvents: editor.readOnly ? 'none' : undefined,
-                opacity: editor.readOnly ? 0.85 : 1,
-              }}>
-                {/* Name */}
-                <div style={{ marginBottom: 14 }}>
-                  <label style={{
-                    display: 'block',
-                    fontSize: 10,
-                    fontWeight: 700,
-                    color: 'var(--muted-foreground)',
-                    letterSpacing: '0.6px',
-                    textTransform: 'uppercase',
-                    marginBottom: 5,
-                  }}>
-                    Filter name
-                  </label>
-                  <input
-                    value={draftName}
-                    onChange={e => setDraftName(e.target.value)}
-                    placeholder="e.g. My open tasks"
-                    // eslint-disable-next-line jsx-a11y/no-autofocus
-                    autoFocus={!editor.readOnly}
-                    style={{
-                      width: '100%',
-                      padding: '8px 10px',
-                      border: '1px solid var(--border)',
-                      borderRadius: 6,
-                      background: 'var(--background)',
-                      color: 'var(--foreground)',
-                      fontSize: 13,
-                      fontFamily: 'var(--font-sans)',
-                      boxSizing: 'border-box',
-                    }}
-                  />
-                </div>
-
-                {/* Match toggle */}
-                <div style={{ marginBottom: 14, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                  <span style={{ fontSize: 12, color: 'var(--muted-foreground)' }}>Match</span>
-                  <div style={{
-                    display: 'flex',
-                    background: 'var(--muted)',
-                    borderRadius: 6,
-                    padding: 2,
-                    border: '1px solid var(--border)',
-                  }}>
-                    {(['and', 'or'] as const).map(l => (
-                      <button
-                        key={l}
-                        type="button"
-                        onClick={() => setDraftLogic(l)}
-                        style={{
-                          padding: '3px 10px',
-                          border: 'none',
-                          borderRadius: 4,
-                          fontSize: 12,
-                          fontWeight: 600,
-                          cursor: 'pointer',
-                          fontFamily: 'var(--font-sans)',
-                          background: draftLogic === l ? 'var(--primary)' : 'transparent',
-                          color: draftLogic === l ? 'white' : 'var(--muted-foreground)',
-                          transition: 'all 0.1s',
-                        }}
-                      >
-                        {l === 'and' ? 'All' : 'Any'}
-                      </button>
-                    ))}
-                  </div>
-                  <span style={{ fontSize: 12, color: 'var(--muted-foreground)' }}>of the following conditions</span>
-                </div>
-
-                {/* Conditions */}
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 12 }}>
-                  {draftConditions.map((c, i) => (
-                    <FilterConditionRow
-                      key={i}
-                      condition={c}
-                      statusOptions={statusOptions}
-                      tags={tags}
-                      members={members}
-                      onChange={next =>
-                        setDraftConditions(prev => prev.map((x, j) => j === i ? next : x))
-                      }
-                      onRemove={() =>
-                        setDraftConditions(prev => {
-                          const next = prev.filter((_, j) => j !== i)
-                          return next.length ? next : [makeBlank()]
-                        })
-                      }
-                    />
-                  ))}
-                </div>
-
-                <button
-                  type="button"
-                  onClick={() => setDraftConditions(prev => [...prev, makeBlank()])}
-                  style={{
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    gap: 5,
-                    padding: '6px 12px',
-                    border: '1px dashed var(--border)',
-                    borderRadius: 6,
-                    background: 'transparent',
-                    color: 'var(--muted-foreground)',
-                    cursor: 'pointer',
-                    fontSize: 12,
-                    fontFamily: 'var(--font-sans)',
-                  }}
-                >
-                  <Plus size={12} strokeWidth={2} />
-                  Add condition
-                </button>
-              </div>
-
-              {editorError && (
-                <div style={{ fontSize: 12, color: 'var(--destructive)', marginTop: 10 }}>
-                  {editorError}
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-
-        {/* ── Footer ──────────────────────────────────────────────────────── */}
-        <div style={{
-          padding: '12px 18px',
-          borderTop: '1px solid var(--border)',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          flexShrink: 0,
-          gap: 8,
-        }}>
-          {!editor ? (
-            <>
-              <span style={{ fontSize: 11, color: 'var(--muted-foreground)' }}>
-                {teamFilters.length} team · {myFilters.length} private
-              </span>
-              <button onClick={onClose} style={BTN_PRIMARY}>Done</button>
-            </>
-          ) : (
-            <>
-              {/* Left cluster — destructive / scope actions */}
-              <div style={{ display: 'flex', gap: 8 }}>
-                {editor.mode === 'edit' && editor.filter && !editor.readOnly && (
-                  <button
-                    onClick={async () => {
-                      if (!editor.filter) return
-                      await handleDelete(editor.filter)
-                      setEditor(null)
-                    }}
-                    style={BTN_DANGER}
-                  >
-                    <Trash2 size={11} strokeWidth={2} />
-                    Delete
-                  </button>
-                )}
-                {editor.mode === 'edit' && editor.filter && isAdmin && !editor.filter.isTeamFilter && (
-                  <button onClick={() => editor.filter && handlePromote(editor.filter)} style={BTN_PROMOTE}>
-                    <ArrowUp size={11} strokeWidth={2} />
-                    Promote to team
-                  </button>
-                )}
-                {editor.mode === 'edit' && editor.filter?.isTeamFilter && isAdmin && (
-                  <button onClick={() => editor.filter && handleDemote(editor.filter)} style={BTN}>
-                    <Lock size={11} strokeWidth={2} />
-                    Remove from team
-                  </button>
-                )}
-              </div>
-
-              {/* Right cluster */}
-              <div style={{ display: 'flex', gap: 8 }}>
-                <button onClick={() => setEditor(null)} style={BTN}>
-                  {editor.readOnly ? 'Back' : 'Cancel'}
-                </button>
-                {!editor.readOnly && (
-                  <button
-                    onClick={handleSave}
-                    disabled={isSaving || !draftName.trim()}
-                    style={{
-                      ...BTN_PRIMARY,
-                      opacity: isSaving || !draftName.trim() ? 0.6 : 1,
-                      cursor: isSaving || !draftName.trim() ? 'not-allowed' : 'pointer',
-                    }}
-                  >
-                    <Check size={12} strokeWidth={2.5} />
-                    {isSaving ? 'Saving…' : editor.mode === 'new' ? 'Create filter' : 'Save changes'}
-                  </button>
-                )}
-              </div>
-            </>
-          )}
-        </div>
-
-        {/* ── Toast ───────────────────────────────────────────────────────── */}
-        {toast && (
-          <div style={{
-            position: 'fixed',
-            bottom: 24,
-            left: '50%',
-            transform: 'translateX(-50%)',
+      {/* Dropdown panel */}
+      {open && (
+        <div
+          style={{
+            position: 'absolute',
+            top: 'calc(100% + 8px)',
+            right: 0,
+            width: 284,
             background: 'var(--card)',
             border: '1px solid var(--border)',
-            borderRadius: 99,
-            padding: '7px 16px',
-            fontSize: 12,
-            color: 'var(--foreground)',
-            display: 'flex',
-            alignItems: 'center',
-            gap: 7,
-            boxShadow: '0 4px 16px rgba(0,0,0,.12)',
-            whiteSpace: 'nowrap',
-            pointerEvents: 'none',
-            zIndex: 1001,
-          }}>
-            <Check size={13} strokeWidth={2.5} color="var(--primary)" />
-            {toast}
-          </div>
-        )}
-      </div>
-    </div>,
-    document.body,
+            borderRadius: 8,
+            boxShadow: '0 8px 24px rgba(0,0,0,.11), 0 2px 6px rgba(0,0,0,.07)',
+            zIndex: 100,
+            paddingBottom: 4,
+            overflowY: 'auto',
+          }}
+        >
+          {/* Presets */}
+          <SectionHeader label="Presets" />
+          {PRESETS.map(p => {
+            const f: ActiveFilter = { kind: 'preset', id: p.id }
+            return (
+              <ItemRow
+                key={p.id}
+                icon={p.icon}
+                label={p.label}
+                subtitle={p.subtitle}
+                active={isSelected(f)}
+                onClick={() => select(f)}
+              />
+            )
+          })}
+
+          {/* Members */}
+          {membersWithUser.length > 0 && (
+            <>
+              <Divider />
+              <SectionHeader label="Members" />
+              {membersWithUser.map(m => {
+                const f: ActiveFilter = { kind: 'member', userId: m.userId }
+                const name = m.userId === currentUserId ? `${m.displayName} (you)` : m.displayName
+                return (
+                  <ItemRow
+                    key={m.userId}
+                    dotColor={m.color ?? '#8b949e'}
+                    label={name}
+                    active={isSelected(f)}
+                    onClick={() => select(f)}
+                  />
+                )
+              })}
+            </>
+          )}
+
+          {/* Team filters */}
+          {teamFilters.length > 0 && (
+            <>
+              <Divider />
+              <SectionHeader label="Team filters" teamBadge />
+              {teamFilters.map(s => {
+                const f: ActiveFilter = { kind: 'saved', id: s.id }
+                return (
+                  <ItemRow
+                    key={s.id}
+                    dotColor={filterColor(s.id)}
+                    label={s.name}
+                    active={isSelected(f)}
+                    onClick={() => select(f)}
+                  />
+                )
+              })}
+            </>
+          )}
+
+          {/* My filters */}
+          {myFilters.length > 0 && (
+            <>
+              <Divider />
+              <SectionHeader label="My filters" />
+              {myFilters.map(s => {
+                const f: ActiveFilter = { kind: 'saved', id: s.id }
+                return (
+                  <ItemRow
+                    key={s.id}
+                    dotColor={filterColor(s.id)}
+                    label={s.name}
+                    active={isSelected(f)}
+                    onClick={() => select(f)}
+                  />
+                )
+              })}
+            </>
+          )}
+
+          {/* Footer */}
+          <Divider />
+          <ManageFiltersRow onClick={() => { onOpenManager(); setOpen(false) }} />
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Manage filters footer row ─────────────────────────────────────────────────
+
+function ManageFiltersRow({ onClick }: { onClick: () => void }) {
+  const [hovered, setHovered] = useState(false)
+  return (
+    <button
+      onClick={onClick}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 6,
+        width: '100%',
+        padding: '7px 14px',
+        background: hovered ? 'var(--muted)' : 'transparent',
+        border: 'none',
+        fontSize: 13,
+        fontWeight: hovered ? 600 : 400,
+        color: hovered ? 'var(--foreground)' : 'var(--muted-foreground)',
+        cursor: 'pointer',
+        fontFamily: 'var(--font-sans)',
+        textAlign: 'left',
+        transition: 'all 0.1s',
+      }}
+    >
+      <List size={14} strokeWidth={2} />
+      Manage filters
+    </button>
   )
 }
 ````
@@ -38793,125 +39572,6 @@ export default function KanbanToolbar({
 }
 ````
 
-## File: packages/web/src/components/layout/TopBar.tsx
-````typescript
-/**
- * Top toolbar above the active view. Left side: global app navigation
- * (view switcher) and global object actions (Share). Right side: global
- * cross-view actions: Find bar (or Search icon trigger), Filter dropdown,
- * then whatever the parent injects into `rightSlot` (typically the profile menu).
- *
- * View-specific controls (date nav, zoom) intentionally live elsewhere —
- * a context-sensitive sub-toolbar hosts them.
- */
-
-import { Search, CalendarDays, GanttChart, Columns3, List } from 'lucide-react';
-import FilterDropdown from '@/components/filters/FilterDropdown';
-import FindBar from '@/components/layout/FindBar';
-import { Badge } from '@/components/identity/Badge';
-import { useFind } from '@/contexts/FindContext';
-import { cn } from '@/lib/utils';
-import type { Identity } from '@/components/identity/identity-constants';
-import { DEFAULT_TIMELINE_IDENTITY } from '@/components/identity/identity-constants';
-
-export type ViewMode = 'calendar' | 'gantt' | 'kanban' | 'list';
-
-interface Props {
-  view: ViewMode;
-  teamId?: string;
-  timelineName?: string;
-  timelineIdentity?: Identity;
-  onViewChange: (view: ViewMode) => void;
-  onOpenFilterManager: () => void;
-  rightSlot?: React.ReactNode;
-}
-
-const VIEWS: { id: ViewMode; icon: React.ReactNode; label: string }[] = [
-  { id: 'list',     icon: <List size={13} strokeWidth={1.8} />,        label: 'List' },
-  { id: 'calendar', icon: <CalendarDays size={13} strokeWidth={1.8} />, label: 'Calendar' },
-  { id: 'gantt',    icon: <GanttChart size={13} strokeWidth={1.8} />,  label: 'Gantt' },
-  { id: 'kanban',   icon: <Columns3 size={13} strokeWidth={1.8} />,    label: 'Kanban' },
-];
-
-export default function TopBar({
-  view,
-  teamId,
-  timelineName,
-  timelineIdentity,
-  onViewChange,
-  onOpenFilterManager,
-  rightSlot,
-}: Props) {
-  const { findBarOpen, setFindBarOpen } = useFind();
-
-  return (
-    <div className="flex items-center px-3 h-[var(--topbar-h)] bg-card border-b border-border shrink-0 z-40">
-      {/* Left zone: view switcher */}
-      <div className="flex items-center justify-start shrink-0">
-        <div className="flex items-center gap-px bg-muted rounded-md p-0.5 shrink-0">
-          {VIEWS.map(v => (
-            <button
-              key={v.id}
-              onClick={() => onViewChange(v.id)}
-              className={cn(
-                'flex items-center justify-center gap-[5px]',
-                'text-xs font-semibold px-2.5 py-1 rounded-[5px]',
-                'border-none cursor-pointer',
-                view === v.id
-                  ? 'bg-card text-foreground shadow-sm'
-                  : 'bg-transparent text-muted-foreground',
-              )}
-            >
-              {v.icon}
-              {v.label}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* Center zone: timeline identity badge + name */}
-      <div className="flex-1 min-w-0 flex items-center justify-center gap-1.5 px-3">
-        <Badge
-          identity={timelineIdentity ?? DEFAULT_TIMELINE_IDENTITY}
-          name={timelineName ?? ''}
-          shape="square"
-          size={18}
-          className="shrink-0"
-        />
-        <span
-          title={timelineName}
-          className="text-xs font-medium text-muted-foreground truncate select-none"
-        >
-          {timelineName}
-        </span>
-      </div>
-
-      {/* Right zone: Find bar / trigger, Filter, profile slot */}
-      <div className="flex items-center justify-end gap-1.5 shrink-0 min-w-0">
-        {findBarOpen ? (
-          <FindBar />
-        ) : (
-          <button
-            onClick={() => setFindBarOpen(true)}
-            title="Find in view (Ctrl+F)"
-            className={cn(
-              'flex items-center justify-center w-7 h-7',
-              'border border-border rounded-md bg-card',
-              'cursor-pointer text-muted-foreground hover:text-foreground hover:bg-muted',
-              'transition-colors shrink-0',
-            )}
-          >
-            <Search size={13} strokeWidth={1.8} />
-          </button>
-        )}
-        <FilterDropdown teamId={teamId} onOpenManager={onOpenFilterManager} />
-        {rightSlot}
-      </div>
-    </div>
-  );
-}
-````
-
 ## File: packages/web/src/hooks/useShares.test.ts
 ````typescript
 /**
@@ -39501,241 +40161,6 @@ export function comboSortComparator(memberOrder: string[]): (a: string, b: strin
 }
 ````
 
-## File: packages/web/src/lib/presetFilters.test.ts
-````typescript
-/**
- * presetFilters.test.ts — unit tests for applyActiveFilter.
- *
- * Covers each preset, the member filter kind, and saved filter delegation.
- */
-
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest'
-import { applyActiveFilter } from './presetFilters'
-import type { ActiveFilter } from '@/contexts/FilterContext'
-import type { components } from '@draba/shared'
-
-type Activity = components['schemas']['Activity']
-type SavedFilter = components['schemas']['SavedFilter']
-type Status = components['schemas']['Status']
-type Tag = components['schemas']['Tag']
-
-// ── Fixtures ──────────────────────────────────────────────────────────────────
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function makeActivity(overrides: Record<string, any> = {}): Activity {
-  return {
-    id: 'act-1',
-    title: 'Default',
-    timelineId: 'tl-1',
-    startAt: '2026-06-01T00:00:00Z',
-    endAt: '2026-06-30T00:00:00Z',
-    allDay: false,
-    statusId: null,
-    tagIds: [],
-    assignedMemberIds: [],
-    percentComplete: null,
-    parentActivityId: null,
-    color: null,
-    icon: null,
-    description: null,
-    notes: null,
-    location: null,
-    url: null,
-    createdAt: '2026-01-01T00:00:00Z',
-    updatedAt: '2026-01-01T00:00:00Z',
-    archivedAt: null,
-    createdBy: 'user-1',
-    ...overrides,
-  } as Activity
-}
-
-function makeStatus(id: string, name: string, isClosed = false): Status {
-  return { id, name, color: '#3B82F6', icon: null, isClosed, position: 0, timelineId: 'tl-1', createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' }
-}
-
-function makeTag(id: string, name: string): Tag {
-  return { id, name, color: null, teamId: 'team-1', createdAt: '2026-01-01T00:00:00Z', createdBy: 'user-1' }
-}
-
-// Fake the current date to a known value for date-relative tests
-const FAKE_NOW = new Date('2026-06-01T00:00:00Z').getTime()
-beforeAll(() => {
-  vi.spyOn(Date, 'now').mockReturnValue(FAKE_NOW)
-})
-afterAll(() => {
-  vi.restoreAllMocks()
-})
-
-const closedStatusId = 'status-closed'
-const openStatusId = 'status-open'
-const otherMemberId = 'member-other'
-
-const baseCtx = {
-  closedStatusIds: new Set([closedStatusId]),
-  savedFilters: [] as SavedFilter[],
-  statuses: new Map<string, Status[]>([['tl-1', [makeStatus(openStatusId, 'Open'), makeStatus(closedStatusId, 'Done', true)]]]),
-  tags: [makeTag('tag-1', 'urgent')] as Tag[],
-}
-
-const emptyMemberIds = new Map<string, string[]>()
-
-// ── all preset ────────────────────────────────────────────────────────────────
-
-describe("preset 'all'", () => {
-  it('returns all activities unchanged', () => {
-    const activities = [makeActivity({ id: '1' }), makeActivity({ id: '2' })]
-    const filter: ActiveFilter = { kind: 'preset', id: 'all' }
-    expect(applyActiveFilter(activities, filter, emptyMemberIds, baseCtx)).toHaveLength(2)
-  })
-})
-
-// ── open preset ───────────────────────────────────────────────────────────────
-
-describe("preset 'open'", () => {
-  it('removes activities with a closed status', () => {
-    const activities = [
-      makeActivity({ id: 'a', statusId: openStatusId }),
-      makeActivity({ id: 'b', statusId: closedStatusId }),
-      makeActivity({ id: 'c', statusId: null }),
-    ]
-    const filter: ActiveFilter = { kind: 'preset', id: 'open' }
-    const result = applyActiveFilter(activities, filter, emptyMemberIds, baseCtx)
-    expect(result.map(a => a.id)).toEqual(['a', 'c'])
-  })
-})
-
-// ── upcoming preset ───────────────────────────────────────────────────────────
-
-describe("preset 'upcoming'", () => {
-  // FAKE_NOW = 2026-06-01. 7 days = until 2026-06-08.
-  it('includes activities starting within 7 days', () => {
-    const activities = [
-      makeActivity({ id: 'soon', startAt: '2026-06-05T00:00:00Z', endAt: '2026-06-06T00:00:00Z' }),  // within 7d
-      makeActivity({ id: 'far',  startAt: '2026-07-01T00:00:00Z', endAt: '2026-07-15T00:00:00Z' }),  // beyond 7d
-      makeActivity({ id: 'past', startAt: '2026-05-01T00:00:00Z', endAt: '2026-05-10T00:00:00Z' }),  // in past
-    ]
-    const filter: ActiveFilter = { kind: 'preset', id: 'upcoming' }
-    const result = applyActiveFilter(activities, filter, emptyMemberIds, baseCtx)
-    expect(result.map(a => a.id)).toContain('soon')
-    expect(result.map(a => a.id)).not.toContain('far')
-    expect(result.map(a => a.id)).not.toContain('past')
-  })
-
-  it('includes activities ending within 7 days (even if already started)', () => {
-    const activities = [
-      makeActivity({ id: 'ending-soon', endAt: '2026-06-04T00:00:00Z', startAt: '2026-05-01T00:00:00Z' }),
-    ]
-    const filter: ActiveFilter = { kind: 'preset', id: 'upcoming' }
-    const result = applyActiveFilter(activities, filter, emptyMemberIds, baseCtx)
-    expect(result[0].id).toBe('ending-soon')
-  })
-})
-
-// ── overdue preset ────────────────────────────────────────────────────────────
-
-describe("preset 'overdue'", () => {
-  it('returns past-due activities that are not closed', () => {
-    const activities = [
-      makeActivity({ id: 'overdue',    endAt: '2026-05-01T00:00:00Z', statusId: openStatusId }),
-      makeActivity({ id: 'closed-old', endAt: '2026-05-01T00:00:00Z', statusId: closedStatusId }),
-      makeActivity({ id: 'future',     endAt: '2026-07-01T00:00:00Z', statusId: openStatusId }),
-    ]
-    const filter: ActiveFilter = { kind: 'preset', id: 'overdue' }
-    const result = applyActiveFilter(activities, filter, emptyMemberIds, baseCtx)
-    expect(result.map(a => a.id)).toEqual(['overdue'])
-  })
-})
-
-// ── noassign preset ───────────────────────────────────────────────────────────
-
-describe("preset 'noassign'", () => {
-  it('returns only activities with no assignees', () => {
-    const activities = [
-      makeActivity({ id: 'assigned', assignedMemberIds: [otherMemberId] }),
-      makeActivity({ id: 'free',     assignedMemberIds: [] }),
-    ]
-    const filter: ActiveFilter = { kind: 'preset', id: 'noassign' }
-    const result = applyActiveFilter(activities, filter, emptyMemberIds, baseCtx)
-    expect(result.map(a => a.id)).toEqual(['free'])
-  })
-})
-
-// ── member filter kind ────────────────────────────────────────────────────────
-
-describe("filter kind 'member'", () => {
-  it('filters by the resolved member IDs for the userId', () => {
-    const activities = [
-      makeActivity({ id: 'a', assignedMemberIds: ['mbr-alice-1'] }),
-      makeActivity({ id: 'b', assignedMemberIds: ['mbr-bob'] }),
-    ]
-    const memberIds = new Map([['user-alice', ['mbr-alice-1', 'mbr-alice-2']]])
-    const filter: ActiveFilter = { kind: 'member', userId: 'user-alice' }
-    const result = applyActiveFilter(activities, filter, memberIds, baseCtx)
-    expect(result.map(a => a.id)).toEqual(['a'])
-  })
-
-  it('returns empty when user has no member IDs', () => {
-    const activities = [makeActivity()]
-    const filter: ActiveFilter = { kind: 'member', userId: 'unknown-user' }
-    const result = applyActiveFilter(activities, filter, emptyMemberIds, baseCtx)
-    expect(result).toHaveLength(0)
-  })
-})
-
-// ── saved filter kind ─────────────────────────────────────────────────────────
-
-describe("filter kind 'saved'", () => {
-  it('evaluates a saved filter definition against activities', () => {
-    const savedFilter: SavedFilter = {
-      id: 'sf-1',
-      teamId: 'team-1',
-      userId: 'user-1',
-      name: 'Urgent bugs',
-      isTeamFilter: false,
-      definition: JSON.stringify({
-        logic: 'and',
-        conditions: [{ field: 'title', op: 'contains', value: 'urgent' }],
-      }),
-      createdAt: '2026-01-01T00:00:00Z',
-      updatedAt: '2026-01-01T00:00:00Z',
-    }
-    const activities = [
-      makeActivity({ id: 'a', title: 'Fix urgent bug' }),
-      makeActivity({ id: 'b', title: 'Refactor component' }),
-    ]
-    const ctx = { ...baseCtx, savedFilters: [savedFilter] }
-    const filter: ActiveFilter = { kind: 'saved', id: 'sf-1' }
-    const result = applyActiveFilter(activities, filter, emptyMemberIds, ctx)
-    expect(result.map(a => a.id)).toEqual(['a'])
-  })
-
-  it('returns all activities when saved filter is not found', () => {
-    const activities = [makeActivity({ id: 'a' }), makeActivity({ id: 'b' })]
-    const filter: ActiveFilter = { kind: 'saved', id: 'nonexistent' }
-    const result = applyActiveFilter(activities, filter, emptyMemberIds, baseCtx)
-    expect(result).toHaveLength(2)
-  })
-
-  it('returns all activities when saved filter definition is invalid JSON', () => {
-    const badFilter: SavedFilter = {
-      id: 'sf-bad',
-      teamId: 'team-1',
-      userId: 'user-1',
-      name: 'Broken',
-      isTeamFilter: false,
-      definition: 'NOT VALID JSON }{',
-      createdAt: '2026-01-01T00:00:00Z',
-      updatedAt: '2026-01-01T00:00:00Z',
-    }
-    const activities = [makeActivity({ id: 'a' }), makeActivity({ id: 'b' })]
-    const ctx = { ...baseCtx, savedFilters: [badFilter] }
-    const filter: ActiveFilter = { kind: 'saved', id: 'sf-bad' }
-    const result = applyActiveFilter(activities, filter, emptyMemberIds, ctx)
-    expect(result).toHaveLength(2)
-  })
-})
-````
-
 ## File: packages/web/vite.config.ts
 ````typescript
 /// <reference types="vitest" />
@@ -40135,6 +40560,311 @@ func getenv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+````
+
+## File: packages/api/internal/api/server.go
+````go
+// Package api hosts the HTTP handlers, routing, and middleware for the
+// draba REST API. Handlers are intentionally thin: they decode requests,
+// delegate to repositories and services, and write responses. Business
+// logic belongs in the domain packages, not here.
+package api
+
+import (
+	"fmt"
+	"io/fs"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/auth"
+	"github.com/I0-1O/draba/packages/api/internal/db"
+	"github.com/I0-1O/draba/packages/api/internal/events"
+	"github.com/I0-1O/draba/packages/api/internal/mailer"
+	"github.com/I0-1O/draba/packages/api/internal/models"
+	"github.com/I0-1O/draba/packages/api/internal/tier"
+	"github.com/I0-1O/draba/packages/api/internal/ws"
+)
+
+// TimelineStore is the persistence interface required by timeline handlers.
+// The concrete implementation is *db.TimelineRepo; tests may substitute a fake.
+type TimelineStore interface {
+	Create(t *models.Timeline) error
+	GetByID(id string) (*models.Timeline, error)
+	GetByShareToken(token string) (*models.Timeline, error)
+	ListByTeam(teamID string, includeArchived bool) ([]*models.Timeline, error)
+	HasAccess(timelineID, teamMemberID string) (bool, error)
+	GrantAccess(timelineID, teamMemberID, role string) error
+	RevokeAccess(timelineID, teamMemberID string) error
+	GetAccessRole(timelineID, teamMemberID string) (string, error)
+	ListAccess(timelineID string) ([]*models.TimelineAccessEntry, error)
+	SetArchived(id string, at *time.Time) error
+	Update(t *models.Timeline) error
+	Delete(id string) error
+}
+
+// Server holds shared dependencies for all HTTP handlers.
+type Server struct {
+	users          *db.UserRepo
+	invites        *db.InviteRepo
+	teams          *db.TeamRepo
+	activities     *db.ActivityRepo
+	timelines      TimelineStore
+	savedFilters   *db.SavedFilterRepo
+	preferences    *db.UserPreferenceRepo
+	apiTokens      *db.APITokenRepo
+	instanceSets   *db.InstanceSettingsRepo
+	passwordTokens *db.PasswordResetTokenRepo
+	statuses       *db.StatusRepo
+	tags           *db.TagRepo
+	shares         *db.ShareRepo
+	shareCache     *shareCache
+	unlockLimiter  *rateLimiter
+	mailer         *mailer.Mailer
+	tokens         *auth.TokenService
+	tier           tier.Tier
+	bus            *events.Bus
+	hub            *ws.Hub
+	uiFS           fs.FS
+}
+
+// NewServer constructs a Server with its required dependencies. It does not
+// touch the network; call Routes to obtain the http.Handler to serve.
+func NewServer(
+	users *db.UserRepo,
+	invites *db.InviteRepo,
+	teams *db.TeamRepo,
+	activitiesRepo *db.ActivityRepo,
+	timelinesRepo TimelineStore,
+	savedFiltersRepo *db.SavedFilterRepo,
+	preferencesRepo *db.UserPreferenceRepo,
+	apiTokensRepo *db.APITokenRepo,
+	instanceSetsRepo *db.InstanceSettingsRepo,
+	passwordTokensRepo *db.PasswordResetTokenRepo,
+	statusesRepo *db.StatusRepo,
+	tagsRepo *db.TagRepo,
+	sharesRepo *db.ShareRepo,
+	m *mailer.Mailer,
+	tokens *auth.TokenService,
+	t tier.Tier,
+	bus *events.Bus,
+	hub *ws.Hub,
+) *Server {
+	return &Server{
+		users:          users,
+		invites:        invites,
+		teams:          teams,
+		activities:     activitiesRepo,
+		timelines:      timelinesRepo,
+		savedFilters:   savedFiltersRepo,
+		preferences:    preferencesRepo,
+		apiTokens:      apiTokensRepo,
+		instanceSets:   instanceSetsRepo,
+		passwordTokens: passwordTokensRepo,
+		statuses:       statusesRepo,
+		tags:           tagsRepo,
+		shares:         sharesRepo,
+		shareCache:     newShareCache(),
+		unlockLimiter:  newRateLimiter(unlockMaxAttempts, time.Hour),
+		mailer:         m,
+		tokens:         tokens,
+		tier:           t,
+		bus:            bus,
+		hub:            hub,
+	}
+}
+
+// WithUI registers an embedded React SPA to be served at GET /. The FS must
+// be rooted at the build output directory (i.e. contain index.html directly).
+// When called, all unmatched GET paths fall back to index.html so React Router
+// handles client-side navigation. Safe to skip in dev (no-op when not called).
+func (s *Server) WithUI(uiFS fs.FS) *Server {
+	s.uiFS = uiFS
+	return s
+}
+
+// Routes returns the fully-wired HTTP handler for the API, including all
+// core routes plus any routes added by registered tier modules.
+func (s *Server) Routes() http.Handler {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("GET /setup/status", s.handleSetupStatus)
+	mux.HandleFunc("GET /version", s.handleVersion)
+
+	mux.HandleFunc("POST /auth/register", s.handleRegister)
+	mux.HandleFunc("POST /auth/login", s.handleLogin)
+	mux.HandleFunc("POST /auth/refresh", s.handleRefresh)
+	mux.HandleFunc("GET /auth/me", chain(s.handleMe, s.authMiddleware))
+	mux.HandleFunc("POST /auth/forgot-password", s.handleForgotPassword)
+	mux.HandleFunc("POST /auth/reset-password", s.handleResetPassword)
+
+	mux.HandleFunc("GET /users/me/preferences", chain(s.handleGetPreferences, s.authMiddleware))
+	mux.HandleFunc("PUT /users/me/preferences", chain(s.handleUpsertPreference, s.authMiddleware))
+	mux.HandleFunc("GET /users/me/stats", chain(s.handleGetMyStats, s.authMiddleware))
+	mux.HandleFunc("PATCH /users/me", chain(s.handleUpdateProfile, s.authMiddleware))
+	mux.HandleFunc("PUT /users/me/password", chain(s.handleChangePassword, s.authMiddleware))
+
+	mux.HandleFunc("GET /admin/smtp", chain(s.handleGetSMTP, s.authMiddleware))
+	mux.HandleFunc("PUT /admin/smtp", chain(s.handlePutSMTP, s.authMiddleware))
+	mux.HandleFunc("POST /admin/smtp/test", chain(s.handleTestSMTP, s.authMiddleware))
+	mux.HandleFunc("DELETE /admin/smtp", chain(s.handleDeleteSMTP, s.authMiddleware))
+	mux.HandleFunc("GET /admin/settings", chain(s.handleGetAdminSettings, s.authMiddleware))
+	mux.HandleFunc("PATCH /admin/settings", chain(s.handlePatchAdminSettings, s.authMiddleware))
+	mux.HandleFunc("GET /admin/users", chain(s.handleListAdminUsers, s.authMiddleware))
+
+	// Public — no auth required; used by the login page and shared views.
+	mux.HandleFunc("GET /settings/branding", s.handleGetPublicBranding)
+
+	mux.HandleFunc("POST /tokens", chain(s.handleCreateAPIToken, s.authMiddleware))
+	mux.HandleFunc("GET /tokens", chain(s.handleListAPITokens, s.authMiddleware))
+	mux.HandleFunc("DELETE /tokens/{id}", chain(s.handleDeleteAPIToken, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams", chain(s.handleListTeams, s.authMiddleware))
+	mux.HandleFunc("POST /teams", chain(s.handleCreateTeam, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}", chain(s.handleGetTeam, s.authMiddleware))
+	mux.HandleFunc("PATCH /teams/{id}", chain(s.handleUpdateTeam, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/archive", chain(s.handleArchiveTeam, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/unarchive", chain(s.handleUnarchiveTeam, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/invites", chain(s.handleCreateInvite, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/invites", chain(s.handleListInvites, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/invites/{inviteId}", chain(s.handleDeleteInvite, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/invite-link", chain(s.handleCreateInviteLink, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/invite-link/reset", chain(s.handleResetInviteLink, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/invite-link", chain(s.handleGetInviteLink, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/invite-link", chain(s.handleDeleteInviteLink, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/members", chain(s.handleListMembers, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/members/{memberId}", chain(s.handleGetMember, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/members/{memberId}/stats", chain(s.handleGetMemberStats, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/members", chain(s.handleAddMember, s.authMiddleware))
+	mux.HandleFunc("PATCH /teams/{id}/members/{memberId}", chain(s.handleUpdateMember, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/members/{memberId}", chain(s.handleDeleteMember, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/members/{memberId}/archive", chain(s.handleArchiveMember, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/members/{memberId}/unarchive", chain(s.handleUnarchiveMember, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/participants", chain(s.handleCreateParticipant, s.authMiddleware))
+	mux.HandleFunc("GET /users/search", chain(s.handleSearchUsers, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/promote", chain(s.handlePromoteUser, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/archive", chain(s.handleArchiveUser, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/unarchive", chain(s.handleUnarchiveUser, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/revoke", chain(s.handleRevokeUser, s.authMiddleware))
+	mux.HandleFunc("DELETE /users/{id}", chain(s.handleDeleteUser, s.authMiddleware))
+	// Activity routes use the team-scoped prefix (GET /teams/{id}/timelines/{timelineId}/...)
+	// to avoid a Go 1.22 mux conflict with GET /timelines/share/{token}: both are
+	// 3-segment GET paths and neither is more specific when the third segment differs.
+	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/activities", chain(s.handleCreateActivity, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/activities", chain(s.handleListActivities, s.authMiddleware))
+	mux.HandleFunc("PATCH /activities/{id}", chain(s.handleUpdateActivity, s.authMiddleware))
+	mux.HandleFunc("DELETE /activities/{id}", chain(s.handleDeleteActivity, s.authMiddleware))
+	mux.HandleFunc("POST /activities/{id}/archive", chain(s.handleArchiveActivity, s.authMiddleware))
+	mux.HandleFunc("POST /activities/{id}/unarchive", chain(s.handleUnarchiveActivity, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/tags", chain(s.handleListTags, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/tags", chain(s.handleCreateTag, s.authMiddleware))
+	mux.HandleFunc("PATCH /tags/{id}", chain(s.handleUpdateTag, s.authMiddleware))
+	mux.HandleFunc("DELETE /tags/{id}", chain(s.handleDeleteTag, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/saved_filters/all", chain(s.handleListAllTeamSavedFilters, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/saved_filters", chain(s.handleListSavedFilters, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/saved_filters", chain(s.handleCreateSavedFilter, s.authMiddleware))
+	mux.HandleFunc("PATCH /saved_filters/{id}", chain(s.handleUpdateSavedFilter, s.authMiddleware))
+	mux.HandleFunc("DELETE /saved_filters/{id}", chain(s.handleDeleteSavedFilter, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/status-templates", chain(s.handleListStatusTemplates, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/status-templates", chain(s.handleCreateStatusTemplate, s.authMiddleware))
+	mux.HandleFunc("PATCH /status-templates/{id}", chain(s.handleUpdateStatusTemplate, s.authMiddleware))
+	mux.HandleFunc("DELETE /status-templates/{id}", chain(s.handleDeleteStatusTemplate, s.authMiddleware))
+	mux.HandleFunc("POST /status-templates/{id}/items", chain(s.handleCreateTemplateItem, s.authMiddleware))
+	mux.HandleFunc("PATCH /status-template-items/{id}", chain(s.handleUpdateTemplateItem, s.authMiddleware))
+	mux.HandleFunc("DELETE /status-template-items/{id}", chain(s.handleDeleteTemplateItem, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/timelines", chain(s.handleListTimelines, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/timelines", chain(s.handleCreateTimeline, s.authMiddleware))
+	// GET /timelines/share/{token} must be registered before GET /timelines/{id} so
+	// the more-specific literal "share" segment takes precedence.
+	mux.HandleFunc("GET /timelines/share/{token}", s.handleGetTimelineByShareToken)
+	mux.HandleFunc("GET /timelines/{id}", chain(s.handleGetTimeline, s.authMiddleware))
+	// Timeline statuses are placed under /teams/{id}/timelines/{timelineId}/statuses
+	// rather than /timelines/{id}/statuses to avoid a Go 1.22 mux pattern conflict
+	// with GET /timelines/share/{token} (both are 3-segment paths and conflict on
+	// paths like /timelines/share/statuses).
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleListTimelineStatuses, s.authMiddleware))
+	mux.HandleFunc("POST /timelines/{id}/archive", chain(s.handleArchiveTimeline, s.authMiddleware))
+	mux.HandleFunc("POST /timelines/{id}/unarchive", chain(s.handleUnarchiveTimeline, s.authMiddleware))
+
+	mux.HandleFunc("PATCH /timelines/{id}", chain(s.handleUpdateTimeline, s.authMiddleware))
+	mux.HandleFunc("DELETE /timelines/{id}", chain(s.handleDeleteTimeline, s.authMiddleware))
+	// Access list routes use the team-scoped prefix to avoid a Go 1.22 mux
+	// conflict with GET /timelines/share/{token} on 3-segment GET paths.
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/access", chain(s.handleListTimelineAccess, s.authMiddleware))
+	mux.HandleFunc("PUT /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleGrantTimelineAccess, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleRevokeTimelineAccess, s.authMiddleware))
+	// Timeline status CRUD — POST shares the team-scoped prefix with GET statuses.
+	// PATCH and DELETE use a flat /statuses/{id} prefix (2 segments, no conflict).
+	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleCreateTimelineStatus, s.authMiddleware))
+	mux.HandleFunc("PATCH /statuses/{id}", chain(s.handleUpdateStatus, s.authMiddleware))
+	mux.HandleFunc("DELETE /statuses/{id}", chain(s.handleDeleteStatus, s.authMiddleware))
+
+	// Share routes.
+	// GET /shares/{token} is public — no auth. The token is the credential.
+	// POST /timelines/{id}/shares uses the same /timelines/{id}/... prefix
+	// as archive/unarchive so it avoids the Go 1.22 mux pattern conflict with
+	// GET /timelines/share/{token} (only GET-method paths conflict).
+	// GET /teams/{id}/timelines/{timelineId}/shares uses the team-scoped prefix
+	// to avoid the GET conflict described above.
+	mux.HandleFunc("GET /shares/{token}", s.handleGetShareProjection)
+	mux.HandleFunc("POST /shares/{token}/unlock", s.handleUnlockShare)
+	mux.HandleFunc("POST /timelines/{id}/shares", chain(s.handleCreateShare, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/shares", chain(s.handleListShares, s.authMiddleware))
+	mux.HandleFunc("PATCH /shares/{id}", chain(s.handleUpdateShare, s.authMiddleware))
+	mux.HandleFunc("DELETE /shares/{id}", chain(s.handleDeleteShare, s.authMiddleware))
+
+	// GET /ws is intentionally outside authMiddleware — ServeWS validates the
+	// JWT itself before upgrading, because WebSocket clients can't set headers.
+	mux.HandleFunc("GET /ws", s.hub.ServeWS)
+
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	})
+
+	if s.uiFS != nil {
+		mux.Handle("GET /", spaHandler(s.uiFS))
+	}
+
+	ctx := &tier.ModuleContext{Mux: mux, Tier: s.tier}
+	for _, m := range tier.Registered() {
+		if err := m.Register(ctx); err != nil {
+			// Module registration is a startup invariant — a failure here is a programming error.
+			panic(fmt.Sprintf("tier module %q failed to register: %v", m.Name(), err))
+		}
+	}
+
+	return requestLogger(mux)
+}
+
+// chain applies a single middleware to a handler function.
+func chain(h http.HandlerFunc, m func(http.Handler) http.Handler) http.HandlerFunc {
+	return m(h).ServeHTTP
+}
+
+// spaHandler serves the embedded React SPA. Known static assets are served
+// directly; any unrecognised path falls back to index.html so React Router
+// handles client-side navigation.
+func spaHandler(uiFS fs.FS) http.Handler {
+	fserver := http.FileServer(http.FS(uiFS))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := strings.TrimPrefix(r.URL.Path, "/")
+		if path == "" {
+			path = "index.html"
+		}
+		if _, err := uiFS.Open(path); err != nil {
+			// Unknown path — serve index.html and let React Router handle it.
+			r = r.Clone(r.Context())
+			r.URL.Path = "/"
+			fserver.ServeHTTP(w, r)
+			return
+		}
+		fserver.ServeHTTP(w, r)
+	})
 }
 ````
 
@@ -41339,431 +42069,6 @@ export default function CalendarGrid({
       </div>
     </div>
   );
-}
-````
-
-## File: packages/web/src/components/filters/FilterDropdown.tsx
-````typescript
-/**
- * Top-bar filter selector. Surfaces presets, a per-member section,
- * team-promoted filters, and the user's saved filters. Selection is
- * stored in FilterContext and evaluated by applyActiveFilter in GanttView.
- */
-
-import { useEffect, useRef, useState } from 'react'
-import {
-  Layers, Clock, AlertCircle, UserX, CheckCircle,
-  ChevronDown, Check, List,
-} from 'lucide-react'
-import { useFilter, type ActiveFilter } from '@/contexts/FilterContext'
-import { useTeamMembers } from '@/hooks/useTeamActivities'
-import { useSavedFilters } from '@/hooks/useSavedFilters'
-import { useAuth } from '@/contexts/AuthContext'
-import { filterColor } from '@/lib/filterColors'
-
-interface Props {
-  teamId?: string
-  onOpenManager: () => void
-}
-
-// ── Preset definitions ───────────────────────────────────────────────────────
-
-type PresetId = 'all' | 'upcoming' | 'overdue' | 'noassign' | 'open'
-
-interface Preset {
-  id: PresetId
-  label: string
-  icon: React.ReactNode
-  subtitle?: string
-}
-
-const ICON_PRESET = { size: 14, strokeWidth: 1.8 } as const
-
-const PRESETS: Preset[] = [
-  { id: 'all',      label: 'All activities',  icon: <Layers      {...ICON_PRESET} /> },
-  { id: 'open',     label: 'Open only',       icon: <CheckCircle {...ICON_PRESET} />, subtitle: 'Hide activities with a closed status' },
-  { id: 'upcoming', label: 'Upcoming',         icon: <Clock       {...ICON_PRESET} />, subtitle: 'Starting or ending in 7 days' },
-  { id: 'overdue',  label: 'Overdue',          icon: <AlertCircle {...ICON_PRESET} /> },
-  { id: 'noassign', label: 'No one assigned',   icon: <UserX       {...ICON_PRESET} /> },
-]
-
-// ── Helpers ──────────────────────────────────────────────────────────────────
-
-/** Narrow TeamMemberWithUser to only those with a real user account. */
-function hasUserId<T extends { userId?: string | null }>(m: T): m is T & { userId: string } {
-  return typeof m.userId === 'string' && m.userId.length > 0
-}
-
-function activeLabel(
-  active: ActiveFilter,
-  members: { userId: string; displayName: string }[],
-  saved: { id: string; name: string }[],
-): string {
-  if (active.kind === 'preset') return PRESETS.find(p => p.id === active.id)?.label ?? 'Filter'
-  if (active.kind === 'member') return members.find(m => m.userId === active.userId)?.displayName ?? 'Member'
-  return saved.find(s => s.id === active.id)?.name ?? 'Saved filter'
-}
-
-function activeDotColor(
-  active: ActiveFilter,
-  members: { userId: string; color?: string | null }[],
-  saved: { id: string }[],
-): string | null {
-  if (active.kind === 'member') return members.find(m => m.userId === active.userId)?.color ?? null
-  if (active.kind === 'saved') {
-    const s = saved.find(f => f.id === active.id)
-    return s ? filterColor(s.id) : null
-  }
-  return null
-}
-
-// ── Sub-components ───────────────────────────────────────────────────────────
-
-interface ItemRowProps {
-  icon?: React.ReactNode
-  /** Rendered in the 8px-dot slot when provided (overrides icon). */
-  dotColor?: string
-  label: string
-  subtitle?: string
-  active: boolean
-  onClick: () => void
-}
-
-function ItemRow({ icon, dotColor, label, subtitle, active, onClick }: ItemRowProps) {
-  const [hovered, setHovered] = useState(false)
-
-  const rowBg = active
-    ? 'rgba(40,140,155,.09)'
-    : hovered
-    ? 'var(--muted)'
-    : 'transparent'
-
-  const labelColor = active ? 'var(--primary)' : 'var(--foreground)'
-  const labelWeight = active ? 600 : 400
-
-  return (
-    <div
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        padding: '5px 10px 5px 14px',
-        background: rowBg,
-        cursor: 'pointer',
-        transition: 'background 0.08s',
-      }}
-      onClick={onClick}
-    >
-      {/* 16px icon / dot slot */}
-      <div style={{ width: 16, height: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, color: active ? 'var(--primary)' : 'var(--muted-foreground)' }}>
-        {dotColor ? (
-          <div style={{ width: 8, height: 8, borderRadius: '50%', background: dotColor }} />
-        ) : (
-          icon
-        )}
-      </div>
-
-      {/* Label + subtitle */}
-      <div style={{ flex: 1, minWidth: 0, marginLeft: 8 }}>
-        <div style={{
-          fontSize: 13,
-          fontWeight: labelWeight,
-          color: labelColor,
-          overflow: 'hidden',
-          textOverflow: 'ellipsis',
-          whiteSpace: 'nowrap',
-        }}
-          title={label}
-        >
-          {label}
-        </div>
-        {subtitle && (
-          <div style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {subtitle}
-          </div>
-        )}
-      </div>
-
-      {/* 24px right slot — checkmark when active */}
-      <div style={{ width: 24, height: 24, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-        {active && <Check size={13} strokeWidth={2.5} color="var(--primary)" />}
-      </div>
-    </div>
-  )
-}
-
-// ── Section header ───────────────────────────────────────────────────────────
-
-interface SectionHeaderProps {
-  label: string
-  teamBadge?: boolean
-}
-
-function SectionHeader({ label, teamBadge }: SectionHeaderProps) {
-  return (
-    <div style={{
-      padding: '10px 14px 3px',
-      fontSize: 10,
-      fontWeight: 700,
-      letterSpacing: '0.8px',
-      textTransform: 'uppercase',
-      color: 'var(--muted-foreground)',
-      display: 'flex',
-      alignItems: 'center',
-      gap: 6,
-    }}>
-      {label}
-      {teamBadge && (
-        <span style={{
-          fontSize: 9,
-          fontWeight: 700,
-          color: 'var(--primary)',
-          background: 'rgba(40,140,155,.1)',
-          border: '1px solid rgba(40,140,155,.25)',
-          borderRadius: 99,
-          padding: '1px 5px',
-          letterSpacing: 0,
-          textTransform: 'none',
-        }}>
-          Team
-        </span>
-      )}
-    </div>
-  )
-}
-
-function Divider() {
-  return <div style={{ height: 1, background: 'var(--border)', margin: '4px 0' }} />
-}
-
-// ── Main component ───────────────────────────────────────────────────────────
-
-export default function FilterDropdown({ teamId = '', onOpenManager }: Props) {
-  const { activeFilter, setActiveFilter } = useFilter()
-  const { user } = useAuth()
-  const { data: members = [] } = useTeamMembers(teamId)
-  const { data: saved = [] } = useSavedFilters(teamId)
-
-  const [open, setOpen] = useState(false)
-  const ref = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    function onDown(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
-    }
-    function onKey(e: KeyboardEvent) {
-      if (e.key === 'Escape') setOpen(false)
-    }
-    document.addEventListener('mousedown', onDown)
-    document.addEventListener('keydown', onKey)
-    return () => {
-      document.removeEventListener('mousedown', onDown)
-      document.removeEventListener('keydown', onKey)
-    }
-  }, [])
-
-  const membersWithUser = members.filter(hasUserId)
-  const label = activeLabel(activeFilter, membersWithUser, saved)
-  const triggerDotColor = activeDotColor(activeFilter, membersWithUser, saved)
-  const currentUserId = (user as { id?: string } | null)?.id ?? ''
-
-  // Partition saved filters: team-promoted vs. user's own personal
-  const teamFilters = saved.filter(f => f.isTeamFilter)
-  const myFilters = saved.filter(f => !f.isTeamFilter)
-
-  const isDefaultFilter = activeFilter.kind === 'preset' && activeFilter.id === 'all'
-
-  function select(f: ActiveFilter) {
-    setActiveFilter(f)
-    setOpen(false)
-  }
-
-  function isSelected(f: ActiveFilter): boolean {
-    if (f.kind !== activeFilter.kind) return false
-    if (f.kind === 'preset' && activeFilter.kind === 'preset') return f.id === activeFilter.id
-    if (f.kind === 'member' && activeFilter.kind === 'member') return f.userId === activeFilter.userId
-    if (f.kind === 'saved' && activeFilter.kind === 'saved') return f.id === activeFilter.id
-    return false
-  }
-
-  // Trigger appearance — teal tint when a non-default filter is active.
-  const triggerBg = isDefaultFilter ? 'transparent' : 'rgba(40,140,155,.09)'
-  const triggerBorder = isDefaultFilter ? 'var(--border)' : 'rgba(40,140,155,.22)'
-  const triggerColor = isDefaultFilter ? 'var(--foreground)' : 'var(--primary)'
-  const triggerWeight = isDefaultFilter ? 400 : 600
-
-  return (
-    <div ref={ref} style={{ position: 'relative' }}>
-      {/* Trigger */}
-      <button
-        onClick={() => setOpen(o => !o)}
-        title="Filter"
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 6,
-          cursor: 'pointer',
-          fontFamily: 'var(--font-sans)',
-          border: `1px solid ${triggerBorder}`,
-          borderRadius: 6,
-          background: triggerBg,
-          color: triggerColor,
-          padding: '5px 9px 5px 8px',
-          height: 30,
-          fontSize: 13,
-          fontWeight: triggerWeight,
-          maxWidth: 220,
-          transition: 'all 0.12s',
-        }}
-      >
-        {/* Icon: colored dot when a non-preset filter is active, otherwise Filter icon */}
-        {triggerDotColor && !isDefaultFilter ? (
-          <div style={{ width: 8, height: 8, borderRadius: '50%', background: triggerDotColor, flexShrink: 0 }} />
-        ) : (
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, color: 'var(--muted-foreground)' }}>
-            <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3" />
-          </svg>
-        )}
-        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
-          {label}
-        </span>
-        <ChevronDown size={12} strokeWidth={2} style={{ flexShrink: 0, color: 'var(--muted-foreground)' }} />
-      </button>
-
-      {/* Dropdown panel */}
-      {open && (
-        <div
-          style={{
-            position: 'absolute',
-            top: 'calc(100% + 8px)',
-            right: 0,
-            width: 284,
-            background: 'var(--card)',
-            border: '1px solid var(--border)',
-            borderRadius: 8,
-            boxShadow: '0 8px 24px rgba(0,0,0,.11), 0 2px 6px rgba(0,0,0,.07)',
-            zIndex: 100,
-            paddingBottom: 4,
-            overflowY: 'auto',
-          }}
-        >
-          {/* Presets */}
-          <SectionHeader label="Presets" />
-          {PRESETS.map(p => {
-            const f: ActiveFilter = { kind: 'preset', id: p.id }
-            return (
-              <ItemRow
-                key={p.id}
-                icon={p.icon}
-                label={p.label}
-                subtitle={p.subtitle}
-                active={isSelected(f)}
-                onClick={() => select(f)}
-              />
-            )
-          })}
-
-          {/* Members */}
-          {membersWithUser.length > 0 && (
-            <>
-              <Divider />
-              <SectionHeader label="Members" />
-              {membersWithUser.map(m => {
-                const f: ActiveFilter = { kind: 'member', userId: m.userId }
-                const name = m.userId === currentUserId ? `${m.displayName} (you)` : m.displayName
-                return (
-                  <ItemRow
-                    key={m.userId}
-                    dotColor={m.color ?? '#8b949e'}
-                    label={name}
-                    active={isSelected(f)}
-                    onClick={() => select(f)}
-                  />
-                )
-              })}
-            </>
-          )}
-
-          {/* Team filters */}
-          {teamFilters.length > 0 && (
-            <>
-              <Divider />
-              <SectionHeader label="Team filters" teamBadge />
-              {teamFilters.map(s => {
-                const f: ActiveFilter = { kind: 'saved', id: s.id }
-                return (
-                  <ItemRow
-                    key={s.id}
-                    dotColor={filterColor(s.id)}
-                    label={s.name}
-                    active={isSelected(f)}
-                    onClick={() => select(f)}
-                  />
-                )
-              })}
-            </>
-          )}
-
-          {/* My filters */}
-          {myFilters.length > 0 && (
-            <>
-              <Divider />
-              <SectionHeader label="My filters" />
-              {myFilters.map(s => {
-                const f: ActiveFilter = { kind: 'saved', id: s.id }
-                return (
-                  <ItemRow
-                    key={s.id}
-                    dotColor={filterColor(s.id)}
-                    label={s.name}
-                    active={isSelected(f)}
-                    onClick={() => select(f)}
-                  />
-                )
-              })}
-            </>
-          )}
-
-          {/* Footer */}
-          <Divider />
-          <ManageFiltersRow onClick={() => { onOpenManager(); setOpen(false) }} />
-        </div>
-      )}
-    </div>
-  )
-}
-
-// ── Manage filters footer row ─────────────────────────────────────────────────
-
-function ManageFiltersRow({ onClick }: { onClick: () => void }) {
-  const [hovered, setHovered] = useState(false)
-  return (
-    <button
-      onClick={onClick}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 6,
-        width: '100%',
-        padding: '7px 14px',
-        background: hovered ? 'var(--muted)' : 'transparent',
-        border: 'none',
-        fontSize: 13,
-        fontWeight: hovered ? 600 : 400,
-        color: hovered ? 'var(--foreground)' : 'var(--muted-foreground)',
-        cursor: 'pointer',
-        fontFamily: 'var(--font-sans)',
-        textAlign: 'left',
-        transition: 'all 0.1s',
-      }}
-    >
-      <List size={14} strokeWidth={2} />
-      Manage filters
-    </button>
-  )
 }
 ````
 
@@ -44750,311 +45055,6 @@ No Vitest / Testing Library setup exists yet. Components (`TimelineGrid`, `Event
 2. Under the relevant subagent heading, list concrete, runnable assertions tied to the ROADMAP exit criteria.
 3. If a new subagent is needed, add it to the subagent map with an "active from" phase.
 4. That's it — `/test-phase` will pick it up on the next run.
-````
-
-## File: packages/api/internal/api/server.go
-````go
-// Package api hosts the HTTP handlers, routing, and middleware for the
-// draba REST API. Handlers are intentionally thin: they decode requests,
-// delegate to repositories and services, and write responses. Business
-// logic belongs in the domain packages, not here.
-package api
-
-import (
-	"fmt"
-	"io/fs"
-	"net/http"
-	"strings"
-	"time"
-
-	"github.com/I0-1O/draba/packages/api/internal/auth"
-	"github.com/I0-1O/draba/packages/api/internal/db"
-	"github.com/I0-1O/draba/packages/api/internal/events"
-	"github.com/I0-1O/draba/packages/api/internal/mailer"
-	"github.com/I0-1O/draba/packages/api/internal/models"
-	"github.com/I0-1O/draba/packages/api/internal/tier"
-	"github.com/I0-1O/draba/packages/api/internal/ws"
-)
-
-// TimelineStore is the persistence interface required by timeline handlers.
-// The concrete implementation is *db.TimelineRepo; tests may substitute a fake.
-type TimelineStore interface {
-	Create(t *models.Timeline) error
-	GetByID(id string) (*models.Timeline, error)
-	GetByShareToken(token string) (*models.Timeline, error)
-	ListByTeam(teamID string, includeArchived bool) ([]*models.Timeline, error)
-	HasAccess(timelineID, teamMemberID string) (bool, error)
-	GrantAccess(timelineID, teamMemberID, role string) error
-	RevokeAccess(timelineID, teamMemberID string) error
-	GetAccessRole(timelineID, teamMemberID string) (string, error)
-	ListAccess(timelineID string) ([]*models.TimelineAccessEntry, error)
-	SetArchived(id string, at *time.Time) error
-	Update(t *models.Timeline) error
-	Delete(id string) error
-}
-
-// Server holds shared dependencies for all HTTP handlers.
-type Server struct {
-	users          *db.UserRepo
-	invites        *db.InviteRepo
-	teams          *db.TeamRepo
-	activities     *db.ActivityRepo
-	timelines      TimelineStore
-	savedFilters   *db.SavedFilterRepo
-	preferences    *db.UserPreferenceRepo
-	apiTokens      *db.APITokenRepo
-	instanceSets   *db.InstanceSettingsRepo
-	passwordTokens *db.PasswordResetTokenRepo
-	statuses       *db.StatusRepo
-	tags           *db.TagRepo
-	shares         *db.ShareRepo
-	shareCache     *shareCache
-	unlockLimiter  *rateLimiter
-	mailer         *mailer.Mailer
-	tokens         *auth.TokenService
-	tier           tier.Tier
-	bus            *events.Bus
-	hub            *ws.Hub
-	uiFS           fs.FS
-}
-
-// NewServer constructs a Server with its required dependencies. It does not
-// touch the network; call Routes to obtain the http.Handler to serve.
-func NewServer(
-	users *db.UserRepo,
-	invites *db.InviteRepo,
-	teams *db.TeamRepo,
-	activitiesRepo *db.ActivityRepo,
-	timelinesRepo TimelineStore,
-	savedFiltersRepo *db.SavedFilterRepo,
-	preferencesRepo *db.UserPreferenceRepo,
-	apiTokensRepo *db.APITokenRepo,
-	instanceSetsRepo *db.InstanceSettingsRepo,
-	passwordTokensRepo *db.PasswordResetTokenRepo,
-	statusesRepo *db.StatusRepo,
-	tagsRepo *db.TagRepo,
-	sharesRepo *db.ShareRepo,
-	m *mailer.Mailer,
-	tokens *auth.TokenService,
-	t tier.Tier,
-	bus *events.Bus,
-	hub *ws.Hub,
-) *Server {
-	return &Server{
-		users:          users,
-		invites:        invites,
-		teams:          teams,
-		activities:     activitiesRepo,
-		timelines:      timelinesRepo,
-		savedFilters:   savedFiltersRepo,
-		preferences:    preferencesRepo,
-		apiTokens:      apiTokensRepo,
-		instanceSets:   instanceSetsRepo,
-		passwordTokens: passwordTokensRepo,
-		statuses:       statusesRepo,
-		tags:           tagsRepo,
-		shares:         sharesRepo,
-		shareCache:     newShareCache(),
-		unlockLimiter:  newRateLimiter(unlockMaxAttempts, time.Hour),
-		mailer:         m,
-		tokens:         tokens,
-		tier:           t,
-		bus:            bus,
-		hub:            hub,
-	}
-}
-
-// WithUI registers an embedded React SPA to be served at GET /. The FS must
-// be rooted at the build output directory (i.e. contain index.html directly).
-// When called, all unmatched GET paths fall back to index.html so React Router
-// handles client-side navigation. Safe to skip in dev (no-op when not called).
-func (s *Server) WithUI(uiFS fs.FS) *Server {
-	s.uiFS = uiFS
-	return s
-}
-
-// Routes returns the fully-wired HTTP handler for the API, including all
-// core routes plus any routes added by registered tier modules.
-func (s *Server) Routes() http.Handler {
-	mux := http.NewServeMux()
-
-	mux.HandleFunc("GET /setup/status", s.handleSetupStatus)
-	mux.HandleFunc("GET /version", s.handleVersion)
-
-	mux.HandleFunc("POST /auth/register", s.handleRegister)
-	mux.HandleFunc("POST /auth/login", s.handleLogin)
-	mux.HandleFunc("POST /auth/refresh", s.handleRefresh)
-	mux.HandleFunc("GET /auth/me", chain(s.handleMe, s.authMiddleware))
-	mux.HandleFunc("POST /auth/forgot-password", s.handleForgotPassword)
-	mux.HandleFunc("POST /auth/reset-password", s.handleResetPassword)
-
-	mux.HandleFunc("GET /users/me/preferences", chain(s.handleGetPreferences, s.authMiddleware))
-	mux.HandleFunc("PUT /users/me/preferences", chain(s.handleUpsertPreference, s.authMiddleware))
-	mux.HandleFunc("GET /users/me/stats", chain(s.handleGetMyStats, s.authMiddleware))
-	mux.HandleFunc("PATCH /users/me", chain(s.handleUpdateProfile, s.authMiddleware))
-	mux.HandleFunc("PUT /users/me/password", chain(s.handleChangePassword, s.authMiddleware))
-
-	mux.HandleFunc("GET /admin/smtp", chain(s.handleGetSMTP, s.authMiddleware))
-	mux.HandleFunc("PUT /admin/smtp", chain(s.handlePutSMTP, s.authMiddleware))
-	mux.HandleFunc("POST /admin/smtp/test", chain(s.handleTestSMTP, s.authMiddleware))
-	mux.HandleFunc("DELETE /admin/smtp", chain(s.handleDeleteSMTP, s.authMiddleware))
-	mux.HandleFunc("GET /admin/settings", chain(s.handleGetAdminSettings, s.authMiddleware))
-	mux.HandleFunc("PATCH /admin/settings", chain(s.handlePatchAdminSettings, s.authMiddleware))
-	mux.HandleFunc("GET /admin/users", chain(s.handleListAdminUsers, s.authMiddleware))
-
-	// Public — no auth required; used by the login page and shared views.
-	mux.HandleFunc("GET /settings/branding", s.handleGetPublicBranding)
-
-	mux.HandleFunc("POST /tokens", chain(s.handleCreateAPIToken, s.authMiddleware))
-	mux.HandleFunc("GET /tokens", chain(s.handleListAPITokens, s.authMiddleware))
-	mux.HandleFunc("DELETE /tokens/{id}", chain(s.handleDeleteAPIToken, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams", chain(s.handleListTeams, s.authMiddleware))
-	mux.HandleFunc("POST /teams", chain(s.handleCreateTeam, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}", chain(s.handleGetTeam, s.authMiddleware))
-	mux.HandleFunc("PATCH /teams/{id}", chain(s.handleUpdateTeam, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/archive", chain(s.handleArchiveTeam, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/unarchive", chain(s.handleUnarchiveTeam, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/invites", chain(s.handleCreateInvite, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/invites", chain(s.handleListInvites, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/invites/{inviteId}", chain(s.handleDeleteInvite, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/invite-link", chain(s.handleCreateInviteLink, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/invite-link/reset", chain(s.handleResetInviteLink, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/invite-link", chain(s.handleGetInviteLink, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/invite-link", chain(s.handleDeleteInviteLink, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/members", chain(s.handleListMembers, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/members/{memberId}", chain(s.handleGetMember, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/members/{memberId}/stats", chain(s.handleGetMemberStats, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/members", chain(s.handleAddMember, s.authMiddleware))
-	mux.HandleFunc("PATCH /teams/{id}/members/{memberId}", chain(s.handleUpdateMember, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/members/{memberId}", chain(s.handleDeleteMember, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/members/{memberId}/archive", chain(s.handleArchiveMember, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/members/{memberId}/unarchive", chain(s.handleUnarchiveMember, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/participants", chain(s.handleCreateParticipant, s.authMiddleware))
-	mux.HandleFunc("GET /users/search", chain(s.handleSearchUsers, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/promote", chain(s.handlePromoteUser, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/archive", chain(s.handleArchiveUser, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/unarchive", chain(s.handleUnarchiveUser, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/revoke", chain(s.handleRevokeUser, s.authMiddleware))
-	mux.HandleFunc("DELETE /users/{id}", chain(s.handleDeleteUser, s.authMiddleware))
-	// Activity routes use the team-scoped prefix (GET /teams/{id}/timelines/{timelineId}/...)
-	// to avoid a Go 1.22 mux conflict with GET /timelines/share/{token}: both are
-	// 3-segment GET paths and neither is more specific when the third segment differs.
-	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/activities", chain(s.handleCreateActivity, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/activities", chain(s.handleListActivities, s.authMiddleware))
-	mux.HandleFunc("PATCH /activities/{id}", chain(s.handleUpdateActivity, s.authMiddleware))
-	mux.HandleFunc("DELETE /activities/{id}", chain(s.handleDeleteActivity, s.authMiddleware))
-	mux.HandleFunc("POST /activities/{id}/archive", chain(s.handleArchiveActivity, s.authMiddleware))
-	mux.HandleFunc("POST /activities/{id}/unarchive", chain(s.handleUnarchiveActivity, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/tags", chain(s.handleListTags, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/tags", chain(s.handleCreateTag, s.authMiddleware))
-	mux.HandleFunc("PATCH /tags/{id}", chain(s.handleUpdateTag, s.authMiddleware))
-	mux.HandleFunc("DELETE /tags/{id}", chain(s.handleDeleteTag, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/saved_filters/all", chain(s.handleListAllTeamSavedFilters, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/saved_filters", chain(s.handleListSavedFilters, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/saved_filters", chain(s.handleCreateSavedFilter, s.authMiddleware))
-	mux.HandleFunc("PATCH /saved_filters/{id}", chain(s.handleUpdateSavedFilter, s.authMiddleware))
-	mux.HandleFunc("DELETE /saved_filters/{id}", chain(s.handleDeleteSavedFilter, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/status-templates", chain(s.handleListStatusTemplates, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/status-templates", chain(s.handleCreateStatusTemplate, s.authMiddleware))
-	mux.HandleFunc("PATCH /status-templates/{id}", chain(s.handleUpdateStatusTemplate, s.authMiddleware))
-	mux.HandleFunc("DELETE /status-templates/{id}", chain(s.handleDeleteStatusTemplate, s.authMiddleware))
-	mux.HandleFunc("POST /status-templates/{id}/items", chain(s.handleCreateTemplateItem, s.authMiddleware))
-	mux.HandleFunc("PATCH /status-template-items/{id}", chain(s.handleUpdateTemplateItem, s.authMiddleware))
-	mux.HandleFunc("DELETE /status-template-items/{id}", chain(s.handleDeleteTemplateItem, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/timelines", chain(s.handleListTimelines, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/timelines", chain(s.handleCreateTimeline, s.authMiddleware))
-	// GET /timelines/share/{token} must be registered before GET /timelines/{id} so
-	// the more-specific literal "share" segment takes precedence.
-	mux.HandleFunc("GET /timelines/share/{token}", s.handleGetTimelineByShareToken)
-	mux.HandleFunc("GET /timelines/{id}", chain(s.handleGetTimeline, s.authMiddleware))
-	// Timeline statuses are placed under /teams/{id}/timelines/{timelineId}/statuses
-	// rather than /timelines/{id}/statuses to avoid a Go 1.22 mux pattern conflict
-	// with GET /timelines/share/{token} (both are 3-segment paths and conflict on
-	// paths like /timelines/share/statuses).
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleListTimelineStatuses, s.authMiddleware))
-	mux.HandleFunc("POST /timelines/{id}/archive", chain(s.handleArchiveTimeline, s.authMiddleware))
-	mux.HandleFunc("POST /timelines/{id}/unarchive", chain(s.handleUnarchiveTimeline, s.authMiddleware))
-
-	mux.HandleFunc("PATCH /timelines/{id}", chain(s.handleUpdateTimeline, s.authMiddleware))
-	mux.HandleFunc("DELETE /timelines/{id}", chain(s.handleDeleteTimeline, s.authMiddleware))
-	// Access list routes use the team-scoped prefix to avoid a Go 1.22 mux
-	// conflict with GET /timelines/share/{token} on 3-segment GET paths.
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/access", chain(s.handleListTimelineAccess, s.authMiddleware))
-	mux.HandleFunc("PUT /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleGrantTimelineAccess, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleRevokeTimelineAccess, s.authMiddleware))
-	// Timeline status CRUD — POST shares the team-scoped prefix with GET statuses.
-	// PATCH and DELETE use a flat /statuses/{id} prefix (2 segments, no conflict).
-	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleCreateTimelineStatus, s.authMiddleware))
-	mux.HandleFunc("PATCH /statuses/{id}", chain(s.handleUpdateStatus, s.authMiddleware))
-	mux.HandleFunc("DELETE /statuses/{id}", chain(s.handleDeleteStatus, s.authMiddleware))
-
-	// Share routes.
-	// GET /shares/{token} is public — no auth. The token is the credential.
-	// POST /timelines/{id}/shares uses the same /timelines/{id}/... prefix
-	// as archive/unarchive so it avoids the Go 1.22 mux pattern conflict with
-	// GET /timelines/share/{token} (only GET-method paths conflict).
-	// GET /teams/{id}/timelines/{timelineId}/shares uses the team-scoped prefix
-	// to avoid the GET conflict described above.
-	mux.HandleFunc("GET /shares/{token}", s.handleGetShareProjection)
-	mux.HandleFunc("POST /shares/{token}/unlock", s.handleUnlockShare)
-	mux.HandleFunc("POST /timelines/{id}/shares", chain(s.handleCreateShare, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/shares", chain(s.handleListShares, s.authMiddleware))
-	mux.HandleFunc("PATCH /shares/{id}", chain(s.handleUpdateShare, s.authMiddleware))
-	mux.HandleFunc("DELETE /shares/{id}", chain(s.handleDeleteShare, s.authMiddleware))
-
-	// GET /ws is intentionally outside authMiddleware — ServeWS validates the
-	// JWT itself before upgrading, because WebSocket clients can't set headers.
-	mux.HandleFunc("GET /ws", s.hub.ServeWS)
-
-	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-	})
-
-	if s.uiFS != nil {
-		mux.Handle("GET /", spaHandler(s.uiFS))
-	}
-
-	ctx := &tier.ModuleContext{Mux: mux, Tier: s.tier}
-	for _, m := range tier.Registered() {
-		if err := m.Register(ctx); err != nil {
-			// Module registration is a startup invariant — a failure here is a programming error.
-			panic(fmt.Sprintf("tier module %q failed to register: %v", m.Name(), err))
-		}
-	}
-
-	return requestLogger(mux)
-}
-
-// chain applies a single middleware to a handler function.
-func chain(h http.HandlerFunc, m func(http.Handler) http.Handler) http.HandlerFunc {
-	return m(h).ServeHTTP
-}
-
-// spaHandler serves the embedded React SPA. Known static assets are served
-// directly; any unrecognised path falls back to index.html so React Router
-// handles client-side navigation.
-func spaHandler(uiFS fs.FS) http.Handler {
-	fserver := http.FileServer(http.FS(uiFS))
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		path := strings.TrimPrefix(r.URL.Path, "/")
-		if path == "" {
-			path = "index.html"
-		}
-		if _, err := uiFS.Open(path); err != nil {
-			// Unknown path — serve index.html and let React Router handle it.
-			r = r.Clone(r.Context())
-			r.URL.Path = "/"
-			fserver.ServeHTTP(w, r)
-			return
-		}
-		fserver.ServeHTTP(w, r)
-	})
-}
 ````
 
 ## File: packages/web/src/components/gantt/GanttGrid.tsx
@@ -58675,6 +58675,907 @@ export default function GanttView({
 }
 ````
 
+## File: packages/web/src/pages/DashboardPage.tsx
+````typescript
+/**
+ * Main application shell: sidebar + top bar + content area.
+ *
+ * Fetches the authenticated user's first team and first timeline to seed the
+ * initial view. Team-selection UI and full sidebar wiring come in a later phase.
+ */
+
+import { useState, useRef, useEffect, useCallback } from 'react'
+import Sidebar from '@/components/layout/Sidebar'
+import TopBar, { type ViewMode } from '@/components/layout/TopBar'
+import GanttView from '@/components/gantt/GanttView'
+import { DEFAULT_LABEL_COL_W } from '@/components/gantt/GanttGrid'
+import GanttToolbar, { type GroupBy, type SortBy, type TimeGranularity, type ColorBy } from '@/components/gantt/GanttToolbar'
+import ListToolbar, { type ListGroupBy, type ListSortBy, type ListColorBy, type ListDensity, type ColumnConfig } from '@/components/list/ListToolbar'
+import ListView from '@/components/list/ListView'
+import CalendarToolbar, { type CalendarLayout } from '@/components/calendar/CalendarToolbar'
+import CalendarView from '@/components/calendar/CalendarView'
+import KanbanToolbar, { type KanbanGroupBy, type KanbanSortBy, type KanbanCardField } from '@/components/kanban/KanbanToolbar'
+import KanbanView from '@/components/kanban/KanbanView'
+import { DEFAULT_CARD_FIELDS } from '@/components/kanban/kanbanColumns'
+import ActivityDetailPanel from '@/components/gantt/ActivityDetailPanel'
+import ActivityCreatePanel from '@/components/gantt/ActivityCreatePanel'
+import { FilterProvider, useFilter } from '@/contexts/FilterContext'
+import { FindProvider, useFind } from '@/contexts/FindContext'
+import { useAuth } from '@/contexts/AuthContext'
+import { useDarkMode } from '@/hooks/useDarkMode'
+import { usePreferences, usePreferenceMap, useUpsertPreference } from '@/hooks/usePreferences'
+import { Settings, Moon, Sun, LogOut } from 'lucide-react'
+import { Badge } from '@/components/identity/Badge'
+import type { Identity } from '@/components/identity/identity-constants'
+import { useMyTeams, useTeamTimelines, useTeamTimelinesWithArchived, useTeamActivitySync, useUnarchiveTeam, useUnarchiveTimeline, useTeamMembers } from '@/hooks/useTeamActivities'
+import { useTimelineStatuses } from '@/hooks/useStatusTemplates'
+import { useSavedFilters } from '@/hooks/useSavedFilters'
+import { useTags } from '@/hooks/useTags'
+import TeamModal from '@/components/TeamModal'
+import MemberModal from '@/components/MemberModal'
+import TimelineModal from '@/components/TimelineModal'
+import FilterManageModal from '@/components/filters/FilterManageModal'
+import ShareModal from '@/components/ShareModal'
+import { useNavigate } from 'react-router-dom'
+import type { components } from '@draba/shared'
+import type { Member } from '@/types'
+
+type ApiActivity = components['schemas']['Activity']
+type ApiTeam = components['schemas']['Team']
+type ApiTimeline = components['schemas']['Timeline']
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
+
+const DROPDOWN_BTN: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 8,
+  width: '100%',
+  padding: '10px 14px',
+  background: 'none',
+  border: 'none',
+  fontSize: 13,
+  color: 'var(--foreground)',
+  cursor: 'pointer',
+  fontFamily: 'var(--font-sans)',
+  textAlign: 'left',
+}
+
+function DashboardShell() {
+  const { logout, accessToken, user } = useAuth()
+  const { activeFilter, setActiveFilter } = useFilter()
+  const navigate = useNavigate()
+  const { isDark, toggle: toggleDark, theme } = useDarkMode()
+  const { setFindBarOpen } = useFind()
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [view, setView] = useState<ViewMode>('gantt')
+  // Gantt label-column width — held here so it survives switching to another
+  // view and back (GanttView unmounts on view change, which would reset it).
+  const [ganttLabelColW, setGanttLabelColW] = useState(DEFAULT_LABEL_COL_W)
+  // Close the detail sidebar when switching to list view (edits are inline there)
+  const prevView = useRef<ViewMode>('gantt')
+  const [profileOpen, setProfileOpen] = useState(false)
+  const [selectedActivityId, setSelectedActivityId] = useState<string | null>(null)
+  const [selectedApiActivity, setSelectedApiActivity] = useState<ApiActivity | null>(null)
+  const [ganttMembers, setGanttMembers] = useState<Member[]>([])
+  const [createDefaults, setCreateDefaults] = useState<{ start: string; end: string; memberId: string | null; statusId?: string | null } | null>(null)
+  const [filterModalOpen, setFilterModalOpen] = useState(false)
+  const [shareModalOpen, setShareModalOpen] = useState(false)
+  const [liveDragDates, setLiveDragDates] = useState<{ activityId: string; start: string; end: string } | null>(null)
+  // Gantt toolbar state
+  const [groupBy, setGroupBy] = useState<GroupBy>('none')
+  const [sortBy, setSortBy] = useState<SortBy>('startDate')
+  const [granularity, setGranularity] = useState<TimeGranularity | 'auto'>('auto')
+  const [colorBy, setColorBy] = useState<ColorBy>('activity')
+  // List toolbar state
+  const [listGroupBy, setListGroupBy] = useState<ListGroupBy>('none')
+  const [listSortBy, setListSortBy] = useState<ListSortBy>('startDate')
+  const [listColorBy, setListColorBy] = useState<ListColorBy>('activity')
+  const [listDensity, setListDensity] = useState<ListDensity>('comfortable')
+  const [listColumns, setListColumns] = useState<ColumnConfig[]>([])
+  // Incremented seq lets ListView know a new toggle has arrived
+  const [listColToggle, setListColToggle] = useState<{ colId: string; visible: boolean; seq: number } | null>(null)
+  const listColToggleSeq = useRef(0)
+  // Calendar toolbar state
+  const [calendarLayout, setCalendarLayout] = useState<CalendarLayout>('month')
+  // anchorDate = UTC midnight of the 1st of the displayed month (month) or weekStart (week).
+  const [calendarAnchorDate, setCalendarAnchorDate] = useState<Date>(() => {
+    const d = new Date()
+    d.setUTCHours(0, 0, 0, 0)
+    d.setUTCDate(1)
+    return d
+  })
+  // Kanban toolbar state
+  const [kanbanGroupBy, setKanbanGroupBy] = useState<KanbanGroupBy>('status')
+  const [kanbanSortBy, setKanbanSortBy] = useState<KanbanSortBy>('startDate')
+  const [kanbanColorBy, setKanbanColorBy] = useState<ColorBy>('activity')
+  const [kanbanCardFields, setKanbanCardFields] = useState<KanbanCardField[]>(DEFAULT_CARD_FIELDS)
+  const [kanbanCollapsedColumns, setKanbanCollapsedColumns] = useState<string[]>([])
+  const [kanbanShowHierarchy, setKanbanShowHierarchy] = useState(false)
+  // Incremented to trigger inline row creation in list view
+  const [listNewRowSeq, setListNewRowSeq] = useState(0)
+  const profileRef = useRef<HTMLDivElement>(null)
+  // Preference persistence
+  const upsert = useUpsertPreference()
+  // Track whether we've applied server prefs for the active timeline so we
+  // don't immediately write defaults back before the server data arrives.
+  const prefsAppliedForTimeline = useRef<string | null>(null)
+  // One-shot guard: init activeTimelineId from global prefs only on first load.
+  const timelineIdInitialized = useRef(false)
+
+
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (profileRef.current && !profileRef.current.contains(e.target as Node)) {
+        setProfileOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [])
+
+  // Close the detail sidebar when switching to list view (list edits are inline).
+  useEffect(() => {
+    if (view === 'list' && prevView.current !== 'list') {
+      setSelectedActivityId(null)
+      setSelectedApiActivity(null)
+      setCreateDefaults(null)
+    }
+    prevView.current = view
+  }, [view])
+
+  // Ctrl/Cmd+F opens the Find bar; browser default (page search) is suppressed.
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
+        e.preventDefault()
+        setFindBarOpen(true)
+      }
+    }
+    document.addEventListener('keydown', handleKeyDown)
+    return () => document.removeEventListener('keydown', handleKeyDown)
+  }, [setFindBarOpen])
+
+  const displayName = (user as { displayName?: string } | null)?.displayName ?? 'User'
+  const email = (user as { email?: string } | null)?.email ?? ''
+  const userIdentity: Identity = {
+    color: (user as { color?: string } | null)?.color ?? '#288C9B',
+    icon: (user as { icon?: string } | null)?.icon ?? '__name_2__',
+  }
+
+  // Global preferences — restored on login to seed team/timeline selection.
+  const { isSuccess: globalPrefsSettled } = usePreferences()
+  const globalPrefMap = usePreferenceMap()
+  const weekStartDay: 0 | 1 = (globalPrefMap['week_start'] as string | undefined) === 'sunday' ? 0 : 1
+
+  // Team modal state
+  const [teamModalMode, setTeamModalMode] = useState<'new' | 'edit' | null>(null)
+  const [editingTeam, setEditingTeam] = useState<ApiTeam | null>(null)
+  const unarchiveTeam = useUnarchiveTeam()
+
+  // Member modal state
+  const [editingMember, setEditingMember] = useState<TeamMemberWithUser | null>(null)
+
+  // Timeline modal state
+  const [timelineModalMode, setTimelineModalMode] = useState<'new' | 'edit' | null>(null)
+  const [editingTimeline, setEditingTimeline] = useState<ApiTimeline | null>(null)
+
+  // Fetch all teams including archived for the sidebar's archived section.
+  const { data: allTeams = [] } = useMyTeams(true)
+  const activeTeams = allTeams.filter(t => !t.archivedAt)
+  const archivedTeams = allTeams.filter(t => Boolean(t.archivedAt))
+
+  // Explicit team selection state — null until the global pref is applied so
+  // that timelines (and the timeline init effect) don't fire against the wrong
+  // fallback team before the saved team pref resolves.
+  const [activeTeamId, setActiveTeamId] = useState<string | null>(null)
+  const teamIdInitialized = useRef(false)
+  useEffect(() => {
+    if (!activeTeams.length || !globalPrefsSettled || teamIdInitialized.current) return
+    teamIdInitialized.current = true
+    const saved = typeof globalPrefMap['selected_team'] === 'string' ? globalPrefMap['selected_team'] : null
+    const exists = saved && activeTeams.some(t => t.id === saved)
+    setActiveTeamId(exists ? saved : activeTeams[0].id)
+  }, [activeTeams, globalPrefsSettled, globalPrefMap])
+
+  // Only derive an active team once the pref has been applied (activeTeamId !== null).
+  // The activeTeams[0] fallback here handles the edge case where the saved team
+  // was archived or deleted between sessions.
+  const activeTeam = activeTeamId !== null
+    ? (activeTeams.find(t => t.id === activeTeamId) ?? activeTeams[0] ?? undefined)
+    : undefined
+  const teamId = activeTeam?.id ?? ''
+
+  // Check whether the current user is an admin of the active team.
+  const { data: teamMembers = [] } = useTeamMembers(teamId)
+  const userId = (user as { id?: string } | null)?.id ?? ''
+  const isSuperadmin = Boolean((user as { isSuperadmin?: boolean } | null)?.isSuperadmin)
+  const canEditTeam = isSuperadmin || teamMembers.some(m => m.userId === userId && m.role === 'admin')
+
+  const handleSelectTeam = useCallback((id: string) => {
+    setActiveTeamId(id)
+    // Clear the stale timeline selection so the init effect re-fires with the
+    // new team's timeline list. Without this, the old timeline ID leaks into
+    // the new team's API requests and produces 404s.
+    setActiveTimelineId(undefined)
+    prefsAppliedForTimeline.current = null
+    timelineIdInitialized.current = false
+  }, [])
+
+  const unarchiveTimeline = useUnarchiveTimeline(teamId)
+
+  const { data: timelines = [] } = useTeamTimelines(teamId)
+  const { data: allTimelines = [] } = useTeamTimelinesWithArchived(teamId)
+  const archivedTimelines = allTimelines.filter(t => Boolean(t.archivedAt))
+  const [activeTimelineId, setActiveTimelineId] = useState<string | undefined>()
+  const { data: activeTimelineStatuses = [] } = useTimelineStatuses(teamId, activeTimelineId ?? '')
+  const { data: savedFilters = [] } = useSavedFilters(teamId)
+  const { data: tags = [] } = useTags(teamId)
+  // Initialize activeTimelineId from the saved global pref (selected_timeline),
+  // falling back to timelines[0] when no pref is stored or the saved timeline
+  // is no longer in the list. Waits for global prefs to settle so we don't
+  // immediately overwrite a restored value with the fallback.
+  useEffect(() => {
+    if (timelines.length === 0 || !globalPrefsSettled || timelineIdInitialized.current) return
+    timelineIdInitialized.current = true
+    const saved = typeof globalPrefMap['selected_timeline'] === 'string' ? globalPrefMap['selected_timeline'] : null
+    const exists = saved && timelines.some(t => t.id === saved)
+    setActiveTimelineId(exists ? saved : timelines[0].id)
+  }, [timelines, globalPrefsSettled, globalPrefMap])
+  const activeTimeline = timelines.find(t => t.id === activeTimelineId) ?? timelines[0]
+  // Derived so they stay in sync after edits without needing separate state.
+  const activeTimelineColor = activeTimeline?.color ?? '#1A97A2'
+  const activeTimelineName = activeTimeline?.name ?? ''
+  const activeTimelineIdentity: Identity = {
+    color: activeTimeline?.color ?? '#288C9B',
+    icon: activeTimeline?.icon ?? '__none__',
+  }
+
+  // Close the activity detail panel whenever the active filter changes so the
+  // filtered view is unobstructed by a stale selection.
+  useEffect(() => {
+    setSelectedActivityId(null)
+    setSelectedApiActivity(null)
+  }, [activeFilter]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handleTimelineChange = useCallback((id: string) => {
+    prefsAppliedForTimeline.current = null
+    setActiveTimelineId(id)
+    setActiveFilter({ kind: 'preset', id: 'all' })
+  }, [setActiveFilter])
+
+  // Calendar navigation helpers.
+  const calendarPrev = useCallback(() => {
+    setCalendarAnchorDate(prev => {
+      const d = new Date(prev)
+      if (calendarLayout === 'month') {
+        d.setUTCMonth(d.getUTCMonth() - 1)
+      } else {
+        d.setUTCDate(d.getUTCDate() - 7)
+      }
+      return d
+    })
+  }, [calendarLayout])
+
+  const calendarNext = useCallback(() => {
+    setCalendarAnchorDate(prev => {
+      const d = new Date(prev)
+      if (calendarLayout === 'month') {
+        d.setUTCMonth(d.getUTCMonth() + 1)
+      } else {
+        d.setUTCDate(d.getUTCDate() + 7)
+      }
+      return d
+    })
+  }, [calendarLayout])
+
+  const calendarToday = useCallback(() => {
+    const d = new Date()
+    d.setUTCHours(0, 0, 0, 0)
+    if (calendarLayout === 'month') {
+      d.setUTCDate(1)
+    } else {
+      // Snap to weekStart.
+      const dow = d.getUTCDay()
+      const daysBack = weekStartDay === 1 ? (dow === 0 ? 6 : dow - 1) : dow
+      d.setUTCDate(d.getUTCDate() - daysBack)
+    }
+    setCalendarAnchorDate(d)
+  }, [calendarLayout, weekStartDay])
+
+  // Switching layouts also snaps the anchor date to the correct boundary so
+  // the week-view always starts on the configured weekStart day.
+  const handleCalendarLayoutChange = useCallback((l: CalendarLayout) => {
+    setCalendarLayout(l)
+    setCalendarAnchorDate(prev => {
+      const d = new Date(prev)
+      d.setUTCHours(0, 0, 0, 0)
+      if (l === 'week') {
+        const dow = d.getUTCDay()
+        const daysBack = weekStartDay === 1 ? (dow === 0 ? 6 : dow - 1) : dow
+        d.setUTCDate(d.getUTCDate() - daysBack)
+      } else {
+        d.setUTCDate(1)
+      }
+      return d
+    })
+  }, [weekStartDay])
+
+  useTeamActivitySync(teamId, accessToken)
+
+  // Per-timeline preferences: restore toolbar state when the active timeline changes.
+  // isSuccess gate ensures we don't mark prefs applied before the query resolves.
+  const { isSuccess: prefsSettled } = usePreferences(activeTimelineId)
+  const timelinePrefs = usePreferenceMap(activeTimelineId)
+  useEffect(() => {
+    if (!activeTimelineId || !prefsSettled) return
+    if (prefsAppliedForTimeline.current === activeTimelineId) return
+    prefsAppliedForTimeline.current = activeTimelineId
+
+    if (typeof timelinePrefs['group_by'] === 'string') setGroupBy(timelinePrefs['group_by'] as GroupBy)
+    if (typeof timelinePrefs['sort_by'] === 'string') setSortBy(timelinePrefs['sort_by'] as SortBy)
+    if (typeof timelinePrefs['zoom_granularity'] === 'string') setGranularity(timelinePrefs['zoom_granularity'] as TimeGranularity | 'auto')
+    if (typeof timelinePrefs['color_by'] === 'string') setColorBy(timelinePrefs['color_by'] as ColorBy)
+    if (typeof timelinePrefs['list_group_by'] === 'string') setListGroupBy(timelinePrefs['list_group_by'] as ListGroupBy)
+    if (typeof timelinePrefs['list_sort_by'] === 'string') setListSortBy(timelinePrefs['list_sort_by'] as ListSortBy)
+    if (typeof timelinePrefs['list_color_by'] === 'string') setListColorBy(timelinePrefs['list_color_by'] as ListColorBy)
+    if (typeof timelinePrefs['list_density'] === 'string') setListDensity(timelinePrefs['list_density'] as ListDensity)
+    if (typeof timelinePrefs['view_mode'] === 'string') setView(timelinePrefs['view_mode'] as ViewMode)
+    if (typeof timelinePrefs['kanban_group_by'] === 'string') setKanbanGroupBy(timelinePrefs['kanban_group_by'] as KanbanGroupBy)
+    if (typeof timelinePrefs['kanban_sort_by'] === 'string') setKanbanSortBy(timelinePrefs['kanban_sort_by'] as KanbanSortBy)
+    if (typeof timelinePrefs['kanban_color_by'] === 'string') setKanbanColorBy(timelinePrefs['kanban_color_by'] as ColorBy)
+    if (typeof timelinePrefs['kanban_card_fields'] === 'string') {
+      try { setKanbanCardFields(JSON.parse(timelinePrefs['kanban_card_fields']) as KanbanCardField[]) } catch { /* ignore */ }
+    }
+    if (typeof timelinePrefs['kanban_collapsed'] === 'string') {
+      try { setKanbanCollapsedColumns(JSON.parse(timelinePrefs['kanban_collapsed']) as string[]) } catch { /* ignore */ }
+    }
+    if (typeof timelinePrefs['kanban_show_hierarchy'] === 'string') {
+      try { setKanbanShowHierarchy(JSON.parse(timelinePrefs['kanban_show_hierarchy']) as boolean) } catch { /* ignore */ }
+    }
+  }, [activeTimelineId, prefsSettled, timelinePrefs])
+
+  // Save toolbar state changes to per-timeline prefs.
+  const saveTimelinePref = useCallback((key: string, value: string) => {
+    if (!activeTimelineId) return
+    upsert.mutate({ key, value: JSON.stringify(value), timelineId: activeTimelineId })
+  }, [activeTimelineId, upsert.mutate]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('group_by', groupBy)
+  }, [groupBy, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('sort_by', sortBy)
+  }, [sortBy, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('zoom_granularity', granularity)
+  }, [granularity, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('color_by', colorBy)
+  }, [colorBy, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('view_mode', view)
+  }, [view, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('list_group_by', listGroupBy)
+  }, [listGroupBy, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('list_sort_by', listSortBy)
+  }, [listSortBy, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('list_color_by', listColorBy)
+  }, [listColorBy, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('list_density', listDensity)
+  }, [listDensity, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('kanban_group_by', kanbanGroupBy)
+  }, [kanbanGroupBy, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('kanban_sort_by', kanbanSortBy)
+  }, [kanbanSortBy, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('kanban_color_by', kanbanColorBy)
+  }, [kanbanColorBy, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('kanban_card_fields', JSON.stringify(kanbanCardFields))
+  }, [kanbanCardFields, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('kanban_show_hierarchy', JSON.stringify(kanbanShowHierarchy))
+  }, [kanbanShowHierarchy, saveTimelinePref])
+
+  // Global preferences: persist dark mode, active team, and active timeline.
+  useEffect(() => {
+    upsert.mutate({ key: 'theme', value: JSON.stringify(theme) })
+  }, [theme]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!teamId) return
+    upsert.mutate({ key: 'selected_team', value: JSON.stringify(teamId) })
+  }, [teamId]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!activeTimelineId) return
+    upsert.mutate({ key: 'selected_timeline', value: JSON.stringify(activeTimelineId) })
+  }, [activeTimelineId]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Reset label column width when the user switches timelines so each timeline
+  // starts fresh. Switching between views on the same timeline preserves width
+  // because the state lives here rather than inside the unmounting GanttView.
+  useEffect(() => {
+    setGanttLabelColW(DEFAULT_LABEL_COL_W)
+  }, [activeTimelineId])
+
+  return (
+    <div style={{ display: 'flex', height: '100vh', overflow: 'hidden', background: 'var(--background)' }}>
+      <Sidebar
+        collapsed={sidebarCollapsed}
+        onToggle={() => setSidebarCollapsed(c => !c)}
+        apiTimelines={timelines}
+        archivedTimelines={archivedTimelines}
+        activeTimelineId={activeTimelineId}
+        onActiveTimelineChange={handleTimelineChange}
+        onNewTimeline={() => { setEditingTimeline(null); setTimelineModalMode('new') }}
+        onEditTimeline={id => {
+          // timelines (active) is always loaded; allTimelines (?archived=true) may
+          // still be in-flight, so prefer the already-loaded list to avoid opening
+          // the modal with an undefined timeline and blank fields.
+          const tl = timelines.find(t => t.id === id) ?? allTimelines.find(t => t.id === id)
+          setEditingTimeline(tl ?? null)
+          setTimelineModalMode('edit')
+        }}
+        onNewActivity={() => {
+          const today = new Date().toISOString().slice(0, 10)
+          setSelectedActivityId(null)
+          setSelectedApiActivity(null)
+          if (view === 'list') {
+            setListNewRowSeq(s => s + 1)
+          } else {
+            setCreateDefaults({ start: today, end: today, memberId: null })
+          }
+        }}
+        activeTeam={activeTeam}
+        activeTeams={activeTeams}
+        archivedTeams={archivedTeams}
+        canEditTeam={canEditTeam}
+        onSelectTeam={handleSelectTeam}
+        onNewTeam={isSuperadmin ? () => { setEditingTeam(null); setTeamModalMode('new'); } : undefined}
+        onEditTeam={t => { setEditingTeam(t as ApiTeam); setTeamModalMode('edit'); }}
+        onUnarchiveTeam={id => unarchiveTeam.mutate(id)}
+        members={teamMembers.length > 0 ? teamMembers : undefined}
+        onEditMember={isSuperadmin ? m => setEditingMember(m) : undefined}
+      />
+
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0 }}>
+        <TopBar
+          view={view}
+          teamId={teamId}
+          timelineName={activeTimelineName}
+          timelineIdentity={activeTimelineIdentity}
+          onViewChange={setView}
+          onOpenFilterManager={() => setFilterModalOpen(true)}
+          rightSlot={
+            <div ref={profileRef} style={{ position: 'relative', marginLeft: 4, zIndex: 30 }}>
+              <button
+                onClick={() => setProfileOpen(o => !o)}
+                style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', display: 'flex' }}
+                title={displayName}
+              >
+                <Badge identity={userIdentity} name={displayName} shape="circle" size={28} />
+              </button>
+
+              {profileOpen && (
+                <div
+                  style={{
+                    position: 'absolute',
+                    top: 'calc(100% + 8px)',
+                    right: 0,
+                    width: 220,
+                    background: 'var(--card)',
+                    border: '1px solid var(--border)',
+                    borderRadius: 8,
+                    boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
+                    zIndex: 100,
+                    overflow: 'hidden',
+                  }}
+                >
+                  <div style={{ padding: '12px 14px', borderBottom: '1px solid var(--border)' }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)' }}>{displayName}</div>
+                    <div style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 2 }}>{email}</div>
+                  </div>
+                  <button
+                    onClick={toggleDark}
+                    style={{ ...DROPDOWN_BTN, borderBottom: '1px solid var(--border)' }}
+                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                  >
+                    {isDark ? <Moon size={14} strokeWidth={1.8} /> : <Sun size={14} strokeWidth={1.8} />}
+                    {isDark ? 'Dark mode' : 'Light mode'}
+                  </button>
+                  <button
+                    onClick={() => { setProfileOpen(false); navigate('/settings'); }}
+                    style={{ ...DROPDOWN_BTN, borderBottom: '1px solid var(--border)' }}
+                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                  >
+                    <Settings size={14} strokeWidth={1.8} />
+                    Settings
+                  </button>
+                  <button
+                    onClick={logout}
+                    style={{ ...DROPDOWN_BTN, color: 'var(--muted-foreground)' }}
+                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                  >
+                    <LogOut size={14} strokeWidth={1.8} />
+                    Sign out
+                  </button>
+                </div>
+              )}
+            </div>
+          }
+        />
+
+        {/* Active timeline color band */}
+        <div style={{ height: 3, background: activeTimelineColor, flexShrink: 0, transition: 'background 0.2s ease' }} />
+
+        {/* Gantt sub-toolbar — only shown in Gantt view */}
+        {view === 'gantt' && (
+          <GanttToolbar
+            groupBy={groupBy}
+            onGroupByChange={setGroupBy}
+            sortBy={sortBy}
+            onSortByChange={setSortBy}
+            granularity={granularity}
+            onGranularityChange={setGranularity}
+            colorBy={colorBy}
+            onColorByChange={setColorBy}
+            onExport={() => {}}
+            onShare={() => setShareModalOpen(true)}
+          />
+        )}
+
+        {/* List sub-toolbar — only shown in List view */}
+        {view === 'list' && (
+          <ListToolbar
+            columns={listColumns}
+            onColumnVisibilityChange={(colId, visible) => {
+              listColToggleSeq.current += 1
+              setListColToggle({ colId, visible, seq: listColToggleSeq.current })
+              setListColumns(prev => prev.map(c => c.id === colId ? { ...c, visible } : c))
+            }}
+            density={listDensity}
+            onDensityChange={setListDensity}
+            groupBy={listGroupBy}
+            onGroupByChange={setListGroupBy}
+            sortBy={listSortBy}
+            onSortByChange={setListSortBy}
+            colorBy={listColorBy}
+            onColorByChange={setListColorBy}
+            onExport={() => {}}
+            onShare={() => {}}
+          />
+        )}
+
+        {/* Calendar sub-toolbar — only shown in Calendar view */}
+        {view === 'calendar' && (
+          <CalendarToolbar
+            layout={calendarLayout}
+            onLayoutChange={handleCalendarLayoutChange}
+            anchorDate={calendarAnchorDate}
+            onPrev={calendarPrev}
+            onNext={calendarNext}
+            onToday={calendarToday}
+            colorBy={colorBy}
+            onColorByChange={setColorBy}
+            onExport={() => {}}
+            onShare={() => {}}
+          />
+        )}
+
+        {/* Kanban sub-toolbar — only shown in Kanban view */}
+        {view === 'kanban' && (
+          <KanbanToolbar
+            groupBy={kanbanGroupBy}
+            onGroupByChange={setKanbanGroupBy}
+            sortBy={kanbanSortBy}
+            onSortByChange={setKanbanSortBy}
+            colorBy={kanbanColorBy}
+            onColorByChange={setKanbanColorBy}
+            cardFields={kanbanCardFields}
+            onCardFieldsChange={setKanbanCardFields}
+            showHierarchy={kanbanShowHierarchy}
+            onShowHierarchyChange={setKanbanShowHierarchy}
+            onExport={() => {}}
+            onShare={() => {}}
+          />
+        )}
+
+        {/* Content area */}
+        <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+          {view === 'gantt' && teamId && activeTimelineId ? (
+            <GanttView
+              teamId={teamId}
+              timelineId={activeTimelineId}
+              startDate={activeTimeline?.startDate}
+              endDate={activeTimeline?.endDate}
+              groupBy={groupBy}
+              sortBy={sortBy}
+              granularity={granularity}
+              colorBy={colorBy}
+              timelineStatuses={activeTimelineStatuses}
+              savedFilters={savedFilters}
+              tags={tags}
+              selectedActivityId={selectedActivityId}
+              onSelectActivity={(id) => {
+                setSelectedActivityId(id)
+                if (!id) { setSelectedApiActivity(null); setCreateDefaults(null) }
+              }}
+              onSelectApiActivity={(activity) => {
+                setSelectedApiActivity(activity)
+                setCreateDefaults(null)
+              }}
+              onBarDragProgress={(activityId, newStart, newEnd) => {
+                setLiveDragDates({
+                  activityId,
+                  start: newStart.toISOString().slice(0, 10),
+                  end: newEnd.toISOString().slice(0, 10),
+                })
+              }}
+              onBarDragEnd={() => setLiveDragDates(null)}
+              onMembersLoaded={setGanttMembers}
+              labelColW={ganttLabelColW}
+              onLabelColWChange={setGanttLabelColW}
+            />
+          ) : view === 'gantt' && (!teamId || !activeTimelineId) ? (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>Loading your team…</p>
+            </div>
+          ) : view === 'list' && teamId && activeTimelineId ? (
+            <ListView
+              teamId={teamId}
+              timelineId={activeTimelineId}
+              groupBy={listGroupBy}
+              sortBy={listSortBy}
+              colorBy={listColorBy}
+              density={listDensity}
+              timelineStatuses={activeTimelineStatuses}
+              savedFilters={savedFilters}
+              tags={tags}
+              selectedActivityId={selectedActivityId}
+              pendingColumnToggle={listColToggle}
+              onSelectActivity={(id) => {
+                setSelectedActivityId(id)
+                if (!id) { setSelectedApiActivity(null); setCreateDefaults(null) }
+              }}
+              onSelectApiActivity={(activity) => {
+                setSelectedApiActivity(activity)
+                setCreateDefaults(null)
+              }}
+              onMembersLoaded={setGanttMembers}
+              onColumnsChange={setListColumns}
+              triggerNewRow={listNewRowSeq}
+            />
+          ) : view === 'list' && (!teamId || !activeTimelineId) ? (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>Loading your team…</p>
+            </div>
+          ) : view === 'calendar' && teamId && activeTimelineId ? (
+            <CalendarView
+              teamId={teamId}
+              timelineId={activeTimelineId}
+              layout={calendarLayout}
+              anchorDate={calendarAnchorDate}
+              colorBy={colorBy}
+              timelineStatuses={activeTimelineStatuses}
+              savedFilters={savedFilters}
+              tags={tags}
+              selectedActivityId={selectedActivityId}
+              onSelectActivity={(id) => {
+                setSelectedActivityId(id)
+                if (!id) { setSelectedApiActivity(null); setCreateDefaults(null) }
+              }}
+              onSelectApiActivity={(activity) => {
+                setSelectedApiActivity(activity)
+                setCreateDefaults(null)
+              }}
+              onBarDragProgress={(activityId, newStart, newEnd) => {
+                setLiveDragDates({
+                  activityId,
+                  start: newStart.toISOString().slice(0, 10),
+                  end: newEnd.toISOString().slice(0, 10),
+                })
+              }}
+              onBarDragEnd={() => setLiveDragDates(null)}
+              onCellClick={(date) => {
+                const iso = date.toISOString().slice(0, 10)
+                setSelectedActivityId(null)
+                setSelectedApiActivity(null)
+                setCreateDefaults({ start: iso, end: iso, memberId: null })
+              }}
+              onMembersLoaded={setGanttMembers}
+            />
+          ) : view === 'calendar' && (!teamId || !activeTimelineId) ? (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>Loading your team…</p>
+            </div>
+          ) : view === 'kanban' && teamId && activeTimelineId ? (
+            <KanbanView
+              teamId={teamId}
+              timelineId={activeTimelineId}
+              groupBy={kanbanGroupBy}
+              sortBy={kanbanSortBy}
+              colorBy={kanbanColorBy}
+              cardFields={kanbanCardFields}
+              collapsedColumnIds={kanbanCollapsedColumns}
+              onCollapsedColumnIdsChange={setKanbanCollapsedColumns}
+              showHierarchy={kanbanShowHierarchy}
+              timelineStatuses={activeTimelineStatuses}
+              savedFilters={savedFilters}
+              tags={tags}
+              selectedActivityId={selectedActivityId}
+              onSelectActivity={(id) => {
+                setSelectedActivityId(id)
+                if (!id) { setSelectedApiActivity(null); setCreateDefaults(null) }
+              }}
+              onSelectApiActivity={(activity) => {
+                setSelectedApiActivity(activity)
+                setCreateDefaults(null)
+              }}
+              onAddActivity={(defaults) => {
+                setSelectedActivityId(null)
+                setSelectedApiActivity(null)
+                setCreateDefaults(defaults)
+              }}
+              onMembersLoaded={setGanttMembers}
+            />
+          ) : view === 'kanban' && (!teamId || !activeTimelineId) ? (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>Loading your team…</p>
+            </div>
+          ) : (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>
+                {view.charAt(0).toUpperCase() + view.slice(1)} view coming soon.
+              </p>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Activity detail panel — slides in from right when an activity is selected */}
+      <ActivityDetailPanel
+        open={Boolean(selectedApiActivity)}
+        event={selectedApiActivity}
+        members={ganttMembers}
+        teamId={teamId}
+        timelineId={activeTimelineId ?? ''}
+        onClose={() => { setSelectedActivityId(null); setSelectedApiActivity(null); setLiveDragDates(null) }}
+        liveDragStart={liveDragDates && liveDragDates.activityId === selectedApiActivity?.id ? liveDragDates.start : undefined}
+        liveDragEnd={liveDragDates && liveDragDates.activityId === selectedApiActivity?.id ? liveDragDates.end : undefined}
+      />
+
+      {/* Activity create panel — slides in from New Activity button or future drag */}
+      <ActivityCreatePanel
+        open={Boolean(createDefaults) && !selectedApiActivity}
+        teamId={teamId}
+        timelineId={activeTimelineId ?? ''}
+        members={ganttMembers}
+        timelineStatuses={activeTimelineStatuses}
+        defaultStart={createDefaults?.start ?? new Date().toISOString().slice(0, 10)}
+        defaultEnd={createDefaults?.end ?? new Date().toISOString().slice(0, 10)}
+        defaultMemberId={createDefaults?.memberId}
+        defaultStatusId={createDefaults?.statusId}
+        onClose={() => setCreateDefaults(null)}
+      />
+
+      <FilterManageModal
+        open={filterModalOpen}
+        onClose={() => setFilterModalOpen(false)}
+        teamId={teamId}
+        timelineId={activeTimelineId ?? ''}
+        isAdmin={canEditTeam}
+      />
+
+      {/* Team modal — create or edit */}
+      {teamModalMode && (
+        <TeamModal
+          mode={teamModalMode}
+          team={editingTeam ?? undefined}
+          isAdmin={canEditTeam}
+          onClose={() => { setTeamModalMode(null); setEditingTeam(null); }}
+          onTeamCreated={created => setActiveTeamId(created.id)}
+        />
+      )}
+
+      {/* Member modal — edit a team member */}
+      {editingMember && (
+        <MemberModal
+          teamId={teamId}
+          memberId={editingMember.id}
+          isAdmin={canEditTeam}
+          isSuperadmin={isSuperadmin}
+          onClose={() => setEditingMember(null)}
+        />
+      )}
+
+      {/* Share modal — create a Gantt share link */}
+      {shareModalOpen && activeTimelineId && teamId && (
+        <ShareModal
+          teamId={teamId}
+          timelineId={activeTimelineId}
+          viewType="gantt"
+          timelineName={activeTimelineName}
+          viewConfig={{
+            groupBy,
+            sortBy,
+            colorBy,
+            granularity: String(granularity),
+            filter: activeFilter.kind === 'saved'
+              ? (() => {
+                  const sf = savedFilters.find(f => f.id === activeFilter.id)
+                  if (!sf) return null
+                  try { return JSON.parse(sf.definition) as import('@/lib/filterTypes').FilterDefinition } catch { return null }
+                })()
+              : null,
+          }}
+          onClose={() => setShareModalOpen(false)}
+        />
+      )}
+
+      {/* Timeline modal — create or edit */}
+      {timelineModalMode && (
+        <TimelineModal
+          mode={timelineModalMode}
+          teamId={teamId}
+          timeline={editingTimeline ?? undefined}
+          canAdmin={canEditTeam}
+          onClose={() => { setTimelineModalMode(null); setEditingTimeline(null) }}
+          onCreated={created => setActiveTimelineId(created.id)}
+          onUnarchive={id => unarchiveTimeline.mutate(id, { onSuccess: () => { setTimelineModalMode(null); setEditingTimeline(null) } })}
+        />
+      )}
+    </div>
+  )
+}
+
+export default function DashboardPage() {
+  return (
+    <FindProvider>
+      <FilterProvider>
+        <DashboardShell />
+      </FilterProvider>
+    </FindProvider>
+  )
+}
+````
+
 ## File: docs/TASKS.md
 ````markdown
 # Tasks
@@ -60019,907 +60920,6 @@ Includes both the webhook backend and the per-timeline connector sidebar UI (pre
 - Notifications (email, push)
 - Recurring event UI (RRULE editing)
 - Kanban drag-to-change-status (v2; v1 Kanban is read-only)
-````
-
-## File: packages/web/src/pages/DashboardPage.tsx
-````typescript
-/**
- * Main application shell: sidebar + top bar + content area.
- *
- * Fetches the authenticated user's first team and first timeline to seed the
- * initial view. Team-selection UI and full sidebar wiring come in a later phase.
- */
-
-import { useState, useRef, useEffect, useCallback } from 'react'
-import Sidebar from '@/components/layout/Sidebar'
-import TopBar, { type ViewMode } from '@/components/layout/TopBar'
-import GanttView from '@/components/gantt/GanttView'
-import { DEFAULT_LABEL_COL_W } from '@/components/gantt/GanttGrid'
-import GanttToolbar, { type GroupBy, type SortBy, type TimeGranularity, type ColorBy } from '@/components/gantt/GanttToolbar'
-import ListToolbar, { type ListGroupBy, type ListSortBy, type ListColorBy, type ListDensity, type ColumnConfig } from '@/components/list/ListToolbar'
-import ListView from '@/components/list/ListView'
-import CalendarToolbar, { type CalendarLayout } from '@/components/calendar/CalendarToolbar'
-import CalendarView from '@/components/calendar/CalendarView'
-import KanbanToolbar, { type KanbanGroupBy, type KanbanSortBy, type KanbanCardField } from '@/components/kanban/KanbanToolbar'
-import KanbanView from '@/components/kanban/KanbanView'
-import { DEFAULT_CARD_FIELDS } from '@/components/kanban/kanbanColumns'
-import ActivityDetailPanel from '@/components/gantt/ActivityDetailPanel'
-import ActivityCreatePanel from '@/components/gantt/ActivityCreatePanel'
-import { FilterProvider, useFilter } from '@/contexts/FilterContext'
-import { FindProvider, useFind } from '@/contexts/FindContext'
-import { useAuth } from '@/contexts/AuthContext'
-import { useDarkMode } from '@/hooks/useDarkMode'
-import { usePreferences, usePreferenceMap, useUpsertPreference } from '@/hooks/usePreferences'
-import { Settings, Moon, Sun, LogOut } from 'lucide-react'
-import { Badge } from '@/components/identity/Badge'
-import type { Identity } from '@/components/identity/identity-constants'
-import { useMyTeams, useTeamTimelines, useTeamTimelinesWithArchived, useTeamActivitySync, useUnarchiveTeam, useUnarchiveTimeline, useTeamMembers } from '@/hooks/useTeamActivities'
-import { useTimelineStatuses } from '@/hooks/useStatusTemplates'
-import { useSavedFilters } from '@/hooks/useSavedFilters'
-import { useTags } from '@/hooks/useTags'
-import TeamModal from '@/components/TeamModal'
-import MemberModal from '@/components/MemberModal'
-import TimelineModal from '@/components/TimelineModal'
-import FilterManageModal from '@/components/filters/FilterManageModal'
-import ShareModal from '@/components/ShareModal'
-import { useNavigate } from 'react-router-dom'
-import type { components } from '@draba/shared'
-import type { Member } from '@/types'
-
-type ApiActivity = components['schemas']['Activity']
-type ApiTeam = components['schemas']['Team']
-type ApiTimeline = components['schemas']['Timeline']
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
-
-const DROPDOWN_BTN: React.CSSProperties = {
-  display: 'flex',
-  alignItems: 'center',
-  gap: 8,
-  width: '100%',
-  padding: '10px 14px',
-  background: 'none',
-  border: 'none',
-  fontSize: 13,
-  color: 'var(--foreground)',
-  cursor: 'pointer',
-  fontFamily: 'var(--font-sans)',
-  textAlign: 'left',
-}
-
-function DashboardShell() {
-  const { logout, accessToken, user } = useAuth()
-  const { activeFilter, setActiveFilter } = useFilter()
-  const navigate = useNavigate()
-  const { isDark, toggle: toggleDark, theme } = useDarkMode()
-  const { setFindBarOpen } = useFind()
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
-  const [view, setView] = useState<ViewMode>('gantt')
-  // Gantt label-column width — held here so it survives switching to another
-  // view and back (GanttView unmounts on view change, which would reset it).
-  const [ganttLabelColW, setGanttLabelColW] = useState(DEFAULT_LABEL_COL_W)
-  // Close the detail sidebar when switching to list view (edits are inline there)
-  const prevView = useRef<ViewMode>('gantt')
-  const [profileOpen, setProfileOpen] = useState(false)
-  const [selectedActivityId, setSelectedActivityId] = useState<string | null>(null)
-  const [selectedApiActivity, setSelectedApiActivity] = useState<ApiActivity | null>(null)
-  const [ganttMembers, setGanttMembers] = useState<Member[]>([])
-  const [createDefaults, setCreateDefaults] = useState<{ start: string; end: string; memberId: string | null; statusId?: string | null } | null>(null)
-  const [filterModalOpen, setFilterModalOpen] = useState(false)
-  const [shareModalOpen, setShareModalOpen] = useState(false)
-  const [liveDragDates, setLiveDragDates] = useState<{ activityId: string; start: string; end: string } | null>(null)
-  // Gantt toolbar state
-  const [groupBy, setGroupBy] = useState<GroupBy>('none')
-  const [sortBy, setSortBy] = useState<SortBy>('startDate')
-  const [granularity, setGranularity] = useState<TimeGranularity | 'auto'>('auto')
-  const [colorBy, setColorBy] = useState<ColorBy>('activity')
-  // List toolbar state
-  const [listGroupBy, setListGroupBy] = useState<ListGroupBy>('none')
-  const [listSortBy, setListSortBy] = useState<ListSortBy>('startDate')
-  const [listColorBy, setListColorBy] = useState<ListColorBy>('activity')
-  const [listDensity, setListDensity] = useState<ListDensity>('comfortable')
-  const [listColumns, setListColumns] = useState<ColumnConfig[]>([])
-  // Incremented seq lets ListView know a new toggle has arrived
-  const [listColToggle, setListColToggle] = useState<{ colId: string; visible: boolean; seq: number } | null>(null)
-  const listColToggleSeq = useRef(0)
-  // Calendar toolbar state
-  const [calendarLayout, setCalendarLayout] = useState<CalendarLayout>('month')
-  // anchorDate = UTC midnight of the 1st of the displayed month (month) or weekStart (week).
-  const [calendarAnchorDate, setCalendarAnchorDate] = useState<Date>(() => {
-    const d = new Date()
-    d.setUTCHours(0, 0, 0, 0)
-    d.setUTCDate(1)
-    return d
-  })
-  // Kanban toolbar state
-  const [kanbanGroupBy, setKanbanGroupBy] = useState<KanbanGroupBy>('status')
-  const [kanbanSortBy, setKanbanSortBy] = useState<KanbanSortBy>('startDate')
-  const [kanbanColorBy, setKanbanColorBy] = useState<ColorBy>('activity')
-  const [kanbanCardFields, setKanbanCardFields] = useState<KanbanCardField[]>(DEFAULT_CARD_FIELDS)
-  const [kanbanCollapsedColumns, setKanbanCollapsedColumns] = useState<string[]>([])
-  const [kanbanShowHierarchy, setKanbanShowHierarchy] = useState(false)
-  // Incremented to trigger inline row creation in list view
-  const [listNewRowSeq, setListNewRowSeq] = useState(0)
-  const profileRef = useRef<HTMLDivElement>(null)
-  // Preference persistence
-  const upsert = useUpsertPreference()
-  // Track whether we've applied server prefs for the active timeline so we
-  // don't immediately write defaults back before the server data arrives.
-  const prefsAppliedForTimeline = useRef<string | null>(null)
-  // One-shot guard: init activeTimelineId from global prefs only on first load.
-  const timelineIdInitialized = useRef(false)
-
-
-  useEffect(() => {
-    function handleClickOutside(e: MouseEvent) {
-      if (profileRef.current && !profileRef.current.contains(e.target as Node)) {
-        setProfileOpen(false)
-      }
-    }
-    document.addEventListener('mousedown', handleClickOutside)
-    return () => document.removeEventListener('mousedown', handleClickOutside)
-  }, [])
-
-  // Close the detail sidebar when switching to list view (list edits are inline).
-  useEffect(() => {
-    if (view === 'list' && prevView.current !== 'list') {
-      setSelectedActivityId(null)
-      setSelectedApiActivity(null)
-      setCreateDefaults(null)
-    }
-    prevView.current = view
-  }, [view])
-
-  // Ctrl/Cmd+F opens the Find bar; browser default (page search) is suppressed.
-  useEffect(() => {
-    function handleKeyDown(e: KeyboardEvent) {
-      if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
-        e.preventDefault()
-        setFindBarOpen(true)
-      }
-    }
-    document.addEventListener('keydown', handleKeyDown)
-    return () => document.removeEventListener('keydown', handleKeyDown)
-  }, [setFindBarOpen])
-
-  const displayName = (user as { displayName?: string } | null)?.displayName ?? 'User'
-  const email = (user as { email?: string } | null)?.email ?? ''
-  const userIdentity: Identity = {
-    color: (user as { color?: string } | null)?.color ?? '#288C9B',
-    icon: (user as { icon?: string } | null)?.icon ?? '__name_2__',
-  }
-
-  // Global preferences — restored on login to seed team/timeline selection.
-  const { isSuccess: globalPrefsSettled } = usePreferences()
-  const globalPrefMap = usePreferenceMap()
-  const weekStartDay: 0 | 1 = (globalPrefMap['week_start'] as string | undefined) === 'sunday' ? 0 : 1
-
-  // Team modal state
-  const [teamModalMode, setTeamModalMode] = useState<'new' | 'edit' | null>(null)
-  const [editingTeam, setEditingTeam] = useState<ApiTeam | null>(null)
-  const unarchiveTeam = useUnarchiveTeam()
-
-  // Member modal state
-  const [editingMember, setEditingMember] = useState<TeamMemberWithUser | null>(null)
-
-  // Timeline modal state
-  const [timelineModalMode, setTimelineModalMode] = useState<'new' | 'edit' | null>(null)
-  const [editingTimeline, setEditingTimeline] = useState<ApiTimeline | null>(null)
-
-  // Fetch all teams including archived for the sidebar's archived section.
-  const { data: allTeams = [] } = useMyTeams(true)
-  const activeTeams = allTeams.filter(t => !t.archivedAt)
-  const archivedTeams = allTeams.filter(t => Boolean(t.archivedAt))
-
-  // Explicit team selection state — null until the global pref is applied so
-  // that timelines (and the timeline init effect) don't fire against the wrong
-  // fallback team before the saved team pref resolves.
-  const [activeTeamId, setActiveTeamId] = useState<string | null>(null)
-  const teamIdInitialized = useRef(false)
-  useEffect(() => {
-    if (!activeTeams.length || !globalPrefsSettled || teamIdInitialized.current) return
-    teamIdInitialized.current = true
-    const saved = typeof globalPrefMap['selected_team'] === 'string' ? globalPrefMap['selected_team'] : null
-    const exists = saved && activeTeams.some(t => t.id === saved)
-    setActiveTeamId(exists ? saved : activeTeams[0].id)
-  }, [activeTeams, globalPrefsSettled, globalPrefMap])
-
-  // Only derive an active team once the pref has been applied (activeTeamId !== null).
-  // The activeTeams[0] fallback here handles the edge case where the saved team
-  // was archived or deleted between sessions.
-  const activeTeam = activeTeamId !== null
-    ? (activeTeams.find(t => t.id === activeTeamId) ?? activeTeams[0] ?? undefined)
-    : undefined
-  const teamId = activeTeam?.id ?? ''
-
-  // Check whether the current user is an admin of the active team.
-  const { data: teamMembers = [] } = useTeamMembers(teamId)
-  const userId = (user as { id?: string } | null)?.id ?? ''
-  const isSuperadmin = Boolean((user as { isSuperadmin?: boolean } | null)?.isSuperadmin)
-  const canEditTeam = isSuperadmin || teamMembers.some(m => m.userId === userId && m.role === 'admin')
-
-  const handleSelectTeam = useCallback((id: string) => {
-    setActiveTeamId(id)
-    // Clear the stale timeline selection so the init effect re-fires with the
-    // new team's timeline list. Without this, the old timeline ID leaks into
-    // the new team's API requests and produces 404s.
-    setActiveTimelineId(undefined)
-    prefsAppliedForTimeline.current = null
-    timelineIdInitialized.current = false
-  }, [])
-
-  const unarchiveTimeline = useUnarchiveTimeline(teamId)
-
-  const { data: timelines = [] } = useTeamTimelines(teamId)
-  const { data: allTimelines = [] } = useTeamTimelinesWithArchived(teamId)
-  const archivedTimelines = allTimelines.filter(t => Boolean(t.archivedAt))
-  const [activeTimelineId, setActiveTimelineId] = useState<string | undefined>()
-  const { data: activeTimelineStatuses = [] } = useTimelineStatuses(teamId, activeTimelineId ?? '')
-  const { data: savedFilters = [] } = useSavedFilters(teamId)
-  const { data: tags = [] } = useTags(teamId)
-  // Initialize activeTimelineId from the saved global pref (selected_timeline),
-  // falling back to timelines[0] when no pref is stored or the saved timeline
-  // is no longer in the list. Waits for global prefs to settle so we don't
-  // immediately overwrite a restored value with the fallback.
-  useEffect(() => {
-    if (timelines.length === 0 || !globalPrefsSettled || timelineIdInitialized.current) return
-    timelineIdInitialized.current = true
-    const saved = typeof globalPrefMap['selected_timeline'] === 'string' ? globalPrefMap['selected_timeline'] : null
-    const exists = saved && timelines.some(t => t.id === saved)
-    setActiveTimelineId(exists ? saved : timelines[0].id)
-  }, [timelines, globalPrefsSettled, globalPrefMap])
-  const activeTimeline = timelines.find(t => t.id === activeTimelineId) ?? timelines[0]
-  // Derived so they stay in sync after edits without needing separate state.
-  const activeTimelineColor = activeTimeline?.color ?? '#1A97A2'
-  const activeTimelineName = activeTimeline?.name ?? ''
-  const activeTimelineIdentity: Identity = {
-    color: activeTimeline?.color ?? '#288C9B',
-    icon: activeTimeline?.icon ?? '__none__',
-  }
-
-  // Close the activity detail panel whenever the active filter changes so the
-  // filtered view is unobstructed by a stale selection.
-  useEffect(() => {
-    setSelectedActivityId(null)
-    setSelectedApiActivity(null)
-  }, [activeFilter]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  const handleTimelineChange = useCallback((id: string) => {
-    prefsAppliedForTimeline.current = null
-    setActiveTimelineId(id)
-    setActiveFilter({ kind: 'preset', id: 'all' })
-  }, [setActiveFilter])
-
-  // Calendar navigation helpers.
-  const calendarPrev = useCallback(() => {
-    setCalendarAnchorDate(prev => {
-      const d = new Date(prev)
-      if (calendarLayout === 'month') {
-        d.setUTCMonth(d.getUTCMonth() - 1)
-      } else {
-        d.setUTCDate(d.getUTCDate() - 7)
-      }
-      return d
-    })
-  }, [calendarLayout])
-
-  const calendarNext = useCallback(() => {
-    setCalendarAnchorDate(prev => {
-      const d = new Date(prev)
-      if (calendarLayout === 'month') {
-        d.setUTCMonth(d.getUTCMonth() + 1)
-      } else {
-        d.setUTCDate(d.getUTCDate() + 7)
-      }
-      return d
-    })
-  }, [calendarLayout])
-
-  const calendarToday = useCallback(() => {
-    const d = new Date()
-    d.setUTCHours(0, 0, 0, 0)
-    if (calendarLayout === 'month') {
-      d.setUTCDate(1)
-    } else {
-      // Snap to weekStart.
-      const dow = d.getUTCDay()
-      const daysBack = weekStartDay === 1 ? (dow === 0 ? 6 : dow - 1) : dow
-      d.setUTCDate(d.getUTCDate() - daysBack)
-    }
-    setCalendarAnchorDate(d)
-  }, [calendarLayout, weekStartDay])
-
-  // Switching layouts also snaps the anchor date to the correct boundary so
-  // the week-view always starts on the configured weekStart day.
-  const handleCalendarLayoutChange = useCallback((l: CalendarLayout) => {
-    setCalendarLayout(l)
-    setCalendarAnchorDate(prev => {
-      const d = new Date(prev)
-      d.setUTCHours(0, 0, 0, 0)
-      if (l === 'week') {
-        const dow = d.getUTCDay()
-        const daysBack = weekStartDay === 1 ? (dow === 0 ? 6 : dow - 1) : dow
-        d.setUTCDate(d.getUTCDate() - daysBack)
-      } else {
-        d.setUTCDate(1)
-      }
-      return d
-    })
-  }, [weekStartDay])
-
-  useTeamActivitySync(teamId, accessToken)
-
-  // Per-timeline preferences: restore toolbar state when the active timeline changes.
-  // isSuccess gate ensures we don't mark prefs applied before the query resolves.
-  const { isSuccess: prefsSettled } = usePreferences(activeTimelineId)
-  const timelinePrefs = usePreferenceMap(activeTimelineId)
-  useEffect(() => {
-    if (!activeTimelineId || !prefsSettled) return
-    if (prefsAppliedForTimeline.current === activeTimelineId) return
-    prefsAppliedForTimeline.current = activeTimelineId
-
-    if (typeof timelinePrefs['group_by'] === 'string') setGroupBy(timelinePrefs['group_by'] as GroupBy)
-    if (typeof timelinePrefs['sort_by'] === 'string') setSortBy(timelinePrefs['sort_by'] as SortBy)
-    if (typeof timelinePrefs['zoom_granularity'] === 'string') setGranularity(timelinePrefs['zoom_granularity'] as TimeGranularity | 'auto')
-    if (typeof timelinePrefs['color_by'] === 'string') setColorBy(timelinePrefs['color_by'] as ColorBy)
-    if (typeof timelinePrefs['list_group_by'] === 'string') setListGroupBy(timelinePrefs['list_group_by'] as ListGroupBy)
-    if (typeof timelinePrefs['list_sort_by'] === 'string') setListSortBy(timelinePrefs['list_sort_by'] as ListSortBy)
-    if (typeof timelinePrefs['list_color_by'] === 'string') setListColorBy(timelinePrefs['list_color_by'] as ListColorBy)
-    if (typeof timelinePrefs['list_density'] === 'string') setListDensity(timelinePrefs['list_density'] as ListDensity)
-    if (typeof timelinePrefs['view_mode'] === 'string') setView(timelinePrefs['view_mode'] as ViewMode)
-    if (typeof timelinePrefs['kanban_group_by'] === 'string') setKanbanGroupBy(timelinePrefs['kanban_group_by'] as KanbanGroupBy)
-    if (typeof timelinePrefs['kanban_sort_by'] === 'string') setKanbanSortBy(timelinePrefs['kanban_sort_by'] as KanbanSortBy)
-    if (typeof timelinePrefs['kanban_color_by'] === 'string') setKanbanColorBy(timelinePrefs['kanban_color_by'] as ColorBy)
-    if (typeof timelinePrefs['kanban_card_fields'] === 'string') {
-      try { setKanbanCardFields(JSON.parse(timelinePrefs['kanban_card_fields']) as KanbanCardField[]) } catch { /* ignore */ }
-    }
-    if (typeof timelinePrefs['kanban_collapsed'] === 'string') {
-      try { setKanbanCollapsedColumns(JSON.parse(timelinePrefs['kanban_collapsed']) as string[]) } catch { /* ignore */ }
-    }
-    if (typeof timelinePrefs['kanban_show_hierarchy'] === 'string') {
-      try { setKanbanShowHierarchy(JSON.parse(timelinePrefs['kanban_show_hierarchy']) as boolean) } catch { /* ignore */ }
-    }
-  }, [activeTimelineId, prefsSettled, timelinePrefs])
-
-  // Save toolbar state changes to per-timeline prefs.
-  const saveTimelinePref = useCallback((key: string, value: string) => {
-    if (!activeTimelineId) return
-    upsert.mutate({ key, value: JSON.stringify(value), timelineId: activeTimelineId })
-  }, [activeTimelineId, upsert.mutate]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('group_by', groupBy)
-  }, [groupBy, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('sort_by', sortBy)
-  }, [sortBy, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('zoom_granularity', granularity)
-  }, [granularity, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('color_by', colorBy)
-  }, [colorBy, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('view_mode', view)
-  }, [view, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('list_group_by', listGroupBy)
-  }, [listGroupBy, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('list_sort_by', listSortBy)
-  }, [listSortBy, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('list_color_by', listColorBy)
-  }, [listColorBy, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('list_density', listDensity)
-  }, [listDensity, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('kanban_group_by', kanbanGroupBy)
-  }, [kanbanGroupBy, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('kanban_sort_by', kanbanSortBy)
-  }, [kanbanSortBy, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('kanban_color_by', kanbanColorBy)
-  }, [kanbanColorBy, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('kanban_card_fields', JSON.stringify(kanbanCardFields))
-  }, [kanbanCardFields, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('kanban_show_hierarchy', JSON.stringify(kanbanShowHierarchy))
-  }, [kanbanShowHierarchy, saveTimelinePref])
-
-  // Global preferences: persist dark mode, active team, and active timeline.
-  useEffect(() => {
-    upsert.mutate({ key: 'theme', value: JSON.stringify(theme) })
-  }, [theme]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    if (!teamId) return
-    upsert.mutate({ key: 'selected_team', value: JSON.stringify(teamId) })
-  }, [teamId]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    if (!activeTimelineId) return
-    upsert.mutate({ key: 'selected_timeline', value: JSON.stringify(activeTimelineId) })
-  }, [activeTimelineId]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Reset label column width when the user switches timelines so each timeline
-  // starts fresh. Switching between views on the same timeline preserves width
-  // because the state lives here rather than inside the unmounting GanttView.
-  useEffect(() => {
-    setGanttLabelColW(DEFAULT_LABEL_COL_W)
-  }, [activeTimelineId])
-
-  return (
-    <div style={{ display: 'flex', height: '100vh', overflow: 'hidden', background: 'var(--background)' }}>
-      <Sidebar
-        collapsed={sidebarCollapsed}
-        onToggle={() => setSidebarCollapsed(c => !c)}
-        apiTimelines={timelines}
-        archivedTimelines={archivedTimelines}
-        activeTimelineId={activeTimelineId}
-        onActiveTimelineChange={handleTimelineChange}
-        onNewTimeline={() => { setEditingTimeline(null); setTimelineModalMode('new') }}
-        onEditTimeline={id => {
-          // timelines (active) is always loaded; allTimelines (?archived=true) may
-          // still be in-flight, so prefer the already-loaded list to avoid opening
-          // the modal with an undefined timeline and blank fields.
-          const tl = timelines.find(t => t.id === id) ?? allTimelines.find(t => t.id === id)
-          setEditingTimeline(tl ?? null)
-          setTimelineModalMode('edit')
-        }}
-        onNewActivity={() => {
-          const today = new Date().toISOString().slice(0, 10)
-          setSelectedActivityId(null)
-          setSelectedApiActivity(null)
-          if (view === 'list') {
-            setListNewRowSeq(s => s + 1)
-          } else {
-            setCreateDefaults({ start: today, end: today, memberId: null })
-          }
-        }}
-        activeTeam={activeTeam}
-        activeTeams={activeTeams}
-        archivedTeams={archivedTeams}
-        canEditTeam={canEditTeam}
-        onSelectTeam={handleSelectTeam}
-        onNewTeam={isSuperadmin ? () => { setEditingTeam(null); setTeamModalMode('new'); } : undefined}
-        onEditTeam={t => { setEditingTeam(t as ApiTeam); setTeamModalMode('edit'); }}
-        onUnarchiveTeam={id => unarchiveTeam.mutate(id)}
-        members={teamMembers.length > 0 ? teamMembers : undefined}
-        onEditMember={isSuperadmin ? m => setEditingMember(m) : undefined}
-      />
-
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0 }}>
-        <TopBar
-          view={view}
-          teamId={teamId}
-          timelineName={activeTimelineName}
-          timelineIdentity={activeTimelineIdentity}
-          onViewChange={setView}
-          onOpenFilterManager={() => setFilterModalOpen(true)}
-          rightSlot={
-            <div ref={profileRef} style={{ position: 'relative', marginLeft: 4, zIndex: 30 }}>
-              <button
-                onClick={() => setProfileOpen(o => !o)}
-                style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', display: 'flex' }}
-                title={displayName}
-              >
-                <Badge identity={userIdentity} name={displayName} shape="circle" size={28} />
-              </button>
-
-              {profileOpen && (
-                <div
-                  style={{
-                    position: 'absolute',
-                    top: 'calc(100% + 8px)',
-                    right: 0,
-                    width: 220,
-                    background: 'var(--card)',
-                    border: '1px solid var(--border)',
-                    borderRadius: 8,
-                    boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
-                    zIndex: 100,
-                    overflow: 'hidden',
-                  }}
-                >
-                  <div style={{ padding: '12px 14px', borderBottom: '1px solid var(--border)' }}>
-                    <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)' }}>{displayName}</div>
-                    <div style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 2 }}>{email}</div>
-                  </div>
-                  <button
-                    onClick={toggleDark}
-                    style={{ ...DROPDOWN_BTN, borderBottom: '1px solid var(--border)' }}
-                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-                  >
-                    {isDark ? <Moon size={14} strokeWidth={1.8} /> : <Sun size={14} strokeWidth={1.8} />}
-                    {isDark ? 'Dark mode' : 'Light mode'}
-                  </button>
-                  <button
-                    onClick={() => { setProfileOpen(false); navigate('/settings'); }}
-                    style={{ ...DROPDOWN_BTN, borderBottom: '1px solid var(--border)' }}
-                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-                  >
-                    <Settings size={14} strokeWidth={1.8} />
-                    Settings
-                  </button>
-                  <button
-                    onClick={logout}
-                    style={{ ...DROPDOWN_BTN, color: 'var(--muted-foreground)' }}
-                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-                  >
-                    <LogOut size={14} strokeWidth={1.8} />
-                    Sign out
-                  </button>
-                </div>
-              )}
-            </div>
-          }
-        />
-
-        {/* Active timeline color band */}
-        <div style={{ height: 3, background: activeTimelineColor, flexShrink: 0, transition: 'background 0.2s ease' }} />
-
-        {/* Gantt sub-toolbar — only shown in Gantt view */}
-        {view === 'gantt' && (
-          <GanttToolbar
-            groupBy={groupBy}
-            onGroupByChange={setGroupBy}
-            sortBy={sortBy}
-            onSortByChange={setSortBy}
-            granularity={granularity}
-            onGranularityChange={setGranularity}
-            colorBy={colorBy}
-            onColorByChange={setColorBy}
-            onExport={() => {}}
-            onShare={() => setShareModalOpen(true)}
-          />
-        )}
-
-        {/* List sub-toolbar — only shown in List view */}
-        {view === 'list' && (
-          <ListToolbar
-            columns={listColumns}
-            onColumnVisibilityChange={(colId, visible) => {
-              listColToggleSeq.current += 1
-              setListColToggle({ colId, visible, seq: listColToggleSeq.current })
-              setListColumns(prev => prev.map(c => c.id === colId ? { ...c, visible } : c))
-            }}
-            density={listDensity}
-            onDensityChange={setListDensity}
-            groupBy={listGroupBy}
-            onGroupByChange={setListGroupBy}
-            sortBy={listSortBy}
-            onSortByChange={setListSortBy}
-            colorBy={listColorBy}
-            onColorByChange={setListColorBy}
-            onExport={() => {}}
-            onShare={() => {}}
-          />
-        )}
-
-        {/* Calendar sub-toolbar — only shown in Calendar view */}
-        {view === 'calendar' && (
-          <CalendarToolbar
-            layout={calendarLayout}
-            onLayoutChange={handleCalendarLayoutChange}
-            anchorDate={calendarAnchorDate}
-            onPrev={calendarPrev}
-            onNext={calendarNext}
-            onToday={calendarToday}
-            colorBy={colorBy}
-            onColorByChange={setColorBy}
-            onExport={() => {}}
-            onShare={() => {}}
-          />
-        )}
-
-        {/* Kanban sub-toolbar — only shown in Kanban view */}
-        {view === 'kanban' && (
-          <KanbanToolbar
-            groupBy={kanbanGroupBy}
-            onGroupByChange={setKanbanGroupBy}
-            sortBy={kanbanSortBy}
-            onSortByChange={setKanbanSortBy}
-            colorBy={kanbanColorBy}
-            onColorByChange={setKanbanColorBy}
-            cardFields={kanbanCardFields}
-            onCardFieldsChange={setKanbanCardFields}
-            showHierarchy={kanbanShowHierarchy}
-            onShowHierarchyChange={setKanbanShowHierarchy}
-            onExport={() => {}}
-            onShare={() => {}}
-          />
-        )}
-
-        {/* Content area */}
-        <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-          {view === 'gantt' && teamId && activeTimelineId ? (
-            <GanttView
-              teamId={teamId}
-              timelineId={activeTimelineId}
-              startDate={activeTimeline?.startDate}
-              endDate={activeTimeline?.endDate}
-              groupBy={groupBy}
-              sortBy={sortBy}
-              granularity={granularity}
-              colorBy={colorBy}
-              timelineStatuses={activeTimelineStatuses}
-              savedFilters={savedFilters}
-              tags={tags}
-              selectedActivityId={selectedActivityId}
-              onSelectActivity={(id) => {
-                setSelectedActivityId(id)
-                if (!id) { setSelectedApiActivity(null); setCreateDefaults(null) }
-              }}
-              onSelectApiActivity={(activity) => {
-                setSelectedApiActivity(activity)
-                setCreateDefaults(null)
-              }}
-              onBarDragProgress={(activityId, newStart, newEnd) => {
-                setLiveDragDates({
-                  activityId,
-                  start: newStart.toISOString().slice(0, 10),
-                  end: newEnd.toISOString().slice(0, 10),
-                })
-              }}
-              onBarDragEnd={() => setLiveDragDates(null)}
-              onMembersLoaded={setGanttMembers}
-              labelColW={ganttLabelColW}
-              onLabelColWChange={setGanttLabelColW}
-            />
-          ) : view === 'gantt' && (!teamId || !activeTimelineId) ? (
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
-              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>Loading your team…</p>
-            </div>
-          ) : view === 'list' && teamId && activeTimelineId ? (
-            <ListView
-              teamId={teamId}
-              timelineId={activeTimelineId}
-              groupBy={listGroupBy}
-              sortBy={listSortBy}
-              colorBy={listColorBy}
-              density={listDensity}
-              timelineStatuses={activeTimelineStatuses}
-              savedFilters={savedFilters}
-              tags={tags}
-              selectedActivityId={selectedActivityId}
-              pendingColumnToggle={listColToggle}
-              onSelectActivity={(id) => {
-                setSelectedActivityId(id)
-                if (!id) { setSelectedApiActivity(null); setCreateDefaults(null) }
-              }}
-              onSelectApiActivity={(activity) => {
-                setSelectedApiActivity(activity)
-                setCreateDefaults(null)
-              }}
-              onMembersLoaded={setGanttMembers}
-              onColumnsChange={setListColumns}
-              triggerNewRow={listNewRowSeq}
-            />
-          ) : view === 'list' && (!teamId || !activeTimelineId) ? (
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
-              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>Loading your team…</p>
-            </div>
-          ) : view === 'calendar' && teamId && activeTimelineId ? (
-            <CalendarView
-              teamId={teamId}
-              timelineId={activeTimelineId}
-              layout={calendarLayout}
-              anchorDate={calendarAnchorDate}
-              colorBy={colorBy}
-              timelineStatuses={activeTimelineStatuses}
-              savedFilters={savedFilters}
-              tags={tags}
-              selectedActivityId={selectedActivityId}
-              onSelectActivity={(id) => {
-                setSelectedActivityId(id)
-                if (!id) { setSelectedApiActivity(null); setCreateDefaults(null) }
-              }}
-              onSelectApiActivity={(activity) => {
-                setSelectedApiActivity(activity)
-                setCreateDefaults(null)
-              }}
-              onBarDragProgress={(activityId, newStart, newEnd) => {
-                setLiveDragDates({
-                  activityId,
-                  start: newStart.toISOString().slice(0, 10),
-                  end: newEnd.toISOString().slice(0, 10),
-                })
-              }}
-              onBarDragEnd={() => setLiveDragDates(null)}
-              onCellClick={(date) => {
-                const iso = date.toISOString().slice(0, 10)
-                setSelectedActivityId(null)
-                setSelectedApiActivity(null)
-                setCreateDefaults({ start: iso, end: iso, memberId: null })
-              }}
-              onMembersLoaded={setGanttMembers}
-            />
-          ) : view === 'calendar' && (!teamId || !activeTimelineId) ? (
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
-              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>Loading your team…</p>
-            </div>
-          ) : view === 'kanban' && teamId && activeTimelineId ? (
-            <KanbanView
-              teamId={teamId}
-              timelineId={activeTimelineId}
-              groupBy={kanbanGroupBy}
-              sortBy={kanbanSortBy}
-              colorBy={kanbanColorBy}
-              cardFields={kanbanCardFields}
-              collapsedColumnIds={kanbanCollapsedColumns}
-              onCollapsedColumnIdsChange={setKanbanCollapsedColumns}
-              showHierarchy={kanbanShowHierarchy}
-              timelineStatuses={activeTimelineStatuses}
-              savedFilters={savedFilters}
-              tags={tags}
-              selectedActivityId={selectedActivityId}
-              onSelectActivity={(id) => {
-                setSelectedActivityId(id)
-                if (!id) { setSelectedApiActivity(null); setCreateDefaults(null) }
-              }}
-              onSelectApiActivity={(activity) => {
-                setSelectedApiActivity(activity)
-                setCreateDefaults(null)
-              }}
-              onAddActivity={(defaults) => {
-                setSelectedActivityId(null)
-                setSelectedApiActivity(null)
-                setCreateDefaults(defaults)
-              }}
-              onMembersLoaded={setGanttMembers}
-            />
-          ) : view === 'kanban' && (!teamId || !activeTimelineId) ? (
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
-              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>Loading your team…</p>
-            </div>
-          ) : (
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
-              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>
-                {view.charAt(0).toUpperCase() + view.slice(1)} view coming soon.
-              </p>
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Activity detail panel — slides in from right when an activity is selected */}
-      <ActivityDetailPanel
-        open={Boolean(selectedApiActivity)}
-        event={selectedApiActivity}
-        members={ganttMembers}
-        teamId={teamId}
-        timelineId={activeTimelineId ?? ''}
-        onClose={() => { setSelectedActivityId(null); setSelectedApiActivity(null); setLiveDragDates(null) }}
-        liveDragStart={liveDragDates && liveDragDates.activityId === selectedApiActivity?.id ? liveDragDates.start : undefined}
-        liveDragEnd={liveDragDates && liveDragDates.activityId === selectedApiActivity?.id ? liveDragDates.end : undefined}
-      />
-
-      {/* Activity create panel — slides in from New Activity button or future drag */}
-      <ActivityCreatePanel
-        open={Boolean(createDefaults) && !selectedApiActivity}
-        teamId={teamId}
-        timelineId={activeTimelineId ?? ''}
-        members={ganttMembers}
-        timelineStatuses={activeTimelineStatuses}
-        defaultStart={createDefaults?.start ?? new Date().toISOString().slice(0, 10)}
-        defaultEnd={createDefaults?.end ?? new Date().toISOString().slice(0, 10)}
-        defaultMemberId={createDefaults?.memberId}
-        defaultStatusId={createDefaults?.statusId}
-        onClose={() => setCreateDefaults(null)}
-      />
-
-      <FilterManageModal
-        open={filterModalOpen}
-        onClose={() => setFilterModalOpen(false)}
-        teamId={teamId}
-        timelineId={activeTimelineId ?? ''}
-        isAdmin={canEditTeam}
-      />
-
-      {/* Team modal — create or edit */}
-      {teamModalMode && (
-        <TeamModal
-          mode={teamModalMode}
-          team={editingTeam ?? undefined}
-          isAdmin={canEditTeam}
-          onClose={() => { setTeamModalMode(null); setEditingTeam(null); }}
-          onTeamCreated={created => setActiveTeamId(created.id)}
-        />
-      )}
-
-      {/* Member modal — edit a team member */}
-      {editingMember && (
-        <MemberModal
-          teamId={teamId}
-          memberId={editingMember.id}
-          isAdmin={canEditTeam}
-          isSuperadmin={isSuperadmin}
-          onClose={() => setEditingMember(null)}
-        />
-      )}
-
-      {/* Share modal — create a Gantt share link */}
-      {shareModalOpen && activeTimelineId && teamId && (
-        <ShareModal
-          teamId={teamId}
-          timelineId={activeTimelineId}
-          viewType="gantt"
-          timelineName={activeTimelineName}
-          viewConfig={{
-            groupBy,
-            sortBy,
-            colorBy,
-            granularity: String(granularity),
-            filter: activeFilter.kind === 'saved'
-              ? (() => {
-                  const sf = savedFilters.find(f => f.id === activeFilter.id)
-                  if (!sf) return null
-                  try { return JSON.parse(sf.definition) as import('@/lib/filterTypes').FilterDefinition } catch { return null }
-                })()
-              : null,
-          }}
-          onClose={() => setShareModalOpen(false)}
-        />
-      )}
-
-      {/* Timeline modal — create or edit */}
-      {timelineModalMode && (
-        <TimelineModal
-          mode={timelineModalMode}
-          teamId={teamId}
-          timeline={editingTimeline ?? undefined}
-          canAdmin={canEditTeam}
-          onClose={() => { setTimelineModalMode(null); setEditingTimeline(null) }}
-          onCreated={created => setActiveTimelineId(created.id)}
-          onUnarchive={id => unarchiveTimeline.mutate(id, { onSuccess: () => { setTimelineModalMode(null); setEditingTimeline(null) } })}
-        />
-      )}
-    </div>
-  )
-}
-
-export default function DashboardPage() {
-  return (
-    <FindProvider>
-      <FilterProvider>
-        <DashboardShell />
-      </FilterProvider>
-    </FindProvider>
-  )
-}
 ````
 
 ## File: packages/web/src/components/list/ListView.tsx
@@ -65699,7 +65699,7 @@ This document organizes development into discrete phases with effort estimates a
 | 12 | [Communications Testing](#phase-12--communications-testing) | S — 1 day | ✅ |
 | 13 | [Shares — Public Read-Only View Links](#phase-13--shares--multi-share-views-with-passwords) (sub-phased) | L | ⬜ |
 | 13.1 | [Foundation, Public Gateway, Gantt Viewer (MVP)](#phase-131--foundation-public-gateway-gantt-viewer-mvp) | M–L | ✅ |
-| 13.2 | [Share Module Overhaul + Password Protection](#phase-132--share-module-overhaul--password-protection) | M–L | ⬜ |
+| 13.2 | [Share Module Overhaul + Password Protection](#phase-132--share-module-overhaul--password-protection) | M–L | ✅ |
 | 13.3 | [List + Kanban Read-Only](#phase-133--list--kanban-read-only) | M | ⬜ |
 | 13.4 | [Calendar — ICS Feed Sharing](#phase-134--calendar--ics-feed-sharing) | M | ⬜ |
 | 13.5 | [Lifecycle Tail](#phase-135--lifecycle-tail) | S | ⬜ |
@@ -67180,7 +67180,7 @@ The whole data-leak surface is confronted here so 13.2–13.4 ride on a proven-s
 ---
 
 ### Phase 13.2 — Share Module Overhaul + Password Protection
-**Status:** 🔄 Automated checks pass (2026-06-05) — awaiting Docker verification | **Effort:** M–L
+**Status:** ✅ Done (2026-06-07) — Docker-verified | **Effort:** M–L
 
 Rebuilds the "Share this view" modal to the [design handoff](plans/phase-13-shares.md#the-share-module-overhaul-132) and pulls **password protection** forward to ride alongside it (the handoff's create form has a password toggle, so the two are inseparable). The modal becomes the per-view share manager: an active-links list (one timeline → many named shares), a create form (title, optional description, optional password), copy-to-clipboard with a success state, an inline delete-confirm, and an empty state. Each row shows creator, created date, and **view count**. This absorbs most of the old Lifecycle phase's "Manage shares" surface.
 
