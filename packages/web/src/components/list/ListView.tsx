@@ -73,7 +73,7 @@ type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
 
 // ── Column catalog ─────────────────────────────────────────────────────────────
 
-interface ColMeta {
+export interface ColMeta {
   id: string;
   label: string;
   defaultVisible: boolean;
@@ -84,7 +84,7 @@ interface ColMeta {
   noMenu?: boolean;
 }
 
-const COL_CATALOG: ColMeta[] = [
+export const COL_CATALOG: ColMeta[] = [
   { id: 'colorBar',    label: '',             defaultVisible: true,  defaultWidth: 18,  editable: false, editType: 'none', noMenu: true },
   { id: 'identity',    label: '',             defaultVisible: true,  defaultWidth: 52,  editable: true,  editType: 'identity' },
   { id: 'title',       label: 'Title',        defaultVisible: true,  defaultWidth: 280, editable: true,  editType: 'text' },
@@ -285,7 +285,7 @@ export function formatActivityDate(iso: string | null | undefined): string {
   return isNaN(d.getTime()) ? '—' : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
 }
 
-function formatDuration(startAt: string | null | undefined, endAt: string | null | undefined): string {
+export function formatDuration(startAt: string | null | undefined, endAt: string | null | undefined): string {
   if (!startAt || !endAt) return '—';
   const start = new Date(startAt);
   const end = new Date(endAt);

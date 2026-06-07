@@ -2,7 +2,7 @@
 
 _Updated after each significant work session. Read this first to orient — it is intentionally short. Per-phase implementation detail lives in [docs/log.md](../log.md); this file is a current-state snapshot only._
 
-**Last updated:** 2026-06-05 (Phase 13.2 complete — 13.2a password backend + 13.2b share-modal overhaul & public unlock prompt; all automated checks pass. Awaiting Docker verification.)
+**Last updated:** 2026-06-07 (Phase 13.3 complete — List + Kanban read-only public shares; all automated checks pass. Awaiting Docker verification.)
 
 ---
 
@@ -10,13 +10,13 @@ _Updated after each significant work session. Read this first to orient — it i
 
 **All phases through 10.4.6 are complete and automated-checks-pass.** That covers Identity (9.6), Teams/Members/Settings (10.1.x), Status Templates (10.2), Timelines CRUD (10.3), 10.4.1–10.4.5 polish, and 10.4.6 Filter Implementation. Phases through 10.4.5 are Docker-verified; 10.4.6, 11.1, 11.1.1, 11.1.2, 11.2, 11.3, and 12 are awaiting Docker verification.
 
-**Phase 13.1 — Shares MVP** (gateway, Go filter engine + golden fixtures, Gantt `interactive=false`, ShareModal create-link, `/s/:token` viewer) and **Phase 13.2a — password backend** both pass automated checks. Awaiting Docker verification. Detail in [log.md](../log.md).
+**Phase 13.1 — Shares MVP**, **13.2 — share-modal overhaul + password**, and **13.3 — List + Kanban read-only** all pass automated checks. Awaiting Docker verification. Detail in [log.md](../log.md).
 
-**Phase 13.2 — share module overhaul + password (2026-06-05):** backend (13.2a) — bcrypt password on create/PATCH; locked `GET /shares/{token}` → `401 { passwordRequired: true }`; `POST /shares/{token}/unlock` → 30-min share-scoped `share_view` JWT (not replayable across shares); 10/IP/hour in-memory rate limit; PATCH/DELETE gate **dropped** (any team member manages shares); `viewCount` in list response. Frontend (13.2b) — `ShareModal.tsx` rebuilt to the handoff (active-links list, create form w/ password toggle, copy, inline delete-confirm, empty state, per-row creator/date/views), public `UnlockPrompt` at `/s/:token`. Backend gained `description` (migration 021) + derived `protected` flag. No migration needed for password (cols existed in 019).
+**Phase 13.3 — List + Kanban read-only (2026-06-07):** `interactive=false` threaded through `KanbanCard`/`KanbanColumn`/`KanbanBoard` (mirrors Gantt's pattern — drag/click/affordances inert). `ShareViewPage.tsx` now branches on `proj.share.viewType`: List gets a new dedicated `PublicListTable`/`PublicListCell` renderer (reuses `buildListRows`/`COL_CATALOG`/date formatters from `ListView` rather than threading `interactive` through its 2600-line container), Kanban gets `<KanbanBoard interactive={false}>` fed adapted data, Gantt keeps the existing `GanttGrid` path. `toApiActivity`/`toTeamMemberWithUser` adapters convert the scope-locked `PublicActivity`/`PublicMember` projection types into full API shapes with placeholder defaults (precedented by `optimisticActivity`). Backend: `notes` is now included on `PublicActivity` only for List shares whose captured `view_config.columns` has the Notes column visible. "Share this view" wired into the List and Kanban toolbars.
 
 | Next phase | Scope | Plan |
 |------------|-------|------|
-| **13.3** | List + Kanban read-only: `interactive=false` + public mounting for List and Kanban, "Share this view" in both toolbars, List `notes`/enabled-columns projection nuance | [plan §13.3](../plans/phase-13-shares.md#133--list--kanban-read-only) · [ROADMAP §13.3](../ROADMAP.md#phase-133--list--kanban-read-only) |
+| **13.4** | Calendar — ICS feed sharing: `shares.kind` discriminator, `GET /shares/{token}.ics`, distinct Calendar share modal, whole-timeline + per-member feeds | [plan §13.4](../plans/phase-13-shares.md#134--calendar--ics-feed-sharing) · [ROADMAP §13.4](../ROADMAP.md#phase-134--calendar--ics-feed-sharing) |
 
 **Phase 13 back-half re-sequenced (2026-06-05):** 13.2 = share-modal overhaul + password (pulled forward); 13.3 = List + Kanban read-only; 13.4 = Calendar **ICS feed** sharing (whole-timeline or per-member, token-as-secret, no password/filter — a different model from view-shares); 13.5 = lifecycle tail (expiry, tile chip). The handoff design lives in [`docs/design/handoffs/share-modal/`](../design/handoffs/share-modal/design_handoff_share_modal/README.md). See [ROADMAP re-sequencing note](../ROADMAP.md#phase-13--shares--multi-share-views-with-passwords) and [plan §13.2 overhaul](../plans/phase-13-shares.md#the-share-module-overhaul-132).
 
@@ -24,7 +24,9 @@ _Updated after each significant work session. Read this first to orient — it i
 
 ## Open Issues
 
-None surfaced. Manual verification items for 10.4.6, 11.1, 11.1.1, 11.1.2, 11.2, 11.3, 12, and 13.1 tracked in TASKS.md.
+None surfaced. Manual verification items for 10.4.6, 11.1, 11.1.1, 11.1.2, 11.2, 11.3, 12, 13.1, 13.2, and 13.3 tracked in TASKS.md.
+
+**Revisit after Phase 13 — commit/CI process:** drop the automated `repomap.md` generation (the AI-context lookup step doesn't appear to depend on it day-to-day) and look into incorporating Graphify into its place. Not yet scoped — just a flag to come back to once the Phase 13 sub-phases land.
 
 ---
 

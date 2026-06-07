@@ -53,6 +53,7 @@ export default function ListToolbar({
   onSortByChange: _onSortByChange,
   colorBy,
   onColorByChange,
+  onShare,
 }: Props) {
   const [colMenuOpen, setColMenuOpen] = useState(false);
   const colMenuRef = useRef<HTMLDivElement>(null);
@@ -176,11 +177,7 @@ export default function ListToolbar({
         Export
       </button>
 
-      <button
-        className={cn(ctrlBtn, 'opacity-40 cursor-not-allowed')}
-        disabled
-        title="Coming soon"
-      >
+      <button className={ctrlBtn} onClick={onShare} title="Share this view">
         <Share2 size={13} strokeWidth={1.8} />
         Share
       </button>

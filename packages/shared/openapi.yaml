@@ -943,6 +943,10 @@ components:
         description:
           type: string
           nullable: true
+        notes:
+          type: string
+          nullable: true
+          description: Only present for List shares with the Notes column enabled in view_config.
         icon:
           type: string
           nullable: true

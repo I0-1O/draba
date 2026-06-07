@@ -50,6 +50,8 @@ interface Props {
   onToggleHierarchy?: (e: React.MouseEvent) => void;
   /** True when this card is nested under a parent — disables drag. */
   isChildCard?: boolean;
+  /** When false (public share viewer), drag and clicks are inert. Defaults to true. */
+  interactive?: boolean;
 }
 
 export default function KanbanCard({
@@ -70,12 +72,13 @@ export default function KanbanCard({
   onToggleHierarchy,
   isChildCard = false,
   activityTitleById,
+  interactive = true,
 }: Props) {
   const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
     id: activity.id,
     data: { activityId: activity.id },
     // Drag overlay renders separately, and child cards travel with their parent.
-    disabled: isDragOverlay || isChildCard,
+    disabled: isDragOverlay || isChildCard || !interactive,
   });
 
   // Do NOT apply the dnd-kit transform to the original card.
@@ -118,7 +121,7 @@ export default function KanbanCard({
     borderLeft: `3px solid ${accentColor}`,
     borderRadius: 6,
     padding: '8px 10px',
-    cursor: isDragOverlay ? 'grabbing' : 'pointer',
+    cursor: !interactive ? 'default' : isDragOverlay ? 'grabbing' : 'pointer',
     boxShadow: isDragOverlay
       ? '0 8px 24px rgba(0,0,0,0.2)'
       : isSelected
@@ -134,19 +137,19 @@ export default function KanbanCard({
   return (
     <div
       ref={setNodeRef}
-      {...listeners}
-      {...attributes}
+      {...(interactive ? listeners : {})}
+      {...(interactive ? attributes : {})}
       style={cardStyle}
-      onClick={onClick}
-      role="button"
-      tabIndex={0}
-      onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') onClick(); }}
+      onClick={interactive ? onClick : undefined}
+      role={interactive ? 'button' : undefined}
+      tabIndex={interactive ? 0 : undefined}
+      onKeyDown={interactive ? (e => { if (e.key === 'Enter' || e.key === ' ') onClick(); }) : undefined}
     >
       {/* Title row — with optional collapse chevron for hierarchy parents */}
       <div style={{ display: 'flex', alignItems: 'flex-start', gap: 4, marginBottom: 4 }}>
         {hasHierarchyChildren && (
           <button
-            onClick={e => { e.stopPropagation(); onToggleHierarchy?.(e); }}
+            onClick={interactive ? (e => { e.stopPropagation(); onToggleHierarchy?.(e); }) : undefined}
             title={isHierarchyCollapsed ? 'Expand children' : 'Collapse children'}
             style={{
               flexShrink: 0,
@@ -154,7 +157,7 @@ export default function KanbanCard({
               background: 'none',
               border: 'none',
               padding: 0,
-              cursor: 'pointer',
+              cursor: interactive ? 'pointer' : 'default',
               color: 'var(--muted-foreground)',
               display: 'flex',
               alignItems: 'center',

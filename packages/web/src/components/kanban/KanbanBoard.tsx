@@ -55,6 +55,8 @@ interface Props {
   childrenByParentId: Map<string, ApiActivity[]>;
   collapsedParents: Set<string>;
   onToggleParent: (activityId: string) => void;
+  /** When false (public share viewer), drag, drop, and clicks are inert. Defaults to true. */
+  interactive?: boolean;
 }
 
 export default function KanbanBoard({
@@ -81,6 +83,7 @@ export default function KanbanBoard({
   onDrop,
   activityById,
   activityTitleById,
+  interactive = true,
 }: Props) {
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [overColumnId, setOverColumnId] = useState<string | null>(null);
@@ -181,13 +184,14 @@ export default function KanbanBoard({
             onToggleCollapse={() => onToggleCollapse(col.id)}
             onCardClick={onCardClick}
             onAddClick={() => onAddInColumn(col)}
+            interactive={interactive}
           />
         ))}
       </div>
 
       {/* Drag overlay — floats above everything while dragging */}
       <DragOverlay dropAnimation={null}>
-        {draggingActivity ? (
+        {interactive && draggingActivity ? (
           <KanbanCard
             activity={draggingActivity}
             accentColor={colorMap.get(draggingActivity.id) ?? '#6b7280'}

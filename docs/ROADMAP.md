@@ -1555,7 +1555,7 @@ Rebuilds the "Share this view" modal to the [design handoff](plans/phase-13-shar
 ---
 
 ### Phase 13.3 — List + Kanban Read-Only
-**Status:** ⬜ | **Effort:** M
+**Status:** ✅ Done (2026-06-07) | **Effort:** M
 
 Extends `interactive=false` + public mounting to **List and Kanban** (clicks inert here too), plus the per-view polish each needs to read cleanly without chrome. "Share this view" (the 13.2 modal) added to both toolbars. The same scope-locked gateway serves these as view-shares — the only projection nuance is `notes`, included only when a List share has the Notes column enabled. (Calendar is intentionally *not* here — see 13.4.)
 

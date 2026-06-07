@@ -270,7 +270,7 @@ export default function KanbanToolbar({
           <Download size={12} strokeWidth={1.8} />
           Export
         </button>
-        <button className={btn} onClick={onShare} title="Share (coming soon)">
+        <button className={btn} onClick={onShare} title="Share this view">
           <Share2 size={12} strokeWidth={1.8} />
           Share
         </button>

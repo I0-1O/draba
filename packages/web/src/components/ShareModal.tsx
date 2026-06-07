@@ -43,6 +43,8 @@ export interface ShareViewConfig {
   colorBy: string
   granularity: string
   filter: FilterDefinition | null
+  /** List shares only — column visibility snapshot; drives the "notes" projection nuance. */
+  columns?: { id: string; visible: boolean }[]
 }
 
 interface Props {
@@ -361,6 +363,7 @@ export default function ShareModal({ teamId, timelineId, viewType, viewConfig, t
     colorBy: viewConfig.colorBy,
     granularity: viewConfig.granularity,
     filter: viewConfig.filter ?? { logic: 'and', conditions: [] },
+    ...(viewConfig.columns ? { columns: viewConfig.columns } : {}),
   })
 
   const handleCreate = (payload: CreatePayload) => {

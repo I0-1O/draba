@@ -1595,6 +1595,8 @@ export interface components {
             id: string;
             title: string;
             description?: string | null;
+            /** @description Only present for List shares with the Notes column enabled in view_config. */
+            notes?: string | null;
             icon?: string | null;
             color?: string | null;
             /** Format: date-time */

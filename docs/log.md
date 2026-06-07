@@ -2,6 +2,32 @@
 
 ---
 
+## 2026-06-07 — Phase 13.3: List + Kanban read-only public shares
+
+**Goal:** Extend the `interactive=false` + public-mounting pattern from Gantt (13.1) to List and Kanban, add the `notes` projection nuance for List shares with the Notes column enabled, and wire "Share this view" into both toolbars.
+
+**Backend (`packages/api`):**
+- **`share_handler.go`**: extended `viewConfigJSON` with `Columns []shareColumnConfig` (`{id, visible}`, mirrors the captured List column-visibility snapshot). In `buildShareProjection`, a List share's `notes` field is now included on each `PublicActivity` only when the captured `view_config.columns` has an entry `{id: "notes", visible: true}` — the only projection nuance beyond scope-locking and field-pruning called out in the exit criteria.
+- **OpenAPI**: added nullable `notes` to `PublicActivity` (documented as List-share-only, Notes-column-gated). TS types regenerated.
+
+**Frontend (`packages/web`):**
+- **Kanban presentational chain** (`KanbanCard`, `KanbanColumn`, `KanbanBoard`): added an `interactive?: boolean` prop (default `true`) mirroring Gantt's established pattern. When `false`: `useDraggable`/`useDroppable` are disabled, `listeners`/`attributes`/`onClick`/keyboard handlers are stripped, the collapse-toggle and "+ Add" affordances are hidden, and the drag overlay never renders.
+- **`ShareModal.tsx`**: `ShareViewConfig` gained an optional `columns?: { id, visible }[]` (List-only — drives the `notes` nuance and viewer column rendering); included in the captured `viewConfig` JSON when present.
+- **`DashboardPage.tsx`**: wired the List and Kanban toolbars' Share buttons to open `ShareModal` (previously no-ops); added an `activeShareFilter` memo and branched the `viewConfig` passed to the modal by active view — List adds `columns`, Kanban omits `granularity`.
+- **`ListToolbar.tsx` / `KanbanToolbar.tsx`**: replaced the disabled "coming soon" Share stub with a working button (List) / updated the title (Kanban).
+- **`ListView.tsx`**: exported `ColMeta`, `COL_CATALOG`, `formatDuration` (joining the already-exported `ListDisplayRow`/`buildListRows`/`formatActivityDate`/`formatTimestamp`) so the new public renderer can mirror the authenticated List's columns and formatting without duplicating them.
+- **`ShareViewPage.tsx`** — the core of this phase:
+  - Decided **not** to thread `interactive` through the 2600-line `ListView.tsx` (a data-fetching container with deeply intertwined editing/picker/DnD/multiselect logic — unsuitable for the bypass-the-container pattern). Instead built a dedicated `PublicListTable`/`PublicListCell` read-only renderer that reuses `buildListRows`/`COL_CATALOG`/the date formatters to mirror the authenticated List's visuals (group headers with member-color dots, status pills, assignee/tag badges, progress bars, formatted dates) with zero interactivity.
+  - Added `toApiActivity`/`toTeamMemberWithUser` adapters that convert the scope-locked `PublicActivity`/`PublicMember` projection types into type-valid `Activity`/`TeamMemberWithUser` shapes by filling required-but-irrelevant fields (location, url, createdBy, rrule, teamId, role, email, …) with placeholder defaults — mirroring the `optimisticActivity` precedent in `ListView`. These placeholders are never rendered.
+  - Added `parseListViewConfig`/`parseKanbanViewConfig` (mirrors the existing `parseViewConfig` for Gantt) to read the frozen `groupBy`/`sortBy`/`colorBy`/`columns` out of the share's captured `viewConfig` JSON.
+  - Branched the main render on `proj.share.viewType`: `'list'` → `PublicListTable`, `'kanban'` → `KanbanBoard interactive={false}` (fed adapted activities/members, `colorMap` via `resolveActivityColor`, columns via `buildColumns`/`buildHierarchyMaps`, all mutation handlers no-ops), `'gantt'` (default) → the existing `GanttGrid` path. (`'calendar'` is out of scope — see 13.4.)
+
+**Checks:** `golangci-lint run` ✅ · `go test ./...` ✅ · `pnpm --filter web lint` ✅ · `pnpm --filter web build` ✅ · `pnpm --filter web test` ✅ (292).
+
+**Not browser-verified yet:** same as 13.2 — the running Docker instance (`epcot.lan:8081`) predates the gateway changes; deferred to the Docker rebuild pass. Suggest `/test-phase 13.3` and `/review-phase 13.3` to fan verification across subagents.
+
+---
+
 ## 2026-06-05 — /test-phase 13.2
 
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e

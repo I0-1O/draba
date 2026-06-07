@@ -5,7 +5,7 @@
  * initial view. Team-selection UI and full sidebar wiring come in a later phase.
  */
 
-import { useState, useRef, useEffect, useCallback } from 'react'
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import Sidebar from '@/components/layout/Sidebar'
 import TopBar, { type ViewMode } from '@/components/layout/TopBar'
 import GanttView from '@/components/gantt/GanttView'
@@ -250,6 +250,15 @@ function DashboardShell() {
     color: activeTimeline?.color ?? '#288C9B',
     icon: activeTimeline?.icon ?? '__none__',
   }
+
+  // The frozen filter snapshot captured into a share's view config — shared
+  // across Gantt/List/Kanban since `activeFilter` applies to the whole timeline.
+  const activeShareFilter = useMemo(() => {
+    if (activeFilter.kind !== 'saved') return null
+    const sf = savedFilters.find(f => f.id === activeFilter.id)
+    if (!sf) return null
+    try { return JSON.parse(sf.definition) as import('@/lib/filterTypes').FilterDefinition } catch { return null }
+  }, [activeFilter, savedFilters])
 
   // Close the activity detail panel whenever the active filter changes so the
   // filtered view is unobstructed by a stale selection.
@@ -600,7 +609,7 @@ function DashboardShell() {
             colorBy={listColorBy}
             onColorByChange={setListColorBy}
             onExport={() => {}}
-            onShare={() => {}}
+            onShare={() => setShareModalOpen(true)}
           />
         )}
 
@@ -634,7 +643,7 @@ function DashboardShell() {
             showHierarchy={kanbanShowHierarchy}
             onShowHierarchyChange={setKanbanShowHierarchy}
             onExport={() => {}}
-            onShare={() => {}}
+            onShare={() => setShareModalOpen(true)}
           />
         )}
 
@@ -846,26 +855,27 @@ function DashboardShell() {
         />
       )}
 
-      {/* Share modal — create a Gantt share link */}
-      {shareModalOpen && activeTimelineId && teamId && (
+      {/* Share modal — create a share link for the active view */}
+      {shareModalOpen && activeTimelineId && teamId && (view === 'gantt' || view === 'list' || view === 'kanban') && (
         <ShareModal
           teamId={teamId}
           timelineId={activeTimelineId}
-          viewType="gantt"
+          viewType={view}
           timelineName={activeTimelineName}
-          viewConfig={{
-            groupBy,
-            sortBy,
-            colorBy,
-            granularity: String(granularity),
-            filter: activeFilter.kind === 'saved'
-              ? (() => {
-                  const sf = savedFilters.find(f => f.id === activeFilter.id)
-                  if (!sf) return null
-                  try { return JSON.parse(sf.definition) as import('@/lib/filterTypes').FilterDefinition } catch { return null }
-                })()
-              : null,
-          }}
+          viewConfig={
+            view === 'gantt'
+              ? { groupBy, sortBy, colorBy, granularity: String(granularity), filter: activeShareFilter }
+              : view === 'list'
+              ? {
+                  groupBy: listGroupBy,
+                  sortBy: listSortBy,
+                  colorBy: listColorBy,
+                  granularity: '',
+                  filter: activeShareFilter,
+                  columns: listColumns.map(c => ({ id: c.id, visible: c.visible })),
+                }
+              : { groupBy: kanbanGroupBy, sortBy: kanbanSortBy, colorBy: kanbanColorBy, granularity: '', filter: activeShareFilter }
+          }
           onClose={() => setShareModalOpen(false)}
         />
       )}

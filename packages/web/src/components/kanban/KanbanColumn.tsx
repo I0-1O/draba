@@ -51,6 +51,7 @@ interface CardTreeProps {
   childrenByParentId: Map<string, ApiActivity[]>;
   collapsedParents: Set<string>;
   onToggleParent: (activityId: string) => void;
+  interactive: boolean;
 }
 
 function CardTree({
@@ -73,6 +74,7 @@ function CardTree({
   childrenByParentId,
   collapsedParents,
   onToggleParent,
+  interactive,
 }: CardTreeProps) {
   const children = showHierarchy ? (childrenByParentId.get(activity.id) ?? []) : [];
   const hasChildren = children.length > 0;
@@ -97,6 +99,7 @@ function CardTree({
     childrenByParentId,
     collapsedParents,
     onToggleParent,
+    interactive,
   };
 
   return (
@@ -119,6 +122,7 @@ function CardTree({
           isHierarchyCollapsed={isCollapsed}
           onToggleHierarchy={() => onToggleParent(activity.id)}
           onClick={() => onCardClick(activity)}
+          interactive={interactive}
         />
       </div>
       {hasChildren && !isCollapsed && children.map(child => (
@@ -160,6 +164,8 @@ interface Props {
   /** Set of parent activity IDs whose children are hidden. */
   collapsedParents: Set<string>;
   onToggleParent: (activityId: string) => void;
+  /** When false (public share viewer), drag, drop, and clicks are inert. Defaults to true. */
+  interactive?: boolean;
 }
 
 const COLUMN_WIDTH = 260;
@@ -187,10 +193,11 @@ export default function KanbanColumn({
   childrenByParentId,
   collapsedParents,
   onToggleParent,
+  interactive = true,
 }: Props) {
   const { setNodeRef, isOver: dndIsOver } = useDroppable({
     id: column.id,
-    disabled: !column.droppable,
+    disabled: !column.droppable || !interactive,
     data: { columnId: column.id },
   });
 
@@ -219,6 +226,7 @@ export default function KanbanColumn({
     childrenByParentId,
     collapsedParents,
     onToggleParent,
+    interactive,
   };
 
   if (isCollapsed) {
@@ -233,12 +241,12 @@ export default function KanbanColumn({
           background: 'var(--muted)',
           borderRadius: 8,
           padding: '8px 0',
-          cursor: 'pointer',
+          cursor: interactive ? 'pointer' : 'default',
           border: '1px solid var(--border)',
           minHeight: 120,
           gap: 8,
         }}
-        onClick={onToggleCollapse}
+        onClick={interactive ? onToggleCollapse : undefined}
         title={`${column.label} (${column.items.length})`}
       >
         <ChevronRight size={14} strokeWidth={2} style={{ color: 'var(--muted-foreground)' }} />
@@ -335,7 +343,8 @@ export default function KanbanColumn({
           {column.items.length}
         </span>
 
-        {/* Collapse toggle */}
+        {/* Collapse toggle — hidden in read-only public views */}
+        {interactive && (
         <button
           onClick={onToggleCollapse}
           title="Collapse column"
@@ -351,6 +360,7 @@ export default function KanbanColumn({
         >
           <ChevronDown size={13} strokeWidth={2} />
         </button>
+        )}
       </div>
 
       {/* Card list — scrolls independently */}
@@ -386,7 +396,8 @@ export default function KanbanColumn({
         )}
       </div>
 
-      {/* + Add affordance */}
+      {/* + Add affordance — hidden in read-only public views */}
+      {interactive && (
       <div style={{ padding: '4px 8px 8px', flexShrink: 0 }}>
         <button
           onClick={onAddClick}
@@ -417,6 +428,7 @@ export default function KanbanColumn({
           Add
         </button>
       </div>
+      )}
     </div>
   );
 }

@@ -1311,9 +1311,9 @@ Includes both the webhook backend and the per-timeline connector sidebar UI (pre
 - [x] `useShares`: `useUnlockShare`, view-token param on `useShareProjection`, `description`/`password` on create input; 6 new/updated hook tests
 
 **13.3 — List + Kanban read-only:**
-- [ ] `interactive=false` + public mounting for List and Kanban (clicks inert)
-- [ ] Projection: include `notes` only when a List share has the Notes column enabled in `view_config`
-- [ ] Per-view read-only polish + "Share this view" (13.2 modal) in both toolbars
+- [x] `interactive=false` + public mounting for List and Kanban (clicks inert)
+- [x] Projection: include `notes` only when a List share has the Notes column enabled in `view_config`
+- [x] Per-view read-only polish + "Share this view" (13.2 modal) in both toolbars
 
 **13.4 — Calendar — ICS feed sharing:**
 - [ ] `shares.kind` discriminator (`view` | `ics`); ICS rows carry `scope` (`timeline` | `member`) + nullable `member_id`, no `view_config`/filter/password

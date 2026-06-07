@@ -77,8 +77,18 @@ func (c *shareCache) invalidate(token string) {
 // viewConfigJSON is the shape stored in shares.view_config. The filter field
 // is evaluated server-side by the Go filter engine; the other fields are
 // forwarded to the client as-is so the public viewer can apply them.
+//
+// columns carries the List view's column visibility snapshot — it drives the
+// "notes" projection nuance below (and lets the public viewer render exactly
+// the columns the share creator chose).
 type viewConfigJSON struct {
-	Filter *filters.FilterDefinition `json:"filter,omitempty"`
+	Filter  *filters.FilterDefinition `json:"filter,omitempty"`
+	Columns []shareColumnConfig       `json:"columns,omitempty"`
+}
+
+type shareColumnConfig struct {
+	ID      string `json:"id"`
+	Visible bool   `json:"visible"`
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
@@ -226,8 +236,20 @@ func (s *Server) buildShareProjection(share *models.Share) (*models.ShareProject
 		}
 	}
 
-	// Build PublicActivity slice — notes omitted unless this is a list share
-	// with notes enabled (Phase 13.2+ handles that nuance; for now always omit).
+	// notes is included only for List shares whose creator left the Notes
+	// column visible — the only projection nuance beyond scope-locking and
+	// field-pruning (Phase 13.3 exit criteria).
+	notesEnabled := false
+	if share.ViewType == "list" {
+		for _, c := range vc.Columns {
+			if c.ID == "notes" && c.Visible {
+				notesEnabled = true
+				break
+			}
+		}
+	}
+
+	// Build PublicActivity slice.
 	pubActivities := make([]models.PublicActivity, 0, len(filteredActs))
 	for _, a := range filteredActs {
 		pub := models.PublicActivity{
@@ -244,6 +266,9 @@ func (s *Server) buildShareProjection(share *models.Share) (*models.ShareProject
 			PercentComplete:   a.PercentComplete,
 			AssignedMemberIDs: a.AssignedMemberIDs,
 			TagIDs:            a.TagIDs,
+		}
+		if notesEnabled {
+			pub.Notes = a.Notes
 		}
 		if pub.AssignedMemberIDs == nil {
 			pub.AssignedMemberIDs = []string{}
