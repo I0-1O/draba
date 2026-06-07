@@ -1543,6 +1543,8 @@ Rebuilds the "Share this view" modal to the [design handoff](plans/phase-13-shar
 
 **Delete is not permission-gated.** A share is a read-only projection that can never mutate app data, so the old admin-vs-creator `canDelete` rule is dropped — any team member who can manage the timeline may remove any of its shares.
 
+**Troubleshooting aids that rode along with this phase (in scope by inclusion, not by original plan):** verifying the password gateway against the Docker test instance kept stalling on "is the running image even today's commit?", so build-commit stamping shipped mid-phase — `internal/buildinfo` (ldflags-injected commit/build-time, VCS-stamp fallback for local builds) plus a public `GET /version`, logged at startup and wired through the Dockerfile/publish workflow. Verifying the new share rows also needed real fixtures, so sample-data auto-seeding shipped alongside it — embedded `sample_data/*.sql` seeded into an empty DB via `DRABA_SEED_SAMPLE_DATA` (`db.SeedSampleDataIfEmpty`), `11_shares.sql` (open + password-protected fixtures exercising the new modal), and a collision-safe rewrite of `reset-test-env.sh` so the bootstrap admin coexists with seeded sample users. Both are general-purpose dev/ops tooling the phase needed to verify itself, not share-module features — call this out explicitly so a scope review doesn't mistake them for creep.
+
 **Exit criteria — safe to pause when:**
 - The modal matches the handoff design, built from existing components + design tokens (no ported inline styles)
 - One timeline hosts multiple named shares in the list; each row shows creator, date, and a live view count

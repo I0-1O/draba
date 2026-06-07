@@ -6,6 +6,10 @@
  * delete-confirm, plus an inline create form with optional password protection.
  * One timeline can host many named shares; each is a frozen view snapshot.
  *
+ * Styled with Tailwind utility classes against the project's design tokens
+ * (see index.css `@theme`) and shadcn/ui primitives — the handoff is a visual
+ * reference, not production code, so its inline styles were not ported.
+ *
  * Delete is intentionally not permission-gated — a share is a read-only
  * projection that cannot mutate app data, so any team member may manage any
  * link (Phase 13.2 decision).
@@ -22,6 +26,10 @@ import { useTeamMembers } from '@/hooks/useTeamActivities'
 import { useAuth } from '@/contexts/AuthContext'
 import { Badge } from '@/components/identity/Badge'
 import { resolveColorHex } from '@/components/identity/identity-constants'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { cn } from '@/lib/utils'
 import { MEMBER_COLORS } from '@/types'
 import type { FilterDefinition } from '@/lib/filterTypes'
 import type { components } from '@draba/shared'
@@ -54,12 +62,15 @@ interface CreatePayload {
 }
 
 // ── Shared token-styled bits ──────────────────────────────────────────────────
+//
+// The handoff colors a share's "type tile" teal (open link) or amber
+// (password-protected). Those tints aren't semantic tokens on their own, so
+// they're expressed as arbitrary-value Tailwind classes derived from the
+// existing `--primary` / `--secondary` HSL values rather than ported hex.
 
-/** Teal tint used for the unprotected link tile / header icon. */
-const TEAL_TINT = 'hsl(188 59% 38% / 0.12)'
-/** Amber tints used for the protected (password) tile and badge. */
-const AMBER_TINT = 'hsl(30 87% 62% / 0.16)'
-const AMBER_TINT_STRONG = 'hsl(30 87% 62% / 0.22)'
+const TILE_TEAL = 'bg-[hsl(188_59%_38%/0.12)] text-primary'
+const TILE_AMBER = 'bg-[hsl(30_87%_62%/0.16)] text-secondary'
+const BADGE_AMBER = 'bg-[hsl(30_87%_62%/0.22)] text-secondary-foreground'
 
 function MiniAvatar({ member, size = 20 }: { member: TeamMemberWithUser | undefined; size?: number }) {
   if (!member) return null
@@ -102,56 +113,46 @@ function ShareRow({
   }
 
   return (
-    <div style={{ position: 'relative', border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)', background: 'var(--card)', padding: 14, boxShadow: 'var(--shadow-sm)' }}>
+    <div className="relative rounded-[var(--radius-lg)] border border-border bg-card p-3.5 shadow-sm">
       {/* Top: type tile + title + delete */}
-      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
-        <div style={{
-          width: 32, height: 32, borderRadius: 'var(--radius-md)', flexShrink: 0,
-          background: protectedShare ? AMBER_TINT : TEAL_TINT,
-          color: protectedShare ? 'var(--secondary)' : 'var(--primary)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-        }}>
+      <div className="flex items-start gap-2.5">
+        <div className={cn('flex h-8 w-8 shrink-0 items-center justify-center rounded-[var(--radius-md)]', protectedShare ? TILE_AMBER : TILE_TEAL)}>
           {protectedShare ? <Lock size={16} strokeWidth={2.2} /> : <LinkIcon size={16} strokeWidth={2.2} />}
         </div>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-            <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--foreground)' }}>{share.name || 'Untitled link'}</span>
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-sm font-semibold text-foreground">{share.name || 'Untitled link'}</span>
             {protectedShare && (
-              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11, fontWeight: 600, color: 'var(--secondary-foreground)', background: AMBER_TINT_STRONG, padding: '1px 8px', borderRadius: 'var(--radius-full)' }}>
+              <span className={cn('inline-flex items-center gap-1 rounded-[var(--radius-full)] px-2 py-px text-[11px] font-semibold', BADGE_AMBER)}>
                 <Lock size={10} strokeWidth={2.4} /> password
               </span>
             )}
           </div>
           {share.description && (
-            <p style={{ fontSize: 12.5, color: 'var(--muted-foreground)', marginTop: 3, lineHeight: 1.45 }}>{share.description}</p>
+            <p className="mt-[3px] text-[12.5px] leading-[1.45] text-muted-foreground">{share.description}</p>
           )}
         </div>
         <button
           onClick={() => setConfirming(true)}
           title="Delete share"
-          style={{ width: 28, height: 28, flexShrink: 0, borderRadius: 'var(--radius-md)', border: 'none', background: 'transparent', color: 'var(--muted-foreground)', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
-          onMouseEnter={e => { e.currentTarget.style.background = 'hsl(0 72% 51% / 0.1)'; e.currentTarget.style.color = 'var(--destructive)' }}
-          onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'var(--muted-foreground)' }}
+          className="flex h-7 w-7 shrink-0 cursor-pointer items-center justify-center rounded-[var(--radius-md)] border-none bg-transparent text-muted-foreground transition-colors hover:bg-[hsl(0_72%_51%/0.1)] hover:text-destructive"
         >
           <Trash2 size={15} strokeWidth={2} />
         </button>
       </div>
 
       {/* URL row */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 11 }}>
-        <div style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: 8, padding: '7px 11px', background: 'var(--muted)', borderRadius: 'var(--radius-md)', fontFamily: 'var(--font-mono)', fontSize: 12.5, color: 'var(--foreground)' }}>
-          <Link2 size={13} style={{ color: 'var(--muted-foreground)', flexShrink: 0 }} strokeWidth={2} />
-          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{url}</span>
+      <div className="mt-[11px] flex items-center gap-2">
+        <div className="flex min-w-0 flex-1 items-center gap-2 rounded-[var(--radius-md)] bg-muted px-[11px] py-[7px] font-mono text-[12.5px] text-foreground">
+          <Link2 size={13} className="shrink-0 text-muted-foreground" strokeWidth={2} />
+          <span className="overflow-hidden text-ellipsis whitespace-nowrap">{url}</span>
         </div>
         <button
           onClick={copy}
-          style={{
-            display: 'flex', alignItems: 'center', gap: 5, flexShrink: 0, fontSize: 12.5, fontWeight: 600,
-            padding: '7px 12px', borderRadius: 'var(--radius-md)', cursor: 'pointer',
-            border: `1px solid ${copied ? 'var(--success)' : 'var(--border)'}`,
-            background: copied ? 'hsl(145 63% 42% / 0.12)' : 'var(--card)',
-            color: copied ? 'var(--success)' : 'var(--foreground)', transition: 'all .15s',
-          }}
+          className={cn(
+            'flex shrink-0 items-center gap-[5px] rounded-[var(--radius-md)] border px-3 py-[7px] text-[12.5px] font-semibold transition-colors',
+            copied ? 'border-success bg-[hsl(145_63%_42%/0.12)] text-success' : 'border-border bg-card text-foreground',
+          )}
         >
           {copied ? <Check size={13} strokeWidth={2.2} /> : <Copy size={13} strokeWidth={2.2} />}
           {copied ? 'Copied' : 'Copy'}
@@ -159,35 +160,35 @@ function ShareRow({
       </div>
 
       {/* Footer meta */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 11, fontSize: 12, color: 'var(--muted-foreground)' }}>
+      <div className="mt-[11px] flex items-center gap-2 text-xs text-muted-foreground">
         <MiniAvatar member={creator} size={20} />
-        <span style={{ color: 'var(--foreground)', fontWeight: 600 }}>
+        <span className="font-semibold text-foreground">
           {creator?.displayName ?? 'Team member'}
-          {isOwn && <span style={{ color: 'var(--muted-foreground)', fontWeight: 400 }}> · you</span>}
+          {isOwn && <span className="font-normal text-muted-foreground"> · you</span>}
         </span>
-        <span style={{ opacity: 0.5 }}>•</span>
+        <span className="opacity-50">•</span>
         <span>{formatCreated(share.createdAt)}</span>
-        <span style={{ opacity: 0.5 }}>•</span>
-        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+        <span className="opacity-50">•</span>
+        <span className="inline-flex items-center gap-1">
           <Eye size={12} strokeWidth={2} />{share.viewCount} {share.viewCount === 1 ? 'view' : 'views'}
         </span>
       </div>
 
       {/* Inline delete confirm */}
       {confirming && (
-        <div style={{ position: 'absolute', inset: 0, borderRadius: 'var(--radius-lg)', background: 'var(--card)', border: '1px solid var(--destructive)', display: 'flex', flexDirection: 'column', justifyContent: 'center', padding: '14px 16px', gap: 10 }}>
-          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
-            <div style={{ width: 30, height: 30, flexShrink: 0, borderRadius: 'var(--radius-md)', background: 'hsl(0 72% 51% / 0.1)', color: 'var(--destructive)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        <div className="absolute inset-0 flex flex-col justify-center gap-2.5 rounded-[var(--radius-lg)] border border-destructive bg-card px-4 py-3.5">
+          <div className="flex items-start gap-2.5">
+            <div className="flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-[var(--radius-md)] bg-[hsl(0_72%_51%/0.1)] text-destructive">
               <Trash2 size={15} strokeWidth={2.2} />
             </div>
             <div>
-              <div style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--foreground)' }}>Delete this share?</div>
-              <div style={{ fontSize: 12, color: 'var(--muted-foreground)', marginTop: 2 }}>Anyone with the link will immediately lose access. This can&apos;t be undone.</div>
+              <div className="text-[13.5px] font-semibold text-foreground">Delete this share?</div>
+              <div className="mt-0.5 text-xs text-muted-foreground">Anyone with the link will immediately lose access. This can&apos;t be undone.</div>
             </div>
           </div>
-          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-            <button onClick={() => setConfirming(false)} style={{ fontSize: 12.5, fontWeight: 600, padding: '6px 14px', borderRadius: 'var(--radius-md)', border: '1px solid var(--border)', background: 'var(--card)', color: 'var(--foreground)', cursor: 'pointer' }}>Cancel</button>
-            <button onClick={() => { onDelete(share.id); setConfirming(false) }} style={{ fontSize: 12.5, fontWeight: 600, padding: '6px 14px', borderRadius: 'var(--radius-md)', border: 'none', background: 'var(--destructive)', color: 'var(--destructive-foreground)', cursor: 'pointer' }}>Delete link</button>
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" size="sm" onClick={() => setConfirming(false)}>Cancel</Button>
+            <Button variant="destructive" size="sm" onClick={() => { onDelete(share.id); setConfirming(false) }}>Delete link</Button>
           </div>
         </div>
       )}
@@ -197,23 +198,11 @@ function ShareRow({
 
 // ── The add-share inline form ───────────────────────────────────────────────────
 
-const inputBase: React.CSSProperties = {
-  width: '100%', fontSize: 13, color: 'var(--foreground)', padding: '8px 11px',
-  border: '1px solid var(--input)', borderRadius: 'var(--radius-md)', background: 'var(--card)',
-  outline: 'none', fontFamily: 'var(--font-sans)', boxSizing: 'border-box',
-}
-const labelStyle: React.CSSProperties = {
-  fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', marginBottom: 5,
-  display: 'block', letterSpacing: '0.02em',
-}
-const focusOn = (e: React.FocusEvent<HTMLElement>) => {
-  e.target.style.borderColor = 'var(--primary)'
-  e.target.style.boxShadow = '0 0 0 2px hsl(188 59% 38% / 0.2)'
-}
-const focusOff = (e: React.FocusEvent<HTMLElement>) => {
-  e.target.style.borderColor = 'var(--input)'
-  e.target.style.boxShadow = 'none'
-}
+/**
+ * No shadcn Textarea exists yet, so this mirrors Input's class string —
+ * keeps the field visually consistent without inline styles.
+ */
+const TEXTAREA_CLASSES = 'flex w-full resize-y rounded-md border border-[var(--border)] bg-[var(--background)] px-3 py-2 text-sm leading-relaxed text-[var(--foreground)] shadow-sm transition-colors placeholder:text-[var(--muted-foreground)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)]'
 
 function AddShareForm({
   currentMember,
@@ -245,72 +234,81 @@ function AddShareForm({
   }
 
   return (
-    <div style={{ border: '1.5px solid var(--primary)', borderRadius: 'var(--radius-lg)', background: 'var(--card)', padding: 16, boxShadow: '0 0 0 3px hsl(188 59% 38% / 0.08)' }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14 }}>
-        <PlusCircle size={16} style={{ color: 'var(--primary)' }} strokeWidth={2.2} />
-        <span style={{ fontSize: 13.5, fontWeight: 700, color: 'var(--foreground)' }}>New share link</span>
+    <div className="rounded-[var(--radius-lg)] border-[1.5px] border-primary bg-card p-4 shadow-[0_0_0_3px_hsl(188_59%_38%/0.08)]">
+      <div className="mb-3.5 flex items-center gap-2">
+        <PlusCircle size={16} className="text-primary" strokeWidth={2.2} />
+        <span className="text-[13.5px] font-bold text-foreground">New share link</span>
       </div>
 
-      <div style={{ marginBottom: 12 }}>
-        <label style={labelStyle}>Title</label>
-        <input
+      <div className="mb-3 flex flex-col gap-1.5">
+        <Label htmlFor="share-title">Title</Label>
+        <Input
+          id="share-title"
           ref={titleRef}
           value={title}
           onChange={e => setTitle(e.target.value)}
           onKeyDown={e => { if (e.key === 'Enter') submit() }}
           placeholder="e.g. Acme stakeholder view"
-          style={inputBase}
-          onFocus={focusOn}
-          onBlur={focusOff}
         />
       </div>
 
-      <div style={{ marginBottom: 12 }}>
-        <label style={labelStyle}>Description <span style={{ fontWeight: 400, textTransform: 'none' }}>· optional</span></label>
+      <div className="mb-3 flex flex-col gap-1.5">
+        <Label htmlFor="share-description">
+          Description <span className="lowercase font-normal">· optional</span>
+        </Label>
         <textarea
+          id="share-description"
           value={desc}
           onChange={e => setDesc(e.target.value)}
           rows={2}
           placeholder="What's this link for, and who is it shared with?"
-          style={{ ...inputBase, resize: 'vertical', lineHeight: 1.5 }}
-          onFocus={focusOn}
-          onBlur={focusOff}
+          className={TEXTAREA_CLASSES}
         />
       </div>
 
       {/* Password protect */}
-      <div style={{ border: '1px solid var(--border)', borderRadius: 'var(--radius-md)', overflow: 'hidden' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 12px' }}>
-          <div style={{ width: 28, height: 28, flexShrink: 0, borderRadius: 'var(--radius-md)', background: 'var(--muted)', color: 'var(--muted-foreground)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+      <div className="overflow-hidden rounded-[var(--radius-md)] border border-border">
+        <div className="flex items-center gap-2.5 px-3 py-2.5">
+          <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[var(--radius-md)] bg-muted text-muted-foreground">
             <Lock size={14} strokeWidth={2} />
           </div>
-          <div style={{ flex: 1 }}>
-            <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)' }}>Password protect</div>
-            <div style={{ fontSize: 11.5, color: 'var(--muted-foreground)' }}>Require a password to open the link</div>
+          <div className="flex-1">
+            <div className="text-[13px] font-semibold text-foreground">Password protect</div>
+            <div className="text-[11.5px] text-muted-foreground">Require a password to open the link</div>
           </div>
           <button
             onClick={() => setPwOn(v => !v)}
             role="switch"
             aria-checked={pwOn}
             aria-label="Password protect"
-            style={{ width: 40, height: 22, flexShrink: 0, borderRadius: 'var(--radius-full)', border: 'none', cursor: 'pointer', background: pwOn ? 'var(--primary)' : 'var(--border)', position: 'relative', transition: 'background .15s', padding: 0 }}
+            className={cn(
+              'relative h-[22px] w-10 shrink-0 cursor-pointer rounded-[var(--radius-full)] border-none p-0 transition-colors',
+              pwOn ? 'bg-primary' : 'bg-border',
+            )}
           >
-            <span style={{ position: 'absolute', top: 2, left: pwOn ? 20 : 2, width: 18, height: 18, borderRadius: '50%', background: '#fff', transition: 'left .15s', boxShadow: 'var(--shadow-sm)' }} />
+            <span className={cn(
+              'absolute top-[2px] h-[18px] w-[18px] rounded-full bg-white shadow-sm transition-[left] duration-150',
+              pwOn ? 'left-5' : 'left-[2px]',
+            )} />
           </button>
         </div>
         {pwOn && (
-          <div style={{ padding: '12px 12px 12px', borderTop: '1px solid var(--border)' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'var(--card)', border: '1px solid var(--input)', borderRadius: 'var(--radius-md)', padding: '0 10px' }}>
-              <KeyRound size={14} style={{ color: 'var(--muted-foreground)' }} strokeWidth={2} />
+          <div className="border-t border-border px-3 py-3">
+            <div className="flex items-center gap-2 rounded-[var(--radius-md)] border border-input bg-card px-2.5">
+              <KeyRound size={14} className="text-muted-foreground" strokeWidth={2} />
               <input
                 value={pw}
                 onChange={e => setPw(e.target.value)}
                 onKeyDown={e => { if (e.key === 'Enter') submit() }}
                 type={showPw ? 'text' : 'password'}
                 placeholder="Set a password"
-                style={{ flex: 1, fontSize: 13, color: 'var(--foreground)', padding: '8px 0', border: 'none', outline: 'none', background: 'transparent', fontFamily: 'var(--font-sans)' }}
+                className="flex-1 border-none bg-transparent py-2 text-[13px] text-foreground outline-none placeholder:text-muted-foreground"
               />
-              <button onClick={() => setShowPw(v => !v)} aria-label={showPw ? 'Hide password' : 'Show password'} style={{ border: 'none', background: 'transparent', cursor: 'pointer', color: 'var(--muted-foreground)', display: 'flex', padding: 4 }}>
+              <button
+                onClick={() => setShowPw(v => !v)}
+                aria-label={showPw ? 'Hide password' : 'Show password'}
+                className="flex cursor-pointer border-none bg-transparent p-1 text-muted-foreground"
+              >
                 {showPw ? <EyeOff size={14} strokeWidth={2} /> : <Eye size={14} strokeWidth={2} />}
               </button>
             </div>
@@ -319,23 +317,19 @@ function AddShareForm({
       </div>
 
       {isError && (
-        <p style={{ fontSize: 11, color: 'var(--destructive)', marginTop: 10 }}>Failed to create share. Please try again.</p>
+        <p className="mt-2.5 text-[11px] text-destructive">Failed to create share. Please try again.</p>
       )}
 
       {/* Actions */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 16 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginRight: 'auto', fontSize: 12, color: 'var(--muted-foreground)' }}>
+      <div className="mt-4 flex items-center gap-2.5">
+        <div className="mr-auto flex items-center gap-[7px] text-xs text-muted-foreground">
           <MiniAvatar member={currentMember} size={20} />
           <span>Sharing as {currentMember?.displayName ?? 'you'}</span>
         </div>
-        <button onClick={onCancel} style={{ fontSize: 13, fontWeight: 600, padding: '8px 16px', borderRadius: 'var(--radius-md)', border: '1px solid var(--border)', background: 'var(--card)', color: 'var(--foreground)', cursor: 'pointer' }}>Cancel</button>
-        <button
-          onClick={submit}
-          disabled={!valid || isPending}
-          style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, fontWeight: 600, padding: '8px 18px', borderRadius: 'var(--radius-md)', border: 'none', cursor: valid && !isPending ? 'pointer' : 'not-allowed', background: 'var(--primary)', color: 'var(--primary-foreground)', opacity: valid && !isPending ? 1 : 0.45 }}
-        >
+        <Button variant="outline" onClick={onCancel}>Cancel</Button>
+        <Button onClick={submit} disabled={!valid || isPending}>
           <LinkIcon size={14} strokeWidth={2.2} /> {isPending ? 'Creating…' : 'Create link'}
-        </button>
+        </Button>
       </div>
     </div>
   )
@@ -390,44 +384,48 @@ export default function ShareModal({ teamId, timelineId, viewType, viewConfig, t
   return createPortal(
     <div
       onClick={onClose}
-      style={{ position: 'fixed', inset: 0, zIndex: 1000, background: 'rgb(20 28 33 / 0.55)', backdropFilter: 'blur(2px)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 }}
+      className="fixed inset-0 z-[1000] flex items-center justify-center bg-[hsl(200_24%_11%/0.55)] p-6 backdrop-blur-[2px]"
     >
       <div
         onClick={e => e.stopPropagation()}
-        style={{ width: 'min(580px, 100%)', maxHeight: '88vh', background: 'var(--card)', borderRadius: 'var(--radius-xl)', boxShadow: 'var(--shadow-lg)', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}
+        className="flex max-h-[88vh] w-[min(580px,100%)] flex-col overflow-hidden rounded-[var(--radius-xl)] bg-card shadow-[var(--shadow-lg)]"
       >
         {/* Header */}
-        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12, padding: '18px 20px', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
-          <div style={{ width: 38, height: 38, flexShrink: 0, borderRadius: 'var(--radius-md)', background: TEAL_TINT, color: 'var(--primary)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        <div className="flex shrink-0 items-start gap-3 border-b border-border px-5 py-[18px]">
+          <div className={cn('flex h-[38px] w-[38px] shrink-0 items-center justify-center rounded-[var(--radius-md)]', TILE_TEAL)}>
             <LinkIcon size={19} strokeWidth={2.2} />
           </div>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <h2 style={{ fontSize: 17, fontWeight: 700, color: 'var(--foreground)', lineHeight: 1.25, margin: 0 }}>Share this view</h2>
-            <div style={{ fontSize: 12.5, color: 'var(--muted-foreground)', marginTop: 2, display: 'flex', alignItems: 'center', gap: 6 }}>
-              <span style={{ width: 8, height: 8, borderRadius: 2, background: 'var(--secondary)', display: 'inline-block', flexShrink: 0 }} />
+          <div className="min-w-0 flex-1">
+            <h2 className="m-0 text-[17px] font-bold leading-tight text-foreground">Share this view</h2>
+            <div className="mt-0.5 flex items-center gap-1.5 text-[12.5px] text-muted-foreground">
+              <span className="inline-block h-2 w-2 shrink-0 rounded-sm bg-secondary" />
               {timelineName ? `${timelineName} · ` : ''}anyone with a link can view
             </div>
           </div>
-          <button onClick={onClose} aria-label="Close" style={{ width: 30, height: 30, flexShrink: 0, border: 'none', background: 'var(--muted)', borderRadius: 'var(--radius-md)', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', color: 'var(--muted-foreground)' }}>
+          <button
+            onClick={onClose}
+            aria-label="Close"
+            className="flex h-[30px] w-[30px] shrink-0 cursor-pointer items-center justify-center rounded-[var(--radius-md)] border-none bg-muted text-muted-foreground"
+          >
             <X size={16} strokeWidth={2.2} />
           </button>
         </div>
 
         {/* Section bar */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '13px 20px 11px', flexShrink: 0 }}>
-          <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--muted-foreground)', letterSpacing: '0.06em', textTransform: 'uppercase' }}>Active links</span>
-          <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--muted-foreground)', background: 'var(--muted)', borderRadius: 'var(--radius-full)', padding: '1px 8px', minWidth: 20, textAlign: 'center' }}>{shares.length}</span>
-          <div style={{ marginLeft: 'auto' }}>
+        <div className="flex shrink-0 items-center gap-2 px-5 pb-[11px] pt-[13px]">
+          <span className="text-[11px] font-bold uppercase tracking-[0.06em] text-muted-foreground">Active links</span>
+          <span className="min-w-[20px] rounded-[var(--radius-full)] bg-muted px-2 py-px text-center text-[11px] font-bold text-muted-foreground">{shares.length}</span>
+          <div className="ml-auto">
             {!adding && (
-              <button onClick={() => setAdding(true)} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12.5, fontWeight: 600, padding: '6px 13px', borderRadius: 'var(--radius-md)', border: 'none', cursor: 'pointer', background: 'var(--primary)', color: 'var(--primary-foreground)' }}>
+              <Button size="sm" onClick={() => setAdding(true)}>
                 <Plus size={14} strokeWidth={2.4} /> New share
-              </button>
+              </Button>
             )}
           </div>
         </div>
 
         {/* Body */}
-        <div ref={bodyRef} style={{ flex: 1, overflowY: 'auto', padding: '0 20px 20px', minHeight: 120, display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <div ref={bodyRef} className="flex min-h-[120px] flex-1 flex-col gap-3 overflow-y-auto px-5 pb-5">
           {adding && (
             <AddShareForm
               currentMember={currentMember}
@@ -439,15 +437,15 @@ export default function ShareModal({ teamId, timelineId, viewType, viewConfig, t
           )}
 
           {!isLoading && shares.length === 0 && !adding && (
-            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', textAlign: 'center', padding: '36px 20px', border: '1px dashed var(--border)', borderRadius: 'var(--radius-lg)' }}>
-              <div style={{ width: 48, height: 48, borderRadius: 'var(--radius-lg)', background: 'var(--muted)', color: 'var(--muted-foreground)', display: 'flex', alignItems: 'center', justifyContent: 'center', marginBottom: 12 }}>
+            <div className="flex flex-1 flex-col items-center justify-center rounded-[var(--radius-lg)] border border-dashed border-border px-5 py-9 text-center">
+              <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-[var(--radius-lg)] bg-muted text-muted-foreground">
                 <LinkIcon size={22} strokeWidth={1.8} />
               </div>
-              <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--foreground)' }}>No share links yet</div>
-              <div style={{ fontSize: 12.5, color: 'var(--muted-foreground)', marginTop: 4, maxWidth: 280 }}>Create a link to let people outside your team view this timeline.</div>
-              <button onClick={() => setAdding(true)} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, fontWeight: 600, padding: '8px 16px', borderRadius: 'var(--radius-md)', border: 'none', cursor: 'pointer', background: 'var(--primary)', color: 'var(--primary-foreground)', marginTop: 16 }}>
+              <div className="text-sm font-semibold text-foreground">No share links yet</div>
+              <div className="mt-1 max-w-[280px] text-[12.5px] text-muted-foreground">Create a link to let people outside your team view this timeline.</div>
+              <Button size="sm" className="mt-4" onClick={() => setAdding(true)}>
                 <Plus size={14} strokeWidth={2.4} /> Create share link
-              </button>
+              </Button>
             </div>
           )}
 
@@ -463,12 +461,12 @@ export default function ShareModal({ teamId, timelineId, viewType, viewConfig, t
         </div>
 
         {/* Footer */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '13px 20px', borderTop: '1px solid var(--border)', flexShrink: 0 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 12, color: 'var(--muted-foreground)' }}>
+        <div className="flex shrink-0 items-center gap-2.5 border-t border-border px-5 py-[13px]">
+          <div className="flex items-center gap-[7px] text-xs text-muted-foreground">
             <Users size={14} strokeWidth={2} />
             Read-only links · anyone on your team can manage them
           </div>
-          <button onClick={onClose} style={{ marginLeft: 'auto', fontSize: 13, fontWeight: 600, padding: '8px 20px', borderRadius: 'var(--radius-md)', border: '1px solid var(--border)', background: 'var(--card)', color: 'var(--foreground)', cursor: 'pointer' }}>Done</button>
+          <Button variant="outline" className="ml-auto" onClick={onClose}>Done</Button>
         </div>
       </div>
     </div>,

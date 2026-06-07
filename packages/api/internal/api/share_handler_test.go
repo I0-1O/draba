@@ -524,3 +524,50 @@ func TestShareList_ExposesViewCount(t *testing.T) {
 	srv.ServeHTTP(wV, httptest.NewRequest(http.MethodGet, "/shares/"+shareToken, http.NoBody))
 	require.Equal(t, http.StatusOK, wV.Code)
 }
+
+// TestShareDescription_PersistsAcrossCreateUpdateAndList exercises migration 021
+// (shares.description, added for the 13.2 modal's per-row description): create
+// stores it, PATCH replaces it, and the list response — the modal's data
+// source — carries the column through both times.
+func TestShareDescription_PersistsAcrossCreateUpdateAndList(t *testing.T) {
+	srv, token, teamID, timelineID := shareTestSetup(t)
+
+	wC := httptest.NewRecorder()
+	srv.ServeHTTP(wC, authReq(http.MethodPost, fmt.Sprintf("/timelines/%s/shares", timelineID), map[string]any{
+		"viewType":    "gantt",
+		"viewConfig":  "{}",
+		"description": "Acme stakeholder view — read only",
+	}, token))
+	require.Equal(t, http.StatusCreated, wC.Code)
+	var created map[string]any
+	require.NoError(t, json.NewDecoder(wC.Body).Decode(&created))
+	shareID := created["id"].(string)
+	assert.Equal(t, "Acme stakeholder view — read only", created["description"])
+
+	wL := httptest.NewRecorder()
+	srv.ServeHTTP(wL, authReq(http.MethodGet, fmt.Sprintf("/teams/%s/timelines/%s/shares", teamID, timelineID), nil, token))
+	require.Equal(t, http.StatusOK, wL.Code)
+	var shares []map[string]any
+	require.NoError(t, json.NewDecoder(wL.Body).Decode(&shares))
+	require.Len(t, shares, 1)
+	assert.Equal(t, "Acme stakeholder view — read only", shares[0]["description"])
+
+	// PATCH replaces the description; verify both the response and a fresh
+	// list fetch reflect it (round-trips through share_repo.Update + the column).
+	wU := httptest.NewRecorder()
+	srv.ServeHTTP(wU, authReq(http.MethodPatch, fmt.Sprintf("/shares/%s", shareID), map[string]any{
+		"description": "Updated for Q3 review",
+	}, token))
+	require.Equal(t, http.StatusOK, wU.Code)
+	var updated map[string]any
+	require.NoError(t, json.NewDecoder(wU.Body).Decode(&updated))
+	assert.Equal(t, "Updated for Q3 review", updated["description"])
+
+	wL2 := httptest.NewRecorder()
+	srv.ServeHTTP(wL2, authReq(http.MethodGet, fmt.Sprintf("/teams/%s/timelines/%s/shares", teamID, timelineID), nil, token))
+	require.Equal(t, http.StatusOK, wL2.Code)
+	var sharesAfter []map[string]any
+	require.NoError(t, json.NewDecoder(wL2.Body).Decode(&sharesAfter))
+	require.Len(t, sharesAfter, 1)
+	assert.Equal(t, "Updated for Q3 review", sharesAfter[0]["description"])
+}
