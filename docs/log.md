@@ -2141,3 +2141,9 @@ Port 8080 was already in use on the host.
 - Result: all pass (web-e2e partial — code-verified, no live server; ws-smoke cross-team isolation skipped, covered by unit tests)
 - Smoke target: http://epcot.lan:8081
 - Note: type-sync initially failed (4 tag endpoints missing from openapi.yaml); fixed and committed before logging
+
+## 2026-06-08 — /test-phase 13.3
+
+- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, web-e2e
+- Result: all pass (web-e2e initially skipped — Chrome extension not connected — re-run after reconnecting passed: List + Kanban shares render faithfully read-only, no over-exposure, Phase 7 auth-redirect regression holds; created two ad hoc QA share links live since the seeded fixture had no List/Kanban shares yet)
+- Smoke target: http://epcot.lan:8081 (reset via `ssh draba-test` — canonical sample dataset + bootstrap)

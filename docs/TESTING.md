@@ -30,7 +30,7 @@ Before each `/test-phase` run that needs a clean DB, run on the docker host:
 ```bash
 ./scripts/reset-test-env.sh
 ```
-This stops the container, wipes the SQLite file, restarts, waits for the schema **and the sample-data seed** to load, then layers a bootstrap team + a known invite token on top. After it completes, the container holds the **canonical sample dataset** (3 teams, 6 timelines, 58 activities, 6 share links, …) *plus* the bootstrap admin/team/invite, with `DRABA_TEST_INVITE_TOKEN` valid for `POST /auth/register`.
+This stops the container, wipes the SQLite file, restarts, waits for the schema **and the sample-data seed** to load, then layers a bootstrap team + a known invite token on top. After it completes, the container holds the **canonical sample dataset** (3 teams, 6 timelines, 58 activities, 8 share links, …) *plus* the bootstrap admin/team/invite, with `DRABA_TEST_INVITE_TOKEN` valid for `POST /auth/register`.
 
 **Sample data is the default dataset during pre-launch.** The container must have **`DRABA_SEED_SAMPLE_DATA=1`** set (it's in `docker-compose.yml`; add it to the Portainer/epcot container env too). On an empty DB the binary seeds the embedded `packages/api/sample_data/*.sql` after migrations; it is a no-op once the DB has users, so it never clobbers data. This is a deliberate pre-launch convenience while it's just us and there are no real users — **turn the flag off before onboarding anyone real.** The bootstrap rows (`test-admin@local`, `bootstrap-team`, the invite) are intentionally distinct from every sample email/ID, so they coexist without collision.
 

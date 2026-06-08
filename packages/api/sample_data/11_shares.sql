@@ -1,10 +1,13 @@
--- Shares: 6 share links across 4 timelines (3 open, 3 password-protected),
+-- Shares: 8 share links across 4 timelines (4 open, 4 password-protected),
 -- exercising the Phase 13.2 share module — named links, descriptions, view
--- counts, varied view configs, and the password/protected indicator.
+-- counts, varied view configs, and the password/protected indicator. Phase
+-- 13.3 added List and Kanban as read-only viewers (Gantt shipped in 13.1);
+-- one of each is included below alongside the Gantt links so the public
+-- projection's view-type branches and the List "notes" column-gating nuance
+-- (view_config.columns) are exercisable against the seeded dataset.
 --
 -- created_by references team_members(id) (NOT users). password_hash is a bcrypt
 -- hash of "password" (the sample-data convention; all logins use "password").
--- view_type is 'gantt' for every row — the only read-only viewer live until 13.3.
 
 INSERT INTO shares (id, timeline_id, token, name, description, view_type, view_config, password_hash, created_by, created_at, last_viewed_at, view_count) VALUES
   -- Product Marketing · Q1 Workload — an open all-hands link and a protected stakeholder view.
@@ -39,4 +42,19 @@ INSERT INTO shares (id, timeline_id, token, name, description, view_type, view_c
   ('sh-mcf-agency', 'tl-mcf-rebrand', 'share-demo-agency',
    'Agency review', 'Weekly read-only link for the rebrand agency. Password protected.',
    'gantt', '{"groupBy":"assignee","sortBy":"endDate","colorBy":"member","granularity":"month","filter":{"logic":"and","conditions":[]}}',
-   '$2a$12$EKcdOqSJcFP0zf4MSSUf9Ou7/cglkraTAqiExfZPPWV13sIB7tIUS', 'tm-mcf-paula', datetime('now', '-9 days'), datetime('now', '-3 days'), 17);
+   '$2a$12$EKcdOqSJcFP0zf4MSSUf9Ou7/cglkraTAqiExfZPPWV13sIB7tIUS', 'tm-mcf-paula', datetime('now', '-9 days'), datetime('now', '-3 days'), 17),
+
+  -- Product Marketing · Sales Kick Off — open List link for the extended planning group.
+  -- columns captures the column-visibility snapshot at share time, incl. Notes
+  -- visible (drives the Phase 13.3 "notes" projection nuance) and Tags hidden
+  -- (exercises "exposes exactly its enabled columns; no over-exposure").
+  ('sh-pm-sko-list', 'tl-pm-sko', 'share-demo-sko-list',
+   'Planning group list', 'Read-only task list for the extended SKO planning group, with notes visible.',
+   'list', '{"groupBy":"none","sortBy":"startDate","colorBy":"status","granularity":"week","filter":{"logic":"and","conditions":[]},"columns":[{"id":"colorBar","visible":true},{"id":"identity","visible":true},{"id":"title","visible":true},{"id":"startAt","visible":true},{"id":"endAt","visible":true},{"id":"status","visible":true},{"id":"assignees","visible":true},{"id":"tags","visible":false},{"id":"notes","visible":true}]}',
+   NULL, 'tm-pm-erik', datetime('now', '-4 days'), datetime('now', '-1 days'), 22),
+
+  -- P&B Tiger Team · Right to Win — protected Kanban board for the extended steering group.
+  ('sh-pb-rtw-kanban', 'tl-pb-rtw', 'share-demo-rtw-kanban',
+   'Steering board', 'Read-only Kanban board for the Right to Win steering group, grouped by status.',
+   'kanban', '{"groupBy":"status","sortBy":"startDate","colorBy":"member","granularity":"week","filter":{"logic":"and","conditions":[]}}',
+   '$2a$12$EKcdOqSJcFP0zf4MSSUf9Ou7/cglkraTAqiExfZPPWV13sIB7tIUS', 'tm-pb-brian', datetime('now', '-7 days'), datetime('now', '-2 days'), 13);

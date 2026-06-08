@@ -12,7 +12,7 @@ Run the automated test suite for the phase specified in $ARGUMENTS (e.g. "2" or 
 2a. **Reset the live test environment.** Before running live-smoke subagents:
    - Run `ssh draba-test` (the SSH alias is pinned to the reset wrapper via `authorized_keys command=`, so no command argument is needed). Confirm output ends with "Done."
    - If SSH fails or the alias is not configured, **stop and ask the user to run `scripts/reset-test-env.sh` on the docker host**, then resume when they confirm. Do not proceed with live smoke against a dirty DB.
-   - The reset leaves the DB holding the **canonical sample dataset** (3 teams, 6 timelines, 58 activities, 6 shares) **plus** the bootstrap admin/team/invite — not an empty DB. `api-smoke` should target `bootstrap-team` for register/login flows and must **not** assume exact global team/user counts. (See docs/TESTING.md.)
+   - The reset leaves the DB holding the **canonical sample dataset** (3 teams, 6 timelines, 58 activities, 8 shares) **plus** the bootstrap admin/team/invite — not an empty DB. `api-smoke` should target `bootstrap-team` for register/login flows and must **not** assume exact global team/user counts. (See docs/TESTING.md.)
    - Skip this entire step if no live-smoke subagents are active for the target phase.
 
 3. Spawn the active subagents **in parallel** via the Agent tool (single message, multiple Agent calls). Each agent prompt must:
