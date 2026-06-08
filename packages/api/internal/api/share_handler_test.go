@@ -329,6 +329,74 @@ func TestShareGateway_FilteredOutActivitiesAbsent(t *testing.T) {
 	assert.Equal(t, "Alpha", act["title"])
 }
 
+// TestShareGateway_KanbanKeepsUnusedStatusColumns verifies that Kanban shares
+// receive the full per-timeline status list — including statuses with zero
+// activities — so the public board renders the same empty columns the in-app
+// board does (e.g. an empty "Deferred" column). List shares keep the existing
+// referenced-only pruning, since List has no per-status column to populate.
+func TestShareGateway_KanbanKeepsUnusedStatusColumns(t *testing.T) {
+	srv, token, teamID, timelineID := shareTestSetup(t)
+
+	// Two statuses: "Used" gets an activity, "Unused" gets none.
+	statusURL := fmt.Sprintf("/teams/%s/timelines/%s/statuses", teamID, timelineID)
+	wUsed := httptest.NewRecorder()
+	srv.ServeHTTP(wUsed, authReq(http.MethodPost, statusURL, map[string]any{"name": "Used", "color": "#3B82F6"}, token))
+	require.Equal(t, http.StatusCreated, wUsed.Code)
+	var usedStatus map[string]any
+	require.NoError(t, json.NewDecoder(wUsed.Body).Decode(&usedStatus))
+	usedStatusID := usedStatus["id"].(string)
+
+	wUnused := httptest.NewRecorder()
+	srv.ServeHTTP(wUnused, authReq(http.MethodPost, statusURL, map[string]any{"name": "Unused", "color": "#F59E0B"}, token))
+	require.Equal(t, http.StatusCreated, wUnused.Code)
+
+	// One activity, assigned to "Used".
+	actURL := fmt.Sprintf("/teams/%s/timelines/%s/activities", teamID, timelineID)
+	wAct := httptest.NewRecorder()
+	srv.ServeHTTP(wAct, authReq(http.MethodPost, actURL, map[string]any{
+		"title": "Only activity", "startAt": "2026-05-01T00:00:00Z", "endAt": "2026-05-10T00:00:00Z",
+		"allDay": true, "statusId": usedStatusID,
+	}, token))
+	require.Equal(t, http.StatusCreated, wAct.Code)
+
+	createShare := func(viewType string) string {
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, authReq(http.MethodPost, fmt.Sprintf("/timelines/%s/shares", timelineID), map[string]any{
+			"viewType": viewType, "viewConfig": "{}",
+		}, token))
+		require.Equal(t, http.StatusCreated, w.Code)
+		var created map[string]any
+		require.NoError(t, json.NewDecoder(w.Body).Decode(&created))
+		return created["token"].(string)
+	}
+
+	fetchStatusNames := func(shareToken string) []string {
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/shares/"+shareToken, http.NoBody))
+		require.Equal(t, http.StatusOK, w.Code)
+		var proj map[string]any
+		require.NoError(t, json.NewDecoder(w.Body).Decode(&proj))
+		var names []string
+		for _, raw := range proj["statuses"].([]any) {
+			names = append(names, raw.(map[string]any)["name"].(string))
+		}
+		return names
+	}
+
+	// The timeline starts with statuses copied from the team's status template
+	// (e.g. "Planning"/"In Progress"/"Complete"), so assert by membership rather
+	// than an exact set — the point under test is whether "Unused" survives.
+	kanbanNames := fetchStatusNames(createShare("kanban"))
+	assert.Contains(t, kanbanNames, "Used")
+	assert.Contains(t, kanbanNames, "Unused",
+		"Kanban shares should include every timeline status, even ones with no activities")
+
+	listNames := fetchStatusNames(createShare("list"))
+	assert.Contains(t, listNames, "Used")
+	assert.NotContains(t, listNames, "Unused",
+		"List shares should keep pruning to referenced statuses only")
+}
+
 // ── Password protection tests (Phase 13.2) ────────────────────────────────────
 
 // createProtectedShare creates a password-protected share and returns its token.

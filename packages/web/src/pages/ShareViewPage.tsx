@@ -8,7 +8,7 @@
  * it beats any dark-class applied from localStorage by useDarkMode.
  */
 
-import { useMemo, useLayoutEffect, useEffect, useState } from 'react'
+import { useMemo, useLayoutEffect, useEffect, useState, useCallback, useRef } from 'react'
 import { useParams } from 'react-router-dom'
 import { useShareProjection, useUnlockShare } from '@/hooks/useShares'
 import GanttGrid from '@/components/gantt/GanttGrid'
@@ -28,6 +28,7 @@ import {
   buildColumns,
   buildHierarchyMaps,
   DEFAULT_CARD_FIELDS,
+  type KanbanCardField,
   type KanbanGroupBy,
   type KanbanSortBy,
 } from '@/components/kanban/kanbanColumns'
@@ -102,6 +103,9 @@ interface ParsedKanbanViewConfig {
   groupBy: KanbanGroupBy
   sortBy: KanbanSortBy
   colorBy: ColorBy
+  cardFields: KanbanCardField[]
+  showHierarchy: boolean
+  collapsedColumns: string[]
 }
 
 function parseKanbanViewConfig(raw: string): ParsedKanbanViewConfig {
@@ -111,9 +115,12 @@ function parseKanbanViewConfig(raw: string): ParsedKanbanViewConfig {
       groupBy: (c.groupBy as KanbanGroupBy) ?? 'status',
       sortBy: (c.sortBy as KanbanSortBy) ?? 'startDate',
       colorBy: (c.colorBy as ColorBy) ?? 'activity',
+      cardFields: Array.isArray(c.cardFields) && c.cardFields.length > 0 ? c.cardFields as KanbanCardField[] : DEFAULT_CARD_FIELDS,
+      showHierarchy: c.showHierarchy ?? false,
+      collapsedColumns: Array.isArray(c.collapsedColumns) ? c.collapsedColumns as string[] : [],
     }
   } catch {
-    return { groupBy: 'status', sortBy: 'startDate', colorBy: 'activity' }
+    return { groupBy: 'status', sortBy: 'startDate', colorBy: 'activity', cardFields: DEFAULT_CARD_FIELDS, showHierarchy: false, collapsedColumns: [] }
   }
 }
 
@@ -215,12 +222,87 @@ interface PublicListTableProps {
   activityTitleById: Map<string, string>
 }
 
+/**
+ * Drag handle on a column's right edge — lets the viewer resize columns to
+ * taste (a pure display preference; it never touches activity data, so it's
+ * fair game in a read-only viewer). Mirrors the visual idiom of ListView's
+ * SortableColHeader resize handle, minus the TanStack plumbing.
+ */
+function ColumnResizeHandle({ colId, width, onResize }: {
+  colId: string
+  width: number
+  onResize: (colId: string, width: number) => void
+}) {
+  const [isResizing, setIsResizing] = useState(false)
+  const dragStart = useRef<{ x: number; width: number } | null>(null)
+
+  const onMouseDown = (e: React.MouseEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    dragStart.current = { x: e.clientX, width }
+    setIsResizing(true)
+
+    const onMouseMove = (ev: MouseEvent) => {
+      if (!dragStart.current) return
+      const next = Math.max(40, dragStart.current.width + (ev.clientX - dragStart.current.x))
+      onResize(colId, next)
+    }
+    const onMouseUp = () => {
+      dragStart.current = null
+      setIsResizing(false)
+      window.removeEventListener('mousemove', onMouseMove)
+      window.removeEventListener('mouseup', onMouseUp)
+    }
+    window.addEventListener('mousemove', onMouseMove)
+    window.addEventListener('mouseup', onMouseUp)
+  }
+
+  return (
+    <div
+      onMouseDown={onMouseDown}
+      style={{
+        position: 'absolute', right: 0, top: 0, height: '100%', width: 4,
+        cursor: 'col-resize', background: isResizing ? 'var(--primary)' : 'transparent', zIndex: 1,
+      }}
+      onMouseEnter={e => { if (!isResizing) (e.currentTarget as HTMLElement).style.background = '#d1d5db' }}
+      onMouseLeave={e => { if (!isResizing) (e.currentTarget as HTMLElement).style.background = 'transparent' }}
+    />
+  )
+}
+
 function PublicListTable({ rows, visibleColumns, memberById, statusById, tagById, activityTitleById }: PublicListTableProps) {
+  const [widths, setWidths] = useState<Record<string, number>>(
+    () => Object.fromEntries(visibleColumns.map(c => [c.id, c.defaultWidth])),
+  )
+
+  // Re-seed widths when the visible-column set changes (e.g. share swap).
+  useEffect(() => {
+    setWidths(prev => {
+      const next: Record<string, number> = {}
+      let changed = false
+      for (const c of visibleColumns) {
+        next[c.id] = prev[c.id] ?? c.defaultWidth
+        if (next[c.id] !== prev[c.id]) changed = true
+      }
+      if (Object.keys(prev).length !== Object.keys(next).length) changed = true
+      return changed ? next : prev
+    })
+  }, [visibleColumns])
+
+  const handleResize = useCallback((colId: string, width: number) => {
+    setWidths(w => ({ ...w, [colId]: width }))
+  }, [])
+
+  const rowHoverProps = {
+    onMouseEnter: (e: React.MouseEvent<HTMLTableRowElement>) => { e.currentTarget.style.background = '#f9fafb' },
+    onMouseLeave: (e: React.MouseEvent<HTMLTableRowElement>) => { e.currentTarget.style.background = 'transparent' },
+  }
+
   return (
     <div style={{ flex: 1, overflow: 'auto', background: '#ffffff' }}>
       <table style={{ width: '100%', borderCollapse: 'separate', borderSpacing: 0, tableLayout: 'fixed' }}>
         <colgroup>
-          {visibleColumns.map(c => <col key={c.id} style={{ width: c.defaultWidth }} />)}
+          {visibleColumns.map(c => <col key={c.id} style={{ width: widths[c.id] ?? c.defaultWidth }} />)}
         </colgroup>
         <thead>
           <tr style={{ height: 36 }}>
@@ -229,9 +311,12 @@ function PublicListTable({ rows, visibleColumns, memberById, statusById, tagById
                 position: 'sticky', top: 0, zIndex: 2, background: '#f9fafb',
                 borderBottom: '2px solid #e5e7eb', textAlign: 'left',
                 fontSize: 11, fontWeight: 600, color: '#6b7280', textTransform: 'uppercase',
-                letterSpacing: '0.04em', padding: '0 8px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                letterSpacing: '0.04em', padding: '0 8px', overflow: 'visible', whiteSpace: 'nowrap',
               }}>
-                {c.label}
+                <span style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.label}</span>
+                {c.id !== 'colorBar' && (
+                  <ColumnResizeHandle colId={c.id} width={widths[c.id] ?? c.defaultWidth} onResize={handleResize} />
+                )}
               </th>
             ))}
           </tr>
@@ -270,7 +355,7 @@ function PublicListTable({ rows, visibleColumns, memberById, statusById, tagById
             }
 
             return (
-              <tr key={row.activity.id} style={{ height: 36 }}>
+              <tr key={row.activity.id} style={{ height: 36 }} {...rowHoverProps}>
                 {visibleColumns.map(col => (
                   <PublicListCell
                     key={col.id}
@@ -700,12 +785,28 @@ export default function ShareViewPage() {
     return m
   }, [apiActivities, memberById, kanbanVc.colorBy, kanbanStatusColorById])
 
+  const kanbanHierarchy = useMemo(
+    () => kanbanVc.showHierarchy ? buildHierarchyMaps(apiActivities) : { childrenByParentId: new Map<string, ApiActivity[]>(), childIds: new Set<string>() },
+    [apiActivities, kanbanVc.showHierarchy],
+  )
+
+  // When hierarchy is on, children get nested under their parent's card by
+  // KanbanColumn — they must be excluded here or they'd also appear as their
+  // own top-level card in whichever column their status places them (mirrors
+  // KanbanView's `columnActivities`).
+  const kanbanColumnActivities = useMemo(
+    () => kanbanVc.showHierarchy
+      ? apiActivities.filter(a => !kanbanHierarchy.childIds.has(a.id))
+      : apiActivities,
+    [apiActivities, kanbanVc.showHierarchy, kanbanHierarchy],
+  )
+
+  const kanbanCollapsedSet = useMemo(() => new Set(kanbanVc.collapsedColumns), [kanbanVc.collapsedColumns])
+
   const kanbanColumnsResolved = useMemo(() => {
     if (!proj || proj.share.viewType !== 'kanban') return []
-    return buildColumns(kanbanVc.groupBy, apiActivities, adaptedMembers, proj.statuses, kanbanVc.sortBy)
-  }, [proj, kanbanVc.groupBy, kanbanVc.sortBy, apiActivities, adaptedMembers])
-
-  const kanbanHierarchy = useMemo(() => buildHierarchyMaps(apiActivities), [apiActivities])
+    return buildColumns(kanbanVc.groupBy, kanbanColumnActivities, adaptedMembers, proj.statuses, kanbanVc.sortBy)
+  }, [proj, kanbanVc.groupBy, kanbanVc.sortBy, kanbanColumnActivities, adaptedMembers])
 
   const kanbanActivityById = useMemo(() => {
     const m = new Map<string, ApiActivity>()
@@ -790,20 +891,20 @@ export default function ShareViewPage() {
             statusById={statusById}
             tagById={tagById}
             colorMap={kanbanColorMap}
-            cardFields={DEFAULT_CARD_FIELDS}
+            cardFields={kanbanVc.cardFields}
             suppressedFields={new Set()}
             selectedActivityId={null}
             matchedIds={new Set()}
             activeMatchId={null}
             hasQuery={false}
-            collapsedColumnIds={new Set()}
+            collapsedColumnIds={kanbanCollapsedSet}
             onToggleCollapse={() => {}}
             onCardClick={() => {}}
             onAddInColumn={() => {}}
             onDrop={() => {}}
             activityById={kanbanActivityById}
             activityTitleById={activityTitleById}
-            showHierarchy={false}
+            showHierarchy={kanbanVc.showHierarchy}
             childrenByParentId={kanbanHierarchy.childrenByParentId}
             collapsedParents={new Set()}
             onToggleParent={() => {}}

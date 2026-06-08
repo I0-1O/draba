@@ -874,7 +874,16 @@ function DashboardShell() {
                   filter: activeShareFilter,
                   columns: listColumns.map(c => ({ id: c.id, visible: c.visible })),
                 }
-              : { groupBy: kanbanGroupBy, sortBy: kanbanSortBy, colorBy: kanbanColorBy, granularity: '', filter: activeShareFilter }
+              : {
+                  groupBy: kanbanGroupBy,
+                  sortBy: kanbanSortBy,
+                  colorBy: kanbanColorBy,
+                  granularity: '',
+                  filter: activeShareFilter,
+                  cardFields: kanbanCardFields,
+                  showHierarchy: kanbanShowHierarchy,
+                  collapsedColumns: kanbanCollapsedColumns,
+                }
           }
           onClose={() => setShareModalOpen(false)}
         />

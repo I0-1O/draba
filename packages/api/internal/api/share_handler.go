@@ -301,10 +301,15 @@ func (s *Server) buildShareProjection(share *models.Share) (*models.ShareProject
 		})
 	}
 
-	// Prune statuses to referenced ones.
+	// Prune statuses to referenced ones — except for Kanban shares, where
+	// every status is a column regardless of whether it currently holds any
+	// activities (mirrors the in-app board, which always renders one column
+	// per timeline status). Pruning there would silently drop empty columns
+	// that anonymous viewers would otherwise see, e.g. an empty "Deferred"
+	// column that's still meaningful to the team.
 	pubStatuses := make([]models.Status, 0)
 	for _, st := range statuses {
-		if usedStatusIDs[st.ID] {
+		if share.ViewType == "kanban" || usedStatusIDs[st.ID] {
 			pubStatuses = append(pubStatuses, *st)
 		}
 	}

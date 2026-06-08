@@ -45,6 +45,12 @@ export interface ShareViewConfig {
   filter: FilterDefinition | null
   /** List shares only — column visibility snapshot; drives the "notes" projection nuance. */
   columns?: { id: string; visible: boolean }[]
+  /** Kanban shares only — which fields render on each card. */
+  cardFields?: string[]
+  /** Kanban shares only — whether child activities nest under their parent. */
+  showHierarchy?: boolean
+  /** Kanban shares only — column IDs collapsed at share-creation time. */
+  collapsedColumns?: string[]
 }
 
 interface Props {
@@ -341,7 +347,13 @@ function AddShareForm({
 
 export default function ShareModal({ teamId, timelineId, viewType, viewConfig, timelineName, onClose }: Props) {
   const { user } = useAuth()
-  const { data: shares = [], isLoading } = useListShares(teamId, timelineId)
+  const { data: allShares = [], isLoading } = useListShares(teamId, timelineId)
+  // Scoped to this exact view — a share is a frozen snapshot of one view's
+  // config, so a Gantt link can't usefully stand in for a List or Kanban one.
+  // Showing only same-type links keeps "active links" literal and leaves room
+  // to tailor the modal per view type (e.g. Calendar/ICS in 13.4) without
+  // having to reconcile it against unrelated shares.
+  const shares = allShares.filter(s => s.viewType === viewType)
   const { data: members = [] } = useTeamMembers(teamId)
   const createShare = useCreateShare(teamId, timelineId)
   const deleteShare = useDeleteShare(teamId, timelineId)
@@ -364,6 +376,9 @@ export default function ShareModal({ teamId, timelineId, viewType, viewConfig, t
     granularity: viewConfig.granularity,
     filter: viewConfig.filter ?? { logic: 'and', conditions: [] },
     ...(viewConfig.columns ? { columns: viewConfig.columns } : {}),
+    ...(viewConfig.cardFields ? { cardFields: viewConfig.cardFields } : {}),
+    ...(viewConfig.showHierarchy !== undefined ? { showHierarchy: viewConfig.showHierarchy } : {}),
+    ...(viewConfig.collapsedColumns ? { collapsedColumns: viewConfig.collapsedColumns } : {}),
   })
 
   const handleCreate = (payload: CreatePayload) => {
@@ -386,11 +401,9 @@ export default function ShareModal({ teamId, timelineId, viewType, viewConfig, t
 
   return createPortal(
     <div
-      onClick={onClose}
       className="fixed inset-0 z-[1000] flex items-center justify-center bg-[hsl(200_24%_11%/0.55)] p-6 backdrop-blur-[2px]"
     >
       <div
-        onClick={e => e.stopPropagation()}
         className="flex max-h-[88vh] w-[min(580px,100%)] flex-col overflow-hidden rounded-[var(--radius-xl)] bg-card shadow-[var(--shadow-lg)]"
       >
         {/* Header */}
