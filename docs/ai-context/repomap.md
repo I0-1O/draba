@@ -9172,6 +9172,230 @@ func requestLogger(next http.Handler) http.Handler {
 }
 ````
 
+## File: packages/api/internal/api/saved_filter_handler.go
+````go
+package api
+
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// handleListSavedFilters handles GET /teams/{id}/saved_filters. Returns
+// only filters owned by the calling user within the given team.
+func (s *Server) handleListSavedFilters(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
+		return
+	}
+
+	filters, err := s.savedFilters.ListByTeamUser(teamID, claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list saved filters")
+		return
+	}
+	writeJSON(w, http.StatusOK, filters)
+}
+
+// handleListAllTeamSavedFilters handles GET /teams/{id}/saved_filters/all.
+// Returns every saved filter in the team (private + team). Admin-only.
+func (s *Server) handleListAllTeamSavedFilters(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+
+	member, ok := s.requireTeamMember(w, r, teamID)
+	if !ok {
+		return
+	}
+	if member.Role != "admin" {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "only team admins can list all team filters")
+		return
+	}
+
+	filters, err := s.savedFilters.ListAllByTeam(teamID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list saved filters")
+		return
+	}
+	writeJSON(w, http.StatusOK, filters)
+}
+
+// handleCreateSavedFilter handles POST /teams/{id}/saved_filters. The
+// authenticated user must be a member of the team and becomes the owner.
+// Setting isTeamFilter=true at creation time requires admin role.
+func (s *Server) handleCreateSavedFilter(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	member, ok := s.requireTeamMember(w, r, teamID)
+	if !ok {
+		return
+	}
+
+	var req CreateSavedFilterJSONBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+	if req.Name == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name is required")
+		return
+	}
+	if !json.Valid([]byte(req.Definition)) {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "definition must be valid JSON")
+		return
+	}
+
+	isTeamFilter := false
+	if req.IsTeamFilter != nil && *req.IsTeamFilter {
+		if member.Role != "admin" {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "only team admins can create team filters")
+			return
+		}
+		isTeamFilter = true
+	}
+
+	now := time.Now()
+	filter := &models.SavedFilter{
+		ID:           newID(),
+		TeamID:       teamID,
+		UserID:       claims.UserID,
+		Name:         req.Name,
+		Definition:   req.Definition,
+		IsTeamFilter: isTeamFilter,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+	if err := s.savedFilters.Create(filter); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create saved filter")
+		return
+	}
+	writeJSON(w, http.StatusCreated, filter)
+}
+
+// handleUpdateSavedFilter handles PATCH /saved_filters/{id}. Owners may
+// update name and definition. Setting isTeamFilter=true is admin-only;
+// admins may also update filters they don't own when the filter is already
+// a team filter.
+func (s *Server) handleUpdateSavedFilter(w http.ResponseWriter, r *http.Request) {
+	filterID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	filter, err := s.savedFilters.GetByID(filterID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "saved filter not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update saved filter")
+		return
+	}
+
+	var req UpdateSavedFilterJSONBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	// Determine whether the caller is a team admin for permission checks.
+	isAdmin := false
+	if adminMember, ok := s.requireTeamMember(w, r, filter.TeamID); ok {
+		isAdmin = adminMember.Role == "admin"
+	} else {
+		return
+	}
+
+	isOwner := filter.UserID == claims.UserID
+
+	// Name and definition can be updated by the owner or by a team admin, but
+	// only after the filter has been promoted. This prevents admins from silently
+	// editing a member's private filter before they decide to share it — promotion
+	// is the explicit consent step.
+	wantsNameOrDef := req.Name != nil || req.Definition != nil
+	if wantsNameOrDef && !isOwner {
+		if !isAdmin || !filter.IsTeamFilter {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not the owner of this saved filter")
+			return
+		}
+	}
+
+	if req.Name != nil {
+		if *req.Name == "" {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name must not be empty")
+			return
+		}
+		filter.Name = *req.Name
+	}
+	if req.Definition != nil {
+		if !json.Valid([]byte(*req.Definition)) {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "definition must be valid JSON")
+			return
+		}
+		filter.Definition = *req.Definition
+	}
+	// Only admins may promote or demote isTeamFilter — setting it back to false
+	// is just as impactful as promoting, since it silently removes the filter
+	// from all members' views.
+	if req.IsTeamFilter != nil {
+		if !isAdmin {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "only team admins can change team filter status")
+			return
+		}
+		filter.IsTeamFilter = *req.IsTeamFilter
+	}
+	filter.UpdatedAt = time.Now()
+
+	if err := s.savedFilters.Update(filter); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update saved filter")
+		return
+	}
+	writeJSON(w, http.StatusOK, filter)
+}
+
+// handleDeleteSavedFilter handles DELETE /saved_filters/{id}. The owner may
+// always delete their own filter. Team admins may additionally delete any
+// team filter (is_team_filter = true) even if they aren't the owner.
+func (s *Server) handleDeleteSavedFilter(w http.ResponseWriter, r *http.Request) {
+	filterID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	filter, err := s.savedFilters.GetByID(filterID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "saved filter not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete saved filter")
+		return
+	}
+
+	// Check membership to determine admin status.
+	adminMember, ok := s.requireTeamMember(w, r, filter.TeamID)
+	if !ok {
+		return
+	}
+	isAdmin := adminMember.Role == "admin"
+
+	// Owner can always delete; admin can delete team filters they don't own.
+	if filter.UserID != claims.UserID && !(isAdmin && filter.IsTeamFilter) {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "not the owner of this saved filter")
+		return
+	}
+
+	if err := s.savedFilters.Delete(filterID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete saved filter")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+````
+
 ## File: packages/api/internal/api/setup_handler.go
 ````go
 package api
@@ -23872,6 +24096,241 @@ describe('IDENTITY_COLORS', () => {
 });
 ````
 
+## File: packages/web/src/lib/presetFilters.test.ts
+````typescript
+/**
+ * presetFilters.test.ts — unit tests for applyActiveFilter.
+ *
+ * Covers each preset, the member filter kind, and saved filter delegation.
+ */
+
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest'
+import { applyActiveFilter } from './presetFilters'
+import type { ActiveFilter } from '@/contexts/FilterContext'
+import type { components } from '@draba/shared'
+
+type Activity = components['schemas']['Activity']
+type SavedFilter = components['schemas']['SavedFilter']
+type Status = components['schemas']['Status']
+type Tag = components['schemas']['Tag']
+
+// ── Fixtures ──────────────────────────────────────────────────────────────────
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function makeActivity(overrides: Record<string, any> = {}): Activity {
+  return {
+    id: 'act-1',
+    title: 'Default',
+    timelineId: 'tl-1',
+    startAt: '2026-06-01T00:00:00Z',
+    endAt: '2026-06-30T00:00:00Z',
+    allDay: false,
+    statusId: null,
+    tagIds: [],
+    assignedMemberIds: [],
+    percentComplete: null,
+    parentActivityId: null,
+    color: null,
+    icon: null,
+    description: null,
+    notes: null,
+    location: null,
+    url: null,
+    createdAt: '2026-01-01T00:00:00Z',
+    updatedAt: '2026-01-01T00:00:00Z',
+    archivedAt: null,
+    createdBy: 'user-1',
+    ...overrides,
+  } as Activity
+}
+
+function makeStatus(id: string, name: string, isClosed = false): Status {
+  return { id, name, color: '#3B82F6', icon: null, isClosed, position: 0, timelineId: 'tl-1', createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' }
+}
+
+function makeTag(id: string, name: string): Tag {
+  return { id, name, color: null, teamId: 'team-1', createdAt: '2026-01-01T00:00:00Z', createdBy: 'user-1' }
+}
+
+// Fake the current date to a known value for date-relative tests
+const FAKE_NOW = new Date('2026-06-01T00:00:00Z').getTime()
+beforeAll(() => {
+  vi.spyOn(Date, 'now').mockReturnValue(FAKE_NOW)
+})
+afterAll(() => {
+  vi.restoreAllMocks()
+})
+
+const closedStatusId = 'status-closed'
+const openStatusId = 'status-open'
+const otherMemberId = 'member-other'
+
+const baseCtx = {
+  closedStatusIds: new Set([closedStatusId]),
+  savedFilters: [] as SavedFilter[],
+  statuses: new Map<string, Status[]>([['tl-1', [makeStatus(openStatusId, 'Open'), makeStatus(closedStatusId, 'Done', true)]]]),
+  tags: [makeTag('tag-1', 'urgent')] as Tag[],
+}
+
+const emptyMemberIds = new Map<string, string[]>()
+
+// ── all preset ────────────────────────────────────────────────────────────────
+
+describe("preset 'all'", () => {
+  it('returns all activities unchanged', () => {
+    const activities = [makeActivity({ id: '1' }), makeActivity({ id: '2' })]
+    const filter: ActiveFilter = { kind: 'preset', id: 'all' }
+    expect(applyActiveFilter(activities, filter, emptyMemberIds, baseCtx)).toHaveLength(2)
+  })
+})
+
+// ── open preset ───────────────────────────────────────────────────────────────
+
+describe("preset 'open'", () => {
+  it('removes activities with a closed status', () => {
+    const activities = [
+      makeActivity({ id: 'a', statusId: openStatusId }),
+      makeActivity({ id: 'b', statusId: closedStatusId }),
+      makeActivity({ id: 'c', statusId: null }),
+    ]
+    const filter: ActiveFilter = { kind: 'preset', id: 'open' }
+    const result = applyActiveFilter(activities, filter, emptyMemberIds, baseCtx)
+    expect(result.map(a => a.id)).toEqual(['a', 'c'])
+  })
+})
+
+// ── upcoming preset ───────────────────────────────────────────────────────────
+
+describe("preset 'upcoming'", () => {
+  // FAKE_NOW = 2026-06-01. 7 days = until 2026-06-08.
+  it('includes activities starting within 7 days', () => {
+    const activities = [
+      makeActivity({ id: 'soon', startAt: '2026-06-05T00:00:00Z', endAt: '2026-06-06T00:00:00Z' }),  // within 7d
+      makeActivity({ id: 'far',  startAt: '2026-07-01T00:00:00Z', endAt: '2026-07-15T00:00:00Z' }),  // beyond 7d
+      makeActivity({ id: 'past', startAt: '2026-05-01T00:00:00Z', endAt: '2026-05-10T00:00:00Z' }),  // in past
+    ]
+    const filter: ActiveFilter = { kind: 'preset', id: 'upcoming' }
+    const result = applyActiveFilter(activities, filter, emptyMemberIds, baseCtx)
+    expect(result.map(a => a.id)).toContain('soon')
+    expect(result.map(a => a.id)).not.toContain('far')
+    expect(result.map(a => a.id)).not.toContain('past')
+  })
+
+  it('includes activities ending within 7 days (even if already started)', () => {
+    const activities = [
+      makeActivity({ id: 'ending-soon', endAt: '2026-06-04T00:00:00Z', startAt: '2026-05-01T00:00:00Z' }),
+    ]
+    const filter: ActiveFilter = { kind: 'preset', id: 'upcoming' }
+    const result = applyActiveFilter(activities, filter, emptyMemberIds, baseCtx)
+    expect(result[0].id).toBe('ending-soon')
+  })
+})
+
+// ── overdue preset ────────────────────────────────────────────────────────────
+
+describe("preset 'overdue'", () => {
+  it('returns past-due activities that are not closed', () => {
+    const activities = [
+      makeActivity({ id: 'overdue',    endAt: '2026-05-01T00:00:00Z', statusId: openStatusId }),
+      makeActivity({ id: 'closed-old', endAt: '2026-05-01T00:00:00Z', statusId: closedStatusId }),
+      makeActivity({ id: 'future',     endAt: '2026-07-01T00:00:00Z', statusId: openStatusId }),
+    ]
+    const filter: ActiveFilter = { kind: 'preset', id: 'overdue' }
+    const result = applyActiveFilter(activities, filter, emptyMemberIds, baseCtx)
+    expect(result.map(a => a.id)).toEqual(['overdue'])
+  })
+})
+
+// ── noassign preset ───────────────────────────────────────────────────────────
+
+describe("preset 'noassign'", () => {
+  it('returns only activities with no assignees', () => {
+    const activities = [
+      makeActivity({ id: 'assigned', assignedMemberIds: [otherMemberId] }),
+      makeActivity({ id: 'free',     assignedMemberIds: [] }),
+    ]
+    const filter: ActiveFilter = { kind: 'preset', id: 'noassign' }
+    const result = applyActiveFilter(activities, filter, emptyMemberIds, baseCtx)
+    expect(result.map(a => a.id)).toEqual(['free'])
+  })
+})
+
+// ── member filter kind ────────────────────────────────────────────────────────
+
+describe("filter kind 'member'", () => {
+  it('filters by the resolved member IDs for the userId', () => {
+    const activities = [
+      makeActivity({ id: 'a', assignedMemberIds: ['mbr-alice-1'] }),
+      makeActivity({ id: 'b', assignedMemberIds: ['mbr-bob'] }),
+    ]
+    const memberIds = new Map([['user-alice', ['mbr-alice-1', 'mbr-alice-2']]])
+    const filter: ActiveFilter = { kind: 'member', userId: 'user-alice' }
+    const result = applyActiveFilter(activities, filter, memberIds, baseCtx)
+    expect(result.map(a => a.id)).toEqual(['a'])
+  })
+
+  it('returns empty when user has no member IDs', () => {
+    const activities = [makeActivity()]
+    const filter: ActiveFilter = { kind: 'member', userId: 'unknown-user' }
+    const result = applyActiveFilter(activities, filter, emptyMemberIds, baseCtx)
+    expect(result).toHaveLength(0)
+  })
+})
+
+// ── saved filter kind ─────────────────────────────────────────────────────────
+
+describe("filter kind 'saved'", () => {
+  it('evaluates a saved filter definition against activities', () => {
+    const savedFilter: SavedFilter = {
+      id: 'sf-1',
+      teamId: 'team-1',
+      userId: 'user-1',
+      name: 'Urgent bugs',
+      isTeamFilter: false,
+      definition: JSON.stringify({
+        logic: 'and',
+        conditions: [{ field: 'title', op: 'contains', value: 'urgent' }],
+      }),
+      createdAt: '2026-01-01T00:00:00Z',
+      updatedAt: '2026-01-01T00:00:00Z',
+    }
+    const activities = [
+      makeActivity({ id: 'a', title: 'Fix urgent bug' }),
+      makeActivity({ id: 'b', title: 'Refactor component' }),
+    ]
+    const ctx = { ...baseCtx, savedFilters: [savedFilter] }
+    const filter: ActiveFilter = { kind: 'saved', id: 'sf-1' }
+    const result = applyActiveFilter(activities, filter, emptyMemberIds, ctx)
+    expect(result.map(a => a.id)).toEqual(['a'])
+  })
+
+  it('returns all activities when saved filter is not found', () => {
+    const activities = [makeActivity({ id: 'a' }), makeActivity({ id: 'b' })]
+    const filter: ActiveFilter = { kind: 'saved', id: 'nonexistent' }
+    const result = applyActiveFilter(activities, filter, emptyMemberIds, baseCtx)
+    expect(result).toHaveLength(2)
+  })
+
+  it('returns all activities when saved filter definition is invalid JSON', () => {
+    const badFilter: SavedFilter = {
+      id: 'sf-bad',
+      teamId: 'team-1',
+      userId: 'user-1',
+      name: 'Broken',
+      isTeamFilter: false,
+      definition: 'NOT VALID JSON }{',
+      createdAt: '2026-01-01T00:00:00Z',
+      updatedAt: '2026-01-01T00:00:00Z',
+    }
+    const activities = [makeActivity({ id: 'a' }), makeActivity({ id: 'b' })]
+    const ctx = { ...baseCtx, savedFilters: [badFilter] }
+    const filter: ActiveFilter = { kind: 'saved', id: 'sf-bad' }
+    const result = applyActiveFilter(activities, filter, emptyMemberIds, ctx)
+    expect(result).toHaveLength(2)
+  })
+})
+````
+
 ## File: packages/web/src/lib/presetFilters.ts
 ````typescript
 /**
@@ -26823,46 +27282,6 @@ docker pull mewcus/draba
 draba is currently under active development. The core backend API foundation (authentication, teams, events, websockets) is complete, and active development is focused on building out the React frontend.
 
 Check out the `docs/` folder for our architecture decisions, roadmap, and design patterns.
-````
-
-## File: .claude/commands/test-phase.md
-````markdown
-Run the automated test suite for the phase specified in $ARGUMENTS (e.g. "2" or "Phase 2").
-
-1. Read `docs/TESTING.md` end-to-end. Identify the subagents whose "active from" phase is ≤ the target phase. Read each per-phase section from Phase 1 through the target phase (regression — earlier phases must still pass).
-
-2. Resolve the live-smoke target URL in this priority order:
-   - `DRABA_TEST_URL` env var
-   - The `reference_test_docker.md` memory entry
-   - If neither is available, mark live-smoke subagents as **skipped** for this run.
-
-   Also resolve `DRABA_TEST_INVITE_TOKEN` (env or memory). If it is missing, the `api-smoke` subagent should skip the register-flow assertions and run only the auth-required flows that don't need fresh registration.
-
-2a. **Reset the live test environment.** Before running live-smoke subagents:
-   - Run `ssh draba-test` (the SSH alias is pinned to the reset wrapper via `authorized_keys command=`, so no command argument is needed). Confirm output ends with "Done."
-   - If SSH fails or the alias is not configured, **stop and ask the user to run `scripts/reset-test-env.sh` on the docker host**, then resume when they confirm. Do not proceed with live smoke against a dirty DB.
-   - The reset leaves the DB holding the **canonical sample dataset** (3 teams, 6 timelines, 58 activities, 6 shares) **plus** the bootstrap admin/team/invite — not an empty DB. `api-smoke` should target `bootstrap-team` for register/login flows and must **not** assume exact global team/user counts. (See docs/TESTING.md.)
-   - Skip this entire step if no live-smoke subagents are active for the target phase.
-
-3. Spawn the active subagents **in parallel** via the Agent tool (single message, multiple Agent calls). Each agent prompt must:
-   - State which subagent role it is (`static-check`, `unit-test`, `schema-check`, `api-smoke`, `security-review`, etc.)
-   - Quote the exact assertions from `docs/TESTING.md` for the target phase + all prior phases relevant to its role
-   - Pass the resolved smoke URL when applicable
-   - Request a concise pass/fail report (under 300 words) with file:line citations for any failure
-
-4. Aggregate results into a single table — columns: subagent | status (pass / fail / skipped) | summary. Print blockers first, then failures, then skips, then passes.
-
-5. If any subagent failed, stop here — do not append to the log. Surface the failures to the user with concrete next steps.
-
-6. If all active subagents passed (or skipped cleanly), append a dated entry to `docs/log.md`:
-   ```
-   ## YYYY-MM-DD — /test-phase N
-   - Subagents run: <list>
-   - Result: all pass (or: N pass, M skip)
-   - Smoke target: <url or "skipped">
-   ```
-
-7. Report the table back to the user. Do not modify any source code.
 ````
 
 ## File: .github/workflows/docker-publish.yml
@@ -30066,230 +30485,6 @@ func clientIP(r *http.Request) string {
 }
 ````
 
-## File: packages/api/internal/api/saved_filter_handler.go
-````go
-package api
-
-import (
-	"database/sql"
-	"encoding/json"
-	"errors"
-	"net/http"
-	"time"
-
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// handleListSavedFilters handles GET /teams/{id}/saved_filters. Returns
-// only filters owned by the calling user within the given team.
-func (s *Server) handleListSavedFilters(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
-		return
-	}
-
-	filters, err := s.savedFilters.ListByTeamUser(teamID, claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list saved filters")
-		return
-	}
-	writeJSON(w, http.StatusOK, filters)
-}
-
-// handleListAllTeamSavedFilters handles GET /teams/{id}/saved_filters/all.
-// Returns every saved filter in the team (private + team). Admin-only.
-func (s *Server) handleListAllTeamSavedFilters(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-
-	member, ok := s.requireTeamMember(w, r, teamID)
-	if !ok {
-		return
-	}
-	if member.Role != "admin" {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "only team admins can list all team filters")
-		return
-	}
-
-	filters, err := s.savedFilters.ListAllByTeam(teamID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list saved filters")
-		return
-	}
-	writeJSON(w, http.StatusOK, filters)
-}
-
-// handleCreateSavedFilter handles POST /teams/{id}/saved_filters. The
-// authenticated user must be a member of the team and becomes the owner.
-// Setting isTeamFilter=true at creation time requires admin role.
-func (s *Server) handleCreateSavedFilter(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	member, ok := s.requireTeamMember(w, r, teamID)
-	if !ok {
-		return
-	}
-
-	var req CreateSavedFilterJSONBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-	if req.Name == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name is required")
-		return
-	}
-	if !json.Valid([]byte(req.Definition)) {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "definition must be valid JSON")
-		return
-	}
-
-	isTeamFilter := false
-	if req.IsTeamFilter != nil && *req.IsTeamFilter {
-		if member.Role != "admin" {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "only team admins can create team filters")
-			return
-		}
-		isTeamFilter = true
-	}
-
-	now := time.Now()
-	filter := &models.SavedFilter{
-		ID:           newID(),
-		TeamID:       teamID,
-		UserID:       claims.UserID,
-		Name:         req.Name,
-		Definition:   req.Definition,
-		IsTeamFilter: isTeamFilter,
-		CreatedAt:    now,
-		UpdatedAt:    now,
-	}
-	if err := s.savedFilters.Create(filter); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create saved filter")
-		return
-	}
-	writeJSON(w, http.StatusCreated, filter)
-}
-
-// handleUpdateSavedFilter handles PATCH /saved_filters/{id}. Owners may
-// update name and definition. Setting isTeamFilter=true is admin-only;
-// admins may also update filters they don't own when the filter is already
-// a team filter.
-func (s *Server) handleUpdateSavedFilter(w http.ResponseWriter, r *http.Request) {
-	filterID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	filter, err := s.savedFilters.GetByID(filterID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "saved filter not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update saved filter")
-		return
-	}
-
-	var req UpdateSavedFilterJSONBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	// Determine whether the caller is a team admin for permission checks.
-	isAdmin := false
-	if adminMember, ok := s.requireTeamMember(w, r, filter.TeamID); ok {
-		isAdmin = adminMember.Role == "admin"
-	} else {
-		return
-	}
-
-	isOwner := filter.UserID == claims.UserID
-
-	// Name and definition can be updated by the owner or by a team admin, but
-	// only after the filter has been promoted. This prevents admins from silently
-	// editing a member's private filter before they decide to share it — promotion
-	// is the explicit consent step.
-	wantsNameOrDef := req.Name != nil || req.Definition != nil
-	if wantsNameOrDef && !isOwner {
-		if !isAdmin || !filter.IsTeamFilter {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not the owner of this saved filter")
-			return
-		}
-	}
-
-	if req.Name != nil {
-		if *req.Name == "" {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name must not be empty")
-			return
-		}
-		filter.Name = *req.Name
-	}
-	if req.Definition != nil {
-		if !json.Valid([]byte(*req.Definition)) {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "definition must be valid JSON")
-			return
-		}
-		filter.Definition = *req.Definition
-	}
-	// Only admins may promote or demote isTeamFilter — setting it back to false
-	// is just as impactful as promoting, since it silently removes the filter
-	// from all members' views.
-	if req.IsTeamFilter != nil {
-		if !isAdmin {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "only team admins can change team filter status")
-			return
-		}
-		filter.IsTeamFilter = *req.IsTeamFilter
-	}
-	filter.UpdatedAt = time.Now()
-
-	if err := s.savedFilters.Update(filter); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update saved filter")
-		return
-	}
-	writeJSON(w, http.StatusOK, filter)
-}
-
-// handleDeleteSavedFilter handles DELETE /saved_filters/{id}. The owner may
-// always delete their own filter. Team admins may additionally delete any
-// team filter (is_team_filter = true) even if they aren't the owner.
-func (s *Server) handleDeleteSavedFilter(w http.ResponseWriter, r *http.Request) {
-	filterID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	filter, err := s.savedFilters.GetByID(filterID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "saved filter not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete saved filter")
-		return
-	}
-
-	// Check membership to determine admin status.
-	adminMember, ok := s.requireTeamMember(w, r, filter.TeamID)
-	if !ok {
-		return
-	}
-	isAdmin := adminMember.Role == "admin"
-
-	// Owner can always delete; admin can delete team filters they don't own.
-	if filter.UserID != claims.UserID && !(isAdmin && filter.IsTeamFilter) {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "not the owner of this saved filter")
-		return
-	}
-
-	if err := s.savedFilters.Delete(filterID); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete saved filter")
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-````
-
 ## File: packages/api/internal/api/version_handler.go
 ````go
 package api
@@ -30977,97 +31172,6 @@ DELETE FROM invites;
 DELETE FROM api_tokens;
 DELETE FROM calendar_connections;
 DELETE FROM users;
-````
-
-## File: packages/api/sample_data/11_shares.sql
-````sql
--- Shares: 6 share links across 4 timelines (3 open, 3 password-protected),
--- exercising the Phase 13.2 share module — named links, descriptions, view
--- counts, varied view configs, and the password/protected indicator.
---
--- created_by references team_members(id) (NOT users). password_hash is a bcrypt
--- hash of "password" (the sample-data convention; all logins use "password").
--- view_type is 'gantt' for every row — the only read-only viewer live until 13.3.
-
-INSERT INTO shares (id, timeline_id, token, name, description, view_type, view_config, password_hash, created_by, created_at, last_viewed_at, view_count) VALUES
-  -- Product Marketing · Q1 Workload — an open all-hands link and a protected stakeholder view.
-  ('sh-pm-q1-allhands', 'tl-pm-q1', 'share-demo-allhands',
-   'All-hands public link', 'Embedded in the company all-hands deck. Read-only, grouped by assignee.',
-   'gantt', '{"groupBy":"assignee","sortBy":"startDate","colorBy":"member","granularity":"week","filter":{"logic":"and","conditions":[]}}',
-   NULL, 'tm-pm-erik', datetime('now', '-12 days'), datetime('now', '-1 days'), 126),
-
-  ('sh-pm-q1-acme', 'tl-pm-q1', 'share-demo-acme',
-   'Acme stakeholder view', 'Read-only status for the weekly Acme client review. Updated automatically.',
-   'gantt', '{"groupBy":"none","sortBy":"startDate","colorBy":"activity","granularity":"week","filter":{"logic":"and","conditions":[]}}',
-   '$2a$12$EKcdOqSJcFP0zf4MSSUf9Ou7/cglkraTAqiExfZPPWV13sIB7tIUS', 'tm-pm-lindsay', datetime('now', '-20 days'), datetime('now', '-2 days'), 48),
-
-  -- Product Marketing · Sales Kick Off — open link for sales leadership.
-  ('sh-pm-sko-leadership', 'tl-pm-sko', 'share-demo-sko',
-   'Sales leadership', 'Snapshot for the SKO steering committee.',
-   'gantt', '{"groupBy":"none","sortBy":"startDate","colorBy":"status","granularity":"week","filter":{"logic":"and","conditions":[]}}',
-   NULL, 'tm-pm-erik', datetime('now', '-6 days'), datetime('now', '-1 days'), 31),
-
-  -- P&B Tiger Team · Right to Win — protected exec readout.
-  ('sh-pb-rtw-exec', 'tl-pb-rtw', 'share-demo-exec',
-   'Exec readout', 'Scoped exec view for the Right to Win steering review.',
-   'gantt', '{"groupBy":"none","sortBy":"startDate","colorBy":"activity","granularity":"month","filter":{"logic":"and","conditions":[]}}',
-   '$2a$12$EKcdOqSJcFP0zf4MSSUf9Ou7/cglkraTAqiExfZPPWV13sIB7tIUS', 'tm-pb-brian', datetime('now', '-30 days'), datetime('now', '-5 days'), 9),
-
-  -- Marketing Cross Functional · Web Site Rebrand — open contractor link + protected agency review.
-  ('sh-mcf-contractor', 'tl-mcf-rebrand', 'share-demo-contractor',
-   'Design contractor view', 'Scoped view for the two external design contractors.',
-   'gantt', '{"groupBy":"none","sortBy":"startDate","colorBy":"activity","granularity":"week","filter":{"logic":"and","conditions":[]}}',
-   NULL, 'tm-mcf-scott', datetime('now', '-18 days'), datetime('now', '-1 days'), 64),
-
-  ('sh-mcf-agency', 'tl-mcf-rebrand', 'share-demo-agency',
-   'Agency review', 'Weekly read-only link for the rebrand agency. Password protected.',
-   'gantt', '{"groupBy":"assignee","sortBy":"endDate","colorBy":"member","granularity":"month","filter":{"logic":"and","conditions":[]}}',
-   '$2a$12$EKcdOqSJcFP0zf4MSSUf9Ou7/cglkraTAqiExfZPPWV13sIB7tIUS', 'tm-mcf-paula', datetime('now', '-9 days'), datetime('now', '-3 days'), 17);
-````
-
-## File: packages/api/sample_data/README.md
-````markdown
-# Sample Data
-
-SQL files that populate the database with realistic test data. Files are numbered to respect FK insertion order.
-
-| File | Contents |
-|---|---|
-| `00_flush.sql` | Deletes all data in FK-safe order |
-| `01_users.sql` | 13 users (2 super admins) |
-| `02_teams.sql` | 3 teams (1 archived) |
-| `03_team_members.sql` | 16 members (1 external participant) |
-| `04_status_templates.sql` | 5 templates + 21 items |
-| `05_timelines.sql` | 6 timelines (1 archived) |
-| `06_statuses.sql` | Live statuses per timeline |
-| `07_activities.sql` | 58 activities |
-| `08_activity_assignments.sql` | Activity → member links |
-| `09_timeline_access.sql` | Timeline → member access |
-| `10_tags.sql` | Tags + activity → tag links |
-| `11_shares.sql` | 6 share links (3 open, 3 password-protected) |
-
-## Usage
-
-All files concatenated in order form a complete flush-and-reload script.
-
-**SQLite CLI:**
-```bash
-cat sample_data/*.sql | sqlite3 draba.db
-```
-
-**Go test:** See `internal/db/sample_data_test.go`.
-
-## Updating
-
-When a schema migration changes a table that has sample data:
-1. Edit only the affected file (e.g., add a column to `01_users.sql`)
-2. Run `go test ./internal/db/ -run TestSampleDataLoads` to verify
-
-See `docs/SAMPLE_DATA.md` for the full dataset specification and identity rules.
-
-## Credentials
-
-All user passwords: `password`
 ````
 
 ## File: packages/api/sample_data/sampledata.go
@@ -34589,241 +34693,6 @@ describe('comboSortComparator', () => {
 })
 ````
 
-## File: packages/web/src/lib/presetFilters.test.ts
-````typescript
-/**
- * presetFilters.test.ts — unit tests for applyActiveFilter.
- *
- * Covers each preset, the member filter kind, and saved filter delegation.
- */
-
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest'
-import { applyActiveFilter } from './presetFilters'
-import type { ActiveFilter } from '@/contexts/FilterContext'
-import type { components } from '@draba/shared'
-
-type Activity = components['schemas']['Activity']
-type SavedFilter = components['schemas']['SavedFilter']
-type Status = components['schemas']['Status']
-type Tag = components['schemas']['Tag']
-
-// ── Fixtures ──────────────────────────────────────────────────────────────────
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function makeActivity(overrides: Record<string, any> = {}): Activity {
-  return {
-    id: 'act-1',
-    title: 'Default',
-    timelineId: 'tl-1',
-    startAt: '2026-06-01T00:00:00Z',
-    endAt: '2026-06-30T00:00:00Z',
-    allDay: false,
-    statusId: null,
-    tagIds: [],
-    assignedMemberIds: [],
-    percentComplete: null,
-    parentActivityId: null,
-    color: null,
-    icon: null,
-    description: null,
-    notes: null,
-    location: null,
-    url: null,
-    createdAt: '2026-01-01T00:00:00Z',
-    updatedAt: '2026-01-01T00:00:00Z',
-    archivedAt: null,
-    createdBy: 'user-1',
-    ...overrides,
-  } as Activity
-}
-
-function makeStatus(id: string, name: string, isClosed = false): Status {
-  return { id, name, color: '#3B82F6', icon: null, isClosed, position: 0, timelineId: 'tl-1', createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' }
-}
-
-function makeTag(id: string, name: string): Tag {
-  return { id, name, color: null, teamId: 'team-1', createdAt: '2026-01-01T00:00:00Z', createdBy: 'user-1' }
-}
-
-// Fake the current date to a known value for date-relative tests
-const FAKE_NOW = new Date('2026-06-01T00:00:00Z').getTime()
-beforeAll(() => {
-  vi.spyOn(Date, 'now').mockReturnValue(FAKE_NOW)
-})
-afterAll(() => {
-  vi.restoreAllMocks()
-})
-
-const closedStatusId = 'status-closed'
-const openStatusId = 'status-open'
-const otherMemberId = 'member-other'
-
-const baseCtx = {
-  closedStatusIds: new Set([closedStatusId]),
-  savedFilters: [] as SavedFilter[],
-  statuses: new Map<string, Status[]>([['tl-1', [makeStatus(openStatusId, 'Open'), makeStatus(closedStatusId, 'Done', true)]]]),
-  tags: [makeTag('tag-1', 'urgent')] as Tag[],
-}
-
-const emptyMemberIds = new Map<string, string[]>()
-
-// ── all preset ────────────────────────────────────────────────────────────────
-
-describe("preset 'all'", () => {
-  it('returns all activities unchanged', () => {
-    const activities = [makeActivity({ id: '1' }), makeActivity({ id: '2' })]
-    const filter: ActiveFilter = { kind: 'preset', id: 'all' }
-    expect(applyActiveFilter(activities, filter, emptyMemberIds, baseCtx)).toHaveLength(2)
-  })
-})
-
-// ── open preset ───────────────────────────────────────────────────────────────
-
-describe("preset 'open'", () => {
-  it('removes activities with a closed status', () => {
-    const activities = [
-      makeActivity({ id: 'a', statusId: openStatusId }),
-      makeActivity({ id: 'b', statusId: closedStatusId }),
-      makeActivity({ id: 'c', statusId: null }),
-    ]
-    const filter: ActiveFilter = { kind: 'preset', id: 'open' }
-    const result = applyActiveFilter(activities, filter, emptyMemberIds, baseCtx)
-    expect(result.map(a => a.id)).toEqual(['a', 'c'])
-  })
-})
-
-// ── upcoming preset ───────────────────────────────────────────────────────────
-
-describe("preset 'upcoming'", () => {
-  // FAKE_NOW = 2026-06-01. 7 days = until 2026-06-08.
-  it('includes activities starting within 7 days', () => {
-    const activities = [
-      makeActivity({ id: 'soon', startAt: '2026-06-05T00:00:00Z', endAt: '2026-06-06T00:00:00Z' }),  // within 7d
-      makeActivity({ id: 'far',  startAt: '2026-07-01T00:00:00Z', endAt: '2026-07-15T00:00:00Z' }),  // beyond 7d
-      makeActivity({ id: 'past', startAt: '2026-05-01T00:00:00Z', endAt: '2026-05-10T00:00:00Z' }),  // in past
-    ]
-    const filter: ActiveFilter = { kind: 'preset', id: 'upcoming' }
-    const result = applyActiveFilter(activities, filter, emptyMemberIds, baseCtx)
-    expect(result.map(a => a.id)).toContain('soon')
-    expect(result.map(a => a.id)).not.toContain('far')
-    expect(result.map(a => a.id)).not.toContain('past')
-  })
-
-  it('includes activities ending within 7 days (even if already started)', () => {
-    const activities = [
-      makeActivity({ id: 'ending-soon', endAt: '2026-06-04T00:00:00Z', startAt: '2026-05-01T00:00:00Z' }),
-    ]
-    const filter: ActiveFilter = { kind: 'preset', id: 'upcoming' }
-    const result = applyActiveFilter(activities, filter, emptyMemberIds, baseCtx)
-    expect(result[0].id).toBe('ending-soon')
-  })
-})
-
-// ── overdue preset ────────────────────────────────────────────────────────────
-
-describe("preset 'overdue'", () => {
-  it('returns past-due activities that are not closed', () => {
-    const activities = [
-      makeActivity({ id: 'overdue',    endAt: '2026-05-01T00:00:00Z', statusId: openStatusId }),
-      makeActivity({ id: 'closed-old', endAt: '2026-05-01T00:00:00Z', statusId: closedStatusId }),
-      makeActivity({ id: 'future',     endAt: '2026-07-01T00:00:00Z', statusId: openStatusId }),
-    ]
-    const filter: ActiveFilter = { kind: 'preset', id: 'overdue' }
-    const result = applyActiveFilter(activities, filter, emptyMemberIds, baseCtx)
-    expect(result.map(a => a.id)).toEqual(['overdue'])
-  })
-})
-
-// ── noassign preset ───────────────────────────────────────────────────────────
-
-describe("preset 'noassign'", () => {
-  it('returns only activities with no assignees', () => {
-    const activities = [
-      makeActivity({ id: 'assigned', assignedMemberIds: [otherMemberId] }),
-      makeActivity({ id: 'free',     assignedMemberIds: [] }),
-    ]
-    const filter: ActiveFilter = { kind: 'preset', id: 'noassign' }
-    const result = applyActiveFilter(activities, filter, emptyMemberIds, baseCtx)
-    expect(result.map(a => a.id)).toEqual(['free'])
-  })
-})
-
-// ── member filter kind ────────────────────────────────────────────────────────
-
-describe("filter kind 'member'", () => {
-  it('filters by the resolved member IDs for the userId', () => {
-    const activities = [
-      makeActivity({ id: 'a', assignedMemberIds: ['mbr-alice-1'] }),
-      makeActivity({ id: 'b', assignedMemberIds: ['mbr-bob'] }),
-    ]
-    const memberIds = new Map([['user-alice', ['mbr-alice-1', 'mbr-alice-2']]])
-    const filter: ActiveFilter = { kind: 'member', userId: 'user-alice' }
-    const result = applyActiveFilter(activities, filter, memberIds, baseCtx)
-    expect(result.map(a => a.id)).toEqual(['a'])
-  })
-
-  it('returns empty when user has no member IDs', () => {
-    const activities = [makeActivity()]
-    const filter: ActiveFilter = { kind: 'member', userId: 'unknown-user' }
-    const result = applyActiveFilter(activities, filter, emptyMemberIds, baseCtx)
-    expect(result).toHaveLength(0)
-  })
-})
-
-// ── saved filter kind ─────────────────────────────────────────────────────────
-
-describe("filter kind 'saved'", () => {
-  it('evaluates a saved filter definition against activities', () => {
-    const savedFilter: SavedFilter = {
-      id: 'sf-1',
-      teamId: 'team-1',
-      userId: 'user-1',
-      name: 'Urgent bugs',
-      isTeamFilter: false,
-      definition: JSON.stringify({
-        logic: 'and',
-        conditions: [{ field: 'title', op: 'contains', value: 'urgent' }],
-      }),
-      createdAt: '2026-01-01T00:00:00Z',
-      updatedAt: '2026-01-01T00:00:00Z',
-    }
-    const activities = [
-      makeActivity({ id: 'a', title: 'Fix urgent bug' }),
-      makeActivity({ id: 'b', title: 'Refactor component' }),
-    ]
-    const ctx = { ...baseCtx, savedFilters: [savedFilter] }
-    const filter: ActiveFilter = { kind: 'saved', id: 'sf-1' }
-    const result = applyActiveFilter(activities, filter, emptyMemberIds, ctx)
-    expect(result.map(a => a.id)).toEqual(['a'])
-  })
-
-  it('returns all activities when saved filter is not found', () => {
-    const activities = [makeActivity({ id: 'a' }), makeActivity({ id: 'b' })]
-    const filter: ActiveFilter = { kind: 'saved', id: 'nonexistent' }
-    const result = applyActiveFilter(activities, filter, emptyMemberIds, baseCtx)
-    expect(result).toHaveLength(2)
-  })
-
-  it('returns all activities when saved filter definition is invalid JSON', () => {
-    const badFilter: SavedFilter = {
-      id: 'sf-bad',
-      teamId: 'team-1',
-      userId: 'user-1',
-      name: 'Broken',
-      isTeamFilter: false,
-      definition: 'NOT VALID JSON }{',
-      createdAt: '2026-01-01T00:00:00Z',
-      updatedAt: '2026-01-01T00:00:00Z',
-    }
-    const activities = [makeActivity({ id: 'a' }), makeActivity({ id: 'b' })]
-    const ctx = { ...baseCtx, savedFilters: [badFilter] }
-    const filter: ActiveFilter = { kind: 'saved', id: 'sf-bad' }
-    const result = applyActiveFilter(activities, filter, emptyMemberIds, ctx)
-    expect(result).toHaveLength(2)
-  })
-})
-````
-
 ## File: packages/web/src/pages/ForgotPasswordPage.tsx
 ````typescript
 /**
@@ -35788,6 +35657,46 @@ export default defineConfig(({ mode }) => {
     },
   }
 })
+````
+
+## File: .claude/commands/test-phase.md
+````markdown
+Run the automated test suite for the phase specified in $ARGUMENTS (e.g. "2" or "Phase 2").
+
+1. Read `docs/TESTING.md` end-to-end. Identify the subagents whose "active from" phase is ≤ the target phase. Read each per-phase section from Phase 1 through the target phase (regression — earlier phases must still pass).
+
+2. Resolve the live-smoke target URL in this priority order:
+   - `DRABA_TEST_URL` env var
+   - The `reference_test_docker.md` memory entry
+   - If neither is available, mark live-smoke subagents as **skipped** for this run.
+
+   Also resolve `DRABA_TEST_INVITE_TOKEN` (env or memory). If it is missing, the `api-smoke` subagent should skip the register-flow assertions and run only the auth-required flows that don't need fresh registration.
+
+2a. **Reset the live test environment.** Before running live-smoke subagents:
+   - Run `ssh draba-test` (the SSH alias is pinned to the reset wrapper via `authorized_keys command=`, so no command argument is needed). Confirm output ends with "Done."
+   - If SSH fails or the alias is not configured, **stop and ask the user to run `scripts/reset-test-env.sh` on the docker host**, then resume when they confirm. Do not proceed with live smoke against a dirty DB.
+   - The reset leaves the DB holding the **canonical sample dataset** (3 teams, 6 timelines, 58 activities, 8 shares) **plus** the bootstrap admin/team/invite — not an empty DB. `api-smoke` should target `bootstrap-team` for register/login flows and must **not** assume exact global team/user counts. (See docs/TESTING.md.)
+   - Skip this entire step if no live-smoke subagents are active for the target phase.
+
+3. Spawn the active subagents **in parallel** via the Agent tool (single message, multiple Agent calls). Each agent prompt must:
+   - State which subagent role it is (`static-check`, `unit-test`, `schema-check`, `api-smoke`, `security-review`, etc.)
+   - Quote the exact assertions from `docs/TESTING.md` for the target phase + all prior phases relevant to its role
+   - Pass the resolved smoke URL when applicable
+   - Request a concise pass/fail report (under 300 words) with file:line citations for any failure
+
+4. Aggregate results into a single table — columns: subagent | status (pass / fail / skipped) | summary. Print blockers first, then failures, then skips, then passes.
+
+5. If any subagent failed, stop here — do not append to the log. Surface the failures to the user with concrete next steps.
+
+6. If all active subagents passed (or skipped cleanly), append a dated entry to `docs/log.md`:
+   ```
+   ## YYYY-MM-DD — /test-phase N
+   - Subagents run: <list>
+   - Result: all pass (or: N pass, M skip)
+   - Smoke target: <url or "skipped">
+   ```
+
+7. Report the table back to the user. Do not modify any source code.
 ````
 
 ## File: docs/plans/phase-13-shares.md
@@ -37635,6 +37544,115 @@ func flatten[T any](s []*T) []T {
 	}
 	return out
 }
+````
+
+## File: packages/api/sample_data/11_shares.sql
+````sql
+-- Shares: 8 share links across 4 timelines (4 open, 4 password-protected),
+-- exercising the Phase 13.2 share module — named links, descriptions, view
+-- counts, varied view configs, and the password/protected indicator. Phase
+-- 13.3 added List and Kanban as read-only viewers (Gantt shipped in 13.1);
+-- one of each is included below alongside the Gantt links so the public
+-- projection's view-type branches and the List "notes" column-gating nuance
+-- (view_config.columns) are exercisable against the seeded dataset.
+--
+-- created_by references team_members(id) (NOT users). password_hash is a bcrypt
+-- hash of "password" (the sample-data convention; all logins use "password").
+
+INSERT INTO shares (id, timeline_id, token, name, description, view_type, view_config, password_hash, created_by, created_at, last_viewed_at, view_count) VALUES
+  -- Product Marketing · Q1 Workload — an open all-hands link and a protected stakeholder view.
+  ('sh-pm-q1-allhands', 'tl-pm-q1', 'share-demo-allhands',
+   'All-hands public link', 'Embedded in the company all-hands deck. Read-only, grouped by assignee.',
+   'gantt', '{"groupBy":"assignee","sortBy":"startDate","colorBy":"member","granularity":"week","filter":{"logic":"and","conditions":[]}}',
+   NULL, 'tm-pm-erik', datetime('now', '-12 days'), datetime('now', '-1 days'), 126),
+
+  ('sh-pm-q1-acme', 'tl-pm-q1', 'share-demo-acme',
+   'Acme stakeholder view', 'Read-only status for the weekly Acme client review. Updated automatically.',
+   'gantt', '{"groupBy":"none","sortBy":"startDate","colorBy":"activity","granularity":"week","filter":{"logic":"and","conditions":[]}}',
+   '$2a$12$EKcdOqSJcFP0zf4MSSUf9Ou7/cglkraTAqiExfZPPWV13sIB7tIUS', 'tm-pm-lindsay', datetime('now', '-20 days'), datetime('now', '-2 days'), 48),
+
+  -- Product Marketing · Sales Kick Off — open link for sales leadership.
+  ('sh-pm-sko-leadership', 'tl-pm-sko', 'share-demo-sko',
+   'Sales leadership', 'Snapshot for the SKO steering committee.',
+   'gantt', '{"groupBy":"none","sortBy":"startDate","colorBy":"status","granularity":"week","filter":{"logic":"and","conditions":[]}}',
+   NULL, 'tm-pm-erik', datetime('now', '-6 days'), datetime('now', '-1 days'), 31),
+
+  -- P&B Tiger Team · Right to Win — protected exec readout.
+  ('sh-pb-rtw-exec', 'tl-pb-rtw', 'share-demo-exec',
+   'Exec readout', 'Scoped exec view for the Right to Win steering review.',
+   'gantt', '{"groupBy":"none","sortBy":"startDate","colorBy":"activity","granularity":"month","filter":{"logic":"and","conditions":[]}}',
+   '$2a$12$EKcdOqSJcFP0zf4MSSUf9Ou7/cglkraTAqiExfZPPWV13sIB7tIUS', 'tm-pb-brian', datetime('now', '-30 days'), datetime('now', '-5 days'), 9),
+
+  -- Marketing Cross Functional · Web Site Rebrand — open contractor link + protected agency review.
+  ('sh-mcf-contractor', 'tl-mcf-rebrand', 'share-demo-contractor',
+   'Design contractor view', 'Scoped view for the two external design contractors.',
+   'gantt', '{"groupBy":"none","sortBy":"startDate","colorBy":"activity","granularity":"week","filter":{"logic":"and","conditions":[]}}',
+   NULL, 'tm-mcf-scott', datetime('now', '-18 days'), datetime('now', '-1 days'), 64),
+
+  ('sh-mcf-agency', 'tl-mcf-rebrand', 'share-demo-agency',
+   'Agency review', 'Weekly read-only link for the rebrand agency. Password protected.',
+   'gantt', '{"groupBy":"assignee","sortBy":"endDate","colorBy":"member","granularity":"month","filter":{"logic":"and","conditions":[]}}',
+   '$2a$12$EKcdOqSJcFP0zf4MSSUf9Ou7/cglkraTAqiExfZPPWV13sIB7tIUS', 'tm-mcf-paula', datetime('now', '-9 days'), datetime('now', '-3 days'), 17),
+
+  -- Product Marketing · Sales Kick Off — open List link for the extended planning group.
+  -- columns captures the column-visibility snapshot at share time, incl. Notes
+  -- visible (drives the Phase 13.3 "notes" projection nuance) and Tags hidden
+  -- (exercises "exposes exactly its enabled columns; no over-exposure").
+  ('sh-pm-sko-list', 'tl-pm-sko', 'share-demo-sko-list',
+   'Planning group list', 'Read-only task list for the extended SKO planning group, with notes visible.',
+   'list', '{"groupBy":"none","sortBy":"startDate","colorBy":"status","granularity":"week","filter":{"logic":"and","conditions":[]},"columns":[{"id":"colorBar","visible":true},{"id":"identity","visible":true},{"id":"title","visible":true},{"id":"startAt","visible":true},{"id":"endAt","visible":true},{"id":"status","visible":true},{"id":"assignees","visible":true},{"id":"tags","visible":false},{"id":"notes","visible":true}]}',
+   NULL, 'tm-pm-erik', datetime('now', '-4 days'), datetime('now', '-1 days'), 22),
+
+  -- P&B Tiger Team · Right to Win — protected Kanban board for the extended steering group.
+  ('sh-pb-rtw-kanban', 'tl-pb-rtw', 'share-demo-rtw-kanban',
+   'Steering board', 'Read-only Kanban board for the Right to Win steering group, grouped by status.',
+   'kanban', '{"groupBy":"status","sortBy":"startDate","colorBy":"member","granularity":"week","filter":{"logic":"and","conditions":[]}}',
+   '$2a$12$EKcdOqSJcFP0zf4MSSUf9Ou7/cglkraTAqiExfZPPWV13sIB7tIUS', 'tm-pb-brian', datetime('now', '-7 days'), datetime('now', '-2 days'), 13);
+````
+
+## File: packages/api/sample_data/README.md
+````markdown
+# Sample Data
+
+SQL files that populate the database with realistic test data. Files are numbered to respect FK insertion order.
+
+| File | Contents |
+|---|---|
+| `00_flush.sql` | Deletes all data in FK-safe order |
+| `01_users.sql` | 13 users (2 super admins) |
+| `02_teams.sql` | 3 teams (1 archived) |
+| `03_team_members.sql` | 16 members (1 external participant) |
+| `04_status_templates.sql` | 5 templates + 21 items |
+| `05_timelines.sql` | 6 timelines (1 archived) |
+| `06_statuses.sql` | Live statuses per timeline |
+| `07_activities.sql` | 58 activities |
+| `08_activity_assignments.sql` | Activity → member links |
+| `09_timeline_access.sql` | Timeline → member access |
+| `10_tags.sql` | Tags + activity → tag links |
+| `11_shares.sql` | 8 share links (4 open, 4 password-protected; gantt/list/kanban view types) |
+
+## Usage
+
+All files concatenated in order form a complete flush-and-reload script.
+
+**SQLite CLI:**
+```bash
+cat sample_data/*.sql | sqlite3 draba.db
+```
+
+**Go test:** See `internal/db/sample_data_test.go`.
+
+## Updating
+
+When a schema migration changes a table that has sample data:
+1. Edit only the affected file (e.g., add a column to `01_users.sql`)
+2. Run `go test ./internal/db/ -run TestSampleDataLoads` to verify
+
+See `docs/SAMPLE_DATA.md` for the full dataset specification and identity rules.
+
+## Credentials
+
+All user passwords: `password`
 ````
 
 ## File: packages/web/src/components/calendar/CalendarToolbar.tsx
@@ -44435,237 +44453,6 @@ export default function RegisterPage() {
 }
 ````
 
-## File: docs/TESTING.md
-````markdown
-# Testing & Review Procedures
-
-This document is the source of truth for what we test and how. It is consumed by the `/test-phase` and `/review-phase` slash commands, which fan work out to subagents that run in parallel. The framework grows phase-by-phase: every new ROADMAP phase adds a section here, and the subagents pick it up automatically.
-
-For the human-review checklist used on diffs, see [REVIEW.md](REVIEW.md).
-
----
-
-## Test environment setup (manual, do once per host)
-
-These steps set up the docker host so `/test-phase` can run end-to-end. Do them **in this order** — later steps assume earlier ones are done.
-
-### Step 1 — One-time host prep (manual)
-On the docker host, as the `draba-test` user (created in the SSH setup steps below):
-
-1. Copy `scripts/reset-test-env.sh` to `~/scripts/reset-test-env.sh` and `chmod +x` it.
-2. Create `~/.draba-test.env` (chmod 600) with:
-   ```
-   DRABA_TEST_INVITE_TOKEN=<pick a long random string>
-   DRABA_TEST_ADMIN_EMAIL=test-admin@local
-   DRABA_TEST_INVITE_EMAIL=invitee@local
-   DRABA_DB_DIR=/portainer/Files/AppData/Config/draba/data
-   DRABA_CONTAINER=draba
-   ```
-   `DRABA_TEST_INVITE_EMAIL` is the email the api-smoke subagent registers as — it must match the email the invite was seeded for. Default `invitee@local` is fine.
-   The script auto-sources this file at startup. No sudo, no `/etc/`, no compose dir — the script uses `docker stop/start` directly and runs file ops inside throwaway containers, so the host user only needs `docker` group membership.
-
-### Step 2 — Per-run reset (manual or SSH-driven)
-Before each `/test-phase` run that needs a clean DB, run on the docker host:
-```bash
-./scripts/reset-test-env.sh
-```
-This stops the container, wipes the SQLite file, restarts, waits for the schema **and the sample-data seed** to load, then layers a bootstrap team + a known invite token on top. After it completes, the container holds the **canonical sample dataset** (3 teams, 6 timelines, 58 activities, 6 share links, …) *plus* the bootstrap admin/team/invite, with `DRABA_TEST_INVITE_TOKEN` valid for `POST /auth/register`.
-
-**Sample data is the default dataset during pre-launch.** The container must have **`DRABA_SEED_SAMPLE_DATA=1`** set (it's in `docker-compose.yml`; add it to the Portainer/epcot container env too). On an empty DB the binary seeds the embedded `packages/api/sample_data/*.sql` after migrations; it is a no-op once the DB has users, so it never clobbers data. This is a deliberate pre-launch convenience while it's just us and there are no real users — **turn the flag off before onboarding anyone real.** The bootstrap rows (`test-admin@local`, `bootstrap-team`, the invite) are intentionally distinct from every sample email/ID, so they coexist without collision.
-
-> api-smoke note: the DB now contains the 3 sample teams in addition to `bootstrap-team`. Flows that target `bootstrap-team` by name/id are unaffected; avoid assertions that assume an exact global team/user count.
-
-### Step 3 — Tell Claude how to reach it (one-time, on the dev box)
-On the machine where you run Claude (this Windows box):
-- The test URL should be stored in the `reference_test_docker.md` memory entry (not committed to the repo).
-- Set `DRABA_TEST_INVITE_TOKEN` in your shell or in a memory entry so subagents can pass it through. **Do not commit it.**
-- Configure key-based SSH from this box to the docker host so `/test-phase` can run the reset itself. Recommended setup: a dedicated `draba-test` user on the docker host, an ed25519 keypair with a passphrase loaded in `ssh-agent`, and the public key pinned in `authorized_keys` with `command="/usr/local/bin/draba-reset"` plus `no-pty,no-port-forwarding,no-X11-forwarding,no-agent-forwarding` so the key can only run the reset script. Add an SSH config alias `Host draba-test` so the call is just `ssh draba-test`.
-
-### What's manual vs automated, at a glance
-
-| Step | Where it runs | Who does it |
-|---|---|---|
-| Host prep (Step 1) | Docker host | **You, once** |
-| Reset before a test run (Step 2) | Docker host | **You manually** *(or SSH-driven if configured — Claude can trigger)* |
-| Static checks, unit tests, schema check, security review | Dev box (this machine) | Claude |
-| API smoke against live container | Dev box → live container | Claude |
-| Logging the run to `docs/log.md` | Dev box | Claude |
-
----
-
-## Global procedures
-
-These run regardless of phase.
-
-### Static checks
-- `cd packages/api && golangci-lint run`
-- `cd packages/api && go vet ./...`
-- `pnpm --filter web lint`
-- `pnpm --filter web build`
-
-### Unit & integration
-- `cd packages/api && go test -count=1 ./...`
-- Race detector (`-race`) requires CGO/GCC — not available on the Windows dev box. It runs in CI (GitHub Actions, Linux runner) on every push. Do not mark a local run as failed for omitting `-race`.
-
-### Live smoke target
-Live-smoke subagents (`api-smoke`, future `ws-smoke`) hit a running container. The URL is **not** stored in the repo — it's resolved at runtime in this priority order:
-1. `DRABA_TEST_URL` environment variable, if set.
-2. The `reference_test_docker.md` memory entry (Brian's local LAN host).
-3. If neither is available, the subagent reports **skipped**, not failed.
-
-### Review checklist (always)
-- CONVENTIONS.md compliance
-- No scope creep beyond the phase's ROADMAP entry
-- Errors handled at boundaries (HTTP, DB, external APIs); internal calls trust contracts
-- No secrets, no `.env` files, no host-specific values committed
-- Migrations idempotent (re-run produces no diff)
-- `docs/log.md` updated with a dated entry
-
----
-
-## Subagent map
-
-| Subagent | Scope | Active from |
-|---|---|---|
-| `static-check` | lint + vet + web typecheck/build | Phase 1 |
-| `unit-test` | `go test -race -count=1 ./...` | Phase 2 |
-| `schema-check` | run migrations on fresh SQLite, re-run, assert no diff | Phase 2 |
-| `api-smoke` | hit live container, run phase exit-criteria flows via curl | Phase 2 |
-| `security-review` | scan diff for secrets, missing auth, SQL concat, JWT misuse | Phase 2 |
-| `type-sync` | regen OpenAPI types, assert no diff | Phase 4 |
-| `ws-smoke` | WebSocket: team-scoped broadcast within 500ms, heartbeat | Phase 5 |
-| `web-e2e` | Chrome MCP — login, render timeline, drag-create | Phase 7 |
-
----
-
-## Per-phase procedures
-
-### Phase 1 — Project Infrastructure
-
-**static-check**
-- `go build ./...` from `packages/api/` succeeds with no errors
-- `pnpm build` from `packages/web/` succeeds
-- `golangci-lint run` is clean
-- `docker compose config` parses without error — skip if Docker is not installed on the dev box (verified by CI)
-
-### Phase 2 — API Foundation (DB & Auth)
-
-**unit-test**
-- All `*_test.go` under `packages/api/internal/` pass with `-race -count=1`
-- `internal/auth` package — unit tests needed (currently no test file; tracked gap):
-  - `IssueAccessToken` / `IssueRefreshToken` / `Validate` roundtrip returns correct claims
-  - `Validate` rejects a token signed with a different secret (tampered signature)
-  - `Validate` rejects an expired token
-  - `Validate` returns error when token type mismatches (`"refresh"` presented as `"access"` and vice versa)
-  - `Validate` rejects `alg=none` / non-HMAC algorithm (algorithm-confusion guard)
-  - `HashPassword` / `CheckPassword` roundtrip succeeds; wrong password returns error
-- `internal/db` — `invite_repo` unit tests needed (currently no test file; tracked gap):
-  - `GetValid` returns `sql.ErrNoRows` for an expired invite
-  - `GetValid` returns `sql.ErrNoRows` after `MarkAccepted` (single-use enforcement)
-
-**schema-check**
-- Start container against a fresh `data.db`; confirm these tables exist: `users`, `teams`, `team_members`, `invites`, `api_tokens`, `activities`, `activity_tags`, `activity_assignments`, `timelines`, `timeline_access`, `calendar_connections`, `statuses`
-  - Note: `status_templates`, `status_template_items`, `instance_settings`, and `password_reset_tokens` are managed via app logic, not standalone migration tables.
-- Restart the container; assert migration runner produces no schema changes (idempotency)
-
-**api-smoke** (against `$DRABA_TEST_URL`)
-- `POST /auth/register` with a valid invite token → 200/201, returns user + JWT
-- `POST /auth/register` with an invalid/missing invite token → 4xx
-- `POST /auth/register` with the **same** invite token a second time → 4xx (single-use)
-- `POST /auth/login` with the registered credentials → 200, returns JWT
-- `POST /auth/login` with a non-existent email → 401
-- `POST /auth/login` with bad credentials → 401
-- `POST /auth/refresh` with a valid refresh token → 200, returns new JWT
-- `POST /auth/refresh` with an access token (wrong type) → 401
-- `POST /auth/refresh` with a token signed by a different secret → 401
-- A subsequent authenticated request with the issued JWT → 200 (validates signing)
-
-**security-review**
-- No password fields stored in plaintext (grep migrations + handlers)
-- JWT secret loaded from env/config, not hardcoded
-- Invite tokens single-use (consumed on register) — also asserted behaviorally in api-smoke above
-- No SQL string concatenation in queries
-
-### Phase 3 — Core API (Events & Teams)
-
-**api-smoke**
-- `POST /teams` → returns team (201 Created)
-- `GET /teams/:id` with member token → 200 OK, returns team
-- `GET /teams/:id` with non-member token → 403 Forbidden
-- `POST /teams/:id/invites` → returns invite token (201 Created)
-- Register via that token → user appears in `GET /teams/:id/members` (200 OK)
-- `POST /teams/:id/timelines/:timelineId/activities` (body: `title`, `startAt`, `endAt` as RFC3339) → 201 Created, then `GET /teams/:id/timelines/:timelineId/activities?from=<RFC3339>&to=<RFC3339>` returns it (200 OK) — params must be full RFC3339 (e.g. `2026-01-01T00:00:00Z`), bare dates return 400
-- `PATCH /activities/:id` updates fields (200 OK); `DELETE /activities/:id` removes it (204 No Content / 200 OK), subsequent GET excludes it
-- Auth: every endpoint rejects requests without a valid JWT (401 Unauthorized)
-- Authz: a user not on the team cannot read or mutate that team's activities (403 Forbidden)
-  - **Setup note:** the "non-member" user must be genuinely absent from the team under test. In the seeded environment every user registered via the bootstrap invite automatically joins `bootstrap-team`, so using that user against `bootstrap-team` produces `200 []` (correct member behaviour, not a 403). Correct approach: create a second team (`POST /teams`), issue an invite for that team, register a fresh user — that user is on team B only. Then use their JWT to hit team A's activity endpoint and expect `403`.
-- Tier Limits: exceeding the plan limits for a team returns appropriate HTTP errors (e.g., 402 Payment Required or 403 Forbidden)
-
-**security-review**
-- Every new route requires auth middleware
-- Team membership enforced on every team-scoped endpoint
-
-### Phase 4 — OpenAPI Spec & Type Generation
-
-**type-sync**
-- `pnpm generate` succeeds with no errors
-- `git diff` after generate is empty (committed types match spec)
-- All Phase 2–3 endpoints present in `packages/shared/openapi.yaml`
-
-### Phase 5 — Real-Time (WebSocket)
-
-**unit-test**
-- `TestHub_Heartbeat_PingReceived` — server sends a `{"type":"ping"}` JSON message within one heartbeat interval
-- `TestHub_Heartbeat_MissedPingDisconnects` — server closes the connection after `readTimeout` elapses with no pong
-- Both tests use `testSetupFast` (50ms heartbeat / 200ms readTimeout) so they run in milliseconds
-
-**ws-smoke**
-- Two clients on team A both receive a delta within 500ms of an event mutation
-- A client on team B does not receive team A's events
-- Heartbeat: connect, subscribe, respond to every `{"type":"ping"}` with `{"type":"pong"}`, assert connection stays open for at least 3 ping cycles (use a 30s real-interval container; verify no disconnect over ~100s)
-  - Note: this is a slow manual check; unit tests (`TestHub_Heartbeat_*`) cover the behavior at speed
-
-### Phase 6 — Timelines
-
-**unit-test**
-- `timeline_repo.RevokeAccess` — unit tests needed (currently no coverage; tracked gap):
-  - Grant access then revoke; `HasAccess` returns false after revoke
-  - Revoking access that was never granted is a no-op (no error)
-- `timeline_repo.ListByTeam` — unit test needed:
-  - Returns all non-archived timelines for a team in descending creation order
-  - Returns empty slice (not error) when team has no timelines
-
-**api-smoke**
-- `POST /teams/:id/timelines` with JWT → 201 Created
-- `GET /timelines/:id` with JWT (user on access list) → 200 OK
-- `GET /timelines/:id` with JWT (user not on access list) → 403 Forbidden
-- `GET /timelines/share/:token` → 200 OK without requiring auth
-
-### Phase 7 — Web — Scaffold
-
-**web-e2e**
-- Navigating to protected routes unauthenticated redirects to `/login`
-- Successful login redirects to the main app view and stores the token
-- TanStack Query successfully fetches team/event data from the API
-- WebSocket client successfully connects and maintains a heartbeat
-
-**Known gap — frontend component unit tests**
-No Vitest / Testing Library setup exists yet. Components (`TimelineGrid`, `EventPanel`, `Sidebar`, `MemberAvatar`) have zero unit-level coverage. This is intentional for early phases — the Chrome MCP e2e tests cover the golden path. When the web layer stabilises, add a `web-unit` subagent that runs `pnpm --filter web test` and assert render output for key components. Track as a Phase 8+ task.
-
-### Phase 8+ — Web
-
-*Stubs.* Detailed assertions added when each phase begins.
-
----
-
-## Adding tests for a new phase
-
-1. Find the phase's section in this file (or add one if missing).
-2. Under the relevant subagent heading, list concrete, runnable assertions tied to the ROADMAP exit criteria.
-3. If a new subagent is needed, add it to the subagent map with an "active from" phase.
-4. That's it — `/test-phase` will pick it up on the next run.
-````
-
 ## File: packages/web/src/components/gantt/GanttGrid.tsx
 ````typescript
 /**
@@ -46704,6 +46491,237 @@ export function useRevokeTimelineAccess(teamId: string, timelineId: string) {
 }
 ````
 
+## File: docs/TESTING.md
+````markdown
+# Testing & Review Procedures
+
+This document is the source of truth for what we test and how. It is consumed by the `/test-phase` and `/review-phase` slash commands, which fan work out to subagents that run in parallel. The framework grows phase-by-phase: every new ROADMAP phase adds a section here, and the subagents pick it up automatically.
+
+For the human-review checklist used on diffs, see [REVIEW.md](REVIEW.md).
+
+---
+
+## Test environment setup (manual, do once per host)
+
+These steps set up the docker host so `/test-phase` can run end-to-end. Do them **in this order** — later steps assume earlier ones are done.
+
+### Step 1 — One-time host prep (manual)
+On the docker host, as the `draba-test` user (created in the SSH setup steps below):
+
+1. Copy `scripts/reset-test-env.sh` to `~/scripts/reset-test-env.sh` and `chmod +x` it.
+2. Create `~/.draba-test.env` (chmod 600) with:
+   ```
+   DRABA_TEST_INVITE_TOKEN=<pick a long random string>
+   DRABA_TEST_ADMIN_EMAIL=test-admin@local
+   DRABA_TEST_INVITE_EMAIL=invitee@local
+   DRABA_DB_DIR=/portainer/Files/AppData/Config/draba/data
+   DRABA_CONTAINER=draba
+   ```
+   `DRABA_TEST_INVITE_EMAIL` is the email the api-smoke subagent registers as — it must match the email the invite was seeded for. Default `invitee@local` is fine.
+   The script auto-sources this file at startup. No sudo, no `/etc/`, no compose dir — the script uses `docker stop/start` directly and runs file ops inside throwaway containers, so the host user only needs `docker` group membership.
+
+### Step 2 — Per-run reset (manual or SSH-driven)
+Before each `/test-phase` run that needs a clean DB, run on the docker host:
+```bash
+./scripts/reset-test-env.sh
+```
+This stops the container, wipes the SQLite file, restarts, waits for the schema **and the sample-data seed** to load, then layers a bootstrap team + a known invite token on top. After it completes, the container holds the **canonical sample dataset** (3 teams, 6 timelines, 58 activities, 8 share links, …) *plus* the bootstrap admin/team/invite, with `DRABA_TEST_INVITE_TOKEN` valid for `POST /auth/register`.
+
+**Sample data is the default dataset during pre-launch.** The container must have **`DRABA_SEED_SAMPLE_DATA=1`** set (it's in `docker-compose.yml`; add it to the Portainer/epcot container env too). On an empty DB the binary seeds the embedded `packages/api/sample_data/*.sql` after migrations; it is a no-op once the DB has users, so it never clobbers data. This is a deliberate pre-launch convenience while it's just us and there are no real users — **turn the flag off before onboarding anyone real.** The bootstrap rows (`test-admin@local`, `bootstrap-team`, the invite) are intentionally distinct from every sample email/ID, so they coexist without collision.
+
+> api-smoke note: the DB now contains the 3 sample teams in addition to `bootstrap-team`. Flows that target `bootstrap-team` by name/id are unaffected; avoid assertions that assume an exact global team/user count.
+
+### Step 3 — Tell Claude how to reach it (one-time, on the dev box)
+On the machine where you run Claude (this Windows box):
+- The test URL should be stored in the `reference_test_docker.md` memory entry (not committed to the repo).
+- Set `DRABA_TEST_INVITE_TOKEN` in your shell or in a memory entry so subagents can pass it through. **Do not commit it.**
+- Configure key-based SSH from this box to the docker host so `/test-phase` can run the reset itself. Recommended setup: a dedicated `draba-test` user on the docker host, an ed25519 keypair with a passphrase loaded in `ssh-agent`, and the public key pinned in `authorized_keys` with `command="/usr/local/bin/draba-reset"` plus `no-pty,no-port-forwarding,no-X11-forwarding,no-agent-forwarding` so the key can only run the reset script. Add an SSH config alias `Host draba-test` so the call is just `ssh draba-test`.
+
+### What's manual vs automated, at a glance
+
+| Step | Where it runs | Who does it |
+|---|---|---|
+| Host prep (Step 1) | Docker host | **You, once** |
+| Reset before a test run (Step 2) | Docker host | **You manually** *(or SSH-driven if configured — Claude can trigger)* |
+| Static checks, unit tests, schema check, security review | Dev box (this machine) | Claude |
+| API smoke against live container | Dev box → live container | Claude |
+| Logging the run to `docs/log.md` | Dev box | Claude |
+
+---
+
+## Global procedures
+
+These run regardless of phase.
+
+### Static checks
+- `cd packages/api && golangci-lint run`
+- `cd packages/api && go vet ./...`
+- `pnpm --filter web lint`
+- `pnpm --filter web build`
+
+### Unit & integration
+- `cd packages/api && go test -count=1 ./...`
+- Race detector (`-race`) requires CGO/GCC — not available on the Windows dev box. It runs in CI (GitHub Actions, Linux runner) on every push. Do not mark a local run as failed for omitting `-race`.
+
+### Live smoke target
+Live-smoke subagents (`api-smoke`, future `ws-smoke`) hit a running container. The URL is **not** stored in the repo — it's resolved at runtime in this priority order:
+1. `DRABA_TEST_URL` environment variable, if set.
+2. The `reference_test_docker.md` memory entry (Brian's local LAN host).
+3. If neither is available, the subagent reports **skipped**, not failed.
+
+### Review checklist (always)
+- CONVENTIONS.md compliance
+- No scope creep beyond the phase's ROADMAP entry
+- Errors handled at boundaries (HTTP, DB, external APIs); internal calls trust contracts
+- No secrets, no `.env` files, no host-specific values committed
+- Migrations idempotent (re-run produces no diff)
+- `docs/log.md` updated with a dated entry
+
+---
+
+## Subagent map
+
+| Subagent | Scope | Active from |
+|---|---|---|
+| `static-check` | lint + vet + web typecheck/build | Phase 1 |
+| `unit-test` | `go test -race -count=1 ./...` | Phase 2 |
+| `schema-check` | run migrations on fresh SQLite, re-run, assert no diff | Phase 2 |
+| `api-smoke` | hit live container, run phase exit-criteria flows via curl | Phase 2 |
+| `security-review` | scan diff for secrets, missing auth, SQL concat, JWT misuse | Phase 2 |
+| `type-sync` | regen OpenAPI types, assert no diff | Phase 4 |
+| `ws-smoke` | WebSocket: team-scoped broadcast within 500ms, heartbeat | Phase 5 |
+| `web-e2e` | Chrome MCP — login, render timeline, drag-create | Phase 7 |
+
+---
+
+## Per-phase procedures
+
+### Phase 1 — Project Infrastructure
+
+**static-check**
+- `go build ./...` from `packages/api/` succeeds with no errors
+- `pnpm build` from `packages/web/` succeeds
+- `golangci-lint run` is clean
+- `docker compose config` parses without error — skip if Docker is not installed on the dev box (verified by CI)
+
+### Phase 2 — API Foundation (DB & Auth)
+
+**unit-test**
+- All `*_test.go` under `packages/api/internal/` pass with `-race -count=1`
+- `internal/auth` package — unit tests needed (currently no test file; tracked gap):
+  - `IssueAccessToken` / `IssueRefreshToken` / `Validate` roundtrip returns correct claims
+  - `Validate` rejects a token signed with a different secret (tampered signature)
+  - `Validate` rejects an expired token
+  - `Validate` returns error when token type mismatches (`"refresh"` presented as `"access"` and vice versa)
+  - `Validate` rejects `alg=none` / non-HMAC algorithm (algorithm-confusion guard)
+  - `HashPassword` / `CheckPassword` roundtrip succeeds; wrong password returns error
+- `internal/db` — `invite_repo` unit tests needed (currently no test file; tracked gap):
+  - `GetValid` returns `sql.ErrNoRows` for an expired invite
+  - `GetValid` returns `sql.ErrNoRows` after `MarkAccepted` (single-use enforcement)
+
+**schema-check**
+- Start container against a fresh `data.db`; confirm these tables exist: `users`, `teams`, `team_members`, `invites`, `api_tokens`, `activities`, `activity_tags`, `activity_assignments`, `timelines`, `timeline_access`, `calendar_connections`, `statuses`
+  - Note: `status_templates`, `status_template_items`, `instance_settings`, and `password_reset_tokens` are managed via app logic, not standalone migration tables.
+- Restart the container; assert migration runner produces no schema changes (idempotency)
+
+**api-smoke** (against `$DRABA_TEST_URL`)
+- `POST /auth/register` with a valid invite token → 200/201, returns user + JWT
+- `POST /auth/register` with an invalid/missing invite token → 4xx
+- `POST /auth/register` with the **same** invite token a second time → 4xx (single-use)
+- `POST /auth/login` with the registered credentials → 200, returns JWT
+- `POST /auth/login` with a non-existent email → 401
+- `POST /auth/login` with bad credentials → 401
+- `POST /auth/refresh` with a valid refresh token → 200, returns new JWT
+- `POST /auth/refresh` with an access token (wrong type) → 401
+- `POST /auth/refresh` with a token signed by a different secret → 401
+- A subsequent authenticated request with the issued JWT → 200 (validates signing)
+
+**security-review**
+- No password fields stored in plaintext (grep migrations + handlers)
+- JWT secret loaded from env/config, not hardcoded
+- Invite tokens single-use (consumed on register) — also asserted behaviorally in api-smoke above
+- No SQL string concatenation in queries
+
+### Phase 3 — Core API (Events & Teams)
+
+**api-smoke**
+- `POST /teams` → returns team (201 Created)
+- `GET /teams/:id` with member token → 200 OK, returns team
+- `GET /teams/:id` with non-member token → 403 Forbidden
+- `POST /teams/:id/invites` → returns invite token (201 Created)
+- Register via that token → user appears in `GET /teams/:id/members` (200 OK)
+- `POST /teams/:id/timelines/:timelineId/activities` (body: `title`, `startAt`, `endAt` as RFC3339) → 201 Created, then `GET /teams/:id/timelines/:timelineId/activities?from=<RFC3339>&to=<RFC3339>` returns it (200 OK) — params must be full RFC3339 (e.g. `2026-01-01T00:00:00Z`), bare dates return 400
+- `PATCH /activities/:id` updates fields (200 OK); `DELETE /activities/:id` removes it (204 No Content / 200 OK), subsequent GET excludes it
+- Auth: every endpoint rejects requests without a valid JWT (401 Unauthorized)
+- Authz: a user not on the team cannot read or mutate that team's activities (403 Forbidden)
+  - **Setup note:** the "non-member" user must be genuinely absent from the team under test. In the seeded environment every user registered via the bootstrap invite automatically joins `bootstrap-team`, so using that user against `bootstrap-team` produces `200 []` (correct member behaviour, not a 403). Correct approach: create a second team (`POST /teams`), issue an invite for that team, register a fresh user — that user is on team B only. Then use their JWT to hit team A's activity endpoint and expect `403`.
+- Tier Limits: exceeding the plan limits for a team returns appropriate HTTP errors (e.g., 402 Payment Required or 403 Forbidden)
+
+**security-review**
+- Every new route requires auth middleware
+- Team membership enforced on every team-scoped endpoint
+
+### Phase 4 — OpenAPI Spec & Type Generation
+
+**type-sync**
+- `pnpm generate` succeeds with no errors
+- `git diff` after generate is empty (committed types match spec)
+- All Phase 2–3 endpoints present in `packages/shared/openapi.yaml`
+
+### Phase 5 — Real-Time (WebSocket)
+
+**unit-test**
+- `TestHub_Heartbeat_PingReceived` — server sends a `{"type":"ping"}` JSON message within one heartbeat interval
+- `TestHub_Heartbeat_MissedPingDisconnects` — server closes the connection after `readTimeout` elapses with no pong
+- Both tests use `testSetupFast` (50ms heartbeat / 200ms readTimeout) so they run in milliseconds
+
+**ws-smoke**
+- Two clients on team A both receive a delta within 500ms of an event mutation
+- A client on team B does not receive team A's events
+- Heartbeat: connect, subscribe, respond to every `{"type":"ping"}` with `{"type":"pong"}`, assert connection stays open for at least 3 ping cycles (use a 30s real-interval container; verify no disconnect over ~100s)
+  - Note: this is a slow manual check; unit tests (`TestHub_Heartbeat_*`) cover the behavior at speed
+
+### Phase 6 — Timelines
+
+**unit-test**
+- `timeline_repo.RevokeAccess` — unit tests needed (currently no coverage; tracked gap):
+  - Grant access then revoke; `HasAccess` returns false after revoke
+  - Revoking access that was never granted is a no-op (no error)
+- `timeline_repo.ListByTeam` — unit test needed:
+  - Returns all non-archived timelines for a team in descending creation order
+  - Returns empty slice (not error) when team has no timelines
+
+**api-smoke**
+- `POST /teams/:id/timelines` with JWT → 201 Created
+- `GET /timelines/:id` with JWT (user on access list) → 200 OK
+- `GET /timelines/:id` with JWT (user not on access list) → 403 Forbidden
+- `GET /timelines/share/:token` → 200 OK without requiring auth
+
+### Phase 7 — Web — Scaffold
+
+**web-e2e**
+- Navigating to protected routes unauthenticated redirects to `/login`
+- Successful login redirects to the main app view and stores the token
+- TanStack Query successfully fetches team/event data from the API
+- WebSocket client successfully connects and maintains a heartbeat
+
+**Known gap — frontend component unit tests**
+No Vitest / Testing Library setup exists yet. Components (`TimelineGrid`, `EventPanel`, `Sidebar`, `MemberAvatar`) have zero unit-level coverage. This is intentional for early phases — the Chrome MCP e2e tests cover the golden path. When the web layer stabilises, add a `web-unit` subagent that runs `pnpm --filter web test` and assert render output for key components. Track as a Phase 8+ task.
+
+### Phase 8+ — Web
+
+*Stubs.* Detailed assertions added when each phase begins.
+
+---
+
+## Adding tests for a new phase
+
+1. Find the phase's section in this file (or add one if missing).
+2. Under the relevant subagent heading, list concrete, runnable assertions tied to the ROADMAP exit criteria.
+3. If a new subagent is needed, add it to the subagent map with an "active from" phase.
+4. That's it — `/test-phase` will pick it up on the next run.
+````
+
 ## File: packages/api/internal/models/models.go
 ````go
 // Package models holds the domain types shared across the API, db,
@@ -48283,6 +48301,3877 @@ export default function Sidebar({ collapsed, onToggle, onNewActivity, onBulkImpo
     </div>
   );
 }
+````
+
+## File: packages/shared/openapi.yaml
+````yaml
+openapi: "3.0.3"
+
+info:
+  title: draba API
+  description: Team coordination API — Phases 2–10.4.5 (auth, teams, events, timelines, tags).
+  version: "1.0.0"
+
+servers:
+  - url: http://localhost:8080
+    description: Local development
+
+# All authenticated endpoints require a Bearer JWT unless overridden with security: [].
+security:
+  - bearerAuth: []
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  # ────────────────────────────────────────────────────────────
+  # Schemas
+  # ────────────────────────────────────────────────────────────
+  schemas:
+
+    User:
+      type: object
+      required: [id, email, displayName, isSuperadmin, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+        email:
+          type: string
+          format: email
+        displayName:
+          type: string
+        avatarUrl:
+          type: string
+          nullable: true
+        color:
+          type: string
+          nullable: true
+          description: User-level identity color ID. Propagates to team memberships.
+        icon:
+          type: string
+          nullable: true
+          description: User-level identity icon ID. Propagates to team memberships.
+        isSuperadmin:
+          type: boolean
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        archivedAt:
+          type: string
+          nullable: true
+          format: date-time
+
+    UpdateProfileInput:
+      type: object
+      properties:
+        displayName:
+          type: string
+        color:
+          type: string
+          nullable: true
+        icon:
+          type: string
+          nullable: true
+
+    ChangePasswordInput:
+      type: object
+      required: [currentPassword, newPassword]
+      properties:
+        currentPassword:
+          type: string
+        newPassword:
+          type: string
+
+    ForgotPasswordInput:
+      type: object
+      required: [email]
+      properties:
+        email:
+          type: string
+          format: email
+
+    ResetPasswordInput:
+      type: object
+      required: [token, newPassword]
+      properties:
+        token:
+          type: string
+        newPassword:
+          type: string
+
+    SMTPConfig:
+      type: object
+      properties:
+        host:
+          type: string
+        port:
+          type: integer
+        username:
+          type: string
+        password:
+          type: string
+          description: Masked in GET responses.
+        fromName:
+          type: string
+        fromEmail:
+          type: string
+        encryption:
+          type: string
+          enum: [none, tls, starttls]
+
+    AdminUserRow:
+      type: object
+      allOf:
+        - $ref: '#/components/schemas/User'
+      properties:
+        teamCount:
+          type: integer
+
+    Team:
+      type: object
+      required: [id, name, slug, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        slug:
+          type: string
+        description:
+          type: string
+          nullable: true
+        notes:
+          type: string
+          nullable: true
+        color:
+          type: string
+          nullable: true
+          description: Identity color ID (e.g. "teal"). Null until explicitly set.
+        icon:
+          type: string
+          nullable: true
+          description: Identity icon ID (e.g. "briefcase") or special value. Null until explicitly set.
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        archivedAt:
+          type: string
+          nullable: true
+          format: date-time
+
+    TeamMember:
+      type: object
+      required: [id, teamId, role, joinedAt]
+      properties:
+        id:
+          type: string
+          description: Team-member record ID (team_members.id).
+        teamId:
+          type: string
+        userId:
+          type: string
+          nullable: true
+        role:
+          type: string
+          enum: [admin, member]
+        color:
+          type: string
+          nullable: true
+          description: Identity color ID (e.g. "teal"). Null until explicitly set.
+        icon:
+          type: string
+          nullable: true
+          description: Identity icon ID or special value. Null until explicitly set.
+        joinedAt:
+          type: string
+          format: date-time
+        archivedAt:
+          type: string
+          nullable: true
+          format: date-time
+          description: Non-null when the member is inactivated.
+
+    TeamMemberWithUser:
+      allOf:
+        - $ref: "#/components/schemas/TeamMember"
+        - type: object
+          required: [email, displayName]
+          properties:
+            email:
+              type: string
+              format: email
+            displayName:
+              type: string
+            avatarUrl:
+              type: string
+              nullable: true
+
+    MemberStats:
+      type: object
+      required: [activeTimelines, archivedTimelines, pastDue, running, upcoming, unscheduled, archivedActivities]
+      properties:
+        activeTimelines:
+          type: integer
+        archivedTimelines:
+          type: integer
+        pastDue:
+          type: integer
+          description: Activities with end_at in the past, not archived.
+        running:
+          type: integer
+          description: Activities currently in progress (start_at ≤ now ≤ end_at), not archived.
+        upcoming:
+          type: integer
+          description: Activities with start_at in the future, not archived.
+        unscheduled:
+          type: integer
+          description: Activities with no start or end date, not archived.
+        archivedActivities:
+          type: integer
+
+    MemberDetail:
+      allOf:
+        - $ref: "#/components/schemas/TeamMemberWithUser"
+        - type: object
+          required: [stats, teams, deletable]
+          properties:
+            stats:
+              $ref: "#/components/schemas/MemberStats"
+            teams:
+              type: array
+              items:
+                $ref: "#/components/schemas/TeamMemberWithUser"
+            deletable:
+              type: boolean
+              description: True when the member can be hard-deleted (no active activities, single team).
+            userArchivedAt:
+              type: string
+              format: date-time
+              nullable: true
+              description: Set when the user account is deactivated (users.archived_at). Null for active accounts and participants.
+
+    Invite:
+      type: object
+      required: [id, teamId, email, token, role, invitedBy, expiresAt, createdAt]
+      properties:
+        id:
+          type: string
+        teamId:
+          type: string
+        email:
+          type: string
+        token:
+          type: string
+        role:
+          type: string
+          enum: [admin, member]
+        invitedBy:
+          type: string
+        expiresAt:
+          type: string
+          format: date-time
+        acceptedAt:
+          type: string
+          nullable: true
+          format: date-time
+        createdAt:
+          type: string
+          format: date-time
+
+    InviteLink:
+      type: object
+      required: [token]
+      properties:
+        token:
+          type: string
+          nullable: true
+          description: The current invite link token, or null if none is set.
+
+    Activity:
+      type: object
+      required: [id, timelineId, title, startAt, endAt, allDay, createdBy, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+        timelineId:
+          type: string
+        title:
+          type: string
+        description:
+          type: string
+          nullable: true
+        notes:
+          type: string
+          nullable: true
+        icon:
+          type: string
+          nullable: true
+        color:
+          type: string
+          nullable: true
+        startAt:
+          type: string
+          format: date-time
+        endAt:
+          type: string
+          format: date-time
+        allDay:
+          type: boolean
+        statusId:
+          type: string
+          nullable: true
+        parentActivityId:
+          type: string
+          nullable: true
+        percentComplete:
+          type: integer
+          nullable: true
+          minimum: 0
+          maximum: 100
+        location:
+          type: string
+          nullable: true
+        url:
+          type: string
+          nullable: true
+        rrule:
+          type: string
+          nullable: true
+        caldavUid:
+          type: string
+          nullable: true
+          description: External CalDAV VEVENT UID — preserved from Phase 12 calendar sync.
+        googleEventId:
+          type: string
+          nullable: true
+          description: External Google Calendar event ID — preserved from Phase 12 calendar sync.
+        createdBy:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        archivedAt:
+          type: string
+          nullable: true
+          format: date-time
+        assignedMemberIds:
+          type: array
+          items:
+            type: string
+          description: IDs of team_members assigned to this activity (from activity_assignments).
+        tagIds:
+          type: array
+          items:
+            type: string
+          description: IDs of tags associated with this activity (from activity_tags).
+
+    Tag:
+      type: object
+      required: [id, teamId, name, createdBy, createdAt]
+      properties:
+        id:
+          type: string
+        teamId:
+          type: string
+        name:
+          type: string
+        color:
+          type: string
+          nullable: true
+        createdBy:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+
+    Timeline:
+      type: object
+      required: [id, teamId, name, startDate, endDate, shareToken, icalToken, createdBy, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+        teamId:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+          nullable: true
+        notes:
+          type: string
+          nullable: true
+        color:
+          type: string
+          nullable: true
+          description: Identity color ID (e.g. "teal"). Null until explicitly set.
+        icon:
+          type: string
+          nullable: true
+          description: Identity icon ID or special value. Null until explicitly set.
+        startDate:
+          type: string
+          format: date
+        endDate:
+          type: string
+          format: date
+        shareToken:
+          type: string
+        icalToken:
+          type: string
+        createdBy:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        archivedAt:
+          type: string
+          nullable: true
+          format: date-time
+
+    SavedFilter:
+      type: object
+      required: [id, teamId, userId, name, definition, isTeamFilter, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+        teamId:
+          type: string
+        userId:
+          type: string
+        name:
+          type: string
+        definition:
+          type: string
+          description: Opaque JSON filter spec (validated client-side).
+        isTeamFilter:
+          type: boolean
+          description: When true, the filter is visible to all team members (set by admins only).
+          default: false
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    UserPreference:
+      type: object
+      required: [id, userId, key, value, updatedAt]
+      properties:
+        id:
+          type: string
+        userId:
+          type: string
+        timelineId:
+          type: string
+          nullable: true
+          description: Empty string or absent means global (not timeline-scoped).
+        key:
+          type: string
+          description: Preference key (e.g. group_by, sort_by, zoom_granularity, theme).
+        value:
+          type: string
+          description: JSON-encoded preference value.
+        updatedAt:
+          type: string
+          format: date-time
+
+    APIToken:
+      type: object
+      required: [id, userId, name, scope, createdAt]
+      properties:
+        id:
+          type: string
+        userId:
+          type: string
+        name:
+          type: string
+          description: Human-readable label (e.g. "ci-readonly").
+        scope:
+          type: string
+          enum: [read, add, edit_own, edit_all]
+        lastUsedAt:
+          type: string
+          format: date-time
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        revokedAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    APITokenCreated:
+      allOf:
+        - $ref: "#/components/schemas/APIToken"
+        - type: object
+          required: [token]
+          properties:
+            token:
+              type: string
+              description: The raw token value. Returned exactly once at creation; never re-fetchable.
+
+    AuthResponse:
+      type: object
+      required: [user, accessToken, refreshToken]
+      properties:
+        user:
+          $ref: "#/components/schemas/User"
+        accessToken:
+          type: string
+        refreshToken:
+          type: string
+
+    RefreshResponse:
+      type: object
+      required: [accessToken]
+      properties:
+        accessToken:
+          type: string
+
+    HealthResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+
+    ApiError:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+
+    RevokeUserResult:
+      type: object
+      required: [accountDeactivated, membershipsInactivated, membershipsRemoved]
+      properties:
+        accountDeactivated:
+          type: boolean
+        membershipsInactivated:
+          type: integer
+        membershipsRemoved:
+          type: integer
+
+    StatusTemplateItem:
+      type: object
+      required: [id, templateId, name, color, isClosed, position]
+      properties:
+        id:
+          type: string
+        templateId:
+          type: string
+        name:
+          type: string
+        color:
+          type: string
+          description: Hex color string (e.g. "#3B82F6").
+        icon:
+          type: string
+          nullable: true
+          description: Identity icon ID. Null if not set.
+        isClosed:
+          type: boolean
+          description: Closed statuses filter activities out of active views.
+        position:
+          type: integer
+
+    StatusTemplate:
+      type: object
+      required: [id, teamId, name, position, createdBy, createdAt, updatedAt, items]
+      properties:
+        id:
+          type: string
+        teamId:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+          nullable: true
+        position:
+          type: integer
+        createdBy:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/StatusTemplateItem"
+
+    Status:
+      type: object
+      required: [id, timelineId, name, color, isClosed, position, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+        timelineId:
+          type: string
+        name:
+          type: string
+        color:
+          type: string
+          description: Hex color string (e.g. "#3B82F6").
+        icon:
+          type: string
+          nullable: true
+          description: Identity icon ID. Null if not set.
+        isClosed:
+          type: boolean
+          description: Closed statuses filter activities out of active views.
+        position:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    CreateStatusTemplateInput:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+          nullable: true
+
+    PatchStatusTemplateInput:
+      type: object
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+          nullable: true
+        position:
+          type: integer
+
+    CreateStatusTemplateItemInput:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+        color:
+          type: string
+        icon:
+          type: string
+          nullable: true
+        isClosed:
+          type: boolean
+
+    PatchStatusTemplateItemInput:
+      type: object
+      properties:
+        name:
+          type: string
+        color:
+          type: string
+        icon:
+          type: string
+          nullable: true
+        isClosed:
+          type: boolean
+        position:
+          type: integer
+
+    PatchTimelineInput:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+        startDate:
+          type: string
+          format: date
+        endDate:
+          type: string
+          format: date
+        color:
+          type: string
+          nullable: true
+        icon:
+          type: string
+          nullable: true
+        description:
+          type: string
+          nullable: true
+        notes:
+          type: string
+          nullable: true
+
+    TimelineAccessEntry:
+      type: object
+      required: [timelineId, teamMemberId, role, displayName, email]
+      properties:
+        timelineId:
+          type: string
+        teamMemberId:
+          type: string
+        role:
+          type: string
+          enum: [admin, member]
+        displayName:
+          type: string
+        email:
+          type: string
+        color:
+          type: string
+          nullable: true
+        icon:
+          type: string
+          nullable: true
+        userId:
+          type: string
+          nullable: true
+
+    CreateStatusInput:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+        color:
+          type: string
+        icon:
+          type: string
+          nullable: true
+        isClosed:
+          type: boolean
+
+    PatchStatusInput:
+      type: object
+      properties:
+        name:
+          type: string
+        color:
+          type: string
+        icon:
+          type: string
+          nullable: true
+        isClosed:
+          type: boolean
+        position:
+          type: integer
+
+    DeleteStatusInput:
+      type: object
+      properties:
+        replacementStatusId:
+          type: string
+          nullable: true
+          description: Required when activities reference the deleted status.
+
+    # ── Share schemas ────────────────────────────────────────────────────────────
+
+    Share:
+      type: object
+      required: [id, timelineId, token, viewType, viewConfig, createdBy, createdAt, viewCount, protected]
+      properties:
+        id:
+          type: string
+        timelineId:
+          type: string
+        token:
+          type: string
+        name:
+          type: string
+          nullable: true
+          description: Optional human-readable label for this share link.
+        description:
+          type: string
+          nullable: true
+          description: Optional free-text describing what the link is for.
+        viewType:
+          type: string
+          enum: [gantt, list, calendar, kanban]
+        viewConfig:
+          type: string
+          description: JSON-encoded view configuration snapshot.
+        protected:
+          type: boolean
+          description: >
+            True when the share requires a password. Derived from the
+            (never-exposed) password hash so clients can show a lock indicator.
+        createdBy:
+          type: string
+          description: Team member ID of the creator.
+        createdAt:
+          type: string
+          format: date-time
+        lastViewedAt:
+          type: string
+          nullable: true
+          format: date-time
+        viewCount:
+          type: integer
+        expiresAt:
+          type: string
+          nullable: true
+          format: date-time
+        revokedAt:
+          type: string
+          nullable: true
+          format: date-time
+
+    PublicShare:
+      description: >
+        Safe projection of a Share for unauthenticated callers.
+        Omits operational telemetry (viewCount, lastViewedAt) and internal
+        fields (createdBy, revokedAt) that must not reach anonymous callers.
+      type: object
+      required: [id, timelineId, token, viewType, viewConfig, createdAt]
+      properties:
+        id:
+          type: string
+        timelineId:
+          type: string
+        token:
+          type: string
+        name:
+          type: string
+          nullable: true
+          description: Optional human-readable label for this share link.
+        viewType:
+          type: string
+          enum: [gantt, list, calendar, kanban]
+        viewConfig:
+          type: string
+          description: JSON-encoded view configuration snapshot.
+        createdAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          nullable: true
+          format: date-time
+
+    CreateShareInput:
+      type: object
+      properties:
+        name:
+          type: string
+          nullable: true
+        description:
+          type: string
+          nullable: true
+        viewType:
+          type: string
+          enum: [gantt, list, calendar, kanban]
+        viewConfig:
+          type: string
+          description: JSON-encoded view configuration.
+        password:
+          type: string
+          nullable: true
+          writeOnly: true
+          description: >
+            Optional password. When set, the share is locked and requires
+            unlocking via POST /shares/{token}/unlock. Never returned in any
+            response.
+
+    PatchShareInput:
+      type: object
+      properties:
+        name:
+          type: string
+          nullable: true
+        description:
+          type: string
+          nullable: true
+        viewType:
+          type: string
+          enum: [gantt, list, calendar, kanban]
+        viewConfig:
+          type: string
+        password:
+          type: string
+          nullable: true
+          writeOnly: true
+          description: >
+            Set a non-empty value to add/replace the password; an empty string
+            clears it; omit the field to leave it unchanged.
+
+    PublicMember:
+      type: object
+      required: [id, displayName]
+      properties:
+        id:
+          type: string
+        displayName:
+          type: string
+        color:
+          type: string
+          nullable: true
+        icon:
+          type: string
+          nullable: true
+
+    PublicActivity:
+      type: object
+      required: [id, title, startAt, endAt, allDay, assignedMemberIds, tagIds]
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        description:
+          type: string
+          nullable: true
+        notes:
+          type: string
+          nullable: true
+          description: Only present for List shares with the Notes column enabled in view_config.
+        icon:
+          type: string
+          nullable: true
+        color:
+          type: string
+          nullable: true
+        startAt:
+          type: string
+          format: date-time
+        endAt:
+          type: string
+          format: date-time
+        allDay:
+          type: boolean
+        statusId:
+          type: string
+          nullable: true
+        parentActivityId:
+          type: string
+          nullable: true
+        percentComplete:
+          type: integer
+          nullable: true
+        assignedMemberIds:
+          type: array
+          items:
+            type: string
+        tagIds:
+          type: array
+          items:
+            type: string
+
+    PublicTimeline:
+      type: object
+      required: [id, name, startDate, endDate]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        color:
+          type: string
+          nullable: true
+        icon:
+          type: string
+          nullable: true
+        startDate:
+          type: string
+          format: date
+        endDate:
+          type: string
+          format: date
+
+    ShareProjection:
+      type: object
+      required: [share, timeline, teamName, members, statuses, tags, activities]
+      properties:
+        share:
+          $ref: "#/components/schemas/PublicShare"
+        teamName:
+          type: string
+        timeline:
+          $ref: "#/components/schemas/PublicTimeline"
+        members:
+          type: array
+          items:
+            $ref: "#/components/schemas/PublicMember"
+        statuses:
+          type: array
+          items:
+            $ref: "#/components/schemas/Status"
+        tags:
+          type: array
+          items:
+            $ref: "#/components/schemas/Tag"
+        activities:
+          type: array
+          items:
+            $ref: "#/components/schemas/PublicActivity"
+
+  # ────────────────────────────────────────────────────────────
+  # Reusable responses
+  # ────────────────────────────────────────────────────────────
+  responses:
+    BadRequest:
+      description: Invalid request body or parameters.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+
+    Unauthorized:
+      description: Missing or invalid authentication token.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+
+    Forbidden:
+      description: Authenticated but not allowed to perform this action.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+
+    NotFound:
+      description: Resource not found.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+
+    PaymentRequired:
+      description: Tier limit reached.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+
+    InternalError:
+      description: Unexpected server error.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+
+  # ────────────────────────────────────────────────────────────
+  # Reusable parameters
+  # ────────────────────────────────────────────────────────────
+  parameters:
+    teamId:
+      name: id
+      in: path
+      required: true
+      description: Team ID.
+      schema:
+        type: string
+
+    activityId:
+      name: id
+      in: path
+      required: true
+      description: Activity ID.
+      schema:
+        type: string
+
+    timelineId:
+      name: id
+      in: path
+      required: true
+      description: Timeline ID.
+      schema:
+        type: string
+
+    timelineIdParam:
+      name: timelineId
+      in: path
+      required: true
+      description: Timeline ID (nested path parameter).
+      schema:
+        type: string
+
+    savedFilterId:
+      name: id
+      in: path
+      required: true
+      description: Saved filter ID.
+      schema:
+        type: string
+
+    id:
+      name: id
+      in: path
+      required: true
+      description: Resource ID.
+      schema:
+        type: string
+
+    shareToken:
+      name: token
+      in: path
+      required: true
+      description: Public share token for a timeline.
+      schema:
+        type: string
+
+    shareId:
+      name: id
+      in: path
+      required: true
+      description: Share ID.
+      schema:
+        type: string
+
+    timelineIdNested:
+      name: timelineId
+      in: path
+      required: true
+      description: Timeline ID (nested under team).
+      schema:
+        type: string
+
+# ────────────────────────────────────────────────────────────
+# Paths
+# ────────────────────────────────────────────────────────────
+paths:
+
+  /health:
+    get:
+      operationId: health
+      summary: Health check
+      security: []
+      tags: [system]
+      responses:
+        "200":
+          description: Server is healthy.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  # ── Auth ────────────────────────────────────────────────────
+
+  /auth/register:
+    post:
+      operationId: register
+      summary: Register a new user
+      description: |
+        The first user on a fresh install may register without an invite token
+        (bootstrap). Every subsequent user must supply a valid invite token.
+      security: []
+      tags: [auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password, displayName]
+              properties:
+                email:
+                  type: string
+                  format: email
+                password:
+                  type: string
+                  minLength: 8
+                displayName:
+                  type: string
+                  minLength: 1
+                inviteToken:
+                  type: string
+      responses:
+        "201":
+          description: User registered successfully.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "402":
+          $ref: "#/components/responses/PaymentRequired"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: Email address is already registered.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /auth/login:
+    post:
+      operationId: login
+      summary: Authenticate and obtain tokens
+      security: []
+      tags: [auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email:
+                  type: string
+                  format: email
+                password:
+                  type: string
+      responses:
+        "200":
+          description: Authenticated successfully.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /auth/refresh:
+    post:
+      operationId: refreshToken
+      summary: Exchange a refresh token for a new access token
+      security: []
+      tags: [auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refreshToken]
+              properties:
+                refreshToken:
+                  type: string
+      responses:
+        "200":
+          description: New access token issued.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RefreshResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /auth/me:
+    get:
+      operationId: getMe
+      summary: Get the authenticated user's profile
+      tags: [auth]
+      responses:
+        "200":
+          description: Current user profile.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ── User preferences ─────────────────────────────────────────
+
+  /users/me/preferences:
+    get:
+      operationId: getPreferences
+      summary: Get preferences for the authenticated user
+      description: |
+        Returns all preferences matching the given scope. Omit timeline_id
+        (or pass an empty string) to fetch global preferences.
+      tags: [users]
+      parameters:
+        - name: timeline_id
+          in: query
+          required: false
+          description: Scope results to a specific timeline. Omit for global prefs.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Array of matching preferences.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/UserPreference"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    put:
+      operationId: upsertPreference
+      summary: Create or update a single preference
+      tags: [users]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [key, value]
+              properties:
+                key:
+                  type: string
+                  description: Preference key (e.g. group_by, sort_by, zoom_granularity, theme).
+                value:
+                  type: string
+                  description: JSON-encoded preference value.
+                timelineId:
+                  type: string
+                  nullable: true
+                  description: Omit or pass "" for a global preference.
+      responses:
+        "200":
+          description: Upserted preference.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserPreference"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ── API Tokens ───────────────────────────────────────────────
+
+  /tokens:
+    get:
+      operationId: listAPITokens
+      summary: List API tokens owned by the caller
+      tags: [tokens]
+      responses:
+        "200":
+          description: Array of tokens (active and revoked). Raw token value is never included.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/APIToken"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    post:
+      operationId: createAPIToken
+      summary: Create a new API token
+      description: |
+        Mints a long-lived Bearer token scoped to the caller's account. The raw token
+        value is returned exactly once in the response and never re-fetchable. API
+        tokens cannot be used to mint other API tokens — this endpoint requires a JWT.
+      tags: [tokens]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, scope]
+              properties:
+                name:
+                  type: string
+                  minLength: 1
+                scope:
+                  type: string
+                  enum: [read, add, edit_own, edit_all]
+      responses:
+        "201":
+          description: Token created. The raw value is included in this response only.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/APITokenCreated"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /tokens/{id}:
+    delete:
+      operationId: revokeAPIToken
+      summary: Revoke an API token
+      description: Marks the token as revoked. The row is preserved so the listing UI can show "Revoked on …".
+      tags: [tokens]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Token revoked (or already revoked).
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ── Teams ────────────────────────────────────────────────────
+
+  /teams:
+    get:
+      operationId: listTeams
+      summary: List teams for the authenticated user
+      tags: [teams]
+      parameters:
+        - name: archived
+          in: query
+          required: false
+          description: When `true`, include archived teams. Default excludes them.
+          schema:
+            type: string
+            enum: [ "true", "false" ]
+      responses:
+        "200":
+          description: Array of teams the user belongs to.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Team"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    post:
+      operationId: createTeam
+      summary: Create a new team
+      description: The authenticated user automatically becomes the team's first admin member.
+      tags: [teams]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                  minLength: 1
+                description:
+                  type: string
+                  nullable: true
+                notes:
+                  type: string
+                  nullable: true
+                color:
+                  type: string
+                  nullable: true
+                icon:
+                  type: string
+                  nullable: true
+      responses:
+        "201":
+          description: Team created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Team"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "402":
+          $ref: "#/components/responses/PaymentRequired"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /teams/{id}:
+    get:
+      operationId: getTeam
+      summary: Get a team by ID
+      description: Any member of the team may fetch the team record.
+      tags: [teams]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+      responses:
+        "200":
+          description: Team record.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Team"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    patch:
+      operationId: updateTeam
+      summary: Partially update a team (admin only)
+      description: Only fields present in the request body are modified. Only team admins may update.
+      tags: [teams]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  minLength: 1
+                description:
+                  type: string
+                  nullable: true
+                notes:
+                  type: string
+                  nullable: true
+                color:
+                  type: string
+                  nullable: true
+                icon:
+                  type: string
+                  nullable: true
+      responses:
+        "200":
+          description: Updated team.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Team"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /teams/{id}/archive:
+    post:
+      operationId: archiveTeam
+      summary: Archive a team (admin only)
+      description: Sets archivedAt on the team. The team is hidden from active pickers but all data is preserved.
+      tags: [teams]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+      responses:
+        "200":
+          description: The archived team.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Team"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /teams/{id}/unarchive:
+    post:
+      operationId: unarchiveTeam
+      summary: Restore a previously archived team (admin only)
+      tags: [teams]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+      responses:
+        "200":
+          description: The restored team.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Team"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /teams/{id}/invites:
+    get:
+      operationId: listInvites
+      summary: List pending invites for a team (admin only)
+      tags: [teams]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+      responses:
+        "200":
+          description: Array of pending invites.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Invite"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    post:
+      operationId: createInvite
+      summary: Create a team invite
+      description: Only team admins may create invites. The token expires after 7 days.
+      tags: [teams]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                email:
+                  type: string
+                  format: email
+                  description: If provided, the invite is scoped to this email address.
+                role:
+                  type: string
+                  enum: [admin, member]
+                  default: member
+      responses:
+        "201":
+          description: Invite created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Invite"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /teams/{id}/invites/{inviteId}:
+    delete:
+      operationId: revokeInvite
+      summary: Revoke a pending invite (admin only)
+      tags: [teams]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+        - name: inviteId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Invite revoked.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /teams/{id}/invite-link:
+    get:
+      operationId: getInviteLink
+      summary: Get the current reusable invite link token (admin only)
+      tags: [teams]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+      responses:
+        "200":
+          description: Current invite link token (null if none is set).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InviteLink"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    post:
+      operationId: createInviteLink
+      summary: Generate or regenerate the reusable invite link (admin only)
+      tags: [teams]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+      responses:
+        "200":
+          description: New invite link token.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InviteLink"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    delete:
+      operationId: revokeInviteLink
+      summary: Revoke the reusable invite link (admin only)
+      tags: [teams]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+      responses:
+        "204":
+          description: Invite link revoked.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /teams/{id}/members:
+    get:
+      operationId: listTeamMembers
+      summary: List members of a team
+      tags: [teams]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+      responses:
+        "200":
+          description: Array of team members with user display info.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/TeamMemberWithUser"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    post:
+      operationId: addMember
+      summary: Add an existing registered user to a team (admin only)
+      tags: [teams]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [userId]
+              properties:
+                userId:
+                  type: string
+                role:
+                  type: string
+                  enum: [admin, member]
+                  default: member
+      responses:
+        "201":
+          description: Member added.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TeamMemberWithUser"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: User is already a member.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /teams/{id}/members/{memberId}:
+    get:
+      operationId: getMember
+      summary: Get a team member with computed stats
+      tags: [teams]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+        - name: memberId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Member detail with stats.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MemberDetail"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    patch:
+      operationId: updateMember
+      summary: Update a team member's display name, identity, or role
+      tags: [teams]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+        - name: memberId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                displayName:
+                  type: string
+                  nullable: true
+                color:
+                  type: string
+                  nullable: true
+                icon:
+                  type: string
+                  nullable: true
+                role:
+                  type: string
+                  enum: [admin, member]
+      responses:
+        "200":
+          description: Updated member.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TeamMemberWithUser"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Cannot demote the last admin.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    delete:
+      operationId: deleteMember
+      summary: Remove a member from a team (admin only)
+      tags: [teams]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+        - name: memberId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Member removed.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Cannot remove the last admin.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /teams/{id}/members/{memberId}/archive:
+    post:
+      operationId: archiveMember
+      summary: Inactivate a team member (admin only)
+      tags: [teams]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+        - name: memberId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Inactivated member.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TeamMemberWithUser"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Cannot inactivate the last admin.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /teams/{id}/members/{memberId}/unarchive:
+    post:
+      operationId: unarchiveMember
+      summary: Reactivate an inactivated team member (admin only)
+      tags: [teams]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+        - name: memberId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Reactivated member.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TeamMemberWithUser"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /teams/{id}/participants:
+    post:
+      operationId: createParticipant
+      summary: Create a login-less participant (admin only)
+      tags: [teams]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                  minLength: 1
+                color:
+                  type: string
+                  nullable: true
+                icon:
+                  type: string
+                  nullable: true
+      responses:
+        "201":
+          description: Participant created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TeamMemberWithUser"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /users/search:
+    get:
+      operationId: searchUsers
+      summary: Search users by name or email
+      description: Returns up to 20 matching non-archived users. Query must be at least 2 characters.
+      tags: [users]
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 2
+      responses:
+        "200":
+          description: Matching users.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/User"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /users/{id}/promote:
+    post:
+      operationId: promoteUser
+      summary: Grant superadmin status to a user (superadmin only)
+      tags: [users]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Updated user.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /users/{id}/archive:
+    post:
+      operationId: archiveUser
+      summary: Inactivate a user account (superadmin only)
+      tags: [users]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Inactivated user.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /users/{id}/unarchive:
+    post:
+      operationId: unarchiveUser
+      summary: Reactivate an inactivated user account (superadmin only)
+      tags: [users]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Reactivated user.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /users/{id}/revoke:
+    post:
+      operationId: revokeUser
+      summary: Atomically revoke all access for a user (superadmin only)
+      description: >
+        Sets users.archived_at (blocks login everywhere), inactivates all team
+        memberships that have activity assignments, and hard-deletes memberships
+        with zero assignments. Returns a summary of the three operations.
+      tags: [users]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Revocation summary.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RevokeUserResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /users/{id}:
+    delete:
+      operationId: deleteUser
+      summary: Hard-delete a user (superadmin only)
+      description: Only permitted when the user has no active activities and belongs to a single team.
+      tags: [users]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: User deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: User cannot be deleted (multi-team or has active activities).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ── Activities ───────────────────────────────────────────────
+
+  /teams/{id}/timelines/{timelineId}/activities:
+    post:
+      operationId: createActivity
+      summary: Create an activity in a timeline
+      tags: [activities]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+        - name: timelineId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title, startAt, endAt]
+              properties:
+                title:
+                  type: string
+                  minLength: 1
+                description:
+                  type: string
+                  nullable: true
+                notes:
+                  type: string
+                  nullable: true
+                icon:
+                  type: string
+                  nullable: true
+                color:
+                  type: string
+                  nullable: true
+                startAt:
+                  type: string
+                  format: date-time
+                endAt:
+                  type: string
+                  format: date-time
+                allDay:
+                  type: boolean
+                  default: false
+                statusId:
+                  type: string
+                  nullable: true
+                parentActivityId:
+                  type: string
+                  nullable: true
+                percentComplete:
+                  type: integer
+                  nullable: true
+                  minimum: 0
+                  maximum: 100
+                location:
+                  type: string
+                  nullable: true
+                url:
+                  type: string
+                  nullable: true
+                rrule:
+                  type: string
+                  nullable: true
+                assignedMemberIds:
+                  type: array
+                  items:
+                    type: string
+                  description: IDs of team_members to assign. Replaces all existing assignments.
+                tagIds:
+                  type: array
+                  items:
+                    type: string
+                  description: IDs of tags to associate. Replaces all existing tag associations.
+      responses:
+        "201":
+          description: Activity created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Activity"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    get:
+      operationId: listActivities
+      summary: List activities for a timeline
+      description: Archived activities are excluded by default. Optional date-range filter on startAt.
+      tags: [activities]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+        - name: timelineId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: from
+          in: query
+          required: false
+          description: Only return activities where startAt >= from (RFC 3339).
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          required: false
+          description: Only return activities where startAt <= to (RFC 3339).
+          schema:
+            type: string
+            format: date-time
+        - name: archived
+          in: query
+          required: false
+          description: When `true`, include archived activities. Default excludes them.
+          schema:
+            type: string
+            enum: [ "true", "false" ]
+      responses:
+        "200":
+          description: Array of activities.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Activity"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /activities/{id}:
+    patch:
+      operationId: updateActivity
+      summary: Partially update an activity
+      description: Only fields present in the request body are modified (true PATCH semantics).
+      tags: [activities]
+      parameters:
+        - $ref: "#/components/parameters/activityId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title:
+                  type: string
+                  minLength: 1
+                description:
+                  type: string
+                  nullable: true
+                notes:
+                  type: string
+                  nullable: true
+                icon:
+                  type: string
+                  nullable: true
+                color:
+                  type: string
+                  nullable: true
+                startAt:
+                  type: string
+                  format: date-time
+                endAt:
+                  type: string
+                  format: date-time
+                allDay:
+                  type: boolean
+                statusId:
+                  type: string
+                  nullable: true
+                parentActivityId:
+                  type: string
+                  nullable: true
+                percentComplete:
+                  type: integer
+                  nullable: true
+                  minimum: 0
+                  maximum: 100
+                location:
+                  type: string
+                  nullable: true
+                url:
+                  type: string
+                  nullable: true
+                rrule:
+                  type: string
+                  nullable: true
+                assignedMemberIds:
+                  type: array
+                  items:
+                    type: string
+                  description: IDs of team_members to assign. Replaces all existing assignments.
+                tagIds:
+                  type: array
+                  items:
+                    type: string
+                  description: IDs of tags to associate. Replaces all existing tag associations.
+      responses:
+        "200":
+          description: Updated activity.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Activity"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    delete:
+      operationId: deleteActivity
+      summary: Delete an activity
+      tags: [activities]
+      parameters:
+        - $ref: "#/components/parameters/activityId"
+      responses:
+        "204":
+          description: Activity deleted (no body).
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /activities/{id}/archive:
+    post:
+      operationId: archiveActivity
+      summary: Archive an activity (soft delete)
+      description: Sets archivedAt on the activity so it is hidden from default list responses but can be restored via /activities/{id}/unarchive.
+      tags: [activities]
+      parameters:
+        - $ref: "#/components/parameters/activityId"
+      responses:
+        "200":
+          description: The archived activity.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Activity"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /activities/{id}/unarchive:
+    post:
+      operationId: unarchiveActivity
+      summary: Restore a previously archived activity
+      tags: [activities]
+      parameters:
+        - $ref: "#/components/parameters/activityId"
+      responses:
+        "200":
+          description: The restored activity.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Activity"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ── Timelines ────────────────────────────────────────────────
+
+  /teams/{id}/timelines:
+    get:
+      operationId: listTimelines
+      summary: List timelines for a team
+      tags: [timelines]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+        - name: archived
+          in: query
+          required: false
+          description: When `true`, include archived timelines. Default excludes them.
+          schema:
+            type: string
+            enum: [ "true", "false" ]
+      responses:
+        "200":
+          description: Array of non-archived timelines for the team.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Timeline"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    post:
+      operationId: createTimeline
+      summary: Create a timeline for a team
+      description: The authenticated user must be a member of the team. Restricted timelines automatically grant access to the creator.
+      tags: [timelines]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, startDate, endDate]
+              properties:
+                name:
+                  type: string
+                  minLength: 1
+                startDate:
+                  type: string
+                  format: date
+                endDate:
+                  type: string
+                  format: date
+                color:
+                  type: string
+                  nullable: true
+                icon:
+                  type: string
+                  nullable: true
+                description:
+                  type: string
+                  nullable: true
+                notes:
+                  type: string
+                  nullable: true
+                templateId:
+                  type: string
+                  nullable: true
+                  description: ID of the status template to seed this timeline's statuses from. Uses the team's first template when omitted.
+      responses:
+        "201":
+          description: Timeline created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Timeline"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /timelines/{id}/archive:
+    post:
+      operationId: archiveTimeline
+      summary: Archive a timeline (admin only)
+      description: Team admins only. Sets archivedAt on the timeline so it is hidden from default list responses but can be restored via /timelines/{id}/unarchive.
+      tags: [timelines]
+      parameters:
+        - $ref: "#/components/parameters/timelineId"
+      responses:
+        "200":
+          description: The archived timeline.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Timeline"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /timelines/{id}/unarchive:
+    post:
+      operationId: unarchiveTimeline
+      summary: Restore a previously archived timeline
+      tags: [timelines]
+      parameters:
+        - $ref: "#/components/parameters/timelineId"
+      responses:
+        "200":
+          description: The restored timeline.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Timeline"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /timelines/{id}:
+    get:
+      operationId: getTimeline
+      summary: Fetch a timeline by ID
+      description: Requires team membership. Restricted timelines additionally require an entry in the access list.
+      tags: [timelines]
+      parameters:
+        - $ref: "#/components/parameters/timelineId"
+      responses:
+        "200":
+          description: Timeline found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Timeline"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    patch:
+      operationId: updateTimeline
+      summary: Rename or change dates on a timeline (timeline admin only)
+      tags: [timelines]
+      parameters:
+        - $ref: "#/components/parameters/timelineId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PatchTimelineInput"
+      responses:
+        "200":
+          description: Updated timeline.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Timeline"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    delete:
+      operationId: deleteTimeline
+      summary: Hard-delete a timeline (team admin only)
+      description: Deletes the timeline and all its statuses. Activities are NOT deleted.
+      tags: [timelines]
+      parameters:
+        - $ref: "#/components/parameters/timelineId"
+      responses:
+        "204":
+          description: Timeline deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /teams/{id}/timelines/{timelineId}/access:
+    get:
+      operationId: listTimelineAccess
+      summary: List access grants for a timeline
+      tags: [timelines]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+        - $ref: "#/components/parameters/timelineIdParam"
+      responses:
+        "200":
+          description: List of access grants.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/TimelineAccessEntry"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /teams/{id}/timelines/{timelineId}/access/{memberId}:
+    put:
+      operationId: grantTimelineAccess
+      summary: Grant or update a team member's access to a timeline (timeline admin only)
+      tags: [timelines]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+        - $ref: "#/components/parameters/timelineIdParam"
+        - name: memberId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [role]
+              properties:
+                role:
+                  type: string
+                  enum: [admin, member]
+      responses:
+        "200":
+          description: Updated access list.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/TimelineAccessEntry"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    delete:
+      operationId: revokeTimelineAccess
+      summary: Revoke a team member's access to a timeline (timeline admin only)
+      tags: [timelines]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+        - $ref: "#/components/parameters/timelineIdParam"
+        - name: memberId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Access revoked.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ── Saved Filters ────────────────────────────────────────────
+
+  /teams/{id}/saved_filters:
+    get:
+      operationId: listSavedFilters
+      summary: List the authenticated user's saved filters for a team
+      tags: [savedFilters]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+      responses:
+        "200":
+          description: Array of saved filters owned by the caller.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/SavedFilter"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    post:
+      operationId: createSavedFilter
+      summary: Create a saved filter for the authenticated user in a team
+      tags: [savedFilters]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, definition]
+              properties:
+                name:
+                  type: string
+                  minLength: 1
+                definition:
+                  type: string
+                  description: Opaque JSON filter spec (validated client-side).
+                isTeamFilter:
+                  type: boolean
+                  description: When true, visible to all team members (admin-only).
+      responses:
+        "201":
+          description: Saved filter created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SavedFilter"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /saved_filters/{id}:
+    patch:
+      operationId: updateSavedFilter
+      summary: Partially update a saved filter (owner only)
+      tags: [savedFilters]
+      parameters:
+        - $ref: "#/components/parameters/savedFilterId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  minLength: 1
+                definition:
+                  type: string
+                isTeamFilter:
+                  type: boolean
+                  description: Promotes or demotes team visibility. Admin-only — both setting true and reverting to false require admin role.
+      responses:
+        "200":
+          description: Updated saved filter.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SavedFilter"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    delete:
+      operationId: deleteSavedFilter
+      summary: Delete a saved filter (owner only)
+      tags: [savedFilters]
+      parameters:
+        - $ref: "#/components/parameters/savedFilterId"
+      responses:
+        "204":
+          description: Saved filter deleted (no body).
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ── Tags ─────────────────────────────────────────────────────
+
+  /teams/{id}/tags:
+    get:
+      operationId: listTags
+      summary: List tags for a team
+      tags: [tags]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+      responses:
+        "200":
+          description: Array of tags for the team.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Tag"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    post:
+      operationId: createTag
+      summary: Create a tag for a team
+      tags: [tags]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                  minLength: 1
+                color:
+                  type: string
+                  nullable: true
+      responses:
+        "201":
+          description: Tag created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Tag"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: A tag with that name already exists in this team.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /tags/{id}:
+    patch:
+      operationId: updateTag
+      summary: Update a tag's name or color
+      tags: [tags]
+      parameters:
+        - $ref: "#/components/parameters/id"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  minLength: 1
+                color:
+                  type: string
+                  nullable: true
+      responses:
+        "200":
+          description: Updated tag.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Tag"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: A tag with that name already exists in this team.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    delete:
+      operationId: deleteTag
+      summary: Delete a tag (cascades to activity_tags)
+      tags: [tags]
+      parameters:
+        - $ref: "#/components/parameters/id"
+      responses:
+        "204":
+          description: Tag deleted (no body).
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ── Profile & Security ────────────────────────────────────────
+
+  /users/me:
+    patch:
+      operationId: updateProfile
+      summary: Update the authenticated user's display name, color, and icon
+      tags: [users]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateProfileInput"
+      responses:
+        "200":
+          description: Updated user profile.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /users/me/password:
+    put:
+      operationId: changePassword
+      summary: Change the authenticated user's password
+      tags: [users]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChangePasswordInput"
+      responses:
+        "200":
+          description: Password changed successfully.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /auth/forgot-password:
+    post:
+      operationId: forgotPassword
+      summary: Request a password reset email
+      security: []
+      tags: [auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ForgotPasswordInput"
+      responses:
+        "200":
+          description: Always 200; no email enumeration.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /auth/reset-password:
+    post:
+      operationId: resetPassword
+      summary: Reset a password using a valid reset token
+      security: []
+      tags: [auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ResetPasswordInput"
+      responses:
+        "200":
+          description: Password reset successfully.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ── Admin ─────────────────────────────────────────────────────
+
+  /admin/smtp:
+    get:
+      operationId: getSMTPConfig
+      summary: Get current SMTP configuration (password masked)
+      tags: [admin]
+      responses:
+        "200":
+          description: SMTP config or null when not configured.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    put:
+      operationId: putSMTPConfig
+      summary: Save and validate SMTP configuration
+      tags: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SMTPConfig"
+      responses:
+        "200":
+          description: SMTP config saved.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    delete:
+      operationId: deleteSMTPConfig
+      summary: Clear SMTP configuration
+      tags: [admin]
+      responses:
+        "204":
+          description: SMTP config cleared.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /admin/smtp/test:
+    post:
+      operationId: testSMTPConfig
+      summary: Send a test email using supplied config without saving
+      tags: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SMTPConfig"
+      responses:
+        "200":
+          description: Test email sent.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /settings/branding:
+    get:
+      operationId: getPublicBranding
+      summary: Get public branding settings (no auth required)
+      description: >
+        Returns the instance name and accent color. Intentionally public so the
+        login page and shared timeline views can display branding before sign-in.
+        Only cosmetic settings are exposed here.
+      tags: [settings]
+      security: []
+      responses:
+        "200":
+          description: Public branding values.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  instanceName:
+                    type: string
+                    description: Admin-configured name shown in the browser tab and login page.
+                  accentColor:
+                    type: string
+                    description: 6-digit hex override for the primary color (e.g. "#288C9B"). Empty string means no override.
+
+  /admin/settings:
+    get:
+      operationId: getAdminSettings
+      summary: Get instance-level settings
+      tags: [admin]
+      responses:
+        "200":
+          description: Instance settings map.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    patch:
+      operationId: patchAdminSettings
+      summary: Update one or more instance-level settings
+      tags: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties:
+                type: string
+      responses:
+        "200":
+          description: Updated settings.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /admin/users:
+    get:
+      operationId: listAdminUsers
+      summary: List all users with team membership counts
+      tags: [admin]
+      parameters:
+        - name: orphaned
+          in: query
+          required: false
+          description: When true, return only users with zero active team memberships.
+          schema:
+            type: boolean
+      responses:
+        "200":
+          description: List of admin user rows.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  users:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AdminUserRow"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /teams/{teamId}/status-templates:
+    get:
+      operationId: listStatusTemplates
+      summary: List all status templates for a team
+      tags: [statusTemplates]
+      parameters:
+        - name: teamId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: List of status templates with their items.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/StatusTemplate"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    post:
+      operationId: createStatusTemplate
+      summary: Create a status template
+      tags: [statusTemplates]
+      parameters:
+        - name: teamId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateStatusTemplateInput"
+      responses:
+        "201":
+          description: Created status template (with empty items array).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusTemplate"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /status-templates/{id}:
+    patch:
+      operationId: updateStatusTemplate
+      summary: Rename or reorder a status template
+      tags: [statusTemplates]
+      parameters:
+        - $ref: "#/components/parameters/id"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PatchStatusTemplateInput"
+      responses:
+        "200":
+          description: Updated status template.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusTemplate"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      operationId: deleteStatusTemplate
+      summary: Delete a status template (blocked if it is the last one)
+      tags: [statusTemplates]
+      parameters:
+        - $ref: "#/components/parameters/id"
+      responses:
+        "204":
+          description: Deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Cannot delete the last template on the team.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /status-templates/{id}/items:
+    post:
+      operationId: createStatusTemplateItem
+      summary: Add an item to a status template
+      tags: [statusTemplates]
+      parameters:
+        - $ref: "#/components/parameters/id"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateStatusTemplateItemInput"
+      responses:
+        "201":
+          description: Created template item.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusTemplateItem"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /status-template-items/{id}:
+    patch:
+      operationId: updateStatusTemplateItem
+      summary: Rename, recolor, reicon, toggle is_closed, or reorder a template item
+      tags: [statusTemplates]
+      parameters:
+        - $ref: "#/components/parameters/id"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PatchStatusTemplateItemInput"
+      responses:
+        "200":
+          description: Updated template item.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusTemplateItem"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      operationId: deleteStatusTemplateItem
+      summary: Delete a template item (blocked if it is the last one in the template)
+      tags: [statusTemplates]
+      parameters:
+        - $ref: "#/components/parameters/id"
+      responses:
+        "204":
+          description: Deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Cannot delete the last item in a template.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /teams/{teamId}/timelines/{timelineId}/statuses:
+    get:
+      operationId: listTimelineStatuses
+      summary: List statuses for a specific timeline
+      tags: [statuses]
+      parameters:
+        - name: teamId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: timelineId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: List of timeline statuses in position order.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Status"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    post:
+      operationId: createTimelineStatus
+      summary: Add a status to a timeline (timeline admin only)
+      tags: [statuses]
+      parameters:
+        - name: teamId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: timelineId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateStatusInput"
+      responses:
+        "201":
+          description: Status created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Status"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /statuses/{id}:
+    patch:
+      operationId: updateStatus
+      summary: Rename, recolor, or reorder a timeline status (timeline admin only)
+      tags: [statuses]
+      parameters:
+        - $ref: "#/components/parameters/id"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PatchStatusInput"
+      responses:
+        "200":
+          description: Updated status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Status"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    delete:
+      operationId: deleteStatus
+      summary: Delete a timeline status (timeline admin only)
+      description: Blocked if it is the last status. Requires replacementStatusId if any activities reference the status.
+      tags: [statuses]
+      parameters:
+        - $ref: "#/components/parameters/id"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeleteStatusInput"
+      responses:
+        "204":
+          description: Deleted.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Last status or activities reference it without a replacement.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ── Shares ──────────────────────────────────────────────────────────────────
+
+  /timelines/{id}/shares:
+    post:
+      operationId: createShare
+      summary: Create a share for a timeline
+      tags: [shares]
+      parameters:
+        - $ref: "#/components/parameters/timelineId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateShareInput"
+      responses:
+        "201":
+          description: Share created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Share"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /teams/{id}/timelines/{timelineId}/shares:
+    get:
+      operationId: listShares
+      summary: List shares for a timeline
+      tags: [shares]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+        - $ref: "#/components/parameters/timelineIdNested"
+      responses:
+        "200":
+          description: List of shares.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Share"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /shares/{id}:
+    patch:
+      operationId: updateShare
+      summary: Update a share
+      tags: [shares]
+      parameters:
+        - $ref: "#/components/parameters/shareId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PatchShareInput"
+      responses:
+        "200":
+          description: Updated share.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Share"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    delete:
+      operationId: deleteShare
+      summary: Delete a share
+      tags: [shares]
+      parameters:
+        - $ref: "#/components/parameters/shareId"
+      responses:
+        "204":
+          description: Deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /shares/{token}:
+    get:
+      operationId: getShareProjection
+      summary: Fetch a public share projection
+      description: >
+        No authentication required. Returns the full read-only projection for the
+        given share token. The scope is locked server-side to the share's timeline;
+        client-supplied scope params are ignored.
+      security: []
+      tags: [shares]
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Share projection.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ShareProjection"
+        "401":
+          description: >
+            Password required. The body carries only `{ "passwordRequired": true }`
+            — no projection data. Exchange the password at
+            POST /shares/{token}/unlock for a view token, then resend with an
+            `Authorization: Bearer <viewToken>` header.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  passwordRequired:
+                    type: boolean
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "410":
+          description: Share revoked or expired.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /shares/{token}/unlock:
+    post:
+      operationId: unlockShare
+      summary: Exchange a share password for a short-lived view token
+      description: >
+        No authentication required. Validates the password for a
+        password-protected share and returns a short-lived view token scoped to
+        that share. Attempts are rate-limited per client IP.
+      security: []
+      tags: [shares]
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password]
+              properties:
+                password:
+                  type: string
+      responses:
+        "200":
+          description: Unlock succeeded; view token issued.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token:
+                    type: string
+                    description: Short-lived view token, scoped to this share.
+        "400":
+          description: Malformed body, or the share is not password protected.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          description: Incorrect password.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "410":
+          description: Share revoked or expired.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "429":
+          description: Too many unlock attempts from this client.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /timelines/share/{token}:
+    get:
+      operationId: getTimelineByShareToken
+      summary: Fetch a timeline via its public share token
+      description: No authentication required. The share token itself is the credential.
+      security: []
+      tags: [timelines]
+      parameters:
+        - $ref: "#/components/parameters/shareToken"
+      responses:
+        "200":
+          description: Timeline found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Timeline"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
 ````
 
 ## File: packages/web/src/components/gantt/GanttView.tsx
@@ -53388,3877 +57277,6 @@ export interface operations {
         };
     };
 }
-````
-
-## File: packages/shared/openapi.yaml
-````yaml
-openapi: "3.0.3"
-
-info:
-  title: draba API
-  description: Team coordination API — Phases 2–10.4.5 (auth, teams, events, timelines, tags).
-  version: "1.0.0"
-
-servers:
-  - url: http://localhost:8080
-    description: Local development
-
-# All authenticated endpoints require a Bearer JWT unless overridden with security: [].
-security:
-  - bearerAuth: []
-
-components:
-  securitySchemes:
-    bearerAuth:
-      type: http
-      scheme: bearer
-      bearerFormat: JWT
-
-  # ────────────────────────────────────────────────────────────
-  # Schemas
-  # ────────────────────────────────────────────────────────────
-  schemas:
-
-    User:
-      type: object
-      required: [id, email, displayName, isSuperadmin, createdAt, updatedAt]
-      properties:
-        id:
-          type: string
-        email:
-          type: string
-          format: email
-        displayName:
-          type: string
-        avatarUrl:
-          type: string
-          nullable: true
-        color:
-          type: string
-          nullable: true
-          description: User-level identity color ID. Propagates to team memberships.
-        icon:
-          type: string
-          nullable: true
-          description: User-level identity icon ID. Propagates to team memberships.
-        isSuperadmin:
-          type: boolean
-        createdAt:
-          type: string
-          format: date-time
-        updatedAt:
-          type: string
-          format: date-time
-        archivedAt:
-          type: string
-          nullable: true
-          format: date-time
-
-    UpdateProfileInput:
-      type: object
-      properties:
-        displayName:
-          type: string
-        color:
-          type: string
-          nullable: true
-        icon:
-          type: string
-          nullable: true
-
-    ChangePasswordInput:
-      type: object
-      required: [currentPassword, newPassword]
-      properties:
-        currentPassword:
-          type: string
-        newPassword:
-          type: string
-
-    ForgotPasswordInput:
-      type: object
-      required: [email]
-      properties:
-        email:
-          type: string
-          format: email
-
-    ResetPasswordInput:
-      type: object
-      required: [token, newPassword]
-      properties:
-        token:
-          type: string
-        newPassword:
-          type: string
-
-    SMTPConfig:
-      type: object
-      properties:
-        host:
-          type: string
-        port:
-          type: integer
-        username:
-          type: string
-        password:
-          type: string
-          description: Masked in GET responses.
-        fromName:
-          type: string
-        fromEmail:
-          type: string
-        encryption:
-          type: string
-          enum: [none, tls, starttls]
-
-    AdminUserRow:
-      type: object
-      allOf:
-        - $ref: '#/components/schemas/User'
-      properties:
-        teamCount:
-          type: integer
-
-    Team:
-      type: object
-      required: [id, name, slug, createdAt, updatedAt]
-      properties:
-        id:
-          type: string
-        name:
-          type: string
-        slug:
-          type: string
-        description:
-          type: string
-          nullable: true
-        notes:
-          type: string
-          nullable: true
-        color:
-          type: string
-          nullable: true
-          description: Identity color ID (e.g. "teal"). Null until explicitly set.
-        icon:
-          type: string
-          nullable: true
-          description: Identity icon ID (e.g. "briefcase") or special value. Null until explicitly set.
-        createdAt:
-          type: string
-          format: date-time
-        updatedAt:
-          type: string
-          format: date-time
-        archivedAt:
-          type: string
-          nullable: true
-          format: date-time
-
-    TeamMember:
-      type: object
-      required: [id, teamId, role, joinedAt]
-      properties:
-        id:
-          type: string
-          description: Team-member record ID (team_members.id).
-        teamId:
-          type: string
-        userId:
-          type: string
-          nullable: true
-        role:
-          type: string
-          enum: [admin, member]
-        color:
-          type: string
-          nullable: true
-          description: Identity color ID (e.g. "teal"). Null until explicitly set.
-        icon:
-          type: string
-          nullable: true
-          description: Identity icon ID or special value. Null until explicitly set.
-        joinedAt:
-          type: string
-          format: date-time
-        archivedAt:
-          type: string
-          nullable: true
-          format: date-time
-          description: Non-null when the member is inactivated.
-
-    TeamMemberWithUser:
-      allOf:
-        - $ref: "#/components/schemas/TeamMember"
-        - type: object
-          required: [email, displayName]
-          properties:
-            email:
-              type: string
-              format: email
-            displayName:
-              type: string
-            avatarUrl:
-              type: string
-              nullable: true
-
-    MemberStats:
-      type: object
-      required: [activeTimelines, archivedTimelines, pastDue, running, upcoming, unscheduled, archivedActivities]
-      properties:
-        activeTimelines:
-          type: integer
-        archivedTimelines:
-          type: integer
-        pastDue:
-          type: integer
-          description: Activities with end_at in the past, not archived.
-        running:
-          type: integer
-          description: Activities currently in progress (start_at ≤ now ≤ end_at), not archived.
-        upcoming:
-          type: integer
-          description: Activities with start_at in the future, not archived.
-        unscheduled:
-          type: integer
-          description: Activities with no start or end date, not archived.
-        archivedActivities:
-          type: integer
-
-    MemberDetail:
-      allOf:
-        - $ref: "#/components/schemas/TeamMemberWithUser"
-        - type: object
-          required: [stats, teams, deletable]
-          properties:
-            stats:
-              $ref: "#/components/schemas/MemberStats"
-            teams:
-              type: array
-              items:
-                $ref: "#/components/schemas/TeamMemberWithUser"
-            deletable:
-              type: boolean
-              description: True when the member can be hard-deleted (no active activities, single team).
-            userArchivedAt:
-              type: string
-              format: date-time
-              nullable: true
-              description: Set when the user account is deactivated (users.archived_at). Null for active accounts and participants.
-
-    Invite:
-      type: object
-      required: [id, teamId, email, token, role, invitedBy, expiresAt, createdAt]
-      properties:
-        id:
-          type: string
-        teamId:
-          type: string
-        email:
-          type: string
-        token:
-          type: string
-        role:
-          type: string
-          enum: [admin, member]
-        invitedBy:
-          type: string
-        expiresAt:
-          type: string
-          format: date-time
-        acceptedAt:
-          type: string
-          nullable: true
-          format: date-time
-        createdAt:
-          type: string
-          format: date-time
-
-    InviteLink:
-      type: object
-      required: [token]
-      properties:
-        token:
-          type: string
-          nullable: true
-          description: The current invite link token, or null if none is set.
-
-    Activity:
-      type: object
-      required: [id, timelineId, title, startAt, endAt, allDay, createdBy, createdAt, updatedAt]
-      properties:
-        id:
-          type: string
-        timelineId:
-          type: string
-        title:
-          type: string
-        description:
-          type: string
-          nullable: true
-        notes:
-          type: string
-          nullable: true
-        icon:
-          type: string
-          nullable: true
-        color:
-          type: string
-          nullable: true
-        startAt:
-          type: string
-          format: date-time
-        endAt:
-          type: string
-          format: date-time
-        allDay:
-          type: boolean
-        statusId:
-          type: string
-          nullable: true
-        parentActivityId:
-          type: string
-          nullable: true
-        percentComplete:
-          type: integer
-          nullable: true
-          minimum: 0
-          maximum: 100
-        location:
-          type: string
-          nullable: true
-        url:
-          type: string
-          nullable: true
-        rrule:
-          type: string
-          nullable: true
-        caldavUid:
-          type: string
-          nullable: true
-          description: External CalDAV VEVENT UID — preserved from Phase 12 calendar sync.
-        googleEventId:
-          type: string
-          nullable: true
-          description: External Google Calendar event ID — preserved from Phase 12 calendar sync.
-        createdBy:
-          type: string
-        createdAt:
-          type: string
-          format: date-time
-        updatedAt:
-          type: string
-          format: date-time
-        archivedAt:
-          type: string
-          nullable: true
-          format: date-time
-        assignedMemberIds:
-          type: array
-          items:
-            type: string
-          description: IDs of team_members assigned to this activity (from activity_assignments).
-        tagIds:
-          type: array
-          items:
-            type: string
-          description: IDs of tags associated with this activity (from activity_tags).
-
-    Tag:
-      type: object
-      required: [id, teamId, name, createdBy, createdAt]
-      properties:
-        id:
-          type: string
-        teamId:
-          type: string
-        name:
-          type: string
-        color:
-          type: string
-          nullable: true
-        createdBy:
-          type: string
-        createdAt:
-          type: string
-          format: date-time
-
-    Timeline:
-      type: object
-      required: [id, teamId, name, startDate, endDate, shareToken, icalToken, createdBy, createdAt, updatedAt]
-      properties:
-        id:
-          type: string
-        teamId:
-          type: string
-        name:
-          type: string
-        description:
-          type: string
-          nullable: true
-        notes:
-          type: string
-          nullable: true
-        color:
-          type: string
-          nullable: true
-          description: Identity color ID (e.g. "teal"). Null until explicitly set.
-        icon:
-          type: string
-          nullable: true
-          description: Identity icon ID or special value. Null until explicitly set.
-        startDate:
-          type: string
-          format: date
-        endDate:
-          type: string
-          format: date
-        shareToken:
-          type: string
-        icalToken:
-          type: string
-        createdBy:
-          type: string
-        createdAt:
-          type: string
-          format: date-time
-        updatedAt:
-          type: string
-          format: date-time
-        archivedAt:
-          type: string
-          nullable: true
-          format: date-time
-
-    SavedFilter:
-      type: object
-      required: [id, teamId, userId, name, definition, isTeamFilter, createdAt, updatedAt]
-      properties:
-        id:
-          type: string
-        teamId:
-          type: string
-        userId:
-          type: string
-        name:
-          type: string
-        definition:
-          type: string
-          description: Opaque JSON filter spec (validated client-side).
-        isTeamFilter:
-          type: boolean
-          description: When true, the filter is visible to all team members (set by admins only).
-          default: false
-        createdAt:
-          type: string
-          format: date-time
-        updatedAt:
-          type: string
-          format: date-time
-
-    UserPreference:
-      type: object
-      required: [id, userId, key, value, updatedAt]
-      properties:
-        id:
-          type: string
-        userId:
-          type: string
-        timelineId:
-          type: string
-          nullable: true
-          description: Empty string or absent means global (not timeline-scoped).
-        key:
-          type: string
-          description: Preference key (e.g. group_by, sort_by, zoom_granularity, theme).
-        value:
-          type: string
-          description: JSON-encoded preference value.
-        updatedAt:
-          type: string
-          format: date-time
-
-    APIToken:
-      type: object
-      required: [id, userId, name, scope, createdAt]
-      properties:
-        id:
-          type: string
-        userId:
-          type: string
-        name:
-          type: string
-          description: Human-readable label (e.g. "ci-readonly").
-        scope:
-          type: string
-          enum: [read, add, edit_own, edit_all]
-        lastUsedAt:
-          type: string
-          format: date-time
-          nullable: true
-        createdAt:
-          type: string
-          format: date-time
-        revokedAt:
-          type: string
-          format: date-time
-          nullable: true
-
-    APITokenCreated:
-      allOf:
-        - $ref: "#/components/schemas/APIToken"
-        - type: object
-          required: [token]
-          properties:
-            token:
-              type: string
-              description: The raw token value. Returned exactly once at creation; never re-fetchable.
-
-    AuthResponse:
-      type: object
-      required: [user, accessToken, refreshToken]
-      properties:
-        user:
-          $ref: "#/components/schemas/User"
-        accessToken:
-          type: string
-        refreshToken:
-          type: string
-
-    RefreshResponse:
-      type: object
-      required: [accessToken]
-      properties:
-        accessToken:
-          type: string
-
-    HealthResponse:
-      type: object
-      required: [status]
-      properties:
-        status:
-          type: string
-          enum: [ok]
-
-    ApiError:
-      type: object
-      required: [error]
-      properties:
-        error:
-          type: object
-          required: [code, message]
-          properties:
-            code:
-              type: string
-            message:
-              type: string
-
-    RevokeUserResult:
-      type: object
-      required: [accountDeactivated, membershipsInactivated, membershipsRemoved]
-      properties:
-        accountDeactivated:
-          type: boolean
-        membershipsInactivated:
-          type: integer
-        membershipsRemoved:
-          type: integer
-
-    StatusTemplateItem:
-      type: object
-      required: [id, templateId, name, color, isClosed, position]
-      properties:
-        id:
-          type: string
-        templateId:
-          type: string
-        name:
-          type: string
-        color:
-          type: string
-          description: Hex color string (e.g. "#3B82F6").
-        icon:
-          type: string
-          nullable: true
-          description: Identity icon ID. Null if not set.
-        isClosed:
-          type: boolean
-          description: Closed statuses filter activities out of active views.
-        position:
-          type: integer
-
-    StatusTemplate:
-      type: object
-      required: [id, teamId, name, position, createdBy, createdAt, updatedAt, items]
-      properties:
-        id:
-          type: string
-        teamId:
-          type: string
-        name:
-          type: string
-        description:
-          type: string
-          nullable: true
-        position:
-          type: integer
-        createdBy:
-          type: string
-        createdAt:
-          type: string
-          format: date-time
-        updatedAt:
-          type: string
-          format: date-time
-        items:
-          type: array
-          items:
-            $ref: "#/components/schemas/StatusTemplateItem"
-
-    Status:
-      type: object
-      required: [id, timelineId, name, color, isClosed, position, createdAt, updatedAt]
-      properties:
-        id:
-          type: string
-        timelineId:
-          type: string
-        name:
-          type: string
-        color:
-          type: string
-          description: Hex color string (e.g. "#3B82F6").
-        icon:
-          type: string
-          nullable: true
-          description: Identity icon ID. Null if not set.
-        isClosed:
-          type: boolean
-          description: Closed statuses filter activities out of active views.
-        position:
-          type: integer
-        createdAt:
-          type: string
-          format: date-time
-        updatedAt:
-          type: string
-          format: date-time
-
-    CreateStatusTemplateInput:
-      type: object
-      required: [name]
-      properties:
-        name:
-          type: string
-        description:
-          type: string
-          nullable: true
-
-    PatchStatusTemplateInput:
-      type: object
-      properties:
-        name:
-          type: string
-        description:
-          type: string
-          nullable: true
-        position:
-          type: integer
-
-    CreateStatusTemplateItemInput:
-      type: object
-      required: [name]
-      properties:
-        name:
-          type: string
-        color:
-          type: string
-        icon:
-          type: string
-          nullable: true
-        isClosed:
-          type: boolean
-
-    PatchStatusTemplateItemInput:
-      type: object
-      properties:
-        name:
-          type: string
-        color:
-          type: string
-        icon:
-          type: string
-          nullable: true
-        isClosed:
-          type: boolean
-        position:
-          type: integer
-
-    PatchTimelineInput:
-      type: object
-      properties:
-        name:
-          type: string
-          minLength: 1
-        startDate:
-          type: string
-          format: date
-        endDate:
-          type: string
-          format: date
-        color:
-          type: string
-          nullable: true
-        icon:
-          type: string
-          nullable: true
-        description:
-          type: string
-          nullable: true
-        notes:
-          type: string
-          nullable: true
-
-    TimelineAccessEntry:
-      type: object
-      required: [timelineId, teamMemberId, role, displayName, email]
-      properties:
-        timelineId:
-          type: string
-        teamMemberId:
-          type: string
-        role:
-          type: string
-          enum: [admin, member]
-        displayName:
-          type: string
-        email:
-          type: string
-        color:
-          type: string
-          nullable: true
-        icon:
-          type: string
-          nullable: true
-        userId:
-          type: string
-          nullable: true
-
-    CreateStatusInput:
-      type: object
-      required: [name]
-      properties:
-        name:
-          type: string
-        color:
-          type: string
-        icon:
-          type: string
-          nullable: true
-        isClosed:
-          type: boolean
-
-    PatchStatusInput:
-      type: object
-      properties:
-        name:
-          type: string
-        color:
-          type: string
-        icon:
-          type: string
-          nullable: true
-        isClosed:
-          type: boolean
-        position:
-          type: integer
-
-    DeleteStatusInput:
-      type: object
-      properties:
-        replacementStatusId:
-          type: string
-          nullable: true
-          description: Required when activities reference the deleted status.
-
-    # ── Share schemas ────────────────────────────────────────────────────────────
-
-    Share:
-      type: object
-      required: [id, timelineId, token, viewType, viewConfig, createdBy, createdAt, viewCount, protected]
-      properties:
-        id:
-          type: string
-        timelineId:
-          type: string
-        token:
-          type: string
-        name:
-          type: string
-          nullable: true
-          description: Optional human-readable label for this share link.
-        description:
-          type: string
-          nullable: true
-          description: Optional free-text describing what the link is for.
-        viewType:
-          type: string
-          enum: [gantt, list, calendar, kanban]
-        viewConfig:
-          type: string
-          description: JSON-encoded view configuration snapshot.
-        protected:
-          type: boolean
-          description: >
-            True when the share requires a password. Derived from the
-            (never-exposed) password hash so clients can show a lock indicator.
-        createdBy:
-          type: string
-          description: Team member ID of the creator.
-        createdAt:
-          type: string
-          format: date-time
-        lastViewedAt:
-          type: string
-          nullable: true
-          format: date-time
-        viewCount:
-          type: integer
-        expiresAt:
-          type: string
-          nullable: true
-          format: date-time
-        revokedAt:
-          type: string
-          nullable: true
-          format: date-time
-
-    PublicShare:
-      description: >
-        Safe projection of a Share for unauthenticated callers.
-        Omits operational telemetry (viewCount, lastViewedAt) and internal
-        fields (createdBy, revokedAt) that must not reach anonymous callers.
-      type: object
-      required: [id, timelineId, token, viewType, viewConfig, createdAt]
-      properties:
-        id:
-          type: string
-        timelineId:
-          type: string
-        token:
-          type: string
-        name:
-          type: string
-          nullable: true
-          description: Optional human-readable label for this share link.
-        viewType:
-          type: string
-          enum: [gantt, list, calendar, kanban]
-        viewConfig:
-          type: string
-          description: JSON-encoded view configuration snapshot.
-        createdAt:
-          type: string
-          format: date-time
-        expiresAt:
-          type: string
-          nullable: true
-          format: date-time
-
-    CreateShareInput:
-      type: object
-      properties:
-        name:
-          type: string
-          nullable: true
-        description:
-          type: string
-          nullable: true
-        viewType:
-          type: string
-          enum: [gantt, list, calendar, kanban]
-        viewConfig:
-          type: string
-          description: JSON-encoded view configuration.
-        password:
-          type: string
-          nullable: true
-          writeOnly: true
-          description: >
-            Optional password. When set, the share is locked and requires
-            unlocking via POST /shares/{token}/unlock. Never returned in any
-            response.
-
-    PatchShareInput:
-      type: object
-      properties:
-        name:
-          type: string
-          nullable: true
-        description:
-          type: string
-          nullable: true
-        viewType:
-          type: string
-          enum: [gantt, list, calendar, kanban]
-        viewConfig:
-          type: string
-        password:
-          type: string
-          nullable: true
-          writeOnly: true
-          description: >
-            Set a non-empty value to add/replace the password; an empty string
-            clears it; omit the field to leave it unchanged.
-
-    PublicMember:
-      type: object
-      required: [id, displayName]
-      properties:
-        id:
-          type: string
-        displayName:
-          type: string
-        color:
-          type: string
-          nullable: true
-        icon:
-          type: string
-          nullable: true
-
-    PublicActivity:
-      type: object
-      required: [id, title, startAt, endAt, allDay, assignedMemberIds, tagIds]
-      properties:
-        id:
-          type: string
-        title:
-          type: string
-        description:
-          type: string
-          nullable: true
-        notes:
-          type: string
-          nullable: true
-          description: Only present for List shares with the Notes column enabled in view_config.
-        icon:
-          type: string
-          nullable: true
-        color:
-          type: string
-          nullable: true
-        startAt:
-          type: string
-          format: date-time
-        endAt:
-          type: string
-          format: date-time
-        allDay:
-          type: boolean
-        statusId:
-          type: string
-          nullable: true
-        parentActivityId:
-          type: string
-          nullable: true
-        percentComplete:
-          type: integer
-          nullable: true
-        assignedMemberIds:
-          type: array
-          items:
-            type: string
-        tagIds:
-          type: array
-          items:
-            type: string
-
-    PublicTimeline:
-      type: object
-      required: [id, name, startDate, endDate]
-      properties:
-        id:
-          type: string
-        name:
-          type: string
-        color:
-          type: string
-          nullable: true
-        icon:
-          type: string
-          nullable: true
-        startDate:
-          type: string
-          format: date
-        endDate:
-          type: string
-          format: date
-
-    ShareProjection:
-      type: object
-      required: [share, timeline, teamName, members, statuses, tags, activities]
-      properties:
-        share:
-          $ref: "#/components/schemas/PublicShare"
-        teamName:
-          type: string
-        timeline:
-          $ref: "#/components/schemas/PublicTimeline"
-        members:
-          type: array
-          items:
-            $ref: "#/components/schemas/PublicMember"
-        statuses:
-          type: array
-          items:
-            $ref: "#/components/schemas/Status"
-        tags:
-          type: array
-          items:
-            $ref: "#/components/schemas/Tag"
-        activities:
-          type: array
-          items:
-            $ref: "#/components/schemas/PublicActivity"
-
-  # ────────────────────────────────────────────────────────────
-  # Reusable responses
-  # ────────────────────────────────────────────────────────────
-  responses:
-    BadRequest:
-      description: Invalid request body or parameters.
-      content:
-        application/json:
-          schema:
-            $ref: "#/components/schemas/ApiError"
-
-    Unauthorized:
-      description: Missing or invalid authentication token.
-      content:
-        application/json:
-          schema:
-            $ref: "#/components/schemas/ApiError"
-
-    Forbidden:
-      description: Authenticated but not allowed to perform this action.
-      content:
-        application/json:
-          schema:
-            $ref: "#/components/schemas/ApiError"
-
-    NotFound:
-      description: Resource not found.
-      content:
-        application/json:
-          schema:
-            $ref: "#/components/schemas/ApiError"
-
-    PaymentRequired:
-      description: Tier limit reached.
-      content:
-        application/json:
-          schema:
-            $ref: "#/components/schemas/ApiError"
-
-    InternalError:
-      description: Unexpected server error.
-      content:
-        application/json:
-          schema:
-            $ref: "#/components/schemas/ApiError"
-
-  # ────────────────────────────────────────────────────────────
-  # Reusable parameters
-  # ────────────────────────────────────────────────────────────
-  parameters:
-    teamId:
-      name: id
-      in: path
-      required: true
-      description: Team ID.
-      schema:
-        type: string
-
-    activityId:
-      name: id
-      in: path
-      required: true
-      description: Activity ID.
-      schema:
-        type: string
-
-    timelineId:
-      name: id
-      in: path
-      required: true
-      description: Timeline ID.
-      schema:
-        type: string
-
-    timelineIdParam:
-      name: timelineId
-      in: path
-      required: true
-      description: Timeline ID (nested path parameter).
-      schema:
-        type: string
-
-    savedFilterId:
-      name: id
-      in: path
-      required: true
-      description: Saved filter ID.
-      schema:
-        type: string
-
-    id:
-      name: id
-      in: path
-      required: true
-      description: Resource ID.
-      schema:
-        type: string
-
-    shareToken:
-      name: token
-      in: path
-      required: true
-      description: Public share token for a timeline.
-      schema:
-        type: string
-
-    shareId:
-      name: id
-      in: path
-      required: true
-      description: Share ID.
-      schema:
-        type: string
-
-    timelineIdNested:
-      name: timelineId
-      in: path
-      required: true
-      description: Timeline ID (nested under team).
-      schema:
-        type: string
-
-# ────────────────────────────────────────────────────────────
-# Paths
-# ────────────────────────────────────────────────────────────
-paths:
-
-  /health:
-    get:
-      operationId: health
-      summary: Health check
-      security: []
-      tags: [system]
-      responses:
-        "200":
-          description: Server is healthy.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/HealthResponse"
-
-  # ── Auth ────────────────────────────────────────────────────
-
-  /auth/register:
-    post:
-      operationId: register
-      summary: Register a new user
-      description: |
-        The first user on a fresh install may register without an invite token
-        (bootstrap). Every subsequent user must supply a valid invite token.
-      security: []
-      tags: [auth]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [email, password, displayName]
-              properties:
-                email:
-                  type: string
-                  format: email
-                password:
-                  type: string
-                  minLength: 8
-                displayName:
-                  type: string
-                  minLength: 1
-                inviteToken:
-                  type: string
-      responses:
-        "201":
-          description: User registered successfully.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/AuthResponse"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "402":
-          $ref: "#/components/responses/PaymentRequired"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "409":
-          description: Email address is already registered.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ApiError"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  /auth/login:
-    post:
-      operationId: login
-      summary: Authenticate and obtain tokens
-      security: []
-      tags: [auth]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [email, password]
-              properties:
-                email:
-                  type: string
-                  format: email
-                password:
-                  type: string
-      responses:
-        "200":
-          description: Authenticated successfully.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/AuthResponse"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  /auth/refresh:
-    post:
-      operationId: refreshToken
-      summary: Exchange a refresh token for a new access token
-      security: []
-      tags: [auth]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [refreshToken]
-              properties:
-                refreshToken:
-                  type: string
-      responses:
-        "200":
-          description: New access token issued.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/RefreshResponse"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  /auth/me:
-    get:
-      operationId: getMe
-      summary: Get the authenticated user's profile
-      tags: [auth]
-      responses:
-        "200":
-          description: Current user profile.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/User"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  # ── User preferences ─────────────────────────────────────────
-
-  /users/me/preferences:
-    get:
-      operationId: getPreferences
-      summary: Get preferences for the authenticated user
-      description: |
-        Returns all preferences matching the given scope. Omit timeline_id
-        (or pass an empty string) to fetch global preferences.
-      tags: [users]
-      parameters:
-        - name: timeline_id
-          in: query
-          required: false
-          description: Scope results to a specific timeline. Omit for global prefs.
-          schema:
-            type: string
-      responses:
-        "200":
-          description: Array of matching preferences.
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/UserPreference"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "500":
-          $ref: "#/components/responses/InternalError"
-    put:
-      operationId: upsertPreference
-      summary: Create or update a single preference
-      tags: [users]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [key, value]
-              properties:
-                key:
-                  type: string
-                  description: Preference key (e.g. group_by, sort_by, zoom_granularity, theme).
-                value:
-                  type: string
-                  description: JSON-encoded preference value.
-                timelineId:
-                  type: string
-                  nullable: true
-                  description: Omit or pass "" for a global preference.
-      responses:
-        "200":
-          description: Upserted preference.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/UserPreference"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  # ── API Tokens ───────────────────────────────────────────────
-
-  /tokens:
-    get:
-      operationId: listAPITokens
-      summary: List API tokens owned by the caller
-      tags: [tokens]
-      responses:
-        "200":
-          description: Array of tokens (active and revoked). Raw token value is never included.
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/APIToken"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "500":
-          $ref: "#/components/responses/InternalError"
-    post:
-      operationId: createAPIToken
-      summary: Create a new API token
-      description: |
-        Mints a long-lived Bearer token scoped to the caller's account. The raw token
-        value is returned exactly once in the response and never re-fetchable. API
-        tokens cannot be used to mint other API tokens — this endpoint requires a JWT.
-      tags: [tokens]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [name, scope]
-              properties:
-                name:
-                  type: string
-                  minLength: 1
-                scope:
-                  type: string
-                  enum: [read, add, edit_own, edit_all]
-      responses:
-        "201":
-          description: Token created. The raw value is included in this response only.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/APITokenCreated"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  /tokens/{id}:
-    delete:
-      operationId: revokeAPIToken
-      summary: Revoke an API token
-      description: Marks the token as revoked. The row is preserved so the listing UI can show "Revoked on …".
-      tags: [tokens]
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-      responses:
-        "204":
-          description: Token revoked (or already revoked).
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  # ── Teams ────────────────────────────────────────────────────
-
-  /teams:
-    get:
-      operationId: listTeams
-      summary: List teams for the authenticated user
-      tags: [teams]
-      parameters:
-        - name: archived
-          in: query
-          required: false
-          description: When `true`, include archived teams. Default excludes them.
-          schema:
-            type: string
-            enum: [ "true", "false" ]
-      responses:
-        "200":
-          description: Array of teams the user belongs to.
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/Team"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-    post:
-      operationId: createTeam
-      summary: Create a new team
-      description: The authenticated user automatically becomes the team's first admin member.
-      tags: [teams]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [name]
-              properties:
-                name:
-                  type: string
-                  minLength: 1
-                description:
-                  type: string
-                  nullable: true
-                notes:
-                  type: string
-                  nullable: true
-                color:
-                  type: string
-                  nullable: true
-                icon:
-                  type: string
-                  nullable: true
-      responses:
-        "201":
-          description: Team created.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Team"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "402":
-          $ref: "#/components/responses/PaymentRequired"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  /teams/{id}:
-    get:
-      operationId: getTeam
-      summary: Get a team by ID
-      description: Any member of the team may fetch the team record.
-      tags: [teams]
-      parameters:
-        - $ref: "#/components/parameters/teamId"
-      responses:
-        "200":
-          description: Team record.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Team"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-    patch:
-      operationId: updateTeam
-      summary: Partially update a team (admin only)
-      description: Only fields present in the request body are modified. Only team admins may update.
-      tags: [teams]
-      parameters:
-        - $ref: "#/components/parameters/teamId"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                name:
-                  type: string
-                  minLength: 1
-                description:
-                  type: string
-                  nullable: true
-                notes:
-                  type: string
-                  nullable: true
-                color:
-                  type: string
-                  nullable: true
-                icon:
-                  type: string
-                  nullable: true
-      responses:
-        "200":
-          description: Updated team.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Team"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  /teams/{id}/archive:
-    post:
-      operationId: archiveTeam
-      summary: Archive a team (admin only)
-      description: Sets archivedAt on the team. The team is hidden from active pickers but all data is preserved.
-      tags: [teams]
-      parameters:
-        - $ref: "#/components/parameters/teamId"
-      responses:
-        "200":
-          description: The archived team.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Team"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  /teams/{id}/unarchive:
-    post:
-      operationId: unarchiveTeam
-      summary: Restore a previously archived team (admin only)
-      tags: [teams]
-      parameters:
-        - $ref: "#/components/parameters/teamId"
-      responses:
-        "200":
-          description: The restored team.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Team"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  /teams/{id}/invites:
-    get:
-      operationId: listInvites
-      summary: List pending invites for a team (admin only)
-      tags: [teams]
-      parameters:
-        - $ref: "#/components/parameters/teamId"
-      responses:
-        "200":
-          description: Array of pending invites.
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/Invite"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "500":
-          $ref: "#/components/responses/InternalError"
-    post:
-      operationId: createInvite
-      summary: Create a team invite
-      description: Only team admins may create invites. The token expires after 7 days.
-      tags: [teams]
-      parameters:
-        - $ref: "#/components/parameters/teamId"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                email:
-                  type: string
-                  format: email
-                  description: If provided, the invite is scoped to this email address.
-                role:
-                  type: string
-                  enum: [admin, member]
-                  default: member
-      responses:
-        "201":
-          description: Invite created.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Invite"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  /teams/{id}/invites/{inviteId}:
-    delete:
-      operationId: revokeInvite
-      summary: Revoke a pending invite (admin only)
-      tags: [teams]
-      parameters:
-        - $ref: "#/components/parameters/teamId"
-        - name: inviteId
-          in: path
-          required: true
-          schema:
-            type: string
-      responses:
-        "204":
-          description: Invite revoked.
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  /teams/{id}/invite-link:
-    get:
-      operationId: getInviteLink
-      summary: Get the current reusable invite link token (admin only)
-      tags: [teams]
-      parameters:
-        - $ref: "#/components/parameters/teamId"
-      responses:
-        "200":
-          description: Current invite link token (null if none is set).
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/InviteLink"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "500":
-          $ref: "#/components/responses/InternalError"
-    post:
-      operationId: createInviteLink
-      summary: Generate or regenerate the reusable invite link (admin only)
-      tags: [teams]
-      parameters:
-        - $ref: "#/components/parameters/teamId"
-      responses:
-        "200":
-          description: New invite link token.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/InviteLink"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "500":
-          $ref: "#/components/responses/InternalError"
-    delete:
-      operationId: revokeInviteLink
-      summary: Revoke the reusable invite link (admin only)
-      tags: [teams]
-      parameters:
-        - $ref: "#/components/parameters/teamId"
-      responses:
-        "204":
-          description: Invite link revoked.
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  /teams/{id}/members:
-    get:
-      operationId: listTeamMembers
-      summary: List members of a team
-      tags: [teams]
-      parameters:
-        - $ref: "#/components/parameters/teamId"
-      responses:
-        "200":
-          description: Array of team members with user display info.
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/TeamMemberWithUser"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "500":
-          $ref: "#/components/responses/InternalError"
-    post:
-      operationId: addMember
-      summary: Add an existing registered user to a team (admin only)
-      tags: [teams]
-      parameters:
-        - $ref: "#/components/parameters/teamId"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [userId]
-              properties:
-                userId:
-                  type: string
-                role:
-                  type: string
-                  enum: [admin, member]
-                  default: member
-      responses:
-        "201":
-          description: Member added.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/TeamMemberWithUser"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "409":
-          description: User is already a member.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ApiError"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  /teams/{id}/members/{memberId}:
-    get:
-      operationId: getMember
-      summary: Get a team member with computed stats
-      tags: [teams]
-      parameters:
-        - $ref: "#/components/parameters/teamId"
-        - name: memberId
-          in: path
-          required: true
-          schema:
-            type: string
-      responses:
-        "200":
-          description: Member detail with stats.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/MemberDetail"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "500":
-          $ref: "#/components/responses/InternalError"
-    patch:
-      operationId: updateMember
-      summary: Update a team member's display name, identity, or role
-      tags: [teams]
-      parameters:
-        - $ref: "#/components/parameters/teamId"
-        - name: memberId
-          in: path
-          required: true
-          schema:
-            type: string
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                displayName:
-                  type: string
-                  nullable: true
-                color:
-                  type: string
-                  nullable: true
-                icon:
-                  type: string
-                  nullable: true
-                role:
-                  type: string
-                  enum: [admin, member]
-      responses:
-        "200":
-          description: Updated member.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/TeamMemberWithUser"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "409":
-          description: Cannot demote the last admin.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ApiError"
-        "500":
-          $ref: "#/components/responses/InternalError"
-    delete:
-      operationId: deleteMember
-      summary: Remove a member from a team (admin only)
-      tags: [teams]
-      parameters:
-        - $ref: "#/components/parameters/teamId"
-        - name: memberId
-          in: path
-          required: true
-          schema:
-            type: string
-      responses:
-        "204":
-          description: Member removed.
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "409":
-          description: Cannot remove the last admin.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ApiError"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  /teams/{id}/members/{memberId}/archive:
-    post:
-      operationId: archiveMember
-      summary: Inactivate a team member (admin only)
-      tags: [teams]
-      parameters:
-        - $ref: "#/components/parameters/teamId"
-        - name: memberId
-          in: path
-          required: true
-          schema:
-            type: string
-      responses:
-        "200":
-          description: Inactivated member.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/TeamMemberWithUser"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "409":
-          description: Cannot inactivate the last admin.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ApiError"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  /teams/{id}/members/{memberId}/unarchive:
-    post:
-      operationId: unarchiveMember
-      summary: Reactivate an inactivated team member (admin only)
-      tags: [teams]
-      parameters:
-        - $ref: "#/components/parameters/teamId"
-        - name: memberId
-          in: path
-          required: true
-          schema:
-            type: string
-      responses:
-        "200":
-          description: Reactivated member.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/TeamMemberWithUser"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  /teams/{id}/participants:
-    post:
-      operationId: createParticipant
-      summary: Create a login-less participant (admin only)
-      tags: [teams]
-      parameters:
-        - $ref: "#/components/parameters/teamId"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [name]
-              properties:
-                name:
-                  type: string
-                  minLength: 1
-                color:
-                  type: string
-                  nullable: true
-                icon:
-                  type: string
-                  nullable: true
-      responses:
-        "201":
-          description: Participant created.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/TeamMemberWithUser"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  /users/search:
-    get:
-      operationId: searchUsers
-      summary: Search users by name or email
-      description: Returns up to 20 matching non-archived users. Query must be at least 2 characters.
-      tags: [users]
-      parameters:
-        - name: q
-          in: query
-          required: true
-          schema:
-            type: string
-            minLength: 2
-      responses:
-        "200":
-          description: Matching users.
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/User"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  /users/{id}/promote:
-    post:
-      operationId: promoteUser
-      summary: Grant superadmin status to a user (superadmin only)
-      tags: [users]
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-      responses:
-        "200":
-          description: Updated user.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/User"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  /users/{id}/archive:
-    post:
-      operationId: archiveUser
-      summary: Inactivate a user account (superadmin only)
-      tags: [users]
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-      responses:
-        "200":
-          description: Inactivated user.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/User"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  /users/{id}/unarchive:
-    post:
-      operationId: unarchiveUser
-      summary: Reactivate an inactivated user account (superadmin only)
-      tags: [users]
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-      responses:
-        "200":
-          description: Reactivated user.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/User"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  /users/{id}/revoke:
-    post:
-      operationId: revokeUser
-      summary: Atomically revoke all access for a user (superadmin only)
-      description: >
-        Sets users.archived_at (blocks login everywhere), inactivates all team
-        memberships that have activity assignments, and hard-deletes memberships
-        with zero assignments. Returns a summary of the three operations.
-      tags: [users]
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-      responses:
-        "200":
-          description: Revocation summary.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/RevokeUserResult"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  /users/{id}:
-    delete:
-      operationId: deleteUser
-      summary: Hard-delete a user (superadmin only)
-      description: Only permitted when the user has no active activities and belongs to a single team.
-      tags: [users]
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-      responses:
-        "204":
-          description: User deleted.
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "409":
-          description: User cannot be deleted (multi-team or has active activities).
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ApiError"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  # ── Activities ───────────────────────────────────────────────
-
-  /teams/{id}/timelines/{timelineId}/activities:
-    post:
-      operationId: createActivity
-      summary: Create an activity in a timeline
-      tags: [activities]
-      parameters:
-        - $ref: "#/components/parameters/teamId"
-        - name: timelineId
-          in: path
-          required: true
-          schema:
-            type: string
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [title, startAt, endAt]
-              properties:
-                title:
-                  type: string
-                  minLength: 1
-                description:
-                  type: string
-                  nullable: true
-                notes:
-                  type: string
-                  nullable: true
-                icon:
-                  type: string
-                  nullable: true
-                color:
-                  type: string
-                  nullable: true
-                startAt:
-                  type: string
-                  format: date-time
-                endAt:
-                  type: string
-                  format: date-time
-                allDay:
-                  type: boolean
-                  default: false
-                statusId:
-                  type: string
-                  nullable: true
-                parentActivityId:
-                  type: string
-                  nullable: true
-                percentComplete:
-                  type: integer
-                  nullable: true
-                  minimum: 0
-                  maximum: 100
-                location:
-                  type: string
-                  nullable: true
-                url:
-                  type: string
-                  nullable: true
-                rrule:
-                  type: string
-                  nullable: true
-                assignedMemberIds:
-                  type: array
-                  items:
-                    type: string
-                  description: IDs of team_members to assign. Replaces all existing assignments.
-                tagIds:
-                  type: array
-                  items:
-                    type: string
-                  description: IDs of tags to associate. Replaces all existing tag associations.
-      responses:
-        "201":
-          description: Activity created.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Activity"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-    get:
-      operationId: listActivities
-      summary: List activities for a timeline
-      description: Archived activities are excluded by default. Optional date-range filter on startAt.
-      tags: [activities]
-      parameters:
-        - $ref: "#/components/parameters/teamId"
-        - name: timelineId
-          in: path
-          required: true
-          schema:
-            type: string
-        - name: from
-          in: query
-          required: false
-          description: Only return activities where startAt >= from (RFC 3339).
-          schema:
-            type: string
-            format: date-time
-        - name: to
-          in: query
-          required: false
-          description: Only return activities where startAt <= to (RFC 3339).
-          schema:
-            type: string
-            format: date-time
-        - name: archived
-          in: query
-          required: false
-          description: When `true`, include archived activities. Default excludes them.
-          schema:
-            type: string
-            enum: [ "true", "false" ]
-      responses:
-        "200":
-          description: Array of activities.
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/Activity"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  /activities/{id}:
-    patch:
-      operationId: updateActivity
-      summary: Partially update an activity
-      description: Only fields present in the request body are modified (true PATCH semantics).
-      tags: [activities]
-      parameters:
-        - $ref: "#/components/parameters/activityId"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                title:
-                  type: string
-                  minLength: 1
-                description:
-                  type: string
-                  nullable: true
-                notes:
-                  type: string
-                  nullable: true
-                icon:
-                  type: string
-                  nullable: true
-                color:
-                  type: string
-                  nullable: true
-                startAt:
-                  type: string
-                  format: date-time
-                endAt:
-                  type: string
-                  format: date-time
-                allDay:
-                  type: boolean
-                statusId:
-                  type: string
-                  nullable: true
-                parentActivityId:
-                  type: string
-                  nullable: true
-                percentComplete:
-                  type: integer
-                  nullable: true
-                  minimum: 0
-                  maximum: 100
-                location:
-                  type: string
-                  nullable: true
-                url:
-                  type: string
-                  nullable: true
-                rrule:
-                  type: string
-                  nullable: true
-                assignedMemberIds:
-                  type: array
-                  items:
-                    type: string
-                  description: IDs of team_members to assign. Replaces all existing assignments.
-                tagIds:
-                  type: array
-                  items:
-                    type: string
-                  description: IDs of tags to associate. Replaces all existing tag associations.
-      responses:
-        "200":
-          description: Updated activity.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Activity"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-    delete:
-      operationId: deleteActivity
-      summary: Delete an activity
-      tags: [activities]
-      parameters:
-        - $ref: "#/components/parameters/activityId"
-      responses:
-        "204":
-          description: Activity deleted (no body).
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  /activities/{id}/archive:
-    post:
-      operationId: archiveActivity
-      summary: Archive an activity (soft delete)
-      description: Sets archivedAt on the activity so it is hidden from default list responses but can be restored via /activities/{id}/unarchive.
-      tags: [activities]
-      parameters:
-        - $ref: "#/components/parameters/activityId"
-      responses:
-        "200":
-          description: The archived activity.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Activity"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  /activities/{id}/unarchive:
-    post:
-      operationId: unarchiveActivity
-      summary: Restore a previously archived activity
-      tags: [activities]
-      parameters:
-        - $ref: "#/components/parameters/activityId"
-      responses:
-        "200":
-          description: The restored activity.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Activity"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  # ── Timelines ────────────────────────────────────────────────
-
-  /teams/{id}/timelines:
-    get:
-      operationId: listTimelines
-      summary: List timelines for a team
-      tags: [timelines]
-      parameters:
-        - $ref: "#/components/parameters/teamId"
-        - name: archived
-          in: query
-          required: false
-          description: When `true`, include archived timelines. Default excludes them.
-          schema:
-            type: string
-            enum: [ "true", "false" ]
-      responses:
-        "200":
-          description: Array of non-archived timelines for the team.
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/Timeline"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-    post:
-      operationId: createTimeline
-      summary: Create a timeline for a team
-      description: The authenticated user must be a member of the team. Restricted timelines automatically grant access to the creator.
-      tags: [timelines]
-      parameters:
-        - $ref: "#/components/parameters/teamId"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [name, startDate, endDate]
-              properties:
-                name:
-                  type: string
-                  minLength: 1
-                startDate:
-                  type: string
-                  format: date
-                endDate:
-                  type: string
-                  format: date
-                color:
-                  type: string
-                  nullable: true
-                icon:
-                  type: string
-                  nullable: true
-                description:
-                  type: string
-                  nullable: true
-                notes:
-                  type: string
-                  nullable: true
-                templateId:
-                  type: string
-                  nullable: true
-                  description: ID of the status template to seed this timeline's statuses from. Uses the team's first template when omitted.
-      responses:
-        "201":
-          description: Timeline created.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Timeline"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  /timelines/{id}/archive:
-    post:
-      operationId: archiveTimeline
-      summary: Archive a timeline (admin only)
-      description: Team admins only. Sets archivedAt on the timeline so it is hidden from default list responses but can be restored via /timelines/{id}/unarchive.
-      tags: [timelines]
-      parameters:
-        - $ref: "#/components/parameters/timelineId"
-      responses:
-        "200":
-          description: The archived timeline.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Timeline"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  /timelines/{id}/unarchive:
-    post:
-      operationId: unarchiveTimeline
-      summary: Restore a previously archived timeline
-      tags: [timelines]
-      parameters:
-        - $ref: "#/components/parameters/timelineId"
-      responses:
-        "200":
-          description: The restored timeline.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Timeline"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  /timelines/{id}:
-    get:
-      operationId: getTimeline
-      summary: Fetch a timeline by ID
-      description: Requires team membership. Restricted timelines additionally require an entry in the access list.
-      tags: [timelines]
-      parameters:
-        - $ref: "#/components/parameters/timelineId"
-      responses:
-        "200":
-          description: Timeline found.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Timeline"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-    patch:
-      operationId: updateTimeline
-      summary: Rename or change dates on a timeline (timeline admin only)
-      tags: [timelines]
-      parameters:
-        - $ref: "#/components/parameters/timelineId"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/PatchTimelineInput"
-      responses:
-        "200":
-          description: Updated timeline.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Timeline"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-    delete:
-      operationId: deleteTimeline
-      summary: Hard-delete a timeline (team admin only)
-      description: Deletes the timeline and all its statuses. Activities are NOT deleted.
-      tags: [timelines]
-      parameters:
-        - $ref: "#/components/parameters/timelineId"
-      responses:
-        "204":
-          description: Timeline deleted.
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  /teams/{id}/timelines/{timelineId}/access:
-    get:
-      operationId: listTimelineAccess
-      summary: List access grants for a timeline
-      tags: [timelines]
-      parameters:
-        - $ref: "#/components/parameters/teamId"
-        - $ref: "#/components/parameters/timelineIdParam"
-      responses:
-        "200":
-          description: List of access grants.
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/TimelineAccessEntry"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  /teams/{id}/timelines/{timelineId}/access/{memberId}:
-    put:
-      operationId: grantTimelineAccess
-      summary: Grant or update a team member's access to a timeline (timeline admin only)
-      tags: [timelines]
-      parameters:
-        - $ref: "#/components/parameters/teamId"
-        - $ref: "#/components/parameters/timelineIdParam"
-        - name: memberId
-          in: path
-          required: true
-          schema:
-            type: string
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [role]
-              properties:
-                role:
-                  type: string
-                  enum: [admin, member]
-      responses:
-        "200":
-          description: Updated access list.
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/TimelineAccessEntry"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-    delete:
-      operationId: revokeTimelineAccess
-      summary: Revoke a team member's access to a timeline (timeline admin only)
-      tags: [timelines]
-      parameters:
-        - $ref: "#/components/parameters/teamId"
-        - $ref: "#/components/parameters/timelineIdParam"
-        - name: memberId
-          in: path
-          required: true
-          schema:
-            type: string
-      responses:
-        "204":
-          description: Access revoked.
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  # ── Saved Filters ────────────────────────────────────────────
-
-  /teams/{id}/saved_filters:
-    get:
-      operationId: listSavedFilters
-      summary: List the authenticated user's saved filters for a team
-      tags: [savedFilters]
-      parameters:
-        - $ref: "#/components/parameters/teamId"
-      responses:
-        "200":
-          description: Array of saved filters owned by the caller.
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/SavedFilter"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-    post:
-      operationId: createSavedFilter
-      summary: Create a saved filter for the authenticated user in a team
-      tags: [savedFilters]
-      parameters:
-        - $ref: "#/components/parameters/teamId"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [name, definition]
-              properties:
-                name:
-                  type: string
-                  minLength: 1
-                definition:
-                  type: string
-                  description: Opaque JSON filter spec (validated client-side).
-                isTeamFilter:
-                  type: boolean
-                  description: When true, visible to all team members (admin-only).
-      responses:
-        "201":
-          description: Saved filter created.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/SavedFilter"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  /saved_filters/{id}:
-    patch:
-      operationId: updateSavedFilter
-      summary: Partially update a saved filter (owner only)
-      tags: [savedFilters]
-      parameters:
-        - $ref: "#/components/parameters/savedFilterId"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                name:
-                  type: string
-                  minLength: 1
-                definition:
-                  type: string
-                isTeamFilter:
-                  type: boolean
-                  description: Promotes or demotes team visibility. Admin-only — both setting true and reverting to false require admin role.
-      responses:
-        "200":
-          description: Updated saved filter.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/SavedFilter"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-    delete:
-      operationId: deleteSavedFilter
-      summary: Delete a saved filter (owner only)
-      tags: [savedFilters]
-      parameters:
-        - $ref: "#/components/parameters/savedFilterId"
-      responses:
-        "204":
-          description: Saved filter deleted (no body).
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  # ── Tags ─────────────────────────────────────────────────────
-
-  /teams/{id}/tags:
-    get:
-      operationId: listTags
-      summary: List tags for a team
-      tags: [tags]
-      parameters:
-        - $ref: "#/components/parameters/teamId"
-      responses:
-        "200":
-          description: Array of tags for the team.
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/Tag"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-    post:
-      operationId: createTag
-      summary: Create a tag for a team
-      tags: [tags]
-      parameters:
-        - $ref: "#/components/parameters/teamId"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [name]
-              properties:
-                name:
-                  type: string
-                  minLength: 1
-                color:
-                  type: string
-                  nullable: true
-      responses:
-        "201":
-          description: Tag created.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Tag"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "409":
-          description: A tag with that name already exists in this team.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ApiError"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  /tags/{id}:
-    patch:
-      operationId: updateTag
-      summary: Update a tag's name or color
-      tags: [tags]
-      parameters:
-        - $ref: "#/components/parameters/id"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                name:
-                  type: string
-                  minLength: 1
-                color:
-                  type: string
-                  nullable: true
-      responses:
-        "200":
-          description: Updated tag.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Tag"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "409":
-          description: A tag with that name already exists in this team.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ApiError"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-    delete:
-      operationId: deleteTag
-      summary: Delete a tag (cascades to activity_tags)
-      tags: [tags]
-      parameters:
-        - $ref: "#/components/parameters/id"
-      responses:
-        "204":
-          description: Tag deleted (no body).
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  # ── Profile & Security ────────────────────────────────────────
-
-  /users/me:
-    patch:
-      operationId: updateProfile
-      summary: Update the authenticated user's display name, color, and icon
-      tags: [users]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/UpdateProfileInput"
-      responses:
-        "200":
-          description: Updated user profile.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/User"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  /users/me/password:
-    put:
-      operationId: changePassword
-      summary: Change the authenticated user's password
-      tags: [users]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/ChangePasswordInput"
-      responses:
-        "200":
-          description: Password changed successfully.
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  /auth/forgot-password:
-    post:
-      operationId: forgotPassword
-      summary: Request a password reset email
-      security: []
-      tags: [auth]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/ForgotPasswordInput"
-      responses:
-        "200":
-          description: Always 200; no email enumeration.
-        "400":
-          $ref: "#/components/responses/BadRequest"
-
-  /auth/reset-password:
-    post:
-      operationId: resetPassword
-      summary: Reset a password using a valid reset token
-      security: []
-      tags: [auth]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/ResetPasswordInput"
-      responses:
-        "200":
-          description: Password reset successfully.
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  # ── Admin ─────────────────────────────────────────────────────
-
-  /admin/smtp:
-    get:
-      operationId: getSMTPConfig
-      summary: Get current SMTP configuration (password masked)
-      tags: [admin]
-      responses:
-        "200":
-          description: SMTP config or null when not configured.
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-    put:
-      operationId: putSMTPConfig
-      summary: Save and validate SMTP configuration
-      tags: [admin]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/SMTPConfig"
-      responses:
-        "200":
-          description: SMTP config saved.
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-    delete:
-      operationId: deleteSMTPConfig
-      summary: Clear SMTP configuration
-      tags: [admin]
-      responses:
-        "204":
-          description: SMTP config cleared.
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-
-  /admin/smtp/test:
-    post:
-      operationId: testSMTPConfig
-      summary: Send a test email using supplied config without saving
-      tags: [admin]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/SMTPConfig"
-      responses:
-        "200":
-          description: Test email sent.
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-
-  /settings/branding:
-    get:
-      operationId: getPublicBranding
-      summary: Get public branding settings (no auth required)
-      description: >
-        Returns the instance name and accent color. Intentionally public so the
-        login page and shared timeline views can display branding before sign-in.
-        Only cosmetic settings are exposed here.
-      tags: [settings]
-      security: []
-      responses:
-        "200":
-          description: Public branding values.
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  instanceName:
-                    type: string
-                    description: Admin-configured name shown in the browser tab and login page.
-                  accentColor:
-                    type: string
-                    description: 6-digit hex override for the primary color (e.g. "#288C9B"). Empty string means no override.
-
-  /admin/settings:
-    get:
-      operationId: getAdminSettings
-      summary: Get instance-level settings
-      tags: [admin]
-      responses:
-        "200":
-          description: Instance settings map.
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-    patch:
-      operationId: patchAdminSettings
-      summary: Update one or more instance-level settings
-      tags: [admin]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              additionalProperties:
-                type: string
-      responses:
-        "200":
-          description: Updated settings.
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-
-  /admin/users:
-    get:
-      operationId: listAdminUsers
-      summary: List all users with team membership counts
-      tags: [admin]
-      parameters:
-        - name: orphaned
-          in: query
-          required: false
-          description: When true, return only users with zero active team memberships.
-          schema:
-            type: boolean
-      responses:
-        "200":
-          description: List of admin user rows.
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  users:
-                    type: array
-                    items:
-                      $ref: "#/components/schemas/AdminUserRow"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-
-  /teams/{teamId}/status-templates:
-    get:
-      operationId: listStatusTemplates
-      summary: List all status templates for a team
-      tags: [statusTemplates]
-      parameters:
-        - name: teamId
-          in: path
-          required: true
-          schema:
-            type: string
-      responses:
-        "200":
-          description: List of status templates with their items.
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/StatusTemplate"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-    post:
-      operationId: createStatusTemplate
-      summary: Create a status template
-      tags: [statusTemplates]
-      parameters:
-        - name: teamId
-          in: path
-          required: true
-          schema:
-            type: string
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/CreateStatusTemplateInput"
-      responses:
-        "201":
-          description: Created status template (with empty items array).
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/StatusTemplate"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-
-  /status-templates/{id}:
-    patch:
-      operationId: updateStatusTemplate
-      summary: Rename or reorder a status template
-      tags: [statusTemplates]
-      parameters:
-        - $ref: "#/components/parameters/id"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/PatchStatusTemplateInput"
-      responses:
-        "200":
-          description: Updated status template.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/StatusTemplate"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          $ref: "#/components/responses/NotFound"
-    delete:
-      operationId: deleteStatusTemplate
-      summary: Delete a status template (blocked if it is the last one)
-      tags: [statusTemplates]
-      parameters:
-        - $ref: "#/components/parameters/id"
-      responses:
-        "204":
-          description: Deleted.
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "409":
-          description: Cannot delete the last template on the team.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ApiError"
-
-  /status-templates/{id}/items:
-    post:
-      operationId: createStatusTemplateItem
-      summary: Add an item to a status template
-      tags: [statusTemplates]
-      parameters:
-        - $ref: "#/components/parameters/id"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/CreateStatusTemplateItemInput"
-      responses:
-        "201":
-          description: Created template item.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/StatusTemplateItem"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          $ref: "#/components/responses/NotFound"
-
-  /status-template-items/{id}:
-    patch:
-      operationId: updateStatusTemplateItem
-      summary: Rename, recolor, reicon, toggle is_closed, or reorder a template item
-      tags: [statusTemplates]
-      parameters:
-        - $ref: "#/components/parameters/id"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/PatchStatusTemplateItemInput"
-      responses:
-        "200":
-          description: Updated template item.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/StatusTemplateItem"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          $ref: "#/components/responses/NotFound"
-    delete:
-      operationId: deleteStatusTemplateItem
-      summary: Delete a template item (blocked if it is the last one in the template)
-      tags: [statusTemplates]
-      parameters:
-        - $ref: "#/components/parameters/id"
-      responses:
-        "204":
-          description: Deleted.
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "409":
-          description: Cannot delete the last item in a template.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ApiError"
-
-  /teams/{teamId}/timelines/{timelineId}/statuses:
-    get:
-      operationId: listTimelineStatuses
-      summary: List statuses for a specific timeline
-      tags: [statuses]
-      parameters:
-        - name: teamId
-          in: path
-          required: true
-          schema:
-            type: string
-        - name: timelineId
-          in: path
-          required: true
-          schema:
-            type: string
-      responses:
-        "200":
-          description: List of timeline statuses in position order.
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/Status"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          $ref: "#/components/responses/NotFound"
-
-    post:
-      operationId: createTimelineStatus
-      summary: Add a status to a timeline (timeline admin only)
-      tags: [statuses]
-      parameters:
-        - name: teamId
-          in: path
-          required: true
-          schema:
-            type: string
-        - name: timelineId
-          in: path
-          required: true
-          schema:
-            type: string
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/CreateStatusInput"
-      responses:
-        "201":
-          description: Status created.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Status"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  /statuses/{id}:
-    patch:
-      operationId: updateStatus
-      summary: Rename, recolor, or reorder a timeline status (timeline admin only)
-      tags: [statuses]
-      parameters:
-        - $ref: "#/components/parameters/id"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/PatchStatusInput"
-      responses:
-        "200":
-          description: Updated status.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Status"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-    delete:
-      operationId: deleteStatus
-      summary: Delete a timeline status (timeline admin only)
-      description: Blocked if it is the last status. Requires replacementStatusId if any activities reference the status.
-      tags: [statuses]
-      parameters:
-        - $ref: "#/components/parameters/id"
-      requestBody:
-        required: false
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/DeleteStatusInput"
-      responses:
-        "204":
-          description: Deleted.
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "409":
-          description: Last status or activities reference it without a replacement.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ApiError"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  # ── Shares ──────────────────────────────────────────────────────────────────
-
-  /timelines/{id}/shares:
-    post:
-      operationId: createShare
-      summary: Create a share for a timeline
-      tags: [shares]
-      parameters:
-        - $ref: "#/components/parameters/timelineId"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/CreateShareInput"
-      responses:
-        "201":
-          description: Share created.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Share"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  /teams/{id}/timelines/{timelineId}/shares:
-    get:
-      operationId: listShares
-      summary: List shares for a timeline
-      tags: [shares]
-      parameters:
-        - $ref: "#/components/parameters/teamId"
-        - $ref: "#/components/parameters/timelineIdNested"
-      responses:
-        "200":
-          description: List of shares.
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/Share"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  /shares/{id}:
-    patch:
-      operationId: updateShare
-      summary: Update a share
-      tags: [shares]
-      parameters:
-        - $ref: "#/components/parameters/shareId"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/PatchShareInput"
-      responses:
-        "200":
-          description: Updated share.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Share"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "500":
-          $ref: "#/components/responses/InternalError"
-    delete:
-      operationId: deleteShare
-      summary: Delete a share
-      tags: [shares]
-      parameters:
-        - $ref: "#/components/parameters/shareId"
-      responses:
-        "204":
-          description: Deleted.
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  /shares/{token}:
-    get:
-      operationId: getShareProjection
-      summary: Fetch a public share projection
-      description: >
-        No authentication required. Returns the full read-only projection for the
-        given share token. The scope is locked server-side to the share's timeline;
-        client-supplied scope params are ignored.
-      security: []
-      tags: [shares]
-      parameters:
-        - name: token
-          in: path
-          required: true
-          schema:
-            type: string
-      responses:
-        "200":
-          description: Share projection.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ShareProjection"
-        "401":
-          description: >
-            Password required. The body carries only `{ "passwordRequired": true }`
-            — no projection data. Exchange the password at
-            POST /shares/{token}/unlock for a view token, then resend with an
-            `Authorization: Bearer <viewToken>` header.
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  passwordRequired:
-                    type: boolean
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "410":
-          description: Share revoked or expired.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ApiError"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  /shares/{token}/unlock:
-    post:
-      operationId: unlockShare
-      summary: Exchange a share password for a short-lived view token
-      description: >
-        No authentication required. Validates the password for a
-        password-protected share and returns a short-lived view token scoped to
-        that share. Attempts are rate-limited per client IP.
-      security: []
-      tags: [shares]
-      parameters:
-        - name: token
-          in: path
-          required: true
-          schema:
-            type: string
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [password]
-              properties:
-                password:
-                  type: string
-      responses:
-        "200":
-          description: Unlock succeeded; view token issued.
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  token:
-                    type: string
-                    description: Short-lived view token, scoped to this share.
-        "400":
-          description: Malformed body, or the share is not password protected.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ApiError"
-        "401":
-          description: Incorrect password.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ApiError"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "410":
-          description: Share revoked or expired.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ApiError"
-        "429":
-          description: Too many unlock attempts from this client.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ApiError"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  /timelines/share/{token}:
-    get:
-      operationId: getTimelineByShareToken
-      summary: Fetch a timeline via its public share token
-      description: No authentication required. The share token itself is the credential.
-      security: []
-      tags: [timelines]
-      parameters:
-        - $ref: "#/components/parameters/shareToken"
-      responses:
-        "200":
-          description: Timeline found.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Timeline"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "500":
-          $ref: "#/components/responses/InternalError"
 ````
 
 ## File: packages/web/src/pages/ShareViewPage.tsx
@@ -66353,6 +66371,12 @@ Port 8080 was already in use on the host.
 - Result: all pass (web-e2e partial — code-verified, no live server; ws-smoke cross-team isolation skipped, covered by unit tests)
 - Smoke target: http://epcot.lan:8081
 - Note: type-sync initially failed (4 tag endpoints missing from openapi.yaml); fixed and committed before logging
+
+## 2026-06-08 — /test-phase 13.3
+
+- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, web-e2e
+- Result: all pass (web-e2e initially skipped — Chrome extension not connected — re-run after reconnecting passed: List + Kanban shares render faithfully read-only, no over-exposure, Phase 7 auth-redirect regression holds; created two ad hoc QA share links live since the seeded fixture had no List/Kanban shares yet)
+- Smoke target: http://epcot.lan:8081 (reset via `ssh draba-test` — canonical sample dataset + bootstrap)
 ````
 
 ## File: docs/ROADMAP.md
