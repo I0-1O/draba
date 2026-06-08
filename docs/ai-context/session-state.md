@@ -26,7 +26,7 @@ _Updated after each significant work session. Read this first to orient — it i
 
 None surfaced. Manual verification items for 10.4.6, 11.1, 11.1.1, 11.1.2, 11.2, 11.3, 12, 13.1, 13.2, and 13.3 tracked in TASKS.md.
 
-**Revisit after Phase 13 — commit/CI process:** drop the automated `repomap.md` generation (the AI-context lookup step doesn't appear to depend on it day-to-day) and look into incorporating Graphify into its place. Not yet scoped — just a flag to come back to once the Phase 13 sub-phases land.
+(Process backlog — e.g. revisiting `repomap.md` generation vs. Graphify after Phase 13 lands — now lives in the [TASKS.md Parking Lot](../TASKS.md#parking-lot), where it stays visible across sessions instead of aging out of this snapshot.)
 
 ---
 

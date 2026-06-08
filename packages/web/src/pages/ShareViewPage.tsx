@@ -270,7 +270,7 @@ function ColumnResizeHandle({ colId, width, onResize }: {
   )
 }
 
-function PublicListTable({ rows, visibleColumns, memberById, statusById, tagById, activityTitleById }: PublicListTableProps) {
+export function PublicListTable({ rows, visibleColumns, memberById, statusById, tagById, activityTitleById }: PublicListTableProps) {
   const [widths, setWidths] = useState<Record<string, number>>(
     () => Object.fromEntries(visibleColumns.map(c => [c.id, c.defaultWidth])),
   )

@@ -23,13 +23,13 @@ func NewActivityRepo(db *sqlx.DB) *ActivityRepo {
 func (r *ActivityRepo) Create(activity *models.Activity) error {
 	_, err := r.db.NamedExec(`
 		INSERT INTO activities (
-			id, timeline_id, title, description, icon, color,
+			id, timeline_id, title, description, notes, icon, color,
 			start_at, end_at, all_day, status_id, parent_activity_id,
 			percent_complete, location, url, rrule,
 			caldav_uid, google_event_id,
 			created_by, created_at, updated_at
 		) VALUES (
-			:id, :timeline_id, :title, :description, :icon, :color,
+			:id, :timeline_id, :title, :description, :notes, :icon, :color,
 			:start_at, :end_at, :all_day, :status_id, :parent_activity_id,
 			:percent_complete, :location, :url, :rrule,
 			:caldav_uid, :google_event_id,

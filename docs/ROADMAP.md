@@ -1557,10 +1557,10 @@ Rebuilds the "Share this view" modal to the [design handoff](plans/phase-13-shar
 ### Phase 13.3 — List + Kanban Read-Only
 **Status:** ✅ Done (2026-06-07) | **Effort:** M
 
-Extends `interactive=false` + public mounting to **List and Kanban** (clicks inert here too), plus the per-view polish each needs to read cleanly without chrome. "Share this view" (the 13.2 modal) added to both toolbars. The same scope-locked gateway serves these as view-shares — the only projection nuance is `notes`, included only when a List share has the Notes column enabled. (Calendar is intentionally *not* here — see 13.4.)
+Extends `interactive=false` + public mounting to **List and Kanban**, plus the per-view polish each needs to read cleanly without chrome. As with Gantt's title-column adjustments, "inert" means *no app-state mutation* — display-only affordances that never touch activity data (List's column-resize handle, mirroring Gantt's precedent) are fair game; clicks, drag, collapse toggles, and "+ Add" all remain inert. "Share this view" (the 13.2 modal) added to both toolbars. The same scope-locked gateway serves these as view-shares, with two projection nuances beyond scope-locking and field-pruning: `notes` is included only when a List share has the Notes column enabled, and Kanban shares receive the **full per-timeline status list** (including unused statuses) so the public board renders the same empty columns the in-app board does — List keeps the existing referenced-only pruning. (Calendar is intentionally *not* here — see 13.4.)
 
 **Exit criteria — safe to pause when:**
-- A share created from List or Kanban renders faithfully and read-only
+- A share created from List or Kanban renders faithfully and read-only (no app-state mutation possible — display-only affordances like column resize are the sole exception, mirroring Gantt)
 - A List share exposes exactly its enabled columns; no payload over-exposure in either view
 - `pnpm --filter web lint` + `test` pass
 

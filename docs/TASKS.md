@@ -1330,6 +1330,7 @@ Includes both the webhook backend and the per-timeline connector sidebar UI (pre
 - [x] Define requirements, architecture, conventions — 2026-04-27
 
 ## Parking Lot
+- **Commit/CI process — repomap.md vs. Graphify:** drop the automated `repomap.md` generation (the AI-context lookup step doesn't appear to depend on it day-to-day) and look into incorporating Graphify in its place. Not yet scoped — revisit once the Phase 13 sub-phases land.
 - MySQL/MariaDB and Postgres DB adapters (SQLite first, then add others)
 - CLI binary
 - MCP server for AI agent access

@@ -397,6 +397,61 @@ func TestShareGateway_KanbanKeepsUnusedStatusColumns(t *testing.T) {
 		"List shares should keep pruning to referenced statuses only")
 }
 
+// TestShareGateway_NotesGatedByListColumnVisibility verifies the phase 13.3
+// projection nuance: notes travels to the public viewer only for List shares
+// whose creator left the Notes column visible — never for Kanban/Gantt shares,
+// and never for a List share with the column hidden.
+func TestShareGateway_NotesGatedByListColumnVisibility(t *testing.T) {
+	srv, token, teamID, timelineID := shareTestSetup(t)
+
+	actURL := fmt.Sprintf("/teams/%s/timelines/%s/activities", teamID, timelineID)
+	wAct := httptest.NewRecorder()
+	srv.ServeHTTP(wAct, authReq(http.MethodPost, actURL, map[string]any{
+		"title": "Has notes", "startAt": "2026-05-01T00:00:00Z", "endAt": "2026-05-10T00:00:00Z",
+		"allDay": true, "notes": "Secret planning notes",
+	}, token))
+	require.Equal(t, http.StatusCreated, wAct.Code)
+
+	createShare := func(viewType, viewConfig string) string {
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, authReq(http.MethodPost, fmt.Sprintf("/timelines/%s/shares", timelineID), map[string]any{
+			"viewType": viewType, "viewConfig": viewConfig,
+		}, token))
+		require.Equal(t, http.StatusCreated, w.Code)
+		var created map[string]any
+		require.NoError(t, json.NewDecoder(w.Body).Decode(&created))
+		return created["token"].(string)
+	}
+
+	fetchNotes := func(shareToken string) (notes any, present bool) {
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/shares/"+shareToken, http.NoBody))
+		require.Equal(t, http.StatusOK, w.Code)
+		var proj map[string]any
+		require.NoError(t, json.NewDecoder(w.Body).Decode(&proj))
+		activities := proj["activities"].([]any)
+		require.Len(t, activities, 1)
+		act := activities[0].(map[string]any)
+		notes, present = act["notes"]
+		return notes, present
+	}
+
+	visibleConfig := `{"groupBy":"none","sortBy":"startDate","columns":[{"id":"notes","visible":true}]}`
+	notes, present := fetchNotes(createShare("list", visibleConfig))
+	assert.True(t, present, "List share with Notes column visible should expose notes")
+	assert.Equal(t, "Secret planning notes", notes)
+
+	hiddenConfig := `{"groupBy":"none","sortBy":"startDate","columns":[{"id":"notes","visible":false}]}`
+	_, present = fetchNotes(createShare("list", hiddenConfig))
+	assert.False(t, present, "List share with Notes column hidden must not expose notes")
+
+	_, present = fetchNotes(createShare("kanban", visibleConfig))
+	assert.False(t, present, "Kanban shares must never expose notes regardless of view config")
+
+	_, present = fetchNotes(createShare("gantt", "{}"))
+	assert.False(t, present, "Gantt shares must never expose notes")
+}
+
 // ── Password protection tests (Phase 13.2) ────────────────────────────────────
 
 // createProtectedShare creates a password-protected share and returns its token.
