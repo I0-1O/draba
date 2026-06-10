@@ -59,7 +59,7 @@ func TestSampleDataLoads(t *testing.T) {
 		"status_templates":      5,
 		"status_template_items": 21,
 		"timeline_access":       32,
-		"shares":                8,
+		"shares":                10, // 8 view shares + 2 ICS feeds (13.4)
 	}
 
 	for table, want := range counts {

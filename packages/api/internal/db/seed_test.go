@@ -30,7 +30,8 @@ func TestSeedSampleDataIfEmpty(t *testing.T) {
 	require.NoError(t, database.Get(&users, `SELECT COUNT(*) FROM users`))
 	require.NoError(t, database.Get(&shares, `SELECT COUNT(*) FROM shares`))
 	require.Equal(t, 13, users)
-	require.Equal(t, 8, shares)
+	// 8 view shares + 2 ICS calendar feeds (Phase 13.4).
+	require.Equal(t, 10, shares)
 
 	// Second run: populated DB → no-op, counts unchanged.
 	seeded, err = db.SeedSampleDataIfEmpty(database, sql)

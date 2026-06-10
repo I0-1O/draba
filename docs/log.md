@@ -2,6 +2,34 @@
 
 ---
 
+## 2026-06-10 — Phase 13.4: Calendar — ICS feed sharing
+
+**Goal:** Calendar shares as live subscribable ICS feeds (not view-shares): `shares.kind` discriminator, `GET /shares/{token}.ics`, whole-timeline + per-member scopes, token rotation as the revocation story, and a distinct Calendar share modal (a feed configurator, deliberately not the active-links list the other views use).
+
+**Backend (`packages/api`):**
+- **Migration 022** (`022_share_kind.sql`): `shares.kind` (`'view'` default | `'ics'`), `scope` (`'timeline'` | `'member'`, nullable), `member_id` (nullable FK → `team_members`, `ON DELETE CASCADE` — a feed for a deleted member is meaningless, so it drops with the row rather than blocking like the migration-011 RESTRICT FKs).
+- **`internal/ics` (new package)**: minimal RFC 5545 serializer — `Calendar(name, events)` emits a `PUBLISH` VCALENDAR with `X-WR-CALNAME`; each `Event` becomes an all-day VEVENT (`DTSTART;VALUE=DATE`, **exclusive** `DTEND` = inclusive end + 1 day, `DTSTAMP` from the activity's `UpdatedAt` so clients detect changes between polls). Implements §3.3.11 text escaping and §3.1 75-octet line folding (rune-boundary-safe); CRLF endings throughout.
+- **`share_ics_handler.go` (new)**: `serveICSFeed` — public, no auth, no password (calendar clients can't unlock interactively; the token is the secret). Checks kind/revoked/expired, then serves `text/calendar` from `buildICSFeed`: timeline + activities resolved from the share row only; member scope drops unassigned activities **before** serialization; the member's display name in the calendar title is the only person-identifying field. Backed by `icsFeedCache`, a second TTL cache (rendered payload, same `DRABA_SHARE_CACHE_TTL`). Also `handleRegenerateShare` (`POST /shares/{id}/regenerate`): rotates the token via `ShareRepo.RotateToken`, invalidates both caches for the old token, any team member may call it (consistent with PATCH/DELETE).
+- **`share_handler.go`**: `GET /shares/{token}` dispatches a `.ics` suffix inside the `{token}` path value to `serveICSFeed` (Go 1.22 mux wildcards span the whole segment — no separate route needed). **Kind isolation both directions:** an ICS token on the JSON gateway → 404 (a member-scoped feed token must never unlock a whole-timeline projection), a view token on `.ics` → 404, ICS tokens 404 on `/unlock`. Create validation for `kind=ics`: scope required (`timeline`|`member`), `memberId` required for member scope and must belong to the timeline's team, passwords rejected, `view_config` forced to `{}`/`view_type` to `calendar`. PATCH rejects setting a password on an ICS share; PATCH/DELETE invalidate the ICS cache too.
+- **`models.Share`**: `Kind`/`Scope`/`MemberID` + `ShareKind*`/`ShareScope*` constants; repo `Create` persists the new columns.
+- **Sample data** (`11_shares.sql`): +2 ICS feeds (whole-timeline + per-member on Q1 Workload); count assertions in `seed_test.go`/`sample_data_test.go` updated 8→10.
+- **OpenAPI**: `kind`/`scope`/`memberId` on `Share` + `CreateShareInput`, new `/shares/{token}.ics` and `/shares/{id}/regenerate` paths. TS types regenerated.
+
+**Frontend (`packages/web`):**
+- **`components/CalendarShareModal.tsx` (new)** — the distinct surface: scope selector (Whole timeline / One member + member dropdown), public-access On/Off toggle (ON creates the feed share for the selected scope, OFF deletes it — old URL dies immediately), mono feed-URL field + Copy (1.6s success state), one-click **Add to Google / Apple / Outlook** links (Google `calendar/render?cid=`, Apple direct `webcal://`, Outlook `addfromweb`), and **Regenerate link**. No password UI by design. Same visual language as ShareModal (portal overlay, tile header, footer + Done) so it reads as a sibling, not a clone.
+- **`hooks/useShares.ts`**: `CreateShareInput` gained `kind`/`scope`/`memberId` (viewType/viewConfig now optional); new `useRegenerateShare` mutation.
+- **`components/ShareModal.tsx`**: active-links filter now also requires `kind === 'view'` so ICS feeds never appear in the view-share list.
+- **`pages/DashboardPage.tsx`**: Calendar toolbar's Share button (previously a no-op) opens `CalendarShareModal` via its own `calendarShareModalOpen` state; `CalendarToolbar` share stub title updated.
+
+**Tests:** Go — `internal/ics` unit tests (all-day dates, exclusive DTEND, escaping, folding round-trip); `share_ics_handler_test.go` (timeline feed content, member-feed scoping, PII absence, kind isolation both directions, create validation matrix, regenerate kills warm-cached old token + requires team membership). Web — `useShares.test.ts` ICS create body + regenerate cases; new `CalendarShareModal.test.tsx` (toggle on/off → create/delete with right scope+member, URL + subscribe links render, regenerate, view shares ignored). 314 web tests pass.
+- Also fixed a pre-existing `tsc -b`-only break: the `Status` fixture in `ShareViewPage.test.tsx` was missing required fields (`pnpm --filter web build` failed on HEAD before this phase's changes; `--noEmit` lint missed it).
+
+**Checks:** `golangci-lint run` ✅ · `go test ./...` ✅ · `pnpm --filter web lint` ✅ · `pnpm --filter web build` ✅ · `pnpm --filter web test` ✅ (314).
+
+**Not verified in a real calendar app yet:** subscribing from Google/Apple (the headline exit criterion) needs the Docker instance rebuilt with this code, plus a reachable URL for Google's fetcher. Suggest `/test-phase 13.4` and `/review-phase 13.4` to fan verification across subagents.
+
+---
+
 ## 2026-06-07 — Phase 13.3: List + Kanban read-only public shares
 
 **Goal:** Extend the `interactive=false` + public-mounting pattern from Gantt (13.1) to List and Kanban, add the `notes` projection nuance for List shares with the Notes column enabled, and wire "Share this view" into both toolbars.

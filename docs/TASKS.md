@@ -1315,11 +1315,12 @@ Includes both the webhook backend and the per-timeline connector sidebar UI (pre
 - [x] Projection: include `notes` only when a List share has the Notes column enabled in `view_config`
 - [x] Per-view read-only polish + "Share this view" (13.2 modal) in both toolbars
 
-**13.4 — Calendar — ICS feed sharing:**
-- [ ] `shares.kind` discriminator (`view` | `ics`); ICS rows carry `scope` (`timeline` | `member`) + nullable `member_id`, no `view_config`/filter/password
-- [ ] `GET /shares/{token}.ics` (`text/calendar`) + `webcal://` variant; all-day VEVENTs (`DTSTART;VALUE=DATE` start→end); live data, short cache
-- [ ] Distinct Calendar share modal: public On/Off toggle, scope selector (timeline vs. member), feed URL, Copy, Add-to-Google/Apple/Outlook, Regenerate link
-- [ ] Whole-timeline AND per-member feeds; payload carries no email/`user_id`/role/other-timelines
+**13.4 — Calendar — ICS feed sharing:** — ✅ 2026-06-10 (automated checks)
+- [x] `shares.kind` discriminator (`view` | `ics`) — migration 022; ICS rows carry `scope` (`timeline` | `member`) + nullable `member_id`, no `view_config`/filter/password (create/patch validation rejects passwords on feeds)
+- [x] `GET /shares/{token}.ics` (`text/calendar`, dispatched inside the `{token}` wildcard) + `webcal://` variant in the modal links; all-day VEVENTs (`DTSTART;VALUE=DATE`, exclusive `DTEND` = end+1d) via new `internal/ics` package (RFC 5545 escaping + 75-octet folding); live data, ICS TTL cache sharing `DRABA_SHARE_CACHE_TTL`
+- [x] Distinct Calendar share modal (`CalendarShareModal.tsx`): public On/Off toggle, scope selector (timeline vs. member), feed URL, Copy, Add-to-Google/Apple/Outlook, Regenerate link (`POST /shares/{id}/regenerate` rotates the token)
+- [x] Whole-timeline AND per-member feeds; payload carries no email/`user_id`/role/other-timelines; kinds isolated both directions (ICS token dead on the JSON gateway and vice versa)
+- [ ] Manual: subscribe to a timeline feed in a real calendar app (Google or Apple) → activities appear as all-day events; per-member feed shows only that member's; toggle-off and Regenerate kill the old URL (Docker)
 
 **13.5 — Lifecycle tail:**
 - [ ] Optional expiry → `410 Gone` after `expires_at`

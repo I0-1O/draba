@@ -100,6 +100,14 @@ type shareColumnConfig struct {
 func (s *Server) handleGetShareProjection(w http.ResponseWriter, r *http.Request) {
 	token := r.PathValue("token")
 
+	// GET /shares/{token}.ics — Go 1.22 mux wildcards span the whole path
+	// segment, so the ICS feed's .ics suffix arrives inside {token}; dispatch
+	// it to the calendar-feed handler (Phase 13.4).
+	if strings.HasSuffix(token, ".ics") {
+		s.serveICSFeed(w, r, strings.TrimSuffix(token, ".ics"))
+		return
+	}
+
 	// ── 1. Resolve the share row ──────────────────────────────────────────────
 	share, err := s.shares.GetByToken(token)
 	if err != nil {
@@ -108,6 +116,14 @@ func (s *Server) handleGetShareProjection(w http.ResponseWriter, r *http.Request
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load share")
+		return
+	}
+
+	// An ICS feed is only reachable through the .ics endpoint. Serving it as a
+	// JSON projection would expose the whole timeline for member-scoped feeds
+	// (the projection has no member filter), so the kinds never cross over.
+	if share.Kind != models.ShareKindView {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
 		return
 	}
 
@@ -383,6 +399,13 @@ func (s *Server) handleCreateShare(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
 		return
 	}
+	if req.Kind == "" {
+		req.Kind = models.ShareKindView
+	}
+	if req.Kind != models.ShareKindView && req.Kind != models.ShareKindICS {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "kind must be 'view' or 'ics'")
+		return
+	}
 	if req.ViewType == "" {
 		req.ViewType = "gantt"
 	}
@@ -395,6 +418,7 @@ func (s *Server) handleCreateShare(w http.ResponseWriter, r *http.Request) {
 		ID:          newID(),
 		TimelineID:  timelineID,
 		Token:       newToken(),
+		Kind:        req.Kind,
 		Name:        req.Name,
 		Description: req.Description,
 		ViewType:    req.ViewType,
@@ -404,9 +428,40 @@ func (s *Server) handleCreateShare(w http.ResponseWriter, r *http.Request) {
 		ViewCount:   0,
 	}
 
-	// Optional password protection. An empty/whitespace string means "no
-	// password" — the field stays NULL and the share is open.
-	if req.Password != nil && strings.TrimSpace(*req.Password) != "" {
+	if req.Kind == models.ShareKindICS {
+		// An ICS feed has no view semantics and no password — the token is the
+		// secret (calendar clients cannot unlock interactively). Scope is the
+		// only configuration: the whole timeline, or one member's assignments.
+		if req.Password != nil && strings.TrimSpace(*req.Password) != "" {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "ICS feeds cannot be password protected")
+			return
+		}
+		if req.Scope != models.ShareScopeTimeline && req.Scope != models.ShareScopeMember {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "scope must be 'timeline' or 'member' for ICS shares")
+			return
+		}
+		share.Scope = &req.Scope
+		share.ViewType = "calendar"
+		share.ViewConfig = "{}"
+		if req.Scope == models.ShareScopeMember {
+			if req.MemberID == nil || *req.MemberID == "" {
+				writeError(w, http.StatusBadRequest, "BAD_REQUEST", "memberId is required for member-scoped ICS shares")
+				return
+			}
+			// The member must belong to this timeline's team — a feed must not
+			// be creatable for an arbitrary member ID from another team.
+			feedMember, err := s.teams.GetMemberByID(*req.MemberID)
+			if err != nil || feedMember.TeamID != timeline.TeamID {
+				writeError(w, http.StatusBadRequest, "BAD_REQUEST", "memberId does not belong to this timeline's team")
+				return
+			}
+			share.MemberID = req.MemberID
+		}
+	}
+
+	// Optional password protection (view shares only). An empty/whitespace
+	// string means "no password" — the field stays NULL and the share is open.
+	if req.Kind == models.ShareKindView && req.Password != nil && strings.TrimSpace(*req.Password) != "" {
 		hash, err := auth.HashPassword(*req.Password)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to secure share")
@@ -500,7 +555,12 @@ func (s *Server) handleUpdateShare(w http.ResponseWriter, r *http.Request) {
 		share.ViewConfig = *req.ViewConfig
 	}
 	// Password: nil leaves it unchanged; an empty string clears protection; a
-	// non-empty string sets/replaces it.
+	// non-empty string sets/replaces it. ICS feeds can never carry one —
+	// calendar clients have no interactive unlock.
+	if req.Password != nil && share.Kind == models.ShareKindICS && strings.TrimSpace(*req.Password) != "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "ICS feeds cannot be password protected")
+		return
+	}
 	if req.Password != nil {
 		if strings.TrimSpace(*req.Password) == "" {
 			share.PasswordHash = nil
@@ -519,8 +579,9 @@ func (s *Server) handleUpdateShare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Invalidate cache so the next public request picks up the new config.
+	// Invalidate caches so the next public request picks up the new config.
 	s.shareCache.invalidate(share.Token)
+	s.icsCache.invalidate(share.Token)
 
 	// Refresh the derived flag — the password may have just been set/cleared.
 	share.Protected = share.PasswordHash != nil
@@ -560,6 +621,7 @@ func (s *Server) handleDeleteShare(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.shareCache.invalidate(share.Token)
+	s.icsCache.invalidate(share.Token)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -593,6 +655,12 @@ func (s *Server) handleUnlockShare(w http.ResponseWriter, r *http.Request) {
 	}
 	if share.ExpiresAt != nil && time.Now().After(*share.ExpiresAt) {
 		writeError(w, http.StatusGone, "GONE", "this share has expired")
+		return
+	}
+	// ICS feeds are never password protected; mirror the projection gateway's
+	// 404 rather than confirming the token exists in another mode.
+	if share.Kind != models.ShareKindView {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
 		return
 	}
 	if share.PasswordHash == nil {
@@ -631,6 +699,9 @@ func bearerToken(r *http.Request) string {
 // ── Request bodies ────────────────────────────────────────────────────────────
 
 type createShareBody struct {
+	Kind        string  `json:"kind,omitempty"`
+	Scope       string  `json:"scope,omitempty"`
+	MemberID    *string `json:"memberId,omitempty"`
 	Name        *string `json:"name,omitempty"`
 	Description *string `json:"description,omitempty"`
 	ViewType    string  `json:"viewType"`

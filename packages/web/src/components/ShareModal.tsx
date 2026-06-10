@@ -353,7 +353,9 @@ export default function ShareModal({ teamId, timelineId, viewType, viewConfig, t
   // Showing only same-type links keeps "active links" literal and leaves room
   // to tailor the modal per view type (e.g. Calendar/ICS in 13.4) without
   // having to reconcile it against unrelated shares.
-  const shares = allShares.filter(s => s.viewType === viewType)
+  // kind === 'view' also keeps ICS calendar feeds (13.4) out of this list —
+  // they live in CalendarShareModal, a different surface entirely.
+  const shares = allShares.filter(s => s.kind === 'view' && s.viewType === viewType)
   const { data: members = [] } = useTeamMembers(teamId)
   const createShare = useCreateShare(teamId, timelineId)
   const deleteShare = useDeleteShare(teamId, timelineId)

@@ -24,11 +24,11 @@ func NewShareRepo(db *sqlx.DB) *ShareRepo {
 func (r *ShareRepo) Create(s *models.Share) error {
 	_, err := r.db.NamedExec(`
 		INSERT INTO shares (
-			id, timeline_id, token, name, description, view_type, view_config,
-			password_hash, created_by, created_at, view_count
+			id, timeline_id, token, kind, scope, member_id, name, description,
+			view_type, view_config, password_hash, created_by, created_at, view_count
 		) VALUES (
-			:id, :timeline_id, :token, :name, :description, :view_type, :view_config,
-			:password_hash, :created_by, :created_at, :view_count
+			:id, :timeline_id, :token, :kind, :scope, :member_id, :name, :description,
+			:view_type, :view_config, :password_hash, :created_by, :created_at, :view_count
 		)
 	`, s)
 	if err != nil {
@@ -88,6 +88,15 @@ func (r *ShareRepo) Update(s *models.Share) error {
 	`, s)
 	if err != nil {
 		return fmt.Errorf("updating share: %w", err)
+	}
+	return nil
+}
+
+// RotateToken replaces a share's token, immediately invalidating the old URL.
+// This is the revocation story for ICS feeds, which have no password gate.
+func (r *ShareRepo) RotateToken(id, newToken string) error {
+	if _, err := r.db.Exec(`UPDATE shares SET token = ? WHERE id = ?`, newToken, id); err != nil {
+		return fmt.Errorf("rotating share token: %w", err)
 	}
 	return nil
 }

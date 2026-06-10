@@ -53,6 +53,7 @@ type Server struct {
 	tags           *db.TagRepo
 	shares         *db.ShareRepo
 	shareCache     *shareCache
+	icsCache       *icsFeedCache
 	unlockLimiter  *rateLimiter
 	mailer         *mailer.Mailer
 	tokens         *auth.TokenService
@@ -84,6 +85,8 @@ func NewServer(
 	bus *events.Bus,
 	hub *ws.Hub,
 ) *Server {
+	// Both public-share caches share the DRABA_SHARE_CACHE_TTL setting.
+	sc := newShareCache()
 	return &Server{
 		users:          users,
 		invites:        invites,
@@ -98,7 +101,8 @@ func NewServer(
 		statuses:       statusesRepo,
 		tags:           tagsRepo,
 		shares:         sharesRepo,
-		shareCache:     newShareCache(),
+		shareCache:     sc,
+		icsCache:       newICSFeedCache(sc.ttl),
 		unlockLimiter:  newRateLimiter(unlockMaxAttempts, time.Hour),
 		mailer:         m,
 		tokens:         tokens,
@@ -250,6 +254,11 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/shares", chain(s.handleListShares, s.authMiddleware))
 	mux.HandleFunc("PATCH /shares/{id}", chain(s.handleUpdateShare, s.authMiddleware))
 	mux.HandleFunc("DELETE /shares/{id}", chain(s.handleDeleteShare, s.authMiddleware))
+	// Token rotation — the revocation story for ICS feeds (no password gate).
+	// GET /shares/{token}.ics is served inside handleGetShareProjection: the
+	// {token} wildcard spans the whole segment, so the .ics suffix arrives in
+	// the path value and is dispatched there.
+	mux.HandleFunc("POST /shares/{id}/regenerate", chain(s.handleRegenerateShare, s.authMiddleware))
 
 	// GET /ws is intentionally outside authMiddleware — ServeWS validates the
 	// JWT itself before upgrading, because WebSocket clients can't set headers.

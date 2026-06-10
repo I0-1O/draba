@@ -791,7 +791,7 @@ components:
 
     Share:
       type: object
-      required: [id, timelineId, token, viewType, viewConfig, createdBy, createdAt, viewCount, protected]
+      required: [id, timelineId, token, kind, viewType, viewConfig, createdBy, createdAt, viewCount, protected]
       properties:
         id:
           type: string
@@ -799,6 +799,24 @@ components:
           type: string
         token:
           type: string
+        kind:
+          type: string
+          enum: [view, ics]
+          description: >
+            Discriminator between the two share flavors: "view" is a frozen
+            view-config snapshot served at /s/{token}; "ics" is a live
+            subscribable calendar feed served at GET /shares/{token}.ics.
+        scope:
+          type: string
+          nullable: true
+          enum: [timeline, member]
+          description: >
+            ICS shares only. "timeline" feeds every activity; "member" feeds
+            one member's assigned activities.
+        memberId:
+          type: string
+          nullable: true
+          description: ICS shares with scope "member" only — the feed's member.
         name:
           type: string
           nullable: true
@@ -874,6 +892,20 @@ components:
     CreateShareInput:
       type: object
       properties:
+        kind:
+          type: string
+          enum: [view, ics]
+          description: Defaults to "view" when omitted.
+        scope:
+          type: string
+          enum: [timeline, member]
+          description: Required when kind is "ics"; ignored for view shares.
+        memberId:
+          type: string
+          nullable: true
+          description: >
+            Required when scope is "member". Must belong to the timeline's
+            team.
         name:
           type: string
           nullable: true
@@ -3776,6 +3808,71 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /shares/{token}.ics:
+    get:
+      operationId: getShareICSFeed
+      summary: Fetch a public ICS calendar feed
+      description: >
+        No authentication required — the unguessable token is the secret (ICS
+        shares cannot be password protected; calendar clients have no
+        interactive unlock). Serves live data as all-day VEVENTs, scoped
+        server-side to the share's timeline or, for member feeds, to one
+        member's assigned activities. The payload never carries member emails,
+        user IDs, or roles. A webcal:// URL pointing at this path is the
+        subscription variant most calendar apps accept.
+      security: []
+      tags: [shares]
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: iCalendar document.
+          content:
+            text/calendar:
+              schema:
+                type: string
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "410":
+          description: Share revoked or expired.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /shares/{id}/regenerate:
+    post:
+      operationId: regenerateShare
+      summary: Rotate a share's token
+      description: >
+        Replaces the share token with a fresh one, immediately invalidating the
+        old URL — the revocation story for ICS feeds, which have no password
+        gate. Any member of the timeline's team may regenerate any share.
+      tags: [shares]
+      parameters:
+        - $ref: "#/components/parameters/shareId"
+      responses:
+        "200":
+          description: Share with its new token.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Share"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
         "500":
           $ref: "#/components/responses/InternalError"
 

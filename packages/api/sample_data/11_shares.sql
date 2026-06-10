@@ -1,4 +1,5 @@
--- Shares: 8 share links across 4 timelines (4 open, 4 password-protected),
+-- Shares: 10 share links across 4 timelines (4 open view links, 4 password-
+-- protected view links, 2 ICS calendar feeds),
 -- exercising the Phase 13.2 share module — named links, descriptions, view
 -- counts, varied view configs, and the password/protected indicator. Phase
 -- 13.3 added List and Kanban as read-only viewers (Gantt shipped in 13.1);
@@ -58,3 +59,16 @@ INSERT INTO shares (id, timeline_id, token, name, description, view_type, view_c
    'Steering board', 'Read-only Kanban board for the Right to Win steering group, grouped by status.',
    'kanban', '{"groupBy":"status","sortBy":"startDate","colorBy":"member","granularity":"week","filter":{"logic":"and","conditions":[]}}',
    '$2a$12$EKcdOqSJcFP0zf4MSSUf9Ou7/cglkraTAqiExfZPPWV13sIB7tIUS', 'tm-pb-brian', datetime('now', '-7 days'), datetime('now', '-2 days'), 13);
+
+-- ICS calendar feeds (Phase 13.4): kind='ics' rows are live subscribable
+-- feeds served at GET /shares/{token}.ics — no view_config, filter, or
+-- password (the token is the secret). One whole-timeline feed and one
+-- per-member feed so both scopes are exercisable against the seeded dataset.
+INSERT INTO shares (id, timeline_id, token, kind, scope, member_id, name, view_type, view_config, created_by, created_at, view_count) VALUES
+  -- Product Marketing · Q1 Workload — whole-timeline feed.
+  ('sh-pm-q1-ics', 'tl-pm-q1', 'share-demo-q1-ics', 'ics', 'timeline', NULL,
+   'Q1 Workload calendar feed', 'calendar', '{}', 'tm-pm-erik', datetime('now', '-10 days'), 204),
+
+  -- Product Marketing · Q1 Workload — Lindsay's personal feed.
+  ('sh-pm-q1-ics-lindsay', 'tl-pm-q1', 'share-demo-q1-ics-lindsay', 'ics', 'member', 'tm-pm-lindsay',
+   'Lindsay''s calendar feed', 'calendar', '{}', 'tm-pm-lindsay', datetime('now', '-8 days'), 96);

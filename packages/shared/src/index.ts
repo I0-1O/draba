@@ -1106,6 +1106,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/shares/{token}.ics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Fetch a public ICS calendar feed
+         * @description No authentication required — the unguessable token is the secret (ICS shares cannot be password protected; calendar clients have no interactive unlock). Serves live data as all-day VEVENTs, scoped server-side to the share's timeline or, for member feeds, to one member's assigned activities. The payload never carries member emails, user IDs, or roles. A webcal:// URL pointing at this path is the subscription variant most calendar apps accept.
+         */
+        get: operations["getShareICSFeed"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/shares/{id}/regenerate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Rotate a share's token
+         * @description Replaces the share token with a fresh one, immediately invalidating the old URL — the revocation story for ICS feeds, which have no password gate. Any member of the timeline's team may regenerate any share.
+         */
+        post: operations["regenerateShare"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/shares/{token}/unlock": {
         parameters: {
             query?: never;
@@ -1528,6 +1568,18 @@ export interface components {
             id: string;
             timelineId: string;
             token: string;
+            /**
+             * @description Discriminator between the two share flavors: "view" is a frozen view-config snapshot served at /s/{token}; "ics" is a live subscribable calendar feed served at GET /shares/{token}.ics.
+             * @enum {string}
+             */
+            kind: "view" | "ics";
+            /**
+             * @description ICS shares only. "timeline" feeds every activity; "member" feeds one member's assigned activities.
+             * @enum {string|null}
+             */
+            scope?: "timeline" | "member" | null;
+            /** @description ICS shares with scope "member" only — the feed's member. */
+            memberId?: string | null;
             /** @description Optional human-readable label for this share link. */
             name?: string | null;
             /** @description Optional free-text describing what the link is for. */
@@ -1567,6 +1619,18 @@ export interface components {
             expiresAt?: string | null;
         };
         CreateShareInput: {
+            /**
+             * @description Defaults to "view" when omitted.
+             * @enum {string}
+             */
+            kind?: "view" | "ics";
+            /**
+             * @description Required when kind is "ics"; ignored for view shares.
+             * @enum {string}
+             */
+            scope?: "timeline" | "member";
+            /** @description Required when scope is "member". Must belong to the timeline's team. */
+            memberId?: string | null;
             name?: string | null;
             description?: string | null;
             /** @enum {string} */
@@ -4363,6 +4427,66 @@ export interface operations {
                     "application/json": components["schemas"]["ApiError"];
                 };
             };
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getShareICSFeed: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                token: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description iCalendar document. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/calendar": string;
+                };
+            };
+            404: components["responses"]["NotFound"];
+            /** @description Share revoked or expired. */
+            410: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            500: components["responses"]["InternalError"];
+        };
+    };
+    regenerateShare: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Share ID. */
+                id: components["parameters"]["shareId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Share with its new token. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Share"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
             500: components["responses"]["InternalError"];
         };
     };

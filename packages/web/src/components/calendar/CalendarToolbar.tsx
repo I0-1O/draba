@@ -2,7 +2,8 @@
  * CalendarToolbar — sub-toolbar for the Calendar view.
  *
  * Provides: Month / Week layout toggle, today / prev / next navigation,
- * a jump-to-date picker, color-by, and export/share stubs.
+ * a jump-to-date picker, color-by, an export stub, and Share (opens the
+ * ICS feed modal — CalendarShareModal, not the view-share modal).
  */
 
 import { ChevronLeft, ChevronRight, Download, Share2 } from 'lucide-react';
@@ -109,14 +110,14 @@ export default function CalendarToolbar({
         <option value="status">Status</option>
       </select>
 
-      {/* Stubs — pushed to the right edge */}
+      {/* Export stub + share — pushed to the right edge */}
       <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
         <div className={divider} />
         <button className={btn} onClick={onExport} title="Export (coming soon)">
           <Download size={12} strokeWidth={1.8} />
           Export
         </button>
-        <button className={btn} onClick={onShare} title="Share (coming soon)">
+        <button className={btn} onClick={onShare} title="Share this calendar">
           <Share2 size={12} strokeWidth={1.8} />
           Share
         </button>

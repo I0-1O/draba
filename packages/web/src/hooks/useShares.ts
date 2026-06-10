@@ -31,11 +31,17 @@ export function useListShares(teamId: string, timelineId: string) {
 }
 
 interface CreateShareInput {
+  /** "view" (default) or "ics" — ICS shares are live calendar feeds. */
+  kind?: 'view' | 'ics'
+  /** ICS shares only: "timeline" (every activity) or "member" (one member's). */
+  scope?: 'timeline' | 'member'
+  /** ICS shares with scope "member" only. */
+  memberId?: string
   name?: string | null
   description?: string | null
-  viewType: string
-  viewConfig: string
-  /** When set, the share is locked and requires unlocking to view. */
+  viewType?: string
+  viewConfig?: string
+  /** When set, the share is locked and requires unlocking to view. View shares only. */
   password?: string
 }
 
@@ -51,6 +57,21 @@ export function useCreateShare(teamId: string, timelineId: string) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(input),
       }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: sharesKey(teamId, timelineId) }),
+  })
+}
+
+/**
+ * Rotates a share's token, immediately invalidating the old URL — the
+ * revocation story for ICS feeds, which have no password gate.
+ */
+export function useRegenerateShare(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (shareId: string) =>
+      authFetch<Share>(`/shares/${shareId}/regenerate`, { method: 'POST' }),
     onSuccess: () => qc.invalidateQueries({ queryKey: sharesKey(teamId, timelineId) }),
   })
 }

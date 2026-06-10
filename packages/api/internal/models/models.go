@@ -228,15 +228,29 @@ type AdminUserRow struct {
 	TeamCount int `db:"team_count" json:"teamCount"`
 }
 
-// Share is a public read-only link to a specific view of a timeline. One
-// timeline may have many shares, each freezing a different view configuration.
-// Token is an unguessable URL-safe string; PasswordHash is set only when the
-// share requires a password (Phase 13.3); ExpiresAt and RevokedAt support
-// lifecycle management (Phase 13.4).
+// Valid Share.Kind and Share.Scope values.
+const (
+	ShareKindView      = "view"
+	ShareKindICS       = "ics"
+	ShareScopeTimeline = "timeline"
+	ShareScopeMember   = "member"
+)
+
+// Share is a public read-only link scoped to one timeline. Kind discriminates
+// the two flavors (migration 022): "view" shares freeze one view configuration
+// and are served as a web snapshot at /s/{token}; "ics" shares are live
+// subscribable calendar feeds served at GET /shares/{token}.ics. ICS shares
+// carry Scope ("timeline" | "member") + MemberID and never a view config,
+// filter, or password — the unguessable token is their only secret.
+// PasswordHash is set only when a view share requires a password (Phase 13.2);
+// ExpiresAt and RevokedAt support lifecycle management (Phase 13.4/13.5).
 type Share struct {
 	ID           string     `db:"id"             json:"id"`
 	TimelineID   string     `db:"timeline_id"    json:"timelineId"`
 	Token        string     `db:"token"          json:"token"`
+	Kind         string     `db:"kind"           json:"kind"`
+	Scope        *string    `db:"scope"          json:"scope,omitempty"`
+	MemberID     *string    `db:"member_id"      json:"memberId,omitempty"`
 	Name         *string    `db:"name"           json:"name,omitempty"`
 	Description  *string    `db:"description"    json:"description,omitempty"`
 	ViewType     string     `db:"view_type"      json:"viewType"`

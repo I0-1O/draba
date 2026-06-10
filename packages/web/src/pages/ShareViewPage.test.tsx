@@ -48,7 +48,7 @@ const activity: ApiActivity = {
 }
 
 const member: PublicMember = { id: 'member-1', displayName: 'Asha Patel', color: 'blue', icon: null }
-const status: Status = { id: 'status-1', timelineId: 'tl-1', name: 'In Progress', color: '#3B82F6' }
+const status: Status = { id: 'status-1', timelineId: 'tl-1', name: 'In Progress', color: '#3B82F6', isClosed: false, position: 0, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' }
 const tag: Tag = { id: 'tag-1', teamId: 'team-1', name: 'launch', color: 'red', createdBy: 'user-1', createdAt: '2026-01-01T00:00:00Z' }
 
 const memberById = new Map([[member.id, member]])

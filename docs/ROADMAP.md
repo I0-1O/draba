@@ -55,8 +55,8 @@ This document organizes development into discrete phases with effort estimates a
 | 13 | [Shares — Public Read-Only View Links](#phase-13--shares--multi-share-views-with-passwords) (sub-phased) | L | ⬜ |
 | 13.1 | [Foundation, Public Gateway, Gantt Viewer (MVP)](#phase-131--foundation-public-gateway-gantt-viewer-mvp) | M–L | ✅ |
 | 13.2 | [Share Module Overhaul + Password Protection](#phase-132--share-module-overhaul--password-protection) | M–L | ✅ |
-| 13.3 | [List + Kanban Read-Only](#phase-133--list--kanban-read-only) | M | ⬜ |
-| 13.4 | [Calendar — ICS Feed Sharing](#phase-134--calendar--ics-feed-sharing) | M | ⬜ |
+| 13.3 | [List + Kanban Read-Only](#phase-133--list--kanban-read-only) | M | ✅ |
+| 13.4 | [Calendar — ICS Feed Sharing](#phase-134--calendar--ics-feed-sharing) | M | ✅ |
 | 13.5 | [Lifecycle Tail](#phase-135--lifecycle-tail) | S | ⬜ |
 | 14 | [Export — Tabular & Per-View](#phase-14--export--tabular--per-view) | M — 3–5 days | ⬜ |
 | 15 | [Import — Tabular](#phase-15--import--tabular) | M — 2–3 days | ⬜ |
@@ -1567,7 +1567,7 @@ Extends `interactive=false` + public mounting to **List and Kanban**, plus the p
 ---
 
 ### Phase 13.4 — Calendar — ICS Feed Sharing
-**Status:** ⬜ | **Effort:** M
+**Status:** ✅ Done (2026-06-10) — all automated checks pass; real-calendar-app subscription (Google/Apple) needs manual Docker verification | **Effort:** M
 
 Calendar diverges from the other views by design. What people want from a shared calendar isn't a frozen web rendering — it's a **feed they subscribe to** in Google / Apple / Outlook. This is also the product's native model: *the app is the source of truth; calendars are read projections.* So a Calendar share is a **subscribable ICS feed**, not a view-share.
 

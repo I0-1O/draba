@@ -37,6 +37,7 @@ import MemberModal from '@/components/MemberModal'
 import TimelineModal from '@/components/TimelineModal'
 import FilterManageModal from '@/components/filters/FilterManageModal'
 import ShareModal from '@/components/ShareModal'
+import CalendarShareModal from '@/components/CalendarShareModal'
 import { useNavigate } from 'react-router-dom'
 import type { components } from '@draba/shared'
 import type { Member } from '@/types'
@@ -81,6 +82,9 @@ function DashboardShell() {
   const [createDefaults, setCreateDefaults] = useState<{ start: string; end: string; memberId: string | null; statusId?: string | null } | null>(null)
   const [filterModalOpen, setFilterModalOpen] = useState(false)
   const [shareModalOpen, setShareModalOpen] = useState(false)
+  // Calendar gets its own share surface — an ICS feed configurator, not the
+  // active-links list (Phase 13.4).
+  const [calendarShareModalOpen, setCalendarShareModalOpen] = useState(false)
   const [liveDragDates, setLiveDragDates] = useState<{ activityId: string; start: string; end: string } | null>(null)
   // Gantt toolbar state
   const [groupBy, setGroupBy] = useState<GroupBy>('none')
@@ -625,7 +629,7 @@ function DashboardShell() {
             colorBy={colorBy}
             onColorByChange={setColorBy}
             onExport={() => {}}
-            onShare={() => {}}
+            onShare={() => setCalendarShareModalOpen(true)}
           />
         )}
 
@@ -886,6 +890,16 @@ function DashboardShell() {
                 }
           }
           onClose={() => setShareModalOpen(false)}
+        />
+      )}
+
+      {/* Calendar share modal — ICS feed configurator (distinct from ShareModal) */}
+      {calendarShareModalOpen && activeTimelineId && teamId && (
+        <CalendarShareModal
+          teamId={teamId}
+          timelineId={activeTimelineId}
+          timelineName={activeTimelineName}
+          onClose={() => setCalendarShareModalOpen(false)}
         />
       )}
 
