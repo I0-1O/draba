@@ -132,6 +132,7 @@ packages/
         server.go
         setup_handler.go
         share_handler.go
+        share_ics_handler.go
         status_handler.go
         status_types.go
         tag_handler.go
@@ -170,6 +171,7 @@ packages/
           019_shares.sql
           020_share_name.sql
           021_share_description.sql
+          022_share_kind.sql
         activity_repo.go
         api_token_repo.go
         db.go
@@ -190,6 +192,8 @@ packages/
         bus.go
       filters/
         engine.go
+      ics/
+        ics.go
       mailer/
         mailer.go
       models/
@@ -292,6 +296,7 @@ packages/
           label.tsx
         ActivityPanel.tsx
         BrandingSync.tsx
+        CalendarShareModal.tsx
         DarkModeToggle.tsx
         MemberAvatar.tsx
         MemberModal.tsx
@@ -30910,6 +30915,211 @@ func clientIP(r *http.Request) string {
 }
 ````
 
+## File: packages/api/internal/api/share_ics_handler.go
+````go
+package api
+
+import (
+	"database/sql"
+	"errors"
+	"net/http"
+	"sync"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/ics"
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// ── In-memory ICS feed cache ──────────────────────────────────────────────────
+//
+// Mirrors shareCache, but stores the rendered text/calendar payload. Calendar
+// clients poll on their own cadence (minutes to hours), so the same short TTL
+// keeps feeds near-live while absorbing aggressive pollers.
+
+type icsCacheEntry struct {
+	builtAt time.Time
+	payload string
+}
+
+type icsFeedCache struct {
+	mu      sync.RWMutex
+	entries map[string]*icsCacheEntry
+	ttl     time.Duration
+}
+
+func newICSFeedCache(ttl time.Duration) *icsFeedCache {
+	return &icsFeedCache{entries: make(map[string]*icsCacheEntry), ttl: ttl}
+}
+
+func (c *icsFeedCache) get(token string) (string, bool) {
+	c.mu.RLock()
+	e, ok := c.entries[token]
+	c.mu.RUnlock()
+	if !ok || time.Since(e.builtAt) > c.ttl {
+		return "", false
+	}
+	return e.payload, true
+}
+
+func (c *icsFeedCache) set(token, payload string) {
+	c.mu.Lock()
+	c.entries[token] = &icsCacheEntry{builtAt: time.Now(), payload: payload}
+	c.mu.Unlock()
+}
+
+func (c *icsFeedCache) invalidate(token string) {
+	c.mu.Lock()
+	delete(c.entries, token)
+	c.mu.Unlock()
+}
+
+// ── Handlers ──────────────────────────────────────────────────────────────────
+
+// serveICSFeed handles GET /shares/{token}.ics — the public, unauthenticated
+// calendar feed. It is dispatched from handleGetShareProjection when the token
+// path value carries the .ics suffix (Go 1.22 mux wildcards span the whole
+// segment, so the suffix arrives inside {token}).
+//
+// The feed serves live data scoped server-side to the share's timeline — or,
+// for member feeds, to one member's assigned activities. There is no password
+// gate: calendar clients cannot unlock interactively, so the unguessable token
+// is the secret and revocation is rotate-or-delete.
+func (s *Server) serveICSFeed(w http.ResponseWriter, r *http.Request, token string) {
+	share, err := s.shares.GetByToken(token)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load share")
+		return
+	}
+	// A view share is not a feed — 404 rather than leaking that the token
+	// exists in another mode.
+	if share.Kind != models.ShareKindICS {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+		return
+	}
+	if share.RevokedAt != nil {
+		writeError(w, http.StatusGone, "GONE", "this share has been revoked")
+		return
+	}
+	if share.ExpiresAt != nil && time.Now().After(*share.ExpiresAt) {
+		writeError(w, http.StatusGone, "GONE", "this share has expired")
+		return
+	}
+
+	body, ok := s.icsCache.get(token)
+	if !ok {
+		body, err = s.buildICSFeed(share)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to build calendar feed")
+			return
+		}
+		s.icsCache.set(token, body)
+	}
+
+	go func() { _ = s.shares.RecordView(share.ID) }()
+	w.Header().Set("Content-Type", "text/calendar; charset=utf-8")
+	w.Header().Set("Cache-Control", "max-age=60")
+	_, _ = w.Write([]byte(body))
+}
+
+// buildICSFeed renders the iCalendar document for an ICS share. Scope is
+// hard-locked server-side: the timeline comes from the share row, and member
+// feeds drop every activity the member is not assigned to before
+// serialization. The payload carries titles, dates, and descriptions only —
+// never member emails, user IDs, or roles.
+func (s *Server) buildICSFeed(share *models.Share) (string, error) {
+	timeline, err := s.timelines.GetByID(share.TimelineID)
+	if err != nil {
+		return "", err
+	}
+
+	acts, err := s.activities.ListByTimeline(share.TimelineID, nil, nil, false)
+	if err != nil {
+		return "", err
+	}
+
+	name := timeline.Name
+	if share.Scope != nil && *share.Scope == models.ShareScopeMember && share.MemberID != nil {
+		filtered := acts[:0]
+		for _, a := range acts {
+			for _, id := range a.AssignedMemberIDs {
+				if id == *share.MemberID {
+					filtered = append(filtered, a)
+					break
+				}
+			}
+		}
+		acts = filtered
+
+		// The member's display name in the calendar title is the only
+		// person-identifying field an ICS feed may carry.
+		if m, err := s.teams.GetMemberByID(*share.MemberID); err == nil && m.DisplayName != "" {
+			name = timeline.Name + " — " + m.DisplayName
+		}
+	}
+
+	events := make([]ics.Event, 0, len(acts))
+	for _, a := range acts {
+		ev := ics.Event{
+			UID:     a.ID + "@draba",
+			Summary: a.Title,
+			Start:   a.StartAt,
+			End:     a.EndAt,
+			Stamp:   a.UpdatedAt,
+		}
+		if a.Description != nil {
+			ev.Description = *a.Description
+		}
+		events = append(events, ev)
+	}
+	return ics.Calendar(name, events), nil
+}
+
+// handleRegenerateShare handles POST /shares/{id}/regenerate. It rotates the
+// share's token, immediately invalidating the old URL — the revocation story
+// for ICS feeds, which cannot carry a password. It works for view shares too
+// (rotating is strictly safer than nothing), and any member of the timeline's
+// team may do it, consistent with PATCH/DELETE.
+func (s *Server) handleRegenerateShare(w http.ResponseWriter, r *http.Request) {
+	shareID := r.PathValue("id")
+
+	share, err := s.shares.GetByID(shareID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
+		return
+	}
+
+	timeline, err := s.timelines.GetByID(share.TimelineID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
+		return
+	}
+	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
+		return
+	}
+
+	oldToken := share.Token
+	share.Token = newToken()
+	if err := s.shares.RotateToken(share.ID, share.Token); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to regenerate share link")
+		return
+	}
+
+	// Kill both caches for the dead token so it stops serving immediately.
+	s.shareCache.invalidate(oldToken)
+	s.icsCache.invalidate(oldToken)
+
+	writeJSON(w, http.StatusOK, share)
+}
+````
+
 ## File: packages/api/internal/api/version_handler.go
 ````go
 package api
@@ -31190,6 +31400,28 @@ ALTER TABLE shares ADD COLUMN name TEXT;
 -- Optional free-text shown in the share-management modal (Phase 13.2b). Nullable;
 -- existing and description-less shares stay empty.
 ALTER TABLE shares ADD COLUMN description TEXT;
+````
+
+## File: packages/api/internal/db/migrations/022_share_kind.sql
+````sql
+-- Migration 022: shares.kind discriminator + ICS feed scope columns.
+--
+-- Phase 13.4: a Calendar share is a subscribable ICS feed, not a frozen view
+-- snapshot. Both flavors live in the shares table, discriminated by kind:
+--   kind = 'view' — frozen view-config share served at /s/{token} (13.1–13.3)
+--   kind = 'ics'  — live calendar feed served at GET /shares/{token}.ics
+--
+-- ICS rows carry scope ('timeline' = every activity, 'member' = one member's
+-- assigned activities) plus member_id when scope = 'member'. They never carry
+-- a view_config, filter, or password — the token is the secret.
+--
+-- member_id uses ON DELETE CASCADE (unlike the RESTRICT FKs of migration 011):
+-- a per-member feed is meaningless once the member row is gone, so the feed
+-- row is dropped with the member rather than blocking the delete.
+
+ALTER TABLE shares ADD COLUMN kind TEXT NOT NULL DEFAULT 'view';
+ALTER TABLE shares ADD COLUMN scope TEXT;
+ALTER TABLE shares ADD COLUMN member_id TEXT REFERENCES team_members(id) ON DELETE CASCADE;
 ````
 
 ## File: packages/api/internal/db/seed.go
@@ -31571,6 +31803,98 @@ func parseDate(s string) (time.Time, error) {
 		return t, nil
 	}
 	return time.Parse("2006-01-02", s)
+}
+````
+
+## File: packages/api/internal/ics/ics.go
+````go
+// Package ics serializes activities into RFC 5545 iCalendar feeds for the
+// Phase 13.4 calendar share endpoint (GET /shares/{token}.ics). It implements
+// only the slice of the spec draba needs — all-day VEVENTs in a PUBLISH
+// calendar — rather than wrapping a general-purpose library.
+package ics
+
+import (
+	"strings"
+	"time"
+)
+
+// Event is one all-day calendar entry. Start and End are inclusive calendar
+// dates (draba's activity model, Phase 11.1.1); End is converted to the
+// RFC 5545 exclusive DTEND during serialization.
+type Event struct {
+	UID         string
+	Summary     string
+	Description string
+	Start       time.Time
+	End         time.Time
+	// Stamp becomes DTSTAMP — the activity's last-modified time, which lets
+	// calendar clients detect changed events between polls.
+	Stamp time.Time
+}
+
+// Calendar renders a complete VCALENDAR document with CRLF line endings.
+// name becomes X-WR-CALNAME, the display name most clients adopt when the
+// user subscribes.
+func Calendar(name string, events []Event) string {
+	var b strings.Builder
+	writeLine(&b, "BEGIN:VCALENDAR")
+	writeLine(&b, "VERSION:2.0")
+	writeLine(&b, "PRODID:-//draba//draba//EN")
+	writeLine(&b, "CALSCALE:GREGORIAN")
+	writeLine(&b, "METHOD:PUBLISH")
+	writeLine(&b, "X-WR-CALNAME:"+escapeText(name))
+	for i := range events {
+		writeEvent(&b, &events[i])
+	}
+	writeLine(&b, "END:VCALENDAR")
+	return b.String()
+}
+
+func writeEvent(b *strings.Builder, e *Event) {
+	writeLine(b, "BEGIN:VEVENT")
+	writeLine(b, "UID:"+escapeText(e.UID))
+	writeLine(b, "DTSTAMP:"+e.Stamp.UTC().Format("20060102T150405Z"))
+	writeLine(b, "DTSTART;VALUE=DATE:"+e.Start.UTC().Format("20060102"))
+	// RFC 5545 DTEND is exclusive: an event covering its inclusive end date
+	// must end at midnight of the following day.
+	writeLine(b, "DTEND;VALUE=DATE:"+e.End.UTC().AddDate(0, 0, 1).Format("20060102"))
+	writeLine(b, "SUMMARY:"+escapeText(e.Summary))
+	if e.Description != "" {
+		writeLine(b, "DESCRIPTION:"+escapeText(e.Description))
+	}
+	writeLine(b, "END:VEVENT")
+}
+
+// writeLine emits one content line, folded per RFC 5545 §3.1: lines longer
+// than 75 octets continue on the next line after a CRLF + single space.
+// Folding happens on rune boundaries so multi-byte UTF-8 sequences are never
+// split mid-character.
+func writeLine(b *strings.Builder, line string) {
+	const limit = 75
+	octets := 0
+	for _, r := range line {
+		rl := len(string(r))
+		if octets+rl > limit {
+			b.WriteString("\r\n ")
+			// The leading fold space counts against the next line's budget.
+			octets = 1
+		}
+		b.WriteRune(r)
+		octets += rl
+	}
+	b.WriteString("\r\n")
+}
+
+// escapeText escapes a value per RFC 5545 §3.3.11: backslash, semicolon, and
+// comma are backslash-escaped; newlines become literal "\n".
+func escapeText(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, ";", `\;`)
+	s = strings.ReplaceAll(s, ",", `\,`)
+	s = strings.ReplaceAll(s, "\r\n", `\n`)
+	s = strings.ReplaceAll(s, "\n", `\n`)
+	return s
 }
 ````
 
@@ -33587,6 +33911,286 @@ export function ActivityFieldsBody(props: ActivityFieldsBodyProps) {
       </div>
 
     </div>
+  )
+}
+````
+
+## File: packages/web/src/components/CalendarShareModal.tsx
+````typescript
+/**
+ * CalendarShareModal — manage the ICS calendar feeds for a timeline.
+ *
+ * Deliberately a different surface from ShareModal (Phase 13.4): a Calendar
+ * share is not a frozen view snapshot but a live subscribable ICS feed, so
+ * instead of an active-links list this modal is a feed configurator — a scope
+ * selector (whole timeline vs. one member), a public-access On/Off toggle, the
+ * feed URL with one-click add-to-calendar links, and Regenerate.
+ *
+ * There is no password option: calendar clients cannot unlock a subscription
+ * URL interactively, so the unguessable token is the secret and revocation is
+ * regenerate-or-toggle-off.
+ */
+
+import { useEffect, useState } from 'react'
+import { createPortal } from 'react-dom'
+import {
+  CalendarDays, Link2, Copy, Check, RefreshCw, X, Rss, Users,
+} from 'lucide-react'
+import { useListShares, useCreateShare, useDeleteShare, useRegenerateShare } from '@/hooks/useShares'
+import { useTeamMembers } from '@/hooks/useTeamActivities'
+import { Button } from '@/components/ui/button'
+import { cn } from '@/lib/utils'
+import type { components } from '@draba/shared'
+
+type Share = components['schemas']['Share']
+
+type FeedScope = 'timeline' | 'member'
+
+interface Props {
+  teamId: string
+  timelineId: string
+  /** Display name of the timeline, shown in the header subtitle and feed names. */
+  timelineName?: string
+  onClose: () => void
+}
+
+const TILE_TEAL = 'bg-[hsl(188_59%_38%/0.12)] text-primary'
+
+/** Builds the absolute https feed URL for a share token. */
+function feedURL(token: string): string {
+  return `${window.location.origin}/shares/${token}.ics`
+}
+
+/** The webcal:// variant most calendar apps treat as "subscribe". */
+function webcalURL(token: string): string {
+  return feedURL(token).replace(/^https?:\/\//, 'webcal://')
+}
+
+export default function CalendarShareModal({ teamId, timelineId, timelineName, onClose }: Props) {
+  const { data: allShares = [], isLoading } = useListShares(teamId, timelineId)
+  const { data: members = [] } = useTeamMembers(teamId)
+  const createShare = useCreateShare(teamId, timelineId)
+  const deleteShare = useDeleteShare(teamId, timelineId)
+  const regenerateShare = useRegenerateShare(teamId, timelineId)
+
+  const [scope, setScope] = useState<FeedScope>('timeline')
+  const [memberId, setMemberId] = useState('')
+  const [copied, setCopied] = useState(false)
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  // Default the member selector to the first team member once loaded.
+  useEffect(() => {
+    if (!memberId && members.length > 0) setMemberId(members[0].id)
+  }, [memberId, members])
+
+  const icsShares = allShares.filter((s): s is Share => s.kind === 'ics')
+  const activeShare = scope === 'timeline'
+    ? icsShares.find(s => s.scope === 'timeline')
+    : icsShares.find(s => s.scope === 'member' && s.memberId === memberId)
+
+  const selectedMember = members.find(m => m.id === memberId)
+  const mutating = createShare.isPending || deleteShare.isPending || regenerateShare.isPending
+
+  const handleToggle = () => {
+    if (mutating || isLoading) return
+    if (activeShare) {
+      deleteShare.mutate(activeShare.id)
+      return
+    }
+    if (scope === 'member' && !memberId) return
+    const name = scope === 'timeline'
+      ? `${timelineName ?? 'Timeline'} calendar feed`
+      : `${selectedMember?.displayName ?? 'Member'} calendar feed`
+    createShare.mutate({
+      kind: 'ics',
+      scope,
+      ...(scope === 'member' ? { memberId } : {}),
+      name,
+    })
+  }
+
+  const copy = () => {
+    if (!activeShare) return
+    void navigator.clipboard.writeText(feedURL(activeShare.token)).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1600)
+    })
+  }
+
+  const scopeBtn = (value: FeedScope, label: string) => (
+    <button
+      onClick={() => setScope(value)}
+      className={cn(
+        'flex-1 cursor-pointer rounded-[var(--radius-md)] border px-3 py-2 text-[13px] font-semibold transition-colors',
+        scope === value
+          ? 'border-primary bg-[hsl(188_59%_38%/0.08)] text-primary'
+          : 'border-border bg-card text-muted-foreground hover:bg-muted',
+      )}
+    >
+      {label}
+    </button>
+  )
+
+  const url = activeShare ? feedURL(activeShare.token) : null
+  const webcal = activeShare ? webcalURL(activeShare.token) : null
+
+  return createPortal(
+    <div className="fixed inset-0 z-[1000] flex items-center justify-center bg-[hsl(200_24%_11%/0.55)] p-6 backdrop-blur-[2px]">
+      <div className="flex max-h-[88vh] w-[min(520px,100%)] flex-col overflow-hidden rounded-[var(--radius-xl)] bg-card shadow-[var(--shadow-lg)]">
+        {/* Header */}
+        <div className="flex shrink-0 items-start gap-3 border-b border-border px-5 py-[18px]">
+          <div className={cn('flex h-[38px] w-[38px] shrink-0 items-center justify-center rounded-[var(--radius-md)]', TILE_TEAL)}>
+            <CalendarDays size={19} strokeWidth={2.2} />
+          </div>
+          <div className="min-w-0 flex-1">
+            <h2 className="m-0 text-[17px] font-bold leading-tight text-foreground">Share calendar</h2>
+            <div className="mt-0.5 text-[12.5px] text-muted-foreground">
+              {timelineName ? `${timelineName} · ` : ''}subscribe from Google, Apple, or Outlook
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            aria-label="Close"
+            className="flex h-[30px] w-[30px] shrink-0 cursor-pointer items-center justify-center rounded-[var(--radius-md)] border-none bg-muted text-muted-foreground"
+          >
+            <X size={16} strokeWidth={2.2} />
+          </button>
+        </div>
+
+        {/* Body */}
+        <div className="flex flex-1 flex-col gap-4 overflow-y-auto px-5 py-4">
+          {/* Scope selector */}
+          <div>
+            <div className="mb-1.5 text-[11px] font-bold uppercase tracking-[0.06em] text-muted-foreground">Feed scope</div>
+            <div className="flex gap-2">
+              {scopeBtn('timeline', 'Whole timeline')}
+              {scopeBtn('member', 'One member')}
+            </div>
+            {scope === 'member' && (
+              <select
+                value={memberId}
+                onChange={e => setMemberId(e.target.value)}
+                aria-label="Member"
+                className="mt-2 h-9 w-full cursor-pointer rounded-[var(--radius-md)] border border-border bg-card px-2.5 text-[13px] text-foreground"
+              >
+                {members.map(m => (
+                  <option key={m.id} value={m.id}>{m.displayName || 'Team member'}</option>
+                ))}
+              </select>
+            )}
+          </div>
+
+          {/* Public access toggle */}
+          <div className="overflow-hidden rounded-[var(--radius-md)] border border-border">
+            <div className="flex items-center gap-2.5 px-3 py-2.5">
+              <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[var(--radius-md)] bg-muted text-muted-foreground">
+                <Rss size={14} strokeWidth={2} />
+              </div>
+              <div className="flex-1">
+                <div className="text-[13px] font-semibold text-foreground">Public calendar feed</div>
+                <div className="text-[11.5px] text-muted-foreground">
+                  {activeShare
+                    ? 'Live feed is on — turning it off immediately kills the link'
+                    : 'Publish a live, read-only feed anyone with the link can subscribe to'}
+                </div>
+              </div>
+              <button
+                onClick={handleToggle}
+                role="switch"
+                aria-checked={Boolean(activeShare)}
+                aria-label="Public calendar feed"
+                disabled={mutating || isLoading}
+                className={cn(
+                  'relative h-[22px] w-10 shrink-0 cursor-pointer rounded-[var(--radius-full)] border-none p-0 transition-colors',
+                  activeShare ? 'bg-primary' : 'bg-border',
+                )}
+              >
+                <span className={cn(
+                  'absolute top-[2px] h-[18px] w-[18px] rounded-full bg-white shadow-sm transition-[left] duration-150',
+                  activeShare ? 'left-5' : 'left-[2px]',
+                )} />
+              </button>
+            </div>
+
+            {activeShare && url && webcal && (
+              <div className="flex flex-col gap-2.5 border-t border-border px-3 py-3">
+                {/* Feed URL + copy */}
+                <div className="flex items-center gap-2">
+                  <div className="flex min-w-0 flex-1 items-center gap-2 rounded-[var(--radius-md)] bg-muted px-[11px] py-[7px] font-mono text-[12.5px] text-foreground">
+                    <Link2 size={13} className="shrink-0 text-muted-foreground" strokeWidth={2} />
+                    <span className="overflow-hidden text-ellipsis whitespace-nowrap">{url}</span>
+                  </div>
+                  <button
+                    onClick={copy}
+                    className={cn(
+                      'flex shrink-0 items-center gap-[5px] rounded-[var(--radius-md)] border px-3 py-[7px] text-[12.5px] font-semibold transition-colors',
+                      copied ? 'border-success bg-[hsl(145_63%_42%/0.12)] text-success' : 'border-border bg-card text-foreground',
+                    )}
+                  >
+                    {copied ? <Check size={13} strokeWidth={2.2} /> : <Copy size={13} strokeWidth={2.2} />}
+                    {copied ? 'Copied' : 'Copy'}
+                  </button>
+                </div>
+
+                {/* One-click subscribe links */}
+                <div className="flex flex-wrap items-center gap-2">
+                  <a
+                    href={`https://calendar.google.com/calendar/render?cid=${encodeURIComponent(webcal)}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="flex items-center gap-[5px] rounded-[var(--radius-md)] border border-border bg-card px-3 py-[6px] text-[12.5px] font-semibold text-foreground transition-colors hover:bg-muted"
+                  >
+                    Add to Google
+                  </a>
+                  <a
+                    href={webcal}
+                    className="flex items-center gap-[5px] rounded-[var(--radius-md)] border border-border bg-card px-3 py-[6px] text-[12.5px] font-semibold text-foreground transition-colors hover:bg-muted"
+                  >
+                    Add to Apple
+                  </a>
+                  <a
+                    href={`https://outlook.live.com/calendar/0/addfromweb?url=${encodeURIComponent(webcal)}&name=${encodeURIComponent(activeShare.name ?? timelineName ?? 'draba')}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="flex items-center gap-[5px] rounded-[var(--radius-md)] border border-border bg-card px-3 py-[6px] text-[12.5px] font-semibold text-foreground transition-colors hover:bg-muted"
+                  >
+                    Add to Outlook
+                  </a>
+                  <button
+                    onClick={() => regenerateShare.mutate(activeShare.id)}
+                    disabled={mutating}
+                    title="Replace the link — the old URL stops working immediately"
+                    className="ml-auto flex cursor-pointer items-center gap-[5px] rounded-[var(--radius-md)] border border-border bg-card px-3 py-[6px] text-[12.5px] font-semibold text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                  >
+                    <RefreshCw size={13} strokeWidth={2} className={regenerateShare.isPending ? 'animate-spin' : undefined} />
+                    Regenerate link
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {(createShare.isError || deleteShare.isError || regenerateShare.isError) && (
+            <p className="text-[11px] text-destructive">Something went wrong. Please try again.</p>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div className="flex shrink-0 items-center gap-2.5 border-t border-border px-5 py-[13px]">
+          <div className="flex items-center gap-[7px] text-xs text-muted-foreground">
+            <Users size={14} strokeWidth={2} />
+            Live data · no password — the link itself is the secret
+          </div>
+          <Button variant="outline" className="ml-auto" onClick={onClose}>Done</Button>
+        </div>
+      </div>
+    </div>,
+    document.body,
   )
 }
 ````
@@ -37546,70 +38150,6 @@ func flatten[T any](s []*T) []T {
 }
 ````
 
-## File: packages/api/sample_data/11_shares.sql
-````sql
--- Shares: 8 share links across 4 timelines (4 open, 4 password-protected),
--- exercising the Phase 13.2 share module — named links, descriptions, view
--- counts, varied view configs, and the password/protected indicator. Phase
--- 13.3 added List and Kanban as read-only viewers (Gantt shipped in 13.1);
--- one of each is included below alongside the Gantt links so the public
--- projection's view-type branches and the List "notes" column-gating nuance
--- (view_config.columns) are exercisable against the seeded dataset.
---
--- created_by references team_members(id) (NOT users). password_hash is a bcrypt
--- hash of "password" (the sample-data convention; all logins use "password").
-
-INSERT INTO shares (id, timeline_id, token, name, description, view_type, view_config, password_hash, created_by, created_at, last_viewed_at, view_count) VALUES
-  -- Product Marketing · Q1 Workload — an open all-hands link and a protected stakeholder view.
-  ('sh-pm-q1-allhands', 'tl-pm-q1', 'share-demo-allhands',
-   'All-hands public link', 'Embedded in the company all-hands deck. Read-only, grouped by assignee.',
-   'gantt', '{"groupBy":"assignee","sortBy":"startDate","colorBy":"member","granularity":"week","filter":{"logic":"and","conditions":[]}}',
-   NULL, 'tm-pm-erik', datetime('now', '-12 days'), datetime('now', '-1 days'), 126),
-
-  ('sh-pm-q1-acme', 'tl-pm-q1', 'share-demo-acme',
-   'Acme stakeholder view', 'Read-only status for the weekly Acme client review. Updated automatically.',
-   'gantt', '{"groupBy":"none","sortBy":"startDate","colorBy":"activity","granularity":"week","filter":{"logic":"and","conditions":[]}}',
-   '$2a$12$EKcdOqSJcFP0zf4MSSUf9Ou7/cglkraTAqiExfZPPWV13sIB7tIUS', 'tm-pm-lindsay', datetime('now', '-20 days'), datetime('now', '-2 days'), 48),
-
-  -- Product Marketing · Sales Kick Off — open link for sales leadership.
-  ('sh-pm-sko-leadership', 'tl-pm-sko', 'share-demo-sko',
-   'Sales leadership', 'Snapshot for the SKO steering committee.',
-   'gantt', '{"groupBy":"none","sortBy":"startDate","colorBy":"status","granularity":"week","filter":{"logic":"and","conditions":[]}}',
-   NULL, 'tm-pm-erik', datetime('now', '-6 days'), datetime('now', '-1 days'), 31),
-
-  -- P&B Tiger Team · Right to Win — protected exec readout.
-  ('sh-pb-rtw-exec', 'tl-pb-rtw', 'share-demo-exec',
-   'Exec readout', 'Scoped exec view for the Right to Win steering review.',
-   'gantt', '{"groupBy":"none","sortBy":"startDate","colorBy":"activity","granularity":"month","filter":{"logic":"and","conditions":[]}}',
-   '$2a$12$EKcdOqSJcFP0zf4MSSUf9Ou7/cglkraTAqiExfZPPWV13sIB7tIUS', 'tm-pb-brian', datetime('now', '-30 days'), datetime('now', '-5 days'), 9),
-
-  -- Marketing Cross Functional · Web Site Rebrand — open contractor link + protected agency review.
-  ('sh-mcf-contractor', 'tl-mcf-rebrand', 'share-demo-contractor',
-   'Design contractor view', 'Scoped view for the two external design contractors.',
-   'gantt', '{"groupBy":"none","sortBy":"startDate","colorBy":"activity","granularity":"week","filter":{"logic":"and","conditions":[]}}',
-   NULL, 'tm-mcf-scott', datetime('now', '-18 days'), datetime('now', '-1 days'), 64),
-
-  ('sh-mcf-agency', 'tl-mcf-rebrand', 'share-demo-agency',
-   'Agency review', 'Weekly read-only link for the rebrand agency. Password protected.',
-   'gantt', '{"groupBy":"assignee","sortBy":"endDate","colorBy":"member","granularity":"month","filter":{"logic":"and","conditions":[]}}',
-   '$2a$12$EKcdOqSJcFP0zf4MSSUf9Ou7/cglkraTAqiExfZPPWV13sIB7tIUS', 'tm-mcf-paula', datetime('now', '-9 days'), datetime('now', '-3 days'), 17),
-
-  -- Product Marketing · Sales Kick Off — open List link for the extended planning group.
-  -- columns captures the column-visibility snapshot at share time, incl. Notes
-  -- visible (drives the Phase 13.3 "notes" projection nuance) and Tags hidden
-  -- (exercises "exposes exactly its enabled columns; no over-exposure").
-  ('sh-pm-sko-list', 'tl-pm-sko', 'share-demo-sko-list',
-   'Planning group list', 'Read-only task list for the extended SKO planning group, with notes visible.',
-   'list', '{"groupBy":"none","sortBy":"startDate","colorBy":"status","granularity":"week","filter":{"logic":"and","conditions":[]},"columns":[{"id":"colorBar","visible":true},{"id":"identity","visible":true},{"id":"title","visible":true},{"id":"startAt","visible":true},{"id":"endAt","visible":true},{"id":"status","visible":true},{"id":"assignees","visible":true},{"id":"tags","visible":false},{"id":"notes","visible":true}]}',
-   NULL, 'tm-pm-erik', datetime('now', '-4 days'), datetime('now', '-1 days'), 22),
-
-  -- P&B Tiger Team · Right to Win — protected Kanban board for the extended steering group.
-  ('sh-pb-rtw-kanban', 'tl-pb-rtw', 'share-demo-rtw-kanban',
-   'Steering board', 'Read-only Kanban board for the Right to Win steering group, grouped by status.',
-   'kanban', '{"groupBy":"status","sortBy":"startDate","colorBy":"member","granularity":"week","filter":{"logic":"and","conditions":[]}}',
-   '$2a$12$EKcdOqSJcFP0zf4MSSUf9Ou7/cglkraTAqiExfZPPWV13sIB7tIUS', 'tm-pb-brian', datetime('now', '-7 days'), datetime('now', '-2 days'), 13);
-````
-
 ## File: packages/api/sample_data/README.md
 ````markdown
 # Sample Data
@@ -37653,136 +38193,6 @@ See `docs/SAMPLE_DATA.md` for the full dataset specification and identity rules.
 ## Credentials
 
 All user passwords: `password`
-````
-
-## File: packages/web/src/components/calendar/CalendarToolbar.tsx
-````typescript
-/**
- * CalendarToolbar — sub-toolbar for the Calendar view.
- *
- * Provides: Month / Week layout toggle, today / prev / next navigation,
- * a jump-to-date picker, color-by, and export/share stubs.
- */
-
-import { ChevronLeft, ChevronRight, Download, Share2 } from 'lucide-react';
-import type { ColorBy } from '@/components/gantt/GanttToolbar';
-
-export type CalendarLayout = 'month' | 'week';
-
-interface Props {
-  layout: CalendarLayout;
-  onLayoutChange: (l: CalendarLayout) => void;
-  /** The month/week currently in view. */
-  anchorDate: Date;
-  onPrev: () => void;
-  onNext: () => void;
-  onToday: () => void;
-  colorBy: ColorBy;
-  onColorByChange: (c: ColorBy) => void;
-  onExport?: () => void;
-  onShare?: () => void;
-}
-
-const btn = 'flex items-center justify-center gap-[5px] h-[26px] px-2 border border-border rounded-md bg-card text-foreground text-xs font-medium cursor-pointer shrink-0 hover:bg-muted transition-colors';
-const iconBtn = 'flex items-center justify-center h-[26px] w-[26px] border border-border rounded-md bg-card text-foreground cursor-pointer shrink-0 hover:bg-muted transition-colors';
-const divider = 'w-px h-4 bg-border shrink-0';
-const label   = 'text-[11px] text-muted-foreground shrink-0';
-const select  = 'h-[26px] px-1.5 border border-border rounded-md bg-card text-foreground text-xs cursor-pointer shrink-0';
-
-function formatAnchorLabel(date: Date, layout: CalendarLayout): string {
-  if (layout === 'month') {
-    return date.toLocaleDateString(undefined, { month: 'long', year: 'numeric', timeZone: 'UTC' });
-  }
-  // Week: show the range "Jun 1 – 7, 2026"
-  const end = new Date(date);
-  end.setUTCDate(date.getUTCDate() + 6);
-  const startStr = date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
-  const endStr   = end.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
-  return `${startStr} – ${endStr}`;
-}
-
-export default function CalendarToolbar({
-  layout,
-  onLayoutChange,
-  anchorDate,
-  onPrev,
-  onNext,
-  onToday,
-  colorBy,
-  onColorByChange,
-  onExport,
-  onShare,
-}: Props) {
-  return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '0 12px', height: 36, background: 'var(--card)', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
-      {/* Layout toggle */}
-      <div style={{ display: 'flex', border: '1px solid var(--border)', borderRadius: 6, overflow: 'hidden', height: 26 }}>
-        {(['month', 'week'] as CalendarLayout[]).map(l => (
-          <button
-            key={l}
-            onClick={() => onLayoutChange(l)}
-            style={{
-              padding: '0 10px',
-              fontSize: 12,
-              fontWeight: 500,
-              border: 'none',
-              borderRight: l === 'month' ? '1px solid var(--border)' : 'none',
-              background: layout === l ? 'var(--muted)' : 'var(--card)',
-              color: 'var(--foreground)',
-              cursor: 'pointer',
-              height: '100%',
-            }}
-          >
-            {l === 'month' ? 'Month' : 'Week'}
-          </button>
-        ))}
-      </div>
-
-      <div className={divider} />
-
-      {/* Navigation */}
-      <button className={iconBtn} onClick={onPrev} title="Previous">
-        <ChevronLeft size={13} strokeWidth={2} />
-      </button>
-      <button className={btn} onClick={onToday}>Today</button>
-      <button className={iconBtn} onClick={onNext} title="Next">
-        <ChevronRight size={13} strokeWidth={2} />
-      </button>
-
-      {/* Current range label */}
-      <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)', minWidth: 160, textAlign: 'center' }}>
-        {formatAnchorLabel(anchorDate, layout)}
-      </span>
-
-      <div className={divider} />
-
-      {/* Color by */}
-      <span className={label}>Color by</span>
-      <select
-        className={select}
-        value={colorBy}
-        onChange={e => onColorByChange(e.target.value as ColorBy)}
-      >
-        <option value="activity">Activity</option>
-        <option value="member">Member</option>
-        <option value="status">Status</option>
-      </select>
-
-      {/* Stubs — pushed to the right edge */}
-      <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
-        <div className={divider} />
-        <button className={btn} onClick={onExport} title="Export (coming soon)">
-          <Download size={12} strokeWidth={1.8} />
-          Export
-        </button>
-        <button className={btn} onClick={onShare} title="Share (coming soon)">
-          <Share2 size={12} strokeWidth={1.8} />
-          Share
-        </button>
-      </div>
-    </div>
-  );
-}
 ````
 
 ## File: packages/web/src/components/calendar/CalendarView.tsx
@@ -38590,292 +39000,6 @@ describe('buildRows — member grouping (combo-key grouping)', () => {
 })
 ````
 
-## File: packages/web/src/hooks/useShares.test.ts
-````typescript
-/**
- * useShares hooks — unit tests verifying query keys, mutation endpoints,
- * cache invalidation, and the public share projection fetch.
- * Uses a real QueryClient with fetch mocked globally.
- */
-
-import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { renderHook, waitFor } from '@testing-library/react'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { createElement } from 'react'
-import {
-  useListShares,
-  useCreateShare,
-  useDeleteShare,
-  useShareProjection,
-  useUnlockShare,
-} from './useShares'
-
-// ── Auth mock ─────────────────────────────────────────────────────────────────
-
-vi.mock('@/contexts/AuthContext', () => ({
-  useAuth: () => ({ getAccessToken: async () => 'test-token' }),
-}))
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-function makeWrapper() {
-  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-  return {
-    qc,
-    wrapper: ({ children }: { children: React.ReactNode }) =>
-      createElement(QueryClientProvider, { client: qc }, children),
-  }
-}
-
-const SHARE_FIXTURE = {
-  id: 'share-1',
-  timelineId: 'tl-1',
-  token: 'abc123',
-  viewType: 'gantt',
-  viewConfig: '{}',
-  createdBy: 'member-1',
-  createdAt: '2026-01-01T00:00:00Z',
-  viewCount: 0,
-}
-
-// ── useListShares ─────────────────────────────────────────────────────────────
-
-describe('useListShares', () => {
-  beforeEach(() => {
-    vi.stubGlobal('fetch', vi.fn())
-  })
-
-  it('fetches shares from the correct URL', async () => {
-    vi.mocked(fetch).mockResolvedValueOnce(
-      new Response(JSON.stringify([SHARE_FIXTURE]), { status: 200 }),
-    )
-
-    const { wrapper } = makeWrapper()
-    const { result } = renderHook(() => useListShares('team-1', 'tl-1'), { wrapper })
-
-    await waitFor(() => expect(result.current.isSuccess).toBe(true))
-
-    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
-      expect.stringContaining('/teams/team-1/timelines/tl-1/shares'),
-      expect.any(Object),
-    )
-    expect(result.current.data).toHaveLength(1)
-  })
-
-  it('does not fetch when teamId is empty', () => {
-    const { wrapper } = makeWrapper()
-    renderHook(() => useListShares('', 'tl-1'), { wrapper })
-    expect(vi.mocked(fetch)).not.toHaveBeenCalled()
-  })
-
-  it('does not fetch when timelineId is empty', () => {
-    const { wrapper } = makeWrapper()
-    renderHook(() => useListShares('team-1', ''), { wrapper })
-    expect(vi.mocked(fetch)).not.toHaveBeenCalled()
-  })
-})
-
-// ── useCreateShare ────────────────────────────────────────────────────────────
-
-describe('useCreateShare', () => {
-  beforeEach(() => {
-    vi.stubGlobal('fetch', vi.fn())
-  })
-
-  it('POSTs to the correct URL and invalidates the share list', async () => {
-    vi.mocked(fetch).mockResolvedValueOnce(
-      new Response(JSON.stringify(SHARE_FIXTURE), { status: 201 }),
-    )
-
-    const { wrapper, qc } = makeWrapper()
-    const invalidate = vi.spyOn(qc, 'invalidateQueries')
-
-    const { result } = renderHook(() => useCreateShare('team-1', 'tl-1'), { wrapper })
-    result.current.mutate({ viewType: 'gantt', viewConfig: '{}' })
-
-    await waitFor(() => expect(result.current.isSuccess).toBe(true))
-
-    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
-      expect.stringContaining('/timelines/tl-1/shares'),
-      expect.objectContaining({ method: 'POST' }),
-    )
-    expect(invalidate).toHaveBeenCalledWith(
-      expect.objectContaining({
-        queryKey: ['teams', 'team-1', 'timelines', 'tl-1', 'shares'],
-      }),
-    )
-  })
-})
-
-// ── useDeleteShare ────────────────────────────────────────────────────────────
-
-describe('useDeleteShare', () => {
-  beforeEach(() => {
-    vi.stubGlobal('fetch', vi.fn())
-  })
-
-  it('DELETEs the correct URL and invalidates the share list', async () => {
-    vi.mocked(fetch).mockResolvedValueOnce(new Response(null, { status: 204 }))
-
-    const { wrapper, qc } = makeWrapper()
-    const invalidate = vi.spyOn(qc, 'invalidateQueries')
-
-    const { result } = renderHook(() => useDeleteShare('team-1', 'tl-1'), { wrapper })
-    result.current.mutate('share-1')
-
-    await waitFor(() => expect(result.current.isSuccess).toBe(true))
-
-    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
-      expect.stringContaining('/shares/share-1'),
-      expect.objectContaining({ method: 'DELETE' }),
-    )
-    expect(invalidate).toHaveBeenCalledWith(
-      expect.objectContaining({
-        queryKey: ['teams', 'team-1', 'timelines', 'tl-1', 'shares'],
-      }),
-    )
-  })
-})
-
-// ── useShareProjection ────────────────────────────────────────────────────────
-
-const PROJECTION_FIXTURE = {
-  share: {
-    id: 'share-1',
-    timelineId: 'tl-1',
-    token: 'abc123',
-    viewType: 'gantt',
-    viewConfig: '{}',
-    createdAt: '2026-01-01T00:00:00Z',
-  },
-  teamName: 'Test Team',
-  timeline: { id: 'tl-1', name: 'Q1 Plan', startDate: '2026-01-01', endDate: '2026-12-31' },
-  members: [],
-  statuses: [],
-  tags: [],
-  activities: [],
-}
-
-describe('useShareProjection', () => {
-  beforeEach(() => {
-    vi.stubGlobal('fetch', vi.fn())
-  })
-
-  it('fetches the public projection without an auth header', async () => {
-    vi.mocked(fetch).mockResolvedValueOnce(
-      new Response(JSON.stringify(PROJECTION_FIXTURE), { status: 200 }),
-    )
-
-    const { wrapper } = makeWrapper()
-    const { result } = renderHook(() => useShareProjection('abc123'), { wrapper })
-
-    await waitFor(() => expect(result.current.isSuccess).toBe(true))
-
-    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
-      expect.stringContaining('/shares/abc123'),
-      expect.anything(),
-    )
-    // No Authorization header — this is a public endpoint (no view token passed).
-    const callArgs = vi.mocked(fetch).mock.calls[0]
-    const opts = callArgs[1] as RequestInit | undefined
-    const headers = (opts?.headers ?? {}) as Record<string, string>
-    expect(headers.Authorization).toBeUndefined()
-    expect(result.current.data?.teamName).toBe('Test Team')
-  })
-
-  it('does not fetch when token is undefined', () => {
-    const { wrapper } = makeWrapper()
-    renderHook(() => useShareProjection(undefined), { wrapper })
-    expect(vi.mocked(fetch)).not.toHaveBeenCalled()
-  })
-
-  it('throws an ApiError with the response status on non-200', async () => {
-    vi.mocked(fetch).mockResolvedValueOnce(
-      new Response(
-        JSON.stringify({ error: { code: 'NOT_FOUND', message: 'share not found' } }),
-        { status: 404 },
-      ),
-    )
-
-    const { wrapper } = makeWrapper()
-    const { result } = renderHook(() => useShareProjection('bad-token'), { wrapper })
-
-    await waitFor(() => expect(result.current.isError).toBe(true))
-
-    const err = result.current.error as { status?: number; code?: string }
-    expect(err.status).toBe(404)
-    expect(err.code).toBe('NOT_FOUND')
-  })
-
-  it('sends the view token as a Bearer header when provided', async () => {
-    vi.mocked(fetch).mockResolvedValueOnce(
-      new Response(JSON.stringify(PROJECTION_FIXTURE), { status: 200 }),
-    )
-
-    const { wrapper } = makeWrapper()
-    const { result } = renderHook(() => useShareProjection('abc123', 'view-jwt'), { wrapper })
-
-    await waitFor(() => expect(result.current.isSuccess).toBe(true))
-
-    const opts = vi.mocked(fetch).mock.calls[0][1] as RequestInit | undefined
-    const headers = (opts?.headers ?? {}) as Record<string, string>
-    expect(headers.Authorization).toBe('Bearer view-jwt')
-  })
-
-  it('maps a 401 { passwordRequired } response to a PASSWORD_REQUIRED error', async () => {
-    vi.mocked(fetch).mockResolvedValueOnce(
-      new Response(JSON.stringify({ passwordRequired: true }), { status: 401 }),
-    )
-
-    const { wrapper } = makeWrapper()
-    const { result } = renderHook(() => useShareProjection('locked-token'), { wrapper })
-
-    await waitFor(() => expect(result.current.isError).toBe(true))
-
-    const err = result.current.error as { status?: number; code?: string }
-    expect(err.status).toBe(401)
-    expect(err.code).toBe('PASSWORD_REQUIRED')
-  })
-})
-
-// ── useUnlockShare ──────────────────────────────────────────────────────────────
-
-describe('useUnlockShare', () => {
-  beforeEach(() => {
-    vi.stubGlobal('fetch', vi.fn())
-  })
-
-  it('POSTs the password to the unlock endpoint and returns the view token', async () => {
-    vi.mocked(fetch).mockResolvedValueOnce(
-      new Response(JSON.stringify({ token: 'view-jwt' }), { status: 200 }),
-    )
-
-    const { wrapper } = makeWrapper()
-    const { result } = renderHook(() => useUnlockShare('abc123'), { wrapper })
-
-    let token = ''
-    await waitFor(async () => { token = await result.current.mutateAsync('hunter2') })
-
-    expect(token).toBe('view-jwt')
-    const [url, opts] = vi.mocked(fetch).mock.calls[0]
-    expect(String(url)).toContain('/shares/abc123/unlock')
-    expect(opts?.method).toBe('POST')
-    expect(JSON.parse(String(opts?.body))).toEqual({ password: 'hunter2' })
-  })
-
-  it('throws an ApiError on a wrong password (401)', async () => {
-    vi.mocked(fetch).mockResolvedValueOnce(
-      new Response(JSON.stringify({ error: { code: 'INVALID_PASSWORD', message: 'incorrect password' } }), { status: 401 }),
-    )
-
-    const { wrapper } = makeWrapper()
-    const { result } = renderHook(() => useUnlockShare('abc123'), { wrapper })
-
-    await expect(result.current.mutateAsync('wrong')).rejects.toMatchObject({ status: 401 })
-  })
-})
-````
-
 ## File: packages/web/src/lib/calendarLanes.ts
 ````typescript
 /**
@@ -39521,426 +39645,82 @@ func getenv(key, fallback string) string {
 }
 ````
 
-## File: packages/api/internal/api/server.go
-````go
-// Package api hosts the HTTP handlers, routing, and middleware for the
-// draba REST API. Handlers are intentionally thin: they decode requests,
-// delegate to repositories and services, and write responses. Business
-// logic belongs in the domain packages, not here.
-package api
+## File: packages/api/sample_data/11_shares.sql
+````sql
+-- Shares: 10 share links across 4 timelines (4 open view links, 4 password-
+-- protected view links, 2 ICS calendar feeds),
+-- exercising the Phase 13.2 share module — named links, descriptions, view
+-- counts, varied view configs, and the password/protected indicator. Phase
+-- 13.3 added List and Kanban as read-only viewers (Gantt shipped in 13.1);
+-- one of each is included below alongside the Gantt links so the public
+-- projection's view-type branches and the List "notes" column-gating nuance
+-- (view_config.columns) are exercisable against the seeded dataset.
+--
+-- created_by references team_members(id) (NOT users). password_hash is a bcrypt
+-- hash of "password" (the sample-data convention; all logins use "password").
 
-import (
-	"fmt"
-	"io/fs"
-	"net/http"
-	"strings"
-	"time"
+INSERT INTO shares (id, timeline_id, token, name, description, view_type, view_config, password_hash, created_by, created_at, last_viewed_at, view_count) VALUES
+  -- Product Marketing · Q1 Workload — an open all-hands link and a protected stakeholder view.
+  ('sh-pm-q1-allhands', 'tl-pm-q1', 'share-demo-allhands',
+   'All-hands public link', 'Embedded in the company all-hands deck. Read-only, grouped by assignee.',
+   'gantt', '{"groupBy":"assignee","sortBy":"startDate","colorBy":"member","granularity":"week","filter":{"logic":"and","conditions":[]}}',
+   NULL, 'tm-pm-erik', datetime('now', '-12 days'), datetime('now', '-1 days'), 126),
 
-	"github.com/I0-1O/draba/packages/api/internal/auth"
-	"github.com/I0-1O/draba/packages/api/internal/db"
-	"github.com/I0-1O/draba/packages/api/internal/events"
-	"github.com/I0-1O/draba/packages/api/internal/mailer"
-	"github.com/I0-1O/draba/packages/api/internal/models"
-	"github.com/I0-1O/draba/packages/api/internal/tier"
-	"github.com/I0-1O/draba/packages/api/internal/ws"
-)
+  ('sh-pm-q1-acme', 'tl-pm-q1', 'share-demo-acme',
+   'Acme stakeholder view', 'Read-only status for the weekly Acme client review. Updated automatically.',
+   'gantt', '{"groupBy":"none","sortBy":"startDate","colorBy":"activity","granularity":"week","filter":{"logic":"and","conditions":[]}}',
+   '$2a$12$EKcdOqSJcFP0zf4MSSUf9Ou7/cglkraTAqiExfZPPWV13sIB7tIUS', 'tm-pm-lindsay', datetime('now', '-20 days'), datetime('now', '-2 days'), 48),
 
-// TimelineStore is the persistence interface required by timeline handlers.
-// The concrete implementation is *db.TimelineRepo; tests may substitute a fake.
-type TimelineStore interface {
-	Create(t *models.Timeline) error
-	GetByID(id string) (*models.Timeline, error)
-	GetByShareToken(token string) (*models.Timeline, error)
-	ListByTeam(teamID string, includeArchived bool) ([]*models.Timeline, error)
-	HasAccess(timelineID, teamMemberID string) (bool, error)
-	GrantAccess(timelineID, teamMemberID, role string) error
-	RevokeAccess(timelineID, teamMemberID string) error
-	GetAccessRole(timelineID, teamMemberID string) (string, error)
-	ListAccess(timelineID string) ([]*models.TimelineAccessEntry, error)
-	SetArchived(id string, at *time.Time) error
-	Update(t *models.Timeline) error
-	Delete(id string) error
-}
+  -- Product Marketing · Sales Kick Off — open link for sales leadership.
+  ('sh-pm-sko-leadership', 'tl-pm-sko', 'share-demo-sko',
+   'Sales leadership', 'Snapshot for the SKO steering committee.',
+   'gantt', '{"groupBy":"none","sortBy":"startDate","colorBy":"status","granularity":"week","filter":{"logic":"and","conditions":[]}}',
+   NULL, 'tm-pm-erik', datetime('now', '-6 days'), datetime('now', '-1 days'), 31),
 
-// Server holds shared dependencies for all HTTP handlers.
-type Server struct {
-	users          *db.UserRepo
-	invites        *db.InviteRepo
-	teams          *db.TeamRepo
-	activities     *db.ActivityRepo
-	timelines      TimelineStore
-	savedFilters   *db.SavedFilterRepo
-	preferences    *db.UserPreferenceRepo
-	apiTokens      *db.APITokenRepo
-	instanceSets   *db.InstanceSettingsRepo
-	passwordTokens *db.PasswordResetTokenRepo
-	statuses       *db.StatusRepo
-	tags           *db.TagRepo
-	shares         *db.ShareRepo
-	shareCache     *shareCache
-	unlockLimiter  *rateLimiter
-	mailer         *mailer.Mailer
-	tokens         *auth.TokenService
-	tier           tier.Tier
-	bus            *events.Bus
-	hub            *ws.Hub
-	uiFS           fs.FS
-}
+  -- P&B Tiger Team · Right to Win — protected exec readout.
+  ('sh-pb-rtw-exec', 'tl-pb-rtw', 'share-demo-exec',
+   'Exec readout', 'Scoped exec view for the Right to Win steering review.',
+   'gantt', '{"groupBy":"none","sortBy":"startDate","colorBy":"activity","granularity":"month","filter":{"logic":"and","conditions":[]}}',
+   '$2a$12$EKcdOqSJcFP0zf4MSSUf9Ou7/cglkraTAqiExfZPPWV13sIB7tIUS', 'tm-pb-brian', datetime('now', '-30 days'), datetime('now', '-5 days'), 9),
 
-// NewServer constructs a Server with its required dependencies. It does not
-// touch the network; call Routes to obtain the http.Handler to serve.
-func NewServer(
-	users *db.UserRepo,
-	invites *db.InviteRepo,
-	teams *db.TeamRepo,
-	activitiesRepo *db.ActivityRepo,
-	timelinesRepo TimelineStore,
-	savedFiltersRepo *db.SavedFilterRepo,
-	preferencesRepo *db.UserPreferenceRepo,
-	apiTokensRepo *db.APITokenRepo,
-	instanceSetsRepo *db.InstanceSettingsRepo,
-	passwordTokensRepo *db.PasswordResetTokenRepo,
-	statusesRepo *db.StatusRepo,
-	tagsRepo *db.TagRepo,
-	sharesRepo *db.ShareRepo,
-	m *mailer.Mailer,
-	tokens *auth.TokenService,
-	t tier.Tier,
-	bus *events.Bus,
-	hub *ws.Hub,
-) *Server {
-	return &Server{
-		users:          users,
-		invites:        invites,
-		teams:          teams,
-		activities:     activitiesRepo,
-		timelines:      timelinesRepo,
-		savedFilters:   savedFiltersRepo,
-		preferences:    preferencesRepo,
-		apiTokens:      apiTokensRepo,
-		instanceSets:   instanceSetsRepo,
-		passwordTokens: passwordTokensRepo,
-		statuses:       statusesRepo,
-		tags:           tagsRepo,
-		shares:         sharesRepo,
-		shareCache:     newShareCache(),
-		unlockLimiter:  newRateLimiter(unlockMaxAttempts, time.Hour),
-		mailer:         m,
-		tokens:         tokens,
-		tier:           t,
-		bus:            bus,
-		hub:            hub,
-	}
-}
+  -- Marketing Cross Functional · Web Site Rebrand — open contractor link + protected agency review.
+  ('sh-mcf-contractor', 'tl-mcf-rebrand', 'share-demo-contractor',
+   'Design contractor view', 'Scoped view for the two external design contractors.',
+   'gantt', '{"groupBy":"none","sortBy":"startDate","colorBy":"activity","granularity":"week","filter":{"logic":"and","conditions":[]}}',
+   NULL, 'tm-mcf-scott', datetime('now', '-18 days'), datetime('now', '-1 days'), 64),
 
-// WithUI registers an embedded React SPA to be served at GET /. The FS must
-// be rooted at the build output directory (i.e. contain index.html directly).
-// When called, all unmatched GET paths fall back to index.html so React Router
-// handles client-side navigation. Safe to skip in dev (no-op when not called).
-func (s *Server) WithUI(uiFS fs.FS) *Server {
-	s.uiFS = uiFS
-	return s
-}
+  ('sh-mcf-agency', 'tl-mcf-rebrand', 'share-demo-agency',
+   'Agency review', 'Weekly read-only link for the rebrand agency. Password protected.',
+   'gantt', '{"groupBy":"assignee","sortBy":"endDate","colorBy":"member","granularity":"month","filter":{"logic":"and","conditions":[]}}',
+   '$2a$12$EKcdOqSJcFP0zf4MSSUf9Ou7/cglkraTAqiExfZPPWV13sIB7tIUS', 'tm-mcf-paula', datetime('now', '-9 days'), datetime('now', '-3 days'), 17),
 
-// Routes returns the fully-wired HTTP handler for the API, including all
-// core routes plus any routes added by registered tier modules.
-func (s *Server) Routes() http.Handler {
-	mux := http.NewServeMux()
+  -- Product Marketing · Sales Kick Off — open List link for the extended planning group.
+  -- columns captures the column-visibility snapshot at share time, incl. Notes
+  -- visible (drives the Phase 13.3 "notes" projection nuance) and Tags hidden
+  -- (exercises "exposes exactly its enabled columns; no over-exposure").
+  ('sh-pm-sko-list', 'tl-pm-sko', 'share-demo-sko-list',
+   'Planning group list', 'Read-only task list for the extended SKO planning group, with notes visible.',
+   'list', '{"groupBy":"none","sortBy":"startDate","colorBy":"status","granularity":"week","filter":{"logic":"and","conditions":[]},"columns":[{"id":"colorBar","visible":true},{"id":"identity","visible":true},{"id":"title","visible":true},{"id":"startAt","visible":true},{"id":"endAt","visible":true},{"id":"status","visible":true},{"id":"assignees","visible":true},{"id":"tags","visible":false},{"id":"notes","visible":true}]}',
+   NULL, 'tm-pm-erik', datetime('now', '-4 days'), datetime('now', '-1 days'), 22),
 
-	mux.HandleFunc("GET /setup/status", s.handleSetupStatus)
-	mux.HandleFunc("GET /version", s.handleVersion)
+  -- P&B Tiger Team · Right to Win — protected Kanban board for the extended steering group.
+  ('sh-pb-rtw-kanban', 'tl-pb-rtw', 'share-demo-rtw-kanban',
+   'Steering board', 'Read-only Kanban board for the Right to Win steering group, grouped by status.',
+   'kanban', '{"groupBy":"status","sortBy":"startDate","colorBy":"member","granularity":"week","filter":{"logic":"and","conditions":[]}}',
+   '$2a$12$EKcdOqSJcFP0zf4MSSUf9Ou7/cglkraTAqiExfZPPWV13sIB7tIUS', 'tm-pb-brian', datetime('now', '-7 days'), datetime('now', '-2 days'), 13);
 
-	mux.HandleFunc("POST /auth/register", s.handleRegister)
-	mux.HandleFunc("POST /auth/login", s.handleLogin)
-	mux.HandleFunc("POST /auth/refresh", s.handleRefresh)
-	mux.HandleFunc("GET /auth/me", chain(s.handleMe, s.authMiddleware))
-	mux.HandleFunc("POST /auth/forgot-password", s.handleForgotPassword)
-	mux.HandleFunc("POST /auth/reset-password", s.handleResetPassword)
+-- ICS calendar feeds (Phase 13.4): kind='ics' rows are live subscribable
+-- feeds served at GET /shares/{token}.ics — no view_config, filter, or
+-- password (the token is the secret). One whole-timeline feed and one
+-- per-member feed so both scopes are exercisable against the seeded dataset.
+INSERT INTO shares (id, timeline_id, token, kind, scope, member_id, name, view_type, view_config, created_by, created_at, view_count) VALUES
+  -- Product Marketing · Q1 Workload — whole-timeline feed.
+  ('sh-pm-q1-ics', 'tl-pm-q1', 'share-demo-q1-ics', 'ics', 'timeline', NULL,
+   'Q1 Workload calendar feed', 'calendar', '{}', 'tm-pm-erik', datetime('now', '-10 days'), 204),
 
-	mux.HandleFunc("GET /users/me/preferences", chain(s.handleGetPreferences, s.authMiddleware))
-	mux.HandleFunc("PUT /users/me/preferences", chain(s.handleUpsertPreference, s.authMiddleware))
-	mux.HandleFunc("GET /users/me/stats", chain(s.handleGetMyStats, s.authMiddleware))
-	mux.HandleFunc("PATCH /users/me", chain(s.handleUpdateProfile, s.authMiddleware))
-	mux.HandleFunc("PUT /users/me/password", chain(s.handleChangePassword, s.authMiddleware))
-
-	mux.HandleFunc("GET /admin/smtp", chain(s.handleGetSMTP, s.authMiddleware))
-	mux.HandleFunc("PUT /admin/smtp", chain(s.handlePutSMTP, s.authMiddleware))
-	mux.HandleFunc("POST /admin/smtp/test", chain(s.handleTestSMTP, s.authMiddleware))
-	mux.HandleFunc("DELETE /admin/smtp", chain(s.handleDeleteSMTP, s.authMiddleware))
-	mux.HandleFunc("GET /admin/settings", chain(s.handleGetAdminSettings, s.authMiddleware))
-	mux.HandleFunc("PATCH /admin/settings", chain(s.handlePatchAdminSettings, s.authMiddleware))
-	mux.HandleFunc("GET /admin/users", chain(s.handleListAdminUsers, s.authMiddleware))
-
-	// Public — no auth required; used by the login page and shared views.
-	mux.HandleFunc("GET /settings/branding", s.handleGetPublicBranding)
-
-	mux.HandleFunc("POST /tokens", chain(s.handleCreateAPIToken, s.authMiddleware))
-	mux.HandleFunc("GET /tokens", chain(s.handleListAPITokens, s.authMiddleware))
-	mux.HandleFunc("DELETE /tokens/{id}", chain(s.handleDeleteAPIToken, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams", chain(s.handleListTeams, s.authMiddleware))
-	mux.HandleFunc("POST /teams", chain(s.handleCreateTeam, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}", chain(s.handleGetTeam, s.authMiddleware))
-	mux.HandleFunc("PATCH /teams/{id}", chain(s.handleUpdateTeam, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/archive", chain(s.handleArchiveTeam, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/unarchive", chain(s.handleUnarchiveTeam, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/invites", chain(s.handleCreateInvite, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/invites", chain(s.handleListInvites, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/invites/{inviteId}", chain(s.handleDeleteInvite, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/invite-link", chain(s.handleCreateInviteLink, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/invite-link/reset", chain(s.handleResetInviteLink, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/invite-link", chain(s.handleGetInviteLink, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/invite-link", chain(s.handleDeleteInviteLink, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/members", chain(s.handleListMembers, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/members/{memberId}", chain(s.handleGetMember, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/members/{memberId}/stats", chain(s.handleGetMemberStats, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/members", chain(s.handleAddMember, s.authMiddleware))
-	mux.HandleFunc("PATCH /teams/{id}/members/{memberId}", chain(s.handleUpdateMember, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/members/{memberId}", chain(s.handleDeleteMember, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/members/{memberId}/archive", chain(s.handleArchiveMember, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/members/{memberId}/unarchive", chain(s.handleUnarchiveMember, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/participants", chain(s.handleCreateParticipant, s.authMiddleware))
-	mux.HandleFunc("GET /users/search", chain(s.handleSearchUsers, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/promote", chain(s.handlePromoteUser, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/archive", chain(s.handleArchiveUser, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/unarchive", chain(s.handleUnarchiveUser, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/revoke", chain(s.handleRevokeUser, s.authMiddleware))
-	mux.HandleFunc("DELETE /users/{id}", chain(s.handleDeleteUser, s.authMiddleware))
-	// Activity routes use the team-scoped prefix (GET /teams/{id}/timelines/{timelineId}/...)
-	// to avoid a Go 1.22 mux conflict with GET /timelines/share/{token}: both are
-	// 3-segment GET paths and neither is more specific when the third segment differs.
-	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/activities", chain(s.handleCreateActivity, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/activities", chain(s.handleListActivities, s.authMiddleware))
-	mux.HandleFunc("PATCH /activities/{id}", chain(s.handleUpdateActivity, s.authMiddleware))
-	mux.HandleFunc("DELETE /activities/{id}", chain(s.handleDeleteActivity, s.authMiddleware))
-	mux.HandleFunc("POST /activities/{id}/archive", chain(s.handleArchiveActivity, s.authMiddleware))
-	mux.HandleFunc("POST /activities/{id}/unarchive", chain(s.handleUnarchiveActivity, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/tags", chain(s.handleListTags, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/tags", chain(s.handleCreateTag, s.authMiddleware))
-	mux.HandleFunc("PATCH /tags/{id}", chain(s.handleUpdateTag, s.authMiddleware))
-	mux.HandleFunc("DELETE /tags/{id}", chain(s.handleDeleteTag, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/saved_filters/all", chain(s.handleListAllTeamSavedFilters, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/saved_filters", chain(s.handleListSavedFilters, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/saved_filters", chain(s.handleCreateSavedFilter, s.authMiddleware))
-	mux.HandleFunc("PATCH /saved_filters/{id}", chain(s.handleUpdateSavedFilter, s.authMiddleware))
-	mux.HandleFunc("DELETE /saved_filters/{id}", chain(s.handleDeleteSavedFilter, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/status-templates", chain(s.handleListStatusTemplates, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/status-templates", chain(s.handleCreateStatusTemplate, s.authMiddleware))
-	mux.HandleFunc("PATCH /status-templates/{id}", chain(s.handleUpdateStatusTemplate, s.authMiddleware))
-	mux.HandleFunc("DELETE /status-templates/{id}", chain(s.handleDeleteStatusTemplate, s.authMiddleware))
-	mux.HandleFunc("POST /status-templates/{id}/items", chain(s.handleCreateTemplateItem, s.authMiddleware))
-	mux.HandleFunc("PATCH /status-template-items/{id}", chain(s.handleUpdateTemplateItem, s.authMiddleware))
-	mux.HandleFunc("DELETE /status-template-items/{id}", chain(s.handleDeleteTemplateItem, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/timelines", chain(s.handleListTimelines, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/timelines", chain(s.handleCreateTimeline, s.authMiddleware))
-	// GET /timelines/share/{token} must be registered before GET /timelines/{id} so
-	// the more-specific literal "share" segment takes precedence.
-	mux.HandleFunc("GET /timelines/share/{token}", s.handleGetTimelineByShareToken)
-	mux.HandleFunc("GET /timelines/{id}", chain(s.handleGetTimeline, s.authMiddleware))
-	// Timeline statuses are placed under /teams/{id}/timelines/{timelineId}/statuses
-	// rather than /timelines/{id}/statuses to avoid a Go 1.22 mux pattern conflict
-	// with GET /timelines/share/{token} (both are 3-segment paths and conflict on
-	// paths like /timelines/share/statuses).
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleListTimelineStatuses, s.authMiddleware))
-	mux.HandleFunc("POST /timelines/{id}/archive", chain(s.handleArchiveTimeline, s.authMiddleware))
-	mux.HandleFunc("POST /timelines/{id}/unarchive", chain(s.handleUnarchiveTimeline, s.authMiddleware))
-
-	mux.HandleFunc("PATCH /timelines/{id}", chain(s.handleUpdateTimeline, s.authMiddleware))
-	mux.HandleFunc("DELETE /timelines/{id}", chain(s.handleDeleteTimeline, s.authMiddleware))
-	// Access list routes use the team-scoped prefix to avoid a Go 1.22 mux
-	// conflict with GET /timelines/share/{token} on 3-segment GET paths.
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/access", chain(s.handleListTimelineAccess, s.authMiddleware))
-	mux.HandleFunc("PUT /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleGrantTimelineAccess, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleRevokeTimelineAccess, s.authMiddleware))
-	// Timeline status CRUD — POST shares the team-scoped prefix with GET statuses.
-	// PATCH and DELETE use a flat /statuses/{id} prefix (2 segments, no conflict).
-	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleCreateTimelineStatus, s.authMiddleware))
-	mux.HandleFunc("PATCH /statuses/{id}", chain(s.handleUpdateStatus, s.authMiddleware))
-	mux.HandleFunc("DELETE /statuses/{id}", chain(s.handleDeleteStatus, s.authMiddleware))
-
-	// Share routes.
-	// GET /shares/{token} is public — no auth. The token is the credential.
-	// POST /timelines/{id}/shares uses the same /timelines/{id}/... prefix
-	// as archive/unarchive so it avoids the Go 1.22 mux pattern conflict with
-	// GET /timelines/share/{token} (only GET-method paths conflict).
-	// GET /teams/{id}/timelines/{timelineId}/shares uses the team-scoped prefix
-	// to avoid the GET conflict described above.
-	mux.HandleFunc("GET /shares/{token}", s.handleGetShareProjection)
-	mux.HandleFunc("POST /shares/{token}/unlock", s.handleUnlockShare)
-	mux.HandleFunc("POST /timelines/{id}/shares", chain(s.handleCreateShare, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/shares", chain(s.handleListShares, s.authMiddleware))
-	mux.HandleFunc("PATCH /shares/{id}", chain(s.handleUpdateShare, s.authMiddleware))
-	mux.HandleFunc("DELETE /shares/{id}", chain(s.handleDeleteShare, s.authMiddleware))
-
-	// GET /ws is intentionally outside authMiddleware — ServeWS validates the
-	// JWT itself before upgrading, because WebSocket clients can't set headers.
-	mux.HandleFunc("GET /ws", s.hub.ServeWS)
-
-	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-	})
-
-	if s.uiFS != nil {
-		mux.Handle("GET /", spaHandler(s.uiFS))
-	}
-
-	ctx := &tier.ModuleContext{Mux: mux, Tier: s.tier}
-	for _, m := range tier.Registered() {
-		if err := m.Register(ctx); err != nil {
-			// Module registration is a startup invariant — a failure here is a programming error.
-			panic(fmt.Sprintf("tier module %q failed to register: %v", m.Name(), err))
-		}
-	}
-
-	return requestLogger(mux)
-}
-
-// chain applies a single middleware to a handler function.
-func chain(h http.HandlerFunc, m func(http.Handler) http.Handler) http.HandlerFunc {
-	return m(h).ServeHTTP
-}
-
-// spaHandler serves the embedded React SPA. Known static assets are served
-// directly; any unrecognised path falls back to index.html so React Router
-// handles client-side navigation.
-func spaHandler(uiFS fs.FS) http.Handler {
-	fserver := http.FileServer(http.FS(uiFS))
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		path := strings.TrimPrefix(r.URL.Path, "/")
-		if path == "" {
-			path = "index.html"
-		}
-		if _, err := uiFS.Open(path); err != nil {
-			// Unknown path — serve index.html and let React Router handle it.
-			r = r.Clone(r.Context())
-			r.URL.Path = "/"
-			fserver.ServeHTTP(w, r)
-			return
-		}
-		fserver.ServeHTTP(w, r)
-	})
-}
-````
-
-## File: packages/api/internal/db/share_repo.go
-````go
-// Package db contains the persistence layer for draba.
-package db
-
-import (
-	"fmt"
-	"time"
-
-	"github.com/jmoiron/sqlx"
-
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// ShareRepo is the persistence layer for Share records.
-type ShareRepo struct {
-	db *sqlx.DB
-}
-
-// NewShareRepo returns a ShareRepo backed by db.
-func NewShareRepo(db *sqlx.DB) *ShareRepo {
-	return &ShareRepo{db: db}
-}
-
-// Create inserts a new Share row.
-func (r *ShareRepo) Create(s *models.Share) error {
-	_, err := r.db.NamedExec(`
-		INSERT INTO shares (
-			id, timeline_id, token, name, description, view_type, view_config,
-			password_hash, created_by, created_at, view_count
-		) VALUES (
-			:id, :timeline_id, :token, :name, :description, :view_type, :view_config,
-			:password_hash, :created_by, :created_at, :view_count
-		)
-	`, s)
-	if err != nil {
-		return fmt.Errorf("creating share: %w", err)
-	}
-	return nil
-}
-
-// GetByID fetches a Share by primary key. Returns sql.ErrNoRows (wrapped) when
-// no row matches.
-func (r *ShareRepo) GetByID(id string) (*models.Share, error) {
-	var s models.Share
-	if err := r.db.Get(&s, `SELECT * FROM shares WHERE id = ?`, id); err != nil {
-		return nil, fmt.Errorf("getting share: %w", err)
-	}
-	s.Protected = s.PasswordHash != nil
-	return &s, nil
-}
-
-// GetByToken fetches a Share by its public token. Returns sql.ErrNoRows
-// (wrapped) when no row matches.
-func (r *ShareRepo) GetByToken(token string) (*models.Share, error) {
-	var s models.Share
-	if err := r.db.Get(&s, `SELECT * FROM shares WHERE token = ?`, token); err != nil {
-		return nil, fmt.Errorf("getting share by token: %w", err)
-	}
-	s.Protected = s.PasswordHash != nil
-	return &s, nil
-}
-
-// ListByTimeline returns all non-revoked shares for a timeline, ordered by
-// creation time ascending.
-func (r *ShareRepo) ListByTimeline(timelineID string) ([]*models.Share, error) {
-	out := make([]*models.Share, 0)
-	if err := r.db.Select(&out,
-		`SELECT * FROM shares WHERE timeline_id = ? ORDER BY created_at ASC`,
-		timelineID,
-	); err != nil {
-		return nil, fmt.Errorf("listing shares: %w", err)
-	}
-	for _, s := range out {
-		s.Protected = s.PasswordHash != nil
-	}
-	return out, nil
-}
-
-// Update writes mutable fields for an existing share.
-func (r *ShareRepo) Update(s *models.Share) error {
-	_, err := r.db.NamedExec(`
-		UPDATE shares SET
-			name          = :name,
-			description   = :description,
-			view_type     = :view_type,
-			view_config   = :view_config,
-			password_hash = :password_hash
-		WHERE id = :id
-	`, s)
-	if err != nil {
-		return fmt.Errorf("updating share: %w", err)
-	}
-	return nil
-}
-
-// Delete permanently removes a share row.
-func (r *ShareRepo) Delete(id string) error {
-	if _, err := r.db.Exec(`DELETE FROM shares WHERE id = ?`, id); err != nil {
-		return fmt.Errorf("deleting share: %w", err)
-	}
-	return nil
-}
-
-// RecordView increments view_count and sets last_viewed_at to now for a share.
-func (r *ShareRepo) RecordView(id string) error {
-	_, err := r.db.Exec(
-		`UPDATE shares SET view_count = view_count + 1, last_viewed_at = ? WHERE id = ?`,
-		time.Now().UTC(), id,
-	)
-	if err != nil {
-		return fmt.Errorf("recording share view: %w", err)
-	}
-	return nil
-}
+  -- Product Marketing · Q1 Workload — Lindsay's personal feed.
+  ('sh-pm-q1-ics-lindsay', 'tl-pm-q1', 'share-demo-q1-ics-lindsay', 'ics', 'member', 'tm-pm-lindsay',
+   'Lindsay''s calendar feed', 'calendar', '{}', 'tm-pm-lindsay', datetime('now', '-8 days'), 96);
 ````
 
 ## File: packages/web/src/components/calendar/CalendarGrid.tsx
@@ -40715,6 +40495,137 @@ export default function CalendarGrid({
             onCapCommit={onCapCommit}
           />
         ))}
+      </div>
+    </div>
+  );
+}
+````
+
+## File: packages/web/src/components/calendar/CalendarToolbar.tsx
+````typescript
+/**
+ * CalendarToolbar — sub-toolbar for the Calendar view.
+ *
+ * Provides: Month / Week layout toggle, today / prev / next navigation,
+ * a jump-to-date picker, color-by, an export stub, and Share (opens the
+ * ICS feed modal — CalendarShareModal, not the view-share modal).
+ */
+
+import { ChevronLeft, ChevronRight, Download, Share2 } from 'lucide-react';
+import type { ColorBy } from '@/components/gantt/GanttToolbar';
+
+export type CalendarLayout = 'month' | 'week';
+
+interface Props {
+  layout: CalendarLayout;
+  onLayoutChange: (l: CalendarLayout) => void;
+  /** The month/week currently in view. */
+  anchorDate: Date;
+  onPrev: () => void;
+  onNext: () => void;
+  onToday: () => void;
+  colorBy: ColorBy;
+  onColorByChange: (c: ColorBy) => void;
+  onExport?: () => void;
+  onShare?: () => void;
+}
+
+const btn = 'flex items-center justify-center gap-[5px] h-[26px] px-2 border border-border rounded-md bg-card text-foreground text-xs font-medium cursor-pointer shrink-0 hover:bg-muted transition-colors';
+const iconBtn = 'flex items-center justify-center h-[26px] w-[26px] border border-border rounded-md bg-card text-foreground cursor-pointer shrink-0 hover:bg-muted transition-colors';
+const divider = 'w-px h-4 bg-border shrink-0';
+const label   = 'text-[11px] text-muted-foreground shrink-0';
+const select  = 'h-[26px] px-1.5 border border-border rounded-md bg-card text-foreground text-xs cursor-pointer shrink-0';
+
+function formatAnchorLabel(date: Date, layout: CalendarLayout): string {
+  if (layout === 'month') {
+    return date.toLocaleDateString(undefined, { month: 'long', year: 'numeric', timeZone: 'UTC' });
+  }
+  // Week: show the range "Jun 1 – 7, 2026"
+  const end = new Date(date);
+  end.setUTCDate(date.getUTCDate() + 6);
+  const startStr = date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
+  const endStr   = end.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
+  return `${startStr} – ${endStr}`;
+}
+
+export default function CalendarToolbar({
+  layout,
+  onLayoutChange,
+  anchorDate,
+  onPrev,
+  onNext,
+  onToday,
+  colorBy,
+  onColorByChange,
+  onExport,
+  onShare,
+}: Props) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '0 12px', height: 36, background: 'var(--card)', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
+      {/* Layout toggle */}
+      <div style={{ display: 'flex', border: '1px solid var(--border)', borderRadius: 6, overflow: 'hidden', height: 26 }}>
+        {(['month', 'week'] as CalendarLayout[]).map(l => (
+          <button
+            key={l}
+            onClick={() => onLayoutChange(l)}
+            style={{
+              padding: '0 10px',
+              fontSize: 12,
+              fontWeight: 500,
+              border: 'none',
+              borderRight: l === 'month' ? '1px solid var(--border)' : 'none',
+              background: layout === l ? 'var(--muted)' : 'var(--card)',
+              color: 'var(--foreground)',
+              cursor: 'pointer',
+              height: '100%',
+            }}
+          >
+            {l === 'month' ? 'Month' : 'Week'}
+          </button>
+        ))}
+      </div>
+
+      <div className={divider} />
+
+      {/* Navigation */}
+      <button className={iconBtn} onClick={onPrev} title="Previous">
+        <ChevronLeft size={13} strokeWidth={2} />
+      </button>
+      <button className={btn} onClick={onToday}>Today</button>
+      <button className={iconBtn} onClick={onNext} title="Next">
+        <ChevronRight size={13} strokeWidth={2} />
+      </button>
+
+      {/* Current range label */}
+      <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)', minWidth: 160, textAlign: 'center' }}>
+        {formatAnchorLabel(anchorDate, layout)}
+      </span>
+
+      <div className={divider} />
+
+      {/* Color by */}
+      <span className={label}>Color by</span>
+      <select
+        className={select}
+        value={colorBy}
+        onChange={e => onColorByChange(e.target.value as ColorBy)}
+      >
+        <option value="activity">Activity</option>
+        <option value="member">Member</option>
+        <option value="status">Status</option>
+      </select>
+
+      {/* Export stub + share — pushed to the right edge */}
+      <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
+        <div className={divider} />
+        <button className={btn} onClick={onExport} title="Export (coming soon)">
+          <Download size={12} strokeWidth={1.8} />
+          Export
+        </button>
+        <button className={btn} onClick={onShare} title="Share this calendar">
+          <Share2 size={12} strokeWidth={1.8} />
+          Share
+        </button>
       </div>
     </div>
   );
@@ -43402,129 +43313,349 @@ describe('buildListRows — groupBy: parent', () => {
 })
 ````
 
-## File: packages/web/src/hooks/useShares.ts
+## File: packages/web/src/hooks/useShares.test.ts
 ````typescript
 /**
- * TanStack Query hooks for Share CRUD and the public share projection.
- *
- * Authenticated hooks (useCreateShare, useListShares, useDeleteShare) require
- * an auth token. useShareProjection is public and uses a plain fetch.
+ * useShares hooks — unit tests verifying query keys, mutation endpoints,
+ * cache invalidation, and the public share projection fetch.
+ * Uses a real QueryClient with fetch mocked globally.
  */
 
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import type { components } from '@draba/shared'
-import { createAuthFetch, API_BASE, ApiError } from '@/lib/api'
-import { useAuth } from '@/contexts/AuthContext'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { renderHook, waitFor } from '@testing-library/react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { createElement } from 'react'
+import {
+  useListShares,
+  useCreateShare,
+  useDeleteShare,
+  useRegenerateShare,
+  useShareProjection,
+  useUnlockShare,
+} from './useShares'
 
-type Share = components['schemas']['Share']
-type ShareProjection = components['schemas']['ShareProjection']
+// ── Auth mock ─────────────────────────────────────────────────────────────────
 
-const sharesKey = (teamId: string, timelineId: string) =>
-  ['teams', teamId, 'timelines', timelineId, 'shares'] as const
+vi.mock('@/contexts/AuthContext', () => ({
+  useAuth: () => ({ getAccessToken: async () => 'test-token' }),
+}))
 
-// ── Authenticated hooks ───────────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
-/** Lists all shares for a timeline. */
-export function useListShares(teamId: string, timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  return useQuery({
-    queryKey: sharesKey(teamId, timelineId),
-    queryFn: () =>
-      authFetch<Share[]>(`/teams/${teamId}/timelines/${timelineId}/shares`),
-    enabled: Boolean(teamId) && Boolean(timelineId),
+function makeWrapper() {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  return {
+    qc,
+    wrapper: ({ children }: { children: React.ReactNode }) =>
+      createElement(QueryClientProvider, { client: qc }, children),
+  }
+}
+
+const SHARE_FIXTURE = {
+  id: 'share-1',
+  timelineId: 'tl-1',
+  token: 'abc123',
+  viewType: 'gantt',
+  viewConfig: '{}',
+  createdBy: 'member-1',
+  createdAt: '2026-01-01T00:00:00Z',
+  viewCount: 0,
+}
+
+// ── useListShares ─────────────────────────────────────────────────────────────
+
+describe('useListShares', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn())
   })
-}
 
-interface CreateShareInput {
-  name?: string | null
-  description?: string | null
-  viewType: string
-  viewConfig: string
-  /** When set, the share is locked and requires unlocking to view. */
-  password?: string
-}
+  it('fetches shares from the correct URL', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify([SHARE_FIXTURE]), { status: 200 }),
+    )
 
-/** Creates a share and invalidates the list. */
-export function useCreateShare(teamId: string, timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: (input: CreateShareInput) =>
-      authFetch<Share>(`/timelines/${timelineId}/shares`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(input),
+    const { wrapper } = makeWrapper()
+    const { result } = renderHook(() => useListShares('team-1', 'tl-1'), { wrapper })
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+
+    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+      expect.stringContaining('/teams/team-1/timelines/tl-1/shares'),
+      expect.any(Object),
+    )
+    expect(result.current.data).toHaveLength(1)
+  })
+
+  it('does not fetch when teamId is empty', () => {
+    const { wrapper } = makeWrapper()
+    renderHook(() => useListShares('', 'tl-1'), { wrapper })
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled()
+  })
+
+  it('does not fetch when timelineId is empty', () => {
+    const { wrapper } = makeWrapper()
+    renderHook(() => useListShares('team-1', ''), { wrapper })
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled()
+  })
+})
+
+// ── useCreateShare ────────────────────────────────────────────────────────────
+
+describe('useCreateShare', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn())
+  })
+
+  it('POSTs to the correct URL and invalidates the share list', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify(SHARE_FIXTURE), { status: 201 }),
+    )
+
+    const { wrapper, qc } = makeWrapper()
+    const invalidate = vi.spyOn(qc, 'invalidateQueries')
+
+    const { result } = renderHook(() => useCreateShare('team-1', 'tl-1'), { wrapper })
+    result.current.mutate({ viewType: 'gantt', viewConfig: '{}' })
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+
+    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+      expect.stringContaining('/timelines/tl-1/shares'),
+      expect.objectContaining({ method: 'POST' }),
+    )
+    expect(invalidate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        queryKey: ['teams', 'team-1', 'timelines', 'tl-1', 'shares'],
       }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: sharesKey(teamId, timelineId) }),
+    )
   })
+})
+
+describe('useCreateShare (ICS feeds)', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn())
+  })
+
+  it('sends kind/scope/memberId for a member-scoped ICS feed', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ ...SHARE_FIXTURE, kind: 'ics', scope: 'member', memberId: 'm-1' }), { status: 201 }),
+    )
+
+    const { wrapper } = makeWrapper()
+    const { result } = renderHook(() => useCreateShare('team-1', 'tl-1'), { wrapper })
+    result.current.mutate({ kind: 'ics', scope: 'member', memberId: 'm-1', name: 'Feed' })
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+
+    const opts = vi.mocked(fetch).mock.calls[0][1] as RequestInit
+    expect(JSON.parse(String(opts.body))).toMatchObject({
+      kind: 'ics',
+      scope: 'member',
+      memberId: 'm-1',
+    })
+  })
+})
+
+// ── useRegenerateShare ────────────────────────────────────────────────────────
+
+describe('useRegenerateShare', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn())
+  })
+
+  it('POSTs to the regenerate endpoint and invalidates the share list', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ ...SHARE_FIXTURE, token: 'rotated' }), { status: 200 }),
+    )
+
+    const { wrapper, qc } = makeWrapper()
+    const invalidate = vi.spyOn(qc, 'invalidateQueries')
+
+    const { result } = renderHook(() => useRegenerateShare('team-1', 'tl-1'), { wrapper })
+    result.current.mutate('share-1')
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+
+    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+      expect.stringContaining('/shares/share-1/regenerate'),
+      expect.objectContaining({ method: 'POST' }),
+    )
+    expect(result.current.data?.token).toBe('rotated')
+    expect(invalidate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        queryKey: ['teams', 'team-1', 'timelines', 'tl-1', 'shares'],
+      }),
+    )
+  })
+})
+
+// ── useDeleteShare ────────────────────────────────────────────────────────────
+
+describe('useDeleteShare', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn())
+  })
+
+  it('DELETEs the correct URL and invalidates the share list', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(new Response(null, { status: 204 }))
+
+    const { wrapper, qc } = makeWrapper()
+    const invalidate = vi.spyOn(qc, 'invalidateQueries')
+
+    const { result } = renderHook(() => useDeleteShare('team-1', 'tl-1'), { wrapper })
+    result.current.mutate('share-1')
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+
+    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+      expect.stringContaining('/shares/share-1'),
+      expect.objectContaining({ method: 'DELETE' }),
+    )
+    expect(invalidate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        queryKey: ['teams', 'team-1', 'timelines', 'tl-1', 'shares'],
+      }),
+    )
+  })
+})
+
+// ── useShareProjection ────────────────────────────────────────────────────────
+
+const PROJECTION_FIXTURE = {
+  share: {
+    id: 'share-1',
+    timelineId: 'tl-1',
+    token: 'abc123',
+    viewType: 'gantt',
+    viewConfig: '{}',
+    createdAt: '2026-01-01T00:00:00Z',
+  },
+  teamName: 'Test Team',
+  timeline: { id: 'tl-1', name: 'Q1 Plan', startDate: '2026-01-01', endDate: '2026-12-31' },
+  members: [],
+  statuses: [],
+  tags: [],
+  activities: [],
 }
 
-/** Deletes a share and invalidates the list. */
-export function useDeleteShare(teamId: string, timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: (shareId: string) =>
-      authFetch<void>(`/shares/${shareId}`, { method: 'DELETE' }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: sharesKey(teamId, timelineId) }),
+describe('useShareProjection', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn())
   })
-}
 
-// ── Public hooks (no auth) ────────────────────────────────────────────────────
+  it('fetches the public projection without an auth header', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify(PROJECTION_FIXTURE), { status: 200 }),
+    )
 
-/**
- * Fetches a public share projection. No authentication required.
- *
- * For password-protected shares, pass the `viewToken` obtained from
- * {@link useUnlockShare}; it is sent as a Bearer credential. Without a valid
- * token a locked share responds 401 — surfaced here as an ApiError with code
- * `PASSWORD_REQUIRED` so the viewer can render an unlock prompt.
- */
-export function useShareProjection(token: string | undefined, viewToken?: string | null) {
-  return useQuery({
-    queryKey: ['shares', token, viewToken ?? null] as const,
-    queryFn: async () => {
-      const headers: HeadersInit = viewToken ? { Authorization: `Bearer ${viewToken}` } : {}
-      const res = await fetch(`${API_BASE}/shares/${token}`, { headers })
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}))
-        // A locked share returns { passwordRequired: true } (no error envelope).
-        if (res.status === 401 && body?.passwordRequired) {
-          throw new ApiError(401, 'PASSWORD_REQUIRED', 'password required')
-        }
-        throw new ApiError(res.status, body?.error?.code ?? 'ERROR', body?.error?.message ?? res.statusText)
-      }
-      return res.json() as Promise<ShareProjection>
-    },
-    enabled: Boolean(token),
-    staleTime: 60_000,
-    retry: false,
+    const { wrapper } = makeWrapper()
+    const { result } = renderHook(() => useShareProjection('abc123'), { wrapper })
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+
+    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+      expect.stringContaining('/shares/abc123'),
+      expect.anything(),
+    )
+    // No Authorization header — this is a public endpoint (no view token passed).
+    const callArgs = vi.mocked(fetch).mock.calls[0]
+    const opts = callArgs[1] as RequestInit | undefined
+    const headers = (opts?.headers ?? {}) as Record<string, string>
+    expect(headers.Authorization).toBeUndefined()
+    expect(result.current.data?.teamName).toBe('Test Team')
   })
-}
 
-/**
- * Exchanges a share password for a short-lived view token. No authentication
- * required. The returned token is scoped to this share and expires server-side.
- */
-export function useUnlockShare(token: string | undefined) {
-  return useMutation({
-    mutationFn: async (password: string): Promise<string> => {
-      const res = await fetch(`${API_BASE}/shares/${token}/unlock`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ password }),
-      })
-      const body = await res.json().catch(() => ({}))
-      if (!res.ok) {
-        throw new ApiError(res.status, body?.error?.code ?? 'ERROR', body?.error?.message ?? res.statusText)
-      }
-      return (body as { token: string }).token
-    },
+  it('does not fetch when token is undefined', () => {
+    const { wrapper } = makeWrapper()
+    renderHook(() => useShareProjection(undefined), { wrapper })
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled()
   })
-}
+
+  it('throws an ApiError with the response status on non-200', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({ error: { code: 'NOT_FOUND', message: 'share not found' } }),
+        { status: 404 },
+      ),
+    )
+
+    const { wrapper } = makeWrapper()
+    const { result } = renderHook(() => useShareProjection('bad-token'), { wrapper })
+
+    await waitFor(() => expect(result.current.isError).toBe(true))
+
+    const err = result.current.error as { status?: number; code?: string }
+    expect(err.status).toBe(404)
+    expect(err.code).toBe('NOT_FOUND')
+  })
+
+  it('sends the view token as a Bearer header when provided', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify(PROJECTION_FIXTURE), { status: 200 }),
+    )
+
+    const { wrapper } = makeWrapper()
+    const { result } = renderHook(() => useShareProjection('abc123', 'view-jwt'), { wrapper })
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+
+    const opts = vi.mocked(fetch).mock.calls[0][1] as RequestInit | undefined
+    const headers = (opts?.headers ?? {}) as Record<string, string>
+    expect(headers.Authorization).toBe('Bearer view-jwt')
+  })
+
+  it('maps a 401 { passwordRequired } response to a PASSWORD_REQUIRED error', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ passwordRequired: true }), { status: 401 }),
+    )
+
+    const { wrapper } = makeWrapper()
+    const { result } = renderHook(() => useShareProjection('locked-token'), { wrapper })
+
+    await waitFor(() => expect(result.current.isError).toBe(true))
+
+    const err = result.current.error as { status?: number; code?: string }
+    expect(err.status).toBe(401)
+    expect(err.code).toBe('PASSWORD_REQUIRED')
+  })
+})
+
+// ── useUnlockShare ──────────────────────────────────────────────────────────────
+
+describe('useUnlockShare', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn())
+  })
+
+  it('POSTs the password to the unlock endpoint and returns the view token', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ token: 'view-jwt' }), { status: 200 }),
+    )
+
+    const { wrapper } = makeWrapper()
+    const { result } = renderHook(() => useUnlockShare('abc123'), { wrapper })
+
+    let token = ''
+    await waitFor(async () => { token = await result.current.mutateAsync('hunter2') })
+
+    expect(token).toBe('view-jwt')
+    const [url, opts] = vi.mocked(fetch).mock.calls[0]
+    expect(String(url)).toContain('/shares/abc123/unlock')
+    expect(opts?.method).toBe('POST')
+    expect(JSON.parse(String(opts?.body))).toEqual({ password: 'hunter2' })
+  })
+
+  it('throws an ApiError on a wrong password (401)', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: { code: 'INVALID_PASSWORD', message: 'incorrect password' } }), { status: 401 }),
+    )
+
+    const { wrapper } = makeWrapper()
+    const { result } = renderHook(() => useUnlockShare('abc123'), { wrapper })
+
+    await expect(result.current.mutateAsync('wrong')).rejects.toMatchObject({ status: 401 })
+  })
+})
 ````
 
 ## File: packages/web/src/pages/LoginPage.tsx
@@ -44144,6 +44275,320 @@ export default function RegisterPage() {
 }
 ````
 
+## File: packages/api/internal/api/server.go
+````go
+// Package api hosts the HTTP handlers, routing, and middleware for the
+// draba REST API. Handlers are intentionally thin: they decode requests,
+// delegate to repositories and services, and write responses. Business
+// logic belongs in the domain packages, not here.
+package api
+
+import (
+	"fmt"
+	"io/fs"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/auth"
+	"github.com/I0-1O/draba/packages/api/internal/db"
+	"github.com/I0-1O/draba/packages/api/internal/events"
+	"github.com/I0-1O/draba/packages/api/internal/mailer"
+	"github.com/I0-1O/draba/packages/api/internal/models"
+	"github.com/I0-1O/draba/packages/api/internal/tier"
+	"github.com/I0-1O/draba/packages/api/internal/ws"
+)
+
+// TimelineStore is the persistence interface required by timeline handlers.
+// The concrete implementation is *db.TimelineRepo; tests may substitute a fake.
+type TimelineStore interface {
+	Create(t *models.Timeline) error
+	GetByID(id string) (*models.Timeline, error)
+	GetByShareToken(token string) (*models.Timeline, error)
+	ListByTeam(teamID string, includeArchived bool) ([]*models.Timeline, error)
+	HasAccess(timelineID, teamMemberID string) (bool, error)
+	GrantAccess(timelineID, teamMemberID, role string) error
+	RevokeAccess(timelineID, teamMemberID string) error
+	GetAccessRole(timelineID, teamMemberID string) (string, error)
+	ListAccess(timelineID string) ([]*models.TimelineAccessEntry, error)
+	SetArchived(id string, at *time.Time) error
+	Update(t *models.Timeline) error
+	Delete(id string) error
+}
+
+// Server holds shared dependencies for all HTTP handlers.
+type Server struct {
+	users          *db.UserRepo
+	invites        *db.InviteRepo
+	teams          *db.TeamRepo
+	activities     *db.ActivityRepo
+	timelines      TimelineStore
+	savedFilters   *db.SavedFilterRepo
+	preferences    *db.UserPreferenceRepo
+	apiTokens      *db.APITokenRepo
+	instanceSets   *db.InstanceSettingsRepo
+	passwordTokens *db.PasswordResetTokenRepo
+	statuses       *db.StatusRepo
+	tags           *db.TagRepo
+	shares         *db.ShareRepo
+	shareCache     *shareCache
+	icsCache       *icsFeedCache
+	unlockLimiter  *rateLimiter
+	mailer         *mailer.Mailer
+	tokens         *auth.TokenService
+	tier           tier.Tier
+	bus            *events.Bus
+	hub            *ws.Hub
+	uiFS           fs.FS
+}
+
+// NewServer constructs a Server with its required dependencies. It does not
+// touch the network; call Routes to obtain the http.Handler to serve.
+func NewServer(
+	users *db.UserRepo,
+	invites *db.InviteRepo,
+	teams *db.TeamRepo,
+	activitiesRepo *db.ActivityRepo,
+	timelinesRepo TimelineStore,
+	savedFiltersRepo *db.SavedFilterRepo,
+	preferencesRepo *db.UserPreferenceRepo,
+	apiTokensRepo *db.APITokenRepo,
+	instanceSetsRepo *db.InstanceSettingsRepo,
+	passwordTokensRepo *db.PasswordResetTokenRepo,
+	statusesRepo *db.StatusRepo,
+	tagsRepo *db.TagRepo,
+	sharesRepo *db.ShareRepo,
+	m *mailer.Mailer,
+	tokens *auth.TokenService,
+	t tier.Tier,
+	bus *events.Bus,
+	hub *ws.Hub,
+) *Server {
+	// Both public-share caches share the DRABA_SHARE_CACHE_TTL setting.
+	sc := newShareCache()
+	return &Server{
+		users:          users,
+		invites:        invites,
+		teams:          teams,
+		activities:     activitiesRepo,
+		timelines:      timelinesRepo,
+		savedFilters:   savedFiltersRepo,
+		preferences:    preferencesRepo,
+		apiTokens:      apiTokensRepo,
+		instanceSets:   instanceSetsRepo,
+		passwordTokens: passwordTokensRepo,
+		statuses:       statusesRepo,
+		tags:           tagsRepo,
+		shares:         sharesRepo,
+		shareCache:     sc,
+		icsCache:       newICSFeedCache(sc.ttl),
+		unlockLimiter:  newRateLimiter(unlockMaxAttempts, time.Hour),
+		mailer:         m,
+		tokens:         tokens,
+		tier:           t,
+		bus:            bus,
+		hub:            hub,
+	}
+}
+
+// WithUI registers an embedded React SPA to be served at GET /. The FS must
+// be rooted at the build output directory (i.e. contain index.html directly).
+// When called, all unmatched GET paths fall back to index.html so React Router
+// handles client-side navigation. Safe to skip in dev (no-op when not called).
+func (s *Server) WithUI(uiFS fs.FS) *Server {
+	s.uiFS = uiFS
+	return s
+}
+
+// Routes returns the fully-wired HTTP handler for the API, including all
+// core routes plus any routes added by registered tier modules.
+func (s *Server) Routes() http.Handler {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("GET /setup/status", s.handleSetupStatus)
+	mux.HandleFunc("GET /version", s.handleVersion)
+
+	mux.HandleFunc("POST /auth/register", s.handleRegister)
+	mux.HandleFunc("POST /auth/login", s.handleLogin)
+	mux.HandleFunc("POST /auth/refresh", s.handleRefresh)
+	mux.HandleFunc("GET /auth/me", chain(s.handleMe, s.authMiddleware))
+	mux.HandleFunc("POST /auth/forgot-password", s.handleForgotPassword)
+	mux.HandleFunc("POST /auth/reset-password", s.handleResetPassword)
+
+	mux.HandleFunc("GET /users/me/preferences", chain(s.handleGetPreferences, s.authMiddleware))
+	mux.HandleFunc("PUT /users/me/preferences", chain(s.handleUpsertPreference, s.authMiddleware))
+	mux.HandleFunc("GET /users/me/stats", chain(s.handleGetMyStats, s.authMiddleware))
+	mux.HandleFunc("PATCH /users/me", chain(s.handleUpdateProfile, s.authMiddleware))
+	mux.HandleFunc("PUT /users/me/password", chain(s.handleChangePassword, s.authMiddleware))
+
+	mux.HandleFunc("GET /admin/smtp", chain(s.handleGetSMTP, s.authMiddleware))
+	mux.HandleFunc("PUT /admin/smtp", chain(s.handlePutSMTP, s.authMiddleware))
+	mux.HandleFunc("POST /admin/smtp/test", chain(s.handleTestSMTP, s.authMiddleware))
+	mux.HandleFunc("DELETE /admin/smtp", chain(s.handleDeleteSMTP, s.authMiddleware))
+	mux.HandleFunc("GET /admin/settings", chain(s.handleGetAdminSettings, s.authMiddleware))
+	mux.HandleFunc("PATCH /admin/settings", chain(s.handlePatchAdminSettings, s.authMiddleware))
+	mux.HandleFunc("GET /admin/users", chain(s.handleListAdminUsers, s.authMiddleware))
+
+	// Public — no auth required; used by the login page and shared views.
+	mux.HandleFunc("GET /settings/branding", s.handleGetPublicBranding)
+
+	mux.HandleFunc("POST /tokens", chain(s.handleCreateAPIToken, s.authMiddleware))
+	mux.HandleFunc("GET /tokens", chain(s.handleListAPITokens, s.authMiddleware))
+	mux.HandleFunc("DELETE /tokens/{id}", chain(s.handleDeleteAPIToken, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams", chain(s.handleListTeams, s.authMiddleware))
+	mux.HandleFunc("POST /teams", chain(s.handleCreateTeam, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}", chain(s.handleGetTeam, s.authMiddleware))
+	mux.HandleFunc("PATCH /teams/{id}", chain(s.handleUpdateTeam, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/archive", chain(s.handleArchiveTeam, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/unarchive", chain(s.handleUnarchiveTeam, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/invites", chain(s.handleCreateInvite, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/invites", chain(s.handleListInvites, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/invites/{inviteId}", chain(s.handleDeleteInvite, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/invite-link", chain(s.handleCreateInviteLink, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/invite-link/reset", chain(s.handleResetInviteLink, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/invite-link", chain(s.handleGetInviteLink, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/invite-link", chain(s.handleDeleteInviteLink, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/members", chain(s.handleListMembers, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/members/{memberId}", chain(s.handleGetMember, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/members/{memberId}/stats", chain(s.handleGetMemberStats, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/members", chain(s.handleAddMember, s.authMiddleware))
+	mux.HandleFunc("PATCH /teams/{id}/members/{memberId}", chain(s.handleUpdateMember, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/members/{memberId}", chain(s.handleDeleteMember, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/members/{memberId}/archive", chain(s.handleArchiveMember, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/members/{memberId}/unarchive", chain(s.handleUnarchiveMember, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/participants", chain(s.handleCreateParticipant, s.authMiddleware))
+	mux.HandleFunc("GET /users/search", chain(s.handleSearchUsers, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/promote", chain(s.handlePromoteUser, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/archive", chain(s.handleArchiveUser, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/unarchive", chain(s.handleUnarchiveUser, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/revoke", chain(s.handleRevokeUser, s.authMiddleware))
+	mux.HandleFunc("DELETE /users/{id}", chain(s.handleDeleteUser, s.authMiddleware))
+	// Activity routes use the team-scoped prefix (GET /teams/{id}/timelines/{timelineId}/...)
+	// to avoid a Go 1.22 mux conflict with GET /timelines/share/{token}: both are
+	// 3-segment GET paths and neither is more specific when the third segment differs.
+	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/activities", chain(s.handleCreateActivity, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/activities", chain(s.handleListActivities, s.authMiddleware))
+	mux.HandleFunc("PATCH /activities/{id}", chain(s.handleUpdateActivity, s.authMiddleware))
+	mux.HandleFunc("DELETE /activities/{id}", chain(s.handleDeleteActivity, s.authMiddleware))
+	mux.HandleFunc("POST /activities/{id}/archive", chain(s.handleArchiveActivity, s.authMiddleware))
+	mux.HandleFunc("POST /activities/{id}/unarchive", chain(s.handleUnarchiveActivity, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/tags", chain(s.handleListTags, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/tags", chain(s.handleCreateTag, s.authMiddleware))
+	mux.HandleFunc("PATCH /tags/{id}", chain(s.handleUpdateTag, s.authMiddleware))
+	mux.HandleFunc("DELETE /tags/{id}", chain(s.handleDeleteTag, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/saved_filters/all", chain(s.handleListAllTeamSavedFilters, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/saved_filters", chain(s.handleListSavedFilters, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/saved_filters", chain(s.handleCreateSavedFilter, s.authMiddleware))
+	mux.HandleFunc("PATCH /saved_filters/{id}", chain(s.handleUpdateSavedFilter, s.authMiddleware))
+	mux.HandleFunc("DELETE /saved_filters/{id}", chain(s.handleDeleteSavedFilter, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/status-templates", chain(s.handleListStatusTemplates, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/status-templates", chain(s.handleCreateStatusTemplate, s.authMiddleware))
+	mux.HandleFunc("PATCH /status-templates/{id}", chain(s.handleUpdateStatusTemplate, s.authMiddleware))
+	mux.HandleFunc("DELETE /status-templates/{id}", chain(s.handleDeleteStatusTemplate, s.authMiddleware))
+	mux.HandleFunc("POST /status-templates/{id}/items", chain(s.handleCreateTemplateItem, s.authMiddleware))
+	mux.HandleFunc("PATCH /status-template-items/{id}", chain(s.handleUpdateTemplateItem, s.authMiddleware))
+	mux.HandleFunc("DELETE /status-template-items/{id}", chain(s.handleDeleteTemplateItem, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/timelines", chain(s.handleListTimelines, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/timelines", chain(s.handleCreateTimeline, s.authMiddleware))
+	// GET /timelines/share/{token} must be registered before GET /timelines/{id} so
+	// the more-specific literal "share" segment takes precedence.
+	mux.HandleFunc("GET /timelines/share/{token}", s.handleGetTimelineByShareToken)
+	mux.HandleFunc("GET /timelines/{id}", chain(s.handleGetTimeline, s.authMiddleware))
+	// Timeline statuses are placed under /teams/{id}/timelines/{timelineId}/statuses
+	// rather than /timelines/{id}/statuses to avoid a Go 1.22 mux pattern conflict
+	// with GET /timelines/share/{token} (both are 3-segment paths and conflict on
+	// paths like /timelines/share/statuses).
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleListTimelineStatuses, s.authMiddleware))
+	mux.HandleFunc("POST /timelines/{id}/archive", chain(s.handleArchiveTimeline, s.authMiddleware))
+	mux.HandleFunc("POST /timelines/{id}/unarchive", chain(s.handleUnarchiveTimeline, s.authMiddleware))
+
+	mux.HandleFunc("PATCH /timelines/{id}", chain(s.handleUpdateTimeline, s.authMiddleware))
+	mux.HandleFunc("DELETE /timelines/{id}", chain(s.handleDeleteTimeline, s.authMiddleware))
+	// Access list routes use the team-scoped prefix to avoid a Go 1.22 mux
+	// conflict with GET /timelines/share/{token} on 3-segment GET paths.
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/access", chain(s.handleListTimelineAccess, s.authMiddleware))
+	mux.HandleFunc("PUT /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleGrantTimelineAccess, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleRevokeTimelineAccess, s.authMiddleware))
+	// Timeline status CRUD — POST shares the team-scoped prefix with GET statuses.
+	// PATCH and DELETE use a flat /statuses/{id} prefix (2 segments, no conflict).
+	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleCreateTimelineStatus, s.authMiddleware))
+	mux.HandleFunc("PATCH /statuses/{id}", chain(s.handleUpdateStatus, s.authMiddleware))
+	mux.HandleFunc("DELETE /statuses/{id}", chain(s.handleDeleteStatus, s.authMiddleware))
+
+	// Share routes.
+	// GET /shares/{token} is public — no auth. The token is the credential.
+	// POST /timelines/{id}/shares uses the same /timelines/{id}/... prefix
+	// as archive/unarchive so it avoids the Go 1.22 mux pattern conflict with
+	// GET /timelines/share/{token} (only GET-method paths conflict).
+	// GET /teams/{id}/timelines/{timelineId}/shares uses the team-scoped prefix
+	// to avoid the GET conflict described above.
+	mux.HandleFunc("GET /shares/{token}", s.handleGetShareProjection)
+	mux.HandleFunc("POST /shares/{token}/unlock", s.handleUnlockShare)
+	mux.HandleFunc("POST /timelines/{id}/shares", chain(s.handleCreateShare, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/shares", chain(s.handleListShares, s.authMiddleware))
+	mux.HandleFunc("PATCH /shares/{id}", chain(s.handleUpdateShare, s.authMiddleware))
+	mux.HandleFunc("DELETE /shares/{id}", chain(s.handleDeleteShare, s.authMiddleware))
+	// Token rotation — the revocation story for ICS feeds (no password gate).
+	// GET /shares/{token}.ics is served inside handleGetShareProjection: the
+	// {token} wildcard spans the whole segment, so the .ics suffix arrives in
+	// the path value and is dispatched there.
+	mux.HandleFunc("POST /shares/{id}/regenerate", chain(s.handleRegenerateShare, s.authMiddleware))
+
+	// GET /ws is intentionally outside authMiddleware — ServeWS validates the
+	// JWT itself before upgrading, because WebSocket clients can't set headers.
+	mux.HandleFunc("GET /ws", s.hub.ServeWS)
+
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	})
+
+	if s.uiFS != nil {
+		mux.Handle("GET /", spaHandler(s.uiFS))
+	}
+
+	ctx := &tier.ModuleContext{Mux: mux, Tier: s.tier}
+	for _, m := range tier.Registered() {
+		if err := m.Register(ctx); err != nil {
+			// Module registration is a startup invariant — a failure here is a programming error.
+			panic(fmt.Sprintf("tier module %q failed to register: %v", m.Name(), err))
+		}
+	}
+
+	return requestLogger(mux)
+}
+
+// chain applies a single middleware to a handler function.
+func chain(h http.HandlerFunc, m func(http.Handler) http.Handler) http.HandlerFunc {
+	return m(h).ServeHTTP
+}
+
+// spaHandler serves the embedded React SPA. Known static assets are served
+// directly; any unrecognised path falls back to index.html so React Router
+// handles client-side navigation.
+func spaHandler(uiFS fs.FS) http.Handler {
+	fserver := http.FileServer(http.FS(uiFS))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := strings.TrimPrefix(r.URL.Path, "/")
+		if path == "" {
+			path = "index.html"
+		}
+		if _, err := uiFS.Open(path); err != nil {
+			// Unknown path — serve index.html and let React Router handle it.
+			r = r.Clone(r.Context())
+			r.URL.Path = "/"
+			fserver.ServeHTTP(w, r)
+			return
+		}
+		fserver.ServeHTTP(w, r)
+	})
+}
+````
+
 ## File: packages/api/internal/db/activity_repo.go
 ````go
 package db
@@ -44450,6 +44895,132 @@ func (r *ActivityRepo) ListByTimeline(timelineID string, from, to *time.Time, in
 	}
 
 	return acts, nil
+}
+````
+
+## File: packages/api/internal/db/share_repo.go
+````go
+// Package db contains the persistence layer for draba.
+package db
+
+import (
+	"fmt"
+	"time"
+
+	"github.com/jmoiron/sqlx"
+
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// ShareRepo is the persistence layer for Share records.
+type ShareRepo struct {
+	db *sqlx.DB
+}
+
+// NewShareRepo returns a ShareRepo backed by db.
+func NewShareRepo(db *sqlx.DB) *ShareRepo {
+	return &ShareRepo{db: db}
+}
+
+// Create inserts a new Share row.
+func (r *ShareRepo) Create(s *models.Share) error {
+	_, err := r.db.NamedExec(`
+		INSERT INTO shares (
+			id, timeline_id, token, kind, scope, member_id, name, description,
+			view_type, view_config, password_hash, created_by, created_at, view_count
+		) VALUES (
+			:id, :timeline_id, :token, :kind, :scope, :member_id, :name, :description,
+			:view_type, :view_config, :password_hash, :created_by, :created_at, :view_count
+		)
+	`, s)
+	if err != nil {
+		return fmt.Errorf("creating share: %w", err)
+	}
+	return nil
+}
+
+// GetByID fetches a Share by primary key. Returns sql.ErrNoRows (wrapped) when
+// no row matches.
+func (r *ShareRepo) GetByID(id string) (*models.Share, error) {
+	var s models.Share
+	if err := r.db.Get(&s, `SELECT * FROM shares WHERE id = ?`, id); err != nil {
+		return nil, fmt.Errorf("getting share: %w", err)
+	}
+	s.Protected = s.PasswordHash != nil
+	return &s, nil
+}
+
+// GetByToken fetches a Share by its public token. Returns sql.ErrNoRows
+// (wrapped) when no row matches.
+func (r *ShareRepo) GetByToken(token string) (*models.Share, error) {
+	var s models.Share
+	if err := r.db.Get(&s, `SELECT * FROM shares WHERE token = ?`, token); err != nil {
+		return nil, fmt.Errorf("getting share by token: %w", err)
+	}
+	s.Protected = s.PasswordHash != nil
+	return &s, nil
+}
+
+// ListByTimeline returns all non-revoked shares for a timeline, ordered by
+// creation time ascending.
+func (r *ShareRepo) ListByTimeline(timelineID string) ([]*models.Share, error) {
+	out := make([]*models.Share, 0)
+	if err := r.db.Select(&out,
+		`SELECT * FROM shares WHERE timeline_id = ? ORDER BY created_at ASC`,
+		timelineID,
+	); err != nil {
+		return nil, fmt.Errorf("listing shares: %w", err)
+	}
+	for _, s := range out {
+		s.Protected = s.PasswordHash != nil
+	}
+	return out, nil
+}
+
+// Update writes mutable fields for an existing share.
+func (r *ShareRepo) Update(s *models.Share) error {
+	_, err := r.db.NamedExec(`
+		UPDATE shares SET
+			name          = :name,
+			description   = :description,
+			view_type     = :view_type,
+			view_config   = :view_config,
+			password_hash = :password_hash
+		WHERE id = :id
+	`, s)
+	if err != nil {
+		return fmt.Errorf("updating share: %w", err)
+	}
+	return nil
+}
+
+// RotateToken replaces a share's token, immediately invalidating the old URL.
+// This is the revocation story for ICS feeds, which have no password gate.
+func (r *ShareRepo) RotateToken(id, newToken string) error {
+	if _, err := r.db.Exec(`UPDATE shares SET token = ? WHERE id = ?`, newToken, id); err != nil {
+		return fmt.Errorf("rotating share token: %w", err)
+	}
+	return nil
+}
+
+// Delete permanently removes a share row.
+func (r *ShareRepo) Delete(id string) error {
+	if _, err := r.db.Exec(`DELETE FROM shares WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("deleting share: %w", err)
+	}
+	return nil
+}
+
+// RecordView increments view_count and sets last_viewed_at to now for a share.
+func (r *ShareRepo) RecordView(id string) error {
+	_, err := r.db.Exec(
+		`UPDATE shares SET view_count = view_count + 1, last_viewed_at = ? WHERE id = ?`,
+		time.Now().UTC(), id,
+	)
+	if err != nil {
+		return fmt.Errorf("recording share view: %w", err)
+	}
+	return nil
 }
 ````
 
@@ -47090,6 +47661,152 @@ export default function ListToolbar({
 }
 ````
 
+## File: packages/web/src/hooks/useShares.ts
+````typescript
+/**
+ * TanStack Query hooks for Share CRUD and the public share projection.
+ *
+ * Authenticated hooks (useCreateShare, useListShares, useDeleteShare) require
+ * an auth token. useShareProjection is public and uses a plain fetch.
+ */
+
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import type { components } from '@draba/shared'
+import { createAuthFetch, API_BASE, ApiError } from '@/lib/api'
+import { useAuth } from '@/contexts/AuthContext'
+
+type Share = components['schemas']['Share']
+type ShareProjection = components['schemas']['ShareProjection']
+
+const sharesKey = (teamId: string, timelineId: string) =>
+  ['teams', teamId, 'timelines', timelineId, 'shares'] as const
+
+// ── Authenticated hooks ───────────────────────────────────────────────────────
+
+/** Lists all shares for a timeline. */
+export function useListShares(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  return useQuery({
+    queryKey: sharesKey(teamId, timelineId),
+    queryFn: () =>
+      authFetch<Share[]>(`/teams/${teamId}/timelines/${timelineId}/shares`),
+    enabled: Boolean(teamId) && Boolean(timelineId),
+  })
+}
+
+interface CreateShareInput {
+  /** "view" (default) or "ics" — ICS shares are live calendar feeds. */
+  kind?: 'view' | 'ics'
+  /** ICS shares only: "timeline" (every activity) or "member" (one member's). */
+  scope?: 'timeline' | 'member'
+  /** ICS shares with scope "member" only. */
+  memberId?: string
+  name?: string | null
+  description?: string | null
+  viewType?: string
+  viewConfig?: string
+  /** When set, the share is locked and requires unlocking to view. View shares only. */
+  password?: string
+}
+
+/** Creates a share and invalidates the list. */
+export function useCreateShare(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (input: CreateShareInput) =>
+      authFetch<Share>(`/timelines/${timelineId}/shares`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(input),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: sharesKey(teamId, timelineId) }),
+  })
+}
+
+/**
+ * Rotates a share's token, immediately invalidating the old URL — the
+ * revocation story for ICS feeds, which have no password gate.
+ */
+export function useRegenerateShare(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (shareId: string) =>
+      authFetch<Share>(`/shares/${shareId}/regenerate`, { method: 'POST' }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: sharesKey(teamId, timelineId) }),
+  })
+}
+
+/** Deletes a share and invalidates the list. */
+export function useDeleteShare(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (shareId: string) =>
+      authFetch<void>(`/shares/${shareId}`, { method: 'DELETE' }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: sharesKey(teamId, timelineId) }),
+  })
+}
+
+// ── Public hooks (no auth) ────────────────────────────────────────────────────
+
+/**
+ * Fetches a public share projection. No authentication required.
+ *
+ * For password-protected shares, pass the `viewToken` obtained from
+ * {@link useUnlockShare}; it is sent as a Bearer credential. Without a valid
+ * token a locked share responds 401 — surfaced here as an ApiError with code
+ * `PASSWORD_REQUIRED` so the viewer can render an unlock prompt.
+ */
+export function useShareProjection(token: string | undefined, viewToken?: string | null) {
+  return useQuery({
+    queryKey: ['shares', token, viewToken ?? null] as const,
+    queryFn: async () => {
+      const headers: HeadersInit = viewToken ? { Authorization: `Bearer ${viewToken}` } : {}
+      const res = await fetch(`${API_BASE}/shares/${token}`, { headers })
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}))
+        // A locked share returns { passwordRequired: true } (no error envelope).
+        if (res.status === 401 && body?.passwordRequired) {
+          throw new ApiError(401, 'PASSWORD_REQUIRED', 'password required')
+        }
+        throw new ApiError(res.status, body?.error?.code ?? 'ERROR', body?.error?.message ?? res.statusText)
+      }
+      return res.json() as Promise<ShareProjection>
+    },
+    enabled: Boolean(token),
+    staleTime: 60_000,
+    retry: false,
+  })
+}
+
+/**
+ * Exchanges a share password for a short-lived view token. No authentication
+ * required. The returned token is scoped to this share and expires server-side.
+ */
+export function useUnlockShare(token: string | undefined) {
+  return useMutation({
+    mutationFn: async (password: string): Promise<string> => {
+      const res = await fetch(`${API_BASE}/shares/${token}/unlock`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password }),
+      })
+      const body = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        throw new ApiError(res.status, body?.error?.code ?? 'ERROR', body?.error?.message ?? res.statusText)
+      }
+      return (body as { token: string }).token
+    },
+  })
+}
+````
+
 ## File: packages/web/src/hooks/useTeamActivities.ts
 ````typescript
 /**
@@ -48121,15 +48838,29 @@ type AdminUserRow struct {
 	TeamCount int `db:"team_count" json:"teamCount"`
 }
 
-// Share is a public read-only link to a specific view of a timeline. One
-// timeline may have many shares, each freezing a different view configuration.
-// Token is an unguessable URL-safe string; PasswordHash is set only when the
-// share requires a password (Phase 13.3); ExpiresAt and RevokedAt support
-// lifecycle management (Phase 13.4).
+// Valid Share.Kind and Share.Scope values.
+const (
+	ShareKindView      = "view"
+	ShareKindICS       = "ics"
+	ShareScopeTimeline = "timeline"
+	ShareScopeMember   = "member"
+)
+
+// Share is a public read-only link scoped to one timeline. Kind discriminates
+// the two flavors (migration 022): "view" shares freeze one view configuration
+// and are served as a web snapshot at /s/{token}; "ics" shares are live
+// subscribable calendar feeds served at GET /shares/{token}.ics. ICS shares
+// carry Scope ("timeline" | "member") + MemberID and never a view config,
+// filter, or password — the unguessable token is their only secret.
+// PasswordHash is set only when a view share requires a password (Phase 13.2);
+// ExpiresAt and RevokedAt support lifecycle management (Phase 13.4/13.5).
 type Share struct {
 	ID           string     `db:"id"             json:"id"`
 	TimelineID   string     `db:"timeline_id"    json:"timelineId"`
 	Token        string     `db:"token"          json:"token"`
+	Kind         string     `db:"kind"           json:"kind"`
+	Scope        *string    `db:"scope"          json:"scope,omitempty"`
+	MemberID     *string    `db:"member_id"      json:"memberId,omitempty"`
 	Name         *string    `db:"name"           json:"name,omitempty"`
 	Description  *string    `db:"description"    json:"description,omitempty"`
 	ViewType     string     `db:"view_type"      json:"viewType"`
@@ -48300,6 +49031,644 @@ type Invite struct {
 	ExpiresAt  time.Time  `db:"expires_at"  json:"expiresAt"`
 	AcceptedAt *time.Time `db:"accepted_at" json:"acceptedAt,omitempty"`
 	CreatedAt  time.Time  `db:"created_at"  json:"createdAt"`
+}
+````
+
+## File: packages/web/src/components/gantt/GanttView.tsx
+````typescript
+/**
+ * GanttView — data container for the Gantt grid.
+ *
+ * Fetches events and members, applies grouping and sorting, builds the
+ * GanttRow list, and passes everything to GanttGrid. The component owns
+ * no layout state — granularity, groupBy, and sortBy come from DashboardPage.
+ *
+ * Also owns the find-match computation: it reads the debounced query from
+ * FindContext, matches against the fetched API events, and registers the
+ * ordered match list back into FindContext so GanttGrid can apply visual
+ * treatment and auto-scroll.
+ */
+
+import { useMemo, useRef, useState, useLayoutEffect, useEffect, useCallback } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
+import GanttGrid, { type GanttActivity, type GanttRow, type FindState } from './GanttGrid';
+import { useTimelineActivities, useTeamMembers, useUpdateActivity } from '@/hooks/useTeamActivities';
+import type { components } from '@draba/shared';
+import { type Member, ACTIVITY_COLORS, MEMBER_COLORS } from '@/types';
+import { resolveColorHex } from '@/components/identity/identity-constants';
+import type { GroupBy, SortBy, TimeGranularity, ColorBy } from './GanttToolbar';
+import {
+  generateColumns,
+  positionInColumns,
+  todayColumnPosition,
+  autoFitGranularity,
+  type ColumnDef,
+} from './granularity';
+import { matchEvents } from '@/lib/findMatcher';
+import { memberComboKey, orderedComboIds, memberComboLabel, comboSortComparator, UNASSIGNED_KEY, SEP } from '@/lib/memberGroups';
+import { useFind } from '@/contexts/FindContext';
+import { useFilter } from '@/contexts/FilterContext';
+import { usePreferenceMap } from '@/hooks/usePreferences';
+import { applyActiveFilter } from '@/lib/presetFilters';
+
+type ApiActivity = components['schemas']['Activity'];
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
+type Status = components['schemas']['Status'];
+type SavedFilter = components['schemas']['SavedFilter'];
+type Tag = components['schemas']['Tag'];
+
+interface Props {
+  teamId: string;
+  /** Active timeline ID — activities are fetched scoped to this timeline. */
+  timelineId: string;
+  /** ISO date "YYYY-MM-DD" — defaults to 14 days before today. */
+  startDate?: string;
+  /** ISO date "YYYY-MM-DD" — defaults to 75 days after today. */
+  endDate?: string;
+  groupBy: GroupBy;
+  sortBy: SortBy;
+  granularity: TimeGranularity | 'auto';
+  colorBy: ColorBy;
+  /**
+   * Timeline statuses — used to derive closedStatusIds and resolve status names
+   * in the filter engine. Replaces the old closedStatusIds prop.
+   */
+  timelineStatuses?: Status[];
+  /** Saved filters for the active team — evaluated by the filter engine. */
+  savedFilters?: SavedFilter[];
+  /** Team tags — used to resolve tag names in the filter engine. */
+  tags?: Tag[];
+  selectedActivityId?: string | null;
+  onSelectActivity?: (id: string | null) => void;
+  /** Called when the user drags on an empty lane to create an activity. */
+  onLaneDrag?: (startDate: Date, endDate: Date, memberId: string | null) => void;
+  /** Called during a bar drag with live snapped dates — for sidebar preview. */
+  onBarDragProgress?: (activityId: string, newStart: Date, newEnd: Date) => void;
+  /** Called when a bar drag completes (before the PATCH fires). */
+  onBarDragEnd?: () => void;
+  /** Called once members are loaded, so the parent can access them for panels. */
+  onMembersLoaded?: (members: Member[]) => void;
+  /** Called when an activity is selected — passes the full API activity object. */
+  onSelectApiActivity?: (activity: ApiActivity | null) => void;
+  /** Label column width in px — passed through to GanttGrid for controlled persistence. */
+  labelColW?: number;
+  /** Called when the user drags the label column resize handle. */
+  onLabelColWChange?: (w: number) => void;
+  /**
+   * When false, all click and drag interactions are suppressed — bars, lane
+   * drags, and group toggles are inert. Used by the public share viewer.
+   * Default: true.
+   */
+  interactive?: boolean;
+}
+
+
+// ── Date helpers ────────────────────────────────────────────────────────────
+
+function toDateOnly(datetime: string): string {
+  return datetime.slice(0, 10);
+}
+
+function todayMidnight(): Date {
+  const d = new Date();
+  d.setUTCHours(0, 0, 0, 0); // UTC midnight so it aligns with UTC-stored activity dates
+  return d;
+}
+
+function initialsFrom(name: string): string {
+  return name
+    .split(/\s+/)
+    .map(w => w[0] ?? '')
+    .slice(0, 2)
+    .join('')
+    .toUpperCase();
+}
+
+// ── Type mapping ─────────────────────────────────────────────────────────────
+
+function toMember(m: TeamMemberWithUser, index: number): Member {
+  const name = m.displayName || m.email || 'Unknown';
+  const fallbackHex = MEMBER_COLORS[index % MEMBER_COLORS.length];
+  return {
+    id: m.id,
+    name,
+    initials: initialsFrom(name),
+    color: resolveColorHex(m.color) || fallbackHex,
+  };
+}
+
+/** Intermediate activity type that carries API fields alongside computed view-state. Exported for use by the public share viewer. */
+export interface RichActivity extends GanttActivity {
+  startAtMs: number;
+  endAtMs: number;
+  parentActivityId: string | null;
+  primaryMemberId: string | null;
+  assignedMemberIds: string[];
+  statusId: string | null;
+}
+
+function toRichActivity(
+  ev: ApiActivity,
+  index: number,
+  memberById: Record<string, Member>,
+  viewStart: Date,
+  viewEnd: Date,
+  columns: ColumnDef[],
+  colorBy: ColorBy,
+  statusColorById: Map<string, string>,
+): RichActivity | null {
+  const evStart = new Date(toDateOnly(ev.startAt));
+  const evEnd = new Date(toDateOnly(ev.endAt));
+
+  if (evEnd < viewStart || evStart > viewEnd) return null;
+
+  const clampedStart = evStart < viewStart ? viewStart : evStart;
+  const clampedEnd = evEnd > viewEnd ? viewEnd : evEnd;
+
+  const { startCol, span } = positionInColumns(clampedStart, clampedEnd, columns);
+  const assignedIds = ev.assignedMemberIds ?? [];
+  const members = assignedIds.map(id => memberById[id]).filter((m): m is Member => Boolean(m));
+
+  const color =
+    colorBy === 'member' ? (members[0]?.color ?? ev.color ?? ACTIVITY_COLORS[index % ACTIVITY_COLORS.length]) :
+    colorBy === 'status' ? (statusColorById.get((ev as ApiActivity & { statusId?: string | null }).statusId ?? '') ?? '#6b7280') :
+    /* activity */ (ev.color ?? ACTIVITY_COLORS[index % ACTIVITY_COLORS.length]);
+
+  return {
+    id: ev.id,
+    title: ev.title,
+    startCol,
+    span,
+    color,
+    icon: ev.icon ?? undefined,
+    members,
+    isChild: Boolean(ev.parentActivityId),
+    startAtMs: new Date(ev.startAt).getTime(),
+    endAtMs: new Date(ev.endAt).getTime(),
+    parentActivityId: ev.parentActivityId ?? null,
+    primaryMemberId: members[0]?.id ?? null,
+    assignedMemberIds: assignedIds,
+    statusId: (ev as ApiActivity & { statusId?: string | null }).statusId ?? null,
+  };
+}
+
+// ── Sorting ──────────────────────────────────────────────────────────────────
+
+function sortActivities(activities: RichActivity[], sortBy: SortBy): RichActivity[] {
+  return [...activities].sort((a, b) => {
+    if (sortBy === 'title') return a.title.localeCompare(b.title);
+    if (sortBy === 'endDate') return a.endAtMs - b.endAtMs;
+    return a.startAtMs - b.startAtMs;
+  });
+}
+
+// ── Grouping ─────────────────────────────────────────────────────────────────
+
+/**
+ * Builds the flat GanttRow list from positioned activities, applying grouping,
+ * sorting, parent→child nesting (arbitrary depth), and collapse state.
+ * Exported for unit testing of the tree/collapse logic.
+ */
+export function buildRows(
+  activities: RichActivity[],
+  members: Member[],
+  groupBy: GroupBy,
+  sortBy: SortBy,
+  collapsedParents: Set<string>,
+  collapsedGroups: Set<string>,
+  statuses?: Status[],
+): GanttRow[] {
+  const sorted = sortActivities(activities, sortBy);
+
+  if (groupBy === 'none') {
+    // Flat list — no parent nesting, so children are not indented.
+    return sorted.map(ev => ({ kind: 'activity' as const, event: { ...ev, isChild: false, depth: 0 } }));
+  }
+
+  if (groupBy === 'member') {
+    const memberOrder = members.map(m => m.id);
+    const nameById = new Map(members.map(m => [m.id, m.name]));
+    // Colors here are already resolved hex (from the Member type / toMember conversion).
+    // ListView applies resolveColorHex on the raw API color string instead — both
+    // produce hex, but the resolution step happens at different layers.
+    const colorById = new Map(members.map(m => [m.id, m.color]));
+
+    const buckets = new Map<string, RichActivity[]>();
+    for (const ev of sorted) {
+      const key = memberComboKey(ev.assignedMemberIds);
+      const list = buckets.get(key) ?? [];
+      list.push(ev);
+      buckets.set(key, list);
+    }
+
+    const comparator = comboSortComparator(memberOrder);
+    const sortedKeys = [...buckets.keys()].sort(comparator);
+
+    const rows: GanttRow[] = [];
+    for (const key of sortedKeys) {
+      const evs = buckets.get(key)!;
+      const rawIds = key === UNASSIGNED_KEY ? [] : key.split(SEP);
+      const orderedIds = orderedComboIds(rawIds, memberOrder);
+      const label = key === UNASSIGNED_KEY ? 'Unassigned' : memberComboLabel(orderedIds, nameById);
+      const memberColors = orderedIds.map(id => colorById.get(id) ?? 'var(--muted-foreground)');
+      const primaryColor = key === UNASSIGNED_KEY ? 'var(--muted-foreground)' : (memberColors[0] ?? 'var(--muted-foreground)');
+      const collapsed = collapsedGroups.has(key);
+      rows.push({ kind: 'group', id: key, label, color: primaryColor, memberColors, count: evs.length, collapsed });
+      if (collapsed) continue;
+      for (const ev of evs) rows.push({ kind: 'activity', event: { ...ev, isChild: false, depth: 0 } });
+    }
+    return rows;
+  }
+
+  if (groupBy === 'parent') {
+    // Build a parent→children index, then emit rows via depth-first traversal so
+    // grandchildren (and deeper) nest correctly. An activity is a "root" when it
+    // has no parent or its parent fell outside the current view.
+    const byId = new Map(sorted.map(a => [a.id, a]));
+    const childrenByParent = new Map<string, RichActivity[]>();
+    const roots: RichActivity[] = [];
+    for (const ev of sorted) {
+      const pid = ev.parentActivityId;
+      if (pid && byId.has(pid)) {
+        const list = childrenByParent.get(pid) ?? [];
+        list.push(ev);
+        childrenByParent.set(pid, list);
+      } else {
+        roots.push(ev);
+      }
+    }
+
+    const rows: GanttRow[] = [];
+    const seen = new Set<string>();   // emitted into rows (also guards cycles)
+    const hidden = new Set<string>(); // suppressed under a collapsed ancestor
+
+    // Recursively mark a collapsed node's descendants as hidden so the leftover
+    // sweep below doesn't resurrect them. The `hidden` guard also stops cycles.
+    const markHidden = (ev: RichActivity) => {
+      if (hidden.has(ev.id)) return;
+      hidden.add(ev.id);
+      for (const k of childrenByParent.get(ev.id) ?? []) markHidden(k);
+    };
+
+    const visit = (ev: RichActivity, depth: number) => {
+      if (seen.has(ev.id)) return;
+      seen.add(ev.id);
+      const kids = childrenByParent.get(ev.id) ?? [];
+      const hasChildren = kids.length > 0;
+      const collapsed = collapsedParents.has(ev.id);
+      rows.push({
+        kind: 'activity',
+        event: { ...ev, isChild: depth > 0, depth, hasChildren, collapsed },
+      });
+      if (!hasChildren) return;
+      if (collapsed) for (const k of kids) markHidden(k);
+      else for (const k of kids) visit(k, depth + 1);
+    };
+
+    for (const r of roots) visit(r, 0);
+    // Safety net: emit any activity unreachable from a root (e.g. a parent-
+    // pointer cycle where no node qualifies as a root) at depth 0, but never
+    // resurrect a node intentionally hidden under a collapsed ancestor.
+    for (const ev of sorted) {
+      if (!seen.has(ev.id) && !hidden.has(ev.id)) visit(ev, 0);
+    }
+    return rows;
+  }
+
+  if (groupBy === 'status') {
+    const buckets = new Map<string, RichActivity[]>();
+    for (const ev of sorted) {
+      const key = ev.statusId ?? '__no_status__';
+      const list = buckets.get(key) ?? [];
+      list.push(ev);
+      buckets.set(key, list);
+    }
+
+    const rows: GanttRow[] = [];
+    const pushStatusBucket = (id: string, label: string, color: string, evs: RichActivity[]) => {
+      const collapsed = collapsedGroups.has(id);
+      rows.push({ kind: 'group', id, label, color, count: evs.length, collapsed });
+      if (collapsed) return;
+      for (const ev of evs) rows.push({ kind: 'activity', event: { ...ev, isChild: false, depth: 0 } });
+    };
+
+    if (statuses) {
+      for (const s of statuses) {
+        const evs = buckets.get(s.id);
+        if (!evs?.length) continue;
+        pushStatusBucket(s.id, s.name, resolveColorHex(s.color ?? null) ?? 'var(--muted-foreground)', evs);
+      }
+    }
+    const noStatus = buckets.get('__no_status__');
+    if (noStatus?.length) {
+      pushStatusBucket('__no_status__', 'No status', 'var(--muted-foreground)', noStatus);
+    }
+    return rows;
+  }
+
+  return sorted.map(ev => ({ kind: 'activity' as const, event: ev }));
+}
+
+// ── Component ─────────────────────────────────────────────────────────────────
+
+/**
+ * Returns only the activities whose status is not in closedStatusIds.
+ * Extracted as a named export so the 'open' filter preset logic can be
+ * unit-tested without mounting the full component.
+ */
+export function filterOpenActivities<T extends { statusId?: string | null | undefined }>(
+  activities: T[],
+  closedStatusIds: Set<string>,
+): T[] {
+  return activities.filter(a => !a.statusId || !closedStatusIds.has(a.statusId))
+}
+
+export default function GanttView({
+  teamId,
+  timelineId,
+  startDate,
+  endDate,
+  groupBy,
+  sortBy,
+  granularity,
+  colorBy,
+  timelineStatuses,
+  savedFilters,
+  tags,
+  selectedActivityId = null,
+  onSelectActivity = () => {},
+  onLaneDrag,
+  onBarDragProgress,
+  onBarDragEnd,
+  onMembersLoaded,
+  onSelectApiActivity,
+  labelColW,
+  onLabelColWChange,
+  interactive = true,
+}: Props) {
+  const queryClient = useQueryClient();
+  const updateActivity = useUpdateActivity(timelineId);
+  const today = todayMidnight();
+
+  // Collapse state for the Gantt tree. `collapsedParents` hides an activity's
+  // child subtree (parent grouping); `collapsedGroups` hides a member bucket's
+  // activities (member grouping). Both persist across re-renders and view tweaks.
+  const [collapsedParents, setCollapsedParents] = useState<Set<string>>(new Set());
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
+
+  const toggleParent = useCallback((id: string) => {
+    setCollapsedParents(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }, []);
+
+  const toggleGroup = useCallback((id: string) => {
+    setCollapsedGroups(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }, []);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [containerWidth, setContainerWidth] = useState(800);
+
+  const { debouncedQuery, registerMatches, activeMatchId, matchedIds, matchReasons } = useFind();
+  const { activeFilter } = useFilter();
+
+  const globalPrefs = usePreferenceMap();
+  const prefWeekStart = (globalPrefs['week_start'] as string | undefined) === 'sunday' ? 'sunday' : 'monday';
+  // Map the stored date_format preference to a BCP 47 locale for Gantt column labels.
+  // DD/MM/YYYY users prefer day-first ordering (en-GB: "5 Jan"); all others get MM-first (en-US: "Jan 5").
+  const prefDateFormat = (globalPrefs['date_format'] as string | undefined) ?? 'MMM D, YYYY';
+  const prefLocale = prefDateFormat === 'DD/MM/YYYY' ? 'en-GB' : 'en-US';
+
+  useLayoutEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(entries => {
+      const w = entries[0]?.contentRect.width;
+      if (w && w > 0) setContainerWidth(w);
+    });
+    ro.observe(el);
+    setContainerWidth(el.clientWidth || 800);
+    return () => ro.disconnect();
+  }, []);
+
+  const viewStart = useMemo<Date>(() => {
+    if (startDate) return new Date(startDate);
+    const d = new Date(today);
+    d.setUTCDate(d.getUTCDate() - 14);
+    return d;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [startDate]);
+
+  const viewEnd = useMemo<Date>(() => {
+    if (endDate) return new Date(endDate);
+    const d = new Date(today);
+    d.setUTCDate(d.getUTCDate() + 75);
+    return d;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [endDate]);
+
+  const resolvedGranularity = useMemo<TimeGranularity>(() => {
+    if (granularity !== 'auto') return granularity;
+    return autoFitGranularity(viewStart, viewEnd, containerWidth);
+  }, [granularity, viewStart, viewEnd, containerWidth]);
+
+  const columns = useMemo(
+    () => generateColumns(viewStart, viewEnd, resolvedGranularity, { weekStart: prefWeekStart, locale: prefLocale }),
+    [viewStart, viewEnd, resolvedGranularity, prefWeekStart, prefLocale],
+  );
+
+  const todayIdx = useMemo(
+    () => todayColumnPosition(columns),
+    [columns],
+  );
+
+  const from = viewStart.toISOString();
+  const to = viewEnd.toISOString();
+
+  const { data: apiMembers = [] } = useTeamMembers(teamId);
+  const { data: apiActivities = [], isLoading } = useTimelineActivities(teamId, timelineId, from, to);
+
+  const members: Member[] = useMemo(
+    () => apiMembers.map((m, i) => toMember(m, i)),
+    [apiMembers],
+  );
+
+  const memberById = useMemo<Record<string, Member>>(() => {
+    const map: Record<string, Member> = {};
+    members.forEach(m => { map[m.id] = m; });
+    return map;
+  }, [members]);
+
+  // Notify parent once the member list resolves.
+  useEffect(() => {
+    if (onMembersLoaded && members.length > 0) {
+      onMembersLoaded(members);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [members]);
+
+  // Derive data needed by the unified filter engine from the passed-in statuses/tags/filters.
+  const closedStatusIds = useMemo(
+    () => new Set((timelineStatuses ?? []).filter(s => s.isClosed).map(s => s.id)),
+    [timelineStatuses],
+  );
+
+  const statusesByTimeline = useMemo(() => {
+    const m = new Map<string, Status[]>();
+    if (timelineStatuses?.length) m.set(timelineId, timelineStatuses);
+    return m;
+  }, [timelineId, timelineStatuses]);
+
+  // Map userId → team_member_id[] so the 'member' filter kind can resolve by userId.
+  const memberIdsByUserId = useMemo(() => {
+    const m = new Map<string, string[]>();
+    apiMembers.forEach(member => {
+      if (member.userId) {
+        const existing = m.get(member.userId) ?? [];
+        m.set(member.userId, [...existing, member.id]);
+      }
+    });
+    return m;
+  }, [apiMembers]);
+
+  const visibleActivities = useMemo(() => applyActiveFilter(
+    apiActivities,
+    activeFilter,
+    memberIdsByUserId,
+    {
+      closedStatusIds,
+      savedFilters: savedFilters ?? [],
+      statuses: statusesByTimeline,
+      tags: tags ?? [],
+    },
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  ), [apiActivities, activeFilter, memberIdsByUserId, closedStatusIds, savedFilters, statusesByTimeline, tags]);
+
+  const statusColorById = useMemo(
+    () => new Map((timelineStatuses ?? []).map(s => [s.id, s.color])),
+    [timelineStatuses],
+  );
+
+  const rows: GanttRow[] = useMemo(() => {
+    const richActivities = visibleActivities
+      .map((ev, i) => toRichActivity(ev, i, memberById, viewStart, viewEnd, columns, colorBy, statusColorById))
+      .filter((a): a is RichActivity => a !== null);
+    return buildRows(richActivities, members, groupBy, sortBy, collapsedParents, collapsedGroups, timelineStatuses);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visibleActivities, members, memberById, groupBy, sortBy, colorBy, statusColorById, viewStart, viewEnd, columns, collapsedParents, collapsedGroups, timelineStatuses]);
+
+  // ── Find: compute matches and register with context ───────────────────────
+
+  const matchResults = useMemo(
+    () => matchEvents(debouncedQuery, visibleActivities, members, visibleActivities),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [debouncedQuery, visibleActivities, members],
+  );
+
+  const matchedSet = useMemo(
+    () => new Set(matchResults.map(r => r.activityId)),
+    [matchResults],
+  );
+
+  const computedMatchReasons = useMemo(() => {
+    const map = new Map<string, string[]>();
+    matchResults.forEach(r => map.set(r.activityId, r.reasons));
+    return map;
+  }, [matchResults]);
+
+  // Ordered match IDs follow the current row order so prev/next walks the
+  // visual top-to-bottom sequence rather than the arbitrary API order.
+  const orderedMatchIds = useMemo(
+    () => rows
+      .filter(r => r.kind === 'activity' && matchedSet.has(r.event.id))
+      .map(r => (r as { kind: 'activity'; event: GanttActivity }).event.id),
+    [rows, matchedSet],
+  );
+
+  useEffect(() => {
+    registerMatches(orderedMatchIds, computedMatchReasons);
+  }, [orderedMatchIds, computedMatchReasons, registerMatches]);
+
+  // Build the FindState passed to GanttGrid
+  const hasQuery = debouncedQuery.trim().length > 0;
+  const filtersActive = activeFilter.kind !== 'preset' || activeFilter.id !== 'all';
+  const findState: FindState = useMemo(() => ({
+    hasQuery,
+    matchedIds: matchedSet,
+    activeMatchId,
+    matchReasons,
+    filtersActive,
+    matchCount: matchedIds.length,
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), [hasQuery, matchedSet, activeMatchId, matchReasons, filtersActive, matchedIds.length]);
+
+  // ── Bar drag ─────────────────────────────────────────────────────────────
+
+  const handleBarDrag = useCallback((activityId: string, newStartDate: Date, newEndDate: Date) => {
+    const patch = {
+      startAt: newStartDate.toISOString(),
+      endAt: newEndDate.toISOString(),
+    };
+
+    // Synchronously update the cache so the bar doesn't flash back to old
+    // position when GanttGrid clears its drag state in the same render cycle.
+    queryClient.setQueriesData<ApiActivity[]>(
+      { queryKey: ['timelines', timelineId, 'activities'] },
+      (old) => old?.map((a) => (a.id === activityId ? { ...a, ...patch } : a)),
+    );
+
+    // Push updated activity to the sidebar so it shows new dates immediately
+    // instead of the stale snapshot from when the activity was selected.
+    if (onSelectApiActivity) {
+      const updated = apiActivities.find(a => a.id === activityId);
+      if (updated) onSelectApiActivity({ ...updated, ...patch });
+    }
+
+    onBarDragEnd?.();
+    updateActivity.mutate({ activityId, patch });
+  }, [updateActivity, onBarDragEnd, queryClient, timelineId, apiActivities, onSelectApiActivity]);
+
+  if (isLoading) {
+    return (
+      <div ref={containerRef} className="flex items-center justify-center h-full text-muted-foreground text-[13px]">
+        Loading activities…
+      </div>
+    );
+  }
+
+  return (
+    <div ref={containerRef} style={{ flex: 1, minHeight: 0 }}>
+      <GanttGrid
+        rows={rows}
+        columns={columns}
+        todayIndex={todayIdx}
+        selectedActivityId={selectedActivityId}
+        findState={findState}
+        onSelectActivity={(id) => {
+          onSelectActivity(id);
+          if (onSelectApiActivity) {
+            const found = id ? (apiActivities.find(a => a.id === id) ?? null) : null;
+            onSelectApiActivity(found);
+          }
+        }}
+        onLaneDrag={interactive ? onLaneDrag : undefined}
+        onBarDrag={interactive ? handleBarDrag : undefined}
+        onBarDragProgress={interactive ? onBarDragProgress : undefined}
+        resolvedGranularity={resolvedGranularity}
+        onClearFilters={filtersActive ? () => {} : undefined}
+        labelColW={labelColW}
+        onLabelColWChange={onLabelColWChange}
+        onToggleActivity={groupBy === 'parent' ? toggleParent : undefined}
+        onToggleGroup={groupBy === 'member' || groupBy === 'status' ? toggleGroup : undefined}
+        interactive={interactive}
+      />
+    </div>
+  );
 }
 ````
 
@@ -49098,7 +50467,7 @@ components:
 
     Share:
       type: object
-      required: [id, timelineId, token, viewType, viewConfig, createdBy, createdAt, viewCount, protected]
+      required: [id, timelineId, token, kind, viewType, viewConfig, createdBy, createdAt, viewCount, protected]
       properties:
         id:
           type: string
@@ -49106,6 +50475,24 @@ components:
           type: string
         token:
           type: string
+        kind:
+          type: string
+          enum: [view, ics]
+          description: >
+            Discriminator between the two share flavors: "view" is a frozen
+            view-config snapshot served at /s/{token}; "ics" is a live
+            subscribable calendar feed served at GET /shares/{token}.ics.
+        scope:
+          type: string
+          nullable: true
+          enum: [timeline, member]
+          description: >
+            ICS shares only. "timeline" feeds every activity; "member" feeds
+            one member's assigned activities.
+        memberId:
+          type: string
+          nullable: true
+          description: ICS shares with scope "member" only — the feed's member.
         name:
           type: string
           nullable: true
@@ -49181,6 +50568,20 @@ components:
     CreateShareInput:
       type: object
       properties:
+        kind:
+          type: string
+          enum: [view, ics]
+          description: Defaults to "view" when omitted.
+        scope:
+          type: string
+          enum: [timeline, member]
+          description: Required when kind is "ics"; ignored for view shares.
+        memberId:
+          type: string
+          nullable: true
+          description: >
+            Required when scope is "member". Must belong to the timeline's
+            team.
         name:
           type: string
           nullable: true
@@ -52086,6 +53487,71 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  /shares/{token}.ics:
+    get:
+      operationId: getShareICSFeed
+      summary: Fetch a public ICS calendar feed
+      description: >
+        No authentication required — the unguessable token is the secret (ICS
+        shares cannot be password protected; calendar clients have no
+        interactive unlock). Serves live data as all-day VEVENTs, scoped
+        server-side to the share's timeline or, for member feeds, to one
+        member's assigned activities. The payload never carries member emails,
+        user IDs, or roles. A webcal:// URL pointing at this path is the
+        subscription variant most calendar apps accept.
+      security: []
+      tags: [shares]
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: iCalendar document.
+          content:
+            text/calendar:
+              schema:
+                type: string
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "410":
+          description: Share revoked or expired.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /shares/{id}/regenerate:
+    post:
+      operationId: regenerateShare
+      summary: Rotate a share's token
+      description: >
+        Replaces the share token with a fresh one, immediately invalidating the
+        old URL — the revocation story for ICS feeds, which have no password
+        gate. Any member of the timeline's team may regenerate any share.
+      tags: [shares]
+      parameters:
+        - $ref: "#/components/parameters/shareId"
+      responses:
+        "200":
+          description: Share with its new token.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Share"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
   /shares/{token}/unlock:
     post:
       operationId: unlockShare
@@ -52172,644 +53638,6 @@ paths:
           $ref: "#/components/responses/NotFound"
         "500":
           $ref: "#/components/responses/InternalError"
-````
-
-## File: packages/web/src/components/gantt/GanttView.tsx
-````typescript
-/**
- * GanttView — data container for the Gantt grid.
- *
- * Fetches events and members, applies grouping and sorting, builds the
- * GanttRow list, and passes everything to GanttGrid. The component owns
- * no layout state — granularity, groupBy, and sortBy come from DashboardPage.
- *
- * Also owns the find-match computation: it reads the debounced query from
- * FindContext, matches against the fetched API events, and registers the
- * ordered match list back into FindContext so GanttGrid can apply visual
- * treatment and auto-scroll.
- */
-
-import { useMemo, useRef, useState, useLayoutEffect, useEffect, useCallback } from 'react';
-import { useQueryClient } from '@tanstack/react-query';
-import GanttGrid, { type GanttActivity, type GanttRow, type FindState } from './GanttGrid';
-import { useTimelineActivities, useTeamMembers, useUpdateActivity } from '@/hooks/useTeamActivities';
-import type { components } from '@draba/shared';
-import { type Member, ACTIVITY_COLORS, MEMBER_COLORS } from '@/types';
-import { resolveColorHex } from '@/components/identity/identity-constants';
-import type { GroupBy, SortBy, TimeGranularity, ColorBy } from './GanttToolbar';
-import {
-  generateColumns,
-  positionInColumns,
-  todayColumnPosition,
-  autoFitGranularity,
-  type ColumnDef,
-} from './granularity';
-import { matchEvents } from '@/lib/findMatcher';
-import { memberComboKey, orderedComboIds, memberComboLabel, comboSortComparator, UNASSIGNED_KEY, SEP } from '@/lib/memberGroups';
-import { useFind } from '@/contexts/FindContext';
-import { useFilter } from '@/contexts/FilterContext';
-import { usePreferenceMap } from '@/hooks/usePreferences';
-import { applyActiveFilter } from '@/lib/presetFilters';
-
-type ApiActivity = components['schemas']['Activity'];
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
-type Status = components['schemas']['Status'];
-type SavedFilter = components['schemas']['SavedFilter'];
-type Tag = components['schemas']['Tag'];
-
-interface Props {
-  teamId: string;
-  /** Active timeline ID — activities are fetched scoped to this timeline. */
-  timelineId: string;
-  /** ISO date "YYYY-MM-DD" — defaults to 14 days before today. */
-  startDate?: string;
-  /** ISO date "YYYY-MM-DD" — defaults to 75 days after today. */
-  endDate?: string;
-  groupBy: GroupBy;
-  sortBy: SortBy;
-  granularity: TimeGranularity | 'auto';
-  colorBy: ColorBy;
-  /**
-   * Timeline statuses — used to derive closedStatusIds and resolve status names
-   * in the filter engine. Replaces the old closedStatusIds prop.
-   */
-  timelineStatuses?: Status[];
-  /** Saved filters for the active team — evaluated by the filter engine. */
-  savedFilters?: SavedFilter[];
-  /** Team tags — used to resolve tag names in the filter engine. */
-  tags?: Tag[];
-  selectedActivityId?: string | null;
-  onSelectActivity?: (id: string | null) => void;
-  /** Called when the user drags on an empty lane to create an activity. */
-  onLaneDrag?: (startDate: Date, endDate: Date, memberId: string | null) => void;
-  /** Called during a bar drag with live snapped dates — for sidebar preview. */
-  onBarDragProgress?: (activityId: string, newStart: Date, newEnd: Date) => void;
-  /** Called when a bar drag completes (before the PATCH fires). */
-  onBarDragEnd?: () => void;
-  /** Called once members are loaded, so the parent can access them for panels. */
-  onMembersLoaded?: (members: Member[]) => void;
-  /** Called when an activity is selected — passes the full API activity object. */
-  onSelectApiActivity?: (activity: ApiActivity | null) => void;
-  /** Label column width in px — passed through to GanttGrid for controlled persistence. */
-  labelColW?: number;
-  /** Called when the user drags the label column resize handle. */
-  onLabelColWChange?: (w: number) => void;
-  /**
-   * When false, all click and drag interactions are suppressed — bars, lane
-   * drags, and group toggles are inert. Used by the public share viewer.
-   * Default: true.
-   */
-  interactive?: boolean;
-}
-
-
-// ── Date helpers ────────────────────────────────────────────────────────────
-
-function toDateOnly(datetime: string): string {
-  return datetime.slice(0, 10);
-}
-
-function todayMidnight(): Date {
-  const d = new Date();
-  d.setUTCHours(0, 0, 0, 0); // UTC midnight so it aligns with UTC-stored activity dates
-  return d;
-}
-
-function initialsFrom(name: string): string {
-  return name
-    .split(/\s+/)
-    .map(w => w[0] ?? '')
-    .slice(0, 2)
-    .join('')
-    .toUpperCase();
-}
-
-// ── Type mapping ─────────────────────────────────────────────────────────────
-
-function toMember(m: TeamMemberWithUser, index: number): Member {
-  const name = m.displayName || m.email || 'Unknown';
-  const fallbackHex = MEMBER_COLORS[index % MEMBER_COLORS.length];
-  return {
-    id: m.id,
-    name,
-    initials: initialsFrom(name),
-    color: resolveColorHex(m.color) || fallbackHex,
-  };
-}
-
-/** Intermediate activity type that carries API fields alongside computed view-state. Exported for use by the public share viewer. */
-export interface RichActivity extends GanttActivity {
-  startAtMs: number;
-  endAtMs: number;
-  parentActivityId: string | null;
-  primaryMemberId: string | null;
-  assignedMemberIds: string[];
-  statusId: string | null;
-}
-
-function toRichActivity(
-  ev: ApiActivity,
-  index: number,
-  memberById: Record<string, Member>,
-  viewStart: Date,
-  viewEnd: Date,
-  columns: ColumnDef[],
-  colorBy: ColorBy,
-  statusColorById: Map<string, string>,
-): RichActivity | null {
-  const evStart = new Date(toDateOnly(ev.startAt));
-  const evEnd = new Date(toDateOnly(ev.endAt));
-
-  if (evEnd < viewStart || evStart > viewEnd) return null;
-
-  const clampedStart = evStart < viewStart ? viewStart : evStart;
-  const clampedEnd = evEnd > viewEnd ? viewEnd : evEnd;
-
-  const { startCol, span } = positionInColumns(clampedStart, clampedEnd, columns);
-  const assignedIds = ev.assignedMemberIds ?? [];
-  const members = assignedIds.map(id => memberById[id]).filter((m): m is Member => Boolean(m));
-
-  const color =
-    colorBy === 'member' ? (members[0]?.color ?? ev.color ?? ACTIVITY_COLORS[index % ACTIVITY_COLORS.length]) :
-    colorBy === 'status' ? (statusColorById.get((ev as ApiActivity & { statusId?: string | null }).statusId ?? '') ?? '#6b7280') :
-    /* activity */ (ev.color ?? ACTIVITY_COLORS[index % ACTIVITY_COLORS.length]);
-
-  return {
-    id: ev.id,
-    title: ev.title,
-    startCol,
-    span,
-    color,
-    icon: ev.icon ?? undefined,
-    members,
-    isChild: Boolean(ev.parentActivityId),
-    startAtMs: new Date(ev.startAt).getTime(),
-    endAtMs: new Date(ev.endAt).getTime(),
-    parentActivityId: ev.parentActivityId ?? null,
-    primaryMemberId: members[0]?.id ?? null,
-    assignedMemberIds: assignedIds,
-    statusId: (ev as ApiActivity & { statusId?: string | null }).statusId ?? null,
-  };
-}
-
-// ── Sorting ──────────────────────────────────────────────────────────────────
-
-function sortActivities(activities: RichActivity[], sortBy: SortBy): RichActivity[] {
-  return [...activities].sort((a, b) => {
-    if (sortBy === 'title') return a.title.localeCompare(b.title);
-    if (sortBy === 'endDate') return a.endAtMs - b.endAtMs;
-    return a.startAtMs - b.startAtMs;
-  });
-}
-
-// ── Grouping ─────────────────────────────────────────────────────────────────
-
-/**
- * Builds the flat GanttRow list from positioned activities, applying grouping,
- * sorting, parent→child nesting (arbitrary depth), and collapse state.
- * Exported for unit testing of the tree/collapse logic.
- */
-export function buildRows(
-  activities: RichActivity[],
-  members: Member[],
-  groupBy: GroupBy,
-  sortBy: SortBy,
-  collapsedParents: Set<string>,
-  collapsedGroups: Set<string>,
-  statuses?: Status[],
-): GanttRow[] {
-  const sorted = sortActivities(activities, sortBy);
-
-  if (groupBy === 'none') {
-    // Flat list — no parent nesting, so children are not indented.
-    return sorted.map(ev => ({ kind: 'activity' as const, event: { ...ev, isChild: false, depth: 0 } }));
-  }
-
-  if (groupBy === 'member') {
-    const memberOrder = members.map(m => m.id);
-    const nameById = new Map(members.map(m => [m.id, m.name]));
-    // Colors here are already resolved hex (from the Member type / toMember conversion).
-    // ListView applies resolveColorHex on the raw API color string instead — both
-    // produce hex, but the resolution step happens at different layers.
-    const colorById = new Map(members.map(m => [m.id, m.color]));
-
-    const buckets = new Map<string, RichActivity[]>();
-    for (const ev of sorted) {
-      const key = memberComboKey(ev.assignedMemberIds);
-      const list = buckets.get(key) ?? [];
-      list.push(ev);
-      buckets.set(key, list);
-    }
-
-    const comparator = comboSortComparator(memberOrder);
-    const sortedKeys = [...buckets.keys()].sort(comparator);
-
-    const rows: GanttRow[] = [];
-    for (const key of sortedKeys) {
-      const evs = buckets.get(key)!;
-      const rawIds = key === UNASSIGNED_KEY ? [] : key.split(SEP);
-      const orderedIds = orderedComboIds(rawIds, memberOrder);
-      const label = key === UNASSIGNED_KEY ? 'Unassigned' : memberComboLabel(orderedIds, nameById);
-      const memberColors = orderedIds.map(id => colorById.get(id) ?? 'var(--muted-foreground)');
-      const primaryColor = key === UNASSIGNED_KEY ? 'var(--muted-foreground)' : (memberColors[0] ?? 'var(--muted-foreground)');
-      const collapsed = collapsedGroups.has(key);
-      rows.push({ kind: 'group', id: key, label, color: primaryColor, memberColors, count: evs.length, collapsed });
-      if (collapsed) continue;
-      for (const ev of evs) rows.push({ kind: 'activity', event: { ...ev, isChild: false, depth: 0 } });
-    }
-    return rows;
-  }
-
-  if (groupBy === 'parent') {
-    // Build a parent→children index, then emit rows via depth-first traversal so
-    // grandchildren (and deeper) nest correctly. An activity is a "root" when it
-    // has no parent or its parent fell outside the current view.
-    const byId = new Map(sorted.map(a => [a.id, a]));
-    const childrenByParent = new Map<string, RichActivity[]>();
-    const roots: RichActivity[] = [];
-    for (const ev of sorted) {
-      const pid = ev.parentActivityId;
-      if (pid && byId.has(pid)) {
-        const list = childrenByParent.get(pid) ?? [];
-        list.push(ev);
-        childrenByParent.set(pid, list);
-      } else {
-        roots.push(ev);
-      }
-    }
-
-    const rows: GanttRow[] = [];
-    const seen = new Set<string>();   // emitted into rows (also guards cycles)
-    const hidden = new Set<string>(); // suppressed under a collapsed ancestor
-
-    // Recursively mark a collapsed node's descendants as hidden so the leftover
-    // sweep below doesn't resurrect them. The `hidden` guard also stops cycles.
-    const markHidden = (ev: RichActivity) => {
-      if (hidden.has(ev.id)) return;
-      hidden.add(ev.id);
-      for (const k of childrenByParent.get(ev.id) ?? []) markHidden(k);
-    };
-
-    const visit = (ev: RichActivity, depth: number) => {
-      if (seen.has(ev.id)) return;
-      seen.add(ev.id);
-      const kids = childrenByParent.get(ev.id) ?? [];
-      const hasChildren = kids.length > 0;
-      const collapsed = collapsedParents.has(ev.id);
-      rows.push({
-        kind: 'activity',
-        event: { ...ev, isChild: depth > 0, depth, hasChildren, collapsed },
-      });
-      if (!hasChildren) return;
-      if (collapsed) for (const k of kids) markHidden(k);
-      else for (const k of kids) visit(k, depth + 1);
-    };
-
-    for (const r of roots) visit(r, 0);
-    // Safety net: emit any activity unreachable from a root (e.g. a parent-
-    // pointer cycle where no node qualifies as a root) at depth 0, but never
-    // resurrect a node intentionally hidden under a collapsed ancestor.
-    for (const ev of sorted) {
-      if (!seen.has(ev.id) && !hidden.has(ev.id)) visit(ev, 0);
-    }
-    return rows;
-  }
-
-  if (groupBy === 'status') {
-    const buckets = new Map<string, RichActivity[]>();
-    for (const ev of sorted) {
-      const key = ev.statusId ?? '__no_status__';
-      const list = buckets.get(key) ?? [];
-      list.push(ev);
-      buckets.set(key, list);
-    }
-
-    const rows: GanttRow[] = [];
-    const pushStatusBucket = (id: string, label: string, color: string, evs: RichActivity[]) => {
-      const collapsed = collapsedGroups.has(id);
-      rows.push({ kind: 'group', id, label, color, count: evs.length, collapsed });
-      if (collapsed) return;
-      for (const ev of evs) rows.push({ kind: 'activity', event: { ...ev, isChild: false, depth: 0 } });
-    };
-
-    if (statuses) {
-      for (const s of statuses) {
-        const evs = buckets.get(s.id);
-        if (!evs?.length) continue;
-        pushStatusBucket(s.id, s.name, resolveColorHex(s.color ?? null) ?? 'var(--muted-foreground)', evs);
-      }
-    }
-    const noStatus = buckets.get('__no_status__');
-    if (noStatus?.length) {
-      pushStatusBucket('__no_status__', 'No status', 'var(--muted-foreground)', noStatus);
-    }
-    return rows;
-  }
-
-  return sorted.map(ev => ({ kind: 'activity' as const, event: ev }));
-}
-
-// ── Component ─────────────────────────────────────────────────────────────────
-
-/**
- * Returns only the activities whose status is not in closedStatusIds.
- * Extracted as a named export so the 'open' filter preset logic can be
- * unit-tested without mounting the full component.
- */
-export function filterOpenActivities<T extends { statusId?: string | null | undefined }>(
-  activities: T[],
-  closedStatusIds: Set<string>,
-): T[] {
-  return activities.filter(a => !a.statusId || !closedStatusIds.has(a.statusId))
-}
-
-export default function GanttView({
-  teamId,
-  timelineId,
-  startDate,
-  endDate,
-  groupBy,
-  sortBy,
-  granularity,
-  colorBy,
-  timelineStatuses,
-  savedFilters,
-  tags,
-  selectedActivityId = null,
-  onSelectActivity = () => {},
-  onLaneDrag,
-  onBarDragProgress,
-  onBarDragEnd,
-  onMembersLoaded,
-  onSelectApiActivity,
-  labelColW,
-  onLabelColWChange,
-  interactive = true,
-}: Props) {
-  const queryClient = useQueryClient();
-  const updateActivity = useUpdateActivity(timelineId);
-  const today = todayMidnight();
-
-  // Collapse state for the Gantt tree. `collapsedParents` hides an activity's
-  // child subtree (parent grouping); `collapsedGroups` hides a member bucket's
-  // activities (member grouping). Both persist across re-renders and view tweaks.
-  const [collapsedParents, setCollapsedParents] = useState<Set<string>>(new Set());
-  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
-
-  const toggleParent = useCallback((id: string) => {
-    setCollapsedParents(prev => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id); else next.add(id);
-      return next;
-    });
-  }, []);
-
-  const toggleGroup = useCallback((id: string) => {
-    setCollapsedGroups(prev => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id); else next.add(id);
-      return next;
-    });
-  }, []);
-  const containerRef = useRef<HTMLDivElement>(null);
-  const [containerWidth, setContainerWidth] = useState(800);
-
-  const { debouncedQuery, registerMatches, activeMatchId, matchedIds, matchReasons } = useFind();
-  const { activeFilter } = useFilter();
-
-  const globalPrefs = usePreferenceMap();
-  const prefWeekStart = (globalPrefs['week_start'] as string | undefined) === 'sunday' ? 'sunday' : 'monday';
-  // Map the stored date_format preference to a BCP 47 locale for Gantt column labels.
-  // DD/MM/YYYY users prefer day-first ordering (en-GB: "5 Jan"); all others get MM-first (en-US: "Jan 5").
-  const prefDateFormat = (globalPrefs['date_format'] as string | undefined) ?? 'MMM D, YYYY';
-  const prefLocale = prefDateFormat === 'DD/MM/YYYY' ? 'en-GB' : 'en-US';
-
-  useLayoutEffect(() => {
-    const el = containerRef.current;
-    if (!el) return;
-    const ro = new ResizeObserver(entries => {
-      const w = entries[0]?.contentRect.width;
-      if (w && w > 0) setContainerWidth(w);
-    });
-    ro.observe(el);
-    setContainerWidth(el.clientWidth || 800);
-    return () => ro.disconnect();
-  }, []);
-
-  const viewStart = useMemo<Date>(() => {
-    if (startDate) return new Date(startDate);
-    const d = new Date(today);
-    d.setUTCDate(d.getUTCDate() - 14);
-    return d;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [startDate]);
-
-  const viewEnd = useMemo<Date>(() => {
-    if (endDate) return new Date(endDate);
-    const d = new Date(today);
-    d.setUTCDate(d.getUTCDate() + 75);
-    return d;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [endDate]);
-
-  const resolvedGranularity = useMemo<TimeGranularity>(() => {
-    if (granularity !== 'auto') return granularity;
-    return autoFitGranularity(viewStart, viewEnd, containerWidth);
-  }, [granularity, viewStart, viewEnd, containerWidth]);
-
-  const columns = useMemo(
-    () => generateColumns(viewStart, viewEnd, resolvedGranularity, { weekStart: prefWeekStart, locale: prefLocale }),
-    [viewStart, viewEnd, resolvedGranularity, prefWeekStart, prefLocale],
-  );
-
-  const todayIdx = useMemo(
-    () => todayColumnPosition(columns),
-    [columns],
-  );
-
-  const from = viewStart.toISOString();
-  const to = viewEnd.toISOString();
-
-  const { data: apiMembers = [] } = useTeamMembers(teamId);
-  const { data: apiActivities = [], isLoading } = useTimelineActivities(teamId, timelineId, from, to);
-
-  const members: Member[] = useMemo(
-    () => apiMembers.map((m, i) => toMember(m, i)),
-    [apiMembers],
-  );
-
-  const memberById = useMemo<Record<string, Member>>(() => {
-    const map: Record<string, Member> = {};
-    members.forEach(m => { map[m.id] = m; });
-    return map;
-  }, [members]);
-
-  // Notify parent once the member list resolves.
-  useEffect(() => {
-    if (onMembersLoaded && members.length > 0) {
-      onMembersLoaded(members);
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [members]);
-
-  // Derive data needed by the unified filter engine from the passed-in statuses/tags/filters.
-  const closedStatusIds = useMemo(
-    () => new Set((timelineStatuses ?? []).filter(s => s.isClosed).map(s => s.id)),
-    [timelineStatuses],
-  );
-
-  const statusesByTimeline = useMemo(() => {
-    const m = new Map<string, Status[]>();
-    if (timelineStatuses?.length) m.set(timelineId, timelineStatuses);
-    return m;
-  }, [timelineId, timelineStatuses]);
-
-  // Map userId → team_member_id[] so the 'member' filter kind can resolve by userId.
-  const memberIdsByUserId = useMemo(() => {
-    const m = new Map<string, string[]>();
-    apiMembers.forEach(member => {
-      if (member.userId) {
-        const existing = m.get(member.userId) ?? [];
-        m.set(member.userId, [...existing, member.id]);
-      }
-    });
-    return m;
-  }, [apiMembers]);
-
-  const visibleActivities = useMemo(() => applyActiveFilter(
-    apiActivities,
-    activeFilter,
-    memberIdsByUserId,
-    {
-      closedStatusIds,
-      savedFilters: savedFilters ?? [],
-      statuses: statusesByTimeline,
-      tags: tags ?? [],
-    },
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  ), [apiActivities, activeFilter, memberIdsByUserId, closedStatusIds, savedFilters, statusesByTimeline, tags]);
-
-  const statusColorById = useMemo(
-    () => new Map((timelineStatuses ?? []).map(s => [s.id, s.color])),
-    [timelineStatuses],
-  );
-
-  const rows: GanttRow[] = useMemo(() => {
-    const richActivities = visibleActivities
-      .map((ev, i) => toRichActivity(ev, i, memberById, viewStart, viewEnd, columns, colorBy, statusColorById))
-      .filter((a): a is RichActivity => a !== null);
-    return buildRows(richActivities, members, groupBy, sortBy, collapsedParents, collapsedGroups, timelineStatuses);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visibleActivities, members, memberById, groupBy, sortBy, colorBy, statusColorById, viewStart, viewEnd, columns, collapsedParents, collapsedGroups, timelineStatuses]);
-
-  // ── Find: compute matches and register with context ───────────────────────
-
-  const matchResults = useMemo(
-    () => matchEvents(debouncedQuery, visibleActivities, members, visibleActivities),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [debouncedQuery, visibleActivities, members],
-  );
-
-  const matchedSet = useMemo(
-    () => new Set(matchResults.map(r => r.activityId)),
-    [matchResults],
-  );
-
-  const computedMatchReasons = useMemo(() => {
-    const map = new Map<string, string[]>();
-    matchResults.forEach(r => map.set(r.activityId, r.reasons));
-    return map;
-  }, [matchResults]);
-
-  // Ordered match IDs follow the current row order so prev/next walks the
-  // visual top-to-bottom sequence rather than the arbitrary API order.
-  const orderedMatchIds = useMemo(
-    () => rows
-      .filter(r => r.kind === 'activity' && matchedSet.has(r.event.id))
-      .map(r => (r as { kind: 'activity'; event: GanttActivity }).event.id),
-    [rows, matchedSet],
-  );
-
-  useEffect(() => {
-    registerMatches(orderedMatchIds, computedMatchReasons);
-  }, [orderedMatchIds, computedMatchReasons, registerMatches]);
-
-  // Build the FindState passed to GanttGrid
-  const hasQuery = debouncedQuery.trim().length > 0;
-  const filtersActive = activeFilter.kind !== 'preset' || activeFilter.id !== 'all';
-  const findState: FindState = useMemo(() => ({
-    hasQuery,
-    matchedIds: matchedSet,
-    activeMatchId,
-    matchReasons,
-    filtersActive,
-    matchCount: matchedIds.length,
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [hasQuery, matchedSet, activeMatchId, matchReasons, filtersActive, matchedIds.length]);
-
-  // ── Bar drag ─────────────────────────────────────────────────────────────
-
-  const handleBarDrag = useCallback((activityId: string, newStartDate: Date, newEndDate: Date) => {
-    const patch = {
-      startAt: newStartDate.toISOString(),
-      endAt: newEndDate.toISOString(),
-    };
-
-    // Synchronously update the cache so the bar doesn't flash back to old
-    // position when GanttGrid clears its drag state in the same render cycle.
-    queryClient.setQueriesData<ApiActivity[]>(
-      { queryKey: ['timelines', timelineId, 'activities'] },
-      (old) => old?.map((a) => (a.id === activityId ? { ...a, ...patch } : a)),
-    );
-
-    // Push updated activity to the sidebar so it shows new dates immediately
-    // instead of the stale snapshot from when the activity was selected.
-    if (onSelectApiActivity) {
-      const updated = apiActivities.find(a => a.id === activityId);
-      if (updated) onSelectApiActivity({ ...updated, ...patch });
-    }
-
-    onBarDragEnd?.();
-    updateActivity.mutate({ activityId, patch });
-  }, [updateActivity, onBarDragEnd, queryClient, timelineId, apiActivities, onSelectApiActivity]);
-
-  if (isLoading) {
-    return (
-      <div ref={containerRef} className="flex items-center justify-center h-full text-muted-foreground text-[13px]">
-        Loading activities…
-      </div>
-    );
-  }
-
-  return (
-    <div ref={containerRef} style={{ flex: 1, minHeight: 0 }}>
-      <GanttGrid
-        rows={rows}
-        columns={columns}
-        todayIndex={todayIdx}
-        selectedActivityId={selectedActivityId}
-        findState={findState}
-        onSelectActivity={(id) => {
-          onSelectActivity(id);
-          if (onSelectApiActivity) {
-            const found = id ? (apiActivities.find(a => a.id === id) ?? null) : null;
-            onSelectApiActivity(found);
-          }
-        }}
-        onLaneDrag={interactive ? onLaneDrag : undefined}
-        onBarDrag={interactive ? handleBarDrag : undefined}
-        onBarDragProgress={interactive ? onBarDragProgress : undefined}
-        resolvedGranularity={resolvedGranularity}
-        onClearFilters={filtersActive ? () => {} : undefined}
-        labelColW={labelColW}
-        onLabelColWChange={onLabelColWChange}
-        onToggleActivity={groupBy === 'parent' ? toggleParent : undefined}
-        onToggleGroup={groupBy === 'member' || groupBy === 'status' ? toggleGroup : undefined}
-        interactive={interactive}
-      />
-    </div>
-  );
-}
 ````
 
 ## File: packages/shared/src/index.ts
@@ -53922,6 +54750,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/shares/{token}.ics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Fetch a public ICS calendar feed
+         * @description No authentication required — the unguessable token is the secret (ICS shares cannot be password protected; calendar clients have no interactive unlock). Serves live data as all-day VEVENTs, scoped server-side to the share's timeline or, for member feeds, to one member's assigned activities. The payload never carries member emails, user IDs, or roles. A webcal:// URL pointing at this path is the subscription variant most calendar apps accept.
+         */
+        get: operations["getShareICSFeed"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/shares/{id}/regenerate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Rotate a share's token
+         * @description Replaces the share token with a fresh one, immediately invalidating the old URL — the revocation story for ICS feeds, which have no password gate. Any member of the timeline's team may regenerate any share.
+         */
+        post: operations["regenerateShare"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/shares/{token}/unlock": {
         parameters: {
             query?: never;
@@ -54344,6 +55212,18 @@ export interface components {
             id: string;
             timelineId: string;
             token: string;
+            /**
+             * @description Discriminator between the two share flavors: "view" is a frozen view-config snapshot served at /s/{token}; "ics" is a live subscribable calendar feed served at GET /shares/{token}.ics.
+             * @enum {string}
+             */
+            kind: "view" | "ics";
+            /**
+             * @description ICS shares only. "timeline" feeds every activity; "member" feeds one member's assigned activities.
+             * @enum {string|null}
+             */
+            scope?: "timeline" | "member" | null;
+            /** @description ICS shares with scope "member" only — the feed's member. */
+            memberId?: string | null;
             /** @description Optional human-readable label for this share link. */
             name?: string | null;
             /** @description Optional free-text describing what the link is for. */
@@ -54383,6 +55263,18 @@ export interface components {
             expiresAt?: string | null;
         };
         CreateShareInput: {
+            /**
+             * @description Defaults to "view" when omitted.
+             * @enum {string}
+             */
+            kind?: "view" | "ics";
+            /**
+             * @description Required when kind is "ics"; ignored for view shares.
+             * @enum {string}
+             */
+            scope?: "timeline" | "member";
+            /** @description Required when scope is "member". Must belong to the timeline's team. */
+            memberId?: string | null;
             name?: string | null;
             description?: string | null;
             /** @enum {string} */
@@ -57182,6 +58074,66 @@ export interface operations {
             500: components["responses"]["InternalError"];
         };
     };
+    getShareICSFeed: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                token: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description iCalendar document. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/calendar": string;
+                };
+            };
+            404: components["responses"]["NotFound"];
+            /** @description Share revoked or expired. */
+            410: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            500: components["responses"]["InternalError"];
+        };
+    };
+    regenerateShare: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Share ID. */
+                id: components["parameters"]["shareId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Share with its new token. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Share"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
     unlockShare: {
         parameters: {
             query?: never;
@@ -57276,1156 +58228,6 @@ export interface operations {
             500: components["responses"]["InternalError"];
         };
     };
-}
-````
-
-## File: packages/api/internal/api/share_handler.go
-````go
-package api
-
-import (
-	"database/sql"
-	"encoding/json"
-	"errors"
-	"net/http"
-	"os"
-	"strings"
-	"sync"
-	"time"
-
-	"github.com/I0-1O/draba/packages/api/internal/auth"
-	"github.com/I0-1O/draba/packages/api/internal/filters"
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// unlockMaxAttempts caps password-unlock attempts per client IP per hour. The
-// limit is per-share-independent (keyed on IP only) so cycling tokens cannot
-// multiply an attacker's budget.
-const unlockMaxAttempts = 10
-
-// ── In-memory share cache ─────────────────────────────────────────────────────
-
-type shareCacheEntry struct {
-	builtAt time.Time
-	payload models.ShareProjection
-}
-
-// shareCache is a lightweight TTL cache keyed by share token. It avoids a DB
-// hit on every warm request. The TTL is read from DRABA_SHARE_CACHE_TTL at
-// startup (default 60s); a PATCH or DELETE invalidates the entry immediately.
-type shareCache struct {
-	mu      sync.RWMutex
-	entries map[string]*shareCacheEntry
-	ttl     time.Duration
-}
-
-func newShareCache() *shareCache {
-	ttl := 60 * time.Second
-	if v := os.Getenv("DRABA_SHARE_CACHE_TTL"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			ttl = d
-		}
-	}
-	return &shareCache{entries: make(map[string]*shareCacheEntry), ttl: ttl}
-}
-
-func (c *shareCache) get(token string) (*models.ShareProjection, bool) {
-	c.mu.RLock()
-	e, ok := c.entries[token]
-	c.mu.RUnlock()
-	if !ok {
-		return nil, false
-	}
-	if time.Since(e.builtAt) > c.ttl {
-		return nil, false
-	}
-	p := e.payload
-	return &p, true
-}
-
-func (c *shareCache) set(token string, p *models.ShareProjection) {
-	c.mu.Lock()
-	c.entries[token] = &shareCacheEntry{builtAt: time.Now(), payload: *p}
-	c.mu.Unlock()
-}
-
-func (c *shareCache) invalidate(token string) {
-	c.mu.Lock()
-	delete(c.entries, token)
-	c.mu.Unlock()
-}
-
-// ── viewConfig sub-types ──────────────────────────────────────────────────────
-
-// viewConfigJSON is the shape stored in shares.view_config. The filter field
-// is evaluated server-side by the Go filter engine; the other fields are
-// forwarded to the client as-is so the public viewer can apply them.
-//
-// columns carries the List view's column visibility snapshot — it drives the
-// "notes" projection nuance below (and lets the public viewer render exactly
-// the columns the share creator chose).
-type viewConfigJSON struct {
-	Filter  *filters.FilterDefinition `json:"filter,omitempty"`
-	Columns []shareColumnConfig       `json:"columns,omitempty"`
-}
-
-type shareColumnConfig struct {
-	ID      string `json:"id"`
-	Visible bool   `json:"visible"`
-}
-
-// ── Handlers ──────────────────────────────────────────────────────────────────
-
-// handleGetShareProjection handles GET /shares/{token}. No authentication is
-// required. It is the public data gateway: the scope is hard-locked to the
-// single timeline referenced by the share row; no client-supplied selector can
-// widen it.
-func (s *Server) handleGetShareProjection(w http.ResponseWriter, r *http.Request) {
-	token := r.PathValue("token")
-
-	// ── 1. Resolve the share row ──────────────────────────────────────────────
-	share, err := s.shares.GetByToken(token)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load share")
-		return
-	}
-
-	// Phase 13.4 — revocation / expiry handled here (fields exist in schema now).
-	if share.RevokedAt != nil {
-		writeError(w, http.StatusGone, "GONE", "this share has been revoked")
-		return
-	}
-	if share.ExpiresAt != nil && time.Now().After(*share.ExpiresAt) {
-		writeError(w, http.StatusGone, "GONE", "this share has expired")
-		return
-	}
-
-	// Password gate (Phase 13.2). A locked share serves no data without a valid
-	// view token — obtained by exchanging the password at POST /shares/{token}/unlock.
-	// NOTE: this check must stay above the cache read. PATCH invalidates the cache
-	// entry immediately (see handleUpdateShare), so a newly-added password_hash is
-	// never served from a stale cache. Moving the check below the cache read would
-	// silently bypass the password gate for the TTL window. The 401 body carries no
-	// projection data — only the passwordRequired signal the viewer needs.
-	if share.PasswordHash != nil {
-		vt := bearerToken(r)
-		if vt == "" || s.tokens.ValidateShareViewToken(vt, share.ID) != nil {
-			writeJSON(w, http.StatusUnauthorized, map[string]bool{"passwordRequired": true})
-			return
-		}
-	}
-
-	// ── 2. Serve from cache if warm ───────────────────────────────────────────
-	if proj, ok := s.shareCache.get(token); ok {
-		go func() { _ = s.shares.RecordView(share.ID) }()
-		writeJSON(w, http.StatusOK, proj)
-		return
-	}
-
-	// ── 3. Build projection (cache miss) ─────────────────────────────────────
-	proj, err := s.buildShareProjection(share)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to build share projection")
-		return
-	}
-
-	s.shareCache.set(token, proj)
-	go func() { _ = s.shares.RecordView(share.ID) }()
-	writeJSON(w, http.StatusOK, proj)
-}
-
-// buildShareProjection assembles the full ShareProjection for a share.
-// The scope is hard-locked to share.TimelineID; the caller cannot supply a
-// different timeline ID. Filter evaluation runs in Go before any data leaves
-// the server.
-func (s *Server) buildShareProjection(share *models.Share) (*models.ShareProjection, error) {
-	// Get timeline — using the share's TimelineID, never a client-supplied value.
-	timeline, err := s.timelines.GetByID(share.TimelineID)
-	if err != nil {
-		return nil, err
-	}
-
-	// Get all non-archived activities for this timeline.
-	acts, err := s.activities.ListByTimeline(share.TimelineID, nil, nil, false)
-	if err != nil {
-		return nil, err
-	}
-
-	// Get statuses and tags for filter context + projection.
-	statuses, err := s.statuses.ListStatuses(share.TimelineID)
-	if err != nil {
-		return nil, err
-	}
-	tags, err := s.tags.ListByTeam(timeline.TeamID)
-	if err != nil {
-		return nil, err
-	}
-	members, err := s.teams.ListMembers(timeline.TeamID)
-	if err != nil {
-		return nil, err
-	}
-	team, err := s.teams.GetByID(timeline.TeamID)
-	if err != nil {
-		return nil, err
-	}
-
-	// Parse the frozen filter from view_config and evaluate it server-side.
-	var vc viewConfigJSON
-	if share.ViewConfig != "" && share.ViewConfig != "{}" {
-		_ = json.Unmarshal([]byte(share.ViewConfig), &vc)
-	}
-
-	var filteredActs []*models.Activity
-	if vc.Filter != nil && len(vc.Filter.Conditions) > 0 {
-		// Build filter context.
-		statusesByTL := map[string][]models.Status{share.TimelineID: {}}
-		for _, st := range statuses {
-			statusesByTL[share.TimelineID] = append(statusesByTL[share.TimelineID], *st)
-		}
-		modelTags := make([]models.Tag, 0, len(tags))
-		for _, t := range tags {
-			modelTags = append(modelTags, *t)
-		}
-		ctx := &filters.FilterContext{
-			StatusesByTimelineID: statusesByTL,
-			Tags:                 modelTags,
-		}
-		for _, a := range acts {
-			if filters.MatchesFilter(a, vc.Filter, ctx) {
-				filteredActs = append(filteredActs, a)
-			}
-		}
-	} else {
-		filteredActs = acts
-	}
-
-	// Build referenced-entity sets (prune to what surviving activities reference).
-	usedMemberIDs := make(map[string]bool)
-	usedStatusIDs := make(map[string]bool)
-	usedTagIDs := make(map[string]bool)
-	for _, a := range filteredActs {
-		for _, id := range a.AssignedMemberIDs {
-			usedMemberIDs[id] = true
-		}
-		if a.StatusID != nil {
-			usedStatusIDs[*a.StatusID] = true
-		}
-		for _, id := range a.TagIDs {
-			usedTagIDs[id] = true
-		}
-	}
-
-	// notes is included only for List shares whose creator left the Notes
-	// column visible — the only projection nuance beyond scope-locking and
-	// field-pruning (Phase 13.3 exit criteria).
-	notesEnabled := false
-	if share.ViewType == "list" {
-		for _, c := range vc.Columns {
-			if c.ID == "notes" && c.Visible {
-				notesEnabled = true
-				break
-			}
-		}
-	}
-
-	// Build PublicActivity slice.
-	pubActivities := make([]models.PublicActivity, 0, len(filteredActs))
-	for _, a := range filteredActs {
-		pub := models.PublicActivity{
-			ID:                a.ID,
-			Title:             a.Title,
-			Description:       a.Description,
-			Icon:              a.Icon,
-			Color:             a.Color,
-			StartAt:           a.StartAt,
-			EndAt:             a.EndAt,
-			AllDay:            a.AllDay,
-			StatusID:          a.StatusID,
-			ParentActivityID:  a.ParentActivityID,
-			PercentComplete:   a.PercentComplete,
-			AssignedMemberIDs: a.AssignedMemberIDs,
-			TagIDs:            a.TagIDs,
-		}
-		if notesEnabled {
-			pub.Notes = a.Notes
-		}
-		if pub.AssignedMemberIDs == nil {
-			pub.AssignedMemberIDs = []string{}
-		}
-		if pub.TagIDs == nil {
-			pub.TagIDs = []string{}
-		}
-		pubActivities = append(pubActivities, pub)
-	}
-
-	// Build PublicMember slice — never email/role/userId.
-	pubMembers := make([]models.PublicMember, 0)
-	for _, m := range members {
-		if !usedMemberIDs[m.ID] {
-			continue
-		}
-		name := m.DisplayName
-		if name == "" {
-			// The register endpoint requires a non-empty displayName, so this
-			// branch only fires for rows migrated from older data. Never fall
-			// back to the email address — this response is public and
-			// unauthenticated.
-			name = "Team member"
-		}
-		pubMembers = append(pubMembers, models.PublicMember{
-			ID:          m.ID,
-			DisplayName: name,
-			Color:       m.Color,
-			Icon:        m.Icon,
-		})
-	}
-
-	// Prune statuses to referenced ones — except for Kanban shares, where
-	// every status is a column regardless of whether it currently holds any
-	// activities (mirrors the in-app board, which always renders one column
-	// per timeline status). Pruning there would silently drop empty columns
-	// that anonymous viewers would otherwise see, e.g. an empty "Deferred"
-	// column that's still meaningful to the team.
-	pubStatuses := make([]models.Status, 0)
-	for _, st := range statuses {
-		if share.ViewType == "kanban" || usedStatusIDs[st.ID] {
-			pubStatuses = append(pubStatuses, *st)
-		}
-	}
-
-	// Prune tags to referenced ones.
-	pubTags := make([]models.Tag, 0)
-	for _, tg := range tags {
-		if usedTagIDs[tg.ID] {
-			pubTags = append(pubTags, *tg)
-		}
-	}
-
-	// Build the public share — only the fields anonymous callers need.
-	// Operational telemetry (view_count, last_viewed_at) and internal fields
-	// (created_by, revoked_at) are excluded from the public response.
-	pubShare := models.PublicShare{
-		ID:         share.ID,
-		TimelineID: share.TimelineID,
-		Token:      share.Token,
-		Name:       share.Name,
-		ViewType:   share.ViewType,
-		ViewConfig: share.ViewConfig,
-		CreatedAt:  share.CreatedAt,
-		ExpiresAt:  share.ExpiresAt,
-	}
-	proj := &models.ShareProjection{
-		Share:    pubShare,
-		TeamName: team.Name,
-		Timeline: models.PublicTimeline{
-			ID:        timeline.ID,
-			Name:      timeline.Name,
-			Color:     timeline.Color,
-			Icon:      timeline.Icon,
-			StartDate: timeline.StartDate,
-			EndDate:   timeline.EndDate,
-		},
-		Members:    pubMembers,
-		Statuses:   pubStatuses,
-		Tags:       pubTags,
-		Activities: pubActivities,
-	}
-	return proj, nil
-}
-
-// handleCreateShare handles POST /timelines/{id}/shares. The caller must be a
-// member of the timeline's team. The share captures the current view config.
-func (s *Server) handleCreateShare(w http.ResponseWriter, r *http.Request) {
-	timelineID := r.PathValue("id")
-
-	timeline, err := s.timelines.GetByID(timelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
-		return
-	}
-	if timeline.ArchivedAt != nil {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-		return
-	}
-
-	member, ok := s.requireTeamMember(w, r, timeline.TeamID)
-	if !ok {
-		return
-	}
-
-	var req createShareBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-	if req.ViewType == "" {
-		req.ViewType = "gantt"
-	}
-	if req.ViewConfig == "" {
-		req.ViewConfig = "{}"
-	}
-
-	now := time.Now().UTC()
-	share := &models.Share{
-		ID:          newID(),
-		TimelineID:  timelineID,
-		Token:       newToken(),
-		Name:        req.Name,
-		Description: req.Description,
-		ViewType:    req.ViewType,
-		ViewConfig:  req.ViewConfig,
-		CreatedBy:   member.ID,
-		CreatedAt:   now,
-		ViewCount:   0,
-	}
-
-	// Optional password protection. An empty/whitespace string means "no
-	// password" — the field stays NULL and the share is open.
-	if req.Password != nil && strings.TrimSpace(*req.Password) != "" {
-		hash, err := auth.HashPassword(*req.Password)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to secure share")
-			return
-		}
-		share.PasswordHash = &hash
-	}
-
-	if err := s.shares.Create(share); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create share")
-		return
-	}
-
-	// Surface the derived flag in the create response (the repo sets it on reads).
-	share.Protected = share.PasswordHash != nil
-	writeJSON(w, http.StatusCreated, share)
-}
-
-// handleListShares handles GET /teams/{id}/timelines/{timelineId}/shares.
-// Only team members with access to the timeline may list its shares.
-func (s *Server) handleListShares(w http.ResponseWriter, r *http.Request) {
-	timelineID := r.PathValue("timelineId")
-
-	timeline, err := s.timelines.GetByID(timelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
-		return
-	}
-
-	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
-		return
-	}
-
-	shares, err := s.shares.ListByTimeline(timelineID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list shares")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, shares)
-}
-
-// handleUpdateShare handles PATCH /shares/{id}. Any member of the timeline's
-// team may update it (shares are read-only projections — no creator/admin gate).
-func (s *Server) handleUpdateShare(w http.ResponseWriter, r *http.Request) {
-	shareID := r.PathValue("id")
-
-	share, err := s.shares.GetByID(shareID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
-		return
-	}
-
-	timeline, err := s.timelines.GetByID(share.TimelineID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
-		return
-	}
-
-	// Any member of the timeline's team may manage its shares. A share is a
-	// read-only projection that can never mutate app data, so there is no
-	// creator/admin gate (Phase 13.2 re-sequencing decision).
-	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
-		return
-	}
-
-	var req patchShareBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	if req.Name != nil {
-		share.Name = req.Name
-	}
-	if req.Description != nil {
-		share.Description = req.Description
-	}
-	if req.ViewType != nil {
-		share.ViewType = *req.ViewType
-	}
-	if req.ViewConfig != nil {
-		share.ViewConfig = *req.ViewConfig
-	}
-	// Password: nil leaves it unchanged; an empty string clears protection; a
-	// non-empty string sets/replaces it.
-	if req.Password != nil {
-		if strings.TrimSpace(*req.Password) == "" {
-			share.PasswordHash = nil
-		} else {
-			hash, err := auth.HashPassword(*req.Password)
-			if err != nil {
-				writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to secure share")
-				return
-			}
-			share.PasswordHash = &hash
-		}
-	}
-
-	if err := s.shares.Update(share); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update share")
-		return
-	}
-
-	// Invalidate cache so the next public request picks up the new config.
-	s.shareCache.invalidate(share.Token)
-
-	// Refresh the derived flag — the password may have just been set/cleared.
-	share.Protected = share.PasswordHash != nil
-	writeJSON(w, http.StatusOK, share)
-}
-
-// handleDeleteShare handles DELETE /shares/{id}. Any member of the timeline's
-// team may delete it (see handleUpdateShare).
-func (s *Server) handleDeleteShare(w http.ResponseWriter, r *http.Request) {
-	shareID := r.PathValue("id")
-
-	share, err := s.shares.GetByID(shareID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
-		return
-	}
-
-	timeline, err := s.timelines.GetByID(share.TimelineID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
-		return
-	}
-
-	// Any member of the timeline's team may delete its shares — no creator/admin
-	// gate (see handleUpdateShare).
-	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
-		return
-	}
-
-	if err := s.shares.Delete(shareID); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete share")
-		return
-	}
-
-	s.shareCache.invalidate(share.Token)
-	w.WriteHeader(http.StatusNoContent)
-}
-
-// handleUnlockShare handles POST /shares/{token}/unlock. It is public (no auth
-// middleware): an anonymous viewer exchanges the share password for a
-// short-lived view token, which they then present on GET /shares/{token}.
-// Attempts are rate-limited per client IP to blunt brute-force guessing.
-func (s *Server) handleUnlockShare(w http.ResponseWriter, r *http.Request) {
-	if !s.unlockLimiter.allow(clientIP(r)) {
-		writeError(w, http.StatusTooManyRequests, "RATE_LIMITED", "too many unlock attempts; try again later")
-		return
-	}
-
-	token := r.PathValue("token")
-
-	share, err := s.shares.GetByToken(token)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load share")
-		return
-	}
-
-	// Mirror the GET gateway's revocation/expiry checks so a dead share cannot
-	// be unlocked.
-	if share.RevokedAt != nil {
-		writeError(w, http.StatusGone, "GONE", "this share has been revoked")
-		return
-	}
-	if share.ExpiresAt != nil && time.Now().After(*share.ExpiresAt) {
-		writeError(w, http.StatusGone, "GONE", "this share has expired")
-		return
-	}
-	if share.PasswordHash == nil {
-		writeError(w, http.StatusBadRequest, "NOT_PROTECTED", "this share is not password protected")
-		return
-	}
-
-	var req unlockShareBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-	if auth.CheckPassword(*share.PasswordHash, req.Password) != nil {
-		writeError(w, http.StatusUnauthorized, "INVALID_PASSWORD", "incorrect password")
-		return
-	}
-
-	viewToken, err := s.tokens.IssueShareViewToken(share.ID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to issue view token")
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"token": viewToken})
-}
-
-// bearerToken extracts a Bearer credential from the Authorization header, or
-// returns "" when absent or malformed.
-func bearerToken(r *http.Request) string {
-	header := r.Header.Get("Authorization")
-	if !strings.HasPrefix(header, "Bearer ") {
-		return ""
-	}
-	return strings.TrimPrefix(header, "Bearer ")
-}
-
-// ── Request bodies ────────────────────────────────────────────────────────────
-
-type createShareBody struct {
-	Name        *string `json:"name,omitempty"`
-	Description *string `json:"description,omitempty"`
-	ViewType    string  `json:"viewType"`
-	ViewConfig  string  `json:"viewConfig"`
-	Password    *string `json:"password,omitempty"`
-}
-
-type patchShareBody struct {
-	Name        *string `json:"name,omitempty"`
-	Description *string `json:"description,omitempty"`
-	ViewType    *string `json:"viewType,omitempty"`
-	ViewConfig  *string `json:"viewConfig,omitempty"`
-	Password    *string `json:"password,omitempty"`
-}
-
-type unlockShareBody struct {
-	Password string `json:"password"`
-}
-````
-
-## File: packages/web/src/components/ShareModal.tsx
-````typescript
-/**
- * ShareModal — manage the share links for the current timeline view.
- *
- * Rebuilt to the "Share this view" design handoff (docs/design/handoffs/share-modal):
- * an active-links list with per-row creator/date/view-count meta and an inline
- * delete-confirm, plus an inline create form with optional password protection.
- * One timeline can host many named shares; each is a frozen view snapshot.
- *
- * Styled with Tailwind utility classes against the project's design tokens
- * (see index.css `@theme`) and shadcn/ui primitives — the handoff is a visual
- * reference, not production code, so its inline styles were not ported.
- *
- * Delete is intentionally not permission-gated — a share is a read-only
- * projection that cannot mutate app data, so any team member may manage any
- * link (Phase 13.2 decision).
- */
-
-import { useEffect, useRef, useState } from 'react'
-import { createPortal } from 'react-dom'
-import {
-  Link as LinkIcon, Link2, Lock, KeyRound, Copy, Check, Eye, EyeOff,
-  Trash2, Plus, PlusCircle, X, Users,
-} from 'lucide-react'
-import { useCreateShare, useListShares, useDeleteShare } from '@/hooks/useShares'
-import { useTeamMembers } from '@/hooks/useTeamActivities'
-import { useAuth } from '@/contexts/AuthContext'
-import { Badge } from '@/components/identity/Badge'
-import { resolveColorHex } from '@/components/identity/identity-constants'
-import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import { cn } from '@/lib/utils'
-import { MEMBER_COLORS } from '@/types'
-import type { FilterDefinition } from '@/lib/filterTypes'
-import type { components } from '@draba/shared'
-
-type Share = components['schemas']['Share']
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
-
-export interface ShareViewConfig {
-  groupBy: string
-  sortBy: string
-  colorBy: string
-  granularity: string
-  filter: FilterDefinition | null
-  /** List shares only — column visibility snapshot; drives the "notes" projection nuance. */
-  columns?: { id: string; visible: boolean }[]
-  /** Kanban shares only — which fields render on each card. */
-  cardFields?: string[]
-  /** Kanban shares only — whether child activities nest under their parent. */
-  showHierarchy?: boolean
-  /** Kanban shares only — column IDs collapsed at share-creation time. */
-  collapsedColumns?: string[]
-}
-
-interface Props {
-  teamId: string
-  timelineId: string
-  viewType: 'gantt' | 'list' | 'calendar' | 'kanban'
-  viewConfig: ShareViewConfig
-  /** Display name of the timeline, shown in the header subtitle. */
-  timelineName?: string
-  onClose: () => void
-}
-
-interface CreatePayload {
-  title: string
-  description: string
-  password: string | null
-}
-
-// ── Shared token-styled bits ──────────────────────────────────────────────────
-//
-// The handoff colors a share's "type tile" teal (open link) or amber
-// (password-protected). Those tints aren't semantic tokens on their own, so
-// they're expressed as arbitrary-value Tailwind classes derived from the
-// existing `--primary` / `--secondary` HSL values rather than ported hex.
-
-const TILE_TEAL = 'bg-[hsl(188_59%_38%/0.12)] text-primary'
-const TILE_AMBER = 'bg-[hsl(30_87%_62%/0.16)] text-secondary'
-const BADGE_AMBER = 'bg-[hsl(30_87%_62%/0.22)] text-secondary-foreground'
-
-function MiniAvatar({ member, size = 20 }: { member: TeamMemberWithUser | undefined; size?: number }) {
-  if (!member) return null
-  const name = member.displayName || 'Team member'
-  const color = resolveColorHex(member.color) || MEMBER_COLORS[0]
-  return (
-    <Badge identity={{ color, icon: member.icon ?? '__name_1__' }} name={name} size={size} shape="circle" />
-  )
-}
-
-function formatCreated(iso: string): string {
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return ''
-  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
-}
-
-// ── A single share row ─────────────────────────────────────────────────────────
-
-function ShareRow({
-  share,
-  creator,
-  isOwn,
-  onDelete,
-}: {
-  share: Share
-  creator: TeamMemberWithUser | undefined
-  isOwn: boolean
-  onDelete: (id: string) => void
-}) {
-  const url = `${window.location.host}/s/${share.token}`
-  const [copied, setCopied] = useState(false)
-  const [confirming, setConfirming] = useState(false)
-  const protectedShare = Boolean(share.protected)
-
-  const copy = () => {
-    void navigator.clipboard.writeText(`${window.location.origin}/s/${share.token}`).then(() => {
-      setCopied(true)
-      setTimeout(() => setCopied(false), 1600)
-    })
-  }
-
-  return (
-    <div className="relative rounded-[var(--radius-lg)] border border-border bg-card p-3.5 shadow-sm">
-      {/* Top: type tile + title + delete */}
-      <div className="flex items-start gap-2.5">
-        <div className={cn('flex h-8 w-8 shrink-0 items-center justify-center rounded-[var(--radius-md)]', protectedShare ? TILE_AMBER : TILE_TEAL)}>
-          {protectedShare ? <Lock size={16} strokeWidth={2.2} /> : <LinkIcon size={16} strokeWidth={2.2} />}
-        </div>
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="text-sm font-semibold text-foreground">{share.name || 'Untitled link'}</span>
-            {protectedShare && (
-              <span className={cn('inline-flex items-center gap-1 rounded-[var(--radius-full)] px-2 py-px text-[11px] font-semibold', BADGE_AMBER)}>
-                <Lock size={10} strokeWidth={2.4} /> password
-              </span>
-            )}
-          </div>
-          {share.description && (
-            <p className="mt-[3px] text-[12.5px] leading-[1.45] text-muted-foreground">{share.description}</p>
-          )}
-        </div>
-        <button
-          onClick={() => setConfirming(true)}
-          title="Delete share"
-          className="flex h-7 w-7 shrink-0 cursor-pointer items-center justify-center rounded-[var(--radius-md)] border-none bg-transparent text-muted-foreground transition-colors hover:bg-[hsl(0_72%_51%/0.1)] hover:text-destructive"
-        >
-          <Trash2 size={15} strokeWidth={2} />
-        </button>
-      </div>
-
-      {/* URL row */}
-      <div className="mt-[11px] flex items-center gap-2">
-        <div className="flex min-w-0 flex-1 items-center gap-2 rounded-[var(--radius-md)] bg-muted px-[11px] py-[7px] font-mono text-[12.5px] text-foreground">
-          <Link2 size={13} className="shrink-0 text-muted-foreground" strokeWidth={2} />
-          <span className="overflow-hidden text-ellipsis whitespace-nowrap">{url}</span>
-        </div>
-        <button
-          onClick={copy}
-          className={cn(
-            'flex shrink-0 items-center gap-[5px] rounded-[var(--radius-md)] border px-3 py-[7px] text-[12.5px] font-semibold transition-colors',
-            copied ? 'border-success bg-[hsl(145_63%_42%/0.12)] text-success' : 'border-border bg-card text-foreground',
-          )}
-        >
-          {copied ? <Check size={13} strokeWidth={2.2} /> : <Copy size={13} strokeWidth={2.2} />}
-          {copied ? 'Copied' : 'Copy'}
-        </button>
-      </div>
-
-      {/* Footer meta */}
-      <div className="mt-[11px] flex items-center gap-2 text-xs text-muted-foreground">
-        <MiniAvatar member={creator} size={20} />
-        <span className="font-semibold text-foreground">
-          {creator?.displayName ?? 'Team member'}
-          {isOwn && <span className="font-normal text-muted-foreground"> · you</span>}
-        </span>
-        <span className="opacity-50">•</span>
-        <span>{formatCreated(share.createdAt)}</span>
-        <span className="opacity-50">•</span>
-        <span className="inline-flex items-center gap-1">
-          <Eye size={12} strokeWidth={2} />{share.viewCount} {share.viewCount === 1 ? 'view' : 'views'}
-        </span>
-      </div>
-
-      {/* Inline delete confirm */}
-      {confirming && (
-        <div className="absolute inset-0 flex flex-col justify-center gap-2.5 rounded-[var(--radius-lg)] border border-destructive bg-card px-4 py-3.5">
-          <div className="flex items-start gap-2.5">
-            <div className="flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-[var(--radius-md)] bg-[hsl(0_72%_51%/0.1)] text-destructive">
-              <Trash2 size={15} strokeWidth={2.2} />
-            </div>
-            <div>
-              <div className="text-[13.5px] font-semibold text-foreground">Delete this share?</div>
-              <div className="mt-0.5 text-xs text-muted-foreground">Anyone with the link will immediately lose access. This can&apos;t be undone.</div>
-            </div>
-          </div>
-          <div className="flex justify-end gap-2">
-            <Button variant="outline" size="sm" onClick={() => setConfirming(false)}>Cancel</Button>
-            <Button variant="destructive" size="sm" onClick={() => { onDelete(share.id); setConfirming(false) }}>Delete link</Button>
-          </div>
-        </div>
-      )}
-    </div>
-  )
-}
-
-// ── The add-share inline form ───────────────────────────────────────────────────
-
-/**
- * No shadcn Textarea exists yet, so this mirrors Input's class string —
- * keeps the field visually consistent without inline styles.
- */
-const TEXTAREA_CLASSES = 'flex w-full resize-y rounded-md border border-[var(--border)] bg-[var(--background)] px-3 py-2 text-sm leading-relaxed text-[var(--foreground)] shadow-sm transition-colors placeholder:text-[var(--muted-foreground)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)]'
-
-function AddShareForm({
-  currentMember,
-  onCreate,
-  onCancel,
-  isPending,
-  isError,
-}: {
-  currentMember: TeamMemberWithUser | undefined
-  onCreate: (payload: CreatePayload) => void
-  onCancel: () => void
-  isPending: boolean
-  isError: boolean
-}) {
-  const [title, setTitle] = useState('')
-  const [desc, setDesc] = useState('')
-  const [pwOn, setPwOn] = useState(false)
-  const [pw, setPw] = useState('')
-  const [showPw, setShowPw] = useState(false)
-  const titleRef = useRef<HTMLInputElement>(null)
-
-  useEffect(() => { titleRef.current?.focus() }, [])
-
-  const valid = title.trim().length > 0 && (!pwOn || pw.trim().length > 0)
-
-  const submit = () => {
-    if (!valid || isPending) return
-    onCreate({ title: title.trim(), description: desc.trim(), password: pwOn ? pw : null })
-  }
-
-  return (
-    <div className="rounded-[var(--radius-lg)] border-[1.5px] border-primary bg-card p-4 shadow-[0_0_0_3px_hsl(188_59%_38%/0.08)]">
-      <div className="mb-3.5 flex items-center gap-2">
-        <PlusCircle size={16} className="text-primary" strokeWidth={2.2} />
-        <span className="text-[13.5px] font-bold text-foreground">New share link</span>
-      </div>
-
-      <div className="mb-3 flex flex-col gap-1.5">
-        <Label htmlFor="share-title">Title</Label>
-        <Input
-          id="share-title"
-          ref={titleRef}
-          value={title}
-          onChange={e => setTitle(e.target.value)}
-          onKeyDown={e => { if (e.key === 'Enter') submit() }}
-          placeholder="e.g. Acme stakeholder view"
-        />
-      </div>
-
-      <div className="mb-3 flex flex-col gap-1.5">
-        <Label htmlFor="share-description">
-          Description <span className="lowercase font-normal">· optional</span>
-        </Label>
-        <textarea
-          id="share-description"
-          value={desc}
-          onChange={e => setDesc(e.target.value)}
-          rows={2}
-          placeholder="What's this link for, and who is it shared with?"
-          className={TEXTAREA_CLASSES}
-        />
-      </div>
-
-      {/* Password protect */}
-      <div className="overflow-hidden rounded-[var(--radius-md)] border border-border">
-        <div className="flex items-center gap-2.5 px-3 py-2.5">
-          <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[var(--radius-md)] bg-muted text-muted-foreground">
-            <Lock size={14} strokeWidth={2} />
-          </div>
-          <div className="flex-1">
-            <div className="text-[13px] font-semibold text-foreground">Password protect</div>
-            <div className="text-[11.5px] text-muted-foreground">Require a password to open the link</div>
-          </div>
-          <button
-            onClick={() => setPwOn(v => !v)}
-            role="switch"
-            aria-checked={pwOn}
-            aria-label="Password protect"
-            className={cn(
-              'relative h-[22px] w-10 shrink-0 cursor-pointer rounded-[var(--radius-full)] border-none p-0 transition-colors',
-              pwOn ? 'bg-primary' : 'bg-border',
-            )}
-          >
-            <span className={cn(
-              'absolute top-[2px] h-[18px] w-[18px] rounded-full bg-white shadow-sm transition-[left] duration-150',
-              pwOn ? 'left-5' : 'left-[2px]',
-            )} />
-          </button>
-        </div>
-        {pwOn && (
-          <div className="border-t border-border px-3 py-3">
-            <div className="flex items-center gap-2 rounded-[var(--radius-md)] border border-input bg-card px-2.5">
-              <KeyRound size={14} className="text-muted-foreground" strokeWidth={2} />
-              <input
-                value={pw}
-                onChange={e => setPw(e.target.value)}
-                onKeyDown={e => { if (e.key === 'Enter') submit() }}
-                type={showPw ? 'text' : 'password'}
-                placeholder="Set a password"
-                className="flex-1 border-none bg-transparent py-2 text-[13px] text-foreground outline-none placeholder:text-muted-foreground"
-              />
-              <button
-                onClick={() => setShowPw(v => !v)}
-                aria-label={showPw ? 'Hide password' : 'Show password'}
-                className="flex cursor-pointer border-none bg-transparent p-1 text-muted-foreground"
-              >
-                {showPw ? <EyeOff size={14} strokeWidth={2} /> : <Eye size={14} strokeWidth={2} />}
-              </button>
-            </div>
-          </div>
-        )}
-      </div>
-
-      {isError && (
-        <p className="mt-2.5 text-[11px] text-destructive">Failed to create share. Please try again.</p>
-      )}
-
-      {/* Actions */}
-      <div className="mt-4 flex items-center gap-2.5">
-        <div className="mr-auto flex items-center gap-[7px] text-xs text-muted-foreground">
-          <MiniAvatar member={currentMember} size={20} />
-          <span>Sharing as {currentMember?.displayName ?? 'you'}</span>
-        </div>
-        <Button variant="outline" onClick={onCancel}>Cancel</Button>
-        <Button onClick={submit} disabled={!valid || isPending}>
-          <LinkIcon size={14} strokeWidth={2.2} /> {isPending ? 'Creating…' : 'Create link'}
-        </Button>
-      </div>
-    </div>
-  )
-}
-
-// ── The modal shell ──────────────────────────────────────────────────────────
-
-export default function ShareModal({ teamId, timelineId, viewType, viewConfig, timelineName, onClose }: Props) {
-  const { user } = useAuth()
-  const { data: allShares = [], isLoading } = useListShares(teamId, timelineId)
-  // Scoped to this exact view — a share is a frozen snapshot of one view's
-  // config, so a Gantt link can't usefully stand in for a List or Kanban one.
-  // Showing only same-type links keeps "active links" literal and leaves room
-  // to tailor the modal per view type (e.g. Calendar/ICS in 13.4) without
-  // having to reconcile it against unrelated shares.
-  const shares = allShares.filter(s => s.viewType === viewType)
-  const { data: members = [] } = useTeamMembers(teamId)
-  const createShare = useCreateShare(teamId, timelineId)
-  const deleteShare = useDeleteShare(teamId, timelineId)
-  const [adding, setAdding] = useState(false)
-  const bodyRef = useRef<HTMLDivElement>(null)
-
-  const memberByID = new Map(members.map(m => [m.id, m]))
-  const currentMember = members.find(m => m.userId && m.userId === user?.id)
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [onClose])
-
-  const configString = JSON.stringify({
-    groupBy: viewConfig.groupBy,
-    sortBy: viewConfig.sortBy,
-    colorBy: viewConfig.colorBy,
-    granularity: viewConfig.granularity,
-    filter: viewConfig.filter ?? { logic: 'and', conditions: [] },
-    ...(viewConfig.columns ? { columns: viewConfig.columns } : {}),
-    ...(viewConfig.cardFields ? { cardFields: viewConfig.cardFields } : {}),
-    ...(viewConfig.showHierarchy !== undefined ? { showHierarchy: viewConfig.showHierarchy } : {}),
-    ...(viewConfig.collapsedColumns ? { collapsedColumns: viewConfig.collapsedColumns } : {}),
-  })
-
-  const handleCreate = (payload: CreatePayload) => {
-    createShare.mutate(
-      {
-        name: payload.title,
-        description: payload.description || null,
-        viewType,
-        viewConfig: configString,
-        password: payload.password ?? undefined,
-      },
-      {
-        onSuccess: () => {
-          setAdding(false)
-          setTimeout(() => { if (bodyRef.current) bodyRef.current.scrollTop = 0 }, 0)
-        },
-      },
-    )
-  }
-
-  return createPortal(
-    <div
-      className="fixed inset-0 z-[1000] flex items-center justify-center bg-[hsl(200_24%_11%/0.55)] p-6 backdrop-blur-[2px]"
-    >
-      <div
-        className="flex max-h-[88vh] w-[min(580px,100%)] flex-col overflow-hidden rounded-[var(--radius-xl)] bg-card shadow-[var(--shadow-lg)]"
-      >
-        {/* Header */}
-        <div className="flex shrink-0 items-start gap-3 border-b border-border px-5 py-[18px]">
-          <div className={cn('flex h-[38px] w-[38px] shrink-0 items-center justify-center rounded-[var(--radius-md)]', TILE_TEAL)}>
-            <LinkIcon size={19} strokeWidth={2.2} />
-          </div>
-          <div className="min-w-0 flex-1">
-            <h2 className="m-0 text-[17px] font-bold leading-tight text-foreground">Share this view</h2>
-            <div className="mt-0.5 flex items-center gap-1.5 text-[12.5px] text-muted-foreground">
-              <span className="inline-block h-2 w-2 shrink-0 rounded-sm bg-secondary" />
-              {timelineName ? `${timelineName} · ` : ''}anyone with a link can view
-            </div>
-          </div>
-          <button
-            onClick={onClose}
-            aria-label="Close"
-            className="flex h-[30px] w-[30px] shrink-0 cursor-pointer items-center justify-center rounded-[var(--radius-md)] border-none bg-muted text-muted-foreground"
-          >
-            <X size={16} strokeWidth={2.2} />
-          </button>
-        </div>
-
-        {/* Section bar */}
-        <div className="flex shrink-0 items-center gap-2 px-5 pb-[11px] pt-[13px]">
-          <span className="text-[11px] font-bold uppercase tracking-[0.06em] text-muted-foreground">Active links</span>
-          <span className="min-w-[20px] rounded-[var(--radius-full)] bg-muted px-2 py-px text-center text-[11px] font-bold text-muted-foreground">{shares.length}</span>
-          <div className="ml-auto">
-            {!adding && (
-              <Button size="sm" onClick={() => setAdding(true)}>
-                <Plus size={14} strokeWidth={2.4} /> New share
-              </Button>
-            )}
-          </div>
-        </div>
-
-        {/* Body */}
-        <div ref={bodyRef} className="flex min-h-[120px] flex-1 flex-col gap-3 overflow-y-auto px-5 pb-5">
-          {adding && (
-            <AddShareForm
-              currentMember={currentMember}
-              onCreate={handleCreate}
-              onCancel={() => setAdding(false)}
-              isPending={createShare.isPending}
-              isError={createShare.isError}
-            />
-          )}
-
-          {!isLoading && shares.length === 0 && !adding && (
-            <div className="flex flex-1 flex-col items-center justify-center rounded-[var(--radius-lg)] border border-dashed border-border px-5 py-9 text-center">
-              <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-[var(--radius-lg)] bg-muted text-muted-foreground">
-                <LinkIcon size={22} strokeWidth={1.8} />
-              </div>
-              <div className="text-sm font-semibold text-foreground">No share links yet</div>
-              <div className="mt-1 max-w-[280px] text-[12.5px] text-muted-foreground">Create a link to let people outside your team view this timeline.</div>
-              <Button size="sm" className="mt-4" onClick={() => setAdding(true)}>
-                <Plus size={14} strokeWidth={2.4} /> Create share link
-              </Button>
-            </div>
-          )}
-
-          {shares.map(s => (
-            <ShareRow
-              key={s.id}
-              share={s}
-              creator={s.createdBy ? memberByID.get(s.createdBy) : undefined}
-              isOwn={Boolean(currentMember && s.createdBy === currentMember.id)}
-              onDelete={(id) => deleteShare.mutate(id)}
-            />
-          ))}
-        </div>
-
-        {/* Footer */}
-        <div className="flex shrink-0 items-center gap-2.5 border-t border-border px-5 py-[13px]">
-          <div className="flex items-center gap-[7px] text-xs text-muted-foreground">
-            <Users size={14} strokeWidth={2} />
-            Read-only links · anyone on your team can manage them
-          </div>
-          <Button variant="outline" className="ml-auto" onClick={onClose}>Done</Button>
-        </div>
-      </div>
-    </div>,
-    document.body,
-  )
 }
 ````
 
@@ -59362,2271 +59164,1227 @@ export default function ShareViewPage() {
 }
 ````
 
-## File: packages/web/src/pages/DashboardPage.tsx
-````typescript
-/**
- * Main application shell: sidebar + top bar + content area.
- *
- * Fetches the authenticated user's first team and first timeline to seed the
- * initial view. Team-selection UI and full sidebar wiring come in a later phase.
- */
+## File: packages/api/internal/api/share_handler.go
+````go
+package api
 
-import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
-import Sidebar from '@/components/layout/Sidebar'
-import TopBar, { type ViewMode } from '@/components/layout/TopBar'
-import GanttView from '@/components/gantt/GanttView'
-import { DEFAULT_LABEL_COL_W } from '@/components/gantt/GanttGrid'
-import GanttToolbar, { type GroupBy, type SortBy, type TimeGranularity, type ColorBy } from '@/components/gantt/GanttToolbar'
-import ListToolbar, { type ListGroupBy, type ListSortBy, type ListColorBy, type ListDensity, type ColumnConfig } from '@/components/list/ListToolbar'
-import ListView from '@/components/list/ListView'
-import CalendarToolbar, { type CalendarLayout } from '@/components/calendar/CalendarToolbar'
-import CalendarView from '@/components/calendar/CalendarView'
-import KanbanToolbar, { type KanbanGroupBy, type KanbanSortBy, type KanbanCardField } from '@/components/kanban/KanbanToolbar'
-import KanbanView from '@/components/kanban/KanbanView'
-import { DEFAULT_CARD_FIELDS } from '@/components/kanban/kanbanColumns'
-import ActivityDetailPanel from '@/components/gantt/ActivityDetailPanel'
-import ActivityCreatePanel from '@/components/gantt/ActivityCreatePanel'
-import { FilterProvider, useFilter } from '@/contexts/FilterContext'
-import { FindProvider, useFind } from '@/contexts/FindContext'
-import { useAuth } from '@/contexts/AuthContext'
-import { useDarkMode } from '@/hooks/useDarkMode'
-import { usePreferences, usePreferenceMap, useUpsertPreference } from '@/hooks/usePreferences'
-import { Settings, Moon, Sun, LogOut } from 'lucide-react'
-import { Badge } from '@/components/identity/Badge'
-import type { Identity } from '@/components/identity/identity-constants'
-import { useMyTeams, useTeamTimelines, useTeamTimelinesWithArchived, useTeamActivitySync, useUnarchiveTeam, useUnarchiveTimeline, useTeamMembers } from '@/hooks/useTeamActivities'
-import { useTimelineStatuses } from '@/hooks/useStatusTemplates'
-import { useSavedFilters } from '@/hooks/useSavedFilters'
-import { useTags } from '@/hooks/useTags'
-import TeamModal from '@/components/TeamModal'
-import MemberModal from '@/components/MemberModal'
-import TimelineModal from '@/components/TimelineModal'
-import FilterManageModal from '@/components/filters/FilterManageModal'
-import ShareModal from '@/components/ShareModal'
-import { useNavigate } from 'react-router-dom'
-import type { components } from '@draba/shared'
-import type { Member } from '@/types'
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"os"
+	"strings"
+	"sync"
+	"time"
 
-type ApiActivity = components['schemas']['Activity']
-type ApiTeam = components['schemas']['Team']
-type ApiTimeline = components['schemas']['Timeline']
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
+	"github.com/I0-1O/draba/packages/api/internal/auth"
+	"github.com/I0-1O/draba/packages/api/internal/filters"
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
 
-const DROPDOWN_BTN: React.CSSProperties = {
-  display: 'flex',
-  alignItems: 'center',
-  gap: 8,
-  width: '100%',
-  padding: '10px 14px',
-  background: 'none',
-  border: 'none',
-  fontSize: 13,
-  color: 'var(--foreground)',
-  cursor: 'pointer',
-  fontFamily: 'var(--font-sans)',
-  textAlign: 'left',
+// unlockMaxAttempts caps password-unlock attempts per client IP per hour. The
+// limit is per-share-independent (keyed on IP only) so cycling tokens cannot
+// multiply an attacker's budget.
+const unlockMaxAttempts = 10
+
+// ── In-memory share cache ─────────────────────────────────────────────────────
+
+type shareCacheEntry struct {
+	builtAt time.Time
+	payload models.ShareProjection
 }
 
-function DashboardShell() {
-  const { logout, accessToken, user } = useAuth()
-  const { activeFilter, setActiveFilter } = useFilter()
-  const navigate = useNavigate()
-  const { isDark, toggle: toggleDark, theme } = useDarkMode()
-  const { setFindBarOpen } = useFind()
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
-  const [view, setView] = useState<ViewMode>('gantt')
-  // Gantt label-column width — held here so it survives switching to another
-  // view and back (GanttView unmounts on view change, which would reset it).
-  const [ganttLabelColW, setGanttLabelColW] = useState(DEFAULT_LABEL_COL_W)
-  // Close the detail sidebar when switching to list view (edits are inline there)
-  const prevView = useRef<ViewMode>('gantt')
-  const [profileOpen, setProfileOpen] = useState(false)
-  const [selectedActivityId, setSelectedActivityId] = useState<string | null>(null)
-  const [selectedApiActivity, setSelectedApiActivity] = useState<ApiActivity | null>(null)
-  const [ganttMembers, setGanttMembers] = useState<Member[]>([])
-  const [createDefaults, setCreateDefaults] = useState<{ start: string; end: string; memberId: string | null; statusId?: string | null } | null>(null)
-  const [filterModalOpen, setFilterModalOpen] = useState(false)
-  const [shareModalOpen, setShareModalOpen] = useState(false)
-  const [liveDragDates, setLiveDragDates] = useState<{ activityId: string; start: string; end: string } | null>(null)
-  // Gantt toolbar state
-  const [groupBy, setGroupBy] = useState<GroupBy>('none')
-  const [sortBy, setSortBy] = useState<SortBy>('startDate')
-  const [granularity, setGranularity] = useState<TimeGranularity | 'auto'>('auto')
-  const [colorBy, setColorBy] = useState<ColorBy>('activity')
-  // List toolbar state
-  const [listGroupBy, setListGroupBy] = useState<ListGroupBy>('none')
-  const [listSortBy, setListSortBy] = useState<ListSortBy>('startDate')
-  const [listColorBy, setListColorBy] = useState<ListColorBy>('activity')
-  const [listDensity, setListDensity] = useState<ListDensity>('comfortable')
-  const [listColumns, setListColumns] = useState<ColumnConfig[]>([])
-  // Incremented seq lets ListView know a new toggle has arrived
-  const [listColToggle, setListColToggle] = useState<{ colId: string; visible: boolean; seq: number } | null>(null)
-  const listColToggleSeq = useRef(0)
-  // Calendar toolbar state
-  const [calendarLayout, setCalendarLayout] = useState<CalendarLayout>('month')
-  // anchorDate = UTC midnight of the 1st of the displayed month (month) or weekStart (week).
-  const [calendarAnchorDate, setCalendarAnchorDate] = useState<Date>(() => {
-    const d = new Date()
-    d.setUTCHours(0, 0, 0, 0)
-    d.setUTCDate(1)
-    return d
-  })
-  // Kanban toolbar state
-  const [kanbanGroupBy, setKanbanGroupBy] = useState<KanbanGroupBy>('status')
-  const [kanbanSortBy, setKanbanSortBy] = useState<KanbanSortBy>('startDate')
-  const [kanbanColorBy, setKanbanColorBy] = useState<ColorBy>('activity')
-  const [kanbanCardFields, setKanbanCardFields] = useState<KanbanCardField[]>(DEFAULT_CARD_FIELDS)
-  const [kanbanCollapsedColumns, setKanbanCollapsedColumns] = useState<string[]>([])
-  const [kanbanShowHierarchy, setKanbanShowHierarchy] = useState(false)
-  // Incremented to trigger inline row creation in list view
-  const [listNewRowSeq, setListNewRowSeq] = useState(0)
-  const profileRef = useRef<HTMLDivElement>(null)
-  // Preference persistence
-  const upsert = useUpsertPreference()
-  // Track whether we've applied server prefs for the active timeline so we
-  // don't immediately write defaults back before the server data arrives.
-  const prefsAppliedForTimeline = useRef<string | null>(null)
-  // One-shot guard: init activeTimelineId from global prefs only on first load.
-  const timelineIdInitialized = useRef(false)
+// shareCache is a lightweight TTL cache keyed by share token. It avoids a DB
+// hit on every warm request. The TTL is read from DRABA_SHARE_CACHE_TTL at
+// startup (default 60s); a PATCH or DELETE invalidates the entry immediately.
+type shareCache struct {
+	mu      sync.RWMutex
+	entries map[string]*shareCacheEntry
+	ttl     time.Duration
+}
 
+func newShareCache() *shareCache {
+	ttl := 60 * time.Second
+	if v := os.Getenv("DRABA_SHARE_CACHE_TTL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			ttl = d
+		}
+	}
+	return &shareCache{entries: make(map[string]*shareCacheEntry), ttl: ttl}
+}
 
-  useEffect(() => {
-    function handleClickOutside(e: MouseEvent) {
-      if (profileRef.current && !profileRef.current.contains(e.target as Node)) {
-        setProfileOpen(false)
-      }
-    }
-    document.addEventListener('mousedown', handleClickOutside)
-    return () => document.removeEventListener('mousedown', handleClickOutside)
-  }, [])
+func (c *shareCache) get(token string) (*models.ShareProjection, bool) {
+	c.mu.RLock()
+	e, ok := c.entries[token]
+	c.mu.RUnlock()
+	if !ok {
+		return nil, false
+	}
+	if time.Since(e.builtAt) > c.ttl {
+		return nil, false
+	}
+	p := e.payload
+	return &p, true
+}
 
-  // Close the detail sidebar when switching to list view (list edits are inline).
-  useEffect(() => {
-    if (view === 'list' && prevView.current !== 'list') {
-      setSelectedActivityId(null)
-      setSelectedApiActivity(null)
-      setCreateDefaults(null)
-    }
-    prevView.current = view
-  }, [view])
+func (c *shareCache) set(token string, p *models.ShareProjection) {
+	c.mu.Lock()
+	c.entries[token] = &shareCacheEntry{builtAt: time.Now(), payload: *p}
+	c.mu.Unlock()
+}
 
-  // Ctrl/Cmd+F opens the Find bar; browser default (page search) is suppressed.
-  useEffect(() => {
-    function handleKeyDown(e: KeyboardEvent) {
-      if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
-        e.preventDefault()
-        setFindBarOpen(true)
-      }
-    }
-    document.addEventListener('keydown', handleKeyDown)
-    return () => document.removeEventListener('keydown', handleKeyDown)
-  }, [setFindBarOpen])
+func (c *shareCache) invalidate(token string) {
+	c.mu.Lock()
+	delete(c.entries, token)
+	c.mu.Unlock()
+}
 
-  const displayName = (user as { displayName?: string } | null)?.displayName ?? 'User'
-  const email = (user as { email?: string } | null)?.email ?? ''
-  const userIdentity: Identity = {
-    color: (user as { color?: string } | null)?.color ?? '#288C9B',
-    icon: (user as { icon?: string } | null)?.icon ?? '__name_2__',
+// ── viewConfig sub-types ──────────────────────────────────────────────────────
+
+// viewConfigJSON is the shape stored in shares.view_config. The filter field
+// is evaluated server-side by the Go filter engine; the other fields are
+// forwarded to the client as-is so the public viewer can apply them.
+//
+// columns carries the List view's column visibility snapshot — it drives the
+// "notes" projection nuance below (and lets the public viewer render exactly
+// the columns the share creator chose).
+type viewConfigJSON struct {
+	Filter  *filters.FilterDefinition `json:"filter,omitempty"`
+	Columns []shareColumnConfig       `json:"columns,omitempty"`
+}
+
+type shareColumnConfig struct {
+	ID      string `json:"id"`
+	Visible bool   `json:"visible"`
+}
+
+// ── Handlers ──────────────────────────────────────────────────────────────────
+
+// handleGetShareProjection handles GET /shares/{token}. No authentication is
+// required. It is the public data gateway: the scope is hard-locked to the
+// single timeline referenced by the share row; no client-supplied selector can
+// widen it.
+func (s *Server) handleGetShareProjection(w http.ResponseWriter, r *http.Request) {
+	token := r.PathValue("token")
+
+	// GET /shares/{token}.ics — Go 1.22 mux wildcards span the whole path
+	// segment, so the ICS feed's .ics suffix arrives inside {token}; dispatch
+	// it to the calendar-feed handler (Phase 13.4).
+	if strings.HasSuffix(token, ".ics") {
+		s.serveICSFeed(w, r, strings.TrimSuffix(token, ".ics"))
+		return
+	}
+
+	// ── 1. Resolve the share row ──────────────────────────────────────────────
+	share, err := s.shares.GetByToken(token)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load share")
+		return
+	}
+
+	// An ICS feed is only reachable through the .ics endpoint. Serving it as a
+	// JSON projection would expose the whole timeline for member-scoped feeds
+	// (the projection has no member filter), so the kinds never cross over.
+	if share.Kind != models.ShareKindView {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+		return
+	}
+
+	// Phase 13.4 — revocation / expiry handled here (fields exist in schema now).
+	if share.RevokedAt != nil {
+		writeError(w, http.StatusGone, "GONE", "this share has been revoked")
+		return
+	}
+	if share.ExpiresAt != nil && time.Now().After(*share.ExpiresAt) {
+		writeError(w, http.StatusGone, "GONE", "this share has expired")
+		return
+	}
+
+	// Password gate (Phase 13.2). A locked share serves no data without a valid
+	// view token — obtained by exchanging the password at POST /shares/{token}/unlock.
+	// NOTE: this check must stay above the cache read. PATCH invalidates the cache
+	// entry immediately (see handleUpdateShare), so a newly-added password_hash is
+	// never served from a stale cache. Moving the check below the cache read would
+	// silently bypass the password gate for the TTL window. The 401 body carries no
+	// projection data — only the passwordRequired signal the viewer needs.
+	if share.PasswordHash != nil {
+		vt := bearerToken(r)
+		if vt == "" || s.tokens.ValidateShareViewToken(vt, share.ID) != nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]bool{"passwordRequired": true})
+			return
+		}
+	}
+
+	// ── 2. Serve from cache if warm ───────────────────────────────────────────
+	if proj, ok := s.shareCache.get(token); ok {
+		go func() { _ = s.shares.RecordView(share.ID) }()
+		writeJSON(w, http.StatusOK, proj)
+		return
+	}
+
+	// ── 3. Build projection (cache miss) ─────────────────────────────────────
+	proj, err := s.buildShareProjection(share)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to build share projection")
+		return
+	}
+
+	s.shareCache.set(token, proj)
+	go func() { _ = s.shares.RecordView(share.ID) }()
+	writeJSON(w, http.StatusOK, proj)
+}
+
+// buildShareProjection assembles the full ShareProjection for a share.
+// The scope is hard-locked to share.TimelineID; the caller cannot supply a
+// different timeline ID. Filter evaluation runs in Go before any data leaves
+// the server.
+func (s *Server) buildShareProjection(share *models.Share) (*models.ShareProjection, error) {
+	// Get timeline — using the share's TimelineID, never a client-supplied value.
+	timeline, err := s.timelines.GetByID(share.TimelineID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Get all non-archived activities for this timeline.
+	acts, err := s.activities.ListByTimeline(share.TimelineID, nil, nil, false)
+	if err != nil {
+		return nil, err
+	}
+
+	// Get statuses and tags for filter context + projection.
+	statuses, err := s.statuses.ListStatuses(share.TimelineID)
+	if err != nil {
+		return nil, err
+	}
+	tags, err := s.tags.ListByTeam(timeline.TeamID)
+	if err != nil {
+		return nil, err
+	}
+	members, err := s.teams.ListMembers(timeline.TeamID)
+	if err != nil {
+		return nil, err
+	}
+	team, err := s.teams.GetByID(timeline.TeamID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Parse the frozen filter from view_config and evaluate it server-side.
+	var vc viewConfigJSON
+	if share.ViewConfig != "" && share.ViewConfig != "{}" {
+		_ = json.Unmarshal([]byte(share.ViewConfig), &vc)
+	}
+
+	var filteredActs []*models.Activity
+	if vc.Filter != nil && len(vc.Filter.Conditions) > 0 {
+		// Build filter context.
+		statusesByTL := map[string][]models.Status{share.TimelineID: {}}
+		for _, st := range statuses {
+			statusesByTL[share.TimelineID] = append(statusesByTL[share.TimelineID], *st)
+		}
+		modelTags := make([]models.Tag, 0, len(tags))
+		for _, t := range tags {
+			modelTags = append(modelTags, *t)
+		}
+		ctx := &filters.FilterContext{
+			StatusesByTimelineID: statusesByTL,
+			Tags:                 modelTags,
+		}
+		for _, a := range acts {
+			if filters.MatchesFilter(a, vc.Filter, ctx) {
+				filteredActs = append(filteredActs, a)
+			}
+		}
+	} else {
+		filteredActs = acts
+	}
+
+	// Build referenced-entity sets (prune to what surviving activities reference).
+	usedMemberIDs := make(map[string]bool)
+	usedStatusIDs := make(map[string]bool)
+	usedTagIDs := make(map[string]bool)
+	for _, a := range filteredActs {
+		for _, id := range a.AssignedMemberIDs {
+			usedMemberIDs[id] = true
+		}
+		if a.StatusID != nil {
+			usedStatusIDs[*a.StatusID] = true
+		}
+		for _, id := range a.TagIDs {
+			usedTagIDs[id] = true
+		}
+	}
+
+	// notes is included only for List shares whose creator left the Notes
+	// column visible — the only projection nuance beyond scope-locking and
+	// field-pruning (Phase 13.3 exit criteria).
+	notesEnabled := false
+	if share.ViewType == "list" {
+		for _, c := range vc.Columns {
+			if c.ID == "notes" && c.Visible {
+				notesEnabled = true
+				break
+			}
+		}
+	}
+
+	// Build PublicActivity slice.
+	pubActivities := make([]models.PublicActivity, 0, len(filteredActs))
+	for _, a := range filteredActs {
+		pub := models.PublicActivity{
+			ID:                a.ID,
+			Title:             a.Title,
+			Description:       a.Description,
+			Icon:              a.Icon,
+			Color:             a.Color,
+			StartAt:           a.StartAt,
+			EndAt:             a.EndAt,
+			AllDay:            a.AllDay,
+			StatusID:          a.StatusID,
+			ParentActivityID:  a.ParentActivityID,
+			PercentComplete:   a.PercentComplete,
+			AssignedMemberIDs: a.AssignedMemberIDs,
+			TagIDs:            a.TagIDs,
+		}
+		if notesEnabled {
+			pub.Notes = a.Notes
+		}
+		if pub.AssignedMemberIDs == nil {
+			pub.AssignedMemberIDs = []string{}
+		}
+		if pub.TagIDs == nil {
+			pub.TagIDs = []string{}
+		}
+		pubActivities = append(pubActivities, pub)
+	}
+
+	// Build PublicMember slice — never email/role/userId.
+	pubMembers := make([]models.PublicMember, 0)
+	for _, m := range members {
+		if !usedMemberIDs[m.ID] {
+			continue
+		}
+		name := m.DisplayName
+		if name == "" {
+			// The register endpoint requires a non-empty displayName, so this
+			// branch only fires for rows migrated from older data. Never fall
+			// back to the email address — this response is public and
+			// unauthenticated.
+			name = "Team member"
+		}
+		pubMembers = append(pubMembers, models.PublicMember{
+			ID:          m.ID,
+			DisplayName: name,
+			Color:       m.Color,
+			Icon:        m.Icon,
+		})
+	}
+
+	// Prune statuses to referenced ones — except for Kanban shares, where
+	// every status is a column regardless of whether it currently holds any
+	// activities (mirrors the in-app board, which always renders one column
+	// per timeline status). Pruning there would silently drop empty columns
+	// that anonymous viewers would otherwise see, e.g. an empty "Deferred"
+	// column that's still meaningful to the team.
+	pubStatuses := make([]models.Status, 0)
+	for _, st := range statuses {
+		if share.ViewType == "kanban" || usedStatusIDs[st.ID] {
+			pubStatuses = append(pubStatuses, *st)
+		}
+	}
+
+	// Prune tags to referenced ones.
+	pubTags := make([]models.Tag, 0)
+	for _, tg := range tags {
+		if usedTagIDs[tg.ID] {
+			pubTags = append(pubTags, *tg)
+		}
+	}
+
+	// Build the public share — only the fields anonymous callers need.
+	// Operational telemetry (view_count, last_viewed_at) and internal fields
+	// (created_by, revoked_at) are excluded from the public response.
+	pubShare := models.PublicShare{
+		ID:         share.ID,
+		TimelineID: share.TimelineID,
+		Token:      share.Token,
+		Name:       share.Name,
+		ViewType:   share.ViewType,
+		ViewConfig: share.ViewConfig,
+		CreatedAt:  share.CreatedAt,
+		ExpiresAt:  share.ExpiresAt,
+	}
+	proj := &models.ShareProjection{
+		Share:    pubShare,
+		TeamName: team.Name,
+		Timeline: models.PublicTimeline{
+			ID:        timeline.ID,
+			Name:      timeline.Name,
+			Color:     timeline.Color,
+			Icon:      timeline.Icon,
+			StartDate: timeline.StartDate,
+			EndDate:   timeline.EndDate,
+		},
+		Members:    pubMembers,
+		Statuses:   pubStatuses,
+		Tags:       pubTags,
+		Activities: pubActivities,
+	}
+	return proj, nil
+}
+
+// handleCreateShare handles POST /timelines/{id}/shares. The caller must be a
+// member of the timeline's team. The share captures the current view config.
+func (s *Server) handleCreateShare(w http.ResponseWriter, r *http.Request) {
+	timelineID := r.PathValue("id")
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
+		return
+	}
+	if timeline.ArchivedAt != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+		return
+	}
+
+	member, ok := s.requireTeamMember(w, r, timeline.TeamID)
+	if !ok {
+		return
+	}
+
+	var req createShareBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+	if req.Kind == "" {
+		req.Kind = models.ShareKindView
+	}
+	if req.Kind != models.ShareKindView && req.Kind != models.ShareKindICS {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "kind must be 'view' or 'ics'")
+		return
+	}
+	if req.ViewType == "" {
+		req.ViewType = "gantt"
+	}
+	if req.ViewConfig == "" {
+		req.ViewConfig = "{}"
+	}
+
+	now := time.Now().UTC()
+	share := &models.Share{
+		ID:          newID(),
+		TimelineID:  timelineID,
+		Token:       newToken(),
+		Kind:        req.Kind,
+		Name:        req.Name,
+		Description: req.Description,
+		ViewType:    req.ViewType,
+		ViewConfig:  req.ViewConfig,
+		CreatedBy:   member.ID,
+		CreatedAt:   now,
+		ViewCount:   0,
+	}
+
+	if req.Kind == models.ShareKindICS {
+		// An ICS feed has no view semantics and no password — the token is the
+		// secret (calendar clients cannot unlock interactively). Scope is the
+		// only configuration: the whole timeline, or one member's assignments.
+		if req.Password != nil && strings.TrimSpace(*req.Password) != "" {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "ICS feeds cannot be password protected")
+			return
+		}
+		if req.Scope != models.ShareScopeTimeline && req.Scope != models.ShareScopeMember {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "scope must be 'timeline' or 'member' for ICS shares")
+			return
+		}
+		share.Scope = &req.Scope
+		share.ViewType = "calendar"
+		share.ViewConfig = "{}"
+		if req.Scope == models.ShareScopeMember {
+			if req.MemberID == nil || *req.MemberID == "" {
+				writeError(w, http.StatusBadRequest, "BAD_REQUEST", "memberId is required for member-scoped ICS shares")
+				return
+			}
+			// The member must belong to this timeline's team — a feed must not
+			// be creatable for an arbitrary member ID from another team.
+			feedMember, err := s.teams.GetMemberByID(*req.MemberID)
+			if err != nil || feedMember.TeamID != timeline.TeamID {
+				writeError(w, http.StatusBadRequest, "BAD_REQUEST", "memberId does not belong to this timeline's team")
+				return
+			}
+			share.MemberID = req.MemberID
+		}
+	}
+
+	// Optional password protection (view shares only). An empty/whitespace
+	// string means "no password" — the field stays NULL and the share is open.
+	if req.Kind == models.ShareKindView && req.Password != nil && strings.TrimSpace(*req.Password) != "" {
+		hash, err := auth.HashPassword(*req.Password)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to secure share")
+			return
+		}
+		share.PasswordHash = &hash
+	}
+
+	if err := s.shares.Create(share); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create share")
+		return
+	}
+
+	// Surface the derived flag in the create response (the repo sets it on reads).
+	share.Protected = share.PasswordHash != nil
+	writeJSON(w, http.StatusCreated, share)
+}
+
+// handleListShares handles GET /teams/{id}/timelines/{timelineId}/shares.
+// Only team members with access to the timeline may list its shares.
+func (s *Server) handleListShares(w http.ResponseWriter, r *http.Request) {
+	timelineID := r.PathValue("timelineId")
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
+		return
+	}
+
+	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
+		return
+	}
+
+	shares, err := s.shares.ListByTimeline(timelineID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list shares")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, shares)
+}
+
+// handleUpdateShare handles PATCH /shares/{id}. Any member of the timeline's
+// team may update it (shares are read-only projections — no creator/admin gate).
+func (s *Server) handleUpdateShare(w http.ResponseWriter, r *http.Request) {
+	shareID := r.PathValue("id")
+
+	share, err := s.shares.GetByID(shareID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
+		return
+	}
+
+	timeline, err := s.timelines.GetByID(share.TimelineID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
+		return
+	}
+
+	// Any member of the timeline's team may manage its shares. A share is a
+	// read-only projection that can never mutate app data, so there is no
+	// creator/admin gate (Phase 13.2 re-sequencing decision).
+	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
+		return
+	}
+
+	var req patchShareBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	if req.Name != nil {
+		share.Name = req.Name
+	}
+	if req.Description != nil {
+		share.Description = req.Description
+	}
+	if req.ViewType != nil {
+		share.ViewType = *req.ViewType
+	}
+	if req.ViewConfig != nil {
+		share.ViewConfig = *req.ViewConfig
+	}
+	// Password: nil leaves it unchanged; an empty string clears protection; a
+	// non-empty string sets/replaces it. ICS feeds can never carry one —
+	// calendar clients have no interactive unlock.
+	if req.Password != nil && share.Kind == models.ShareKindICS && strings.TrimSpace(*req.Password) != "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "ICS feeds cannot be password protected")
+		return
+	}
+	if req.Password != nil {
+		if strings.TrimSpace(*req.Password) == "" {
+			share.PasswordHash = nil
+		} else {
+			hash, err := auth.HashPassword(*req.Password)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to secure share")
+				return
+			}
+			share.PasswordHash = &hash
+		}
+	}
+
+	if err := s.shares.Update(share); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update share")
+		return
+	}
+
+	// Invalidate caches so the next public request picks up the new config.
+	s.shareCache.invalidate(share.Token)
+	s.icsCache.invalidate(share.Token)
+
+	// Refresh the derived flag — the password may have just been set/cleared.
+	share.Protected = share.PasswordHash != nil
+	writeJSON(w, http.StatusOK, share)
+}
+
+// handleDeleteShare handles DELETE /shares/{id}. Any member of the timeline's
+// team may delete it (see handleUpdateShare).
+func (s *Server) handleDeleteShare(w http.ResponseWriter, r *http.Request) {
+	shareID := r.PathValue("id")
+
+	share, err := s.shares.GetByID(shareID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
+		return
+	}
+
+	timeline, err := s.timelines.GetByID(share.TimelineID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
+		return
+	}
+
+	// Any member of the timeline's team may delete its shares — no creator/admin
+	// gate (see handleUpdateShare).
+	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
+		return
+	}
+
+	if err := s.shares.Delete(shareID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete share")
+		return
+	}
+
+	s.shareCache.invalidate(share.Token)
+	s.icsCache.invalidate(share.Token)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleUnlockShare handles POST /shares/{token}/unlock. It is public (no auth
+// middleware): an anonymous viewer exchanges the share password for a
+// short-lived view token, which they then present on GET /shares/{token}.
+// Attempts are rate-limited per client IP to blunt brute-force guessing.
+func (s *Server) handleUnlockShare(w http.ResponseWriter, r *http.Request) {
+	if !s.unlockLimiter.allow(clientIP(r)) {
+		writeError(w, http.StatusTooManyRequests, "RATE_LIMITED", "too many unlock attempts; try again later")
+		return
+	}
+
+	token := r.PathValue("token")
+
+	share, err := s.shares.GetByToken(token)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load share")
+		return
+	}
+
+	// Mirror the GET gateway's revocation/expiry checks so a dead share cannot
+	// be unlocked.
+	if share.RevokedAt != nil {
+		writeError(w, http.StatusGone, "GONE", "this share has been revoked")
+		return
+	}
+	if share.ExpiresAt != nil && time.Now().After(*share.ExpiresAt) {
+		writeError(w, http.StatusGone, "GONE", "this share has expired")
+		return
+	}
+	// ICS feeds are never password protected; mirror the projection gateway's
+	// 404 rather than confirming the token exists in another mode.
+	if share.Kind != models.ShareKindView {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+		return
+	}
+	if share.PasswordHash == nil {
+		writeError(w, http.StatusBadRequest, "NOT_PROTECTED", "this share is not password protected")
+		return
+	}
+
+	var req unlockShareBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+	if auth.CheckPassword(*share.PasswordHash, req.Password) != nil {
+		writeError(w, http.StatusUnauthorized, "INVALID_PASSWORD", "incorrect password")
+		return
+	}
+
+	viewToken, err := s.tokens.IssueShareViewToken(share.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to issue view token")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"token": viewToken})
+}
+
+// bearerToken extracts a Bearer credential from the Authorization header, or
+// returns "" when absent or malformed.
+func bearerToken(r *http.Request) string {
+	header := r.Header.Get("Authorization")
+	if !strings.HasPrefix(header, "Bearer ") {
+		return ""
+	}
+	return strings.TrimPrefix(header, "Bearer ")
+}
+
+// ── Request bodies ────────────────────────────────────────────────────────────
+
+type createShareBody struct {
+	Kind        string  `json:"kind,omitempty"`
+	Scope       string  `json:"scope,omitempty"`
+	MemberID    *string `json:"memberId,omitempty"`
+	Name        *string `json:"name,omitempty"`
+	Description *string `json:"description,omitempty"`
+	ViewType    string  `json:"viewType"`
+	ViewConfig  string  `json:"viewConfig"`
+	Password    *string `json:"password,omitempty"`
+}
+
+type patchShareBody struct {
+	Name        *string `json:"name,omitempty"`
+	Description *string `json:"description,omitempty"`
+	ViewType    *string `json:"viewType,omitempty"`
+	ViewConfig  *string `json:"viewConfig,omitempty"`
+	Password    *string `json:"password,omitempty"`
+}
+
+type unlockShareBody struct {
+	Password string `json:"password"`
+}
+````
+
+## File: packages/web/src/components/ShareModal.tsx
+````typescript
+/**
+ * ShareModal — manage the share links for the current timeline view.
+ *
+ * Rebuilt to the "Share this view" design handoff (docs/design/handoffs/share-modal):
+ * an active-links list with per-row creator/date/view-count meta and an inline
+ * delete-confirm, plus an inline create form with optional password protection.
+ * One timeline can host many named shares; each is a frozen view snapshot.
+ *
+ * Styled with Tailwind utility classes against the project's design tokens
+ * (see index.css `@theme`) and shadcn/ui primitives — the handoff is a visual
+ * reference, not production code, so its inline styles were not ported.
+ *
+ * Delete is intentionally not permission-gated — a share is a read-only
+ * projection that cannot mutate app data, so any team member may manage any
+ * link (Phase 13.2 decision).
+ */
+
+import { useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
+import {
+  Link as LinkIcon, Link2, Lock, KeyRound, Copy, Check, Eye, EyeOff,
+  Trash2, Plus, PlusCircle, X, Users,
+} from 'lucide-react'
+import { useCreateShare, useListShares, useDeleteShare } from '@/hooks/useShares'
+import { useTeamMembers } from '@/hooks/useTeamActivities'
+import { useAuth } from '@/contexts/AuthContext'
+import { Badge } from '@/components/identity/Badge'
+import { resolveColorHex } from '@/components/identity/identity-constants'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { cn } from '@/lib/utils'
+import { MEMBER_COLORS } from '@/types'
+import type { FilterDefinition } from '@/lib/filterTypes'
+import type { components } from '@draba/shared'
+
+type Share = components['schemas']['Share']
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
+
+export interface ShareViewConfig {
+  groupBy: string
+  sortBy: string
+  colorBy: string
+  granularity: string
+  filter: FilterDefinition | null
+  /** List shares only — column visibility snapshot; drives the "notes" projection nuance. */
+  columns?: { id: string; visible: boolean }[]
+  /** Kanban shares only — which fields render on each card. */
+  cardFields?: string[]
+  /** Kanban shares only — whether child activities nest under their parent. */
+  showHierarchy?: boolean
+  /** Kanban shares only — column IDs collapsed at share-creation time. */
+  collapsedColumns?: string[]
+}
+
+interface Props {
+  teamId: string
+  timelineId: string
+  viewType: 'gantt' | 'list' | 'calendar' | 'kanban'
+  viewConfig: ShareViewConfig
+  /** Display name of the timeline, shown in the header subtitle. */
+  timelineName?: string
+  onClose: () => void
+}
+
+interface CreatePayload {
+  title: string
+  description: string
+  password: string | null
+}
+
+// ── Shared token-styled bits ──────────────────────────────────────────────────
+//
+// The handoff colors a share's "type tile" teal (open link) or amber
+// (password-protected). Those tints aren't semantic tokens on their own, so
+// they're expressed as arbitrary-value Tailwind classes derived from the
+// existing `--primary` / `--secondary` HSL values rather than ported hex.
+
+const TILE_TEAL = 'bg-[hsl(188_59%_38%/0.12)] text-primary'
+const TILE_AMBER = 'bg-[hsl(30_87%_62%/0.16)] text-secondary'
+const BADGE_AMBER = 'bg-[hsl(30_87%_62%/0.22)] text-secondary-foreground'
+
+function MiniAvatar({ member, size = 20 }: { member: TeamMemberWithUser | undefined; size?: number }) {
+  if (!member) return null
+  const name = member.displayName || 'Team member'
+  const color = resolveColorHex(member.color) || MEMBER_COLORS[0]
+  return (
+    <Badge identity={{ color, icon: member.icon ?? '__name_1__' }} name={name} size={size} shape="circle" />
+  )
+}
+
+function formatCreated(iso: string): string {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ''
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+}
+
+// ── A single share row ─────────────────────────────────────────────────────────
+
+function ShareRow({
+  share,
+  creator,
+  isOwn,
+  onDelete,
+}: {
+  share: Share
+  creator: TeamMemberWithUser | undefined
+  isOwn: boolean
+  onDelete: (id: string) => void
+}) {
+  const url = `${window.location.host}/s/${share.token}`
+  const [copied, setCopied] = useState(false)
+  const [confirming, setConfirming] = useState(false)
+  const protectedShare = Boolean(share.protected)
+
+  const copy = () => {
+    void navigator.clipboard.writeText(`${window.location.origin}/s/${share.token}`).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1600)
+    })
   }
-
-  // Global preferences — restored on login to seed team/timeline selection.
-  const { isSuccess: globalPrefsSettled } = usePreferences()
-  const globalPrefMap = usePreferenceMap()
-  const weekStartDay: 0 | 1 = (globalPrefMap['week_start'] as string | undefined) === 'sunday' ? 0 : 1
-
-  // Team modal state
-  const [teamModalMode, setTeamModalMode] = useState<'new' | 'edit' | null>(null)
-  const [editingTeam, setEditingTeam] = useState<ApiTeam | null>(null)
-  const unarchiveTeam = useUnarchiveTeam()
-
-  // Member modal state
-  const [editingMember, setEditingMember] = useState<TeamMemberWithUser | null>(null)
-
-  // Timeline modal state
-  const [timelineModalMode, setTimelineModalMode] = useState<'new' | 'edit' | null>(null)
-  const [editingTimeline, setEditingTimeline] = useState<ApiTimeline | null>(null)
-
-  // Fetch all teams including archived for the sidebar's archived section.
-  const { data: allTeams = [] } = useMyTeams(true)
-  const activeTeams = allTeams.filter(t => !t.archivedAt)
-  const archivedTeams = allTeams.filter(t => Boolean(t.archivedAt))
-
-  // Explicit team selection state — null until the global pref is applied so
-  // that timelines (and the timeline init effect) don't fire against the wrong
-  // fallback team before the saved team pref resolves.
-  const [activeTeamId, setActiveTeamId] = useState<string | null>(null)
-  const teamIdInitialized = useRef(false)
-  useEffect(() => {
-    if (!activeTeams.length || !globalPrefsSettled || teamIdInitialized.current) return
-    teamIdInitialized.current = true
-    const saved = typeof globalPrefMap['selected_team'] === 'string' ? globalPrefMap['selected_team'] : null
-    const exists = saved && activeTeams.some(t => t.id === saved)
-    setActiveTeamId(exists ? saved : activeTeams[0].id)
-  }, [activeTeams, globalPrefsSettled, globalPrefMap])
-
-  // Only derive an active team once the pref has been applied (activeTeamId !== null).
-  // The activeTeams[0] fallback here handles the edge case where the saved team
-  // was archived or deleted between sessions.
-  const activeTeam = activeTeamId !== null
-    ? (activeTeams.find(t => t.id === activeTeamId) ?? activeTeams[0] ?? undefined)
-    : undefined
-  const teamId = activeTeam?.id ?? ''
-
-  // Check whether the current user is an admin of the active team.
-  const { data: teamMembers = [] } = useTeamMembers(teamId)
-  const userId = (user as { id?: string } | null)?.id ?? ''
-  const isSuperadmin = Boolean((user as { isSuperadmin?: boolean } | null)?.isSuperadmin)
-  const canEditTeam = isSuperadmin || teamMembers.some(m => m.userId === userId && m.role === 'admin')
-
-  const handleSelectTeam = useCallback((id: string) => {
-    setActiveTeamId(id)
-    // Clear the stale timeline selection so the init effect re-fires with the
-    // new team's timeline list. Without this, the old timeline ID leaks into
-    // the new team's API requests and produces 404s.
-    setActiveTimelineId(undefined)
-    prefsAppliedForTimeline.current = null
-    timelineIdInitialized.current = false
-  }, [])
-
-  const unarchiveTimeline = useUnarchiveTimeline(teamId)
-
-  const { data: timelines = [] } = useTeamTimelines(teamId)
-  const { data: allTimelines = [] } = useTeamTimelinesWithArchived(teamId)
-  const archivedTimelines = allTimelines.filter(t => Boolean(t.archivedAt))
-  const [activeTimelineId, setActiveTimelineId] = useState<string | undefined>()
-  const { data: activeTimelineStatuses = [] } = useTimelineStatuses(teamId, activeTimelineId ?? '')
-  const { data: savedFilters = [] } = useSavedFilters(teamId)
-  const { data: tags = [] } = useTags(teamId)
-  // Initialize activeTimelineId from the saved global pref (selected_timeline),
-  // falling back to timelines[0] when no pref is stored or the saved timeline
-  // is no longer in the list. Waits for global prefs to settle so we don't
-  // immediately overwrite a restored value with the fallback.
-  useEffect(() => {
-    if (timelines.length === 0 || !globalPrefsSettled || timelineIdInitialized.current) return
-    timelineIdInitialized.current = true
-    const saved = typeof globalPrefMap['selected_timeline'] === 'string' ? globalPrefMap['selected_timeline'] : null
-    const exists = saved && timelines.some(t => t.id === saved)
-    setActiveTimelineId(exists ? saved : timelines[0].id)
-  }, [timelines, globalPrefsSettled, globalPrefMap])
-  const activeTimeline = timelines.find(t => t.id === activeTimelineId) ?? timelines[0]
-  // Derived so they stay in sync after edits without needing separate state.
-  const activeTimelineColor = activeTimeline?.color ?? '#1A97A2'
-  const activeTimelineName = activeTimeline?.name ?? ''
-  const activeTimelineIdentity: Identity = {
-    color: activeTimeline?.color ?? '#288C9B',
-    icon: activeTimeline?.icon ?? '__none__',
-  }
-
-  // The frozen filter snapshot captured into a share's view config — shared
-  // across Gantt/List/Kanban since `activeFilter` applies to the whole timeline.
-  const activeShareFilter = useMemo(() => {
-    if (activeFilter.kind !== 'saved') return null
-    const sf = savedFilters.find(f => f.id === activeFilter.id)
-    if (!sf) return null
-    try { return JSON.parse(sf.definition) as import('@/lib/filterTypes').FilterDefinition } catch { return null }
-  }, [activeFilter, savedFilters])
-
-  // Close the activity detail panel whenever the active filter changes so the
-  // filtered view is unobstructed by a stale selection.
-  useEffect(() => {
-    setSelectedActivityId(null)
-    setSelectedApiActivity(null)
-  }, [activeFilter]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  const handleTimelineChange = useCallback((id: string) => {
-    prefsAppliedForTimeline.current = null
-    setActiveTimelineId(id)
-    setActiveFilter({ kind: 'preset', id: 'all' })
-  }, [setActiveFilter])
-
-  // Calendar navigation helpers.
-  const calendarPrev = useCallback(() => {
-    setCalendarAnchorDate(prev => {
-      const d = new Date(prev)
-      if (calendarLayout === 'month') {
-        d.setUTCMonth(d.getUTCMonth() - 1)
-      } else {
-        d.setUTCDate(d.getUTCDate() - 7)
-      }
-      return d
-    })
-  }, [calendarLayout])
-
-  const calendarNext = useCallback(() => {
-    setCalendarAnchorDate(prev => {
-      const d = new Date(prev)
-      if (calendarLayout === 'month') {
-        d.setUTCMonth(d.getUTCMonth() + 1)
-      } else {
-        d.setUTCDate(d.getUTCDate() + 7)
-      }
-      return d
-    })
-  }, [calendarLayout])
-
-  const calendarToday = useCallback(() => {
-    const d = new Date()
-    d.setUTCHours(0, 0, 0, 0)
-    if (calendarLayout === 'month') {
-      d.setUTCDate(1)
-    } else {
-      // Snap to weekStart.
-      const dow = d.getUTCDay()
-      const daysBack = weekStartDay === 1 ? (dow === 0 ? 6 : dow - 1) : dow
-      d.setUTCDate(d.getUTCDate() - daysBack)
-    }
-    setCalendarAnchorDate(d)
-  }, [calendarLayout, weekStartDay])
-
-  // Switching layouts also snaps the anchor date to the correct boundary so
-  // the week-view always starts on the configured weekStart day.
-  const handleCalendarLayoutChange = useCallback((l: CalendarLayout) => {
-    setCalendarLayout(l)
-    setCalendarAnchorDate(prev => {
-      const d = new Date(prev)
-      d.setUTCHours(0, 0, 0, 0)
-      if (l === 'week') {
-        const dow = d.getUTCDay()
-        const daysBack = weekStartDay === 1 ? (dow === 0 ? 6 : dow - 1) : dow
-        d.setUTCDate(d.getUTCDate() - daysBack)
-      } else {
-        d.setUTCDate(1)
-      }
-      return d
-    })
-  }, [weekStartDay])
-
-  useTeamActivitySync(teamId, accessToken)
-
-  // Per-timeline preferences: restore toolbar state when the active timeline changes.
-  // isSuccess gate ensures we don't mark prefs applied before the query resolves.
-  const { isSuccess: prefsSettled } = usePreferences(activeTimelineId)
-  const timelinePrefs = usePreferenceMap(activeTimelineId)
-  useEffect(() => {
-    if (!activeTimelineId || !prefsSettled) return
-    if (prefsAppliedForTimeline.current === activeTimelineId) return
-    prefsAppliedForTimeline.current = activeTimelineId
-
-    if (typeof timelinePrefs['group_by'] === 'string') setGroupBy(timelinePrefs['group_by'] as GroupBy)
-    if (typeof timelinePrefs['sort_by'] === 'string') setSortBy(timelinePrefs['sort_by'] as SortBy)
-    if (typeof timelinePrefs['zoom_granularity'] === 'string') setGranularity(timelinePrefs['zoom_granularity'] as TimeGranularity | 'auto')
-    if (typeof timelinePrefs['color_by'] === 'string') setColorBy(timelinePrefs['color_by'] as ColorBy)
-    if (typeof timelinePrefs['list_group_by'] === 'string') setListGroupBy(timelinePrefs['list_group_by'] as ListGroupBy)
-    if (typeof timelinePrefs['list_sort_by'] === 'string') setListSortBy(timelinePrefs['list_sort_by'] as ListSortBy)
-    if (typeof timelinePrefs['list_color_by'] === 'string') setListColorBy(timelinePrefs['list_color_by'] as ListColorBy)
-    if (typeof timelinePrefs['list_density'] === 'string') setListDensity(timelinePrefs['list_density'] as ListDensity)
-    if (typeof timelinePrefs['view_mode'] === 'string') setView(timelinePrefs['view_mode'] as ViewMode)
-    if (typeof timelinePrefs['kanban_group_by'] === 'string') setKanbanGroupBy(timelinePrefs['kanban_group_by'] as KanbanGroupBy)
-    if (typeof timelinePrefs['kanban_sort_by'] === 'string') setKanbanSortBy(timelinePrefs['kanban_sort_by'] as KanbanSortBy)
-    if (typeof timelinePrefs['kanban_color_by'] === 'string') setKanbanColorBy(timelinePrefs['kanban_color_by'] as ColorBy)
-    if (typeof timelinePrefs['kanban_card_fields'] === 'string') {
-      try { setKanbanCardFields(JSON.parse(timelinePrefs['kanban_card_fields']) as KanbanCardField[]) } catch { /* ignore */ }
-    }
-    if (typeof timelinePrefs['kanban_collapsed'] === 'string') {
-      try { setKanbanCollapsedColumns(JSON.parse(timelinePrefs['kanban_collapsed']) as string[]) } catch { /* ignore */ }
-    }
-    if (typeof timelinePrefs['kanban_show_hierarchy'] === 'string') {
-      try { setKanbanShowHierarchy(JSON.parse(timelinePrefs['kanban_show_hierarchy']) as boolean) } catch { /* ignore */ }
-    }
-  }, [activeTimelineId, prefsSettled, timelinePrefs])
-
-  // Save toolbar state changes to per-timeline prefs.
-  const saveTimelinePref = useCallback((key: string, value: string) => {
-    if (!activeTimelineId) return
-    upsert.mutate({ key, value: JSON.stringify(value), timelineId: activeTimelineId })
-  }, [activeTimelineId, upsert.mutate]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('group_by', groupBy)
-  }, [groupBy, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('sort_by', sortBy)
-  }, [sortBy, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('zoom_granularity', granularity)
-  }, [granularity, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('color_by', colorBy)
-  }, [colorBy, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('view_mode', view)
-  }, [view, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('list_group_by', listGroupBy)
-  }, [listGroupBy, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('list_sort_by', listSortBy)
-  }, [listSortBy, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('list_color_by', listColorBy)
-  }, [listColorBy, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('list_density', listDensity)
-  }, [listDensity, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('kanban_group_by', kanbanGroupBy)
-  }, [kanbanGroupBy, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('kanban_sort_by', kanbanSortBy)
-  }, [kanbanSortBy, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('kanban_color_by', kanbanColorBy)
-  }, [kanbanColorBy, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('kanban_card_fields', JSON.stringify(kanbanCardFields))
-  }, [kanbanCardFields, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('kanban_show_hierarchy', JSON.stringify(kanbanShowHierarchy))
-  }, [kanbanShowHierarchy, saveTimelinePref])
-
-  // Global preferences: persist dark mode, active team, and active timeline.
-  useEffect(() => {
-    upsert.mutate({ key: 'theme', value: JSON.stringify(theme) })
-  }, [theme]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    if (!teamId) return
-    upsert.mutate({ key: 'selected_team', value: JSON.stringify(teamId) })
-  }, [teamId]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    if (!activeTimelineId) return
-    upsert.mutate({ key: 'selected_timeline', value: JSON.stringify(activeTimelineId) })
-  }, [activeTimelineId]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Reset label column width when the user switches timelines so each timeline
-  // starts fresh. Switching between views on the same timeline preserves width
-  // because the state lives here rather than inside the unmounting GanttView.
-  useEffect(() => {
-    setGanttLabelColW(DEFAULT_LABEL_COL_W)
-  }, [activeTimelineId])
 
   return (
-    <div style={{ display: 'flex', height: '100vh', overflow: 'hidden', background: 'var(--background)' }}>
-      <Sidebar
-        collapsed={sidebarCollapsed}
-        onToggle={() => setSidebarCollapsed(c => !c)}
-        apiTimelines={timelines}
-        archivedTimelines={archivedTimelines}
-        activeTimelineId={activeTimelineId}
-        onActiveTimelineChange={handleTimelineChange}
-        onNewTimeline={() => { setEditingTimeline(null); setTimelineModalMode('new') }}
-        onEditTimeline={id => {
-          // timelines (active) is always loaded; allTimelines (?archived=true) may
-          // still be in-flight, so prefer the already-loaded list to avoid opening
-          // the modal with an undefined timeline and blank fields.
-          const tl = timelines.find(t => t.id === id) ?? allTimelines.find(t => t.id === id)
-          setEditingTimeline(tl ?? null)
-          setTimelineModalMode('edit')
-        }}
-        onNewActivity={() => {
-          const today = new Date().toISOString().slice(0, 10)
-          setSelectedActivityId(null)
-          setSelectedApiActivity(null)
-          if (view === 'list') {
-            setListNewRowSeq(s => s + 1)
-          } else {
-            setCreateDefaults({ start: today, end: today, memberId: null })
-          }
-        }}
-        activeTeam={activeTeam}
-        activeTeams={activeTeams}
-        archivedTeams={archivedTeams}
-        canEditTeam={canEditTeam}
-        onSelectTeam={handleSelectTeam}
-        onNewTeam={isSuperadmin ? () => { setEditingTeam(null); setTeamModalMode('new'); } : undefined}
-        onEditTeam={t => { setEditingTeam(t as ApiTeam); setTeamModalMode('edit'); }}
-        onUnarchiveTeam={id => unarchiveTeam.mutate(id)}
-        members={teamMembers.length > 0 ? teamMembers : undefined}
-        onEditMember={isSuperadmin ? m => setEditingMember(m) : undefined}
-      />
-
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0 }}>
-        <TopBar
-          view={view}
-          teamId={teamId}
-          timelineName={activeTimelineName}
-          timelineIdentity={activeTimelineIdentity}
-          onViewChange={setView}
-          onOpenFilterManager={() => setFilterModalOpen(true)}
-          rightSlot={
-            <div ref={profileRef} style={{ position: 'relative', marginLeft: 4, zIndex: 30 }}>
-              <button
-                onClick={() => setProfileOpen(o => !o)}
-                style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', display: 'flex' }}
-                title={displayName}
-              >
-                <Badge identity={userIdentity} name={displayName} shape="circle" size={28} />
-              </button>
-
-              {profileOpen && (
-                <div
-                  style={{
-                    position: 'absolute',
-                    top: 'calc(100% + 8px)',
-                    right: 0,
-                    width: 220,
-                    background: 'var(--card)',
-                    border: '1px solid var(--border)',
-                    borderRadius: 8,
-                    boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
-                    zIndex: 100,
-                    overflow: 'hidden',
-                  }}
-                >
-                  <div style={{ padding: '12px 14px', borderBottom: '1px solid var(--border)' }}>
-                    <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)' }}>{displayName}</div>
-                    <div style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 2 }}>{email}</div>
-                  </div>
-                  <button
-                    onClick={toggleDark}
-                    style={{ ...DROPDOWN_BTN, borderBottom: '1px solid var(--border)' }}
-                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-                  >
-                    {isDark ? <Moon size={14} strokeWidth={1.8} /> : <Sun size={14} strokeWidth={1.8} />}
-                    {isDark ? 'Dark mode' : 'Light mode'}
-                  </button>
-                  <button
-                    onClick={() => { setProfileOpen(false); navigate('/settings'); }}
-                    style={{ ...DROPDOWN_BTN, borderBottom: '1px solid var(--border)' }}
-                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-                  >
-                    <Settings size={14} strokeWidth={1.8} />
-                    Settings
-                  </button>
-                  <button
-                    onClick={logout}
-                    style={{ ...DROPDOWN_BTN, color: 'var(--muted-foreground)' }}
-                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-                  >
-                    <LogOut size={14} strokeWidth={1.8} />
-                    Sign out
-                  </button>
-                </div>
-              )}
-            </div>
-          }
-        />
-
-        {/* Active timeline color band */}
-        <div style={{ height: 3, background: activeTimelineColor, flexShrink: 0, transition: 'background 0.2s ease' }} />
-
-        {/* Gantt sub-toolbar — only shown in Gantt view */}
-        {view === 'gantt' && (
-          <GanttToolbar
-            groupBy={groupBy}
-            onGroupByChange={setGroupBy}
-            sortBy={sortBy}
-            onSortByChange={setSortBy}
-            granularity={granularity}
-            onGranularityChange={setGranularity}
-            colorBy={colorBy}
-            onColorByChange={setColorBy}
-            onExport={() => {}}
-            onShare={() => setShareModalOpen(true)}
-          />
-        )}
-
-        {/* List sub-toolbar — only shown in List view */}
-        {view === 'list' && (
-          <ListToolbar
-            columns={listColumns}
-            onColumnVisibilityChange={(colId, visible) => {
-              listColToggleSeq.current += 1
-              setListColToggle({ colId, visible, seq: listColToggleSeq.current })
-              setListColumns(prev => prev.map(c => c.id === colId ? { ...c, visible } : c))
-            }}
-            density={listDensity}
-            onDensityChange={setListDensity}
-            groupBy={listGroupBy}
-            onGroupByChange={setListGroupBy}
-            sortBy={listSortBy}
-            onSortByChange={setListSortBy}
-            colorBy={listColorBy}
-            onColorByChange={setListColorBy}
-            onExport={() => {}}
-            onShare={() => setShareModalOpen(true)}
-          />
-        )}
-
-        {/* Calendar sub-toolbar — only shown in Calendar view */}
-        {view === 'calendar' && (
-          <CalendarToolbar
-            layout={calendarLayout}
-            onLayoutChange={handleCalendarLayoutChange}
-            anchorDate={calendarAnchorDate}
-            onPrev={calendarPrev}
-            onNext={calendarNext}
-            onToday={calendarToday}
-            colorBy={colorBy}
-            onColorByChange={setColorBy}
-            onExport={() => {}}
-            onShare={() => {}}
-          />
-        )}
-
-        {/* Kanban sub-toolbar — only shown in Kanban view */}
-        {view === 'kanban' && (
-          <KanbanToolbar
-            groupBy={kanbanGroupBy}
-            onGroupByChange={setKanbanGroupBy}
-            sortBy={kanbanSortBy}
-            onSortByChange={setKanbanSortBy}
-            colorBy={kanbanColorBy}
-            onColorByChange={setKanbanColorBy}
-            cardFields={kanbanCardFields}
-            onCardFieldsChange={setKanbanCardFields}
-            showHierarchy={kanbanShowHierarchy}
-            onShowHierarchyChange={setKanbanShowHierarchy}
-            onExport={() => {}}
-            onShare={() => setShareModalOpen(true)}
-          />
-        )}
-
-        {/* Content area */}
-        <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-          {view === 'gantt' && teamId && activeTimelineId ? (
-            <GanttView
-              teamId={teamId}
-              timelineId={activeTimelineId}
-              startDate={activeTimeline?.startDate}
-              endDate={activeTimeline?.endDate}
-              groupBy={groupBy}
-              sortBy={sortBy}
-              granularity={granularity}
-              colorBy={colorBy}
-              timelineStatuses={activeTimelineStatuses}
-              savedFilters={savedFilters}
-              tags={tags}
-              selectedActivityId={selectedActivityId}
-              onSelectActivity={(id) => {
-                setSelectedActivityId(id)
-                if (!id) { setSelectedApiActivity(null); setCreateDefaults(null) }
-              }}
-              onSelectApiActivity={(activity) => {
-                setSelectedApiActivity(activity)
-                setCreateDefaults(null)
-              }}
-              onBarDragProgress={(activityId, newStart, newEnd) => {
-                setLiveDragDates({
-                  activityId,
-                  start: newStart.toISOString().slice(0, 10),
-                  end: newEnd.toISOString().slice(0, 10),
-                })
-              }}
-              onBarDragEnd={() => setLiveDragDates(null)}
-              onMembersLoaded={setGanttMembers}
-              labelColW={ganttLabelColW}
-              onLabelColWChange={setGanttLabelColW}
-            />
-          ) : view === 'gantt' && (!teamId || !activeTimelineId) ? (
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
-              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>Loading your team…</p>
-            </div>
-          ) : view === 'list' && teamId && activeTimelineId ? (
-            <ListView
-              teamId={teamId}
-              timelineId={activeTimelineId}
-              groupBy={listGroupBy}
-              sortBy={listSortBy}
-              colorBy={listColorBy}
-              density={listDensity}
-              timelineStatuses={activeTimelineStatuses}
-              savedFilters={savedFilters}
-              tags={tags}
-              selectedActivityId={selectedActivityId}
-              pendingColumnToggle={listColToggle}
-              onSelectActivity={(id) => {
-                setSelectedActivityId(id)
-                if (!id) { setSelectedApiActivity(null); setCreateDefaults(null) }
-              }}
-              onSelectApiActivity={(activity) => {
-                setSelectedApiActivity(activity)
-                setCreateDefaults(null)
-              }}
-              onMembersLoaded={setGanttMembers}
-              onColumnsChange={setListColumns}
-              triggerNewRow={listNewRowSeq}
-            />
-          ) : view === 'list' && (!teamId || !activeTimelineId) ? (
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
-              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>Loading your team…</p>
-            </div>
-          ) : view === 'calendar' && teamId && activeTimelineId ? (
-            <CalendarView
-              teamId={teamId}
-              timelineId={activeTimelineId}
-              layout={calendarLayout}
-              anchorDate={calendarAnchorDate}
-              colorBy={colorBy}
-              timelineStatuses={activeTimelineStatuses}
-              savedFilters={savedFilters}
-              tags={tags}
-              selectedActivityId={selectedActivityId}
-              onSelectActivity={(id) => {
-                setSelectedActivityId(id)
-                if (!id) { setSelectedApiActivity(null); setCreateDefaults(null) }
-              }}
-              onSelectApiActivity={(activity) => {
-                setSelectedApiActivity(activity)
-                setCreateDefaults(null)
-              }}
-              onBarDragProgress={(activityId, newStart, newEnd) => {
-                setLiveDragDates({
-                  activityId,
-                  start: newStart.toISOString().slice(0, 10),
-                  end: newEnd.toISOString().slice(0, 10),
-                })
-              }}
-              onBarDragEnd={() => setLiveDragDates(null)}
-              onCellClick={(date) => {
-                const iso = date.toISOString().slice(0, 10)
-                setSelectedActivityId(null)
-                setSelectedApiActivity(null)
-                setCreateDefaults({ start: iso, end: iso, memberId: null })
-              }}
-              onMembersLoaded={setGanttMembers}
-            />
-          ) : view === 'calendar' && (!teamId || !activeTimelineId) ? (
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
-              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>Loading your team…</p>
-            </div>
-          ) : view === 'kanban' && teamId && activeTimelineId ? (
-            <KanbanView
-              teamId={teamId}
-              timelineId={activeTimelineId}
-              groupBy={kanbanGroupBy}
-              sortBy={kanbanSortBy}
-              colorBy={kanbanColorBy}
-              cardFields={kanbanCardFields}
-              collapsedColumnIds={kanbanCollapsedColumns}
-              onCollapsedColumnIdsChange={setKanbanCollapsedColumns}
-              showHierarchy={kanbanShowHierarchy}
-              timelineStatuses={activeTimelineStatuses}
-              savedFilters={savedFilters}
-              tags={tags}
-              selectedActivityId={selectedActivityId}
-              onSelectActivity={(id) => {
-                setSelectedActivityId(id)
-                if (!id) { setSelectedApiActivity(null); setCreateDefaults(null) }
-              }}
-              onSelectApiActivity={(activity) => {
-                setSelectedApiActivity(activity)
-                setCreateDefaults(null)
-              }}
-              onAddActivity={(defaults) => {
-                setSelectedActivityId(null)
-                setSelectedApiActivity(null)
-                setCreateDefaults(defaults)
-              }}
-              onMembersLoaded={setGanttMembers}
-            />
-          ) : view === 'kanban' && (!teamId || !activeTimelineId) ? (
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
-              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>Loading your team…</p>
-            </div>
-          ) : (
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
-              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>
-                {view.charAt(0).toUpperCase() + view.slice(1)} view coming soon.
-              </p>
-            </div>
+    <div className="relative rounded-[var(--radius-lg)] border border-border bg-card p-3.5 shadow-sm">
+      {/* Top: type tile + title + delete */}
+      <div className="flex items-start gap-2.5">
+        <div className={cn('flex h-8 w-8 shrink-0 items-center justify-center rounded-[var(--radius-md)]', protectedShare ? TILE_AMBER : TILE_TEAL)}>
+          {protectedShare ? <Lock size={16} strokeWidth={2.2} /> : <LinkIcon size={16} strokeWidth={2.2} />}
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-sm font-semibold text-foreground">{share.name || 'Untitled link'}</span>
+            {protectedShare && (
+              <span className={cn('inline-flex items-center gap-1 rounded-[var(--radius-full)] px-2 py-px text-[11px] font-semibold', BADGE_AMBER)}>
+                <Lock size={10} strokeWidth={2.4} /> password
+              </span>
+            )}
+          </div>
+          {share.description && (
+            <p className="mt-[3px] text-[12.5px] leading-[1.45] text-muted-foreground">{share.description}</p>
           )}
         </div>
+        <button
+          onClick={() => setConfirming(true)}
+          title="Delete share"
+          className="flex h-7 w-7 shrink-0 cursor-pointer items-center justify-center rounded-[var(--radius-md)] border-none bg-transparent text-muted-foreground transition-colors hover:bg-[hsl(0_72%_51%/0.1)] hover:text-destructive"
+        >
+          <Trash2 size={15} strokeWidth={2} />
+        </button>
       </div>
 
-      {/* Activity detail panel — slides in from right when an activity is selected */}
-      <ActivityDetailPanel
-        open={Boolean(selectedApiActivity)}
-        event={selectedApiActivity}
-        members={ganttMembers}
-        teamId={teamId}
-        timelineId={activeTimelineId ?? ''}
-        onClose={() => { setSelectedActivityId(null); setSelectedApiActivity(null); setLiveDragDates(null) }}
-        liveDragStart={liveDragDates && liveDragDates.activityId === selectedApiActivity?.id ? liveDragDates.start : undefined}
-        liveDragEnd={liveDragDates && liveDragDates.activityId === selectedApiActivity?.id ? liveDragDates.end : undefined}
-      />
+      {/* URL row */}
+      <div className="mt-[11px] flex items-center gap-2">
+        <div className="flex min-w-0 flex-1 items-center gap-2 rounded-[var(--radius-md)] bg-muted px-[11px] py-[7px] font-mono text-[12.5px] text-foreground">
+          <Link2 size={13} className="shrink-0 text-muted-foreground" strokeWidth={2} />
+          <span className="overflow-hidden text-ellipsis whitespace-nowrap">{url}</span>
+        </div>
+        <button
+          onClick={copy}
+          className={cn(
+            'flex shrink-0 items-center gap-[5px] rounded-[var(--radius-md)] border px-3 py-[7px] text-[12.5px] font-semibold transition-colors',
+            copied ? 'border-success bg-[hsl(145_63%_42%/0.12)] text-success' : 'border-border bg-card text-foreground',
+          )}
+        >
+          {copied ? <Check size={13} strokeWidth={2.2} /> : <Copy size={13} strokeWidth={2.2} />}
+          {copied ? 'Copied' : 'Copy'}
+        </button>
+      </div>
 
-      {/* Activity create panel — slides in from New Activity button or future drag */}
-      <ActivityCreatePanel
-        open={Boolean(createDefaults) && !selectedApiActivity}
-        teamId={teamId}
-        timelineId={activeTimelineId ?? ''}
-        members={ganttMembers}
-        timelineStatuses={activeTimelineStatuses}
-        defaultStart={createDefaults?.start ?? new Date().toISOString().slice(0, 10)}
-        defaultEnd={createDefaults?.end ?? new Date().toISOString().slice(0, 10)}
-        defaultMemberId={createDefaults?.memberId}
-        defaultStatusId={createDefaults?.statusId}
-        onClose={() => setCreateDefaults(null)}
-      />
+      {/* Footer meta */}
+      <div className="mt-[11px] flex items-center gap-2 text-xs text-muted-foreground">
+        <MiniAvatar member={creator} size={20} />
+        <span className="font-semibold text-foreground">
+          {creator?.displayName ?? 'Team member'}
+          {isOwn && <span className="font-normal text-muted-foreground"> · you</span>}
+        </span>
+        <span className="opacity-50">•</span>
+        <span>{formatCreated(share.createdAt)}</span>
+        <span className="opacity-50">•</span>
+        <span className="inline-flex items-center gap-1">
+          <Eye size={12} strokeWidth={2} />{share.viewCount} {share.viewCount === 1 ? 'view' : 'views'}
+        </span>
+      </div>
 
-      <FilterManageModal
-        open={filterModalOpen}
-        onClose={() => setFilterModalOpen(false)}
-        teamId={teamId}
-        timelineId={activeTimelineId ?? ''}
-        isAdmin={canEditTeam}
-      />
-
-      {/* Team modal — create or edit */}
-      {teamModalMode && (
-        <TeamModal
-          mode={teamModalMode}
-          team={editingTeam ?? undefined}
-          isAdmin={canEditTeam}
-          onClose={() => { setTeamModalMode(null); setEditingTeam(null); }}
-          onTeamCreated={created => setActiveTeamId(created.id)}
-        />
-      )}
-
-      {/* Member modal — edit a team member */}
-      {editingMember && (
-        <MemberModal
-          teamId={teamId}
-          memberId={editingMember.id}
-          isAdmin={canEditTeam}
-          isSuperadmin={isSuperadmin}
-          onClose={() => setEditingMember(null)}
-        />
-      )}
-
-      {/* Share modal — create a share link for the active view */}
-      {shareModalOpen && activeTimelineId && teamId && (view === 'gantt' || view === 'list' || view === 'kanban') && (
-        <ShareModal
-          teamId={teamId}
-          timelineId={activeTimelineId}
-          viewType={view}
-          timelineName={activeTimelineName}
-          viewConfig={
-            view === 'gantt'
-              ? { groupBy, sortBy, colorBy, granularity: String(granularity), filter: activeShareFilter }
-              : view === 'list'
-              ? {
-                  groupBy: listGroupBy,
-                  sortBy: listSortBy,
-                  colorBy: listColorBy,
-                  granularity: '',
-                  filter: activeShareFilter,
-                  columns: listColumns.map(c => ({ id: c.id, visible: c.visible })),
-                }
-              : {
-                  groupBy: kanbanGroupBy,
-                  sortBy: kanbanSortBy,
-                  colorBy: kanbanColorBy,
-                  granularity: '',
-                  filter: activeShareFilter,
-                  cardFields: kanbanCardFields,
-                  showHierarchy: kanbanShowHierarchy,
-                  collapsedColumns: kanbanCollapsedColumns,
-                }
-          }
-          onClose={() => setShareModalOpen(false)}
-        />
-      )}
-
-      {/* Timeline modal — create or edit */}
-      {timelineModalMode && (
-        <TimelineModal
-          mode={timelineModalMode}
-          teamId={teamId}
-          timeline={editingTimeline ?? undefined}
-          canAdmin={canEditTeam}
-          onClose={() => { setTimelineModalMode(null); setEditingTimeline(null) }}
-          onCreated={created => setActiveTimelineId(created.id)}
-          onUnarchive={id => unarchiveTimeline.mutate(id, { onSuccess: () => { setTimelineModalMode(null); setEditingTimeline(null) } })}
-        />
+      {/* Inline delete confirm */}
+      {confirming && (
+        <div className="absolute inset-0 flex flex-col justify-center gap-2.5 rounded-[var(--radius-lg)] border border-destructive bg-card px-4 py-3.5">
+          <div className="flex items-start gap-2.5">
+            <div className="flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-[var(--radius-md)] bg-[hsl(0_72%_51%/0.1)] text-destructive">
+              <Trash2 size={15} strokeWidth={2.2} />
+            </div>
+            <div>
+              <div className="text-[13.5px] font-semibold text-foreground">Delete this share?</div>
+              <div className="mt-0.5 text-xs text-muted-foreground">Anyone with the link will immediately lose access. This can&apos;t be undone.</div>
+            </div>
+          </div>
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" size="sm" onClick={() => setConfirming(false)}>Cancel</Button>
+            <Button variant="destructive" size="sm" onClick={() => { onDelete(share.id); setConfirming(false) }}>Delete link</Button>
+          </div>
+        </div>
       )}
     </div>
   )
 }
 
-export default function DashboardPage() {
+// ── The add-share inline form ───────────────────────────────────────────────────
+
+/**
+ * No shadcn Textarea exists yet, so this mirrors Input's class string —
+ * keeps the field visually consistent without inline styles.
+ */
+const TEXTAREA_CLASSES = 'flex w-full resize-y rounded-md border border-[var(--border)] bg-[var(--background)] px-3 py-2 text-sm leading-relaxed text-[var(--foreground)] shadow-sm transition-colors placeholder:text-[var(--muted-foreground)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)]'
+
+function AddShareForm({
+  currentMember,
+  onCreate,
+  onCancel,
+  isPending,
+  isError,
+}: {
+  currentMember: TeamMemberWithUser | undefined
+  onCreate: (payload: CreatePayload) => void
+  onCancel: () => void
+  isPending: boolean
+  isError: boolean
+}) {
+  const [title, setTitle] = useState('')
+  const [desc, setDesc] = useState('')
+  const [pwOn, setPwOn] = useState(false)
+  const [pw, setPw] = useState('')
+  const [showPw, setShowPw] = useState(false)
+  const titleRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => { titleRef.current?.focus() }, [])
+
+  const valid = title.trim().length > 0 && (!pwOn || pw.trim().length > 0)
+
+  const submit = () => {
+    if (!valid || isPending) return
+    onCreate({ title: title.trim(), description: desc.trim(), password: pwOn ? pw : null })
+  }
+
   return (
-    <FindProvider>
-      <FilterProvider>
-        <DashboardShell />
-      </FilterProvider>
-    </FindProvider>
+    <div className="rounded-[var(--radius-lg)] border-[1.5px] border-primary bg-card p-4 shadow-[0_0_0_3px_hsl(188_59%_38%/0.08)]">
+      <div className="mb-3.5 flex items-center gap-2">
+        <PlusCircle size={16} className="text-primary" strokeWidth={2.2} />
+        <span className="text-[13.5px] font-bold text-foreground">New share link</span>
+      </div>
+
+      <div className="mb-3 flex flex-col gap-1.5">
+        <Label htmlFor="share-title">Title</Label>
+        <Input
+          id="share-title"
+          ref={titleRef}
+          value={title}
+          onChange={e => setTitle(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') submit() }}
+          placeholder="e.g. Acme stakeholder view"
+        />
+      </div>
+
+      <div className="mb-3 flex flex-col gap-1.5">
+        <Label htmlFor="share-description">
+          Description <span className="lowercase font-normal">· optional</span>
+        </Label>
+        <textarea
+          id="share-description"
+          value={desc}
+          onChange={e => setDesc(e.target.value)}
+          rows={2}
+          placeholder="What's this link for, and who is it shared with?"
+          className={TEXTAREA_CLASSES}
+        />
+      </div>
+
+      {/* Password protect */}
+      <div className="overflow-hidden rounded-[var(--radius-md)] border border-border">
+        <div className="flex items-center gap-2.5 px-3 py-2.5">
+          <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[var(--radius-md)] bg-muted text-muted-foreground">
+            <Lock size={14} strokeWidth={2} />
+          </div>
+          <div className="flex-1">
+            <div className="text-[13px] font-semibold text-foreground">Password protect</div>
+            <div className="text-[11.5px] text-muted-foreground">Require a password to open the link</div>
+          </div>
+          <button
+            onClick={() => setPwOn(v => !v)}
+            role="switch"
+            aria-checked={pwOn}
+            aria-label="Password protect"
+            className={cn(
+              'relative h-[22px] w-10 shrink-0 cursor-pointer rounded-[var(--radius-full)] border-none p-0 transition-colors',
+              pwOn ? 'bg-primary' : 'bg-border',
+            )}
+          >
+            <span className={cn(
+              'absolute top-[2px] h-[18px] w-[18px] rounded-full bg-white shadow-sm transition-[left] duration-150',
+              pwOn ? 'left-5' : 'left-[2px]',
+            )} />
+          </button>
+        </div>
+        {pwOn && (
+          <div className="border-t border-border px-3 py-3">
+            <div className="flex items-center gap-2 rounded-[var(--radius-md)] border border-input bg-card px-2.5">
+              <KeyRound size={14} className="text-muted-foreground" strokeWidth={2} />
+              <input
+                value={pw}
+                onChange={e => setPw(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') submit() }}
+                type={showPw ? 'text' : 'password'}
+                placeholder="Set a password"
+                className="flex-1 border-none bg-transparent py-2 text-[13px] text-foreground outline-none placeholder:text-muted-foreground"
+              />
+              <button
+                onClick={() => setShowPw(v => !v)}
+                aria-label={showPw ? 'Hide password' : 'Show password'}
+                className="flex cursor-pointer border-none bg-transparent p-1 text-muted-foreground"
+              >
+                {showPw ? <EyeOff size={14} strokeWidth={2} /> : <Eye size={14} strokeWidth={2} />}
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {isError && (
+        <p className="mt-2.5 text-[11px] text-destructive">Failed to create share. Please try again.</p>
+      )}
+
+      {/* Actions */}
+      <div className="mt-4 flex items-center gap-2.5">
+        <div className="mr-auto flex items-center gap-[7px] text-xs text-muted-foreground">
+          <MiniAvatar member={currentMember} size={20} />
+          <span>Sharing as {currentMember?.displayName ?? 'you'}</span>
+        </div>
+        <Button variant="outline" onClick={onCancel}>Cancel</Button>
+        <Button onClick={submit} disabled={!valid || isPending}>
+          <LinkIcon size={14} strokeWidth={2.2} /> {isPending ? 'Creating…' : 'Create link'}
+        </Button>
+      </div>
+    </div>
   )
 }
-````
 
-## File: docs/TASKS.md
-````markdown
-# Tasks
-
-## Current Sprint — Foundation
-
-### Repo & Tooling
-- [x] Initialize Go module (`packages/api/`) with basic project structure — 2026-04-29
-- [x] Initialize React + TypeScript + Vite project (`packages/web/`) — 2026-04-29
-- [x] Set up pnpm workspace (`pnpm-workspace.yaml`) — 2026-04-29
-- [x] Add `golangci-lint` config (`.golangci.yml`) — 2026-04-29
-- [x] Set up GitHub Actions CI: lint + test on PR — 2026-04-29
-- [x] Write `docker-compose.yml` for local development — 2026-04-29
-
-### API — Core
-- [x] DB abstraction layer with SQLite adapter (sqlx + modernc.org/sqlite) — 2026-04-30
-- [x] Migration runner (auto-runs on startup) — 2026-04-30
-- [x] Initial schema migrations: users, teams, team_members, invites, events, event_tags, event_assignments, timelines, timeline_access, calendar_connections, api_tokens — 2026-04-30
-- [x] Auth: JWT issue/validate, password hash/verify, invite token generate/validate — 2026-04-30
-- [x] `POST /auth/register` (invite token required) — 2026-04-30
-- [x] `POST /auth/login` — 2026-04-30
-- [x] `POST /auth/refresh` — 2026-04-30
-- [x] `POST /teams` — create team — 2026-05-03
-- [x] `POST /teams/:id/invites` — send invite — 2026-05-03
-- [x] `GET /teams/:id/members` — 2026-05-03
-- [x] `POST /teams/:id/events` — create event — 2026-05-03
-- [x] `GET /teams/:id/events` — list events (date range filter) — 2026-05-03
-- [x] `PATCH /events/:id` — update event — 2026-05-03
-- [x] `DELETE /events/:id` — delete event — 2026-05-03
-
-### API — Real-Time
-- [x] WebSocket hub (`internal/ws/`) — 2026-05-14
-- [x] Team-scoped subscription model — 2026-05-14
-- [x] Broadcast on `events.*` internal bus events — 2026-05-14
-
-### API — Timelines
-- [x] `POST /teams/:id/timelines` — create timeline — 2026-05-15
-- [x] `GET /timelines/:id` — fetch timeline (public or auth-gated) — 2026-05-15
-- [x] `GET /timelines/share/:token` — public share link handler — 2026-05-15
-- [x] Timeline access list enforcement — 2026-05-15
-
-### Web — Scaffold
-- [x] Initialize shadcn/ui: `pnpm dlx shadcn@latest init` — 2026-05-16
-- [x] Set color tokens in `src/index.css` once palette is decided — 2026-05-16
-- [x] Set up dark mode toggle (localStorage + `prefers-color-scheme`) — 2026-05-16
-- [x] Routing setup (React Router) — 2026-05-16
-- [x] Auth flow: login, register (via invite), token storage — 2026-05-16
-- [x] API client (TanStack Query + fetch wrapper using generated types) — 2026-05-16
-- [x] WebSocket client hook (`useWebSocket`) — 2026-05-16
-- [x] Embed React build in Go binary (`//go:embed`); API serves SPA at `GET /` — 2026-05-16
-
-### RBAC Refactor + First-Run Setup (Phase 8.0)
-- [x] Migration 003: `team_members` PK, nullable `user_id`, `display_name` — 2026-05-18
-- [x] Migration 003: `event_assignments` + `timeline_access` swap `user_id` FK for `team_member_id` — 2026-05-18
-- [x] Migration 003: `timeline_access` gains `role (admin|member)`; `visibility` dropped from `timelines` — 2026-05-18
-- [x] `User.IsSuperadmin`: first registered user auto-granted superadmin — 2026-05-18
-- [x] `GET /setup/status` — public endpoint (`{ needsSetup: bool }`) — 2026-05-18
-- [x] Timeline access: team admins bypass check; members require explicit `timeline_access` entry — 2026-05-18
-- [x] `SetupPage`: 3-step first-run wizard (account → team → timeline) — 2026-05-18
-- [x] `ProtectedRoute`: redirect to `/setup` when `needsSetup` is true — 2026-05-18
-- [x] Production Dockerfile: run as non-root `draba` user (uid 1000) — 2026-05-18
-
-### Web — Timeline View (Phase 8.1: Shell & Rendering — Gantt pivot)
-- [x] API: `GET /teams`, `GET /teams/:id/timelines`, `assignedMemberIds[]` on Event — 2026-05-18
-- [x] `TimelineView` + `TimelineGrid` (person-lane prototype, later pivoted) — 2026-05-18
-- [x] Pixel ↔ date math (map date range to X offset/width) — 2026-05-18
-- [x] Wire to `GET /teams/:id/events?start=&end=` and `GET /teams/:id/members` — 2026-05-18
-- [x] `TimelineGrid` rewrite: Gantt layout — one row per event, sticky label col, member avatars — 2026-05-18
-- [x] `TimelineToolbar` component: zoom in/out, group-by, sort-by, export stub — 2026-05-18
-- [x] `TimelineView` update: build `GanttRow[]` with grouping + sorting logic — 2026-05-18
-- [x] Group by Member: section headers per assignee, events under primary assignee — 2026-05-18
-- [x] Group by Parent: root events first, children indented below their parent — 2026-05-18
-- [x] Sort by: start date, end date, title A–Z — 2026-05-18
-- [x] Zoom: variable `colWidth` stepped through [40, 60, 80, 120, 160] px/day — 2026-05-18
-- [x] `DashboardPage`: render `TimelineToolbar`, pass group/sort/zoom state to `TimelineView` — 2026-05-18
-
-### Web — Timeline View (Phase 8.2: Interactions)
-- [x] Click event block → open `EventDetailPanel` (view mode) — 2026-05-19
-- [x] Edit form in panel (title, description, date range, status, assignees); save via `PATCH /events/:id` — 2026-05-19
-- [x] Delete event with confirm dialog; remove from timeline — 2026-05-19
-- [x] Drag on empty lane cell → open `EventCreateForm` pre-filled with date range + lane member — 2026-05-19
-- [x] Submit create form → `POST /teams/:id/events`, insert block into timeline — 2026-05-19
-
-### Web — Gantt Bar Drag (Phase 8.2.1: Resize & Move)
-- [x] Detect mousedown on left/right edge (8px zone) vs. bar body — 2026-05-19
-- [x] Edge drag: update start or end date live as user drags; snap to active granularity column — 2026-05-19
-- [x] Body drag: shift both start and end dates by the same column delta — 2026-05-19
-- [x] Show date tooltip during drag (start date for left edge, end date for right edge, both for body) — 2026-05-19
-- [x] PATCH `/events/:id` with new startAt/endAt on mouseup; optimistic update in cache — 2026-05-19
-- [x] Block drag on `is_external` events (read-only; Phase 14 flag) — 2026-05-19
-
-### Web — Timeline View (Phase 8.3: Real-Time Sync)
-- [x] Connect `useWebSocket` to subscribe to `events.*` for active team — 2026-05-19
-- [x] `events.created` delta: insert block into TanStack Query cache — 2026-05-19
-- [x] `events.updated` delta: update block in cache — 2026-05-19
-- [x] `events.deleted` delta: remove block from cache — 2026-05-19
-- [x] Handle optimistic update conflicts (in-flight local edit vs. arriving WS delta) — 2026-05-19
-
-### OpenAPI
-- [x] Write initial `openapi.yaml` in `packages/shared/` — 2026-05-04
-- [x] Set up TypeScript type generation from spec (openapi-typescript) — 2026-05-04
-- [x] Set up Go type generation from spec (`oapi-codegen`) — 2026-05-16
-- [x] Refactor existing Go handlers to use generated OpenAPI models — 2026-05-16
-
-### Web — Persistent View Settings (Phase 8.4)
-- [x] Migration 004: `user_preferences` table with empty-string sentinel for global scope — 2026-05-20
-- [x] `UserPreference` model (`models.go`) — 2026-05-20
-- [x] `UserPreferenceRepo`: `List` and `Upsert` methods — 2026-05-20
-- [x] `GET /users/me/preferences?timeline_id=` — returns scoped or global prefs — 2026-05-20
-- [x] `PUT /users/me/preferences` — upsert single key/value, validates JSON — 2026-05-20
-- [x] OpenAPI spec: `UserPreference` schema + two endpoints — 2026-05-20
-- [x] TypeScript types regenerated from spec — 2026-05-20
-- [x] `usePreferences` / `useUpsertPreference` / `usePreferenceMap` hooks — 2026-05-20
-- [x] `DashboardPage`: restore toolbar state from per-timeline prefs on timeline switch — 2026-05-20
-- [x] `DashboardPage`: save toolbar state (group_by, sort_by, zoom_granularity, color_by) on change — 2026-05-20
-- [x] `DashboardPage`: persist dark mode preference globally — 2026-05-20
-
-### Web — Find (Phase 8.5)
-In-view "find in page" with highlight + match navigation. Scoped to already-loaded events; respects active filters. Global cross-team search is deferred to Phase 15.
-
-**Find bar:**
-- [x] `FindBar` component in the TopBar (between FilterDropdown and ProfileMenu) — query input, match counter (`N / M`), prev/next chevrons, close (×) — 2026-05-20
-- [x] Open via `Ctrl/Cmd+F` global keybinding and via a search icon in the TopBar; close via `Esc` or × — 2026-05-20
-- [x] Debounced (~150ms) client-side matcher over already-fetched events — 2026-05-20
-
-**Match scope:**
-- [x] Case-insensitive match against: event title, description, assignee display names, parent event title — 2026-05-20
-- [x] Respect active filters — only events already visible in the current view are candidates — 2026-05-20
-
-**Visual treatment:**
-- [x] Matching events: amber outline / glow using existing design tokens — 2026-05-20
-- [x] Non-matching events: dimmed to ~0.3 opacity — 2026-05-20
-- [x] Active match (prev/next cursor position): stronger outline + subtle pulse to distinguish from other matches — 2026-05-20
-- [x] On hover, non-title matches show a "why matched" hint (e.g. `matched assignee Jane`) — 2026-05-20
-
-**Navigation:**
-- [x] `Enter` / `Shift+Enter` and ◀ ▶ chevrons walk forward/backward through matches — 2026-05-20
-- [x] Auto-scroll the Gantt on each step — horizontal pan to event's date range, vertical scroll to its row, centered in viewport — 2026-05-20
-
-**Empty / edge cases:**
-- [x] Zero matches, no filters active → bar shows `No matches` — 2026-05-20
-- [x] Zero matches in view, filters active → soft callout: *"No matches in current view. [Clear filters]"* — 2026-05-20
-- [x] Find query is ephemeral (not persisted across navigation/reload); bar open-state also ephemeral — 2026-05-20
-
-**Testing:**
-- [x] Unit: matcher returns correct hits across all match fields, case-insensitive — 2026-05-20
-- [ ] Integration: Find works at every granularity level and every group-by mode (requires live data — manual)
-- [ ] Keyboard: full prev/next cycle reachable with keyboard only (manual verification with live events)
-
-## Up Next
-
-> **Member management work is split across Phase 10.1.1 (Teams — CRUD) and Phase 10.1.2 (Members — Management & Editing)**. Team entity CRUD (create, edit, archive) is in 10.1.1; member lifecycle (add, edit, roles, invites, stubs, inactivation, admin actions) is in 10.1.2. The previously enumerated sidebar gear-icon + add-member-sheet tasks are absorbed into 10.1.2.
-
-### Web — Filter Scoping (FilterDropdown + API)
-Reorganizes the filter dropdown into four explicit sections. Filters are stored as personal by default; admins can promote any filter to team or timeline scope; members can nominate their filters for admin review.
-
-**Data model:**
-- Single `saved_filters` table: `(id, team_id, timeline_id nullable, created_by, name, definition JSON, scope ENUM(personal|nominated|team|timeline), status ENUM(active|pending_review))`
-- `scope=personal` — visible only to creator; `scope=team` — visible to all team members; `scope=timeline` — visible to all members of that timeline; `scope=nominated` — personal filter flagged by member for admin review (visible to admins)
-
-**API:**
-- [ ] Migration: replace current `saved_filters` shape with the unified schema above
-- [ ] `GET /teams/:id/filters` — returns filters scoped `team` or `timeline` (for the active timeline), plus the calling user's `personal` and `nominated` filters
-- [ ] `POST /teams/:id/filters` — create a new personal filter; `definition` is the filter JSON
-- [ ] `PATCH /filters/:id` — update name or definition (creator or admin)
-- [ ] `PATCH /filters/:id/scope` — promote/demote scope; admin-only for `team`/`timeline`; any member can set `nominated`
-- [ ] `DELETE /filters/:id` — creator or admin
-
-**Web — FilterDropdown layout:**
-- [ ] Reorganize dropdown into four labeled sections, each hidden when empty:
-  1. **Default** — All events / Upcoming / My events (hardcoded presets, always present)
-  2. **Team** — filters with `scope=team` from API
-  3. **Timeline** — filters with `scope=timeline` for the active timeline
-  4. **Mine** — caller's `personal` filters; nominated filters shown with a "Pending" badge
-- [ ] Filter names truncate with ellipsis at a max width; full name in tooltip on hover
-- [ ] "New filter…" opens filter editor (personal scope by default); "Share…" action on existing personal filters lets the member nominate it or (if admin) promote directly to team/timeline
-- [ ] Pass active timeline ID through context so the dropdown can fetch timeline-scoped filters
-- [ ] Admin-visible section at bottom of "Mine": nominated filters awaiting review, with Approve / Reject actions
-
----
-
-> **Connectors sidebar + per-timeline connector model is absorbed into the External Connectors (Inbound Webhooks) task block further down** — that section now carries both the webhook backend and the sidebar UI work.
-
-### API — Token Auth (Phase 9)
-- [x] `POST /tokens` — create API token (returns value once) — 2026-05-20
-- [x] `GET /tokens` — list tokens for current user — 2026-05-20
-- [x] `DELETE /tokens/:id` — revoke token (preserved row, sets revoked_at) — 2026-05-20
-- [x] Middleware: accept Bearer token (JWT or API token) on all authenticated routes — 2026-05-20
-- [x] Enforce token scope on writes (read-only tokens blocked from mutations) — 2026-05-20
-
-### API — Archive (Phase 9)
-- [x] `POST /events/:id/archive` and `POST /events/:id/unarchive` — 2026-05-20
-- [x] `POST /timelines/:id/archive` and `POST /timelines/:id/unarchive` (team-admin only) — 2026-05-20
-- [x] List endpoints exclude archived records by default; `?archived=true` to include — 2026-05-20
-
-### The Great Event → Activity Rename (Phase 9.5)
-Rename the domain entity `Event` → `Activity` everywhere. Runbook: [GreatEventToActivity.md](GreatEventToActivity.md). Roadmap: [Phase 9.5](ROADMAP.md#phase-95--rename-event--activity-the-great-rename).
-
-> **Historical note:** Phase 3 / 8.x / 9 task entries above use "event" because that was the entity's name when those phases shipped. Do not rewrite them. Phase 9.5 is the formal cutover; all later entries use "activity".
-
-**DB:**
-- [x] Write migration `005_rename_events_to_activities.sql` — 2026-05-21 (`ALTER TABLE ... RENAME`)
-- [x] Rename indexes containing `event` in their name — 2026-05-21
-- [x] Update `migrations_test.go` to assert new table + column names — 2026-05-21
-- [ ] Verify against a copy of the prod DB: row counts unchanged, `PRAGMA foreign_key_check` clean
-
-**Go API:**
-- [x] `models.Event` → `models.Activity` — 2026-05-21
-- [x] Rename file `internal/db/event_repo.go` → `activity_repo.go`; `EventRepo` → `ActivityRepo` — 2026-05-21
-- [x] Rename file `internal/api/event_handler.go` → `activity_handler.go`; all `handle*Event*` functions — 2026-05-21
-- [x] `server.go`: routes `/events*` → `/activities*` — 2026-05-21
-- [x] `internal/events/bus.go`: rename constants `EventCreated/Updated/Deleted` — 2026-05-21 → `ActivityCreated/Updated/Deleted` + wire strings (`event.*` → `activity.*`). **Keep** package name and `TimelineCreated/Updated`.
-- [x] Update `bus_test.go`, `hub_test.go` wire-string assertions — 2026-05-21
-- [x] `golangci-lint run` clean, `go test ./...` passes — 2026-05-21
-
-**OpenAPI + generated types:**
-- [x] `packages/shared/openapi.yaml`: schema, paths, operationIds — 2026-05-21, tags, body types. **Keep** `googleEventId` and `caldavUid` fields.
-- [x] Run `pnpm --filter shared generate`; verify `Activity` exports — 2026-05-21, zero `Event` exports
-
-**Web:**
-- [x] `src/types/index.ts`: `DrabaEvent`/`EventStatus`/`EVENT_COLORS` — 2026-05-21 → `DrabaActivity`/`ActivityStatus`/`ACTIVITY_COLORS`
-- [x] Rename `useTeamEvents.ts` → `useTeamActivities.ts`; hooks + query keys — 2026-05-21
-- [x] `useWebSocket.ts`: update message-type switch to `activity.*` — 2026-05-21
-- [x] Rename `EventDetailPanel`, `EventCreatePanel`, `EventPanel` → `Activity*` — 2026-05-21; fix imports
-- [x] UI copy sweep: sidebar label, panel titles, empty state, ARIA, button labels — 2026-05-21
-- [x] `pnpm --filter web lint` clean — 2026-05-21
-
-**Tests + seed:**
-- [x] Rename `event_handler_test.go` → `activity_handler_test.go` — 2026-05-21
-- [x] Rename `scripts/seed-find-test-events.sql` → `seed-find-test-activities.sql` — 2026-05-21; update INSERTs + cleanup
-
-**Docs:**
-- [x] Sweep ROADMAP.md, REQUIREMENTS.md, ARCHITECTURE.md, CONVENTIONS.md, TESTING.md, design/UX_PATTERNS.md — 2026-05-21
-- [x] Hand-review: ROADMAP Phase 3 title — 2026-05-21 → "Core API — Activities & Teams (originally Events; renamed in Phase 9.5)"
-- [x] Do **not** rewrite `docs/log.md` historical entries — 2026-05-21
-- [x] Add Phase 9.5 entry to `docs/log.md` — 2026-05-21
-
-**Verification (smoke against http://epcot.lan:8081):**
-- [ ] Create / edit / archive / unarchive / delete an Activity end-to-end
-- [ ] WebSocket frames arrive as `activity.created` / `.updated` / `.deleted`
-- [ ] Final sweep `rg "\bevent" packages/ docs/` returns only expected hits (bus package, calendar fields, log.md)
-
-### Identity System (Phase 9.6)
-Reusable Identity component system (color + icon) for all entities. Design spec: [IDENTITY_SYSTEM.md](design/IDENTITY_SYSTEM.md). Prototype: `docs/design/assets/identity-widget-prototype.html`.
-
-**Schema (migration 006):**
-- [x] Write migration `006_identity_fields.sql` — 2026-05-24
-- [x] Update `migrations_test.go` to assert new columns exist — 2026-05-24
-
-**Go API:**
-- [x] `models.go`: add `Icon *string` + `Color *string` to `Team`; add `Icon *string` + `Color *string` to `Timeline`; add `Icon *string` to `TeamMember` — 2026-05-24
-- [x] Update `TeamMemberWithUser` to surface the new `Icon` field (via embedding) — 2026-05-24
-- [x] Update OpenAPI spec: add `icon`/`color` to `Team`, `Timeline`, `TeamMember` schemas — 2026-05-24
-- [x] Regenerate TypeScript types (`pnpm --filter shared generate`) — 2026-05-24
-- [x] `golangci-lint run` clean; `go test ./...` passes — 2026-05-24
-
-**Web — component library (`src/components/identity/`):**
-- [x] `identity-constants.ts` — 2026-05-24
-- [x] `Badge.tsx` — 2026-05-24
-- [x] `IdentityTrigger.tsx` — 2026-05-24
-- [x] `IdentityPicker.tsx` — 2026-05-24
-- [x] `IdentityWidget.tsx` — 2026-05-24
-
-**Web — replace existing color/icon UI:**
-- [x] `ActivityDetailPanel`: `<IdentityWidget>` replacing icon stub + 8-color swatch — 2026-05-24
-- [x] `ActivityCreatePanel`: `<IdentityWidget>` replacing color swatch — 2026-05-24
-- [x] Gantt bar label column: `<Badge size={20} shape="square">` — 2026-05-24
-- [x] Sidebar timeline rows: `<Badge size={20} shape="square">` — 2026-05-24
-- [x] Sidebar member rows: `<Badge size={20} shape="circle">` — 2026-05-24
-
-**Web — MemberAvatar migration:**
-- [x] Refactor `MemberAvatar.tsx` to delegate to `<Badge>` — 2026-05-24
-- [ ] Verify all existing MemberAvatar call sites render correctly (manual)
-
-**Web — palette consolidation:**
-- [x] Update `types/index.ts`: re-export `ACTIVITY_COLORS` and `MEMBER_COLORS` from `identity-constants.ts` — 2026-05-24
-- [x] Update `index.css`: `--member-N-*` → 16 `--identity-<name>` custom properties — 2026-05-24
-- [x] Update `DESIGN_SYSTEM.md`: 8-color → 16-color identity palette reference — 2026-05-24
-
-**Testing & verification:**
-- [x] `pnpm --filter web lint` clean — 2026-05-24
-- [x] `golangci-lint run` clean — 2026-05-24
-- [x] `go test ./...` passes — 2026-05-24
-- [ ] Badge renders all four modes (Lucide icon, 1-letter, 2-letter, none) at sizes 20–40px, both shapes (manual)
-- [ ] IdentityWidget popover opens/closes; color, name option, and icon selection fire onChange (manual)
-- [ ] Legacy hex colors in existing activities display correctly via `hexToColorId()` mapping (manual — test on Docker)
-- [ ] Manual: ActivityDetailPanel uses IdentityWidget; changes persist as color IDs (manual — test on Docker)
-- [ ] Manual: sidebar member + timeline rows use Badge (manual)
-
-**Docs:**
-- [x] Add Phase 9.6 entry to `docs/log.md` — 2026-05-24
-
----
-
-### Phase 10 — Entity Management (data-cornerstone CRUD)
-
-Closes CRUD gaps for the three core data entities. Activities (renamed from Events in Phase 9.5) are already CRUD-complete (Phases 3 / 8.2 / 8.2.1 + Phase 9 archive); Teams and Timelines are not, so 10.x focuses on them.
-
-Design references:
-- Team Modal: `docs/design/handoffs/team-modal/` — Settings tab, Members tab, archive flow
-- Member Edit Modal: `docs/design/handoffs/member-modal/` — member profile, stats, admin actions
-
----
-
-### Teams — CRUD & Management (Phase 10.1.1)
-Closes the Teams data entity. Ships the Team Modal with Settings tab functional; Members tab scaffolded as locked/placeholder until 10.1.2.
-
-**Schema (migration 008):**
-- [x] Add `description TEXT` column to `teams` (nullable) — 2026-05-25
-- [x] Add `notes TEXT` column to `teams` (nullable) — 2026-05-25
-- [x] Add `archived_at DATETIME` column to `teams` (nullable) — 2026-05-25
-- [x] Update `migrations_test.go` to assert new columns — 2026-05-25
-
-**API — team-level:**
-- [x] `GET /teams/:id` — full team detail (name, description, notes, icon, color, archived_at) — 2026-05-25
-- [x] `PATCH /teams/:id` — update name, description, notes, icon, color (admin only) — 2026-05-25
-- [x] `POST /teams/:id/archive` and `POST /teams/:id/unarchive` — 2026-05-25
-- [x] Update `POST /teams` to accept `description`, `notes`, `icon`, `color` — 2026-05-25
-- [x] Update `GET /teams` — add `?archived=true` to include archived teams — 2026-05-25
-
-**OpenAPI + types:**
-- [x] Update `Team` schema: add `description`, `notes`, `archivedAt` — 2026-05-25
-- [x] Update `CreateTeamInput` and `PatchTeamInput` request bodies — 2026-05-25
-- [x] Regenerate TypeScript types (`pnpm --filter shared generate`) — 2026-05-25
-
-**Web — Team Modal (`<TeamModal>`):**
-- [x] Modal shell: portal, backdrop, panel (580px, dark theme), header, tab bar, scrollable content, footer — 2026-05-25
-- [x] Header: identity badge (36px square) + label ("NEW TEAM" / "EDIT TEAM") + team name + close button — 2026-05-25
-- [x] Tab bar: Settings (active) + Members (locked/placeholder in this phase) — 2026-05-25
-- [x] Members tab locked state: opacity 0.45, not-allowed cursor, tooltip "Save the team first to add members" — 2026-05-25
-- [x] Settings tab: `<IdentityPicker>` (square shape), name (required), description, notes (textarea) — 2026-05-25
-- [x] Footer: Archive team button (edit mode, left side), Cancel + Create team / Save changes (right side, team-color primary button) — 2026-05-25
-- [x] "Saved" banner: appears after new team creation, auto-dismisses after 3s — 2026-05-25
-- [x] New-team flow: Settings tab → Create team → banner → Members tab unlocks (placeholder content) — 2026-05-25
-- [x] Edit-team flow: pre-populated Settings tab, Members tab unlocked (placeholder) — 2026-05-25
-- [x] Archive confirmation dialog: replaces modal content, amber styling, icon, title, body, Cancel + Archive team buttons — 2026-05-25
-
-**Web — team picker + settings shell:**
-- [x] "New team" affordance in team picker dropdown → opens `<TeamModal mode="new">` — 2026-05-25
-- [x] Team edit affordance (gear icon or similar) → opens `<TeamModal mode="edit" team={...}>` — 2026-05-25
-- [x] `/settings` route shell with left-nav layout (foundation for 10.1.2–10.4.2) — 2026-05-25
-- [x] Archived teams in picker under collapsed "Archived" section with unarchive action — 2026-05-25
-- [x] `GET /teams` query includes archived teams for the picker's Archived section — 2026-05-25
-
-**Testing & verification:**
-- [x] `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean — 2026-05-25
-- [ ] Manual: create second team from picker, edit existing team, archive/unarchive
-- [ ] Manual: Team Modal opens in both modes with correct Settings tab behavior
-- [x] `docs/log.md` Phase 10.1.1 entry written — 2026-05-25
-
----
-
-### Members — Management & Editing (Phase 10.1.2)
-Fills in the Team Modal Members tab and adds the Member Edit Modal. Full member lifecycle: add, edit, roles, stubs, invites, reusable invite link, stats, inactivation, superadmin actions. Depends on 10.1.1 (Team Modal shell).
-
-**Terminology:** "Participant" = login-less team member (backend: `user_id = NULL`). Design handoffs use "stub" but we use "Participant" — established in Phase 8.0, more user-friendly. "Inactivate" = `archived_at`-based disabling. "Super Admin" = `is_superadmin`.
-
-**Schema (migration 009):**
-- [x] Add `archived_at DATETIME` column to `team_members` (nullable) — member inactivation — 2026-05-25
-- [x] Add `archived_at DATETIME` column to `users` (nullable) — account-level inactivation — 2026-05-25
-- [x] Add `invite_link_token TEXT UNIQUE` column to `teams` (nullable) — reusable invite link — 2026-05-25
-- [x] Update `migrations_test.go` to assert new columns — 2026-05-25
-
-**API — member CRUD:**
-- [x] `GET /teams/:id/members/:memberId` — full member detail with computed stats — 2026-05-25
-- [x] `POST /teams/:id/members` — add existing registered user by `userId` (admin only) — 2026-05-25
-- [x] `PATCH /teams/:id/members/:memberId` — update display name, color, icon, role (admin for role; self for own name/color/icon) — 2026-05-25
-- [x] `DELETE /teams/:id/members/:memberId` — remove from team; reject if last admin — 2026-05-25
-- [x] `POST /teams/:id/members/:memberId/archive` — inactivate member (set `archived_at`) — 2026-05-25
-- [x] `POST /teams/:id/members/:memberId/unarchive` — reactivate member (clear `archived_at`) — 2026-05-25
-
-**API — participant CRUD:**
-- [x] `POST /teams/:id/participants` — create login-less participant (admin only); name, icon, color, optional email — 2026-05-25
-- [x] Participants managed via same PATCH/DELETE member endpoints (role always `member`, `user_id` stays NULL) — 2026-05-25
-
-**API — invites:**
-- [x] `GET /teams/:id/invites` — list pending invites (email, sent date) — 2026-05-25
-- [x] `DELETE /teams/:id/invites/:inviteId` — revoke/cancel pending invite — 2026-05-25
-- [x] `POST /teams/:id/invite-link` — generate or regenerate reusable team invite link token — 2026-05-25
-- [x] `GET /teams/:id/invite-link` — get current invite link (or null) — 2026-05-25
-- [x] `DELETE /teams/:id/invite-link` — revoke current invite link — 2026-05-25
-- [x] Update `POST /auth/register` to accept reusable invite link tokens alongside existing one-time tokens — 2026-05-25
-
-**API — member stats (computed per request, not stored):**
-- [x] Timeline counts: active, archived (per member) — 2026-05-25
-- [x] Activity counts: past due, running, upcoming, unscheduled, archived (date-relative, not status-relative) — 2026-05-25
-
-**API — superadmin actions:**
-- [x] `POST /users/:id/promote` — set `is_superadmin = true` (superadmin only, not applicable to participants) — 2026-05-25
-- [x] `POST /users/:id/archive` — inactivate user account (superadmin only) — 2026-05-25
-- [x] `POST /users/:id/unarchive` — reactivate user account (superadmin only) — 2026-05-25
-- [x] `DELETE /users/:id` — hard delete user (superadmin only; zero active activities + single team only) — 2026-05-25
-- [x] Auth middleware: reject login from archived users with clear error — 2026-05-25
-
-**OpenAPI + types:**
-- [x] Add `MemberDetail` schema with stats, teams list, archived_at — 2026-05-25
-- [x] Add invite link endpoints to spec — 2026-05-25
-- [x] Add superadmin action endpoints to spec — 2026-05-25
-- [x] Update `TeamMember` schema with `archivedAt` — 2026-05-25
-- [x] Regenerate TypeScript types — 2026-05-25
-
-**Web — Team Modal Members tab:**
-- [x] Search/add input: search users by name/email, or type email to invite; clear button — 2026-05-25
-- [x] Search results dropdown: user matches with "Add" / "Already added" / "Invite pending"; email-only with "Invite" — 2026-05-25
-- [x] Participant creation: expandable inline form — identity picker (circle), name (required), optional email, "Create participant" button (amber) — 2026-05-25
-- [x] Member list: avatar (dashed border for stubs), name, "No login" pill (stubs, amber), email, `<RoleDropdown>`, remove (×) — 2026-05-25
-- [x] `<RoleDropdown>`: Admin (teal), Member (muted), Participant (amber) — with descriptions; portal-rendered; role changes save immediately — 2026-05-25
-- [x] Pending invitations section: rows with dashed-circle mail icon, email, sent date, "Revoke" button (red) — 2026-05-25
-- [x] Invite link section: URL display + "Copy link" button (teal transition to "Copied!"), explanatory note below — 2026-05-25
-- [x] Member count badge on Members tab label — 2026-05-25
-
-**Web — Member Edit Modal (`<MemberModal>`):**
-- [x] Modal shell: portal, backdrop, 560px panel, header / scrollable content / footer — 2026-05-25
-- [x] Header: `<IdentityPicker>` (40px circle), subline (participant/team member + viewer role label), name + badges ("No login" amber) — 2026-05-25
-- [x] Name + email row: 2-column grid; email read-only for participants ("No email — participant" placeholder) — 2026-05-25
-- [x] Timeline stats: 2 chips — Active (teal border), Archived (muted border) — 2026-05-25
-- [x] Activity stats: 5 chips — Past due (red if >0), Running (teal), Upcoming (blue), Unscheduled (muted), Archived (muted) — 2026-05-25
-- [x] Joined date: read-only pill with icon — 2026-05-25
-- [x] Teams list: each row with team badge (square, initials), team name, role pill — 2026-05-25
-- [x] Account section (team admin + non-participant): password reset button — shows "SMTP not configured" until Phase 14 — 2026-05-25
-- [x] Super Admin actions section (superadmin viewer only): Promote to Super Admin button (indigo), Inactivate (amber) / Delete (red) based on deletability — 2026-05-25
-- [x] Promote confirmation dialog: indigo icon, title, body, Cancel + Promote — 2026-05-25
-- [x] Inactivate confirmation dialog: amber icon, title, body, Cancel + Inactivate — 2026-05-25
-- [x] Delete confirmation dialog: red icon, title, body, Cancel + Delete — 2026-05-25
-- [x] Footer: Cancel + Save changes (member identity color) — 2026-05-25
-- [x] Deletable rule: zero active activities AND single team membership — 2026-05-25
-- [x] Role permission matrix enforcement: team admin vs superadmin capability differences — 2026-05-25
-
-**Web — sidebar integration:**
-- [x] Member rows: gear icon on hover → opens `<MemberModal>` for that member — 2026-05-25
-- [x] Inactivated members: reduced opacity — 2026-05-25
-
-**Testing & verification:**
-- [x] `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean — 2026-05-25
-- [ ] Manual: add user, invite email, create participant, change roles, remove member
-- [ ] Manual: generate invite link, copy, register new user via link
-- [ ] Manual: Member Modal shows correct stats, admin actions work with confirmations
-- [ ] Manual: inactivated user cannot log in; reactivation restores access
-- [x] `docs/log.md` Phase 10.1.2 entry written — 2026-05-25
-
----
-
-### Settings — Profile, Tokens & Admin (Phase 10.1.3)
-Builds out the `/settings` page into a working settings experience. Users get profile + identity management, security (password change), preferences, and API token management. Superadmins get SMTP config, instance defaults, and an orphaned-users view. Also ships forgot-password flow.
-
-**Design reference:** `docs/design/handoffs/settings-modal.zip` — directional prototype. Using the visual language (sidebar nav, field styling, token palette) but as a full page (existing `/settings` route), not a modal. Skipping Notifications panel (no infrastructure), Organization panel (multi-tenant concept doesn't apply), Billing panel (self-hosted), and Sessions section (JWTs are stateless). Security panel scoped to password change only.
-
-**Schema (migration 010):**
-- [x] Add `color TEXT` and `icon TEXT` columns to `users` table — user-level identity — 2026-05-26
-- [x] Create `instance_settings` table (`key TEXT PRIMARY KEY`, `value TEXT`, `updated_at DATETIME`) — 2026-05-26
-- [x] Create `password_reset_tokens` table (`id TEXT PK`, `user_id TEXT FK`, `token_hash TEXT`, `expires_at DATETIME`, `used_at DATETIME`, `created_at DATETIME`) — 2026-05-26
-- [x] Update `migrations_test.go` to assert new columns and tables — 2026-05-26
-
-**API — profile management:**
-- [x] `PATCH /users/me` — update `display_name`, `color`, `icon`; validate non-empty name; trim whitespace — 2026-05-26
-- [x] Identity propagation: when color/icon changes, update all `team_members` rows for the user where the member's value matches the user's old value or is NULL — 2026-05-26
-- [x] Add `UpdateProfile` repo method with propagation logic — 2026-05-26
-- [x] Test: happy path — name change persists; color change propagates to team_members — 2026-05-26
-- [x] Test: error path — empty name returns 400 — 2026-05-26
-
-**API — password change:**
-- [x] `PUT /users/me/password` — requires `{ currentPassword, newPassword }`; verify current hash; update; return 200 — 2026-05-26
-- [x] Return 401 `WRONG_PASSWORD` on mismatch; 400 `WEAK_PASSWORD` if < 8 chars — 2026-05-26
-- [x] Test: happy path — password changed — 2026-05-26
-- [x] Test: error path — wrong current password returns 401 — 2026-05-26
-
-**API — forgot password:**
-- [x] `POST /auth/forgot-password` — accepts `{ email }`; generate 1-hour reset token; store hash in `password_reset_tokens`; send email via mailer if configured; always return 200 — 2026-05-26
-- [x] `POST /auth/reset-password` — accepts `{ token, newPassword }`; validate token not expired/used; hash new password; update user; mark token used; return 200 — 2026-05-26
-- [x] Return 400 `TOKEN_INVALID` or `TOKEN_EXPIRED` on bad/expired token — 2026-05-26
-- [x] Test: invalid token returns TOKEN_INVALID — 2026-05-26
-- [x] Test: forgot-password always returns 200 (no enumeration) — 2026-05-26
-
-**API — SMTP configuration (superadmin only):**
-- [x] Internal `mailer` package (`internal/mailer/`): wraps `net/smtp`; reads config from `instance_settings` at send time; exposes `Send(to, subject, htmlBody) error` and `IsConfigured() bool` — 2026-05-26
-- [x] `GET /admin/smtp` — return current SMTP config with password masked; 403 if not superadmin — 2026-05-26
-- [x] `PUT /admin/smtp` — upsert config (host, port, username, password, from_name, from_email, encryption); validate by sending test email to caller; 403 if not superadmin — 2026-05-26
-- [x] `POST /admin/smtp/test` — send test email without saving; 403 if not superadmin — 2026-05-26
-- [x] `DELETE /admin/smtp` — clear SMTP config; 403 if not superadmin — 2026-05-26
-- [ ] SMTP password encrypted at rest (currently stored as JSON in instance_settings; encryption deferred)
-- [x] Test: 403 for non-superadmin on admin settings endpoints — 2026-05-26
-
-**API — instance settings (superadmin only):**
-- [x] `GET /admin/settings` — return all instance settings (registration_policy, default_timezone, default_date_format, default_week_start); 403 if not superadmin — 2026-05-26
-- [x] `PATCH /admin/settings` — update one or more settings; validate values; 403 if not superadmin — 2026-05-26
-- [ ] Test: set registration_policy to "open" → registration without invite succeeds (manual only)
-
-**API — orphaned users (superadmin only):**
-- [x] `GET /admin/users` — return all users with team membership count and status; support `?orphaned=true` filter; 403 if not superadmin — 2026-05-26
-- [x] Test: superadmin can list all users — 2026-05-26
-
-**OpenAPI + types:**
-- [x] Add `PATCH /users/me` to spec (UpdateProfile request/response) — 2026-05-26
-- [x] Add `PUT /users/me/password` to spec (ChangePassword request/response) — 2026-05-26
-- [x] Add `POST /auth/forgot-password` and `POST /auth/reset-password` to spec — 2026-05-26
-- [x] Add `GET/PUT/DELETE /admin/smtp` and `POST /admin/smtp/test` to spec — 2026-05-26
-- [x] Add `GET/PATCH /admin/settings` to spec — 2026-05-26
-- [x] Add `GET /admin/users` to spec — 2026-05-26
-- [x] Regenerate TypeScript types — 2026-05-26
-
-**Web — Settings page layout:**
-- [x] Rework `SettingsPage.tsx`: sidebar nav with grouped nav items, active state styling — 2026-05-26
-- [x] Route structure: `/settings/profile`, `/settings/security`, `/settings/preferences`, `/settings/tokens`, `/settings/admin` (superadmin only) — 2026-05-26
-- [x] Admin nav items hidden for non-superadmin users — 2026-05-26
-- [x] Sub-route content renders in right panel with title + subtitle header pattern — 2026-05-26
-
-**Web — Profile (`/settings/profile`):**
-- [x] Display name field with save button; calls `PATCH /users/me` — 2026-05-26
-- [x] Identity picker (reuse `IdentityWidget` from 9.6): color + icon selection; changes call `PATCH /users/me` with new color/icon — 2026-05-26
-- [x] Identity badge preview (avatar at current color/icon) — 2026-05-26
-- [x] Email shown read-only with explanatory note ("Email changes are not yet supported") — 2026-05-26
-- [x] Inline success/error feedback on save — 2026-05-26
-
-**Web — Security (`/settings/security`):**
-- [x] Change password form: current password, new password (min 8 chars), confirm new password — 2026-05-26
-- [x] Validation: new + confirm must match; save disabled until valid — 2026-05-26
-- [x] On success: show success message, clear form — 2026-05-26
-- [x] On 401 WRONG_PASSWORD: show "Current password is incorrect" error — 2026-05-26
-- [x] Calls `PUT /users/me/password` — 2026-05-26
-
-**Web — Preferences (`/settings/preferences`):**
-- [x] Regional section: timezone (IANA selector), date format dropdown, week starts on — 2026-05-26
-- [x] Appearance section: theme toggle (Light / Dark / System) — 2026-05-26
-- [x] All values read/written via existing `GET/PUT /users/me/preferences` endpoints — 2026-05-26
-- [x] Theme change applies immediately — 2026-05-26
-- [ ] Defaults section: default team/timeline dropdowns (deferred — requires loading teams/timelines)
-
-**Web — API Tokens (`/settings/tokens`):**
-- [x] Table: name, scope badge, last used (relative time or "Never"), created date, revoke button — 2026-05-26
-- [x] Create form: name input + scope picker with descriptions (read-only / add / edit-own / edit-all) — 2026-05-26
-- [x] On creation: one-time secret reveal with copy-to-clipboard button; close dismisses — 2026-05-26
-- [x] Revoke: inline confirmation → `DELETE /tokens/:id` → remove from list — 2026-05-26
-- [x] Empty state when no tokens exist — 2026-05-26
-
-**Web — Admin: Instance (`/settings/admin`):**
-- [x] Instance defaults form: default timezone, default week start — calls `PATCH /admin/settings` — 2026-05-26
-- [x] Registration policy toggle: invite-only vs open — calls `PATCH /admin/settings` — 2026-05-26
-- [x] Instance name field — 2026-05-26
-- [x] Save button with inline success feedback — 2026-05-26
-
-**Web — Admin: Email / SMTP (`/settings/admin`):**
-- [x] SMTP form: host, port (2-column), username, password (masked with eye toggle), from name, from email (2-column), encryption dropdown — 2026-05-26
-- [x] "Save SMTP settings" button → `PUT /admin/smtp` — 2026-05-26
-- [x] "Send test email" button → `POST /admin/smtp/test`; transitions through Sending → Sent/Failed — 2026-05-26
-- [x] Info note: "When SMTP is not configured, password resets and email invitations are unavailable" — 2026-05-26
-
-**Web — Admin: Users (`/settings/admin`):**
-- [x] Orphaned alert banner (when count > 0): warning-colored, count + "View" button — 2026-05-26
-- [x] Tabs: "All (N)" / "Orphaned (N)" — segmented control — 2026-05-26
-- [x] Search input: filter by name or email — 2026-05-26
-- [x] User rows: avatar, name, email, team count, status badge — 2026-05-26
-- [ ] Click user row → opens existing `MemberModal` (deferred — requires passing modal state up)
-- [ ] Orphaned users: "Assign team" action (deferred)
-
-**Web — Forgot password flow:**
-- [x] `/forgot-password` public page: email input → shows "If an account exists, a reset link has been sent" — 2026-05-26
-- [x] `/reset-password?token=...` public page: new password + confirm → success redirects to `/login` — 2026-05-26
-- [x] Login page: "Forgot password?" link below the password field — 2026-05-26
-- [ ] When SMTP not configured: `/forgot-password` shows "contact admin" (deferred — requires public SMTP status endpoint)
-
-**Testing & verification:**
-- [x] `golangci-lint run` clean — 2026-05-26
-- [x] `go test ./...` passes — 2026-05-26
-- [x] `pnpm --filter web lint` clean — 2026-05-26
-- [ ] Manual: change display name → visible in sidebar and team member lists after refresh
-- [ ] Manual: change identity color/icon → propagated to team memberships; visible on Gantt bars
-- [ ] Manual: change password → old password rejected, new password works
-- [ ] Manual: forgot-password → email received → click link → set new password → login works
-- [ ] Manual: create API token → secret shown once → copy → use in curl → works; revoke → rejected
-- [ ] Manual: configure SMTP → test email arrives → save persists across restart
-- [ ] Manual: set instance defaults → values persist
-- [ ] Manual: view all users; filter orphaned
-- [ ] Manual: toggle registration policy → test with/without invite
-- [ ] Manual: non-superadmin does not see admin sections
-- [x] `docs/log.md` Phase 10.1.3 entry written — 2026-05-26
-
----
-
-### Member Access & Data Lifecycle (Phase 10.1.4)
-Closes data-integrity and access-revocation gaps from 10.1.2. Protects historical activity data, defines the three membership lifecycle states, and gives superadmins a single "revoke all access" action.
-
-**Schema (migration 011):**
-- [x] Verify `activity_assignments.team_member_id` FK has `ON DELETE RESTRICT`; add explicit constraint in migration if missing — 2026-05-27
-- [x] Same check for `timeline_access.team_member_id` — 2026-05-27
-- [x] Enable `PRAGMA foreign_keys = ON` in DB initialization (`internal/db/`) — already set since early phases — 2026-05-27
-- [x] Update `migrations_test.go` to assert FK pragma is on and both FKs are RESTRICT — 2026-05-27
-
-**API — removal guard:**
-- [x] `DELETE /teams/:id/members/:memberId` — count `activity_assignments` before deleting; if count > 0, return 409 `MEMBER_HAS_ASSIGNMENTS` with `{ "assignmentCount": N }` — 2026-05-27
-- [x] Zero-assignment removal continues to hard-delete as before (deletes timeline_access first due to RESTRICT FK) — 2026-05-27
-- [x] Add `MemberHasAssignments` error handling to OpenAPI spec via `RevokeUserResult` and inline error response — 2026-05-27
-
-**API — full revoke (superadmin only):**
-- [x] `POST /users/:id/revoke` — new endpoint; superadmin only; atomically: set `users.archived_at`, set `archived_at` on all `team_members` for the user, hard-delete `team_members` rows where assignment count is 0; return `{ accountDeactivated: bool, membershipsInactivated: int, membershipsRemoved: int }` — 2026-05-27
-- [x] Add `RevokeUser` repo method: wraps the three steps in a transaction — 2026-05-27
-- [x] 403 if caller is not superadmin; 404 if user not found — 2026-05-27
-- [x] Add `POST /users/{id}/revoke` to OpenAPI spec; regenerate TypeScript types — 2026-05-27
-
-**Web — TeamModal Members tab:**
-- [x] On 409 `MEMBER_HAS_ASSIGNMENTS` from the remove (×) button, show inline error beneath the member row: "N assignment(s) — [Inactivate instead]" where the bracketed link calls `POST /teams/:id/members/:memberId/archive` — 2026-05-27
-- [x] On inactivate success from the inline error, dismiss the error and re-fetch the member list — 2026-05-27
-- [x] Clear the inline error before each new removal attempt for the same member — 2026-05-27
-
-**Web — MemberModal:**
-- [x] Add "Revoke all access" button to Super Admin Actions section (red, below Delete) — 2026-05-27
-- [x] Button hidden when user is already fully inactivated (`users.archived_at` set) — 2026-05-27
-- [x] Confirmation dialog: lists all three effects (account deactivated, memberships inactivated, zero-history memberships removed) — 2026-05-27
-- [x] On confirm: call `POST /users/:id/revoke`; on success show a summary chip for 2s, then close modal — 2026-05-27
-- [x] Invalidate `['teams']` query cache on success — 2026-05-27
-
-**Testing & verification:**
-- [ ] Manual: remove a member with assignments → 409; inline error appears; "Inactivate instead" button works
-- [ ] Manual: remove a member with zero assignments → success
-- [ ] Manual: superadmin uses "Revoke all access" → account deactivated; user can no longer log in; existing Gantt bars still show their avatar name
-- [ ] Manual: inactivated members' avatars still render on Gantt bars (data preserved)
-- [x] `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean — 2026-05-27
-- [x] `docs/log.md` Phase 10.1.4 entry written — 2026-05-27
-
----
-
-### Status Templates & Timeline Statuses (Phase 10.2)
-API + UI bundled. Required before Phase 11.3 (Kanban). Depends on 10.1.2 (Members).
-
-**Schema (migration 012):**
-- [x] Create `status_templates` (team-level), `status_template_items`, `statuses` (timeline-level) tables — 2026-05-27
-- [x] Rebuild `activities` table so `status_id` references `statuses` instead of `team_statuses`; drop `team_statuses` — 2026-05-27
-- [x] Update `migrations_test.go` — 2026-05-27
-
-**Go API:**
-- [x] `StatusTemplate`, `StatusTemplateItem`, `Status` models — 2026-05-27
-- [x] `StatusRepo`: list/get/create/update/delete templates; list/get/create/update/delete items; `SeedDefaultTemplate`; `CopyTemplateToTimeline` — 2026-05-27
-- [x] `handleCreateTeam` — seeds "Simple" template (Planned / In Progress / Done) on team creation — 2026-05-27
-- [x] `handleCreateTimeline` — copies first template's items into live statuses on timeline creation — 2026-05-27
-- [x] `GET /teams/:id/status-templates` — list templates with items — 2026-05-27
-- [x] `POST /teams/:id/status-templates` — create template — 2026-05-27
-- [x] `PATCH /status-templates/:id` — rename, reorder — 2026-05-27
-- [x] `DELETE /status-templates/:id` — blocked if last template on team — 2026-05-27
-- [x] `POST /status-templates/:id/items` — add item — 2026-05-27
-- [x] `PATCH /status-template-items/:id` — rename, recolor, reicon, toggle is_closed, reorder — 2026-05-27
-- [x] `DELETE /status-template-items/:id` — blocked if last item in template — 2026-05-27
-- [x] `GET /teams/:id/timelines/:timelineId/statuses` — list statuses for a timeline — 2026-05-27
-
-**OpenAPI + types:**
-- [x] `StatusTemplate`, `StatusTemplateItem`, `Status` schemas + input types — 2026-05-27
-- [x] All new endpoint paths — 2026-05-27
-- [x] Regenerate TypeScript types — 2026-05-27
-
-**Web:**
-- [x] `useStatusTemplates.ts` — hooks for all status template and statuses endpoints — 2026-05-27
-- [x] `StatusTemplatesTab.tsx` — template list with expandable item rows, inline editing, color picker, is_closed toggle, add/delete guards — 2026-05-27
-- [x] `TeamModal.tsx` — "Status Templates" tab added (locked until team saved) — 2026-05-27
-
-**Testing & verification:**
-- [x] `status_handler_test.go` — default seeding, admin-only create, last-template guard, item add/delete, statuses copied to timeline — 2026-05-27
-- [x] `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean — 2026-05-27
-- [ ] Manual: new team gets "Simple" template; open TeamModal → Status Templates tab shows Planned / In Progress / Done
-- [ ] Manual: create second template, add items, rename/recolor items
-- [ ] Manual: delete non-last template → success; delete last template → blocked with 409
-- [ ] Manual: create timeline → GET statuses returns 3 rows matching Simple template
-- [x] `docs/log.md` Phase 10.2 entry written — 2026-05-27
-
----
-
-### Timelines — Full CRUD (Phase 10.3)
-Closes the Timelines cornerstone. Today timelines can be created in the wizard and never managed afterward; access lists exist in schema but have no CRUD endpoints.
-
-**API — timeline-level:**
-- [x] `PATCH /timelines/:id` — rename, change start/end date, color, icon (team or timeline admin) — 2026-05-27
-- [x] `DELETE /timelines/:id` — hard delete; team admin only — 2026-05-27
-- [x] Archive endpoints already in Phase 9
-
-**API — timeline statuses (editing):**
-- [x] `POST /teams/:id/timelines/:timelineId/statuses` — add a status — 2026-05-27
-- [x] `PATCH /statuses/:id` — rename, recolor, reicon, toggle is_closed, reorder — 2026-05-27
-- [x] `DELETE /statuses/:id` — requires replacementStatusId if activities reference it; blocked if last status — 2026-05-27
-
-**API — access list:**
-- [x] `GET /teams/:id/timelines/:timelineId/access` — list current grants (team member + role) — 2026-05-27
-- [x] `PUT /teams/:id/timelines/:timelineId/access/:memberId` — grant or update role (admin / member) — 2026-05-27
-- [x] `DELETE /teams/:id/timelines/:timelineId/access/:memberId` — revoke grant — 2026-05-27
-
-**Web:**
-- [x] "New timeline" affordance in the sidebar timelines list → `TimelineModal` in create mode (name, date range, identity, template preview) — 2026-05-27
-- [x] Edit-timeline modal from the sidebar gear icon: rename, change date range, identity, archive, delete — 2026-05-27
-- [x] `TimelineModal` Statuses tab: add/edit/delete live statuses; delete-with-replacement dialog — 2026-05-27
-- [x] `TimelineModal` Access tab: search-pick team members, role toggle, remove — 2026-05-27
-- [x] Archived timelines under a collapsed "Archived" group in the sidebar; Restore button for unarchive — 2026-05-27
-- [x] Activity detail panel: status dropdown populated from live timeline statuses — 2026-05-27
-- [x] "Hide closed" toggle in GanttToolbar (shown when timeline has closed statuses) — 2026-05-27
-- [x] `TimelineAccessEntry` model + `TimelineStore` interface expanded; `canAdminTimeline` helper — 2026-05-27
-
-**Testing & verification:**
-- [x] `TestUpdateTimeline_AdminCanRename`, `TestUpdateTimeline_NonAdminForbidden` — 2026-05-27
-- [x] `TestDeleteTimeline_AdminCanDelete`, `TestDeleteTimeline_NonAdminForbidden` — 2026-05-27
-- [x] `TestTimelineAccessList_GrantAndRevoke` — 2026-05-27
-- [x] `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean — 2026-05-27
-- [ ] Manual: create second timeline from sidebar → modal opens → create → new timeline appears
-- [ ] Manual: edit timeline name, date range → save → sidebar reflects changes
-- [ ] Manual: add/edit/delete statuses via Statuses tab → activity detail panel shows updated list
-- [ ] Manual: grant/revoke member access via Access tab → member can/cannot access timeline
-- [ ] Manual: archive timeline → disappears from active list → appears in Archived → Restore restores it
-- [ ] Manual: delete timeline → confirm → gone from sidebar
-- [ ] Manual: hide-closed toggle hides activities with closed status; unchecking restores them
-- [x] `docs/log.md` Phase 10.3 entry written — 2026-05-27
-
----
-
-### Preference Consumption & Session Handling (Phase 10.4.1)
-Wires user and instance preferences (stored in 10.1.3) into views. Fixes the broken session lifecycle (access tokens expire after 15 min with no refresh interceptor). Adds cosmetic branding for admins.
-
-**Session lifecycle:**
-- [x] Add 401 interceptor to `apiFetch` (`packages/web/src/lib/api.ts`): on 401, attempt silent refresh via stored refresh token, retry original request; if refresh also fails, clear tokens and redirect to `/login`
-- [x] Mutex/queue so concurrent 401s don't fire multiple refresh calls
-- [x] Invisible to user — no toast, no banner (standard SPA pattern)
-
-**Preference consumption:**
-- [x] Create `useFormatDate()` hook — reads user's `date_format` preference, returns a formatter
-- [x] Gantt `granularity.ts` `formatLabel()`: replace hardcoded `en-US` with user's date format preference
-- [x] Gantt `granularity.ts` `startOfWeek()`: replace hardcoded Monday with user's `week_start` preference; Gantt columns align to user's chosen start day
-- [ ] `ActivityDetailPanel` and other date displays: consume date format preference (date inputs are native browser — no explicit text formatting needed until a read-only date display surface is added)
-- [ ] Public/shared timeline views: fall back to instance-level defaults when no user is logged in (deferred — shared views ship in Phase 13)
-- [x] Theme: sync server-side preference on login (`useDarkMode.ts` — added `applyTheme`; `ThemeSync` component applies server value on auth init)
-
-**Admin — branding (`/settings/admin`):**
-- [x] Instance name field (stored in `instance_settings`); shown in browser tab title and login page
-- [x] Accent color override (stored in `instance_settings`); applies globally via CSS custom property
-- [ ] Optional logo upload (stretch — deferred)
-
----
-
-### Activity Schema Normalization — Drop team_id (Phase 10.4.2)
-Removes `activities.team_id` (redundant now that `timeline_id` is stored). Hardens `timeline_id` to NOT NULL. Moves activity routes to `/teams/{id}/timelines/{timelineId}/activities` (team-scoped prefix avoids Go 1.22 mux conflict with `GET /timelines/share/{token}`).
-
-**Schema (migration 015):**
-- [x] Backfill NULL `timeline_id` rows (assign to team's oldest timeline) — 2026-05-28
-- [x] Rebuild `activities` table without `team_id`, with `timeline_id TEXT NOT NULL REFERENCES timelines(id) ON DELETE CASCADE` — 2026-05-28
-- [x] Recreate `idx_activities_timeline_id` on the new table — 2026-05-28
-
-**API — Go:**
-- [x] `models.Activity`: remove `TeamID` field; change `TimelineID` from `*string` to `string` — 2026-05-28
-- [x] `ActivityRepo.Create`: remove `team_id` from INSERT — 2026-05-28
-- [x] `ActivityRepo.ListByTeam` → `ListByTimeline(timelineID string, ...)`: query becomes `WHERE timeline_id = ?` — 2026-05-28
-- [x] `handleCreateActivity`, `handleListActivities`: path params are `teamId` + `timelineId`; look up timeline to verify ownership — 2026-05-28
-- [x] `handleUpdateActivity`, `handleDeleteActivity`, `handleArchive/Unarchive`: replace `activity.TeamID` with timeline lookup — 2026-05-28
-- [x] WebSocket broadcasts: derive `TeamID` from timeline lookup — 2026-05-28
-- [x] Move activity routes: `POST /teams/{id}/timelines/{timelineId}/activities`, `GET /teams/{id}/timelines/{timelineId}/activities` — 2026-05-28
-
-**OpenAPI + types:**
-- [x] Update `Activity` schema: replace `teamId` with `timelineId` (required, non-nullable) — 2026-05-28
-- [x] Update activity endpoints to new team-scoped path — 2026-05-28
-- [x] Regenerate TypeScript types — 2026-05-28
-
-**Frontend:**
-- [x] Rename `useTeamActivities` → `useTimelineActivities(teamId, timelineId, from, to)` — cache key `['timelines', timelineId, 'activities']` — 2026-05-28
-- [x] `useCreateActivity(teamId, timelineId)`: URL becomes `/teams/${teamId}/timelines/${timelineId}/activities`; no `timelineId` in request body — 2026-05-28
-- [x] `useUpdateActivity(timelineId)`, `useDeleteActivity(timelineId)`: cache key updated — 2026-05-28
-- [x] `useTeamActivitySync`: update cache key lookups to `['timelines', timelineId, 'activities']` — 2026-05-28
-- [x] `GanttView`: use `useTimelineActivities`; `timelineId` prop is now required (not optional) — 2026-05-28
-- [x] `ActivityCreatePanel`: `teamId` + `timelineId` passed to `useCreateActivity`; no `timelineId` in body — 2026-05-28
-- [x] `ActivityDetailPanel`: `timelineId` required; passed to `useUpdateActivity`/`useDeleteActivity` — 2026-05-28
-- [x] `DashboardPage`: updated GanttView/ActivityCreatePanel/ActivityDetailPanel prop signatures — 2026-05-28
-
-**Tests:**
-- [x] `activity_repo_test.go`: `makeActivity` uses `timelineID`; all `ListByTeam` calls → `ListByTimeline` — 2026-05-28
-- [x] Added `TestActivityRepo_ListByTimeline_Filter` — 2026-05-28
-- [x] `activity_handler_test.go`: `activityTestSetup` creates a timeline; all routes updated — 2026-05-28
-- [x] `archive_test.go`, `revoke_user_test.go`, `team_handler_test.go`: create timeline before activity; use new routes — 2026-05-28
-- [x] `user_repo_test.go`, `migrations_test.go`: activity INSERTs use `timeline_id` instead of `team_id` — 2026-05-28
-
-**Testing & verification:**
-- [x] `golangci-lint run` clean — 2026-05-28
-- [x] `go test ./...` passes — 2026-05-28
-- [x] `pnpm --filter web lint` clean — 2026-05-28
-- [ ] Manual: Gantt view loads activities for the active timeline
-- [ ] Manual: Creating an activity from the panel associates it with the correct timeline
-- [ ] Manual: `PRAGMA foreign_key_check` returns no rows after migration on Docker DB
-
----
-
-### UI Consistency — Modals, Sidebar & Toolbar (Phase 10.4.3) [was mislabeled 10.4.2]
-Standardizes visual patterns across TeamModal, MemberModal, TimelineModal, sidebar, and Gantt toolbar. Eliminates three different inline-editing patterns, three different archive button styles, three different confirmation dialog implementations, and mixed hardcoded hex colors vs CSS variables.
-
-**Inline name editing (3 → 1):**
-- [x] Extract shared `InlineEditableTitle` component: always-input with subtle bottom border on hover/focus — 2026-05-28
-- [x] Replace `MemberModal.tsx` name editing (focus underline pattern) with `InlineEditableTitle` — 2026-05-28
-- [x] Replace `TeamModal.tsx` name editing (toggle div/input state machine) with `InlineEditableTitle` — 2026-05-28
-- [x] Replace `TimelineModal.tsx` name editing (no visual cue) with `InlineEditableTitle` — 2026-05-28
-
-**Archive/restore buttons (3 → 1):**
-- [x] Standardize archive button: amber bg+border+icon (aligned with MemberModal prominence) — 2026-05-28
-- [x] Standardize restore button: teal bg+border+RotateCcw icon — 2026-05-28
-- [x] Fix `TeamModal.tsx` archive button (was neutral gray) — 2026-05-28
-- [x] Fix `TimelineModal.tsx` archive button (was border-only, no icon) — 2026-05-28
-
-**Confirmation dialogs (3 → 1):**
-- [x] Consolidate into shared `ConfirmDialog` component with color variants (red, amber, indigo, teal) — 2026-05-28
-- [x] Replace `MemberModal.tsx` custom ConfirmDialog — 2026-05-28
-- [x] Replace `TeamModal.tsx` ArchiveDialog — 2026-05-28
-- [x] Replace `TimelineModal.tsx` inline confirmation panels — 2026-05-28
-
-**Color system (mixed → CSS variables):**
-- [x] Migrate `TeamModal.tsx` hardcoded hex colors to CSS variables — 2026-05-28
-- [x] Migrate `MemberModal.tsx` hardcoded hex colors to CSS variables — 2026-05-28
-- [x] Verified `TimelineModal.tsx` CSS variable usage is consistent — 2026-05-28
-
-**Sidebar & toolbar audit:**
-- [x] Sidebar member/timeline rows: Badge usage, hover states, gear icon consistency verified — 2026-05-28
-- [x] Gantt toolbar controls: Tailwind + CSS vars, consistent with modal footer patterns — 2026-05-28
-- [x] No inconsistencies requiring fixes found — 2026-05-28
-
----
-
-### Gantt Interaction & Activity Edit Polish (Phase 10.4.4)
-
-**Schema (migration 016):**
-- [x] Add `notes TEXT` column to `activities` (nullable) — 2026-05-29
-
-**Go API:**
-- [x] `Activity` model: add `Notes *string` field — 2026-05-29
-- [x] `ActivityRepo.Update`: include `notes` in UPDATE SET — 2026-05-29
-- [x] `handleUpdateActivity`: parse `notes` from PATCH body — 2026-05-29
-
-**OpenAPI + types:**
-- [x] Add `notes` to `Activity` schema and PATCH body — 2026-05-29
-- [x] Regenerate TypeScript types — 2026-05-29
-- [x] Add `notes` to `UpdateActivityInput` patch type in `useTeamActivities.ts` — 2026-05-29
-
-**Gantt — resizable activity column:**
-- [x] Label column drag handle on right edge; min 140px, max 400px; live resize — 2026-05-29
-
-**Gantt — click-to-activate before drag:**
-- [x] Unselected bars show `cursor: pointer`; drag/resize only starts when bar is selected — 2026-05-29
-- [x] Resize handles (left/right edge) visible only on selected bars — 2026-05-29
-
-**Gantt — bar drag updates sidebar dates live:**
-- [x] `onBarDragProgress` callback fires during mousemove with current snapped dates — 2026-05-29
-- [x] `DashboardPage` stores `liveDragDates` and passes to `ActivityDetailPanel` — 2026-05-29
-- [x] `ActivityDetailPanel` shows live dates in date inputs without triggering saves — 2026-05-29
-- [x] `onBarDragEnd` callback clears live dates when drag completes — 2026-05-29
-
-**Gantt — finer-grained snap during drag:**
-- [x] `snapDivisorFor(granularity)`: day→1, week→7, month→4, quarter→3, year→4 — 2026-05-29
-- [x] `colFracToDate` interpolates fractional column positions for accurate date mapping — 2026-05-29
-- [x] Drag mousemove uses `Math.round(x / step) * step` with finer step — 2026-05-29
-- [x] `resolvedGranularity` prop passed from GanttView → GanttGrid — 2026-05-29
-
-**Gantt — "Hide closed" moves to filter preset:**
-- [x] Remove `hideClosed` checkbox and props from `GanttToolbar` — 2026-05-29
-- [x] Add `'open'` preset to `FilterDropdown` ("Open only — Hide activities with a closed status") — 2026-05-29
-- [x] Add `'open'` to `ActiveFilter` preset type in `FilterContext` — 2026-05-29
-- [x] `GanttView` reads `activeFilter.id === 'open'` to activate closed-status filtering — 2026-05-29
-- [x] Remove `hideClosed` state from `DashboardPage` — 2026-05-29
-
-**Activity Edit Sidebar — layout and field changes:**
-- [x] Remove "All day" checkbox — 2026-05-29
-- [x] Remove human-readable date summary line — 2026-05-29
-- [x] Move Description field directly below date pickers — 2026-05-29
-- [x] Restyle Assigned To with bordered card style matching create panel — 2026-05-29
-- [x] Status dropdown: replaced plain `<select>` with rich dropdown (color dot + name + CLOSED badge) — 2026-05-29
-- [x] Remove "Identity" line from Classify section — 2026-05-29
-- [x] Rename "Details" → "Advanced" — 2026-05-29
-- [x] Add Notes textarea (multi-line, resizable) backed by new `notes` column — 2026-05-29
-
-**Testing & verification:**
-- [x] `golangci-lint run` clean — 2026-05-29
-- [x] `go test ./...` passes — 2026-05-29
-- [x] `pnpm --filter web lint` clean — 2026-05-29
-- [ ] Manual: drag label column edge → width changes and persists during session
-- [ ] Manual: click bar (unselected) → selects it; second drag moves/resizes it
-- [ ] Manual: drag bar at week zoom → date tooltip shows day-level changes, not week-level
-- [ ] Manual: drag bar at month zoom → snaps to week boundaries
-- [ ] Manual: select "Open only" filter → closed-status activities hidden; clearing restores them
-- [ ] Manual: edit panel shows only date pickers (no allDay, no date summary)
-- [ ] Manual: description moves below dates; matches create panel layout
-- [ ] Manual: assignees use bordered card style (colored border + tint when selected)
-- [ ] Manual: status dropdown shows color dot + name; selection persists
-- [ ] Manual: notes textarea saves and loads correctly
-- [ ] Manual: bar drag → sidebar date inputs update live; stop drag → dates reset to server value
-
----
-
-### Activity Tags, Parent & Progress Fields (Phase 10.4.5)
-Replaces the three "coming soon" stubs in the activity edit panel with functional fields. Tags are normalized (team-scoped `tags` table). Parent and progress already had backend support; this phase adds the UI.
-
-**Schema (migration 017):**
-- [x] Create `tags` table: `id, team_id, name, color, created_by, created_at`; UNIQUE(team_id, name) — 2026-05-30
-- [x] Rebuild `activity_tags`: drop old text-junction table, create normalized FK junction — 2026-05-30
-
-**Go API:**
-- [x] `Tag` model added to `models.go` — 2026-05-30
-- [x] `Activity.TagIDs []string` field added (same `db:"-"` pattern as `AssignedMemberIDs`) — 2026-05-30
-- [x] `TagRepo`: `Create`, `GetByID`, `ListByTeam`, `Update`, `Delete` — 2026-05-30
-- [x] `ActivityRepo.SetTags` / `GetTags` — transaction pattern matching `SetAssignments` — 2026-05-30
-- [x] `ActivityRepo.ListByTimeline`: batch-populates `TagIDs` via `sqlx.In` (same as `AssignedMemberIDs`) — 2026-05-30
-- [x] `tag_handler.go`: `GET /teams/{id}/tags`, `POST /teams/{id}/tags`, `PATCH /tags/{id}`, `DELETE /tags/{id}` — 2026-05-30
-- [x] `activity_handler.go`: `handleCreateActivity` and `handleUpdateActivity` accept `tagIds`; `setActivityArchive` populates `TagIDs` on response — 2026-05-30
-- [x] `isUniqueConstraintError` helper added to `helpers.go` — 2026-05-30
-- [x] `server.go`: `tags *db.TagRepo` field; tag routes registered — 2026-05-30
-- [x] `main.go`: `db.NewTagRepo(database)` instantiated and passed to `NewServer` — 2026-05-30
-
-**OpenAPI + types:**
-- [x] `Tag` schema added to `openapi.yaml` — 2026-05-30
-- [x] `tagIds` added to `Activity` schema and create/update request bodies — 2026-05-30
-- [x] Regenerated TypeScript types — 2026-05-30
-
-**Frontend:**
-- [x] `useTags.ts`: `useTags`, `useCreateTag`, `useUpdateTag`, `useDeleteTag` hooks — 2026-05-30
-- [x] `TagInput.tsx`: combobox with colored pills, autocomplete, create-on-the-fly — 2026-05-30
-- [x] `ActivityDetailPanel`: Tags stub → `TagInput`; Parent stub → `<select>` from same-timeline activities; Progress stub → `<input type="range">`; tagIds/parentActivityId/percentComplete in state and save calls — 2026-05-30
-- [x] `ActivityCreatePanel`: `TagInput` added (below Assignees); `tagIds` in create mutation — 2026-05-30
-- [x] `GanttGrid`: progress fill overlay on bars (darker shade at `percentComplete%` width) — 2026-05-30
-- [x] `vite.config.ts`: `/tags` proxy added — 2026-05-30
-
-**Sample data:**
-- [x] `sample_data/10_tags.sql`: 8 tags for Product Marketing team + activity_tag associations — 2026-05-30
-
-**Tests:**
-- [x] `tag_repo_test.go`: CRUD, unique constraint, SetTags/GetTags, ListByTimeline TagIDs population — 2026-05-30
-- [x] `tag_handler_test.go`: create/list/update/delete happy paths, 409 duplicate, 404 not found, 403 non-member — 2026-05-30
-- [x] All existing test files updated to pass `db.NewTagRepo(database)` to `NewServer` — 2026-05-30
-
-**Testing & verification:**
-- [x] `golangci-lint run` clean — 2026-05-30
-- [x] `go test ./...` passes — 2026-05-30
-- [x] `pnpm --filter web lint` clean — 2026-05-30
-- [ ] Manual: create a tag in the activity detail panel; it appears in team tag list for future activities
-- [ ] Manual: tag autocomplete shows existing team tags; typing a new name offers "Create" option
-- [ ] Manual: tagged activity shows tag pills in the detail panel; pills persist across panel close/reopen
-- [ ] Manual: set parent activity; verify it persists across reload
-- [ ] Manual: drag the progress slider; Gantt bar shows progress fill; value persists
-- [ ] Manual: create activity with tags from the create panel; tags appear in detail panel
-
----
-
-### Filter Implementation (Phase 10.4.6)
-Full filter system: filter definition language, client-side engine, all 6 presets wired, filter builder UI, team filter promotion, and management panel.
-
-**Schema (migration 018):**
-- [x] `ALTER TABLE saved_filters ADD COLUMN is_team_filter BOOLEAN NOT NULL DEFAULT 0` — 2026-05-30
-
-**Backend:**
-- [x] `SavedFilter` model: add `IsTeamFilter bool` — 2026-05-30
-- [x] `SavedFilterRepo.Create`: include `is_team_filter` in INSERT — 2026-05-30
-- [x] `SavedFilterRepo.Update`: include `is_team_filter` in UPDATE — 2026-05-30
-- [x] `SavedFilterRepo.ListByTeamUser`: return user's own filters + all team filters (`is_team_filter = 1`) — 2026-05-30
-- [x] `handleCreateSavedFilter`: accept `isTeamFilter` (admin-only to set true) — 2026-05-30
-- [x] `handleUpdateSavedFilter`: admin can promote/demote; admin can edit name/def of existing team filters — 2026-05-30
-- [x] `handleDeleteSavedFilter`: admin can delete team filters they don't own — 2026-05-30
-
-**OpenAPI + types:**
-- [x] Add `isTeamFilter` boolean to `SavedFilter` schema — 2026-05-30
-- [x] Add `isTeamFilter` to `CreateSavedFilterJSONBody` and `PatchSavedFilterJSONBody` — 2026-05-30
-- [x] Update `api_types.gen.go` manually with new fields — 2026-05-30
-- [x] Regenerate TypeScript types (`pnpm --filter shared generate`) — 2026-05-30
-
-**Frontend — filter engine:**
-- [x] `lib/filterTypes.ts` — FilterDefinition type system (logic, conditions, operators per field type) — 2026-05-30
-- [x] `lib/filterEngine.ts` — `matchesFilter(activity, filter, ctx)` pure function — 2026-05-30
-- [x] `lib/presetFilters.ts` — `applyActiveFilter(activities, activeFilter, memberIdsByUserId, ctx)` — all 6 presets + member + saved filter kinds — 2026-05-30
-
-**Frontend — GanttView wiring:**
-- [x] Replace `closedStatusIds` prop with `timelineStatuses`, `savedFilters`, `tags` props — 2026-05-30
-- [x] Derive `closedStatusIds`, `statusesByTimeline`, `memberIdsByUserId`, `currentUserMemberIds` inside GanttView — 2026-05-30
-- [x] Replace old open-only filter with `applyActiveFilter` — makes all 6 presets + member + saved filters work — 2026-05-30
-
-**Frontend — filter builder UI:**
-- [x] `components/filters/FilterConditionRow.tsx` — field/op/value row with multi-select, text, number, date inputs — 2026-05-30
-- [x] `components/filters/FilterEditor.tsx` — name input, AND/OR toggle, condition rows, Save/Delete/Cancel footer — 2026-05-30
-- [x] `components/filters/FilterManagePanel.tsx` — My Filters + Team Filters sections with edit/delete/promote/demote — 2026-05-30
-
-**Frontend — FilterDropdown updates:**
-- [x] Partition saved filters into `teamFilters` and `myFilters` — 2026-05-30
-- [x] Render "Team filters" section with real data (replacing stub) — 2026-05-30
-- [x] Add "Manage filters" link at bottom of dropdown — 2026-05-30
-- [x] Add `onOpenManager` prop — 2026-05-30
-
-**Frontend — DashboardPage wiring:**
-- [x] Add `useSavedFilters` and `useTags` hooks — 2026-05-30
-- [x] Add `filterManageOpen` and `editingFilter` state — 2026-05-30
-- [x] Wire `FilterEditor` and `FilterManagePanel` into `RightSidebar` — 2026-05-30
-- [x] Pass `timelineStatuses`, `savedFilters`, `tags` to GanttView — 2026-05-30
-- [x] Add `onOpenFilterManager` to `TopBar` — 2026-05-30
-- [x] Update `useSavedFilters.ts`: add `isTeamFilter` to `UpdateSavedFilterInput` — 2026-05-30
-
-**Tests:**
-- [x] `lib/filterEngine.test.ts` — 20+ unit tests: each field type, each operator, AND/OR, edge cases, case-insensitive — 2026-05-30
-- [x] `lib/presetFilters.test.ts` — 11 unit tests: each preset, member filter, saved filter delegation — 2026-05-30
-- [x] `saved_filter_handler_test.go`: 5 new tests — team filter list includes team filters, admin can promote, non-admin cannot promote, admin can delete team filter, non-admin cannot — 2026-05-30
-- [x] `migrations_test.go`: assert `is_team_filter` column exists after migration 018 — 2026-05-30
-- [x] `golangci-lint run` clean; `go test ./...` all pass; `pnpm --filter web lint` clean; `pnpm --filter web build` clean — 2026-05-30
-
-**Manual verification (Docker):**
-- [ ] All 6 preset filters actually filter activities (open, upcoming, my, overdue, noassign, all)
-- [ ] Member filter kind filters by assignee
-- [ ] Filter builder: add/remove conditions, pick field/op/value for all supported fields, AND/OR toggle
-- [ ] Save/load/edit/delete custom filters end-to-end
-- [ ] Status conditions match by name across timelines
-- [ ] Tag conditions match by tag name
-- [ ] Team filter flag: admin promotes user filter → visible to all team members
-- [ ] "Manage filters" panel accessible from dropdown
-- [ ] `docs/log.md` Phase 10.4.6 entry written — 2026-05-30
-
----
-
-### Timeline Views — List / Spreadsheet (Web — Phase 11.1)
-Ships the view-switcher infrastructure plus the dense, sortable, inline-editable List view.
-
-**Infrastructure:**
-- [x] `ViewMode` already defined as `'gantt' | 'list' | 'calendar' | 'kanban'` in TopBar.tsx — 2026-05-31
-- [x] View switcher control in TopBar; per-timeline view mode persisted via preferences (key: `view_mode`) — 2026-05-31
-- [x] View-specific toolbar slots — GanttToolbar shown for gantt, ListToolbar shown for list — 2026-05-31
-
-**Dependencies installed:**
-- [x] `@tanstack/react-table@^8.21.3` — headless table (column visibility/order/sizing/pinning/sorting) — 2026-05-31
-- [x] `@dnd-kit/core`, `@dnd-kit/sortable`, `@dnd-kit/utilities` — column drag-reorder — 2026-05-31
-
-**ListToolbar (`components/list/ListToolbar.tsx`):**
-- [x] Columns menu (hide/show all columns via checkbox list) — 2026-05-31
-- [x] Density toggle (Comfortable / Compact) — 2026-05-31
-- [x] Group by (None / Member / Parent activity / Status) — 2026-05-31
-- [x] Sort by (Start date / End date / Title / Status / Progress) — 2026-05-31
-- [x] Color by (Activity / Member / Status) — 2026-05-31
-- [x] Export + Share stubs — 2026-05-31
-
-**ListView (`components/list/ListView.tsx`):**
-- [x] TanStack Table v8 with column visibility, order, sizing, pinning (Title always pinned left) — 2026-05-31
-- [x] Default columns: Title, Start, End, Duration, Status, Assignees, Tags (hidden: Progress, Parent, Description, Location, URL, Created, Updated) — 2026-05-31
-- [x] Column hide/show via toolbar Columns menu (pendingColumnToggle prop) — 2026-05-31
-- [x] Column drag-reorder via @dnd-kit (drag handles on column headers) — 2026-05-31
-- [x] Column resizing via TanStack's `columnResizeMode: 'onChange'` — 2026-05-31
-- [x] Column config (order/hidden/widths) persisted per-timeline via `list_columns` preference key — 2026-05-31
-- [x] Single-column sort by clicking column header (sort indicator arrow) — 2026-05-31
-- [x] Density toggle changes row height (comfortable: 40px, compact: 32px) and persists — 2026-05-31
-- [x] Keyboard navigation: Arrow keys move selection, Enter/F2 enters edit mode, Esc cancels, Tab/Shift+Tab commit+move horizontal, Enter in edit commits+moves down — 2026-05-31
-- [x] Inline editing: Title (text), Start (date), End (date), Description/Location/URL (text), Progress (number) — 2026-05-31
-- [x] Status cell: click to open StatusPicker popover with color pills — 2026-05-31
-- [x] Assignees cell: read-only display with member Badges (up to 4 + overflow count) — 2026-05-31
-- [x] Tags cell: read-only display with colored tag pills (up to 3 + overflow count) — 2026-05-31
-- [x] Progress cell: read-only mini progress bar + percentage — 2026-05-31
-- [x] Duration cell: computed from start/end dates (read-only) — 2026-05-31
-- [x] PATCH mutations via useUpdateActivity with optimistic updates — 2026-05-31
-- [x] Group-by: None / Member / Parent / Status with collapsible group header rows — 2026-05-31
-- [x] Color-by: left border stripe per row (activity color / primary member color / status color) — 2026-05-31
-- [x] Group-by/Color-by/Sort-by/Density persisted per-timeline in DashboardPage (keys: `list_group_by`, `list_color_by`, `list_sort_by`, `list_density`) — 2026-05-31
-- [x] Find bar highlights: matching rows amber outline, non-matching rows dimmed 30%, active match stronger outline — 2026-05-31
-- [x] Active filter applied (applyActiveFilter) — all 6 presets + member + saved filter kinds — 2026-05-31
-- [x] Row click opens ActivityDetailPanel; Space in selection mode opens detail panel — 2026-05-31
-- [x] Title column sticky left with box-shadow separator — 2026-05-31
-
-**DashboardPage wiring:**
-- [x] List toolbar state (listGroupBy, listSortBy, listColorBy, listDensity) in DashboardPage — 2026-05-31
-- [x] List toolbar state restored from per-timeline preferences on timeline switch — 2026-05-31
-- [x] List toolbar state saved to per-timeline preferences on change — 2026-05-31
-- [x] ListView rendered when view === 'list' with correct props — 2026-05-31
-
-**Testing & verification:**
-- [x] `golangci-lint run` clean — 2026-05-31
-- [x] `go test ./...` passes (135 tests) — 2026-05-31
-- [x] `pnpm --filter web lint` clean — 2026-05-31
-- [x] `pnpm --filter web build` clean — 2026-05-31
-- [ ] Manual: view switcher toggles Gantt ↔ List; choice persists per timeline
-- [ ] Manual: List shows activities with default columns, respects active filter
-- [ ] Manual: hide/show columns from Columns menu; persists across reload
-- [ ] Manual: drag column headers to reorder; persists across reload
-- [ ] Manual: resize column by dragging header right edge; persists
-- [ ] Manual: density toggle changes row height; persists
-- [ ] Manual: keyboard navigation (arrows, Enter/F2, Esc, Tab)
-- [ ] Manual: inline edit Title, Start, End → switches to Gantt → change reflected
-- [ ] Manual: click Status cell → picker opens → select → pill updates
-- [ ] Manual: Title column stays visible when scrolled horizontally
-- [ ] Manual: sort by column header (click once asc, twice desc, three times off)
-- [ ] Manual: group-by and color-by controls work
-- [ ] Manual: Find bar highlights matching rows in List view
-
----
-
-### Timezone-Safe Activity Dates (Phase 11.1.1)
-Fixes midnight-UTC activity dates displaying one calendar day early in negative-UTC-offset timezones.
-
-- [x] `granularity.ts`: switch all internal date helpers to UTC (startOfDay/Week/Month/Quarter/Year, addDays/addMonths, isoWeekNumber, formatLabel, todayColumnPosition) — 2026-06-01
-- [x] `GanttView.tsx`: `todayMidnight()` → `setUTCHours(0,0,0,0)`; fallback viewStart/viewEnd use `setUTCDate`/`getUTCDate` — 2026-06-01
-- [x] `GanttGrid.tsx`: `formatDragDate` → adds `timeZone: 'UTC'` to `toLocaleDateString` — 2026-06-01
-- [x] `ListView.tsx`: add `formatActivityDate` (UTC, for Start/End cells); keep `formatDate` (local, for Created/Updated) — 2026-06-01
-- [x] `granularity.test.ts`: update existing tests to use `getUTCDay`/`getUTCDate` assertions; add timezone-safety suite with midnight-UTC positioning and label checks — 2026-06-01
-- [x] `golangci-lint run` clean — 2026-06-01
-- [x] `go test ./...` passes — 2026-06-01
-- [x] `pnpm --filter web lint` clean — 2026-06-01
-- [x] `pnpm --filter web build` clean — 2026-06-01
-- [x] `pnpm --filter web test` — 149 tests pass including new timezone-safety suite — 2026-06-01
-- [ ] Manual: List Start/End cells show correct calendar day in a negative-offset timezone
-- [ ] Manual: Gantt bars land on the correct day column in a negative-offset timezone
-- [ ] Manual: Gantt day/week/month labels match List dates for same activity
-- [ ] Manual: round-trip — open date picker, save unchanged, displayed date does not shift
-
----
-
-### Group by Assignee Combination (Phase 11.1.2)
-Multi-assignee activities now appear under their exact assignee-set group in both Gantt and List.
-
-- [x] `lib/memberGroups.ts`: `memberComboKey`, `orderedComboIds`, `memberComboLabel`, `comboSortComparator`, `UNASSIGNED_KEY` — 2026-06-02
-- [x] `GanttGrid.tsx`: extend `GanttRow` group type with `memberColors?: string[]`; render stacked color dots in group headers — 2026-06-02
-- [x] `GanttView.tsx` `buildRows`: bucket by `memberComboKey(assignedMemberIds)`; sort groups via `comboSortComparator`; pass `memberColors` to group rows — 2026-06-02
-- [x] `ListView.tsx` `buildListRows`: same combo-key bucketing and sorting; `memberColors` on group rows; stacked dots in group header renderer — 2026-06-02
-- [x] `lib/memberGroups.test.ts`: full suite for key, label, ordering, comparator — 2026-06-02
-- [x] `GanttView.tree.test.ts`: updated member-grouping suite for combo-key behavior — 2026-06-02
-- [x] `ListView.tree.test.ts`: updated member-grouping suite for combo-key behavior — 2026-06-02
-- [x] `pnpm --filter web lint` clean — 2026-06-02
-- [x] `pnpm --filter web build` clean — 2026-06-02
-- [x] `pnpm --filter web test` — 187 tests pass — 2026-06-02
-- [ ] Manual: multi-assignee activity renders under its own combination group in both Gantt and List
-- [ ] Manual: combination group labels are in team order with Oxford/truncation formatting
-- [ ] Manual: group headers show stacked color dots
-- [ ] Manual: group ordering identical between Gantt and List; Unassigned last
-- [ ] Manual: collapse/expand works on combination groups; counts correct with no double-counting
-
----
-
-### Timeline Views — Calendar (Web — Phase 11.2)
-**Month / Week** all-day-bar layouts sharing one skeleton. No Day view, no time grid (every activity is all-day). Detailed plan: `docs/plans/phase-11.2-calendar-view.md`.
-
-**Shared:**
-- [x] Layout switcher (Month / Week) in the view's toolbar slot — 2026-06-02
-- [x] Today / prev / next navigation — 2026-06-02
-- [x] Color-by (activity / member / status) carried over via shared `lib/activityColor.ts` — 2026-06-02
-- [x] Click empty cell → `ActivityCreatePanel` prefilled with that date — 2026-06-02
-- [x] Click bar → existing `ActivityDetailPanel` — 2026-06-02
-- [x] Drag bar body → move (duration-preserving, whole-day snap, week-wrap aware) → PATCH; drag edge → resize; live sidebar preview — 2026-06-02
-- [x] Respects active filter, Find highlight, `week_start` pref — 2026-06-02
-
-**Lane packing (`lib/calendarLanes.ts`, pure + unit-tested):**
-- [x] Per-week-row greedy lane assignment for concurrent multi-day bars — 2026-06-02
-- [x] Cross-week activities split into one segment per week row with "continues" edges — 2026-06-02
-
-**Month layout:**
-- [x] 6-week grid; multi-day activities render as continuous bars across cells — 2026-06-02
-
-**Week layout:**
-- [x] 7 day columns, taller cells (higher default visible-lane cap = 6) — 2026-06-02
-
-**Density / overflow:**
-- [x] Per-day "+N more" chip → day popover listing every activity that day → row click opens sidebar — 2026-06-02
-- [x] Manual per-week row-height drag handle raises/lowers visible-lane cap; persists per-timeline-per-user — 2026-06-02
-
-**Testing & verification:**
-- [x] `pnpm --filter web lint` clean — 2026-06-02
-- [x] `pnpm --filter web test` — 208 tests pass including new `calendarLanes.test.ts` (21 tests) — 2026-06-02
-- [x] `pnpm --filter web build` clean — 2026-06-02
-- [x] `golangci-lint run` clean; `go test ./...` passes — 2026-06-02
-- [ ] Manual: view switcher toggles Gantt ↔ List ↔ Calendar, persisting per timeline
-- [ ] Manual: Month and Week layouts render with correct day cells and today highlight
-- [ ] Manual: multi-day activity renders as a continuous bar with "continues" arrow on clipped edges
-- [ ] Manual: color-by recolors bars (activity / member / status)
-- [ ] Manual: "+N more" chip shows count; popover lists all activities for that day; row click opens sidebar
-- [ ] Manual: row-height resize handle raises/lowers visible lanes; persists after reload
-- [ ] Manual: bar click opens ActivityDetailPanel; empty-cell click opens ActivityCreatePanel prefilled
-- [ ] Manual: drag bar body moves it (duration preserved); drag edge resizes; sidebar shows live dates
-- [ ] Manual: Find highlights matching bars in both layouts
-- [ ] Manual: active filter applied (all 6 presets, saved filters)
-
----
-
-### Timeline Views — Kanban (Web — Phase 11.3)
-Fully interactive board. Re-scoped 2026-06-03 from read-only to interactive (drag-to-recolumn, group-by-driven columns, card fields). Depends on Phase 10.2 (statuses API + UI).
-
-- [x] View switcher shows Kanban tab; switching persists per timeline — 2026-06-03
-- [x] `kanbanColumns.ts`: `buildColumns()` for Status/Member/Combination/Parent/None; sort comparators; sentinels — 2026-06-03
-- [x] `KanbanToolbar.tsx`: Group by / Sort by / Color by / Card fields multi-select — 2026-06-03
-- [x] `KanbanCard.tsx`: draggable card with accent border (colorBy), title, date range, status, tags, members, % complete, parent, description — 2026-06-03
-- [x] `KanbanColumn.tsx`: droppable column with header (accent dot + count + collapse), card list, empty state, "+ Add" — 2026-06-03
-- [x] `KanbanBoard.tsx`: DndContext host with drag overlay, drop semantics per groupBy, no-op drop guard — 2026-06-03
-- [x] `KanbanView.tsx`: data container (fetch, filter, Find, colorMap, buildColumns, drag commit, preference persistence) — 2026-06-03
-- [x] `KanbanView.test.ts`: 32 unit tests for `buildColumns` and `sortActivities` — 2026-06-03
-- [x] Columns collapse/expand; state persisted per timeline — 2026-06-03
-- [x] Card fields configurable; Group by axis field auto-suppressed from cards — 2026-06-03
-- [x] Filter parity: `applyActiveFilter` applied; column counts reflect filtered set — 2026-06-03
-- [x] Find parity: matching cards highlighted, non-matches dimmed; active match auto-expands collapsed columns — 2026-06-03
-- [x] Drag-to-recolumn commits status/reassign/reparent via `useUpdateActivity` (optimistic update) — 2026-06-03
-- [x] Combination/None columns non-droppable — 2026-06-03
-- [x] "+ Add" opens create panel pre-filled with column member (for member columns) — 2026-06-03
-- [x] All automated checks pass (`golangci-lint`, `go test ./...`, `pnpm lint`, `pnpm build`) — 2026-06-03
-- [ ] Manual: Drag card between status columns — status changes and card moves
-- [ ] Manual: Drag card between member columns — primary assignee changes
-- [ ] Manual: Drag card to parent column — parent changes
-- [ ] Manual: Card fields toggle shows/hides fields; Group by axis field auto-hides
-- [ ] Manual: Collapse/expand columns survive reload
-- [ ] Manual: Filter and Find work correctly on the board
-
-### Calendar Sync
-- [ ] Google Calendar OAuth connect flow
-- [ ] Outbound sync: push draba events to Google Calendar on create/update/delete
-- [ ] Inbound sync: Google webhook handler → upsert event in draba
-- [ ] Built-in CalDAV server (`internal/caldav/`)
-- [ ] CalDAV connect flow (user provides URL + credentials)
-- [ ] Outbound sync: push draba events to CalDAV on create/update/delete
-- [ ] Team iCal feed endpoint: `GET /timelines/:ical_token/feed.ics` (public, sanitized — no notes)
-
-### Shares — Multi-Share Views with Passwords (Phase 13)
-First-class Share entity. One timeline can host many shares, each frozen to a specific view + config.
-
-**Schema:**
-- [ ] Migration: `shares` table — id, timeline_id, view_type, view_config JSON, password_hash (nullable), expires_at (nullable), created_by, created_at, last_viewed_at, view_count, revoked_at
-- [ ] Migration: migrate existing `timelines.share_token` value into a first share row, then drop the column in a follow-up migration once UI references are gone
-
-**API:**
-- [ ] `POST /timelines/:id/shares` — create share with view_type + view_config snapshot + optional password + optional expiry
-- [ ] `GET /timelines/:id/shares` — list shares (creator + admins)
-- [ ] `PATCH /shares/:id` — rename / change password / extend expiry / revoke
-- [ ] `DELETE /shares/:id` — hard delete
-- [ ] `GET /shares/:token` — public lookup; password-protected returns 401 with `passwordRequired: true`
-- [ ] `POST /shares/:token/unlock` — exchange password for a short-lived view JWT scoped to that share
-- [ ] Rate-limit unlock attempts per IP
-
-**Web — creating shares:**
-- [ ] "Share this view" button in every view's toolbar slot (Gantt / List / Calendar / Kanban)
-- [ ] Share modal: snapshots current toolbar state into `view_config`, optional password + expiry toggles, returns URL with copy button
-
-**Web — viewing shares:**
-- [ ] Public viewer route `/s/:token` — no auth required
-- [ ] Password gate page for protected shares
-- [ ] Mount the appropriate view component in read-only mode with `view_config` applied
-- [ ] Branding strip: team name, "Shared view", last-updated timestamp
-
-**Web — managing shares:**
-- [ ] Manage-shares section on each timeline (list, view counts, revoke, edit)
-- [ ] Indicator chip on timeline tile showing active share count
-
----
-
-### Data Portability & Exports (Phase 14)
-
-**Tabular (round-trip):**
-- [ ] `GET /timelines/:id/export.csv` and `GET /timelines/:id/export.xlsx`
-- [ ] `POST /teams/:id/events/import` — CSV/Excel import with preview + validation
-- [ ] Downloadable import template at `GET /import-template.csv` and `.xlsx`
-
-**Visual exports (gofpdf):**
-- [ ] Gantt → PDF: landscape, paginated by date range, member-color legend strip
-- [ ] Gantt → PNG: single-page rasterized variant
-- [ ] Kanban → PDF: columns side-by-side, paginated when too wide
-- [ ] Kanban → PNG: single-page
-- [ ] List → Markdown (GitHub-flavored table) and PDF (styled table)
-- [ ] Calendar → PDF: one page per month / week depending on active layout
-- [ ] Header strip on every visual export: team name, timeline name, generated-at timestamp, applied filter description
-- [ ] All visual exports respect active filter / sort / group at time of export
-
-**Wiring:**
-- [ ] Gantt toolbar's existing "Export" stub becomes a real menu: CSV / xlsx / PDF / PNG
-- [ ] Same export menu in 11.1 / 11.2 / 11.3 toolbar slots, scoped to formats valid for that view
-
-**SMTP & password reset (lands here because import errors / reset emails are first SMTP use):**
-- [ ] Password reset flow (email required — pick SMTP or transactional email provider)
-- [ ] SMTP configuration surface in `/settings/admin`
-
----
-
-### External Connectors (Inbound Webhooks) — Phase 15
-Includes both the webhook backend and the per-timeline connector sidebar UI (previously a separate Up-Next block).
-
-**Backend:**
-- [ ] Create `team_inbound_webhooks` and `event_links` DB migrations
-- [ ] Add `is_external` boolean column to `events` table
-- [ ] `POST /teams/:id/webhooks` — generate an inbound webhook URL for a provider (e.g. Asana)
-- [ ] `GET /teams/:id/webhooks` — list active inbound webhooks
-- [ ] `POST /webhooks/:provider/:token` — generic inbound webhook handler to map payload to Draba events
-- [ ] Web UI: Render `is_external` events as read-only (disable drag-and-drop handles)
-- [ ] Web UI: Show external provider icon/link on the event detail card
-
-**Per-timeline connector model (was Up-Next "Web — Connectors"):**
-- [ ] Migration: `team_connectors (id, team_id, timeline_id, provider ENUM, display_name, config JSON, created_by, created_at)` — one row per connector instance
-- [ ] Provider values initially: `asana | aha | google_sheets | excel_online | webhook`
-- [ ] `GET /timelines/:id/connectors` — list connectors for a timeline
-- [ ] `POST /timelines/:id/connectors` — create connector (admin only); returns generated inbound token
-- [ ] `PATCH /connectors/:id` — update display name or config (admin only)
-- [ ] `DELETE /connectors/:id` — remove connector (admin only)
-- [ ] `POST /connectors/:token/ingest` — public inbound endpoint; validates token; maps payload via provider adapter
-
-**Sidebar CONNECTORS section (already stubbed):**
-- [ ] Wire `GET /timelines/:id/connectors` — list active connectors beneath the active timeline label
-- [ ] "Add connector" → connector setup sheet: provider picker → config fields → save → `POST /timelines/:id/connectors`
-- [ ] Connector row hover → gear icon → config drawer; delete with confirm
-- [ ] Provider icon set (Asana, Aha, Sheets, Excel, generic Plug)
-
-## Phase 13 — Shares (Public Read-Only View Links)
-
-**Next up.** Full design in [docs/plans/phase-13-shares.md](plans/phase-13-shares.md). Decision: live cached data + read-only SPA, server-side (Go) filter, view-driven field projection. No Chromium.
-
-**13.1 — Foundation, public gateway, Gantt viewer (MVP):** — ✅ 2026-06-04
-- [x] Migration: `shares` table (`id`, `timeline_id`, `token` UNIQUE, `view_type`, `view_config` JSON, `password_hash?`, `expires_at?`, `created_by`, `created_at`, `last_viewed_at`, `view_count`, `revoked_at`)
-- [x] Token migration: insert one `shares` row per existing timeline reusing `timelines.share_token` (keep the column for now; drop in a later migration)
-- [x] Go filter evaluator (`internal/filters`) mirroring `lib/filterEngine.ts` `matchesFilter`
-- [x] Shared golden-fixture suite (`packages/shared/testdata/filter-fixtures.json`) run by both `filterEngine.test.ts` and a Go test (drift guard)
-- [x] `GET /shares/{token}` gateway: scope-locked query (token → server-derived `timeline_id`, **no client selector**) → evaluate frozen filter in Go → fixed display projection → prune referenced members/statuses/tags → TTL cache (`DRABA_SHARE_CACHE_TTL`, default 60s)
-- [x] `POST /timelines/{id}/shares`, `GET /teams/{id}/timelines/{timelineId}/shares`, `PATCH /shares/{id}`, `DELETE /shares/{id}`
-- [x] OpenAPI: `Share`, `CreateShareInput`, `PatchShareInput`, `PublicActivity`, `PublicMember`, `PublicTimeline`, `ShareProjection`; regenerate TS types
-- [x] Gantt `interactive=false` mode (clicks inert in GanttGrid + GanttView; no drag/select)
-- [x] "Share this view" action in Gantt toolbar → snapshot live toolbar state incl. resolved `FilterDefinition` → create share → copy URL
-- [x] `/s/:token` public route (outside `ProtectedRoute`) + branding strip (timeline name · "Shared view" · activity count)
-- [x] Scope-isolation test: token reaches exactly its timeline's filtered records; tampering (other timeline/activity/team id, scope-widening params) cannot widen; no share-reachable by-id/list endpoint
-- [x] Verify payload: filtered-out activities + member email/`user_id`/role + access list + other timelines all absent (automated test)
-
-**13.2a — Password backend + view counts (Go, done 2026-06-05):**
-- [x] `password_hash` (bcrypt) on create/patch; `GET /shares/{token}` → `401 { passwordRequired: true }` when locked (no data); valid view token bypasses the gate
-- [x] `POST /shares/{token}/unlock` → short-lived view JWT (`share_view` type, share-scoped subject — not replayable across shares); rate-limit unlock attempts (10/IP/hour, in-memory limiter)
-- [x] Drop the `canManageShare = isAdmin || creator` gate on PATCH+DELETE — any timeline-team member may manage any share (shares can't mutate data)
-- [x] View counts: `viewCount` surfaced in the authenticated list response (per-row display backing)
-- [x] OpenAPI: `password` (writeOnly) on Create/Patch inputs, `passwordRequired` 401 body, `/shares/{token}/unlock` path; TS types regenerated
-
-**13.2b — Share module overhaul (frontend, done 2026-06-05):**
-- [x] Rebuilt `ShareModal.tsx` to the handoff design (header w/ link tile + timeline-name subtitle, "ACTIVE LINKS" section bar + count chip + New share, inline `AddShareForm` with title/description/password-toggle + show-hide, share rows, dashed empty state, footer + Done) using existing tokens/components
-- [x] Per-row meta: creator `Badge` + name (+ "· you"), created date, view count, lock/link type tile + "password" badge; copy w/ 1.6s success state; inline delete-confirm overlay
-- [x] Public unlock prompt at `/s/:token` (`UnlockPrompt` → `useUnlockShare` → store view token → `useShareProjection` resends GET with `Authorization: Bearer`); 401-`passwordRequired` mapped to `PASSWORD_REQUIRED`; 429 → "too many attempts" copy
-- [x] Backend support for the design: `description` column (migration 021) + derived `protected` flag on `Share` (never exposes the hash); plumbed through create/patch bodies, repo, OpenAPI; TS types regenerated
-- [x] `useShares`: `useUnlockShare`, view-token param on `useShareProjection`, `description`/`password` on create input; 6 new/updated hook tests
-
-**13.3 — List + Kanban read-only:**
-- [x] `interactive=false` + public mounting for List and Kanban (clicks inert)
-- [x] Projection: include `notes` only when a List share has the Notes column enabled in `view_config`
-- [x] Per-view read-only polish + "Share this view" (13.2 modal) in both toolbars
-
-**13.4 — Calendar — ICS feed sharing:**
-- [ ] `shares.kind` discriminator (`view` | `ics`); ICS rows carry `scope` (`timeline` | `member`) + nullable `member_id`, no `view_config`/filter/password
-- [ ] `GET /shares/{token}.ics` (`text/calendar`) + `webcal://` variant; all-day VEVENTs (`DTSTART;VALUE=DATE` start→end); live data, short cache
-- [ ] Distinct Calendar share modal: public On/Off toggle, scope selector (timeline vs. member), feed URL, Copy, Add-to-Google/Apple/Outlook, Regenerate link
-- [ ] Whole-timeline AND per-member feeds; payload carries no email/`user_id`/role/other-timelines
-
-**13.5 — Lifecycle tail:**
-- [ ] Optional expiry → `410 Gone` after `expires_at`
-- [ ] Active-share-count chip on the timeline tile; last-viewed surfaced in the 13.2 modal
-
-## Done
-- [x] Initialize repo scaffold — 2026-04-27
-- [x] Define requirements, architecture, conventions — 2026-04-27
-
-## Parking Lot
-- **Commit/CI process — repomap.md vs. Graphify:** drop the automated `repomap.md` generation (the AI-context lookup step doesn't appear to depend on it day-to-day) and look into incorporating Graphify in its place. Not yet scoped — revisit once the Phase 13 sub-phases land.
-- MySQL/MariaDB and Postgres DB adapters (SQLite first, then add others)
-- CLI binary
-- MCP server for AI agent access
-- Mobile native apps (ship PWA first)
-- Microsoft/Outlook calendar sync (v2)
-- Multi-tenant cloud hosting
-- SSO / OAuth login (GitHub, Google)
-- Notifications (email, push)
-- Recurring event UI (RRULE editing)
-- Kanban drag-to-change-status (v2; v1 Kanban is read-only)
+// ── The modal shell ──────────────────────────────────────────────────────────
+
+export default function ShareModal({ teamId, timelineId, viewType, viewConfig, timelineName, onClose }: Props) {
+  const { user } = useAuth()
+  const { data: allShares = [], isLoading } = useListShares(teamId, timelineId)
+  // Scoped to this exact view — a share is a frozen snapshot of one view's
+  // config, so a Gantt link can't usefully stand in for a List or Kanban one.
+  // Showing only same-type links keeps "active links" literal and leaves room
+  // to tailor the modal per view type (e.g. Calendar/ICS in 13.4) without
+  // having to reconcile it against unrelated shares.
+  // kind === 'view' also keeps ICS calendar feeds (13.4) out of this list —
+  // they live in CalendarShareModal, a different surface entirely.
+  const shares = allShares.filter(s => s.kind === 'view' && s.viewType === viewType)
+  const { data: members = [] } = useTeamMembers(teamId)
+  const createShare = useCreateShare(teamId, timelineId)
+  const deleteShare = useDeleteShare(teamId, timelineId)
+  const [adding, setAdding] = useState(false)
+  const bodyRef = useRef<HTMLDivElement>(null)
+
+  const memberByID = new Map(members.map(m => [m.id, m]))
+  const currentMember = members.find(m => m.userId && m.userId === user?.id)
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  const configString = JSON.stringify({
+    groupBy: viewConfig.groupBy,
+    sortBy: viewConfig.sortBy,
+    colorBy: viewConfig.colorBy,
+    granularity: viewConfig.granularity,
+    filter: viewConfig.filter ?? { logic: 'and', conditions: [] },
+    ...(viewConfig.columns ? { columns: viewConfig.columns } : {}),
+    ...(viewConfig.cardFields ? { cardFields: viewConfig.cardFields } : {}),
+    ...(viewConfig.showHierarchy !== undefined ? { showHierarchy: viewConfig.showHierarchy } : {}),
+    ...(viewConfig.collapsedColumns ? { collapsedColumns: viewConfig.collapsedColumns } : {}),
+  })
+
+  const handleCreate = (payload: CreatePayload) => {
+    createShare.mutate(
+      {
+        name: payload.title,
+        description: payload.description || null,
+        viewType,
+        viewConfig: configString,
+        password: payload.password ?? undefined,
+      },
+      {
+        onSuccess: () => {
+          setAdding(false)
+          setTimeout(() => { if (bodyRef.current) bodyRef.current.scrollTop = 0 }, 0)
+        },
+      },
+    )
+  }
+
+  return createPortal(
+    <div
+      className="fixed inset-0 z-[1000] flex items-center justify-center bg-[hsl(200_24%_11%/0.55)] p-6 backdrop-blur-[2px]"
+    >
+      <div
+        className="flex max-h-[88vh] w-[min(580px,100%)] flex-col overflow-hidden rounded-[var(--radius-xl)] bg-card shadow-[var(--shadow-lg)]"
+      >
+        {/* Header */}
+        <div className="flex shrink-0 items-start gap-3 border-b border-border px-5 py-[18px]">
+          <div className={cn('flex h-[38px] w-[38px] shrink-0 items-center justify-center rounded-[var(--radius-md)]', TILE_TEAL)}>
+            <LinkIcon size={19} strokeWidth={2.2} />
+          </div>
+          <div className="min-w-0 flex-1">
+            <h2 className="m-0 text-[17px] font-bold leading-tight text-foreground">Share this view</h2>
+            <div className="mt-0.5 flex items-center gap-1.5 text-[12.5px] text-muted-foreground">
+              <span className="inline-block h-2 w-2 shrink-0 rounded-sm bg-secondary" />
+              {timelineName ? `${timelineName} · ` : ''}anyone with a link can view
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            aria-label="Close"
+            className="flex h-[30px] w-[30px] shrink-0 cursor-pointer items-center justify-center rounded-[var(--radius-md)] border-none bg-muted text-muted-foreground"
+          >
+            <X size={16} strokeWidth={2.2} />
+          </button>
+        </div>
+
+        {/* Section bar */}
+        <div className="flex shrink-0 items-center gap-2 px-5 pb-[11px] pt-[13px]">
+          <span className="text-[11px] font-bold uppercase tracking-[0.06em] text-muted-foreground">Active links</span>
+          <span className="min-w-[20px] rounded-[var(--radius-full)] bg-muted px-2 py-px text-center text-[11px] font-bold text-muted-foreground">{shares.length}</span>
+          <div className="ml-auto">
+            {!adding && (
+              <Button size="sm" onClick={() => setAdding(true)}>
+                <Plus size={14} strokeWidth={2.4} /> New share
+              </Button>
+            )}
+          </div>
+        </div>
+
+        {/* Body */}
+        <div ref={bodyRef} className="flex min-h-[120px] flex-1 flex-col gap-3 overflow-y-auto px-5 pb-5">
+          {adding && (
+            <AddShareForm
+              currentMember={currentMember}
+              onCreate={handleCreate}
+              onCancel={() => setAdding(false)}
+              isPending={createShare.isPending}
+              isError={createShare.isError}
+            />
+          )}
+
+          {!isLoading && shares.length === 0 && !adding && (
+            <div className="flex flex-1 flex-col items-center justify-center rounded-[var(--radius-lg)] border border-dashed border-border px-5 py-9 text-center">
+              <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-[var(--radius-lg)] bg-muted text-muted-foreground">
+                <LinkIcon size={22} strokeWidth={1.8} />
+              </div>
+              <div className="text-sm font-semibold text-foreground">No share links yet</div>
+              <div className="mt-1 max-w-[280px] text-[12.5px] text-muted-foreground">Create a link to let people outside your team view this timeline.</div>
+              <Button size="sm" className="mt-4" onClick={() => setAdding(true)}>
+                <Plus size={14} strokeWidth={2.4} /> Create share link
+              </Button>
+            </div>
+          )}
+
+          {shares.map(s => (
+            <ShareRow
+              key={s.id}
+              share={s}
+              creator={s.createdBy ? memberByID.get(s.createdBy) : undefined}
+              isOwn={Boolean(currentMember && s.createdBy === currentMember.id)}
+              onDelete={(id) => deleteShare.mutate(id)}
+            />
+          ))}
+        </div>
+
+        {/* Footer */}
+        <div className="flex shrink-0 items-center gap-2.5 border-t border-border px-5 py-[13px]">
+          <div className="flex items-center gap-[7px] text-xs text-muted-foreground">
+            <Users size={14} strokeWidth={2} />
+            Read-only links · anyone on your team can manage them
+          </div>
+          <Button variant="outline" className="ml-auto" onClick={onClose}>Done</Button>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  )
+}
 ````
 
 ## File: packages/web/src/components/list/ListView.tsx
@@ -64227,9 +62985,2319 @@ export default function ListView({
 }
 ````
 
+## File: packages/web/src/pages/DashboardPage.tsx
+````typescript
+/**
+ * Main application shell: sidebar + top bar + content area.
+ *
+ * Fetches the authenticated user's first team and first timeline to seed the
+ * initial view. Team-selection UI and full sidebar wiring come in a later phase.
+ */
+
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
+import Sidebar from '@/components/layout/Sidebar'
+import TopBar, { type ViewMode } from '@/components/layout/TopBar'
+import GanttView from '@/components/gantt/GanttView'
+import { DEFAULT_LABEL_COL_W } from '@/components/gantt/GanttGrid'
+import GanttToolbar, { type GroupBy, type SortBy, type TimeGranularity, type ColorBy } from '@/components/gantt/GanttToolbar'
+import ListToolbar, { type ListGroupBy, type ListSortBy, type ListColorBy, type ListDensity, type ColumnConfig } from '@/components/list/ListToolbar'
+import ListView from '@/components/list/ListView'
+import CalendarToolbar, { type CalendarLayout } from '@/components/calendar/CalendarToolbar'
+import CalendarView from '@/components/calendar/CalendarView'
+import KanbanToolbar, { type KanbanGroupBy, type KanbanSortBy, type KanbanCardField } from '@/components/kanban/KanbanToolbar'
+import KanbanView from '@/components/kanban/KanbanView'
+import { DEFAULT_CARD_FIELDS } from '@/components/kanban/kanbanColumns'
+import ActivityDetailPanel from '@/components/gantt/ActivityDetailPanel'
+import ActivityCreatePanel from '@/components/gantt/ActivityCreatePanel'
+import { FilterProvider, useFilter } from '@/contexts/FilterContext'
+import { FindProvider, useFind } from '@/contexts/FindContext'
+import { useAuth } from '@/contexts/AuthContext'
+import { useDarkMode } from '@/hooks/useDarkMode'
+import { usePreferences, usePreferenceMap, useUpsertPreference } from '@/hooks/usePreferences'
+import { Settings, Moon, Sun, LogOut } from 'lucide-react'
+import { Badge } from '@/components/identity/Badge'
+import type { Identity } from '@/components/identity/identity-constants'
+import { useMyTeams, useTeamTimelines, useTeamTimelinesWithArchived, useTeamActivitySync, useUnarchiveTeam, useUnarchiveTimeline, useTeamMembers } from '@/hooks/useTeamActivities'
+import { useTimelineStatuses } from '@/hooks/useStatusTemplates'
+import { useSavedFilters } from '@/hooks/useSavedFilters'
+import { useTags } from '@/hooks/useTags'
+import TeamModal from '@/components/TeamModal'
+import MemberModal from '@/components/MemberModal'
+import TimelineModal from '@/components/TimelineModal'
+import FilterManageModal from '@/components/filters/FilterManageModal'
+import ShareModal from '@/components/ShareModal'
+import CalendarShareModal from '@/components/CalendarShareModal'
+import { useNavigate } from 'react-router-dom'
+import type { components } from '@draba/shared'
+import type { Member } from '@/types'
+
+type ApiActivity = components['schemas']['Activity']
+type ApiTeam = components['schemas']['Team']
+type ApiTimeline = components['schemas']['Timeline']
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
+
+const DROPDOWN_BTN: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 8,
+  width: '100%',
+  padding: '10px 14px',
+  background: 'none',
+  border: 'none',
+  fontSize: 13,
+  color: 'var(--foreground)',
+  cursor: 'pointer',
+  fontFamily: 'var(--font-sans)',
+  textAlign: 'left',
+}
+
+function DashboardShell() {
+  const { logout, accessToken, user } = useAuth()
+  const { activeFilter, setActiveFilter } = useFilter()
+  const navigate = useNavigate()
+  const { isDark, toggle: toggleDark, theme } = useDarkMode()
+  const { setFindBarOpen } = useFind()
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [view, setView] = useState<ViewMode>('gantt')
+  // Gantt label-column width — held here so it survives switching to another
+  // view and back (GanttView unmounts on view change, which would reset it).
+  const [ganttLabelColW, setGanttLabelColW] = useState(DEFAULT_LABEL_COL_W)
+  // Close the detail sidebar when switching to list view (edits are inline there)
+  const prevView = useRef<ViewMode>('gantt')
+  const [profileOpen, setProfileOpen] = useState(false)
+  const [selectedActivityId, setSelectedActivityId] = useState<string | null>(null)
+  const [selectedApiActivity, setSelectedApiActivity] = useState<ApiActivity | null>(null)
+  const [ganttMembers, setGanttMembers] = useState<Member[]>([])
+  const [createDefaults, setCreateDefaults] = useState<{ start: string; end: string; memberId: string | null; statusId?: string | null } | null>(null)
+  const [filterModalOpen, setFilterModalOpen] = useState(false)
+  const [shareModalOpen, setShareModalOpen] = useState(false)
+  // Calendar gets its own share surface — an ICS feed configurator, not the
+  // active-links list (Phase 13.4).
+  const [calendarShareModalOpen, setCalendarShareModalOpen] = useState(false)
+  const [liveDragDates, setLiveDragDates] = useState<{ activityId: string; start: string; end: string } | null>(null)
+  // Gantt toolbar state
+  const [groupBy, setGroupBy] = useState<GroupBy>('none')
+  const [sortBy, setSortBy] = useState<SortBy>('startDate')
+  const [granularity, setGranularity] = useState<TimeGranularity | 'auto'>('auto')
+  const [colorBy, setColorBy] = useState<ColorBy>('activity')
+  // List toolbar state
+  const [listGroupBy, setListGroupBy] = useState<ListGroupBy>('none')
+  const [listSortBy, setListSortBy] = useState<ListSortBy>('startDate')
+  const [listColorBy, setListColorBy] = useState<ListColorBy>('activity')
+  const [listDensity, setListDensity] = useState<ListDensity>('comfortable')
+  const [listColumns, setListColumns] = useState<ColumnConfig[]>([])
+  // Incremented seq lets ListView know a new toggle has arrived
+  const [listColToggle, setListColToggle] = useState<{ colId: string; visible: boolean; seq: number } | null>(null)
+  const listColToggleSeq = useRef(0)
+  // Calendar toolbar state
+  const [calendarLayout, setCalendarLayout] = useState<CalendarLayout>('month')
+  // anchorDate = UTC midnight of the 1st of the displayed month (month) or weekStart (week).
+  const [calendarAnchorDate, setCalendarAnchorDate] = useState<Date>(() => {
+    const d = new Date()
+    d.setUTCHours(0, 0, 0, 0)
+    d.setUTCDate(1)
+    return d
+  })
+  // Kanban toolbar state
+  const [kanbanGroupBy, setKanbanGroupBy] = useState<KanbanGroupBy>('status')
+  const [kanbanSortBy, setKanbanSortBy] = useState<KanbanSortBy>('startDate')
+  const [kanbanColorBy, setKanbanColorBy] = useState<ColorBy>('activity')
+  const [kanbanCardFields, setKanbanCardFields] = useState<KanbanCardField[]>(DEFAULT_CARD_FIELDS)
+  const [kanbanCollapsedColumns, setKanbanCollapsedColumns] = useState<string[]>([])
+  const [kanbanShowHierarchy, setKanbanShowHierarchy] = useState(false)
+  // Incremented to trigger inline row creation in list view
+  const [listNewRowSeq, setListNewRowSeq] = useState(0)
+  const profileRef = useRef<HTMLDivElement>(null)
+  // Preference persistence
+  const upsert = useUpsertPreference()
+  // Track whether we've applied server prefs for the active timeline so we
+  // don't immediately write defaults back before the server data arrives.
+  const prefsAppliedForTimeline = useRef<string | null>(null)
+  // One-shot guard: init activeTimelineId from global prefs only on first load.
+  const timelineIdInitialized = useRef(false)
+
+
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (profileRef.current && !profileRef.current.contains(e.target as Node)) {
+        setProfileOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [])
+
+  // Close the detail sidebar when switching to list view (list edits are inline).
+  useEffect(() => {
+    if (view === 'list' && prevView.current !== 'list') {
+      setSelectedActivityId(null)
+      setSelectedApiActivity(null)
+      setCreateDefaults(null)
+    }
+    prevView.current = view
+  }, [view])
+
+  // Ctrl/Cmd+F opens the Find bar; browser default (page search) is suppressed.
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
+        e.preventDefault()
+        setFindBarOpen(true)
+      }
+    }
+    document.addEventListener('keydown', handleKeyDown)
+    return () => document.removeEventListener('keydown', handleKeyDown)
+  }, [setFindBarOpen])
+
+  const displayName = (user as { displayName?: string } | null)?.displayName ?? 'User'
+  const email = (user as { email?: string } | null)?.email ?? ''
+  const userIdentity: Identity = {
+    color: (user as { color?: string } | null)?.color ?? '#288C9B',
+    icon: (user as { icon?: string } | null)?.icon ?? '__name_2__',
+  }
+
+  // Global preferences — restored on login to seed team/timeline selection.
+  const { isSuccess: globalPrefsSettled } = usePreferences()
+  const globalPrefMap = usePreferenceMap()
+  const weekStartDay: 0 | 1 = (globalPrefMap['week_start'] as string | undefined) === 'sunday' ? 0 : 1
+
+  // Team modal state
+  const [teamModalMode, setTeamModalMode] = useState<'new' | 'edit' | null>(null)
+  const [editingTeam, setEditingTeam] = useState<ApiTeam | null>(null)
+  const unarchiveTeam = useUnarchiveTeam()
+
+  // Member modal state
+  const [editingMember, setEditingMember] = useState<TeamMemberWithUser | null>(null)
+
+  // Timeline modal state
+  const [timelineModalMode, setTimelineModalMode] = useState<'new' | 'edit' | null>(null)
+  const [editingTimeline, setEditingTimeline] = useState<ApiTimeline | null>(null)
+
+  // Fetch all teams including archived for the sidebar's archived section.
+  const { data: allTeams = [] } = useMyTeams(true)
+  const activeTeams = allTeams.filter(t => !t.archivedAt)
+  const archivedTeams = allTeams.filter(t => Boolean(t.archivedAt))
+
+  // Explicit team selection state — null until the global pref is applied so
+  // that timelines (and the timeline init effect) don't fire against the wrong
+  // fallback team before the saved team pref resolves.
+  const [activeTeamId, setActiveTeamId] = useState<string | null>(null)
+  const teamIdInitialized = useRef(false)
+  useEffect(() => {
+    if (!activeTeams.length || !globalPrefsSettled || teamIdInitialized.current) return
+    teamIdInitialized.current = true
+    const saved = typeof globalPrefMap['selected_team'] === 'string' ? globalPrefMap['selected_team'] : null
+    const exists = saved && activeTeams.some(t => t.id === saved)
+    setActiveTeamId(exists ? saved : activeTeams[0].id)
+  }, [activeTeams, globalPrefsSettled, globalPrefMap])
+
+  // Only derive an active team once the pref has been applied (activeTeamId !== null).
+  // The activeTeams[0] fallback here handles the edge case where the saved team
+  // was archived or deleted between sessions.
+  const activeTeam = activeTeamId !== null
+    ? (activeTeams.find(t => t.id === activeTeamId) ?? activeTeams[0] ?? undefined)
+    : undefined
+  const teamId = activeTeam?.id ?? ''
+
+  // Check whether the current user is an admin of the active team.
+  const { data: teamMembers = [] } = useTeamMembers(teamId)
+  const userId = (user as { id?: string } | null)?.id ?? ''
+  const isSuperadmin = Boolean((user as { isSuperadmin?: boolean } | null)?.isSuperadmin)
+  const canEditTeam = isSuperadmin || teamMembers.some(m => m.userId === userId && m.role === 'admin')
+
+  const handleSelectTeam = useCallback((id: string) => {
+    setActiveTeamId(id)
+    // Clear the stale timeline selection so the init effect re-fires with the
+    // new team's timeline list. Without this, the old timeline ID leaks into
+    // the new team's API requests and produces 404s.
+    setActiveTimelineId(undefined)
+    prefsAppliedForTimeline.current = null
+    timelineIdInitialized.current = false
+  }, [])
+
+  const unarchiveTimeline = useUnarchiveTimeline(teamId)
+
+  const { data: timelines = [] } = useTeamTimelines(teamId)
+  const { data: allTimelines = [] } = useTeamTimelinesWithArchived(teamId)
+  const archivedTimelines = allTimelines.filter(t => Boolean(t.archivedAt))
+  const [activeTimelineId, setActiveTimelineId] = useState<string | undefined>()
+  const { data: activeTimelineStatuses = [] } = useTimelineStatuses(teamId, activeTimelineId ?? '')
+  const { data: savedFilters = [] } = useSavedFilters(teamId)
+  const { data: tags = [] } = useTags(teamId)
+  // Initialize activeTimelineId from the saved global pref (selected_timeline),
+  // falling back to timelines[0] when no pref is stored or the saved timeline
+  // is no longer in the list. Waits for global prefs to settle so we don't
+  // immediately overwrite a restored value with the fallback.
+  useEffect(() => {
+    if (timelines.length === 0 || !globalPrefsSettled || timelineIdInitialized.current) return
+    timelineIdInitialized.current = true
+    const saved = typeof globalPrefMap['selected_timeline'] === 'string' ? globalPrefMap['selected_timeline'] : null
+    const exists = saved && timelines.some(t => t.id === saved)
+    setActiveTimelineId(exists ? saved : timelines[0].id)
+  }, [timelines, globalPrefsSettled, globalPrefMap])
+  const activeTimeline = timelines.find(t => t.id === activeTimelineId) ?? timelines[0]
+  // Derived so they stay in sync after edits without needing separate state.
+  const activeTimelineColor = activeTimeline?.color ?? '#1A97A2'
+  const activeTimelineName = activeTimeline?.name ?? ''
+  const activeTimelineIdentity: Identity = {
+    color: activeTimeline?.color ?? '#288C9B',
+    icon: activeTimeline?.icon ?? '__none__',
+  }
+
+  // The frozen filter snapshot captured into a share's view config — shared
+  // across Gantt/List/Kanban since `activeFilter` applies to the whole timeline.
+  const activeShareFilter = useMemo(() => {
+    if (activeFilter.kind !== 'saved') return null
+    const sf = savedFilters.find(f => f.id === activeFilter.id)
+    if (!sf) return null
+    try { return JSON.parse(sf.definition) as import('@/lib/filterTypes').FilterDefinition } catch { return null }
+  }, [activeFilter, savedFilters])
+
+  // Close the activity detail panel whenever the active filter changes so the
+  // filtered view is unobstructed by a stale selection.
+  useEffect(() => {
+    setSelectedActivityId(null)
+    setSelectedApiActivity(null)
+  }, [activeFilter]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handleTimelineChange = useCallback((id: string) => {
+    prefsAppliedForTimeline.current = null
+    setActiveTimelineId(id)
+    setActiveFilter({ kind: 'preset', id: 'all' })
+  }, [setActiveFilter])
+
+  // Calendar navigation helpers.
+  const calendarPrev = useCallback(() => {
+    setCalendarAnchorDate(prev => {
+      const d = new Date(prev)
+      if (calendarLayout === 'month') {
+        d.setUTCMonth(d.getUTCMonth() - 1)
+      } else {
+        d.setUTCDate(d.getUTCDate() - 7)
+      }
+      return d
+    })
+  }, [calendarLayout])
+
+  const calendarNext = useCallback(() => {
+    setCalendarAnchorDate(prev => {
+      const d = new Date(prev)
+      if (calendarLayout === 'month') {
+        d.setUTCMonth(d.getUTCMonth() + 1)
+      } else {
+        d.setUTCDate(d.getUTCDate() + 7)
+      }
+      return d
+    })
+  }, [calendarLayout])
+
+  const calendarToday = useCallback(() => {
+    const d = new Date()
+    d.setUTCHours(0, 0, 0, 0)
+    if (calendarLayout === 'month') {
+      d.setUTCDate(1)
+    } else {
+      // Snap to weekStart.
+      const dow = d.getUTCDay()
+      const daysBack = weekStartDay === 1 ? (dow === 0 ? 6 : dow - 1) : dow
+      d.setUTCDate(d.getUTCDate() - daysBack)
+    }
+    setCalendarAnchorDate(d)
+  }, [calendarLayout, weekStartDay])
+
+  // Switching layouts also snaps the anchor date to the correct boundary so
+  // the week-view always starts on the configured weekStart day.
+  const handleCalendarLayoutChange = useCallback((l: CalendarLayout) => {
+    setCalendarLayout(l)
+    setCalendarAnchorDate(prev => {
+      const d = new Date(prev)
+      d.setUTCHours(0, 0, 0, 0)
+      if (l === 'week') {
+        const dow = d.getUTCDay()
+        const daysBack = weekStartDay === 1 ? (dow === 0 ? 6 : dow - 1) : dow
+        d.setUTCDate(d.getUTCDate() - daysBack)
+      } else {
+        d.setUTCDate(1)
+      }
+      return d
+    })
+  }, [weekStartDay])
+
+  useTeamActivitySync(teamId, accessToken)
+
+  // Per-timeline preferences: restore toolbar state when the active timeline changes.
+  // isSuccess gate ensures we don't mark prefs applied before the query resolves.
+  const { isSuccess: prefsSettled } = usePreferences(activeTimelineId)
+  const timelinePrefs = usePreferenceMap(activeTimelineId)
+  useEffect(() => {
+    if (!activeTimelineId || !prefsSettled) return
+    if (prefsAppliedForTimeline.current === activeTimelineId) return
+    prefsAppliedForTimeline.current = activeTimelineId
+
+    if (typeof timelinePrefs['group_by'] === 'string') setGroupBy(timelinePrefs['group_by'] as GroupBy)
+    if (typeof timelinePrefs['sort_by'] === 'string') setSortBy(timelinePrefs['sort_by'] as SortBy)
+    if (typeof timelinePrefs['zoom_granularity'] === 'string') setGranularity(timelinePrefs['zoom_granularity'] as TimeGranularity | 'auto')
+    if (typeof timelinePrefs['color_by'] === 'string') setColorBy(timelinePrefs['color_by'] as ColorBy)
+    if (typeof timelinePrefs['list_group_by'] === 'string') setListGroupBy(timelinePrefs['list_group_by'] as ListGroupBy)
+    if (typeof timelinePrefs['list_sort_by'] === 'string') setListSortBy(timelinePrefs['list_sort_by'] as ListSortBy)
+    if (typeof timelinePrefs['list_color_by'] === 'string') setListColorBy(timelinePrefs['list_color_by'] as ListColorBy)
+    if (typeof timelinePrefs['list_density'] === 'string') setListDensity(timelinePrefs['list_density'] as ListDensity)
+    if (typeof timelinePrefs['view_mode'] === 'string') setView(timelinePrefs['view_mode'] as ViewMode)
+    if (typeof timelinePrefs['kanban_group_by'] === 'string') setKanbanGroupBy(timelinePrefs['kanban_group_by'] as KanbanGroupBy)
+    if (typeof timelinePrefs['kanban_sort_by'] === 'string') setKanbanSortBy(timelinePrefs['kanban_sort_by'] as KanbanSortBy)
+    if (typeof timelinePrefs['kanban_color_by'] === 'string') setKanbanColorBy(timelinePrefs['kanban_color_by'] as ColorBy)
+    if (typeof timelinePrefs['kanban_card_fields'] === 'string') {
+      try { setKanbanCardFields(JSON.parse(timelinePrefs['kanban_card_fields']) as KanbanCardField[]) } catch { /* ignore */ }
+    }
+    if (typeof timelinePrefs['kanban_collapsed'] === 'string') {
+      try { setKanbanCollapsedColumns(JSON.parse(timelinePrefs['kanban_collapsed']) as string[]) } catch { /* ignore */ }
+    }
+    if (typeof timelinePrefs['kanban_show_hierarchy'] === 'string') {
+      try { setKanbanShowHierarchy(JSON.parse(timelinePrefs['kanban_show_hierarchy']) as boolean) } catch { /* ignore */ }
+    }
+  }, [activeTimelineId, prefsSettled, timelinePrefs])
+
+  // Save toolbar state changes to per-timeline prefs.
+  const saveTimelinePref = useCallback((key: string, value: string) => {
+    if (!activeTimelineId) return
+    upsert.mutate({ key, value: JSON.stringify(value), timelineId: activeTimelineId })
+  }, [activeTimelineId, upsert.mutate]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('group_by', groupBy)
+  }, [groupBy, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('sort_by', sortBy)
+  }, [sortBy, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('zoom_granularity', granularity)
+  }, [granularity, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('color_by', colorBy)
+  }, [colorBy, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('view_mode', view)
+  }, [view, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('list_group_by', listGroupBy)
+  }, [listGroupBy, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('list_sort_by', listSortBy)
+  }, [listSortBy, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('list_color_by', listColorBy)
+  }, [listColorBy, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('list_density', listDensity)
+  }, [listDensity, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('kanban_group_by', kanbanGroupBy)
+  }, [kanbanGroupBy, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('kanban_sort_by', kanbanSortBy)
+  }, [kanbanSortBy, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('kanban_color_by', kanbanColorBy)
+  }, [kanbanColorBy, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('kanban_card_fields', JSON.stringify(kanbanCardFields))
+  }, [kanbanCardFields, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('kanban_show_hierarchy', JSON.stringify(kanbanShowHierarchy))
+  }, [kanbanShowHierarchy, saveTimelinePref])
+
+  // Global preferences: persist dark mode, active team, and active timeline.
+  useEffect(() => {
+    upsert.mutate({ key: 'theme', value: JSON.stringify(theme) })
+  }, [theme]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!teamId) return
+    upsert.mutate({ key: 'selected_team', value: JSON.stringify(teamId) })
+  }, [teamId]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!activeTimelineId) return
+    upsert.mutate({ key: 'selected_timeline', value: JSON.stringify(activeTimelineId) })
+  }, [activeTimelineId]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Reset label column width when the user switches timelines so each timeline
+  // starts fresh. Switching between views on the same timeline preserves width
+  // because the state lives here rather than inside the unmounting GanttView.
+  useEffect(() => {
+    setGanttLabelColW(DEFAULT_LABEL_COL_W)
+  }, [activeTimelineId])
+
+  return (
+    <div style={{ display: 'flex', height: '100vh', overflow: 'hidden', background: 'var(--background)' }}>
+      <Sidebar
+        collapsed={sidebarCollapsed}
+        onToggle={() => setSidebarCollapsed(c => !c)}
+        apiTimelines={timelines}
+        archivedTimelines={archivedTimelines}
+        activeTimelineId={activeTimelineId}
+        onActiveTimelineChange={handleTimelineChange}
+        onNewTimeline={() => { setEditingTimeline(null); setTimelineModalMode('new') }}
+        onEditTimeline={id => {
+          // timelines (active) is always loaded; allTimelines (?archived=true) may
+          // still be in-flight, so prefer the already-loaded list to avoid opening
+          // the modal with an undefined timeline and blank fields.
+          const tl = timelines.find(t => t.id === id) ?? allTimelines.find(t => t.id === id)
+          setEditingTimeline(tl ?? null)
+          setTimelineModalMode('edit')
+        }}
+        onNewActivity={() => {
+          const today = new Date().toISOString().slice(0, 10)
+          setSelectedActivityId(null)
+          setSelectedApiActivity(null)
+          if (view === 'list') {
+            setListNewRowSeq(s => s + 1)
+          } else {
+            setCreateDefaults({ start: today, end: today, memberId: null })
+          }
+        }}
+        activeTeam={activeTeam}
+        activeTeams={activeTeams}
+        archivedTeams={archivedTeams}
+        canEditTeam={canEditTeam}
+        onSelectTeam={handleSelectTeam}
+        onNewTeam={isSuperadmin ? () => { setEditingTeam(null); setTeamModalMode('new'); } : undefined}
+        onEditTeam={t => { setEditingTeam(t as ApiTeam); setTeamModalMode('edit'); }}
+        onUnarchiveTeam={id => unarchiveTeam.mutate(id)}
+        members={teamMembers.length > 0 ? teamMembers : undefined}
+        onEditMember={isSuperadmin ? m => setEditingMember(m) : undefined}
+      />
+
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0 }}>
+        <TopBar
+          view={view}
+          teamId={teamId}
+          timelineName={activeTimelineName}
+          timelineIdentity={activeTimelineIdentity}
+          onViewChange={setView}
+          onOpenFilterManager={() => setFilterModalOpen(true)}
+          rightSlot={
+            <div ref={profileRef} style={{ position: 'relative', marginLeft: 4, zIndex: 30 }}>
+              <button
+                onClick={() => setProfileOpen(o => !o)}
+                style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', display: 'flex' }}
+                title={displayName}
+              >
+                <Badge identity={userIdentity} name={displayName} shape="circle" size={28} />
+              </button>
+
+              {profileOpen && (
+                <div
+                  style={{
+                    position: 'absolute',
+                    top: 'calc(100% + 8px)',
+                    right: 0,
+                    width: 220,
+                    background: 'var(--card)',
+                    border: '1px solid var(--border)',
+                    borderRadius: 8,
+                    boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
+                    zIndex: 100,
+                    overflow: 'hidden',
+                  }}
+                >
+                  <div style={{ padding: '12px 14px', borderBottom: '1px solid var(--border)' }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)' }}>{displayName}</div>
+                    <div style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 2 }}>{email}</div>
+                  </div>
+                  <button
+                    onClick={toggleDark}
+                    style={{ ...DROPDOWN_BTN, borderBottom: '1px solid var(--border)' }}
+                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                  >
+                    {isDark ? <Moon size={14} strokeWidth={1.8} /> : <Sun size={14} strokeWidth={1.8} />}
+                    {isDark ? 'Dark mode' : 'Light mode'}
+                  </button>
+                  <button
+                    onClick={() => { setProfileOpen(false); navigate('/settings'); }}
+                    style={{ ...DROPDOWN_BTN, borderBottom: '1px solid var(--border)' }}
+                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                  >
+                    <Settings size={14} strokeWidth={1.8} />
+                    Settings
+                  </button>
+                  <button
+                    onClick={logout}
+                    style={{ ...DROPDOWN_BTN, color: 'var(--muted-foreground)' }}
+                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                  >
+                    <LogOut size={14} strokeWidth={1.8} />
+                    Sign out
+                  </button>
+                </div>
+              )}
+            </div>
+          }
+        />
+
+        {/* Active timeline color band */}
+        <div style={{ height: 3, background: activeTimelineColor, flexShrink: 0, transition: 'background 0.2s ease' }} />
+
+        {/* Gantt sub-toolbar — only shown in Gantt view */}
+        {view === 'gantt' && (
+          <GanttToolbar
+            groupBy={groupBy}
+            onGroupByChange={setGroupBy}
+            sortBy={sortBy}
+            onSortByChange={setSortBy}
+            granularity={granularity}
+            onGranularityChange={setGranularity}
+            colorBy={colorBy}
+            onColorByChange={setColorBy}
+            onExport={() => {}}
+            onShare={() => setShareModalOpen(true)}
+          />
+        )}
+
+        {/* List sub-toolbar — only shown in List view */}
+        {view === 'list' && (
+          <ListToolbar
+            columns={listColumns}
+            onColumnVisibilityChange={(colId, visible) => {
+              listColToggleSeq.current += 1
+              setListColToggle({ colId, visible, seq: listColToggleSeq.current })
+              setListColumns(prev => prev.map(c => c.id === colId ? { ...c, visible } : c))
+            }}
+            density={listDensity}
+            onDensityChange={setListDensity}
+            groupBy={listGroupBy}
+            onGroupByChange={setListGroupBy}
+            sortBy={listSortBy}
+            onSortByChange={setListSortBy}
+            colorBy={listColorBy}
+            onColorByChange={setListColorBy}
+            onExport={() => {}}
+            onShare={() => setShareModalOpen(true)}
+          />
+        )}
+
+        {/* Calendar sub-toolbar — only shown in Calendar view */}
+        {view === 'calendar' && (
+          <CalendarToolbar
+            layout={calendarLayout}
+            onLayoutChange={handleCalendarLayoutChange}
+            anchorDate={calendarAnchorDate}
+            onPrev={calendarPrev}
+            onNext={calendarNext}
+            onToday={calendarToday}
+            colorBy={colorBy}
+            onColorByChange={setColorBy}
+            onExport={() => {}}
+            onShare={() => setCalendarShareModalOpen(true)}
+          />
+        )}
+
+        {/* Kanban sub-toolbar — only shown in Kanban view */}
+        {view === 'kanban' && (
+          <KanbanToolbar
+            groupBy={kanbanGroupBy}
+            onGroupByChange={setKanbanGroupBy}
+            sortBy={kanbanSortBy}
+            onSortByChange={setKanbanSortBy}
+            colorBy={kanbanColorBy}
+            onColorByChange={setKanbanColorBy}
+            cardFields={kanbanCardFields}
+            onCardFieldsChange={setKanbanCardFields}
+            showHierarchy={kanbanShowHierarchy}
+            onShowHierarchyChange={setKanbanShowHierarchy}
+            onExport={() => {}}
+            onShare={() => setShareModalOpen(true)}
+          />
+        )}
+
+        {/* Content area */}
+        <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+          {view === 'gantt' && teamId && activeTimelineId ? (
+            <GanttView
+              teamId={teamId}
+              timelineId={activeTimelineId}
+              startDate={activeTimeline?.startDate}
+              endDate={activeTimeline?.endDate}
+              groupBy={groupBy}
+              sortBy={sortBy}
+              granularity={granularity}
+              colorBy={colorBy}
+              timelineStatuses={activeTimelineStatuses}
+              savedFilters={savedFilters}
+              tags={tags}
+              selectedActivityId={selectedActivityId}
+              onSelectActivity={(id) => {
+                setSelectedActivityId(id)
+                if (!id) { setSelectedApiActivity(null); setCreateDefaults(null) }
+              }}
+              onSelectApiActivity={(activity) => {
+                setSelectedApiActivity(activity)
+                setCreateDefaults(null)
+              }}
+              onBarDragProgress={(activityId, newStart, newEnd) => {
+                setLiveDragDates({
+                  activityId,
+                  start: newStart.toISOString().slice(0, 10),
+                  end: newEnd.toISOString().slice(0, 10),
+                })
+              }}
+              onBarDragEnd={() => setLiveDragDates(null)}
+              onMembersLoaded={setGanttMembers}
+              labelColW={ganttLabelColW}
+              onLabelColWChange={setGanttLabelColW}
+            />
+          ) : view === 'gantt' && (!teamId || !activeTimelineId) ? (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>Loading your team…</p>
+            </div>
+          ) : view === 'list' && teamId && activeTimelineId ? (
+            <ListView
+              teamId={teamId}
+              timelineId={activeTimelineId}
+              groupBy={listGroupBy}
+              sortBy={listSortBy}
+              colorBy={listColorBy}
+              density={listDensity}
+              timelineStatuses={activeTimelineStatuses}
+              savedFilters={savedFilters}
+              tags={tags}
+              selectedActivityId={selectedActivityId}
+              pendingColumnToggle={listColToggle}
+              onSelectActivity={(id) => {
+                setSelectedActivityId(id)
+                if (!id) { setSelectedApiActivity(null); setCreateDefaults(null) }
+              }}
+              onSelectApiActivity={(activity) => {
+                setSelectedApiActivity(activity)
+                setCreateDefaults(null)
+              }}
+              onMembersLoaded={setGanttMembers}
+              onColumnsChange={setListColumns}
+              triggerNewRow={listNewRowSeq}
+            />
+          ) : view === 'list' && (!teamId || !activeTimelineId) ? (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>Loading your team…</p>
+            </div>
+          ) : view === 'calendar' && teamId && activeTimelineId ? (
+            <CalendarView
+              teamId={teamId}
+              timelineId={activeTimelineId}
+              layout={calendarLayout}
+              anchorDate={calendarAnchorDate}
+              colorBy={colorBy}
+              timelineStatuses={activeTimelineStatuses}
+              savedFilters={savedFilters}
+              tags={tags}
+              selectedActivityId={selectedActivityId}
+              onSelectActivity={(id) => {
+                setSelectedActivityId(id)
+                if (!id) { setSelectedApiActivity(null); setCreateDefaults(null) }
+              }}
+              onSelectApiActivity={(activity) => {
+                setSelectedApiActivity(activity)
+                setCreateDefaults(null)
+              }}
+              onBarDragProgress={(activityId, newStart, newEnd) => {
+                setLiveDragDates({
+                  activityId,
+                  start: newStart.toISOString().slice(0, 10),
+                  end: newEnd.toISOString().slice(0, 10),
+                })
+              }}
+              onBarDragEnd={() => setLiveDragDates(null)}
+              onCellClick={(date) => {
+                const iso = date.toISOString().slice(0, 10)
+                setSelectedActivityId(null)
+                setSelectedApiActivity(null)
+                setCreateDefaults({ start: iso, end: iso, memberId: null })
+              }}
+              onMembersLoaded={setGanttMembers}
+            />
+          ) : view === 'calendar' && (!teamId || !activeTimelineId) ? (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>Loading your team…</p>
+            </div>
+          ) : view === 'kanban' && teamId && activeTimelineId ? (
+            <KanbanView
+              teamId={teamId}
+              timelineId={activeTimelineId}
+              groupBy={kanbanGroupBy}
+              sortBy={kanbanSortBy}
+              colorBy={kanbanColorBy}
+              cardFields={kanbanCardFields}
+              collapsedColumnIds={kanbanCollapsedColumns}
+              onCollapsedColumnIdsChange={setKanbanCollapsedColumns}
+              showHierarchy={kanbanShowHierarchy}
+              timelineStatuses={activeTimelineStatuses}
+              savedFilters={savedFilters}
+              tags={tags}
+              selectedActivityId={selectedActivityId}
+              onSelectActivity={(id) => {
+                setSelectedActivityId(id)
+                if (!id) { setSelectedApiActivity(null); setCreateDefaults(null) }
+              }}
+              onSelectApiActivity={(activity) => {
+                setSelectedApiActivity(activity)
+                setCreateDefaults(null)
+              }}
+              onAddActivity={(defaults) => {
+                setSelectedActivityId(null)
+                setSelectedApiActivity(null)
+                setCreateDefaults(defaults)
+              }}
+              onMembersLoaded={setGanttMembers}
+            />
+          ) : view === 'kanban' && (!teamId || !activeTimelineId) ? (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>Loading your team…</p>
+            </div>
+          ) : (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>
+                {view.charAt(0).toUpperCase() + view.slice(1)} view coming soon.
+              </p>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Activity detail panel — slides in from right when an activity is selected */}
+      <ActivityDetailPanel
+        open={Boolean(selectedApiActivity)}
+        event={selectedApiActivity}
+        members={ganttMembers}
+        teamId={teamId}
+        timelineId={activeTimelineId ?? ''}
+        onClose={() => { setSelectedActivityId(null); setSelectedApiActivity(null); setLiveDragDates(null) }}
+        liveDragStart={liveDragDates && liveDragDates.activityId === selectedApiActivity?.id ? liveDragDates.start : undefined}
+        liveDragEnd={liveDragDates && liveDragDates.activityId === selectedApiActivity?.id ? liveDragDates.end : undefined}
+      />
+
+      {/* Activity create panel — slides in from New Activity button or future drag */}
+      <ActivityCreatePanel
+        open={Boolean(createDefaults) && !selectedApiActivity}
+        teamId={teamId}
+        timelineId={activeTimelineId ?? ''}
+        members={ganttMembers}
+        timelineStatuses={activeTimelineStatuses}
+        defaultStart={createDefaults?.start ?? new Date().toISOString().slice(0, 10)}
+        defaultEnd={createDefaults?.end ?? new Date().toISOString().slice(0, 10)}
+        defaultMemberId={createDefaults?.memberId}
+        defaultStatusId={createDefaults?.statusId}
+        onClose={() => setCreateDefaults(null)}
+      />
+
+      <FilterManageModal
+        open={filterModalOpen}
+        onClose={() => setFilterModalOpen(false)}
+        teamId={teamId}
+        timelineId={activeTimelineId ?? ''}
+        isAdmin={canEditTeam}
+      />
+
+      {/* Team modal — create or edit */}
+      {teamModalMode && (
+        <TeamModal
+          mode={teamModalMode}
+          team={editingTeam ?? undefined}
+          isAdmin={canEditTeam}
+          onClose={() => { setTeamModalMode(null); setEditingTeam(null); }}
+          onTeamCreated={created => setActiveTeamId(created.id)}
+        />
+      )}
+
+      {/* Member modal — edit a team member */}
+      {editingMember && (
+        <MemberModal
+          teamId={teamId}
+          memberId={editingMember.id}
+          isAdmin={canEditTeam}
+          isSuperadmin={isSuperadmin}
+          onClose={() => setEditingMember(null)}
+        />
+      )}
+
+      {/* Share modal — create a share link for the active view */}
+      {shareModalOpen && activeTimelineId && teamId && (view === 'gantt' || view === 'list' || view === 'kanban') && (
+        <ShareModal
+          teamId={teamId}
+          timelineId={activeTimelineId}
+          viewType={view}
+          timelineName={activeTimelineName}
+          viewConfig={
+            view === 'gantt'
+              ? { groupBy, sortBy, colorBy, granularity: String(granularity), filter: activeShareFilter }
+              : view === 'list'
+              ? {
+                  groupBy: listGroupBy,
+                  sortBy: listSortBy,
+                  colorBy: listColorBy,
+                  granularity: '',
+                  filter: activeShareFilter,
+                  columns: listColumns.map(c => ({ id: c.id, visible: c.visible })),
+                }
+              : {
+                  groupBy: kanbanGroupBy,
+                  sortBy: kanbanSortBy,
+                  colorBy: kanbanColorBy,
+                  granularity: '',
+                  filter: activeShareFilter,
+                  cardFields: kanbanCardFields,
+                  showHierarchy: kanbanShowHierarchy,
+                  collapsedColumns: kanbanCollapsedColumns,
+                }
+          }
+          onClose={() => setShareModalOpen(false)}
+        />
+      )}
+
+      {/* Calendar share modal — ICS feed configurator (distinct from ShareModal) */}
+      {calendarShareModalOpen && activeTimelineId && teamId && (
+        <CalendarShareModal
+          teamId={teamId}
+          timelineId={activeTimelineId}
+          timelineName={activeTimelineName}
+          onClose={() => setCalendarShareModalOpen(false)}
+        />
+      )}
+
+      {/* Timeline modal — create or edit */}
+      {timelineModalMode && (
+        <TimelineModal
+          mode={timelineModalMode}
+          teamId={teamId}
+          timeline={editingTimeline ?? undefined}
+          canAdmin={canEditTeam}
+          onClose={() => { setTimelineModalMode(null); setEditingTimeline(null) }}
+          onCreated={created => setActiveTimelineId(created.id)}
+          onUnarchive={id => unarchiveTimeline.mutate(id, { onSuccess: () => { setTimelineModalMode(null); setEditingTimeline(null) } })}
+        />
+      )}
+    </div>
+  )
+}
+
+export default function DashboardPage() {
+  return (
+    <FindProvider>
+      <FilterProvider>
+        <DashboardShell />
+      </FilterProvider>
+    </FindProvider>
+  )
+}
+````
+
+## File: docs/TASKS.md
+````markdown
+# Tasks
+
+## Current Sprint — Foundation
+
+### Repo & Tooling
+- [x] Initialize Go module (`packages/api/`) with basic project structure — 2026-04-29
+- [x] Initialize React + TypeScript + Vite project (`packages/web/`) — 2026-04-29
+- [x] Set up pnpm workspace (`pnpm-workspace.yaml`) — 2026-04-29
+- [x] Add `golangci-lint` config (`.golangci.yml`) — 2026-04-29
+- [x] Set up GitHub Actions CI: lint + test on PR — 2026-04-29
+- [x] Write `docker-compose.yml` for local development — 2026-04-29
+
+### API — Core
+- [x] DB abstraction layer with SQLite adapter (sqlx + modernc.org/sqlite) — 2026-04-30
+- [x] Migration runner (auto-runs on startup) — 2026-04-30
+- [x] Initial schema migrations: users, teams, team_members, invites, events, event_tags, event_assignments, timelines, timeline_access, calendar_connections, api_tokens — 2026-04-30
+- [x] Auth: JWT issue/validate, password hash/verify, invite token generate/validate — 2026-04-30
+- [x] `POST /auth/register` (invite token required) — 2026-04-30
+- [x] `POST /auth/login` — 2026-04-30
+- [x] `POST /auth/refresh` — 2026-04-30
+- [x] `POST /teams` — create team — 2026-05-03
+- [x] `POST /teams/:id/invites` — send invite — 2026-05-03
+- [x] `GET /teams/:id/members` — 2026-05-03
+- [x] `POST /teams/:id/events` — create event — 2026-05-03
+- [x] `GET /teams/:id/events` — list events (date range filter) — 2026-05-03
+- [x] `PATCH /events/:id` — update event — 2026-05-03
+- [x] `DELETE /events/:id` — delete event — 2026-05-03
+
+### API — Real-Time
+- [x] WebSocket hub (`internal/ws/`) — 2026-05-14
+- [x] Team-scoped subscription model — 2026-05-14
+- [x] Broadcast on `events.*` internal bus events — 2026-05-14
+
+### API — Timelines
+- [x] `POST /teams/:id/timelines` — create timeline — 2026-05-15
+- [x] `GET /timelines/:id` — fetch timeline (public or auth-gated) — 2026-05-15
+- [x] `GET /timelines/share/:token` — public share link handler — 2026-05-15
+- [x] Timeline access list enforcement — 2026-05-15
+
+### Web — Scaffold
+- [x] Initialize shadcn/ui: `pnpm dlx shadcn@latest init` — 2026-05-16
+- [x] Set color tokens in `src/index.css` once palette is decided — 2026-05-16
+- [x] Set up dark mode toggle (localStorage + `prefers-color-scheme`) — 2026-05-16
+- [x] Routing setup (React Router) — 2026-05-16
+- [x] Auth flow: login, register (via invite), token storage — 2026-05-16
+- [x] API client (TanStack Query + fetch wrapper using generated types) — 2026-05-16
+- [x] WebSocket client hook (`useWebSocket`) — 2026-05-16
+- [x] Embed React build in Go binary (`//go:embed`); API serves SPA at `GET /` — 2026-05-16
+
+### RBAC Refactor + First-Run Setup (Phase 8.0)
+- [x] Migration 003: `team_members` PK, nullable `user_id`, `display_name` — 2026-05-18
+- [x] Migration 003: `event_assignments` + `timeline_access` swap `user_id` FK for `team_member_id` — 2026-05-18
+- [x] Migration 003: `timeline_access` gains `role (admin|member)`; `visibility` dropped from `timelines` — 2026-05-18
+- [x] `User.IsSuperadmin`: first registered user auto-granted superadmin — 2026-05-18
+- [x] `GET /setup/status` — public endpoint (`{ needsSetup: bool }`) — 2026-05-18
+- [x] Timeline access: team admins bypass check; members require explicit `timeline_access` entry — 2026-05-18
+- [x] `SetupPage`: 3-step first-run wizard (account → team → timeline) — 2026-05-18
+- [x] `ProtectedRoute`: redirect to `/setup` when `needsSetup` is true — 2026-05-18
+- [x] Production Dockerfile: run as non-root `draba` user (uid 1000) — 2026-05-18
+
+### Web — Timeline View (Phase 8.1: Shell & Rendering — Gantt pivot)
+- [x] API: `GET /teams`, `GET /teams/:id/timelines`, `assignedMemberIds[]` on Event — 2026-05-18
+- [x] `TimelineView` + `TimelineGrid` (person-lane prototype, later pivoted) — 2026-05-18
+- [x] Pixel ↔ date math (map date range to X offset/width) — 2026-05-18
+- [x] Wire to `GET /teams/:id/events?start=&end=` and `GET /teams/:id/members` — 2026-05-18
+- [x] `TimelineGrid` rewrite: Gantt layout — one row per event, sticky label col, member avatars — 2026-05-18
+- [x] `TimelineToolbar` component: zoom in/out, group-by, sort-by, export stub — 2026-05-18
+- [x] `TimelineView` update: build `GanttRow[]` with grouping + sorting logic — 2026-05-18
+- [x] Group by Member: section headers per assignee, events under primary assignee — 2026-05-18
+- [x] Group by Parent: root events first, children indented below their parent — 2026-05-18
+- [x] Sort by: start date, end date, title A–Z — 2026-05-18
+- [x] Zoom: variable `colWidth` stepped through [40, 60, 80, 120, 160] px/day — 2026-05-18
+- [x] `DashboardPage`: render `TimelineToolbar`, pass group/sort/zoom state to `TimelineView` — 2026-05-18
+
+### Web — Timeline View (Phase 8.2: Interactions)
+- [x] Click event block → open `EventDetailPanel` (view mode) — 2026-05-19
+- [x] Edit form in panel (title, description, date range, status, assignees); save via `PATCH /events/:id` — 2026-05-19
+- [x] Delete event with confirm dialog; remove from timeline — 2026-05-19
+- [x] Drag on empty lane cell → open `EventCreateForm` pre-filled with date range + lane member — 2026-05-19
+- [x] Submit create form → `POST /teams/:id/events`, insert block into timeline — 2026-05-19
+
+### Web — Gantt Bar Drag (Phase 8.2.1: Resize & Move)
+- [x] Detect mousedown on left/right edge (8px zone) vs. bar body — 2026-05-19
+- [x] Edge drag: update start or end date live as user drags; snap to active granularity column — 2026-05-19
+- [x] Body drag: shift both start and end dates by the same column delta — 2026-05-19
+- [x] Show date tooltip during drag (start date for left edge, end date for right edge, both for body) — 2026-05-19
+- [x] PATCH `/events/:id` with new startAt/endAt on mouseup; optimistic update in cache — 2026-05-19
+- [x] Block drag on `is_external` events (read-only; Phase 14 flag) — 2026-05-19
+
+### Web — Timeline View (Phase 8.3: Real-Time Sync)
+- [x] Connect `useWebSocket` to subscribe to `events.*` for active team — 2026-05-19
+- [x] `events.created` delta: insert block into TanStack Query cache — 2026-05-19
+- [x] `events.updated` delta: update block in cache — 2026-05-19
+- [x] `events.deleted` delta: remove block from cache — 2026-05-19
+- [x] Handle optimistic update conflicts (in-flight local edit vs. arriving WS delta) — 2026-05-19
+
+### OpenAPI
+- [x] Write initial `openapi.yaml` in `packages/shared/` — 2026-05-04
+- [x] Set up TypeScript type generation from spec (openapi-typescript) — 2026-05-04
+- [x] Set up Go type generation from spec (`oapi-codegen`) — 2026-05-16
+- [x] Refactor existing Go handlers to use generated OpenAPI models — 2026-05-16
+
+### Web — Persistent View Settings (Phase 8.4)
+- [x] Migration 004: `user_preferences` table with empty-string sentinel for global scope — 2026-05-20
+- [x] `UserPreference` model (`models.go`) — 2026-05-20
+- [x] `UserPreferenceRepo`: `List` and `Upsert` methods — 2026-05-20
+- [x] `GET /users/me/preferences?timeline_id=` — returns scoped or global prefs — 2026-05-20
+- [x] `PUT /users/me/preferences` — upsert single key/value, validates JSON — 2026-05-20
+- [x] OpenAPI spec: `UserPreference` schema + two endpoints — 2026-05-20
+- [x] TypeScript types regenerated from spec — 2026-05-20
+- [x] `usePreferences` / `useUpsertPreference` / `usePreferenceMap` hooks — 2026-05-20
+- [x] `DashboardPage`: restore toolbar state from per-timeline prefs on timeline switch — 2026-05-20
+- [x] `DashboardPage`: save toolbar state (group_by, sort_by, zoom_granularity, color_by) on change — 2026-05-20
+- [x] `DashboardPage`: persist dark mode preference globally — 2026-05-20
+
+### Web — Find (Phase 8.5)
+In-view "find in page" with highlight + match navigation. Scoped to already-loaded events; respects active filters. Global cross-team search is deferred to Phase 15.
+
+**Find bar:**
+- [x] `FindBar` component in the TopBar (between FilterDropdown and ProfileMenu) — query input, match counter (`N / M`), prev/next chevrons, close (×) — 2026-05-20
+- [x] Open via `Ctrl/Cmd+F` global keybinding and via a search icon in the TopBar; close via `Esc` or × — 2026-05-20
+- [x] Debounced (~150ms) client-side matcher over already-fetched events — 2026-05-20
+
+**Match scope:**
+- [x] Case-insensitive match against: event title, description, assignee display names, parent event title — 2026-05-20
+- [x] Respect active filters — only events already visible in the current view are candidates — 2026-05-20
+
+**Visual treatment:**
+- [x] Matching events: amber outline / glow using existing design tokens — 2026-05-20
+- [x] Non-matching events: dimmed to ~0.3 opacity — 2026-05-20
+- [x] Active match (prev/next cursor position): stronger outline + subtle pulse to distinguish from other matches — 2026-05-20
+- [x] On hover, non-title matches show a "why matched" hint (e.g. `matched assignee Jane`) — 2026-05-20
+
+**Navigation:**
+- [x] `Enter` / `Shift+Enter` and ◀ ▶ chevrons walk forward/backward through matches — 2026-05-20
+- [x] Auto-scroll the Gantt on each step — horizontal pan to event's date range, vertical scroll to its row, centered in viewport — 2026-05-20
+
+**Empty / edge cases:**
+- [x] Zero matches, no filters active → bar shows `No matches` — 2026-05-20
+- [x] Zero matches in view, filters active → soft callout: *"No matches in current view. [Clear filters]"* — 2026-05-20
+- [x] Find query is ephemeral (not persisted across navigation/reload); bar open-state also ephemeral — 2026-05-20
+
+**Testing:**
+- [x] Unit: matcher returns correct hits across all match fields, case-insensitive — 2026-05-20
+- [ ] Integration: Find works at every granularity level and every group-by mode (requires live data — manual)
+- [ ] Keyboard: full prev/next cycle reachable with keyboard only (manual verification with live events)
+
+## Up Next
+
+> **Member management work is split across Phase 10.1.1 (Teams — CRUD) and Phase 10.1.2 (Members — Management & Editing)**. Team entity CRUD (create, edit, archive) is in 10.1.1; member lifecycle (add, edit, roles, invites, stubs, inactivation, admin actions) is in 10.1.2. The previously enumerated sidebar gear-icon + add-member-sheet tasks are absorbed into 10.1.2.
+
+### Web — Filter Scoping (FilterDropdown + API)
+Reorganizes the filter dropdown into four explicit sections. Filters are stored as personal by default; admins can promote any filter to team or timeline scope; members can nominate their filters for admin review.
+
+**Data model:**
+- Single `saved_filters` table: `(id, team_id, timeline_id nullable, created_by, name, definition JSON, scope ENUM(personal|nominated|team|timeline), status ENUM(active|pending_review))`
+- `scope=personal` — visible only to creator; `scope=team` — visible to all team members; `scope=timeline` — visible to all members of that timeline; `scope=nominated` — personal filter flagged by member for admin review (visible to admins)
+
+**API:**
+- [ ] Migration: replace current `saved_filters` shape with the unified schema above
+- [ ] `GET /teams/:id/filters` — returns filters scoped `team` or `timeline` (for the active timeline), plus the calling user's `personal` and `nominated` filters
+- [ ] `POST /teams/:id/filters` — create a new personal filter; `definition` is the filter JSON
+- [ ] `PATCH /filters/:id` — update name or definition (creator or admin)
+- [ ] `PATCH /filters/:id/scope` — promote/demote scope; admin-only for `team`/`timeline`; any member can set `nominated`
+- [ ] `DELETE /filters/:id` — creator or admin
+
+**Web — FilterDropdown layout:**
+- [ ] Reorganize dropdown into four labeled sections, each hidden when empty:
+  1. **Default** — All events / Upcoming / My events (hardcoded presets, always present)
+  2. **Team** — filters with `scope=team` from API
+  3. **Timeline** — filters with `scope=timeline` for the active timeline
+  4. **Mine** — caller's `personal` filters; nominated filters shown with a "Pending" badge
+- [ ] Filter names truncate with ellipsis at a max width; full name in tooltip on hover
+- [ ] "New filter…" opens filter editor (personal scope by default); "Share…" action on existing personal filters lets the member nominate it or (if admin) promote directly to team/timeline
+- [ ] Pass active timeline ID through context so the dropdown can fetch timeline-scoped filters
+- [ ] Admin-visible section at bottom of "Mine": nominated filters awaiting review, with Approve / Reject actions
+
+---
+
+> **Connectors sidebar + per-timeline connector model is absorbed into the External Connectors (Inbound Webhooks) task block further down** — that section now carries both the webhook backend and the sidebar UI work.
+
+### API — Token Auth (Phase 9)
+- [x] `POST /tokens` — create API token (returns value once) — 2026-05-20
+- [x] `GET /tokens` — list tokens for current user — 2026-05-20
+- [x] `DELETE /tokens/:id` — revoke token (preserved row, sets revoked_at) — 2026-05-20
+- [x] Middleware: accept Bearer token (JWT or API token) on all authenticated routes — 2026-05-20
+- [x] Enforce token scope on writes (read-only tokens blocked from mutations) — 2026-05-20
+
+### API — Archive (Phase 9)
+- [x] `POST /events/:id/archive` and `POST /events/:id/unarchive` — 2026-05-20
+- [x] `POST /timelines/:id/archive` and `POST /timelines/:id/unarchive` (team-admin only) — 2026-05-20
+- [x] List endpoints exclude archived records by default; `?archived=true` to include — 2026-05-20
+
+### The Great Event → Activity Rename (Phase 9.5)
+Rename the domain entity `Event` → `Activity` everywhere. Runbook: [GreatEventToActivity.md](GreatEventToActivity.md). Roadmap: [Phase 9.5](ROADMAP.md#phase-95--rename-event--activity-the-great-rename).
+
+> **Historical note:** Phase 3 / 8.x / 9 task entries above use "event" because that was the entity's name when those phases shipped. Do not rewrite them. Phase 9.5 is the formal cutover; all later entries use "activity".
+
+**DB:**
+- [x] Write migration `005_rename_events_to_activities.sql` — 2026-05-21 (`ALTER TABLE ... RENAME`)
+- [x] Rename indexes containing `event` in their name — 2026-05-21
+- [x] Update `migrations_test.go` to assert new table + column names — 2026-05-21
+- [ ] Verify against a copy of the prod DB: row counts unchanged, `PRAGMA foreign_key_check` clean
+
+**Go API:**
+- [x] `models.Event` → `models.Activity` — 2026-05-21
+- [x] Rename file `internal/db/event_repo.go` → `activity_repo.go`; `EventRepo` → `ActivityRepo` — 2026-05-21
+- [x] Rename file `internal/api/event_handler.go` → `activity_handler.go`; all `handle*Event*` functions — 2026-05-21
+- [x] `server.go`: routes `/events*` → `/activities*` — 2026-05-21
+- [x] `internal/events/bus.go`: rename constants `EventCreated/Updated/Deleted` — 2026-05-21 → `ActivityCreated/Updated/Deleted` + wire strings (`event.*` → `activity.*`). **Keep** package name and `TimelineCreated/Updated`.
+- [x] Update `bus_test.go`, `hub_test.go` wire-string assertions — 2026-05-21
+- [x] `golangci-lint run` clean, `go test ./...` passes — 2026-05-21
+
+**OpenAPI + generated types:**
+- [x] `packages/shared/openapi.yaml`: schema, paths, operationIds — 2026-05-21, tags, body types. **Keep** `googleEventId` and `caldavUid` fields.
+- [x] Run `pnpm --filter shared generate`; verify `Activity` exports — 2026-05-21, zero `Event` exports
+
+**Web:**
+- [x] `src/types/index.ts`: `DrabaEvent`/`EventStatus`/`EVENT_COLORS` — 2026-05-21 → `DrabaActivity`/`ActivityStatus`/`ACTIVITY_COLORS`
+- [x] Rename `useTeamEvents.ts` → `useTeamActivities.ts`; hooks + query keys — 2026-05-21
+- [x] `useWebSocket.ts`: update message-type switch to `activity.*` — 2026-05-21
+- [x] Rename `EventDetailPanel`, `EventCreatePanel`, `EventPanel` → `Activity*` — 2026-05-21; fix imports
+- [x] UI copy sweep: sidebar label, panel titles, empty state, ARIA, button labels — 2026-05-21
+- [x] `pnpm --filter web lint` clean — 2026-05-21
+
+**Tests + seed:**
+- [x] Rename `event_handler_test.go` → `activity_handler_test.go` — 2026-05-21
+- [x] Rename `scripts/seed-find-test-events.sql` → `seed-find-test-activities.sql` — 2026-05-21; update INSERTs + cleanup
+
+**Docs:**
+- [x] Sweep ROADMAP.md, REQUIREMENTS.md, ARCHITECTURE.md, CONVENTIONS.md, TESTING.md, design/UX_PATTERNS.md — 2026-05-21
+- [x] Hand-review: ROADMAP Phase 3 title — 2026-05-21 → "Core API — Activities & Teams (originally Events; renamed in Phase 9.5)"
+- [x] Do **not** rewrite `docs/log.md` historical entries — 2026-05-21
+- [x] Add Phase 9.5 entry to `docs/log.md` — 2026-05-21
+
+**Verification (smoke against http://epcot.lan:8081):**
+- [ ] Create / edit / archive / unarchive / delete an Activity end-to-end
+- [ ] WebSocket frames arrive as `activity.created` / `.updated` / `.deleted`
+- [ ] Final sweep `rg "\bevent" packages/ docs/` returns only expected hits (bus package, calendar fields, log.md)
+
+### Identity System (Phase 9.6)
+Reusable Identity component system (color + icon) for all entities. Design spec: [IDENTITY_SYSTEM.md](design/IDENTITY_SYSTEM.md). Prototype: `docs/design/assets/identity-widget-prototype.html`.
+
+**Schema (migration 006):**
+- [x] Write migration `006_identity_fields.sql` — 2026-05-24
+- [x] Update `migrations_test.go` to assert new columns exist — 2026-05-24
+
+**Go API:**
+- [x] `models.go`: add `Icon *string` + `Color *string` to `Team`; add `Icon *string` + `Color *string` to `Timeline`; add `Icon *string` to `TeamMember` — 2026-05-24
+- [x] Update `TeamMemberWithUser` to surface the new `Icon` field (via embedding) — 2026-05-24
+- [x] Update OpenAPI spec: add `icon`/`color` to `Team`, `Timeline`, `TeamMember` schemas — 2026-05-24
+- [x] Regenerate TypeScript types (`pnpm --filter shared generate`) — 2026-05-24
+- [x] `golangci-lint run` clean; `go test ./...` passes — 2026-05-24
+
+**Web — component library (`src/components/identity/`):**
+- [x] `identity-constants.ts` — 2026-05-24
+- [x] `Badge.tsx` — 2026-05-24
+- [x] `IdentityTrigger.tsx` — 2026-05-24
+- [x] `IdentityPicker.tsx` — 2026-05-24
+- [x] `IdentityWidget.tsx` — 2026-05-24
+
+**Web — replace existing color/icon UI:**
+- [x] `ActivityDetailPanel`: `<IdentityWidget>` replacing icon stub + 8-color swatch — 2026-05-24
+- [x] `ActivityCreatePanel`: `<IdentityWidget>` replacing color swatch — 2026-05-24
+- [x] Gantt bar label column: `<Badge size={20} shape="square">` — 2026-05-24
+- [x] Sidebar timeline rows: `<Badge size={20} shape="square">` — 2026-05-24
+- [x] Sidebar member rows: `<Badge size={20} shape="circle">` — 2026-05-24
+
+**Web — MemberAvatar migration:**
+- [x] Refactor `MemberAvatar.tsx` to delegate to `<Badge>` — 2026-05-24
+- [ ] Verify all existing MemberAvatar call sites render correctly (manual)
+
+**Web — palette consolidation:**
+- [x] Update `types/index.ts`: re-export `ACTIVITY_COLORS` and `MEMBER_COLORS` from `identity-constants.ts` — 2026-05-24
+- [x] Update `index.css`: `--member-N-*` → 16 `--identity-<name>` custom properties — 2026-05-24
+- [x] Update `DESIGN_SYSTEM.md`: 8-color → 16-color identity palette reference — 2026-05-24
+
+**Testing & verification:**
+- [x] `pnpm --filter web lint` clean — 2026-05-24
+- [x] `golangci-lint run` clean — 2026-05-24
+- [x] `go test ./...` passes — 2026-05-24
+- [ ] Badge renders all four modes (Lucide icon, 1-letter, 2-letter, none) at sizes 20–40px, both shapes (manual)
+- [ ] IdentityWidget popover opens/closes; color, name option, and icon selection fire onChange (manual)
+- [ ] Legacy hex colors in existing activities display correctly via `hexToColorId()` mapping (manual — test on Docker)
+- [ ] Manual: ActivityDetailPanel uses IdentityWidget; changes persist as color IDs (manual — test on Docker)
+- [ ] Manual: sidebar member + timeline rows use Badge (manual)
+
+**Docs:**
+- [x] Add Phase 9.6 entry to `docs/log.md` — 2026-05-24
+
+---
+
+### Phase 10 — Entity Management (data-cornerstone CRUD)
+
+Closes CRUD gaps for the three core data entities. Activities (renamed from Events in Phase 9.5) are already CRUD-complete (Phases 3 / 8.2 / 8.2.1 + Phase 9 archive); Teams and Timelines are not, so 10.x focuses on them.
+
+Design references:
+- Team Modal: `docs/design/handoffs/team-modal/` — Settings tab, Members tab, archive flow
+- Member Edit Modal: `docs/design/handoffs/member-modal/` — member profile, stats, admin actions
+
+---
+
+### Teams — CRUD & Management (Phase 10.1.1)
+Closes the Teams data entity. Ships the Team Modal with Settings tab functional; Members tab scaffolded as locked/placeholder until 10.1.2.
+
+**Schema (migration 008):**
+- [x] Add `description TEXT` column to `teams` (nullable) — 2026-05-25
+- [x] Add `notes TEXT` column to `teams` (nullable) — 2026-05-25
+- [x] Add `archived_at DATETIME` column to `teams` (nullable) — 2026-05-25
+- [x] Update `migrations_test.go` to assert new columns — 2026-05-25
+
+**API — team-level:**
+- [x] `GET /teams/:id` — full team detail (name, description, notes, icon, color, archived_at) — 2026-05-25
+- [x] `PATCH /teams/:id` — update name, description, notes, icon, color (admin only) — 2026-05-25
+- [x] `POST /teams/:id/archive` and `POST /teams/:id/unarchive` — 2026-05-25
+- [x] Update `POST /teams` to accept `description`, `notes`, `icon`, `color` — 2026-05-25
+- [x] Update `GET /teams` — add `?archived=true` to include archived teams — 2026-05-25
+
+**OpenAPI + types:**
+- [x] Update `Team` schema: add `description`, `notes`, `archivedAt` — 2026-05-25
+- [x] Update `CreateTeamInput` and `PatchTeamInput` request bodies — 2026-05-25
+- [x] Regenerate TypeScript types (`pnpm --filter shared generate`) — 2026-05-25
+
+**Web — Team Modal (`<TeamModal>`):**
+- [x] Modal shell: portal, backdrop, panel (580px, dark theme), header, tab bar, scrollable content, footer — 2026-05-25
+- [x] Header: identity badge (36px square) + label ("NEW TEAM" / "EDIT TEAM") + team name + close button — 2026-05-25
+- [x] Tab bar: Settings (active) + Members (locked/placeholder in this phase) — 2026-05-25
+- [x] Members tab locked state: opacity 0.45, not-allowed cursor, tooltip "Save the team first to add members" — 2026-05-25
+- [x] Settings tab: `<IdentityPicker>` (square shape), name (required), description, notes (textarea) — 2026-05-25
+- [x] Footer: Archive team button (edit mode, left side), Cancel + Create team / Save changes (right side, team-color primary button) — 2026-05-25
+- [x] "Saved" banner: appears after new team creation, auto-dismisses after 3s — 2026-05-25
+- [x] New-team flow: Settings tab → Create team → banner → Members tab unlocks (placeholder content) — 2026-05-25
+- [x] Edit-team flow: pre-populated Settings tab, Members tab unlocked (placeholder) — 2026-05-25
+- [x] Archive confirmation dialog: replaces modal content, amber styling, icon, title, body, Cancel + Archive team buttons — 2026-05-25
+
+**Web — team picker + settings shell:**
+- [x] "New team" affordance in team picker dropdown → opens `<TeamModal mode="new">` — 2026-05-25
+- [x] Team edit affordance (gear icon or similar) → opens `<TeamModal mode="edit" team={...}>` — 2026-05-25
+- [x] `/settings` route shell with left-nav layout (foundation for 10.1.2–10.4.2) — 2026-05-25
+- [x] Archived teams in picker under collapsed "Archived" section with unarchive action — 2026-05-25
+- [x] `GET /teams` query includes archived teams for the picker's Archived section — 2026-05-25
+
+**Testing & verification:**
+- [x] `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean — 2026-05-25
+- [ ] Manual: create second team from picker, edit existing team, archive/unarchive
+- [ ] Manual: Team Modal opens in both modes with correct Settings tab behavior
+- [x] `docs/log.md` Phase 10.1.1 entry written — 2026-05-25
+
+---
+
+### Members — Management & Editing (Phase 10.1.2)
+Fills in the Team Modal Members tab and adds the Member Edit Modal. Full member lifecycle: add, edit, roles, stubs, invites, reusable invite link, stats, inactivation, superadmin actions. Depends on 10.1.1 (Team Modal shell).
+
+**Terminology:** "Participant" = login-less team member (backend: `user_id = NULL`). Design handoffs use "stub" but we use "Participant" — established in Phase 8.0, more user-friendly. "Inactivate" = `archived_at`-based disabling. "Super Admin" = `is_superadmin`.
+
+**Schema (migration 009):**
+- [x] Add `archived_at DATETIME` column to `team_members` (nullable) — member inactivation — 2026-05-25
+- [x] Add `archived_at DATETIME` column to `users` (nullable) — account-level inactivation — 2026-05-25
+- [x] Add `invite_link_token TEXT UNIQUE` column to `teams` (nullable) — reusable invite link — 2026-05-25
+- [x] Update `migrations_test.go` to assert new columns — 2026-05-25
+
+**API — member CRUD:**
+- [x] `GET /teams/:id/members/:memberId` — full member detail with computed stats — 2026-05-25
+- [x] `POST /teams/:id/members` — add existing registered user by `userId` (admin only) — 2026-05-25
+- [x] `PATCH /teams/:id/members/:memberId` — update display name, color, icon, role (admin for role; self for own name/color/icon) — 2026-05-25
+- [x] `DELETE /teams/:id/members/:memberId` — remove from team; reject if last admin — 2026-05-25
+- [x] `POST /teams/:id/members/:memberId/archive` — inactivate member (set `archived_at`) — 2026-05-25
+- [x] `POST /teams/:id/members/:memberId/unarchive` — reactivate member (clear `archived_at`) — 2026-05-25
+
+**API — participant CRUD:**
+- [x] `POST /teams/:id/participants` — create login-less participant (admin only); name, icon, color, optional email — 2026-05-25
+- [x] Participants managed via same PATCH/DELETE member endpoints (role always `member`, `user_id` stays NULL) — 2026-05-25
+
+**API — invites:**
+- [x] `GET /teams/:id/invites` — list pending invites (email, sent date) — 2026-05-25
+- [x] `DELETE /teams/:id/invites/:inviteId` — revoke/cancel pending invite — 2026-05-25
+- [x] `POST /teams/:id/invite-link` — generate or regenerate reusable team invite link token — 2026-05-25
+- [x] `GET /teams/:id/invite-link` — get current invite link (or null) — 2026-05-25
+- [x] `DELETE /teams/:id/invite-link` — revoke current invite link — 2026-05-25
+- [x] Update `POST /auth/register` to accept reusable invite link tokens alongside existing one-time tokens — 2026-05-25
+
+**API — member stats (computed per request, not stored):**
+- [x] Timeline counts: active, archived (per member) — 2026-05-25
+- [x] Activity counts: past due, running, upcoming, unscheduled, archived (date-relative, not status-relative) — 2026-05-25
+
+**API — superadmin actions:**
+- [x] `POST /users/:id/promote` — set `is_superadmin = true` (superadmin only, not applicable to participants) — 2026-05-25
+- [x] `POST /users/:id/archive` — inactivate user account (superadmin only) — 2026-05-25
+- [x] `POST /users/:id/unarchive` — reactivate user account (superadmin only) — 2026-05-25
+- [x] `DELETE /users/:id` — hard delete user (superadmin only; zero active activities + single team only) — 2026-05-25
+- [x] Auth middleware: reject login from archived users with clear error — 2026-05-25
+
+**OpenAPI + types:**
+- [x] Add `MemberDetail` schema with stats, teams list, archived_at — 2026-05-25
+- [x] Add invite link endpoints to spec — 2026-05-25
+- [x] Add superadmin action endpoints to spec — 2026-05-25
+- [x] Update `TeamMember` schema with `archivedAt` — 2026-05-25
+- [x] Regenerate TypeScript types — 2026-05-25
+
+**Web — Team Modal Members tab:**
+- [x] Search/add input: search users by name/email, or type email to invite; clear button — 2026-05-25
+- [x] Search results dropdown: user matches with "Add" / "Already added" / "Invite pending"; email-only with "Invite" — 2026-05-25
+- [x] Participant creation: expandable inline form — identity picker (circle), name (required), optional email, "Create participant" button (amber) — 2026-05-25
+- [x] Member list: avatar (dashed border for stubs), name, "No login" pill (stubs, amber), email, `<RoleDropdown>`, remove (×) — 2026-05-25
+- [x] `<RoleDropdown>`: Admin (teal), Member (muted), Participant (amber) — with descriptions; portal-rendered; role changes save immediately — 2026-05-25
+- [x] Pending invitations section: rows with dashed-circle mail icon, email, sent date, "Revoke" button (red) — 2026-05-25
+- [x] Invite link section: URL display + "Copy link" button (teal transition to "Copied!"), explanatory note below — 2026-05-25
+- [x] Member count badge on Members tab label — 2026-05-25
+
+**Web — Member Edit Modal (`<MemberModal>`):**
+- [x] Modal shell: portal, backdrop, 560px panel, header / scrollable content / footer — 2026-05-25
+- [x] Header: `<IdentityPicker>` (40px circle), subline (participant/team member + viewer role label), name + badges ("No login" amber) — 2026-05-25
+- [x] Name + email row: 2-column grid; email read-only for participants ("No email — participant" placeholder) — 2026-05-25
+- [x] Timeline stats: 2 chips — Active (teal border), Archived (muted border) — 2026-05-25
+- [x] Activity stats: 5 chips — Past due (red if >0), Running (teal), Upcoming (blue), Unscheduled (muted), Archived (muted) — 2026-05-25
+- [x] Joined date: read-only pill with icon — 2026-05-25
+- [x] Teams list: each row with team badge (square, initials), team name, role pill — 2026-05-25
+- [x] Account section (team admin + non-participant): password reset button — shows "SMTP not configured" until Phase 14 — 2026-05-25
+- [x] Super Admin actions section (superadmin viewer only): Promote to Super Admin button (indigo), Inactivate (amber) / Delete (red) based on deletability — 2026-05-25
+- [x] Promote confirmation dialog: indigo icon, title, body, Cancel + Promote — 2026-05-25
+- [x] Inactivate confirmation dialog: amber icon, title, body, Cancel + Inactivate — 2026-05-25
+- [x] Delete confirmation dialog: red icon, title, body, Cancel + Delete — 2026-05-25
+- [x] Footer: Cancel + Save changes (member identity color) — 2026-05-25
+- [x] Deletable rule: zero active activities AND single team membership — 2026-05-25
+- [x] Role permission matrix enforcement: team admin vs superadmin capability differences — 2026-05-25
+
+**Web — sidebar integration:**
+- [x] Member rows: gear icon on hover → opens `<MemberModal>` for that member — 2026-05-25
+- [x] Inactivated members: reduced opacity — 2026-05-25
+
+**Testing & verification:**
+- [x] `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean — 2026-05-25
+- [ ] Manual: add user, invite email, create participant, change roles, remove member
+- [ ] Manual: generate invite link, copy, register new user via link
+- [ ] Manual: Member Modal shows correct stats, admin actions work with confirmations
+- [ ] Manual: inactivated user cannot log in; reactivation restores access
+- [x] `docs/log.md` Phase 10.1.2 entry written — 2026-05-25
+
+---
+
+### Settings — Profile, Tokens & Admin (Phase 10.1.3)
+Builds out the `/settings` page into a working settings experience. Users get profile + identity management, security (password change), preferences, and API token management. Superadmins get SMTP config, instance defaults, and an orphaned-users view. Also ships forgot-password flow.
+
+**Design reference:** `docs/design/handoffs/settings-modal.zip` — directional prototype. Using the visual language (sidebar nav, field styling, token palette) but as a full page (existing `/settings` route), not a modal. Skipping Notifications panel (no infrastructure), Organization panel (multi-tenant concept doesn't apply), Billing panel (self-hosted), and Sessions section (JWTs are stateless). Security panel scoped to password change only.
+
+**Schema (migration 010):**
+- [x] Add `color TEXT` and `icon TEXT` columns to `users` table — user-level identity — 2026-05-26
+- [x] Create `instance_settings` table (`key TEXT PRIMARY KEY`, `value TEXT`, `updated_at DATETIME`) — 2026-05-26
+- [x] Create `password_reset_tokens` table (`id TEXT PK`, `user_id TEXT FK`, `token_hash TEXT`, `expires_at DATETIME`, `used_at DATETIME`, `created_at DATETIME`) — 2026-05-26
+- [x] Update `migrations_test.go` to assert new columns and tables — 2026-05-26
+
+**API — profile management:**
+- [x] `PATCH /users/me` — update `display_name`, `color`, `icon`; validate non-empty name; trim whitespace — 2026-05-26
+- [x] Identity propagation: when color/icon changes, update all `team_members` rows for the user where the member's value matches the user's old value or is NULL — 2026-05-26
+- [x] Add `UpdateProfile` repo method with propagation logic — 2026-05-26
+- [x] Test: happy path — name change persists; color change propagates to team_members — 2026-05-26
+- [x] Test: error path — empty name returns 400 — 2026-05-26
+
+**API — password change:**
+- [x] `PUT /users/me/password` — requires `{ currentPassword, newPassword }`; verify current hash; update; return 200 — 2026-05-26
+- [x] Return 401 `WRONG_PASSWORD` on mismatch; 400 `WEAK_PASSWORD` if < 8 chars — 2026-05-26
+- [x] Test: happy path — password changed — 2026-05-26
+- [x] Test: error path — wrong current password returns 401 — 2026-05-26
+
+**API — forgot password:**
+- [x] `POST /auth/forgot-password` — accepts `{ email }`; generate 1-hour reset token; store hash in `password_reset_tokens`; send email via mailer if configured; always return 200 — 2026-05-26
+- [x] `POST /auth/reset-password` — accepts `{ token, newPassword }`; validate token not expired/used; hash new password; update user; mark token used; return 200 — 2026-05-26
+- [x] Return 400 `TOKEN_INVALID` or `TOKEN_EXPIRED` on bad/expired token — 2026-05-26
+- [x] Test: invalid token returns TOKEN_INVALID — 2026-05-26
+- [x] Test: forgot-password always returns 200 (no enumeration) — 2026-05-26
+
+**API — SMTP configuration (superadmin only):**
+- [x] Internal `mailer` package (`internal/mailer/`): wraps `net/smtp`; reads config from `instance_settings` at send time; exposes `Send(to, subject, htmlBody) error` and `IsConfigured() bool` — 2026-05-26
+- [x] `GET /admin/smtp` — return current SMTP config with password masked; 403 if not superadmin — 2026-05-26
+- [x] `PUT /admin/smtp` — upsert config (host, port, username, password, from_name, from_email, encryption); validate by sending test email to caller; 403 if not superadmin — 2026-05-26
+- [x] `POST /admin/smtp/test` — send test email without saving; 403 if not superadmin — 2026-05-26
+- [x] `DELETE /admin/smtp` — clear SMTP config; 403 if not superadmin — 2026-05-26
+- [ ] SMTP password encrypted at rest (currently stored as JSON in instance_settings; encryption deferred)
+- [x] Test: 403 for non-superadmin on admin settings endpoints — 2026-05-26
+
+**API — instance settings (superadmin only):**
+- [x] `GET /admin/settings` — return all instance settings (registration_policy, default_timezone, default_date_format, default_week_start); 403 if not superadmin — 2026-05-26
+- [x] `PATCH /admin/settings` — update one or more settings; validate values; 403 if not superadmin — 2026-05-26
+- [ ] Test: set registration_policy to "open" → registration without invite succeeds (manual only)
+
+**API — orphaned users (superadmin only):**
+- [x] `GET /admin/users` — return all users with team membership count and status; support `?orphaned=true` filter; 403 if not superadmin — 2026-05-26
+- [x] Test: superadmin can list all users — 2026-05-26
+
+**OpenAPI + types:**
+- [x] Add `PATCH /users/me` to spec (UpdateProfile request/response) — 2026-05-26
+- [x] Add `PUT /users/me/password` to spec (ChangePassword request/response) — 2026-05-26
+- [x] Add `POST /auth/forgot-password` and `POST /auth/reset-password` to spec — 2026-05-26
+- [x] Add `GET/PUT/DELETE /admin/smtp` and `POST /admin/smtp/test` to spec — 2026-05-26
+- [x] Add `GET/PATCH /admin/settings` to spec — 2026-05-26
+- [x] Add `GET /admin/users` to spec — 2026-05-26
+- [x] Regenerate TypeScript types — 2026-05-26
+
+**Web — Settings page layout:**
+- [x] Rework `SettingsPage.tsx`: sidebar nav with grouped nav items, active state styling — 2026-05-26
+- [x] Route structure: `/settings/profile`, `/settings/security`, `/settings/preferences`, `/settings/tokens`, `/settings/admin` (superadmin only) — 2026-05-26
+- [x] Admin nav items hidden for non-superadmin users — 2026-05-26
+- [x] Sub-route content renders in right panel with title + subtitle header pattern — 2026-05-26
+
+**Web — Profile (`/settings/profile`):**
+- [x] Display name field with save button; calls `PATCH /users/me` — 2026-05-26
+- [x] Identity picker (reuse `IdentityWidget` from 9.6): color + icon selection; changes call `PATCH /users/me` with new color/icon — 2026-05-26
+- [x] Identity badge preview (avatar at current color/icon) — 2026-05-26
+- [x] Email shown read-only with explanatory note ("Email changes are not yet supported") — 2026-05-26
+- [x] Inline success/error feedback on save — 2026-05-26
+
+**Web — Security (`/settings/security`):**
+- [x] Change password form: current password, new password (min 8 chars), confirm new password — 2026-05-26
+- [x] Validation: new + confirm must match; save disabled until valid — 2026-05-26
+- [x] On success: show success message, clear form — 2026-05-26
+- [x] On 401 WRONG_PASSWORD: show "Current password is incorrect" error — 2026-05-26
+- [x] Calls `PUT /users/me/password` — 2026-05-26
+
+**Web — Preferences (`/settings/preferences`):**
+- [x] Regional section: timezone (IANA selector), date format dropdown, week starts on — 2026-05-26
+- [x] Appearance section: theme toggle (Light / Dark / System) — 2026-05-26
+- [x] All values read/written via existing `GET/PUT /users/me/preferences` endpoints — 2026-05-26
+- [x] Theme change applies immediately — 2026-05-26
+- [ ] Defaults section: default team/timeline dropdowns (deferred — requires loading teams/timelines)
+
+**Web — API Tokens (`/settings/tokens`):**
+- [x] Table: name, scope badge, last used (relative time or "Never"), created date, revoke button — 2026-05-26
+- [x] Create form: name input + scope picker with descriptions (read-only / add / edit-own / edit-all) — 2026-05-26
+- [x] On creation: one-time secret reveal with copy-to-clipboard button; close dismisses — 2026-05-26
+- [x] Revoke: inline confirmation → `DELETE /tokens/:id` → remove from list — 2026-05-26
+- [x] Empty state when no tokens exist — 2026-05-26
+
+**Web — Admin: Instance (`/settings/admin`):**
+- [x] Instance defaults form: default timezone, default week start — calls `PATCH /admin/settings` — 2026-05-26
+- [x] Registration policy toggle: invite-only vs open — calls `PATCH /admin/settings` — 2026-05-26
+- [x] Instance name field — 2026-05-26
+- [x] Save button with inline success feedback — 2026-05-26
+
+**Web — Admin: Email / SMTP (`/settings/admin`):**
+- [x] SMTP form: host, port (2-column), username, password (masked with eye toggle), from name, from email (2-column), encryption dropdown — 2026-05-26
+- [x] "Save SMTP settings" button → `PUT /admin/smtp` — 2026-05-26
+- [x] "Send test email" button → `POST /admin/smtp/test`; transitions through Sending → Sent/Failed — 2026-05-26
+- [x] Info note: "When SMTP is not configured, password resets and email invitations are unavailable" — 2026-05-26
+
+**Web — Admin: Users (`/settings/admin`):**
+- [x] Orphaned alert banner (when count > 0): warning-colored, count + "View" button — 2026-05-26
+- [x] Tabs: "All (N)" / "Orphaned (N)" — segmented control — 2026-05-26
+- [x] Search input: filter by name or email — 2026-05-26
+- [x] User rows: avatar, name, email, team count, status badge — 2026-05-26
+- [ ] Click user row → opens existing `MemberModal` (deferred — requires passing modal state up)
+- [ ] Orphaned users: "Assign team" action (deferred)
+
+**Web — Forgot password flow:**
+- [x] `/forgot-password` public page: email input → shows "If an account exists, a reset link has been sent" — 2026-05-26
+- [x] `/reset-password?token=...` public page: new password + confirm → success redirects to `/login` — 2026-05-26
+- [x] Login page: "Forgot password?" link below the password field — 2026-05-26
+- [ ] When SMTP not configured: `/forgot-password` shows "contact admin" (deferred — requires public SMTP status endpoint)
+
+**Testing & verification:**
+- [x] `golangci-lint run` clean — 2026-05-26
+- [x] `go test ./...` passes — 2026-05-26
+- [x] `pnpm --filter web lint` clean — 2026-05-26
+- [ ] Manual: change display name → visible in sidebar and team member lists after refresh
+- [ ] Manual: change identity color/icon → propagated to team memberships; visible on Gantt bars
+- [ ] Manual: change password → old password rejected, new password works
+- [ ] Manual: forgot-password → email received → click link → set new password → login works
+- [ ] Manual: create API token → secret shown once → copy → use in curl → works; revoke → rejected
+- [ ] Manual: configure SMTP → test email arrives → save persists across restart
+- [ ] Manual: set instance defaults → values persist
+- [ ] Manual: view all users; filter orphaned
+- [ ] Manual: toggle registration policy → test with/without invite
+- [ ] Manual: non-superadmin does not see admin sections
+- [x] `docs/log.md` Phase 10.1.3 entry written — 2026-05-26
+
+---
+
+### Member Access & Data Lifecycle (Phase 10.1.4)
+Closes data-integrity and access-revocation gaps from 10.1.2. Protects historical activity data, defines the three membership lifecycle states, and gives superadmins a single "revoke all access" action.
+
+**Schema (migration 011):**
+- [x] Verify `activity_assignments.team_member_id` FK has `ON DELETE RESTRICT`; add explicit constraint in migration if missing — 2026-05-27
+- [x] Same check for `timeline_access.team_member_id` — 2026-05-27
+- [x] Enable `PRAGMA foreign_keys = ON` in DB initialization (`internal/db/`) — already set since early phases — 2026-05-27
+- [x] Update `migrations_test.go` to assert FK pragma is on and both FKs are RESTRICT — 2026-05-27
+
+**API — removal guard:**
+- [x] `DELETE /teams/:id/members/:memberId` — count `activity_assignments` before deleting; if count > 0, return 409 `MEMBER_HAS_ASSIGNMENTS` with `{ "assignmentCount": N }` — 2026-05-27
+- [x] Zero-assignment removal continues to hard-delete as before (deletes timeline_access first due to RESTRICT FK) — 2026-05-27
+- [x] Add `MemberHasAssignments` error handling to OpenAPI spec via `RevokeUserResult` and inline error response — 2026-05-27
+
+**API — full revoke (superadmin only):**
+- [x] `POST /users/:id/revoke` — new endpoint; superadmin only; atomically: set `users.archived_at`, set `archived_at` on all `team_members` for the user, hard-delete `team_members` rows where assignment count is 0; return `{ accountDeactivated: bool, membershipsInactivated: int, membershipsRemoved: int }` — 2026-05-27
+- [x] Add `RevokeUser` repo method: wraps the three steps in a transaction — 2026-05-27
+- [x] 403 if caller is not superadmin; 404 if user not found — 2026-05-27
+- [x] Add `POST /users/{id}/revoke` to OpenAPI spec; regenerate TypeScript types — 2026-05-27
+
+**Web — TeamModal Members tab:**
+- [x] On 409 `MEMBER_HAS_ASSIGNMENTS` from the remove (×) button, show inline error beneath the member row: "N assignment(s) — [Inactivate instead]" where the bracketed link calls `POST /teams/:id/members/:memberId/archive` — 2026-05-27
+- [x] On inactivate success from the inline error, dismiss the error and re-fetch the member list — 2026-05-27
+- [x] Clear the inline error before each new removal attempt for the same member — 2026-05-27
+
+**Web — MemberModal:**
+- [x] Add "Revoke all access" button to Super Admin Actions section (red, below Delete) — 2026-05-27
+- [x] Button hidden when user is already fully inactivated (`users.archived_at` set) — 2026-05-27
+- [x] Confirmation dialog: lists all three effects (account deactivated, memberships inactivated, zero-history memberships removed) — 2026-05-27
+- [x] On confirm: call `POST /users/:id/revoke`; on success show a summary chip for 2s, then close modal — 2026-05-27
+- [x] Invalidate `['teams']` query cache on success — 2026-05-27
+
+**Testing & verification:**
+- [ ] Manual: remove a member with assignments → 409; inline error appears; "Inactivate instead" button works
+- [ ] Manual: remove a member with zero assignments → success
+- [ ] Manual: superadmin uses "Revoke all access" → account deactivated; user can no longer log in; existing Gantt bars still show their avatar name
+- [ ] Manual: inactivated members' avatars still render on Gantt bars (data preserved)
+- [x] `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean — 2026-05-27
+- [x] `docs/log.md` Phase 10.1.4 entry written — 2026-05-27
+
+---
+
+### Status Templates & Timeline Statuses (Phase 10.2)
+API + UI bundled. Required before Phase 11.3 (Kanban). Depends on 10.1.2 (Members).
+
+**Schema (migration 012):**
+- [x] Create `status_templates` (team-level), `status_template_items`, `statuses` (timeline-level) tables — 2026-05-27
+- [x] Rebuild `activities` table so `status_id` references `statuses` instead of `team_statuses`; drop `team_statuses` — 2026-05-27
+- [x] Update `migrations_test.go` — 2026-05-27
+
+**Go API:**
+- [x] `StatusTemplate`, `StatusTemplateItem`, `Status` models — 2026-05-27
+- [x] `StatusRepo`: list/get/create/update/delete templates; list/get/create/update/delete items; `SeedDefaultTemplate`; `CopyTemplateToTimeline` — 2026-05-27
+- [x] `handleCreateTeam` — seeds "Simple" template (Planned / In Progress / Done) on team creation — 2026-05-27
+- [x] `handleCreateTimeline` — copies first template's items into live statuses on timeline creation — 2026-05-27
+- [x] `GET /teams/:id/status-templates` — list templates with items — 2026-05-27
+- [x] `POST /teams/:id/status-templates` — create template — 2026-05-27
+- [x] `PATCH /status-templates/:id` — rename, reorder — 2026-05-27
+- [x] `DELETE /status-templates/:id` — blocked if last template on team — 2026-05-27
+- [x] `POST /status-templates/:id/items` — add item — 2026-05-27
+- [x] `PATCH /status-template-items/:id` — rename, recolor, reicon, toggle is_closed, reorder — 2026-05-27
+- [x] `DELETE /status-template-items/:id` — blocked if last item in template — 2026-05-27
+- [x] `GET /teams/:id/timelines/:timelineId/statuses` — list statuses for a timeline — 2026-05-27
+
+**OpenAPI + types:**
+- [x] `StatusTemplate`, `StatusTemplateItem`, `Status` schemas + input types — 2026-05-27
+- [x] All new endpoint paths — 2026-05-27
+- [x] Regenerate TypeScript types — 2026-05-27
+
+**Web:**
+- [x] `useStatusTemplates.ts` — hooks for all status template and statuses endpoints — 2026-05-27
+- [x] `StatusTemplatesTab.tsx` — template list with expandable item rows, inline editing, color picker, is_closed toggle, add/delete guards — 2026-05-27
+- [x] `TeamModal.tsx` — "Status Templates" tab added (locked until team saved) — 2026-05-27
+
+**Testing & verification:**
+- [x] `status_handler_test.go` — default seeding, admin-only create, last-template guard, item add/delete, statuses copied to timeline — 2026-05-27
+- [x] `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean — 2026-05-27
+- [ ] Manual: new team gets "Simple" template; open TeamModal → Status Templates tab shows Planned / In Progress / Done
+- [ ] Manual: create second template, add items, rename/recolor items
+- [ ] Manual: delete non-last template → success; delete last template → blocked with 409
+- [ ] Manual: create timeline → GET statuses returns 3 rows matching Simple template
+- [x] `docs/log.md` Phase 10.2 entry written — 2026-05-27
+
+---
+
+### Timelines — Full CRUD (Phase 10.3)
+Closes the Timelines cornerstone. Today timelines can be created in the wizard and never managed afterward; access lists exist in schema but have no CRUD endpoints.
+
+**API — timeline-level:**
+- [x] `PATCH /timelines/:id` — rename, change start/end date, color, icon (team or timeline admin) — 2026-05-27
+- [x] `DELETE /timelines/:id` — hard delete; team admin only — 2026-05-27
+- [x] Archive endpoints already in Phase 9
+
+**API — timeline statuses (editing):**
+- [x] `POST /teams/:id/timelines/:timelineId/statuses` — add a status — 2026-05-27
+- [x] `PATCH /statuses/:id` — rename, recolor, reicon, toggle is_closed, reorder — 2026-05-27
+- [x] `DELETE /statuses/:id` — requires replacementStatusId if activities reference it; blocked if last status — 2026-05-27
+
+**API — access list:**
+- [x] `GET /teams/:id/timelines/:timelineId/access` — list current grants (team member + role) — 2026-05-27
+- [x] `PUT /teams/:id/timelines/:timelineId/access/:memberId` — grant or update role (admin / member) — 2026-05-27
+- [x] `DELETE /teams/:id/timelines/:timelineId/access/:memberId` — revoke grant — 2026-05-27
+
+**Web:**
+- [x] "New timeline" affordance in the sidebar timelines list → `TimelineModal` in create mode (name, date range, identity, template preview) — 2026-05-27
+- [x] Edit-timeline modal from the sidebar gear icon: rename, change date range, identity, archive, delete — 2026-05-27
+- [x] `TimelineModal` Statuses tab: add/edit/delete live statuses; delete-with-replacement dialog — 2026-05-27
+- [x] `TimelineModal` Access tab: search-pick team members, role toggle, remove — 2026-05-27
+- [x] Archived timelines under a collapsed "Archived" group in the sidebar; Restore button for unarchive — 2026-05-27
+- [x] Activity detail panel: status dropdown populated from live timeline statuses — 2026-05-27
+- [x] "Hide closed" toggle in GanttToolbar (shown when timeline has closed statuses) — 2026-05-27
+- [x] `TimelineAccessEntry` model + `TimelineStore` interface expanded; `canAdminTimeline` helper — 2026-05-27
+
+**Testing & verification:**
+- [x] `TestUpdateTimeline_AdminCanRename`, `TestUpdateTimeline_NonAdminForbidden` — 2026-05-27
+- [x] `TestDeleteTimeline_AdminCanDelete`, `TestDeleteTimeline_NonAdminForbidden` — 2026-05-27
+- [x] `TestTimelineAccessList_GrantAndRevoke` — 2026-05-27
+- [x] `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean — 2026-05-27
+- [ ] Manual: create second timeline from sidebar → modal opens → create → new timeline appears
+- [ ] Manual: edit timeline name, date range → save → sidebar reflects changes
+- [ ] Manual: add/edit/delete statuses via Statuses tab → activity detail panel shows updated list
+- [ ] Manual: grant/revoke member access via Access tab → member can/cannot access timeline
+- [ ] Manual: archive timeline → disappears from active list → appears in Archived → Restore restores it
+- [ ] Manual: delete timeline → confirm → gone from sidebar
+- [ ] Manual: hide-closed toggle hides activities with closed status; unchecking restores them
+- [x] `docs/log.md` Phase 10.3 entry written — 2026-05-27
+
+---
+
+### Preference Consumption & Session Handling (Phase 10.4.1)
+Wires user and instance preferences (stored in 10.1.3) into views. Fixes the broken session lifecycle (access tokens expire after 15 min with no refresh interceptor). Adds cosmetic branding for admins.
+
+**Session lifecycle:**
+- [x] Add 401 interceptor to `apiFetch` (`packages/web/src/lib/api.ts`): on 401, attempt silent refresh via stored refresh token, retry original request; if refresh also fails, clear tokens and redirect to `/login`
+- [x] Mutex/queue so concurrent 401s don't fire multiple refresh calls
+- [x] Invisible to user — no toast, no banner (standard SPA pattern)
+
+**Preference consumption:**
+- [x] Create `useFormatDate()` hook — reads user's `date_format` preference, returns a formatter
+- [x] Gantt `granularity.ts` `formatLabel()`: replace hardcoded `en-US` with user's date format preference
+- [x] Gantt `granularity.ts` `startOfWeek()`: replace hardcoded Monday with user's `week_start` preference; Gantt columns align to user's chosen start day
+- [ ] `ActivityDetailPanel` and other date displays: consume date format preference (date inputs are native browser — no explicit text formatting needed until a read-only date display surface is added)
+- [ ] Public/shared timeline views: fall back to instance-level defaults when no user is logged in (deferred — shared views ship in Phase 13)
+- [x] Theme: sync server-side preference on login (`useDarkMode.ts` — added `applyTheme`; `ThemeSync` component applies server value on auth init)
+
+**Admin — branding (`/settings/admin`):**
+- [x] Instance name field (stored in `instance_settings`); shown in browser tab title and login page
+- [x] Accent color override (stored in `instance_settings`); applies globally via CSS custom property
+- [ ] Optional logo upload (stretch — deferred)
+
+---
+
+### Activity Schema Normalization — Drop team_id (Phase 10.4.2)
+Removes `activities.team_id` (redundant now that `timeline_id` is stored). Hardens `timeline_id` to NOT NULL. Moves activity routes to `/teams/{id}/timelines/{timelineId}/activities` (team-scoped prefix avoids Go 1.22 mux conflict with `GET /timelines/share/{token}`).
+
+**Schema (migration 015):**
+- [x] Backfill NULL `timeline_id` rows (assign to team's oldest timeline) — 2026-05-28
+- [x] Rebuild `activities` table without `team_id`, with `timeline_id TEXT NOT NULL REFERENCES timelines(id) ON DELETE CASCADE` — 2026-05-28
+- [x] Recreate `idx_activities_timeline_id` on the new table — 2026-05-28
+
+**API — Go:**
+- [x] `models.Activity`: remove `TeamID` field; change `TimelineID` from `*string` to `string` — 2026-05-28
+- [x] `ActivityRepo.Create`: remove `team_id` from INSERT — 2026-05-28
+- [x] `ActivityRepo.ListByTeam` → `ListByTimeline(timelineID string, ...)`: query becomes `WHERE timeline_id = ?` — 2026-05-28
+- [x] `handleCreateActivity`, `handleListActivities`: path params are `teamId` + `timelineId`; look up timeline to verify ownership — 2026-05-28
+- [x] `handleUpdateActivity`, `handleDeleteActivity`, `handleArchive/Unarchive`: replace `activity.TeamID` with timeline lookup — 2026-05-28
+- [x] WebSocket broadcasts: derive `TeamID` from timeline lookup — 2026-05-28
+- [x] Move activity routes: `POST /teams/{id}/timelines/{timelineId}/activities`, `GET /teams/{id}/timelines/{timelineId}/activities` — 2026-05-28
+
+**OpenAPI + types:**
+- [x] Update `Activity` schema: replace `teamId` with `timelineId` (required, non-nullable) — 2026-05-28
+- [x] Update activity endpoints to new team-scoped path — 2026-05-28
+- [x] Regenerate TypeScript types — 2026-05-28
+
+**Frontend:**
+- [x] Rename `useTeamActivities` → `useTimelineActivities(teamId, timelineId, from, to)` — cache key `['timelines', timelineId, 'activities']` — 2026-05-28
+- [x] `useCreateActivity(teamId, timelineId)`: URL becomes `/teams/${teamId}/timelines/${timelineId}/activities`; no `timelineId` in request body — 2026-05-28
+- [x] `useUpdateActivity(timelineId)`, `useDeleteActivity(timelineId)`: cache key updated — 2026-05-28
+- [x] `useTeamActivitySync`: update cache key lookups to `['timelines', timelineId, 'activities']` — 2026-05-28
+- [x] `GanttView`: use `useTimelineActivities`; `timelineId` prop is now required (not optional) — 2026-05-28
+- [x] `ActivityCreatePanel`: `teamId` + `timelineId` passed to `useCreateActivity`; no `timelineId` in body — 2026-05-28
+- [x] `ActivityDetailPanel`: `timelineId` required; passed to `useUpdateActivity`/`useDeleteActivity` — 2026-05-28
+- [x] `DashboardPage`: updated GanttView/ActivityCreatePanel/ActivityDetailPanel prop signatures — 2026-05-28
+
+**Tests:**
+- [x] `activity_repo_test.go`: `makeActivity` uses `timelineID`; all `ListByTeam` calls → `ListByTimeline` — 2026-05-28
+- [x] Added `TestActivityRepo_ListByTimeline_Filter` — 2026-05-28
+- [x] `activity_handler_test.go`: `activityTestSetup` creates a timeline; all routes updated — 2026-05-28
+- [x] `archive_test.go`, `revoke_user_test.go`, `team_handler_test.go`: create timeline before activity; use new routes — 2026-05-28
+- [x] `user_repo_test.go`, `migrations_test.go`: activity INSERTs use `timeline_id` instead of `team_id` — 2026-05-28
+
+**Testing & verification:**
+- [x] `golangci-lint run` clean — 2026-05-28
+- [x] `go test ./...` passes — 2026-05-28
+- [x] `pnpm --filter web lint` clean — 2026-05-28
+- [ ] Manual: Gantt view loads activities for the active timeline
+- [ ] Manual: Creating an activity from the panel associates it with the correct timeline
+- [ ] Manual: `PRAGMA foreign_key_check` returns no rows after migration on Docker DB
+
+---
+
+### UI Consistency — Modals, Sidebar & Toolbar (Phase 10.4.3) [was mislabeled 10.4.2]
+Standardizes visual patterns across TeamModal, MemberModal, TimelineModal, sidebar, and Gantt toolbar. Eliminates three different inline-editing patterns, three different archive button styles, three different confirmation dialog implementations, and mixed hardcoded hex colors vs CSS variables.
+
+**Inline name editing (3 → 1):**
+- [x] Extract shared `InlineEditableTitle` component: always-input with subtle bottom border on hover/focus — 2026-05-28
+- [x] Replace `MemberModal.tsx` name editing (focus underline pattern) with `InlineEditableTitle` — 2026-05-28
+- [x] Replace `TeamModal.tsx` name editing (toggle div/input state machine) with `InlineEditableTitle` — 2026-05-28
+- [x] Replace `TimelineModal.tsx` name editing (no visual cue) with `InlineEditableTitle` — 2026-05-28
+
+**Archive/restore buttons (3 → 1):**
+- [x] Standardize archive button: amber bg+border+icon (aligned with MemberModal prominence) — 2026-05-28
+- [x] Standardize restore button: teal bg+border+RotateCcw icon — 2026-05-28
+- [x] Fix `TeamModal.tsx` archive button (was neutral gray) — 2026-05-28
+- [x] Fix `TimelineModal.tsx` archive button (was border-only, no icon) — 2026-05-28
+
+**Confirmation dialogs (3 → 1):**
+- [x] Consolidate into shared `ConfirmDialog` component with color variants (red, amber, indigo, teal) — 2026-05-28
+- [x] Replace `MemberModal.tsx` custom ConfirmDialog — 2026-05-28
+- [x] Replace `TeamModal.tsx` ArchiveDialog — 2026-05-28
+- [x] Replace `TimelineModal.tsx` inline confirmation panels — 2026-05-28
+
+**Color system (mixed → CSS variables):**
+- [x] Migrate `TeamModal.tsx` hardcoded hex colors to CSS variables — 2026-05-28
+- [x] Migrate `MemberModal.tsx` hardcoded hex colors to CSS variables — 2026-05-28
+- [x] Verified `TimelineModal.tsx` CSS variable usage is consistent — 2026-05-28
+
+**Sidebar & toolbar audit:**
+- [x] Sidebar member/timeline rows: Badge usage, hover states, gear icon consistency verified — 2026-05-28
+- [x] Gantt toolbar controls: Tailwind + CSS vars, consistent with modal footer patterns — 2026-05-28
+- [x] No inconsistencies requiring fixes found — 2026-05-28
+
+---
+
+### Gantt Interaction & Activity Edit Polish (Phase 10.4.4)
+
+**Schema (migration 016):**
+- [x] Add `notes TEXT` column to `activities` (nullable) — 2026-05-29
+
+**Go API:**
+- [x] `Activity` model: add `Notes *string` field — 2026-05-29
+- [x] `ActivityRepo.Update`: include `notes` in UPDATE SET — 2026-05-29
+- [x] `handleUpdateActivity`: parse `notes` from PATCH body — 2026-05-29
+
+**OpenAPI + types:**
+- [x] Add `notes` to `Activity` schema and PATCH body — 2026-05-29
+- [x] Regenerate TypeScript types — 2026-05-29
+- [x] Add `notes` to `UpdateActivityInput` patch type in `useTeamActivities.ts` — 2026-05-29
+
+**Gantt — resizable activity column:**
+- [x] Label column drag handle on right edge; min 140px, max 400px; live resize — 2026-05-29
+
+**Gantt — click-to-activate before drag:**
+- [x] Unselected bars show `cursor: pointer`; drag/resize only starts when bar is selected — 2026-05-29
+- [x] Resize handles (left/right edge) visible only on selected bars — 2026-05-29
+
+**Gantt — bar drag updates sidebar dates live:**
+- [x] `onBarDragProgress` callback fires during mousemove with current snapped dates — 2026-05-29
+- [x] `DashboardPage` stores `liveDragDates` and passes to `ActivityDetailPanel` — 2026-05-29
+- [x] `ActivityDetailPanel` shows live dates in date inputs without triggering saves — 2026-05-29
+- [x] `onBarDragEnd` callback clears live dates when drag completes — 2026-05-29
+
+**Gantt — finer-grained snap during drag:**
+- [x] `snapDivisorFor(granularity)`: day→1, week→7, month→4, quarter→3, year→4 — 2026-05-29
+- [x] `colFracToDate` interpolates fractional column positions for accurate date mapping — 2026-05-29
+- [x] Drag mousemove uses `Math.round(x / step) * step` with finer step — 2026-05-29
+- [x] `resolvedGranularity` prop passed from GanttView → GanttGrid — 2026-05-29
+
+**Gantt — "Hide closed" moves to filter preset:**
+- [x] Remove `hideClosed` checkbox and props from `GanttToolbar` — 2026-05-29
+- [x] Add `'open'` preset to `FilterDropdown` ("Open only — Hide activities with a closed status") — 2026-05-29
+- [x] Add `'open'` to `ActiveFilter` preset type in `FilterContext` — 2026-05-29
+- [x] `GanttView` reads `activeFilter.id === 'open'` to activate closed-status filtering — 2026-05-29
+- [x] Remove `hideClosed` state from `DashboardPage` — 2026-05-29
+
+**Activity Edit Sidebar — layout and field changes:**
+- [x] Remove "All day" checkbox — 2026-05-29
+- [x] Remove human-readable date summary line — 2026-05-29
+- [x] Move Description field directly below date pickers — 2026-05-29
+- [x] Restyle Assigned To with bordered card style matching create panel — 2026-05-29
+- [x] Status dropdown: replaced plain `<select>` with rich dropdown (color dot + name + CLOSED badge) — 2026-05-29
+- [x] Remove "Identity" line from Classify section — 2026-05-29
+- [x] Rename "Details" → "Advanced" — 2026-05-29
+- [x] Add Notes textarea (multi-line, resizable) backed by new `notes` column — 2026-05-29
+
+**Testing & verification:**
+- [x] `golangci-lint run` clean — 2026-05-29
+- [x] `go test ./...` passes — 2026-05-29
+- [x] `pnpm --filter web lint` clean — 2026-05-29
+- [ ] Manual: drag label column edge → width changes and persists during session
+- [ ] Manual: click bar (unselected) → selects it; second drag moves/resizes it
+- [ ] Manual: drag bar at week zoom → date tooltip shows day-level changes, not week-level
+- [ ] Manual: drag bar at month zoom → snaps to week boundaries
+- [ ] Manual: select "Open only" filter → closed-status activities hidden; clearing restores them
+- [ ] Manual: edit panel shows only date pickers (no allDay, no date summary)
+- [ ] Manual: description moves below dates; matches create panel layout
+- [ ] Manual: assignees use bordered card style (colored border + tint when selected)
+- [ ] Manual: status dropdown shows color dot + name; selection persists
+- [ ] Manual: notes textarea saves and loads correctly
+- [ ] Manual: bar drag → sidebar date inputs update live; stop drag → dates reset to server value
+
+---
+
+### Activity Tags, Parent & Progress Fields (Phase 10.4.5)
+Replaces the three "coming soon" stubs in the activity edit panel with functional fields. Tags are normalized (team-scoped `tags` table). Parent and progress already had backend support; this phase adds the UI.
+
+**Schema (migration 017):**
+- [x] Create `tags` table: `id, team_id, name, color, created_by, created_at`; UNIQUE(team_id, name) — 2026-05-30
+- [x] Rebuild `activity_tags`: drop old text-junction table, create normalized FK junction — 2026-05-30
+
+**Go API:**
+- [x] `Tag` model added to `models.go` — 2026-05-30
+- [x] `Activity.TagIDs []string` field added (same `db:"-"` pattern as `AssignedMemberIDs`) — 2026-05-30
+- [x] `TagRepo`: `Create`, `GetByID`, `ListByTeam`, `Update`, `Delete` — 2026-05-30
+- [x] `ActivityRepo.SetTags` / `GetTags` — transaction pattern matching `SetAssignments` — 2026-05-30
+- [x] `ActivityRepo.ListByTimeline`: batch-populates `TagIDs` via `sqlx.In` (same as `AssignedMemberIDs`) — 2026-05-30
+- [x] `tag_handler.go`: `GET /teams/{id}/tags`, `POST /teams/{id}/tags`, `PATCH /tags/{id}`, `DELETE /tags/{id}` — 2026-05-30
+- [x] `activity_handler.go`: `handleCreateActivity` and `handleUpdateActivity` accept `tagIds`; `setActivityArchive` populates `TagIDs` on response — 2026-05-30
+- [x] `isUniqueConstraintError` helper added to `helpers.go` — 2026-05-30
+- [x] `server.go`: `tags *db.TagRepo` field; tag routes registered — 2026-05-30
+- [x] `main.go`: `db.NewTagRepo(database)` instantiated and passed to `NewServer` — 2026-05-30
+
+**OpenAPI + types:**
+- [x] `Tag` schema added to `openapi.yaml` — 2026-05-30
+- [x] `tagIds` added to `Activity` schema and create/update request bodies — 2026-05-30
+- [x] Regenerated TypeScript types — 2026-05-30
+
+**Frontend:**
+- [x] `useTags.ts`: `useTags`, `useCreateTag`, `useUpdateTag`, `useDeleteTag` hooks — 2026-05-30
+- [x] `TagInput.tsx`: combobox with colored pills, autocomplete, create-on-the-fly — 2026-05-30
+- [x] `ActivityDetailPanel`: Tags stub → `TagInput`; Parent stub → `<select>` from same-timeline activities; Progress stub → `<input type="range">`; tagIds/parentActivityId/percentComplete in state and save calls — 2026-05-30
+- [x] `ActivityCreatePanel`: `TagInput` added (below Assignees); `tagIds` in create mutation — 2026-05-30
+- [x] `GanttGrid`: progress fill overlay on bars (darker shade at `percentComplete%` width) — 2026-05-30
+- [x] `vite.config.ts`: `/tags` proxy added — 2026-05-30
+
+**Sample data:**
+- [x] `sample_data/10_tags.sql`: 8 tags for Product Marketing team + activity_tag associations — 2026-05-30
+
+**Tests:**
+- [x] `tag_repo_test.go`: CRUD, unique constraint, SetTags/GetTags, ListByTimeline TagIDs population — 2026-05-30
+- [x] `tag_handler_test.go`: create/list/update/delete happy paths, 409 duplicate, 404 not found, 403 non-member — 2026-05-30
+- [x] All existing test files updated to pass `db.NewTagRepo(database)` to `NewServer` — 2026-05-30
+
+**Testing & verification:**
+- [x] `golangci-lint run` clean — 2026-05-30
+- [x] `go test ./...` passes — 2026-05-30
+- [x] `pnpm --filter web lint` clean — 2026-05-30
+- [ ] Manual: create a tag in the activity detail panel; it appears in team tag list for future activities
+- [ ] Manual: tag autocomplete shows existing team tags; typing a new name offers "Create" option
+- [ ] Manual: tagged activity shows tag pills in the detail panel; pills persist across panel close/reopen
+- [ ] Manual: set parent activity; verify it persists across reload
+- [ ] Manual: drag the progress slider; Gantt bar shows progress fill; value persists
+- [ ] Manual: create activity with tags from the create panel; tags appear in detail panel
+
+---
+
+### Filter Implementation (Phase 10.4.6)
+Full filter system: filter definition language, client-side engine, all 6 presets wired, filter builder UI, team filter promotion, and management panel.
+
+**Schema (migration 018):**
+- [x] `ALTER TABLE saved_filters ADD COLUMN is_team_filter BOOLEAN NOT NULL DEFAULT 0` — 2026-05-30
+
+**Backend:**
+- [x] `SavedFilter` model: add `IsTeamFilter bool` — 2026-05-30
+- [x] `SavedFilterRepo.Create`: include `is_team_filter` in INSERT — 2026-05-30
+- [x] `SavedFilterRepo.Update`: include `is_team_filter` in UPDATE — 2026-05-30
+- [x] `SavedFilterRepo.ListByTeamUser`: return user's own filters + all team filters (`is_team_filter = 1`) — 2026-05-30
+- [x] `handleCreateSavedFilter`: accept `isTeamFilter` (admin-only to set true) — 2026-05-30
+- [x] `handleUpdateSavedFilter`: admin can promote/demote; admin can edit name/def of existing team filters — 2026-05-30
+- [x] `handleDeleteSavedFilter`: admin can delete team filters they don't own — 2026-05-30
+
+**OpenAPI + types:**
+- [x] Add `isTeamFilter` boolean to `SavedFilter` schema — 2026-05-30
+- [x] Add `isTeamFilter` to `CreateSavedFilterJSONBody` and `PatchSavedFilterJSONBody` — 2026-05-30
+- [x] Update `api_types.gen.go` manually with new fields — 2026-05-30
+- [x] Regenerate TypeScript types (`pnpm --filter shared generate`) — 2026-05-30
+
+**Frontend — filter engine:**
+- [x] `lib/filterTypes.ts` — FilterDefinition type system (logic, conditions, operators per field type) — 2026-05-30
+- [x] `lib/filterEngine.ts` — `matchesFilter(activity, filter, ctx)` pure function — 2026-05-30
+- [x] `lib/presetFilters.ts` — `applyActiveFilter(activities, activeFilter, memberIdsByUserId, ctx)` — all 6 presets + member + saved filter kinds — 2026-05-30
+
+**Frontend — GanttView wiring:**
+- [x] Replace `closedStatusIds` prop with `timelineStatuses`, `savedFilters`, `tags` props — 2026-05-30
+- [x] Derive `closedStatusIds`, `statusesByTimeline`, `memberIdsByUserId`, `currentUserMemberIds` inside GanttView — 2026-05-30
+- [x] Replace old open-only filter with `applyActiveFilter` — makes all 6 presets + member + saved filters work — 2026-05-30
+
+**Frontend — filter builder UI:**
+- [x] `components/filters/FilterConditionRow.tsx` — field/op/value row with multi-select, text, number, date inputs — 2026-05-30
+- [x] `components/filters/FilterEditor.tsx` — name input, AND/OR toggle, condition rows, Save/Delete/Cancel footer — 2026-05-30
+- [x] `components/filters/FilterManagePanel.tsx` — My Filters + Team Filters sections with edit/delete/promote/demote — 2026-05-30
+
+**Frontend — FilterDropdown updates:**
+- [x] Partition saved filters into `teamFilters` and `myFilters` — 2026-05-30
+- [x] Render "Team filters" section with real data (replacing stub) — 2026-05-30
+- [x] Add "Manage filters" link at bottom of dropdown — 2026-05-30
+- [x] Add `onOpenManager` prop — 2026-05-30
+
+**Frontend — DashboardPage wiring:**
+- [x] Add `useSavedFilters` and `useTags` hooks — 2026-05-30
+- [x] Add `filterManageOpen` and `editingFilter` state — 2026-05-30
+- [x] Wire `FilterEditor` and `FilterManagePanel` into `RightSidebar` — 2026-05-30
+- [x] Pass `timelineStatuses`, `savedFilters`, `tags` to GanttView — 2026-05-30
+- [x] Add `onOpenFilterManager` to `TopBar` — 2026-05-30
+- [x] Update `useSavedFilters.ts`: add `isTeamFilter` to `UpdateSavedFilterInput` — 2026-05-30
+
+**Tests:**
+- [x] `lib/filterEngine.test.ts` — 20+ unit tests: each field type, each operator, AND/OR, edge cases, case-insensitive — 2026-05-30
+- [x] `lib/presetFilters.test.ts` — 11 unit tests: each preset, member filter, saved filter delegation — 2026-05-30
+- [x] `saved_filter_handler_test.go`: 5 new tests — team filter list includes team filters, admin can promote, non-admin cannot promote, admin can delete team filter, non-admin cannot — 2026-05-30
+- [x] `migrations_test.go`: assert `is_team_filter` column exists after migration 018 — 2026-05-30
+- [x] `golangci-lint run` clean; `go test ./...` all pass; `pnpm --filter web lint` clean; `pnpm --filter web build` clean — 2026-05-30
+
+**Manual verification (Docker):**
+- [ ] All 6 preset filters actually filter activities (open, upcoming, my, overdue, noassign, all)
+- [ ] Member filter kind filters by assignee
+- [ ] Filter builder: add/remove conditions, pick field/op/value for all supported fields, AND/OR toggle
+- [ ] Save/load/edit/delete custom filters end-to-end
+- [ ] Status conditions match by name across timelines
+- [ ] Tag conditions match by tag name
+- [ ] Team filter flag: admin promotes user filter → visible to all team members
+- [ ] "Manage filters" panel accessible from dropdown
+- [ ] `docs/log.md` Phase 10.4.6 entry written — 2026-05-30
+
+---
+
+### Timeline Views — List / Spreadsheet (Web — Phase 11.1)
+Ships the view-switcher infrastructure plus the dense, sortable, inline-editable List view.
+
+**Infrastructure:**
+- [x] `ViewMode` already defined as `'gantt' | 'list' | 'calendar' | 'kanban'` in TopBar.tsx — 2026-05-31
+- [x] View switcher control in TopBar; per-timeline view mode persisted via preferences (key: `view_mode`) — 2026-05-31
+- [x] View-specific toolbar slots — GanttToolbar shown for gantt, ListToolbar shown for list — 2026-05-31
+
+**Dependencies installed:**
+- [x] `@tanstack/react-table@^8.21.3` — headless table (column visibility/order/sizing/pinning/sorting) — 2026-05-31
+- [x] `@dnd-kit/core`, `@dnd-kit/sortable`, `@dnd-kit/utilities` — column drag-reorder — 2026-05-31
+
+**ListToolbar (`components/list/ListToolbar.tsx`):**
+- [x] Columns menu (hide/show all columns via checkbox list) — 2026-05-31
+- [x] Density toggle (Comfortable / Compact) — 2026-05-31
+- [x] Group by (None / Member / Parent activity / Status) — 2026-05-31
+- [x] Sort by (Start date / End date / Title / Status / Progress) — 2026-05-31
+- [x] Color by (Activity / Member / Status) — 2026-05-31
+- [x] Export + Share stubs — 2026-05-31
+
+**ListView (`components/list/ListView.tsx`):**
+- [x] TanStack Table v8 with column visibility, order, sizing, pinning (Title always pinned left) — 2026-05-31
+- [x] Default columns: Title, Start, End, Duration, Status, Assignees, Tags (hidden: Progress, Parent, Description, Location, URL, Created, Updated) — 2026-05-31
+- [x] Column hide/show via toolbar Columns menu (pendingColumnToggle prop) — 2026-05-31
+- [x] Column drag-reorder via @dnd-kit (drag handles on column headers) — 2026-05-31
+- [x] Column resizing via TanStack's `columnResizeMode: 'onChange'` — 2026-05-31
+- [x] Column config (order/hidden/widths) persisted per-timeline via `list_columns` preference key — 2026-05-31
+- [x] Single-column sort by clicking column header (sort indicator arrow) — 2026-05-31
+- [x] Density toggle changes row height (comfortable: 40px, compact: 32px) and persists — 2026-05-31
+- [x] Keyboard navigation: Arrow keys move selection, Enter/F2 enters edit mode, Esc cancels, Tab/Shift+Tab commit+move horizontal, Enter in edit commits+moves down — 2026-05-31
+- [x] Inline editing: Title (text), Start (date), End (date), Description/Location/URL (text), Progress (number) — 2026-05-31
+- [x] Status cell: click to open StatusPicker popover with color pills — 2026-05-31
+- [x] Assignees cell: read-only display with member Badges (up to 4 + overflow count) — 2026-05-31
+- [x] Tags cell: read-only display with colored tag pills (up to 3 + overflow count) — 2026-05-31
+- [x] Progress cell: read-only mini progress bar + percentage — 2026-05-31
+- [x] Duration cell: computed from start/end dates (read-only) — 2026-05-31
+- [x] PATCH mutations via useUpdateActivity with optimistic updates — 2026-05-31
+- [x] Group-by: None / Member / Parent / Status with collapsible group header rows — 2026-05-31
+- [x] Color-by: left border stripe per row (activity color / primary member color / status color) — 2026-05-31
+- [x] Group-by/Color-by/Sort-by/Density persisted per-timeline in DashboardPage (keys: `list_group_by`, `list_color_by`, `list_sort_by`, `list_density`) — 2026-05-31
+- [x] Find bar highlights: matching rows amber outline, non-matching rows dimmed 30%, active match stronger outline — 2026-05-31
+- [x] Active filter applied (applyActiveFilter) — all 6 presets + member + saved filter kinds — 2026-05-31
+- [x] Row click opens ActivityDetailPanel; Space in selection mode opens detail panel — 2026-05-31
+- [x] Title column sticky left with box-shadow separator — 2026-05-31
+
+**DashboardPage wiring:**
+- [x] List toolbar state (listGroupBy, listSortBy, listColorBy, listDensity) in DashboardPage — 2026-05-31
+- [x] List toolbar state restored from per-timeline preferences on timeline switch — 2026-05-31
+- [x] List toolbar state saved to per-timeline preferences on change — 2026-05-31
+- [x] ListView rendered when view === 'list' with correct props — 2026-05-31
+
+**Testing & verification:**
+- [x] `golangci-lint run` clean — 2026-05-31
+- [x] `go test ./...` passes (135 tests) — 2026-05-31
+- [x] `pnpm --filter web lint` clean — 2026-05-31
+- [x] `pnpm --filter web build` clean — 2026-05-31
+- [ ] Manual: view switcher toggles Gantt ↔ List; choice persists per timeline
+- [ ] Manual: List shows activities with default columns, respects active filter
+- [ ] Manual: hide/show columns from Columns menu; persists across reload
+- [ ] Manual: drag column headers to reorder; persists across reload
+- [ ] Manual: resize column by dragging header right edge; persists
+- [ ] Manual: density toggle changes row height; persists
+- [ ] Manual: keyboard navigation (arrows, Enter/F2, Esc, Tab)
+- [ ] Manual: inline edit Title, Start, End → switches to Gantt → change reflected
+- [ ] Manual: click Status cell → picker opens → select → pill updates
+- [ ] Manual: Title column stays visible when scrolled horizontally
+- [ ] Manual: sort by column header (click once asc, twice desc, three times off)
+- [ ] Manual: group-by and color-by controls work
+- [ ] Manual: Find bar highlights matching rows in List view
+
+---
+
+### Timezone-Safe Activity Dates (Phase 11.1.1)
+Fixes midnight-UTC activity dates displaying one calendar day early in negative-UTC-offset timezones.
+
+- [x] `granularity.ts`: switch all internal date helpers to UTC (startOfDay/Week/Month/Quarter/Year, addDays/addMonths, isoWeekNumber, formatLabel, todayColumnPosition) — 2026-06-01
+- [x] `GanttView.tsx`: `todayMidnight()` → `setUTCHours(0,0,0,0)`; fallback viewStart/viewEnd use `setUTCDate`/`getUTCDate` — 2026-06-01
+- [x] `GanttGrid.tsx`: `formatDragDate` → adds `timeZone: 'UTC'` to `toLocaleDateString` — 2026-06-01
+- [x] `ListView.tsx`: add `formatActivityDate` (UTC, for Start/End cells); keep `formatDate` (local, for Created/Updated) — 2026-06-01
+- [x] `granularity.test.ts`: update existing tests to use `getUTCDay`/`getUTCDate` assertions; add timezone-safety suite with midnight-UTC positioning and label checks — 2026-06-01
+- [x] `golangci-lint run` clean — 2026-06-01
+- [x] `go test ./...` passes — 2026-06-01
+- [x] `pnpm --filter web lint` clean — 2026-06-01
+- [x] `pnpm --filter web build` clean — 2026-06-01
+- [x] `pnpm --filter web test` — 149 tests pass including new timezone-safety suite — 2026-06-01
+- [ ] Manual: List Start/End cells show correct calendar day in a negative-offset timezone
+- [ ] Manual: Gantt bars land on the correct day column in a negative-offset timezone
+- [ ] Manual: Gantt day/week/month labels match List dates for same activity
+- [ ] Manual: round-trip — open date picker, save unchanged, displayed date does not shift
+
+---
+
+### Group by Assignee Combination (Phase 11.1.2)
+Multi-assignee activities now appear under their exact assignee-set group in both Gantt and List.
+
+- [x] `lib/memberGroups.ts`: `memberComboKey`, `orderedComboIds`, `memberComboLabel`, `comboSortComparator`, `UNASSIGNED_KEY` — 2026-06-02
+- [x] `GanttGrid.tsx`: extend `GanttRow` group type with `memberColors?: string[]`; render stacked color dots in group headers — 2026-06-02
+- [x] `GanttView.tsx` `buildRows`: bucket by `memberComboKey(assignedMemberIds)`; sort groups via `comboSortComparator`; pass `memberColors` to group rows — 2026-06-02
+- [x] `ListView.tsx` `buildListRows`: same combo-key bucketing and sorting; `memberColors` on group rows; stacked dots in group header renderer — 2026-06-02
+- [x] `lib/memberGroups.test.ts`: full suite for key, label, ordering, comparator — 2026-06-02
+- [x] `GanttView.tree.test.ts`: updated member-grouping suite for combo-key behavior — 2026-06-02
+- [x] `ListView.tree.test.ts`: updated member-grouping suite for combo-key behavior — 2026-06-02
+- [x] `pnpm --filter web lint` clean — 2026-06-02
+- [x] `pnpm --filter web build` clean — 2026-06-02
+- [x] `pnpm --filter web test` — 187 tests pass — 2026-06-02
+- [ ] Manual: multi-assignee activity renders under its own combination group in both Gantt and List
+- [ ] Manual: combination group labels are in team order with Oxford/truncation formatting
+- [ ] Manual: group headers show stacked color dots
+- [ ] Manual: group ordering identical between Gantt and List; Unassigned last
+- [ ] Manual: collapse/expand works on combination groups; counts correct with no double-counting
+
+---
+
+### Timeline Views — Calendar (Web — Phase 11.2)
+**Month / Week** all-day-bar layouts sharing one skeleton. No Day view, no time grid (every activity is all-day). Detailed plan: `docs/plans/phase-11.2-calendar-view.md`.
+
+**Shared:**
+- [x] Layout switcher (Month / Week) in the view's toolbar slot — 2026-06-02
+- [x] Today / prev / next navigation — 2026-06-02
+- [x] Color-by (activity / member / status) carried over via shared `lib/activityColor.ts` — 2026-06-02
+- [x] Click empty cell → `ActivityCreatePanel` prefilled with that date — 2026-06-02
+- [x] Click bar → existing `ActivityDetailPanel` — 2026-06-02
+- [x] Drag bar body → move (duration-preserving, whole-day snap, week-wrap aware) → PATCH; drag edge → resize; live sidebar preview — 2026-06-02
+- [x] Respects active filter, Find highlight, `week_start` pref — 2026-06-02
+
+**Lane packing (`lib/calendarLanes.ts`, pure + unit-tested):**
+- [x] Per-week-row greedy lane assignment for concurrent multi-day bars — 2026-06-02
+- [x] Cross-week activities split into one segment per week row with "continues" edges — 2026-06-02
+
+**Month layout:**
+- [x] 6-week grid; multi-day activities render as continuous bars across cells — 2026-06-02
+
+**Week layout:**
+- [x] 7 day columns, taller cells (higher default visible-lane cap = 6) — 2026-06-02
+
+**Density / overflow:**
+- [x] Per-day "+N more" chip → day popover listing every activity that day → row click opens sidebar — 2026-06-02
+- [x] Manual per-week row-height drag handle raises/lowers visible-lane cap; persists per-timeline-per-user — 2026-06-02
+
+**Testing & verification:**
+- [x] `pnpm --filter web lint` clean — 2026-06-02
+- [x] `pnpm --filter web test` — 208 tests pass including new `calendarLanes.test.ts` (21 tests) — 2026-06-02
+- [x] `pnpm --filter web build` clean — 2026-06-02
+- [x] `golangci-lint run` clean; `go test ./...` passes — 2026-06-02
+- [ ] Manual: view switcher toggles Gantt ↔ List ↔ Calendar, persisting per timeline
+- [ ] Manual: Month and Week layouts render with correct day cells and today highlight
+- [ ] Manual: multi-day activity renders as a continuous bar with "continues" arrow on clipped edges
+- [ ] Manual: color-by recolors bars (activity / member / status)
+- [ ] Manual: "+N more" chip shows count; popover lists all activities for that day; row click opens sidebar
+- [ ] Manual: row-height resize handle raises/lowers visible lanes; persists after reload
+- [ ] Manual: bar click opens ActivityDetailPanel; empty-cell click opens ActivityCreatePanel prefilled
+- [ ] Manual: drag bar body moves it (duration preserved); drag edge resizes; sidebar shows live dates
+- [ ] Manual: Find highlights matching bars in both layouts
+- [ ] Manual: active filter applied (all 6 presets, saved filters)
+
+---
+
+### Timeline Views — Kanban (Web — Phase 11.3)
+Fully interactive board. Re-scoped 2026-06-03 from read-only to interactive (drag-to-recolumn, group-by-driven columns, card fields). Depends on Phase 10.2 (statuses API + UI).
+
+- [x] View switcher shows Kanban tab; switching persists per timeline — 2026-06-03
+- [x] `kanbanColumns.ts`: `buildColumns()` for Status/Member/Combination/Parent/None; sort comparators; sentinels — 2026-06-03
+- [x] `KanbanToolbar.tsx`: Group by / Sort by / Color by / Card fields multi-select — 2026-06-03
+- [x] `KanbanCard.tsx`: draggable card with accent border (colorBy), title, date range, status, tags, members, % complete, parent, description — 2026-06-03
+- [x] `KanbanColumn.tsx`: droppable column with header (accent dot + count + collapse), card list, empty state, "+ Add" — 2026-06-03
+- [x] `KanbanBoard.tsx`: DndContext host with drag overlay, drop semantics per groupBy, no-op drop guard — 2026-06-03
+- [x] `KanbanView.tsx`: data container (fetch, filter, Find, colorMap, buildColumns, drag commit, preference persistence) — 2026-06-03
+- [x] `KanbanView.test.ts`: 32 unit tests for `buildColumns` and `sortActivities` — 2026-06-03
+- [x] Columns collapse/expand; state persisted per timeline — 2026-06-03
+- [x] Card fields configurable; Group by axis field auto-suppressed from cards — 2026-06-03
+- [x] Filter parity: `applyActiveFilter` applied; column counts reflect filtered set — 2026-06-03
+- [x] Find parity: matching cards highlighted, non-matches dimmed; active match auto-expands collapsed columns — 2026-06-03
+- [x] Drag-to-recolumn commits status/reassign/reparent via `useUpdateActivity` (optimistic update) — 2026-06-03
+- [x] Combination/None columns non-droppable — 2026-06-03
+- [x] "+ Add" opens create panel pre-filled with column member (for member columns) — 2026-06-03
+- [x] All automated checks pass (`golangci-lint`, `go test ./...`, `pnpm lint`, `pnpm build`) — 2026-06-03
+- [ ] Manual: Drag card between status columns — status changes and card moves
+- [ ] Manual: Drag card between member columns — primary assignee changes
+- [ ] Manual: Drag card to parent column — parent changes
+- [ ] Manual: Card fields toggle shows/hides fields; Group by axis field auto-hides
+- [ ] Manual: Collapse/expand columns survive reload
+- [ ] Manual: Filter and Find work correctly on the board
+
+### Calendar Sync
+- [ ] Google Calendar OAuth connect flow
+- [ ] Outbound sync: push draba events to Google Calendar on create/update/delete
+- [ ] Inbound sync: Google webhook handler → upsert event in draba
+- [ ] Built-in CalDAV server (`internal/caldav/`)
+- [ ] CalDAV connect flow (user provides URL + credentials)
+- [ ] Outbound sync: push draba events to CalDAV on create/update/delete
+- [ ] Team iCal feed endpoint: `GET /timelines/:ical_token/feed.ics` (public, sanitized — no notes)
+
+### Shares — Multi-Share Views with Passwords (Phase 13)
+First-class Share entity. One timeline can host many shares, each frozen to a specific view + config.
+
+**Schema:**
+- [ ] Migration: `shares` table — id, timeline_id, view_type, view_config JSON, password_hash (nullable), expires_at (nullable), created_by, created_at, last_viewed_at, view_count, revoked_at
+- [ ] Migration: migrate existing `timelines.share_token` value into a first share row, then drop the column in a follow-up migration once UI references are gone
+
+**API:**
+- [ ] `POST /timelines/:id/shares` — create share with view_type + view_config snapshot + optional password + optional expiry
+- [ ] `GET /timelines/:id/shares` — list shares (creator + admins)
+- [ ] `PATCH /shares/:id` — rename / change password / extend expiry / revoke
+- [ ] `DELETE /shares/:id` — hard delete
+- [ ] `GET /shares/:token` — public lookup; password-protected returns 401 with `passwordRequired: true`
+- [ ] `POST /shares/:token/unlock` — exchange password for a short-lived view JWT scoped to that share
+- [ ] Rate-limit unlock attempts per IP
+
+**Web — creating shares:**
+- [ ] "Share this view" button in every view's toolbar slot (Gantt / List / Calendar / Kanban)
+- [ ] Share modal: snapshots current toolbar state into `view_config`, optional password + expiry toggles, returns URL with copy button
+
+**Web — viewing shares:**
+- [ ] Public viewer route `/s/:token` — no auth required
+- [ ] Password gate page for protected shares
+- [ ] Mount the appropriate view component in read-only mode with `view_config` applied
+- [ ] Branding strip: team name, "Shared view", last-updated timestamp
+
+**Web — managing shares:**
+- [ ] Manage-shares section on each timeline (list, view counts, revoke, edit)
+- [ ] Indicator chip on timeline tile showing active share count
+
+---
+
+### Data Portability & Exports (Phase 14)
+
+**Tabular (round-trip):**
+- [ ] `GET /timelines/:id/export.csv` and `GET /timelines/:id/export.xlsx`
+- [ ] `POST /teams/:id/events/import` — CSV/Excel import with preview + validation
+- [ ] Downloadable import template at `GET /import-template.csv` and `.xlsx`
+
+**Visual exports (gofpdf):**
+- [ ] Gantt → PDF: landscape, paginated by date range, member-color legend strip
+- [ ] Gantt → PNG: single-page rasterized variant
+- [ ] Kanban → PDF: columns side-by-side, paginated when too wide
+- [ ] Kanban → PNG: single-page
+- [ ] List → Markdown (GitHub-flavored table) and PDF (styled table)
+- [ ] Calendar → PDF: one page per month / week depending on active layout
+- [ ] Header strip on every visual export: team name, timeline name, generated-at timestamp, applied filter description
+- [ ] All visual exports respect active filter / sort / group at time of export
+
+**Wiring:**
+- [ ] Gantt toolbar's existing "Export" stub becomes a real menu: CSV / xlsx / PDF / PNG
+- [ ] Same export menu in 11.1 / 11.2 / 11.3 toolbar slots, scoped to formats valid for that view
+
+**SMTP & password reset (lands here because import errors / reset emails are first SMTP use):**
+- [ ] Password reset flow (email required — pick SMTP or transactional email provider)
+- [ ] SMTP configuration surface in `/settings/admin`
+
+---
+
+### External Connectors (Inbound Webhooks) — Phase 15
+Includes both the webhook backend and the per-timeline connector sidebar UI (previously a separate Up-Next block).
+
+**Backend:**
+- [ ] Create `team_inbound_webhooks` and `event_links` DB migrations
+- [ ] Add `is_external` boolean column to `events` table
+- [ ] `POST /teams/:id/webhooks` — generate an inbound webhook URL for a provider (e.g. Asana)
+- [ ] `GET /teams/:id/webhooks` — list active inbound webhooks
+- [ ] `POST /webhooks/:provider/:token` — generic inbound webhook handler to map payload to Draba events
+- [ ] Web UI: Render `is_external` events as read-only (disable drag-and-drop handles)
+- [ ] Web UI: Show external provider icon/link on the event detail card
+
+**Per-timeline connector model (was Up-Next "Web — Connectors"):**
+- [ ] Migration: `team_connectors (id, team_id, timeline_id, provider ENUM, display_name, config JSON, created_by, created_at)` — one row per connector instance
+- [ ] Provider values initially: `asana | aha | google_sheets | excel_online | webhook`
+- [ ] `GET /timelines/:id/connectors` — list connectors for a timeline
+- [ ] `POST /timelines/:id/connectors` — create connector (admin only); returns generated inbound token
+- [ ] `PATCH /connectors/:id` — update display name or config (admin only)
+- [ ] `DELETE /connectors/:id` — remove connector (admin only)
+- [ ] `POST /connectors/:token/ingest` — public inbound endpoint; validates token; maps payload via provider adapter
+
+**Sidebar CONNECTORS section (already stubbed):**
+- [ ] Wire `GET /timelines/:id/connectors` — list active connectors beneath the active timeline label
+- [ ] "Add connector" → connector setup sheet: provider picker → config fields → save → `POST /timelines/:id/connectors`
+- [ ] Connector row hover → gear icon → config drawer; delete with confirm
+- [ ] Provider icon set (Asana, Aha, Sheets, Excel, generic Plug)
+
+## Phase 13 — Shares (Public Read-Only View Links)
+
+**Next up.** Full design in [docs/plans/phase-13-shares.md](plans/phase-13-shares.md). Decision: live cached data + read-only SPA, server-side (Go) filter, view-driven field projection. No Chromium.
+
+**13.1 — Foundation, public gateway, Gantt viewer (MVP):** — ✅ 2026-06-04
+- [x] Migration: `shares` table (`id`, `timeline_id`, `token` UNIQUE, `view_type`, `view_config` JSON, `password_hash?`, `expires_at?`, `created_by`, `created_at`, `last_viewed_at`, `view_count`, `revoked_at`)
+- [x] Token migration: insert one `shares` row per existing timeline reusing `timelines.share_token` (keep the column for now; drop in a later migration)
+- [x] Go filter evaluator (`internal/filters`) mirroring `lib/filterEngine.ts` `matchesFilter`
+- [x] Shared golden-fixture suite (`packages/shared/testdata/filter-fixtures.json`) run by both `filterEngine.test.ts` and a Go test (drift guard)
+- [x] `GET /shares/{token}` gateway: scope-locked query (token → server-derived `timeline_id`, **no client selector**) → evaluate frozen filter in Go → fixed display projection → prune referenced members/statuses/tags → TTL cache (`DRABA_SHARE_CACHE_TTL`, default 60s)
+- [x] `POST /timelines/{id}/shares`, `GET /teams/{id}/timelines/{timelineId}/shares`, `PATCH /shares/{id}`, `DELETE /shares/{id}`
+- [x] OpenAPI: `Share`, `CreateShareInput`, `PatchShareInput`, `PublicActivity`, `PublicMember`, `PublicTimeline`, `ShareProjection`; regenerate TS types
+- [x] Gantt `interactive=false` mode (clicks inert in GanttGrid + GanttView; no drag/select)
+- [x] "Share this view" action in Gantt toolbar → snapshot live toolbar state incl. resolved `FilterDefinition` → create share → copy URL
+- [x] `/s/:token` public route (outside `ProtectedRoute`) + branding strip (timeline name · "Shared view" · activity count)
+- [x] Scope-isolation test: token reaches exactly its timeline's filtered records; tampering (other timeline/activity/team id, scope-widening params) cannot widen; no share-reachable by-id/list endpoint
+- [x] Verify payload: filtered-out activities + member email/`user_id`/role + access list + other timelines all absent (automated test)
+
+**13.2a — Password backend + view counts (Go, done 2026-06-05):**
+- [x] `password_hash` (bcrypt) on create/patch; `GET /shares/{token}` → `401 { passwordRequired: true }` when locked (no data); valid view token bypasses the gate
+- [x] `POST /shares/{token}/unlock` → short-lived view JWT (`share_view` type, share-scoped subject — not replayable across shares); rate-limit unlock attempts (10/IP/hour, in-memory limiter)
+- [x] Drop the `canManageShare = isAdmin || creator` gate on PATCH+DELETE — any timeline-team member may manage any share (shares can't mutate data)
+- [x] View counts: `viewCount` surfaced in the authenticated list response (per-row display backing)
+- [x] OpenAPI: `password` (writeOnly) on Create/Patch inputs, `passwordRequired` 401 body, `/shares/{token}/unlock` path; TS types regenerated
+
+**13.2b — Share module overhaul (frontend, done 2026-06-05):**
+- [x] Rebuilt `ShareModal.tsx` to the handoff design (header w/ link tile + timeline-name subtitle, "ACTIVE LINKS" section bar + count chip + New share, inline `AddShareForm` with title/description/password-toggle + show-hide, share rows, dashed empty state, footer + Done) using existing tokens/components
+- [x] Per-row meta: creator `Badge` + name (+ "· you"), created date, view count, lock/link type tile + "password" badge; copy w/ 1.6s success state; inline delete-confirm overlay
+- [x] Public unlock prompt at `/s/:token` (`UnlockPrompt` → `useUnlockShare` → store view token → `useShareProjection` resends GET with `Authorization: Bearer`); 401-`passwordRequired` mapped to `PASSWORD_REQUIRED`; 429 → "too many attempts" copy
+- [x] Backend support for the design: `description` column (migration 021) + derived `protected` flag on `Share` (never exposes the hash); plumbed through create/patch bodies, repo, OpenAPI; TS types regenerated
+- [x] `useShares`: `useUnlockShare`, view-token param on `useShareProjection`, `description`/`password` on create input; 6 new/updated hook tests
+
+**13.3 — List + Kanban read-only:**
+- [x] `interactive=false` + public mounting for List and Kanban (clicks inert)
+- [x] Projection: include `notes` only when a List share has the Notes column enabled in `view_config`
+- [x] Per-view read-only polish + "Share this view" (13.2 modal) in both toolbars
+
+**13.4 — Calendar — ICS feed sharing:** — ✅ 2026-06-10 (automated checks)
+- [x] `shares.kind` discriminator (`view` | `ics`) — migration 022; ICS rows carry `scope` (`timeline` | `member`) + nullable `member_id`, no `view_config`/filter/password (create/patch validation rejects passwords on feeds)
+- [x] `GET /shares/{token}.ics` (`text/calendar`, dispatched inside the `{token}` wildcard) + `webcal://` variant in the modal links; all-day VEVENTs (`DTSTART;VALUE=DATE`, exclusive `DTEND` = end+1d) via new `internal/ics` package (RFC 5545 escaping + 75-octet folding); live data, ICS TTL cache sharing `DRABA_SHARE_CACHE_TTL`
+- [x] Distinct Calendar share modal (`CalendarShareModal.tsx`): public On/Off toggle, scope selector (timeline vs. member), feed URL, Copy, Add-to-Google/Apple/Outlook, Regenerate link (`POST /shares/{id}/regenerate` rotates the token)
+- [x] Whole-timeline AND per-member feeds; payload carries no email/`user_id`/role/other-timelines; kinds isolated both directions (ICS token dead on the JSON gateway and vice versa)
+- [ ] Manual: subscribe to a timeline feed in a real calendar app (Google or Apple) → activities appear as all-day events; per-member feed shows only that member's; toggle-off and Regenerate kill the old URL (Docker)
+
+**13.5 — Lifecycle tail:**
+- [ ] Optional expiry → `410 Gone` after `expires_at`
+- [ ] Active-share-count chip on the timeline tile; last-viewed surfaced in the 13.2 modal
+
+## Done
+- [x] Initialize repo scaffold — 2026-04-27
+- [x] Define requirements, architecture, conventions — 2026-04-27
+
+## Parking Lot
+- **Commit/CI process — repomap.md vs. Graphify:** drop the automated `repomap.md` generation (the AI-context lookup step doesn't appear to depend on it day-to-day) and look into incorporating Graphify in its place. Not yet scoped — revisit once the Phase 13 sub-phases land.
+- MySQL/MariaDB and Postgres DB adapters (SQLite first, then add others)
+- CLI binary
+- MCP server for AI agent access
+- Mobile native apps (ship PWA first)
+- Microsoft/Outlook calendar sync (v2)
+- Multi-tenant cloud hosting
+- SSO / OAuth login (GitHub, Google)
+- Notifications (email, push)
+- Recurring event UI (RRULE editing)
+- Kanban drag-to-change-status (v2; v1 Kanban is read-only)
+````
+
 ## File: docs/log.md
 ````markdown
 # Development Log
+
+---
+
+## 2026-06-10 — Phase 13.4: Calendar — ICS feed sharing
+
+**Goal:** Calendar shares as live subscribable ICS feeds (not view-shares): `shares.kind` discriminator, `GET /shares/{token}.ics`, whole-timeline + per-member scopes, token rotation as the revocation story, and a distinct Calendar share modal (a feed configurator, deliberately not the active-links list the other views use).
+
+**Backend (`packages/api`):**
+- **Migration 022** (`022_share_kind.sql`): `shares.kind` (`'view'` default | `'ics'`), `scope` (`'timeline'` | `'member'`, nullable), `member_id` (nullable FK → `team_members`, `ON DELETE CASCADE` — a feed for a deleted member is meaningless, so it drops with the row rather than blocking like the migration-011 RESTRICT FKs).
+- **`internal/ics` (new package)**: minimal RFC 5545 serializer — `Calendar(name, events)` emits a `PUBLISH` VCALENDAR with `X-WR-CALNAME`; each `Event` becomes an all-day VEVENT (`DTSTART;VALUE=DATE`, **exclusive** `DTEND` = inclusive end + 1 day, `DTSTAMP` from the activity's `UpdatedAt` so clients detect changes between polls). Implements §3.3.11 text escaping and §3.1 75-octet line folding (rune-boundary-safe); CRLF endings throughout.
+- **`share_ics_handler.go` (new)**: `serveICSFeed` — public, no auth, no password (calendar clients can't unlock interactively; the token is the secret). Checks kind/revoked/expired, then serves `text/calendar` from `buildICSFeed`: timeline + activities resolved from the share row only; member scope drops unassigned activities **before** serialization; the member's display name in the calendar title is the only person-identifying field. Backed by `icsFeedCache`, a second TTL cache (rendered payload, same `DRABA_SHARE_CACHE_TTL`). Also `handleRegenerateShare` (`POST /shares/{id}/regenerate`): rotates the token via `ShareRepo.RotateToken`, invalidates both caches for the old token, any team member may call it (consistent with PATCH/DELETE).
+- **`share_handler.go`**: `GET /shares/{token}` dispatches a `.ics` suffix inside the `{token}` path value to `serveICSFeed` (Go 1.22 mux wildcards span the whole segment — no separate route needed). **Kind isolation both directions:** an ICS token on the JSON gateway → 404 (a member-scoped feed token must never unlock a whole-timeline projection), a view token on `.ics` → 404, ICS tokens 404 on `/unlock`. Create validation for `kind=ics`: scope required (`timeline`|`member`), `memberId` required for member scope and must belong to the timeline's team, passwords rejected, `view_config` forced to `{}`/`view_type` to `calendar`. PATCH rejects setting a password on an ICS share; PATCH/DELETE invalidate the ICS cache too.
+- **`models.Share`**: `Kind`/`Scope`/`MemberID` + `ShareKind*`/`ShareScope*` constants; repo `Create` persists the new columns.
+- **Sample data** (`11_shares.sql`): +2 ICS feeds (whole-timeline + per-member on Q1 Workload); count assertions in `seed_test.go`/`sample_data_test.go` updated 8→10.
+- **OpenAPI**: `kind`/`scope`/`memberId` on `Share` + `CreateShareInput`, new `/shares/{token}.ics` and `/shares/{id}/regenerate` paths. TS types regenerated.
+
+**Frontend (`packages/web`):**
+- **`components/CalendarShareModal.tsx` (new)** — the distinct surface: scope selector (Whole timeline / One member + member dropdown), public-access On/Off toggle (ON creates the feed share for the selected scope, OFF deletes it — old URL dies immediately), mono feed-URL field + Copy (1.6s success state), one-click **Add to Google / Apple / Outlook** links (Google `calendar/render?cid=`, Apple direct `webcal://`, Outlook `addfromweb`), and **Regenerate link**. No password UI by design. Same visual language as ShareModal (portal overlay, tile header, footer + Done) so it reads as a sibling, not a clone.
+- **`hooks/useShares.ts`**: `CreateShareInput` gained `kind`/`scope`/`memberId` (viewType/viewConfig now optional); new `useRegenerateShare` mutation.
+- **`components/ShareModal.tsx`**: active-links filter now also requires `kind === 'view'` so ICS feeds never appear in the view-share list.
+- **`pages/DashboardPage.tsx`**: Calendar toolbar's Share button (previously a no-op) opens `CalendarShareModal` via its own `calendarShareModalOpen` state; `CalendarToolbar` share stub title updated.
+
+**Tests:** Go — `internal/ics` unit tests (all-day dates, exclusive DTEND, escaping, folding round-trip); `share_ics_handler_test.go` (timeline feed content, member-feed scoping, PII absence, kind isolation both directions, create validation matrix, regenerate kills warm-cached old token + requires team membership). Web — `useShares.test.ts` ICS create body + regenerate cases; new `CalendarShareModal.test.tsx` (toggle on/off → create/delete with right scope+member, URL + subscribe links render, regenerate, view shares ignored). 314 web tests pass.
+- Also fixed a pre-existing `tsc -b`-only break: the `Status` fixture in `ShareViewPage.test.tsx` was missing required fields (`pnpm --filter web build` failed on HEAD before this phase's changes; `--noEmit` lint missed it).
+
+**Checks:** `golangci-lint run` ✅ · `go test ./...` ✅ · `pnpm --filter web lint` ✅ · `pnpm --filter web build` ✅ · `pnpm --filter web test` ✅ (314).
+
+**Not verified in a real calendar app yet:** subscribing from Google/Apple (the headline exit criterion) needs the Docker instance rebuilt with this code, plus a reachable URL for Google's fetcher. Suggest `/test-phase 13.4` and `/review-phase 13.4` to fan verification across subagents.
 
 ---
 
@@ -66439,8 +67507,8 @@ This document organizes development into discrete phases with effort estimates a
 | 13 | [Shares — Public Read-Only View Links](#phase-13--shares--multi-share-views-with-passwords) (sub-phased) | L | ⬜ |
 | 13.1 | [Foundation, Public Gateway, Gantt Viewer (MVP)](#phase-131--foundation-public-gateway-gantt-viewer-mvp) | M–L | ✅ |
 | 13.2 | [Share Module Overhaul + Password Protection](#phase-132--share-module-overhaul--password-protection) | M–L | ✅ |
-| 13.3 | [List + Kanban Read-Only](#phase-133--list--kanban-read-only) | M | ⬜ |
-| 13.4 | [Calendar — ICS Feed Sharing](#phase-134--calendar--ics-feed-sharing) | M | ⬜ |
+| 13.3 | [List + Kanban Read-Only](#phase-133--list--kanban-read-only) | M | ✅ |
+| 13.4 | [Calendar — ICS Feed Sharing](#phase-134--calendar--ics-feed-sharing) | M | ✅ |
 | 13.5 | [Lifecycle Tail](#phase-135--lifecycle-tail) | S | ⬜ |
 | 14 | [Export — Tabular & Per-View](#phase-14--export--tabular--per-view) | M — 3–5 days | ⬜ |
 | 15 | [Import — Tabular](#phase-15--import--tabular) | M — 2–3 days | ⬜ |
@@ -67951,7 +69019,7 @@ Extends `interactive=false` + public mounting to **List and Kanban**, plus the p
 ---
 
 ### Phase 13.4 — Calendar — ICS Feed Sharing
-**Status:** ⬜ | **Effort:** M
+**Status:** ✅ Done (2026-06-10) — all automated checks pass; real-calendar-app subscription (Google/Apple) needs manual Docker verification | **Effort:** M
 
 Calendar diverges from the other views by design. What people want from a shared calendar isn't a frozen web rendering — it's a **feed they subscribe to** in Google / Apple / Outlook. This is also the product's native model: *the app is the source of truth; calendars are read projections.* So a Calendar share is a **subscribable ICS feed**, not a view-share.
 
