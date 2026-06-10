@@ -172,6 +172,7 @@ packages/
           020_share_name.sql
           021_share_description.sql
           022_share_kind.sql
+          023_share_created_by_nullable.sql
         activity_repo.go
         api_token_repo.go
         db.go
@@ -27027,6 +27028,57 @@ EXPOSE 5173
 CMD ["pnpm", "dev", "--host"]
 ````
 
+## File: packages/web/package.json
+````json
+{
+  "name": "@draba/web",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "lint": "tsc --noEmit",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@dnd-kit/core": "^6.3.1",
+    "@dnd-kit/sortable": "^10.0.0",
+    "@dnd-kit/utilities": "^3.2.2",
+    "@draba/shared": "workspace:*",
+    "@radix-ui/react-label": "^2.1.8",
+    "@radix-ui/react-slot": "^1.2.4",
+    "@tanstack/react-query": "^5.100.10",
+    "@tanstack/react-table": "^8.21.3",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "lucide-react": "^0.500.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "react-router-dom": "^7.15.1",
+    "tailwind-merge": "^3.6.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.1.0",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
+    "@types/node": "^25.8.0",
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "@vitejs/plugin-react": "^4.5.0",
+    "@vitest/ui": "^4.1.7",
+    "jsdom": "^29.1.1",
+    "tailwindcss": "^4.1.0",
+    "typescript": "~5.8.0",
+    "vite": "^6.3.0",
+    "vitest": "^4.1.7"
+  }
+}
+````
+
 ## File: packages/web/tsconfig.json
 ````json
 {
@@ -31424,6 +31476,57 @@ ALTER TABLE shares ADD COLUMN scope TEXT;
 ALTER TABLE shares ADD COLUMN member_id TEXT REFERENCES team_members(id) ON DELETE CASCADE;
 ````
 
+## File: packages/api/internal/db/migrations/023_share_created_by_nullable.sql
+````sql
+-- Migration 023: make shares.created_by nullable.
+--
+-- A superadmin may manage a team they hold no team_members row in;
+-- requireTeamMember passes them through with a synthetic member whose ID is
+-- "". Share creation wrote that empty string into the NOT NULL created_by FK
+-- and blew up with a constraint failure (500). A NULL created_by now means
+-- "created by a superadmin outside the team" — the UI already falls back to
+-- a generic creator label when the member lookup misses.
+--
+-- SQLite cannot drop NOT NULL in place, so this is a standard table rebuild.
+
+CREATE TABLE shares_new (
+  id             TEXT PRIMARY KEY,
+  timeline_id    TEXT NOT NULL REFERENCES timelines(id) ON DELETE CASCADE,
+  token          TEXT NOT NULL UNIQUE,
+  view_type      TEXT NOT NULL DEFAULT 'gantt',
+  view_config    TEXT NOT NULL DEFAULT '{}',
+  password_hash  TEXT,
+  expires_at     DATETIME,
+  created_by     TEXT REFERENCES team_members(id),
+  created_at     DATETIME NOT NULL,
+  last_viewed_at DATETIME,
+  view_count     INTEGER NOT NULL DEFAULT 0,
+  revoked_at     DATETIME,
+  name           TEXT,
+  description    TEXT,
+  kind           TEXT NOT NULL DEFAULT 'view',
+  scope          TEXT,
+  member_id      TEXT REFERENCES team_members(id) ON DELETE CASCADE
+);
+
+INSERT INTO shares_new (
+  id, timeline_id, token, view_type, view_config, password_hash, expires_at,
+  created_by, created_at, last_viewed_at, view_count, revoked_at, name,
+  description, kind, scope, member_id
+)
+SELECT
+  id, timeline_id, token, view_type, view_config, password_hash, expires_at,
+  created_by, created_at, last_viewed_at, view_count, revoked_at, name,
+  description, kind, scope, member_id
+FROM shares;
+
+DROP TABLE shares;
+ALTER TABLE shares_new RENAME TO shares;
+
+CREATE INDEX idx_shares_timeline_id ON shares(timeline_id);
+CREATE INDEX idx_shares_token       ON shares(token);
+````
+
 ## File: packages/api/internal/db/seed.go
 ````go
 package db
@@ -33915,286 +34018,6 @@ export function ActivityFieldsBody(props: ActivityFieldsBodyProps) {
 }
 ````
 
-## File: packages/web/src/components/CalendarShareModal.tsx
-````typescript
-/**
- * CalendarShareModal — manage the ICS calendar feeds for a timeline.
- *
- * Deliberately a different surface from ShareModal (Phase 13.4): a Calendar
- * share is not a frozen view snapshot but a live subscribable ICS feed, so
- * instead of an active-links list this modal is a feed configurator — a scope
- * selector (whole timeline vs. one member), a public-access On/Off toggle, the
- * feed URL with one-click add-to-calendar links, and Regenerate.
- *
- * There is no password option: calendar clients cannot unlock a subscription
- * URL interactively, so the unguessable token is the secret and revocation is
- * regenerate-or-toggle-off.
- */
-
-import { useEffect, useState } from 'react'
-import { createPortal } from 'react-dom'
-import {
-  CalendarDays, Link2, Copy, Check, RefreshCw, X, Rss, Users,
-} from 'lucide-react'
-import { useListShares, useCreateShare, useDeleteShare, useRegenerateShare } from '@/hooks/useShares'
-import { useTeamMembers } from '@/hooks/useTeamActivities'
-import { Button } from '@/components/ui/button'
-import { cn } from '@/lib/utils'
-import type { components } from '@draba/shared'
-
-type Share = components['schemas']['Share']
-
-type FeedScope = 'timeline' | 'member'
-
-interface Props {
-  teamId: string
-  timelineId: string
-  /** Display name of the timeline, shown in the header subtitle and feed names. */
-  timelineName?: string
-  onClose: () => void
-}
-
-const TILE_TEAL = 'bg-[hsl(188_59%_38%/0.12)] text-primary'
-
-/** Builds the absolute https feed URL for a share token. */
-function feedURL(token: string): string {
-  return `${window.location.origin}/shares/${token}.ics`
-}
-
-/** The webcal:// variant most calendar apps treat as "subscribe". */
-function webcalURL(token: string): string {
-  return feedURL(token).replace(/^https?:\/\//, 'webcal://')
-}
-
-export default function CalendarShareModal({ teamId, timelineId, timelineName, onClose }: Props) {
-  const { data: allShares = [], isLoading } = useListShares(teamId, timelineId)
-  const { data: members = [] } = useTeamMembers(teamId)
-  const createShare = useCreateShare(teamId, timelineId)
-  const deleteShare = useDeleteShare(teamId, timelineId)
-  const regenerateShare = useRegenerateShare(teamId, timelineId)
-
-  const [scope, setScope] = useState<FeedScope>('timeline')
-  const [memberId, setMemberId] = useState('')
-  const [copied, setCopied] = useState(false)
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [onClose])
-
-  // Default the member selector to the first team member once loaded.
-  useEffect(() => {
-    if (!memberId && members.length > 0) setMemberId(members[0].id)
-  }, [memberId, members])
-
-  const icsShares = allShares.filter((s): s is Share => s.kind === 'ics')
-  const activeShare = scope === 'timeline'
-    ? icsShares.find(s => s.scope === 'timeline')
-    : icsShares.find(s => s.scope === 'member' && s.memberId === memberId)
-
-  const selectedMember = members.find(m => m.id === memberId)
-  const mutating = createShare.isPending || deleteShare.isPending || regenerateShare.isPending
-
-  const handleToggle = () => {
-    if (mutating || isLoading) return
-    if (activeShare) {
-      deleteShare.mutate(activeShare.id)
-      return
-    }
-    if (scope === 'member' && !memberId) return
-    const name = scope === 'timeline'
-      ? `${timelineName ?? 'Timeline'} calendar feed`
-      : `${selectedMember?.displayName ?? 'Member'} calendar feed`
-    createShare.mutate({
-      kind: 'ics',
-      scope,
-      ...(scope === 'member' ? { memberId } : {}),
-      name,
-    })
-  }
-
-  const copy = () => {
-    if (!activeShare) return
-    void navigator.clipboard.writeText(feedURL(activeShare.token)).then(() => {
-      setCopied(true)
-      setTimeout(() => setCopied(false), 1600)
-    })
-  }
-
-  const scopeBtn = (value: FeedScope, label: string) => (
-    <button
-      onClick={() => setScope(value)}
-      className={cn(
-        'flex-1 cursor-pointer rounded-[var(--radius-md)] border px-3 py-2 text-[13px] font-semibold transition-colors',
-        scope === value
-          ? 'border-primary bg-[hsl(188_59%_38%/0.08)] text-primary'
-          : 'border-border bg-card text-muted-foreground hover:bg-muted',
-      )}
-    >
-      {label}
-    </button>
-  )
-
-  const url = activeShare ? feedURL(activeShare.token) : null
-  const webcal = activeShare ? webcalURL(activeShare.token) : null
-
-  return createPortal(
-    <div className="fixed inset-0 z-[1000] flex items-center justify-center bg-[hsl(200_24%_11%/0.55)] p-6 backdrop-blur-[2px]">
-      <div className="flex max-h-[88vh] w-[min(520px,100%)] flex-col overflow-hidden rounded-[var(--radius-xl)] bg-card shadow-[var(--shadow-lg)]">
-        {/* Header */}
-        <div className="flex shrink-0 items-start gap-3 border-b border-border px-5 py-[18px]">
-          <div className={cn('flex h-[38px] w-[38px] shrink-0 items-center justify-center rounded-[var(--radius-md)]', TILE_TEAL)}>
-            <CalendarDays size={19} strokeWidth={2.2} />
-          </div>
-          <div className="min-w-0 flex-1">
-            <h2 className="m-0 text-[17px] font-bold leading-tight text-foreground">Share calendar</h2>
-            <div className="mt-0.5 text-[12.5px] text-muted-foreground">
-              {timelineName ? `${timelineName} · ` : ''}subscribe from Google, Apple, or Outlook
-            </div>
-          </div>
-          <button
-            onClick={onClose}
-            aria-label="Close"
-            className="flex h-[30px] w-[30px] shrink-0 cursor-pointer items-center justify-center rounded-[var(--radius-md)] border-none bg-muted text-muted-foreground"
-          >
-            <X size={16} strokeWidth={2.2} />
-          </button>
-        </div>
-
-        {/* Body */}
-        <div className="flex flex-1 flex-col gap-4 overflow-y-auto px-5 py-4">
-          {/* Scope selector */}
-          <div>
-            <div className="mb-1.5 text-[11px] font-bold uppercase tracking-[0.06em] text-muted-foreground">Feed scope</div>
-            <div className="flex gap-2">
-              {scopeBtn('timeline', 'Whole timeline')}
-              {scopeBtn('member', 'One member')}
-            </div>
-            {scope === 'member' && (
-              <select
-                value={memberId}
-                onChange={e => setMemberId(e.target.value)}
-                aria-label="Member"
-                className="mt-2 h-9 w-full cursor-pointer rounded-[var(--radius-md)] border border-border bg-card px-2.5 text-[13px] text-foreground"
-              >
-                {members.map(m => (
-                  <option key={m.id} value={m.id}>{m.displayName || 'Team member'}</option>
-                ))}
-              </select>
-            )}
-          </div>
-
-          {/* Public access toggle */}
-          <div className="overflow-hidden rounded-[var(--radius-md)] border border-border">
-            <div className="flex items-center gap-2.5 px-3 py-2.5">
-              <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[var(--radius-md)] bg-muted text-muted-foreground">
-                <Rss size={14} strokeWidth={2} />
-              </div>
-              <div className="flex-1">
-                <div className="text-[13px] font-semibold text-foreground">Public calendar feed</div>
-                <div className="text-[11.5px] text-muted-foreground">
-                  {activeShare
-                    ? 'Live feed is on — turning it off immediately kills the link'
-                    : 'Publish a live, read-only feed anyone with the link can subscribe to'}
-                </div>
-              </div>
-              <button
-                onClick={handleToggle}
-                role="switch"
-                aria-checked={Boolean(activeShare)}
-                aria-label="Public calendar feed"
-                disabled={mutating || isLoading}
-                className={cn(
-                  'relative h-[22px] w-10 shrink-0 cursor-pointer rounded-[var(--radius-full)] border-none p-0 transition-colors',
-                  activeShare ? 'bg-primary' : 'bg-border',
-                )}
-              >
-                <span className={cn(
-                  'absolute top-[2px] h-[18px] w-[18px] rounded-full bg-white shadow-sm transition-[left] duration-150',
-                  activeShare ? 'left-5' : 'left-[2px]',
-                )} />
-              </button>
-            </div>
-
-            {activeShare && url && webcal && (
-              <div className="flex flex-col gap-2.5 border-t border-border px-3 py-3">
-                {/* Feed URL + copy */}
-                <div className="flex items-center gap-2">
-                  <div className="flex min-w-0 flex-1 items-center gap-2 rounded-[var(--radius-md)] bg-muted px-[11px] py-[7px] font-mono text-[12.5px] text-foreground">
-                    <Link2 size={13} className="shrink-0 text-muted-foreground" strokeWidth={2} />
-                    <span className="overflow-hidden text-ellipsis whitespace-nowrap">{url}</span>
-                  </div>
-                  <button
-                    onClick={copy}
-                    className={cn(
-                      'flex shrink-0 items-center gap-[5px] rounded-[var(--radius-md)] border px-3 py-[7px] text-[12.5px] font-semibold transition-colors',
-                      copied ? 'border-success bg-[hsl(145_63%_42%/0.12)] text-success' : 'border-border bg-card text-foreground',
-                    )}
-                  >
-                    {copied ? <Check size={13} strokeWidth={2.2} /> : <Copy size={13} strokeWidth={2.2} />}
-                    {copied ? 'Copied' : 'Copy'}
-                  </button>
-                </div>
-
-                {/* One-click subscribe links */}
-                <div className="flex flex-wrap items-center gap-2">
-                  <a
-                    href={`https://calendar.google.com/calendar/render?cid=${encodeURIComponent(webcal)}`}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="flex items-center gap-[5px] rounded-[var(--radius-md)] border border-border bg-card px-3 py-[6px] text-[12.5px] font-semibold text-foreground transition-colors hover:bg-muted"
-                  >
-                    Add to Google
-                  </a>
-                  <a
-                    href={webcal}
-                    className="flex items-center gap-[5px] rounded-[var(--radius-md)] border border-border bg-card px-3 py-[6px] text-[12.5px] font-semibold text-foreground transition-colors hover:bg-muted"
-                  >
-                    Add to Apple
-                  </a>
-                  <a
-                    href={`https://outlook.live.com/calendar/0/addfromweb?url=${encodeURIComponent(webcal)}&name=${encodeURIComponent(activeShare.name ?? timelineName ?? 'draba')}`}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="flex items-center gap-[5px] rounded-[var(--radius-md)] border border-border bg-card px-3 py-[6px] text-[12.5px] font-semibold text-foreground transition-colors hover:bg-muted"
-                  >
-                    Add to Outlook
-                  </a>
-                  <button
-                    onClick={() => regenerateShare.mutate(activeShare.id)}
-                    disabled={mutating}
-                    title="Replace the link — the old URL stops working immediately"
-                    className="ml-auto flex cursor-pointer items-center gap-[5px] rounded-[var(--radius-md)] border border-border bg-card px-3 py-[6px] text-[12.5px] font-semibold text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-                  >
-                    <RefreshCw size={13} strokeWidth={2} className={regenerateShare.isPending ? 'animate-spin' : undefined} />
-                    Regenerate link
-                  </button>
-                </div>
-              </div>
-            )}
-          </div>
-
-          {(createShare.isError || deleteShare.isError || regenerateShare.isError) && (
-            <p className="text-[11px] text-destructive">Something went wrong. Please try again.</p>
-          )}
-        </div>
-
-        {/* Footer */}
-        <div className="flex shrink-0 items-center gap-2.5 border-t border-border px-5 py-[13px]">
-          <div className="flex items-center gap-[7px] text-xs text-muted-foreground">
-            <Users size={14} strokeWidth={2} />
-            Live data · no password — the link itself is the secret
-          </div>
-          <Button variant="outline" className="ml-auto" onClick={onClose}>Done</Button>
-        </div>
-      </div>
-    </div>,
-    document.body,
-  )
-}
-````
-
 ## File: packages/web/src/lib/activityColor.test.ts
 ````typescript
 /**
@@ -36117,57 +35940,6 @@ export default function App() {
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
-````
-
-## File: packages/web/package.json
-````json
-{
-  "name": "@draba/web",
-  "private": true,
-  "version": "0.0.0",
-  "type": "module",
-  "scripts": {
-    "dev": "vite",
-    "build": "tsc -b && vite build",
-    "lint": "tsc --noEmit",
-    "preview": "vite preview",
-    "test": "vitest run",
-    "test:watch": "vitest"
-  },
-  "dependencies": {
-    "@dnd-kit/core": "^6.3.1",
-    "@dnd-kit/sortable": "^10.0.0",
-    "@dnd-kit/utilities": "^3.2.2",
-    "@draba/shared": "workspace:*",
-    "@radix-ui/react-label": "^2.1.8",
-    "@radix-ui/react-slot": "^1.2.4",
-    "@tanstack/react-query": "^5.100.10",
-    "@tanstack/react-table": "^8.21.3",
-    "class-variance-authority": "^0.7.1",
-    "clsx": "^2.1.1",
-    "lucide-react": "^0.500.0",
-    "react": "^19.1.0",
-    "react-dom": "^19.1.0",
-    "react-router-dom": "^7.15.1",
-    "tailwind-merge": "^3.6.0"
-  },
-  "devDependencies": {
-    "@tailwindcss/vite": "^4.1.0",
-    "@testing-library/jest-dom": "^6.9.1",
-    "@testing-library/react": "^16.3.2",
-    "@testing-library/user-event": "^14.6.1",
-    "@types/node": "^25.8.0",
-    "@types/react": "^19.1.0",
-    "@types/react-dom": "^19.1.0",
-    "@vitejs/plugin-react": "^4.5.0",
-    "@vitest/ui": "^4.1.7",
-    "jsdom": "^29.1.1",
-    "tailwindcss": "^4.1.0",
-    "typescript": "~5.8.0",
-    "vite": "^6.3.0",
-    "vitest": "^4.1.7"
-  }
-}
 ````
 
 ## File: packages/web/tsconfig.app.json
@@ -38998,6 +38770,296 @@ describe('buildRows — member grouping (combo-key grouping)', () => {
     expect(groupIds[groupIds.length - 1]).toBe('__unassigned__')
   })
 })
+````
+
+## File: packages/web/src/components/CalendarShareModal.tsx
+````typescript
+/**
+ * CalendarShareModal — manage the ICS calendar feeds for a timeline.
+ *
+ * Deliberately a different surface from ShareModal (Phase 13.4): a Calendar
+ * share is not a frozen view snapshot but a live subscribable ICS feed. The
+ * modal is a flat list of every feed the timeline can publish — the whole
+ * timeline first, then one row per team member — each with an on/off toggle.
+ * Toggling a row on creates that feed and reveals its URL (copy, one-click
+ * subscribe links, regenerate); toggling off deletes it, killing the URL
+ * immediately.
+ *
+ * All feeds are public read-only. There is no password option: calendar
+ * clients cannot unlock a subscription URL interactively, so the unguessable
+ * token is the secret and revocation is regenerate-or-toggle-off.
+ */
+
+import { useEffect, useState } from 'react'
+import { createPortal } from 'react-dom'
+import {
+  CalendarDays, Link2, Copy, Check, RefreshCw, X, Users,
+} from 'lucide-react'
+import { useListShares, useCreateShare, useDeleteShare, useRegenerateShare } from '@/hooks/useShares'
+import { useTeamMembers } from '@/hooks/useTeamActivities'
+import { Badge } from '@/components/identity/Badge'
+import { resolveColorHex } from '@/components/identity/identity-constants'
+import { Button } from '@/components/ui/button'
+import { cn } from '@/lib/utils'
+import { MEMBER_COLORS } from '@/types'
+import type { components } from '@draba/shared'
+
+type Share = components['schemas']['Share']
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
+
+interface Props {
+  teamId: string
+  timelineId: string
+  /** Display name of the timeline, shown in the header subtitle and feed names. */
+  timelineName?: string
+  onClose: () => void
+}
+
+const TILE_TEAL = 'bg-[hsl(188_59%_38%/0.12)] text-primary'
+
+/** Builds the absolute https feed URL for a share token. */
+function feedURL(token: string): string {
+  return `${window.location.origin}/shares/${token}.ics`
+}
+
+/** The webcal:// variant most calendar apps treat as "subscribe". */
+function webcalURL(token: string): string {
+  return feedURL(token).replace(/^https?:\/\//, 'webcal://')
+}
+
+// ── One feed row: label + toggle, expanding to the link when on ───────────────
+
+function FeedRow({
+  label,
+  member,
+  share,
+  busy,
+  onToggle,
+  onRegenerate,
+}: {
+  label: string
+  /** Set for member rows — renders the identity badge next to the label. */
+  member?: TeamMemberWithUser
+  /** The existing ICS share for this row, when the feed is on. */
+  share?: Share
+  busy: boolean
+  onToggle: () => void
+  onRegenerate: (shareId: string) => void
+}) {
+  const [copied, setCopied] = useState(false)
+  const on = Boolean(share)
+  const url = share ? feedURL(share.token) : null
+  const webcal = share ? webcalURL(share.token) : null
+
+  const copy = () => {
+    if (!url) return
+    void navigator.clipboard.writeText(url).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1600)
+    })
+  }
+
+  return (
+    <div className="overflow-hidden rounded-[var(--radius-md)] border border-border">
+      <div className="flex items-center gap-2.5 px-3 py-2.5">
+        {member ? (
+          <Badge
+            identity={{ color: resolveColorHex(member.color) || MEMBER_COLORS[0], icon: member.icon ?? '__name_1__' }}
+            name={member.displayName || 'Team member'}
+            size={26}
+            shape="circle"
+          />
+        ) : (
+          <div className={cn('flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-[var(--radius-md)]', TILE_TEAL)}>
+            <CalendarDays size={14} strokeWidth={2.2} />
+          </div>
+        )}
+        <div className="flex-1 text-[13px] font-semibold text-foreground">{label}</div>
+        <button
+          onClick={onToggle}
+          role="switch"
+          aria-checked={on}
+          aria-label={`${label} feed`}
+          disabled={busy}
+          className={cn(
+            'relative h-[22px] w-10 shrink-0 cursor-pointer rounded-[var(--radius-full)] border-none p-0 transition-colors',
+            on ? 'bg-primary' : 'bg-border',
+          )}
+        >
+          <span className={cn(
+            'absolute top-[2px] h-[18px] w-[18px] rounded-full bg-white shadow-sm transition-[left] duration-150',
+            on ? 'left-5' : 'left-[2px]',
+          )} />
+        </button>
+      </div>
+
+      {share && url && webcal && (
+        <div className="flex flex-col gap-2 border-t border-border bg-muted/40 px-3 py-2.5">
+          <div className="flex items-center gap-2">
+            <div className="flex min-w-0 flex-1 items-center gap-2 rounded-[var(--radius-md)] bg-muted px-[11px] py-[7px] font-mono text-[12px] text-foreground">
+              <Link2 size={13} className="shrink-0 text-muted-foreground" strokeWidth={2} />
+              <span className="overflow-hidden text-ellipsis whitespace-nowrap">{url}</span>
+            </div>
+            <button
+              onClick={copy}
+              className={cn(
+                'flex shrink-0 items-center gap-[5px] rounded-[var(--radius-md)] border px-3 py-[7px] text-[12.5px] font-semibold transition-colors',
+                copied ? 'border-success bg-[hsl(145_63%_42%/0.12)] text-success' : 'border-border bg-card text-foreground',
+              )}
+            >
+              {copied ? <Check size={13} strokeWidth={2.2} /> : <Copy size={13} strokeWidth={2.2} />}
+              {copied ? 'Copied' : 'Copy'}
+            </button>
+          </div>
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px]">
+            <span className="text-muted-foreground">Add to:</span>
+            <a
+              href={`https://calendar.google.com/calendar/render?cid=${encodeURIComponent(webcal)}`}
+              target="_blank"
+              rel="noreferrer"
+              className="font-semibold text-primary hover:underline"
+            >
+              Google
+            </a>
+            <a href={webcal} className="font-semibold text-primary hover:underline">
+              Apple
+            </a>
+            <a
+              href={`https://outlook.live.com/calendar/0/addfromweb?url=${encodeURIComponent(webcal)}&name=${encodeURIComponent(share.name ?? label)}`}
+              target="_blank"
+              rel="noreferrer"
+              className="font-semibold text-primary hover:underline"
+            >
+              Outlook
+            </a>
+            <button
+              onClick={() => onRegenerate(share.id)}
+              disabled={busy}
+              title="Replace the link — the old URL stops working immediately"
+              className="ml-auto flex cursor-pointer items-center gap-[5px] border-none bg-transparent p-0 text-[12px] font-semibold text-muted-foreground transition-colors hover:text-foreground"
+            >
+              <RefreshCw size={12} strokeWidth={2} />
+              Regenerate link
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── The modal shell ────────────────────────────────────────────────────────────
+
+export default function CalendarShareModal({ teamId, timelineId, timelineName, onClose }: Props) {
+  const { data: allShares = [], isLoading } = useListShares(teamId, timelineId)
+  const { data: members = [] } = useTeamMembers(teamId)
+  const createShare = useCreateShare(teamId, timelineId)
+  const deleteShare = useDeleteShare(teamId, timelineId)
+  const regenerateShare = useRegenerateShare(teamId, timelineId)
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  const icsShares = allShares.filter(s => s.kind === 'ics')
+  const timelineShare = icsShares.find(s => s.scope === 'timeline')
+  const memberShare = (memberId: string) =>
+    icsShares.find(s => s.scope === 'member' && s.memberId === memberId)
+
+  const busy = isLoading || createShare.isPending || deleteShare.isPending || regenerateShare.isPending
+
+  const toggleTimeline = () => {
+    if (busy) return
+    if (timelineShare) {
+      deleteShare.mutate(timelineShare.id)
+    } else {
+      createShare.mutate({ kind: 'ics', scope: 'timeline', name: `${timelineName ?? 'Timeline'} calendar feed` })
+    }
+  }
+
+  const toggleMember = (m: TeamMemberWithUser) => {
+    if (busy) return
+    const existing = memberShare(m.id)
+    if (existing) {
+      deleteShare.mutate(existing.id)
+    } else {
+      createShare.mutate({
+        kind: 'ics',
+        scope: 'member',
+        memberId: m.id,
+        name: `${m.displayName || 'Member'} calendar feed`,
+      })
+    }
+  }
+
+  return createPortal(
+    <div className="fixed inset-0 z-[1000] flex items-center justify-center bg-[hsl(200_24%_11%/0.55)] p-6 backdrop-blur-[2px]">
+      <div className="flex max-h-[88vh] w-[min(560px,100%)] flex-col overflow-hidden rounded-[var(--radius-xl)] bg-card shadow-[var(--shadow-lg)]">
+        {/* Header */}
+        <div className="flex shrink-0 items-start gap-3 border-b border-border px-5 py-[18px]">
+          <div className={cn('flex h-[38px] w-[38px] shrink-0 items-center justify-center rounded-[var(--radius-md)]', TILE_TEAL)}>
+            <CalendarDays size={19} strokeWidth={2.2} />
+          </div>
+          <div className="min-w-0 flex-1">
+            <h2 className="m-0 text-[17px] font-bold leading-tight text-foreground">Share calendar</h2>
+            <div className="mt-0.5 text-[12.5px] text-muted-foreground">
+              {timelineName ? `${timelineName} · ` : ''}live read-only feeds — subscribe from Google, Apple, or Outlook
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            aria-label="Close"
+            className="flex h-[30px] w-[30px] shrink-0 cursor-pointer items-center justify-center rounded-[var(--radius-md)] border-none bg-muted text-muted-foreground"
+          >
+            <X size={16} strokeWidth={2.2} />
+          </button>
+        </div>
+
+        {/* Body — one row per publishable feed */}
+        <div className="flex flex-1 flex-col gap-2 overflow-y-auto px-5 py-4">
+          <FeedRow
+            label="Whole timeline"
+            share={timelineShare}
+            busy={busy}
+            onToggle={toggleTimeline}
+            onRegenerate={id => regenerateShare.mutate(id)}
+          />
+
+          {members.length > 0 && (
+            <div className="mt-1.5 text-[11px] font-bold uppercase tracking-[0.06em] text-muted-foreground">Per member</div>
+          )}
+          {members.map(m => (
+            <FeedRow
+              key={m.id}
+              label={m.displayName || 'Team member'}
+              member={m}
+              share={memberShare(m.id)}
+              busy={busy}
+              onToggle={() => toggleMember(m)}
+              onRegenerate={id => regenerateShare.mutate(id)}
+            />
+          ))}
+
+          {(createShare.isError || deleteShare.isError || regenerateShare.isError) && (
+            <p className="text-[11px] text-destructive">Something went wrong. Please try again.</p>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div className="flex shrink-0 items-center gap-2.5 border-t border-border px-5 py-[13px]">
+          <div className="flex items-center gap-[7px] text-xs text-muted-foreground">
+            <Users size={14} strokeWidth={2} />
+            Public read-only · the link itself is the secret
+          </div>
+          <Button variant="outline" className="ml-auto" onClick={onClose}>Done</Button>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  )
+}
 ````
 
 ## File: packages/web/src/lib/calendarLanes.ts
@@ -43108,6 +43170,196 @@ export default function KanbanView({
       collapsedParents={collapsedParents}
       onToggleParent={handleToggleParent}
     />
+  );
+}
+````
+
+## File: packages/web/src/components/list/ListToolbar.tsx
+````typescript
+/**
+ * ListToolbar — sub-toolbar for the List view.
+ *
+ * Provides Columns (hide/show menu), Density toggle, Group by, Sort by, and
+ * Color by controls. The Columns menu includes drag-reorder handles (implemented
+ * via @dnd-kit) so column order can be changed from the menu as well as by
+ * dragging the table headers.
+ */
+
+import { useState, useRef, useEffect } from 'react';
+import { Columns2, ChevronDown, Download, Share2, AlignJustify } from 'lucide-react';
+import { cn } from '@/lib/utils';
+
+export type ListGroupBy = 'none' | 'member' | 'parent' | 'status';
+export type ListSortBy = 'startDate' | 'endDate' | 'title' | 'status' | 'progress';
+export type ListColorBy = 'activity' | 'member' | 'status';
+export type ListDensity = 'comfortable' | 'compact';
+
+export interface ColumnConfig {
+  id: string;
+  label: string;
+  visible: boolean;
+}
+
+interface Props {
+  columns: ColumnConfig[];
+  onColumnVisibilityChange: (columnId: string, visible: boolean) => void;
+  density: ListDensity;
+  onDensityChange: (d: ListDensity) => void;
+  groupBy: ListGroupBy;
+  onGroupByChange: (g: ListGroupBy) => void;
+  sortBy: ListSortBy;
+  onSortByChange: (s: ListSortBy) => void;
+  colorBy: ListColorBy;
+  onColorByChange: (c: ListColorBy) => void;
+  onExport?: () => void;
+  onShare?: () => void;
+}
+
+const ctrlBtn = 'flex items-center justify-center gap-[5px] h-[26px] px-2 border border-border rounded-md bg-card text-foreground text-xs font-medium cursor-pointer shrink-0';
+const divider  = 'w-px h-4 bg-border shrink-0';
+const label    = 'text-[11px] text-muted-foreground shrink-0';
+const select   = 'h-[26px] px-1.5 border border-border rounded-md bg-card text-foreground text-xs cursor-pointer shrink-0';
+
+export default function ListToolbar({
+  columns,
+  onColumnVisibilityChange,
+  density,
+  onDensityChange,
+  groupBy,
+  onGroupByChange,
+  sortBy: _sortBy,
+  onSortByChange: _onSortByChange,
+  colorBy,
+  onColorByChange,
+  onShare,
+}: Props) {
+  const [colMenuOpen, setColMenuOpen] = useState(false);
+  const colMenuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (colMenuRef.current && !colMenuRef.current.contains(e.target as Node)) {
+        setColMenuOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  return (
+    <div className="flex items-center gap-2 px-3 h-9 bg-card border-b border-border shrink-0" style={{ position: 'relative', zIndex: 30 }}>
+      {/* Columns menu */}
+      <div ref={colMenuRef} className="relative">
+        <button
+          onClick={() => setColMenuOpen(o => !o)}
+          className={cn(ctrlBtn, colMenuOpen && 'bg-muted')}
+          title="Show/hide columns"
+        >
+          <Columns2 size={13} strokeWidth={1.8} />
+          Columns
+          <ChevronDown size={11} strokeWidth={2} className={cn('transition-transform', colMenuOpen && 'rotate-180')} />
+        </button>
+
+        {colMenuOpen && (
+          <div
+            style={{
+              position: 'absolute',
+              top: 'calc(100% + 4px)',
+              left: 0,
+              zIndex: 50,
+              background: 'var(--card)',
+              border: '1px solid var(--border)',
+              borderRadius: 8,
+              boxShadow: '0 4px 16px rgba(0,0,0,0.12)',
+              minWidth: 180,
+              padding: '6px 0',
+            }}
+          >
+            {columns.map(col => (
+              <label
+                key={col.id}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  padding: '5px 12px',
+                  cursor: 'pointer',
+                  fontSize: 12,
+                  color: 'var(--foreground)',
+                }}
+                onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+                onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+              >
+                <input
+                  type="checkbox"
+                  checked={col.visible}
+                  onChange={e => onColumnVisibilityChange(col.id, e.target.checked)}
+                  style={{ cursor: 'pointer' }}
+                />
+                {col.label}
+              </label>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className={divider} />
+
+      {/* Group by */}
+      <span className={label}>Group by</span>
+      <select
+        className={select}
+        value={groupBy}
+        onChange={e => onGroupByChange(e.target.value as ListGroupBy)}
+      >
+        <option value="none">None</option>
+        <option value="member">Member</option>
+        <option value="parent">Parent activity</option>
+        <option value="status">Status</option>
+      </select>
+
+      <div className={divider} />
+
+      {/* Color by */}
+      <span className={label}>Color by</span>
+      <select
+        className={select}
+        value={colorBy}
+        onChange={e => onColorByChange(e.target.value as ListColorBy)}
+      >
+        <option value="activity">Activity</option>
+        <option value="member">Member</option>
+        <option value="status">Status</option>
+      </select>
+
+      <div className={divider} />
+
+      {/* Density toggle */}
+      <button
+        onClick={() => onDensityChange(density === 'comfortable' ? 'compact' : 'comfortable')}
+        className={ctrlBtn}
+        title={density === 'comfortable' ? 'Switch to compact rows' : 'Switch to comfortable rows'}
+      >
+        <AlignJustify size={13} strokeWidth={1.8} />
+        {density === 'comfortable' ? 'Comfortable' : 'Compact'}
+      </button>
+
+      <div className="flex-1" />
+
+      <button
+        className={cn(ctrlBtn, 'opacity-40 cursor-not-allowed')}
+        disabled
+        title="Coming soon"
+      >
+        <Download size={13} strokeWidth={1.8} />
+        Export
+      </button>
+
+      <button className={ctrlBtn} onClick={onShare} title="Share this view">
+        <Share2 size={13} strokeWidth={1.8} />
+        Share
+      </button>
+    </div>
   );
 }
 ````
@@ -47471,196 +47723,6 @@ export default function Sidebar({ collapsed, onToggle, onNewActivity, onBulkImpo
 }
 ````
 
-## File: packages/web/src/components/list/ListToolbar.tsx
-````typescript
-/**
- * ListToolbar — sub-toolbar for the List view.
- *
- * Provides Columns (hide/show menu), Density toggle, Group by, Sort by, and
- * Color by controls. The Columns menu includes drag-reorder handles (implemented
- * via @dnd-kit) so column order can be changed from the menu as well as by
- * dragging the table headers.
- */
-
-import { useState, useRef, useEffect } from 'react';
-import { Columns2, ChevronDown, Download, Share2, AlignJustify } from 'lucide-react';
-import { cn } from '@/lib/utils';
-
-export type ListGroupBy = 'none' | 'member' | 'parent' | 'status';
-export type ListSortBy = 'startDate' | 'endDate' | 'title' | 'status' | 'progress';
-export type ListColorBy = 'activity' | 'member' | 'status';
-export type ListDensity = 'comfortable' | 'compact';
-
-export interface ColumnConfig {
-  id: string;
-  label: string;
-  visible: boolean;
-}
-
-interface Props {
-  columns: ColumnConfig[];
-  onColumnVisibilityChange: (columnId: string, visible: boolean) => void;
-  density: ListDensity;
-  onDensityChange: (d: ListDensity) => void;
-  groupBy: ListGroupBy;
-  onGroupByChange: (g: ListGroupBy) => void;
-  sortBy: ListSortBy;
-  onSortByChange: (s: ListSortBy) => void;
-  colorBy: ListColorBy;
-  onColorByChange: (c: ListColorBy) => void;
-  onExport?: () => void;
-  onShare?: () => void;
-}
-
-const ctrlBtn = 'flex items-center justify-center gap-[5px] h-[26px] px-2 border border-border rounded-md bg-card text-foreground text-xs font-medium cursor-pointer shrink-0';
-const divider  = 'w-px h-4 bg-border shrink-0';
-const label    = 'text-[11px] text-muted-foreground shrink-0';
-const select   = 'h-[26px] px-1.5 border border-border rounded-md bg-card text-foreground text-xs cursor-pointer shrink-0';
-
-export default function ListToolbar({
-  columns,
-  onColumnVisibilityChange,
-  density,
-  onDensityChange,
-  groupBy,
-  onGroupByChange,
-  sortBy: _sortBy,
-  onSortByChange: _onSortByChange,
-  colorBy,
-  onColorByChange,
-  onShare,
-}: Props) {
-  const [colMenuOpen, setColMenuOpen] = useState(false);
-  const colMenuRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    function handleClickOutside(e: MouseEvent) {
-      if (colMenuRef.current && !colMenuRef.current.contains(e.target as Node)) {
-        setColMenuOpen(false);
-      }
-    }
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, []);
-
-  return (
-    <div className="flex items-center gap-2 px-3 h-9 bg-card border-b border-border shrink-0" style={{ position: 'relative', zIndex: 30 }}>
-      {/* Columns menu */}
-      <div ref={colMenuRef} className="relative">
-        <button
-          onClick={() => setColMenuOpen(o => !o)}
-          className={cn(ctrlBtn, colMenuOpen && 'bg-muted')}
-          title="Show/hide columns"
-        >
-          <Columns2 size={13} strokeWidth={1.8} />
-          Columns
-          <ChevronDown size={11} strokeWidth={2} className={cn('transition-transform', colMenuOpen && 'rotate-180')} />
-        </button>
-
-        {colMenuOpen && (
-          <div
-            style={{
-              position: 'absolute',
-              top: 'calc(100% + 4px)',
-              left: 0,
-              zIndex: 50,
-              background: 'var(--card)',
-              border: '1px solid var(--border)',
-              borderRadius: 8,
-              boxShadow: '0 4px 16px rgba(0,0,0,0.12)',
-              minWidth: 180,
-              padding: '6px 0',
-            }}
-          >
-            {columns.map(col => (
-              <label
-                key={col.id}
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 8,
-                  padding: '5px 12px',
-                  cursor: 'pointer',
-                  fontSize: 12,
-                  color: 'var(--foreground)',
-                }}
-                onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-                onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-              >
-                <input
-                  type="checkbox"
-                  checked={col.visible}
-                  onChange={e => onColumnVisibilityChange(col.id, e.target.checked)}
-                  style={{ cursor: 'pointer' }}
-                />
-                {col.label}
-              </label>
-            ))}
-          </div>
-        )}
-      </div>
-
-      <div className={divider} />
-
-      {/* Group by */}
-      <span className={label}>Group by</span>
-      <select
-        className={select}
-        value={groupBy}
-        onChange={e => onGroupByChange(e.target.value as ListGroupBy)}
-      >
-        <option value="none">None</option>
-        <option value="member">Member</option>
-        <option value="parent">Parent activity</option>
-        <option value="status">Status</option>
-      </select>
-
-      <div className={divider} />
-
-      {/* Color by */}
-      <span className={label}>Color by</span>
-      <select
-        className={select}
-        value={colorBy}
-        onChange={e => onColorByChange(e.target.value as ListColorBy)}
-      >
-        <option value="activity">Activity</option>
-        <option value="member">Member</option>
-        <option value="status">Status</option>
-      </select>
-
-      <div className={divider} />
-
-      {/* Density toggle */}
-      <button
-        onClick={() => onDensityChange(density === 'comfortable' ? 'compact' : 'comfortable')}
-        className={ctrlBtn}
-        title={density === 'comfortable' ? 'Switch to compact rows' : 'Switch to comfortable rows'}
-      >
-        <AlignJustify size={13} strokeWidth={1.8} />
-        {density === 'comfortable' ? 'Comfortable' : 'Compact'}
-      </button>
-
-      <div className="flex-1" />
-
-      <button
-        className={cn(ctrlBtn, 'opacity-40 cursor-not-allowed')}
-        disabled
-        title="Coming soon"
-      >
-        <Download size={13} strokeWidth={1.8} />
-        Export
-      </button>
-
-      <button className={ctrlBtn} onClick={onShare} title="Share this view">
-        <Share2 size={13} strokeWidth={1.8} />
-        Share
-      </button>
-    </div>
-  );
-}
-````
-
 ## File: packages/web/src/hooks/useShares.ts
 ````typescript
 /**
@@ -48606,434 +48668,6 @@ No Vitest / Testing Library setup exists yet. Components (`TimelineGrid`, `Event
 4. That's it — `/test-phase` will pick it up on the next run.
 ````
 
-## File: packages/api/internal/models/models.go
-````go
-// Package models holds the domain types shared across the API, db,
-// and event-bus packages. These types are persisted directly via sqlx
-// (db tags) and serialised on the wire (json tags); changing tags is a
-// schema change.
-package models
-
-import "time"
-
-// Activity is a scheduled item of work belonging to a Timeline. ArchivedAt is
-// non-nil when the activity is soft-deleted; list endpoints exclude archived
-// activities by default.
-//
-// AssignedMemberIDs is not stored on the activities table; it is populated by
-// the repository from activity_assignments after every list query.
-//
-// GoogleEventID and CaldavUID are preserved as-is — they identify the
-// corresponding records in external calendar systems (VEVENT identifiers).
-type Activity struct {
-	ID                string     `db:"id"                  json:"id"`
-	TimelineID        string     `db:"timeline_id"         json:"timelineId"`
-	Title             string     `db:"title"               json:"title"`
-	Description       *string    `db:"description"         json:"description,omitempty"`
-	Notes             *string    `db:"notes"               json:"notes,omitempty"`
-	Icon              *string    `db:"icon"                json:"icon,omitempty"`
-	Color             *string    `db:"color"               json:"color,omitempty"`
-	StartAt           time.Time  `db:"start_at"            json:"startAt"`
-	EndAt             time.Time  `db:"end_at"              json:"endAt"`
-	AllDay            bool       `db:"all_day"             json:"allDay"`
-	StatusID          *string    `db:"status_id"           json:"statusId,omitempty"`
-	ParentActivityID  *string    `db:"parent_activity_id"  json:"parentActivityId,omitempty"`
-	PercentComplete   *int       `db:"percent_complete"    json:"percentComplete,omitempty"`
-	Location          *string    `db:"location"            json:"location,omitempty"`
-	URL               *string    `db:"url"                 json:"url,omitempty"`
-	Rrule             *string    `db:"rrule"               json:"rrule,omitempty"`
-	CaldavUID         *string    `db:"caldav_uid"          json:"caldavUid,omitempty"`
-	GoogleEventID     *string    `db:"google_event_id"     json:"googleEventId,omitempty"`
-	CreatedBy         string     `db:"created_by"          json:"createdBy"`
-	CreatedAt         time.Time  `db:"created_at"          json:"createdAt"`
-	UpdatedAt         time.Time  `db:"updated_at"          json:"updatedAt"`
-	ArchivedAt        *time.Time `db:"archived_at"         json:"archivedAt,omitempty"`
-	AssignedMemberIDs []string   `db:"-"                   json:"assignedMemberIds"`
-	TagIDs            []string   `db:"-"                   json:"tagIds"`
-}
-
-// TeamMemberWithUser joins a TeamMember row with its associated User so
-// callers receive display names and emails in a single query. Participants
-// (no user account) have empty email and avatar; their display_name comes
-// from team_members.display_name via COALESCE in the query.
-type TeamMemberWithUser struct {
-	TeamMember
-	Email       string  `db:"email"        json:"email"`
-	DisplayName string  `db:"display_name" json:"displayName"`
-	AvatarURL   *string `db:"avatar_url"   json:"avatarUrl,omitempty"`
-}
-
-// User is an authenticated account. PasswordHash is omitted from JSON
-// to avoid leaking it through any handler that returns a User.
-// ArchivedAt is non-nil when the account is inactivated; login is rejected
-// for archived users. Color and Icon are user-level identity fields (migration
-// 010); they propagate to team_members rows for the user when changed.
-type User struct {
-	ID           string     `db:"id"             json:"id"`
-	Email        string     `db:"email"          json:"email"`
-	PasswordHash string     `db:"password_hash"  json:"-"`
-	DisplayName  string     `db:"display_name"   json:"displayName"`
-	AvatarURL    *string    `db:"avatar_url"     json:"avatarUrl,omitempty"`
-	Color        *string    `db:"color"          json:"color,omitempty"`
-	Icon         *string    `db:"icon"           json:"icon,omitempty"`
-	IsSuperadmin bool       `db:"is_superadmin"  json:"isSuperadmin"`
-	CreatedAt    time.Time  `db:"created_at"     json:"createdAt"`
-	UpdatedAt    time.Time  `db:"updated_at"     json:"updatedAt"`
-	ArchivedAt   *time.Time `db:"archived_at"    json:"archivedAt,omitempty"`
-}
-
-// Team is a workspace that groups users and their scheduled work. Color and
-// Icon are identity fields added in migration 006; both are nullable until
-// explicitly set by an admin. Description, Notes, and ArchivedAt are added in
-// migration 008; ArchivedAt is non-nil when the team is soft-deleted.
-// InviteLinkToken is a stable, reusable token added in migration 009; when
-// non-nil it can be used by anyone to join the team during registration.
-type Team struct {
-	ID              string     `db:"id"                  json:"id"`
-	Name            string     `db:"name"                json:"name"`
-	Slug            string     `db:"slug"                json:"slug"`
-	Description     *string    `db:"description"         json:"description,omitempty"`
-	Notes           *string    `db:"notes"               json:"notes,omitempty"`
-	Color           *string    `db:"color"               json:"color,omitempty"`
-	Icon            *string    `db:"icon"                json:"icon,omitempty"`
-	InviteLinkToken *string    `db:"invite_link_token"   json:"inviteLinkToken,omitempty"`
-	CreatedAt       time.Time  `db:"created_at"          json:"createdAt"`
-	UpdatedAt       time.Time  `db:"updated_at"          json:"updatedAt"`
-	ArchivedAt      *time.Time `db:"archived_at"         json:"archivedAt,omitempty"`
-}
-
-// TeamMember is the join row that puts a person in a Team. UserID is nil
-// for login-less Participants; DisplayName is populated for them instead.
-// Role is the team-level role: "admin" or "member". Color and Icon are
-// identity fields (migration 006); Color stores a color ID (e.g. "teal").
-// ArchivedAt is non-nil when the member is inactivated (migration 009);
-// inactivated members lose access but their data and assignments are preserved.
-type TeamMember struct {
-	ID          string     `db:"id"           json:"id"`
-	TeamID      string     `db:"team_id"      json:"teamId"`
-	UserID      *string    `db:"user_id"      json:"userId,omitempty"`
-	DisplayName *string    `db:"display_name" json:"displayName,omitempty"`
-	Role        string     `db:"role"         json:"role"`
-	Color       *string    `db:"color"        json:"color,omitempty"`
-	Icon        *string    `db:"icon"         json:"icon,omitempty"`
-	JoinedAt    time.Time  `db:"joined_at"    json:"joinedAt"`
-	ArchivedAt  *time.Time `db:"archived_at"  json:"archivedAt,omitempty"`
-}
-
-// MemberStats holds computed activity and timeline counts for a member.
-// All counts are date-relative and scoped to activities the member is assigned to.
-type MemberStats struct {
-	ActiveTimelines    int `json:"activeTimelines"`
-	ArchivedTimelines  int `json:"archivedTimelines"`
-	PastDue            int `json:"pastDue"`
-	Running            int `json:"running"`
-	Upcoming           int `json:"upcoming"`
-	Unscheduled        int `json:"unscheduled"`
-	ArchivedActivities int `json:"archivedActivities"`
-}
-
-// MemberDetail combines a TeamMemberWithUser with computed stats and the
-// member's full list of team memberships. Returned by GET /teams/:id/members/:memberId.
-// UserArchivedAt reflects users.archived_at (account-level deactivation), distinct
-// from ArchivedAt which is team_members.archived_at (membership-level inactivation).
-type MemberDetail struct {
-	TeamMemberWithUser
-	Stats          MemberStats          `json:"stats"`
-	Teams          []TeamMemberWithUser `json:"teams"`
-	Deletable      bool                 `json:"deletable"`
-	UserArchivedAt *time.Time           `json:"userArchivedAt,omitempty"`
-}
-
-// Timeline is a named date range over a team's events. It is not a data
-// container — it is a view over a team's events for a given date window.
-// Access is governed by timeline_access + team role; share_token allows
-// unauthenticated read access via a stable public URL. Color and Icon are
-// identity fields (migration 006). Description and Notes are free-text fields
-// added in migration 013.
-type Timeline struct {
-	ID          string     `db:"id"          json:"id"`
-	TeamID      string     `db:"team_id"     json:"teamId"`
-	Name        string     `db:"name"        json:"name"`
-	Description *string    `db:"description" json:"description,omitempty"`
-	Notes       *string    `db:"notes"       json:"notes,omitempty"`
-	StartDate   string     `db:"start_date"  json:"startDate"`
-	EndDate     string     `db:"end_date"    json:"endDate"`
-	Color       *string    `db:"color"       json:"color,omitempty"`
-	Icon        *string    `db:"icon"        json:"icon,omitempty"`
-	ShareToken  string     `db:"share_token" json:"shareToken"`
-	IcalToken   string     `db:"ical_token"  json:"icalToken"`
-	CreatedBy   string     `db:"created_by"  json:"createdBy"`
-	CreatedAt   time.Time  `db:"created_at"  json:"createdAt"`
-	UpdatedAt   time.Time  `db:"updated_at"  json:"updatedAt"`
-	ArchivedAt  *time.Time `db:"archived_at" json:"archivedAt,omitempty"`
-}
-
-// SavedFilter is a user-owned, team-scoped named filter spec. Definition is
-// an opaque JSON string interpreted by the client; the server treats it as
-// arbitrary text and only validates that it parses as JSON.
-type SavedFilter struct {
-	ID           string    `db:"id"             json:"id"`
-	TeamID       string    `db:"team_id"        json:"teamId"`
-	UserID       string    `db:"user_id"        json:"userId"`
-	Name         string    `db:"name"           json:"name"`
-	Definition   string    `db:"definition"     json:"definition"`
-	IsTeamFilter bool      `db:"is_team_filter" json:"isTeamFilter"`
-	CreatedAt    time.Time `db:"created_at"     json:"createdAt"`
-	UpdatedAt    time.Time `db:"updated_at"     json:"updatedAt"`
-}
-
-// UserPreference stores a single key/value setting for a user, optionally
-// scoped to a timeline. TimelineID is “” for global preferences so the
-// UNIQUE(user_id, timeline_id, key) DB constraint works without NULL handling.
-// Serialised JSON omits TimelineID when empty so callers see null for global prefs.
-type UserPreference struct {
-	ID         string    `db:"id"          json:"id"`
-	UserID     string    `db:"user_id"     json:"userId"`
-	TimelineID string    `db:"timeline_id" json:"timelineId,omitempty"`
-	Key        string    `db:"key"         json:"key"`
-	Value      string    `db:"value"       json:"value"`
-	UpdatedAt  time.Time `db:"updated_at"  json:"updatedAt"`
-}
-
-// APIToken is a long-lived Bearer credential a user issues for programmatic
-// access. token_hash stores SHA-256(rawToken); the raw value is shown to the
-// caller only once on creation. RevokedAt is non-nil when the token has been
-// revoked; revoked tokens are not deleted so listing remains stable.
-type APIToken struct {
-	ID         string     `db:"id"           json:"id"`
-	UserID     string     `db:"user_id"      json:"userId"`
-	Name       string     `db:"name"         json:"name"`
-	TokenHash  string     `db:"token_hash"   json:"-"`
-	Scope      string     `db:"scope"        json:"scope"`
-	LastUsedAt *time.Time `db:"last_used_at" json:"lastUsedAt,omitempty"`
-	CreatedAt  time.Time  `db:"created_at"   json:"createdAt"`
-	RevokedAt  *time.Time `db:"revoked_at"   json:"revokedAt,omitempty"`
-}
-
-// InstanceSetting stores a single instance-level configuration value.
-// SMTP config and defaults live here. The value column is plain text;
-// the mailer package handles decryption of the SMTP password field.
-type InstanceSetting struct {
-	Key       string    `db:"key"        json:"key"`
-	Value     string    `db:"value"      json:"value"`
-	UpdatedAt time.Time `db:"updated_at" json:"updatedAt"`
-}
-
-// PasswordResetToken is a single-use token for the forgot-password flow.
-// TokenHash stores SHA-256 of the raw token; the raw value is sent by email
-// and never stored. UsedAt is set when the token is consumed.
-type PasswordResetToken struct {
-	ID        string     `db:"id"         json:"id"`
-	UserID    string     `db:"user_id"    json:"userId"`
-	TokenHash string     `db:"token_hash" json:"-"`
-	ExpiresAt time.Time  `db:"expires_at" json:"expiresAt"`
-	UsedAt    *time.Time `db:"used_at"    json:"usedAt,omitempty"`
-	CreatedAt time.Time  `db:"created_at" json:"createdAt"`
-}
-
-// AdminUserRow is a flat view of a user for the admin users list. It includes
-// the user's fields plus the count of active team memberships.
-type AdminUserRow struct {
-	User
-	TeamCount int `db:"team_count" json:"teamCount"`
-}
-
-// Valid Share.Kind and Share.Scope values.
-const (
-	ShareKindView      = "view"
-	ShareKindICS       = "ics"
-	ShareScopeTimeline = "timeline"
-	ShareScopeMember   = "member"
-)
-
-// Share is a public read-only link scoped to one timeline. Kind discriminates
-// the two flavors (migration 022): "view" shares freeze one view configuration
-// and are served as a web snapshot at /s/{token}; "ics" shares are live
-// subscribable calendar feeds served at GET /shares/{token}.ics. ICS shares
-// carry Scope ("timeline" | "member") + MemberID and never a view config,
-// filter, or password — the unguessable token is their only secret.
-// PasswordHash is set only when a view share requires a password (Phase 13.2);
-// ExpiresAt and RevokedAt support lifecycle management (Phase 13.4/13.5).
-type Share struct {
-	ID           string     `db:"id"             json:"id"`
-	TimelineID   string     `db:"timeline_id"    json:"timelineId"`
-	Token        string     `db:"token"          json:"token"`
-	Kind         string     `db:"kind"           json:"kind"`
-	Scope        *string    `db:"scope"          json:"scope,omitempty"`
-	MemberID     *string    `db:"member_id"      json:"memberId,omitempty"`
-	Name         *string    `db:"name"           json:"name,omitempty"`
-	Description  *string    `db:"description"    json:"description,omitempty"`
-	ViewType     string     `db:"view_type"      json:"viewType"`
-	ViewConfig   string     `db:"view_config"    json:"viewConfig"`
-	PasswordHash *string    `db:"password_hash"  json:"-"`
-	ExpiresAt    *time.Time `db:"expires_at"     json:"expiresAt,omitempty"`
-	CreatedBy    string     `db:"created_by"     json:"createdBy"`
-	CreatedAt    time.Time  `db:"created_at"     json:"createdAt"`
-	LastViewedAt *time.Time `db:"last_viewed_at" json:"lastViewedAt,omitempty"`
-	ViewCount    int        `db:"view_count"     json:"viewCount"`
-	RevokedAt    *time.Time `db:"revoked_at"     json:"revokedAt,omitempty"`
-	// Protected is a derived, read-only flag (password_hash is never serialized).
-	// It is populated by the repo read methods so clients can show a lock badge
-	// without ever seeing the hash.
-	Protected bool `db:"-" json:"protected"`
-}
-
-// PublicMember is the safe projection of a team member for public share
-// responses. It exposes only display fields — never email, role, or user_id.
-type PublicMember struct {
-	ID          string  `json:"id"`
-	DisplayName string  `json:"displayName"`
-	Color       *string `json:"color,omitempty"`
-	Icon        *string `json:"icon,omitempty"`
-}
-
-// PublicActivity is the safe projection of an activity for public share
-// responses. It includes standard display fields but omits notes (unless
-// explicitly included for List shares with Notes enabled), caldav/google
-// identifiers, and any internal fields.
-type PublicActivity struct {
-	ID                string    `json:"id"`
-	Title             string    `json:"title"`
-	Description       *string   `json:"description,omitempty"`
-	Notes             *string   `json:"notes,omitempty"`
-	Icon              *string   `json:"icon,omitempty"`
-	Color             *string   `json:"color,omitempty"`
-	StartAt           time.Time `json:"startAt"`
-	EndAt             time.Time `json:"endAt"`
-	AllDay            bool      `json:"allDay"`
-	StatusID          *string   `json:"statusId,omitempty"`
-	ParentActivityID  *string   `json:"parentActivityId,omitempty"`
-	PercentComplete   *int      `json:"percentComplete,omitempty"`
-	AssignedMemberIDs []string  `json:"assignedMemberIds"`
-	TagIDs            []string  `json:"tagIds"`
-}
-
-// PublicTimeline is the safe timeline projection for share responses.
-type PublicTimeline struct {
-	ID        string  `json:"id"`
-	Name      string  `json:"name"`
-	Color     *string `json:"color,omitempty"`
-	Icon      *string `json:"icon,omitempty"`
-	StartDate string  `json:"startDate"`
-	EndDate   string  `json:"endDate"`
-}
-
-// PublicShare is the safe projection of a share row for the unauthenticated
-// gateway response. It omits operational telemetry (view_count, last_viewed_at)
-// and internal fields (created_by, revoked_at) that must not reach anonymous callers.
-type PublicShare struct {
-	ID         string     `json:"id"`
-	TimelineID string     `json:"timelineId"`
-	Token      string     `json:"token"`
-	Name       *string    `json:"name,omitempty"`
-	ViewType   string     `json:"viewType"`
-	ViewConfig string     `json:"viewConfig"`
-	CreatedAt  time.Time  `json:"createdAt"`
-	ExpiresAt  *time.Time `json:"expiresAt,omitempty"`
-}
-
-// ShareProjection is the full aggregate returned by GET /shares/{token}.
-// It contains all data the public viewer needs to render the configured view.
-type ShareProjection struct {
-	Share      PublicShare      `json:"share"`
-	Timeline   PublicTimeline   `json:"timeline"`
-	TeamName   string           `json:"teamName"`
-	Members    []PublicMember   `json:"members"`
-	Statuses   []Status         `json:"statuses"`
-	Tags       []Tag            `json:"tags"`
-	Activities []PublicActivity `json:"activities"`
-}
-
-// RevokeUserResult summarizes the outcome of POST /users/:id/revoke.
-// The three counters let the caller show a meaningful summary in the UI.
-type RevokeUserResult struct {
-	AccountDeactivated     bool `json:"accountDeactivated"`
-	MembershipsInactivated int  `json:"membershipsInactivated"`
-	MembershipsRemoved     int  `json:"membershipsRemoved"`
-}
-
-// StatusTemplate is a reusable named preset of statuses owned by a team.
-// When a timeline is created the team's chosen template's items are copied
-// into live Status rows for that timeline.
-type StatusTemplate struct {
-	ID          string    `db:"id"          json:"id"`
-	TeamID      string    `db:"team_id"     json:"teamId"`
-	Name        string    `db:"name"        json:"name"`
-	Description *string   `db:"description" json:"description,omitempty"`
-	Position    int       `db:"position"    json:"position"`
-	CreatedBy   string    `db:"created_by"  json:"createdBy"`
-	CreatedAt   time.Time `db:"created_at"  json:"createdAt"`
-	UpdatedAt   time.Time `db:"updated_at"  json:"updatedAt"`
-	// Items is populated by the repository when listing templates.
-	Items []StatusTemplateItem `db:"-" json:"items"`
-}
-
-// StatusTemplateItem is one status value within a StatusTemplate.
-type StatusTemplateItem struct {
-	ID         string  `db:"id"          json:"id"`
-	TemplateID string  `db:"template_id" json:"templateId"`
-	Name       string  `db:"name"        json:"name"`
-	Color      string  `db:"color"       json:"color"`
-	Icon       *string `db:"icon"        json:"icon,omitempty"`
-	IsClosed   bool    `db:"is_closed"   json:"isClosed"`
-	Position   int     `db:"position"    json:"position"`
-}
-
-// Status is a live status value on a specific timeline. Rows are copied from a
-// StatusTemplate's items when the timeline is created and then evolve independently.
-type Status struct {
-	ID         string    `db:"id"          json:"id"`
-	TimelineID string    `db:"timeline_id" json:"timelineId"`
-	Name       string    `db:"name"        json:"name"`
-	Color      string    `db:"color"       json:"color"`
-	Icon       *string   `db:"icon"        json:"icon,omitempty"`
-	IsClosed   bool      `db:"is_closed"   json:"isClosed"`
-	Position   int       `db:"position"    json:"position"`
-	CreatedAt  time.Time `db:"created_at"  json:"createdAt"`
-	UpdatedAt  time.Time `db:"updated_at"  json:"updatedAt"`
-}
-
-// TimelineAccessEntry is a single timeline access grant joined with the team
-// member's display info. Returned by GET /teams/:id/timelines/:timelineId/access.
-type TimelineAccessEntry struct {
-	TimelineID   string  `db:"timeline_id"    json:"timelineId"`
-	TeamMemberID string  `db:"team_member_id" json:"teamMemberId"`
-	Role         string  `db:"role"           json:"role"`
-	DisplayName  string  `db:"display_name"   json:"displayName"`
-	Email        string  `db:"email"          json:"email"`
-	Color        *string `db:"color"          json:"color,omitempty"`
-	Icon         *string `db:"icon"           json:"icon,omitempty"`
-	UserID       *string `db:"user_id"        json:"userId,omitempty"`
-}
-
-// Tag is a team-scoped label that can be applied to activities. Tags are
-// normalized: a team_id+name pair is unique, enabling rename-all and
-// name-based filter matching across timelines.
-type Tag struct {
-	ID        string    `db:"id"         json:"id"`
-	TeamID    string    `db:"team_id"    json:"teamId"`
-	Name      string    `db:"name"       json:"name"`
-	Color     *string   `db:"color"      json:"color,omitempty"`
-	CreatedBy string    `db:"created_by" json:"createdBy"`
-	CreatedAt time.Time `db:"created_at" json:"createdAt"`
-}
-
-// Invite is a single-use token that grants an email address the right to
-// join a Team. AcceptedAt is non-nil once consumed; expired or accepted
-// invites are rejected by the registration handler.
-type Invite struct {
-	ID         string     `db:"id"          json:"id"`
-	TeamID     string     `db:"team_id"     json:"teamId"`
-	Email      string     `db:"email"       json:"email"`
-	Token      string     `db:"token"       json:"token"`
-	Role       string     `db:"role"        json:"role"`
-	InvitedBy  string     `db:"invited_by"  json:"invitedBy"`
-	ExpiresAt  time.Time  `db:"expires_at"  json:"expiresAt"`
-	AcceptedAt *time.Time `db:"accepted_at" json:"acceptedAt,omitempty"`
-	CreatedAt  time.Time  `db:"created_at"  json:"createdAt"`
-}
-````
-
 ## File: packages/web/src/components/gantt/GanttView.tsx
 ````typescript
 /**
@@ -49669,6 +49303,436 @@ export default function GanttView({
       />
     </div>
   );
+}
+````
+
+## File: packages/api/internal/models/models.go
+````go
+// Package models holds the domain types shared across the API, db,
+// and event-bus packages. These types are persisted directly via sqlx
+// (db tags) and serialised on the wire (json tags); changing tags is a
+// schema change.
+package models
+
+import "time"
+
+// Activity is a scheduled item of work belonging to a Timeline. ArchivedAt is
+// non-nil when the activity is soft-deleted; list endpoints exclude archived
+// activities by default.
+//
+// AssignedMemberIDs is not stored on the activities table; it is populated by
+// the repository from activity_assignments after every list query.
+//
+// GoogleEventID and CaldavUID are preserved as-is — they identify the
+// corresponding records in external calendar systems (VEVENT identifiers).
+type Activity struct {
+	ID                string     `db:"id"                  json:"id"`
+	TimelineID        string     `db:"timeline_id"         json:"timelineId"`
+	Title             string     `db:"title"               json:"title"`
+	Description       *string    `db:"description"         json:"description,omitempty"`
+	Notes             *string    `db:"notes"               json:"notes,omitempty"`
+	Icon              *string    `db:"icon"                json:"icon,omitempty"`
+	Color             *string    `db:"color"               json:"color,omitempty"`
+	StartAt           time.Time  `db:"start_at"            json:"startAt"`
+	EndAt             time.Time  `db:"end_at"              json:"endAt"`
+	AllDay            bool       `db:"all_day"             json:"allDay"`
+	StatusID          *string    `db:"status_id"           json:"statusId,omitempty"`
+	ParentActivityID  *string    `db:"parent_activity_id"  json:"parentActivityId,omitempty"`
+	PercentComplete   *int       `db:"percent_complete"    json:"percentComplete,omitempty"`
+	Location          *string    `db:"location"            json:"location,omitempty"`
+	URL               *string    `db:"url"                 json:"url,omitempty"`
+	Rrule             *string    `db:"rrule"               json:"rrule,omitempty"`
+	CaldavUID         *string    `db:"caldav_uid"          json:"caldavUid,omitempty"`
+	GoogleEventID     *string    `db:"google_event_id"     json:"googleEventId,omitempty"`
+	CreatedBy         string     `db:"created_by"          json:"createdBy"`
+	CreatedAt         time.Time  `db:"created_at"          json:"createdAt"`
+	UpdatedAt         time.Time  `db:"updated_at"          json:"updatedAt"`
+	ArchivedAt        *time.Time `db:"archived_at"         json:"archivedAt,omitempty"`
+	AssignedMemberIDs []string   `db:"-"                   json:"assignedMemberIds"`
+	TagIDs            []string   `db:"-"                   json:"tagIds"`
+}
+
+// TeamMemberWithUser joins a TeamMember row with its associated User so
+// callers receive display names and emails in a single query. Participants
+// (no user account) have empty email and avatar; their display_name comes
+// from team_members.display_name via COALESCE in the query.
+type TeamMemberWithUser struct {
+	TeamMember
+	Email       string  `db:"email"        json:"email"`
+	DisplayName string  `db:"display_name" json:"displayName"`
+	AvatarURL   *string `db:"avatar_url"   json:"avatarUrl,omitempty"`
+}
+
+// User is an authenticated account. PasswordHash is omitted from JSON
+// to avoid leaking it through any handler that returns a User.
+// ArchivedAt is non-nil when the account is inactivated; login is rejected
+// for archived users. Color and Icon are user-level identity fields (migration
+// 010); they propagate to team_members rows for the user when changed.
+type User struct {
+	ID           string     `db:"id"             json:"id"`
+	Email        string     `db:"email"          json:"email"`
+	PasswordHash string     `db:"password_hash"  json:"-"`
+	DisplayName  string     `db:"display_name"   json:"displayName"`
+	AvatarURL    *string    `db:"avatar_url"     json:"avatarUrl,omitempty"`
+	Color        *string    `db:"color"          json:"color,omitempty"`
+	Icon         *string    `db:"icon"           json:"icon,omitempty"`
+	IsSuperadmin bool       `db:"is_superadmin"  json:"isSuperadmin"`
+	CreatedAt    time.Time  `db:"created_at"     json:"createdAt"`
+	UpdatedAt    time.Time  `db:"updated_at"     json:"updatedAt"`
+	ArchivedAt   *time.Time `db:"archived_at"    json:"archivedAt,omitempty"`
+}
+
+// Team is a workspace that groups users and their scheduled work. Color and
+// Icon are identity fields added in migration 006; both are nullable until
+// explicitly set by an admin. Description, Notes, and ArchivedAt are added in
+// migration 008; ArchivedAt is non-nil when the team is soft-deleted.
+// InviteLinkToken is a stable, reusable token added in migration 009; when
+// non-nil it can be used by anyone to join the team during registration.
+type Team struct {
+	ID              string     `db:"id"                  json:"id"`
+	Name            string     `db:"name"                json:"name"`
+	Slug            string     `db:"slug"                json:"slug"`
+	Description     *string    `db:"description"         json:"description,omitempty"`
+	Notes           *string    `db:"notes"               json:"notes,omitempty"`
+	Color           *string    `db:"color"               json:"color,omitempty"`
+	Icon            *string    `db:"icon"                json:"icon,omitempty"`
+	InviteLinkToken *string    `db:"invite_link_token"   json:"inviteLinkToken,omitempty"`
+	CreatedAt       time.Time  `db:"created_at"          json:"createdAt"`
+	UpdatedAt       time.Time  `db:"updated_at"          json:"updatedAt"`
+	ArchivedAt      *time.Time `db:"archived_at"         json:"archivedAt,omitempty"`
+}
+
+// TeamMember is the join row that puts a person in a Team. UserID is nil
+// for login-less Participants; DisplayName is populated for them instead.
+// Role is the team-level role: "admin" or "member". Color and Icon are
+// identity fields (migration 006); Color stores a color ID (e.g. "teal").
+// ArchivedAt is non-nil when the member is inactivated (migration 009);
+// inactivated members lose access but their data and assignments are preserved.
+type TeamMember struct {
+	ID          string     `db:"id"           json:"id"`
+	TeamID      string     `db:"team_id"      json:"teamId"`
+	UserID      *string    `db:"user_id"      json:"userId,omitempty"`
+	DisplayName *string    `db:"display_name" json:"displayName,omitempty"`
+	Role        string     `db:"role"         json:"role"`
+	Color       *string    `db:"color"        json:"color,omitempty"`
+	Icon        *string    `db:"icon"         json:"icon,omitempty"`
+	JoinedAt    time.Time  `db:"joined_at"    json:"joinedAt"`
+	ArchivedAt  *time.Time `db:"archived_at"  json:"archivedAt,omitempty"`
+}
+
+// MemberStats holds computed activity and timeline counts for a member.
+// All counts are date-relative and scoped to activities the member is assigned to.
+type MemberStats struct {
+	ActiveTimelines    int `json:"activeTimelines"`
+	ArchivedTimelines  int `json:"archivedTimelines"`
+	PastDue            int `json:"pastDue"`
+	Running            int `json:"running"`
+	Upcoming           int `json:"upcoming"`
+	Unscheduled        int `json:"unscheduled"`
+	ArchivedActivities int `json:"archivedActivities"`
+}
+
+// MemberDetail combines a TeamMemberWithUser with computed stats and the
+// member's full list of team memberships. Returned by GET /teams/:id/members/:memberId.
+// UserArchivedAt reflects users.archived_at (account-level deactivation), distinct
+// from ArchivedAt which is team_members.archived_at (membership-level inactivation).
+type MemberDetail struct {
+	TeamMemberWithUser
+	Stats          MemberStats          `json:"stats"`
+	Teams          []TeamMemberWithUser `json:"teams"`
+	Deletable      bool                 `json:"deletable"`
+	UserArchivedAt *time.Time           `json:"userArchivedAt,omitempty"`
+}
+
+// Timeline is a named date range over a team's events. It is not a data
+// container — it is a view over a team's events for a given date window.
+// Access is governed by timeline_access + team role; share_token allows
+// unauthenticated read access via a stable public URL. Color and Icon are
+// identity fields (migration 006). Description and Notes are free-text fields
+// added in migration 013.
+type Timeline struct {
+	ID          string     `db:"id"          json:"id"`
+	TeamID      string     `db:"team_id"     json:"teamId"`
+	Name        string     `db:"name"        json:"name"`
+	Description *string    `db:"description" json:"description,omitempty"`
+	Notes       *string    `db:"notes"       json:"notes,omitempty"`
+	StartDate   string     `db:"start_date"  json:"startDate"`
+	EndDate     string     `db:"end_date"    json:"endDate"`
+	Color       *string    `db:"color"       json:"color,omitempty"`
+	Icon        *string    `db:"icon"        json:"icon,omitempty"`
+	ShareToken  string     `db:"share_token" json:"shareToken"`
+	IcalToken   string     `db:"ical_token"  json:"icalToken"`
+	CreatedBy   string     `db:"created_by"  json:"createdBy"`
+	CreatedAt   time.Time  `db:"created_at"  json:"createdAt"`
+	UpdatedAt   time.Time  `db:"updated_at"  json:"updatedAt"`
+	ArchivedAt  *time.Time `db:"archived_at" json:"archivedAt,omitempty"`
+}
+
+// SavedFilter is a user-owned, team-scoped named filter spec. Definition is
+// an opaque JSON string interpreted by the client; the server treats it as
+// arbitrary text and only validates that it parses as JSON.
+type SavedFilter struct {
+	ID           string    `db:"id"             json:"id"`
+	TeamID       string    `db:"team_id"        json:"teamId"`
+	UserID       string    `db:"user_id"        json:"userId"`
+	Name         string    `db:"name"           json:"name"`
+	Definition   string    `db:"definition"     json:"definition"`
+	IsTeamFilter bool      `db:"is_team_filter" json:"isTeamFilter"`
+	CreatedAt    time.Time `db:"created_at"     json:"createdAt"`
+	UpdatedAt    time.Time `db:"updated_at"     json:"updatedAt"`
+}
+
+// UserPreference stores a single key/value setting for a user, optionally
+// scoped to a timeline. TimelineID is “” for global preferences so the
+// UNIQUE(user_id, timeline_id, key) DB constraint works without NULL handling.
+// Serialised JSON omits TimelineID when empty so callers see null for global prefs.
+type UserPreference struct {
+	ID         string    `db:"id"          json:"id"`
+	UserID     string    `db:"user_id"     json:"userId"`
+	TimelineID string    `db:"timeline_id" json:"timelineId,omitempty"`
+	Key        string    `db:"key"         json:"key"`
+	Value      string    `db:"value"       json:"value"`
+	UpdatedAt  time.Time `db:"updated_at"  json:"updatedAt"`
+}
+
+// APIToken is a long-lived Bearer credential a user issues for programmatic
+// access. token_hash stores SHA-256(rawToken); the raw value is shown to the
+// caller only once on creation. RevokedAt is non-nil when the token has been
+// revoked; revoked tokens are not deleted so listing remains stable.
+type APIToken struct {
+	ID         string     `db:"id"           json:"id"`
+	UserID     string     `db:"user_id"      json:"userId"`
+	Name       string     `db:"name"         json:"name"`
+	TokenHash  string     `db:"token_hash"   json:"-"`
+	Scope      string     `db:"scope"        json:"scope"`
+	LastUsedAt *time.Time `db:"last_used_at" json:"lastUsedAt,omitempty"`
+	CreatedAt  time.Time  `db:"created_at"   json:"createdAt"`
+	RevokedAt  *time.Time `db:"revoked_at"   json:"revokedAt,omitempty"`
+}
+
+// InstanceSetting stores a single instance-level configuration value.
+// SMTP config and defaults live here. The value column is plain text;
+// the mailer package handles decryption of the SMTP password field.
+type InstanceSetting struct {
+	Key       string    `db:"key"        json:"key"`
+	Value     string    `db:"value"      json:"value"`
+	UpdatedAt time.Time `db:"updated_at" json:"updatedAt"`
+}
+
+// PasswordResetToken is a single-use token for the forgot-password flow.
+// TokenHash stores SHA-256 of the raw token; the raw value is sent by email
+// and never stored. UsedAt is set when the token is consumed.
+type PasswordResetToken struct {
+	ID        string     `db:"id"         json:"id"`
+	UserID    string     `db:"user_id"    json:"userId"`
+	TokenHash string     `db:"token_hash" json:"-"`
+	ExpiresAt time.Time  `db:"expires_at" json:"expiresAt"`
+	UsedAt    *time.Time `db:"used_at"    json:"usedAt,omitempty"`
+	CreatedAt time.Time  `db:"created_at" json:"createdAt"`
+}
+
+// AdminUserRow is a flat view of a user for the admin users list. It includes
+// the user's fields plus the count of active team memberships.
+type AdminUserRow struct {
+	User
+	TeamCount int `db:"team_count" json:"teamCount"`
+}
+
+// Valid Share.Kind and Share.Scope values.
+const (
+	ShareKindView      = "view"
+	ShareKindICS       = "ics"
+	ShareScopeTimeline = "timeline"
+	ShareScopeMember   = "member"
+)
+
+// Share is a public read-only link scoped to one timeline. Kind discriminates
+// the two flavors (migration 022): "view" shares freeze one view configuration
+// and are served as a web snapshot at /s/{token}; "ics" shares are live
+// subscribable calendar feeds served at GET /shares/{token}.ics. ICS shares
+// carry Scope ("timeline" | "member") + MemberID and never a view config,
+// filter, or password — the unguessable token is their only secret.
+// PasswordHash is set only when a view share requires a password (Phase 13.2);
+// ExpiresAt and RevokedAt support lifecycle management (Phase 13.4/13.5).
+type Share struct {
+	ID           string     `db:"id"             json:"id"`
+	TimelineID   string     `db:"timeline_id"    json:"timelineId"`
+	Token        string     `db:"token"          json:"token"`
+	Kind         string     `db:"kind"           json:"kind"`
+	Scope        *string    `db:"scope"          json:"scope,omitempty"`
+	MemberID     *string    `db:"member_id"      json:"memberId,omitempty"`
+	Name         *string    `db:"name"           json:"name,omitempty"`
+	Description  *string    `db:"description"    json:"description,omitempty"`
+	ViewType     string     `db:"view_type"      json:"viewType"`
+	ViewConfig   string     `db:"view_config"    json:"viewConfig"`
+	PasswordHash *string    `db:"password_hash"  json:"-"`
+	ExpiresAt    *time.Time `db:"expires_at"     json:"expiresAt,omitempty"`
+	// CreatedBy is nil when the share was created by a superadmin who holds
+	// no team_members row in the timeline's team (migration 023).
+	CreatedBy    *string    `db:"created_by"     json:"createdBy,omitempty"`
+	CreatedAt    time.Time  `db:"created_at"     json:"createdAt"`
+	LastViewedAt *time.Time `db:"last_viewed_at" json:"lastViewedAt,omitempty"`
+	ViewCount    int        `db:"view_count"     json:"viewCount"`
+	RevokedAt    *time.Time `db:"revoked_at"     json:"revokedAt,omitempty"`
+	// Protected is a derived, read-only flag (password_hash is never serialized).
+	// It is populated by the repo read methods so clients can show a lock badge
+	// without ever seeing the hash.
+	Protected bool `db:"-" json:"protected"`
+}
+
+// PublicMember is the safe projection of a team member for public share
+// responses. It exposes only display fields — never email, role, or user_id.
+type PublicMember struct {
+	ID          string  `json:"id"`
+	DisplayName string  `json:"displayName"`
+	Color       *string `json:"color,omitempty"`
+	Icon        *string `json:"icon,omitempty"`
+}
+
+// PublicActivity is the safe projection of an activity for public share
+// responses. It includes standard display fields but omits notes (unless
+// explicitly included for List shares with Notes enabled), caldav/google
+// identifiers, and any internal fields.
+type PublicActivity struct {
+	ID                string    `json:"id"`
+	Title             string    `json:"title"`
+	Description       *string   `json:"description,omitempty"`
+	Notes             *string   `json:"notes,omitempty"`
+	Icon              *string   `json:"icon,omitempty"`
+	Color             *string   `json:"color,omitempty"`
+	StartAt           time.Time `json:"startAt"`
+	EndAt             time.Time `json:"endAt"`
+	AllDay            bool      `json:"allDay"`
+	StatusID          *string   `json:"statusId,omitempty"`
+	ParentActivityID  *string   `json:"parentActivityId,omitempty"`
+	PercentComplete   *int      `json:"percentComplete,omitempty"`
+	AssignedMemberIDs []string  `json:"assignedMemberIds"`
+	TagIDs            []string  `json:"tagIds"`
+}
+
+// PublicTimeline is the safe timeline projection for share responses.
+type PublicTimeline struct {
+	ID        string  `json:"id"`
+	Name      string  `json:"name"`
+	Color     *string `json:"color,omitempty"`
+	Icon      *string `json:"icon,omitempty"`
+	StartDate string  `json:"startDate"`
+	EndDate   string  `json:"endDate"`
+}
+
+// PublicShare is the safe projection of a share row for the unauthenticated
+// gateway response. It omits operational telemetry (view_count, last_viewed_at)
+// and internal fields (created_by, revoked_at) that must not reach anonymous callers.
+type PublicShare struct {
+	ID         string     `json:"id"`
+	TimelineID string     `json:"timelineId"`
+	Token      string     `json:"token"`
+	Name       *string    `json:"name,omitempty"`
+	ViewType   string     `json:"viewType"`
+	ViewConfig string     `json:"viewConfig"`
+	CreatedAt  time.Time  `json:"createdAt"`
+	ExpiresAt  *time.Time `json:"expiresAt,omitempty"`
+}
+
+// ShareProjection is the full aggregate returned by GET /shares/{token}.
+// It contains all data the public viewer needs to render the configured view.
+type ShareProjection struct {
+	Share      PublicShare      `json:"share"`
+	Timeline   PublicTimeline   `json:"timeline"`
+	TeamName   string           `json:"teamName"`
+	Members    []PublicMember   `json:"members"`
+	Statuses   []Status         `json:"statuses"`
+	Tags       []Tag            `json:"tags"`
+	Activities []PublicActivity `json:"activities"`
+}
+
+// RevokeUserResult summarizes the outcome of POST /users/:id/revoke.
+// The three counters let the caller show a meaningful summary in the UI.
+type RevokeUserResult struct {
+	AccountDeactivated     bool `json:"accountDeactivated"`
+	MembershipsInactivated int  `json:"membershipsInactivated"`
+	MembershipsRemoved     int  `json:"membershipsRemoved"`
+}
+
+// StatusTemplate is a reusable named preset of statuses owned by a team.
+// When a timeline is created the team's chosen template's items are copied
+// into live Status rows for that timeline.
+type StatusTemplate struct {
+	ID          string    `db:"id"          json:"id"`
+	TeamID      string    `db:"team_id"     json:"teamId"`
+	Name        string    `db:"name"        json:"name"`
+	Description *string   `db:"description" json:"description,omitempty"`
+	Position    int       `db:"position"    json:"position"`
+	CreatedBy   string    `db:"created_by"  json:"createdBy"`
+	CreatedAt   time.Time `db:"created_at"  json:"createdAt"`
+	UpdatedAt   time.Time `db:"updated_at"  json:"updatedAt"`
+	// Items is populated by the repository when listing templates.
+	Items []StatusTemplateItem `db:"-" json:"items"`
+}
+
+// StatusTemplateItem is one status value within a StatusTemplate.
+type StatusTemplateItem struct {
+	ID         string  `db:"id"          json:"id"`
+	TemplateID string  `db:"template_id" json:"templateId"`
+	Name       string  `db:"name"        json:"name"`
+	Color      string  `db:"color"       json:"color"`
+	Icon       *string `db:"icon"        json:"icon,omitempty"`
+	IsClosed   bool    `db:"is_closed"   json:"isClosed"`
+	Position   int     `db:"position"    json:"position"`
+}
+
+// Status is a live status value on a specific timeline. Rows are copied from a
+// StatusTemplate's items when the timeline is created and then evolve independently.
+type Status struct {
+	ID         string    `db:"id"          json:"id"`
+	TimelineID string    `db:"timeline_id" json:"timelineId"`
+	Name       string    `db:"name"        json:"name"`
+	Color      string    `db:"color"       json:"color"`
+	Icon       *string   `db:"icon"        json:"icon,omitempty"`
+	IsClosed   bool      `db:"is_closed"   json:"isClosed"`
+	Position   int       `db:"position"    json:"position"`
+	CreatedAt  time.Time `db:"created_at"  json:"createdAt"`
+	UpdatedAt  time.Time `db:"updated_at"  json:"updatedAt"`
+}
+
+// TimelineAccessEntry is a single timeline access grant joined with the team
+// member's display info. Returned by GET /teams/:id/timelines/:timelineId/access.
+type TimelineAccessEntry struct {
+	TimelineID   string  `db:"timeline_id"    json:"timelineId"`
+	TeamMemberID string  `db:"team_member_id" json:"teamMemberId"`
+	Role         string  `db:"role"           json:"role"`
+	DisplayName  string  `db:"display_name"   json:"displayName"`
+	Email        string  `db:"email"          json:"email"`
+	Color        *string `db:"color"          json:"color,omitempty"`
+	Icon         *string `db:"icon"           json:"icon,omitempty"`
+	UserID       *string `db:"user_id"        json:"userId,omitempty"`
+}
+
+// Tag is a team-scoped label that can be applied to activities. Tags are
+// normalized: a team_id+name pair is unique, enabling rename-all and
+// name-based filter matching across timelines.
+type Tag struct {
+	ID        string    `db:"id"         json:"id"`
+	TeamID    string    `db:"team_id"    json:"teamId"`
+	Name      string    `db:"name"       json:"name"`
+	Color     *string   `db:"color"      json:"color,omitempty"`
+	CreatedBy string    `db:"created_by" json:"createdBy"`
+	CreatedAt time.Time `db:"created_at" json:"createdAt"`
+}
+
+// Invite is a single-use token that grants an email address the right to
+// join a Team. AcceptedAt is non-nil once consumed; expired or accepted
+// invites are rejected by the registration handler.
+type Invite struct {
+	ID         string     `db:"id"          json:"id"`
+	TeamID     string     `db:"team_id"     json:"teamId"`
+	Email      string     `db:"email"       json:"email"`
+	Token      string     `db:"token"       json:"token"`
+	Role       string     `db:"role"        json:"role"`
+	InvitedBy  string     `db:"invited_by"  json:"invitedBy"`
+	ExpiresAt  time.Time  `db:"expires_at"  json:"expiresAt"`
+	AcceptedAt *time.Time `db:"accepted_at" json:"acceptedAt,omitempty"`
+	CreatedAt  time.Time  `db:"created_at"  json:"createdAt"`
 }
 ````
 
@@ -50467,7 +50531,7 @@ components:
 
     Share:
       type: object
-      required: [id, timelineId, token, kind, viewType, viewConfig, createdBy, createdAt, viewCount, protected]
+      required: [id, timelineId, token, kind, viewType, viewConfig, createdAt, viewCount, protected]
       properties:
         id:
           type: string
@@ -50514,7 +50578,10 @@ components:
             (never-exposed) password hash so clients can show a lock indicator.
         createdBy:
           type: string
-          description: Team member ID of the creator.
+          nullable: true
+          description: >
+            Team member ID of the creator. Null when the share was created by
+            a superadmin who is not a member of the timeline's team.
         createdAt:
           type: string
           format: date-time
@@ -53640,6 +53707,939 @@ paths:
           $ref: "#/components/responses/InternalError"
 ````
 
+## File: packages/web/src/pages/ShareViewPage.tsx
+````typescript
+/**
+ * ShareViewPage — public read-only view for a share link.
+ *
+ * Mounted at /s/:token outside ProtectedRoute. Fetches the ShareProjection
+ * from the public gateway, then renders the Gantt in interactive=false mode
+ * with the frozen view config (groupBy, sortBy, colorBy, granularity) applied.
+ * Theme is forced to light — useLayoutEffect runs synchronously before paint so
+ * it beats any dark-class applied from localStorage by useDarkMode.
+ */
+
+import { useMemo, useLayoutEffect, useEffect, useState, useCallback, useRef } from 'react'
+import { useParams } from 'react-router-dom'
+import { useShareProjection, useUnlockShare } from '@/hooks/useShares'
+import GanttGrid from '@/components/gantt/GanttGrid'
+import { buildRows, type RichActivity } from '@/components/gantt/GanttView'
+import {
+  buildListRows,
+  formatActivityDate,
+  formatTimestamp,
+  formatDuration,
+  COL_CATALOG,
+  type ListDisplayRow,
+  type ColMeta,
+} from '@/components/list/ListView'
+import type { ListGroupBy, ListSortBy, ListColorBy } from '@/components/list/ListToolbar'
+import KanbanBoard from '@/components/kanban/KanbanBoard'
+import {
+  buildColumns,
+  buildHierarchyMaps,
+  DEFAULT_CARD_FIELDS,
+  type KanbanCardField,
+  type KanbanGroupBy,
+  type KanbanSortBy,
+} from '@/components/kanban/kanbanColumns'
+import { resolveActivityColor } from '@/lib/activityColor'
+import { resolveColorHex } from '@/components/identity/identity-constants'
+import { MEMBER_COLORS, ACTIVITY_COLORS } from '@/types'
+import {
+  generateColumns,
+  positionInColumns,
+  todayColumnPosition,
+  autoFitGranularity,
+} from '@/components/gantt/granularity'
+import { ApiError } from '@/lib/api'
+import type { components } from '@draba/shared'
+import type { GroupBy, SortBy, ColorBy, TimeGranularity } from '@/components/gantt/GanttToolbar'
+import type { Member } from '@/types'
+import { AlertCircle, Loader2, KeyRound, Eye, EyeOff } from 'lucide-react'
+import { Badge } from '@/components/identity/Badge'
+
+type PublicActivity = components['schemas']['PublicActivity']
+type PublicMember = components['schemas']['PublicMember']
+type Status = components['schemas']['Status']
+type Tag = components['schemas']['Tag']
+type ApiActivity = components['schemas']['Activity']
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
+
+// ── View config parsing ───────────────────────────────────────────────────────
+
+interface ParsedViewConfig {
+  groupBy: GroupBy
+  sortBy: SortBy
+  colorBy: ColorBy
+  granularity: TimeGranularity | 'auto'
+}
+
+function parseViewConfig(raw: string): ParsedViewConfig {
+  try {
+    const c = JSON.parse(raw) as Partial<ParsedViewConfig>
+    return {
+      groupBy: (c.groupBy as GroupBy) ?? 'none',
+      sortBy: (c.sortBy as SortBy) ?? 'startDate',
+      colorBy: (c.colorBy as ColorBy) ?? 'activity',
+      granularity: c.granularity ?? 'auto',
+    }
+  } catch {
+    return { groupBy: 'none', sortBy: 'startDate', colorBy: 'activity', granularity: 'auto' }
+  }
+}
+
+interface ParsedListViewConfig {
+  groupBy: ListGroupBy
+  sortBy: ListSortBy
+  colorBy: ListColorBy
+  columns: { id: string; visible: boolean }[] | null
+}
+
+function parseListViewConfig(raw: string): ParsedListViewConfig {
+  try {
+    const c = JSON.parse(raw) as Partial<ParsedListViewConfig>
+    return {
+      groupBy: (c.groupBy as ListGroupBy) ?? 'none',
+      sortBy: (c.sortBy as ListSortBy) ?? 'startDate',
+      colorBy: (c.colorBy as ListColorBy) ?? 'activity',
+      columns: Array.isArray(c.columns) ? c.columns : null,
+    }
+  } catch {
+    return { groupBy: 'none', sortBy: 'startDate', colorBy: 'activity', columns: null }
+  }
+}
+
+interface ParsedKanbanViewConfig {
+  groupBy: KanbanGroupBy
+  sortBy: KanbanSortBy
+  colorBy: ColorBy
+  cardFields: KanbanCardField[]
+  showHierarchy: boolean
+  collapsedColumns: string[]
+}
+
+function parseKanbanViewConfig(raw: string): ParsedKanbanViewConfig {
+  try {
+    const c = JSON.parse(raw) as Partial<ParsedKanbanViewConfig>
+    return {
+      groupBy: (c.groupBy as KanbanGroupBy) ?? 'status',
+      sortBy: (c.sortBy as KanbanSortBy) ?? 'startDate',
+      colorBy: (c.colorBy as ColorBy) ?? 'activity',
+      cardFields: Array.isArray(c.cardFields) && c.cardFields.length > 0 ? c.cardFields as KanbanCardField[] : DEFAULT_CARD_FIELDS,
+      showHierarchy: c.showHierarchy ?? false,
+      collapsedColumns: Array.isArray(c.collapsedColumns) ? c.collapsedColumns as string[] : [],
+    }
+  } catch {
+    return { groupBy: 'status', sortBy: 'startDate', colorBy: 'activity', cardFields: DEFAULT_CARD_FIELDS, showHierarchy: false, collapsedColumns: [] }
+  }
+}
+
+// ── Adapters: projection types → full API shapes ─────────────────────────────
+//
+// The List and Kanban renderers are built around the full Activity / TeamMember
+// shapes (so they can be reused as-is from the authenticated app). The public
+// projection only carries the fields a share is allowed to expose, so these
+// adapters fill the remaining required-but-irrelevant fields with placeholder
+// defaults — mirroring the `optimisticActivity` precedent in ListView.
+
+function toApiActivity(a: PublicActivity, timelineId: string): ApiActivity {
+  return {
+    id: a.id,
+    timelineId,
+    title: a.title,
+    description: a.description ?? null,
+    notes: a.notes ?? null,
+    icon: a.icon ?? null,
+    color: a.color ?? null,
+    startAt: a.startAt,
+    endAt: a.endAt,
+    allDay: a.allDay,
+    statusId: a.statusId ?? null,
+    parentActivityId: a.parentActivityId ?? null,
+    percentComplete: a.percentComplete ?? null,
+    location: null,
+    url: null,
+    rrule: null,
+    caldavUid: null,
+    googleEventId: null,
+    createdBy: '',
+    createdAt: a.startAt,
+    updatedAt: a.startAt,
+    archivedAt: null,
+    assignedMemberIds: a.assignedMemberIds ?? [],
+    tagIds: a.tagIds ?? [],
+  }
+}
+
+function toTeamMemberWithUser(m: PublicMember): TeamMemberWithUser {
+  return {
+    id: m.id,
+    teamId: '',
+    userId: null,
+    role: 'member',
+    color: m.color ?? null,
+    icon: m.icon ?? null,
+    joinedAt: '',
+    archivedAt: null,
+    email: '',
+    displayName: m.displayName,
+    avatarUrl: null,
+  }
+}
+
+function sortListActivities(activities: ApiActivity[], sortBy: ListSortBy): ApiActivity[] {
+  const sorted = [...activities]
+  sorted.sort((a, b) => {
+    if (sortBy === 'startDate') return (a.startAt ?? '').localeCompare(b.startAt ?? '')
+    if (sortBy === 'endDate') return (a.endAt ?? '').localeCompare(b.endAt ?? '')
+    if (sortBy === 'title') return a.title.localeCompare(b.title)
+    if (sortBy === 'status') return (a.statusId ?? '').localeCompare(b.statusId ?? '')
+    if (sortBy === 'progress') return (b.percentComplete ?? 0) - (a.percentComplete ?? 0)
+    return 0
+  })
+  return sorted
+}
+
+// ── Data helpers ──────────────────────────────────────────────────────────────
+
+function initialsFrom(name: string): string {
+  return name.split(/\s+/).map(w => w[0] ?? '').slice(0, 2).join('').toUpperCase()
+}
+
+function toMember(m: PublicMember, index: number): Member {
+  return {
+    id: m.id,
+    name: m.displayName,
+    initials: initialsFrom(m.displayName),
+    color: resolveColorHex(m.color) || MEMBER_COLORS[index % MEMBER_COLORS.length],
+  }
+}
+
+// ── Public List table (read-only) ────────────────────────────────────────────
+//
+// ListView itself is a 2600-line data-fetching container with deep editing/
+// drag/multiselect entanglement — unsuitable for the bypass-the-container
+// pattern. Instead this lightweight renderer reuses ListView's pure helpers
+// (buildListRows, COL_CATALOG, date formatters) to mirror its visuals without
+// any interactivity: no clicks, editing, drag, context menus, or selection.
+
+interface PublicListTableProps {
+  rows: ListDisplayRow[]
+  visibleColumns: ColMeta[]
+  memberById: Map<string, PublicMember>
+  statusById: Map<string, Status>
+  tagById: Map<string, Tag>
+  activityTitleById: Map<string, string>
+}
+
+/**
+ * Drag handle on a column's right edge — lets the viewer resize columns to
+ * taste (a pure display preference; it never touches activity data, so it's
+ * fair game in a read-only viewer). Mirrors the visual idiom of ListView's
+ * SortableColHeader resize handle, minus the TanStack plumbing.
+ */
+function ColumnResizeHandle({ colId, width, onResize }: {
+  colId: string
+  width: number
+  onResize: (colId: string, width: number) => void
+}) {
+  const [isResizing, setIsResizing] = useState(false)
+  const dragStart = useRef<{ x: number; width: number } | null>(null)
+
+  const onMouseDown = (e: React.MouseEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    dragStart.current = { x: e.clientX, width }
+    setIsResizing(true)
+
+    const onMouseMove = (ev: MouseEvent) => {
+      if (!dragStart.current) return
+      const next = Math.max(40, dragStart.current.width + (ev.clientX - dragStart.current.x))
+      onResize(colId, next)
+    }
+    const onMouseUp = () => {
+      dragStart.current = null
+      setIsResizing(false)
+      window.removeEventListener('mousemove', onMouseMove)
+      window.removeEventListener('mouseup', onMouseUp)
+    }
+    window.addEventListener('mousemove', onMouseMove)
+    window.addEventListener('mouseup', onMouseUp)
+  }
+
+  return (
+    <div
+      onMouseDown={onMouseDown}
+      style={{
+        position: 'absolute', right: 0, top: 0, height: '100%', width: 4,
+        cursor: 'col-resize', background: isResizing ? 'var(--primary)' : 'transparent', zIndex: 1,
+      }}
+      onMouseEnter={e => { if (!isResizing) (e.currentTarget as HTMLElement).style.background = '#d1d5db' }}
+      onMouseLeave={e => { if (!isResizing) (e.currentTarget as HTMLElement).style.background = 'transparent' }}
+    />
+  )
+}
+
+export function PublicListTable({ rows, visibleColumns, memberById, statusById, tagById, activityTitleById }: PublicListTableProps) {
+  const [widths, setWidths] = useState<Record<string, number>>(
+    () => Object.fromEntries(visibleColumns.map(c => [c.id, c.defaultWidth])),
+  )
+
+  // Re-seed widths when the visible-column set changes (e.g. share swap).
+  useEffect(() => {
+    setWidths(prev => {
+      const next: Record<string, number> = {}
+      let changed = false
+      for (const c of visibleColumns) {
+        next[c.id] = prev[c.id] ?? c.defaultWidth
+        if (next[c.id] !== prev[c.id]) changed = true
+      }
+      if (Object.keys(prev).length !== Object.keys(next).length) changed = true
+      return changed ? next : prev
+    })
+  }, [visibleColumns])
+
+  const handleResize = useCallback((colId: string, width: number) => {
+    setWidths(w => ({ ...w, [colId]: width }))
+  }, [])
+
+  const rowHoverProps = {
+    onMouseEnter: (e: React.MouseEvent<HTMLTableRowElement>) => { e.currentTarget.style.background = '#f9fafb' },
+    onMouseLeave: (e: React.MouseEvent<HTMLTableRowElement>) => { e.currentTarget.style.background = 'transparent' },
+  }
+
+  return (
+    <div style={{ flex: 1, overflow: 'auto', background: '#ffffff' }}>
+      <table style={{ width: '100%', borderCollapse: 'separate', borderSpacing: 0, tableLayout: 'fixed' }}>
+        <colgroup>
+          {visibleColumns.map(c => <col key={c.id} style={{ width: widths[c.id] ?? c.defaultWidth }} />)}
+        </colgroup>
+        <thead>
+          <tr style={{ height: 36 }}>
+            {visibleColumns.map(c => (
+              <th key={c.id} style={{
+                position: 'sticky', top: 0, zIndex: 2, background: '#f9fafb',
+                borderBottom: '2px solid #e5e7eb', textAlign: 'left',
+                fontSize: 11, fontWeight: 600, color: '#6b7280', textTransform: 'uppercase',
+                letterSpacing: '0.04em', padding: '0 8px', overflow: 'visible', whiteSpace: 'nowrap',
+              }}>
+                <span style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.label}</span>
+                {c.id !== 'colorBar' && (
+                  <ColumnResizeHandle colId={c.id} width={widths[c.id] ?? c.defaultWidth} onResize={handleResize} />
+                )}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.length === 0 && (
+            <tr>
+              <td colSpan={visibleColumns.length} style={{ textAlign: 'center', padding: '48px 0', color: '#9ca3af', fontSize: 13 }}>
+                No activities to show.
+              </td>
+            </tr>
+          )}
+          {rows.map((row, i) => {
+            if (row.kind === 'group') {
+              return (
+                <tr key={`group-${row.key}`}>
+                  <td colSpan={visibleColumns.length} style={{
+                    padding: '4px 8px', background: '#f3f4f6', borderBottom: '1px solid #e5e7eb',
+                    borderTop: i > 0 ? '1px solid #e5e7eb' : undefined, fontSize: 11, fontWeight: 600,
+                    color: '#6b7280', textTransform: 'uppercase', letterSpacing: '0.05em',
+                  }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      {row.memberColors && row.memberColors.length > 0 && (
+                        <div style={{ display: 'flex', flexShrink: 0 }}>
+                          {row.memberColors.map((c, j) => (
+                            <div key={j} style={{ width: 9, height: 9, borderRadius: '50%', background: c, marginLeft: j === 0 ? 0 : -3, outline: '1.5px solid #f3f4f6' }} />
+                          ))}
+                        </div>
+                      )}
+                      {row.label}
+                      <span style={{ fontWeight: 400, opacity: 0.6 }}>({row.count})</span>
+                    </div>
+                  </td>
+                </tr>
+              )
+            }
+
+            return (
+              <tr key={row.activity.id} style={{ height: 36 }} {...rowHoverProps}>
+                {visibleColumns.map(col => (
+                  <PublicListCell
+                    key={col.id}
+                    colId={col.id}
+                    activity={row.activity}
+                    depth={row.depth}
+                    memberById={memberById}
+                    statusById={statusById}
+                    tagById={tagById}
+                    activityTitleById={activityTitleById}
+                  />
+                ))}
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+function PublicListCell({ colId, activity, depth, memberById, statusById, tagById, activityTitleById }: {
+  colId: string
+  activity: ApiActivity
+  depth: number
+  memberById: Map<string, PublicMember>
+  statusById: Map<string, Status>
+  tagById: Map<string, Tag>
+  activityTitleById: Map<string, string>
+}) {
+  const cellStyle: React.CSSProperties = {
+    padding: '0 8px',
+    borderBottom: '1px solid #f3f4f6',
+    fontSize: 12,
+    color: '#111827',
+    overflow: 'hidden',
+    whiteSpace: 'nowrap',
+    textOverflow: 'ellipsis',
+    verticalAlign: 'middle',
+  }
+
+  switch (colId) {
+    case 'colorBar':
+      return <td style={{ ...cellStyle, padding: 0 }}><div style={{ width: 4, height: 24, borderRadius: 2, background: resolveColorHex(activity.color ?? null) ?? '#9ca3af', marginLeft: 6 }} /></td>
+
+    case 'identity':
+      return (
+        <td style={{ ...cellStyle, textAlign: 'center' }}>
+          <Badge identity={{ color: activity.color ?? '#288C9B', icon: activity.icon ?? '__none__' }} name={activity.title} shape="square" size={28} />
+        </td>
+      )
+
+    case 'title':
+      return (
+        <td style={cellStyle}>
+          <span style={{ paddingLeft: depth * 20, fontWeight: 500 }}>{activity.title}</span>
+        </td>
+      )
+
+    case 'startAt':
+      return <td style={cellStyle}>{formatActivityDate(activity.startAt)}</td>
+
+    case 'endAt':
+      return <td style={cellStyle}>{formatActivityDate(activity.endAt)}</td>
+
+    case 'duration':
+      return <td style={{ ...cellStyle, color: '#6b7280' }}>{formatDuration(activity.startAt, activity.endAt)}</td>
+
+    case 'status': {
+      const status = activity.statusId ? statusById.get(activity.statusId) : null
+      const hex = status ? resolveColorHex(status.color ?? null) ?? '#888888' : null
+      return (
+        <td style={cellStyle}>
+          {status ? (
+            <span style={{
+              display: 'inline-flex', alignItems: 'center', gap: 5, padding: '2px 8px', borderRadius: 4,
+              fontSize: 11, fontWeight: 500, background: `${hex}26`, color: hex ?? '#111827', border: `1px solid ${hex}66`,
+            }}>
+              <span style={{ width: 7, height: 7, borderRadius: '50%', background: hex ?? '#888', flexShrink: 0 }} />
+              {status.name}
+            </span>
+          ) : <span style={{ color: '#9ca3af' }}>—</span>}
+        </td>
+      )
+    }
+
+    case 'assignees': {
+      const ids = activity.assignedMemberIds ?? []
+      const members = ids.map(id => memberById.get(id)).filter((m): m is PublicMember => Boolean(m))
+      return (
+        <td style={cellStyle}>
+          <div style={{ display: 'flex', alignItems: 'center', overflow: 'hidden' }}>
+            {members.length === 0 && <span style={{ color: '#9ca3af' }}>—</span>}
+            {members.slice(0, 4).map((m, i) => (
+              <div key={m.id} title={m.displayName} style={{ marginLeft: i === 0 ? 0 : -6 }}>
+                <Badge identity={{ color: m.color ?? '#288C9B', icon: m.icon ?? '__name_2__' }} name={m.displayName} shape="circle" size={22} />
+              </div>
+            ))}
+            {members.length > 4 && <span style={{ fontSize: 10, color: '#9ca3af', marginLeft: 4 }}>+{members.length - 4}</span>}
+          </div>
+        </td>
+      )
+    }
+
+    case 'tags': {
+      const tags = (activity.tagIds ?? []).map(id => tagById.get(id)).filter((t): t is Tag => Boolean(t))
+      return (
+        <td style={cellStyle}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 4, overflow: 'hidden' }}>
+            {tags.length === 0 && <span style={{ color: '#9ca3af' }}>—</span>}
+            {tags.slice(0, 3).map(t => {
+              const hex = resolveColorHex(t.color ?? null)
+              return (
+                <span key={t.id} style={{
+                  padding: '1px 6px', borderRadius: 4, fontSize: 10, whiteSpace: 'nowrap',
+                  background: hex ? `${hex}26` : '#f3f4f6', color: hex ?? '#111827', border: `1px solid ${hex ?? '#e5e7eb'}66`,
+                }}>
+                  {t.name}
+                </span>
+              )
+            })}
+            {tags.length > 3 && <span style={{ fontSize: 10, color: '#9ca3af' }}>+{tags.length - 3}</span>}
+          </div>
+        </td>
+      )
+    }
+
+    case 'progress': {
+      const pct = activity.percentComplete ?? 0
+      return (
+        <td style={cellStyle}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <div style={{ flex: 1, height: 4, background: '#e5e7eb', borderRadius: 2, overflow: 'hidden' }}>
+              <div style={{ height: '100%', width: `${pct}%`, background: 'var(--primary)', borderRadius: 2 }} />
+            </div>
+            <span style={{ fontSize: 11, color: '#9ca3af', flexShrink: 0 }}>{pct}%</span>
+          </div>
+        </td>
+      )
+    }
+
+    case 'description':
+      return <td style={{ ...cellStyle, color: activity.description ? '#374151' : '#9ca3af' }}>{activity.description || '—'}</td>
+
+    case 'notes':
+      return <td style={{ ...cellStyle, color: activity.notes ? '#374151' : '#9ca3af' }}>{activity.notes || '—'}</td>
+
+    case 'location':
+      return <td style={{ ...cellStyle, color: '#9ca3af' }}>—</td>
+
+    case 'url':
+      return <td style={{ ...cellStyle, color: '#9ca3af' }}>—</td>
+
+    case 'parent': {
+      const parentTitle = activity.parentActivityId ? activityTitleById.get(activity.parentActivityId) : null
+      return <td style={{ ...cellStyle, color: parentTitle ? '#374151' : '#9ca3af' }}>{parentTitle ?? '—'}</td>
+    }
+
+    case 'createdAt':
+      return <td style={{ ...cellStyle, color: '#9ca3af' }}>{formatTimestamp(activity.createdAt)}</td>
+
+    case 'updatedAt':
+      return <td style={{ ...cellStyle, color: '#9ca3af' }}>{formatTimestamp(activity.updatedAt)}</td>
+
+    default:
+      return <td style={cellStyle} />
+  }
+}
+
+// ── Unlock prompt (password-protected shares) ─────────────────────────────────
+
+function UnlockPrompt({ token, onUnlocked }: { token: string | undefined; onUnlocked: (viewToken: string) => void }) {
+  const unlock = useUnlockShare(token)
+  const [pw, setPw] = useState('')
+  const [showPw, setShowPw] = useState(false)
+
+  const submit = (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!pw || unlock.isPending) return
+    unlock.mutate(pw, { onSuccess: onUnlocked })
+  }
+
+  const err = unlock.error as ApiError | null
+  const message = err
+    ? err.status === 429
+      ? 'Too many attempts. Please wait a minute and try again.'
+      : 'Incorrect password. Please try again.'
+    : null
+
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh', background: '#ffffff', padding: 24, fontFamily: 'var(--font-sans)' }}>
+      <form onSubmit={submit} style={{ width: 'min(380px, 100%)', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 14, textAlign: 'center' }}>
+        <div style={{ width: 48, height: 48, borderRadius: 'var(--radius-lg)', background: 'hsl(30 87% 62% / 0.16)', color: 'var(--secondary)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <KeyRound size={22} strokeWidth={2} />
+        </div>
+        <div>
+          <h1 style={{ fontSize: 17, fontWeight: 700, color: 'var(--foreground)', margin: 0 }}>This view is password protected</h1>
+          <p style={{ fontSize: 13, color: 'var(--muted-foreground)', margin: '4px 0 0' }}>Enter the password you were given to open it.</p>
+        </div>
+        <div style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 8, background: 'var(--card)', border: '1px solid var(--input)', borderRadius: 'var(--radius-md)', padding: '0 10px' }}>
+          <KeyRound size={14} style={{ color: 'var(--muted-foreground)' }} strokeWidth={2} />
+          {/* eslint-disable-next-line jsx-a11y/no-autofocus */}
+          <input
+            autoFocus
+            value={pw}
+            onChange={e => setPw(e.target.value)}
+            type={showPw ? 'text' : 'password'}
+            placeholder="Password"
+            aria-label="Password"
+            style={{ flex: 1, fontSize: 14, color: 'var(--foreground)', padding: '10px 0', border: 'none', outline: 'none', background: 'transparent', fontFamily: 'var(--font-sans)' }}
+          />
+          <button type="button" onClick={() => setShowPw(v => !v)} aria-label={showPw ? 'Hide password' : 'Show password'} style={{ border: 'none', background: 'transparent', cursor: 'pointer', color: 'var(--muted-foreground)', display: 'flex', padding: 4 }}>
+            {showPw ? <EyeOff size={15} strokeWidth={2} /> : <Eye size={15} strokeWidth={2} />}
+          </button>
+        </div>
+        {message && <p style={{ fontSize: 12.5, color: 'var(--destructive)', margin: 0 }}>{message}</p>}
+        <button
+          type="submit"
+          disabled={!pw || unlock.isPending}
+          style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, fontSize: 14, fontWeight: 600, padding: '10px 0', borderRadius: 'var(--radius-md)', border: 'none', cursor: pw && !unlock.isPending ? 'pointer' : 'not-allowed', background: 'var(--primary)', color: 'var(--primary-foreground)', opacity: pw && !unlock.isPending ? 1 : 0.55 }}
+        >
+          {unlock.isPending ? <Loader2 size={15} className="animate-spin" /> : null}
+          {unlock.isPending ? 'Unlocking…' : 'Unlock view'}
+        </button>
+      </form>
+    </div>
+  )
+}
+
+// ── ShareViewPage ─────────────────────────────────────────────────────────────
+
+export default function ShareViewPage() {
+  const { token } = useParams<{ token: string }>()
+  const [viewToken, setViewToken] = useState<string | null>(null)
+  const { data: proj, isLoading, isError, error } = useShareProjection(token, viewToken)
+
+  // Force light mode synchronously before first paint.
+  // useLayoutEffect runs before the browser paints, beating any dark class set
+  // from localStorage by useDarkMode during the same render cycle.
+  useLayoutEffect(() => {
+    const root = document.documentElement
+    const hadDark = root.classList.contains('dark')
+    root.classList.remove('dark')
+    return () => {
+      if (hadDark) root.classList.add('dark')
+    }
+  }, [])
+
+  // Re-apply on mount in case ThemeSync fires after useLayoutEffect.
+  useEffect(() => {
+    document.documentElement.classList.remove('dark')
+  }, [])
+
+  const vc = useMemo(
+    () => parseViewConfig(proj?.share.viewConfig ?? '{}'),
+    [proj?.share.viewConfig],
+  )
+
+  const { columns, resolvedGranularity } = useMemo(() => {
+    if (!proj) return { columns: [], resolvedGranularity: 'week' as TimeGranularity }
+    const start = new Date(proj.timeline.startDate)
+    const end = new Date(proj.timeline.endDate)
+    if (vc.granularity === 'auto') {
+      const gr = autoFitGranularity(start, end, window.innerWidth || 1000)
+      return { columns: generateColumns(start, end, gr), resolvedGranularity: gr }
+    }
+    return {
+      columns: generateColumns(start, end, vc.granularity as TimeGranularity),
+      resolvedGranularity: vc.granularity as TimeGranularity,
+    }
+  }, [proj, vc.granularity])
+
+  const todayIdx = useMemo(() => todayColumnPosition(columns), [columns])
+
+  const memberArray = useMemo<Member[]>(
+    () => (proj?.members ?? []).map((m, i) => toMember(m, i)),
+    [proj],
+  )
+
+  const memberById = useMemo(
+    () => Object.fromEntries(memberArray.map(m => [m.id, m])),
+    [memberArray],
+  )
+
+  const statusColorById = useMemo(() => {
+    const m = new Map<string, string>()
+    proj?.statuses.forEach((s: Status) => m.set(s.id, s.color))
+    return m
+  }, [proj])
+
+  // Build RichActivity array (mirrors GanttView's toRichActivity).
+  const richActivities = useMemo((): RichActivity[] => {
+    if (!proj || columns.length === 0) return []
+    const viewStart = columns[0].start
+    const viewEnd = columns[columns.length - 1].end
+
+    return proj.activities.flatMap((a: PublicActivity, i: number) => {
+      const start = new Date(a.startAt)
+      const end = new Date(a.endAt)
+      if (end < viewStart || start > viewEnd) return []
+
+      const clampedStart = start < viewStart ? viewStart : start
+      const clampedEnd = end > viewEnd ? viewEnd : end
+      const { startCol, span } = positionInColumns(clampedStart, clampedEnd, columns)
+
+      const members = (a.assignedMemberIds ?? [])
+        .map(id => memberById[id])
+        .filter((m): m is Member => Boolean(m))
+
+      let color: string
+      if (vc.colorBy === 'member') {
+        color = members[0]?.color ?? a.color ?? ACTIVITY_COLORS[i % ACTIVITY_COLORS.length]
+      } else if (vc.colorBy === 'status') {
+        color = statusColorById.get(a.statusId ?? '') ?? '#6b7280'
+      } else {
+        color = a.color ?? ACTIVITY_COLORS[i % ACTIVITY_COLORS.length]
+      }
+
+      return [{
+        id: a.id,
+        title: a.title,
+        startCol,
+        span,
+        color,
+        icon: a.icon ?? undefined,
+        members,
+        isChild: Boolean(a.parentActivityId),
+        depth: 0,
+        startAtMs: start.getTime(),
+        endAtMs: end.getTime(),
+        parentActivityId: a.parentActivityId ?? null,
+        primaryMemberId: members[0]?.id ?? null,
+        assignedMemberIds: a.assignedMemberIds ?? [],
+        statusId: a.statusId ?? null,
+      } satisfies RichActivity]
+    })
+  }, [proj, columns, memberById, statusColorById, vc.colorBy])
+
+  // Apply groupBy + sortBy via the same buildRows used by GanttView.
+  const rows = useMemo(
+    () => buildRows(
+      richActivities,
+      memberArray,
+      vc.groupBy,
+      vc.sortBy,
+      new Set<string>(),
+      new Set<string>(),
+      proj?.statuses,
+    ),
+    [richActivities, memberArray, vc.groupBy, vc.sortBy, proj?.statuses],
+  )
+
+  // ── List / Kanban shared lookups ──────────────────────────────────────────
+
+  const apiActivities = useMemo<ApiActivity[]>(
+    () => (proj?.activities ?? []).map(a => toApiActivity(a, proj?.timeline.id ?? '')),
+    [proj],
+  )
+
+  const publicMemberById = useMemo(() => {
+    const m = new Map<string, PublicMember>()
+    proj?.members.forEach(member => m.set(member.id, member))
+    return m
+  }, [proj])
+
+  const statusById = useMemo(() => {
+    const m = new Map<string, Status>()
+    proj?.statuses.forEach(s => m.set(s.id, s))
+    return m
+  }, [proj])
+
+  const tagById = useMemo(() => {
+    const m = new Map<string, Tag>()
+    proj?.tags.forEach(t => m.set(t.id, t))
+    return m
+  }, [proj])
+
+  const activityTitleById = useMemo(() => {
+    const m = new Map<string, string>()
+    apiActivities.forEach(a => m.set(a.id, a.title))
+    return m
+  }, [apiActivities])
+
+  // ── List view derived data ────────────────────────────────────────────────
+
+  const listVc = useMemo(
+    () => parseListViewConfig(proj?.share.viewConfig ?? '{}'),
+    [proj?.share.viewConfig],
+  )
+
+  const visibleListColumns = useMemo<ColMeta[]>(() => {
+    if (!listVc.columns) return COL_CATALOG.filter(c => c.defaultVisible)
+    const byId = new Map(COL_CATALOG.map(c => [c.id, c]))
+    return listVc.columns
+      .filter(c => c.visible)
+      .map(c => byId.get(c.id))
+      .filter((c): c is ColMeta => Boolean(c))
+  }, [listVc.columns])
+
+  const listRows = useMemo(() => {
+    if (!proj || proj.share.viewType !== 'list') return []
+    const sorted = sortListActivities(apiActivities, listVc.sortBy)
+    return buildListRows(sorted, listVc.groupBy, publicMemberById, statusById, proj.statuses, new Set<string>())
+  }, [proj, apiActivities, listVc.groupBy, listVc.sortBy, publicMemberById, statusById])
+
+  // ── Kanban view derived data ──────────────────────────────────────────────
+
+  const kanbanVc = useMemo(
+    () => parseKanbanViewConfig(proj?.share.viewConfig ?? '{}'),
+    [proj?.share.viewConfig],
+  )
+
+  const adaptedMembers = useMemo<TeamMemberWithUser[]>(
+    () => (proj?.members ?? []).map(toTeamMemberWithUser),
+    [proj],
+  )
+
+  const kanbanStatusColorById = useMemo(() => {
+    const m = new Map<string, string>()
+    proj?.statuses.forEach(s => m.set(s.id, s.color))
+    return m
+  }, [proj])
+
+  const kanbanColorMap = useMemo(() => {
+    const m = new Map<string, string>()
+    apiActivities.forEach((a, i) => m.set(a.id, resolveActivityColor(a, i, memberById, kanbanVc.colorBy, kanbanStatusColorById)))
+    return m
+  }, [apiActivities, memberById, kanbanVc.colorBy, kanbanStatusColorById])
+
+  const kanbanHierarchy = useMemo(
+    () => kanbanVc.showHierarchy ? buildHierarchyMaps(apiActivities) : { childrenByParentId: new Map<string, ApiActivity[]>(), childIds: new Set<string>() },
+    [apiActivities, kanbanVc.showHierarchy],
+  )
+
+  // When hierarchy is on, children get nested under their parent's card by
+  // KanbanColumn — they must be excluded here or they'd also appear as their
+  // own top-level card in whichever column their status places them (mirrors
+  // KanbanView's `columnActivities`).
+  const kanbanColumnActivities = useMemo(
+    () => kanbanVc.showHierarchy
+      ? apiActivities.filter(a => !kanbanHierarchy.childIds.has(a.id))
+      : apiActivities,
+    [apiActivities, kanbanVc.showHierarchy, kanbanHierarchy],
+  )
+
+  const kanbanCollapsedSet = useMemo(() => new Set(kanbanVc.collapsedColumns), [kanbanVc.collapsedColumns])
+
+  const kanbanColumnsResolved = useMemo(() => {
+    if (!proj || proj.share.viewType !== 'kanban') return []
+    return buildColumns(kanbanVc.groupBy, kanbanColumnActivities, adaptedMembers, proj.statuses, kanbanVc.sortBy)
+  }, [proj, kanbanVc.groupBy, kanbanVc.sortBy, kanbanColumnActivities, adaptedMembers])
+
+  const kanbanActivityById = useMemo(() => {
+    const m = new Map<string, ApiActivity>()
+    apiActivities.forEach(a => m.set(a.id, a))
+    return m
+  }, [apiActivities])
+
+  // ── Render ────────────────────────────────────────────────────────────────
+
+  if (isLoading) {
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh', gap: 10, color: '#6b7280', fontFamily: 'var(--font-sans)' }}>
+        <Loader2 size={20} className="animate-spin" />
+        <span>Loading shared view…</span>
+      </div>
+    )
+  }
+
+  // A locked share surfaces as a PASSWORD_REQUIRED error until a valid view
+  // token is obtained — show the unlock prompt rather than a dead-end error.
+  if (isError && (error as ApiError | null)?.code === 'PASSWORD_REQUIRED') {
+    return <UnlockPrompt token={token} onUnlocked={setViewToken} />
+  }
+
+  if (isError) {
+    const apiErr = error as { status?: number } | null
+    const is404 = apiErr?.status === 404
+    const is410 = apiErr?.status === 410
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100vh', gap: 12, color: '#374151', fontFamily: 'var(--font-sans)', padding: 24 }}>
+        <AlertCircle size={32} style={{ color: '#ef4444' }} />
+        <h1 style={{ fontSize: 18, fontWeight: 600, margin: 0 }}>
+          {is404 ? 'Share not found' : is410 ? 'This share has expired or been revoked' : 'Could not load this view'}
+        </h1>
+        <p style={{ fontSize: 13, color: '#6b7280', margin: 0, textAlign: 'center' }}>
+          {is404 || is410 ? 'The link may have been removed or may never have existed.' : 'Please try again later.'}
+        </p>
+      </div>
+    )
+  }
+
+  if (!proj) return null
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: '#ffffff' }}>
+      {/* Branding strip */}
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 8, padding: '0 16px', height: 44,
+        background: '#f9fafb', borderBottom: '1px solid #e5e7eb', flexShrink: 0,
+        color: '#111827',
+      }}>
+        <Badge
+          identity={{ color: proj.timeline.color ?? '#6b7280', icon: proj.timeline.icon ?? '__none__' }}
+          name={proj.timeline.name}
+          size={24}
+        />
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 0, lineHeight: 1.2 }}>
+          <span style={{ fontSize: 13, fontWeight: 700, color: '#111827' }}>{proj.timeline.name}</span>
+          <span style={{ fontSize: 11, color: '#6b7280' }}>{proj.teamName}{proj.share.name ? ` · ${proj.share.name}` : ''}</span>
+        </div>
+        <span style={{ marginLeft: 'auto', fontSize: 11, color: '#9ca3af' }}>
+          {proj.activities.length} {proj.activities.length === 1 ? 'activity' : 'activities'}
+        </span>
+      </div>
+
+      {/* View body — interactive=false for every view type */}
+      {proj.share.viewType === 'list' ? (
+        <PublicListTable
+          rows={listRows}
+          visibleColumns={visibleListColumns}
+          memberById={publicMemberById}
+          statusById={statusById}
+          tagById={tagById}
+          activityTitleById={activityTitleById}
+        />
+      ) : proj.share.viewType === 'kanban' ? (
+        <div style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
+          <KanbanBoard
+            columns={kanbanColumnsResolved}
+            groupBy={kanbanVc.groupBy}
+            members={memberArray}
+            statusById={statusById}
+            tagById={tagById}
+            colorMap={kanbanColorMap}
+            cardFields={kanbanVc.cardFields}
+            suppressedFields={new Set()}
+            selectedActivityId={null}
+            matchedIds={new Set()}
+            activeMatchId={null}
+            hasQuery={false}
+            collapsedColumnIds={kanbanCollapsedSet}
+            onToggleCollapse={() => {}}
+            onCardClick={() => {}}
+            onAddInColumn={() => {}}
+            onDrop={() => {}}
+            activityById={kanbanActivityById}
+            activityTitleById={activityTitleById}
+            showHierarchy={kanbanVc.showHierarchy}
+            childrenByParentId={kanbanHierarchy.childrenByParentId}
+            collapsedParents={new Set()}
+            onToggleParent={() => {}}
+            interactive={false}
+          />
+        </div>
+      ) : (
+        <div style={{ flex: 1, minHeight: 0 }}>
+          <GanttGrid
+            rows={rows}
+            columns={columns}
+            todayIndex={todayIdx}
+            selectedActivityId={null}
+            onSelectActivity={() => {}}
+            resolvedGranularity={resolvedGranularity}
+            interactive={false}
+          />
+        </div>
+      )}
+    </div>
+  )
+}
+````
+
 ## File: packages/shared/src/index.ts
 ````typescript
 /**
@@ -55234,8 +56234,8 @@ export interface components {
             viewConfig: string;
             /** @description True when the share requires a password. Derived from the (never-exposed) password hash so clients can show a lock indicator. */
             protected: boolean;
-            /** @description Team member ID of the creator. */
-            createdBy: string;
+            /** @description Team member ID of the creator. Null when the share was created by a superadmin who is not a member of the timeline's team. */
+            createdBy?: string | null;
             /** Format: date-time */
             createdAt: string;
             /** Format: date-time */
@@ -58231,1665 +59231,6 @@ export interface operations {
 }
 ````
 
-## File: packages/web/src/pages/ShareViewPage.tsx
-````typescript
-/**
- * ShareViewPage — public read-only view for a share link.
- *
- * Mounted at /s/:token outside ProtectedRoute. Fetches the ShareProjection
- * from the public gateway, then renders the Gantt in interactive=false mode
- * with the frozen view config (groupBy, sortBy, colorBy, granularity) applied.
- * Theme is forced to light — useLayoutEffect runs synchronously before paint so
- * it beats any dark-class applied from localStorage by useDarkMode.
- */
-
-import { useMemo, useLayoutEffect, useEffect, useState, useCallback, useRef } from 'react'
-import { useParams } from 'react-router-dom'
-import { useShareProjection, useUnlockShare } from '@/hooks/useShares'
-import GanttGrid from '@/components/gantt/GanttGrid'
-import { buildRows, type RichActivity } from '@/components/gantt/GanttView'
-import {
-  buildListRows,
-  formatActivityDate,
-  formatTimestamp,
-  formatDuration,
-  COL_CATALOG,
-  type ListDisplayRow,
-  type ColMeta,
-} from '@/components/list/ListView'
-import type { ListGroupBy, ListSortBy, ListColorBy } from '@/components/list/ListToolbar'
-import KanbanBoard from '@/components/kanban/KanbanBoard'
-import {
-  buildColumns,
-  buildHierarchyMaps,
-  DEFAULT_CARD_FIELDS,
-  type KanbanCardField,
-  type KanbanGroupBy,
-  type KanbanSortBy,
-} from '@/components/kanban/kanbanColumns'
-import { resolveActivityColor } from '@/lib/activityColor'
-import { resolveColorHex } from '@/components/identity/identity-constants'
-import { MEMBER_COLORS, ACTIVITY_COLORS } from '@/types'
-import {
-  generateColumns,
-  positionInColumns,
-  todayColumnPosition,
-  autoFitGranularity,
-} from '@/components/gantt/granularity'
-import { ApiError } from '@/lib/api'
-import type { components } from '@draba/shared'
-import type { GroupBy, SortBy, ColorBy, TimeGranularity } from '@/components/gantt/GanttToolbar'
-import type { Member } from '@/types'
-import { AlertCircle, Loader2, KeyRound, Eye, EyeOff } from 'lucide-react'
-import { Badge } from '@/components/identity/Badge'
-
-type PublicActivity = components['schemas']['PublicActivity']
-type PublicMember = components['schemas']['PublicMember']
-type Status = components['schemas']['Status']
-type Tag = components['schemas']['Tag']
-type ApiActivity = components['schemas']['Activity']
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
-
-// ── View config parsing ───────────────────────────────────────────────────────
-
-interface ParsedViewConfig {
-  groupBy: GroupBy
-  sortBy: SortBy
-  colorBy: ColorBy
-  granularity: TimeGranularity | 'auto'
-}
-
-function parseViewConfig(raw: string): ParsedViewConfig {
-  try {
-    const c = JSON.parse(raw) as Partial<ParsedViewConfig>
-    return {
-      groupBy: (c.groupBy as GroupBy) ?? 'none',
-      sortBy: (c.sortBy as SortBy) ?? 'startDate',
-      colorBy: (c.colorBy as ColorBy) ?? 'activity',
-      granularity: c.granularity ?? 'auto',
-    }
-  } catch {
-    return { groupBy: 'none', sortBy: 'startDate', colorBy: 'activity', granularity: 'auto' }
-  }
-}
-
-interface ParsedListViewConfig {
-  groupBy: ListGroupBy
-  sortBy: ListSortBy
-  colorBy: ListColorBy
-  columns: { id: string; visible: boolean }[] | null
-}
-
-function parseListViewConfig(raw: string): ParsedListViewConfig {
-  try {
-    const c = JSON.parse(raw) as Partial<ParsedListViewConfig>
-    return {
-      groupBy: (c.groupBy as ListGroupBy) ?? 'none',
-      sortBy: (c.sortBy as ListSortBy) ?? 'startDate',
-      colorBy: (c.colorBy as ListColorBy) ?? 'activity',
-      columns: Array.isArray(c.columns) ? c.columns : null,
-    }
-  } catch {
-    return { groupBy: 'none', sortBy: 'startDate', colorBy: 'activity', columns: null }
-  }
-}
-
-interface ParsedKanbanViewConfig {
-  groupBy: KanbanGroupBy
-  sortBy: KanbanSortBy
-  colorBy: ColorBy
-  cardFields: KanbanCardField[]
-  showHierarchy: boolean
-  collapsedColumns: string[]
-}
-
-function parseKanbanViewConfig(raw: string): ParsedKanbanViewConfig {
-  try {
-    const c = JSON.parse(raw) as Partial<ParsedKanbanViewConfig>
-    return {
-      groupBy: (c.groupBy as KanbanGroupBy) ?? 'status',
-      sortBy: (c.sortBy as KanbanSortBy) ?? 'startDate',
-      colorBy: (c.colorBy as ColorBy) ?? 'activity',
-      cardFields: Array.isArray(c.cardFields) && c.cardFields.length > 0 ? c.cardFields as KanbanCardField[] : DEFAULT_CARD_FIELDS,
-      showHierarchy: c.showHierarchy ?? false,
-      collapsedColumns: Array.isArray(c.collapsedColumns) ? c.collapsedColumns as string[] : [],
-    }
-  } catch {
-    return { groupBy: 'status', sortBy: 'startDate', colorBy: 'activity', cardFields: DEFAULT_CARD_FIELDS, showHierarchy: false, collapsedColumns: [] }
-  }
-}
-
-// ── Adapters: projection types → full API shapes ─────────────────────────────
-//
-// The List and Kanban renderers are built around the full Activity / TeamMember
-// shapes (so they can be reused as-is from the authenticated app). The public
-// projection only carries the fields a share is allowed to expose, so these
-// adapters fill the remaining required-but-irrelevant fields with placeholder
-// defaults — mirroring the `optimisticActivity` precedent in ListView.
-
-function toApiActivity(a: PublicActivity, timelineId: string): ApiActivity {
-  return {
-    id: a.id,
-    timelineId,
-    title: a.title,
-    description: a.description ?? null,
-    notes: a.notes ?? null,
-    icon: a.icon ?? null,
-    color: a.color ?? null,
-    startAt: a.startAt,
-    endAt: a.endAt,
-    allDay: a.allDay,
-    statusId: a.statusId ?? null,
-    parentActivityId: a.parentActivityId ?? null,
-    percentComplete: a.percentComplete ?? null,
-    location: null,
-    url: null,
-    rrule: null,
-    caldavUid: null,
-    googleEventId: null,
-    createdBy: '',
-    createdAt: a.startAt,
-    updatedAt: a.startAt,
-    archivedAt: null,
-    assignedMemberIds: a.assignedMemberIds ?? [],
-    tagIds: a.tagIds ?? [],
-  }
-}
-
-function toTeamMemberWithUser(m: PublicMember): TeamMemberWithUser {
-  return {
-    id: m.id,
-    teamId: '',
-    userId: null,
-    role: 'member',
-    color: m.color ?? null,
-    icon: m.icon ?? null,
-    joinedAt: '',
-    archivedAt: null,
-    email: '',
-    displayName: m.displayName,
-    avatarUrl: null,
-  }
-}
-
-function sortListActivities(activities: ApiActivity[], sortBy: ListSortBy): ApiActivity[] {
-  const sorted = [...activities]
-  sorted.sort((a, b) => {
-    if (sortBy === 'startDate') return (a.startAt ?? '').localeCompare(b.startAt ?? '')
-    if (sortBy === 'endDate') return (a.endAt ?? '').localeCompare(b.endAt ?? '')
-    if (sortBy === 'title') return a.title.localeCompare(b.title)
-    if (sortBy === 'status') return (a.statusId ?? '').localeCompare(b.statusId ?? '')
-    if (sortBy === 'progress') return (b.percentComplete ?? 0) - (a.percentComplete ?? 0)
-    return 0
-  })
-  return sorted
-}
-
-// ── Data helpers ──────────────────────────────────────────────────────────────
-
-function initialsFrom(name: string): string {
-  return name.split(/\s+/).map(w => w[0] ?? '').slice(0, 2).join('').toUpperCase()
-}
-
-function toMember(m: PublicMember, index: number): Member {
-  return {
-    id: m.id,
-    name: m.displayName,
-    initials: initialsFrom(m.displayName),
-    color: resolveColorHex(m.color) || MEMBER_COLORS[index % MEMBER_COLORS.length],
-  }
-}
-
-// ── Public List table (read-only) ────────────────────────────────────────────
-//
-// ListView itself is a 2600-line data-fetching container with deep editing/
-// drag/multiselect entanglement — unsuitable for the bypass-the-container
-// pattern. Instead this lightweight renderer reuses ListView's pure helpers
-// (buildListRows, COL_CATALOG, date formatters) to mirror its visuals without
-// any interactivity: no clicks, editing, drag, context menus, or selection.
-
-interface PublicListTableProps {
-  rows: ListDisplayRow[]
-  visibleColumns: ColMeta[]
-  memberById: Map<string, PublicMember>
-  statusById: Map<string, Status>
-  tagById: Map<string, Tag>
-  activityTitleById: Map<string, string>
-}
-
-/**
- * Drag handle on a column's right edge — lets the viewer resize columns to
- * taste (a pure display preference; it never touches activity data, so it's
- * fair game in a read-only viewer). Mirrors the visual idiom of ListView's
- * SortableColHeader resize handle, minus the TanStack plumbing.
- */
-function ColumnResizeHandle({ colId, width, onResize }: {
-  colId: string
-  width: number
-  onResize: (colId: string, width: number) => void
-}) {
-  const [isResizing, setIsResizing] = useState(false)
-  const dragStart = useRef<{ x: number; width: number } | null>(null)
-
-  const onMouseDown = (e: React.MouseEvent) => {
-    e.preventDefault()
-    e.stopPropagation()
-    dragStart.current = { x: e.clientX, width }
-    setIsResizing(true)
-
-    const onMouseMove = (ev: MouseEvent) => {
-      if (!dragStart.current) return
-      const next = Math.max(40, dragStart.current.width + (ev.clientX - dragStart.current.x))
-      onResize(colId, next)
-    }
-    const onMouseUp = () => {
-      dragStart.current = null
-      setIsResizing(false)
-      window.removeEventListener('mousemove', onMouseMove)
-      window.removeEventListener('mouseup', onMouseUp)
-    }
-    window.addEventListener('mousemove', onMouseMove)
-    window.addEventListener('mouseup', onMouseUp)
-  }
-
-  return (
-    <div
-      onMouseDown={onMouseDown}
-      style={{
-        position: 'absolute', right: 0, top: 0, height: '100%', width: 4,
-        cursor: 'col-resize', background: isResizing ? 'var(--primary)' : 'transparent', zIndex: 1,
-      }}
-      onMouseEnter={e => { if (!isResizing) (e.currentTarget as HTMLElement).style.background = '#d1d5db' }}
-      onMouseLeave={e => { if (!isResizing) (e.currentTarget as HTMLElement).style.background = 'transparent' }}
-    />
-  )
-}
-
-export function PublicListTable({ rows, visibleColumns, memberById, statusById, tagById, activityTitleById }: PublicListTableProps) {
-  const [widths, setWidths] = useState<Record<string, number>>(
-    () => Object.fromEntries(visibleColumns.map(c => [c.id, c.defaultWidth])),
-  )
-
-  // Re-seed widths when the visible-column set changes (e.g. share swap).
-  useEffect(() => {
-    setWidths(prev => {
-      const next: Record<string, number> = {}
-      let changed = false
-      for (const c of visibleColumns) {
-        next[c.id] = prev[c.id] ?? c.defaultWidth
-        if (next[c.id] !== prev[c.id]) changed = true
-      }
-      if (Object.keys(prev).length !== Object.keys(next).length) changed = true
-      return changed ? next : prev
-    })
-  }, [visibleColumns])
-
-  const handleResize = useCallback((colId: string, width: number) => {
-    setWidths(w => ({ ...w, [colId]: width }))
-  }, [])
-
-  const rowHoverProps = {
-    onMouseEnter: (e: React.MouseEvent<HTMLTableRowElement>) => { e.currentTarget.style.background = '#f9fafb' },
-    onMouseLeave: (e: React.MouseEvent<HTMLTableRowElement>) => { e.currentTarget.style.background = 'transparent' },
-  }
-
-  return (
-    <div style={{ flex: 1, overflow: 'auto', background: '#ffffff' }}>
-      <table style={{ width: '100%', borderCollapse: 'separate', borderSpacing: 0, tableLayout: 'fixed' }}>
-        <colgroup>
-          {visibleColumns.map(c => <col key={c.id} style={{ width: widths[c.id] ?? c.defaultWidth }} />)}
-        </colgroup>
-        <thead>
-          <tr style={{ height: 36 }}>
-            {visibleColumns.map(c => (
-              <th key={c.id} style={{
-                position: 'sticky', top: 0, zIndex: 2, background: '#f9fafb',
-                borderBottom: '2px solid #e5e7eb', textAlign: 'left',
-                fontSize: 11, fontWeight: 600, color: '#6b7280', textTransform: 'uppercase',
-                letterSpacing: '0.04em', padding: '0 8px', overflow: 'visible', whiteSpace: 'nowrap',
-              }}>
-                <span style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.label}</span>
-                {c.id !== 'colorBar' && (
-                  <ColumnResizeHandle colId={c.id} width={widths[c.id] ?? c.defaultWidth} onResize={handleResize} />
-                )}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {rows.length === 0 && (
-            <tr>
-              <td colSpan={visibleColumns.length} style={{ textAlign: 'center', padding: '48px 0', color: '#9ca3af', fontSize: 13 }}>
-                No activities to show.
-              </td>
-            </tr>
-          )}
-          {rows.map((row, i) => {
-            if (row.kind === 'group') {
-              return (
-                <tr key={`group-${row.key}`}>
-                  <td colSpan={visibleColumns.length} style={{
-                    padding: '4px 8px', background: '#f3f4f6', borderBottom: '1px solid #e5e7eb',
-                    borderTop: i > 0 ? '1px solid #e5e7eb' : undefined, fontSize: 11, fontWeight: 600,
-                    color: '#6b7280', textTransform: 'uppercase', letterSpacing: '0.05em',
-                  }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                      {row.memberColors && row.memberColors.length > 0 && (
-                        <div style={{ display: 'flex', flexShrink: 0 }}>
-                          {row.memberColors.map((c, j) => (
-                            <div key={j} style={{ width: 9, height: 9, borderRadius: '50%', background: c, marginLeft: j === 0 ? 0 : -3, outline: '1.5px solid #f3f4f6' }} />
-                          ))}
-                        </div>
-                      )}
-                      {row.label}
-                      <span style={{ fontWeight: 400, opacity: 0.6 }}>({row.count})</span>
-                    </div>
-                  </td>
-                </tr>
-              )
-            }
-
-            return (
-              <tr key={row.activity.id} style={{ height: 36 }} {...rowHoverProps}>
-                {visibleColumns.map(col => (
-                  <PublicListCell
-                    key={col.id}
-                    colId={col.id}
-                    activity={row.activity}
-                    depth={row.depth}
-                    memberById={memberById}
-                    statusById={statusById}
-                    tagById={tagById}
-                    activityTitleById={activityTitleById}
-                  />
-                ))}
-              </tr>
-            )
-          })}
-        </tbody>
-      </table>
-    </div>
-  )
-}
-
-function PublicListCell({ colId, activity, depth, memberById, statusById, tagById, activityTitleById }: {
-  colId: string
-  activity: ApiActivity
-  depth: number
-  memberById: Map<string, PublicMember>
-  statusById: Map<string, Status>
-  tagById: Map<string, Tag>
-  activityTitleById: Map<string, string>
-}) {
-  const cellStyle: React.CSSProperties = {
-    padding: '0 8px',
-    borderBottom: '1px solid #f3f4f6',
-    fontSize: 12,
-    color: '#111827',
-    overflow: 'hidden',
-    whiteSpace: 'nowrap',
-    textOverflow: 'ellipsis',
-    verticalAlign: 'middle',
-  }
-
-  switch (colId) {
-    case 'colorBar':
-      return <td style={{ ...cellStyle, padding: 0 }}><div style={{ width: 4, height: 24, borderRadius: 2, background: resolveColorHex(activity.color ?? null) ?? '#9ca3af', marginLeft: 6 }} /></td>
-
-    case 'identity':
-      return (
-        <td style={{ ...cellStyle, textAlign: 'center' }}>
-          <Badge identity={{ color: activity.color ?? '#288C9B', icon: activity.icon ?? '__none__' }} name={activity.title} shape="square" size={28} />
-        </td>
-      )
-
-    case 'title':
-      return (
-        <td style={cellStyle}>
-          <span style={{ paddingLeft: depth * 20, fontWeight: 500 }}>{activity.title}</span>
-        </td>
-      )
-
-    case 'startAt':
-      return <td style={cellStyle}>{formatActivityDate(activity.startAt)}</td>
-
-    case 'endAt':
-      return <td style={cellStyle}>{formatActivityDate(activity.endAt)}</td>
-
-    case 'duration':
-      return <td style={{ ...cellStyle, color: '#6b7280' }}>{formatDuration(activity.startAt, activity.endAt)}</td>
-
-    case 'status': {
-      const status = activity.statusId ? statusById.get(activity.statusId) : null
-      const hex = status ? resolveColorHex(status.color ?? null) ?? '#888888' : null
-      return (
-        <td style={cellStyle}>
-          {status ? (
-            <span style={{
-              display: 'inline-flex', alignItems: 'center', gap: 5, padding: '2px 8px', borderRadius: 4,
-              fontSize: 11, fontWeight: 500, background: `${hex}26`, color: hex ?? '#111827', border: `1px solid ${hex}66`,
-            }}>
-              <span style={{ width: 7, height: 7, borderRadius: '50%', background: hex ?? '#888', flexShrink: 0 }} />
-              {status.name}
-            </span>
-          ) : <span style={{ color: '#9ca3af' }}>—</span>}
-        </td>
-      )
-    }
-
-    case 'assignees': {
-      const ids = activity.assignedMemberIds ?? []
-      const members = ids.map(id => memberById.get(id)).filter((m): m is PublicMember => Boolean(m))
-      return (
-        <td style={cellStyle}>
-          <div style={{ display: 'flex', alignItems: 'center', overflow: 'hidden' }}>
-            {members.length === 0 && <span style={{ color: '#9ca3af' }}>—</span>}
-            {members.slice(0, 4).map((m, i) => (
-              <div key={m.id} title={m.displayName} style={{ marginLeft: i === 0 ? 0 : -6 }}>
-                <Badge identity={{ color: m.color ?? '#288C9B', icon: m.icon ?? '__name_2__' }} name={m.displayName} shape="circle" size={22} />
-              </div>
-            ))}
-            {members.length > 4 && <span style={{ fontSize: 10, color: '#9ca3af', marginLeft: 4 }}>+{members.length - 4}</span>}
-          </div>
-        </td>
-      )
-    }
-
-    case 'tags': {
-      const tags = (activity.tagIds ?? []).map(id => tagById.get(id)).filter((t): t is Tag => Boolean(t))
-      return (
-        <td style={cellStyle}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 4, overflow: 'hidden' }}>
-            {tags.length === 0 && <span style={{ color: '#9ca3af' }}>—</span>}
-            {tags.slice(0, 3).map(t => {
-              const hex = resolveColorHex(t.color ?? null)
-              return (
-                <span key={t.id} style={{
-                  padding: '1px 6px', borderRadius: 4, fontSize: 10, whiteSpace: 'nowrap',
-                  background: hex ? `${hex}26` : '#f3f4f6', color: hex ?? '#111827', border: `1px solid ${hex ?? '#e5e7eb'}66`,
-                }}>
-                  {t.name}
-                </span>
-              )
-            })}
-            {tags.length > 3 && <span style={{ fontSize: 10, color: '#9ca3af' }}>+{tags.length - 3}</span>}
-          </div>
-        </td>
-      )
-    }
-
-    case 'progress': {
-      const pct = activity.percentComplete ?? 0
-      return (
-        <td style={cellStyle}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            <div style={{ flex: 1, height: 4, background: '#e5e7eb', borderRadius: 2, overflow: 'hidden' }}>
-              <div style={{ height: '100%', width: `${pct}%`, background: 'var(--primary)', borderRadius: 2 }} />
-            </div>
-            <span style={{ fontSize: 11, color: '#9ca3af', flexShrink: 0 }}>{pct}%</span>
-          </div>
-        </td>
-      )
-    }
-
-    case 'description':
-      return <td style={{ ...cellStyle, color: activity.description ? '#374151' : '#9ca3af' }}>{activity.description || '—'}</td>
-
-    case 'notes':
-      return <td style={{ ...cellStyle, color: activity.notes ? '#374151' : '#9ca3af' }}>{activity.notes || '—'}</td>
-
-    case 'location':
-      return <td style={{ ...cellStyle, color: '#9ca3af' }}>—</td>
-
-    case 'url':
-      return <td style={{ ...cellStyle, color: '#9ca3af' }}>—</td>
-
-    case 'parent': {
-      const parentTitle = activity.parentActivityId ? activityTitleById.get(activity.parentActivityId) : null
-      return <td style={{ ...cellStyle, color: parentTitle ? '#374151' : '#9ca3af' }}>{parentTitle ?? '—'}</td>
-    }
-
-    case 'createdAt':
-      return <td style={{ ...cellStyle, color: '#9ca3af' }}>{formatTimestamp(activity.createdAt)}</td>
-
-    case 'updatedAt':
-      return <td style={{ ...cellStyle, color: '#9ca3af' }}>{formatTimestamp(activity.updatedAt)}</td>
-
-    default:
-      return <td style={cellStyle} />
-  }
-}
-
-// ── Unlock prompt (password-protected shares) ─────────────────────────────────
-
-function UnlockPrompt({ token, onUnlocked }: { token: string | undefined; onUnlocked: (viewToken: string) => void }) {
-  const unlock = useUnlockShare(token)
-  const [pw, setPw] = useState('')
-  const [showPw, setShowPw] = useState(false)
-
-  const submit = (e: React.FormEvent) => {
-    e.preventDefault()
-    if (!pw || unlock.isPending) return
-    unlock.mutate(pw, { onSuccess: onUnlocked })
-  }
-
-  const err = unlock.error as ApiError | null
-  const message = err
-    ? err.status === 429
-      ? 'Too many attempts. Please wait a minute and try again.'
-      : 'Incorrect password. Please try again.'
-    : null
-
-  return (
-    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh', background: '#ffffff', padding: 24, fontFamily: 'var(--font-sans)' }}>
-      <form onSubmit={submit} style={{ width: 'min(380px, 100%)', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 14, textAlign: 'center' }}>
-        <div style={{ width: 48, height: 48, borderRadius: 'var(--radius-lg)', background: 'hsl(30 87% 62% / 0.16)', color: 'var(--secondary)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-          <KeyRound size={22} strokeWidth={2} />
-        </div>
-        <div>
-          <h1 style={{ fontSize: 17, fontWeight: 700, color: 'var(--foreground)', margin: 0 }}>This view is password protected</h1>
-          <p style={{ fontSize: 13, color: 'var(--muted-foreground)', margin: '4px 0 0' }}>Enter the password you were given to open it.</p>
-        </div>
-        <div style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 8, background: 'var(--card)', border: '1px solid var(--input)', borderRadius: 'var(--radius-md)', padding: '0 10px' }}>
-          <KeyRound size={14} style={{ color: 'var(--muted-foreground)' }} strokeWidth={2} />
-          {/* eslint-disable-next-line jsx-a11y/no-autofocus */}
-          <input
-            autoFocus
-            value={pw}
-            onChange={e => setPw(e.target.value)}
-            type={showPw ? 'text' : 'password'}
-            placeholder="Password"
-            aria-label="Password"
-            style={{ flex: 1, fontSize: 14, color: 'var(--foreground)', padding: '10px 0', border: 'none', outline: 'none', background: 'transparent', fontFamily: 'var(--font-sans)' }}
-          />
-          <button type="button" onClick={() => setShowPw(v => !v)} aria-label={showPw ? 'Hide password' : 'Show password'} style={{ border: 'none', background: 'transparent', cursor: 'pointer', color: 'var(--muted-foreground)', display: 'flex', padding: 4 }}>
-            {showPw ? <EyeOff size={15} strokeWidth={2} /> : <Eye size={15} strokeWidth={2} />}
-          </button>
-        </div>
-        {message && <p style={{ fontSize: 12.5, color: 'var(--destructive)', margin: 0 }}>{message}</p>}
-        <button
-          type="submit"
-          disabled={!pw || unlock.isPending}
-          style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, fontSize: 14, fontWeight: 600, padding: '10px 0', borderRadius: 'var(--radius-md)', border: 'none', cursor: pw && !unlock.isPending ? 'pointer' : 'not-allowed', background: 'var(--primary)', color: 'var(--primary-foreground)', opacity: pw && !unlock.isPending ? 1 : 0.55 }}
-        >
-          {unlock.isPending ? <Loader2 size={15} className="animate-spin" /> : null}
-          {unlock.isPending ? 'Unlocking…' : 'Unlock view'}
-        </button>
-      </form>
-    </div>
-  )
-}
-
-// ── ShareViewPage ─────────────────────────────────────────────────────────────
-
-export default function ShareViewPage() {
-  const { token } = useParams<{ token: string }>()
-  const [viewToken, setViewToken] = useState<string | null>(null)
-  const { data: proj, isLoading, isError, error } = useShareProjection(token, viewToken)
-
-  // Force light mode synchronously before first paint.
-  // useLayoutEffect runs before the browser paints, beating any dark class set
-  // from localStorage by useDarkMode during the same render cycle.
-  useLayoutEffect(() => {
-    const root = document.documentElement
-    const hadDark = root.classList.contains('dark')
-    root.classList.remove('dark')
-    return () => {
-      if (hadDark) root.classList.add('dark')
-    }
-  }, [])
-
-  // Re-apply on mount in case ThemeSync fires after useLayoutEffect.
-  useEffect(() => {
-    document.documentElement.classList.remove('dark')
-  }, [])
-
-  const vc = useMemo(
-    () => parseViewConfig(proj?.share.viewConfig ?? '{}'),
-    [proj?.share.viewConfig],
-  )
-
-  const { columns, resolvedGranularity } = useMemo(() => {
-    if (!proj) return { columns: [], resolvedGranularity: 'week' as TimeGranularity }
-    const start = new Date(proj.timeline.startDate)
-    const end = new Date(proj.timeline.endDate)
-    if (vc.granularity === 'auto') {
-      const gr = autoFitGranularity(start, end, window.innerWidth || 1000)
-      return { columns: generateColumns(start, end, gr), resolvedGranularity: gr }
-    }
-    return {
-      columns: generateColumns(start, end, vc.granularity as TimeGranularity),
-      resolvedGranularity: vc.granularity as TimeGranularity,
-    }
-  }, [proj, vc.granularity])
-
-  const todayIdx = useMemo(() => todayColumnPosition(columns), [columns])
-
-  const memberArray = useMemo<Member[]>(
-    () => (proj?.members ?? []).map((m, i) => toMember(m, i)),
-    [proj],
-  )
-
-  const memberById = useMemo(
-    () => Object.fromEntries(memberArray.map(m => [m.id, m])),
-    [memberArray],
-  )
-
-  const statusColorById = useMemo(() => {
-    const m = new Map<string, string>()
-    proj?.statuses.forEach((s: Status) => m.set(s.id, s.color))
-    return m
-  }, [proj])
-
-  // Build RichActivity array (mirrors GanttView's toRichActivity).
-  const richActivities = useMemo((): RichActivity[] => {
-    if (!proj || columns.length === 0) return []
-    const viewStart = columns[0].start
-    const viewEnd = columns[columns.length - 1].end
-
-    return proj.activities.flatMap((a: PublicActivity, i: number) => {
-      const start = new Date(a.startAt)
-      const end = new Date(a.endAt)
-      if (end < viewStart || start > viewEnd) return []
-
-      const clampedStart = start < viewStart ? viewStart : start
-      const clampedEnd = end > viewEnd ? viewEnd : end
-      const { startCol, span } = positionInColumns(clampedStart, clampedEnd, columns)
-
-      const members = (a.assignedMemberIds ?? [])
-        .map(id => memberById[id])
-        .filter((m): m is Member => Boolean(m))
-
-      let color: string
-      if (vc.colorBy === 'member') {
-        color = members[0]?.color ?? a.color ?? ACTIVITY_COLORS[i % ACTIVITY_COLORS.length]
-      } else if (vc.colorBy === 'status') {
-        color = statusColorById.get(a.statusId ?? '') ?? '#6b7280'
-      } else {
-        color = a.color ?? ACTIVITY_COLORS[i % ACTIVITY_COLORS.length]
-      }
-
-      return [{
-        id: a.id,
-        title: a.title,
-        startCol,
-        span,
-        color,
-        icon: a.icon ?? undefined,
-        members,
-        isChild: Boolean(a.parentActivityId),
-        depth: 0,
-        startAtMs: start.getTime(),
-        endAtMs: end.getTime(),
-        parentActivityId: a.parentActivityId ?? null,
-        primaryMemberId: members[0]?.id ?? null,
-        assignedMemberIds: a.assignedMemberIds ?? [],
-        statusId: a.statusId ?? null,
-      } satisfies RichActivity]
-    })
-  }, [proj, columns, memberById, statusColorById, vc.colorBy])
-
-  // Apply groupBy + sortBy via the same buildRows used by GanttView.
-  const rows = useMemo(
-    () => buildRows(
-      richActivities,
-      memberArray,
-      vc.groupBy,
-      vc.sortBy,
-      new Set<string>(),
-      new Set<string>(),
-      proj?.statuses,
-    ),
-    [richActivities, memberArray, vc.groupBy, vc.sortBy, proj?.statuses],
-  )
-
-  // ── List / Kanban shared lookups ──────────────────────────────────────────
-
-  const apiActivities = useMemo<ApiActivity[]>(
-    () => (proj?.activities ?? []).map(a => toApiActivity(a, proj?.timeline.id ?? '')),
-    [proj],
-  )
-
-  const publicMemberById = useMemo(() => {
-    const m = new Map<string, PublicMember>()
-    proj?.members.forEach(member => m.set(member.id, member))
-    return m
-  }, [proj])
-
-  const statusById = useMemo(() => {
-    const m = new Map<string, Status>()
-    proj?.statuses.forEach(s => m.set(s.id, s))
-    return m
-  }, [proj])
-
-  const tagById = useMemo(() => {
-    const m = new Map<string, Tag>()
-    proj?.tags.forEach(t => m.set(t.id, t))
-    return m
-  }, [proj])
-
-  const activityTitleById = useMemo(() => {
-    const m = new Map<string, string>()
-    apiActivities.forEach(a => m.set(a.id, a.title))
-    return m
-  }, [apiActivities])
-
-  // ── List view derived data ────────────────────────────────────────────────
-
-  const listVc = useMemo(
-    () => parseListViewConfig(proj?.share.viewConfig ?? '{}'),
-    [proj?.share.viewConfig],
-  )
-
-  const visibleListColumns = useMemo<ColMeta[]>(() => {
-    if (!listVc.columns) return COL_CATALOG.filter(c => c.defaultVisible)
-    const byId = new Map(COL_CATALOG.map(c => [c.id, c]))
-    return listVc.columns
-      .filter(c => c.visible)
-      .map(c => byId.get(c.id))
-      .filter((c): c is ColMeta => Boolean(c))
-  }, [listVc.columns])
-
-  const listRows = useMemo(() => {
-    if (!proj || proj.share.viewType !== 'list') return []
-    const sorted = sortListActivities(apiActivities, listVc.sortBy)
-    return buildListRows(sorted, listVc.groupBy, publicMemberById, statusById, proj.statuses, new Set<string>())
-  }, [proj, apiActivities, listVc.groupBy, listVc.sortBy, publicMemberById, statusById])
-
-  // ── Kanban view derived data ──────────────────────────────────────────────
-
-  const kanbanVc = useMemo(
-    () => parseKanbanViewConfig(proj?.share.viewConfig ?? '{}'),
-    [proj?.share.viewConfig],
-  )
-
-  const adaptedMembers = useMemo<TeamMemberWithUser[]>(
-    () => (proj?.members ?? []).map(toTeamMemberWithUser),
-    [proj],
-  )
-
-  const kanbanStatusColorById = useMemo(() => {
-    const m = new Map<string, string>()
-    proj?.statuses.forEach(s => m.set(s.id, s.color))
-    return m
-  }, [proj])
-
-  const kanbanColorMap = useMemo(() => {
-    const m = new Map<string, string>()
-    apiActivities.forEach((a, i) => m.set(a.id, resolveActivityColor(a, i, memberById, kanbanVc.colorBy, kanbanStatusColorById)))
-    return m
-  }, [apiActivities, memberById, kanbanVc.colorBy, kanbanStatusColorById])
-
-  const kanbanHierarchy = useMemo(
-    () => kanbanVc.showHierarchy ? buildHierarchyMaps(apiActivities) : { childrenByParentId: new Map<string, ApiActivity[]>(), childIds: new Set<string>() },
-    [apiActivities, kanbanVc.showHierarchy],
-  )
-
-  // When hierarchy is on, children get nested under their parent's card by
-  // KanbanColumn — they must be excluded here or they'd also appear as their
-  // own top-level card in whichever column their status places them (mirrors
-  // KanbanView's `columnActivities`).
-  const kanbanColumnActivities = useMemo(
-    () => kanbanVc.showHierarchy
-      ? apiActivities.filter(a => !kanbanHierarchy.childIds.has(a.id))
-      : apiActivities,
-    [apiActivities, kanbanVc.showHierarchy, kanbanHierarchy],
-  )
-
-  const kanbanCollapsedSet = useMemo(() => new Set(kanbanVc.collapsedColumns), [kanbanVc.collapsedColumns])
-
-  const kanbanColumnsResolved = useMemo(() => {
-    if (!proj || proj.share.viewType !== 'kanban') return []
-    return buildColumns(kanbanVc.groupBy, kanbanColumnActivities, adaptedMembers, proj.statuses, kanbanVc.sortBy)
-  }, [proj, kanbanVc.groupBy, kanbanVc.sortBy, kanbanColumnActivities, adaptedMembers])
-
-  const kanbanActivityById = useMemo(() => {
-    const m = new Map<string, ApiActivity>()
-    apiActivities.forEach(a => m.set(a.id, a))
-    return m
-  }, [apiActivities])
-
-  // ── Render ────────────────────────────────────────────────────────────────
-
-  if (isLoading) {
-    return (
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh', gap: 10, color: '#6b7280', fontFamily: 'var(--font-sans)' }}>
-        <Loader2 size={20} className="animate-spin" />
-        <span>Loading shared view…</span>
-      </div>
-    )
-  }
-
-  // A locked share surfaces as a PASSWORD_REQUIRED error until a valid view
-  // token is obtained — show the unlock prompt rather than a dead-end error.
-  if (isError && (error as ApiError | null)?.code === 'PASSWORD_REQUIRED') {
-    return <UnlockPrompt token={token} onUnlocked={setViewToken} />
-  }
-
-  if (isError) {
-    const apiErr = error as { status?: number } | null
-    const is404 = apiErr?.status === 404
-    const is410 = apiErr?.status === 410
-    return (
-      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100vh', gap: 12, color: '#374151', fontFamily: 'var(--font-sans)', padding: 24 }}>
-        <AlertCircle size={32} style={{ color: '#ef4444' }} />
-        <h1 style={{ fontSize: 18, fontWeight: 600, margin: 0 }}>
-          {is404 ? 'Share not found' : is410 ? 'This share has expired or been revoked' : 'Could not load this view'}
-        </h1>
-        <p style={{ fontSize: 13, color: '#6b7280', margin: 0, textAlign: 'center' }}>
-          {is404 || is410 ? 'The link may have been removed or may never have existed.' : 'Please try again later.'}
-        </p>
-      </div>
-    )
-  }
-
-  if (!proj) return null
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: '#ffffff' }}>
-      {/* Branding strip */}
-      <div style={{
-        display: 'flex', alignItems: 'center', gap: 8, padding: '0 16px', height: 44,
-        background: '#f9fafb', borderBottom: '1px solid #e5e7eb', flexShrink: 0,
-        color: '#111827',
-      }}>
-        <Badge
-          identity={{ color: proj.timeline.color ?? '#6b7280', icon: proj.timeline.icon ?? '__none__' }}
-          name={proj.timeline.name}
-          size={24}
-        />
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 0, lineHeight: 1.2 }}>
-          <span style={{ fontSize: 13, fontWeight: 700, color: '#111827' }}>{proj.timeline.name}</span>
-          <span style={{ fontSize: 11, color: '#6b7280' }}>{proj.teamName}{proj.share.name ? ` · ${proj.share.name}` : ''}</span>
-        </div>
-        <span style={{ marginLeft: 'auto', fontSize: 11, color: '#9ca3af' }}>
-          {proj.activities.length} {proj.activities.length === 1 ? 'activity' : 'activities'}
-        </span>
-      </div>
-
-      {/* View body — interactive=false for every view type */}
-      {proj.share.viewType === 'list' ? (
-        <PublicListTable
-          rows={listRows}
-          visibleColumns={visibleListColumns}
-          memberById={publicMemberById}
-          statusById={statusById}
-          tagById={tagById}
-          activityTitleById={activityTitleById}
-        />
-      ) : proj.share.viewType === 'kanban' ? (
-        <div style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
-          <KanbanBoard
-            columns={kanbanColumnsResolved}
-            groupBy={kanbanVc.groupBy}
-            members={memberArray}
-            statusById={statusById}
-            tagById={tagById}
-            colorMap={kanbanColorMap}
-            cardFields={kanbanVc.cardFields}
-            suppressedFields={new Set()}
-            selectedActivityId={null}
-            matchedIds={new Set()}
-            activeMatchId={null}
-            hasQuery={false}
-            collapsedColumnIds={kanbanCollapsedSet}
-            onToggleCollapse={() => {}}
-            onCardClick={() => {}}
-            onAddInColumn={() => {}}
-            onDrop={() => {}}
-            activityById={kanbanActivityById}
-            activityTitleById={activityTitleById}
-            showHierarchy={kanbanVc.showHierarchy}
-            childrenByParentId={kanbanHierarchy.childrenByParentId}
-            collapsedParents={new Set()}
-            onToggleParent={() => {}}
-            interactive={false}
-          />
-        </div>
-      ) : (
-        <div style={{ flex: 1, minHeight: 0 }}>
-          <GanttGrid
-            rows={rows}
-            columns={columns}
-            todayIndex={todayIdx}
-            selectedActivityId={null}
-            onSelectActivity={() => {}}
-            resolvedGranularity={resolvedGranularity}
-            interactive={false}
-          />
-        </div>
-      )}
-    </div>
-  )
-}
-````
-
-## File: packages/api/internal/api/share_handler.go
-````go
-package api
-
-import (
-	"database/sql"
-	"encoding/json"
-	"errors"
-	"net/http"
-	"os"
-	"strings"
-	"sync"
-	"time"
-
-	"github.com/I0-1O/draba/packages/api/internal/auth"
-	"github.com/I0-1O/draba/packages/api/internal/filters"
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// unlockMaxAttempts caps password-unlock attempts per client IP per hour. The
-// limit is per-share-independent (keyed on IP only) so cycling tokens cannot
-// multiply an attacker's budget.
-const unlockMaxAttempts = 10
-
-// ── In-memory share cache ─────────────────────────────────────────────────────
-
-type shareCacheEntry struct {
-	builtAt time.Time
-	payload models.ShareProjection
-}
-
-// shareCache is a lightweight TTL cache keyed by share token. It avoids a DB
-// hit on every warm request. The TTL is read from DRABA_SHARE_CACHE_TTL at
-// startup (default 60s); a PATCH or DELETE invalidates the entry immediately.
-type shareCache struct {
-	mu      sync.RWMutex
-	entries map[string]*shareCacheEntry
-	ttl     time.Duration
-}
-
-func newShareCache() *shareCache {
-	ttl := 60 * time.Second
-	if v := os.Getenv("DRABA_SHARE_CACHE_TTL"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			ttl = d
-		}
-	}
-	return &shareCache{entries: make(map[string]*shareCacheEntry), ttl: ttl}
-}
-
-func (c *shareCache) get(token string) (*models.ShareProjection, bool) {
-	c.mu.RLock()
-	e, ok := c.entries[token]
-	c.mu.RUnlock()
-	if !ok {
-		return nil, false
-	}
-	if time.Since(e.builtAt) > c.ttl {
-		return nil, false
-	}
-	p := e.payload
-	return &p, true
-}
-
-func (c *shareCache) set(token string, p *models.ShareProjection) {
-	c.mu.Lock()
-	c.entries[token] = &shareCacheEntry{builtAt: time.Now(), payload: *p}
-	c.mu.Unlock()
-}
-
-func (c *shareCache) invalidate(token string) {
-	c.mu.Lock()
-	delete(c.entries, token)
-	c.mu.Unlock()
-}
-
-// ── viewConfig sub-types ──────────────────────────────────────────────────────
-
-// viewConfigJSON is the shape stored in shares.view_config. The filter field
-// is evaluated server-side by the Go filter engine; the other fields are
-// forwarded to the client as-is so the public viewer can apply them.
-//
-// columns carries the List view's column visibility snapshot — it drives the
-// "notes" projection nuance below (and lets the public viewer render exactly
-// the columns the share creator chose).
-type viewConfigJSON struct {
-	Filter  *filters.FilterDefinition `json:"filter,omitempty"`
-	Columns []shareColumnConfig       `json:"columns,omitempty"`
-}
-
-type shareColumnConfig struct {
-	ID      string `json:"id"`
-	Visible bool   `json:"visible"`
-}
-
-// ── Handlers ──────────────────────────────────────────────────────────────────
-
-// handleGetShareProjection handles GET /shares/{token}. No authentication is
-// required. It is the public data gateway: the scope is hard-locked to the
-// single timeline referenced by the share row; no client-supplied selector can
-// widen it.
-func (s *Server) handleGetShareProjection(w http.ResponseWriter, r *http.Request) {
-	token := r.PathValue("token")
-
-	// GET /shares/{token}.ics — Go 1.22 mux wildcards span the whole path
-	// segment, so the ICS feed's .ics suffix arrives inside {token}; dispatch
-	// it to the calendar-feed handler (Phase 13.4).
-	if strings.HasSuffix(token, ".ics") {
-		s.serveICSFeed(w, r, strings.TrimSuffix(token, ".ics"))
-		return
-	}
-
-	// ── 1. Resolve the share row ──────────────────────────────────────────────
-	share, err := s.shares.GetByToken(token)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load share")
-		return
-	}
-
-	// An ICS feed is only reachable through the .ics endpoint. Serving it as a
-	// JSON projection would expose the whole timeline for member-scoped feeds
-	// (the projection has no member filter), so the kinds never cross over.
-	if share.Kind != models.ShareKindView {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
-		return
-	}
-
-	// Phase 13.4 — revocation / expiry handled here (fields exist in schema now).
-	if share.RevokedAt != nil {
-		writeError(w, http.StatusGone, "GONE", "this share has been revoked")
-		return
-	}
-	if share.ExpiresAt != nil && time.Now().After(*share.ExpiresAt) {
-		writeError(w, http.StatusGone, "GONE", "this share has expired")
-		return
-	}
-
-	// Password gate (Phase 13.2). A locked share serves no data without a valid
-	// view token — obtained by exchanging the password at POST /shares/{token}/unlock.
-	// NOTE: this check must stay above the cache read. PATCH invalidates the cache
-	// entry immediately (see handleUpdateShare), so a newly-added password_hash is
-	// never served from a stale cache. Moving the check below the cache read would
-	// silently bypass the password gate for the TTL window. The 401 body carries no
-	// projection data — only the passwordRequired signal the viewer needs.
-	if share.PasswordHash != nil {
-		vt := bearerToken(r)
-		if vt == "" || s.tokens.ValidateShareViewToken(vt, share.ID) != nil {
-			writeJSON(w, http.StatusUnauthorized, map[string]bool{"passwordRequired": true})
-			return
-		}
-	}
-
-	// ── 2. Serve from cache if warm ───────────────────────────────────────────
-	if proj, ok := s.shareCache.get(token); ok {
-		go func() { _ = s.shares.RecordView(share.ID) }()
-		writeJSON(w, http.StatusOK, proj)
-		return
-	}
-
-	// ── 3. Build projection (cache miss) ─────────────────────────────────────
-	proj, err := s.buildShareProjection(share)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to build share projection")
-		return
-	}
-
-	s.shareCache.set(token, proj)
-	go func() { _ = s.shares.RecordView(share.ID) }()
-	writeJSON(w, http.StatusOK, proj)
-}
-
-// buildShareProjection assembles the full ShareProjection for a share.
-// The scope is hard-locked to share.TimelineID; the caller cannot supply a
-// different timeline ID. Filter evaluation runs in Go before any data leaves
-// the server.
-func (s *Server) buildShareProjection(share *models.Share) (*models.ShareProjection, error) {
-	// Get timeline — using the share's TimelineID, never a client-supplied value.
-	timeline, err := s.timelines.GetByID(share.TimelineID)
-	if err != nil {
-		return nil, err
-	}
-
-	// Get all non-archived activities for this timeline.
-	acts, err := s.activities.ListByTimeline(share.TimelineID, nil, nil, false)
-	if err != nil {
-		return nil, err
-	}
-
-	// Get statuses and tags for filter context + projection.
-	statuses, err := s.statuses.ListStatuses(share.TimelineID)
-	if err != nil {
-		return nil, err
-	}
-	tags, err := s.tags.ListByTeam(timeline.TeamID)
-	if err != nil {
-		return nil, err
-	}
-	members, err := s.teams.ListMembers(timeline.TeamID)
-	if err != nil {
-		return nil, err
-	}
-	team, err := s.teams.GetByID(timeline.TeamID)
-	if err != nil {
-		return nil, err
-	}
-
-	// Parse the frozen filter from view_config and evaluate it server-side.
-	var vc viewConfigJSON
-	if share.ViewConfig != "" && share.ViewConfig != "{}" {
-		_ = json.Unmarshal([]byte(share.ViewConfig), &vc)
-	}
-
-	var filteredActs []*models.Activity
-	if vc.Filter != nil && len(vc.Filter.Conditions) > 0 {
-		// Build filter context.
-		statusesByTL := map[string][]models.Status{share.TimelineID: {}}
-		for _, st := range statuses {
-			statusesByTL[share.TimelineID] = append(statusesByTL[share.TimelineID], *st)
-		}
-		modelTags := make([]models.Tag, 0, len(tags))
-		for _, t := range tags {
-			modelTags = append(modelTags, *t)
-		}
-		ctx := &filters.FilterContext{
-			StatusesByTimelineID: statusesByTL,
-			Tags:                 modelTags,
-		}
-		for _, a := range acts {
-			if filters.MatchesFilter(a, vc.Filter, ctx) {
-				filteredActs = append(filteredActs, a)
-			}
-		}
-	} else {
-		filteredActs = acts
-	}
-
-	// Build referenced-entity sets (prune to what surviving activities reference).
-	usedMemberIDs := make(map[string]bool)
-	usedStatusIDs := make(map[string]bool)
-	usedTagIDs := make(map[string]bool)
-	for _, a := range filteredActs {
-		for _, id := range a.AssignedMemberIDs {
-			usedMemberIDs[id] = true
-		}
-		if a.StatusID != nil {
-			usedStatusIDs[*a.StatusID] = true
-		}
-		for _, id := range a.TagIDs {
-			usedTagIDs[id] = true
-		}
-	}
-
-	// notes is included only for List shares whose creator left the Notes
-	// column visible — the only projection nuance beyond scope-locking and
-	// field-pruning (Phase 13.3 exit criteria).
-	notesEnabled := false
-	if share.ViewType == "list" {
-		for _, c := range vc.Columns {
-			if c.ID == "notes" && c.Visible {
-				notesEnabled = true
-				break
-			}
-		}
-	}
-
-	// Build PublicActivity slice.
-	pubActivities := make([]models.PublicActivity, 0, len(filteredActs))
-	for _, a := range filteredActs {
-		pub := models.PublicActivity{
-			ID:                a.ID,
-			Title:             a.Title,
-			Description:       a.Description,
-			Icon:              a.Icon,
-			Color:             a.Color,
-			StartAt:           a.StartAt,
-			EndAt:             a.EndAt,
-			AllDay:            a.AllDay,
-			StatusID:          a.StatusID,
-			ParentActivityID:  a.ParentActivityID,
-			PercentComplete:   a.PercentComplete,
-			AssignedMemberIDs: a.AssignedMemberIDs,
-			TagIDs:            a.TagIDs,
-		}
-		if notesEnabled {
-			pub.Notes = a.Notes
-		}
-		if pub.AssignedMemberIDs == nil {
-			pub.AssignedMemberIDs = []string{}
-		}
-		if pub.TagIDs == nil {
-			pub.TagIDs = []string{}
-		}
-		pubActivities = append(pubActivities, pub)
-	}
-
-	// Build PublicMember slice — never email/role/userId.
-	pubMembers := make([]models.PublicMember, 0)
-	for _, m := range members {
-		if !usedMemberIDs[m.ID] {
-			continue
-		}
-		name := m.DisplayName
-		if name == "" {
-			// The register endpoint requires a non-empty displayName, so this
-			// branch only fires for rows migrated from older data. Never fall
-			// back to the email address — this response is public and
-			// unauthenticated.
-			name = "Team member"
-		}
-		pubMembers = append(pubMembers, models.PublicMember{
-			ID:          m.ID,
-			DisplayName: name,
-			Color:       m.Color,
-			Icon:        m.Icon,
-		})
-	}
-
-	// Prune statuses to referenced ones — except for Kanban shares, where
-	// every status is a column regardless of whether it currently holds any
-	// activities (mirrors the in-app board, which always renders one column
-	// per timeline status). Pruning there would silently drop empty columns
-	// that anonymous viewers would otherwise see, e.g. an empty "Deferred"
-	// column that's still meaningful to the team.
-	pubStatuses := make([]models.Status, 0)
-	for _, st := range statuses {
-		if share.ViewType == "kanban" || usedStatusIDs[st.ID] {
-			pubStatuses = append(pubStatuses, *st)
-		}
-	}
-
-	// Prune tags to referenced ones.
-	pubTags := make([]models.Tag, 0)
-	for _, tg := range tags {
-		if usedTagIDs[tg.ID] {
-			pubTags = append(pubTags, *tg)
-		}
-	}
-
-	// Build the public share — only the fields anonymous callers need.
-	// Operational telemetry (view_count, last_viewed_at) and internal fields
-	// (created_by, revoked_at) are excluded from the public response.
-	pubShare := models.PublicShare{
-		ID:         share.ID,
-		TimelineID: share.TimelineID,
-		Token:      share.Token,
-		Name:       share.Name,
-		ViewType:   share.ViewType,
-		ViewConfig: share.ViewConfig,
-		CreatedAt:  share.CreatedAt,
-		ExpiresAt:  share.ExpiresAt,
-	}
-	proj := &models.ShareProjection{
-		Share:    pubShare,
-		TeamName: team.Name,
-		Timeline: models.PublicTimeline{
-			ID:        timeline.ID,
-			Name:      timeline.Name,
-			Color:     timeline.Color,
-			Icon:      timeline.Icon,
-			StartDate: timeline.StartDate,
-			EndDate:   timeline.EndDate,
-		},
-		Members:    pubMembers,
-		Statuses:   pubStatuses,
-		Tags:       pubTags,
-		Activities: pubActivities,
-	}
-	return proj, nil
-}
-
-// handleCreateShare handles POST /timelines/{id}/shares. The caller must be a
-// member of the timeline's team. The share captures the current view config.
-func (s *Server) handleCreateShare(w http.ResponseWriter, r *http.Request) {
-	timelineID := r.PathValue("id")
-
-	timeline, err := s.timelines.GetByID(timelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
-		return
-	}
-	if timeline.ArchivedAt != nil {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-		return
-	}
-
-	member, ok := s.requireTeamMember(w, r, timeline.TeamID)
-	if !ok {
-		return
-	}
-
-	var req createShareBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-	if req.Kind == "" {
-		req.Kind = models.ShareKindView
-	}
-	if req.Kind != models.ShareKindView && req.Kind != models.ShareKindICS {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "kind must be 'view' or 'ics'")
-		return
-	}
-	if req.ViewType == "" {
-		req.ViewType = "gantt"
-	}
-	if req.ViewConfig == "" {
-		req.ViewConfig = "{}"
-	}
-
-	now := time.Now().UTC()
-	share := &models.Share{
-		ID:          newID(),
-		TimelineID:  timelineID,
-		Token:       newToken(),
-		Kind:        req.Kind,
-		Name:        req.Name,
-		Description: req.Description,
-		ViewType:    req.ViewType,
-		ViewConfig:  req.ViewConfig,
-		CreatedBy:   member.ID,
-		CreatedAt:   now,
-		ViewCount:   0,
-	}
-
-	if req.Kind == models.ShareKindICS {
-		// An ICS feed has no view semantics and no password — the token is the
-		// secret (calendar clients cannot unlock interactively). Scope is the
-		// only configuration: the whole timeline, or one member's assignments.
-		if req.Password != nil && strings.TrimSpace(*req.Password) != "" {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "ICS feeds cannot be password protected")
-			return
-		}
-		if req.Scope != models.ShareScopeTimeline && req.Scope != models.ShareScopeMember {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "scope must be 'timeline' or 'member' for ICS shares")
-			return
-		}
-		share.Scope = &req.Scope
-		share.ViewType = "calendar"
-		share.ViewConfig = "{}"
-		if req.Scope == models.ShareScopeMember {
-			if req.MemberID == nil || *req.MemberID == "" {
-				writeError(w, http.StatusBadRequest, "BAD_REQUEST", "memberId is required for member-scoped ICS shares")
-				return
-			}
-			// The member must belong to this timeline's team — a feed must not
-			// be creatable for an arbitrary member ID from another team.
-			feedMember, err := s.teams.GetMemberByID(*req.MemberID)
-			if err != nil || feedMember.TeamID != timeline.TeamID {
-				writeError(w, http.StatusBadRequest, "BAD_REQUEST", "memberId does not belong to this timeline's team")
-				return
-			}
-			share.MemberID = req.MemberID
-		}
-	}
-
-	// Optional password protection (view shares only). An empty/whitespace
-	// string means "no password" — the field stays NULL and the share is open.
-	if req.Kind == models.ShareKindView && req.Password != nil && strings.TrimSpace(*req.Password) != "" {
-		hash, err := auth.HashPassword(*req.Password)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to secure share")
-			return
-		}
-		share.PasswordHash = &hash
-	}
-
-	if err := s.shares.Create(share); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create share")
-		return
-	}
-
-	// Surface the derived flag in the create response (the repo sets it on reads).
-	share.Protected = share.PasswordHash != nil
-	writeJSON(w, http.StatusCreated, share)
-}
-
-// handleListShares handles GET /teams/{id}/timelines/{timelineId}/shares.
-// Only team members with access to the timeline may list its shares.
-func (s *Server) handleListShares(w http.ResponseWriter, r *http.Request) {
-	timelineID := r.PathValue("timelineId")
-
-	timeline, err := s.timelines.GetByID(timelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
-		return
-	}
-
-	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
-		return
-	}
-
-	shares, err := s.shares.ListByTimeline(timelineID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list shares")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, shares)
-}
-
-// handleUpdateShare handles PATCH /shares/{id}. Any member of the timeline's
-// team may update it (shares are read-only projections — no creator/admin gate).
-func (s *Server) handleUpdateShare(w http.ResponseWriter, r *http.Request) {
-	shareID := r.PathValue("id")
-
-	share, err := s.shares.GetByID(shareID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
-		return
-	}
-
-	timeline, err := s.timelines.GetByID(share.TimelineID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
-		return
-	}
-
-	// Any member of the timeline's team may manage its shares. A share is a
-	// read-only projection that can never mutate app data, so there is no
-	// creator/admin gate (Phase 13.2 re-sequencing decision).
-	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
-		return
-	}
-
-	var req patchShareBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	if req.Name != nil {
-		share.Name = req.Name
-	}
-	if req.Description != nil {
-		share.Description = req.Description
-	}
-	if req.ViewType != nil {
-		share.ViewType = *req.ViewType
-	}
-	if req.ViewConfig != nil {
-		share.ViewConfig = *req.ViewConfig
-	}
-	// Password: nil leaves it unchanged; an empty string clears protection; a
-	// non-empty string sets/replaces it. ICS feeds can never carry one —
-	// calendar clients have no interactive unlock.
-	if req.Password != nil && share.Kind == models.ShareKindICS && strings.TrimSpace(*req.Password) != "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "ICS feeds cannot be password protected")
-		return
-	}
-	if req.Password != nil {
-		if strings.TrimSpace(*req.Password) == "" {
-			share.PasswordHash = nil
-		} else {
-			hash, err := auth.HashPassword(*req.Password)
-			if err != nil {
-				writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to secure share")
-				return
-			}
-			share.PasswordHash = &hash
-		}
-	}
-
-	if err := s.shares.Update(share); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update share")
-		return
-	}
-
-	// Invalidate caches so the next public request picks up the new config.
-	s.shareCache.invalidate(share.Token)
-	s.icsCache.invalidate(share.Token)
-
-	// Refresh the derived flag — the password may have just been set/cleared.
-	share.Protected = share.PasswordHash != nil
-	writeJSON(w, http.StatusOK, share)
-}
-
-// handleDeleteShare handles DELETE /shares/{id}. Any member of the timeline's
-// team may delete it (see handleUpdateShare).
-func (s *Server) handleDeleteShare(w http.ResponseWriter, r *http.Request) {
-	shareID := r.PathValue("id")
-
-	share, err := s.shares.GetByID(shareID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
-		return
-	}
-
-	timeline, err := s.timelines.GetByID(share.TimelineID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
-		return
-	}
-
-	// Any member of the timeline's team may delete its shares — no creator/admin
-	// gate (see handleUpdateShare).
-	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
-		return
-	}
-
-	if err := s.shares.Delete(shareID); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete share")
-		return
-	}
-
-	s.shareCache.invalidate(share.Token)
-	s.icsCache.invalidate(share.Token)
-	w.WriteHeader(http.StatusNoContent)
-}
-
-// handleUnlockShare handles POST /shares/{token}/unlock. It is public (no auth
-// middleware): an anonymous viewer exchanges the share password for a
-// short-lived view token, which they then present on GET /shares/{token}.
-// Attempts are rate-limited per client IP to blunt brute-force guessing.
-func (s *Server) handleUnlockShare(w http.ResponseWriter, r *http.Request) {
-	if !s.unlockLimiter.allow(clientIP(r)) {
-		writeError(w, http.StatusTooManyRequests, "RATE_LIMITED", "too many unlock attempts; try again later")
-		return
-	}
-
-	token := r.PathValue("token")
-
-	share, err := s.shares.GetByToken(token)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load share")
-		return
-	}
-
-	// Mirror the GET gateway's revocation/expiry checks so a dead share cannot
-	// be unlocked.
-	if share.RevokedAt != nil {
-		writeError(w, http.StatusGone, "GONE", "this share has been revoked")
-		return
-	}
-	if share.ExpiresAt != nil && time.Now().After(*share.ExpiresAt) {
-		writeError(w, http.StatusGone, "GONE", "this share has expired")
-		return
-	}
-	// ICS feeds are never password protected; mirror the projection gateway's
-	// 404 rather than confirming the token exists in another mode.
-	if share.Kind != models.ShareKindView {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
-		return
-	}
-	if share.PasswordHash == nil {
-		writeError(w, http.StatusBadRequest, "NOT_PROTECTED", "this share is not password protected")
-		return
-	}
-
-	var req unlockShareBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-	if auth.CheckPassword(*share.PasswordHash, req.Password) != nil {
-		writeError(w, http.StatusUnauthorized, "INVALID_PASSWORD", "incorrect password")
-		return
-	}
-
-	viewToken, err := s.tokens.IssueShareViewToken(share.ID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to issue view token")
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"token": viewToken})
-}
-
-// bearerToken extracts a Bearer credential from the Authorization header, or
-// returns "" when absent or malformed.
-func bearerToken(r *http.Request) string {
-	header := r.Header.Get("Authorization")
-	if !strings.HasPrefix(header, "Bearer ") {
-		return ""
-	}
-	return strings.TrimPrefix(header, "Bearer ")
-}
-
-// ── Request bodies ────────────────────────────────────────────────────────────
-
-type createShareBody struct {
-	Kind        string  `json:"kind,omitempty"`
-	Scope       string  `json:"scope,omitempty"`
-	MemberID    *string `json:"memberId,omitempty"`
-	Name        *string `json:"name,omitempty"`
-	Description *string `json:"description,omitempty"`
-	ViewType    string  `json:"viewType"`
-	ViewConfig  string  `json:"viewConfig"`
-	Password    *string `json:"password,omitempty"`
-}
-
-type patchShareBody struct {
-	Name        *string `json:"name,omitempty"`
-	Description *string `json:"description,omitempty"`
-	ViewType    *string `json:"viewType,omitempty"`
-	ViewConfig  *string `json:"viewConfig,omitempty"`
-	Password    *string `json:"password,omitempty"`
-}
-
-type unlockShareBody struct {
-	Password string `json:"password"`
-}
-````
-
 ## File: packages/web/src/components/ShareModal.tsx
 ````typescript
 /**
@@ -60384,6 +59725,737 @@ export default function ShareModal({ teamId, timelineId, viewType, viewConfig, t
     </div>,
     document.body,
   )
+}
+````
+
+## File: packages/api/internal/api/share_handler.go
+````go
+package api
+
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"os"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/auth"
+	"github.com/I0-1O/draba/packages/api/internal/filters"
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// unlockMaxAttempts caps password-unlock attempts per client IP per hour. The
+// limit is per-share-independent (keyed on IP only) so cycling tokens cannot
+// multiply an attacker's budget.
+const unlockMaxAttempts = 10
+
+// ── In-memory share cache ─────────────────────────────────────────────────────
+
+type shareCacheEntry struct {
+	builtAt time.Time
+	payload models.ShareProjection
+}
+
+// shareCache is a lightweight TTL cache keyed by share token. It avoids a DB
+// hit on every warm request. The TTL is read from DRABA_SHARE_CACHE_TTL at
+// startup (default 60s); a PATCH or DELETE invalidates the entry immediately.
+type shareCache struct {
+	mu      sync.RWMutex
+	entries map[string]*shareCacheEntry
+	ttl     time.Duration
+}
+
+func newShareCache() *shareCache {
+	ttl := 60 * time.Second
+	if v := os.Getenv("DRABA_SHARE_CACHE_TTL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			ttl = d
+		}
+	}
+	return &shareCache{entries: make(map[string]*shareCacheEntry), ttl: ttl}
+}
+
+func (c *shareCache) get(token string) (*models.ShareProjection, bool) {
+	c.mu.RLock()
+	e, ok := c.entries[token]
+	c.mu.RUnlock()
+	if !ok {
+		return nil, false
+	}
+	if time.Since(e.builtAt) > c.ttl {
+		return nil, false
+	}
+	p := e.payload
+	return &p, true
+}
+
+func (c *shareCache) set(token string, p *models.ShareProjection) {
+	c.mu.Lock()
+	c.entries[token] = &shareCacheEntry{builtAt: time.Now(), payload: *p}
+	c.mu.Unlock()
+}
+
+func (c *shareCache) invalidate(token string) {
+	c.mu.Lock()
+	delete(c.entries, token)
+	c.mu.Unlock()
+}
+
+// ── viewConfig sub-types ──────────────────────────────────────────────────────
+
+// viewConfigJSON is the shape stored in shares.view_config. The filter field
+// is evaluated server-side by the Go filter engine; the other fields are
+// forwarded to the client as-is so the public viewer can apply them.
+//
+// columns carries the List view's column visibility snapshot — it drives the
+// "notes" projection nuance below (and lets the public viewer render exactly
+// the columns the share creator chose).
+type viewConfigJSON struct {
+	Filter  *filters.FilterDefinition `json:"filter,omitempty"`
+	Columns []shareColumnConfig       `json:"columns,omitempty"`
+}
+
+type shareColumnConfig struct {
+	ID      string `json:"id"`
+	Visible bool   `json:"visible"`
+}
+
+// ── Handlers ──────────────────────────────────────────────────────────────────
+
+// handleGetShareProjection handles GET /shares/{token}. No authentication is
+// required. It is the public data gateway: the scope is hard-locked to the
+// single timeline referenced by the share row; no client-supplied selector can
+// widen it.
+func (s *Server) handleGetShareProjection(w http.ResponseWriter, r *http.Request) {
+	token := r.PathValue("token")
+
+	// GET /shares/{token}.ics — Go 1.22 mux wildcards span the whole path
+	// segment, so the ICS feed's .ics suffix arrives inside {token}; dispatch
+	// it to the calendar-feed handler (Phase 13.4).
+	if strings.HasSuffix(token, ".ics") {
+		s.serveICSFeed(w, r, strings.TrimSuffix(token, ".ics"))
+		return
+	}
+
+	// ── 1. Resolve the share row ──────────────────────────────────────────────
+	share, err := s.shares.GetByToken(token)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load share")
+		return
+	}
+
+	// An ICS feed is only reachable through the .ics endpoint. Serving it as a
+	// JSON projection would expose the whole timeline for member-scoped feeds
+	// (the projection has no member filter), so the kinds never cross over.
+	if share.Kind != models.ShareKindView {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+		return
+	}
+
+	// Phase 13.4 — revocation / expiry handled here (fields exist in schema now).
+	if share.RevokedAt != nil {
+		writeError(w, http.StatusGone, "GONE", "this share has been revoked")
+		return
+	}
+	if share.ExpiresAt != nil && time.Now().After(*share.ExpiresAt) {
+		writeError(w, http.StatusGone, "GONE", "this share has expired")
+		return
+	}
+
+	// Password gate (Phase 13.2). A locked share serves no data without a valid
+	// view token — obtained by exchanging the password at POST /shares/{token}/unlock.
+	// NOTE: this check must stay above the cache read. PATCH invalidates the cache
+	// entry immediately (see handleUpdateShare), so a newly-added password_hash is
+	// never served from a stale cache. Moving the check below the cache read would
+	// silently bypass the password gate for the TTL window. The 401 body carries no
+	// projection data — only the passwordRequired signal the viewer needs.
+	if share.PasswordHash != nil {
+		vt := bearerToken(r)
+		if vt == "" || s.tokens.ValidateShareViewToken(vt, share.ID) != nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]bool{"passwordRequired": true})
+			return
+		}
+	}
+
+	// ── 2. Serve from cache if warm ───────────────────────────────────────────
+	if proj, ok := s.shareCache.get(token); ok {
+		go func() { _ = s.shares.RecordView(share.ID) }()
+		writeJSON(w, http.StatusOK, proj)
+		return
+	}
+
+	// ── 3. Build projection (cache miss) ─────────────────────────────────────
+	proj, err := s.buildShareProjection(share)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to build share projection")
+		return
+	}
+
+	s.shareCache.set(token, proj)
+	go func() { _ = s.shares.RecordView(share.ID) }()
+	writeJSON(w, http.StatusOK, proj)
+}
+
+// buildShareProjection assembles the full ShareProjection for a share.
+// The scope is hard-locked to share.TimelineID; the caller cannot supply a
+// different timeline ID. Filter evaluation runs in Go before any data leaves
+// the server.
+func (s *Server) buildShareProjection(share *models.Share) (*models.ShareProjection, error) {
+	// Get timeline — using the share's TimelineID, never a client-supplied value.
+	timeline, err := s.timelines.GetByID(share.TimelineID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Get all non-archived activities for this timeline.
+	acts, err := s.activities.ListByTimeline(share.TimelineID, nil, nil, false)
+	if err != nil {
+		return nil, err
+	}
+
+	// Get statuses and tags for filter context + projection.
+	statuses, err := s.statuses.ListStatuses(share.TimelineID)
+	if err != nil {
+		return nil, err
+	}
+	tags, err := s.tags.ListByTeam(timeline.TeamID)
+	if err != nil {
+		return nil, err
+	}
+	members, err := s.teams.ListMembers(timeline.TeamID)
+	if err != nil {
+		return nil, err
+	}
+	team, err := s.teams.GetByID(timeline.TeamID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Parse the frozen filter from view_config and evaluate it server-side.
+	var vc viewConfigJSON
+	if share.ViewConfig != "" && share.ViewConfig != "{}" {
+		_ = json.Unmarshal([]byte(share.ViewConfig), &vc)
+	}
+
+	var filteredActs []*models.Activity
+	if vc.Filter != nil && len(vc.Filter.Conditions) > 0 {
+		// Build filter context.
+		statusesByTL := map[string][]models.Status{share.TimelineID: {}}
+		for _, st := range statuses {
+			statusesByTL[share.TimelineID] = append(statusesByTL[share.TimelineID], *st)
+		}
+		modelTags := make([]models.Tag, 0, len(tags))
+		for _, t := range tags {
+			modelTags = append(modelTags, *t)
+		}
+		ctx := &filters.FilterContext{
+			StatusesByTimelineID: statusesByTL,
+			Tags:                 modelTags,
+		}
+		for _, a := range acts {
+			if filters.MatchesFilter(a, vc.Filter, ctx) {
+				filteredActs = append(filteredActs, a)
+			}
+		}
+	} else {
+		filteredActs = acts
+	}
+
+	// Build referenced-entity sets (prune to what surviving activities reference).
+	usedMemberIDs := make(map[string]bool)
+	usedStatusIDs := make(map[string]bool)
+	usedTagIDs := make(map[string]bool)
+	for _, a := range filteredActs {
+		for _, id := range a.AssignedMemberIDs {
+			usedMemberIDs[id] = true
+		}
+		if a.StatusID != nil {
+			usedStatusIDs[*a.StatusID] = true
+		}
+		for _, id := range a.TagIDs {
+			usedTagIDs[id] = true
+		}
+	}
+
+	// notes is included only for List shares whose creator left the Notes
+	// column visible — the only projection nuance beyond scope-locking and
+	// field-pruning (Phase 13.3 exit criteria).
+	notesEnabled := false
+	if share.ViewType == "list" {
+		for _, c := range vc.Columns {
+			if c.ID == "notes" && c.Visible {
+				notesEnabled = true
+				break
+			}
+		}
+	}
+
+	// Build PublicActivity slice.
+	pubActivities := make([]models.PublicActivity, 0, len(filteredActs))
+	for _, a := range filteredActs {
+		pub := models.PublicActivity{
+			ID:                a.ID,
+			Title:             a.Title,
+			Description:       a.Description,
+			Icon:              a.Icon,
+			Color:             a.Color,
+			StartAt:           a.StartAt,
+			EndAt:             a.EndAt,
+			AllDay:            a.AllDay,
+			StatusID:          a.StatusID,
+			ParentActivityID:  a.ParentActivityID,
+			PercentComplete:   a.PercentComplete,
+			AssignedMemberIDs: a.AssignedMemberIDs,
+			TagIDs:            a.TagIDs,
+		}
+		if notesEnabled {
+			pub.Notes = a.Notes
+		}
+		if pub.AssignedMemberIDs == nil {
+			pub.AssignedMemberIDs = []string{}
+		}
+		if pub.TagIDs == nil {
+			pub.TagIDs = []string{}
+		}
+		pubActivities = append(pubActivities, pub)
+	}
+
+	// Build PublicMember slice — never email/role/userId.
+	pubMembers := make([]models.PublicMember, 0)
+	for _, m := range members {
+		if !usedMemberIDs[m.ID] {
+			continue
+		}
+		name := m.DisplayName
+		if name == "" {
+			// The register endpoint requires a non-empty displayName, so this
+			// branch only fires for rows migrated from older data. Never fall
+			// back to the email address — this response is public and
+			// unauthenticated.
+			name = "Team member"
+		}
+		pubMembers = append(pubMembers, models.PublicMember{
+			ID:          m.ID,
+			DisplayName: name,
+			Color:       m.Color,
+			Icon:        m.Icon,
+		})
+	}
+
+	// Prune statuses to referenced ones — except for Kanban shares, where
+	// every status is a column regardless of whether it currently holds any
+	// activities (mirrors the in-app board, which always renders one column
+	// per timeline status). Pruning there would silently drop empty columns
+	// that anonymous viewers would otherwise see, e.g. an empty "Deferred"
+	// column that's still meaningful to the team.
+	pubStatuses := make([]models.Status, 0)
+	for _, st := range statuses {
+		if share.ViewType == "kanban" || usedStatusIDs[st.ID] {
+			pubStatuses = append(pubStatuses, *st)
+		}
+	}
+
+	// Prune tags to referenced ones.
+	pubTags := make([]models.Tag, 0)
+	for _, tg := range tags {
+		if usedTagIDs[tg.ID] {
+			pubTags = append(pubTags, *tg)
+		}
+	}
+
+	// Build the public share — only the fields anonymous callers need.
+	// Operational telemetry (view_count, last_viewed_at) and internal fields
+	// (created_by, revoked_at) are excluded from the public response.
+	pubShare := models.PublicShare{
+		ID:         share.ID,
+		TimelineID: share.TimelineID,
+		Token:      share.Token,
+		Name:       share.Name,
+		ViewType:   share.ViewType,
+		ViewConfig: share.ViewConfig,
+		CreatedAt:  share.CreatedAt,
+		ExpiresAt:  share.ExpiresAt,
+	}
+	proj := &models.ShareProjection{
+		Share:    pubShare,
+		TeamName: team.Name,
+		Timeline: models.PublicTimeline{
+			ID:        timeline.ID,
+			Name:      timeline.Name,
+			Color:     timeline.Color,
+			Icon:      timeline.Icon,
+			StartDate: timeline.StartDate,
+			EndDate:   timeline.EndDate,
+		},
+		Members:    pubMembers,
+		Statuses:   pubStatuses,
+		Tags:       pubTags,
+		Activities: pubActivities,
+	}
+	return proj, nil
+}
+
+// handleCreateShare handles POST /timelines/{id}/shares. The caller must be a
+// member of the timeline's team. The share captures the current view config.
+func (s *Server) handleCreateShare(w http.ResponseWriter, r *http.Request) {
+	timelineID := r.PathValue("id")
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
+		return
+	}
+	if timeline.ArchivedAt != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+		return
+	}
+
+	member, ok := s.requireTeamMember(w, r, timeline.TeamID)
+	if !ok {
+		return
+	}
+
+	var req createShareBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+	if req.Kind == "" {
+		req.Kind = models.ShareKindView
+	}
+	if req.Kind != models.ShareKindView && req.Kind != models.ShareKindICS {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "kind must be 'view' or 'ics'")
+		return
+	}
+	if req.ViewType == "" {
+		req.ViewType = "gantt"
+	}
+	if req.ViewConfig == "" {
+		req.ViewConfig = "{}"
+	}
+
+	now := time.Now().UTC()
+	share := &models.Share{
+		ID:          newID(),
+		TimelineID:  timelineID,
+		Token:       newToken(),
+		Kind:        req.Kind,
+		Name:        req.Name,
+		Description: req.Description,
+		ViewType:    req.ViewType,
+		ViewConfig:  req.ViewConfig,
+		CreatedAt:   now,
+		ViewCount:   0,
+	}
+	// A superadmin managing a team they're not in arrives as a synthetic
+	// member with an empty ID (see requireTeamMember); created_by stays NULL
+	// for them rather than violating the team_members FK.
+	if member.ID != "" {
+		share.CreatedBy = &member.ID
+	}
+
+	if req.Kind == models.ShareKindICS {
+		// An ICS feed has no view semantics and no password — the token is the
+		// secret (calendar clients cannot unlock interactively). Scope is the
+		// only configuration: the whole timeline, or one member's assignments.
+		if req.Password != nil && strings.TrimSpace(*req.Password) != "" {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "ICS feeds cannot be password protected")
+			return
+		}
+		if req.Scope != models.ShareScopeTimeline && req.Scope != models.ShareScopeMember {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "scope must be 'timeline' or 'member' for ICS shares")
+			return
+		}
+		share.Scope = &req.Scope
+		share.ViewType = "calendar"
+		share.ViewConfig = "{}"
+		if req.Scope == models.ShareScopeMember {
+			if req.MemberID == nil || *req.MemberID == "" {
+				writeError(w, http.StatusBadRequest, "BAD_REQUEST", "memberId is required for member-scoped ICS shares")
+				return
+			}
+			// The member must belong to this timeline's team — a feed must not
+			// be creatable for an arbitrary member ID from another team.
+			feedMember, err := s.teams.GetMemberByID(*req.MemberID)
+			if err != nil || feedMember.TeamID != timeline.TeamID {
+				writeError(w, http.StatusBadRequest, "BAD_REQUEST", "memberId does not belong to this timeline's team")
+				return
+			}
+			share.MemberID = req.MemberID
+		}
+	}
+
+	// Optional password protection (view shares only). An empty/whitespace
+	// string means "no password" — the field stays NULL and the share is open.
+	if req.Kind == models.ShareKindView && req.Password != nil && strings.TrimSpace(*req.Password) != "" {
+		hash, err := auth.HashPassword(*req.Password)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to secure share")
+			return
+		}
+		share.PasswordHash = &hash
+	}
+
+	if err := s.shares.Create(share); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create share")
+		return
+	}
+
+	// Surface the derived flag in the create response (the repo sets it on reads).
+	share.Protected = share.PasswordHash != nil
+	writeJSON(w, http.StatusCreated, share)
+}
+
+// handleListShares handles GET /teams/{id}/timelines/{timelineId}/shares.
+// Only team members with access to the timeline may list its shares.
+func (s *Server) handleListShares(w http.ResponseWriter, r *http.Request) {
+	timelineID := r.PathValue("timelineId")
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
+		return
+	}
+
+	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
+		return
+	}
+
+	shares, err := s.shares.ListByTimeline(timelineID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list shares")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, shares)
+}
+
+// handleUpdateShare handles PATCH /shares/{id}. Any member of the timeline's
+// team may update it (shares are read-only projections — no creator/admin gate).
+func (s *Server) handleUpdateShare(w http.ResponseWriter, r *http.Request) {
+	shareID := r.PathValue("id")
+
+	share, err := s.shares.GetByID(shareID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
+		return
+	}
+
+	timeline, err := s.timelines.GetByID(share.TimelineID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
+		return
+	}
+
+	// Any member of the timeline's team may manage its shares. A share is a
+	// read-only projection that can never mutate app data, so there is no
+	// creator/admin gate (Phase 13.2 re-sequencing decision).
+	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
+		return
+	}
+
+	var req patchShareBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	if req.Name != nil {
+		share.Name = req.Name
+	}
+	if req.Description != nil {
+		share.Description = req.Description
+	}
+	if req.ViewType != nil {
+		share.ViewType = *req.ViewType
+	}
+	if req.ViewConfig != nil {
+		share.ViewConfig = *req.ViewConfig
+	}
+	// Password: nil leaves it unchanged; an empty string clears protection; a
+	// non-empty string sets/replaces it. ICS feeds can never carry one —
+	// calendar clients have no interactive unlock.
+	if req.Password != nil && share.Kind == models.ShareKindICS && strings.TrimSpace(*req.Password) != "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "ICS feeds cannot be password protected")
+		return
+	}
+	if req.Password != nil {
+		if strings.TrimSpace(*req.Password) == "" {
+			share.PasswordHash = nil
+		} else {
+			hash, err := auth.HashPassword(*req.Password)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to secure share")
+				return
+			}
+			share.PasswordHash = &hash
+		}
+	}
+
+	if err := s.shares.Update(share); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update share")
+		return
+	}
+
+	// Invalidate caches so the next public request picks up the new config.
+	s.shareCache.invalidate(share.Token)
+	s.icsCache.invalidate(share.Token)
+
+	// Refresh the derived flag — the password may have just been set/cleared.
+	share.Protected = share.PasswordHash != nil
+	writeJSON(w, http.StatusOK, share)
+}
+
+// handleDeleteShare handles DELETE /shares/{id}. Any member of the timeline's
+// team may delete it (see handleUpdateShare).
+func (s *Server) handleDeleteShare(w http.ResponseWriter, r *http.Request) {
+	shareID := r.PathValue("id")
+
+	share, err := s.shares.GetByID(shareID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
+		return
+	}
+
+	timeline, err := s.timelines.GetByID(share.TimelineID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
+		return
+	}
+
+	// Any member of the timeline's team may delete its shares — no creator/admin
+	// gate (see handleUpdateShare).
+	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
+		return
+	}
+
+	if err := s.shares.Delete(shareID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete share")
+		return
+	}
+
+	s.shareCache.invalidate(share.Token)
+	s.icsCache.invalidate(share.Token)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleUnlockShare handles POST /shares/{token}/unlock. It is public (no auth
+// middleware): an anonymous viewer exchanges the share password for a
+// short-lived view token, which they then present on GET /shares/{token}.
+// Attempts are rate-limited per client IP to blunt brute-force guessing.
+func (s *Server) handleUnlockShare(w http.ResponseWriter, r *http.Request) {
+	if !s.unlockLimiter.allow(clientIP(r)) {
+		writeError(w, http.StatusTooManyRequests, "RATE_LIMITED", "too many unlock attempts; try again later")
+		return
+	}
+
+	token := r.PathValue("token")
+
+	share, err := s.shares.GetByToken(token)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load share")
+		return
+	}
+
+	// Mirror the GET gateway's revocation/expiry checks so a dead share cannot
+	// be unlocked.
+	if share.RevokedAt != nil {
+		writeError(w, http.StatusGone, "GONE", "this share has been revoked")
+		return
+	}
+	if share.ExpiresAt != nil && time.Now().After(*share.ExpiresAt) {
+		writeError(w, http.StatusGone, "GONE", "this share has expired")
+		return
+	}
+	// ICS feeds are never password protected; mirror the projection gateway's
+	// 404 rather than confirming the token exists in another mode.
+	if share.Kind != models.ShareKindView {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+		return
+	}
+	if share.PasswordHash == nil {
+		writeError(w, http.StatusBadRequest, "NOT_PROTECTED", "this share is not password protected")
+		return
+	}
+
+	var req unlockShareBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+	if auth.CheckPassword(*share.PasswordHash, req.Password) != nil {
+		writeError(w, http.StatusUnauthorized, "INVALID_PASSWORD", "incorrect password")
+		return
+	}
+
+	viewToken, err := s.tokens.IssueShareViewToken(share.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to issue view token")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"token": viewToken})
+}
+
+// bearerToken extracts a Bearer credential from the Authorization header, or
+// returns "" when absent or malformed.
+func bearerToken(r *http.Request) string {
+	header := r.Header.Get("Authorization")
+	if !strings.HasPrefix(header, "Bearer ") {
+		return ""
+	}
+	return strings.TrimPrefix(header, "Bearer ")
+}
+
+// ── Request bodies ────────────────────────────────────────────────────────────
+
+type createShareBody struct {
+	Kind        string  `json:"kind,omitempty"`
+	Scope       string  `json:"scope,omitempty"`
+	MemberID    *string `json:"memberId,omitempty"`
+	Name        *string `json:"name,omitempty"`
+	Description *string `json:"description,omitempty"`
+	ViewType    string  `json:"viewType"`
+	ViewConfig  string  `json:"viewConfig"`
+	Password    *string `json:"password,omitempty"`
+}
+
+type patchShareBody struct {
+	Name        *string `json:"name,omitempty"`
+	Description *string `json:"description,omitempty"`
+	ViewType    *string `json:"viewType,omitempty"`
+	ViewConfig  *string `json:"viewConfig,omitempty"`
+	Password    *string `json:"password,omitempty"`
+}
+
+type unlockShareBody struct {
+	Password string `json:"password"`
 }
 ````
 
@@ -65270,6 +65342,20 @@ Includes both the webhook backend and the per-timeline connector sidebar UI (pre
 ## File: docs/log.md
 ````markdown
 # Development Log
+
+---
+
+## 2026-06-10 — Phase 13.4 post-test fixes: superadmin 500 + modal redesign
+
+User testing against the Docker instance surfaced two issues; both fixed, plus full local-stack browser verification this time.
+
+**Fix 1 — 500 on share create as a superadmin (pre-existing, all share kinds):** `requireTeamMember` passes a superadmin who holds no `team_members` row through with a *synthetic* member whose `ID` is `""` (`authz.go: superadminMember`). `handleCreateShare` wrote that empty string into `shares.created_by` (NOT NULL FK → constraint failure → 500). Latent since 13.1 — every test created its own team, so nobody hit the superadmin-on-foreign-team path until sample-data testing. Fix: **migration 023** rebuilds `shares` with nullable `created_by` (NULL = "created by a superadmin outside the team"); `models.Share.CreatedBy` is now `*string`; the handler leaves it nil for the synthetic member; OpenAPI drops `createdBy` from required. The modal UI already falls back gracefully on a missing creator. Regression test: `TestShareCreate_SuperadminOutsideTeam` (superadmin creates an ICS share on a team they're not in → 201, `createdBy` null, feed alive).
+
+**Fix 2 — CalendarShareModal redesign:** the scope-selector + single-toggle layout read as confusing. Rebuilt as a flat list of every publishable feed — **Whole timeline** first, then **one row per team member** — each with its own on/off toggle. Toggling on creates that feed and expands the row inline: mono URL + Copy, compact "Add to: Google · Apple · Outlook" links, Regenerate. Toggling off deletes the feed (old URL dies instantly). `CalendarShareModal.test.tsx` rewritten to the row contract (7 tests).
+
+**Verified in the browser** (local `go run` API on :8080 with `DRABA_SEED_SAMPLE_DATA=1` + a second Vite dev server on :5175 proxied to it — new `web-local-api` entry in `.claude/launch.json`): logged in as `brian@rieb.cc` (sample superadmin), the exact request that 500'd now returns 201; modal renders the toggle list; whole-timeline and member toggles create feeds whose URLs serve `text/calendar` with correct VEVENTs; toggle-off 404s the old URL immediately; zero console errors.
+
+**Checks:** `golangci-lint run` ✅ · `go test ./...` ✅ · `pnpm --filter web lint` ✅ · `pnpm --filter web build` ✅ · `pnpm --filter web test` ✅ (314).
 
 ---
 
