@@ -187,6 +187,27 @@ func TestShareICS_CreateValidation(t *testing.T) {
 	assert.Equal(t, false, created["protected"])
 }
 
+// TestShareICS_PatchCannotAddPassword verifies that an existing ICS feed can
+// never gain a password through PATCH — calendar clients have no interactive
+// unlock, so a password would silently brick the feed.
+func TestShareICS_PatchCannotAddPassword(t *testing.T) {
+	srv, token, _, timelineID, _ := icsShareSetup(t)
+	created := createICSShare(t, srv, token, timelineID, map[string]any{"scope": "timeline"})
+	shareID := created["id"].(string)
+
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodPatch, "/shares/"+shareID, map[string]any{"password": "secret"}, token))
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+
+	// A benign rename must still work.
+	w2 := httptest.NewRecorder()
+	srv.ServeHTTP(w2, authReq(http.MethodPatch, "/shares/"+shareID, map[string]any{"name": "Renamed feed"}, token))
+	assert.Equal(t, http.StatusOK, w2.Code)
+	var updated map[string]any
+	require.NoError(t, json.NewDecoder(w2.Body).Decode(&updated))
+	assert.Equal(t, false, updated["protected"])
+}
+
 // ── Regenerate ────────────────────────────────────────────────────────────────
 
 // TestShareRegenerate_InvalidatesOldToken verifies the 13.4 exit criterion:
