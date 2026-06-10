@@ -423,9 +423,14 @@ func (s *Server) handleCreateShare(w http.ResponseWriter, r *http.Request) {
 		Description: req.Description,
 		ViewType:    req.ViewType,
 		ViewConfig:  req.ViewConfig,
-		CreatedBy:   member.ID,
 		CreatedAt:   now,
 		ViewCount:   0,
+	}
+	// A superadmin managing a team they're not in arrives as a synthetic
+	// member with an empty ID (see requireTeamMember); created_by stays NULL
+	// for them rather than violating the team_members FK.
+	if member.ID != "" {
+		share.CreatedBy = &member.ID
 	}
 
 	if req.Kind == models.ShareKindICS {

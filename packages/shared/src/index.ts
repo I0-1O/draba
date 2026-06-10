@@ -1590,8 +1590,8 @@ export interface components {
             viewConfig: string;
             /** @description True when the share requires a password. Derived from the (never-exposed) password hash so clients can show a lock indicator. */
             protected: boolean;
-            /** @description Team member ID of the creator. */
-            createdBy: string;
+            /** @description Team member ID of the creator. Null when the share was created by a superadmin who is not a member of the timeline's team. */
+            createdBy?: string | null;
             /** Format: date-time */
             createdAt: string;
             /** Format: date-time */

@@ -2,6 +2,20 @@
 
 ---
 
+## 2026-06-10 — Phase 13.4 post-test fixes: superadmin 500 + modal redesign
+
+User testing against the Docker instance surfaced two issues; both fixed, plus full local-stack browser verification this time.
+
+**Fix 1 — 500 on share create as a superadmin (pre-existing, all share kinds):** `requireTeamMember` passes a superadmin who holds no `team_members` row through with a *synthetic* member whose `ID` is `""` (`authz.go: superadminMember`). `handleCreateShare` wrote that empty string into `shares.created_by` (NOT NULL FK → constraint failure → 500). Latent since 13.1 — every test created its own team, so nobody hit the superadmin-on-foreign-team path until sample-data testing. Fix: **migration 023** rebuilds `shares` with nullable `created_by` (NULL = "created by a superadmin outside the team"); `models.Share.CreatedBy` is now `*string`; the handler leaves it nil for the synthetic member; OpenAPI drops `createdBy` from required. The modal UI already falls back gracefully on a missing creator. Regression test: `TestShareCreate_SuperadminOutsideTeam` (superadmin creates an ICS share on a team they're not in → 201, `createdBy` null, feed alive).
+
+**Fix 2 — CalendarShareModal redesign:** the scope-selector + single-toggle layout read as confusing. Rebuilt as a flat list of every publishable feed — **Whole timeline** first, then **one row per team member** — each with its own on/off toggle. Toggling on creates that feed and expands the row inline: mono URL + Copy, compact "Add to: Google · Apple · Outlook" links, Regenerate. Toggling off deletes the feed (old URL dies instantly). `CalendarShareModal.test.tsx` rewritten to the row contract (7 tests).
+
+**Verified in the browser** (local `go run` API on :8080 with `DRABA_SEED_SAMPLE_DATA=1` + a second Vite dev server on :5175 proxied to it — new `web-local-api` entry in `.claude/launch.json`): logged in as `brian@rieb.cc` (sample superadmin), the exact request that 500'd now returns 201; modal renders the toggle list; whole-timeline and member toggles create feeds whose URLs serve `text/calendar` with correct VEVENTs; toggle-off 404s the old URL immediately; zero console errors.
+
+**Checks:** `golangci-lint run` ✅ · `go test ./...` ✅ · `pnpm --filter web lint` ✅ · `pnpm --filter web build` ✅ · `pnpm --filter web test` ✅ (314).
+
+---
+
 ## 2026-06-10 — Phase 13.4: Calendar — ICS feed sharing
 
 **Goal:** Calendar shares as live subscribable ICS feeds (not view-shares): `shares.kind` discriminator, `GET /shares/{token}.ics`, whole-timeline + per-member scopes, token rotation as the revocation story, and a distinct Calendar share modal (a feed configurator, deliberately not the active-links list the other views use).

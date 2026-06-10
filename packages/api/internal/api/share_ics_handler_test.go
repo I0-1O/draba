@@ -208,6 +208,49 @@ func TestShareICS_PatchCannotAddPassword(t *testing.T) {
 	assert.Equal(t, false, updated["protected"])
 }
 
+// TestShareCreate_SuperadminOutsideTeam reproduces the Docker-found 500: a
+// superadmin who holds no team_members row in the timeline's team passes
+// requireTeamMember as a synthetic member with an empty ID, which previously
+// hit the NOT NULL created_by FK. created_by is now nullable (migration 023)
+// and stays NULL for them.
+func TestShareCreate_SuperadminOutsideTeam(t *testing.T) {
+	srv := newTestServer(t)
+
+	// First registered user is the superadmin.
+	superToken, _ := seedUser(t, srv, "root@share.com", "password1", "Root")
+	// Bob, outside the superadmin's sphere, owns the team + timeline.
+	bobToken := seedNonMember(t, srv, superToken, "bob@icsshare.com", "Bob")
+
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodPost, "/teams", map[string]string{"name": "Bob Team"}, bobToken))
+	require.Equal(t, http.StatusCreated, w.Code)
+	var team map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&team))
+
+	w2 := httptest.NewRecorder()
+	srv.ServeHTTP(w2, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/timelines", team["id"]), map[string]any{
+		"name": "Bob Timeline", "startDate": "2026-01-01", "endDate": "2026-12-31",
+	}, bobToken))
+	require.Equal(t, http.StatusCreated, w2.Code)
+	var tl map[string]any
+	require.NoError(t, json.NewDecoder(w2.Body).Decode(&tl))
+
+	// Superadmin creates an ICS share on Bob's timeline.
+	w3 := httptest.NewRecorder()
+	srv.ServeHTTP(w3, authReq(http.MethodPost, fmt.Sprintf("/timelines/%s/shares", tl["id"]), map[string]any{
+		"kind": "ics", "scope": "timeline",
+	}, superToken))
+	require.Equal(t, http.StatusCreated, w3.Code, "superadmin share creation must not 500: %s", w3.Body.String())
+	var created map[string]any
+	require.NoError(t, json.NewDecoder(w3.Body).Decode(&created))
+	assert.Nil(t, created["createdBy"], "created_by must be NULL for a non-member superadmin")
+
+	// The feed it produced is alive.
+	w4 := httptest.NewRecorder()
+	srv.ServeHTTP(w4, httptest.NewRequest(http.MethodGet, "/shares/"+created["token"].(string)+".ics", http.NoBody))
+	assert.Equal(t, http.StatusOK, w4.Code)
+}
+
 // ── Regenerate ────────────────────────────────────────────────────────────────
 
 // TestShareRegenerate_InvalidatesOldToken verifies the 13.4 exit criterion:

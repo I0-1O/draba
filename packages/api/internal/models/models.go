@@ -257,7 +257,9 @@ type Share struct {
 	ViewConfig   string     `db:"view_config"    json:"viewConfig"`
 	PasswordHash *string    `db:"password_hash"  json:"-"`
 	ExpiresAt    *time.Time `db:"expires_at"     json:"expiresAt,omitempty"`
-	CreatedBy    string     `db:"created_by"     json:"createdBy"`
+	// CreatedBy is nil when the share was created by a superadmin who holds
+	// no team_members row in the timeline's team (migration 023).
+	CreatedBy    *string    `db:"created_by"     json:"createdBy,omitempty"`
 	CreatedAt    time.Time  `db:"created_at"     json:"createdAt"`
 	LastViewedAt *time.Time `db:"last_viewed_at" json:"lastViewedAt,omitempty"`
 	ViewCount    int        `db:"view_count"     json:"viewCount"`

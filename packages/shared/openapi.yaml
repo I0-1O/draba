@@ -791,7 +791,7 @@ components:
 
     Share:
       type: object
-      required: [id, timelineId, token, kind, viewType, viewConfig, createdBy, createdAt, viewCount, protected]
+      required: [id, timelineId, token, kind, viewType, viewConfig, createdAt, viewCount, protected]
       properties:
         id:
           type: string
@@ -838,7 +838,10 @@ components:
             (never-exposed) password hash so clients can show a lock indicator.
         createdBy:
           type: string
-          description: Team member ID of the creator.
+          nullable: true
+          description: >
+            Team member ID of the creator. Null when the share was created by
+            a superadmin who is not a member of the timeline's team.
         createdAt:
           type: string
           format: date-time
