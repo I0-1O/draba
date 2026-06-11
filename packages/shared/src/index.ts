@@ -1411,6 +1411,8 @@ export interface components {
             updatedAt: string;
             /** Format: date-time */
             archivedAt?: string | null;
+            /** @description Derived count of the timeline's active (non-revoked, non-expired) share links — view shares and ICS feeds alike. Backs the timeline tile's share-count chip. */
+            shareCount: number;
         };
         SavedFilter: {
             id: string;

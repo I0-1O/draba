@@ -57,7 +57,7 @@ This document organizes development into discrete phases with effort estimates a
 | 13.2 | [Share Module Overhaul + Password Protection](#phase-132--share-module-overhaul--password-protection) | M–L | ✅ |
 | 13.3 | [List + Kanban Read-Only](#phase-133--list--kanban-read-only) | M | ✅ |
 | 13.4 | [Calendar — ICS Feed Sharing](#phase-134--calendar--ics-feed-sharing) | M | ✅ |
-| 13.5 | [Lifecycle Tail](#phase-135--lifecycle-tail) | S | ⬜ |
+| 13.5 | [Lifecycle Tail](#phase-135--lifecycle-tail) | S | ✅ |
 | 14 | [Export — Tabular & Per-View](#phase-14--export--tabular--per-view) | M — 3–5 days | ⬜ |
 | 15 | [Import — Tabular](#phase-15--import--tabular) | M — 2–3 days | ⬜ |
 | 16 | [Backup & Restore](#phase-16--backup--restore) | M — 2–3 days | ⬜ |
@@ -1589,7 +1589,7 @@ Calendar diverges from the other views by design. What people want from a shared
 ---
 
 ### Phase 13.5 — Lifecycle Tail
-**Status:** ⬜ | **Effort:** S (half-day close-out)
+**Status:** ✅ Done (2026-06-11) — all automated checks pass; exit criteria additionally verified live against a local API with sample data (archive→404→unarchive round-trip, chip counts vs. fixtures, last-viewed updating on access). Docker-image verification rides along with the pending 13.x batch. | **Effort:** S (half-day close-out)
 
 Re-scoped 2026-06-11 — most of the original tail was already built piecemeal during 13.1–13.4 (`expires_at` + `410 Gone` enforcement on both gateways, `view_count` / `last_viewed_at` recorded on every access, view count rendered in the modal). What remains:
 

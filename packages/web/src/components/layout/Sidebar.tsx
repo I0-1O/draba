@@ -10,6 +10,7 @@ import {
   Upload,
   CalendarPlus,
   Plug,
+  Link2,
 } from 'lucide-react';
 import { Badge } from '@/components/identity/Badge';
 import { useAuth } from '@/contexts/AuthContext';
@@ -36,6 +37,7 @@ interface ApiTimeline {
   color?: string | null;
   icon?: string | null;
   archivedAt?: string | null;
+  shareCount?: number;
 }
 
 interface Props {
@@ -78,6 +80,8 @@ interface Timeline {
   icon: string | null;
   startDate?: string;
   endDate?: string;
+  /** Active (non-revoked, non-expired) share links — drives the tile chip. */
+  shareCount?: number;
 }
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
@@ -163,6 +167,28 @@ function TimelineItem({ timeline, active, collapsed, showDate = true, canEdit = 
               </div>
             )}
           </div>
+        )}
+        {/* Active-share-count chip — an affordance that this timeline has live
+            public links (view shares + ICS feeds). Hidden at zero. */}
+        {!collapsed && (timeline.shareCount ?? 0) > 0 && (
+          <span
+            title={`${timeline.shareCount} active share ${timeline.shareCount === 1 ? 'link' : 'links'}`}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 3,
+              padding: '1px 6px',
+              borderRadius: 999,
+              background: 'rgba(255,255,255,0.10)',
+              color: 'rgba(255,255,255,0.55)',
+              fontSize: 10,
+              fontWeight: 600,
+              flexShrink: 0,
+            }}
+          >
+            <Link2 width={10} height={10} strokeWidth={2.2} />
+            {timeline.shareCount}
+          </span>
         )}
       </button>
 
@@ -430,6 +456,7 @@ export default function Sidebar({ collapsed, onToggle, onNewActivity, onBulkImpo
     icon: t.icon ?? null,
     startDate: t.startDate,
     endDate: t.endDate,
+    shareCount: t.shareCount,
   }))
 
   const archivedTimelineItems: Timeline[] = archivedTimelines.map((t) => ({

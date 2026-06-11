@@ -2,7 +2,7 @@
 
 _Updated after each significant work session. Read this first to orient — it is intentionally short. Per-phase implementation detail lives in [docs/log.md](../log.md); this file is a current-state snapshot only._
 
-**Last updated:** 2026-06-11 (13.5 re-scoped to a half-day close-out — see Next phase row below; ROADMAP + plan §13.5 updated. Earlier same day: `/review-phase 13.4` findings addressed: revoked/expired feed `410 Gone` paths now tested via new `newTestServerWithDB` harness variant; ICS `escapeText` hardened against bare-CR/control-char injection; log.md scrubbed of host-specific values; ROADMAP 13.4 updated to match the shipped VEVENT payload. Phase 13.4 remains complete; still awaiting Docker rebuild + real-calendar-app verification.)
+**Last updated:** 2026-06-11 (Phase 13.5 built and verified — Phase 13 is now fully built. Earlier same day: 13.5 re-scoped to a half-day close-out; `/review-phase 13.4` findings addressed.)
 
 ---
 
@@ -10,13 +10,11 @@ _Updated after each significant work session. Read this first to orient — it i
 
 **All phases through 10.4.6 are complete and automated-checks-pass.** That covers Identity (9.6), Teams/Members/Settings (10.1.x), Status Templates (10.2), Timelines CRUD (10.3), 10.4.1–10.4.5 polish, and 10.4.6 Filter Implementation. Phases through 10.4.5 are Docker-verified; 10.4.6, 11.1, 11.1.1, 11.1.2, 11.2, 11.3, and 12 are awaiting Docker verification.
 
-**Phase 13.1 — Shares MVP**, **13.2 — share-modal overhaul + password**, **13.3 — List + Kanban read-only**, and **13.4 — Calendar ICS feeds** all pass automated checks. Awaiting Docker verification. Detail in [log.md](../log.md).
-
-**Phase 13.4 — Calendar ICS feed sharing (2026-06-10):** `shares.kind` discriminator (`view`|`ics`, migration 022) with `scope` (`timeline`|`member`) + `member_id`. New `internal/ics` package (RFC 5545 all-day VEVENTs, exclusive DTEND, escaping/folding) served at `GET /shares/{token}.ics` (the `.ics` suffix arrives inside the mux `{token}` wildcard and is dispatched in `handleGetShareProjection`). Kinds isolated both directions (ICS token → 404 on the JSON gateway and vice versa); no password on feeds — `POST /shares/{id}/regenerate` rotates the token instead. Frontend: new `CalendarShareModal` (scope selector, public On/Off toggle = create/delete, feed URL + Copy, Add to Google/Apple/Outlook, Regenerate) wired to the Calendar toolbar — deliberately a different surface from ShareModal.
+**Phase 13 (13.1–13.5) is fully built and passes all automated checks.** 13.1 Shares MVP, 13.2 modal overhaul + password, 13.3 List + Kanban read-only, 13.4 Calendar ICS feeds, and 13.5 lifecycle tail (archived timeline → shares/feeds `404`, reversible; `Timeline.shareCount` chip on the tile; last-viewed in the modal + `useListShares` refetch-on-open). 13.5 was additionally verified live against a local seeded API. Awaiting Docker verification as a batch. Detail in [log.md](../log.md).
 
 | Next phase | Scope | Plan |
 |------------|-------|------|
-| **13.5** | Lifecycle tail (re-scoped 2026-06-11, half-day): archived timeline → shares/feeds `404` (the real gap — gateways don't check `ArchivedAt` today), active-share-count chip on the timeline tile, render last-viewed in the 13.2 modal. Cut: expiry write path, site-statistics subsystem | [plan §13.5](../plans/phase-13-shares.md#135--lifecycle-tail) · [ROADMAP §13.5](../ROADMAP.md#phase-135--lifecycle-tail) |
+| **14** | Export — tabular (CSV/xlsx) + per-view visual exports (Gantt/Kanban/Calendar → PDF via gofpdf, List → Markdown). Resolve open questions (sync vs. async) before starting | [ROADMAP §14](../ROADMAP.md#phase-14--export--tabular--per-view) (no plan file yet) |
 
 **Phase 13 back-half re-sequenced (2026-06-05):** 13.2 = share-modal overhaul + password (pulled forward); 13.3 = List + Kanban read-only; 13.4 = Calendar **ICS feed** sharing (whole-timeline or per-member, token-as-secret, no password/filter — a different model from view-shares); 13.5 = lifecycle tail (expiry, tile chip). The handoff design lives in [`docs/design/handoffs/share-modal/`](../design/handoffs/share-modal/design_handoff_share_modal/README.md). See [ROADMAP re-sequencing note](../ROADMAP.md#phase-13--shares--multi-share-views-with-passwords) and [plan §13.2 overhaul](../plans/phase-13-shares.md#the-share-module-overhaul-132).
 
@@ -24,7 +22,7 @@ _Updated after each significant work session. Read this first to orient — it i
 
 ## Open Issues
 
-None surfaced. Manual verification items for 10.4.6, 11.1, 11.1.1, 11.1.2, 11.2, 11.3, 12, 13.1, 13.2, 13.3, and 13.4 tracked in TASKS.md — 13.4's headline item (subscribe from a real Google/Apple calendar) additionally needs the feed URL reachable by Google's fetcher, not just the LAN.
+None surfaced. Manual verification items for 10.4.6, 11.1, 11.1.1, 11.1.2, 11.2, 11.3, 12, and 13.1–13.5 tracked in TASKS.md — 13.4's headline item (subscribe from a real Google/Apple calendar) additionally needs the feed URL reachable by Google's fetcher, not just the LAN.
 
 (Process backlog — e.g. revisiting `repomap.md` generation vs. Graphify after Phase 13 lands — now lives in the [TASKS.md Parking Lot](../TASKS.md#parking-lot), where it stays visible across sessions instead of aging out of this snapshot.)
 

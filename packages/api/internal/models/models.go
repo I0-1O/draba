@@ -156,6 +156,10 @@ type Timeline struct {
 	CreatedAt   time.Time  `db:"created_at"  json:"createdAt"`
 	UpdatedAt   time.Time  `db:"updated_at"  json:"updatedAt"`
 	ArchivedAt  *time.Time `db:"archived_at" json:"archivedAt,omitempty"`
+	// ShareCount is a derived count of the timeline's active (non-revoked,
+	// non-expired) share links — view shares and ICS feeds alike. Populated by
+	// the repo read queries; it backs the timeline tile's share chip (13.5).
+	ShareCount int `db:"share_count" json:"shareCount"`
 }
 
 // SavedFilter is a user-owned, team-scoped named filter spec. Definition is

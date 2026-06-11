@@ -95,6 +95,20 @@ function formatCreated(iso: string): string {
   return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
 }
 
+/**
+ * Short "last viewed" label for a share row: time of day when the last view
+ * was today, otherwise the same short date format as the created date.
+ */
+function formatLastViewed(iso: string): string {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ''
+  const now = new Date()
+  if (d.toDateString() === now.toDateString()) {
+    return d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
+  }
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+}
+
 // ── A single share row ─────────────────────────────────────────────────────────
 
 function ShareRow({
@@ -180,6 +194,14 @@ function ShareRow({
         <span className="inline-flex items-center gap-1">
           <Eye size={12} strokeWidth={2} />{share.viewCount} {share.viewCount === 1 ? 'view' : 'views'}
         </span>
+        {share.lastViewedAt && (
+          <>
+            <span className="opacity-50">•</span>
+            <span title={new Date(share.lastViewedAt).toLocaleString()}>
+              Last viewed {formatLastViewed(share.lastViewedAt)}
+            </span>
+          </>
+        )}
       </div>
 
       {/* Inline delete confirm */}

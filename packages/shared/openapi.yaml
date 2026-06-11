@@ -391,7 +391,7 @@ components:
 
     Timeline:
       type: object
-      required: [id, teamId, name, startDate, endDate, shareToken, icalToken, createdBy, createdAt, updatedAt]
+      required: [id, teamId, name, startDate, endDate, shareToken, icalToken, createdBy, createdAt, updatedAt, shareCount]
       properties:
         id:
           type: string
@@ -435,6 +435,12 @@ components:
           type: string
           nullable: true
           format: date-time
+        shareCount:
+          type: integer
+          description: >
+            Derived count of the timeline's active (non-revoked, non-expired)
+            share links — view shares and ICS feeds alike. Backs the timeline
+            tile's share-count chip.
 
     SavedFilter:
       type: object

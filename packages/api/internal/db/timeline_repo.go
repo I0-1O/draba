@@ -41,12 +41,27 @@ func (r *TimelineRepo) Create(t *models.Timeline) error {
 	return nil
 }
 
+// activeShareCountSubquery derives Timeline.ShareCount: the timeline's
+// non-revoked, non-expired shares (view shares and ICS feeds alike). The
+// "now" comparison value is bound as a parameter rather than using the DB's
+// CURRENT_TIMESTAMP so it is serialized in the same format the driver stores
+// expires_at in, keeping the comparison consistent across DB backends.
+const activeShareCountSubquery = `(
+	SELECT COUNT(*) FROM shares s
+	WHERE s.timeline_id = timelines.id
+	  AND s.revoked_at IS NULL
+	  AND (s.expires_at IS NULL OR s.expires_at > ?)
+) AS share_count`
+
 // GetByID fetches a Timeline by primary key, including archived rows so the
 // archive/unarchive handlers can operate on them. Callers that should reject
 // archived timelines must check ArchivedAt explicitly.
 func (r *TimelineRepo) GetByID(id string) (*models.Timeline, error) {
 	var t models.Timeline
-	err := r.db.Get(&t, `SELECT * FROM timelines WHERE id = ?`, id)
+	err := r.db.Get(&t,
+		`SELECT timelines.*, `+activeShareCountSubquery+` FROM timelines WHERE id = ?`,
+		time.Now().UTC(), id,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("getting timeline: %w", err)
 	}
@@ -83,12 +98,12 @@ func (r *TimelineRepo) GetByShareToken(token string) (*models.Timeline, error) {
 // descending. When includeArchived is false, archived rows are excluded.
 func (r *TimelineRepo) ListByTeam(teamID string, includeArchived bool) ([]*models.Timeline, error) {
 	ts := make([]*models.Timeline, 0)
-	query := `SELECT * FROM timelines WHERE team_id = ?`
+	query := `SELECT timelines.*, ` + activeShareCountSubquery + ` FROM timelines WHERE team_id = ?`
 	if !includeArchived {
 		query += ` AND archived_at IS NULL`
 	}
 	query += ` ORDER BY created_at DESC`
-	err := r.db.Select(&ts, query, teamID)
+	err := r.db.Select(&ts, query, time.Now().UTC(), teamID)
 	if err != nil {
 		return nil, fmt.Errorf("listing timelines: %w", err)
 	}

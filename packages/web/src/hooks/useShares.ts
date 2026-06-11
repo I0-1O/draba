@@ -27,6 +27,11 @@ export function useListShares(teamId: string, timelineId: string) {
     queryFn: () =>
       authFetch<Share[]>(`/teams/${teamId}/timelines/${timelineId}/shares`),
     enabled: Boolean(teamId) && Boolean(timelineId),
+    // The share modals are this query's only consumers and mount on demand —
+    // override the app-wide 30s staleTime so the view telemetry they render
+    // (viewCount / lastViewedAt) is current every time a modal opens.
+    staleTime: 0,
+    refetchOnMount: 'always',
   })
 }
 

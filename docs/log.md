@@ -2,6 +2,26 @@
 
 ---
 
+## 2026-06-11 — Phase 13.5: Lifecycle tail
+
+**Goal:** the re-scoped (same-day) half-day close-out of Phase 13: archived timelines stop serving their shares/feeds (reversibly), the timeline tile shows an active-share-count chip, and last-viewed renders in the share modal. Cut from scope: the expiry write path and any site-statistics subsystem.
+
+**Backend (`packages/api`):**
+- **Archived timeline → 404 on the public surface.** New `shareTimelineLive` helper (share_handler.go) loads the share's timeline and 404s when `ArchivedAt` is set; wired into `handleGetShareProjection`, `serveICSFeed`, and `handleUnlockShare`. `404`, not `410`: archive is reversible (unarchive resurrects the links), `410` tells calendar clients to drop the subscription permanently, and `404` matches `handleCreateShare`'s archived response without leaking archive state. The check runs **before the cache reads**, so archiving takes effect immediately regardless of warm projection/ICS caches. In the unlock handler it precedes the `NOT_PROTECTED` branch so an archived timeline reveals nothing about its shares' protection state.
+- **`Timeline.ShareCount`** — derived count of the timeline's active (non-revoked, non-expired) shares, both kinds. New `activeShareCountSubquery` in timeline_repo.go, applied to `GetByID` and `ListByTeam`; "now" is bound as a parameter (not `CURRENT_TIMESTAMP`) so the `expires_at` comparison uses the same driver serialization as the stored values across DB backends. OpenAPI `Timeline.shareCount` (required) + TS types regenerated.
+- **Tests** (`share_lifecycle_test.go`, new): archive kills view share + ICS feed with warm caches and unarchive resurrects both; unlock of an archived timeline's protected share 404s even with the correct password; `shareCount` tracks create/delete across both kinds and appears on single-timeline reads.
+
+**Frontend (`packages/web`):**
+- **Sidebar timeline tile chip** (`Sidebar.tsx`): a small pill (Link2 icon + count) on each timeline row when `shareCount > 0`, with a "N active share links" tooltip; hidden at zero and when the rail is collapsed.
+- **Last-viewed in the share modal** (`ShareModal.tsx`): footer meta now appends "Last viewed …" beside the view count when `lastViewedAt` is set — time of day if today, short date otherwise; full timestamp on hover.
+- **`useListShares` freshness fix** (`useShares.ts`): the app-wide 30s `staleTime` meant reopening the modal within the window served cached telemetry (view count / last-viewed didn't update after an access). The list query now sets `staleTime: 0` + `refetchOnMount: 'always'` — the share modals are its only consumers and mount on demand.
+
+**Verified live** (local `go run` API on :8080 with seeded sample data + the `web-local-api` Vite server on :5175): tile chips read 2 (Sales Kick Off) and 4 (Q1 Workload), matching the share fixtures; modal row shows "31 views · Last viewed Jun 10", and after hitting the public share URL once, reopening shows "32 views · Last viewed 10:03 AM"; archive/unarchive of Q1 Workload flips its view share and ICS feed 200 → 404 → 200.
+
+**Checks:** `golangci-lint run` ✅ · `go test ./...` ✅ · `pnpm --filter web lint` ✅ · `pnpm --filter web build` ✅ · `pnpm --filter web test` ✅ (314).
+
+---
+
 ## 2026-06-11 — /review-phase 13.4: findings addressed
 
 Four-agent review (scope / security / conventions / test-coverage) of the 13.4 commit range. Conventions and scope came back clean; fixes applied for the rest:

@@ -137,6 +137,13 @@ func (s *Server) handleGetShareProjection(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// Archived timeline → its shares stop serving (Phase 13.5). Checked on
+	// every request — before the cache read — so archiving takes effect
+	// immediately regardless of a warm projection cache.
+	if !s.shareTimelineLive(w, share) {
+		return
+	}
+
 	// Password gate (Phase 13.2). A locked share serves no data without a valid
 	// view token — obtained by exchanging the password at POST /shares/{token}/unlock.
 	// NOTE: this check must stay above the cache read. PATCH invalidates the cache
@@ -169,6 +176,25 @@ func (s *Server) handleGetShareProjection(w http.ResponseWriter, r *http.Request
 	s.shareCache.set(token, proj)
 	go func() { _ = s.shares.RecordView(share.ID) }()
 	writeJSON(w, http.StatusOK, proj)
+}
+
+// shareTimelineLive loads the share's timeline and reports whether it is
+// servable on the public surface, writing the error response when it is not.
+// An archived timeline answers 404, not 410: archiving is reversible —
+// unarchiving must resurrect existing links — and 410 tells calendar clients
+// to drop a subscription permanently. 404 also matches handleCreateShare's
+// archived-timeline response without leaking archive state.
+func (s *Server) shareTimelineLive(w http.ResponseWriter, share *models.Share) bool {
+	timeline, err := s.timelines.GetByID(share.TimelineID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load share")
+		return false
+	}
+	if timeline.ArchivedAt != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+		return false
+	}
+	return true
 }
 
 // buildShareProjection assembles the full ShareProjection for a share.
@@ -666,6 +692,12 @@ func (s *Server) handleUnlockShare(w http.ResponseWriter, r *http.Request) {
 	// 404 rather than confirming the token exists in another mode.
 	if share.Kind != models.ShareKindView {
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+		return
+	}
+	// Mirror the GET gateway's archived-timeline 404 (Phase 13.5) — a dead
+	// share must not be unlockable, and the check precedes NOT_PROTECTED so an
+	// archived timeline reveals nothing about its shares' protection state.
+	if !s.shareTimelineLive(w, share) {
 		return
 	}
 	if share.PasswordHash == nil {

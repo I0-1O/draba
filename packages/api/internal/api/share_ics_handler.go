@@ -92,6 +92,14 @@ func (s *Server) serveICSFeed(w http.ResponseWriter, r *http.Request, token stri
 		return
 	}
 
+	// Archived timeline → the feed stops serving (Phase 13.5). 404, not 410:
+	// unarchiving must resurrect the feed, and 410 makes calendar clients
+	// drop the subscription for good. Checked before the cache read so
+	// archiving takes effect immediately.
+	if !s.shareTimelineLive(w, share) {
+		return
+	}
+
 	body, ok := s.icsCache.get(token)
 	if !ok {
 		body, err = s.buildICSFeed(share)

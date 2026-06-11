@@ -1323,9 +1323,11 @@ Includes both the webhook backend and the per-timeline connector sidebar UI (pre
 - [x] Manual: subscribe in a real calendar client → all-day events with fields (verified in Thunderbird, 2026-06-10; client-side fetch, works on LAN). Apple Calendar on LAN also testable.
 - [ ] Manual: Google Calendar / Outlook web subscription — **blocked until a test server is exposed to the internet** (their fetchers run server-side and cannot reach localhost/LAN). Feed URLs derive from `window.location.origin`, so no code change is needed once public.
 
-**13.5 — Lifecycle tail:**
-- [ ] Optional expiry → `410 Gone` after `expires_at`
-- [ ] Active-share-count chip on the timeline tile; last-viewed surfaced in the 13.2 modal
+**13.5 — Lifecycle tail (re-scoped 2026-06-11):** — ✅ 2026-06-11 (automated checks + local live verification)
+- [x] Archived timeline kills its shares: JSON gateway, ICS feed, and unlock all `404` (not `410` — archive is reversible; unarchive resurrects the links); checked before the caches so archiving takes effect immediately
+- [x] Active-share-count chip on the sidebar timeline tile — `Timeline.shareCount` derived in the repo (non-revoked, non-expired shares of both kinds), added to OpenAPI + regenerated types
+- [x] Last-viewed rendered in the 13.2 modal row beside the view count; `useListShares` now refetches on modal open so the telemetry is current (app-wide 30s staleTime was masking updates)
+- [x] ~~Optional expiry write path~~ — cut from scope 2026-06-11 (read-side `410` enforcement stays as tested defensive code)
 
 ## Done
 - [x] Initialize repo scaffold — 2026-04-27
