@@ -2,7 +2,7 @@
 
 _Updated after each significant work session. Read this first to orient — it is intentionally short. Per-phase implementation detail lives in [docs/log.md](../log.md); this file is a current-state snapshot only._
 
-**Last updated:** 2026-06-10 (Phase 13.4 complete + post-test fixes: superadmin-create 500 (migration 023, nullable `shares.created_by`) and modal redesigned as a per-feed toggle list; browser-verified against a local stack. Awaiting Docker rebuild + real-calendar-app verification.)
+**Last updated:** 2026-06-10 (Phase 13.4 complete + two post-test fix rounds: superadmin-create 500 (migration 023, nullable `shares.created_by`), modal as per-feed toggle list, named feed URLs `/shares/{token}/{slug}.ics` for client default-naming, and VEVENT field projection (status/assignees/tags/progress in DESCRIPTION + CATEGORIES, assignees in timeline-feed SUMMARY). Browser-verified locally. Awaiting Docker rebuild + real-calendar-app verification.)
 
 ---
 

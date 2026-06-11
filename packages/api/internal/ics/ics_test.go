@@ -60,6 +60,24 @@ func TestCalendar_FoldsLongLines(t *testing.T) {
 	assert.Contains(t, unfolded, "SUMMARY:"+strings.Repeat("x", 200))
 }
 
+func TestCalendar_NamePropsAndRefreshHint(t *testing.T) {
+	out := Calendar("Sales Kick Off", nil)
+	assert.Contains(t, out, "X-WR-CALNAME:Sales Kick Off\r\n")
+	assert.Contains(t, out, "NAME:Sales Kick Off\r\n")
+	assert.Contains(t, out, "REFRESH-INTERVAL;VALUE=DURATION:PT1H\r\n")
+	assert.Contains(t, out, "X-PUBLISHED-TTL:PT1H\r\n")
+}
+
+func TestCalendar_Categories(t *testing.T) {
+	out := Calendar("cal", []Event{{
+		UID: "a@draba", Summary: "t",
+		Categories: []string{"launch", "q1, big"},
+		Start:      date(2026, 1, 1), End: date(2026, 1, 1), Stamp: date(2026, 1, 1),
+	}})
+	// List-separator commas stay bare; commas inside a value are escaped.
+	assert.Contains(t, out, `CATEGORIES:launch,q1\, big`)
+}
+
 func TestCalendar_OmitsEmptyDescription(t *testing.T) {
 	out := Calendar("cal", []Event{{
 		UID: "a@draba", Summary: "t",

@@ -3852,6 +3852,47 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  /shares/{token}/{filename}:
+    get:
+      operationId: getShareICSFeedNamed
+      summary: Fetch a public ICS calendar feed (named variant)
+      description: >
+        Identical to GET /shares/{token}.ics; the filename segment must end in
+        .ics but is otherwise cosmetic. Calendar clients default the new
+        calendar's name from the URL filename, so shared links carry a
+        readable slug (e.g. .../sales-kick-off.ics). The token alone is
+        authoritative.
+      security: []
+      tags: [shares]
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: filename
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: iCalendar document.
+          content:
+            text/calendar:
+              schema:
+                type: string
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "410":
+          description: Share revoked or expired.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
   /shares/{id}/regenerate:
     post:
       operationId: regenerateShare

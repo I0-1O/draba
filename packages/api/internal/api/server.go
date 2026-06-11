@@ -259,6 +259,9 @@ func (s *Server) Routes() http.Handler {
 	// {token} wildcard spans the whole segment, so the .ics suffix arrives in
 	// the path value and is dispatched there.
 	mux.HandleFunc("POST /shares/{id}/regenerate", chain(s.handleRegenerateShare, s.authMiddleware))
+	// Named feed variant: the {file} slug is cosmetic (calendar clients
+	// default the calendar name from the URL filename); the token is the key.
+	mux.HandleFunc("GET /shares/{token}/{file}", s.handleGetShareICSNamed)
 
 	// GET /ws is intentionally outside authMiddleware — ServeWS validates the
 	// JWT itself before upgrading, because WebSocket clients can't set headers.

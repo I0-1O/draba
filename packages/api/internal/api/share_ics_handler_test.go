@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -101,6 +102,71 @@ func TestShareICS_MemberFeed_OnlyAssignedActivities(t *testing.T) {
 	assert.NotContains(t, body, "Someone else's", "member feed must exclude unassigned activities")
 	// The feed name carries the member's display name — the only PII allowed.
 	assert.Contains(t, body, "Alice")
+}
+
+// TestShareICS_EventFieldProjection verifies the activity display fields ride
+// along in each VEVENT: status (+ percent), assignee display names, and tags
+// in DESCRIPTION / CATEGORIES, with assignees also appended to SUMMARY on
+// whole-timeline feeds (the team-overview grid shows who owns what).
+func TestShareICS_EventFieldProjection(t *testing.T) {
+	srv, token, teamID, timelineID, memberID := icsShareSetup(t)
+
+	wS := httptest.NewRecorder()
+	srv.ServeHTTP(wS, authReq(http.MethodPost,
+		fmt.Sprintf("/teams/%s/timelines/%s/statuses", teamID, timelineID),
+		map[string]any{"name": "In Progress", "color": "#3B82F6"}, token))
+	require.Equal(t, http.StatusCreated, wS.Code)
+	var status map[string]any
+	require.NoError(t, json.NewDecoder(wS.Body).Decode(&status))
+
+	wT := httptest.NewRecorder()
+	srv.ServeHTTP(wT, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/tags", teamID),
+		map[string]any{"name": "launch", "color": "red"}, token))
+	require.Equal(t, http.StatusCreated, wT.Code)
+	var tag map[string]any
+	require.NoError(t, json.NewDecoder(wT.Body).Decode(&tag))
+
+	createActivity(t, srv, token, teamID, timelineID, map[string]any{
+		"title": "Brand audit", "startAt": "2026-05-01T00:00:00Z", "endAt": "2026-05-05T00:00:00Z", "allDay": true,
+		"description":       "Audit current assets.",
+		"statusId":          status["id"],
+		"percentComplete":   40,
+		"assignedMemberIds": []string{memberID},
+		"tagIds":            []string{tag["id"].(string)},
+	})
+
+	created := createICSShare(t, srv, token, timelineID, map[string]any{"scope": "timeline"})
+
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/shares/"+created["token"].(string)+".ics", http.NoBody))
+	require.Equal(t, http.StatusOK, w.Code)
+
+	// Unfold continuation lines so assertions see whole logical lines.
+	body := strings.ReplaceAll(w.Body.String(), "\r\n ", "")
+	assert.Contains(t, body, "SUMMARY:Brand audit — Alice")
+	assert.Contains(t, body, `DESCRIPTION:Status: In Progress (40%)\nAssigned: Alice\nTags: launch\n\nAudit current assets.`)
+	assert.Contains(t, body, "CATEGORIES:launch")
+}
+
+// TestShareICS_NamedFeedURL verifies GET /shares/{token}/{slug}.ics — the slug
+// exists purely so calendar clients default the calendar name from the URL
+// filename; any .ics filename works and non-.ics paths 404.
+func TestShareICS_NamedFeedURL(t *testing.T) {
+	srv, token, teamID, timelineID, _ := icsShareSetup(t)
+	createActivity(t, srv, token, teamID, timelineID, map[string]any{
+		"title": "Work", "startAt": "2026-05-01T00:00:00Z", "endAt": "2026-05-02T00:00:00Z", "allDay": true,
+	})
+	created := createICSShare(t, srv, token, timelineID, map[string]any{"scope": "timeline"})
+	feedToken := created["token"].(string)
+
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/shares/"+feedToken+"/share-timeline.ics", http.NoBody))
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), "SUMMARY:Work")
+
+	w2 := httptest.NewRecorder()
+	srv.ServeHTTP(w2, httptest.NewRequest(http.MethodGet, "/shares/"+feedToken+"/share-timeline.txt", http.NoBody))
+	assert.Equal(t, http.StatusNotFound, w2.Code, "non-.ics filenames must 404")
 }
 
 // TestShareICS_NoPIIInFeed verifies the 13.4 exit criterion: the .ics payload

@@ -16,8 +16,11 @@ type Event struct {
 	UID         string
 	Summary     string
 	Description string
-	Start       time.Time
-	End         time.Time
+	// Categories become the CATEGORIES property (draba tags); clients that
+	// support it (Thunderbird, Apple Calendar) render them as event tags.
+	Categories []string
+	Start      time.Time
+	End        time.Time
 	// Stamp becomes DTSTAMP — the activity's last-modified time, which lets
 	// calendar clients detect changed events between polls.
 	Stamp time.Time
@@ -33,7 +36,15 @@ func Calendar(name string, events []Event) string {
 	writeLine(&b, "PRODID:-//draba//draba//EN")
 	writeLine(&b, "CALSCALE:GREGORIAN")
 	writeLine(&b, "METHOD:PUBLISH")
+	// X-WR-CALNAME is the de-facto property older clients read; NAME is its
+	// standardized RFC 7986 successor. Emit both so every client that names
+	// the calendar from feed content gets the right answer.
 	writeLine(&b, "X-WR-CALNAME:"+escapeText(name))
+	writeLine(&b, "NAME:"+escapeText(name))
+	// Suggest an hourly poll to clients that honor a published refresh
+	// cadence (RFC 7986 REFRESH-INTERVAL; X-PUBLISHED-TTL for older ones).
+	writeLine(&b, "REFRESH-INTERVAL;VALUE=DURATION:PT1H")
+	writeLine(&b, "X-PUBLISHED-TTL:PT1H")
 	for i := range events {
 		writeEvent(&b, &events[i])
 	}
@@ -52,6 +63,15 @@ func writeEvent(b *strings.Builder, e *Event) {
 	writeLine(b, "SUMMARY:"+escapeText(e.Summary))
 	if e.Description != "" {
 		writeLine(b, "DESCRIPTION:"+escapeText(e.Description))
+	}
+	if len(e.Categories) > 0 {
+		// Commas separate list items here, so each value is escaped
+		// individually and joined with bare (unescaped) commas.
+		escaped := make([]string, len(e.Categories))
+		for i, c := range e.Categories {
+			escaped[i] = escapeText(c)
+		}
+		writeLine(b, "CATEGORIES:"+strings.Join(escaped, ","))
 	}
 	writeLine(b, "END:VEVENT")
 }

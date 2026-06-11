@@ -1126,6 +1126,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/shares/{token}/{filename}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Fetch a public ICS calendar feed (named variant)
+         * @description Identical to GET /shares/{token}.ics; the filename segment must end in .ics but is otherwise cosmetic. Calendar clients default the new calendar's name from the URL filename, so shared links carry a readable slug (e.g. .../sales-kick-off.ics). The token alone is authoritative.
+         */
+        get: operations["getShareICSFeedNamed"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/shares/{id}/regenerate": {
         parameters: {
             query?: never;
@@ -4436,6 +4456,40 @@ export interface operations {
             header?: never;
             path: {
                 token: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description iCalendar document. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/calendar": string;
+                };
+            };
+            404: components["responses"]["NotFound"];
+            /** @description Share revoked or expired. */
+            410: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getShareICSFeedNamed: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                token: string;
+                filename: string;
             };
             cookie?: never;
         };

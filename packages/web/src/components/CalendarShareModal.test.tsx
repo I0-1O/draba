@@ -102,8 +102,10 @@ describe('CalendarShareModal', () => {
     expect(screen.getByRole('switch', { name: 'Bob feed' }).getAttribute('aria-checked')).toBe('true')
     expect(screen.getByRole('switch', { name: 'Alice feed' }).getAttribute('aria-checked')).toBe('false')
 
-    expect(screen.getByText(/\/shares\/feed-token\.ics$/)).toBeTruthy()
-    expect(screen.getByText(/\/shares\/member-feed-token\.ics$/)).toBeTruthy()
+    // Readable slug filename — calendar clients default the calendar's name
+    // from the URL filename, so it must not be the bare token hash.
+    expect(screen.getByText(/\/shares\/feed-token\/q1-calendar-feed\.ics$/)).toBeTruthy()
+    expect(screen.getByText(/\/shares\/member-feed-token\/bob-calendar-feed\.ics$/)).toBeTruthy()
 
     const googleLinks = screen.getAllByRole('link', { name: 'Google' })
     expect(googleLinks).toHaveLength(2)

@@ -41,14 +41,25 @@ interface Props {
 
 const TILE_TEAL = 'bg-[hsl(188_59%_38%/0.12)] text-primary'
 
+/**
+ * URL-safe slug for the feed filename. Calendar clients (Thunderbird
+ * included) default the new calendar's name from the URL's filename, so the
+ * link ends in a readable `<name>.ics` rather than the bare token hash. The
+ * server treats the filename as cosmetic — the token is the key.
+ */
+function slugify(name: string): string {
+  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
+  return slug || 'calendar'
+}
+
 /** Builds the absolute https feed URL for a share token. */
-function feedURL(token: string): string {
-  return `${window.location.origin}/shares/${token}.ics`
+function feedURL(token: string, name: string): string {
+  return `${window.location.origin}/shares/${token}/${slugify(name)}.ics`
 }
 
 /** The webcal:// variant most calendar apps treat as "subscribe". */
-function webcalURL(token: string): string {
-  return feedURL(token).replace(/^https?:\/\//, 'webcal://')
+function webcalURL(token: string, name: string): string {
+  return feedURL(token, name).replace(/^https?:\/\//, 'webcal://')
 }
 
 // ── One feed row: label + toggle, expanding to the link when on ───────────────
@@ -72,8 +83,8 @@ function FeedRow({
 }) {
   const [copied, setCopied] = useState(false)
   const on = Boolean(share)
-  const url = share ? feedURL(share.token) : null
-  const webcal = share ? webcalURL(share.token) : null
+  const url = share ? feedURL(share.token, share.name ?? label) : null
+  const webcal = share ? webcalURL(share.token, share.name ?? label) : null
 
   const copy = () => {
     if (!url) return

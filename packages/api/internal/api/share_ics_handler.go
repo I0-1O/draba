@@ -3,7 +3,9 @@ package api
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -109,8 +111,14 @@ func (s *Server) serveICSFeed(w http.ResponseWriter, r *http.Request, token stri
 // buildICSFeed renders the iCalendar document for an ICS share. Scope is
 // hard-locked server-side: the timeline comes from the share row, and member
 // feeds drop every activity the member is not assigned to before
-// serialization. The payload carries titles, dates, and descriptions only —
-// never member emails, user IDs, or roles.
+// serialization.
+//
+// Each VEVENT projects the activity's display fields: status (+ percent
+// complete), assignee display names, and tag names go into DESCRIPTION (and
+// tags into CATEGORIES); whole-timeline feeds also append assignee names to
+// SUMMARY so the month grid shows who owns what. Member display names are the
+// only person-identifying field a feed may carry — never emails, user IDs, or
+// roles.
 func (s *Server) buildICSFeed(share *models.Share) (string, error) {
 	timeline, err := s.timelines.GetByID(share.TimelineID)
 	if err != nil {
@@ -122,8 +130,38 @@ func (s *Server) buildICSFeed(share *models.Share) (string, error) {
 		return "", err
 	}
 
+	// Display-name / tag / status lookups for the event field projection.
+	statuses, err := s.statuses.ListStatuses(share.TimelineID)
+	if err != nil {
+		return "", err
+	}
+	statusName := make(map[string]string, len(statuses))
+	for _, st := range statuses {
+		statusName[st.ID] = st.Name
+	}
+	members, err := s.teams.ListMembers(timeline.TeamID)
+	if err != nil {
+		return "", err
+	}
+	memberName := make(map[string]string, len(members))
+	for _, m := range members {
+		if m.DisplayName != "" {
+			memberName[m.ID] = m.DisplayName
+		}
+	}
+	tags, err := s.tags.ListByTeam(timeline.TeamID)
+	if err != nil {
+		return "", err
+	}
+	tagName := make(map[string]string, len(tags))
+	for _, tg := range tags {
+		tagName[tg.ID] = tg.Name
+	}
+
+	memberScoped := share.Scope != nil && *share.Scope == models.ShareScopeMember && share.MemberID != nil
+
 	name := timeline.Name
-	if share.Scope != nil && *share.Scope == models.ShareScopeMember && share.MemberID != nil {
+	if memberScoped {
 		filtered := acts[:0]
 		for _, a := range acts {
 			for _, id := range a.AssignedMemberIDs {
@@ -135,28 +173,86 @@ func (s *Server) buildICSFeed(share *models.Share) (string, error) {
 		}
 		acts = filtered
 
-		// The member's display name in the calendar title is the only
-		// person-identifying field an ICS feed may carry.
-		if m, err := s.teams.GetMemberByID(*share.MemberID); err == nil && m.DisplayName != "" {
-			name = timeline.Name + " — " + m.DisplayName
+		if n, ok := memberName[*share.MemberID]; ok {
+			name = timeline.Name + " — " + n
 		}
 	}
 
 	events := make([]ics.Event, 0, len(acts))
 	for _, a := range acts {
-		ev := ics.Event{
-			UID:     a.ID + "@draba",
-			Summary: a.Title,
-			Start:   a.StartAt,
-			End:     a.EndAt,
-			Stamp:   a.UpdatedAt,
+		assignees := make([]string, 0, len(a.AssignedMemberIDs))
+		for _, id := range a.AssignedMemberIDs {
+			if n, ok := memberName[id]; ok {
+				assignees = append(assignees, n)
+			}
 		}
-		if a.Description != nil {
-			ev.Description = *a.Description
+		tagNames := make([]string, 0, len(a.TagIDs))
+		for _, id := range a.TagIDs {
+			if n, ok := tagName[id]; ok {
+				tagNames = append(tagNames, n)
+			}
 		}
-		events = append(events, ev)
+
+		summary := a.Title
+		// A member feed is one person's calendar — repeating their name on
+		// every event is noise. The whole-timeline feed is the team overview,
+		// where who-owns-what belongs in the month grid.
+		if !memberScoped && len(assignees) > 0 {
+			summary += " — " + strings.Join(assignees, ", ")
+		}
+
+		// Structured field lines first, then a blank line, then the
+		// free-text activity description.
+		meta := make([]string, 0, 3)
+		if a.StatusID != nil {
+			if n, ok := statusName[*a.StatusID]; ok {
+				line := "Status: " + n
+				if a.PercentComplete != nil {
+					line += fmt.Sprintf(" (%d%%)", *a.PercentComplete)
+				}
+				meta = append(meta, line)
+			}
+		} else if a.PercentComplete != nil {
+			meta = append(meta, fmt.Sprintf("Progress: %d%%", *a.PercentComplete))
+		}
+		if len(assignees) > 0 {
+			meta = append(meta, "Assigned: "+strings.Join(assignees, ", "))
+		}
+		if len(tagNames) > 0 {
+			meta = append(meta, "Tags: "+strings.Join(tagNames, ", "))
+		}
+		desc := strings.Join(meta, "\n")
+		if a.Description != nil && *a.Description != "" {
+			if desc != "" {
+				desc += "\n\n"
+			}
+			desc += *a.Description
+		}
+
+		events = append(events, ics.Event{
+			UID:         a.ID + "@draba",
+			Summary:     summary,
+			Description: desc,
+			Categories:  tagNames,
+			Start:       a.StartAt,
+			End:         a.EndAt,
+			Stamp:       a.UpdatedAt,
+		})
 	}
 	return ics.Calendar(name, events), nil
+}
+
+// handleGetShareICSNamed handles GET /shares/{token}/{file}. The file segment
+// must end in .ics but is otherwise cosmetic: most calendar clients
+// (Thunderbird included) default the new calendar's name from the URL's
+// filename, so the modal links carry a readable slug (e.g. .../sales-kick-off.ics).
+// The token alone is authoritative.
+func (s *Server) handleGetShareICSNamed(w http.ResponseWriter, r *http.Request) {
+	if !strings.HasSuffix(r.PathValue("file"), ".ics") {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+		return
+	}
+	s.serveICSFeed(w, r, r.PathValue("token"))
 }
 
 // handleRegenerateShare handles POST /shares/{id}/regenerate. It rotates the

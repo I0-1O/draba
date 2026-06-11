@@ -2,6 +2,22 @@
 
 ---
 
+## 2026-06-10 — Phase 13.4 feed polish (Thunderbird feedback): named URLs + event fields
+
+Second round of user-testing feedback: subscribing in Thunderbird defaulted the calendar name to the token hash, and events carried no draba fields.
+
+**Named feed URLs:** calendar clients default the new calendar's name from the URL *filename* (they only read feed content after subscribing), so the modal now links to `GET /shares/{token}/{slug}.ics` (e.g. `…/sales-kick-off-calendar-feed.ics`). New mux route + `handleGetShareICSNamed`; the filename must end `.ics` but is otherwise cosmetic — the token alone is the key; the bare `/shares/{token}.ics` form still works. Feed content now also emits `NAME` (RFC 7986) alongside `X-WR-CALNAME`, plus `REFRESH-INTERVAL`/`X-PUBLISHED-TTL` (PT1H) as a poll-cadence hint.
+
+**Read-only:** no ICS property can force a client's "read only" checkbox; the server only routes GET on feed paths (anything else 405s via the Go mux), so client-side edits can never sync back regardless of the checkbox.
+
+**Event field projection (`buildICSFeed`):** each VEVENT now carries `DESCRIPTION` = structured lines (`Status: <name> (<pct>%)` / `Assigned: <display names>` / `Tags: <names>`) + blank line + the activity description; tags also go to `CATEGORIES`. Whole-timeline feeds append assignee names to `SUMMARY` ("Title — Alice, Bob") so the month grid shows who owns what; member feeds keep bare titles (one person's calendar — their name on every event is noise). Display names remain the only person-identifying field.
+
+**Tests:** ics package — NAME/REFRESH props, CATEGORIES comma semantics; handler — `TestShareICS_EventFieldProjection` (status+percent+assignee+tag through to DESCRIPTION/SUMMARY/CATEGORIES), `TestShareICS_NamedFeedURL` (slug 200, non-`.ics` 404); modal test asserts slug URLs. Browser-verified against the local stack: slug URL serves the enriched feed, zero console errors.
+
+**Checks:** `golangci-lint run` ✅ · `go test ./...` ✅ · `pnpm --filter web lint` ✅ · `pnpm --filter web build` ✅ · `pnpm --filter web test` ✅ (314).
+
+---
+
 ## 2026-06-10 — Phase 13.4 post-test fixes: superadmin 500 + modal redesign
 
 User testing against the Docker instance surfaced two issues; both fixed, plus full local-stack browser verification this time.
