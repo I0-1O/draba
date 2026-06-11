@@ -69,6 +69,7 @@ func TestShareICS_TimelineFeed_AllDayEvents(t *testing.T) {
 	srv.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/shares/"+shareToken+".ics", http.NoBody))
 	require.Equal(t, http.StatusOK, w.Code)
 	assert.Contains(t, w.Header().Get("Content-Type"), "text/calendar")
+	assert.Equal(t, "no-store", w.Header().Get("Cache-Control"))
 
 	body := w.Body.String()
 	assert.Contains(t, body, "BEGIN:VCALENDAR")

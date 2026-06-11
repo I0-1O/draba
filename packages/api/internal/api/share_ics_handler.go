@@ -104,7 +104,10 @@ func (s *Server) serveICSFeed(w http.ResponseWriter, r *http.Request, token stri
 
 	go func() { _ = s.shares.RecordView(share.ID) }()
 	w.Header().Set("Content-Type", "text/calendar; charset=utf-8")
-	w.Header().Set("Cache-Control", "max-age=60")
+	// no-store: the token is the secret and rotate/delete is the only kill
+	// switch for a feed, so a revoked URL must not keep serving from browser
+	// or proxy caches. Server-side load is already absorbed by icsCache.
+	w.Header().Set("Cache-Control", "no-store")
 	_, _ = w.Write([]byte(body))
 }
 

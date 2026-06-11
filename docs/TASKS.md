@@ -1320,7 +1320,8 @@ Includes both the webhook backend and the per-timeline connector sidebar UI (pre
 - [x] `GET /shares/{token}.ics` (`text/calendar`, dispatched inside the `{token}` wildcard) + `webcal://` variant in the modal links; all-day VEVENTs (`DTSTART;VALUE=DATE`, exclusive `DTEND` = end+1d) via new `internal/ics` package (RFC 5545 escaping + 75-octet folding); live data, ICS TTL cache sharing `DRABA_SHARE_CACHE_TTL`
 - [x] Distinct Calendar share modal (`CalendarShareModal.tsx`): public On/Off toggle, scope selector (timeline vs. member), feed URL, Copy, Add-to-Google/Apple/Outlook, Regenerate link (`POST /shares/{id}/regenerate` rotates the token)
 - [x] Whole-timeline AND per-member feeds; payload carries no email/`user_id`/role/other-timelines; kinds isolated both directions (ICS token dead on the JSON gateway and vice versa)
-- [ ] Manual: subscribe to a timeline feed in a real calendar app (Google or Apple) → activities appear as all-day events; per-member feed shows only that member's; toggle-off and Regenerate kill the old URL (Docker)
+- [x] Manual: subscribe in a real calendar client → all-day events with fields (verified in Thunderbird, 2026-06-10; client-side fetch, works on LAN). Apple Calendar on LAN also testable.
+- [ ] Manual: Google Calendar / Outlook web subscription — **blocked until a test server is exposed to the internet** (their fetchers run server-side and cannot reach localhost/LAN). Feed URLs derive from `window.location.origin`, so no code change is needed once public.
 
 **13.5 — Lifecycle tail:**
 - [ ] Optional expiry → `410 Gone` after `expires_at`

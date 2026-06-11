@@ -2205,3 +2205,16 @@ Port 8080 was already in use on the host.
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, web-e2e
 - Result: all pass (web-e2e initially skipped — Chrome extension not connected — re-run after reconnecting passed: List + Kanban shares render faithfully read-only, no over-exposure, Phase 7 auth-redirect regression holds; created two ad hoc QA share links live since the seeded fixture had no List/Kanban shares yet)
 - Smoke target: http://epcot.lan:8081 (reset via `ssh draba-test` — canonical sample dataset + bootstrap)
+
+## 2026-06-10 — /test-phase 13.4
+
+- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, web-e2e
+- Result: 7 pass, 1 skip (ws-smoke — slow manual check, heartbeat covered by TestHub_Heartbeat_* unit tests). web-e2e initially skipped (Chrome extension not connected); re-run after reconnecting passed 9/9: CalendarShareModal per-feed toggle list, named slug feed URL serves all-day VEVENTs, regenerate + toggle-off invalidate immediately, per-member feed isolation verified (Michelle's 3 activities only, Brian/Erik-only activity absent), Phase 7 auth-redirect regression holds
+- Smoke target: http://epcot.lan:8081 (reset via `ssh draba-test` — canonical sample dataset + bootstrap)
+- Notes: api-smoke 35/35 incl. full 13.4 ICS suite (all-day VEVENTs w/ exclusive DTEND, named slug URL, per-member feed isolation, kind isolation, immediate regenerate/delete invalidation); security-review clean with two no-action notes (tokens in URLs land in access logs — rotate test tokens before launch; non-constant-time token lookup acceptable at 256-bit)
+
+## 2026-06-10 — 13.4 post-test fix: ICS feed Cache-Control
+
+- web-e2e observed a regenerated feed's OLD URL briefly serving 200 from the browser HTTP cache (server correctly 404'd). Cause: `Cache-Control: max-age=60` on the feed response.
+- Fix: feed now sends `Cache-Control: no-store` — the token is the secret and rotate/delete is the only kill switch, so revocation must be client-immediate too. Server load still absorbed by the in-memory icsCache (DRABA_SHARE_CACHE_TTL).
+- Test: header asserted in share_ics_handler_test.go. `go test ./internal/api/` + `golangci-lint run` clean.
