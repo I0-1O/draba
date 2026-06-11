@@ -181,27 +181,31 @@ function ShareRow({
         </button>
       </div>
 
-      {/* Footer meta */}
-      <div className="mt-[11px] flex items-center gap-2 text-xs text-muted-foreground">
-        <MiniAvatar member={creator} size={20} />
-        <span className="font-semibold text-foreground">
-          {creator?.displayName ?? 'Team member'}
-          {isOwn && <span className="font-normal text-muted-foreground"> · you</span>}
-        </span>
-        <span className="opacity-50">•</span>
-        <span>{formatCreated(share.createdAt)}</span>
-        <span className="opacity-50">•</span>
-        <span className="inline-flex items-center gap-1">
-          <Eye size={12} strokeWidth={2} />{share.viewCount} {share.viewCount === 1 ? 'view' : 'views'}
-        </span>
-        {share.lastViewedAt && (
-          <>
-            <span className="opacity-50">•</span>
-            <span title={new Date(share.lastViewedAt).toLocaleString()}>
-              Last viewed {formatLastViewed(share.lastViewedAt)}
+      {/* Footer meta — labeled columns so each value carries its own context */}
+      <div className="mt-[11px] grid grid-cols-3 gap-2 border-t border-border pt-2.5">
+        <div title={`Created ${formatCreated(share.createdAt)}`}>
+          <div className="text-[10px] font-semibold uppercase tracking-[0.06em] text-muted-foreground">Created by</div>
+          <div className="mt-1 flex min-w-0 items-center gap-1.5 text-xs">
+            <MiniAvatar member={creator} size={16} />
+            <span className="truncate font-semibold text-foreground">
+              {creator?.displayName ?? 'Team member'}
+              {isOwn && <span className="font-normal text-muted-foreground"> · you</span>}
             </span>
-          </>
-        )}
+          </div>
+        </div>
+        <div title={share.lastViewedAt ? new Date(share.lastViewedAt).toLocaleString() : undefined}>
+          <div className="text-[10px] font-semibold uppercase tracking-[0.06em] text-muted-foreground">Last viewed</div>
+          <div className="mt-1 text-xs text-foreground">
+            {share.lastViewedAt ? formatLastViewed(share.lastViewedAt) : 'Never'}
+          </div>
+        </div>
+        <div>
+          <div className="text-[10px] font-semibold uppercase tracking-[0.06em] text-muted-foreground">View total</div>
+          <div className="mt-1 inline-flex items-center gap-1 text-xs text-foreground">
+            <Eye size={12} strokeWidth={2} className="text-muted-foreground" />
+            {share.viewCount}
+          </div>
+        </div>
       </div>
 
       {/* Inline delete confirm */}
