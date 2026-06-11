@@ -13749,215 +13749,6 @@ func (r *TeamRepo) GetByInviteLinkToken(token string) (*models.Team, error) {
 }
 ````
 
-## File: packages/api/internal/db/timeline_repo.go
-````go
-package db
-
-import (
-	"fmt"
-	"time"
-
-	"github.com/jmoiron/sqlx"
-
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// TimelineRepo is the persistence layer for Timeline records and their access
-// control entries.
-type TimelineRepo struct {
-	db *sqlx.DB
-}
-
-// NewTimelineRepo returns a TimelineRepo backed by db.
-func NewTimelineRepo(db *sqlx.DB) *TimelineRepo {
-	return &TimelineRepo{db: db}
-}
-
-// Create inserts a new Timeline row.
-func (r *TimelineRepo) Create(t *models.Timeline) error {
-	_, err := r.db.NamedExec(`
-		INSERT INTO timelines (
-			id, team_id, name, description, notes,
-			start_date, end_date, color, icon,
-			share_token, ical_token,
-			created_by, created_at, updated_at
-		) VALUES (
-			:id, :team_id, :name, :description, :notes,
-			:start_date, :end_date, :color, :icon,
-			:share_token, :ical_token,
-			:created_by, :created_at, :updated_at
-		)
-	`, t)
-	if err != nil {
-		return fmt.Errorf("creating timeline: %w", err)
-	}
-	return nil
-}
-
-// GetByID fetches a Timeline by primary key, including archived rows so the
-// archive/unarchive handlers can operate on them. Callers that should reject
-// archived timelines must check ArchivedAt explicitly.
-func (r *TimelineRepo) GetByID(id string) (*models.Timeline, error) {
-	var t models.Timeline
-	err := r.db.Get(&t, `SELECT * FROM timelines WHERE id = ?`, id)
-	if err != nil {
-		return nil, fmt.Errorf("getting timeline: %w", err)
-	}
-	return &t, nil
-}
-
-// SetArchived sets or clears archived_at on a timeline. Pass a non-nil time
-// to archive; pass nil to unarchive.
-func (r *TimelineRepo) SetArchived(id string, at *time.Time) error {
-	_, err := r.db.Exec(
-		`UPDATE timelines SET archived_at = ?, updated_at = ? WHERE id = ?`,
-		at, time.Now().UTC(), id,
-	)
-	if err != nil {
-		return fmt.Errorf("setting timeline archived_at: %w", err)
-	}
-	return nil
-}
-
-// GetByShareToken fetches a non-archived Timeline by its public share token.
-// Archived timelines are intentionally excluded — public share URLs should
-// 404 once a timeline is archived.
-// Returns sql.ErrNoRows (wrapped) when no row matches.
-func (r *TimelineRepo) GetByShareToken(token string) (*models.Timeline, error) {
-	var t models.Timeline
-	err := r.db.Get(&t, `SELECT * FROM timelines WHERE share_token = ? AND archived_at IS NULL`, token)
-	if err != nil {
-		return nil, fmt.Errorf("getting timeline by share token: %w", err)
-	}
-	return &t, nil
-}
-
-// ListByTeam returns timelines for a team ordered by creation date
-// descending. When includeArchived is false, archived rows are excluded.
-func (r *TimelineRepo) ListByTeam(teamID string, includeArchived bool) ([]*models.Timeline, error) {
-	ts := make([]*models.Timeline, 0)
-	query := `SELECT * FROM timelines WHERE team_id = ?`
-	if !includeArchived {
-		query += ` AND archived_at IS NULL`
-	}
-	query += ` ORDER BY created_at DESC`
-	err := r.db.Select(&ts, query, teamID)
-	if err != nil {
-		return nil, fmt.Errorf("listing timelines: %w", err)
-	}
-	return ts, nil
-}
-
-// HasAccess reports whether teamMemberID has an entry in timeline_access for
-// the given timeline. Returns false (not an error) when the row is absent.
-func (r *TimelineRepo) HasAccess(timelineID, teamMemberID string) (bool, error) {
-	var count int
-	err := r.db.Get(&count,
-		`SELECT COUNT(*) FROM timeline_access WHERE timeline_id = ? AND team_member_id = ?`,
-		timelineID, teamMemberID,
-	)
-	if err != nil {
-		return false, fmt.Errorf("checking timeline access: %w", err)
-	}
-	return count > 0, nil
-}
-
-// GrantAccess inserts a timeline_access row with the given role. On conflict
-// (row already exists) the role is updated to the supplied value.
-func (r *TimelineRepo) GrantAccess(timelineID, teamMemberID, role string) error {
-	_, err := r.db.Exec(
-		`INSERT INTO timeline_access (timeline_id, team_member_id, role)
-		 VALUES (?, ?, ?)
-		 ON CONFLICT(timeline_id, team_member_id) DO UPDATE SET role = excluded.role`,
-		timelineID, teamMemberID, role,
-	)
-	if err != nil {
-		return fmt.Errorf("granting timeline access: %w", err)
-	}
-	return nil
-}
-
-// RevokeAccess removes a timeline_access row. It is a no-op when the row
-// does not exist.
-func (r *TimelineRepo) RevokeAccess(timelineID, teamMemberID string) error {
-	_, err := r.db.Exec(
-		`DELETE FROM timeline_access WHERE timeline_id = ? AND team_member_id = ?`,
-		timelineID, teamMemberID,
-	)
-	if err != nil {
-		return fmt.Errorf("revoking timeline access: %w", err)
-	}
-	return nil
-}
-
-// GetAccessRole returns the role for a member in timeline_access, or "" if
-// no entry exists. Returns sql.ErrNoRows (wrapped) only on DB errors.
-func (r *TimelineRepo) GetAccessRole(timelineID, teamMemberID string) (string, error) {
-	var role string
-	err := r.db.Get(&role,
-		`SELECT role FROM timeline_access WHERE timeline_id = ? AND team_member_id = ?`,
-		timelineID, teamMemberID,
-	)
-	if err != nil {
-		// No row means no access — return empty string, not an error.
-		return "", nil
-	}
-	return role, nil
-}
-
-// ListAccess returns all access grants for a timeline, joined with member
-// display info, ordered by joined_at.
-func (r *TimelineRepo) ListAccess(timelineID string) ([]*models.TimelineAccessEntry, error) {
-	entries := make([]*models.TimelineAccessEntry, 0)
-	err := r.db.Select(&entries, `
-		SELECT
-			ta.timeline_id,
-			ta.team_member_id,
-			ta.role,
-			COALESCE(tm.display_name, u.display_name, '') AS display_name,
-			COALESCE(u.email, '')                           AS email,
-			tm.color,
-			tm.icon,
-			tm.user_id
-		FROM timeline_access ta
-		JOIN team_members tm ON tm.id = ta.team_member_id
-		LEFT JOIN users u ON u.id = tm.user_id
-		WHERE ta.timeline_id = ?
-		ORDER BY tm.joined_at
-	`, timelineID)
-	if err != nil {
-		return nil, fmt.Errorf("listing timeline access: %w", err)
-	}
-	return entries, nil
-}
-
-// Update writes mutable timeline fields: name, description, notes, start_date,
-// end_date, color, icon.
-func (r *TimelineRepo) Update(t *models.Timeline) error {
-	_, err := r.db.Exec(`
-		UPDATE timelines
-		SET name = ?, description = ?, notes = ?,
-		    start_date = ?, end_date = ?,
-		    color = ?, icon = ?, updated_at = ?
-		WHERE id = ?
-	`, t.Name, t.Description, t.Notes, t.StartDate, t.EndDate, t.Color, t.Icon, t.UpdatedAt, t.ID)
-	if err != nil {
-		return fmt.Errorf("updating timeline: %w", err)
-	}
-	return nil
-}
-
-// Delete hard-deletes a timeline and all its child rows (statuses,
-// timeline_access cascade via FK).
-func (r *TimelineRepo) Delete(id string) error {
-	_, err := r.db.Exec(`DELETE FROM timelines WHERE id = ?`, id)
-	if err != nil {
-		return fmt.Errorf("deleting timeline: %w", err)
-	}
-	return nil
-}
-````
-
 ## File: packages/api/internal/db/user_preference_repo.go
 ````go
 package db
@@ -32187,6 +31978,230 @@ func SeedSampleDataIfEmpty(database *sqlx.DB, sql string) (bool, error) {
 }
 ````
 
+## File: packages/api/internal/db/timeline_repo.go
+````go
+package db
+
+import (
+	"fmt"
+	"time"
+
+	"github.com/jmoiron/sqlx"
+
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// TimelineRepo is the persistence layer for Timeline records and their access
+// control entries.
+type TimelineRepo struct {
+	db *sqlx.DB
+}
+
+// NewTimelineRepo returns a TimelineRepo backed by db.
+func NewTimelineRepo(db *sqlx.DB) *TimelineRepo {
+	return &TimelineRepo{db: db}
+}
+
+// Create inserts a new Timeline row.
+func (r *TimelineRepo) Create(t *models.Timeline) error {
+	_, err := r.db.NamedExec(`
+		INSERT INTO timelines (
+			id, team_id, name, description, notes,
+			start_date, end_date, color, icon,
+			share_token, ical_token,
+			created_by, created_at, updated_at
+		) VALUES (
+			:id, :team_id, :name, :description, :notes,
+			:start_date, :end_date, :color, :icon,
+			:share_token, :ical_token,
+			:created_by, :created_at, :updated_at
+		)
+	`, t)
+	if err != nil {
+		return fmt.Errorf("creating timeline: %w", err)
+	}
+	return nil
+}
+
+// activeShareCountSubquery derives Timeline.ShareCount: the timeline's
+// non-revoked, non-expired shares (view shares and ICS feeds alike). The
+// "now" comparison value is bound as a parameter rather than using the DB's
+// CURRENT_TIMESTAMP so it is serialized in the same format the driver stores
+// expires_at in, keeping the comparison consistent across DB backends.
+const activeShareCountSubquery = `(
+	SELECT COUNT(*) FROM shares s
+	WHERE s.timeline_id = timelines.id
+	  AND s.revoked_at IS NULL
+	  AND (s.expires_at IS NULL OR s.expires_at > ?)
+) AS share_count`
+
+// GetByID fetches a Timeline by primary key, including archived rows so the
+// archive/unarchive handlers can operate on them. Callers that should reject
+// archived timelines must check ArchivedAt explicitly.
+func (r *TimelineRepo) GetByID(id string) (*models.Timeline, error) {
+	var t models.Timeline
+	err := r.db.Get(&t,
+		`SELECT timelines.*, `+activeShareCountSubquery+` FROM timelines WHERE id = ?`,
+		time.Now().UTC(), id,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("getting timeline: %w", err)
+	}
+	return &t, nil
+}
+
+// SetArchived sets or clears archived_at on a timeline. Pass a non-nil time
+// to archive; pass nil to unarchive.
+func (r *TimelineRepo) SetArchived(id string, at *time.Time) error {
+	_, err := r.db.Exec(
+		`UPDATE timelines SET archived_at = ?, updated_at = ? WHERE id = ?`,
+		at, time.Now().UTC(), id,
+	)
+	if err != nil {
+		return fmt.Errorf("setting timeline archived_at: %w", err)
+	}
+	return nil
+}
+
+// GetByShareToken fetches a non-archived Timeline by its public share token.
+// Archived timelines are intentionally excluded — public share URLs should
+// 404 once a timeline is archived.
+// Returns sql.ErrNoRows (wrapped) when no row matches.
+func (r *TimelineRepo) GetByShareToken(token string) (*models.Timeline, error) {
+	var t models.Timeline
+	err := r.db.Get(&t, `SELECT * FROM timelines WHERE share_token = ? AND archived_at IS NULL`, token)
+	if err != nil {
+		return nil, fmt.Errorf("getting timeline by share token: %w", err)
+	}
+	return &t, nil
+}
+
+// ListByTeam returns timelines for a team ordered by creation date
+// descending. When includeArchived is false, archived rows are excluded.
+func (r *TimelineRepo) ListByTeam(teamID string, includeArchived bool) ([]*models.Timeline, error) {
+	ts := make([]*models.Timeline, 0)
+	query := `SELECT timelines.*, ` + activeShareCountSubquery + ` FROM timelines WHERE team_id = ?`
+	if !includeArchived {
+		query += ` AND archived_at IS NULL`
+	}
+	query += ` ORDER BY created_at DESC`
+	err := r.db.Select(&ts, query, time.Now().UTC(), teamID)
+	if err != nil {
+		return nil, fmt.Errorf("listing timelines: %w", err)
+	}
+	return ts, nil
+}
+
+// HasAccess reports whether teamMemberID has an entry in timeline_access for
+// the given timeline. Returns false (not an error) when the row is absent.
+func (r *TimelineRepo) HasAccess(timelineID, teamMemberID string) (bool, error) {
+	var count int
+	err := r.db.Get(&count,
+		`SELECT COUNT(*) FROM timeline_access WHERE timeline_id = ? AND team_member_id = ?`,
+		timelineID, teamMemberID,
+	)
+	if err != nil {
+		return false, fmt.Errorf("checking timeline access: %w", err)
+	}
+	return count > 0, nil
+}
+
+// GrantAccess inserts a timeline_access row with the given role. On conflict
+// (row already exists) the role is updated to the supplied value.
+func (r *TimelineRepo) GrantAccess(timelineID, teamMemberID, role string) error {
+	_, err := r.db.Exec(
+		`INSERT INTO timeline_access (timeline_id, team_member_id, role)
+		 VALUES (?, ?, ?)
+		 ON CONFLICT(timeline_id, team_member_id) DO UPDATE SET role = excluded.role`,
+		timelineID, teamMemberID, role,
+	)
+	if err != nil {
+		return fmt.Errorf("granting timeline access: %w", err)
+	}
+	return nil
+}
+
+// RevokeAccess removes a timeline_access row. It is a no-op when the row
+// does not exist.
+func (r *TimelineRepo) RevokeAccess(timelineID, teamMemberID string) error {
+	_, err := r.db.Exec(
+		`DELETE FROM timeline_access WHERE timeline_id = ? AND team_member_id = ?`,
+		timelineID, teamMemberID,
+	)
+	if err != nil {
+		return fmt.Errorf("revoking timeline access: %w", err)
+	}
+	return nil
+}
+
+// GetAccessRole returns the role for a member in timeline_access, or "" if
+// no entry exists. Returns sql.ErrNoRows (wrapped) only on DB errors.
+func (r *TimelineRepo) GetAccessRole(timelineID, teamMemberID string) (string, error) {
+	var role string
+	err := r.db.Get(&role,
+		`SELECT role FROM timeline_access WHERE timeline_id = ? AND team_member_id = ?`,
+		timelineID, teamMemberID,
+	)
+	if err != nil {
+		// No row means no access — return empty string, not an error.
+		return "", nil
+	}
+	return role, nil
+}
+
+// ListAccess returns all access grants for a timeline, joined with member
+// display info, ordered by joined_at.
+func (r *TimelineRepo) ListAccess(timelineID string) ([]*models.TimelineAccessEntry, error) {
+	entries := make([]*models.TimelineAccessEntry, 0)
+	err := r.db.Select(&entries, `
+		SELECT
+			ta.timeline_id,
+			ta.team_member_id,
+			ta.role,
+			COALESCE(tm.display_name, u.display_name, '') AS display_name,
+			COALESCE(u.email, '')                           AS email,
+			tm.color,
+			tm.icon,
+			tm.user_id
+		FROM timeline_access ta
+		JOIN team_members tm ON tm.id = ta.team_member_id
+		LEFT JOIN users u ON u.id = tm.user_id
+		WHERE ta.timeline_id = ?
+		ORDER BY tm.joined_at
+	`, timelineID)
+	if err != nil {
+		return nil, fmt.Errorf("listing timeline access: %w", err)
+	}
+	return entries, nil
+}
+
+// Update writes mutable timeline fields: name, description, notes, start_date,
+// end_date, color, icon.
+func (r *TimelineRepo) Update(t *models.Timeline) error {
+	_, err := r.db.Exec(`
+		UPDATE timelines
+		SET name = ?, description = ?, notes = ?,
+		    start_date = ?, end_date = ?,
+		    color = ?, icon = ?, updated_at = ?
+		WHERE id = ?
+	`, t.Name, t.Description, t.Notes, t.StartDate, t.EndDate, t.Color, t.Icon, t.UpdatedAt, t.ID)
+	if err != nil {
+		return fmt.Errorf("updating timeline: %w", err)
+	}
+	return nil
+}
+
+// Delete hard-deletes a timeline and all its child rows (statuses,
+// timeline_access cascade via FK).
+func (r *TimelineRepo) Delete(id string) error {
+	_, err := r.db.Exec(`DELETE FROM timelines WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("deleting timeline: %w", err)
+	}
+	return nil
+}
+````
+
 ## File: packages/api/internal/filters/engine.go
 ````go
 // Package filters provides the server-side activity filter evaluator.
@@ -38803,6 +38818,574 @@ export default function ListToolbar({
 }
 ````
 
+## File: packages/web/src/hooks/useTeamActivities.ts
+````typescript
+/**
+ * TanStack Query hooks for team-scoped data.
+ *
+ * All hooks call createAuthFetch to inject the current access token at
+ * query-time so stale closures never send an expired token.
+ */
+
+import { useCallback } from 'react'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import type { components } from '@draba/shared'
+import { createAuthFetch } from '@/lib/api'
+import { useAuth } from '@/contexts/AuthContext'
+import { useWebSocket } from '@/hooks/useWebSocket'
+
+type Activity = components['schemas']['Activity']
+type Team = components['schemas']['Team']
+type Timeline = components['schemas']['Timeline']
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
+type TimelineAccessEntry = components['schemas']['TimelineAccessEntry']
+type PatchTimelineInput = components['schemas']['PatchTimelineInput']
+
+/** Query key factory — centralises cache key strings. */
+export const keys = {
+  myTeams: () => ['teams'] as const,
+  timelineActivities: (timelineId: string, from?: string, to?: string) =>
+    ['timelines', timelineId, 'activities', { from, to }] as const,
+  teamMembers: (teamId: string) =>
+    ['teams', teamId, 'members'] as const,
+  teamTimelines: (teamId: string) =>
+    ['teams', teamId, 'timelines'] as const,
+}
+
+/** Fetches all teams the authenticated user belongs to. */
+export function useMyTeams(includeArchived = false) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: [...keys.myTeams(), { includeArchived }],
+    queryFn: async () => (await authFetch<Team[] | null>(includeArchived ? '/teams?archived=true' : '/teams')) ?? [],
+  })
+}
+
+/** Fetches a single team by ID. */
+export function useTeam(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: ['teams', teamId],
+    queryFn: () => authFetch<Team>(`/teams/${teamId}`),
+    enabled: Boolean(teamId),
+  })
+}
+
+/** Fetches all non-archived timelines for a team. */
+export function useTeamTimelines(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: keys.teamTimelines(teamId),
+    queryFn: async () => (await authFetch<Timeline[] | null>(`/teams/${teamId}/timelines`)) ?? [],
+    enabled: Boolean(teamId),
+  })
+}
+
+/** Fetches activities for a timeline, optionally bounded by date range. */
+export function useTimelineActivities(teamId: string, timelineId: string, from?: string, to?: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: keys.timelineActivities(timelineId, from, to),
+    queryFn: async () => {
+      const params = new URLSearchParams()
+      if (from) params.set('from', from)
+      if (to) params.set('to', to)
+      const qs = params.toString()
+      return (await authFetch<Activity[] | null>(`/teams/${teamId}/timelines/${timelineId}/activities${qs ? `?${qs}` : ''}`)) ?? []
+    },
+    enabled: Boolean(teamId) && Boolean(timelineId),
+  })
+}
+
+/** Fetches the member list for a team. */
+export function useTeamMembers(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: keys.teamMembers(teamId),
+    queryFn: async () => (await authFetch<TeamMemberWithUser[] | null>(`/teams/${teamId}/members`)) ?? [],
+    enabled: Boolean(teamId),
+  })
+}
+
+/**
+ * Subscribes to the team's WebSocket feed and applies surgical cache updates
+ * for activity.created / activity.updated / activity.deleted deltas.
+ *
+ * Conflict strategy: for activity.updated, incoming deltas are only applied
+ * when their updatedAt timestamp is strictly newer than the cached version.
+ * This prevents self-echo (our own PATCH broadcast arriving back) and handles
+ * the last-writer-wins case where a concurrent remote edit arrives while our
+ * mutation is in-flight — the server-returned updatedAt on our onSuccess will
+ * always win if our PATCH was truly last.
+ */
+export function useTeamActivitySync(
+  teamId: string,
+  accessToken: string | null | undefined,
+) {
+  const client = useQueryClient()
+
+  const handleMessage = useCallback(
+    (msg: { type: string; payload?: unknown }) => {
+      if (!teamId || !msg.payload) return
+
+      if (msg.type === 'activity.created') {
+        const incoming = msg.payload as Activity
+        // Target all timeline-scoped activity cache entries by using the
+        // timelineId from the incoming activity payload.
+        if (!incoming.timelineId) return
+        client.setQueriesData<Activity[]>(
+          { queryKey: ['timelines', incoming.timelineId, 'activities'] },
+          (old) => {
+            if (!old) return old
+            // Guard against duplicate delivery.
+            if (old.some((a) => a.id === incoming.id)) return old
+            return [...old, incoming]
+          },
+        )
+      } else if (msg.type === 'activity.updated') {
+        const incoming = msg.payload as Activity
+        if (!incoming.timelineId) return
+        client.setQueriesData<Activity[]>(
+          { queryKey: ['timelines', incoming.timelineId, 'activities'] },
+          (old) => {
+            if (!old) return old
+            return old.map((a) => {
+              if (a.id !== incoming.id) return a
+              // Skip if the cache already holds the same or a newer version.
+              const cachedMs = new Date(a.updatedAt).getTime()
+              const incomingMs = new Date(incoming.updatedAt).getTime()
+              return incomingMs > cachedMs ? incoming : a
+            })
+          },
+        )
+      } else if (msg.type === 'activity.deleted') {
+        const { id } = msg.payload as { id: string }
+        // activity.deleted payload only has id — scope invalidation to this
+        // team's timelines so we don't flush unrelated team caches when
+        // multiple teams are active in the same session.
+        const teamTimelines = client.getQueryData<Timeline[]>(keys.teamTimelines(teamId)) ?? []
+        if (teamTimelines.length > 0) {
+          for (const tl of teamTimelines) {
+            client.invalidateQueries({ queryKey: ['timelines', tl.id] })
+            client.setQueriesData<Activity[]>(
+              { queryKey: ['timelines', tl.id, 'activities'] },
+              (old) => old?.filter((a) => a.id !== id),
+            )
+          }
+        } else {
+          // Fallback when the team's timelines aren't cached yet.
+          client.invalidateQueries({ queryKey: ['timelines'] })
+          client.setQueriesData<Activity[]>(
+            { queryKey: ['timelines'] },
+            (old) => old?.filter((a) => a.id !== id),
+          )
+        }
+      }
+    },
+    [client, teamId],
+  )
+
+  useWebSocket({
+    token: accessToken,
+    teamIds: teamId ? [teamId] : [],
+    onMessage: handleMessage,
+  })
+}
+
+interface CreateActivityInput {
+  title: string
+  startAt: string
+  endAt: string
+  description?: string | null
+  notes?: string | null
+  color?: string | null
+  icon?: string | null
+  assignedMemberIds?: string[]
+  tagIds?: string[]
+  statusId?: string | null
+  parentActivityId?: string | null
+  percentComplete?: number | null
+  location?: string | null
+  url?: string | null
+  /** Client-only: if set, replace this placeholder ID in the cache instead of appending. */
+  _tempId?: string
+}
+
+interface UpdateActivityInput {
+  activityId: string
+  patch: {
+    title?: string
+    description?: string | null
+    notes?: string | null
+    startAt?: string
+    endAt?: string
+    allDay?: boolean
+    color?: string | null
+    icon?: string | null
+    location?: string | null
+    url?: string | null
+    statusId?: string | null
+    parentActivityId?: string | null
+    percentComplete?: number | null
+    assignedMemberIds?: string[]
+    tagIds?: string[]
+  }
+}
+
+/** Creates an activity in a timeline and inserts it directly into the cache. */
+export function useCreateActivity(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({ _tempId: _, ...input }: CreateActivityInput) =>
+      authFetch<Activity>(`/teams/${teamId}/timelines/${timelineId}/activities`, {
+        method: 'POST',
+        body: JSON.stringify(input),
+      }),
+    onSuccess: (created, variables) => {
+      const tempId = variables._tempId
+      client.setQueriesData<Activity[]>(
+        { queryKey: ['timelines', timelineId, 'activities'] },
+        (old) => {
+          if (!old) return [created]
+          const hasReal = old.some((a) => a.id === created.id)
+          const hasTemp = tempId ? old.some((a) => a.id === tempId) : false
+          // The WS activity.created self-echo may win the race and append the
+          // real record before this onSuccess runs. In that case we must still
+          // drop the optimistic placeholder, otherwise it lingers as a duplicate
+          // "New Activity" row (and inline edits keep targeting the dead temp id).
+          if (hasReal) {
+            return hasTemp ? old.filter((a) => a.id !== tempId) : old
+          }
+          // Replace optimistic placeholder in-place to avoid a position flash.
+          if (hasTemp) {
+            return old.map((a) => (a.id === tempId ? created : a))
+          }
+          return [...old, created]
+        },
+      )
+    },
+  })
+}
+
+/** PATCHes an activity and optimistically updates the cache. */
+export function useUpdateActivity(timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({ activityId, patch }: UpdateActivityInput) =>
+      authFetch<Activity>(`/activities/${activityId}`, {
+        method: 'PATCH',
+        body: JSON.stringify(patch),
+      }),
+    onMutate: async ({ activityId, patch }) => {
+      await client.cancelQueries({ queryKey: ['timelines', timelineId, 'activities'] })
+      const snapshot = client.getQueriesData<Activity[]>({ queryKey: ['timelines', timelineId, 'activities'] })
+      client.setQueriesData<Activity[]>(
+        { queryKey: ['timelines', timelineId, 'activities'] },
+        (old) => old?.map((a) => (a.id === activityId ? { ...a, ...patch } : a)),
+      )
+      return { snapshot }
+    },
+    onError: (_err, _vars, context) => {
+      if (context?.snapshot) {
+        for (const [key, data] of context.snapshot) {
+          client.setQueryData(key, data)
+        }
+      }
+    },
+    onSuccess: (updated) => {
+      client.setQueriesData<Activity[]>(
+        { queryKey: ['timelines', timelineId, 'activities'] },
+        (old) => old?.map((a) => (a.id === updated.id ? updated : a)),
+      )
+    },
+  })
+}
+
+interface CreateTeamInput {
+  name: string
+  description?: string | null
+  notes?: string | null
+  color?: string | null
+  icon?: string | null
+}
+
+interface UpdateTeamInput {
+  teamId: string
+  patch: {
+    name?: string
+    description?: string | null
+    notes?: string | null
+    color?: string | null
+    icon?: string | null
+  }
+}
+
+/** Creates a team and inserts it into the active-teams cache. */
+export function useCreateTeam() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (input: CreateTeamInput) =>
+      authFetch<Team>('/teams', {
+        method: 'POST',
+        body: JSON.stringify(input),
+      }),
+    onSuccess: () => {
+      // Invalidate both active and archived team lists.
+      client.invalidateQueries({ queryKey: ['teams'] })
+    },
+  })
+}
+
+/** PATCHes a team's mutable fields and refreshes the cache. */
+export function useUpdateTeam() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({ teamId, patch }: UpdateTeamInput) =>
+      authFetch<Team>(`/teams/${teamId}`, {
+        method: 'PATCH',
+        body: JSON.stringify(patch),
+      }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ['teams'] })
+    },
+  })
+}
+
+/** Archives a team (soft delete). */
+export function useArchiveTeam() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (teamId: string) =>
+      authFetch<Team>(`/teams/${teamId}/archive`, { method: 'POST' }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ['teams'] })
+    },
+  })
+}
+
+/** Restores an archived team. */
+export function useUnarchiveTeam() {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (teamId: string) =>
+      authFetch<Team>(`/teams/${teamId}/unarchive`, { method: 'POST' }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ['teams'] })
+    },
+  })
+}
+
+/** Archives an activity (soft-delete). Removes it from the active-list cache. */
+export function useArchiveActivity(timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (activityId: string) =>
+      authFetch<Activity>(`/activities/${activityId}/archive`, { method: 'POST' }),
+    onSuccess: (_data, activityId) => {
+      client.setQueriesData<Activity[]>(
+        { queryKey: ['timelines', timelineId, 'activities'] },
+        (old) => old?.filter((a) => a.id !== activityId),
+      )
+    },
+  })
+}
+
+/** Deletes an activity and removes it from the cache. */
+export function useDeleteActivity(timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (activityId: string) =>
+      authFetch<void>(`/activities/${activityId}`, { method: 'DELETE' }),
+    onSuccess: (_data, activityId) => {
+      client.setQueriesData<Activity[]>(
+        { queryKey: ['timelines', timelineId, 'activities'] },
+        (old) => old?.filter((a) => a.id !== activityId),
+      )
+    },
+  })
+}
+
+// ── Timeline CRUD (Phase 10.3) ────────────────────────────────────────────────
+
+/** Fetches all timelines for a team, optionally including archived ones. */
+export function useTeamTimelinesWithArchived(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: [...keys.teamTimelines(teamId), { includeArchived: true }],
+    queryFn: async () =>
+      (await authFetch<Timeline[] | null>(`/teams/${teamId}/timelines?archived=true`)) ?? [],
+    enabled: Boolean(teamId),
+  })
+}
+
+/** Creates a new timeline for a team. */
+export function useCreateTimeline(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (input: { name: string; startDate: string; endDate: string; color?: string | null; icon?: string | null; description?: string | null; notes?: string | null; templateId?: string | null }) =>
+      authFetch<Timeline>(`/teams/${teamId}/timelines`, {
+        method: 'POST',
+        body: JSON.stringify(input),
+      }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
+    },
+  })
+}
+
+/** PATCHes a timeline's mutable fields. */
+export function useUpdateTimeline(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({ timelineId, patch }: { timelineId: string; patch: PatchTimelineInput }) =>
+      authFetch<Timeline>(`/timelines/${timelineId}`, {
+        method: 'PATCH',
+        body: JSON.stringify(patch),
+      }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
+    },
+  })
+}
+
+/** Hard-deletes a timeline. */
+export function useDeleteTimeline(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (timelineId: string) =>
+      authFetch<void>(`/timelines/${timelineId}`, { method: 'DELETE' }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
+    },
+  })
+}
+
+/** Archives a timeline. */
+export function useArchiveTimeline(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (timelineId: string) =>
+      authFetch<Timeline>(`/timelines/${timelineId}/archive`, { method: 'POST' }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
+    },
+  })
+}
+
+/** Restores an archived timeline. */
+export function useUnarchiveTimeline(teamId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (timelineId: string) =>
+      authFetch<Timeline>(`/timelines/${timelineId}/unarchive`, { method: 'POST' }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
+    },
+  })
+}
+
+/** Fetches the access grant list for a timeline. */
+export function useTimelineAccess(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+
+  return useQuery({
+    queryKey: ['teams', teamId, 'timelines', timelineId, 'access'],
+    queryFn: async () =>
+      (await authFetch<TimelineAccessEntry[]>(
+        `/teams/${teamId}/timelines/${timelineId}/access`,
+      )) ?? [],
+    enabled: Boolean(teamId) && Boolean(timelineId),
+  })
+}
+
+/** Grants or updates a member's access to a timeline. */
+export function useGrantTimelineAccess(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({ memberId, role }: { memberId: string; role: 'admin' | 'member' }) =>
+      authFetch<TimelineAccessEntry[]>(
+        `/teams/${teamId}/timelines/${timelineId}/access/${memberId}`,
+        { method: 'PUT', body: JSON.stringify({ role }) },
+      ),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ['teams', teamId, 'timelines', timelineId, 'access'] })
+    },
+  })
+}
+
+/** Revokes a member's access to a timeline. */
+export function useRevokeTimelineAccess(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (memberId: string) =>
+      authFetch<void>(`/teams/${teamId}/timelines/${timelineId}/access/${memberId}`, {
+        method: 'DELETE',
+      }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ['teams', teamId, 'timelines', timelineId, 'access'] })
+    },
+  })
+}
+````
+
 ## File: packages/web/src/lib/calendarLanes.ts
 ````typescript
 /**
@@ -39660,310 +40243,6 @@ func getenv(key, fallback string) string {
 		return v
 	}
 	return fallback
-}
-````
-
-## File: packages/api/internal/api/share_ics_handler.go
-````go
-package api
-
-import (
-	"database/sql"
-	"errors"
-	"fmt"
-	"net/http"
-	"strings"
-	"sync"
-	"time"
-
-	"github.com/I0-1O/draba/packages/api/internal/ics"
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// ── In-memory ICS feed cache ──────────────────────────────────────────────────
-//
-// Mirrors shareCache, but stores the rendered text/calendar payload. Calendar
-// clients poll on their own cadence (minutes to hours), so the same short TTL
-// keeps feeds near-live while absorbing aggressive pollers.
-
-type icsCacheEntry struct {
-	builtAt time.Time
-	payload string
-}
-
-type icsFeedCache struct {
-	mu      sync.RWMutex
-	entries map[string]*icsCacheEntry
-	ttl     time.Duration
-}
-
-func newICSFeedCache(ttl time.Duration) *icsFeedCache {
-	return &icsFeedCache{entries: make(map[string]*icsCacheEntry), ttl: ttl}
-}
-
-func (c *icsFeedCache) get(token string) (string, bool) {
-	c.mu.RLock()
-	e, ok := c.entries[token]
-	c.mu.RUnlock()
-	if !ok || time.Since(e.builtAt) > c.ttl {
-		return "", false
-	}
-	return e.payload, true
-}
-
-func (c *icsFeedCache) set(token, payload string) {
-	c.mu.Lock()
-	c.entries[token] = &icsCacheEntry{builtAt: time.Now(), payload: payload}
-	c.mu.Unlock()
-}
-
-func (c *icsFeedCache) invalidate(token string) {
-	c.mu.Lock()
-	delete(c.entries, token)
-	c.mu.Unlock()
-}
-
-// ── Handlers ──────────────────────────────────────────────────────────────────
-
-// serveICSFeed handles GET /shares/{token}.ics — the public, unauthenticated
-// calendar feed. It is dispatched from handleGetShareProjection when the token
-// path value carries the .ics suffix (Go 1.22 mux wildcards span the whole
-// segment, so the suffix arrives inside {token}).
-//
-// The feed serves live data scoped server-side to the share's timeline — or,
-// for member feeds, to one member's assigned activities. There is no password
-// gate: calendar clients cannot unlock interactively, so the unguessable token
-// is the secret and revocation is rotate-or-delete.
-func (s *Server) serveICSFeed(w http.ResponseWriter, r *http.Request, token string) {
-	share, err := s.shares.GetByToken(token)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load share")
-		return
-	}
-	// A view share is not a feed — 404 rather than leaking that the token
-	// exists in another mode.
-	if share.Kind != models.ShareKindICS {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
-		return
-	}
-	if share.RevokedAt != nil {
-		writeError(w, http.StatusGone, "GONE", "this share has been revoked")
-		return
-	}
-	if share.ExpiresAt != nil && time.Now().After(*share.ExpiresAt) {
-		writeError(w, http.StatusGone, "GONE", "this share has expired")
-		return
-	}
-
-	body, ok := s.icsCache.get(token)
-	if !ok {
-		body, err = s.buildICSFeed(share)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to build calendar feed")
-			return
-		}
-		s.icsCache.set(token, body)
-	}
-
-	go func() { _ = s.shares.RecordView(share.ID) }()
-	w.Header().Set("Content-Type", "text/calendar; charset=utf-8")
-	// no-store: the token is the secret and rotate/delete is the only kill
-	// switch for a feed, so a revoked URL must not keep serving from browser
-	// or proxy caches. Server-side load is already absorbed by icsCache.
-	w.Header().Set("Cache-Control", "no-store")
-	_, _ = w.Write([]byte(body))
-}
-
-// buildICSFeed renders the iCalendar document for an ICS share. Scope is
-// hard-locked server-side: the timeline comes from the share row, and member
-// feeds drop every activity the member is not assigned to before
-// serialization.
-//
-// Each VEVENT projects the activity's display fields: status (+ percent
-// complete), assignee display names, and tag names go into DESCRIPTION (and
-// tags into CATEGORIES); whole-timeline feeds also append assignee names to
-// SUMMARY so the month grid shows who owns what. Member display names are the
-// only person-identifying field a feed may carry — never emails, user IDs, or
-// roles.
-func (s *Server) buildICSFeed(share *models.Share) (string, error) {
-	timeline, err := s.timelines.GetByID(share.TimelineID)
-	if err != nil {
-		return "", err
-	}
-
-	acts, err := s.activities.ListByTimeline(share.TimelineID, nil, nil, false)
-	if err != nil {
-		return "", err
-	}
-
-	// Display-name / tag / status lookups for the event field projection.
-	statuses, err := s.statuses.ListStatuses(share.TimelineID)
-	if err != nil {
-		return "", err
-	}
-	statusName := make(map[string]string, len(statuses))
-	for _, st := range statuses {
-		statusName[st.ID] = st.Name
-	}
-	members, err := s.teams.ListMembers(timeline.TeamID)
-	if err != nil {
-		return "", err
-	}
-	memberName := make(map[string]string, len(members))
-	for _, m := range members {
-		if m.DisplayName != "" {
-			memberName[m.ID] = m.DisplayName
-		}
-	}
-	tags, err := s.tags.ListByTeam(timeline.TeamID)
-	if err != nil {
-		return "", err
-	}
-	tagName := make(map[string]string, len(tags))
-	for _, tg := range tags {
-		tagName[tg.ID] = tg.Name
-	}
-
-	memberScoped := share.Scope != nil && *share.Scope == models.ShareScopeMember && share.MemberID != nil
-
-	name := timeline.Name
-	if memberScoped {
-		filtered := acts[:0]
-		for _, a := range acts {
-			for _, id := range a.AssignedMemberIDs {
-				if id == *share.MemberID {
-					filtered = append(filtered, a)
-					break
-				}
-			}
-		}
-		acts = filtered
-
-		if n, ok := memberName[*share.MemberID]; ok {
-			name = timeline.Name + " — " + n
-		}
-	}
-
-	events := make([]ics.Event, 0, len(acts))
-	for _, a := range acts {
-		assignees := make([]string, 0, len(a.AssignedMemberIDs))
-		for _, id := range a.AssignedMemberIDs {
-			if n, ok := memberName[id]; ok {
-				assignees = append(assignees, n)
-			}
-		}
-		tagNames := make([]string, 0, len(a.TagIDs))
-		for _, id := range a.TagIDs {
-			if n, ok := tagName[id]; ok {
-				tagNames = append(tagNames, n)
-			}
-		}
-
-		summary := a.Title
-		// A member feed is one person's calendar — repeating their name on
-		// every event is noise. The whole-timeline feed is the team overview,
-		// where who-owns-what belongs in the month grid.
-		if !memberScoped && len(assignees) > 0 {
-			summary += " — " + strings.Join(assignees, ", ")
-		}
-
-		// Structured field lines first, then a blank line, then the
-		// free-text activity description.
-		meta := make([]string, 0, 3)
-		if a.StatusID != nil {
-			if n, ok := statusName[*a.StatusID]; ok {
-				line := "Status: " + n
-				if a.PercentComplete != nil {
-					line += fmt.Sprintf(" (%d%%)", *a.PercentComplete)
-				}
-				meta = append(meta, line)
-			}
-		} else if a.PercentComplete != nil {
-			meta = append(meta, fmt.Sprintf("Progress: %d%%", *a.PercentComplete))
-		}
-		if len(assignees) > 0 {
-			meta = append(meta, "Assigned: "+strings.Join(assignees, ", "))
-		}
-		if len(tagNames) > 0 {
-			meta = append(meta, "Tags: "+strings.Join(tagNames, ", "))
-		}
-		desc := strings.Join(meta, "\n")
-		if a.Description != nil && *a.Description != "" {
-			if desc != "" {
-				desc += "\n\n"
-			}
-			desc += *a.Description
-		}
-
-		events = append(events, ics.Event{
-			UID:         a.ID + "@draba",
-			Summary:     summary,
-			Description: desc,
-			Categories:  tagNames,
-			Start:       a.StartAt,
-			End:         a.EndAt,
-			Stamp:       a.UpdatedAt,
-		})
-	}
-	return ics.Calendar(name, events), nil
-}
-
-// handleGetShareICSNamed handles GET /shares/{token}/{file}. The file segment
-// must end in .ics but is otherwise cosmetic: most calendar clients
-// (Thunderbird included) default the new calendar's name from the URL's
-// filename, so the modal links carry a readable slug (e.g. .../sales-kick-off.ics).
-// The token alone is authoritative.
-func (s *Server) handleGetShareICSNamed(w http.ResponseWriter, r *http.Request) {
-	if !strings.HasSuffix(r.PathValue("file"), ".ics") {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
-		return
-	}
-	s.serveICSFeed(w, r, r.PathValue("token"))
-}
-
-// handleRegenerateShare handles POST /shares/{id}/regenerate. It rotates the
-// share's token, immediately invalidating the old URL — the revocation story
-// for ICS feeds, which cannot carry a password. It works for view shares too
-// (rotating is strictly safer than nothing), and any member of the timeline's
-// team may do it, consistent with PATCH/DELETE.
-func (s *Server) handleRegenerateShare(w http.ResponseWriter, r *http.Request) {
-	shareID := r.PathValue("id")
-
-	share, err := s.shares.GetByID(shareID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
-		return
-	}
-
-	timeline, err := s.timelines.GetByID(share.TimelineID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
-		return
-	}
-	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
-		return
-	}
-
-	oldToken := share.Token
-	share.Token = newToken()
-	if err := s.shares.RotateToken(share.ID, share.Token); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to regenerate share link")
-		return
-	}
-
-	// Kill both caches for the dead token so it stops serving immediately.
-	s.shareCache.invalidate(oldToken)
-	s.icsCache.invalidate(oldToken)
-
-	writeJSON(w, http.StatusOK, share)
 }
 ````
 
@@ -44364,574 +44643,6 @@ describe('useUnlockShare', () => {
 })
 ````
 
-## File: packages/web/src/hooks/useTeamActivities.ts
-````typescript
-/**
- * TanStack Query hooks for team-scoped data.
- *
- * All hooks call createAuthFetch to inject the current access token at
- * query-time so stale closures never send an expired token.
- */
-
-import { useCallback } from 'react'
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import type { components } from '@draba/shared'
-import { createAuthFetch } from '@/lib/api'
-import { useAuth } from '@/contexts/AuthContext'
-import { useWebSocket } from '@/hooks/useWebSocket'
-
-type Activity = components['schemas']['Activity']
-type Team = components['schemas']['Team']
-type Timeline = components['schemas']['Timeline']
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
-type TimelineAccessEntry = components['schemas']['TimelineAccessEntry']
-type PatchTimelineInput = components['schemas']['PatchTimelineInput']
-
-/** Query key factory — centralises cache key strings. */
-export const keys = {
-  myTeams: () => ['teams'] as const,
-  timelineActivities: (timelineId: string, from?: string, to?: string) =>
-    ['timelines', timelineId, 'activities', { from, to }] as const,
-  teamMembers: (teamId: string) =>
-    ['teams', teamId, 'members'] as const,
-  teamTimelines: (teamId: string) =>
-    ['teams', teamId, 'timelines'] as const,
-}
-
-/** Fetches all teams the authenticated user belongs to. */
-export function useMyTeams(includeArchived = false) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: [...keys.myTeams(), { includeArchived }],
-    queryFn: async () => (await authFetch<Team[] | null>(includeArchived ? '/teams?archived=true' : '/teams')) ?? [],
-  })
-}
-
-/** Fetches a single team by ID. */
-export function useTeam(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: ['teams', teamId],
-    queryFn: () => authFetch<Team>(`/teams/${teamId}`),
-    enabled: Boolean(teamId),
-  })
-}
-
-/** Fetches all non-archived timelines for a team. */
-export function useTeamTimelines(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: keys.teamTimelines(teamId),
-    queryFn: async () => (await authFetch<Timeline[] | null>(`/teams/${teamId}/timelines`)) ?? [],
-    enabled: Boolean(teamId),
-  })
-}
-
-/** Fetches activities for a timeline, optionally bounded by date range. */
-export function useTimelineActivities(teamId: string, timelineId: string, from?: string, to?: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: keys.timelineActivities(timelineId, from, to),
-    queryFn: async () => {
-      const params = new URLSearchParams()
-      if (from) params.set('from', from)
-      if (to) params.set('to', to)
-      const qs = params.toString()
-      return (await authFetch<Activity[] | null>(`/teams/${teamId}/timelines/${timelineId}/activities${qs ? `?${qs}` : ''}`)) ?? []
-    },
-    enabled: Boolean(teamId) && Boolean(timelineId),
-  })
-}
-
-/** Fetches the member list for a team. */
-export function useTeamMembers(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: keys.teamMembers(teamId),
-    queryFn: async () => (await authFetch<TeamMemberWithUser[] | null>(`/teams/${teamId}/members`)) ?? [],
-    enabled: Boolean(teamId),
-  })
-}
-
-/**
- * Subscribes to the team's WebSocket feed and applies surgical cache updates
- * for activity.created / activity.updated / activity.deleted deltas.
- *
- * Conflict strategy: for activity.updated, incoming deltas are only applied
- * when their updatedAt timestamp is strictly newer than the cached version.
- * This prevents self-echo (our own PATCH broadcast arriving back) and handles
- * the last-writer-wins case where a concurrent remote edit arrives while our
- * mutation is in-flight — the server-returned updatedAt on our onSuccess will
- * always win if our PATCH was truly last.
- */
-export function useTeamActivitySync(
-  teamId: string,
-  accessToken: string | null | undefined,
-) {
-  const client = useQueryClient()
-
-  const handleMessage = useCallback(
-    (msg: { type: string; payload?: unknown }) => {
-      if (!teamId || !msg.payload) return
-
-      if (msg.type === 'activity.created') {
-        const incoming = msg.payload as Activity
-        // Target all timeline-scoped activity cache entries by using the
-        // timelineId from the incoming activity payload.
-        if (!incoming.timelineId) return
-        client.setQueriesData<Activity[]>(
-          { queryKey: ['timelines', incoming.timelineId, 'activities'] },
-          (old) => {
-            if (!old) return old
-            // Guard against duplicate delivery.
-            if (old.some((a) => a.id === incoming.id)) return old
-            return [...old, incoming]
-          },
-        )
-      } else if (msg.type === 'activity.updated') {
-        const incoming = msg.payload as Activity
-        if (!incoming.timelineId) return
-        client.setQueriesData<Activity[]>(
-          { queryKey: ['timelines', incoming.timelineId, 'activities'] },
-          (old) => {
-            if (!old) return old
-            return old.map((a) => {
-              if (a.id !== incoming.id) return a
-              // Skip if the cache already holds the same or a newer version.
-              const cachedMs = new Date(a.updatedAt).getTime()
-              const incomingMs = new Date(incoming.updatedAt).getTime()
-              return incomingMs > cachedMs ? incoming : a
-            })
-          },
-        )
-      } else if (msg.type === 'activity.deleted') {
-        const { id } = msg.payload as { id: string }
-        // activity.deleted payload only has id — scope invalidation to this
-        // team's timelines so we don't flush unrelated team caches when
-        // multiple teams are active in the same session.
-        const teamTimelines = client.getQueryData<Timeline[]>(keys.teamTimelines(teamId)) ?? []
-        if (teamTimelines.length > 0) {
-          for (const tl of teamTimelines) {
-            client.invalidateQueries({ queryKey: ['timelines', tl.id] })
-            client.setQueriesData<Activity[]>(
-              { queryKey: ['timelines', tl.id, 'activities'] },
-              (old) => old?.filter((a) => a.id !== id),
-            )
-          }
-        } else {
-          // Fallback when the team's timelines aren't cached yet.
-          client.invalidateQueries({ queryKey: ['timelines'] })
-          client.setQueriesData<Activity[]>(
-            { queryKey: ['timelines'] },
-            (old) => old?.filter((a) => a.id !== id),
-          )
-        }
-      }
-    },
-    [client, teamId],
-  )
-
-  useWebSocket({
-    token: accessToken,
-    teamIds: teamId ? [teamId] : [],
-    onMessage: handleMessage,
-  })
-}
-
-interface CreateActivityInput {
-  title: string
-  startAt: string
-  endAt: string
-  description?: string | null
-  notes?: string | null
-  color?: string | null
-  icon?: string | null
-  assignedMemberIds?: string[]
-  tagIds?: string[]
-  statusId?: string | null
-  parentActivityId?: string | null
-  percentComplete?: number | null
-  location?: string | null
-  url?: string | null
-  /** Client-only: if set, replace this placeholder ID in the cache instead of appending. */
-  _tempId?: string
-}
-
-interface UpdateActivityInput {
-  activityId: string
-  patch: {
-    title?: string
-    description?: string | null
-    notes?: string | null
-    startAt?: string
-    endAt?: string
-    allDay?: boolean
-    color?: string | null
-    icon?: string | null
-    location?: string | null
-    url?: string | null
-    statusId?: string | null
-    parentActivityId?: string | null
-    percentComplete?: number | null
-    assignedMemberIds?: string[]
-    tagIds?: string[]
-  }
-}
-
-/** Creates an activity in a timeline and inserts it directly into the cache. */
-export function useCreateActivity(teamId: string, timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: ({ _tempId: _, ...input }: CreateActivityInput) =>
-      authFetch<Activity>(`/teams/${teamId}/timelines/${timelineId}/activities`, {
-        method: 'POST',
-        body: JSON.stringify(input),
-      }),
-    onSuccess: (created, variables) => {
-      const tempId = variables._tempId
-      client.setQueriesData<Activity[]>(
-        { queryKey: ['timelines', timelineId, 'activities'] },
-        (old) => {
-          if (!old) return [created]
-          const hasReal = old.some((a) => a.id === created.id)
-          const hasTemp = tempId ? old.some((a) => a.id === tempId) : false
-          // The WS activity.created self-echo may win the race and append the
-          // real record before this onSuccess runs. In that case we must still
-          // drop the optimistic placeholder, otherwise it lingers as a duplicate
-          // "New Activity" row (and inline edits keep targeting the dead temp id).
-          if (hasReal) {
-            return hasTemp ? old.filter((a) => a.id !== tempId) : old
-          }
-          // Replace optimistic placeholder in-place to avoid a position flash.
-          if (hasTemp) {
-            return old.map((a) => (a.id === tempId ? created : a))
-          }
-          return [...old, created]
-        },
-      )
-    },
-  })
-}
-
-/** PATCHes an activity and optimistically updates the cache. */
-export function useUpdateActivity(timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: ({ activityId, patch }: UpdateActivityInput) =>
-      authFetch<Activity>(`/activities/${activityId}`, {
-        method: 'PATCH',
-        body: JSON.stringify(patch),
-      }),
-    onMutate: async ({ activityId, patch }) => {
-      await client.cancelQueries({ queryKey: ['timelines', timelineId, 'activities'] })
-      const snapshot = client.getQueriesData<Activity[]>({ queryKey: ['timelines', timelineId, 'activities'] })
-      client.setQueriesData<Activity[]>(
-        { queryKey: ['timelines', timelineId, 'activities'] },
-        (old) => old?.map((a) => (a.id === activityId ? { ...a, ...patch } : a)),
-      )
-      return { snapshot }
-    },
-    onError: (_err, _vars, context) => {
-      if (context?.snapshot) {
-        for (const [key, data] of context.snapshot) {
-          client.setQueryData(key, data)
-        }
-      }
-    },
-    onSuccess: (updated) => {
-      client.setQueriesData<Activity[]>(
-        { queryKey: ['timelines', timelineId, 'activities'] },
-        (old) => old?.map((a) => (a.id === updated.id ? updated : a)),
-      )
-    },
-  })
-}
-
-interface CreateTeamInput {
-  name: string
-  description?: string | null
-  notes?: string | null
-  color?: string | null
-  icon?: string | null
-}
-
-interface UpdateTeamInput {
-  teamId: string
-  patch: {
-    name?: string
-    description?: string | null
-    notes?: string | null
-    color?: string | null
-    icon?: string | null
-  }
-}
-
-/** Creates a team and inserts it into the active-teams cache. */
-export function useCreateTeam() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (input: CreateTeamInput) =>
-      authFetch<Team>('/teams', {
-        method: 'POST',
-        body: JSON.stringify(input),
-      }),
-    onSuccess: () => {
-      // Invalidate both active and archived team lists.
-      client.invalidateQueries({ queryKey: ['teams'] })
-    },
-  })
-}
-
-/** PATCHes a team's mutable fields and refreshes the cache. */
-export function useUpdateTeam() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: ({ teamId, patch }: UpdateTeamInput) =>
-      authFetch<Team>(`/teams/${teamId}`, {
-        method: 'PATCH',
-        body: JSON.stringify(patch),
-      }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: ['teams'] })
-    },
-  })
-}
-
-/** Archives a team (soft delete). */
-export function useArchiveTeam() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (teamId: string) =>
-      authFetch<Team>(`/teams/${teamId}/archive`, { method: 'POST' }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: ['teams'] })
-    },
-  })
-}
-
-/** Restores an archived team. */
-export function useUnarchiveTeam() {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (teamId: string) =>
-      authFetch<Team>(`/teams/${teamId}/unarchive`, { method: 'POST' }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: ['teams'] })
-    },
-  })
-}
-
-/** Archives an activity (soft-delete). Removes it from the active-list cache. */
-export function useArchiveActivity(timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (activityId: string) =>
-      authFetch<Activity>(`/activities/${activityId}/archive`, { method: 'POST' }),
-    onSuccess: (_data, activityId) => {
-      client.setQueriesData<Activity[]>(
-        { queryKey: ['timelines', timelineId, 'activities'] },
-        (old) => old?.filter((a) => a.id !== activityId),
-      )
-    },
-  })
-}
-
-/** Deletes an activity and removes it from the cache. */
-export function useDeleteActivity(timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (activityId: string) =>
-      authFetch<void>(`/activities/${activityId}`, { method: 'DELETE' }),
-    onSuccess: (_data, activityId) => {
-      client.setQueriesData<Activity[]>(
-        { queryKey: ['timelines', timelineId, 'activities'] },
-        (old) => old?.filter((a) => a.id !== activityId),
-      )
-    },
-  })
-}
-
-// ── Timeline CRUD (Phase 10.3) ────────────────────────────────────────────────
-
-/** Fetches all timelines for a team, optionally including archived ones. */
-export function useTeamTimelinesWithArchived(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: [...keys.teamTimelines(teamId), { includeArchived: true }],
-    queryFn: async () =>
-      (await authFetch<Timeline[] | null>(`/teams/${teamId}/timelines?archived=true`)) ?? [],
-    enabled: Boolean(teamId),
-  })
-}
-
-/** Creates a new timeline for a team. */
-export function useCreateTimeline(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (input: { name: string; startDate: string; endDate: string; color?: string | null; icon?: string | null; description?: string | null; notes?: string | null; templateId?: string | null }) =>
-      authFetch<Timeline>(`/teams/${teamId}/timelines`, {
-        method: 'POST',
-        body: JSON.stringify(input),
-      }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
-    },
-  })
-}
-
-/** PATCHes a timeline's mutable fields. */
-export function useUpdateTimeline(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: ({ timelineId, patch }: { timelineId: string; patch: PatchTimelineInput }) =>
-      authFetch<Timeline>(`/timelines/${timelineId}`, {
-        method: 'PATCH',
-        body: JSON.stringify(patch),
-      }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
-    },
-  })
-}
-
-/** Hard-deletes a timeline. */
-export function useDeleteTimeline(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (timelineId: string) =>
-      authFetch<void>(`/timelines/${timelineId}`, { method: 'DELETE' }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
-    },
-  })
-}
-
-/** Archives a timeline. */
-export function useArchiveTimeline(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (timelineId: string) =>
-      authFetch<Timeline>(`/timelines/${timelineId}/archive`, { method: 'POST' }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
-    },
-  })
-}
-
-/** Restores an archived timeline. */
-export function useUnarchiveTimeline(teamId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (timelineId: string) =>
-      authFetch<Timeline>(`/timelines/${timelineId}/unarchive`, { method: 'POST' }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: keys.teamTimelines(teamId) })
-    },
-  })
-}
-
-/** Fetches the access grant list for a timeline. */
-export function useTimelineAccess(teamId: string, timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-
-  return useQuery({
-    queryKey: ['teams', teamId, 'timelines', timelineId, 'access'],
-    queryFn: async () =>
-      (await authFetch<TimelineAccessEntry[]>(
-        `/teams/${teamId}/timelines/${timelineId}/access`,
-      )) ?? [],
-    enabled: Boolean(teamId) && Boolean(timelineId),
-  })
-}
-
-/** Grants or updates a member's access to a timeline. */
-export function useGrantTimelineAccess(teamId: string, timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: ({ memberId, role }: { memberId: string; role: 'admin' | 'member' }) =>
-      authFetch<TimelineAccessEntry[]>(
-        `/teams/${teamId}/timelines/${timelineId}/access/${memberId}`,
-        { method: 'PUT', body: JSON.stringify({ role }) },
-      ),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: ['teams', teamId, 'timelines', timelineId, 'access'] })
-    },
-  })
-}
-
-/** Revokes a member's access to a timeline. */
-export function useRevokeTimelineAccess(teamId: string, timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const client = useQueryClient()
-
-  return useMutation({
-    mutationFn: (memberId: string) =>
-      authFetch<void>(`/teams/${teamId}/timelines/${timelineId}/access/${memberId}`, {
-        method: 'DELETE',
-      }),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: ['teams', teamId, 'timelines', timelineId, 'access'] })
-    },
-  })
-}
-````
-
 ## File: packages/web/src/pages/LoginPage.tsx
 ````typescript
 import { useState } from 'react'
@@ -45546,6 +45257,318 @@ export default function RegisterPage() {
       </Card>
     </div>
   )
+}
+````
+
+## File: packages/api/internal/api/share_ics_handler.go
+````go
+package api
+
+import (
+	"database/sql"
+	"errors"
+	"fmt"
+	"net/http"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/ics"
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// ── In-memory ICS feed cache ──────────────────────────────────────────────────
+//
+// Mirrors shareCache, but stores the rendered text/calendar payload. Calendar
+// clients poll on their own cadence (minutes to hours), so the same short TTL
+// keeps feeds near-live while absorbing aggressive pollers.
+
+type icsCacheEntry struct {
+	builtAt time.Time
+	payload string
+}
+
+type icsFeedCache struct {
+	mu      sync.RWMutex
+	entries map[string]*icsCacheEntry
+	ttl     time.Duration
+}
+
+func newICSFeedCache(ttl time.Duration) *icsFeedCache {
+	return &icsFeedCache{entries: make(map[string]*icsCacheEntry), ttl: ttl}
+}
+
+func (c *icsFeedCache) get(token string) (string, bool) {
+	c.mu.RLock()
+	e, ok := c.entries[token]
+	c.mu.RUnlock()
+	if !ok || time.Since(e.builtAt) > c.ttl {
+		return "", false
+	}
+	return e.payload, true
+}
+
+func (c *icsFeedCache) set(token, payload string) {
+	c.mu.Lock()
+	c.entries[token] = &icsCacheEntry{builtAt: time.Now(), payload: payload}
+	c.mu.Unlock()
+}
+
+func (c *icsFeedCache) invalidate(token string) {
+	c.mu.Lock()
+	delete(c.entries, token)
+	c.mu.Unlock()
+}
+
+// ── Handlers ──────────────────────────────────────────────────────────────────
+
+// serveICSFeed handles GET /shares/{token}.ics — the public, unauthenticated
+// calendar feed. It is dispatched from handleGetShareProjection when the token
+// path value carries the .ics suffix (Go 1.22 mux wildcards span the whole
+// segment, so the suffix arrives inside {token}).
+//
+// The feed serves live data scoped server-side to the share's timeline — or,
+// for member feeds, to one member's assigned activities. There is no password
+// gate: calendar clients cannot unlock interactively, so the unguessable token
+// is the secret and revocation is rotate-or-delete.
+func (s *Server) serveICSFeed(w http.ResponseWriter, r *http.Request, token string) {
+	share, err := s.shares.GetByToken(token)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load share")
+		return
+	}
+	// A view share is not a feed — 404 rather than leaking that the token
+	// exists in another mode.
+	if share.Kind != models.ShareKindICS {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+		return
+	}
+	if share.RevokedAt != nil {
+		writeError(w, http.StatusGone, "GONE", "this share has been revoked")
+		return
+	}
+	if share.ExpiresAt != nil && time.Now().After(*share.ExpiresAt) {
+		writeError(w, http.StatusGone, "GONE", "this share has expired")
+		return
+	}
+
+	// Archived timeline → the feed stops serving (Phase 13.5). 404, not 410:
+	// unarchiving must resurrect the feed, and 410 makes calendar clients
+	// drop the subscription for good. Checked before the cache read so
+	// archiving takes effect immediately.
+	if !s.shareTimelineLive(w, share) {
+		return
+	}
+
+	body, ok := s.icsCache.get(token)
+	if !ok {
+		body, err = s.buildICSFeed(share)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to build calendar feed")
+			return
+		}
+		s.icsCache.set(token, body)
+	}
+
+	go func() { _ = s.shares.RecordView(share.ID) }()
+	w.Header().Set("Content-Type", "text/calendar; charset=utf-8")
+	// no-store: the token is the secret and rotate/delete is the only kill
+	// switch for a feed, so a revoked URL must not keep serving from browser
+	// or proxy caches. Server-side load is already absorbed by icsCache.
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write([]byte(body))
+}
+
+// buildICSFeed renders the iCalendar document for an ICS share. Scope is
+// hard-locked server-side: the timeline comes from the share row, and member
+// feeds drop every activity the member is not assigned to before
+// serialization.
+//
+// Each VEVENT projects the activity's display fields: status (+ percent
+// complete), assignee display names, and tag names go into DESCRIPTION (and
+// tags into CATEGORIES); whole-timeline feeds also append assignee names to
+// SUMMARY so the month grid shows who owns what. Member display names are the
+// only person-identifying field a feed may carry — never emails, user IDs, or
+// roles.
+func (s *Server) buildICSFeed(share *models.Share) (string, error) {
+	timeline, err := s.timelines.GetByID(share.TimelineID)
+	if err != nil {
+		return "", err
+	}
+
+	acts, err := s.activities.ListByTimeline(share.TimelineID, nil, nil, false)
+	if err != nil {
+		return "", err
+	}
+
+	// Display-name / tag / status lookups for the event field projection.
+	statuses, err := s.statuses.ListStatuses(share.TimelineID)
+	if err != nil {
+		return "", err
+	}
+	statusName := make(map[string]string, len(statuses))
+	for _, st := range statuses {
+		statusName[st.ID] = st.Name
+	}
+	members, err := s.teams.ListMembers(timeline.TeamID)
+	if err != nil {
+		return "", err
+	}
+	memberName := make(map[string]string, len(members))
+	for _, m := range members {
+		if m.DisplayName != "" {
+			memberName[m.ID] = m.DisplayName
+		}
+	}
+	tags, err := s.tags.ListByTeam(timeline.TeamID)
+	if err != nil {
+		return "", err
+	}
+	tagName := make(map[string]string, len(tags))
+	for _, tg := range tags {
+		tagName[tg.ID] = tg.Name
+	}
+
+	memberScoped := share.Scope != nil && *share.Scope == models.ShareScopeMember && share.MemberID != nil
+
+	name := timeline.Name
+	if memberScoped {
+		filtered := acts[:0]
+		for _, a := range acts {
+			for _, id := range a.AssignedMemberIDs {
+				if id == *share.MemberID {
+					filtered = append(filtered, a)
+					break
+				}
+			}
+		}
+		acts = filtered
+
+		if n, ok := memberName[*share.MemberID]; ok {
+			name = timeline.Name + " — " + n
+		}
+	}
+
+	events := make([]ics.Event, 0, len(acts))
+	for _, a := range acts {
+		assignees := make([]string, 0, len(a.AssignedMemberIDs))
+		for _, id := range a.AssignedMemberIDs {
+			if n, ok := memberName[id]; ok {
+				assignees = append(assignees, n)
+			}
+		}
+		tagNames := make([]string, 0, len(a.TagIDs))
+		for _, id := range a.TagIDs {
+			if n, ok := tagName[id]; ok {
+				tagNames = append(tagNames, n)
+			}
+		}
+
+		summary := a.Title
+		// A member feed is one person's calendar — repeating their name on
+		// every event is noise. The whole-timeline feed is the team overview,
+		// where who-owns-what belongs in the month grid.
+		if !memberScoped && len(assignees) > 0 {
+			summary += " — " + strings.Join(assignees, ", ")
+		}
+
+		// Structured field lines first, then a blank line, then the
+		// free-text activity description.
+		meta := make([]string, 0, 3)
+		if a.StatusID != nil {
+			if n, ok := statusName[*a.StatusID]; ok {
+				line := "Status: " + n
+				if a.PercentComplete != nil {
+					line += fmt.Sprintf(" (%d%%)", *a.PercentComplete)
+				}
+				meta = append(meta, line)
+			}
+		} else if a.PercentComplete != nil {
+			meta = append(meta, fmt.Sprintf("Progress: %d%%", *a.PercentComplete))
+		}
+		if len(assignees) > 0 {
+			meta = append(meta, "Assigned: "+strings.Join(assignees, ", "))
+		}
+		if len(tagNames) > 0 {
+			meta = append(meta, "Tags: "+strings.Join(tagNames, ", "))
+		}
+		desc := strings.Join(meta, "\n")
+		if a.Description != nil && *a.Description != "" {
+			if desc != "" {
+				desc += "\n\n"
+			}
+			desc += *a.Description
+		}
+
+		events = append(events, ics.Event{
+			UID:         a.ID + "@draba",
+			Summary:     summary,
+			Description: desc,
+			Categories:  tagNames,
+			Start:       a.StartAt,
+			End:         a.EndAt,
+			Stamp:       a.UpdatedAt,
+		})
+	}
+	return ics.Calendar(name, events), nil
+}
+
+// handleGetShareICSNamed handles GET /shares/{token}/{file}. The file segment
+// must end in .ics but is otherwise cosmetic: most calendar clients
+// (Thunderbird included) default the new calendar's name from the URL's
+// filename, so the modal links carry a readable slug (e.g. .../sales-kick-off.ics).
+// The token alone is authoritative.
+func (s *Server) handleGetShareICSNamed(w http.ResponseWriter, r *http.Request) {
+	if !strings.HasSuffix(r.PathValue("file"), ".ics") {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+		return
+	}
+	s.serveICSFeed(w, r, r.PathValue("token"))
+}
+
+// handleRegenerateShare handles POST /shares/{id}/regenerate. It rotates the
+// share's token, immediately invalidating the old URL — the revocation story
+// for ICS feeds, which cannot carry a password. It works for view shares too
+// (rotating is strictly safer than nothing), and any member of the timeline's
+// team may do it, consistent with PATCH/DELETE.
+func (s *Server) handleRegenerateShare(w http.ResponseWriter, r *http.Request) {
+	shareID := r.PathValue("id")
+
+	share, err := s.shares.GetByID(shareID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
+		return
+	}
+
+	timeline, err := s.timelines.GetByID(share.TimelineID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
+		return
+	}
+	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
+		return
+	}
+
+	oldToken := share.Token
+	share.Token = newToken()
+	if err := s.shares.RotateToken(share.ID, share.Token); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to regenerate share link")
+		return
+	}
+
+	// Kill both caches for the dead token so it stops serving immediately.
+	s.shareCache.invalidate(oldToken)
+	s.icsCache.invalidate(oldToken)
+
+	writeJSON(w, http.StatusOK, share)
 }
 ````
 
@@ -46955,1319 +46978,6 @@ export default function KanbanBoard({
 }
 ````
 
-## File: packages/web/src/components/layout/Sidebar.tsx
-````typescript
-import { useState, useRef, useEffect } from 'react';
-import {
-  ChevronRight,
-  ChevronLeft,
-  ChevronDown,
-  ChevronsDownUp,
-  ChevronsUpDown,
-  Plus,
-  Settings2,
-  Upload,
-  CalendarPlus,
-  Plug,
-} from 'lucide-react';
-import { Badge } from '@/components/identity/Badge';
-import { useAuth } from '@/contexts/AuthContext';
-import type { components } from '@draba/shared';
-
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
-
-const SIDEBAR_MIN = 220;
-const SIDEBAR_MAX = 360;
-
-interface ApiTeam {
-  id: string;
-  name: string;
-  color?: string | null;
-  icon?: string | null;
-  archivedAt?: string | null;
-}
-
-interface ApiTimeline {
-  id: string;
-  name: string;
-  startDate?: string;
-  endDate?: string;
-  color?: string | null;
-  icon?: string | null;
-  archivedAt?: string | null;
-}
-
-interface Props {
-  collapsed: boolean;
-  onToggle: () => void;
-  onNewActivity?: () => void;
-  /** Stub: bulk-import activities. Surfaced in the "New activity" combo dropdown. */
-  onBulkImport?: () => void;
-  apiTimelines?: ApiTimeline[];
-  archivedTimelines?: ApiTimeline[];
-  activeTimelineId?: string;
-  onActiveTimelineChange?: (id: string) => void;
-  onNewTimeline?: () => void;
-  onEditTimeline?: (timelineId: string) => void;
-  // Team management
-  activeTeam?: ApiTeam;
-  /** All non-archived teams. Used to render the switchable team list. */
-  activeTeams?: ApiTeam[];
-  archivedTeams?: ApiTeam[];
-  onNewTeam?: () => void;
-  onEditTeam?: (team: ApiTeam) => void;
-  onSelectTeam?: (teamId: string) => void;
-  onUnarchiveTeam?: (teamId: string) => void;
-  /** True when the current user is an admin of the active team. */
-  canEditTeam?: boolean;
-  /** Live member list from the API. */
-  members?: TeamMemberWithUser[];
-  /** Called when the user clicks the gear icon on a member row. */
-  onEditMember?: (member: TeamMemberWithUser) => void;
-}
-
-const ICON = { width: 15, height: 15, strokeWidth: 1.8 } as const;
-const ICON_SM = { width: 13, height: 13, strokeWidth: 1.8 } as const;
-const ICON_XS = { width: 11, height: 11, strokeWidth: 2 } as const;
-
-interface Timeline {
-  id: string;
-  name: string;
-  color: string;
-  icon: string | null;
-  startDate?: string;
-  endDate?: string;
-}
-
-const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-
-function formatDateRange(startDate?: string, endDate?: string): string {
-  if (!startDate || !endDate) return ''
-  const s = new Date(startDate + 'T00:00:00')
-  const e = new Date(endDate + 'T00:00:00')
-  const diffDays = (e.getTime() - s.getTime()) / 86_400_000
-  if (diffDays < 90) {
-    return `${MONTHS[s.getMonth()]} ${s.getDate()} – ${MONTHS[e.getMonth()]} ${e.getDate()} ${e.getFullYear()}`
-  }
-  return `${MONTHS[s.getMonth()]} ${s.getFullYear()} – ${MONTHS[e.getMonth()]} ${e.getFullYear()}`
-}
-
-
-interface TimelineItemProps {
-  timeline: Timeline;
-  active: boolean;
-  collapsed: boolean;
-  showDate?: boolean;
-  canEdit?: boolean;
-  onClick: () => void;
-  onSettings: () => void;
-}
-
-function TimelineItem({ timeline, active, collapsed, showDate = true, canEdit = false, onClick, onSettings }: TimelineItemProps) {
-  const [hovered, setHovered] = useState(false);
-  const dateRange = !collapsed && showDate ? formatDateRange(timeline.startDate, timeline.endDate) : ''
-
-  return (
-    <div
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        background: active
-          ? 'rgba(255,255,255,0.10)'
-          : hovered
-          ? 'rgba(255,255,255,0.05)'
-          : 'transparent',
-        borderLeft: active ? `2px solid ${timeline.color}` : '2px solid transparent',
-        transition: 'background 0.12s',
-        cursor: 'pointer',
-        minHeight: 34,
-      }}
-    >
-      <button
-        onClick={onClick}
-        title={collapsed ? timeline.name : undefined}
-        style={{
-          flex: 1,
-          display: 'flex',
-          alignItems: 'center',
-          gap: 8,
-          padding: collapsed ? '7px 14px' : '6px 8px 6px 16px',
-          background: 'none',
-          border: 'none',
-          color: active ? 'white' : 'rgba(255,255,255,0.65)',
-          fontSize: 13,
-          fontWeight: active ? 600 : 400,
-          cursor: 'pointer',
-          fontFamily: 'var(--font-sans)',
-          textAlign: 'left',
-          minWidth: 0,
-        }}
-      >
-        <Badge
-          identity={{ color: timeline.color, icon: timeline.icon ?? '__none__' }}
-          name={timeline.name}
-          shape="square"
-          size={20}
-        />
-        {!collapsed && (
-          <div style={{ minWidth: 0, flex: 1 }}>
-            <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {timeline.name}
-            </div>
-            {dateRange && (
-              <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)', marginTop: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {dateRange}
-              </div>
-            )}
-          </div>
-        )}
-      </button>
-
-      {!collapsed && canEdit && (
-        <button
-          onClick={e => { e.stopPropagation(); onSettings(); }}
-          title={`Configure ${timeline.name}`}
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            width: 26,
-            height: 26,
-            marginRight: 6,
-            background: 'none',
-            border: 'none',
-            borderRadius: 5,
-            color: 'rgba(255,255,255,0.4)',
-            cursor: 'pointer',
-            opacity: hovered ? 1 : 0,
-            transition: 'opacity 0.12s',
-            flexShrink: 0,
-          }}
-          onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.8)')}
-          onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.4)')}
-        >
-          <Settings2 {...ICON_SM} />
-        </button>
-      )}
-    </div>
-  );
-}
-
-function ConnectorItem({ name, status, color }: { name: string; status: string; color: string }) {
-  const [hovered, setHovered] = useState(false);
-
-  return (
-    <div
-      style={{
-        display: 'flex', alignItems: 'center', gap: 8,
-        padding: '6px 6px 6px 16px',
-        cursor: 'pointer',
-        background: hovered ? 'rgba(255,255,255,0.05)' : 'transparent',
-        transition: 'background 0.12s',
-      }}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-    >
-      <div style={{
-        width: 20, height: 20, borderRadius: 4,
-        background: color,
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-        flexShrink: 0,
-      }}>
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="white">
-          <rect x="1" y="1" width="9" height="18" rx="1.5" />
-          <rect x="14" y="1" width="9" height="12" rx="1.5" />
-        </svg>
-      </div>
-      <div style={{ minWidth: 0, flex: 1 }}>
-        <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.65)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {name}
-        </div>
-        <div style={{ fontSize: 9, color: 'rgba(255,255,255,0.25)', marginTop: 1 }}>
-          {status}
-        </div>
-      </div>
-      <button
-        title={`Configure ${name}`}
-        style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          width: 26, height: 26, marginRight: 0,
-          background: 'none', border: 'none', borderRadius: 5,
-          color: 'rgba(255,255,255,0.4)', cursor: 'pointer',
-          opacity: hovered ? 1 : 0, transition: 'opacity 0.12s',
-          flexShrink: 0,
-        }}
-        onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.8)')}
-        onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.4)')}
-      >
-        <Settings2 {...ICON_SM} />
-      </button>
-    </div>
-  );
-}
-
-// ── TeamRow ──────────────────────────────────────────────────────────────────
-
-interface TeamRowProps {
-  team: ApiTeam;
-  isActive: boolean;
-  canEdit: boolean;
-  onSelect?: () => void;
-  onEdit?: () => void;
-}
-
-function TeamRow({ team, isActive, canEdit, onSelect, onEdit }: TeamRowProps) {
-  const [hovered, setHovered] = useState(false);
-
-  return (
-    <div
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-      onClick={() => { if (!isActive) onSelect?.(); }}
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        padding: '5px 6px 5px 16px',
-        borderLeft: isActive ? `2px solid ${team.color ?? 'var(--primary)'}` : '2px solid transparent',
-        background: isActive ? 'rgba(255,255,255,0.07)' : hovered ? 'rgba(255,255,255,0.03)' : 'transparent',
-        cursor: isActive ? 'default' : 'pointer',
-        minHeight: 34,
-        transition: 'background 0.12s',
-      }}
-    >
-      <Badge
-        identity={{ color: team.color ?? 'var(--primary)', icon: team.icon ?? '__name_1__' }}
-        name={team.name}
-        shape="square"
-        size={20}
-      />
-      <span style={{
-        fontSize: 13,
-        fontWeight: isActive ? 600 : 400,
-        color: isActive ? 'white' : 'rgba(255,255,255,0.65)',
-        flex: 1,
-        marginLeft: 8,
-        overflow: 'hidden',
-        textOverflow: 'ellipsis',
-        whiteSpace: 'nowrap',
-        minWidth: 0,
-      }}>
-        {team.name}
-      </span>
-      {canEdit && (
-        <button
-          title="Team settings"
-          onClick={e => { e.stopPropagation(); onEdit?.(); }}
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            width: 26,
-            height: 26,
-            marginRight: 6,
-            background: 'none',
-            border: 'none',
-            borderRadius: 5,
-            color: 'rgba(255,255,255,0.4)',
-            cursor: 'pointer',
-            opacity: hovered ? 1 : 0,
-            transition: 'opacity 0.12s',
-            flexShrink: 0,
-          }}
-          onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.8)')}
-          onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.4)')}
-        >
-          <Settings2 {...ICON_SM} />
-        </button>
-      )}
-    </div>
-  );
-}
-
-// ── MemberSidebarRow ──────────────────────────────────────────────────────────
-
-interface MemberSidebarRowProps {
-  displayName: string;
-  color: string;
-  icon?: string | null;
-  isInactive?: boolean;
-  onEdit?: () => void;
-}
-
-function MemberSidebarRow({ displayName, color, icon, isInactive = false, onEdit }: MemberSidebarRowProps) {
-  const [hovered, setHovered] = useState(false);
-  return (
-    <div
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-      style={{
-        display: 'flex', alignItems: 'center', gap: 8,
-        padding: '4px 6px 4px 16px', cursor: 'default',
-        background: hovered ? 'rgba(255,255,255,0.05)' : 'transparent',
-        opacity: isInactive ? 0.45 : 1,
-      }}
-    >
-      <Badge
-        identity={{ color, icon: icon ?? '__name_words__' }}
-        name={displayName}
-        shape="circle"
-        size={20}
-      />
-      <span style={{ fontSize: 13, color: 'rgba(255,255,255,0.65)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
-        {displayName}
-      </span>
-      {onEdit && (
-        <button
-          onClick={e => { e.stopPropagation(); onEdit(); }}
-          title={`Edit ${displayName}`}
-          style={{
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            width: 22, height: 22, marginRight: 6,
-            background: 'none', border: 'none', borderRadius: 4,
-            color: 'rgba(255,255,255,0.4)', cursor: 'pointer', flexShrink: 0,
-            opacity: hovered ? 1 : 0,
-            transition: 'opacity 0.12s',
-            pointerEvents: hovered ? 'auto' : 'none',
-          }}
-          onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.8)')}
-          onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.4)')}
-        >
-          <Settings2 width={12} height={12} strokeWidth={1.8} />
-        </button>
-      )}
-    </div>
-  );
-}
-
-// ── Sidebar ───────────────────────────────────────────────────────────────────
-
-/**
- * Left navigation rail: brand, team selector with members, and timeline list.
- * Collapsed/expanded state is driven by the parent.
- */
-const TIMELINE_COLORS = ['#1A97A2', '#6366F1', '#F17B2B', '#E11D48', '#10B981', '#F59E0B']
-
-export default function Sidebar({ collapsed, onToggle, onNewActivity, onBulkImport, apiTimelines, archivedTimelines = [], activeTimelineId, onActiveTimelineChange, onNewTimeline, onEditTimeline, activeTeam, activeTeams = [], archivedTeams = [], onNewTeam, onEditTeam, onSelectTeam, canEditTeam = false, members: apiMembers, onEditMember }: Props) {
-  const { user } = useAuth();
-  const currentUserId = (user as { id?: string } | null)?.id;
-  const [internalActiveId, setInternalActiveId] = useState('');
-  const [teamOpen, setTeamOpen] = useState(true);
-  const [connectorsOpen, setConnectorsOpen] = useState(true);
-  // Combo "New activity" dropdown (expanded + collapsed share this state).
-  const [newMenuOpen, setNewMenuOpen] = useState(false);
-  const newMenuRef = useRef<HTMLDivElement>(null);
-  // Collapsed-mode menu is rendered fixed (the rail clips overflow), so we
-  // capture the trigger's viewport rect when it opens.
-  const [collapsedMenuPos, setCollapsedMenuPos] = useState<{ top: number; left: number } | null>(null);
-  // Primary accent for the "New activity" combo button.
-  const NEW_BTN_BG = 'var(--primary)';
-  const NEW_BTN_FG = 'var(--primary-foreground)';
-  const [archivedOpen, setArchivedOpen] = useState(false);
-  const [timelinesOpen, setTimelinesOpen] = useState(true);
-  const [membersOpen, setMembersOpen] = useState(true);
-  const [archivedTeamsOpen, setArchivedTeamsOpen] = useState(false);
-
-  const allExpanded = teamOpen && timelinesOpen && connectorsOpen && membersOpen;
-  function toggleAllSections() {
-    const next = !allExpanded;
-    setTeamOpen(next);
-    setTimelinesOpen(next);
-    setConnectorsOpen(next);
-    setMembersOpen(next);
-    if (!next) {
-      setArchivedOpen(false);
-      setArchivedTeamsOpen(false);
-    }
-  }
-
-  const timelines: Timeline[] = (apiTimelines ?? []).map((t, i) => ({
-    id: t.id,
-    name: t.name,
-    color: t.color ?? TIMELINE_COLORS[i % TIMELINE_COLORS.length],
-    icon: t.icon ?? null,
-    startDate: t.startDate,
-    endDate: t.endDate,
-  }))
-
-  const archivedTimelineItems: Timeline[] = archivedTimelines.map((t) => ({
-    id: t.id,
-    name: t.name,
-    color: t.color ?? '#64748B',
-    icon: t.icon ?? null,
-    startDate: t.startDate,
-    endDate: t.endDate,
-  }))
-  const activeId = activeTimelineId ?? internalActiveId
-  // timelines[0] is typed as Timeline (not T | undefined) because
-  // noUncheckedIndexedAccess is off in the tsconfig, but at runtime an empty
-  // array produces undefined. The explicit type annotation + length guard make
-  // the null case visible to TypeScript so the collapsed-section render below
-  // can safely guard against it.
-  const activeTimeline: Timeline | null =
-    timelines.find(t => t.id === activeId) ??
-    (timelines.length > 0 ? timelines[0] : null);
-
-  const [sidebarWidth, setSidebarWidth] = useState(SIDEBAR_MIN);
-  const dragging = useRef(false);
-  const startX = useRef(0);
-  const startW = useRef(SIDEBAR_MIN);
-
-  useEffect(() => {
-    function onMouseMove(e: MouseEvent) {
-      if (!dragging.current) return;
-      const delta = e.clientX - startX.current;
-      setSidebarWidth(Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, startW.current + delta)));
-    }
-    function onMouseUp() {
-      if (!dragging.current) return;
-      dragging.current = false;
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
-    }
-    document.addEventListener('mousemove', onMouseMove);
-    document.addEventListener('mouseup', onMouseUp);
-    return () => {
-      document.removeEventListener('mousemove', onMouseMove);
-      document.removeEventListener('mouseup', onMouseUp);
-    };
-  }, []);
-
-  // Close the "New activity" dropdown on outside click or Escape.
-  useEffect(() => {
-    if (!newMenuOpen) return;
-    function onDocMouseDown(e: MouseEvent) {
-      if (newMenuRef.current && !newMenuRef.current.contains(e.target as Node)) {
-        setNewMenuOpen(false);
-      }
-    }
-    function onKeyDown(e: KeyboardEvent) {
-      if (e.key === 'Escape') setNewMenuOpen(false);
-    }
-    document.addEventListener('mousedown', onDocMouseDown);
-    document.addEventListener('keydown', onKeyDown);
-    return () => {
-      document.removeEventListener('mousedown', onDocMouseDown);
-      document.removeEventListener('keydown', onKeyDown);
-    };
-  }, [newMenuOpen]);
-
-  function onHandleMouseDown(e: React.MouseEvent) {
-    e.preventDefault();
-    dragging.current = true;
-    startX.current = e.clientX;
-    startW.current = sidebarWidth;
-    document.body.style.cursor = 'col-resize';
-    document.body.style.userSelect = 'none';
-  }
-
-  return (
-    <div
-      style={{
-        position: 'relative',
-        width: collapsed ? 52 : sidebarWidth,
-        flexShrink: 0,
-        background: 'var(--color-charcoal)',
-        color: 'white',
-        display: 'flex',
-        flexDirection: 'column',
-        transition: 'width 0.2s ease',
-        overflow: 'hidden',
-        borderRight: '1px solid rgba(255,255,255,0.06)',
-      }}
-    >
-      {/* Logo + collapse toggle */}
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: collapsed ? 'center' : 'space-between',
-          padding: collapsed ? '0 13px' : '0 8px 0 16px',
-          borderBottom: '1px solid rgba(255,255,255,0.08)',
-          height: 'var(--topbar-h)',
-          flexShrink: 0,
-        }}
-      >
-        {!collapsed && (
-          <div
-            onClick={onToggle}
-            style={{ display: 'flex', alignItems: 'center', gap: 9, cursor: 'pointer' }}
-          >
-            <img src="/logo-orange-white.svg" alt="Draba" style={{ width: 28, height: 28, marginTop: 3 }} />
-            <span style={{ fontSize: 22, fontWeight: 700, letterSpacing: '-0.02em', color: 'white' }}>
-              draba
-            </span>
-          </div>
-        )}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-          {!collapsed && (
-            <button
-              onClick={toggleAllSections}
-              title={allExpanded ? 'Collapse all sections' : 'Expand all sections'}
-              style={{
-                background: 'none',
-                border: 'none',
-                color: 'rgba(255,255,255,0.45)',
-                borderRadius: 6,
-                width: 26,
-                height: 26,
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                cursor: 'pointer',
-                flexShrink: 0,
-              }}
-              onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.8)')}
-              onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.45)')}
-            >
-              {allExpanded ? <ChevronsDownUp width={14} height={14} strokeWidth={1.8} /> : <ChevronsUpDown width={14} height={14} strokeWidth={1.8} />}
-            </button>
-          )}
-          <button
-            onClick={onToggle}
-            style={{
-              background: 'rgba(255,255,255,0.08)',
-              border: 'none',
-              color: 'rgba(255,255,255,0.7)',
-              borderRadius: 6,
-              width: 26,
-              height: 26,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              cursor: 'pointer',
-              flexShrink: 0,
-            }}
-          >
-            {collapsed ? <ChevronRight {...ICON} /> : <ChevronLeft {...ICON} />}
-          </button>
-        </div>
-      </div>
-
-      {/* Primary "New activity" combo button — sits directly under the brand. */}
-      {!collapsed && (
-        <div
-          ref={newMenuRef}
-          style={{ position: 'relative', padding: '12px 16px 2px', flexShrink: 0 }}
-        >
-          <div style={{ display: 'flex', alignItems: 'stretch' }}>
-            <button
-              onClick={onNewActivity}
-              style={{
-                flex: 1,
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                gap: 8,
-                padding: '9px 12px',
-                background: NEW_BTN_BG,
-                border: 'none',
-                borderRadius: '7px 0 0 7px',
-                color: NEW_BTN_FG,
-                fontSize: 13,
-                fontWeight: 600,
-                cursor: 'pointer',
-                fontFamily: 'var(--font-sans)',
-              }}
-              onMouseEnter={e => (e.currentTarget.style.filter = 'brightness(1.08)')}
-              onMouseLeave={e => (e.currentTarget.style.filter = 'none')}
-            >
-              <CalendarPlus width={15} height={15} strokeWidth={2} />
-              New activity
-            </button>
-            <button
-              title="More activity options"
-              aria-haspopup="menu"
-              aria-expanded={newMenuOpen}
-              onClick={() => setNewMenuOpen(o => !o)}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                width: 32,
-                background: NEW_BTN_BG,
-                border: 'none',
-                borderLeft: '1px solid rgba(0,0,0,0.18)',
-                borderRadius: '0 7px 7px 0',
-                color: NEW_BTN_FG,
-                cursor: 'pointer',
-              }}
-              onMouseEnter={e => (e.currentTarget.style.filter = 'brightness(1.08)')}
-              onMouseLeave={e => (e.currentTarget.style.filter = 'none')}
-            >
-              <ChevronDown
-                width={14}
-                height={14}
-                strokeWidth={2}
-                style={{ transform: newMenuOpen ? 'rotate(180deg)' : 'none', transition: 'transform 0.12s' }}
-              />
-            </button>
-          </div>
-
-          {newMenuOpen && (
-            <div
-              role="menu"
-              style={{
-                position: 'absolute',
-                top: 'calc(100% - 4px)',
-                left: 16,
-                right: 16,
-                background: 'var(--color-charcoal)',
-                border: '1px solid rgba(255,255,255,0.12)',
-                borderRadius: 7,
-                boxShadow: '0 8px 24px rgba(0,0,0,0.45)',
-                padding: 4,
-                zIndex: 30,
-              }}
-            >
-              <button
-                role="menuitem"
-                onClick={() => { setNewMenuOpen(false); onBulkImport?.(); }}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: 8,
-                  padding: '8px 10px', width: '100%',
-                  background: 'none', border: 'none', borderRadius: 5,
-                  color: 'rgba(255,255,255,0.75)', fontSize: 13,
-                  cursor: 'pointer', fontFamily: 'var(--font-sans)', textAlign: 'left',
-                }}
-                onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.07)')}
-                onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-              >
-                <Upload width={14} height={14} strokeWidth={1.8} />
-                Bulk import
-              </button>
-            </div>
-          )}
-        </div>
-      )}
-
-      <div style={{ flex: 1, overflowY: 'auto' }}>
-
-        {/* Collapsed: team + timeline icons only */}
-        {collapsed && (
-          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6, padding: '10px 0' }}>
-            {/* Active team badge — click to expand */}
-            <div
-              title={activeTeam?.name ?? 'Team'}
-              onClick={onToggle}
-              style={{ cursor: 'pointer', flexShrink: 0 }}
-            >
-              <Badge
-                identity={{ color: activeTeam?.color ?? 'var(--primary)', icon: activeTeam?.icon ?? '__name_1__' }}
-                name={activeTeam?.name ?? ''}
-                shape="square"
-                size={28}
-              />
-            </div>
-            {/* Active timeline — click to expand */}
-            {activeTimeline && (
-              <div
-                title={activeTimeline.name}
-                onClick={onToggle}
-                style={{ cursor: 'pointer' }}
-              >
-                <Badge
-                  identity={{ color: activeTimeline.color, icon: activeTimeline.icon ?? '__none__' }}
-                  name={activeTimeline.name}
-                  shape="square"
-                  size={28}
-                />
-              </div>
-            )}
-
-            {/* New activity combo — icon button opens a menu with both actions.
-                order:-1 keeps it at the top, matching the expanded layout. */}
-            <div ref={newMenuRef} style={{ position: 'relative', flexShrink: 0, order: -1, marginBottom: 2 }}>
-              <button
-                title="New activity"
-                aria-haspopup="menu"
-                aria-expanded={newMenuOpen}
-                onClick={e => {
-                  if (newMenuOpen) { setNewMenuOpen(false); return; }
-                  const r = e.currentTarget.getBoundingClientRect();
-                  setCollapsedMenuPos({ top: r.top, left: r.right + 6 });
-                  setNewMenuOpen(true);
-                }}
-                style={{
-                  width: 30,
-                  height: 30,
-                  borderRadius: 7,
-                  background: NEW_BTN_BG,
-                  border: 'none',
-                  color: NEW_BTN_FG,
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  cursor: 'pointer',
-                }}
-                onMouseEnter={e => (e.currentTarget.style.filter = 'brightness(1.08)')}
-                onMouseLeave={e => (e.currentTarget.style.filter = 'none')}
-              >
-                <CalendarPlus width={16} height={16} strokeWidth={2} />
-              </button>
-
-              {newMenuOpen && collapsedMenuPos && (
-                <div
-                  role="menu"
-                  style={{
-                    position: 'fixed',
-                    top: collapsedMenuPos.top,
-                    left: collapsedMenuPos.left,
-                    minWidth: 160,
-                    background: 'var(--color-charcoal)',
-                    border: '1px solid rgba(255,255,255,0.12)',
-                    borderRadius: 7,
-                    boxShadow: '0 8px 24px rgba(0,0,0,0.45)',
-                    padding: 4,
-                    zIndex: 30,
-                  }}
-                >
-                  <button
-                    role="menuitem"
-                    onClick={() => { setNewMenuOpen(false); onNewActivity?.(); }}
-                    style={{
-                      display: 'flex', alignItems: 'center', gap: 8,
-                      padding: '8px 10px', width: '100%',
-                      background: 'none', border: 'none', borderRadius: 5,
-                      color: 'rgba(255,255,255,0.75)', fontSize: 13,
-                      cursor: 'pointer', fontFamily: 'var(--font-sans)', textAlign: 'left',
-                    }}
-                    onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.07)')}
-                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-                  >
-                    <CalendarPlus width={14} height={14} strokeWidth={1.8} />
-                    New activity
-                  </button>
-                  <button
-                    role="menuitem"
-                    onClick={() => { setNewMenuOpen(false); onBulkImport?.(); }}
-                    style={{
-                      display: 'flex', alignItems: 'center', gap: 8,
-                      padding: '8px 10px', width: '100%',
-                      background: 'none', border: 'none', borderRadius: 5,
-                      color: 'rgba(255,255,255,0.75)', fontSize: 13,
-                      cursor: 'pointer', fontFamily: 'var(--font-sans)', textAlign: 'left',
-                    }}
-                    onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.07)')}
-                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-                  >
-                    <Upload width={14} height={14} strokeWidth={1.8} />
-                    Bulk import
-                  </button>
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-
-        {/* Team section */}
-        {!collapsed && (
-          <div style={{ borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
-            {/* Section header — collapsible, same pattern as TIMELINE */}
-            <button
-              onClick={() => setTeamOpen(o => !o)}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                width: '100%',
-                padding: '6px 12px 6px 16px',
-                background: 'none',
-                border: 'none',
-                cursor: 'pointer',
-                color: 'rgba(255,255,255,0.35)',
-                fontFamily: 'var(--font-sans)',
-              }}
-            >
-              <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
-                Team
-              </span>
-              {teamOpen
-                ? <ChevronDown width={12} height={12} strokeWidth={2} />
-                : <ChevronRight width={12} height={12} strokeWidth={2} />}
-            </button>
-
-            {/* Team rows — active team highlighted; others clickable to switch */}
-            {(teamOpen ? activeTeams : activeTeam ? [activeTeam] : []).map(t => (
-              <TeamRow
-                key={t.id}
-                team={t}
-                isActive={t.id === activeTeam?.id}
-                canEdit={canEditTeam}
-                onSelect={() => onSelectTeam?.(t.id)}
-                onEdit={() => onEditTeam?.(t)}
-              />
-            ))}
-            {/* Fallback when activeTeams not yet loaded but activeTeam is known */}
-            {!activeTeams.length && activeTeam && (
-              <TeamRow
-                team={activeTeam}
-                isActive
-                canEdit={canEditTeam}
-                onEdit={() => onEditTeam?.(activeTeam)}
-              />
-            )}
-
-            {/* New team button — only superadmins get onNewTeam passed from the parent */}
-            {teamOpen && onNewTeam && (
-              <button
-                onClick={onNewTeam}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: 8,
-                  padding: '4px 16px', background: 'none', border: 'none',
-                  color: 'rgba(255,255,255,0.35)', fontSize: 12,
-                  cursor: 'pointer', width: '100%', fontFamily: 'var(--font-sans)',
-                }}
-                onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.7)')}
-                onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.35)')}
-              >
-                <Plus {...ICON_SM} />
-                New team
-              </button>
-            )}
-
-            {/* Archived teams — collapsible sub-section, shown when team section is open */}
-            {teamOpen && archivedTeams.length > 0 && (
-              <div>
-                <button
-                  onClick={() => setArchivedTeamsOpen(o => !o)}
-                  style={{
-                    display: 'flex', alignItems: 'center', gap: 5,
-                    width: '100%', padding: '4px 8px 4px 16px',
-                    background: 'none', border: 'none', cursor: 'pointer',
-                    color: 'rgba(255,255,255,0.25)', fontFamily: 'var(--font-sans)',
-                  }}
-                  onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.5)')}
-                  onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.25)')}
-                >
-                  {archivedTeamsOpen
-                    ? <ChevronDown {...ICON_XS} />
-                    : <ChevronRight {...ICON_XS} />}
-                  <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
-                    Archived ({archivedTeams.length})
-                  </span>
-                </button>
-                {archivedTeamsOpen && archivedTeams.map(t => (
-                  <TeamRow
-                    key={t.id}
-                    team={t}
-                    isActive={false}
-                    canEdit={Boolean(onNewTeam)}
-                    onEdit={() => onEditTeam?.(t)}
-                  />
-                ))}
-              </div>
-            )}
-
-            {/* Members — only when team section is expanded */}
-            {teamOpen && (
-              <>
-                <button
-                  onClick={() => setMembersOpen(o => !o)}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 5,
-                    width: '100%',
-                    padding: '6px 8px 4px 16px',
-                    background: 'none',
-                    border: 'none',
-                    cursor: 'pointer',
-                    color: 'rgba(255,255,255,0.35)',
-                    fontFamily: 'var(--font-sans)',
-                  }}
-                >
-                  {membersOpen
-                    ? <ChevronDown {...ICON_XS} />
-                    : <ChevronRight {...ICON_XS} />}
-                  <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
-                    Members
-                  </span>
-                </button>
-
-                {membersOpen && (
-                  <div style={{ paddingBottom: 8 }}>
-                    {(apiMembers ?? []).map(m => {
-                      const displayName = (m as TeamMemberWithUser).displayName || m.id;
-                      const color = m.color ?? '#8b949e';
-                      const icon = (m as TeamMemberWithUser).icon ?? null;
-                      return (
-                        <MemberSidebarRow
-                          key={m.id}
-                          displayName={displayName}
-                          color={color}
-                          icon={icon}
-                          isInactive={Boolean((m as TeamMemberWithUser).archivedAt)}
-                          onEdit={onEditMember && (m as TeamMemberWithUser).userId !== currentUserId
-                            ? () => onEditMember(m as TeamMemberWithUser)
-                            : undefined}
-                        />
-                      );
-                    })}
-                  </div>
-                )}
-              </>
-            )}
-          </div>
-        )}
-
-        {/* Timelines section */}
-        <div style={{ padding: '8px 0' }}>
-          {!collapsed ? (
-            <button
-              onClick={() => setTimelinesOpen(o => !o)}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                width: '100%',
-                padding: '6px 12px 4px 16px',
-                background: 'none',
-                border: 'none',
-                cursor: 'pointer',
-                color: 'rgba(255,255,255,0.35)',
-                fontFamily: 'var(--font-sans)',
-              }}
-            >
-              <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
-                Timeline
-              </span>
-              {timelinesOpen
-                ? <ChevronDown width={12} height={12} strokeWidth={2} />
-                : <ChevronRight width={12} height={12} strokeWidth={2} />}
-            </button>
-          ) : (
-            <div style={{ height: 8 }} />
-          )}
-
-          {!collapsed && (timelinesOpen ? (
-            <>
-              {timelines.map(tl => (
-                <TimelineItem
-                  key={tl.id}
-                  timeline={tl}
-                  active={activeId === tl.id}
-                  collapsed={false}
-                  canEdit={canEditTeam}
-                  onClick={() => { setInternalActiveId(tl.id); onActiveTimelineChange?.(tl.id); }}
-                  onSettings={() => onEditTimeline?.(tl.id)}
-                />
-              ))}
-              <button
-                onClick={onNewTimeline}
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 8,
-                  padding: '6px 16px',
-                  background: 'none',
-                  border: 'none',
-                  color: 'rgba(255,255,255,0.35)',
-                  fontSize: 12,
-                  cursor: onNewTimeline ? 'pointer' : 'default',
-                  width: '100%',
-                  fontFamily: 'var(--font-sans)',
-                  marginTop: 2,
-                }}
-                onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.7)')}
-                onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.35)')}
-              >
-                <Plus {...ICON_SM} />
-                New timeline
-              </button>
-
-              {/* Archived sub-section */}
-              {archivedTimelineItems.length > 0 && (
-                <>
-                  <button
-                    onClick={() => setArchivedOpen(o => !o)}
-                    style={{
-                      display: 'flex', alignItems: 'center', gap: 5,
-                      width: '100%', padding: '6px 12px 4px 16px',
-                      background: 'none', border: 'none', cursor: 'pointer',
-                      color: 'rgba(255,255,255,0.25)', fontFamily: 'var(--font-sans)',
-                      marginTop: 4,
-                    }}
-                    onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.45)')}
-                    onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.25)')}
-                  >
-                    {archivedOpen
-                      ? <ChevronDown {...ICON_XS} />
-                      : <ChevronRight {...ICON_XS} />}
-                    <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
-                      Archived
-                    </span>
-                    <span style={{ fontSize: 10, marginLeft: 4 }}>({archivedTimelineItems.length})</span>
-                  </button>
-
-                  {archivedOpen && (
-                    <div style={{ opacity: 0.6 }}>
-                      {archivedTimelineItems.map(tl => (
-                        <TimelineItem
-                          key={tl.id}
-                          timeline={tl}
-                          active={false}
-                          collapsed={false}
-                          canEdit={canEditTeam}
-                          onClick={() => {}}
-                          onSettings={() => onEditTimeline?.(tl.id)}
-                        />
-                      ))}
-                    </div>
-                  )}
-                </>
-              )}
-            </>
-          ) : activeTimeline ? (
-            /* Section collapsed: show just the active timeline.
-               Guard required because activeTimeline is null when the timeline
-               list is empty — that state is briefly true on initial load. */
-            <TimelineItem
-              timeline={activeTimeline}
-              active={true}
-              collapsed={false}
-              showDate={false}
-              canEdit={canEditTeam}
-              onClick={() => setTimelinesOpen(true)}
-              onSettings={() => onEditTimeline?.(activeTimeline.id)}
-            />
-          ) : null)}
-        </div>
-        {/* Connectors section — contextual to active timeline */}
-        {!collapsed && (
-          <div style={{ padding: '8px 0', borderTop: '1px solid rgba(255,255,255,0.08)' }}>
-            <div style={{ display: 'flex', alignItems: 'center', padding: '6px 6px 4px 16px' }}>
-              <button
-                onClick={() => setConnectorsOpen(o => !o)}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: 6, flex: 1,
-                  background: 'none', border: 'none', cursor: 'pointer',
-                  color: 'rgba(255,255,255,0.35)', fontFamily: 'var(--font-sans)',
-                  padding: 0,
-                }}
-              >
-                <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
-                  Connectors
-                </span>
-                {connectorsOpen
-                  ? <ChevronDown width={12} height={12} strokeWidth={2} />
-                  : <ChevronRight width={12} height={12} strokeWidth={2} />}
-              </button>
-            </div>
-
-            {connectorsOpen && (
-              <>
-                <div style={{
-                  padding: '0 16px 4px',
-                  fontSize: 10,
-                  color: 'rgba(255,255,255,0.22)',
-                  letterSpacing: '0.02em',
-                }}>
-                  {activeTimeline?.name}
-                </div>
-                {/* Stub: connected Trello board */}
-                <ConnectorItem name="Trello — Launch Board" status="Synced · 2 min ago" color="#0079BF" />
-                <button
-                  style={{
-                    display: 'flex', alignItems: 'center', gap: 8,
-                    padding: '6px 16px', background: 'none', border: 'none',
-                    color: 'rgba(255,255,255,0.35)', fontSize: 12,
-                    cursor: 'pointer', width: '100%', fontFamily: 'var(--font-sans)',
-                  }}
-                  onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.7)')}
-                  onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.35)')}
-                >
-                  <Plug width={13} height={13} strokeWidth={1.8} />
-                  Add connector
-                </button>
-              </>
-            )}
-          </div>
-        )}
-      </div>
-
-      {/* Resize handle */}
-      {!collapsed && (
-        <div
-          onMouseDown={onHandleMouseDown}
-          style={{
-            position: 'absolute',
-            top: 0,
-            right: 0,
-            width: 5,
-            height: '100%',
-            cursor: 'col-resize',
-            zIndex: 20,
-          }}
-          onMouseEnter={e => ((e.currentTarget.lastElementChild as HTMLElement).style.background = 'var(--primary)')}
-          onMouseLeave={e => ((e.currentTarget.lastElementChild as HTMLElement).style.background = 'transparent')}
-        >
-          <div
-            style={{
-              position: 'absolute',
-              top: 0,
-              right: 0,
-              width: 2,
-              height: '100%',
-              background: 'transparent',
-              transition: 'background 0.15s',
-              pointerEvents: 'none',
-            }}
-          />
-        </div>
-      )}
-    </div>
-  );
-}
-````
-
-## File: packages/web/src/hooks/useShares.ts
-````typescript
-/**
- * TanStack Query hooks for Share CRUD and the public share projection.
- *
- * Authenticated hooks (useCreateShare, useListShares, useDeleteShare) require
- * an auth token. useShareProjection is public and uses a plain fetch.
- */
-
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import type { components } from '@draba/shared'
-import { createAuthFetch, API_BASE, ApiError } from '@/lib/api'
-import { useAuth } from '@/contexts/AuthContext'
-
-type Share = components['schemas']['Share']
-type ShareProjection = components['schemas']['ShareProjection']
-
-const sharesKey = (teamId: string, timelineId: string) =>
-  ['teams', teamId, 'timelines', timelineId, 'shares'] as const
-
-// ── Authenticated hooks ───────────────────────────────────────────────────────
-
-/** Lists all shares for a timeline. */
-export function useListShares(teamId: string, timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  return useQuery({
-    queryKey: sharesKey(teamId, timelineId),
-    queryFn: () =>
-      authFetch<Share[]>(`/teams/${teamId}/timelines/${timelineId}/shares`),
-    enabled: Boolean(teamId) && Boolean(timelineId),
-  })
-}
-
-interface CreateShareInput {
-  /** "view" (default) or "ics" — ICS shares are live calendar feeds. */
-  kind?: 'view' | 'ics'
-  /** ICS shares only: "timeline" (every activity) or "member" (one member's). */
-  scope?: 'timeline' | 'member'
-  /** ICS shares with scope "member" only. */
-  memberId?: string
-  name?: string | null
-  description?: string | null
-  viewType?: string
-  viewConfig?: string
-  /** When set, the share is locked and requires unlocking to view. View shares only. */
-  password?: string
-}
-
-/** Creates a share and invalidates the list. */
-export function useCreateShare(teamId: string, timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: (input: CreateShareInput) =>
-      authFetch<Share>(`/timelines/${timelineId}/shares`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(input),
-      }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: sharesKey(teamId, timelineId) }),
-  })
-}
-
-/**
- * Rotates a share's token, immediately invalidating the old URL — the
- * revocation story for ICS feeds, which have no password gate.
- */
-export function useRegenerateShare(teamId: string, timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: (shareId: string) =>
-      authFetch<Share>(`/shares/${shareId}/regenerate`, { method: 'POST' }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: sharesKey(teamId, timelineId) }),
-  })
-}
-
-/** Deletes a share and invalidates the list. */
-export function useDeleteShare(teamId: string, timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: (shareId: string) =>
-      authFetch<void>(`/shares/${shareId}`, { method: 'DELETE' }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: sharesKey(teamId, timelineId) }),
-  })
-}
-
-// ── Public hooks (no auth) ────────────────────────────────────────────────────
-
-/**
- * Fetches a public share projection. No authentication required.
- *
- * For password-protected shares, pass the `viewToken` obtained from
- * {@link useUnlockShare}; it is sent as a Bearer credential. Without a valid
- * token a locked share responds 401 — surfaced here as an ApiError with code
- * `PASSWORD_REQUIRED` so the viewer can render an unlock prompt.
- */
-export function useShareProjection(token: string | undefined, viewToken?: string | null) {
-  return useQuery({
-    queryKey: ['shares', token, viewToken ?? null] as const,
-    queryFn: async () => {
-      const headers: HeadersInit = viewToken ? { Authorization: `Bearer ${viewToken}` } : {}
-      const res = await fetch(`${API_BASE}/shares/${token}`, { headers })
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}))
-        // A locked share returns { passwordRequired: true } (no error envelope).
-        if (res.status === 401 && body?.passwordRequired) {
-          throw new ApiError(401, 'PASSWORD_REQUIRED', 'password required')
-        }
-        throw new ApiError(res.status, body?.error?.code ?? 'ERROR', body?.error?.message ?? res.statusText)
-      }
-      return res.json() as Promise<ShareProjection>
-    },
-    enabled: Boolean(token),
-    staleTime: 60_000,
-    retry: false,
-  })
-}
-
-/**
- * Exchanges a share password for a short-lived view token. No authentication
- * required. The returned token is scoped to this share and expires server-side.
- */
-export function useUnlockShare(token: string | undefined) {
-  return useMutation({
-    mutationFn: async (password: string): Promise<string> => {
-      const res = await fetch(`${API_BASE}/shares/${token}/unlock`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ password }),
-      })
-      const body = await res.json().catch(() => ({}))
-      if (!res.ok) {
-        throw new ApiError(res.status, body?.error?.code ?? 'ERROR', body?.error?.message ?? res.statusText)
-      }
-      return (body as { token: string }).token
-    },
-  })
-}
-````
-
 ## File: docs/TESTING.md
 ````markdown
 # Testing & Review Procedures
@@ -49454,433 +48164,1348 @@ export default function GanttView({
 }
 ````
 
-## File: packages/api/internal/models/models.go
-````go
-// Package models holds the domain types shared across the API, db,
-// and event-bus packages. These types are persisted directly via sqlx
-// (db tags) and serialised on the wire (json tags); changing tags is a
-// schema change.
-package models
+## File: packages/web/src/components/layout/Sidebar.tsx
+````typescript
+import { useState, useRef, useEffect } from 'react';
+import {
+  ChevronRight,
+  ChevronLeft,
+  ChevronDown,
+  ChevronsDownUp,
+  ChevronsUpDown,
+  Plus,
+  Settings2,
+  Upload,
+  CalendarPlus,
+  Plug,
+  Link2,
+} from 'lucide-react';
+import { Badge } from '@/components/identity/Badge';
+import { useAuth } from '@/contexts/AuthContext';
+import type { components } from '@draba/shared';
 
-import "time"
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
 
-// Activity is a scheduled item of work belonging to a Timeline. ArchivedAt is
-// non-nil when the activity is soft-deleted; list endpoints exclude archived
-// activities by default.
-//
-// AssignedMemberIDs is not stored on the activities table; it is populated by
-// the repository from activity_assignments after every list query.
-//
-// GoogleEventID and CaldavUID are preserved as-is — they identify the
-// corresponding records in external calendar systems (VEVENT identifiers).
-type Activity struct {
-	ID                string     `db:"id"                  json:"id"`
-	TimelineID        string     `db:"timeline_id"         json:"timelineId"`
-	Title             string     `db:"title"               json:"title"`
-	Description       *string    `db:"description"         json:"description,omitempty"`
-	Notes             *string    `db:"notes"               json:"notes,omitempty"`
-	Icon              *string    `db:"icon"                json:"icon,omitempty"`
-	Color             *string    `db:"color"               json:"color,omitempty"`
-	StartAt           time.Time  `db:"start_at"            json:"startAt"`
-	EndAt             time.Time  `db:"end_at"              json:"endAt"`
-	AllDay            bool       `db:"all_day"             json:"allDay"`
-	StatusID          *string    `db:"status_id"           json:"statusId,omitempty"`
-	ParentActivityID  *string    `db:"parent_activity_id"  json:"parentActivityId,omitempty"`
-	PercentComplete   *int       `db:"percent_complete"    json:"percentComplete,omitempty"`
-	Location          *string    `db:"location"            json:"location,omitempty"`
-	URL               *string    `db:"url"                 json:"url,omitempty"`
-	Rrule             *string    `db:"rrule"               json:"rrule,omitempty"`
-	CaldavUID         *string    `db:"caldav_uid"          json:"caldavUid,omitempty"`
-	GoogleEventID     *string    `db:"google_event_id"     json:"googleEventId,omitempty"`
-	CreatedBy         string     `db:"created_by"          json:"createdBy"`
-	CreatedAt         time.Time  `db:"created_at"          json:"createdAt"`
-	UpdatedAt         time.Time  `db:"updated_at"          json:"updatedAt"`
-	ArchivedAt        *time.Time `db:"archived_at"         json:"archivedAt,omitempty"`
-	AssignedMemberIDs []string   `db:"-"                   json:"assignedMemberIds"`
-	TagIDs            []string   `db:"-"                   json:"tagIds"`
+const SIDEBAR_MIN = 220;
+const SIDEBAR_MAX = 360;
+
+interface ApiTeam {
+  id: string;
+  name: string;
+  color?: string | null;
+  icon?: string | null;
+  archivedAt?: string | null;
 }
 
-// TeamMemberWithUser joins a TeamMember row with its associated User so
-// callers receive display names and emails in a single query. Participants
-// (no user account) have empty email and avatar; their display_name comes
-// from team_members.display_name via COALESCE in the query.
-type TeamMemberWithUser struct {
-	TeamMember
-	Email       string  `db:"email"        json:"email"`
-	DisplayName string  `db:"display_name" json:"displayName"`
-	AvatarURL   *string `db:"avatar_url"   json:"avatarUrl,omitempty"`
+interface ApiTimeline {
+  id: string;
+  name: string;
+  startDate?: string;
+  endDate?: string;
+  color?: string | null;
+  icon?: string | null;
+  archivedAt?: string | null;
+  shareCount?: number;
 }
 
-// User is an authenticated account. PasswordHash is omitted from JSON
-// to avoid leaking it through any handler that returns a User.
-// ArchivedAt is non-nil when the account is inactivated; login is rejected
-// for archived users. Color and Icon are user-level identity fields (migration
-// 010); they propagate to team_members rows for the user when changed.
-type User struct {
-	ID           string     `db:"id"             json:"id"`
-	Email        string     `db:"email"          json:"email"`
-	PasswordHash string     `db:"password_hash"  json:"-"`
-	DisplayName  string     `db:"display_name"   json:"displayName"`
-	AvatarURL    *string    `db:"avatar_url"     json:"avatarUrl,omitempty"`
-	Color        *string    `db:"color"          json:"color,omitempty"`
-	Icon         *string    `db:"icon"           json:"icon,omitempty"`
-	IsSuperadmin bool       `db:"is_superadmin"  json:"isSuperadmin"`
-	CreatedAt    time.Time  `db:"created_at"     json:"createdAt"`
-	UpdatedAt    time.Time  `db:"updated_at"     json:"updatedAt"`
-	ArchivedAt   *time.Time `db:"archived_at"    json:"archivedAt,omitempty"`
+interface Props {
+  collapsed: boolean;
+  onToggle: () => void;
+  onNewActivity?: () => void;
+  /** Stub: bulk-import activities. Surfaced in the "New activity" combo dropdown. */
+  onBulkImport?: () => void;
+  apiTimelines?: ApiTimeline[];
+  archivedTimelines?: ApiTimeline[];
+  activeTimelineId?: string;
+  onActiveTimelineChange?: (id: string) => void;
+  onNewTimeline?: () => void;
+  onEditTimeline?: (timelineId: string) => void;
+  // Team management
+  activeTeam?: ApiTeam;
+  /** All non-archived teams. Used to render the switchable team list. */
+  activeTeams?: ApiTeam[];
+  archivedTeams?: ApiTeam[];
+  onNewTeam?: () => void;
+  onEditTeam?: (team: ApiTeam) => void;
+  onSelectTeam?: (teamId: string) => void;
+  onUnarchiveTeam?: (teamId: string) => void;
+  /** True when the current user is an admin of the active team. */
+  canEditTeam?: boolean;
+  /** Live member list from the API. */
+  members?: TeamMemberWithUser[];
+  /** Called when the user clicks the gear icon on a member row. */
+  onEditMember?: (member: TeamMemberWithUser) => void;
 }
 
-// Team is a workspace that groups users and their scheduled work. Color and
-// Icon are identity fields added in migration 006; both are nullable until
-// explicitly set by an admin. Description, Notes, and ArchivedAt are added in
-// migration 008; ArchivedAt is non-nil when the team is soft-deleted.
-// InviteLinkToken is a stable, reusable token added in migration 009; when
-// non-nil it can be used by anyone to join the team during registration.
-type Team struct {
-	ID              string     `db:"id"                  json:"id"`
-	Name            string     `db:"name"                json:"name"`
-	Slug            string     `db:"slug"                json:"slug"`
-	Description     *string    `db:"description"         json:"description,omitempty"`
-	Notes           *string    `db:"notes"               json:"notes,omitempty"`
-	Color           *string    `db:"color"               json:"color,omitempty"`
-	Icon            *string    `db:"icon"                json:"icon,omitempty"`
-	InviteLinkToken *string    `db:"invite_link_token"   json:"inviteLinkToken,omitempty"`
-	CreatedAt       time.Time  `db:"created_at"          json:"createdAt"`
-	UpdatedAt       time.Time  `db:"updated_at"          json:"updatedAt"`
-	ArchivedAt      *time.Time `db:"archived_at"         json:"archivedAt,omitempty"`
+const ICON = { width: 15, height: 15, strokeWidth: 1.8 } as const;
+const ICON_SM = { width: 13, height: 13, strokeWidth: 1.8 } as const;
+const ICON_XS = { width: 11, height: 11, strokeWidth: 2 } as const;
+
+interface Timeline {
+  id: string;
+  name: string;
+  color: string;
+  icon: string | null;
+  startDate?: string;
+  endDate?: string;
+  /** Active (non-revoked, non-expired) share links — drives the tile chip. */
+  shareCount?: number;
 }
 
-// TeamMember is the join row that puts a person in a Team. UserID is nil
-// for login-less Participants; DisplayName is populated for them instead.
-// Role is the team-level role: "admin" or "member". Color and Icon are
-// identity fields (migration 006); Color stores a color ID (e.g. "teal").
-// ArchivedAt is non-nil when the member is inactivated (migration 009);
-// inactivated members lose access but their data and assignments are preserved.
-type TeamMember struct {
-	ID          string     `db:"id"           json:"id"`
-	TeamID      string     `db:"team_id"      json:"teamId"`
-	UserID      *string    `db:"user_id"      json:"userId,omitempty"`
-	DisplayName *string    `db:"display_name" json:"displayName,omitempty"`
-	Role        string     `db:"role"         json:"role"`
-	Color       *string    `db:"color"        json:"color,omitempty"`
-	Icon        *string    `db:"icon"         json:"icon,omitempty"`
-	JoinedAt    time.Time  `db:"joined_at"    json:"joinedAt"`
-	ArchivedAt  *time.Time `db:"archived_at"  json:"archivedAt,omitempty"`
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+
+function formatDateRange(startDate?: string, endDate?: string): string {
+  if (!startDate || !endDate) return ''
+  const s = new Date(startDate + 'T00:00:00')
+  const e = new Date(endDate + 'T00:00:00')
+  const diffDays = (e.getTime() - s.getTime()) / 86_400_000
+  if (diffDays < 90) {
+    return `${MONTHS[s.getMonth()]} ${s.getDate()} – ${MONTHS[e.getMonth()]} ${e.getDate()} ${e.getFullYear()}`
+  }
+  return `${MONTHS[s.getMonth()]} ${s.getFullYear()} – ${MONTHS[e.getMonth()]} ${e.getFullYear()}`
 }
 
-// MemberStats holds computed activity and timeline counts for a member.
-// All counts are date-relative and scoped to activities the member is assigned to.
-type MemberStats struct {
-	ActiveTimelines    int `json:"activeTimelines"`
-	ArchivedTimelines  int `json:"archivedTimelines"`
-	PastDue            int `json:"pastDue"`
-	Running            int `json:"running"`
-	Upcoming           int `json:"upcoming"`
-	Unscheduled        int `json:"unscheduled"`
-	ArchivedActivities int `json:"archivedActivities"`
+
+interface TimelineItemProps {
+  timeline: Timeline;
+  active: boolean;
+  collapsed: boolean;
+  showDate?: boolean;
+  canEdit?: boolean;
+  onClick: () => void;
+  onSettings: () => void;
 }
 
-// MemberDetail combines a TeamMemberWithUser with computed stats and the
-// member's full list of team memberships. Returned by GET /teams/:id/members/:memberId.
-// UserArchivedAt reflects users.archived_at (account-level deactivation), distinct
-// from ArchivedAt which is team_members.archived_at (membership-level inactivation).
-type MemberDetail struct {
-	TeamMemberWithUser
-	Stats          MemberStats          `json:"stats"`
-	Teams          []TeamMemberWithUser `json:"teams"`
-	Deletable      bool                 `json:"deletable"`
-	UserArchivedAt *time.Time           `json:"userArchivedAt,omitempty"`
+function TimelineItem({ timeline, active, collapsed, showDate = true, canEdit = false, onClick, onSettings }: TimelineItemProps) {
+  const [hovered, setHovered] = useState(false);
+  const dateRange = !collapsed && showDate ? formatDateRange(timeline.startDate, timeline.endDate) : ''
+
+  return (
+    <div
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        background: active
+          ? 'rgba(255,255,255,0.10)'
+          : hovered
+          ? 'rgba(255,255,255,0.05)'
+          : 'transparent',
+        borderLeft: active ? `2px solid ${timeline.color}` : '2px solid transparent',
+        transition: 'background 0.12s',
+        cursor: 'pointer',
+        minHeight: 34,
+      }}
+    >
+      <button
+        onClick={onClick}
+        title={collapsed ? timeline.name : undefined}
+        style={{
+          flex: 1,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          padding: collapsed ? '7px 14px' : '6px 8px 6px 16px',
+          background: 'none',
+          border: 'none',
+          color: active ? 'white' : 'rgba(255,255,255,0.65)',
+          fontSize: 13,
+          fontWeight: active ? 600 : 400,
+          cursor: 'pointer',
+          fontFamily: 'var(--font-sans)',
+          textAlign: 'left',
+          minWidth: 0,
+        }}
+      >
+        <Badge
+          identity={{ color: timeline.color, icon: timeline.icon ?? '__none__' }}
+          name={timeline.name}
+          shape="square"
+          size={20}
+        />
+        {!collapsed && (
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {timeline.name}
+            </div>
+            {dateRange && (
+              <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)', marginTop: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {dateRange}
+              </div>
+            )}
+          </div>
+        )}
+        {/* Active-share-count chip — an affordance that this timeline has live
+            public links (view shares + ICS feeds). Hidden at zero. */}
+        {!collapsed && (timeline.shareCount ?? 0) > 0 && (
+          <span
+            title={`${timeline.shareCount} active share ${timeline.shareCount === 1 ? 'link' : 'links'}`}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 3,
+              padding: '1px 6px',
+              borderRadius: 999,
+              background: 'rgba(255,255,255,0.10)',
+              color: 'rgba(255,255,255,0.55)',
+              fontSize: 10,
+              fontWeight: 600,
+              flexShrink: 0,
+            }}
+          >
+            <Link2 width={10} height={10} strokeWidth={2.2} />
+            {timeline.shareCount}
+          </span>
+        )}
+      </button>
+
+      {!collapsed && canEdit && (
+        <button
+          onClick={e => { e.stopPropagation(); onSettings(); }}
+          title={`Configure ${timeline.name}`}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            width: 26,
+            height: 26,
+            marginRight: 6,
+            background: 'none',
+            border: 'none',
+            borderRadius: 5,
+            color: 'rgba(255,255,255,0.4)',
+            cursor: 'pointer',
+            opacity: hovered ? 1 : 0,
+            transition: 'opacity 0.12s',
+            flexShrink: 0,
+          }}
+          onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.8)')}
+          onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.4)')}
+        >
+          <Settings2 {...ICON_SM} />
+        </button>
+      )}
+    </div>
+  );
 }
 
-// Timeline is a named date range over a team's events. It is not a data
-// container — it is a view over a team's events for a given date window.
-// Access is governed by timeline_access + team role; share_token allows
-// unauthenticated read access via a stable public URL. Color and Icon are
-// identity fields (migration 006). Description and Notes are free-text fields
-// added in migration 013.
-type Timeline struct {
-	ID          string     `db:"id"          json:"id"`
-	TeamID      string     `db:"team_id"     json:"teamId"`
-	Name        string     `db:"name"        json:"name"`
-	Description *string    `db:"description" json:"description,omitempty"`
-	Notes       *string    `db:"notes"       json:"notes,omitempty"`
-	StartDate   string     `db:"start_date"  json:"startDate"`
-	EndDate     string     `db:"end_date"    json:"endDate"`
-	Color       *string    `db:"color"       json:"color,omitempty"`
-	Icon        *string    `db:"icon"        json:"icon,omitempty"`
-	ShareToken  string     `db:"share_token" json:"shareToken"`
-	IcalToken   string     `db:"ical_token"  json:"icalToken"`
-	CreatedBy   string     `db:"created_by"  json:"createdBy"`
-	CreatedAt   time.Time  `db:"created_at"  json:"createdAt"`
-	UpdatedAt   time.Time  `db:"updated_at"  json:"updatedAt"`
-	ArchivedAt  *time.Time `db:"archived_at" json:"archivedAt,omitempty"`
+function ConnectorItem({ name, status, color }: { name: string; status: string; color: string }) {
+  const [hovered, setHovered] = useState(false);
+
+  return (
+    <div
+      style={{
+        display: 'flex', alignItems: 'center', gap: 8,
+        padding: '6px 6px 6px 16px',
+        cursor: 'pointer',
+        background: hovered ? 'rgba(255,255,255,0.05)' : 'transparent',
+        transition: 'background 0.12s',
+      }}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+    >
+      <div style={{
+        width: 20, height: 20, borderRadius: 4,
+        background: color,
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        flexShrink: 0,
+      }}>
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="white">
+          <rect x="1" y="1" width="9" height="18" rx="1.5" />
+          <rect x="14" y="1" width="9" height="12" rx="1.5" />
+        </svg>
+      </div>
+      <div style={{ minWidth: 0, flex: 1 }}>
+        <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.65)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {name}
+        </div>
+        <div style={{ fontSize: 9, color: 'rgba(255,255,255,0.25)', marginTop: 1 }}>
+          {status}
+        </div>
+      </div>
+      <button
+        title={`Configure ${name}`}
+        style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          width: 26, height: 26, marginRight: 0,
+          background: 'none', border: 'none', borderRadius: 5,
+          color: 'rgba(255,255,255,0.4)', cursor: 'pointer',
+          opacity: hovered ? 1 : 0, transition: 'opacity 0.12s',
+          flexShrink: 0,
+        }}
+        onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.8)')}
+        onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.4)')}
+      >
+        <Settings2 {...ICON_SM} />
+      </button>
+    </div>
+  );
 }
 
-// SavedFilter is a user-owned, team-scoped named filter spec. Definition is
-// an opaque JSON string interpreted by the client; the server treats it as
-// arbitrary text and only validates that it parses as JSON.
-type SavedFilter struct {
-	ID           string    `db:"id"             json:"id"`
-	TeamID       string    `db:"team_id"        json:"teamId"`
-	UserID       string    `db:"user_id"        json:"userId"`
-	Name         string    `db:"name"           json:"name"`
-	Definition   string    `db:"definition"     json:"definition"`
-	IsTeamFilter bool      `db:"is_team_filter" json:"isTeamFilter"`
-	CreatedAt    time.Time `db:"created_at"     json:"createdAt"`
-	UpdatedAt    time.Time `db:"updated_at"     json:"updatedAt"`
+// ── TeamRow ──────────────────────────────────────────────────────────────────
+
+interface TeamRowProps {
+  team: ApiTeam;
+  isActive: boolean;
+  canEdit: boolean;
+  onSelect?: () => void;
+  onEdit?: () => void;
 }
 
-// UserPreference stores a single key/value setting for a user, optionally
-// scoped to a timeline. TimelineID is “” for global preferences so the
-// UNIQUE(user_id, timeline_id, key) DB constraint works without NULL handling.
-// Serialised JSON omits TimelineID when empty so callers see null for global prefs.
-type UserPreference struct {
-	ID         string    `db:"id"          json:"id"`
-	UserID     string    `db:"user_id"     json:"userId"`
-	TimelineID string    `db:"timeline_id" json:"timelineId,omitempty"`
-	Key        string    `db:"key"         json:"key"`
-	Value      string    `db:"value"       json:"value"`
-	UpdatedAt  time.Time `db:"updated_at"  json:"updatedAt"`
+function TeamRow({ team, isActive, canEdit, onSelect, onEdit }: TeamRowProps) {
+  const [hovered, setHovered] = useState(false);
+
+  return (
+    <div
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      onClick={() => { if (!isActive) onSelect?.(); }}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        padding: '5px 6px 5px 16px',
+        borderLeft: isActive ? `2px solid ${team.color ?? 'var(--primary)'}` : '2px solid transparent',
+        background: isActive ? 'rgba(255,255,255,0.07)' : hovered ? 'rgba(255,255,255,0.03)' : 'transparent',
+        cursor: isActive ? 'default' : 'pointer',
+        minHeight: 34,
+        transition: 'background 0.12s',
+      }}
+    >
+      <Badge
+        identity={{ color: team.color ?? 'var(--primary)', icon: team.icon ?? '__name_1__' }}
+        name={team.name}
+        shape="square"
+        size={20}
+      />
+      <span style={{
+        fontSize: 13,
+        fontWeight: isActive ? 600 : 400,
+        color: isActive ? 'white' : 'rgba(255,255,255,0.65)',
+        flex: 1,
+        marginLeft: 8,
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        whiteSpace: 'nowrap',
+        minWidth: 0,
+      }}>
+        {team.name}
+      </span>
+      {canEdit && (
+        <button
+          title="Team settings"
+          onClick={e => { e.stopPropagation(); onEdit?.(); }}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            width: 26,
+            height: 26,
+            marginRight: 6,
+            background: 'none',
+            border: 'none',
+            borderRadius: 5,
+            color: 'rgba(255,255,255,0.4)',
+            cursor: 'pointer',
+            opacity: hovered ? 1 : 0,
+            transition: 'opacity 0.12s',
+            flexShrink: 0,
+          }}
+          onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.8)')}
+          onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.4)')}
+        >
+          <Settings2 {...ICON_SM} />
+        </button>
+      )}
+    </div>
+  );
 }
 
-// APIToken is a long-lived Bearer credential a user issues for programmatic
-// access. token_hash stores SHA-256(rawToken); the raw value is shown to the
-// caller only once on creation. RevokedAt is non-nil when the token has been
-// revoked; revoked tokens are not deleted so listing remains stable.
-type APIToken struct {
-	ID         string     `db:"id"           json:"id"`
-	UserID     string     `db:"user_id"      json:"userId"`
-	Name       string     `db:"name"         json:"name"`
-	TokenHash  string     `db:"token_hash"   json:"-"`
-	Scope      string     `db:"scope"        json:"scope"`
-	LastUsedAt *time.Time `db:"last_used_at" json:"lastUsedAt,omitempty"`
-	CreatedAt  time.Time  `db:"created_at"   json:"createdAt"`
-	RevokedAt  *time.Time `db:"revoked_at"   json:"revokedAt,omitempty"`
+// ── MemberSidebarRow ──────────────────────────────────────────────────────────
+
+interface MemberSidebarRowProps {
+  displayName: string;
+  color: string;
+  icon?: string | null;
+  isInactive?: boolean;
+  onEdit?: () => void;
 }
 
-// InstanceSetting stores a single instance-level configuration value.
-// SMTP config and defaults live here. The value column is plain text;
-// the mailer package handles decryption of the SMTP password field.
-type InstanceSetting struct {
-	Key       string    `db:"key"        json:"key"`
-	Value     string    `db:"value"      json:"value"`
-	UpdatedAt time.Time `db:"updated_at" json:"updatedAt"`
+function MemberSidebarRow({ displayName, color, icon, isInactive = false, onEdit }: MemberSidebarRowProps) {
+  const [hovered, setHovered] = useState(false);
+  return (
+    <div
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        display: 'flex', alignItems: 'center', gap: 8,
+        padding: '4px 6px 4px 16px', cursor: 'default',
+        background: hovered ? 'rgba(255,255,255,0.05)' : 'transparent',
+        opacity: isInactive ? 0.45 : 1,
+      }}
+    >
+      <Badge
+        identity={{ color, icon: icon ?? '__name_words__' }}
+        name={displayName}
+        shape="circle"
+        size={20}
+      />
+      <span style={{ fontSize: 13, color: 'rgba(255,255,255,0.65)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
+        {displayName}
+      </span>
+      {onEdit && (
+        <button
+          onClick={e => { e.stopPropagation(); onEdit(); }}
+          title={`Edit ${displayName}`}
+          style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            width: 22, height: 22, marginRight: 6,
+            background: 'none', border: 'none', borderRadius: 4,
+            color: 'rgba(255,255,255,0.4)', cursor: 'pointer', flexShrink: 0,
+            opacity: hovered ? 1 : 0,
+            transition: 'opacity 0.12s',
+            pointerEvents: hovered ? 'auto' : 'none',
+          }}
+          onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.8)')}
+          onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.4)')}
+        >
+          <Settings2 width={12} height={12} strokeWidth={1.8} />
+        </button>
+      )}
+    </div>
+  );
 }
 
-// PasswordResetToken is a single-use token for the forgot-password flow.
-// TokenHash stores SHA-256 of the raw token; the raw value is sent by email
-// and never stored. UsedAt is set when the token is consumed.
-type PasswordResetToken struct {
-	ID        string     `db:"id"         json:"id"`
-	UserID    string     `db:"user_id"    json:"userId"`
-	TokenHash string     `db:"token_hash" json:"-"`
-	ExpiresAt time.Time  `db:"expires_at" json:"expiresAt"`
-	UsedAt    *time.Time `db:"used_at"    json:"usedAt,omitempty"`
-	CreatedAt time.Time  `db:"created_at" json:"createdAt"`
+// ── Sidebar ───────────────────────────────────────────────────────────────────
+
+/**
+ * Left navigation rail: brand, team selector with members, and timeline list.
+ * Collapsed/expanded state is driven by the parent.
+ */
+const TIMELINE_COLORS = ['#1A97A2', '#6366F1', '#F17B2B', '#E11D48', '#10B981', '#F59E0B']
+
+export default function Sidebar({ collapsed, onToggle, onNewActivity, onBulkImport, apiTimelines, archivedTimelines = [], activeTimelineId, onActiveTimelineChange, onNewTimeline, onEditTimeline, activeTeam, activeTeams = [], archivedTeams = [], onNewTeam, onEditTeam, onSelectTeam, canEditTeam = false, members: apiMembers, onEditMember }: Props) {
+  const { user } = useAuth();
+  const currentUserId = (user as { id?: string } | null)?.id;
+  const [internalActiveId, setInternalActiveId] = useState('');
+  const [teamOpen, setTeamOpen] = useState(true);
+  const [connectorsOpen, setConnectorsOpen] = useState(true);
+  // Combo "New activity" dropdown (expanded + collapsed share this state).
+  const [newMenuOpen, setNewMenuOpen] = useState(false);
+  const newMenuRef = useRef<HTMLDivElement>(null);
+  // Collapsed-mode menu is rendered fixed (the rail clips overflow), so we
+  // capture the trigger's viewport rect when it opens.
+  const [collapsedMenuPos, setCollapsedMenuPos] = useState<{ top: number; left: number } | null>(null);
+  // Primary accent for the "New activity" combo button.
+  const NEW_BTN_BG = 'var(--primary)';
+  const NEW_BTN_FG = 'var(--primary-foreground)';
+  const [archivedOpen, setArchivedOpen] = useState(false);
+  const [timelinesOpen, setTimelinesOpen] = useState(true);
+  const [membersOpen, setMembersOpen] = useState(true);
+  const [archivedTeamsOpen, setArchivedTeamsOpen] = useState(false);
+
+  const allExpanded = teamOpen && timelinesOpen && connectorsOpen && membersOpen;
+  function toggleAllSections() {
+    const next = !allExpanded;
+    setTeamOpen(next);
+    setTimelinesOpen(next);
+    setConnectorsOpen(next);
+    setMembersOpen(next);
+    if (!next) {
+      setArchivedOpen(false);
+      setArchivedTeamsOpen(false);
+    }
+  }
+
+  const timelines: Timeline[] = (apiTimelines ?? []).map((t, i) => ({
+    id: t.id,
+    name: t.name,
+    color: t.color ?? TIMELINE_COLORS[i % TIMELINE_COLORS.length],
+    icon: t.icon ?? null,
+    startDate: t.startDate,
+    endDate: t.endDate,
+    shareCount: t.shareCount,
+  }))
+
+  const archivedTimelineItems: Timeline[] = archivedTimelines.map((t) => ({
+    id: t.id,
+    name: t.name,
+    color: t.color ?? '#64748B',
+    icon: t.icon ?? null,
+    startDate: t.startDate,
+    endDate: t.endDate,
+  }))
+  const activeId = activeTimelineId ?? internalActiveId
+  // timelines[0] is typed as Timeline (not T | undefined) because
+  // noUncheckedIndexedAccess is off in the tsconfig, but at runtime an empty
+  // array produces undefined. The explicit type annotation + length guard make
+  // the null case visible to TypeScript so the collapsed-section render below
+  // can safely guard against it.
+  const activeTimeline: Timeline | null =
+    timelines.find(t => t.id === activeId) ??
+    (timelines.length > 0 ? timelines[0] : null);
+
+  const [sidebarWidth, setSidebarWidth] = useState(SIDEBAR_MIN);
+  const dragging = useRef(false);
+  const startX = useRef(0);
+  const startW = useRef(SIDEBAR_MIN);
+
+  useEffect(() => {
+    function onMouseMove(e: MouseEvent) {
+      if (!dragging.current) return;
+      const delta = e.clientX - startX.current;
+      setSidebarWidth(Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, startW.current + delta)));
+    }
+    function onMouseUp() {
+      if (!dragging.current) return;
+      dragging.current = false;
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    }
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+    return () => {
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onMouseUp);
+    };
+  }, []);
+
+  // Close the "New activity" dropdown on outside click or Escape.
+  useEffect(() => {
+    if (!newMenuOpen) return;
+    function onDocMouseDown(e: MouseEvent) {
+      if (newMenuRef.current && !newMenuRef.current.contains(e.target as Node)) {
+        setNewMenuOpen(false);
+      }
+    }
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key === 'Escape') setNewMenuOpen(false);
+    }
+    document.addEventListener('mousedown', onDocMouseDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', onDocMouseDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [newMenuOpen]);
+
+  function onHandleMouseDown(e: React.MouseEvent) {
+    e.preventDefault();
+    dragging.current = true;
+    startX.current = e.clientX;
+    startW.current = sidebarWidth;
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+  }
+
+  return (
+    <div
+      style={{
+        position: 'relative',
+        width: collapsed ? 52 : sidebarWidth,
+        flexShrink: 0,
+        background: 'var(--color-charcoal)',
+        color: 'white',
+        display: 'flex',
+        flexDirection: 'column',
+        transition: 'width 0.2s ease',
+        overflow: 'hidden',
+        borderRight: '1px solid rgba(255,255,255,0.06)',
+      }}
+    >
+      {/* Logo + collapse toggle */}
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: collapsed ? 'center' : 'space-between',
+          padding: collapsed ? '0 13px' : '0 8px 0 16px',
+          borderBottom: '1px solid rgba(255,255,255,0.08)',
+          height: 'var(--topbar-h)',
+          flexShrink: 0,
+        }}
+      >
+        {!collapsed && (
+          <div
+            onClick={onToggle}
+            style={{ display: 'flex', alignItems: 'center', gap: 9, cursor: 'pointer' }}
+          >
+            <img src="/logo-orange-white.svg" alt="Draba" style={{ width: 28, height: 28, marginTop: 3 }} />
+            <span style={{ fontSize: 22, fontWeight: 700, letterSpacing: '-0.02em', color: 'white' }}>
+              draba
+            </span>
+          </div>
+        )}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+          {!collapsed && (
+            <button
+              onClick={toggleAllSections}
+              title={allExpanded ? 'Collapse all sections' : 'Expand all sections'}
+              style={{
+                background: 'none',
+                border: 'none',
+                color: 'rgba(255,255,255,0.45)',
+                borderRadius: 6,
+                width: 26,
+                height: 26,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                cursor: 'pointer',
+                flexShrink: 0,
+              }}
+              onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.8)')}
+              onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.45)')}
+            >
+              {allExpanded ? <ChevronsDownUp width={14} height={14} strokeWidth={1.8} /> : <ChevronsUpDown width={14} height={14} strokeWidth={1.8} />}
+            </button>
+          )}
+          <button
+            onClick={onToggle}
+            style={{
+              background: 'rgba(255,255,255,0.08)',
+              border: 'none',
+              color: 'rgba(255,255,255,0.7)',
+              borderRadius: 6,
+              width: 26,
+              height: 26,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              cursor: 'pointer',
+              flexShrink: 0,
+            }}
+          >
+            {collapsed ? <ChevronRight {...ICON} /> : <ChevronLeft {...ICON} />}
+          </button>
+        </div>
+      </div>
+
+      {/* Primary "New activity" combo button — sits directly under the brand. */}
+      {!collapsed && (
+        <div
+          ref={newMenuRef}
+          style={{ position: 'relative', padding: '12px 16px 2px', flexShrink: 0 }}
+        >
+          <div style={{ display: 'flex', alignItems: 'stretch' }}>
+            <button
+              onClick={onNewActivity}
+              style={{
+                flex: 1,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: 8,
+                padding: '9px 12px',
+                background: NEW_BTN_BG,
+                border: 'none',
+                borderRadius: '7px 0 0 7px',
+                color: NEW_BTN_FG,
+                fontSize: 13,
+                fontWeight: 600,
+                cursor: 'pointer',
+                fontFamily: 'var(--font-sans)',
+              }}
+              onMouseEnter={e => (e.currentTarget.style.filter = 'brightness(1.08)')}
+              onMouseLeave={e => (e.currentTarget.style.filter = 'none')}
+            >
+              <CalendarPlus width={15} height={15} strokeWidth={2} />
+              New activity
+            </button>
+            <button
+              title="More activity options"
+              aria-haspopup="menu"
+              aria-expanded={newMenuOpen}
+              onClick={() => setNewMenuOpen(o => !o)}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                width: 32,
+                background: NEW_BTN_BG,
+                border: 'none',
+                borderLeft: '1px solid rgba(0,0,0,0.18)',
+                borderRadius: '0 7px 7px 0',
+                color: NEW_BTN_FG,
+                cursor: 'pointer',
+              }}
+              onMouseEnter={e => (e.currentTarget.style.filter = 'brightness(1.08)')}
+              onMouseLeave={e => (e.currentTarget.style.filter = 'none')}
+            >
+              <ChevronDown
+                width={14}
+                height={14}
+                strokeWidth={2}
+                style={{ transform: newMenuOpen ? 'rotate(180deg)' : 'none', transition: 'transform 0.12s' }}
+              />
+            </button>
+          </div>
+
+          {newMenuOpen && (
+            <div
+              role="menu"
+              style={{
+                position: 'absolute',
+                top: 'calc(100% - 4px)',
+                left: 16,
+                right: 16,
+                background: 'var(--color-charcoal)',
+                border: '1px solid rgba(255,255,255,0.12)',
+                borderRadius: 7,
+                boxShadow: '0 8px 24px rgba(0,0,0,0.45)',
+                padding: 4,
+                zIndex: 30,
+              }}
+            >
+              <button
+                role="menuitem"
+                onClick={() => { setNewMenuOpen(false); onBulkImport?.(); }}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 8,
+                  padding: '8px 10px', width: '100%',
+                  background: 'none', border: 'none', borderRadius: 5,
+                  color: 'rgba(255,255,255,0.75)', fontSize: 13,
+                  cursor: 'pointer', fontFamily: 'var(--font-sans)', textAlign: 'left',
+                }}
+                onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.07)')}
+                onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+              >
+                <Upload width={14} height={14} strokeWidth={1.8} />
+                Bulk import
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      <div style={{ flex: 1, overflowY: 'auto' }}>
+
+        {/* Collapsed: team + timeline icons only */}
+        {collapsed && (
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6, padding: '10px 0' }}>
+            {/* Active team badge — click to expand */}
+            <div
+              title={activeTeam?.name ?? 'Team'}
+              onClick={onToggle}
+              style={{ cursor: 'pointer', flexShrink: 0 }}
+            >
+              <Badge
+                identity={{ color: activeTeam?.color ?? 'var(--primary)', icon: activeTeam?.icon ?? '__name_1__' }}
+                name={activeTeam?.name ?? ''}
+                shape="square"
+                size={28}
+              />
+            </div>
+            {/* Active timeline — click to expand */}
+            {activeTimeline && (
+              <div
+                title={activeTimeline.name}
+                onClick={onToggle}
+                style={{ cursor: 'pointer' }}
+              >
+                <Badge
+                  identity={{ color: activeTimeline.color, icon: activeTimeline.icon ?? '__none__' }}
+                  name={activeTimeline.name}
+                  shape="square"
+                  size={28}
+                />
+              </div>
+            )}
+
+            {/* New activity combo — icon button opens a menu with both actions.
+                order:-1 keeps it at the top, matching the expanded layout. */}
+            <div ref={newMenuRef} style={{ position: 'relative', flexShrink: 0, order: -1, marginBottom: 2 }}>
+              <button
+                title="New activity"
+                aria-haspopup="menu"
+                aria-expanded={newMenuOpen}
+                onClick={e => {
+                  if (newMenuOpen) { setNewMenuOpen(false); return; }
+                  const r = e.currentTarget.getBoundingClientRect();
+                  setCollapsedMenuPos({ top: r.top, left: r.right + 6 });
+                  setNewMenuOpen(true);
+                }}
+                style={{
+                  width: 30,
+                  height: 30,
+                  borderRadius: 7,
+                  background: NEW_BTN_BG,
+                  border: 'none',
+                  color: NEW_BTN_FG,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  cursor: 'pointer',
+                }}
+                onMouseEnter={e => (e.currentTarget.style.filter = 'brightness(1.08)')}
+                onMouseLeave={e => (e.currentTarget.style.filter = 'none')}
+              >
+                <CalendarPlus width={16} height={16} strokeWidth={2} />
+              </button>
+
+              {newMenuOpen && collapsedMenuPos && (
+                <div
+                  role="menu"
+                  style={{
+                    position: 'fixed',
+                    top: collapsedMenuPos.top,
+                    left: collapsedMenuPos.left,
+                    minWidth: 160,
+                    background: 'var(--color-charcoal)',
+                    border: '1px solid rgba(255,255,255,0.12)',
+                    borderRadius: 7,
+                    boxShadow: '0 8px 24px rgba(0,0,0,0.45)',
+                    padding: 4,
+                    zIndex: 30,
+                  }}
+                >
+                  <button
+                    role="menuitem"
+                    onClick={() => { setNewMenuOpen(false); onNewActivity?.(); }}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: 8,
+                      padding: '8px 10px', width: '100%',
+                      background: 'none', border: 'none', borderRadius: 5,
+                      color: 'rgba(255,255,255,0.75)', fontSize: 13,
+                      cursor: 'pointer', fontFamily: 'var(--font-sans)', textAlign: 'left',
+                    }}
+                    onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.07)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                  >
+                    <CalendarPlus width={14} height={14} strokeWidth={1.8} />
+                    New activity
+                  </button>
+                  <button
+                    role="menuitem"
+                    onClick={() => { setNewMenuOpen(false); onBulkImport?.(); }}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: 8,
+                      padding: '8px 10px', width: '100%',
+                      background: 'none', border: 'none', borderRadius: 5,
+                      color: 'rgba(255,255,255,0.75)', fontSize: 13,
+                      cursor: 'pointer', fontFamily: 'var(--font-sans)', textAlign: 'left',
+                    }}
+                    onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.07)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                  >
+                    <Upload width={14} height={14} strokeWidth={1.8} />
+                    Bulk import
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Team section */}
+        {!collapsed && (
+          <div style={{ borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
+            {/* Section header — collapsible, same pattern as TIMELINE */}
+            <button
+              onClick={() => setTeamOpen(o => !o)}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                width: '100%',
+                padding: '6px 12px 6px 16px',
+                background: 'none',
+                border: 'none',
+                cursor: 'pointer',
+                color: 'rgba(255,255,255,0.35)',
+                fontFamily: 'var(--font-sans)',
+              }}
+            >
+              <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                Team
+              </span>
+              {teamOpen
+                ? <ChevronDown width={12} height={12} strokeWidth={2} />
+                : <ChevronRight width={12} height={12} strokeWidth={2} />}
+            </button>
+
+            {/* Team rows — active team highlighted; others clickable to switch */}
+            {(teamOpen ? activeTeams : activeTeam ? [activeTeam] : []).map(t => (
+              <TeamRow
+                key={t.id}
+                team={t}
+                isActive={t.id === activeTeam?.id}
+                canEdit={canEditTeam}
+                onSelect={() => onSelectTeam?.(t.id)}
+                onEdit={() => onEditTeam?.(t)}
+              />
+            ))}
+            {/* Fallback when activeTeams not yet loaded but activeTeam is known */}
+            {!activeTeams.length && activeTeam && (
+              <TeamRow
+                team={activeTeam}
+                isActive
+                canEdit={canEditTeam}
+                onEdit={() => onEditTeam?.(activeTeam)}
+              />
+            )}
+
+            {/* New team button — only superadmins get onNewTeam passed from the parent */}
+            {teamOpen && onNewTeam && (
+              <button
+                onClick={onNewTeam}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 8,
+                  padding: '4px 16px', background: 'none', border: 'none',
+                  color: 'rgba(255,255,255,0.35)', fontSize: 12,
+                  cursor: 'pointer', width: '100%', fontFamily: 'var(--font-sans)',
+                }}
+                onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.7)')}
+                onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.35)')}
+              >
+                <Plus {...ICON_SM} />
+                New team
+              </button>
+            )}
+
+            {/* Archived teams — collapsible sub-section, shown when team section is open */}
+            {teamOpen && archivedTeams.length > 0 && (
+              <div>
+                <button
+                  onClick={() => setArchivedTeamsOpen(o => !o)}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 5,
+                    width: '100%', padding: '4px 8px 4px 16px',
+                    background: 'none', border: 'none', cursor: 'pointer',
+                    color: 'rgba(255,255,255,0.25)', fontFamily: 'var(--font-sans)',
+                  }}
+                  onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.5)')}
+                  onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.25)')}
+                >
+                  {archivedTeamsOpen
+                    ? <ChevronDown {...ICON_XS} />
+                    : <ChevronRight {...ICON_XS} />}
+                  <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                    Archived ({archivedTeams.length})
+                  </span>
+                </button>
+                {archivedTeamsOpen && archivedTeams.map(t => (
+                  <TeamRow
+                    key={t.id}
+                    team={t}
+                    isActive={false}
+                    canEdit={Boolean(onNewTeam)}
+                    onEdit={() => onEditTeam?.(t)}
+                  />
+                ))}
+              </div>
+            )}
+
+            {/* Members — only when team section is expanded */}
+            {teamOpen && (
+              <>
+                <button
+                  onClick={() => setMembersOpen(o => !o)}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 5,
+                    width: '100%',
+                    padding: '6px 8px 4px 16px',
+                    background: 'none',
+                    border: 'none',
+                    cursor: 'pointer',
+                    color: 'rgba(255,255,255,0.35)',
+                    fontFamily: 'var(--font-sans)',
+                  }}
+                >
+                  {membersOpen
+                    ? <ChevronDown {...ICON_XS} />
+                    : <ChevronRight {...ICON_XS} />}
+                  <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                    Members
+                  </span>
+                </button>
+
+                {membersOpen && (
+                  <div style={{ paddingBottom: 8 }}>
+                    {(apiMembers ?? []).map(m => {
+                      const displayName = (m as TeamMemberWithUser).displayName || m.id;
+                      const color = m.color ?? '#8b949e';
+                      const icon = (m as TeamMemberWithUser).icon ?? null;
+                      return (
+                        <MemberSidebarRow
+                          key={m.id}
+                          displayName={displayName}
+                          color={color}
+                          icon={icon}
+                          isInactive={Boolean((m as TeamMemberWithUser).archivedAt)}
+                          onEdit={onEditMember && (m as TeamMemberWithUser).userId !== currentUserId
+                            ? () => onEditMember(m as TeamMemberWithUser)
+                            : undefined}
+                        />
+                      );
+                    })}
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        )}
+
+        {/* Timelines section */}
+        <div style={{ padding: '8px 0' }}>
+          {!collapsed ? (
+            <button
+              onClick={() => setTimelinesOpen(o => !o)}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                width: '100%',
+                padding: '6px 12px 4px 16px',
+                background: 'none',
+                border: 'none',
+                cursor: 'pointer',
+                color: 'rgba(255,255,255,0.35)',
+                fontFamily: 'var(--font-sans)',
+              }}
+            >
+              <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                Timeline
+              </span>
+              {timelinesOpen
+                ? <ChevronDown width={12} height={12} strokeWidth={2} />
+                : <ChevronRight width={12} height={12} strokeWidth={2} />}
+            </button>
+          ) : (
+            <div style={{ height: 8 }} />
+          )}
+
+          {!collapsed && (timelinesOpen ? (
+            <>
+              {timelines.map(tl => (
+                <TimelineItem
+                  key={tl.id}
+                  timeline={tl}
+                  active={activeId === tl.id}
+                  collapsed={false}
+                  canEdit={canEditTeam}
+                  onClick={() => { setInternalActiveId(tl.id); onActiveTimelineChange?.(tl.id); }}
+                  onSettings={() => onEditTimeline?.(tl.id)}
+                />
+              ))}
+              <button
+                onClick={onNewTimeline}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  padding: '6px 16px',
+                  background: 'none',
+                  border: 'none',
+                  color: 'rgba(255,255,255,0.35)',
+                  fontSize: 12,
+                  cursor: onNewTimeline ? 'pointer' : 'default',
+                  width: '100%',
+                  fontFamily: 'var(--font-sans)',
+                  marginTop: 2,
+                }}
+                onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.7)')}
+                onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.35)')}
+              >
+                <Plus {...ICON_SM} />
+                New timeline
+              </button>
+
+              {/* Archived sub-section */}
+              {archivedTimelineItems.length > 0 && (
+                <>
+                  <button
+                    onClick={() => setArchivedOpen(o => !o)}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: 5,
+                      width: '100%', padding: '6px 12px 4px 16px',
+                      background: 'none', border: 'none', cursor: 'pointer',
+                      color: 'rgba(255,255,255,0.25)', fontFamily: 'var(--font-sans)',
+                      marginTop: 4,
+                    }}
+                    onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.45)')}
+                    onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.25)')}
+                  >
+                    {archivedOpen
+                      ? <ChevronDown {...ICON_XS} />
+                      : <ChevronRight {...ICON_XS} />}
+                    <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                      Archived
+                    </span>
+                    <span style={{ fontSize: 10, marginLeft: 4 }}>({archivedTimelineItems.length})</span>
+                  </button>
+
+                  {archivedOpen && (
+                    <div style={{ opacity: 0.6 }}>
+                      {archivedTimelineItems.map(tl => (
+                        <TimelineItem
+                          key={tl.id}
+                          timeline={tl}
+                          active={false}
+                          collapsed={false}
+                          canEdit={canEditTeam}
+                          onClick={() => {}}
+                          onSettings={() => onEditTimeline?.(tl.id)}
+                        />
+                      ))}
+                    </div>
+                  )}
+                </>
+              )}
+            </>
+          ) : activeTimeline ? (
+            /* Section collapsed: show just the active timeline.
+               Guard required because activeTimeline is null when the timeline
+               list is empty — that state is briefly true on initial load. */
+            <TimelineItem
+              timeline={activeTimeline}
+              active={true}
+              collapsed={false}
+              showDate={false}
+              canEdit={canEditTeam}
+              onClick={() => setTimelinesOpen(true)}
+              onSettings={() => onEditTimeline?.(activeTimeline.id)}
+            />
+          ) : null)}
+        </div>
+        {/* Connectors section — contextual to active timeline */}
+        {!collapsed && (
+          <div style={{ padding: '8px 0', borderTop: '1px solid rgba(255,255,255,0.08)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', padding: '6px 6px 4px 16px' }}>
+              <button
+                onClick={() => setConnectorsOpen(o => !o)}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 6, flex: 1,
+                  background: 'none', border: 'none', cursor: 'pointer',
+                  color: 'rgba(255,255,255,0.35)', fontFamily: 'var(--font-sans)',
+                  padding: 0,
+                }}
+              >
+                <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                  Connectors
+                </span>
+                {connectorsOpen
+                  ? <ChevronDown width={12} height={12} strokeWidth={2} />
+                  : <ChevronRight width={12} height={12} strokeWidth={2} />}
+              </button>
+            </div>
+
+            {connectorsOpen && (
+              <>
+                <div style={{
+                  padding: '0 16px 4px',
+                  fontSize: 10,
+                  color: 'rgba(255,255,255,0.22)',
+                  letterSpacing: '0.02em',
+                }}>
+                  {activeTimeline?.name}
+                </div>
+                {/* Stub: connected Trello board */}
+                <ConnectorItem name="Trello — Launch Board" status="Synced · 2 min ago" color="#0079BF" />
+                <button
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 8,
+                    padding: '6px 16px', background: 'none', border: 'none',
+                    color: 'rgba(255,255,255,0.35)', fontSize: 12,
+                    cursor: 'pointer', width: '100%', fontFamily: 'var(--font-sans)',
+                  }}
+                  onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.7)')}
+                  onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.35)')}
+                >
+                  <Plug width={13} height={13} strokeWidth={1.8} />
+                  Add connector
+                </button>
+              </>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Resize handle */}
+      {!collapsed && (
+        <div
+          onMouseDown={onHandleMouseDown}
+          style={{
+            position: 'absolute',
+            top: 0,
+            right: 0,
+            width: 5,
+            height: '100%',
+            cursor: 'col-resize',
+            zIndex: 20,
+          }}
+          onMouseEnter={e => ((e.currentTarget.lastElementChild as HTMLElement).style.background = 'var(--primary)')}
+          onMouseLeave={e => ((e.currentTarget.lastElementChild as HTMLElement).style.background = 'transparent')}
+        >
+          <div
+            style={{
+              position: 'absolute',
+              top: 0,
+              right: 0,
+              width: 2,
+              height: '100%',
+              background: 'transparent',
+              transition: 'background 0.15s',
+              pointerEvents: 'none',
+            }}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+````
+
+## File: packages/web/src/hooks/useShares.ts
+````typescript
+/**
+ * TanStack Query hooks for Share CRUD and the public share projection.
+ *
+ * Authenticated hooks (useCreateShare, useListShares, useDeleteShare) require
+ * an auth token. useShareProjection is public and uses a plain fetch.
+ */
+
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import type { components } from '@draba/shared'
+import { createAuthFetch, API_BASE, ApiError } from '@/lib/api'
+import { useAuth } from '@/contexts/AuthContext'
+
+type Share = components['schemas']['Share']
+type ShareProjection = components['schemas']['ShareProjection']
+
+const sharesKey = (teamId: string, timelineId: string) =>
+  ['teams', teamId, 'timelines', timelineId, 'shares'] as const
+
+// ── Authenticated hooks ───────────────────────────────────────────────────────
+
+/** Lists all shares for a timeline. */
+export function useListShares(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  return useQuery({
+    queryKey: sharesKey(teamId, timelineId),
+    queryFn: () =>
+      authFetch<Share[]>(`/teams/${teamId}/timelines/${timelineId}/shares`),
+    enabled: Boolean(teamId) && Boolean(timelineId),
+    // The share modals are this query's only consumers and mount on demand —
+    // override the app-wide 30s staleTime so the view telemetry they render
+    // (viewCount / lastViewedAt) is current every time a modal opens.
+    staleTime: 0,
+    refetchOnMount: 'always',
+  })
 }
 
-// AdminUserRow is a flat view of a user for the admin users list. It includes
-// the user's fields plus the count of active team memberships.
-type AdminUserRow struct {
-	User
-	TeamCount int `db:"team_count" json:"teamCount"`
+interface CreateShareInput {
+  /** "view" (default) or "ics" — ICS shares are live calendar feeds. */
+  kind?: 'view' | 'ics'
+  /** ICS shares only: "timeline" (every activity) or "member" (one member's). */
+  scope?: 'timeline' | 'member'
+  /** ICS shares with scope "member" only. */
+  memberId?: string
+  name?: string | null
+  description?: string | null
+  viewType?: string
+  viewConfig?: string
+  /** When set, the share is locked and requires unlocking to view. View shares only. */
+  password?: string
 }
 
-// Valid Share.Kind and Share.Scope values.
-const (
-	ShareKindView      = "view"
-	ShareKindICS       = "ics"
-	ShareScopeTimeline = "timeline"
-	ShareScopeMember   = "member"
-)
-
-// Share is a public read-only link scoped to one timeline. Kind discriminates
-// the two flavors (migration 022): "view" shares freeze one view configuration
-// and are served as a web snapshot at /s/{token}; "ics" shares are live
-// subscribable calendar feeds served at GET /shares/{token}.ics. ICS shares
-// carry Scope ("timeline" | "member") + MemberID and never a view config,
-// filter, or password — the unguessable token is their only secret.
-// PasswordHash is set only when a view share requires a password (Phase 13.2);
-// ExpiresAt and RevokedAt support lifecycle management (Phase 13.4/13.5).
-type Share struct {
-	ID           string     `db:"id"             json:"id"`
-	TimelineID   string     `db:"timeline_id"    json:"timelineId"`
-	Token        string     `db:"token"          json:"token"`
-	Kind         string     `db:"kind"           json:"kind"`
-	Scope        *string    `db:"scope"          json:"scope,omitempty"`
-	MemberID     *string    `db:"member_id"      json:"memberId,omitempty"`
-	Name         *string    `db:"name"           json:"name,omitempty"`
-	Description  *string    `db:"description"    json:"description,omitempty"`
-	ViewType     string     `db:"view_type"      json:"viewType"`
-	ViewConfig   string     `db:"view_config"    json:"viewConfig"`
-	PasswordHash *string    `db:"password_hash"  json:"-"`
-	ExpiresAt    *time.Time `db:"expires_at"     json:"expiresAt,omitempty"`
-	// CreatedBy is nil when the share was created by a superadmin who holds
-	// no team_members row in the timeline's team (migration 023).
-	CreatedBy    *string    `db:"created_by"     json:"createdBy,omitempty"`
-	CreatedAt    time.Time  `db:"created_at"     json:"createdAt"`
-	LastViewedAt *time.Time `db:"last_viewed_at" json:"lastViewedAt,omitempty"`
-	ViewCount    int        `db:"view_count"     json:"viewCount"`
-	RevokedAt    *time.Time `db:"revoked_at"     json:"revokedAt,omitempty"`
-	// Protected is a derived, read-only flag (password_hash is never serialized).
-	// It is populated by the repo read methods so clients can show a lock badge
-	// without ever seeing the hash.
-	Protected bool `db:"-" json:"protected"`
+/** Creates a share and invalidates the list. */
+export function useCreateShare(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (input: CreateShareInput) =>
+      authFetch<Share>(`/timelines/${timelineId}/shares`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(input),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: sharesKey(teamId, timelineId) }),
+  })
 }
 
-// PublicMember is the safe projection of a team member for public share
-// responses. It exposes only display fields — never email, role, or user_id.
-type PublicMember struct {
-	ID          string  `json:"id"`
-	DisplayName string  `json:"displayName"`
-	Color       *string `json:"color,omitempty"`
-	Icon        *string `json:"icon,omitempty"`
+/**
+ * Rotates a share's token, immediately invalidating the old URL — the
+ * revocation story for ICS feeds, which have no password gate.
+ */
+export function useRegenerateShare(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (shareId: string) =>
+      authFetch<Share>(`/shares/${shareId}/regenerate`, { method: 'POST' }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: sharesKey(teamId, timelineId) }),
+  })
 }
 
-// PublicActivity is the safe projection of an activity for public share
-// responses. It includes standard display fields but omits notes (unless
-// explicitly included for List shares with Notes enabled), caldav/google
-// identifiers, and any internal fields.
-type PublicActivity struct {
-	ID                string    `json:"id"`
-	Title             string    `json:"title"`
-	Description       *string   `json:"description,omitempty"`
-	Notes             *string   `json:"notes,omitempty"`
-	Icon              *string   `json:"icon,omitempty"`
-	Color             *string   `json:"color,omitempty"`
-	StartAt           time.Time `json:"startAt"`
-	EndAt             time.Time `json:"endAt"`
-	AllDay            bool      `json:"allDay"`
-	StatusID          *string   `json:"statusId,omitempty"`
-	ParentActivityID  *string   `json:"parentActivityId,omitempty"`
-	PercentComplete   *int      `json:"percentComplete,omitempty"`
-	AssignedMemberIDs []string  `json:"assignedMemberIds"`
-	TagIDs            []string  `json:"tagIds"`
+/** Deletes a share and invalidates the list. */
+export function useDeleteShare(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (shareId: string) =>
+      authFetch<void>(`/shares/${shareId}`, { method: 'DELETE' }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: sharesKey(teamId, timelineId) }),
+  })
 }
 
-// PublicTimeline is the safe timeline projection for share responses.
-type PublicTimeline struct {
-	ID        string  `json:"id"`
-	Name      string  `json:"name"`
-	Color     *string `json:"color,omitempty"`
-	Icon      *string `json:"icon,omitempty"`
-	StartDate string  `json:"startDate"`
-	EndDate   string  `json:"endDate"`
+// ── Public hooks (no auth) ────────────────────────────────────────────────────
+
+/**
+ * Fetches a public share projection. No authentication required.
+ *
+ * For password-protected shares, pass the `viewToken` obtained from
+ * {@link useUnlockShare}; it is sent as a Bearer credential. Without a valid
+ * token a locked share responds 401 — surfaced here as an ApiError with code
+ * `PASSWORD_REQUIRED` so the viewer can render an unlock prompt.
+ */
+export function useShareProjection(token: string | undefined, viewToken?: string | null) {
+  return useQuery({
+    queryKey: ['shares', token, viewToken ?? null] as const,
+    queryFn: async () => {
+      const headers: HeadersInit = viewToken ? { Authorization: `Bearer ${viewToken}` } : {}
+      const res = await fetch(`${API_BASE}/shares/${token}`, { headers })
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}))
+        // A locked share returns { passwordRequired: true } (no error envelope).
+        if (res.status === 401 && body?.passwordRequired) {
+          throw new ApiError(401, 'PASSWORD_REQUIRED', 'password required')
+        }
+        throw new ApiError(res.status, body?.error?.code ?? 'ERROR', body?.error?.message ?? res.statusText)
+      }
+      return res.json() as Promise<ShareProjection>
+    },
+    enabled: Boolean(token),
+    staleTime: 60_000,
+    retry: false,
+  })
 }
 
-// PublicShare is the safe projection of a share row for the unauthenticated
-// gateway response. It omits operational telemetry (view_count, last_viewed_at)
-// and internal fields (created_by, revoked_at) that must not reach anonymous callers.
-type PublicShare struct {
-	ID         string     `json:"id"`
-	TimelineID string     `json:"timelineId"`
-	Token      string     `json:"token"`
-	Name       *string    `json:"name,omitempty"`
-	ViewType   string     `json:"viewType"`
-	ViewConfig string     `json:"viewConfig"`
-	CreatedAt  time.Time  `json:"createdAt"`
-	ExpiresAt  *time.Time `json:"expiresAt,omitempty"`
-}
-
-// ShareProjection is the full aggregate returned by GET /shares/{token}.
-// It contains all data the public viewer needs to render the configured view.
-type ShareProjection struct {
-	Share      PublicShare      `json:"share"`
-	Timeline   PublicTimeline   `json:"timeline"`
-	TeamName   string           `json:"teamName"`
-	Members    []PublicMember   `json:"members"`
-	Statuses   []Status         `json:"statuses"`
-	Tags       []Tag            `json:"tags"`
-	Activities []PublicActivity `json:"activities"`
-}
-
-// RevokeUserResult summarizes the outcome of POST /users/:id/revoke.
-// The three counters let the caller show a meaningful summary in the UI.
-type RevokeUserResult struct {
-	AccountDeactivated     bool `json:"accountDeactivated"`
-	MembershipsInactivated int  `json:"membershipsInactivated"`
-	MembershipsRemoved     int  `json:"membershipsRemoved"`
-}
-
-// StatusTemplate is a reusable named preset of statuses owned by a team.
-// When a timeline is created the team's chosen template's items are copied
-// into live Status rows for that timeline.
-type StatusTemplate struct {
-	ID          string    `db:"id"          json:"id"`
-	TeamID      string    `db:"team_id"     json:"teamId"`
-	Name        string    `db:"name"        json:"name"`
-	Description *string   `db:"description" json:"description,omitempty"`
-	Position    int       `db:"position"    json:"position"`
-	CreatedBy   string    `db:"created_by"  json:"createdBy"`
-	CreatedAt   time.Time `db:"created_at"  json:"createdAt"`
-	UpdatedAt   time.Time `db:"updated_at"  json:"updatedAt"`
-	// Items is populated by the repository when listing templates.
-	Items []StatusTemplateItem `db:"-" json:"items"`
-}
-
-// StatusTemplateItem is one status value within a StatusTemplate.
-type StatusTemplateItem struct {
-	ID         string  `db:"id"          json:"id"`
-	TemplateID string  `db:"template_id" json:"templateId"`
-	Name       string  `db:"name"        json:"name"`
-	Color      string  `db:"color"       json:"color"`
-	Icon       *string `db:"icon"        json:"icon,omitempty"`
-	IsClosed   bool    `db:"is_closed"   json:"isClosed"`
-	Position   int     `db:"position"    json:"position"`
-}
-
-// Status is a live status value on a specific timeline. Rows are copied from a
-// StatusTemplate's items when the timeline is created and then evolve independently.
-type Status struct {
-	ID         string    `db:"id"          json:"id"`
-	TimelineID string    `db:"timeline_id" json:"timelineId"`
-	Name       string    `db:"name"        json:"name"`
-	Color      string    `db:"color"       json:"color"`
-	Icon       *string   `db:"icon"        json:"icon,omitempty"`
-	IsClosed   bool      `db:"is_closed"   json:"isClosed"`
-	Position   int       `db:"position"    json:"position"`
-	CreatedAt  time.Time `db:"created_at"  json:"createdAt"`
-	UpdatedAt  time.Time `db:"updated_at"  json:"updatedAt"`
-}
-
-// TimelineAccessEntry is a single timeline access grant joined with the team
-// member's display info. Returned by GET /teams/:id/timelines/:timelineId/access.
-type TimelineAccessEntry struct {
-	TimelineID   string  `db:"timeline_id"    json:"timelineId"`
-	TeamMemberID string  `db:"team_member_id" json:"teamMemberId"`
-	Role         string  `db:"role"           json:"role"`
-	DisplayName  string  `db:"display_name"   json:"displayName"`
-	Email        string  `db:"email"          json:"email"`
-	Color        *string `db:"color"          json:"color,omitempty"`
-	Icon         *string `db:"icon"           json:"icon,omitempty"`
-	UserID       *string `db:"user_id"        json:"userId,omitempty"`
-}
-
-// Tag is a team-scoped label that can be applied to activities. Tags are
-// normalized: a team_id+name pair is unique, enabling rename-all and
-// name-based filter matching across timelines.
-type Tag struct {
-	ID        string    `db:"id"         json:"id"`
-	TeamID    string    `db:"team_id"    json:"teamId"`
-	Name      string    `db:"name"       json:"name"`
-	Color     *string   `db:"color"      json:"color,omitempty"`
-	CreatedBy string    `db:"created_by" json:"createdBy"`
-	CreatedAt time.Time `db:"created_at" json:"createdAt"`
-}
-
-// Invite is a single-use token that grants an email address the right to
-// join a Team. AcceptedAt is non-nil once consumed; expired or accepted
-// invites are rejected by the registration handler.
-type Invite struct {
-	ID         string     `db:"id"          json:"id"`
-	TeamID     string     `db:"team_id"     json:"teamId"`
-	Email      string     `db:"email"       json:"email"`
-	Token      string     `db:"token"       json:"token"`
-	Role       string     `db:"role"        json:"role"`
-	InvitedBy  string     `db:"invited_by"  json:"invitedBy"`
-	ExpiresAt  time.Time  `db:"expires_at"  json:"expiresAt"`
-	AcceptedAt *time.Time `db:"accepted_at" json:"acceptedAt,omitempty"`
-	CreatedAt  time.Time  `db:"created_at"  json:"createdAt"`
+/**
+ * Exchanges a share password for a short-lived view token. No authentication
+ * required. The returned token is scoped to this share and expires server-side.
+ */
+export function useUnlockShare(token: string | undefined) {
+  return useMutation({
+    mutationFn: async (password: string): Promise<string> => {
+      const res = await fetch(`${API_BASE}/shares/${token}/unlock`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password }),
+      })
+      const body = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        throw new ApiError(res.status, body?.error?.code ?? 'ERROR', body?.error?.message ?? res.statusText)
+      }
+      return (body as { token: string }).token
+    },
+  })
 }
 ````
 
@@ -52482,6 +52107,440 @@ export default function ListView({
 }
 ````
 
+## File: packages/api/internal/models/models.go
+````go
+// Package models holds the domain types shared across the API, db,
+// and event-bus packages. These types are persisted directly via sqlx
+// (db tags) and serialised on the wire (json tags); changing tags is a
+// schema change.
+package models
+
+import "time"
+
+// Activity is a scheduled item of work belonging to a Timeline. ArchivedAt is
+// non-nil when the activity is soft-deleted; list endpoints exclude archived
+// activities by default.
+//
+// AssignedMemberIDs is not stored on the activities table; it is populated by
+// the repository from activity_assignments after every list query.
+//
+// GoogleEventID and CaldavUID are preserved as-is — they identify the
+// corresponding records in external calendar systems (VEVENT identifiers).
+type Activity struct {
+	ID                string     `db:"id"                  json:"id"`
+	TimelineID        string     `db:"timeline_id"         json:"timelineId"`
+	Title             string     `db:"title"               json:"title"`
+	Description       *string    `db:"description"         json:"description,omitempty"`
+	Notes             *string    `db:"notes"               json:"notes,omitempty"`
+	Icon              *string    `db:"icon"                json:"icon,omitempty"`
+	Color             *string    `db:"color"               json:"color,omitempty"`
+	StartAt           time.Time  `db:"start_at"            json:"startAt"`
+	EndAt             time.Time  `db:"end_at"              json:"endAt"`
+	AllDay            bool       `db:"all_day"             json:"allDay"`
+	StatusID          *string    `db:"status_id"           json:"statusId,omitempty"`
+	ParentActivityID  *string    `db:"parent_activity_id"  json:"parentActivityId,omitempty"`
+	PercentComplete   *int       `db:"percent_complete"    json:"percentComplete,omitempty"`
+	Location          *string    `db:"location"            json:"location,omitempty"`
+	URL               *string    `db:"url"                 json:"url,omitempty"`
+	Rrule             *string    `db:"rrule"               json:"rrule,omitempty"`
+	CaldavUID         *string    `db:"caldav_uid"          json:"caldavUid,omitempty"`
+	GoogleEventID     *string    `db:"google_event_id"     json:"googleEventId,omitempty"`
+	CreatedBy         string     `db:"created_by"          json:"createdBy"`
+	CreatedAt         time.Time  `db:"created_at"          json:"createdAt"`
+	UpdatedAt         time.Time  `db:"updated_at"          json:"updatedAt"`
+	ArchivedAt        *time.Time `db:"archived_at"         json:"archivedAt,omitempty"`
+	AssignedMemberIDs []string   `db:"-"                   json:"assignedMemberIds"`
+	TagIDs            []string   `db:"-"                   json:"tagIds"`
+}
+
+// TeamMemberWithUser joins a TeamMember row with its associated User so
+// callers receive display names and emails in a single query. Participants
+// (no user account) have empty email and avatar; their display_name comes
+// from team_members.display_name via COALESCE in the query.
+type TeamMemberWithUser struct {
+	TeamMember
+	Email       string  `db:"email"        json:"email"`
+	DisplayName string  `db:"display_name" json:"displayName"`
+	AvatarURL   *string `db:"avatar_url"   json:"avatarUrl,omitempty"`
+}
+
+// User is an authenticated account. PasswordHash is omitted from JSON
+// to avoid leaking it through any handler that returns a User.
+// ArchivedAt is non-nil when the account is inactivated; login is rejected
+// for archived users. Color and Icon are user-level identity fields (migration
+// 010); they propagate to team_members rows for the user when changed.
+type User struct {
+	ID           string     `db:"id"             json:"id"`
+	Email        string     `db:"email"          json:"email"`
+	PasswordHash string     `db:"password_hash"  json:"-"`
+	DisplayName  string     `db:"display_name"   json:"displayName"`
+	AvatarURL    *string    `db:"avatar_url"     json:"avatarUrl,omitempty"`
+	Color        *string    `db:"color"          json:"color,omitempty"`
+	Icon         *string    `db:"icon"           json:"icon,omitempty"`
+	IsSuperadmin bool       `db:"is_superadmin"  json:"isSuperadmin"`
+	CreatedAt    time.Time  `db:"created_at"     json:"createdAt"`
+	UpdatedAt    time.Time  `db:"updated_at"     json:"updatedAt"`
+	ArchivedAt   *time.Time `db:"archived_at"    json:"archivedAt,omitempty"`
+}
+
+// Team is a workspace that groups users and their scheduled work. Color and
+// Icon are identity fields added in migration 006; both are nullable until
+// explicitly set by an admin. Description, Notes, and ArchivedAt are added in
+// migration 008; ArchivedAt is non-nil when the team is soft-deleted.
+// InviteLinkToken is a stable, reusable token added in migration 009; when
+// non-nil it can be used by anyone to join the team during registration.
+type Team struct {
+	ID              string     `db:"id"                  json:"id"`
+	Name            string     `db:"name"                json:"name"`
+	Slug            string     `db:"slug"                json:"slug"`
+	Description     *string    `db:"description"         json:"description,omitempty"`
+	Notes           *string    `db:"notes"               json:"notes,omitempty"`
+	Color           *string    `db:"color"               json:"color,omitempty"`
+	Icon            *string    `db:"icon"                json:"icon,omitempty"`
+	InviteLinkToken *string    `db:"invite_link_token"   json:"inviteLinkToken,omitempty"`
+	CreatedAt       time.Time  `db:"created_at"          json:"createdAt"`
+	UpdatedAt       time.Time  `db:"updated_at"          json:"updatedAt"`
+	ArchivedAt      *time.Time `db:"archived_at"         json:"archivedAt,omitempty"`
+}
+
+// TeamMember is the join row that puts a person in a Team. UserID is nil
+// for login-less Participants; DisplayName is populated for them instead.
+// Role is the team-level role: "admin" or "member". Color and Icon are
+// identity fields (migration 006); Color stores a color ID (e.g. "teal").
+// ArchivedAt is non-nil when the member is inactivated (migration 009);
+// inactivated members lose access but their data and assignments are preserved.
+type TeamMember struct {
+	ID          string     `db:"id"           json:"id"`
+	TeamID      string     `db:"team_id"      json:"teamId"`
+	UserID      *string    `db:"user_id"      json:"userId,omitempty"`
+	DisplayName *string    `db:"display_name" json:"displayName,omitempty"`
+	Role        string     `db:"role"         json:"role"`
+	Color       *string    `db:"color"        json:"color,omitempty"`
+	Icon        *string    `db:"icon"         json:"icon,omitempty"`
+	JoinedAt    time.Time  `db:"joined_at"    json:"joinedAt"`
+	ArchivedAt  *time.Time `db:"archived_at"  json:"archivedAt,omitempty"`
+}
+
+// MemberStats holds computed activity and timeline counts for a member.
+// All counts are date-relative and scoped to activities the member is assigned to.
+type MemberStats struct {
+	ActiveTimelines    int `json:"activeTimelines"`
+	ArchivedTimelines  int `json:"archivedTimelines"`
+	PastDue            int `json:"pastDue"`
+	Running            int `json:"running"`
+	Upcoming           int `json:"upcoming"`
+	Unscheduled        int `json:"unscheduled"`
+	ArchivedActivities int `json:"archivedActivities"`
+}
+
+// MemberDetail combines a TeamMemberWithUser with computed stats and the
+// member's full list of team memberships. Returned by GET /teams/:id/members/:memberId.
+// UserArchivedAt reflects users.archived_at (account-level deactivation), distinct
+// from ArchivedAt which is team_members.archived_at (membership-level inactivation).
+type MemberDetail struct {
+	TeamMemberWithUser
+	Stats          MemberStats          `json:"stats"`
+	Teams          []TeamMemberWithUser `json:"teams"`
+	Deletable      bool                 `json:"deletable"`
+	UserArchivedAt *time.Time           `json:"userArchivedAt,omitempty"`
+}
+
+// Timeline is a named date range over a team's events. It is not a data
+// container — it is a view over a team's events for a given date window.
+// Access is governed by timeline_access + team role; share_token allows
+// unauthenticated read access via a stable public URL. Color and Icon are
+// identity fields (migration 006). Description and Notes are free-text fields
+// added in migration 013.
+type Timeline struct {
+	ID          string     `db:"id"          json:"id"`
+	TeamID      string     `db:"team_id"     json:"teamId"`
+	Name        string     `db:"name"        json:"name"`
+	Description *string    `db:"description" json:"description,omitempty"`
+	Notes       *string    `db:"notes"       json:"notes,omitempty"`
+	StartDate   string     `db:"start_date"  json:"startDate"`
+	EndDate     string     `db:"end_date"    json:"endDate"`
+	Color       *string    `db:"color"       json:"color,omitempty"`
+	Icon        *string    `db:"icon"        json:"icon,omitempty"`
+	ShareToken  string     `db:"share_token" json:"shareToken"`
+	IcalToken   string     `db:"ical_token"  json:"icalToken"`
+	CreatedBy   string     `db:"created_by"  json:"createdBy"`
+	CreatedAt   time.Time  `db:"created_at"  json:"createdAt"`
+	UpdatedAt   time.Time  `db:"updated_at"  json:"updatedAt"`
+	ArchivedAt  *time.Time `db:"archived_at" json:"archivedAt,omitempty"`
+	// ShareCount is a derived count of the timeline's active (non-revoked,
+	// non-expired) share links — view shares and ICS feeds alike. Populated by
+	// the repo read queries; it backs the timeline tile's share chip (13.5).
+	ShareCount int `db:"share_count" json:"shareCount"`
+}
+
+// SavedFilter is a user-owned, team-scoped named filter spec. Definition is
+// an opaque JSON string interpreted by the client; the server treats it as
+// arbitrary text and only validates that it parses as JSON.
+type SavedFilter struct {
+	ID           string    `db:"id"             json:"id"`
+	TeamID       string    `db:"team_id"        json:"teamId"`
+	UserID       string    `db:"user_id"        json:"userId"`
+	Name         string    `db:"name"           json:"name"`
+	Definition   string    `db:"definition"     json:"definition"`
+	IsTeamFilter bool      `db:"is_team_filter" json:"isTeamFilter"`
+	CreatedAt    time.Time `db:"created_at"     json:"createdAt"`
+	UpdatedAt    time.Time `db:"updated_at"     json:"updatedAt"`
+}
+
+// UserPreference stores a single key/value setting for a user, optionally
+// scoped to a timeline. TimelineID is “” for global preferences so the
+// UNIQUE(user_id, timeline_id, key) DB constraint works without NULL handling.
+// Serialised JSON omits TimelineID when empty so callers see null for global prefs.
+type UserPreference struct {
+	ID         string    `db:"id"          json:"id"`
+	UserID     string    `db:"user_id"     json:"userId"`
+	TimelineID string    `db:"timeline_id" json:"timelineId,omitempty"`
+	Key        string    `db:"key"         json:"key"`
+	Value      string    `db:"value"       json:"value"`
+	UpdatedAt  time.Time `db:"updated_at"  json:"updatedAt"`
+}
+
+// APIToken is a long-lived Bearer credential a user issues for programmatic
+// access. token_hash stores SHA-256(rawToken); the raw value is shown to the
+// caller only once on creation. RevokedAt is non-nil when the token has been
+// revoked; revoked tokens are not deleted so listing remains stable.
+type APIToken struct {
+	ID         string     `db:"id"           json:"id"`
+	UserID     string     `db:"user_id"      json:"userId"`
+	Name       string     `db:"name"         json:"name"`
+	TokenHash  string     `db:"token_hash"   json:"-"`
+	Scope      string     `db:"scope"        json:"scope"`
+	LastUsedAt *time.Time `db:"last_used_at" json:"lastUsedAt,omitempty"`
+	CreatedAt  time.Time  `db:"created_at"   json:"createdAt"`
+	RevokedAt  *time.Time `db:"revoked_at"   json:"revokedAt,omitempty"`
+}
+
+// InstanceSetting stores a single instance-level configuration value.
+// SMTP config and defaults live here. The value column is plain text;
+// the mailer package handles decryption of the SMTP password field.
+type InstanceSetting struct {
+	Key       string    `db:"key"        json:"key"`
+	Value     string    `db:"value"      json:"value"`
+	UpdatedAt time.Time `db:"updated_at" json:"updatedAt"`
+}
+
+// PasswordResetToken is a single-use token for the forgot-password flow.
+// TokenHash stores SHA-256 of the raw token; the raw value is sent by email
+// and never stored. UsedAt is set when the token is consumed.
+type PasswordResetToken struct {
+	ID        string     `db:"id"         json:"id"`
+	UserID    string     `db:"user_id"    json:"userId"`
+	TokenHash string     `db:"token_hash" json:"-"`
+	ExpiresAt time.Time  `db:"expires_at" json:"expiresAt"`
+	UsedAt    *time.Time `db:"used_at"    json:"usedAt,omitempty"`
+	CreatedAt time.Time  `db:"created_at" json:"createdAt"`
+}
+
+// AdminUserRow is a flat view of a user for the admin users list. It includes
+// the user's fields plus the count of active team memberships.
+type AdminUserRow struct {
+	User
+	TeamCount int `db:"team_count" json:"teamCount"`
+}
+
+// Valid Share.Kind and Share.Scope values.
+const (
+	ShareKindView      = "view"
+	ShareKindICS       = "ics"
+	ShareScopeTimeline = "timeline"
+	ShareScopeMember   = "member"
+)
+
+// Share is a public read-only link scoped to one timeline. Kind discriminates
+// the two flavors (migration 022): "view" shares freeze one view configuration
+// and are served as a web snapshot at /s/{token}; "ics" shares are live
+// subscribable calendar feeds served at GET /shares/{token}.ics. ICS shares
+// carry Scope ("timeline" | "member") + MemberID and never a view config,
+// filter, or password — the unguessable token is their only secret.
+// PasswordHash is set only when a view share requires a password (Phase 13.2);
+// ExpiresAt and RevokedAt support lifecycle management (Phase 13.4/13.5).
+type Share struct {
+	ID           string     `db:"id"             json:"id"`
+	TimelineID   string     `db:"timeline_id"    json:"timelineId"`
+	Token        string     `db:"token"          json:"token"`
+	Kind         string     `db:"kind"           json:"kind"`
+	Scope        *string    `db:"scope"          json:"scope,omitempty"`
+	MemberID     *string    `db:"member_id"      json:"memberId,omitempty"`
+	Name         *string    `db:"name"           json:"name,omitempty"`
+	Description  *string    `db:"description"    json:"description,omitempty"`
+	ViewType     string     `db:"view_type"      json:"viewType"`
+	ViewConfig   string     `db:"view_config"    json:"viewConfig"`
+	PasswordHash *string    `db:"password_hash"  json:"-"`
+	ExpiresAt    *time.Time `db:"expires_at"     json:"expiresAt,omitempty"`
+	// CreatedBy is nil when the share was created by a superadmin who holds
+	// no team_members row in the timeline's team (migration 023).
+	CreatedBy    *string    `db:"created_by"     json:"createdBy,omitempty"`
+	CreatedAt    time.Time  `db:"created_at"     json:"createdAt"`
+	LastViewedAt *time.Time `db:"last_viewed_at" json:"lastViewedAt,omitempty"`
+	ViewCount    int        `db:"view_count"     json:"viewCount"`
+	RevokedAt    *time.Time `db:"revoked_at"     json:"revokedAt,omitempty"`
+	// Protected is a derived, read-only flag (password_hash is never serialized).
+	// It is populated by the repo read methods so clients can show a lock badge
+	// without ever seeing the hash.
+	Protected bool `db:"-" json:"protected"`
+}
+
+// PublicMember is the safe projection of a team member for public share
+// responses. It exposes only display fields — never email, role, or user_id.
+type PublicMember struct {
+	ID          string  `json:"id"`
+	DisplayName string  `json:"displayName"`
+	Color       *string `json:"color,omitempty"`
+	Icon        *string `json:"icon,omitempty"`
+}
+
+// PublicActivity is the safe projection of an activity for public share
+// responses. It includes standard display fields but omits notes (unless
+// explicitly included for List shares with Notes enabled), caldav/google
+// identifiers, and any internal fields.
+type PublicActivity struct {
+	ID                string    `json:"id"`
+	Title             string    `json:"title"`
+	Description       *string   `json:"description,omitempty"`
+	Notes             *string   `json:"notes,omitempty"`
+	Icon              *string   `json:"icon,omitempty"`
+	Color             *string   `json:"color,omitempty"`
+	StartAt           time.Time `json:"startAt"`
+	EndAt             time.Time `json:"endAt"`
+	AllDay            bool      `json:"allDay"`
+	StatusID          *string   `json:"statusId,omitempty"`
+	ParentActivityID  *string   `json:"parentActivityId,omitempty"`
+	PercentComplete   *int      `json:"percentComplete,omitempty"`
+	AssignedMemberIDs []string  `json:"assignedMemberIds"`
+	TagIDs            []string  `json:"tagIds"`
+}
+
+// PublicTimeline is the safe timeline projection for share responses.
+type PublicTimeline struct {
+	ID        string  `json:"id"`
+	Name      string  `json:"name"`
+	Color     *string `json:"color,omitempty"`
+	Icon      *string `json:"icon,omitempty"`
+	StartDate string  `json:"startDate"`
+	EndDate   string  `json:"endDate"`
+}
+
+// PublicShare is the safe projection of a share row for the unauthenticated
+// gateway response. It omits operational telemetry (view_count, last_viewed_at)
+// and internal fields (created_by, revoked_at) that must not reach anonymous callers.
+type PublicShare struct {
+	ID         string     `json:"id"`
+	TimelineID string     `json:"timelineId"`
+	Token      string     `json:"token"`
+	Name       *string    `json:"name,omitempty"`
+	ViewType   string     `json:"viewType"`
+	ViewConfig string     `json:"viewConfig"`
+	CreatedAt  time.Time  `json:"createdAt"`
+	ExpiresAt  *time.Time `json:"expiresAt,omitempty"`
+}
+
+// ShareProjection is the full aggregate returned by GET /shares/{token}.
+// It contains all data the public viewer needs to render the configured view.
+type ShareProjection struct {
+	Share      PublicShare      `json:"share"`
+	Timeline   PublicTimeline   `json:"timeline"`
+	TeamName   string           `json:"teamName"`
+	Members    []PublicMember   `json:"members"`
+	Statuses   []Status         `json:"statuses"`
+	Tags       []Tag            `json:"tags"`
+	Activities []PublicActivity `json:"activities"`
+}
+
+// RevokeUserResult summarizes the outcome of POST /users/:id/revoke.
+// The three counters let the caller show a meaningful summary in the UI.
+type RevokeUserResult struct {
+	AccountDeactivated     bool `json:"accountDeactivated"`
+	MembershipsInactivated int  `json:"membershipsInactivated"`
+	MembershipsRemoved     int  `json:"membershipsRemoved"`
+}
+
+// StatusTemplate is a reusable named preset of statuses owned by a team.
+// When a timeline is created the team's chosen template's items are copied
+// into live Status rows for that timeline.
+type StatusTemplate struct {
+	ID          string    `db:"id"          json:"id"`
+	TeamID      string    `db:"team_id"     json:"teamId"`
+	Name        string    `db:"name"        json:"name"`
+	Description *string   `db:"description" json:"description,omitempty"`
+	Position    int       `db:"position"    json:"position"`
+	CreatedBy   string    `db:"created_by"  json:"createdBy"`
+	CreatedAt   time.Time `db:"created_at"  json:"createdAt"`
+	UpdatedAt   time.Time `db:"updated_at"  json:"updatedAt"`
+	// Items is populated by the repository when listing templates.
+	Items []StatusTemplateItem `db:"-" json:"items"`
+}
+
+// StatusTemplateItem is one status value within a StatusTemplate.
+type StatusTemplateItem struct {
+	ID         string  `db:"id"          json:"id"`
+	TemplateID string  `db:"template_id" json:"templateId"`
+	Name       string  `db:"name"        json:"name"`
+	Color      string  `db:"color"       json:"color"`
+	Icon       *string `db:"icon"        json:"icon,omitempty"`
+	IsClosed   bool    `db:"is_closed"   json:"isClosed"`
+	Position   int     `db:"position"    json:"position"`
+}
+
+// Status is a live status value on a specific timeline. Rows are copied from a
+// StatusTemplate's items when the timeline is created and then evolve independently.
+type Status struct {
+	ID         string    `db:"id"          json:"id"`
+	TimelineID string    `db:"timeline_id" json:"timelineId"`
+	Name       string    `db:"name"        json:"name"`
+	Color      string    `db:"color"       json:"color"`
+	Icon       *string   `db:"icon"        json:"icon,omitempty"`
+	IsClosed   bool      `db:"is_closed"   json:"isClosed"`
+	Position   int       `db:"position"    json:"position"`
+	CreatedAt  time.Time `db:"created_at"  json:"createdAt"`
+	UpdatedAt  time.Time `db:"updated_at"  json:"updatedAt"`
+}
+
+// TimelineAccessEntry is a single timeline access grant joined with the team
+// member's display info. Returned by GET /teams/:id/timelines/:timelineId/access.
+type TimelineAccessEntry struct {
+	TimelineID   string  `db:"timeline_id"    json:"timelineId"`
+	TeamMemberID string  `db:"team_member_id" json:"teamMemberId"`
+	Role         string  `db:"role"           json:"role"`
+	DisplayName  string  `db:"display_name"   json:"displayName"`
+	Email        string  `db:"email"          json:"email"`
+	Color        *string `db:"color"          json:"color,omitempty"`
+	Icon         *string `db:"icon"           json:"icon,omitempty"`
+	UserID       *string `db:"user_id"        json:"userId,omitempty"`
+}
+
+// Tag is a team-scoped label that can be applied to activities. Tags are
+// normalized: a team_id+name pair is unique, enabling rename-all and
+// name-based filter matching across timelines.
+type Tag struct {
+	ID        string    `db:"id"         json:"id"`
+	TeamID    string    `db:"team_id"    json:"teamId"`
+	Name      string    `db:"name"       json:"name"`
+	Color     *string   `db:"color"      json:"color,omitempty"`
+	CreatedBy string    `db:"created_by" json:"createdBy"`
+	CreatedAt time.Time `db:"created_at" json:"createdAt"`
+}
+
+// Invite is a single-use token that grants an email address the right to
+// join a Team. AcceptedAt is non-nil once consumed; expired or accepted
+// invites are rejected by the registration handler.
+type Invite struct {
+	ID         string     `db:"id"          json:"id"`
+	TeamID     string     `db:"team_id"     json:"teamId"`
+	Email      string     `db:"email"       json:"email"`
+	Token      string     `db:"token"       json:"token"`
+	Role       string     `db:"role"        json:"role"`
+	InvitedBy  string     `db:"invited_by"  json:"invitedBy"`
+	ExpiresAt  time.Time  `db:"expires_at"  json:"expiresAt"`
+	AcceptedAt *time.Time `db:"accepted_at" json:"acceptedAt,omitempty"`
+	CreatedAt  time.Time  `db:"created_at"  json:"createdAt"`
+}
+````
+
 ## File: packages/web/src/pages/ShareViewPage.tsx
 ````typescript
 /**
@@ -53810,7 +53869,7 @@ components:
 
     Timeline:
       type: object
-      required: [id, teamId, name, startDate, endDate, shareToken, icalToken, createdBy, createdAt, updatedAt]
+      required: [id, teamId, name, startDate, endDate, shareToken, icalToken, createdBy, createdAt, updatedAt, shareCount]
       properties:
         id:
           type: string
@@ -53854,6 +53913,12 @@ components:
           type: string
           nullable: true
           format: date-time
+        shareCount:
+          type: integer
+          description: >
+            Derived count of the timeline's active (non-revoked, non-expired)
+            share links — view shares and ICS feeds alike. Backs the timeline
+            tile's share-count chip.
 
     SavedFilter:
       type: object
@@ -57526,6 +57591,20 @@ function formatCreated(iso: string): string {
   return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
 }
 
+/**
+ * Short "last viewed" label for a share row: time of day when the last view
+ * was today, otherwise the same short date format as the created date.
+ */
+function formatLastViewed(iso: string): string {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ''
+  const now = new Date()
+  if (d.toDateString() === now.toDateString()) {
+    return d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
+  }
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+}
+
 // ── A single share row ─────────────────────────────────────────────────────────
 
 function ShareRow({
@@ -57611,6 +57690,14 @@ function ShareRow({
         <span className="inline-flex items-center gap-1">
           <Eye size={12} strokeWidth={2} />{share.viewCount} {share.viewCount === 1 ? 'view' : 'views'}
         </span>
+        {share.lastViewedAt && (
+          <>
+            <span className="opacity-50">•</span>
+            <span title={new Date(share.lastViewedAt).toLocaleString()}>
+              Last viewed {formatLastViewed(share.lastViewedAt)}
+            </span>
+          </>
+        )}
       </div>
 
       {/* Inline delete confirm */}
@@ -57924,6 +58011,940 @@ export default function ShareModal({ teamId, timelineId, viewType, viewConfig, t
 }
 ````
 
+## File: packages/web/src/pages/DashboardPage.tsx
+````typescript
+/**
+ * Main application shell: sidebar + top bar + content area.
+ *
+ * Fetches the authenticated user's first team and first timeline to seed the
+ * initial view. Team-selection UI and full sidebar wiring come in a later phase.
+ */
+
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
+import Sidebar from '@/components/layout/Sidebar'
+import TopBar, { type ViewMode } from '@/components/layout/TopBar'
+import GanttView from '@/components/gantt/GanttView'
+import { DEFAULT_LABEL_COL_W } from '@/components/gantt/GanttGrid'
+import GanttToolbar, { type GroupBy, type SortBy, type TimeGranularity, type ColorBy } from '@/components/gantt/GanttToolbar'
+import ListToolbar, { type ListGroupBy, type ListSortBy, type ListColorBy, type ListDensity, type ColumnConfig } from '@/components/list/ListToolbar'
+import ListView from '@/components/list/ListView'
+import CalendarToolbar, { type CalendarLayout } from '@/components/calendar/CalendarToolbar'
+import CalendarView from '@/components/calendar/CalendarView'
+import KanbanToolbar, { type KanbanGroupBy, type KanbanSortBy, type KanbanCardField } from '@/components/kanban/KanbanToolbar'
+import KanbanView from '@/components/kanban/KanbanView'
+import { DEFAULT_CARD_FIELDS } from '@/components/kanban/kanbanColumns'
+import ActivityDetailPanel from '@/components/gantt/ActivityDetailPanel'
+import ActivityCreatePanel from '@/components/gantt/ActivityCreatePanel'
+import { FilterProvider, useFilter } from '@/contexts/FilterContext'
+import { FindProvider, useFind } from '@/contexts/FindContext'
+import { useAuth } from '@/contexts/AuthContext'
+import { useDarkMode } from '@/hooks/useDarkMode'
+import { usePreferences, usePreferenceMap, useUpsertPreference } from '@/hooks/usePreferences'
+import { Settings, Moon, Sun, LogOut } from 'lucide-react'
+import { Badge } from '@/components/identity/Badge'
+import type { Identity } from '@/components/identity/identity-constants'
+import { useMyTeams, useTeamTimelines, useTeamTimelinesWithArchived, useTeamActivitySync, useUnarchiveTeam, useUnarchiveTimeline, useTeamMembers } from '@/hooks/useTeamActivities'
+import { useTimelineStatuses } from '@/hooks/useStatusTemplates'
+import { useSavedFilters } from '@/hooks/useSavedFilters'
+import { useTags } from '@/hooks/useTags'
+import TeamModal from '@/components/TeamModal'
+import MemberModal from '@/components/MemberModal'
+import TimelineModal from '@/components/TimelineModal'
+import FilterManageModal from '@/components/filters/FilterManageModal'
+import ShareModal from '@/components/ShareModal'
+import CalendarShareModal from '@/components/CalendarShareModal'
+import { useNavigate } from 'react-router-dom'
+import type { components } from '@draba/shared'
+import type { Member } from '@/types'
+
+type ApiActivity = components['schemas']['Activity']
+type ApiTeam = components['schemas']['Team']
+type ApiTimeline = components['schemas']['Timeline']
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
+
+const DROPDOWN_BTN: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 8,
+  width: '100%',
+  padding: '10px 14px',
+  background: 'none',
+  border: 'none',
+  fontSize: 13,
+  color: 'var(--foreground)',
+  cursor: 'pointer',
+  fontFamily: 'var(--font-sans)',
+  textAlign: 'left',
+}
+
+function DashboardShell() {
+  const { logout, accessToken, user } = useAuth()
+  const { activeFilter, setActiveFilter } = useFilter()
+  const navigate = useNavigate()
+  const { isDark, toggle: toggleDark, theme } = useDarkMode()
+  const { setFindBarOpen } = useFind()
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [view, setView] = useState<ViewMode>('gantt')
+  // Gantt label-column width — held here so it survives switching to another
+  // view and back (GanttView unmounts on view change, which would reset it).
+  const [ganttLabelColW, setGanttLabelColW] = useState(DEFAULT_LABEL_COL_W)
+  // Close the detail sidebar when switching to list view (edits are inline there)
+  const prevView = useRef<ViewMode>('gantt')
+  const [profileOpen, setProfileOpen] = useState(false)
+  const [selectedActivityId, setSelectedActivityId] = useState<string | null>(null)
+  const [selectedApiActivity, setSelectedApiActivity] = useState<ApiActivity | null>(null)
+  const [ganttMembers, setGanttMembers] = useState<Member[]>([])
+  const [createDefaults, setCreateDefaults] = useState<{ start: string; end: string; memberId: string | null; statusId?: string | null } | null>(null)
+  const [filterModalOpen, setFilterModalOpen] = useState(false)
+  const [shareModalOpen, setShareModalOpen] = useState(false)
+  // Calendar gets its own share surface — an ICS feed configurator, not the
+  // active-links list (Phase 13.4).
+  const [calendarShareModalOpen, setCalendarShareModalOpen] = useState(false)
+  const [liveDragDates, setLiveDragDates] = useState<{ activityId: string; start: string; end: string } | null>(null)
+  // Gantt toolbar state
+  const [groupBy, setGroupBy] = useState<GroupBy>('none')
+  const [sortBy, setSortBy] = useState<SortBy>('startDate')
+  const [granularity, setGranularity] = useState<TimeGranularity | 'auto'>('auto')
+  const [colorBy, setColorBy] = useState<ColorBy>('activity')
+  // List toolbar state
+  const [listGroupBy, setListGroupBy] = useState<ListGroupBy>('none')
+  const [listSortBy, setListSortBy] = useState<ListSortBy>('startDate')
+  const [listColorBy, setListColorBy] = useState<ListColorBy>('activity')
+  const [listDensity, setListDensity] = useState<ListDensity>('comfortable')
+  const [listColumns, setListColumns] = useState<ColumnConfig[]>([])
+  // Incremented seq lets ListView know a new toggle has arrived
+  const [listColToggle, setListColToggle] = useState<{ colId: string; visible: boolean; seq: number } | null>(null)
+  const listColToggleSeq = useRef(0)
+  // Calendar toolbar state
+  const [calendarLayout, setCalendarLayout] = useState<CalendarLayout>('month')
+  // anchorDate = UTC midnight of the 1st of the displayed month (month) or weekStart (week).
+  const [calendarAnchorDate, setCalendarAnchorDate] = useState<Date>(() => {
+    const d = new Date()
+    d.setUTCHours(0, 0, 0, 0)
+    d.setUTCDate(1)
+    return d
+  })
+  // Kanban toolbar state
+  const [kanbanGroupBy, setKanbanGroupBy] = useState<KanbanGroupBy>('status')
+  const [kanbanSortBy, setKanbanSortBy] = useState<KanbanSortBy>('startDate')
+  const [kanbanColorBy, setKanbanColorBy] = useState<ColorBy>('activity')
+  const [kanbanCardFields, setKanbanCardFields] = useState<KanbanCardField[]>(DEFAULT_CARD_FIELDS)
+  const [kanbanCollapsedColumns, setKanbanCollapsedColumns] = useState<string[]>([])
+  const [kanbanShowHierarchy, setKanbanShowHierarchy] = useState(false)
+  // Incremented to trigger inline row creation in list view
+  const [listNewRowSeq, setListNewRowSeq] = useState(0)
+  const profileRef = useRef<HTMLDivElement>(null)
+  // Preference persistence
+  const upsert = useUpsertPreference()
+  // Track whether we've applied server prefs for the active timeline so we
+  // don't immediately write defaults back before the server data arrives.
+  const prefsAppliedForTimeline = useRef<string | null>(null)
+  // One-shot guard: init activeTimelineId from global prefs only on first load.
+  const timelineIdInitialized = useRef(false)
+
+
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (profileRef.current && !profileRef.current.contains(e.target as Node)) {
+        setProfileOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [])
+
+  // Close the detail sidebar when switching to list view (list edits are inline).
+  useEffect(() => {
+    if (view === 'list' && prevView.current !== 'list') {
+      setSelectedActivityId(null)
+      setSelectedApiActivity(null)
+      setCreateDefaults(null)
+    }
+    prevView.current = view
+  }, [view])
+
+  // Ctrl/Cmd+F opens the Find bar; browser default (page search) is suppressed.
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
+        e.preventDefault()
+        setFindBarOpen(true)
+      }
+    }
+    document.addEventListener('keydown', handleKeyDown)
+    return () => document.removeEventListener('keydown', handleKeyDown)
+  }, [setFindBarOpen])
+
+  const displayName = (user as { displayName?: string } | null)?.displayName ?? 'User'
+  const email = (user as { email?: string } | null)?.email ?? ''
+  const userIdentity: Identity = {
+    color: (user as { color?: string } | null)?.color ?? '#288C9B',
+    icon: (user as { icon?: string } | null)?.icon ?? '__name_2__',
+  }
+
+  // Global preferences — restored on login to seed team/timeline selection.
+  const { isSuccess: globalPrefsSettled } = usePreferences()
+  const globalPrefMap = usePreferenceMap()
+  const weekStartDay: 0 | 1 = (globalPrefMap['week_start'] as string | undefined) === 'sunday' ? 0 : 1
+
+  // Team modal state
+  const [teamModalMode, setTeamModalMode] = useState<'new' | 'edit' | null>(null)
+  const [editingTeam, setEditingTeam] = useState<ApiTeam | null>(null)
+  const unarchiveTeam = useUnarchiveTeam()
+
+  // Member modal state
+  const [editingMember, setEditingMember] = useState<TeamMemberWithUser | null>(null)
+
+  // Timeline modal state
+  const [timelineModalMode, setTimelineModalMode] = useState<'new' | 'edit' | null>(null)
+  const [editingTimeline, setEditingTimeline] = useState<ApiTimeline | null>(null)
+
+  // Fetch all teams including archived for the sidebar's archived section.
+  const { data: allTeams = [] } = useMyTeams(true)
+  const activeTeams = allTeams.filter(t => !t.archivedAt)
+  const archivedTeams = allTeams.filter(t => Boolean(t.archivedAt))
+
+  // Explicit team selection state — null until the global pref is applied so
+  // that timelines (and the timeline init effect) don't fire against the wrong
+  // fallback team before the saved team pref resolves.
+  const [activeTeamId, setActiveTeamId] = useState<string | null>(null)
+  const teamIdInitialized = useRef(false)
+  useEffect(() => {
+    if (!activeTeams.length || !globalPrefsSettled || teamIdInitialized.current) return
+    teamIdInitialized.current = true
+    const saved = typeof globalPrefMap['selected_team'] === 'string' ? globalPrefMap['selected_team'] : null
+    const exists = saved && activeTeams.some(t => t.id === saved)
+    setActiveTeamId(exists ? saved : activeTeams[0].id)
+  }, [activeTeams, globalPrefsSettled, globalPrefMap])
+
+  // Only derive an active team once the pref has been applied (activeTeamId !== null).
+  // The activeTeams[0] fallback here handles the edge case where the saved team
+  // was archived or deleted between sessions.
+  const activeTeam = activeTeamId !== null
+    ? (activeTeams.find(t => t.id === activeTeamId) ?? activeTeams[0] ?? undefined)
+    : undefined
+  const teamId = activeTeam?.id ?? ''
+
+  // Check whether the current user is an admin of the active team.
+  const { data: teamMembers = [] } = useTeamMembers(teamId)
+  const userId = (user as { id?: string } | null)?.id ?? ''
+  const isSuperadmin = Boolean((user as { isSuperadmin?: boolean } | null)?.isSuperadmin)
+  const canEditTeam = isSuperadmin || teamMembers.some(m => m.userId === userId && m.role === 'admin')
+
+  const handleSelectTeam = useCallback((id: string) => {
+    setActiveTeamId(id)
+    // Clear the stale timeline selection so the init effect re-fires with the
+    // new team's timeline list. Without this, the old timeline ID leaks into
+    // the new team's API requests and produces 404s.
+    setActiveTimelineId(undefined)
+    prefsAppliedForTimeline.current = null
+    timelineIdInitialized.current = false
+  }, [])
+
+  const unarchiveTimeline = useUnarchiveTimeline(teamId)
+
+  const { data: timelines = [] } = useTeamTimelines(teamId)
+  const { data: allTimelines = [] } = useTeamTimelinesWithArchived(teamId)
+  const archivedTimelines = allTimelines.filter(t => Boolean(t.archivedAt))
+  const [activeTimelineId, setActiveTimelineId] = useState<string | undefined>()
+  const { data: activeTimelineStatuses = [] } = useTimelineStatuses(teamId, activeTimelineId ?? '')
+  const { data: savedFilters = [] } = useSavedFilters(teamId)
+  const { data: tags = [] } = useTags(teamId)
+  // Initialize activeTimelineId from the saved global pref (selected_timeline),
+  // falling back to timelines[0] when no pref is stored or the saved timeline
+  // is no longer in the list. Waits for global prefs to settle so we don't
+  // immediately overwrite a restored value with the fallback.
+  useEffect(() => {
+    if (timelines.length === 0 || !globalPrefsSettled || timelineIdInitialized.current) return
+    timelineIdInitialized.current = true
+    const saved = typeof globalPrefMap['selected_timeline'] === 'string' ? globalPrefMap['selected_timeline'] : null
+    const exists = saved && timelines.some(t => t.id === saved)
+    setActiveTimelineId(exists ? saved : timelines[0].id)
+  }, [timelines, globalPrefsSettled, globalPrefMap])
+  const activeTimeline = timelines.find(t => t.id === activeTimelineId) ?? timelines[0]
+  // Derived so they stay in sync after edits without needing separate state.
+  const activeTimelineColor = activeTimeline?.color ?? '#1A97A2'
+  const activeTimelineName = activeTimeline?.name ?? ''
+  const activeTimelineIdentity: Identity = {
+    color: activeTimeline?.color ?? '#288C9B',
+    icon: activeTimeline?.icon ?? '__none__',
+  }
+
+  // The frozen filter snapshot captured into a share's view config — shared
+  // across Gantt/List/Kanban since `activeFilter` applies to the whole timeline.
+  const activeShareFilter = useMemo(() => {
+    if (activeFilter.kind !== 'saved') return null
+    const sf = savedFilters.find(f => f.id === activeFilter.id)
+    if (!sf) return null
+    try { return JSON.parse(sf.definition) as import('@/lib/filterTypes').FilterDefinition } catch { return null }
+  }, [activeFilter, savedFilters])
+
+  // Close the activity detail panel whenever the active filter changes so the
+  // filtered view is unobstructed by a stale selection.
+  useEffect(() => {
+    setSelectedActivityId(null)
+    setSelectedApiActivity(null)
+  }, [activeFilter]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handleTimelineChange = useCallback((id: string) => {
+    prefsAppliedForTimeline.current = null
+    setActiveTimelineId(id)
+    setActiveFilter({ kind: 'preset', id: 'all' })
+  }, [setActiveFilter])
+
+  // Calendar navigation helpers.
+  const calendarPrev = useCallback(() => {
+    setCalendarAnchorDate(prev => {
+      const d = new Date(prev)
+      if (calendarLayout === 'month') {
+        d.setUTCMonth(d.getUTCMonth() - 1)
+      } else {
+        d.setUTCDate(d.getUTCDate() - 7)
+      }
+      return d
+    })
+  }, [calendarLayout])
+
+  const calendarNext = useCallback(() => {
+    setCalendarAnchorDate(prev => {
+      const d = new Date(prev)
+      if (calendarLayout === 'month') {
+        d.setUTCMonth(d.getUTCMonth() + 1)
+      } else {
+        d.setUTCDate(d.getUTCDate() + 7)
+      }
+      return d
+    })
+  }, [calendarLayout])
+
+  const calendarToday = useCallback(() => {
+    const d = new Date()
+    d.setUTCHours(0, 0, 0, 0)
+    if (calendarLayout === 'month') {
+      d.setUTCDate(1)
+    } else {
+      // Snap to weekStart.
+      const dow = d.getUTCDay()
+      const daysBack = weekStartDay === 1 ? (dow === 0 ? 6 : dow - 1) : dow
+      d.setUTCDate(d.getUTCDate() - daysBack)
+    }
+    setCalendarAnchorDate(d)
+  }, [calendarLayout, weekStartDay])
+
+  // Switching layouts also snaps the anchor date to the correct boundary so
+  // the week-view always starts on the configured weekStart day.
+  const handleCalendarLayoutChange = useCallback((l: CalendarLayout) => {
+    setCalendarLayout(l)
+    setCalendarAnchorDate(prev => {
+      const d = new Date(prev)
+      d.setUTCHours(0, 0, 0, 0)
+      if (l === 'week') {
+        const dow = d.getUTCDay()
+        const daysBack = weekStartDay === 1 ? (dow === 0 ? 6 : dow - 1) : dow
+        d.setUTCDate(d.getUTCDate() - daysBack)
+      } else {
+        d.setUTCDate(1)
+      }
+      return d
+    })
+  }, [weekStartDay])
+
+  useTeamActivitySync(teamId, accessToken)
+
+  // Per-timeline preferences: restore toolbar state when the active timeline changes.
+  // isSuccess gate ensures we don't mark prefs applied before the query resolves.
+  const { isSuccess: prefsSettled } = usePreferences(activeTimelineId)
+  const timelinePrefs = usePreferenceMap(activeTimelineId)
+  useEffect(() => {
+    if (!activeTimelineId || !prefsSettled) return
+    if (prefsAppliedForTimeline.current === activeTimelineId) return
+    prefsAppliedForTimeline.current = activeTimelineId
+
+    if (typeof timelinePrefs['group_by'] === 'string') setGroupBy(timelinePrefs['group_by'] as GroupBy)
+    if (typeof timelinePrefs['sort_by'] === 'string') setSortBy(timelinePrefs['sort_by'] as SortBy)
+    if (typeof timelinePrefs['zoom_granularity'] === 'string') setGranularity(timelinePrefs['zoom_granularity'] as TimeGranularity | 'auto')
+    if (typeof timelinePrefs['color_by'] === 'string') setColorBy(timelinePrefs['color_by'] as ColorBy)
+    if (typeof timelinePrefs['list_group_by'] === 'string') setListGroupBy(timelinePrefs['list_group_by'] as ListGroupBy)
+    if (typeof timelinePrefs['list_sort_by'] === 'string') setListSortBy(timelinePrefs['list_sort_by'] as ListSortBy)
+    if (typeof timelinePrefs['list_color_by'] === 'string') setListColorBy(timelinePrefs['list_color_by'] as ListColorBy)
+    if (typeof timelinePrefs['list_density'] === 'string') setListDensity(timelinePrefs['list_density'] as ListDensity)
+    if (typeof timelinePrefs['view_mode'] === 'string') setView(timelinePrefs['view_mode'] as ViewMode)
+    if (typeof timelinePrefs['kanban_group_by'] === 'string') setKanbanGroupBy(timelinePrefs['kanban_group_by'] as KanbanGroupBy)
+    if (typeof timelinePrefs['kanban_sort_by'] === 'string') setKanbanSortBy(timelinePrefs['kanban_sort_by'] as KanbanSortBy)
+    if (typeof timelinePrefs['kanban_color_by'] === 'string') setKanbanColorBy(timelinePrefs['kanban_color_by'] as ColorBy)
+    if (typeof timelinePrefs['kanban_card_fields'] === 'string') {
+      try { setKanbanCardFields(JSON.parse(timelinePrefs['kanban_card_fields']) as KanbanCardField[]) } catch { /* ignore */ }
+    }
+    if (typeof timelinePrefs['kanban_collapsed'] === 'string') {
+      try { setKanbanCollapsedColumns(JSON.parse(timelinePrefs['kanban_collapsed']) as string[]) } catch { /* ignore */ }
+    }
+    if (typeof timelinePrefs['kanban_show_hierarchy'] === 'string') {
+      try { setKanbanShowHierarchy(JSON.parse(timelinePrefs['kanban_show_hierarchy']) as boolean) } catch { /* ignore */ }
+    }
+  }, [activeTimelineId, prefsSettled, timelinePrefs])
+
+  // Save toolbar state changes to per-timeline prefs.
+  const saveTimelinePref = useCallback((key: string, value: string) => {
+    if (!activeTimelineId) return
+    upsert.mutate({ key, value: JSON.stringify(value), timelineId: activeTimelineId })
+  }, [activeTimelineId, upsert.mutate]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('group_by', groupBy)
+  }, [groupBy, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('sort_by', sortBy)
+  }, [sortBy, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('zoom_granularity', granularity)
+  }, [granularity, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('color_by', colorBy)
+  }, [colorBy, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('view_mode', view)
+  }, [view, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('list_group_by', listGroupBy)
+  }, [listGroupBy, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('list_sort_by', listSortBy)
+  }, [listSortBy, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('list_color_by', listColorBy)
+  }, [listColorBy, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('list_density', listDensity)
+  }, [listDensity, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('kanban_group_by', kanbanGroupBy)
+  }, [kanbanGroupBy, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('kanban_sort_by', kanbanSortBy)
+  }, [kanbanSortBy, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('kanban_color_by', kanbanColorBy)
+  }, [kanbanColorBy, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('kanban_card_fields', JSON.stringify(kanbanCardFields))
+  }, [kanbanCardFields, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('kanban_show_hierarchy', JSON.stringify(kanbanShowHierarchy))
+  }, [kanbanShowHierarchy, saveTimelinePref])
+
+  // Global preferences: persist dark mode, active team, and active timeline.
+  useEffect(() => {
+    upsert.mutate({ key: 'theme', value: JSON.stringify(theme) })
+  }, [theme]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!teamId) return
+    upsert.mutate({ key: 'selected_team', value: JSON.stringify(teamId) })
+  }, [teamId]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!activeTimelineId) return
+    upsert.mutate({ key: 'selected_timeline', value: JSON.stringify(activeTimelineId) })
+  }, [activeTimelineId]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Reset label column width when the user switches timelines so each timeline
+  // starts fresh. Switching between views on the same timeline preserves width
+  // because the state lives here rather than inside the unmounting GanttView.
+  useEffect(() => {
+    setGanttLabelColW(DEFAULT_LABEL_COL_W)
+  }, [activeTimelineId])
+
+  return (
+    <div style={{ display: 'flex', height: '100vh', overflow: 'hidden', background: 'var(--background)' }}>
+      <Sidebar
+        collapsed={sidebarCollapsed}
+        onToggle={() => setSidebarCollapsed(c => !c)}
+        apiTimelines={timelines}
+        archivedTimelines={archivedTimelines}
+        activeTimelineId={activeTimelineId}
+        onActiveTimelineChange={handleTimelineChange}
+        onNewTimeline={() => { setEditingTimeline(null); setTimelineModalMode('new') }}
+        onEditTimeline={id => {
+          // timelines (active) is always loaded; allTimelines (?archived=true) may
+          // still be in-flight, so prefer the already-loaded list to avoid opening
+          // the modal with an undefined timeline and blank fields.
+          const tl = timelines.find(t => t.id === id) ?? allTimelines.find(t => t.id === id)
+          setEditingTimeline(tl ?? null)
+          setTimelineModalMode('edit')
+        }}
+        onNewActivity={() => {
+          const today = new Date().toISOString().slice(0, 10)
+          setSelectedActivityId(null)
+          setSelectedApiActivity(null)
+          if (view === 'list') {
+            setListNewRowSeq(s => s + 1)
+          } else {
+            setCreateDefaults({ start: today, end: today, memberId: null })
+          }
+        }}
+        activeTeam={activeTeam}
+        activeTeams={activeTeams}
+        archivedTeams={archivedTeams}
+        canEditTeam={canEditTeam}
+        onSelectTeam={handleSelectTeam}
+        onNewTeam={isSuperadmin ? () => { setEditingTeam(null); setTeamModalMode('new'); } : undefined}
+        onEditTeam={t => { setEditingTeam(t as ApiTeam); setTeamModalMode('edit'); }}
+        onUnarchiveTeam={id => unarchiveTeam.mutate(id)}
+        members={teamMembers.length > 0 ? teamMembers : undefined}
+        onEditMember={isSuperadmin ? m => setEditingMember(m) : undefined}
+      />
+
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0 }}>
+        <TopBar
+          view={view}
+          teamId={teamId}
+          timelineName={activeTimelineName}
+          timelineIdentity={activeTimelineIdentity}
+          onViewChange={setView}
+          onOpenFilterManager={() => setFilterModalOpen(true)}
+          rightSlot={
+            <div ref={profileRef} style={{ position: 'relative', marginLeft: 4, zIndex: 30 }}>
+              <button
+                onClick={() => setProfileOpen(o => !o)}
+                style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', display: 'flex' }}
+                title={displayName}
+              >
+                <Badge identity={userIdentity} name={displayName} shape="circle" size={28} />
+              </button>
+
+              {profileOpen && (
+                <div
+                  style={{
+                    position: 'absolute',
+                    top: 'calc(100% + 8px)',
+                    right: 0,
+                    width: 220,
+                    background: 'var(--card)',
+                    border: '1px solid var(--border)',
+                    borderRadius: 8,
+                    boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
+                    zIndex: 100,
+                    overflow: 'hidden',
+                  }}
+                >
+                  <div style={{ padding: '12px 14px', borderBottom: '1px solid var(--border)' }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)' }}>{displayName}</div>
+                    <div style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 2 }}>{email}</div>
+                  </div>
+                  <button
+                    onClick={toggleDark}
+                    style={{ ...DROPDOWN_BTN, borderBottom: '1px solid var(--border)' }}
+                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                  >
+                    {isDark ? <Moon size={14} strokeWidth={1.8} /> : <Sun size={14} strokeWidth={1.8} />}
+                    {isDark ? 'Dark mode' : 'Light mode'}
+                  </button>
+                  <button
+                    onClick={() => { setProfileOpen(false); navigate('/settings'); }}
+                    style={{ ...DROPDOWN_BTN, borderBottom: '1px solid var(--border)' }}
+                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                  >
+                    <Settings size={14} strokeWidth={1.8} />
+                    Settings
+                  </button>
+                  <button
+                    onClick={logout}
+                    style={{ ...DROPDOWN_BTN, color: 'var(--muted-foreground)' }}
+                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                  >
+                    <LogOut size={14} strokeWidth={1.8} />
+                    Sign out
+                  </button>
+                </div>
+              )}
+            </div>
+          }
+        />
+
+        {/* Active timeline color band */}
+        <div style={{ height: 3, background: activeTimelineColor, flexShrink: 0, transition: 'background 0.2s ease' }} />
+
+        {/* Gantt sub-toolbar — only shown in Gantt view */}
+        {view === 'gantt' && (
+          <GanttToolbar
+            groupBy={groupBy}
+            onGroupByChange={setGroupBy}
+            sortBy={sortBy}
+            onSortByChange={setSortBy}
+            granularity={granularity}
+            onGranularityChange={setGranularity}
+            colorBy={colorBy}
+            onColorByChange={setColorBy}
+            onExport={() => {}}
+            onShare={() => setShareModalOpen(true)}
+          />
+        )}
+
+        {/* List sub-toolbar — only shown in List view */}
+        {view === 'list' && (
+          <ListToolbar
+            columns={listColumns}
+            onColumnVisibilityChange={(colId, visible) => {
+              listColToggleSeq.current += 1
+              setListColToggle({ colId, visible, seq: listColToggleSeq.current })
+              setListColumns(prev => prev.map(c => c.id === colId ? { ...c, visible } : c))
+            }}
+            density={listDensity}
+            onDensityChange={setListDensity}
+            groupBy={listGroupBy}
+            onGroupByChange={setListGroupBy}
+            sortBy={listSortBy}
+            onSortByChange={setListSortBy}
+            colorBy={listColorBy}
+            onColorByChange={setListColorBy}
+            onExport={() => {}}
+            onShare={() => setShareModalOpen(true)}
+          />
+        )}
+
+        {/* Calendar sub-toolbar — only shown in Calendar view */}
+        {view === 'calendar' && (
+          <CalendarToolbar
+            layout={calendarLayout}
+            onLayoutChange={handleCalendarLayoutChange}
+            anchorDate={calendarAnchorDate}
+            onPrev={calendarPrev}
+            onNext={calendarNext}
+            onToday={calendarToday}
+            colorBy={colorBy}
+            onColorByChange={setColorBy}
+            onExport={() => {}}
+            onShare={() => setCalendarShareModalOpen(true)}
+          />
+        )}
+
+        {/* Kanban sub-toolbar — only shown in Kanban view */}
+        {view === 'kanban' && (
+          <KanbanToolbar
+            groupBy={kanbanGroupBy}
+            onGroupByChange={setKanbanGroupBy}
+            sortBy={kanbanSortBy}
+            onSortByChange={setKanbanSortBy}
+            colorBy={kanbanColorBy}
+            onColorByChange={setKanbanColorBy}
+            cardFields={kanbanCardFields}
+            onCardFieldsChange={setKanbanCardFields}
+            showHierarchy={kanbanShowHierarchy}
+            onShowHierarchyChange={setKanbanShowHierarchy}
+            onExport={() => {}}
+            onShare={() => setShareModalOpen(true)}
+          />
+        )}
+
+        {/* Content area */}
+        <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+          {view === 'gantt' && teamId && activeTimelineId ? (
+            <GanttView
+              teamId={teamId}
+              timelineId={activeTimelineId}
+              startDate={activeTimeline?.startDate}
+              endDate={activeTimeline?.endDate}
+              groupBy={groupBy}
+              sortBy={sortBy}
+              granularity={granularity}
+              colorBy={colorBy}
+              timelineStatuses={activeTimelineStatuses}
+              savedFilters={savedFilters}
+              tags={tags}
+              selectedActivityId={selectedActivityId}
+              onSelectActivity={(id) => {
+                setSelectedActivityId(id)
+                if (!id) { setSelectedApiActivity(null); setCreateDefaults(null) }
+              }}
+              onSelectApiActivity={(activity) => {
+                setSelectedApiActivity(activity)
+                setCreateDefaults(null)
+              }}
+              onBarDragProgress={(activityId, newStart, newEnd) => {
+                setLiveDragDates({
+                  activityId,
+                  start: newStart.toISOString().slice(0, 10),
+                  end: newEnd.toISOString().slice(0, 10),
+                })
+              }}
+              onBarDragEnd={() => setLiveDragDates(null)}
+              onMembersLoaded={setGanttMembers}
+              labelColW={ganttLabelColW}
+              onLabelColWChange={setGanttLabelColW}
+            />
+          ) : view === 'gantt' && (!teamId || !activeTimelineId) ? (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>Loading your team…</p>
+            </div>
+          ) : view === 'list' && teamId && activeTimelineId ? (
+            <ListView
+              teamId={teamId}
+              timelineId={activeTimelineId}
+              groupBy={listGroupBy}
+              sortBy={listSortBy}
+              colorBy={listColorBy}
+              density={listDensity}
+              timelineStatuses={activeTimelineStatuses}
+              savedFilters={savedFilters}
+              tags={tags}
+              selectedActivityId={selectedActivityId}
+              pendingColumnToggle={listColToggle}
+              onSelectActivity={(id) => {
+                setSelectedActivityId(id)
+                if (!id) { setSelectedApiActivity(null); setCreateDefaults(null) }
+              }}
+              onSelectApiActivity={(activity) => {
+                setSelectedApiActivity(activity)
+                setCreateDefaults(null)
+              }}
+              onMembersLoaded={setGanttMembers}
+              onColumnsChange={setListColumns}
+              triggerNewRow={listNewRowSeq}
+            />
+          ) : view === 'list' && (!teamId || !activeTimelineId) ? (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>Loading your team…</p>
+            </div>
+          ) : view === 'calendar' && teamId && activeTimelineId ? (
+            <CalendarView
+              teamId={teamId}
+              timelineId={activeTimelineId}
+              layout={calendarLayout}
+              anchorDate={calendarAnchorDate}
+              colorBy={colorBy}
+              timelineStatuses={activeTimelineStatuses}
+              savedFilters={savedFilters}
+              tags={tags}
+              selectedActivityId={selectedActivityId}
+              onSelectActivity={(id) => {
+                setSelectedActivityId(id)
+                if (!id) { setSelectedApiActivity(null); setCreateDefaults(null) }
+              }}
+              onSelectApiActivity={(activity) => {
+                setSelectedApiActivity(activity)
+                setCreateDefaults(null)
+              }}
+              onBarDragProgress={(activityId, newStart, newEnd) => {
+                setLiveDragDates({
+                  activityId,
+                  start: newStart.toISOString().slice(0, 10),
+                  end: newEnd.toISOString().slice(0, 10),
+                })
+              }}
+              onBarDragEnd={() => setLiveDragDates(null)}
+              onCellClick={(date) => {
+                const iso = date.toISOString().slice(0, 10)
+                setSelectedActivityId(null)
+                setSelectedApiActivity(null)
+                setCreateDefaults({ start: iso, end: iso, memberId: null })
+              }}
+              onMembersLoaded={setGanttMembers}
+            />
+          ) : view === 'calendar' && (!teamId || !activeTimelineId) ? (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>Loading your team…</p>
+            </div>
+          ) : view === 'kanban' && teamId && activeTimelineId ? (
+            <KanbanView
+              teamId={teamId}
+              timelineId={activeTimelineId}
+              groupBy={kanbanGroupBy}
+              sortBy={kanbanSortBy}
+              colorBy={kanbanColorBy}
+              cardFields={kanbanCardFields}
+              collapsedColumnIds={kanbanCollapsedColumns}
+              onCollapsedColumnIdsChange={setKanbanCollapsedColumns}
+              showHierarchy={kanbanShowHierarchy}
+              timelineStatuses={activeTimelineStatuses}
+              savedFilters={savedFilters}
+              tags={tags}
+              selectedActivityId={selectedActivityId}
+              onSelectActivity={(id) => {
+                setSelectedActivityId(id)
+                if (!id) { setSelectedApiActivity(null); setCreateDefaults(null) }
+              }}
+              onSelectApiActivity={(activity) => {
+                setSelectedApiActivity(activity)
+                setCreateDefaults(null)
+              }}
+              onAddActivity={(defaults) => {
+                setSelectedActivityId(null)
+                setSelectedApiActivity(null)
+                setCreateDefaults(defaults)
+              }}
+              onMembersLoaded={setGanttMembers}
+            />
+          ) : view === 'kanban' && (!teamId || !activeTimelineId) ? (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>Loading your team…</p>
+            </div>
+          ) : (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>
+                {view.charAt(0).toUpperCase() + view.slice(1)} view coming soon.
+              </p>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Activity detail panel — slides in from right when an activity is selected */}
+      <ActivityDetailPanel
+        open={Boolean(selectedApiActivity)}
+        event={selectedApiActivity}
+        members={ganttMembers}
+        teamId={teamId}
+        timelineId={activeTimelineId ?? ''}
+        onClose={() => { setSelectedActivityId(null); setSelectedApiActivity(null); setLiveDragDates(null) }}
+        liveDragStart={liveDragDates && liveDragDates.activityId === selectedApiActivity?.id ? liveDragDates.start : undefined}
+        liveDragEnd={liveDragDates && liveDragDates.activityId === selectedApiActivity?.id ? liveDragDates.end : undefined}
+      />
+
+      {/* Activity create panel — slides in from New Activity button or future drag */}
+      <ActivityCreatePanel
+        open={Boolean(createDefaults) && !selectedApiActivity}
+        teamId={teamId}
+        timelineId={activeTimelineId ?? ''}
+        members={ganttMembers}
+        timelineStatuses={activeTimelineStatuses}
+        defaultStart={createDefaults?.start ?? new Date().toISOString().slice(0, 10)}
+        defaultEnd={createDefaults?.end ?? new Date().toISOString().slice(0, 10)}
+        defaultMemberId={createDefaults?.memberId}
+        defaultStatusId={createDefaults?.statusId}
+        onClose={() => setCreateDefaults(null)}
+      />
+
+      <FilterManageModal
+        open={filterModalOpen}
+        onClose={() => setFilterModalOpen(false)}
+        teamId={teamId}
+        timelineId={activeTimelineId ?? ''}
+        isAdmin={canEditTeam}
+      />
+
+      {/* Team modal — create or edit */}
+      {teamModalMode && (
+        <TeamModal
+          mode={teamModalMode}
+          team={editingTeam ?? undefined}
+          isAdmin={canEditTeam}
+          onClose={() => { setTeamModalMode(null); setEditingTeam(null); }}
+          onTeamCreated={created => setActiveTeamId(created.id)}
+        />
+      )}
+
+      {/* Member modal — edit a team member */}
+      {editingMember && (
+        <MemberModal
+          teamId={teamId}
+          memberId={editingMember.id}
+          isAdmin={canEditTeam}
+          isSuperadmin={isSuperadmin}
+          onClose={() => setEditingMember(null)}
+        />
+      )}
+
+      {/* Share modal — create a share link for the active view */}
+      {shareModalOpen && activeTimelineId && teamId && (view === 'gantt' || view === 'list' || view === 'kanban') && (
+        <ShareModal
+          teamId={teamId}
+          timelineId={activeTimelineId}
+          viewType={view}
+          timelineName={activeTimelineName}
+          viewConfig={
+            view === 'gantt'
+              ? { groupBy, sortBy, colorBy, granularity: String(granularity), filter: activeShareFilter }
+              : view === 'list'
+              ? {
+                  groupBy: listGroupBy,
+                  sortBy: listSortBy,
+                  colorBy: listColorBy,
+                  granularity: '',
+                  filter: activeShareFilter,
+                  columns: listColumns.map(c => ({ id: c.id, visible: c.visible })),
+                }
+              : {
+                  groupBy: kanbanGroupBy,
+                  sortBy: kanbanSortBy,
+                  colorBy: kanbanColorBy,
+                  granularity: '',
+                  filter: activeShareFilter,
+                  cardFields: kanbanCardFields,
+                  showHierarchy: kanbanShowHierarchy,
+                  collapsedColumns: kanbanCollapsedColumns,
+                }
+          }
+          onClose={() => setShareModalOpen(false)}
+        />
+      )}
+
+      {/* Calendar share modal — ICS feed configurator (distinct from ShareModal) */}
+      {calendarShareModalOpen && activeTimelineId && teamId && (
+        <CalendarShareModal
+          teamId={teamId}
+          timelineId={activeTimelineId}
+          timelineName={activeTimelineName}
+          onClose={() => setCalendarShareModalOpen(false)}
+        />
+      )}
+
+      {/* Timeline modal — create or edit */}
+      {timelineModalMode && (
+        <TimelineModal
+          mode={timelineModalMode}
+          teamId={teamId}
+          timeline={editingTimeline ?? undefined}
+          canAdmin={canEditTeam}
+          onClose={() => { setTimelineModalMode(null); setEditingTimeline(null) }}
+          onCreated={created => setActiveTimelineId(created.id)}
+          onUnarchive={id => unarchiveTimeline.mutate(id, { onSuccess: () => { setTimelineModalMode(null); setEditingTimeline(null) } })}
+        />
+      )}
+    </div>
+  )
+}
+
+export default function DashboardPage() {
+  return (
+    <FindProvider>
+      <FilterProvider>
+        <DashboardShell />
+      </FilterProvider>
+    </FindProvider>
+  )
+}
+````
+
 ## File: packages/api/internal/api/share_handler.go
 ````go
 package api
@@ -58065,6 +59086,13 @@ func (s *Server) handleGetShareProjection(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// Archived timeline → its shares stop serving (Phase 13.5). Checked on
+	// every request — before the cache read — so archiving takes effect
+	// immediately regardless of a warm projection cache.
+	if !s.shareTimelineLive(w, share) {
+		return
+	}
+
 	// Password gate (Phase 13.2). A locked share serves no data without a valid
 	// view token — obtained by exchanging the password at POST /shares/{token}/unlock.
 	// NOTE: this check must stay above the cache read. PATCH invalidates the cache
@@ -58097,6 +59125,25 @@ func (s *Server) handleGetShareProjection(w http.ResponseWriter, r *http.Request
 	s.shareCache.set(token, proj)
 	go func() { _ = s.shares.RecordView(share.ID) }()
 	writeJSON(w, http.StatusOK, proj)
+}
+
+// shareTimelineLive loads the share's timeline and reports whether it is
+// servable on the public surface, writing the error response when it is not.
+// An archived timeline answers 404, not 410: archiving is reversible —
+// unarchiving must resurrect existing links — and 410 tells calendar clients
+// to drop a subscription permanently. 404 also matches handleCreateShare's
+// archived-timeline response without leaking archive state.
+func (s *Server) shareTimelineLive(w http.ResponseWriter, share *models.Share) bool {
+	timeline, err := s.timelines.GetByID(share.TimelineID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load share")
+		return false
+	}
+	if timeline.ArchivedAt != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+		return false
+	}
+	return true
 }
 
 // buildShareProjection assembles the full ShareProjection for a share.
@@ -58594,6 +59641,12 @@ func (s *Server) handleUnlockShare(w http.ResponseWriter, r *http.Request) {
 	// 404 rather than confirming the token exists in another mode.
 	if share.Kind != models.ShareKindView {
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+		return
+	}
+	// Mirror the GET gateway's archived-timeline 404 (Phase 13.5) — a dead
+	// share must not be unlockable, and the check precedes NOT_PROTECTED so an
+	// archived timeline reveals nothing about its shares' protection state.
+	if !s.shareTimelineLive(w, share) {
 		return
 	}
 	if share.PasswordHash == nil {
@@ -60070,6 +61123,8 @@ export interface components {
             updatedAt: string;
             /** Format: date-time */
             archivedAt?: string | null;
+            /** @description Derived count of the timeline's active (non-revoked, non-expired) share links — view shares and ICS feeds alike. Backs the timeline tile's share-count chip. */
+            shareCount: number;
         };
         SavedFilter: {
             id: string;
@@ -63300,940 +64355,6 @@ export interface operations {
 }
 ````
 
-## File: packages/web/src/pages/DashboardPage.tsx
-````typescript
-/**
- * Main application shell: sidebar + top bar + content area.
- *
- * Fetches the authenticated user's first team and first timeline to seed the
- * initial view. Team-selection UI and full sidebar wiring come in a later phase.
- */
-
-import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
-import Sidebar from '@/components/layout/Sidebar'
-import TopBar, { type ViewMode } from '@/components/layout/TopBar'
-import GanttView from '@/components/gantt/GanttView'
-import { DEFAULT_LABEL_COL_W } from '@/components/gantt/GanttGrid'
-import GanttToolbar, { type GroupBy, type SortBy, type TimeGranularity, type ColorBy } from '@/components/gantt/GanttToolbar'
-import ListToolbar, { type ListGroupBy, type ListSortBy, type ListColorBy, type ListDensity, type ColumnConfig } from '@/components/list/ListToolbar'
-import ListView from '@/components/list/ListView'
-import CalendarToolbar, { type CalendarLayout } from '@/components/calendar/CalendarToolbar'
-import CalendarView from '@/components/calendar/CalendarView'
-import KanbanToolbar, { type KanbanGroupBy, type KanbanSortBy, type KanbanCardField } from '@/components/kanban/KanbanToolbar'
-import KanbanView from '@/components/kanban/KanbanView'
-import { DEFAULT_CARD_FIELDS } from '@/components/kanban/kanbanColumns'
-import ActivityDetailPanel from '@/components/gantt/ActivityDetailPanel'
-import ActivityCreatePanel from '@/components/gantt/ActivityCreatePanel'
-import { FilterProvider, useFilter } from '@/contexts/FilterContext'
-import { FindProvider, useFind } from '@/contexts/FindContext'
-import { useAuth } from '@/contexts/AuthContext'
-import { useDarkMode } from '@/hooks/useDarkMode'
-import { usePreferences, usePreferenceMap, useUpsertPreference } from '@/hooks/usePreferences'
-import { Settings, Moon, Sun, LogOut } from 'lucide-react'
-import { Badge } from '@/components/identity/Badge'
-import type { Identity } from '@/components/identity/identity-constants'
-import { useMyTeams, useTeamTimelines, useTeamTimelinesWithArchived, useTeamActivitySync, useUnarchiveTeam, useUnarchiveTimeline, useTeamMembers } from '@/hooks/useTeamActivities'
-import { useTimelineStatuses } from '@/hooks/useStatusTemplates'
-import { useSavedFilters } from '@/hooks/useSavedFilters'
-import { useTags } from '@/hooks/useTags'
-import TeamModal from '@/components/TeamModal'
-import MemberModal from '@/components/MemberModal'
-import TimelineModal from '@/components/TimelineModal'
-import FilterManageModal from '@/components/filters/FilterManageModal'
-import ShareModal from '@/components/ShareModal'
-import CalendarShareModal from '@/components/CalendarShareModal'
-import { useNavigate } from 'react-router-dom'
-import type { components } from '@draba/shared'
-import type { Member } from '@/types'
-
-type ApiActivity = components['schemas']['Activity']
-type ApiTeam = components['schemas']['Team']
-type ApiTimeline = components['schemas']['Timeline']
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
-
-const DROPDOWN_BTN: React.CSSProperties = {
-  display: 'flex',
-  alignItems: 'center',
-  gap: 8,
-  width: '100%',
-  padding: '10px 14px',
-  background: 'none',
-  border: 'none',
-  fontSize: 13,
-  color: 'var(--foreground)',
-  cursor: 'pointer',
-  fontFamily: 'var(--font-sans)',
-  textAlign: 'left',
-}
-
-function DashboardShell() {
-  const { logout, accessToken, user } = useAuth()
-  const { activeFilter, setActiveFilter } = useFilter()
-  const navigate = useNavigate()
-  const { isDark, toggle: toggleDark, theme } = useDarkMode()
-  const { setFindBarOpen } = useFind()
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
-  const [view, setView] = useState<ViewMode>('gantt')
-  // Gantt label-column width — held here so it survives switching to another
-  // view and back (GanttView unmounts on view change, which would reset it).
-  const [ganttLabelColW, setGanttLabelColW] = useState(DEFAULT_LABEL_COL_W)
-  // Close the detail sidebar when switching to list view (edits are inline there)
-  const prevView = useRef<ViewMode>('gantt')
-  const [profileOpen, setProfileOpen] = useState(false)
-  const [selectedActivityId, setSelectedActivityId] = useState<string | null>(null)
-  const [selectedApiActivity, setSelectedApiActivity] = useState<ApiActivity | null>(null)
-  const [ganttMembers, setGanttMembers] = useState<Member[]>([])
-  const [createDefaults, setCreateDefaults] = useState<{ start: string; end: string; memberId: string | null; statusId?: string | null } | null>(null)
-  const [filterModalOpen, setFilterModalOpen] = useState(false)
-  const [shareModalOpen, setShareModalOpen] = useState(false)
-  // Calendar gets its own share surface — an ICS feed configurator, not the
-  // active-links list (Phase 13.4).
-  const [calendarShareModalOpen, setCalendarShareModalOpen] = useState(false)
-  const [liveDragDates, setLiveDragDates] = useState<{ activityId: string; start: string; end: string } | null>(null)
-  // Gantt toolbar state
-  const [groupBy, setGroupBy] = useState<GroupBy>('none')
-  const [sortBy, setSortBy] = useState<SortBy>('startDate')
-  const [granularity, setGranularity] = useState<TimeGranularity | 'auto'>('auto')
-  const [colorBy, setColorBy] = useState<ColorBy>('activity')
-  // List toolbar state
-  const [listGroupBy, setListGroupBy] = useState<ListGroupBy>('none')
-  const [listSortBy, setListSortBy] = useState<ListSortBy>('startDate')
-  const [listColorBy, setListColorBy] = useState<ListColorBy>('activity')
-  const [listDensity, setListDensity] = useState<ListDensity>('comfortable')
-  const [listColumns, setListColumns] = useState<ColumnConfig[]>([])
-  // Incremented seq lets ListView know a new toggle has arrived
-  const [listColToggle, setListColToggle] = useState<{ colId: string; visible: boolean; seq: number } | null>(null)
-  const listColToggleSeq = useRef(0)
-  // Calendar toolbar state
-  const [calendarLayout, setCalendarLayout] = useState<CalendarLayout>('month')
-  // anchorDate = UTC midnight of the 1st of the displayed month (month) or weekStart (week).
-  const [calendarAnchorDate, setCalendarAnchorDate] = useState<Date>(() => {
-    const d = new Date()
-    d.setUTCHours(0, 0, 0, 0)
-    d.setUTCDate(1)
-    return d
-  })
-  // Kanban toolbar state
-  const [kanbanGroupBy, setKanbanGroupBy] = useState<KanbanGroupBy>('status')
-  const [kanbanSortBy, setKanbanSortBy] = useState<KanbanSortBy>('startDate')
-  const [kanbanColorBy, setKanbanColorBy] = useState<ColorBy>('activity')
-  const [kanbanCardFields, setKanbanCardFields] = useState<KanbanCardField[]>(DEFAULT_CARD_FIELDS)
-  const [kanbanCollapsedColumns, setKanbanCollapsedColumns] = useState<string[]>([])
-  const [kanbanShowHierarchy, setKanbanShowHierarchy] = useState(false)
-  // Incremented to trigger inline row creation in list view
-  const [listNewRowSeq, setListNewRowSeq] = useState(0)
-  const profileRef = useRef<HTMLDivElement>(null)
-  // Preference persistence
-  const upsert = useUpsertPreference()
-  // Track whether we've applied server prefs for the active timeline so we
-  // don't immediately write defaults back before the server data arrives.
-  const prefsAppliedForTimeline = useRef<string | null>(null)
-  // One-shot guard: init activeTimelineId from global prefs only on first load.
-  const timelineIdInitialized = useRef(false)
-
-
-  useEffect(() => {
-    function handleClickOutside(e: MouseEvent) {
-      if (profileRef.current && !profileRef.current.contains(e.target as Node)) {
-        setProfileOpen(false)
-      }
-    }
-    document.addEventListener('mousedown', handleClickOutside)
-    return () => document.removeEventListener('mousedown', handleClickOutside)
-  }, [])
-
-  // Close the detail sidebar when switching to list view (list edits are inline).
-  useEffect(() => {
-    if (view === 'list' && prevView.current !== 'list') {
-      setSelectedActivityId(null)
-      setSelectedApiActivity(null)
-      setCreateDefaults(null)
-    }
-    prevView.current = view
-  }, [view])
-
-  // Ctrl/Cmd+F opens the Find bar; browser default (page search) is suppressed.
-  useEffect(() => {
-    function handleKeyDown(e: KeyboardEvent) {
-      if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
-        e.preventDefault()
-        setFindBarOpen(true)
-      }
-    }
-    document.addEventListener('keydown', handleKeyDown)
-    return () => document.removeEventListener('keydown', handleKeyDown)
-  }, [setFindBarOpen])
-
-  const displayName = (user as { displayName?: string } | null)?.displayName ?? 'User'
-  const email = (user as { email?: string } | null)?.email ?? ''
-  const userIdentity: Identity = {
-    color: (user as { color?: string } | null)?.color ?? '#288C9B',
-    icon: (user as { icon?: string } | null)?.icon ?? '__name_2__',
-  }
-
-  // Global preferences — restored on login to seed team/timeline selection.
-  const { isSuccess: globalPrefsSettled } = usePreferences()
-  const globalPrefMap = usePreferenceMap()
-  const weekStartDay: 0 | 1 = (globalPrefMap['week_start'] as string | undefined) === 'sunday' ? 0 : 1
-
-  // Team modal state
-  const [teamModalMode, setTeamModalMode] = useState<'new' | 'edit' | null>(null)
-  const [editingTeam, setEditingTeam] = useState<ApiTeam | null>(null)
-  const unarchiveTeam = useUnarchiveTeam()
-
-  // Member modal state
-  const [editingMember, setEditingMember] = useState<TeamMemberWithUser | null>(null)
-
-  // Timeline modal state
-  const [timelineModalMode, setTimelineModalMode] = useState<'new' | 'edit' | null>(null)
-  const [editingTimeline, setEditingTimeline] = useState<ApiTimeline | null>(null)
-
-  // Fetch all teams including archived for the sidebar's archived section.
-  const { data: allTeams = [] } = useMyTeams(true)
-  const activeTeams = allTeams.filter(t => !t.archivedAt)
-  const archivedTeams = allTeams.filter(t => Boolean(t.archivedAt))
-
-  // Explicit team selection state — null until the global pref is applied so
-  // that timelines (and the timeline init effect) don't fire against the wrong
-  // fallback team before the saved team pref resolves.
-  const [activeTeamId, setActiveTeamId] = useState<string | null>(null)
-  const teamIdInitialized = useRef(false)
-  useEffect(() => {
-    if (!activeTeams.length || !globalPrefsSettled || teamIdInitialized.current) return
-    teamIdInitialized.current = true
-    const saved = typeof globalPrefMap['selected_team'] === 'string' ? globalPrefMap['selected_team'] : null
-    const exists = saved && activeTeams.some(t => t.id === saved)
-    setActiveTeamId(exists ? saved : activeTeams[0].id)
-  }, [activeTeams, globalPrefsSettled, globalPrefMap])
-
-  // Only derive an active team once the pref has been applied (activeTeamId !== null).
-  // The activeTeams[0] fallback here handles the edge case where the saved team
-  // was archived or deleted between sessions.
-  const activeTeam = activeTeamId !== null
-    ? (activeTeams.find(t => t.id === activeTeamId) ?? activeTeams[0] ?? undefined)
-    : undefined
-  const teamId = activeTeam?.id ?? ''
-
-  // Check whether the current user is an admin of the active team.
-  const { data: teamMembers = [] } = useTeamMembers(teamId)
-  const userId = (user as { id?: string } | null)?.id ?? ''
-  const isSuperadmin = Boolean((user as { isSuperadmin?: boolean } | null)?.isSuperadmin)
-  const canEditTeam = isSuperadmin || teamMembers.some(m => m.userId === userId && m.role === 'admin')
-
-  const handleSelectTeam = useCallback((id: string) => {
-    setActiveTeamId(id)
-    // Clear the stale timeline selection so the init effect re-fires with the
-    // new team's timeline list. Without this, the old timeline ID leaks into
-    // the new team's API requests and produces 404s.
-    setActiveTimelineId(undefined)
-    prefsAppliedForTimeline.current = null
-    timelineIdInitialized.current = false
-  }, [])
-
-  const unarchiveTimeline = useUnarchiveTimeline(teamId)
-
-  const { data: timelines = [] } = useTeamTimelines(teamId)
-  const { data: allTimelines = [] } = useTeamTimelinesWithArchived(teamId)
-  const archivedTimelines = allTimelines.filter(t => Boolean(t.archivedAt))
-  const [activeTimelineId, setActiveTimelineId] = useState<string | undefined>()
-  const { data: activeTimelineStatuses = [] } = useTimelineStatuses(teamId, activeTimelineId ?? '')
-  const { data: savedFilters = [] } = useSavedFilters(teamId)
-  const { data: tags = [] } = useTags(teamId)
-  // Initialize activeTimelineId from the saved global pref (selected_timeline),
-  // falling back to timelines[0] when no pref is stored or the saved timeline
-  // is no longer in the list. Waits for global prefs to settle so we don't
-  // immediately overwrite a restored value with the fallback.
-  useEffect(() => {
-    if (timelines.length === 0 || !globalPrefsSettled || timelineIdInitialized.current) return
-    timelineIdInitialized.current = true
-    const saved = typeof globalPrefMap['selected_timeline'] === 'string' ? globalPrefMap['selected_timeline'] : null
-    const exists = saved && timelines.some(t => t.id === saved)
-    setActiveTimelineId(exists ? saved : timelines[0].id)
-  }, [timelines, globalPrefsSettled, globalPrefMap])
-  const activeTimeline = timelines.find(t => t.id === activeTimelineId) ?? timelines[0]
-  // Derived so they stay in sync after edits without needing separate state.
-  const activeTimelineColor = activeTimeline?.color ?? '#1A97A2'
-  const activeTimelineName = activeTimeline?.name ?? ''
-  const activeTimelineIdentity: Identity = {
-    color: activeTimeline?.color ?? '#288C9B',
-    icon: activeTimeline?.icon ?? '__none__',
-  }
-
-  // The frozen filter snapshot captured into a share's view config — shared
-  // across Gantt/List/Kanban since `activeFilter` applies to the whole timeline.
-  const activeShareFilter = useMemo(() => {
-    if (activeFilter.kind !== 'saved') return null
-    const sf = savedFilters.find(f => f.id === activeFilter.id)
-    if (!sf) return null
-    try { return JSON.parse(sf.definition) as import('@/lib/filterTypes').FilterDefinition } catch { return null }
-  }, [activeFilter, savedFilters])
-
-  // Close the activity detail panel whenever the active filter changes so the
-  // filtered view is unobstructed by a stale selection.
-  useEffect(() => {
-    setSelectedActivityId(null)
-    setSelectedApiActivity(null)
-  }, [activeFilter]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  const handleTimelineChange = useCallback((id: string) => {
-    prefsAppliedForTimeline.current = null
-    setActiveTimelineId(id)
-    setActiveFilter({ kind: 'preset', id: 'all' })
-  }, [setActiveFilter])
-
-  // Calendar navigation helpers.
-  const calendarPrev = useCallback(() => {
-    setCalendarAnchorDate(prev => {
-      const d = new Date(prev)
-      if (calendarLayout === 'month') {
-        d.setUTCMonth(d.getUTCMonth() - 1)
-      } else {
-        d.setUTCDate(d.getUTCDate() - 7)
-      }
-      return d
-    })
-  }, [calendarLayout])
-
-  const calendarNext = useCallback(() => {
-    setCalendarAnchorDate(prev => {
-      const d = new Date(prev)
-      if (calendarLayout === 'month') {
-        d.setUTCMonth(d.getUTCMonth() + 1)
-      } else {
-        d.setUTCDate(d.getUTCDate() + 7)
-      }
-      return d
-    })
-  }, [calendarLayout])
-
-  const calendarToday = useCallback(() => {
-    const d = new Date()
-    d.setUTCHours(0, 0, 0, 0)
-    if (calendarLayout === 'month') {
-      d.setUTCDate(1)
-    } else {
-      // Snap to weekStart.
-      const dow = d.getUTCDay()
-      const daysBack = weekStartDay === 1 ? (dow === 0 ? 6 : dow - 1) : dow
-      d.setUTCDate(d.getUTCDate() - daysBack)
-    }
-    setCalendarAnchorDate(d)
-  }, [calendarLayout, weekStartDay])
-
-  // Switching layouts also snaps the anchor date to the correct boundary so
-  // the week-view always starts on the configured weekStart day.
-  const handleCalendarLayoutChange = useCallback((l: CalendarLayout) => {
-    setCalendarLayout(l)
-    setCalendarAnchorDate(prev => {
-      const d = new Date(prev)
-      d.setUTCHours(0, 0, 0, 0)
-      if (l === 'week') {
-        const dow = d.getUTCDay()
-        const daysBack = weekStartDay === 1 ? (dow === 0 ? 6 : dow - 1) : dow
-        d.setUTCDate(d.getUTCDate() - daysBack)
-      } else {
-        d.setUTCDate(1)
-      }
-      return d
-    })
-  }, [weekStartDay])
-
-  useTeamActivitySync(teamId, accessToken)
-
-  // Per-timeline preferences: restore toolbar state when the active timeline changes.
-  // isSuccess gate ensures we don't mark prefs applied before the query resolves.
-  const { isSuccess: prefsSettled } = usePreferences(activeTimelineId)
-  const timelinePrefs = usePreferenceMap(activeTimelineId)
-  useEffect(() => {
-    if (!activeTimelineId || !prefsSettled) return
-    if (prefsAppliedForTimeline.current === activeTimelineId) return
-    prefsAppliedForTimeline.current = activeTimelineId
-
-    if (typeof timelinePrefs['group_by'] === 'string') setGroupBy(timelinePrefs['group_by'] as GroupBy)
-    if (typeof timelinePrefs['sort_by'] === 'string') setSortBy(timelinePrefs['sort_by'] as SortBy)
-    if (typeof timelinePrefs['zoom_granularity'] === 'string') setGranularity(timelinePrefs['zoom_granularity'] as TimeGranularity | 'auto')
-    if (typeof timelinePrefs['color_by'] === 'string') setColorBy(timelinePrefs['color_by'] as ColorBy)
-    if (typeof timelinePrefs['list_group_by'] === 'string') setListGroupBy(timelinePrefs['list_group_by'] as ListGroupBy)
-    if (typeof timelinePrefs['list_sort_by'] === 'string') setListSortBy(timelinePrefs['list_sort_by'] as ListSortBy)
-    if (typeof timelinePrefs['list_color_by'] === 'string') setListColorBy(timelinePrefs['list_color_by'] as ListColorBy)
-    if (typeof timelinePrefs['list_density'] === 'string') setListDensity(timelinePrefs['list_density'] as ListDensity)
-    if (typeof timelinePrefs['view_mode'] === 'string') setView(timelinePrefs['view_mode'] as ViewMode)
-    if (typeof timelinePrefs['kanban_group_by'] === 'string') setKanbanGroupBy(timelinePrefs['kanban_group_by'] as KanbanGroupBy)
-    if (typeof timelinePrefs['kanban_sort_by'] === 'string') setKanbanSortBy(timelinePrefs['kanban_sort_by'] as KanbanSortBy)
-    if (typeof timelinePrefs['kanban_color_by'] === 'string') setKanbanColorBy(timelinePrefs['kanban_color_by'] as ColorBy)
-    if (typeof timelinePrefs['kanban_card_fields'] === 'string') {
-      try { setKanbanCardFields(JSON.parse(timelinePrefs['kanban_card_fields']) as KanbanCardField[]) } catch { /* ignore */ }
-    }
-    if (typeof timelinePrefs['kanban_collapsed'] === 'string') {
-      try { setKanbanCollapsedColumns(JSON.parse(timelinePrefs['kanban_collapsed']) as string[]) } catch { /* ignore */ }
-    }
-    if (typeof timelinePrefs['kanban_show_hierarchy'] === 'string') {
-      try { setKanbanShowHierarchy(JSON.parse(timelinePrefs['kanban_show_hierarchy']) as boolean) } catch { /* ignore */ }
-    }
-  }, [activeTimelineId, prefsSettled, timelinePrefs])
-
-  // Save toolbar state changes to per-timeline prefs.
-  const saveTimelinePref = useCallback((key: string, value: string) => {
-    if (!activeTimelineId) return
-    upsert.mutate({ key, value: JSON.stringify(value), timelineId: activeTimelineId })
-  }, [activeTimelineId, upsert.mutate]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('group_by', groupBy)
-  }, [groupBy, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('sort_by', sortBy)
-  }, [sortBy, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('zoom_granularity', granularity)
-  }, [granularity, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('color_by', colorBy)
-  }, [colorBy, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('view_mode', view)
-  }, [view, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('list_group_by', listGroupBy)
-  }, [listGroupBy, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('list_sort_by', listSortBy)
-  }, [listSortBy, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('list_color_by', listColorBy)
-  }, [listColorBy, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('list_density', listDensity)
-  }, [listDensity, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('kanban_group_by', kanbanGroupBy)
-  }, [kanbanGroupBy, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('kanban_sort_by', kanbanSortBy)
-  }, [kanbanSortBy, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('kanban_color_by', kanbanColorBy)
-  }, [kanbanColorBy, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('kanban_card_fields', JSON.stringify(kanbanCardFields))
-  }, [kanbanCardFields, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('kanban_show_hierarchy', JSON.stringify(kanbanShowHierarchy))
-  }, [kanbanShowHierarchy, saveTimelinePref])
-
-  // Global preferences: persist dark mode, active team, and active timeline.
-  useEffect(() => {
-    upsert.mutate({ key: 'theme', value: JSON.stringify(theme) })
-  }, [theme]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    if (!teamId) return
-    upsert.mutate({ key: 'selected_team', value: JSON.stringify(teamId) })
-  }, [teamId]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    if (!activeTimelineId) return
-    upsert.mutate({ key: 'selected_timeline', value: JSON.stringify(activeTimelineId) })
-  }, [activeTimelineId]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Reset label column width when the user switches timelines so each timeline
-  // starts fresh. Switching between views on the same timeline preserves width
-  // because the state lives here rather than inside the unmounting GanttView.
-  useEffect(() => {
-    setGanttLabelColW(DEFAULT_LABEL_COL_W)
-  }, [activeTimelineId])
-
-  return (
-    <div style={{ display: 'flex', height: '100vh', overflow: 'hidden', background: 'var(--background)' }}>
-      <Sidebar
-        collapsed={sidebarCollapsed}
-        onToggle={() => setSidebarCollapsed(c => !c)}
-        apiTimelines={timelines}
-        archivedTimelines={archivedTimelines}
-        activeTimelineId={activeTimelineId}
-        onActiveTimelineChange={handleTimelineChange}
-        onNewTimeline={() => { setEditingTimeline(null); setTimelineModalMode('new') }}
-        onEditTimeline={id => {
-          // timelines (active) is always loaded; allTimelines (?archived=true) may
-          // still be in-flight, so prefer the already-loaded list to avoid opening
-          // the modal with an undefined timeline and blank fields.
-          const tl = timelines.find(t => t.id === id) ?? allTimelines.find(t => t.id === id)
-          setEditingTimeline(tl ?? null)
-          setTimelineModalMode('edit')
-        }}
-        onNewActivity={() => {
-          const today = new Date().toISOString().slice(0, 10)
-          setSelectedActivityId(null)
-          setSelectedApiActivity(null)
-          if (view === 'list') {
-            setListNewRowSeq(s => s + 1)
-          } else {
-            setCreateDefaults({ start: today, end: today, memberId: null })
-          }
-        }}
-        activeTeam={activeTeam}
-        activeTeams={activeTeams}
-        archivedTeams={archivedTeams}
-        canEditTeam={canEditTeam}
-        onSelectTeam={handleSelectTeam}
-        onNewTeam={isSuperadmin ? () => { setEditingTeam(null); setTeamModalMode('new'); } : undefined}
-        onEditTeam={t => { setEditingTeam(t as ApiTeam); setTeamModalMode('edit'); }}
-        onUnarchiveTeam={id => unarchiveTeam.mutate(id)}
-        members={teamMembers.length > 0 ? teamMembers : undefined}
-        onEditMember={isSuperadmin ? m => setEditingMember(m) : undefined}
-      />
-
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0 }}>
-        <TopBar
-          view={view}
-          teamId={teamId}
-          timelineName={activeTimelineName}
-          timelineIdentity={activeTimelineIdentity}
-          onViewChange={setView}
-          onOpenFilterManager={() => setFilterModalOpen(true)}
-          rightSlot={
-            <div ref={profileRef} style={{ position: 'relative', marginLeft: 4, zIndex: 30 }}>
-              <button
-                onClick={() => setProfileOpen(o => !o)}
-                style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', display: 'flex' }}
-                title={displayName}
-              >
-                <Badge identity={userIdentity} name={displayName} shape="circle" size={28} />
-              </button>
-
-              {profileOpen && (
-                <div
-                  style={{
-                    position: 'absolute',
-                    top: 'calc(100% + 8px)',
-                    right: 0,
-                    width: 220,
-                    background: 'var(--card)',
-                    border: '1px solid var(--border)',
-                    borderRadius: 8,
-                    boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
-                    zIndex: 100,
-                    overflow: 'hidden',
-                  }}
-                >
-                  <div style={{ padding: '12px 14px', borderBottom: '1px solid var(--border)' }}>
-                    <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)' }}>{displayName}</div>
-                    <div style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 2 }}>{email}</div>
-                  </div>
-                  <button
-                    onClick={toggleDark}
-                    style={{ ...DROPDOWN_BTN, borderBottom: '1px solid var(--border)' }}
-                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-                  >
-                    {isDark ? <Moon size={14} strokeWidth={1.8} /> : <Sun size={14} strokeWidth={1.8} />}
-                    {isDark ? 'Dark mode' : 'Light mode'}
-                  </button>
-                  <button
-                    onClick={() => { setProfileOpen(false); navigate('/settings'); }}
-                    style={{ ...DROPDOWN_BTN, borderBottom: '1px solid var(--border)' }}
-                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-                  >
-                    <Settings size={14} strokeWidth={1.8} />
-                    Settings
-                  </button>
-                  <button
-                    onClick={logout}
-                    style={{ ...DROPDOWN_BTN, color: 'var(--muted-foreground)' }}
-                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-                  >
-                    <LogOut size={14} strokeWidth={1.8} />
-                    Sign out
-                  </button>
-                </div>
-              )}
-            </div>
-          }
-        />
-
-        {/* Active timeline color band */}
-        <div style={{ height: 3, background: activeTimelineColor, flexShrink: 0, transition: 'background 0.2s ease' }} />
-
-        {/* Gantt sub-toolbar — only shown in Gantt view */}
-        {view === 'gantt' && (
-          <GanttToolbar
-            groupBy={groupBy}
-            onGroupByChange={setGroupBy}
-            sortBy={sortBy}
-            onSortByChange={setSortBy}
-            granularity={granularity}
-            onGranularityChange={setGranularity}
-            colorBy={colorBy}
-            onColorByChange={setColorBy}
-            onExport={() => {}}
-            onShare={() => setShareModalOpen(true)}
-          />
-        )}
-
-        {/* List sub-toolbar — only shown in List view */}
-        {view === 'list' && (
-          <ListToolbar
-            columns={listColumns}
-            onColumnVisibilityChange={(colId, visible) => {
-              listColToggleSeq.current += 1
-              setListColToggle({ colId, visible, seq: listColToggleSeq.current })
-              setListColumns(prev => prev.map(c => c.id === colId ? { ...c, visible } : c))
-            }}
-            density={listDensity}
-            onDensityChange={setListDensity}
-            groupBy={listGroupBy}
-            onGroupByChange={setListGroupBy}
-            sortBy={listSortBy}
-            onSortByChange={setListSortBy}
-            colorBy={listColorBy}
-            onColorByChange={setListColorBy}
-            onExport={() => {}}
-            onShare={() => setShareModalOpen(true)}
-          />
-        )}
-
-        {/* Calendar sub-toolbar — only shown in Calendar view */}
-        {view === 'calendar' && (
-          <CalendarToolbar
-            layout={calendarLayout}
-            onLayoutChange={handleCalendarLayoutChange}
-            anchorDate={calendarAnchorDate}
-            onPrev={calendarPrev}
-            onNext={calendarNext}
-            onToday={calendarToday}
-            colorBy={colorBy}
-            onColorByChange={setColorBy}
-            onExport={() => {}}
-            onShare={() => setCalendarShareModalOpen(true)}
-          />
-        )}
-
-        {/* Kanban sub-toolbar — only shown in Kanban view */}
-        {view === 'kanban' && (
-          <KanbanToolbar
-            groupBy={kanbanGroupBy}
-            onGroupByChange={setKanbanGroupBy}
-            sortBy={kanbanSortBy}
-            onSortByChange={setKanbanSortBy}
-            colorBy={kanbanColorBy}
-            onColorByChange={setKanbanColorBy}
-            cardFields={kanbanCardFields}
-            onCardFieldsChange={setKanbanCardFields}
-            showHierarchy={kanbanShowHierarchy}
-            onShowHierarchyChange={setKanbanShowHierarchy}
-            onExport={() => {}}
-            onShare={() => setShareModalOpen(true)}
-          />
-        )}
-
-        {/* Content area */}
-        <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-          {view === 'gantt' && teamId && activeTimelineId ? (
-            <GanttView
-              teamId={teamId}
-              timelineId={activeTimelineId}
-              startDate={activeTimeline?.startDate}
-              endDate={activeTimeline?.endDate}
-              groupBy={groupBy}
-              sortBy={sortBy}
-              granularity={granularity}
-              colorBy={colorBy}
-              timelineStatuses={activeTimelineStatuses}
-              savedFilters={savedFilters}
-              tags={tags}
-              selectedActivityId={selectedActivityId}
-              onSelectActivity={(id) => {
-                setSelectedActivityId(id)
-                if (!id) { setSelectedApiActivity(null); setCreateDefaults(null) }
-              }}
-              onSelectApiActivity={(activity) => {
-                setSelectedApiActivity(activity)
-                setCreateDefaults(null)
-              }}
-              onBarDragProgress={(activityId, newStart, newEnd) => {
-                setLiveDragDates({
-                  activityId,
-                  start: newStart.toISOString().slice(0, 10),
-                  end: newEnd.toISOString().slice(0, 10),
-                })
-              }}
-              onBarDragEnd={() => setLiveDragDates(null)}
-              onMembersLoaded={setGanttMembers}
-              labelColW={ganttLabelColW}
-              onLabelColWChange={setGanttLabelColW}
-            />
-          ) : view === 'gantt' && (!teamId || !activeTimelineId) ? (
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
-              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>Loading your team…</p>
-            </div>
-          ) : view === 'list' && teamId && activeTimelineId ? (
-            <ListView
-              teamId={teamId}
-              timelineId={activeTimelineId}
-              groupBy={listGroupBy}
-              sortBy={listSortBy}
-              colorBy={listColorBy}
-              density={listDensity}
-              timelineStatuses={activeTimelineStatuses}
-              savedFilters={savedFilters}
-              tags={tags}
-              selectedActivityId={selectedActivityId}
-              pendingColumnToggle={listColToggle}
-              onSelectActivity={(id) => {
-                setSelectedActivityId(id)
-                if (!id) { setSelectedApiActivity(null); setCreateDefaults(null) }
-              }}
-              onSelectApiActivity={(activity) => {
-                setSelectedApiActivity(activity)
-                setCreateDefaults(null)
-              }}
-              onMembersLoaded={setGanttMembers}
-              onColumnsChange={setListColumns}
-              triggerNewRow={listNewRowSeq}
-            />
-          ) : view === 'list' && (!teamId || !activeTimelineId) ? (
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
-              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>Loading your team…</p>
-            </div>
-          ) : view === 'calendar' && teamId && activeTimelineId ? (
-            <CalendarView
-              teamId={teamId}
-              timelineId={activeTimelineId}
-              layout={calendarLayout}
-              anchorDate={calendarAnchorDate}
-              colorBy={colorBy}
-              timelineStatuses={activeTimelineStatuses}
-              savedFilters={savedFilters}
-              tags={tags}
-              selectedActivityId={selectedActivityId}
-              onSelectActivity={(id) => {
-                setSelectedActivityId(id)
-                if (!id) { setSelectedApiActivity(null); setCreateDefaults(null) }
-              }}
-              onSelectApiActivity={(activity) => {
-                setSelectedApiActivity(activity)
-                setCreateDefaults(null)
-              }}
-              onBarDragProgress={(activityId, newStart, newEnd) => {
-                setLiveDragDates({
-                  activityId,
-                  start: newStart.toISOString().slice(0, 10),
-                  end: newEnd.toISOString().slice(0, 10),
-                })
-              }}
-              onBarDragEnd={() => setLiveDragDates(null)}
-              onCellClick={(date) => {
-                const iso = date.toISOString().slice(0, 10)
-                setSelectedActivityId(null)
-                setSelectedApiActivity(null)
-                setCreateDefaults({ start: iso, end: iso, memberId: null })
-              }}
-              onMembersLoaded={setGanttMembers}
-            />
-          ) : view === 'calendar' && (!teamId || !activeTimelineId) ? (
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
-              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>Loading your team…</p>
-            </div>
-          ) : view === 'kanban' && teamId && activeTimelineId ? (
-            <KanbanView
-              teamId={teamId}
-              timelineId={activeTimelineId}
-              groupBy={kanbanGroupBy}
-              sortBy={kanbanSortBy}
-              colorBy={kanbanColorBy}
-              cardFields={kanbanCardFields}
-              collapsedColumnIds={kanbanCollapsedColumns}
-              onCollapsedColumnIdsChange={setKanbanCollapsedColumns}
-              showHierarchy={kanbanShowHierarchy}
-              timelineStatuses={activeTimelineStatuses}
-              savedFilters={savedFilters}
-              tags={tags}
-              selectedActivityId={selectedActivityId}
-              onSelectActivity={(id) => {
-                setSelectedActivityId(id)
-                if (!id) { setSelectedApiActivity(null); setCreateDefaults(null) }
-              }}
-              onSelectApiActivity={(activity) => {
-                setSelectedApiActivity(activity)
-                setCreateDefaults(null)
-              }}
-              onAddActivity={(defaults) => {
-                setSelectedActivityId(null)
-                setSelectedApiActivity(null)
-                setCreateDefaults(defaults)
-              }}
-              onMembersLoaded={setGanttMembers}
-            />
-          ) : view === 'kanban' && (!teamId || !activeTimelineId) ? (
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
-              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>Loading your team…</p>
-            </div>
-          ) : (
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
-              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>
-                {view.charAt(0).toUpperCase() + view.slice(1)} view coming soon.
-              </p>
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Activity detail panel — slides in from right when an activity is selected */}
-      <ActivityDetailPanel
-        open={Boolean(selectedApiActivity)}
-        event={selectedApiActivity}
-        members={ganttMembers}
-        teamId={teamId}
-        timelineId={activeTimelineId ?? ''}
-        onClose={() => { setSelectedActivityId(null); setSelectedApiActivity(null); setLiveDragDates(null) }}
-        liveDragStart={liveDragDates && liveDragDates.activityId === selectedApiActivity?.id ? liveDragDates.start : undefined}
-        liveDragEnd={liveDragDates && liveDragDates.activityId === selectedApiActivity?.id ? liveDragDates.end : undefined}
-      />
-
-      {/* Activity create panel — slides in from New Activity button or future drag */}
-      <ActivityCreatePanel
-        open={Boolean(createDefaults) && !selectedApiActivity}
-        teamId={teamId}
-        timelineId={activeTimelineId ?? ''}
-        members={ganttMembers}
-        timelineStatuses={activeTimelineStatuses}
-        defaultStart={createDefaults?.start ?? new Date().toISOString().slice(0, 10)}
-        defaultEnd={createDefaults?.end ?? new Date().toISOString().slice(0, 10)}
-        defaultMemberId={createDefaults?.memberId}
-        defaultStatusId={createDefaults?.statusId}
-        onClose={() => setCreateDefaults(null)}
-      />
-
-      <FilterManageModal
-        open={filterModalOpen}
-        onClose={() => setFilterModalOpen(false)}
-        teamId={teamId}
-        timelineId={activeTimelineId ?? ''}
-        isAdmin={canEditTeam}
-      />
-
-      {/* Team modal — create or edit */}
-      {teamModalMode && (
-        <TeamModal
-          mode={teamModalMode}
-          team={editingTeam ?? undefined}
-          isAdmin={canEditTeam}
-          onClose={() => { setTeamModalMode(null); setEditingTeam(null); }}
-          onTeamCreated={created => setActiveTeamId(created.id)}
-        />
-      )}
-
-      {/* Member modal — edit a team member */}
-      {editingMember && (
-        <MemberModal
-          teamId={teamId}
-          memberId={editingMember.id}
-          isAdmin={canEditTeam}
-          isSuperadmin={isSuperadmin}
-          onClose={() => setEditingMember(null)}
-        />
-      )}
-
-      {/* Share modal — create a share link for the active view */}
-      {shareModalOpen && activeTimelineId && teamId && (view === 'gantt' || view === 'list' || view === 'kanban') && (
-        <ShareModal
-          teamId={teamId}
-          timelineId={activeTimelineId}
-          viewType={view}
-          timelineName={activeTimelineName}
-          viewConfig={
-            view === 'gantt'
-              ? { groupBy, sortBy, colorBy, granularity: String(granularity), filter: activeShareFilter }
-              : view === 'list'
-              ? {
-                  groupBy: listGroupBy,
-                  sortBy: listSortBy,
-                  colorBy: listColorBy,
-                  granularity: '',
-                  filter: activeShareFilter,
-                  columns: listColumns.map(c => ({ id: c.id, visible: c.visible })),
-                }
-              : {
-                  groupBy: kanbanGroupBy,
-                  sortBy: kanbanSortBy,
-                  colorBy: kanbanColorBy,
-                  granularity: '',
-                  filter: activeShareFilter,
-                  cardFields: kanbanCardFields,
-                  showHierarchy: kanbanShowHierarchy,
-                  collapsedColumns: kanbanCollapsedColumns,
-                }
-          }
-          onClose={() => setShareModalOpen(false)}
-        />
-      )}
-
-      {/* Calendar share modal — ICS feed configurator (distinct from ShareModal) */}
-      {calendarShareModalOpen && activeTimelineId && teamId && (
-        <CalendarShareModal
-          teamId={teamId}
-          timelineId={activeTimelineId}
-          timelineName={activeTimelineName}
-          onClose={() => setCalendarShareModalOpen(false)}
-        />
-      )}
-
-      {/* Timeline modal — create or edit */}
-      {timelineModalMode && (
-        <TimelineModal
-          mode={timelineModalMode}
-          teamId={teamId}
-          timeline={editingTimeline ?? undefined}
-          canAdmin={canEditTeam}
-          onClose={() => { setTimelineModalMode(null); setEditingTimeline(null) }}
-          onCreated={created => setActiveTimelineId(created.id)}
-          onUnarchive={id => unarchiveTimeline.mutate(id, { onSuccess: () => { setTimelineModalMode(null); setEditingTimeline(null) } })}
-        />
-      )}
-    </div>
-  )
-}
-
-export default function DashboardPage() {
-  return (
-    <FindProvider>
-      <FilterProvider>
-        <DashboardShell />
-      </FilterProvider>
-    </FindProvider>
-  )
-}
-````
-
 ## File: docs/TASKS.md
 ````markdown
 # Tasks
@@ -65561,9 +65682,11 @@ Includes both the webhook backend and the per-timeline connector sidebar UI (pre
 - [x] Manual: subscribe in a real calendar client → all-day events with fields (verified in Thunderbird, 2026-06-10; client-side fetch, works on LAN). Apple Calendar on LAN also testable.
 - [ ] Manual: Google Calendar / Outlook web subscription — **blocked until a test server is exposed to the internet** (their fetchers run server-side and cannot reach localhost/LAN). Feed URLs derive from `window.location.origin`, so no code change is needed once public.
 
-**13.5 — Lifecycle tail:**
-- [ ] Optional expiry → `410 Gone` after `expires_at`
-- [ ] Active-share-count chip on the timeline tile; last-viewed surfaced in the 13.2 modal
+**13.5 — Lifecycle tail (re-scoped 2026-06-11):** — ✅ 2026-06-11 (automated checks + local live verification)
+- [x] Archived timeline kills its shares: JSON gateway, ICS feed, and unlock all `404` (not `410` — archive is reversible; unarchive resurrects the links); checked before the caches so archiving takes effect immediately
+- [x] Active-share-count chip on the sidebar timeline tile — `Timeline.shareCount` derived in the repo (non-revoked, non-expired shares of both kinds), added to OpenAPI + regenerated types
+- [x] Last-viewed rendered in the 13.2 modal row beside the view count; `useListShares` now refetches on modal open so the telemetry is current (app-wide 30s staleTime was masking updates)
+- [x] ~~Optional expiry write path~~ — cut from scope 2026-06-11 (read-side `410` enforcement stays as tested defensive code)
 
 ## Done
 - [x] Initialize repo scaffold — 2026-04-27
@@ -65586,6 +65709,26 @@ Includes both the webhook backend and the per-timeline connector sidebar UI (pre
 ## File: docs/log.md
 ````markdown
 # Development Log
+
+---
+
+## 2026-06-11 — Phase 13.5: Lifecycle tail
+
+**Goal:** the re-scoped (same-day) half-day close-out of Phase 13: archived timelines stop serving their shares/feeds (reversibly), the timeline tile shows an active-share-count chip, and last-viewed renders in the share modal. Cut from scope: the expiry write path and any site-statistics subsystem.
+
+**Backend (`packages/api`):**
+- **Archived timeline → 404 on the public surface.** New `shareTimelineLive` helper (share_handler.go) loads the share's timeline and 404s when `ArchivedAt` is set; wired into `handleGetShareProjection`, `serveICSFeed`, and `handleUnlockShare`. `404`, not `410`: archive is reversible (unarchive resurrects the links), `410` tells calendar clients to drop the subscription permanently, and `404` matches `handleCreateShare`'s archived response without leaking archive state. The check runs **before the cache reads**, so archiving takes effect immediately regardless of warm projection/ICS caches. In the unlock handler it precedes the `NOT_PROTECTED` branch so an archived timeline reveals nothing about its shares' protection state.
+- **`Timeline.ShareCount`** — derived count of the timeline's active (non-revoked, non-expired) shares, both kinds. New `activeShareCountSubquery` in timeline_repo.go, applied to `GetByID` and `ListByTeam`; "now" is bound as a parameter (not `CURRENT_TIMESTAMP`) so the `expires_at` comparison uses the same driver serialization as the stored values across DB backends. OpenAPI `Timeline.shareCount` (required) + TS types regenerated.
+- **Tests** (`share_lifecycle_test.go`, new): archive kills view share + ICS feed with warm caches and unarchive resurrects both; unlock of an archived timeline's protected share 404s even with the correct password; `shareCount` tracks create/delete across both kinds and appears on single-timeline reads.
+
+**Frontend (`packages/web`):**
+- **Sidebar timeline tile chip** (`Sidebar.tsx`): a small pill (Link2 icon + count) on each timeline row when `shareCount > 0`, with a "N active share links" tooltip; hidden at zero and when the rail is collapsed.
+- **Last-viewed in the share modal** (`ShareModal.tsx`): footer meta now appends "Last viewed …" beside the view count when `lastViewedAt` is set — time of day if today, short date otherwise; full timestamp on hover.
+- **`useListShares` freshness fix** (`useShares.ts`): the app-wide 30s `staleTime` meant reopening the modal within the window served cached telemetry (view count / last-viewed didn't update after an access). The list query now sets `staleTime: 0` + `refetchOnMount: 'always'` — the share modals are its only consumers and mount on demand.
+
+**Verified live** (local `go run` API on :8080 with seeded sample data + the `web-local-api` Vite server on :5175): tile chips read 2 (Sales Kick Off) and 4 (Q1 Workload), matching the share fixtures; modal row shows "31 views · Last viewed Jun 10", and after hitting the public share URL once, reopening shows "32 views · Last viewed 10:03 AM"; archive/unarchive of Q1 Workload flips its view share and ICS feed 200 → 404 → 200.
+
+**Checks:** `golangci-lint run` ✅ · `go test ./...` ✅ · `pnpm --filter web lint` ✅ · `pnpm --filter web build` ✅ · `pnpm --filter web test` ✅ (314).
 
 ---
 
@@ -67881,7 +68024,7 @@ This document organizes development into discrete phases with effort estimates a
 | 13.2 | [Share Module Overhaul + Password Protection](#phase-132--share-module-overhaul--password-protection) | M–L | ✅ |
 | 13.3 | [List + Kanban Read-Only](#phase-133--list--kanban-read-only) | M | ✅ |
 | 13.4 | [Calendar — ICS Feed Sharing](#phase-134--calendar--ics-feed-sharing) | M | ✅ |
-| 13.5 | [Lifecycle Tail](#phase-135--lifecycle-tail) | S | ⬜ |
+| 13.5 | [Lifecycle Tail](#phase-135--lifecycle-tail) | S | ✅ |
 | 14 | [Export — Tabular & Per-View](#phase-14--export--tabular--per-view) | M — 3–5 days | ⬜ |
 | 15 | [Import — Tabular](#phase-15--import--tabular) | M — 2–3 days | ⬜ |
 | 16 | [Backup & Restore](#phase-16--backup--restore) | M — 2–3 days | ⬜ |
@@ -69413,7 +69556,7 @@ Calendar diverges from the other views by design. What people want from a shared
 ---
 
 ### Phase 13.5 — Lifecycle Tail
-**Status:** ⬜ | **Effort:** S (half-day close-out)
+**Status:** ✅ Done (2026-06-11) — all automated checks pass; exit criteria additionally verified live against a local API with sample data (archive→404→unarchive round-trip, chip counts vs. fixtures, last-viewed updating on access). Docker-image verification rides along with the pending 13.x batch. | **Effort:** S (half-day close-out)
 
 Re-scoped 2026-06-11 — most of the original tail was already built piecemeal during 13.1–13.4 (`expires_at` + `410 Gone` enforcement on both gateways, `view_count` / `last_viewed_at` recorded on every access, view count rendered in the modal). What remains:
 
