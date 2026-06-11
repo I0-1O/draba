@@ -2,7 +2,7 @@
 
 _Updated after each significant work session. Read this first to orient — it is intentionally short. Per-phase implementation detail lives in [docs/log.md](../log.md); this file is a current-state snapshot only._
 
-**Last updated:** 2026-06-11 (`/review-phase 13.4` findings addressed: revoked/expired feed `410 Gone` paths now tested via new `newTestServerWithDB` harness variant; ICS `escapeText` hardened against bare-CR/control-char injection; log.md scrubbed of host-specific values; ROADMAP 13.4 updated to match the shipped VEVENT payload. Phase 13.4 remains complete; still awaiting Docker rebuild + real-calendar-app verification.)
+**Last updated:** 2026-06-11 (13.5 re-scoped to a half-day close-out — see Next phase row below; ROADMAP + plan §13.5 updated. Earlier same day: `/review-phase 13.4` findings addressed: revoked/expired feed `410 Gone` paths now tested via new `newTestServerWithDB` harness variant; ICS `escapeText` hardened against bare-CR/control-char injection; log.md scrubbed of host-specific values; ROADMAP 13.4 updated to match the shipped VEVENT payload. Phase 13.4 remains complete; still awaiting Docker rebuild + real-calendar-app verification.)
 
 ---
 
@@ -16,7 +16,7 @@ _Updated after each significant work session. Read this first to orient — it i
 
 | Next phase | Scope | Plan |
 |------------|-------|------|
-| **13.5** | Lifecycle tail: optional expiry → `410 Gone`, active-share-count chip on the timeline tile, last-viewed in the 13.2 modal | [plan §13.5](../plans/phase-13-shares.md#135--lifecycle-tail) · [ROADMAP §13.5](../ROADMAP.md#phase-135--lifecycle-tail) |
+| **13.5** | Lifecycle tail (re-scoped 2026-06-11, half-day): archived timeline → shares/feeds `404` (the real gap — gateways don't check `ArchivedAt` today), active-share-count chip on the timeline tile, render last-viewed in the 13.2 modal. Cut: expiry write path, site-statistics subsystem | [plan §13.5](../plans/phase-13-shares.md#135--lifecycle-tail) · [ROADMAP §13.5](../ROADMAP.md#phase-135--lifecycle-tail) |
 
 **Phase 13 back-half re-sequenced (2026-06-05):** 13.2 = share-modal overhaul + password (pulled forward); 13.3 = List + Kanban read-only; 13.4 = Calendar **ICS feed** sharing (whole-timeline or per-member, token-as-secret, no password/filter — a different model from view-shares); 13.5 = lifecycle tail (expiry, tile chip). The handoff design lives in [`docs/design/handoffs/share-modal/`](../design/handoffs/share-modal/design_handoff_share_modal/README.md). See [ROADMAP re-sequencing note](../ROADMAP.md#phase-13--shares--multi-share-views-with-passwords) and [plan §13.2 overhaul](../plans/phase-13-shares.md#the-share-module-overhaul-132).
 

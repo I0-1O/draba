@@ -168,11 +168,15 @@ The whole data-leak surface is confronted here so 13.2–13.4 ride on a proven-s
 **Exit:** subscribing to a timeline feed in a real calendar app shows its activities as all-day events; a per-member feed shows only that member's; toggling off / regenerating immediately invalidates the old URL; the `.ics` payload carries no email / `user_id` / role and no other timelines.
 
 ### 13.5 — Lifecycle tail
-- Optional expiry → `410 Gone` after `expires_at`.
-- Active-share-count chip on the timeline tile.
-- Last-viewed timestamps surfaced in the 13.2 modal.
+> **Re-scoped 2026-06-11.** Most of the original tail shipped piecemeal during 13.1–13.4: `expires_at` exists and both gateways already return `410 Gone` past it (tested); `view_count` / `last_viewed_at` are recorded async on every JSON-gateway hit and ICS fetch; the modal already renders the view count. Remaining work is a half-day close-out.
 
-**Exit:** an expired link is dead immediately; the timeline tile shows an accurate active-share count; last-viewed updates on access.
+- **Archived timeline kills its shares.** Existing shares keep serving today after a timeline is archived — neither gateway checks `timeline.ArchivedAt`. Both the JSON gateway and ICS feed must return `404` for shares of an archived timeline. `404`, not `410`: archive is reversible (unarchive resurrects the links), `410` makes calendar clients drop the subscription for good, and `404` matches `handleCreateShare`'s existing archived-timeline response without leaking archive state.
+- Active-share-count chip on the timeline tile.
+- Last-viewed surfaced in the 13.2 modal row beside the view count (already in the authenticated list response — render only).
+
+**Cut:** the expiry write path (no `expiresAt` on create, no UI; read-side enforcement stays as defensive code) and any site-statistics subsystem — the per-share counters answer "is this link being used," and richer analytics has a clean later path as a `share.viewed` event-bus consumer. Caveat: ICS `view_count` counts poller fetches (feed-alive signal), not human views.
+
+**Exit:** archiving a timeline immediately 404s its share links and ICS feeds, and unarchiving restores them; the timeline tile shows an accurate active-share count; last-viewed renders in the modal and updates on access.
 
 ---
 

@@ -1589,13 +1589,19 @@ Calendar diverges from the other views by design. What people want from a shared
 ---
 
 ### Phase 13.5 — Lifecycle Tail
-**Status:** ⬜ | **Effort:** S
+**Status:** ⬜ | **Effort:** S (half-day close-out)
 
-The thin remainder after the 13.2 modal absorbed share management: optional **expiry** (`expires_at` → `410 Gone` once past), an **active-share-count chip** on the timeline tile, and **last-viewed** timestamps surfaced in the modal.
+Re-scoped 2026-06-11 — most of the original tail was already built piecemeal during 13.1–13.4 (`expires_at` + `410 Gone` enforcement on both gateways, `view_count` / `last_viewed_at` recorded on every access, view count rendered in the modal). What remains:
+
+- **Archived timeline → shares stop serving.** Both the JSON gateway and the ICS feed must return `404` (not `410` — archiving is reversible and unarchiving must resurrect the links; `410` tells calendar clients to drop the subscription permanently, and `404` matches `handleCreateShare`'s existing treatment without leaking archive state).
+- **Active-share-count chip** on the timeline tile — an affordance that the timeline has live public links.
+- **Last-viewed** surfaced in the 13.2 modal row next to the existing view count (already in the list response; render only).
+
+**Cut from scope (2026-06-11):** the expiry *write* path (no API field or UI to set `expires_at`; read-side `410` enforcement stays as tested defensive code) and any site-statistics subsystem — per-share `view_count` / `last_viewed_at` answers "is this link being used"; richer analytics, if ever needed, is a `share.viewed` event-bus consumer later. Note: ICS `view_count` counts calendar-app poller fetches, not human views.
 
 **Exit criteria — safe to pause when:**
-- An expired link returns `410 Gone` immediately and is no longer usable
-- The timeline tile shows an accurate active-share count; last-viewed updates on access
+- Archiving a timeline immediately makes its share links and ICS feeds return `404`; unarchiving restores them
+- The timeline tile shows an accurate active-share count; last-viewed renders in the modal and updates on access
 
 ---
 
