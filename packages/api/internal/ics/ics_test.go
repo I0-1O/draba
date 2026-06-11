@@ -44,6 +44,24 @@ func TestCalendar_EscapesText(t *testing.T) {
 	assert.Contains(t, out, `SUMMARY:Plan\; review\, and\nship \\ deploy`)
 }
 
+// TestCalendar_EscapesBareCRAndControlChars covers the injection-hardening
+// path: a lone CR must become the newline escape (never survive as a literal
+// line break a lenient parser would split on), and other control characters
+// must be dropped — except HTAB, which TEXT permits.
+func TestCalendar_EscapesBareCRAndControlChars(t *testing.T) {
+	out := Calendar("cal", []Event{{
+		UID:         "a@draba",
+		Summary:     "before\rDESCRIPTION:injected",
+		Description: "bell\x07 null\x00 del\x7f tab\there",
+		Start:       date(2026, 1, 1),
+		End:         date(2026, 1, 1),
+		Stamp:       date(2026, 1, 1),
+	}})
+	assert.Contains(t, out, `SUMMARY:before\nDESCRIPTION:injected`)
+	assert.NotContains(t, out, "\rDESCRIPTION", "bare CR must never reach the output")
+	assert.Contains(t, out, "DESCRIPTION:bell null del tab\there")
+}
+
 func TestCalendar_FoldsLongLines(t *testing.T) {
 	out := Calendar("cal", []Event{{
 		UID:     "a@draba",

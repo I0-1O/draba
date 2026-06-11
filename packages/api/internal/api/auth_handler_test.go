@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jmoiron/sqlx"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -24,10 +25,20 @@ import (
 
 func newTestServer(t *testing.T) http.Handler {
 	t.Helper()
-	return newTestServerWithTier(t, tier.Unlimited)
+	srv, _ := newTestServerWithDB(t, tier.Unlimited)
+	return srv
 }
 
 func newTestServerWithTier(t *testing.T, tr tier.Tier) http.Handler {
+	t.Helper()
+	srv, _ := newTestServerWithDB(t, tr)
+	return srv
+}
+
+// newTestServerWithDB also returns the backing in-memory database, for tests
+// that must flip state with no API surface — e.g. share revocation/expiry,
+// whose endpoints land in Phase 13.5.
+func newTestServerWithDB(t *testing.T, tr tier.Tier) (http.Handler, *sqlx.DB) {
 	t.Helper()
 	database, err := db.Open(":memory:")
 	require.NoError(t, err)
@@ -50,7 +61,7 @@ func newTestServerWithTier(t *testing.T, tr tier.Tier) http.Handler {
 	statusRepo := db.NewStatusRepo(database)
 	tagsRepo := db.NewTagRepo(database)
 	m := mailer.New(instanceSetsRepo, nil)
-	return api.NewServer(users, invites, teams, activitiesRepo, timelinesRepo, savedFiltersRepo, preferencesRepo, apiTokensRepo, instanceSetsRepo, passwordTokensRepo, statusRepo, tagsRepo, db.NewShareRepo(database), m, tokens, tr, bus, hub).Routes()
+	return api.NewServer(users, invites, teams, activitiesRepo, timelinesRepo, savedFiltersRepo, preferencesRepo, apiTokensRepo, instanceSetsRepo, passwordTokensRepo, statusRepo, tagsRepo, db.NewShareRepo(database), m, tokens, tr, bus, hub).Routes(), database
 }
 
 func postJSON(t *testing.T, handler http.Handler, path string, body any) *httptest.ResponseRecorder {

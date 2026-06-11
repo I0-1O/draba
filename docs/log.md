@@ -2,6 +2,19 @@
 
 ---
 
+## 2026-06-11 — /review-phase 13.4: findings addressed
+
+Four-agent review (scope / security / conventions / test-coverage) of the 13.4 commit range. Conventions and scope came back clean; fixes applied for the rest:
+
+- **Revoked/expired feed paths now tested (was the one blocker):** `serveICSFeed` returns `410 Gone` for `revoked_at`/`expires_at`, but nothing exercised it. New `TestShareICS_RevokedAndExpiredFeeds_Gone` warms the feed cache, flips the row directly in the DB (no endpoint sets these fields until 13.5), and asserts 410 wins over the warm cache. Required a `newTestServerWithDB` harness variant exposing the in-memory `*sqlx.DB`.
+- **ICS escaping hardened:** `escapeText` now folds a bare CR into the `\n` escape and drops remaining C0/DEL control chars (HTAB kept) — a lenient parser splitting on stray CR could otherwise read injected property lines from user-controlled titles/descriptions. Covered by `TestCalendar_EscapesBareCRAndControlChars`.
+- **log.md scrubbed of host-specific values** (LAN hostname/port, SSH alias) per the REVIEW.md secrets grep — generic phrasing throughout, not just the 13.4 additions. The values remain in operational docs (TESTING.md, session-state, web CLAUDE.md, reset script) — a separate policy call.
+- **ROADMAP 13.4 updated** to document the shipped VEVENT payload (status/percent, assignee display names, tags in DESCRIPTION/CATEGORIES, assignees in SUMMARY on whole-timeline feeds).
+- Review also confirmed the warm-cache regenerate suggestion was already covered by `TestShareRegenerate_InvalidatesOldToken`; nits (predictable sample-data tokens, regenerate working for view shares too, no direct migration assertions) accepted as negligible.
+- `go test ./internal/ics/... ./internal/api/...` pass.
+
+---
+
 ## 2026-06-10 — Phase 13.4 feed polish (Thunderbird feedback): named URLs + event fields
 
 Second round of user-testing feedback: subscribing in Thunderbird defaulted the calendar name to the token hash, and events carried no draba fields.
@@ -82,7 +95,7 @@ User testing against the Docker instance surfaced two issues; both fixed, plus f
 
 **Checks:** `golangci-lint run` ✅ · `go test ./...` ✅ · `pnpm --filter web lint` ✅ · `pnpm --filter web build` ✅ · `pnpm --filter web test` ✅ (292).
 
-**Not browser-verified yet:** same as 13.2 — the running Docker instance (`epcot.lan:8081`) predates the gateway changes; deferred to the Docker rebuild pass. Suggest `/test-phase 13.3` and `/review-phase 13.3` to fan verification across subagents.
+**Not browser-verified yet:** same as 13.2 — the running Docker instance (the LAN test instance) predates the gateway changes; deferred to the Docker rebuild pass. Suggest `/test-phase 13.3` and `/review-phase 13.3` to fan verification across subagents.
 
 ---
 
@@ -90,7 +103,7 @@ User testing against the Docker instance surfaced two issues; both fixed, plus f
 
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
 - Result: 8 pass (ws-smoke: 3 assertions skipped — no websocat on Windows dev box; broadcast/isolation/full-heartbeat covered by unit tests)
-- Smoke target: http://epcot.lan:8081
+- Smoke target: the LAN test instance
 
 ---
 
@@ -115,7 +128,7 @@ User testing against the Docker instance surfaced two issues; both fixed, plus f
 
 **Checks:** `golangci-lint run` ✅ · `go test ./...` ✅ · `pnpm --filter web lint` ✅ · `pnpm --filter web build` ✅ · `pnpm --filter web test` ✅ (292).
 
-**Not browser-verified yet:** the running Docker instance (`epcot.lan:8081`) predates this work, so it can't exercise the new gateway; deferred to the Docker rebuild pass along with the other unverified phases.
+**Not browser-verified yet:** the running Docker instance (the LAN test instance) predates this work, so it can't exercise the new gateway; deferred to the Docker rebuild pass along with the other unverified phases.
 
 ---
 
@@ -155,7 +168,7 @@ User testing against the Docker instance surfaced two issues; both fixed, plus f
 
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
 - Result: 6 pass, 2 pass-with-skips (ws-smoke: heartbeat skipped per TESTING.md; web-e2e: live browser skipped, static assertions pass)
-- Smoke target: http://epcot.lan:8081
+- Smoke target: the LAN test instance
 - Note: security-review flagged a non-blocking PII concern — `share_handler.go:249` falls back to email as display name when `DisplayName` is unset, which can expose member emails in public share responses
 
 ---
@@ -201,7 +214,7 @@ User testing against the Docker instance surfaced two issues; both fixed, plus f
 
 ## 2026-06-04 — Phase 12: Communications Testing
 
-**Goal:** Automated coverage for every outbound email flow, then live end-to-end validation against Docker (`epcot.lan:8081`) with a real Gmail SMTP account.
+**Goal:** Automated coverage for every outbound email flow, then live end-to-end validation against Docker (the LAN test instance) with a real Gmail SMTP account.
 
 **Test infrastructure & coverage (`packages/api`):**
 - `internal/api/smtp_capture_test.go` (new): `newTestSMTPServer(t)` — an in-process TCP SMTP server that speaks just enough of the protocol (advertises no extensions, so the client uses the plain no-STARTTLS/no-auth path) and captures every message. Exposes `host()`/`port()`/`messages()`/`reset()`.
@@ -212,13 +225,13 @@ User testing against the Docker instance surfaced two issues; both fixed, plus f
 - `handleCreateInvite` (`team_handler.go`) now emails the invite link (`{DRABA_BASE_URL}/register?token=…`) when an address is supplied — best-effort, logged-not-fatal, no-op when SMTP is unconfigured or the invite is link-only. Previously it created the token but never sent mail, so the flow was untestable.
 
 **Bugs found during live validation & fixed:**
-- **Broken outbound links:** `getBaseURL()` falls back to `http://localhost:8080` when `DRABA_BASE_URL` is unset, so every emailed link (reset, invite) pointed at localhost. Documented the variable in `docker-compose.yml`; the live fix was adding `DRABA_BASE_URL=http://epcot.lan:8081` to the Portainer `api` stack and restarting.
+- **Broken outbound links:** `getBaseURL()` falls back to `http://localhost:8080` when `DRABA_BASE_URL` is unset, so every emailed link (reset, invite) pointed at localhost. Documented the variable in `docker-compose.yml`; the live fix was setting `DRABA_BASE_URL` to the instance public URL in the Portainer `api` stack and restarting.
 - **No reset-success feedback:** `ResetPasswordPage` routed a success message to `/login`, but `LoginPage` never read `location.state.message`, so a completed reset looked like a silent failure. `LoginPage` now renders the notice (green banner, suppressed once a server error shows).
 
 **Onboarding UX follow-up (Brian request):**
 - `RegisterPage` now requires password confirmation (enter twice) with a live "Passwords don't match" warning and a submit gated until they match. Verified in preview (mismatch → warning + disabled; match → enabled).
 
-**Live validation (Docker, real Gmail SMTP):** password-reset email ✓, invite email ✓ (created "TEST PERSON" via the invite → register flow), both links correctly `epcot.lan:8081`. SMTP connection confirmed via delivered mail.
+**Live validation (Docker, real Gmail SMTP):** password-reset email ✓, invite email ✓ (created "TEST PERSON" via the invite → register flow), both links correctly pointed at the LAN test instance. SMTP connection confirmed via delivered mail.
 
 **Checks:** `go test ./...` clean; `golangci-lint run` clean; `pnpm --filter web lint` clean.
 
@@ -269,7 +282,7 @@ User testing against the Docker instance surfaced two issues; both fixed, plus f
 
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
 - Result: 8/8 pass (web-e2e verified with live browser automation: unauthenticated redirect ✓, login + token stored ✓, 10+ API calls 200 OK ✓, zero WS errors ✓)
-- Smoke target: http://epcot.lan:8081
+- Smoke target: the LAN test instance
 
 ---
 
@@ -277,7 +290,7 @@ User testing against the Docker instance surfaced two issues; both fixed, plus f
 
 - Subagents run: static-check, unit-test (Go + Vitest), schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
 - Result: 7 pass, 1 skip (ws-smoke heartbeat 3rd cycle; 30s interval requires ~90s — unit tests cover at speed)
-- Smoke target: http://epcot.lan:8081
+- Smoke target: the LAN test instance
 - Notable: web-e2e confirmed calendar Month/Week layout, navigation, and tab switching; pre-existing `<TimelineItem>` render error in sidebar noted (unrelated to Phase 11.2)
 
 ---
@@ -312,7 +325,7 @@ User testing against the Docker instance surfaced two issues; both fixed, plus f
 
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
 - Result: all pass (1 skip — ws-smoke heartbeat; covered by unit tests)
-- Smoke target: http://epcot.lan:8081
+- Smoke target: the LAN test instance
 - Note: api-smoke assertion 18 (non-member authz) initially flagged as FAIL — investigated and confirmed false positive. The smoke subagent's "non-member" user had registered via the bootstrap-team invite and was therefore a member. Direct reproduction confirmed `requireTeamMember` returns 403 for a genuine non-member. TESTING.md Phase 3 assertion 18 updated with setup guidance.
 
 ---
@@ -374,7 +387,7 @@ User testing against the Docker instance surfaced two issues; both fixed, plus f
 
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
 - Result: all pass (schema-check and type-sync required fixes before passing — TESTING.md assertions corrected to match actual table names; generated index.ts re-committed)
-- Smoke target: http://epcot.lan:8081
+- Smoke target: the LAN test instance
 
 ---
 
@@ -432,7 +445,7 @@ User testing against the Docker instance surfaced two issues; both fixed, plus f
 
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
 - Result: all pass (0 fail, 0 skip)
-- Smoke target: http://epcot.lan:8081
+- Smoke target: the LAN test instance
 - Notes: type-sync notes activity endpoints are timeline-scoped (`/teams/{id}/timelines/{timelineId}/activities`) rather than the flat path in Phase 3 TESTING.md assertions — this is the accepted design; TESTING.md assertions for those two paths are outdated. web-e2e WS heartbeat not directly introspectable from browser JS (app WS client is encapsulated), but no WS errors present and unit tests cover heartbeat behavior.
 
 ---
@@ -596,7 +609,7 @@ User testing against the Docker instance surfaced two issues; both fixed, plus f
 
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
 - Result: 7 pass, 1 skip (ws-smoke — websocat/wscat not installed on dev box; heartbeat covered by unit tests)
-- Smoke target: http://epcot.lan:8081
+- Smoke target: the LAN test instance
 
 ---
 
@@ -656,7 +669,7 @@ User testing against the Docker instance surfaced two issues; both fixed, plus f
 
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke
 - Result: 7 pass, 0 fail, 0 skip (web-e2e not run — no Phase 10.4.2 assertions defined)
-- Smoke target: http://epcot.lan:8081
+- Smoke target: the LAN test instance
 
 ---
 
@@ -723,7 +736,7 @@ User testing against the Docker instance surfaced two issues; both fixed, plus f
 
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
 - Result: all pass (ws-smoke heartbeat 3-cycle skipped — 30s server interval exceeds smoke budget, mechanism verified in code; web-e2e browser runtime skipped — dev server not confirmed running, all assertions pass code-level)
-- Smoke target: http://epcot.lan:8081
+- Smoke target: the LAN test instance
 - Note: TESTING.md Phase 2 schema-check table list updated (old names `team_statuses`, `events`, `event_tags`, `event_assignments` → current names)
 
 ---
@@ -769,7 +782,7 @@ User testing against the Docker instance surfaced two issues; both fixed, plus f
 
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
 - Result: 8 pass (ws-smoke: assertion 2 skipped — single-team test DB; assertion 3 partial — 30s heartbeat cadence, unit tests cover at speed)
-- Smoke target: http://epcot.lan:8081
+- Smoke target: the LAN test instance
 - Notes: `GET /activities?from=&to=` returns 400 (param names differ from Phase 3 spec); `POST /auth/register` requires `displayName` field not in spec — both are spec gaps, not runtime failures
 
 ---
@@ -805,7 +818,7 @@ User testing against the Docker instance surfaced two issues; both fixed, plus f
 
 **Automated:** `golangci-lint run` clean, `go test ./...` all pass, `pnpm --filter web lint` clean.
 
-**Pending manual verification (against epcot.lan:8081):** see TASKS.md checklist.
+**Pending manual verification (against the LAN test instance):** see TASKS.md checklist.
 
 ---
 
@@ -817,7 +830,7 @@ User testing against the Docker instance surfaced two issues; both fixed, plus f
 - Rephrased `is_closed` checkbox label in `StatusTemplatesTab.tsx` to remove forward-reference to "Hide closed" filter (Phase 10.3 scope)
 - Replaced mojibake em-dashes (`â€"`) with hyphens in 4 test files: `team_handler_test.go`, `activity_handler_test.go`, `saved_filter_handler_test.go`, `timeline_handler_test.go`
 
-**Docker verification (epcot.lan:8081):** ✅ passed
+**Docker verification (the LAN test instance):** ✅ passed
 - Default template seeded on team create; template CRUD, item CRUD, and last-item/last-template guards all work from UI
 - New timeline correctly copies template statuses (verified via API)
 - Non-admin sees templates read-only
@@ -830,7 +843,7 @@ User testing against the Docker instance surfaced two issues; both fixed, plus f
 ## 2026-05-27 — /test-phase 10.2
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
 - Result: 7 pass, 1 partial-skip (ws-smoke: heartbeat full 3-cycle skipped per time budget; unit tests cover at speed)
-- Smoke target: http://epcot.lan:8081
+- Smoke target: the LAN test instance
 
 ---
 
@@ -931,7 +944,7 @@ Post-review fixes across security, tests, spec, and conventions:
 
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
 - Result: all pass (8/8)
-- Smoke target: http://epcot.lan:8081
+- Smoke target: the LAN test instance
 
 ---
 
@@ -969,7 +982,7 @@ Post-review fixes across security, tests, conventions, and ROADMAP:
 
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
 - Result: all pass (8/8)
-- Smoke target: http://epcot.lan:8081 (reset via `ssh draba-test` before run)
+- Smoke target: the LAN test instance (reset via SSH to the test host before run)
 
 ---
 
@@ -1192,7 +1205,7 @@ All checks pass: `go test ./...`, `golangci-lint run`, `pnpm --filter web lint`,
 
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
 - Result: all pass (0 fail, 0 skip)
-- Smoke target: http://epcot.lan:8081
+- Smoke target: the LAN test instance
 - Notes: ws-smoke code-verified (no wscat available); 2 cosmetic residuals in web (stale JSDoc in useWebSocket.ts:7, `matchEvents` function name in findMatcher.ts:27 — no runtime impact)
 
 ---
@@ -1334,7 +1347,7 @@ The token management **UI** is intentionally deferred to Phase 10.4 per ROADMAP.
 
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
 - Result: 8 pass (2 fixes applied mid-run: stale "Events for {label}" string in FilterDropdown.tsx; deleted dead EventPanel.tsx)
-- Smoke target: http://epcot.lan:8081
+- Smoke target: the LAN test instance
 
 ---
 
@@ -1342,7 +1355,7 @@ The token management **UI** is intentionally deferred to Phase 10.4 per ROADMAP.
 
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
 - Result: 8 pass (web-e2e ran manually after extension connectivity confirmed)
-- Smoke target: http://epcot.lan:8081
+- Smoke target: the LAN test instance
 - Bug found: auth middleware accepts JWTs for deleted/non-existent users — PUT preferences returns 500 (FK violation) instead of 401; filed as side task
 
 ---
@@ -1351,13 +1364,13 @@ The token management **UI** is intentionally deferred to Phase 10.4 per ROADMAP.
 
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
 - Result: 8 pass, 1 clean skip (ws-smoke team-isolation — only one team on test instance)
-- Smoke target: http://epcot.lan:8081
+- Smoke target: the LAN test instance
 
 ---
 
 ## 2026-05-20 — Phase 8.4 post-test fixes
 
-Three bugs found during live testing against localhost:5173 → epcot.lan:8081:
+Three bugs found during live testing against localhost:5173 → the LAN test instance:
 
 1. **Missing `/users` Vite proxy entry** — `vite.config.ts` had proxy rules for `/auth`, `/teams`, `/timelines`, `/events` but not `/users`. Every `GET /users/me/preferences` and `PUT /users/me/preferences` 404'd in dev. Since the GET failed, `isSuccess` was never `true`, the `prefsAppliedForTimeline` ref was never set, and the guard blocked all saves silently. Fix: added `/users` to the proxy map.
 
@@ -1376,7 +1389,7 @@ Also fixed during this session:
 
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
 - Result: 7 pass, 1 partial (web-e2e — stale JWT for DB-wiped user caused spurious 500 on PUT prefs; api-smoke confirmed endpoint works with a valid user)
-- Smoke target: http://epcot.lan:8081
+- Smoke target: the LAN test instance
 
 ---
 
@@ -1542,7 +1555,7 @@ Also fixed during this session:
 
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
 - Result: all pass (8 pass, 0 fail, 0 skip)
-- Smoke target: http://epcot.lan:8081
+- Smoke target: the LAN test instance
 - Notes: `scripts/reset-test-env.sh` seed INSERT fixed — added `id` column to `team_members` row (Migration 003 compat); all previously tracked unit-test gaps (auth, invite_repo, timeline_repo) now closed
 
 ---
@@ -1654,7 +1667,7 @@ First live preview revealed the person-lane resource view didn't match the inten
 - `go test ./...` — all pass
 - `golangci-lint run` — clean
 - `pnpm --filter web lint` — clean
-- Setup wizard verified end-to-end on epcot.lan container
+- Setup wizard verified end-to-end on the LAN test host container
 
 ---
 
@@ -1694,7 +1707,7 @@ First live preview revealed the person-lane resource view didn't match the inten
 
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
 - Result: 7 pass, 1 partial (ws-smoke heartbeat — slow manual check, per spec)
-- Smoke target: http://epcot.lan:8081 (went offline mid api-smoke run; remaining api-smoke assertions completed against local server on port 9191)
+- Smoke target: the LAN test instance (went offline mid api-smoke run; remaining api-smoke assertions completed against local server on port 9191)
 - Notes: auth + invite_repo gaps from Phase 2 now closed (tests exist and pass); Phase 6 timeline_repo gaps still open; web-e2e TanStack Query conditional pass (teamId placeholder — Phase 8 concern)
 
 ---
@@ -1724,7 +1737,7 @@ First live preview revealed the person-lane resource view didn't match the inten
 - Filter selection is UI-only — the active filter is not yet applied to the events list; real filtering wires in Phase 8 when views render
 - Right sidebar body is a placeholder; filter editor form to be designed and built in a follow-up
 - Saved filter `definition` is an opaque JSON string — schema is enforced by the client, not the server
-- New saved-filter endpoints are not yet deployed to epcot.lan — docker container rebuild required to exercise the full API flow in-browser
+- New saved-filter endpoints are not yet deployed to the LAN test host — docker container rebuild required to exercise the full API flow in-browser
 - golangci-lint clean; all Go tests pass; frontend `tsc --noEmit` + `vite build` clean
 
 ---
@@ -1738,7 +1751,7 @@ First live preview revealed the person-lane resource view didn't match the inten
 | Criterion | Status |
 |-----------|--------|
 | `/login` renders | ✅ verified in browser |
-| `/login` authenticates against live API (epcot.lan:8081) | ✅ logged in as brian@rieb.cc |
+| `/login` authenticates against live API (the LAN test instance) | ✅ logged in as brian@rieb.cc |
 | Protected routes redirect unauthenticated users to `/login` | ✅ ProtectedRoute confirmed |
 | TanStack Query hook fetches team events | ✅ hook wired; placeholder team ID pending Phase 8 |
 | WebSocket connects (browser DevTools) | ✅ hook confirmed; WS URL derives from API_BASE |
@@ -2182,14 +2195,14 @@ GitHub Actions warned that `actions/checkout`, `setup-go`, `setup-node`, etc. ru
 
 **Port conflict in homelab**
 Port 8080 was already in use on the host.
-→ Mapped container port 8080 to host port 8081 in Portainer. No code changes needed.
+→ Mapped container port 8080 to a dedicated host port in Portainer. No code changes needed.
 
 ---
 
 ## 2026-06-01 — /test-phase 11.1.1
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
 - Result: all pass
-- Smoke target: http://epcot.lan:8081
+- Smoke target: the LAN test instance
 - Note: api-smoke surfaced spec mismatch — TESTING.md says `POST /teams/:id/activities` but actual route is `POST /teams/:id/timelines/:timelineId/activities`; functionality correct, spec needs updating. Schema-check noted table renames (activities/activity_tags/activity_assignments/statuses vs legacy event_* names in TESTING.md).
 
 ---
@@ -2197,20 +2210,20 @@ Port 8080 was already in use on the host.
 ## 2026-05-30 — /test-phase 10.4.5
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
 - Result: all pass (web-e2e partial — code-verified, no live server; ws-smoke cross-team isolation skipped, covered by unit tests)
-- Smoke target: http://epcot.lan:8081
+- Smoke target: the LAN test instance
 - Note: type-sync initially failed (4 tag endpoints missing from openapi.yaml); fixed and committed before logging
 
 ## 2026-06-08 — /test-phase 13.3
 
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, web-e2e
 - Result: all pass (web-e2e initially skipped — Chrome extension not connected — re-run after reconnecting passed: List + Kanban shares render faithfully read-only, no over-exposure, Phase 7 auth-redirect regression holds; created two ad hoc QA share links live since the seeded fixture had no List/Kanban shares yet)
-- Smoke target: http://epcot.lan:8081 (reset via `ssh draba-test` — canonical sample dataset + bootstrap)
+- Smoke target: the LAN test instance (reset via SSH to the test host — canonical sample dataset + bootstrap)
 
 ## 2026-06-10 — /test-phase 13.4
 
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, web-e2e
 - Result: 7 pass, 1 skip (ws-smoke — slow manual check, heartbeat covered by TestHub_Heartbeat_* unit tests). web-e2e initially skipped (Chrome extension not connected); re-run after reconnecting passed 9/9: CalendarShareModal per-feed toggle list, named slug feed URL serves all-day VEVENTs, regenerate + toggle-off invalidate immediately, per-member feed isolation verified (Michelle's 3 activities only, Brian/Erik-only activity absent), Phase 7 auth-redirect regression holds
-- Smoke target: http://epcot.lan:8081 (reset via `ssh draba-test` — canonical sample dataset + bootstrap)
+- Smoke target: the LAN test instance (reset via SSH to the test host — canonical sample dataset + bootstrap)
 - Notes: api-smoke 35/35 incl. full 13.4 ICS suite (all-day VEVENTs w/ exclusive DTEND, named slug URL, per-member feed isolation, kind isolation, immediate regenerate/delete invalidation); security-review clean with two no-action notes (tokens in URLs land in access logs — rotate test tokens before launch; non-constant-time token lookup acceptable at 256-bit)
 
 ## 2026-06-10 — 13.4 post-test fix: ICS feed Cache-Control

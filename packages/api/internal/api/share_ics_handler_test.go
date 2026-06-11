@@ -7,9 +7,12 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/I0-1O/draba/packages/api/internal/tier"
 )
 
 // icsShareSetup extends shareTestSetup with Alice's team-member ID, which
@@ -316,6 +319,59 @@ func TestShareCreate_SuperadminOutsideTeam(t *testing.T) {
 	w4 := httptest.NewRecorder()
 	srv.ServeHTTP(w4, httptest.NewRequest(http.MethodGet, "/shares/"+created["token"].(string)+".ics", http.NoBody))
 	assert.Equal(t, http.StatusOK, w4.Code)
+}
+
+// ── Lifecycle: revoked / expired ──────────────────────────────────────────────
+
+// TestShareICS_RevokedAndExpiredFeeds_Gone verifies the feed lifecycle guards:
+// a revoked or expired share returns 410 Gone, even when its payload is
+// already warm in the ICS cache, because the share row is re-checked on every
+// request. No endpoint sets these fields until Phase 13.5, so the rows are
+// flipped directly in the test database.
+func TestShareICS_RevokedAndExpiredFeeds_Gone(t *testing.T) {
+	srv, database := newTestServerWithDB(t, tier.Unlimited)
+
+	token, _ := seedUser(t, srv, "alice@share.com", "password1", "Alice")
+
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodPost, "/teams", map[string]string{"name": "Share Team"}, token))
+	require.Equal(t, http.StatusCreated, w.Code)
+	var team map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&team))
+	teamID := team["id"].(string)
+
+	w2 := httptest.NewRecorder()
+	srv.ServeHTTP(w2, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/timelines", teamID), map[string]any{
+		"name": "Share Timeline", "startDate": "2026-01-01", "endDate": "2026-12-31",
+	}, token))
+	require.Equal(t, http.StatusCreated, w2.Code)
+	var tl map[string]any
+	require.NoError(t, json.NewDecoder(w2.Body).Decode(&tl))
+	timelineID := tl["id"].(string)
+
+	createActivity(t, srv, token, teamID, timelineID, map[string]any{
+		"title": "Work", "startAt": "2026-05-01T00:00:00Z", "endAt": "2026-05-02T00:00:00Z", "allDay": true,
+	})
+
+	feed := func(shareToken string) int {
+		wF := httptest.NewRecorder()
+		srv.ServeHTTP(wF, httptest.NewRequest(http.MethodGet, "/shares/"+shareToken+".ics", http.NoBody))
+		return wF.Code
+	}
+
+	revoked := createICSShare(t, srv, token, timelineID, map[string]any{"scope": "timeline"})
+	require.Equal(t, http.StatusOK, feed(revoked["token"].(string)), "feed must be alive before revocation")
+	_, err := database.Exec(`UPDATE shares SET revoked_at = ? WHERE id = ?`, time.Now().UTC(), revoked["id"])
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusGone, feed(revoked["token"].(string)),
+		"revoked share must 410 even with a warm feed cache")
+
+	expired := createICSShare(t, srv, token, timelineID, map[string]any{"scope": "timeline"})
+	require.Equal(t, http.StatusOK, feed(expired["token"].(string)), "feed must be alive before expiry")
+	_, err = database.Exec(`UPDATE shares SET expires_at = ? WHERE id = ?`, time.Now().UTC().Add(-time.Hour), expired["id"])
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusGone, feed(expired["token"].(string)),
+		"expired share must 410 even with a warm feed cache")
 }
 
 // ── Regenerate ────────────────────────────────────────────────────────────────

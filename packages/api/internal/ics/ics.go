@@ -97,12 +97,23 @@ func writeLine(b *strings.Builder, line string) {
 }
 
 // escapeText escapes a value per RFC 5545 §3.3.11: backslash, semicolon, and
-// comma are backslash-escaped; newlines become literal "\n".
+// comma are backslash-escaped; newlines become literal "\n". A bare CR (legal
+// in JSON input) is folded into the newline escape, and any remaining C0/DEL
+// control characters are dropped — they are illegal in TEXT values, and a
+// lenient parser splitting lines on a stray CR could otherwise read injected
+// property lines out of user-controlled content.
 func escapeText(s string) string {
 	s = strings.ReplaceAll(s, `\`, `\\`)
 	s = strings.ReplaceAll(s, ";", `\;`)
 	s = strings.ReplaceAll(s, ",", `\,`)
 	s = strings.ReplaceAll(s, "\r\n", `\n`)
 	s = strings.ReplaceAll(s, "\n", `\n`)
-	return s
+	s = strings.ReplaceAll(s, "\r", `\n`)
+	return strings.Map(func(r rune) rune {
+		// HTAB is the one control character TEXT permits.
+		if (r < 0x20 && r != '\t') || r == 0x7F {
+			return -1
+		}
+		return r
+	}, s)
 }

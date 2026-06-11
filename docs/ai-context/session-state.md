@@ -2,7 +2,7 @@
 
 _Updated after each significant work session. Read this first to orient — it is intentionally short. Per-phase implementation detail lives in [docs/log.md](../log.md); this file is a current-state snapshot only._
 
-**Last updated:** 2026-06-10 (Phase 13.4 complete + three post-test fix rounds: superadmin-create 500 (migration 023, nullable `shares.created_by`), modal as per-feed toggle list, named feed URLs `/shares/{token}/{slug}.ics` for client default-naming, and VEVENT field projection (status/assignees/tags/progress in DESCRIPTION + CATEGORIES, assignees in timeline-feed SUMMARY). Browser-verified locally. Awaiting Docker rebuild + real-calendar-app verification.)
+**Last updated:** 2026-06-11 (`/review-phase 13.4` findings addressed: revoked/expired feed `410 Gone` paths now tested via new `newTestServerWithDB` harness variant; ICS `escapeText` hardened against bare-CR/control-char injection; log.md scrubbed of host-specific values; ROADMAP 13.4 updated to match the shipped VEVENT payload. Phase 13.4 remains complete; still awaiting Docker rebuild + real-calendar-app verification.)
 
 ---
 
