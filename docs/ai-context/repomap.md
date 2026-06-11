@@ -37798,118 +37798,6 @@ func flatten[T any](s []*T) []T {
 }
 ````
 
-## File: packages/api/internal/ics/ics.go
-````go
-// Package ics serializes activities into RFC 5545 iCalendar feeds for the
-// Phase 13.4 calendar share endpoint (GET /shares/{token}.ics). It implements
-// only the slice of the spec draba needs — all-day VEVENTs in a PUBLISH
-// calendar — rather than wrapping a general-purpose library.
-package ics
-
-import (
-	"strings"
-	"time"
-)
-
-// Event is one all-day calendar entry. Start and End are inclusive calendar
-// dates (draba's activity model, Phase 11.1.1); End is converted to the
-// RFC 5545 exclusive DTEND during serialization.
-type Event struct {
-	UID         string
-	Summary     string
-	Description string
-	// Categories become the CATEGORIES property (draba tags); clients that
-	// support it (Thunderbird, Apple Calendar) render them as event tags.
-	Categories []string
-	Start      time.Time
-	End        time.Time
-	// Stamp becomes DTSTAMP — the activity's last-modified time, which lets
-	// calendar clients detect changed events between polls.
-	Stamp time.Time
-}
-
-// Calendar renders a complete VCALENDAR document with CRLF line endings.
-// name becomes X-WR-CALNAME, the display name most clients adopt when the
-// user subscribes.
-func Calendar(name string, events []Event) string {
-	var b strings.Builder
-	writeLine(&b, "BEGIN:VCALENDAR")
-	writeLine(&b, "VERSION:2.0")
-	writeLine(&b, "PRODID:-//draba//draba//EN")
-	writeLine(&b, "CALSCALE:GREGORIAN")
-	writeLine(&b, "METHOD:PUBLISH")
-	// X-WR-CALNAME is the de-facto property older clients read; NAME is its
-	// standardized RFC 7986 successor. Emit both so every client that names
-	// the calendar from feed content gets the right answer.
-	writeLine(&b, "X-WR-CALNAME:"+escapeText(name))
-	writeLine(&b, "NAME:"+escapeText(name))
-	// Suggest an hourly poll to clients that honor a published refresh
-	// cadence (RFC 7986 REFRESH-INTERVAL; X-PUBLISHED-TTL for older ones).
-	writeLine(&b, "REFRESH-INTERVAL;VALUE=DURATION:PT1H")
-	writeLine(&b, "X-PUBLISHED-TTL:PT1H")
-	for i := range events {
-		writeEvent(&b, &events[i])
-	}
-	writeLine(&b, "END:VCALENDAR")
-	return b.String()
-}
-
-func writeEvent(b *strings.Builder, e *Event) {
-	writeLine(b, "BEGIN:VEVENT")
-	writeLine(b, "UID:"+escapeText(e.UID))
-	writeLine(b, "DTSTAMP:"+e.Stamp.UTC().Format("20060102T150405Z"))
-	writeLine(b, "DTSTART;VALUE=DATE:"+e.Start.UTC().Format("20060102"))
-	// RFC 5545 DTEND is exclusive: an event covering its inclusive end date
-	// must end at midnight of the following day.
-	writeLine(b, "DTEND;VALUE=DATE:"+e.End.UTC().AddDate(0, 0, 1).Format("20060102"))
-	writeLine(b, "SUMMARY:"+escapeText(e.Summary))
-	if e.Description != "" {
-		writeLine(b, "DESCRIPTION:"+escapeText(e.Description))
-	}
-	if len(e.Categories) > 0 {
-		// Commas separate list items here, so each value is escaped
-		// individually and joined with bare (unescaped) commas.
-		escaped := make([]string, len(e.Categories))
-		for i, c := range e.Categories {
-			escaped[i] = escapeText(c)
-		}
-		writeLine(b, "CATEGORIES:"+strings.Join(escaped, ","))
-	}
-	writeLine(b, "END:VEVENT")
-}
-
-// writeLine emits one content line, folded per RFC 5545 §3.1: lines longer
-// than 75 octets continue on the next line after a CRLF + single space.
-// Folding happens on rune boundaries so multi-byte UTF-8 sequences are never
-// split mid-character.
-func writeLine(b *strings.Builder, line string) {
-	const limit = 75
-	octets := 0
-	for _, r := range line {
-		rl := len(string(r))
-		if octets+rl > limit {
-			b.WriteString("\r\n ")
-			// The leading fold space counts against the next line's budget.
-			octets = 1
-		}
-		b.WriteRune(r)
-		octets += rl
-	}
-	b.WriteString("\r\n")
-}
-
-// escapeText escapes a value per RFC 5545 §3.3.11: backslash, semicolon, and
-// comma are backslash-escaped; newlines become literal "\n".
-func escapeText(s string) string {
-	s = strings.ReplaceAll(s, `\`, `\\`)
-	s = strings.ReplaceAll(s, ";", `\;`)
-	s = strings.ReplaceAll(s, ",", `\,`)
-	s = strings.ReplaceAll(s, "\r\n", `\n`)
-	s = strings.ReplaceAll(s, "\n", `\n`)
-	return s
-}
-````
-
 ## File: packages/api/sample_data/README.md
 ````markdown
 # Sample Data
@@ -39723,6 +39611,129 @@ func (s *Server) handleRegenerateShare(w http.ResponseWriter, r *http.Request) {
 	s.icsCache.invalidate(oldToken)
 
 	writeJSON(w, http.StatusOK, share)
+}
+````
+
+## File: packages/api/internal/ics/ics.go
+````go
+// Package ics serializes activities into RFC 5545 iCalendar feeds for the
+// Phase 13.4 calendar share endpoint (GET /shares/{token}.ics). It implements
+// only the slice of the spec draba needs — all-day VEVENTs in a PUBLISH
+// calendar — rather than wrapping a general-purpose library.
+package ics
+
+import (
+	"strings"
+	"time"
+)
+
+// Event is one all-day calendar entry. Start and End are inclusive calendar
+// dates (draba's activity model, Phase 11.1.1); End is converted to the
+// RFC 5545 exclusive DTEND during serialization.
+type Event struct {
+	UID         string
+	Summary     string
+	Description string
+	// Categories become the CATEGORIES property (draba tags); clients that
+	// support it (Thunderbird, Apple Calendar) render them as event tags.
+	Categories []string
+	Start      time.Time
+	End        time.Time
+	// Stamp becomes DTSTAMP — the activity's last-modified time, which lets
+	// calendar clients detect changed events between polls.
+	Stamp time.Time
+}
+
+// Calendar renders a complete VCALENDAR document with CRLF line endings.
+// name becomes X-WR-CALNAME, the display name most clients adopt when the
+// user subscribes.
+func Calendar(name string, events []Event) string {
+	var b strings.Builder
+	writeLine(&b, "BEGIN:VCALENDAR")
+	writeLine(&b, "VERSION:2.0")
+	writeLine(&b, "PRODID:-//draba//draba//EN")
+	writeLine(&b, "CALSCALE:GREGORIAN")
+	writeLine(&b, "METHOD:PUBLISH")
+	// X-WR-CALNAME is the de-facto property older clients read; NAME is its
+	// standardized RFC 7986 successor. Emit both so every client that names
+	// the calendar from feed content gets the right answer.
+	writeLine(&b, "X-WR-CALNAME:"+escapeText(name))
+	writeLine(&b, "NAME:"+escapeText(name))
+	// Suggest an hourly poll to clients that honor a published refresh
+	// cadence (RFC 7986 REFRESH-INTERVAL; X-PUBLISHED-TTL for older ones).
+	writeLine(&b, "REFRESH-INTERVAL;VALUE=DURATION:PT1H")
+	writeLine(&b, "X-PUBLISHED-TTL:PT1H")
+	for i := range events {
+		writeEvent(&b, &events[i])
+	}
+	writeLine(&b, "END:VCALENDAR")
+	return b.String()
+}
+
+func writeEvent(b *strings.Builder, e *Event) {
+	writeLine(b, "BEGIN:VEVENT")
+	writeLine(b, "UID:"+escapeText(e.UID))
+	writeLine(b, "DTSTAMP:"+e.Stamp.UTC().Format("20060102T150405Z"))
+	writeLine(b, "DTSTART;VALUE=DATE:"+e.Start.UTC().Format("20060102"))
+	// RFC 5545 DTEND is exclusive: an event covering its inclusive end date
+	// must end at midnight of the following day.
+	writeLine(b, "DTEND;VALUE=DATE:"+e.End.UTC().AddDate(0, 0, 1).Format("20060102"))
+	writeLine(b, "SUMMARY:"+escapeText(e.Summary))
+	if e.Description != "" {
+		writeLine(b, "DESCRIPTION:"+escapeText(e.Description))
+	}
+	if len(e.Categories) > 0 {
+		// Commas separate list items here, so each value is escaped
+		// individually and joined with bare (unescaped) commas.
+		escaped := make([]string, len(e.Categories))
+		for i, c := range e.Categories {
+			escaped[i] = escapeText(c)
+		}
+		writeLine(b, "CATEGORIES:"+strings.Join(escaped, ","))
+	}
+	writeLine(b, "END:VEVENT")
+}
+
+// writeLine emits one content line, folded per RFC 5545 §3.1: lines longer
+// than 75 octets continue on the next line after a CRLF + single space.
+// Folding happens on rune boundaries so multi-byte UTF-8 sequences are never
+// split mid-character.
+func writeLine(b *strings.Builder, line string) {
+	const limit = 75
+	octets := 0
+	for _, r := range line {
+		rl := len(string(r))
+		if octets+rl > limit {
+			b.WriteString("\r\n ")
+			// The leading fold space counts against the next line's budget.
+			octets = 1
+		}
+		b.WriteRune(r)
+		octets += rl
+	}
+	b.WriteString("\r\n")
+}
+
+// escapeText escapes a value per RFC 5545 §3.3.11: backslash, semicolon, and
+// comma are backslash-escaped; newlines become literal "\n". A bare CR (legal
+// in JSON input) is folded into the newline escape, and any remaining C0/DEL
+// control characters are dropped — they are illegal in TEXT values, and a
+// lenient parser splitting lines on a stray CR could otherwise read injected
+// property lines out of user-controlled content.
+func escapeText(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, ";", `\;`)
+	s = strings.ReplaceAll(s, ",", `\,`)
+	s = strings.ReplaceAll(s, "\r\n", `\n`)
+	s = strings.ReplaceAll(s, "\n", `\n`)
+	s = strings.ReplaceAll(s, "\r", `\n`)
+	return strings.Map(func(r rune) rune {
+		// HTAB is the one control character TEXT permits.
+		if (r < 0x20 && r != '\t') || r == 0x7F {
+			return -1
+		}
+		return r
+	}, s)
 }
 ````
 
@@ -49869,6 +49880,2604 @@ type Invite struct {
 }
 ````
 
+## File: packages/web/src/components/list/ListView.tsx
+````typescript
+/**
+ * ListView — inline-editable, curated table view of the active timeline's
+ * activities.
+ *
+ * Uses TanStack Table v8 for column management (visibility, order, sizing,
+ * pinning, sorting). Row rendering is manual to support group-by headers
+ * interleaved between activity rows and to give full control over
+ * keyboard selection/edit behavior.
+ *
+ * Integrates with FilterContext and FindContext so the same filter and find
+ * query that drives the Gantt view also drives this view.
+ */
+
+import { createPortal } from 'react-dom';
+import {
+  useState,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useCallback,
+  useMemo,
+  KeyboardEvent,
+} from 'react';
+import {
+  useReactTable,
+  getCoreRowModel,
+  getSortedRowModel,
+  type ColumnDef,
+  type SortingState,
+  type ColumnOrderState,
+  type VisibilityState,
+  type ColumnSizingState,
+  type ColumnPinningState,
+} from '@tanstack/react-table';
+import {
+  DndContext,
+  type DragEndEvent,
+  PointerSensor,
+  useSensor,
+  useSensors,
+} from '@dnd-kit/core';
+import {
+  SortableContext,
+  horizontalListSortingStrategy,
+  useSortable,
+  arrayMove,
+} from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
+import { ChevronRight, ChevronDown, GripVertical, Search, Trash2, Archive, Check } from 'lucide-react';
+import { useQueryClient } from '@tanstack/react-query';
+import { useTimelineActivities, useTeamMembers, useUpdateActivity, useCreateActivity, useDeleteActivity, useArchiveActivity } from '@/hooks/useTeamActivities';
+import { usePreferenceMap, useUpsertPreference, usePreferences } from '@/hooks/usePreferences';
+import { useFilter } from '@/contexts/FilterContext';
+import { useFind } from '@/contexts/FindContext';
+import { applyActiveFilter } from '@/lib/presetFilters';
+import { matchEvents } from '@/lib/findMatcher';
+import { memberComboKey, orderedComboIds, memberComboLabel, comboSortComparator, UNASSIGNED_KEY, SEP } from '@/lib/memberGroups';
+import { resolveColorHex } from '@/components/identity/identity-constants';
+import { Badge } from '@/components/identity/Badge';
+import { IdentityPicker } from '@/components/identity/IdentityPicker';
+import type { Identity } from '@/components/identity/identity-constants';
+import TagInput from '@/components/TagInput';
+import type { components } from '@draba/shared';
+import type { Member } from '@/types';
+import type { ListGroupBy, ListSortBy, ListColorBy, ListDensity, ColumnConfig } from './ListToolbar';
+import { useAuth } from '@/contexts/AuthContext';
+
+type ApiActivity = components['schemas']['Activity'];
+type Status = components['schemas']['Status'];
+type SavedFilter = components['schemas']['SavedFilter'];
+type Tag = components['schemas']['Tag'];
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
+
+// ── Column catalog ─────────────────────────────────────────────────────────────
+
+export interface ColMeta {
+  id: string;
+  label: string;
+  defaultVisible: boolean;
+  defaultWidth: number;
+  editable: boolean;
+  editType: 'text' | 'date' | 'status' | 'number' | 'identity' | 'assignees' | 'tags' | 'parent' | 'none';
+  /** Exclude from the columns toggle menu (e.g. fixed structural columns). */
+  noMenu?: boolean;
+}
+
+export const COL_CATALOG: ColMeta[] = [
+  { id: 'colorBar',    label: '',             defaultVisible: true,  defaultWidth: 18,  editable: false, editType: 'none', noMenu: true },
+  { id: 'identity',    label: '',             defaultVisible: true,  defaultWidth: 52,  editable: true,  editType: 'identity' },
+  { id: 'title',       label: 'Title',        defaultVisible: true,  defaultWidth: 280, editable: true,  editType: 'text' },
+  { id: 'startAt',     label: 'Start',        defaultVisible: true,  defaultWidth: 110, editable: true,  editType: 'date' },
+  { id: 'endAt',       label: 'End',          defaultVisible: true,  defaultWidth: 110, editable: true,  editType: 'date' },
+  { id: 'duration',    label: 'Duration',     defaultVisible: false, defaultWidth: 90,  editable: false, editType: 'none' },
+  { id: 'status',      label: 'Status',       defaultVisible: true,  defaultWidth: 130, editable: true,  editType: 'status' },
+  { id: 'assignees',   label: 'Assigned To',  defaultVisible: true,  defaultWidth: 140, editable: true,  editType: 'assignees' },
+  { id: 'tags',        label: 'Tags',         defaultVisible: true,  defaultWidth: 130, editable: true,  editType: 'tags' },
+  { id: 'progress',    label: 'Progress',     defaultVisible: false, defaultWidth: 90,  editable: true,  editType: 'number' },
+  { id: 'parent',      label: 'Parent',       defaultVisible: false, defaultWidth: 150, editable: true,  editType: 'parent' },
+  { id: 'description', label: 'Description',  defaultVisible: false, defaultWidth: 200, editable: true,  editType: 'text' },
+  { id: 'location',    label: 'Location',     defaultVisible: false, defaultWidth: 130, editable: true,  editType: 'text' },
+  { id: 'url',         label: 'URL',          defaultVisible: false, defaultWidth: 150, editable: true,  editType: 'text' },
+  { id: 'notes',       label: 'Notes',        defaultVisible: false, defaultWidth: 200, editable: true,  editType: 'text' },
+  { id: 'createdAt',   label: 'Created',      defaultVisible: false, defaultWidth: 110, editable: false, editType: 'none' },
+  { id: 'updatedAt',   label: 'Updated',      defaultVisible: false, defaultWidth: 110, editable: false, editType: 'none' },
+];
+
+const DEFAULT_COLUMN_ORDER = COL_CATALOG.map(c => c.id);
+const DEFAULT_VISIBILITY: VisibilityState = Object.fromEntries(
+  COL_CATALOG.map(c => [c.id, c.defaultVisible]),
+);
+const DEFAULT_WIDTHS: ColumnSizingState = Object.fromEntries(
+  COL_CATALOG.map(c => [c.id, c.defaultWidth]),
+);
+
+// ── Group-by row builder (exported for unit tests) ─────────────────────────────
+
+export type ListDisplayRow =
+  | { kind: 'group'; key: string; label: string; count: number; memberColors?: string[] }
+  | { kind: 'activity'; activity: ApiActivity; depth: number; hasChildren: boolean; groupKey: string };
+
+/** Converts a pre-sorted flat activity list into display rows for the given group-by mode. */
+export function buildListRows(
+  sortedActivities: ApiActivity[],
+  groupBy: ListGroupBy,
+  memberById: Map<string, { displayName: string; color?: string | null }>,
+  statusById: Map<string, { name: string }>,
+  timelineStatuses: Status[],
+  collapsedGroups: Set<string>,
+  memberOrder: string[] = [],
+): ListDisplayRow[] {
+  const emptyRow = (a: ApiActivity): ListDisplayRow => ({
+    kind: 'activity', activity: a, depth: 0, hasChildren: false, groupKey: '',
+  });
+
+  if (groupBy === 'none') return sortedActivities.map(emptyRow);
+
+  if (groupBy === 'member') {
+    const nameById = new Map(
+      [...memberById.entries()].map(([id, m]) => [id, m.displayName]),
+    );
+
+    const buckets = new Map<string, ApiActivity[]>();
+    for (const activity of sortedActivities) {
+      const key = memberComboKey(activity.assignedMemberIds ?? []);
+      const list = buckets.get(key) ?? [];
+      list.push(activity);
+      buckets.set(key, list);
+    }
+
+    const comparator = comboSortComparator(memberOrder);
+    const sortedKeys = [...buckets.keys()].sort(comparator);
+
+    const rows: ListDisplayRow[] = [];
+    for (const key of sortedKeys) {
+      const activities = buckets.get(key)!;
+      const rawIds = key === UNASSIGNED_KEY ? [] : key.split(SEP);
+      const orderedIds = orderedComboIds(rawIds, memberOrder);
+      const label = key === UNASSIGNED_KEY ? 'Unassigned' : memberComboLabel(orderedIds, nameById);
+      const memberColors = orderedIds.map(id => {
+        const raw = memberById.get(id)?.color;
+        return resolveColorHex(raw ?? null) ?? 'var(--muted-foreground)';
+      });
+      rows.push({ kind: 'group', key, label, count: activities.length, memberColors });
+      if (!collapsedGroups.has(key)) {
+        for (const a of activities) rows.push({ kind: 'activity', activity: a, depth: 0, hasChildren: false, groupKey: key });
+      }
+    }
+    return rows;
+  }
+
+  if (groupBy === 'status') {
+    const groups = new Map<string, { label: string; activities: ApiActivity[] }>();
+    for (const activity of sortedActivities) {
+      const key = activity.statusId ?? '__no_status__';
+      const label = activity.statusId ? (statusById.get(activity.statusId)?.name ?? 'Unknown') : 'No status';
+      const group = groups.get(key) ?? { label, activities: [] };
+      group.activities.push(activity);
+      groups.set(key, group);
+    }
+    const rows: ListDisplayRow[] = [];
+    for (const s of timelineStatuses) {
+      const group = groups.get(s.id);
+      if (!group?.activities.length) continue;
+      rows.push({ kind: 'group', key: s.id, label: s.name, count: group.activities.length });
+      if (!collapsedGroups.has(s.id)) {
+        for (const a of group.activities) rows.push({ kind: 'activity', activity: a, depth: 0, hasChildren: false, groupKey: s.id });
+      }
+    }
+    const noStatus = groups.get('__no_status__');
+    if (noStatus?.activities.length) {
+      rows.push({ kind: 'group', key: '__no_status__', label: 'No status', count: noStatus.activities.length });
+      if (!collapsedGroups.has('__no_status__')) {
+        for (const a of noStatus.activities) rows.push({ kind: 'activity', activity: a, depth: 0, hasChildren: false, groupKey: '__no_status__' });
+      }
+    }
+    return rows;
+  }
+
+  if (groupBy === 'parent') {
+    // Tree nesting mirrors Gantt: parent rows are collapsible, children are indented.
+    // Activities whose parent is not in this view render as roots (orphan-safe).
+    const byId = new Map(sortedActivities.map(a => [a.id, a]));
+    const childrenByParent = new Map<string, ApiActivity[]>();
+    const roots: ApiActivity[] = [];
+    for (const a of sortedActivities) {
+      if (a.parentActivityId && byId.has(a.parentActivityId)) {
+        const list = childrenByParent.get(a.parentActivityId) ?? [];
+        list.push(a);
+        childrenByParent.set(a.parentActivityId, list);
+      } else {
+        roots.push(a);
+      }
+    }
+    const rows: ListDisplayRow[] = [];
+    const seen = new Set<string>();
+    const hidden = new Set<string>();
+    const markHidden = (a: ApiActivity) => {
+      if (hidden.has(a.id)) return;
+      hidden.add(a.id);
+      for (const k of childrenByParent.get(a.id) ?? []) markHidden(k);
+    };
+    const visit = (a: ApiActivity, depth: number) => {
+      if (seen.has(a.id)) return;
+      seen.add(a.id);
+      const kids = childrenByParent.get(a.id) ?? [];
+      const hasChildren = kids.length > 0;
+      rows.push({ kind: 'activity', activity: a, depth, hasChildren, groupKey: a.id });
+      if (!hasChildren) return;
+      if (collapsedGroups.has(a.id)) for (const k of kids) markHidden(k);
+      else for (const k of kids) visit(k, depth + 1);
+    };
+    for (const r of roots) visit(r, 0);
+    // Cycle-safe: any activity not yet visited (parent loop) renders at root depth
+    for (const a of sortedActivities) {
+      if (!seen.has(a.id) && !hidden.has(a.id)) visit(a, 0);
+    }
+    return rows;
+  }
+
+  return sortedActivities.map(emptyRow);
+}
+
+// ── Props ──────────────────────────────────────────────────────────────────────
+
+interface Props {
+  teamId: string;
+  timelineId: string;
+  groupBy: ListGroupBy;
+  sortBy: ListSortBy;
+  colorBy: ListColorBy;
+  density?: ListDensity;
+  timelineStatuses?: Status[];
+  savedFilters?: SavedFilter[];
+  tags?: Tag[];
+  onColumnsChange?: (configs: ColumnConfig[]) => void;
+  /** When set, the component applies the toggle and clears it on the next render. */
+  pendingColumnToggle?: { colId: string; visible: boolean; seq: number } | null;
+  onSelectActivity?: (id: string | null) => void;
+  onSelectApiActivity?: (a: ApiActivity | null) => void;
+  selectedActivityId?: string | null;
+  onMembersLoaded?: (members: Member[]) => void;
+  /** Increment to trigger inline creation of a new activity row. */
+  triggerNewRow?: number;
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────────────
+
+/** Formats a genuine timestamp (createdAt, updatedAt) in the user's local timezone. */
+export function formatTimestamp(iso: string | null | undefined): string {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  return isNaN(d.getTime()) ? '—' : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+/**
+ * Formats an all-day activity date (startAt, endAt) in UTC so that
+ * midnight-UTC dates like "2026-05-31T00:00:00Z" display as "May 31"
+ * regardless of the viewer's local timezone.
+ *
+ * TODO: branch on allDay when timed events ship (Phase 15 calendar sync).
+ */
+export function formatActivityDate(iso: string | null | undefined): string {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  return isNaN(d.getTime()) ? '—' : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
+}
+
+export function formatDuration(startAt: string | null | undefined, endAt: string | null | undefined): string {
+  if (!startAt || !endAt) return '—';
+  const start = new Date(startAt);
+  const end = new Date(endAt);
+  const days = Math.round((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24));
+  if (days < 0) return '—';
+  if (days === 0) return '1 day';
+  return `${days + 1} days`;
+}
+
+function toDateInput(iso: string | null | undefined): string {
+  if (!iso) return '';
+  return iso.slice(0, 10);
+}
+
+// ── Draggable column header ────────────────────────────────────────────────────
+
+function SortableColHeader({ colId, children, style, onSort, sortDir, resizeHandler, isResizing }: {
+  colId: string;
+  children: React.ReactNode;
+  style?: React.CSSProperties;
+  onSort?: () => void;
+  sortDir?: 'asc' | 'desc' | false;
+  resizeHandler?: (e: React.MouseEvent | React.TouchEvent) => void;
+  isResizing?: boolean;
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: colId });
+
+  return (
+    <th
+      ref={setNodeRef}
+      style={{
+        ...style,
+        transform: CSS.Transform.toString(transform),
+        transition,
+        opacity: isDragging ? 0.5 : 1,
+        position: 'sticky',
+        top: 0,
+        background: 'var(--card)',
+        borderBottom: '2px solid var(--border)',
+        userSelect: 'none',
+        whiteSpace: 'nowrap',
+        textOverflow: 'ellipsis',
+        cursor: onSort ? 'pointer' : 'default',
+        fontWeight: 600,
+        fontSize: 11,
+        color: 'var(--muted-foreground)',
+        padding: 0,
+        textTransform: 'uppercase',
+        letterSpacing: '0.05em',
+        textAlign: 'left',
+        overflow: 'visible', // needed for resize handle
+      }}
+      onClick={onSort}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '0 8px', overflow: 'hidden' }}>
+        {/* drag handle */}
+        <span
+          {...attributes}
+          {...listeners}
+          style={{ cursor: 'grab', color: 'var(--muted-foreground)', opacity: 0.4, flexShrink: 0, paddingRight: 2 }}
+          onClick={e => e.stopPropagation()}
+          title="Drag to reorder"
+        >
+          <GripVertical size={12} />
+        </span>
+        <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis' }}>{children}</span>
+        {sortDir === 'asc' && <span style={{ color: 'var(--primary)', flexShrink: 0, fontSize: 9, lineHeight: 1 }}>▲</span>}
+        {sortDir === 'desc' && <span style={{ color: 'var(--primary)', flexShrink: 0, fontSize: 9, lineHeight: 1 }}>▼</span>}
+      </div>
+      {/* Resize handle — absolutely positioned on right edge */}
+      {resizeHandler && (
+        <div
+          onMouseDown={resizeHandler}
+          onTouchStart={resizeHandler}
+          onClick={e => e.stopPropagation()}
+          style={{
+            position: 'absolute',
+            right: 0,
+            top: 0,
+            height: '100%',
+            width: 4,
+            cursor: 'col-resize',
+            background: isResizing ? 'var(--primary)' : 'transparent',
+            zIndex: 1,
+          }}
+          onMouseEnter={e => { if (!isResizing) (e.currentTarget as HTMLElement).style.background = 'var(--border)'; }}
+          onMouseLeave={e => { if (!isResizing) (e.currentTarget as HTMLElement).style.background = 'transparent'; }}
+        />
+      )}
+    </th>
+  );
+}
+
+// ── Status pill popover ────────────────────────────────────────────────────────
+
+function StatusPicker({
+  value,
+  statuses,
+  onChange,
+  onClose,
+  positionStyle,
+}: {
+  value: string | null | undefined;
+  statuses: Status[];
+  onChange: (id: string | null) => void;
+  onClose: () => void;
+  positionStyle?: React.CSSProperties;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  useEffect(() => {
+    function handler(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) onCloseRef.current();
+    }
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  return (
+    <div
+      ref={ref}
+      style={{
+        ...positionStyle,
+        zIndex: 1000,
+        background: 'var(--card)',
+        border: '1px solid var(--border)',
+        borderRadius: 8,
+        boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
+        minWidth: 160,
+        padding: '6px 0',
+      }}
+    >
+      <div
+        onClick={() => { onChange(null); onClose(); }}
+        style={{
+          padding: '6px 12px',
+          cursor: 'pointer',
+          fontSize: 12,
+          color: 'var(--muted-foreground)',
+        }}
+        onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+        onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+      >
+        No status
+      </div>
+      {statuses.map(s => (
+        <div
+          key={s.id}
+          onClick={() => { onChange(s.id); onClose(); }}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            padding: '6px 12px',
+            cursor: 'pointer',
+            fontSize: 12,
+            color: 'var(--foreground)',
+            background: value === s.id ? 'var(--muted)' : 'transparent',
+          }}
+          onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+          onMouseLeave={e => (e.currentTarget.style.background = value === s.id ? 'var(--muted)' : 'transparent')}
+        >
+          <span
+            style={{
+              width: 10,
+              height: 10,
+              borderRadius: '50%',
+              background: resolveColorHex(s.color ?? null) ?? '#888',
+              flexShrink: 0,
+            }}
+          />
+          {s.name}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ── Assignee picker popover ────────────────────────────────────────────────────
+
+function AssigneePicker({
+  members,
+  selectedIds,
+  onToggle,
+  onClose,
+  positionStyle,
+}: {
+  members: Member[];
+  selectedIds: string[];
+  onToggle: (id: string) => void;
+  onClose: () => void;
+  positionStyle?: React.CSSProperties;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  useEffect(() => {
+    function handler(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) onCloseRef.current();
+    }
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  return (
+    <div
+      ref={ref}
+      style={{
+        ...positionStyle,
+        zIndex: 1000,
+        background: 'var(--card)',
+        border: '1px solid var(--border)',
+        borderRadius: 8,
+        boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
+        minWidth: 180,
+        padding: '6px 0',
+      }}
+    >
+      {members.length === 0 && (
+        <div style={{ padding: '6px 12px', fontSize: 12, color: 'var(--muted-foreground)' }}>
+          No team members
+        </div>
+      )}
+      {members.map(m => {
+        const assigned = selectedIds.includes(m.id);
+        return (
+          <div
+            key={m.id}
+            onClick={() => onToggle(m.id)}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 8,
+              padding: '5px 12px', cursor: 'pointer', fontSize: 12,
+              background: assigned ? 'var(--muted)' : 'transparent',
+              color: 'var(--foreground)',
+            }}
+            onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+            onMouseLeave={e => (e.currentTarget.style.background = assigned ? 'var(--muted)' : 'transparent')}
+          >
+            <Badge
+              identity={{ color: m.color, icon: '__name_2__' }}
+              name={m.name}
+              shape="circle"
+              size={20}
+            />
+            <span style={{ flex: 1 }}>{m.name}</span>
+            {assigned && (
+              <span style={{
+                width: 6, height: 6, borderRadius: '50%',
+                background: m.color, flexShrink: 0, display: 'inline-block',
+              }} />
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── Tag picker popover ─────────────────────────────────────────────────────────
+
+function TagPicker({
+  teamId,
+  tags,
+  selectedTagIds,
+  onChange,
+  onClose,
+  positionStyle,
+}: {
+  teamId: string;
+  tags: Tag[];
+  selectedTagIds: string[];
+  onChange: (ids: string[]) => void;
+  onClose: () => void;
+  positionStyle?: React.CSSProperties;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  useEffect(() => {
+    function handler(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) onCloseRef.current();
+    }
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  return (
+    <div
+      ref={ref}
+      style={{
+        ...positionStyle,
+        zIndex: 1000,
+        background: 'var(--card)',
+        border: '1px solid var(--border)',
+        borderRadius: 8,
+        boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
+        minWidth: 220,
+        padding: 8,
+      }}
+    >
+      <TagInput teamId={teamId} tags={tags} selectedTagIds={selectedTagIds} onChange={onChange} />
+    </div>
+  );
+}
+
+// ── Parent activity picker popover ─────────────────────────────────────────────
+
+function ParentPicker({
+  activities,
+  value,
+  onChange,
+  onClose,
+  positionStyle,
+}: {
+  activities: ApiActivity[];
+  value: string | null | undefined;
+  onChange: (id: string | null) => void;
+  onClose: () => void;
+  positionStyle?: React.CSSProperties;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  const [query, setQuery] = useState('');
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    function handler(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) onCloseRef.current();
+    }
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  useEffect(() => { inputRef.current?.focus(); }, []);
+
+  const filtered = activities.filter(a =>
+    a.title.toLowerCase().includes(query.trim().toLowerCase()),
+  );
+
+  function choose(id: string | null) {
+    onChange(id);
+    onClose();
+  }
+
+  return (
+    <div
+      ref={ref}
+      style={{
+        ...positionStyle,
+        zIndex: 1000,
+        background: 'var(--card)',
+        border: '1px solid var(--border)',
+        borderRadius: 8,
+        boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
+        minWidth: 220,
+        overflow: 'hidden',
+      }}
+    >
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 6,
+        padding: '6px 8px', borderBottom: '1px solid var(--border)',
+      }}>
+        <Search size={12} strokeWidth={2} style={{ flexShrink: 0, color: 'var(--muted-foreground)' }} />
+        <input
+          ref={inputRef}
+          value={query}
+          onChange={e => setQuery(e.target.value)}
+          placeholder="Search activities…"
+          style={{
+            flex: 1, border: 'none', outline: 'none', background: 'none',
+            fontSize: 12, color: 'var(--foreground)', fontFamily: 'var(--font-sans)',
+          }}
+        />
+      </div>
+      <div style={{ maxHeight: 200, overflowY: 'auto' }}>
+        <div
+          onClick={() => choose(null)}
+          style={{
+            padding: '6px 10px', fontSize: 12, color: 'var(--muted-foreground)',
+            fontStyle: 'italic', cursor: 'pointer',
+            borderBottom: filtered.length > 0 ? '1px solid var(--border)' : 'none',
+          }}
+          onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+          onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+        >
+          — None —
+        </div>
+        {filtered.map(a => (
+          <div
+            key={a.id}
+            onClick={() => choose(a.id)}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 8,
+              padding: '6px 10px', fontSize: 12, cursor: 'pointer',
+              background: a.id === value ? 'var(--muted)' : 'transparent',
+              fontWeight: a.id === value ? 600 : 400,
+            }}
+            onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+            onMouseLeave={e => (e.currentTarget.style.background = a.id === value ? 'var(--muted)' : 'transparent')}
+          >
+            <Badge
+              identity={{ color: a.color ?? '#288C9B', icon: a.icon ?? '__none__' }}
+              name={a.title}
+              size={16}
+            />
+            <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {a.title}
+            </span>
+          </div>
+        ))}
+        {filtered.length === 0 && (
+          <div style={{ padding: '8px 10px', fontSize: 11, color: 'var(--muted-foreground)', fontStyle: 'italic' }}>
+            No matching activities
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Row context menu ───────────────────────────────────────────────────────────
+
+function ContextMenu({
+  pos,
+  onArchive,
+  onDelete,
+  onClose,
+}: {
+  pos: { top: number; left: number };
+  onArchive: () => void;
+  onDelete: () => void;
+  onClose: () => void;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+
+  useEffect(() => {
+    function handler(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) onCloseRef.current();
+    }
+    function keyHandler(e: globalThis.KeyboardEvent) {
+      if (e.key === 'Escape') onCloseRef.current();
+    }
+    document.addEventListener('mousedown', handler);
+    document.addEventListener('keydown', keyHandler);
+    return () => {
+      document.removeEventListener('mousedown', handler);
+      document.removeEventListener('keydown', keyHandler);
+    };
+  }, []);
+
+  // Clamp so menu doesn't overflow viewport
+  const menuW = 160;
+  const menuH = 80;
+  const left = Math.min(pos.left, window.innerWidth - menuW - 8);
+  const top = pos.top + menuH > window.innerHeight ? pos.top - menuH : pos.top;
+
+  const itemStyle: React.CSSProperties = {
+    display: 'flex', alignItems: 'center', gap: 8,
+    padding: '7px 12px', fontSize: 12, cursor: 'pointer',
+    color: 'var(--foreground)', background: 'transparent',
+    border: 'none', width: '100%', textAlign: 'left',
+    fontFamily: 'var(--font-sans)',
+  };
+
+  return (
+    <div
+      ref={ref}
+      style={{
+        position: 'fixed', top, left,
+        zIndex: 9999,
+        background: 'var(--card)',
+        border: '1px solid var(--border)',
+        borderRadius: 8,
+        boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
+        minWidth: menuW,
+        padding: '4px 0',
+      }}
+    >
+      <button
+        style={itemStyle}
+        onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+        onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+        onClick={onArchive}
+      >
+        <Archive size={13} strokeWidth={2} style={{ flexShrink: 0 }} />
+        Archive
+      </button>
+      <button
+        style={{ ...itemStyle, color: 'var(--destructive)' }}
+        onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+        onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+        onClick={onDelete}
+      >
+        <Trash2 size={13} strokeWidth={2} style={{ flexShrink: 0 }} />
+        Delete
+      </button>
+    </div>
+  );
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────────────
+
+/** Position a popover below a cell, flipping above if there isn't enough space below. */
+function popoverPos(rect: DOMRect, w: number, h: number): { top: number; left: number } {
+  const spaceBelow = window.innerHeight - rect.bottom - 2;
+  const top = spaceBelow >= h
+    ? rect.bottom + 2
+    : Math.max(4, rect.top - h - 2);
+  return {
+    top,
+    left: Math.min(rect.left, window.innerWidth - w - 8),
+  };
+}
+
+// ── Sort helpers ───────────────────────────────────────────────────────────────
+
+function sortByToColId(s: ListSortBy): string {
+  switch (s) {
+    case 'startDate': return 'startAt';
+    case 'endDate':   return 'endAt';
+    case 'title':     return 'title';
+    case 'status':    return 'status';
+    case 'progress':  return 'progress';
+  }
+}
+
+// ── Main component ─────────────────────────────────────────────────────────────
+
+export default function ListView({
+  teamId,
+  timelineId,
+  groupBy,
+  sortBy,
+  colorBy,
+  density,
+  timelineStatuses = [],
+  savedFilters = [],
+  tags = [],
+  onColumnsChange,
+  pendingColumnToggle,
+  onSelectActivity,
+  selectedActivityId,
+  onMembersLoaded,
+  triggerNewRow,
+}: Props) {
+  const { user } = useAuth();
+  const { activeFilter } = useFilter();
+  const { debouncedQuery, registerMatches, matchedIds, activeMatchId } = useFind();
+
+  // ── Data fetching ──────────────────────────────────────────────────────────
+  const queryClient = useQueryClient();
+  const { data: rawActivities = [] } = useTimelineActivities(teamId, timelineId);
+  const { data: rawMembers = [] } = useTeamMembers(teamId);
+  const update = useUpdateActivity(timelineId);
+  const create = useCreateActivity(teamId, timelineId);
+  const deleteAct = useDeleteActivity(timelineId);
+  const archiveAct = useArchiveActivity(timelineId);
+
+  useEffect(() => {
+    if (rawMembers.length > 0 && onMembersLoaded) {
+      onMembersLoaded(rawMembers.map(m => ({
+        id: m.id,
+        name: m.displayName,
+        initials: m.displayName.split(/\s+/).map(w => w[0] ?? '').slice(0, 2).join('').toUpperCase(),
+        color: resolveColorHex(m.color ?? null) ?? '#888',
+      })));
+    }
+  }, [rawMembers, onMembersLoaded]);
+
+  function initialsFrom(name: string): string {
+    return name.split(/\s+/).map(w => w[0] ?? '').slice(0, 2).join('').toUpperCase();
+  }
+
+  const members: Member[] = useMemo(
+    () => rawMembers.map(m => ({
+      id: m.id,
+      name: m.displayName,
+      initials: initialsFrom(m.displayName),
+      color: resolveColorHex(m.color ?? null) ?? '#888',
+    })),
+    [rawMembers],
+  );
+
+  // ── Preference persistence ────────────────────────────────────────────────
+  const { isSuccess: prefsSettled } = usePreferences(timelineId);
+  const prefMap = usePreferenceMap(timelineId);
+  const upsert = useUpsertPreference();
+  const prefsApplied = useRef(false);
+
+  // Column state (managed by TanStack Table)
+  const [columnVisibility, setColumnVisibility] = useState<VisibilityState>(DEFAULT_VISIBILITY);
+  const [columnOrder, setColumnOrder] = useState<ColumnOrderState>(DEFAULT_COLUMN_ORDER);
+  const [columnSizing, setColumnSizing] = useState<ColumnSizingState>(DEFAULT_WIDTHS);
+  const [sorting, setSorting] = useState<SortingState>(() => [{ id: sortByToColId(sortBy), desc: false }]);
+
+  // Sync sort column when the toolbar's Sort By control changes
+  useEffect(() => {
+    setSorting([{ id: sortByToColId(sortBy), desc: false }]);
+  }, [sortBy]);
+
+  // Apply saved column prefs once after they load
+  useEffect(() => {
+    if (!prefsSettled || prefsApplied.current) return;
+    prefsApplied.current = true;
+    const raw = prefMap['list_columns'];
+    if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+      const config = raw as { order?: string[]; hidden?: string[]; widths?: Record<string, number> };
+      if (Array.isArray(config.order) && config.order.length > 0) {
+        const saved = config.order as string[];
+        const allIds = COL_CATALOG.map(c => c.id);
+        const newCols = allIds.filter(id => !saved.includes(id));
+        setColumnOrder([...saved, ...newCols]);
+      }
+      if (Array.isArray(config.hidden)) {
+        const vis: VisibilityState = { ...DEFAULT_VISIBILITY };
+        for (const id of config.hidden as string[]) {
+          if (id in vis) vis[id] = false;
+        }
+        setColumnVisibility(vis);
+      }
+      if (config.widths && typeof config.widths === 'object') {
+        setColumnSizing(prev => ({ ...prev, ...config.widths }));
+      }
+    }
+  }, [prefsSettled, prefMap]);
+
+  // Persist column config on change (debounced via a ref guard)
+  const saveCols = useCallback(
+    (vis: VisibilityState, order: ColumnOrderState, sizing: ColumnSizingState) => {
+      if (!timelineId) return;
+      const hidden = Object.entries(vis).filter(([, v]) => !v).map(([k]) => k);
+      const config = { order, hidden, widths: sizing };
+      upsert.mutate({ key: 'list_columns', value: JSON.stringify(config), timelineId });
+    },
+    [timelineId, upsert.mutate], // eslint-disable-line react-hooks/exhaustive-deps
+  );
+
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const debouncedSaveCols = useCallback(
+    (vis: VisibilityState, order: ColumnOrderState, sizing: ColumnSizingState) => {
+      if (saveTimer.current) clearTimeout(saveTimer.current);
+      saveTimer.current = setTimeout(() => saveCols(vis, order, sizing), 400);
+    },
+    [saveCols],
+  );
+
+  const handleVisibilityChange = useCallback(
+    (updater: VisibilityState | ((prev: VisibilityState) => VisibilityState)) => {
+      setColumnVisibility(prev => {
+        const next = typeof updater === 'function' ? updater(prev) : updater;
+        if (prefsApplied.current) debouncedSaveCols(next, columnOrder, columnSizing);
+        return next;
+      });
+    },
+    [columnOrder, columnSizing, debouncedSaveCols],
+  );
+
+  const handleOrderChange = useCallback(
+    (updater: ColumnOrderState | ((prev: ColumnOrderState) => ColumnOrderState)) => {
+      setColumnOrder(prev => {
+        const next = typeof updater === 'function' ? updater(prev) : updater;
+        if (prefsApplied.current) debouncedSaveCols(columnVisibility, next, columnSizing);
+        return next;
+      });
+    },
+    [columnVisibility, columnSizing, debouncedSaveCols],
+  );
+
+  const handleSizingChange = useCallback(
+    (updater: ColumnSizingState | ((prev: ColumnSizingState) => ColumnSizingState)) => {
+      setColumnSizing(prev => {
+        const next = typeof updater === 'function' ? updater(prev) : updater;
+        if (prefsApplied.current) debouncedSaveCols(columnVisibility, columnOrder, next);
+        return next;
+      });
+    },
+    [columnVisibility, columnOrder, debouncedSaveCols],
+  );
+
+  // ── TanStack Table ─────────────────────────────────────────────────────────
+
+  const columnDefs = useMemo<ColumnDef<ApiActivity>[]>(
+    () =>
+      COL_CATALOG.map(meta => ({
+        id: meta.id,
+        header: meta.label,
+        size: DEFAULT_WIDTHS[meta.id] ?? 120,
+        // colorBar is a fixed-width structural column — lock it so TanStack's
+        // min-size enforcement never stretches it beyond its visual purpose.
+        minSize: meta.id === 'colorBar' ? 18 : 40,
+        maxSize: meta.id === 'colorBar' ? 18 : 800,
+        enableResizing: meta.id !== 'colorBar',
+        enableSorting: meta.editType !== 'none' || meta.id === 'duration',
+      })),
+    [],
+  );
+
+  const table = useReactTable({
+    data: rawActivities,
+    columns: columnDefs,
+    state: {
+      columnVisibility,
+      columnOrder,
+      columnSizing,
+      columnPinning: { left: ['colorBar', 'identity', 'title'] } as ColumnPinningState,
+      sorting,
+    },
+    onSortingChange: setSorting,
+    onColumnVisibilityChange: handleVisibilityChange,
+    onColumnOrderChange: handleOrderChange,
+    onColumnSizingChange: handleSizingChange,
+    getCoreRowModel: getCoreRowModel(),
+    getSortedRowModel: getSortedRowModel(),
+    columnResizeMode: 'onChange',
+  });
+
+  // Apply external column toggle from the toolbar (via DashboardPage)
+  const lastAppliedSeq = useRef<number | null>(null);
+  useEffect(() => {
+    if (!pendingColumnToggle) return;
+    if (pendingColumnToggle.seq === lastAppliedSeq.current) return;
+    lastAppliedSeq.current = pendingColumnToggle.seq;
+    setColumnVisibility(prev => {
+      const next = { ...prev, [pendingColumnToggle.colId]: pendingColumnToggle.visible };
+      if (prefsApplied.current) debouncedSaveCols(next, columnOrder, columnSizing);
+      return next;
+    });
+  }, [pendingColumnToggle, columnOrder, columnSizing, debouncedSaveCols]);
+
+  // Expose ALL column configs (visible + hidden) to toolbar via callback.
+  // Uses a ref-based equality check to avoid calling onColumnsChange (which
+  // typically calls setListColumns in DashboardPage) with a new array reference
+  // every render — that would create an infinite setState→re-render loop.
+  const lastColConfigsRef = useRef<ColumnConfig[] | null>(null);
+  useEffect(() => {
+    if (!onColumnsChange) return;
+    const configs: ColumnConfig[] = table.getAllLeafColumns()
+      .filter(col => !COL_CATALOG.find(c => c.id === col.id)?.noMenu)
+      .map(col => ({
+        id: col.id,
+        label: COL_CATALOG.find(c => c.id === col.id)?.label ?? col.id,
+        visible: col.getIsVisible(),
+      }));
+    const prev = lastColConfigsRef.current;
+    const changed = !prev || prev.length !== configs.length ||
+      prev.some((c, i) => c.id !== configs[i].id || c.visible !== configs[i].visible || c.label !== configs[i].label);
+    if (changed) {
+      lastColConfigsRef.current = configs;
+      onColumnsChange(configs);
+    }
+  }); // runs every render so order/visibility changes propagate immediately
+
+  // ── Filter + sort ──────────────────────────────────────────────────────────
+
+  const memberIdsByUserId = useMemo<Map<string, string[]>>(() => {
+    const map = new Map<string, string[]>();
+    for (const m of rawMembers) {
+      if (!m.userId) continue;
+      const list = map.get(m.userId) ?? [];
+      list.push(m.id);
+      map.set(m.userId, list);
+    }
+    return map;
+  }, [rawMembers]);
+
+  const closedStatusIds = useMemo(
+    () => new Set(timelineStatuses.filter(s => s.isClosed).map(s => s.id)),
+    [timelineStatuses],
+  );
+
+  const statusesByTimeline = useMemo(() => {
+    const m = new Map<string, Status[]>();
+    m.set(timelineId, timelineStatuses);
+    return m;
+  }, [timelineId, timelineStatuses]);
+
+  const filteredActivities = useMemo(
+    () =>
+      applyActiveFilter(rawActivities, activeFilter, memberIdsByUserId, {
+        closedStatusIds,
+        savedFilters,
+        statuses: statusesByTimeline,
+        tags,
+      }),
+    [rawActivities, activeFilter, memberIdsByUserId, closedStatusIds, savedFilters, statusesByTimeline, tags],
+  );
+
+  // Apply TanStack sorting
+  const sortedActivities = useMemo(() => {
+    const acts = [...filteredActivities];
+    const col = sorting[0];
+    if (!col) {
+      return acts.sort((a, b) => {
+        if (sortBy === 'startDate') return (a.startAt ?? '').localeCompare(b.startAt ?? '');
+        if (sortBy === 'endDate') return (a.endAt ?? '').localeCompare(b.endAt ?? '');
+        if (sortBy === 'title') return a.title.localeCompare(b.title);
+        if (sortBy === 'status') return (a.statusId ?? '').localeCompare(b.statusId ?? '');
+        if (sortBy === 'progress') return (b.percentComplete ?? 0) - (a.percentComplete ?? 0);
+        return 0;
+      });
+    }
+    return acts.sort((a, b) => {
+      let av: string | number = '';
+      let bv: string | number = '';
+      switch (col.id) {
+        case 'title': av = a.title; bv = b.title; break;
+        case 'startAt': av = a.startAt ?? ''; bv = b.startAt ?? ''; break;
+        case 'endAt': av = a.endAt ?? ''; bv = b.endAt ?? ''; break;
+        case 'status': av = a.statusId ?? ''; bv = b.statusId ?? ''; break;
+        case 'progress': av = a.percentComplete ?? 0; bv = b.percentComplete ?? 0; break;
+        default: av = a.title; bv = b.title;
+      }
+      const cmp = typeof av === 'number' ? av - (bv as number) : (av as string).localeCompare(bv as string);
+      return col.desc ? -cmp : cmp;
+    });
+  }, [filteredActivities, sorting, sortBy]);
+
+  // ── Group-by ───────────────────────────────────────────────────────────────
+
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
+  const toggleGroup = useCallback((key: string) => {
+    setCollapsedGroups(prev => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  }, []);
+
+  const memberById = useMemo<Map<string, TeamMemberWithUser>>(
+    () => new Map(rawMembers.map(m => [m.id, m])),
+    [rawMembers],
+  );
+  const statusById = useMemo<Map<string, Status>>(
+    () => new Map(timelineStatuses.map(s => [s.id, s])),
+    [timelineStatuses],
+  );
+  const activityById = useMemo<Map<string, ApiActivity>>(
+    () => new Map(rawActivities.map(a => [a.id, a])),
+    [rawActivities],
+  );
+
+  const memberOrder = useMemo(() => members.map(m => m.id), [members]);
+
+  const displayRows = useMemo(
+    () => buildListRows(sortedActivities, groupBy, memberById, statusById, timelineStatuses, collapsedGroups, memberOrder),
+    [sortedActivities, groupBy, memberById, statusById, timelineStatuses, collapsedGroups, memberOrder],
+  );
+
+  // Flat list of activity rows (for keyboard navigation indices)
+  const activityRows = useMemo(
+    () => displayRows.filter((r): r is Extract<ListDisplayRow, { kind: 'activity' }> => r.kind === 'activity'),
+    [displayRows],
+  );
+
+  // ── Find integration ───────────────────────────────────────────────────────
+
+  useEffect(() => {
+    if (!debouncedQuery) {
+      registerMatches([], new Map());
+      return;
+    }
+    const results = matchEvents(debouncedQuery, filteredActivities, members, rawActivities);
+    const ids = results.map(r => r.activityId);
+    const reasons = new Map(results.map(r => [r.activityId, r.reasons]));
+    registerMatches(ids, reasons);
+  }, [debouncedQuery, filteredActivities, members, rawActivities, registerMatches]);
+
+  // Auto-scroll to active match
+  const activeRowRef = useRef<HTMLTableRowElement | null>(null);
+  useEffect(() => {
+    if (activeMatchId && activeRowRef.current) {
+      activeRowRef.current.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
+  }, [activeMatchId]);
+
+  // ── Selection & editing state ──────────────────────────────────────────────
+
+  const [selectedRowIdx, setSelectedRowIdx] = useState<number | null>(null);
+  const [selectedColIdx, setSelectedColIdx] = useState<number>(0);
+  const [editingCell, setEditingCell] = useState<{
+    rowIdx: number;
+    colIdx: number;
+    value: string;
+  } | null>(null);
+  const editInputRef = useRef<HTMLInputElement | null>(null);
+  // Tracks which cell is currently open so the layout effect only focuses/selects
+  // on initial open, not on every value change while typing.
+  const editCellKeyRef = useRef<string | null>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  // When a new activity is selected externally, sync row idx
+  useEffect(() => {
+    if (!selectedActivityId) { setSelectedRowIdx(null); return; }
+    const idx = activityRows.findIndex(r => r.activity.id === selectedActivityId);
+    if (idx >= 0) setSelectedRowIdx(idx);
+  }, [selectedActivityId, activityRows]);
+
+  // useLayoutEffect fires synchronously after DOM commit so the focus is set
+  // before any paint — no window in which another element can steal focus.
+  // Guard: only focus/select when the *cell* changes (new rowIdx:colIdx), not
+  // when the value changes while the user is typing — otherwise inp.select()
+  // would re-select-all after every keystroke, leaving only the last character.
+  useLayoutEffect(() => {
+    if (!editingCell) {
+      editCellKeyRef.current = null;
+      return;
+    }
+    // Include the row's activity id in the key so that when an optimistic row
+    // (optimistic_…) is swapped for its real record at the same index, React
+    // remounts the <tr> (keyed by activity.id) and destroys the focused input —
+    // the changed id forces us to re-focus the freshly mounted input rather than
+    // skip it as a value-only change.
+    const rowId = activityRows[editingCell.rowIdx]?.activity.id ?? '';
+    const cellKey = `${rowId}:${editingCell.colIdx}`;
+    if (editCellKeyRef.current === cellKey) return; // value-only change — skip
+    editCellKeyRef.current = cellKey;
+
+    const inp = editInputRef.current;
+    if (!inp) return;
+    inp.focus();
+    inp.scrollIntoView({ block: 'nearest' });
+    const colId = visibleColIds[editingCell.colIdx];
+    const meta = COL_CATALOG.find(c => c.id === colId);
+    if (meta?.editType === 'date') {
+      // showPicker() opens the calendar immediately. Deferred so the browser
+      // has processed the focus event first. Only one date input is ever in
+      // the DOM at a time (single-cell editing), so no range-picker pairing.
+      setTimeout(() => {
+        try { (inp as HTMLInputElement & { showPicker?(): void }).showPicker?.(); } catch { /* not all browsers */ }
+      }, 0);
+    } else {
+      inp.select();
+    }
+  }, [editingCell, activityRows]); // visibleColIds intentionally excluded — always current in this render cycle
+
+  // Visible column ids, in the SAME order the cells are rendered.
+  //
+  // Cells render from `table.getHeaderGroups()`, which moves pinned-left
+  // columns (colorBar, identity, title) to the front. `getVisibleLeafColumns()`
+  // does NOT apply pinning — it follows raw `columnOrder`. When a persisted
+  // `columnOrder` doesn't place the pinned columns first (e.g. a saved order
+  // from before `colorBar`/`identity` existed appends them at the end), the two
+  // orderings diverge and every colIdx→colId lookup (enterEdit, commitEdit,
+  // showPicker, keyboard nav) targets the wrong column. Deriving from the
+  // header groups keeps colIdx aligned with what the user actually clicked.
+  const visibleColIds = useMemo(
+    () => (table.getHeaderGroups()[0]?.headers ?? []).map(h => h.id),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [columnOrder, columnVisibility],
+  );
+
+  const commitEdit = useCallback(
+    (rowIdx: number, colId: string, value: string) => {
+      const row = activityRows[rowIdx];
+      if (!row) return;
+      const a = row.activity;
+
+      // Optimistic row not yet confirmed by server — queue title and return.
+      if (a.id.startsWith('optimistic_')) {
+        if (colId === 'title' && value.trim()) {
+          pendingTitleAfterCreate.current = value.trim();
+        }
+        return;
+      }
+
+      const patch: Partial<ApiActivity> & { notes?: string | null } = {};
+      if (colId === 'title' && value.trim() !== '') patch.title = value.trim();
+      else if (colId === 'startAt') patch.startAt = value ? `${value}T00:00:00Z` : undefined;
+      else if (colId === 'endAt') patch.endAt = value ? `${value}T00:00:00Z` : undefined;
+      else if (colId === 'description') patch.description = value || undefined;
+      else if (colId === 'location') patch.location = value || undefined;
+      else if (colId === 'url') patch.url = value || undefined;
+      else if (colId === 'notes') patch.notes = value || undefined;
+      else if (colId === 'progress') {
+        const n = parseInt(value, 10);
+        if (!isNaN(n) && n >= 0 && n <= 100) patch.percentComplete = n;
+      }
+
+      if (Object.keys(patch).length > 0) {
+        update.mutate({ activityId: a.id, patch });
+      }
+    },
+    [activityRows, update],
+  );
+
+  const enterEdit = useCallback((rowIdx: number, colIdx: number) => {
+    const row = activityRows[rowIdx];
+    if (!row) return;
+    const colId = visibleColIds[colIdx];
+    const meta = COL_CATALOG.find(c => c.id === colId);
+    if (!meta?.editable || meta.editType === 'status') return;
+    const a = row.activity;
+    let val = '';
+    if (colId === 'title') val = a.title;
+    else if (colId === 'startAt') val = toDateInput(a.startAt);
+    else if (colId === 'endAt') val = toDateInput(a.endAt);
+    else if (colId === 'description') val = a.description ?? '';
+    else if (colId === 'location') val = a.location ?? '';
+    else if (colId === 'url') val = a.url ?? '';
+    else if (colId === 'notes') val = (a as ApiActivity & { notes?: string | null }).notes ?? '';
+    else if (colId === 'progress') val = String(a.percentComplete ?? 0);
+    setEditingCell({ rowIdx, colIdx, value: val });
+  }, [activityRows, visibleColIds]);
+
+  const cancelEdit = useCallback(() => setEditingCell(null), []);
+
+  const commitAndMove = useCallback(
+    (dir: 'down' | 'right' | 'left') => {
+      if (!editingCell) return;
+      commitEdit(editingCell.rowIdx, visibleColIds[editingCell.colIdx], editingCell.value);
+      setEditingCell(null);
+
+      if (dir === 'down') {
+        const nextRow = Math.min(editingCell.rowIdx + 1, activityRows.length - 1);
+        setSelectedRowIdx(nextRow);
+      } else if (dir === 'right') {
+        let nextColIdx = editingCell.colIdx + 1;
+        let nextRowIdx = editingCell.rowIdx;
+        if (nextColIdx >= visibleColIds.length) {
+          if (editingCell.rowIdx < activityRows.length - 1) {
+            nextColIdx = 0;
+            nextRowIdx = editingCell.rowIdx + 1;
+          } else {
+            nextColIdx = visibleColIds.length - 1; // clamp at last cell of last row
+          }
+        }
+        setSelectedColIdx(nextColIdx);
+        setSelectedRowIdx(nextRowIdx);
+        const colId = visibleColIds[nextColIdx];
+        const meta = COL_CATALOG.find(c => c.id === colId);
+        const isText = meta?.editable && meta.editType !== 'status' && meta.editType !== 'none' &&
+          meta.editType !== 'identity' && meta.editType !== 'assignees' &&
+          meta.editType !== 'tags' && meta.editType !== 'parent';
+        if (isText) enterEdit(nextRowIdx, nextColIdx);
+      } else if (dir === 'left') {
+        let prevColIdx = editingCell.colIdx - 1;
+        let prevRowIdx = editingCell.rowIdx;
+        if (prevColIdx < 0) {
+          if (editingCell.rowIdx > 0) {
+            prevColIdx = visibleColIds.length - 1;
+            prevRowIdx = editingCell.rowIdx - 1;
+          } else {
+            prevColIdx = 0; // clamp at first cell of first row
+          }
+        }
+        setSelectedColIdx(prevColIdx);
+        setSelectedRowIdx(prevRowIdx);
+        const colId = visibleColIds[prevColIdx];
+        const meta = COL_CATALOG.find(c => c.id === colId);
+        const isText = meta?.editable && meta.editType !== 'status' && meta.editType !== 'none' &&
+          meta.editType !== 'identity' && meta.editType !== 'assignees' &&
+          meta.editType !== 'tags' && meta.editType !== 'parent';
+        if (isText) enterEdit(prevRowIdx, prevColIdx);
+      }
+    },
+    [editingCell, commitEdit, visibleColIds, activityRows.length, enterEdit],
+  );
+
+  const handleKeyDown = useCallback(
+    (e: KeyboardEvent<HTMLDivElement>) => {
+      if (editingCell) {
+        // Edit mode key handling is in the input's own onKeyDown
+        return;
+      }
+
+      if (e.key === 'Tab') {
+        e.preventDefault();
+        if (activityRows.length === 0) return;
+        if (selectedRowIdx === null) {
+          setSelectedRowIdx(0);
+          setSelectedColIdx(0);
+          return;
+        }
+        if (e.shiftKey) {
+          let prevCol = selectedColIdx - 1;
+          let prevRow = selectedRowIdx;
+          if (prevCol < 0) {
+            if (selectedRowIdx > 0) {
+              prevCol = visibleColIds.length - 1;
+              prevRow = selectedRowIdx - 1;
+            } else {
+              prevCol = 0; // clamp at first cell of first row
+            }
+          }
+          setSelectedColIdx(prevCol);
+          setSelectedRowIdx(prevRow);
+        } else {
+          let nextCol = selectedColIdx + 1;
+          let nextRow = selectedRowIdx;
+          if (nextCol >= visibleColIds.length) {
+            if (selectedRowIdx < activityRows.length - 1) {
+              nextCol = 0;
+              nextRow = selectedRowIdx + 1;
+            } else {
+              nextCol = visibleColIds.length - 1; // clamp at last cell of last row
+            }
+          }
+          setSelectedColIdx(nextCol);
+          setSelectedRowIdx(nextRow);
+        }
+        return;
+      }
+
+      if (selectedRowIdx === null) {
+        if (e.key === 'ArrowDown') { setSelectedRowIdx(0); e.preventDefault(); }
+        return;
+      }
+
+      if (e.key === 'ArrowDown') {
+        setSelectedRowIdx(r => Math.min((r ?? 0) + 1, activityRows.length - 1));
+        e.preventDefault();
+      } else if (e.key === 'ArrowUp') {
+        setSelectedRowIdx(r => Math.max((r ?? 0) - 1, 0));
+        e.preventDefault();
+      } else if (e.key === 'ArrowRight') {
+        setSelectedColIdx(c => Math.min(c + 1, visibleColIds.length - 1));
+        e.preventDefault();
+      } else if (e.key === 'ArrowLeft') {
+        setSelectedColIdx(c => Math.max(c - 1, 0));
+        e.preventDefault();
+      } else if (e.key === 'Enter' || e.key === 'F2') {
+        const colId = visibleColIds[selectedColIdx];
+        const meta = COL_CATALOG.find(c => c.id === colId);
+        const isTextEditable = meta?.editable && meta.editType !== 'none' &&
+          meta.editType !== 'status' && meta.editType !== 'identity' &&
+          meta.editType !== 'assignees' && meta.editType !== 'tags' && meta.editType !== 'parent';
+        if (isTextEditable) enterEdit(selectedRowIdx, selectedColIdx);
+        e.preventDefault();
+      } else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey) {
+        const colId = visibleColIds[selectedColIdx];
+        const meta = COL_CATALOG.find(c => c.id === colId);
+        const isTextEditable = meta?.editable && meta.editType !== 'none' &&
+          meta.editType !== 'status' && meta.editType !== 'identity' &&
+          meta.editType !== 'assignees' && meta.editType !== 'tags' && meta.editType !== 'parent';
+        if (isTextEditable) setEditingCell({ rowIdx: selectedRowIdx, colIdx: selectedColIdx, value: e.key });
+      }
+    },
+    [editingCell, selectedRowIdx, selectedColIdx, activityRows, visibleColIds, enterEdit],
+  );
+
+  // When triggerNewRow increments, optimistically insert a row and focus the title input
+  // immediately — no network round-trip before the UI responds.
+  useEffect(() => {
+    if (!triggerNewRow || triggerNewRow === prevTriggerNewRow.current) return;
+    prevTriggerNewRow.current = triggerNewRow;
+    const today = new Date().toISOString().slice(0, 10);
+    const startAt = `${today}T00:00:00Z`;
+    const now = new Date().toISOString();
+    const tempId = `optimistic_${Date.now()}`;
+    const optimisticActivity: ApiActivity = {
+      id: tempId,
+      timelineId,
+      title: 'New Activity',
+      startAt,
+      endAt: startAt,
+      allDay: false,
+      createdBy: user?.id ?? '',
+      createdAt: now,
+      updatedAt: now,
+      description: null,
+      notes: null,
+      icon: null,
+      color: null,
+      statusId: null,
+      parentActivityId: null,
+      percentComplete: null,
+      location: null,
+      url: null,
+      archivedAt: null,
+      assignedMemberIds: [],
+      tagIds: [],
+    };
+    queryClient.setQueriesData<ApiActivity[]>(
+      { queryKey: ['timelines', timelineId, 'activities'] },
+      (old) => (old ? [...old, optimisticActivity] : [optimisticActivity]),
+    );
+    pendingEditActivityId.current = tempId;
+    create.mutate(
+      { title: 'New Activity', startAt, endAt: startAt, _tempId: tempId },
+      {
+        onSuccess: (created) => {
+          if (pendingTitleAfterCreate.current !== null) {
+            const queued = pendingTitleAfterCreate.current;
+            pendingTitleAfterCreate.current = null;
+            if (queued && queued !== 'New Activity') {
+              update.mutate({ activityId: created.id, patch: { title: queued } });
+            }
+          }
+        },
+        onError: () => {
+          queryClient.setQueriesData<ApiActivity[]>(
+            { queryKey: ['timelines', timelineId, 'activities'] },
+            (old) => (old ? old.filter(a => a.id !== tempId) : []),
+          );
+          // Discard any queued title so it can't leak into the next create.
+          pendingTitleAfterCreate.current = null;
+          setEditingCell(null);
+        },
+      },
+    );
+  }, [triggerNewRow]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // After an activity (including an optimistic one) appears in activityRows, enter title-edit mode on it.
+  useEffect(() => {
+    if (!pendingEditActivityId.current) return;
+    const rowIdx = activityRows.findIndex(r => r.activity.id === pendingEditActivityId.current);
+    if (rowIdx < 0) return;
+    pendingEditActivityId.current = null;
+    setSelectedRowIdx(rowIdx);
+    const titleColIdx = visibleColIds.indexOf('title');
+    if (titleColIdx >= 0) {
+      setEditingCell({ rowIdx, colIdx: titleColIdx, value: 'New Activity' });
+    }
+  }, [activityRows, visibleColIds]);
+
+  // ── Color-by resolution ────────────────────────────────────────────────────
+
+  const getRowAccentColor = useCallback(
+    (activity: ApiActivity): string | null => {
+      if (colorBy === 'activity') return resolveColorHex(activity.color ?? null);
+      if (colorBy === 'member') {
+        const firstId = (activity.assignedMemberIds ?? [])[0];
+        if (!firstId) return null;
+        const m = memberById.get(firstId);
+        return resolveColorHex(m?.color ?? null);
+      }
+      if (colorBy === 'status') {
+        if (!activity.statusId) return null;
+        const s = statusById.get(activity.statusId);
+        return resolveColorHex(s?.color ?? null);
+      }
+      return null;
+    },
+    [colorBy, memberById, statusById],
+  );
+
+  // ── Picker state — all rendered as portals to escape table overflow ──────
+
+  const [statusPickerFor, setStatusPickerFor] = useState<string | null>(null);
+  const [statusPickerPos, setStatusPickerPos] = useState<{ top: number; left: number } | null>(null);
+  const closeStatusPicker = useCallback(() => {
+    setStatusPickerFor(null);
+    setStatusPickerPos(null);
+  }, []);
+
+  const [assigneePickerFor, setAssigneePickerFor] = useState<string | null>(null);
+  const [assigneePickerPos, setAssigneePickerPos] = useState<{ top: number; left: number } | null>(null);
+  const closeAssigneePicker = useCallback(() => {
+    setAssigneePickerFor(null);
+    setAssigneePickerPos(null);
+  }, []);
+
+  const [tagPickerFor, setTagPickerFor] = useState<string | null>(null);
+  const [tagPickerPos, setTagPickerPos] = useState<{ top: number; left: number } | null>(null);
+  const closeTagPicker = useCallback(() => {
+    setTagPickerFor(null);
+    setTagPickerPos(null);
+  }, []);
+
+  const [parentPickerFor, setParentPickerFor] = useState<string | null>(null);
+  const [parentPickerPos, setParentPickerPos] = useState<{ top: number; left: number } | null>(null);
+  const closeParentPicker = useCallback(() => {
+    setParentPickerFor(null);
+    setParentPickerPos(null);
+  }, []);
+
+  const [identityPickerFor, setIdentityPickerFor] = useState<string | null>(null);
+  const [identityPickerPos, setIdentityPickerPos] = useState<{ top: number; left: number } | null>(null);
+  const identityPickerRef = useRef<HTMLDivElement>(null);
+  const closeIdentityPicker = useCallback(() => {
+    setIdentityPickerFor(null);
+    setIdentityPickerPos(null);
+  }, []);
+
+  // Click-outside closes the identity picker
+  useEffect(() => {
+    if (!identityPickerFor) return;
+    function handler(e: MouseEvent) {
+      if (identityPickerRef.current && !identityPickerRef.current.contains(e.target as Node)) {
+        closeIdentityPicker();
+      }
+    }
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [identityPickerFor, closeIdentityPicker]);
+
+  // Multi-select state for row checkboxes
+  const [selectedActivityIds, setSelectedActivityIds] = useState<Set<string>>(new Set());
+  const [hoveredRowId, setHoveredRowId] = useState<string | null>(null);
+
+  // Toast notification
+  const [toast, setToast] = useState<string | null>(null);
+  const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const showToast = useCallback((msg: string) => {
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    setToast(msg);
+    toastTimer.current = setTimeout(() => setToast(null), 2600);
+  }, []);
+
+  // Right-click context menu
+  const [contextMenuFor, setContextMenuFor] = useState<string | null>(null);
+  const [contextMenuPos, setContextMenuPos] = useState<{ top: number; left: number } | null>(null);
+  const closeContextMenu = useCallback(() => {
+    setContextMenuFor(null);
+    setContextMenuPos(null);
+  }, []);
+
+  // Holds the ID of a newly created activity (or optimistic temp ID) waiting to enter title-edit mode
+  const pendingEditActivityId = useRef<string | null>(null);
+  // Guards against re-firing triggerNewRow on re-renders
+  const prevTriggerNewRow = useRef<number>(0);
+  // Title typed while the row is still optimistic — flushed to the server once the real ID arrives
+  const pendingTitleAfterCreate = useRef<string | null>(null);
+
+  // ── Multi-select delete / archive ─────────────────────────────────────────
+
+  const handleDeleteSelected = useCallback(() => {
+    const ids = Array.from(selectedActivityIds);
+    for (const id of ids) {
+      deleteAct.mutate(id);
+    }
+    setSelectedActivityIds(new Set());
+    showToast(`${ids.length} ${ids.length === 1 ? 'activity' : 'activities'} deleted`);
+  }, [selectedActivityIds, deleteAct, showToast]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handleArchiveSelected = useCallback(() => {
+    const ids = Array.from(selectedActivityIds);
+    for (const id of ids) {
+      archiveAct.mutate(id);
+    }
+    setSelectedActivityIds(new Set());
+    showToast(`${ids.length} ${ids.length === 1 ? 'activity' : 'activities'} archived`);
+  }, [selectedActivityIds, archiveAct, showToast]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── DnD column reorder ─────────────────────────────────────────────────────
+
+  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 8 } }));
+
+  function handleDragEnd(event: DragEndEvent) {
+    const { active, over } = event;
+    if (!over || active.id === over.id) return;
+    setColumnOrder(prev => {
+      const oldIdx = prev.indexOf(String(active.id));
+      const newIdx = prev.indexOf(String(over.id));
+      if (oldIdx === -1 || newIdx === -1) return prev;
+      // Pinned columns can't be reordered past each other
+      const pinnedIds = ['colorBar', 'identity', 'title'];
+      if (pinnedIds.includes(String(active.id)) || pinnedIds.includes(String(over.id))) return prev;
+      const next = arrayMove(prev, oldIdx, newIdx);
+      if (prefsApplied.current) debouncedSaveCols(columnVisibility, next, columnSizing);
+      return next;
+    });
+  }
+
+  // ── Render ─────────────────────────────────────────────────────────────────
+
+  const rowH = density === 'compact' ? 32 : 48;
+
+  const visibleHeaders = table.getHeaderGroups()[0]?.headers ?? [];
+
+  // Build a map from colId → left offset for sticky pinning
+  const pinnedLeft = useMemo(() => {
+    let left = 0;
+    const offsets: Record<string, number> = {};
+    for (const h of visibleHeaders) {
+      if (h.column.getIsPinned() === 'left') {
+        offsets[h.id] = left;
+        left += h.getSize();
+      }
+    }
+    return offsets;
+  }, [visibleHeaders]);
+
+  const tableWidth = visibleHeaders.reduce((acc, h) => acc + h.getSize(), 0);
+
+  // Status picker activity (for the portal)
+  const statusPickerActivity = statusPickerFor ? activityById.get(statusPickerFor) : null;
+
+  return (
+    <div
+      ref={containerRef}
+      tabIndex={0}
+      onKeyDown={handleKeyDown}
+      style={{
+        flex: 1,
+        overflow: 'auto',
+        outline: 'none',
+        background: 'var(--background)',
+        position: 'relative',
+      }}
+      onClick={e => {
+        if ((e.target as HTMLElement) === containerRef.current) {
+          setSelectedRowIdx(null);
+          setEditingCell(null);
+          onSelectActivity?.(null);
+        }
+      }}
+    >
+      {/* Selection action bar — appears above the table when rows are checked */}
+      {selectedActivityIds.size > 0 && (
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 10,
+            padding: '0 12px',
+            height: 36,
+            background: 'var(--card)',
+            borderBottom: '1px solid var(--border)',
+            flexShrink: 0,
+            position: 'sticky',
+            top: 0,
+            zIndex: 10,
+          }}
+        >
+          <span style={{ fontSize: 12, color: 'var(--muted-foreground)' }}>
+            {selectedActivityIds.size} selected
+          </span>
+          <button
+            onClick={handleArchiveSelected}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 4,
+              padding: '3px 10px', fontSize: 12, cursor: 'pointer',
+              background: 'var(--card)', color: 'var(--foreground)',
+              border: '1px solid var(--border)', borderRadius: 4, fontFamily: 'var(--font-sans)',
+            }}
+          >
+            <Archive size={12} />
+            Archive
+          </button>
+          <button
+            onClick={handleDeleteSelected}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 4,
+              padding: '3px 10px', fontSize: 12, cursor: 'pointer',
+              background: 'var(--destructive)', color: 'var(--destructive-foreground)',
+              border: 'none', borderRadius: 4, fontFamily: 'var(--font-sans)',
+            }}
+          >
+            <Trash2 size={12} />
+            Delete
+          </button>
+          <button
+            onClick={() => setSelectedActivityIds(new Set())}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 4,
+              padding: '3px 10px', fontSize: 12, cursor: 'pointer',
+              background: 'none', color: 'var(--foreground)',
+              border: '1px solid var(--border)', borderRadius: 4, fontFamily: 'var(--font-sans)',
+            }}
+          >
+            Cancel
+          </button>
+        </div>
+      )}
+
+      {/* DndContext must be outside <table> — its accessibility <div> is invalid inside <thead>. */}
+      <DndContext sensors={sensors} onDragEnd={handleDragEnd}>
+      <table
+        style={{
+          width: tableWidth,
+          minWidth: '100%',
+          borderCollapse: 'separate',
+          borderSpacing: 0,
+          tableLayout: 'fixed',
+        }}
+      >
+        {/* Column sizing */}
+        <colgroup>
+          {visibleHeaders.map(h => (
+            <col key={h.id} style={{ width: h.getSize() }} />
+          ))}
+        </colgroup>
+
+        {/* Header */}
+        <thead>
+          <SortableContext
+            items={visibleHeaders.map(h => h.id)}
+            strategy={horizontalListSortingStrategy}
+          >
+            <tr style={{ height: 36 }}>
+              {visibleHeaders.map(header => {
+                  const colId = header.id;
+                  const isPinned = header.column.getIsPinned() === 'left';
+                  const sortState = sorting[0];
+                  const sortDir = sortState?.id === colId ? (sortState.desc ? 'desc' : 'asc') : false;
+                  const meta = COL_CATALOG.find(c => c.id === colId);
+
+                  if (colId === 'colorBar') {
+                    const allChecked = activityRows.length > 0 &&
+                      activityRows.every(r => selectedActivityIds.has(r.activity.id));
+                    const someChecked = !allChecked &&
+                      activityRows.some(r => selectedActivityIds.has(r.activity.id));
+                    return (
+                      <th
+                        key={colId}
+                        style={{
+                          width: 18,
+                          position: 'sticky',
+                          left: pinnedLeft[colId] ?? 0,
+                          top: 0,
+                          zIndex: 4, // below TopBar's stacking context (z-index:10) so dropdowns show above headers
+                          background: 'var(--card)',
+                          borderBottom: '2px solid var(--border)',
+                          padding: 0,
+                        }}
+                      >
+                        <div style={{ display: 'flex', alignItems: 'stretch', height: '100%' }}>
+                          <div style={{ width: 4, flexShrink: 0 }} />
+                          <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                            <input
+                              type="checkbox"
+                              checked={allChecked}
+                              ref={el => { if (el) el.indeterminate = someChecked; }}
+                              onChange={() => {
+                                if (allChecked || someChecked) {
+                                  setSelectedActivityIds(new Set());
+                                } else {
+                                  setSelectedActivityIds(new Set(activityRows.map(r => r.activity.id)));
+                                }
+                              }}
+                              style={{ cursor: 'pointer', width: 13, height: 13 }}
+                              title="Select all"
+                            />
+                          </div>
+                        </div>
+                      </th>
+                    );
+                  }
+
+                  return (
+                    <SortableColHeader
+                      key={colId}
+                      colId={colId}
+                      style={{
+                        width: header.getSize(),
+                        left: isPinned ? pinnedLeft[colId] : undefined,
+                        position: 'sticky',
+                        zIndex: isPinned ? 4 : 3, // below TopBar's z-index:10 stacking context
+                        boxShadow: isPinned ? '2px 0 4px rgba(0,0,0,0.06)' : undefined,
+                      }}
+                      sortDir={meta?.editType !== 'none' ? sortDir : false}
+                      onSort={meta?.editType !== 'none' ? () => {
+                        setSorting(prev => {
+                          if (prev[0]?.id !== colId) return [{ id: colId, desc: false }];
+                          if (!prev[0].desc) return [{ id: colId, desc: true }];
+                          return [];
+                        });
+                      } : undefined}
+                      resizeHandler={colId !== 'identity' ? (header.getResizeHandler() as unknown as (e: React.MouseEvent | React.TouchEvent) => void) : undefined}
+                      isResizing={header.column.getIsResizing()}
+                    >
+                      {header.column.columnDef.header as string}
+                    </SortableColHeader>
+                  );
+                })}
+              </tr>
+            </SortableContext>
+        </thead>
+
+        {/* Body */}
+        <tbody>
+          {displayRows.length === 0 && (
+            <tr>
+              <td
+                colSpan={visibleHeaders.length}
+                style={{
+                  textAlign: 'center',
+                  padding: '48px 0',
+                  color: 'var(--muted-foreground)',
+                  fontSize: 13,
+                }}
+              >
+                No activities to show.
+              </td>
+            </tr>
+          )}
+
+          {displayRows.map((row, displayIdx) => {
+            // ── Group header row ─────────────────────────────────────────────
+            if (row.kind === 'group') {
+              const collapsed = collapsedGroups.has(row.key);
+              return (
+                <tr key={`group-${row.key}`}>
+                  <td
+                    colSpan={visibleHeaders.length}
+                    style={{
+                      padding: '4px 8px',
+                      background: 'var(--muted)',
+                      borderBottom: '1px solid var(--border)',
+                      borderTop: displayIdx > 0 ? '1px solid var(--border)' : undefined,
+                      fontSize: 11,
+                      fontWeight: 600,
+                      color: 'var(--muted-foreground)',
+                      textTransform: 'uppercase',
+                      letterSpacing: '0.05em',
+                      cursor: 'pointer',
+                      userSelect: 'none',
+                    }}
+                    onClick={() => toggleGroup(row.key)}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      {collapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
+                      {row.memberColors && row.memberColors.length > 0 && (
+                        <div style={{ display: 'flex', flexShrink: 0 }}>
+                          {row.memberColors.map((c, i) => (
+                            <div
+                              key={i}
+                              style={{
+                                width: 9,
+                                height: 9,
+                                borderRadius: '50%',
+                                background: c,
+                                marginLeft: i === 0 ? 0 : -3,
+                                outline: '1.5px solid var(--muted)',
+                              }}
+                            />
+                          ))}
+                        </div>
+                      )}
+                      {row.label}
+                      <span style={{ fontWeight: 400, opacity: 0.6 }}>({row.count})</span>
+                    </div>
+                  </td>
+                </tr>
+              );
+            }
+
+            // ── Activity row ─────────────────────────────────────────────────
+            const { activity, depth, hasChildren, groupKey } = row;
+            const actRowIdx = activityRows.indexOf(row);
+            const isSelected = actRowIdx === selectedRowIdx;
+            const isDetailOpen = activity.id === selectedActivityId;
+            const isMatch = debouncedQuery && matchedIds.includes(activity.id);
+            const isActiveMatch = activity.id === activeMatchId;
+            const isDimmed = debouncedQuery && matchedIds.length > 0 && !isMatch;
+
+            const rowStyle: React.CSSProperties = {
+              height: rowH,
+              opacity: isDimmed ? 0.3 : 1,
+              background: isDetailOpen
+                ? 'var(--muted)'
+                : isSelected
+                ? 'color-mix(in srgb, var(--primary) 8%, var(--background))'
+                : 'transparent',
+              cursor: 'default',
+              outline: isActiveMatch
+                ? '2px solid #f59e0b'
+                : isMatch
+                ? '1px solid rgba(245,158,11,0.6)'
+                : undefined,
+              transition: 'background 0.1s ease, opacity 0.15s ease',
+            };
+
+            return (
+              <tr
+                key={activity.id}
+                ref={isActiveMatch ? el => { (activeRowRef as React.MutableRefObject<HTMLTableRowElement | null>).current = el } : undefined}
+                style={rowStyle}
+                onMouseEnter={() => setHoveredRowId(activity.id)}
+                onMouseLeave={() => setHoveredRowId(null)}
+                onClick={e => {
+                  e.stopPropagation();
+                  setSelectedRowIdx(actRowIdx);
+                  onSelectActivity?.(activity.id);
+                  // intentionally no onSelectApiActivity — edits happen inline
+                }}
+                onContextMenu={e => {
+                  e.preventDefault();
+                  setContextMenuFor(activity.id);
+                  setContextMenuPos({ top: e.clientY, left: e.clientX });
+                }}
+              >
+                {visibleHeaders.map((header, colIdx) => {
+                  const colId = header.id;
+                  const isPinned = header.column.getIsPinned() === 'left';
+                  const isCellSelected = isSelected && colIdx === selectedColIdx;
+                  const isEditing = editingCell?.rowIdx === actRowIdx && editingCell.colIdx === colIdx;
+                  const meta = COL_CATALOG.find(c => c.id === colId)!;
+
+                  const cellStyle: React.CSSProperties = {
+                    width: header.getSize(),
+                    maxWidth: header.getSize(),
+                    padding: '0 8px',
+                    borderBottom: '1px solid color-mix(in srgb, var(--border) 60%, transparent)',
+                    fontSize: 12,
+                    color: 'var(--foreground)',
+                    overflow: 'hidden',
+                    whiteSpace: 'nowrap',
+                    textOverflow: 'ellipsis',
+                    position: isPinned ? 'sticky' : undefined,
+                    left: isPinned ? pinnedLeft[colId] : undefined,
+                    zIndex: isPinned ? 2 : undefined,
+                    background: isPinned
+                      ? (isDetailOpen ? 'var(--muted)' : isSelected ? 'color-mix(in srgb, var(--primary) 8%, var(--background))' : 'var(--background)')
+                      : undefined,
+                    boxShadow: isPinned ? '2px 0 4px rgba(0,0,0,0.06)' : undefined,
+                    outline: isCellSelected && !isEditing ? '2px solid var(--primary)' : undefined,
+                    outlineOffset: '-2px',
+                    verticalAlign: 'middle',
+                    cursor: (meta.editType === 'text' || meta.editType === 'date' || meta.editType === 'number')
+                      ? 'text'
+                      : (meta.editType !== 'none' ? 'pointer' : 'default'),
+                  };
+
+                  // ── Cell content ──────────────────────────────────────────
+
+                  // Editing mode — inline input
+                  if (isEditing && meta.editType !== 'none' && meta.editType !== 'status') {
+                    return (
+                      <td key={colId} style={{ ...cellStyle, padding: 0, overflow: 'visible' }}>
+                        <input
+                          ref={editInputRef}
+                          type={meta.editType === 'date' ? 'date' : meta.editType === 'number' ? 'number' : 'text'}
+                          min={meta.editType === 'number' ? 0 : undefined}
+                          max={meta.editType === 'number' ? 100 : undefined}
+                          value={editingCell.value}
+                          onChange={e => setEditingCell(prev => prev ? { ...prev, value: e.target.value } : prev)}
+                          onKeyDown={e => {
+                            e.stopPropagation();
+                            if (e.key === 'Escape') { cancelEdit(); e.preventDefault(); }
+                            else if (e.key === 'Enter') { commitAndMove('down'); e.preventDefault(); }
+                            else if (e.key === 'Tab') { commitAndMove(e.shiftKey ? 'left' : 'right'); e.preventDefault(); }
+                          }}
+                          onBlur={() => {
+                            commitEdit(editingCell.rowIdx, visibleColIds[editingCell.colIdx], editingCell.value);
+                            setEditingCell(null);
+                          }}
+                          style={{
+                            width: '100%',
+                            height: rowH,
+                            padding: '0 8px',
+                            background: 'var(--background)',
+                            border: 'none',
+                            outline: '2px solid var(--primary)',
+                            outlineOffset: '-2px',
+                            fontSize: 12,
+                            color: 'var(--foreground)',
+                            fontFamily: 'var(--font-sans)',
+                          }}
+                          onClick={e => e.stopPropagation()}
+                        />
+                      </td>
+                    );
+                  }
+
+                  // Color bar + row checkbox — 32px pinned cell
+                  if (colId === 'colorBar') {
+                    const isRowChecked = selectedActivityIds.has(activity.id);
+                    const showCb = isRowChecked || selectedActivityIds.size > 0 || hoveredRowId === activity.id;
+                    return (
+                      <td
+                        key={colId}
+                        style={{
+                          width: 18,
+                          maxWidth: 18,
+                          padding: 0,
+                          borderBottom: '1px solid color-mix(in srgb, var(--border) 60%, transparent)',
+                          position: 'sticky',
+                          left: pinnedLeft[colId] ?? 0,
+                          zIndex: 2, // pinned body cell — below header z-index (4)
+                          background: isDetailOpen
+                              ? 'var(--muted)'
+                              : isSelected
+                              ? 'color-mix(in srgb, var(--primary) 8%, var(--background))'
+                              : 'var(--background)',
+                          cursor: 'default',
+                        }}
+                        onClick={e => {
+                          e.stopPropagation();
+                          setSelectedActivityIds(prev => {
+                            const next = new Set(prev);
+                            if (next.has(activity.id)) next.delete(activity.id);
+                            else next.add(activity.id);
+                            return next;
+                          });
+                        }}
+                      >
+                        <div style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          height: rowH,
+                          opacity: showCb ? 1 : 0,
+                          transition: 'opacity 0.1s',
+                        }}>
+                          <input
+                            type="checkbox"
+                            checked={isRowChecked}
+                            onChange={() => {}}
+                            onClick={e => e.stopPropagation()}
+                            style={{ cursor: 'pointer', width: 13, height: 13, pointerEvents: 'none' }}
+                          />
+                        </div>
+                      </td>
+                    );
+                  }
+
+                  // Identity cell — shows badge; click opens identity picker portal
+                  if (colId === 'identity') {
+                    return (
+                      <td
+                        key={colId}
+                        style={{ ...cellStyle, cursor: 'pointer' }}
+                        onClick={e => {
+                          e.stopPropagation();
+                          setSelectedRowIdx(actRowIdx);
+                          onSelectActivity?.(activity.id);
+                          if (identityPickerFor === activity.id) {
+                            closeIdentityPicker();
+                          } else {
+                            closeStatusPicker(); closeAssigneePicker(); closeTagPicker(); closeParentPicker();
+                            const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                            setIdentityPickerFor(activity.id);
+                            setIdentityPickerPos(popoverPos(rect, 240, 320));
+                          }
+                        }}
+                      >
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                          <Badge
+                            identity={{
+                              color: getRowAccentColor(activity) ?? resolveColorHex(activity.color ?? null) ?? '#288C9B',
+                              icon: activity.icon ?? '__name_2__',
+                            }}
+                            name={activity.title}
+                            shape="square"
+                            size={28}
+                          />
+                        </div>
+                      </td>
+                    );
+                  }
+
+                  // Status cell — click to open picker (portal, escapes scroll overflow)
+                  if (colId === 'status') {
+                    const status = activity.statusId ? statusById.get(activity.statusId) : null;
+                    return (
+                      <td
+                        key={colId}
+                        style={{ ...cellStyle, cursor: 'pointer' }}
+                        onClick={e => {
+                          e.stopPropagation();
+                          setSelectedRowIdx(actRowIdx);
+                          onSelectActivity?.(activity.id);
+                          if (statusPickerFor === activity.id) {
+                            closeStatusPicker();
+                          } else {
+                            closeAssigneePicker(); closeTagPicker(); closeParentPicker(); closeIdentityPicker();
+                            const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                            setStatusPickerFor(activity.id);
+                            setStatusPickerPos(popoverPos(rect, 160, 220));
+                          }
+                        }}
+                      >
+                        {status ? (
+                          <span
+                            style={{
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: 5,
+                              padding: '2px 8px',
+                              borderRadius: 4,
+                              fontSize: 11,
+                              fontWeight: 500,
+                              background: `color-mix(in srgb, ${resolveColorHex(status.color ?? null) ?? '#888'} 15%, transparent)`,
+                              color: resolveColorHex(status.color ?? null) ?? 'var(--foreground)',
+                              border: `1px solid ${resolveColorHex(status.color ?? null) ?? '#888'}40`,
+                            }}
+                          >
+                            <span
+                              style={{
+                                width: 7,
+                                height: 7,
+                                borderRadius: '50%',
+                                background: resolveColorHex(status.color ?? null) ?? '#888',
+                                flexShrink: 0,
+                              }}
+                            />
+                            {status.name}
+                          </span>
+                        ) : (
+                          <span style={{ color: 'var(--muted-foreground)', fontSize: 12 }}>—</span>
+                        )}
+                      </td>
+                    );
+                  }
+
+                  // Assignees cell — overlapping badges; click opens picker
+                  if (colId === 'assignees') {
+                    const ids = activity.assignedMemberIds ?? [];
+                    return (
+                      <td key={colId} style={cellStyle} onClick={e => {
+                        e.stopPropagation();
+                        setSelectedRowIdx(actRowIdx);
+                        onSelectActivity?.(activity.id);
+                        if (assigneePickerFor === activity.id) {
+                          closeAssigneePicker();
+                        } else {
+                          closeStatusPicker(); closeTagPicker(); closeParentPicker(); closeIdentityPicker();
+                          const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                          setAssigneePickerFor(activity.id);
+                          setAssigneePickerPos(popoverPos(rect, 180, 240));
+                        }
+                      }}>
+                        <div style={{ display: 'flex', alignItems: 'center', overflow: 'hidden' }}>
+                          {ids.slice(0, 4).map((mid, i) => {
+                            const m = memberById.get(mid);
+                            if (!m) return null;
+                            return (
+                              <div key={mid} style={{ marginLeft: i === 0 ? 0 : -6 }} title={m.displayName}>
+                                <Badge
+                                  identity={{ color: resolveColorHex(m.color ?? null) ?? '#288C9B', icon: m.icon ?? '__name_2__' }}
+                                  name={m.displayName}
+                                  shape="circle"
+                                  size={22}
+                                />
+                              </div>
+                            );
+                          })}
+                          {ids.length > 4 && (
+                            <span style={{ fontSize: 10, color: 'var(--muted-foreground)', marginLeft: 4 }}>+{ids.length - 4}</span>
+                          )}
+                          {ids.length === 0 && (
+                            <span style={{ color: 'var(--muted-foreground)', fontSize: 12 }}>—</span>
+                          )}
+                        </div>
+                      </td>
+                    );
+                  }
+
+                  // Tags cell — click opens tag picker
+                  if (colId === 'tags') {
+                    const tagList = (activity.tagIds ?? [])
+                      .map(tid => tags.find(t => t.id === tid))
+                      .filter(Boolean) as Tag[];
+                    return (
+                      <td key={colId} style={cellStyle} onClick={e => {
+                        e.stopPropagation();
+                        setSelectedRowIdx(actRowIdx);
+                        onSelectActivity?.(activity.id);
+                        if (tagPickerFor === activity.id) {
+                          closeTagPicker();
+                        } else {
+                          closeStatusPicker(); closeAssigneePicker(); closeParentPicker(); closeIdentityPicker();
+                          const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                          setTagPickerFor(activity.id);
+                          setTagPickerPos(popoverPos(rect, 220, 300));
+                        }
+                      }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 4, overflow: 'hidden', flexWrap: 'nowrap' }}>
+                          {tagList.slice(0, 3).map(t => (
+                            <span
+                              key={t.id}
+                              style={{
+                                padding: '1px 6px',
+                                borderRadius: 4,
+                                fontSize: 10,
+                                background: resolveColorHex(t.color ?? null)
+                                  ? `color-mix(in srgb, ${resolveColorHex(t.color ?? null)} 18%, transparent)`
+                                  : 'var(--muted)',
+                                color: resolveColorHex(t.color ?? null) ?? 'var(--foreground)',
+                                border: `1px solid ${resolveColorHex(t.color ?? null) ?? 'var(--border)'}40`,
+                                whiteSpace: 'nowrap',
+                              }}
+                            >
+                              {t.name}
+                            </span>
+                          ))}
+                          {tagList.length > 3 && (
+                            <span style={{ fontSize: 10, color: 'var(--muted-foreground)' }}>+{tagList.length - 3}</span>
+                          )}
+                          {tagList.length === 0 && (
+                            <span style={{ color: 'var(--muted-foreground)', fontSize: 12 }}>—</span>
+                          )}
+                        </div>
+                      </td>
+                    );
+                  }
+
+                  // Progress cell
+                  if (colId === 'progress') {
+                    const pct = activity.percentComplete ?? 0;
+                    return (
+                      <td key={colId} style={cellStyle} onClick={e => {
+                          e.stopPropagation();
+                          setSelectedRowIdx(actRowIdx);
+                          onSelectActivity?.(activity.id);
+                          enterEdit(actRowIdx, colIdx);
+                        }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                          <div
+                            style={{
+                              flex: 1,
+                              height: 4,
+                              background: 'var(--border)',
+                              borderRadius: 2,
+                              overflow: 'hidden',
+                            }}
+                          >
+                            <div
+                              style={{
+                                height: '100%',
+                                width: `${pct}%`,
+                                background: 'var(--primary)',
+                                borderRadius: 2,
+                                transition: 'width 0.2s',
+                              }}
+                            />
+                          </div>
+                          <span style={{ fontSize: 11, color: 'var(--muted-foreground)', flexShrink: 0 }}>
+                            {pct}%
+                          </span>
+                        </div>
+                      </td>
+                    );
+                  }
+
+                  // Parent cell — click opens parent picker
+                  if (colId === 'parent') {
+                    const parent = activity.parentActivityId ? activityById.get(activity.parentActivityId) : null;
+                    return (
+                      <td key={colId} style={cellStyle} onClick={e => {
+                        e.stopPropagation();
+                        setSelectedRowIdx(actRowIdx);
+                        onSelectActivity?.(activity.id);
+                        if (parentPickerFor === activity.id) {
+                          closeParentPicker();
+                        } else {
+                          closeStatusPicker(); closeAssigneePicker(); closeTagPicker(); closeIdentityPicker();
+                          const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                          setParentPickerFor(activity.id);
+                          setParentPickerPos(popoverPos(rect, 220, 280));
+                        }
+                      }}>
+                        <span style={{ color: parent ? 'var(--foreground)' : 'var(--muted-foreground)' }}>
+                          {parent ? parent.title : '—'}
+                        </span>
+                      </td>
+                    );
+                  }
+
+                  // Duration cell
+                  if (colId === 'duration') {
+                    return (
+                      <td key={colId} style={cellStyle}>
+                        <span style={{ color: 'var(--muted-foreground)' }}>
+                          {formatDuration(activity.startAt, activity.endAt)}
+                        </span>
+                      </td>
+                    );
+                  }
+
+                  // Date cells — single click to edit
+                  if (colId === 'startAt' || colId === 'endAt') {
+                    const iso = colId === 'startAt' ? activity.startAt : activity.endAt;
+                    return (
+                      <td
+                        key={colId}
+                        style={cellStyle}
+                        onClick={e => {
+                          e.stopPropagation();
+                          setSelectedRowIdx(actRowIdx);
+                          onSelectActivity?.(activity.id);
+                          enterEdit(actRowIdx, colIdx);
+                        }}
+                      >
+                        <span style={{ color: iso ? 'var(--foreground)' : 'var(--muted-foreground)' }}>
+                          {formatActivityDate(iso)}
+                        </span>
+                      </td>
+                    );
+                  }
+
+                  // Created/Updated cells
+                  if (colId === 'createdAt' || colId === 'updatedAt') {
+                    const iso = colId === 'createdAt' ? activity.createdAt : activity.updatedAt;
+                    return (
+                      <td key={colId} style={cellStyle}>
+                        <span style={{ color: 'var(--muted-foreground)' }}>
+                          {formatTimestamp(iso)}
+                        </span>
+                      </td>
+                    );
+                  }
+
+                  // Text cells (title, description, location, url, notes)
+                  let textVal = '';
+                  if (colId === 'title') textVal = activity.title;
+                  else if (colId === 'description') textVal = activity.description ?? '';
+                  else if (colId === 'location') textVal = activity.location ?? '';
+                  else if (colId === 'url') textVal = activity.url ?? '';
+                  else if (colId === 'notes') textVal = (activity as ApiActivity & { notes?: string | null }).notes ?? '';
+
+                  return (
+                    <td
+                      key={colId}
+                      style={{ ...cellStyle, fontWeight: colId === 'title' ? 500 : 400 }}
+                      onClick={e => {
+                        e.stopPropagation();
+                        setSelectedRowIdx(actRowIdx);
+                        onSelectActivity?.(activity.id);
+                        if (meta.editable && meta.editType === 'text') enterEdit(actRowIdx, colIdx);
+                      }}
+                    >
+                      {colId === 'title' && groupBy === 'parent' ? (
+                        // Parent-group mode: show indent + collapse toggle
+                        <span style={{ display: 'flex', alignItems: 'center', gap: 4, paddingLeft: depth * 16 }}>
+                          {hasChildren ? (
+                            <span
+                              onClick={e => { e.stopPropagation(); toggleGroup(groupKey); }}
+                              style={{ cursor: 'pointer', flexShrink: 0, color: 'var(--muted-foreground)', display: 'flex', alignItems: 'center' }}
+                            >
+                              {collapsedGroups.has(groupKey) ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
+                            </span>
+                          ) : depth > 0 ? (
+                            <span style={{ width: 13, flexShrink: 0 }} />
+                          ) : null}
+                          <span title={textVal} style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
+                            {textVal || '—'}
+                          </span>
+                        </span>
+                      ) : (
+                        <span
+                          title={textVal}
+                          style={{
+                            display: 'block',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                            color: textVal ? 'var(--foreground)' : 'var(--muted-foreground)',
+                          }}
+                        >
+                          {textVal || '—'}
+                        </span>
+                      )}
+                    </td>
+                  );
+                })}
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      </DndContext>
+
+      {/* Status picker portal */}
+      {statusPickerFor && statusPickerPos && statusPickerActivity &&
+        createPortal(
+          <StatusPicker
+            value={statusPickerActivity.statusId}
+            statuses={timelineStatuses}
+            onChange={statusId => {
+              update.mutate({ activityId: statusPickerFor, patch: { statusId } });
+              closeStatusPicker();
+            }}
+            onClose={closeStatusPicker}
+            positionStyle={{ position: 'fixed', top: statusPickerPos.top, left: statusPickerPos.left }}
+          />,
+          document.body,
+        )
+      }
+
+      {/* Assignee picker portal */}
+      {assigneePickerFor && assigneePickerPos &&
+        createPortal(
+          <AssigneePicker
+            members={members}
+            selectedIds={activityById.get(assigneePickerFor)?.assignedMemberIds ?? []}
+            onToggle={memberId => {
+              const activity = activityById.get(assigneePickerFor);
+              if (!activity) return;
+              const current = activity.assignedMemberIds ?? [];
+              const next = current.includes(memberId)
+                ? current.filter(id => id !== memberId)
+                : [...current, memberId];
+              update.mutate({ activityId: assigneePickerFor, patch: { assignedMemberIds: next } });
+            }}
+            onClose={closeAssigneePicker}
+            positionStyle={{ position: 'fixed', top: assigneePickerPos.top, left: assigneePickerPos.left }}
+          />,
+          document.body,
+        )
+      }
+
+      {/* Tag picker portal */}
+      {tagPickerFor && tagPickerPos &&
+        createPortal(
+          <TagPicker
+            teamId={teamId}
+            tags={tags}
+            selectedTagIds={(activityById.get(tagPickerFor)?.tagIds as string[] | undefined) ?? []}
+            onChange={ids => {
+              update.mutate({ activityId: tagPickerFor, patch: { tagIds: ids } as Partial<ApiActivity> });
+            }}
+            onClose={closeTagPicker}
+            positionStyle={{ position: 'fixed', top: tagPickerPos.top, left: tagPickerPos.left }}
+          />,
+          document.body,
+        )
+      }
+
+      {/* Parent picker portal */}
+      {parentPickerFor && parentPickerPos &&
+        createPortal(
+          <ParentPicker
+            activities={rawActivities.filter(a => a.id !== parentPickerFor)}
+            value={activityById.get(parentPickerFor)?.parentActivityId}
+            onChange={id => {
+              update.mutate({ activityId: parentPickerFor, patch: { parentActivityId: id } as Partial<ApiActivity> });
+              closeParentPicker();
+            }}
+            onClose={closeParentPicker}
+            positionStyle={{ position: 'fixed', top: parentPickerPos.top, left: parentPickerPos.left }}
+          />,
+          document.body,
+        )
+      }
+
+      {/* Identity picker portal */}
+      {identityPickerFor && identityPickerPos && (() => {
+        const identityActivity = activityById.get(identityPickerFor);
+        if (!identityActivity) return null;
+        return createPortal(
+          <div
+            ref={identityPickerRef}
+            style={{
+              position: 'fixed',
+              top: identityPickerPos.top,
+              left: identityPickerPos.left,
+              zIndex: 9999,
+              boxShadow: '0 8px 24px rgba(0,0,0,0.15)',
+              borderRadius: 10,
+              border: '1px solid var(--border)',
+              overflow: 'hidden',
+            }}
+          >
+            <IdentityPicker
+              identity={{
+                color: resolveColorHex(identityActivity.color ?? null) ?? '#288C9B',
+                icon: identityActivity.icon ?? '__name_2__',
+              }}
+              name={identityActivity.title}
+              shape="square"
+              onChange={(next: Identity) => {
+                update.mutate({ activityId: identityPickerFor, patch: { color: next.color, icon: next.icon } });
+              }}
+            />
+          </div>,
+          document.body,
+        );
+      })()}
+
+      {/* Row context menu portal */}
+      {contextMenuFor && contextMenuPos && createPortal(
+        <ContextMenu
+          pos={contextMenuPos}
+          onArchive={() => {
+            archiveAct.mutate(contextMenuFor, {
+              onSuccess: () => showToast('Activity archived'),
+            });
+            closeContextMenu();
+          }}
+          onDelete={() => {
+            deleteAct.mutate(contextMenuFor, {
+              onSuccess: () => showToast('Activity deleted'),
+            });
+            closeContextMenu();
+            if (contextMenuFor === selectedActivityId) onSelectActivity?.(null);
+          }}
+          onClose={closeContextMenu}
+        />,
+        document.body,
+      )}
+
+      {/* Toast notification */}
+      {toast && (
+        <div
+          style={{
+            position: 'fixed',
+            bottom: 20,
+            right: 20,
+            zIndex: 9999,
+            background: 'var(--card)',
+            border: '1px solid var(--border)',
+            borderRadius: 8,
+            padding: '8px 14px',
+            fontSize: 12,
+            color: 'var(--foreground)',
+            boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            pointerEvents: 'none',
+          }}
+        >
+          <Check size={13} strokeWidth={2.5} style={{ color: 'var(--primary)', flexShrink: 0 }} />
+          {toast}
+        </div>
+      )}
+    </div>
+  );
+}
+````
+
 ## File: packages/web/src/pages/ShareViewPage.tsx
 ````typescript
 /**
@@ -54812,2604 +57421,6 @@ paths:
           $ref: "#/components/responses/NotFound"
         "500":
           $ref: "#/components/responses/InternalError"
-````
-
-## File: packages/web/src/components/list/ListView.tsx
-````typescript
-/**
- * ListView — inline-editable, curated table view of the active timeline's
- * activities.
- *
- * Uses TanStack Table v8 for column management (visibility, order, sizing,
- * pinning, sorting). Row rendering is manual to support group-by headers
- * interleaved between activity rows and to give full control over
- * keyboard selection/edit behavior.
- *
- * Integrates with FilterContext and FindContext so the same filter and find
- * query that drives the Gantt view also drives this view.
- */
-
-import { createPortal } from 'react-dom';
-import {
-  useState,
-  useEffect,
-  useLayoutEffect,
-  useRef,
-  useCallback,
-  useMemo,
-  KeyboardEvent,
-} from 'react';
-import {
-  useReactTable,
-  getCoreRowModel,
-  getSortedRowModel,
-  type ColumnDef,
-  type SortingState,
-  type ColumnOrderState,
-  type VisibilityState,
-  type ColumnSizingState,
-  type ColumnPinningState,
-} from '@tanstack/react-table';
-import {
-  DndContext,
-  type DragEndEvent,
-  PointerSensor,
-  useSensor,
-  useSensors,
-} from '@dnd-kit/core';
-import {
-  SortableContext,
-  horizontalListSortingStrategy,
-  useSortable,
-  arrayMove,
-} from '@dnd-kit/sortable';
-import { CSS } from '@dnd-kit/utilities';
-import { ChevronRight, ChevronDown, GripVertical, Search, Trash2, Archive, Check } from 'lucide-react';
-import { useQueryClient } from '@tanstack/react-query';
-import { useTimelineActivities, useTeamMembers, useUpdateActivity, useCreateActivity, useDeleteActivity, useArchiveActivity } from '@/hooks/useTeamActivities';
-import { usePreferenceMap, useUpsertPreference, usePreferences } from '@/hooks/usePreferences';
-import { useFilter } from '@/contexts/FilterContext';
-import { useFind } from '@/contexts/FindContext';
-import { applyActiveFilter } from '@/lib/presetFilters';
-import { matchEvents } from '@/lib/findMatcher';
-import { memberComboKey, orderedComboIds, memberComboLabel, comboSortComparator, UNASSIGNED_KEY, SEP } from '@/lib/memberGroups';
-import { resolveColorHex } from '@/components/identity/identity-constants';
-import { Badge } from '@/components/identity/Badge';
-import { IdentityPicker } from '@/components/identity/IdentityPicker';
-import type { Identity } from '@/components/identity/identity-constants';
-import TagInput from '@/components/TagInput';
-import type { components } from '@draba/shared';
-import type { Member } from '@/types';
-import type { ListGroupBy, ListSortBy, ListColorBy, ListDensity, ColumnConfig } from './ListToolbar';
-import { useAuth } from '@/contexts/AuthContext';
-
-type ApiActivity = components['schemas']['Activity'];
-type Status = components['schemas']['Status'];
-type SavedFilter = components['schemas']['SavedFilter'];
-type Tag = components['schemas']['Tag'];
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
-
-// ── Column catalog ─────────────────────────────────────────────────────────────
-
-export interface ColMeta {
-  id: string;
-  label: string;
-  defaultVisible: boolean;
-  defaultWidth: number;
-  editable: boolean;
-  editType: 'text' | 'date' | 'status' | 'number' | 'identity' | 'assignees' | 'tags' | 'parent' | 'none';
-  /** Exclude from the columns toggle menu (e.g. fixed structural columns). */
-  noMenu?: boolean;
-}
-
-export const COL_CATALOG: ColMeta[] = [
-  { id: 'colorBar',    label: '',             defaultVisible: true,  defaultWidth: 18,  editable: false, editType: 'none', noMenu: true },
-  { id: 'identity',    label: '',             defaultVisible: true,  defaultWidth: 52,  editable: true,  editType: 'identity' },
-  { id: 'title',       label: 'Title',        defaultVisible: true,  defaultWidth: 280, editable: true,  editType: 'text' },
-  { id: 'startAt',     label: 'Start',        defaultVisible: true,  defaultWidth: 110, editable: true,  editType: 'date' },
-  { id: 'endAt',       label: 'End',          defaultVisible: true,  defaultWidth: 110, editable: true,  editType: 'date' },
-  { id: 'duration',    label: 'Duration',     defaultVisible: false, defaultWidth: 90,  editable: false, editType: 'none' },
-  { id: 'status',      label: 'Status',       defaultVisible: true,  defaultWidth: 130, editable: true,  editType: 'status' },
-  { id: 'assignees',   label: 'Assigned To',  defaultVisible: true,  defaultWidth: 140, editable: true,  editType: 'assignees' },
-  { id: 'tags',        label: 'Tags',         defaultVisible: true,  defaultWidth: 130, editable: true,  editType: 'tags' },
-  { id: 'progress',    label: 'Progress',     defaultVisible: false, defaultWidth: 90,  editable: true,  editType: 'number' },
-  { id: 'parent',      label: 'Parent',       defaultVisible: false, defaultWidth: 150, editable: true,  editType: 'parent' },
-  { id: 'description', label: 'Description',  defaultVisible: false, defaultWidth: 200, editable: true,  editType: 'text' },
-  { id: 'location',    label: 'Location',     defaultVisible: false, defaultWidth: 130, editable: true,  editType: 'text' },
-  { id: 'url',         label: 'URL',          defaultVisible: false, defaultWidth: 150, editable: true,  editType: 'text' },
-  { id: 'notes',       label: 'Notes',        defaultVisible: false, defaultWidth: 200, editable: true,  editType: 'text' },
-  { id: 'createdAt',   label: 'Created',      defaultVisible: false, defaultWidth: 110, editable: false, editType: 'none' },
-  { id: 'updatedAt',   label: 'Updated',      defaultVisible: false, defaultWidth: 110, editable: false, editType: 'none' },
-];
-
-const DEFAULT_COLUMN_ORDER = COL_CATALOG.map(c => c.id);
-const DEFAULT_VISIBILITY: VisibilityState = Object.fromEntries(
-  COL_CATALOG.map(c => [c.id, c.defaultVisible]),
-);
-const DEFAULT_WIDTHS: ColumnSizingState = Object.fromEntries(
-  COL_CATALOG.map(c => [c.id, c.defaultWidth]),
-);
-
-// ── Group-by row builder (exported for unit tests) ─────────────────────────────
-
-export type ListDisplayRow =
-  | { kind: 'group'; key: string; label: string; count: number; memberColors?: string[] }
-  | { kind: 'activity'; activity: ApiActivity; depth: number; hasChildren: boolean; groupKey: string };
-
-/** Converts a pre-sorted flat activity list into display rows for the given group-by mode. */
-export function buildListRows(
-  sortedActivities: ApiActivity[],
-  groupBy: ListGroupBy,
-  memberById: Map<string, { displayName: string; color?: string | null }>,
-  statusById: Map<string, { name: string }>,
-  timelineStatuses: Status[],
-  collapsedGroups: Set<string>,
-  memberOrder: string[] = [],
-): ListDisplayRow[] {
-  const emptyRow = (a: ApiActivity): ListDisplayRow => ({
-    kind: 'activity', activity: a, depth: 0, hasChildren: false, groupKey: '',
-  });
-
-  if (groupBy === 'none') return sortedActivities.map(emptyRow);
-
-  if (groupBy === 'member') {
-    const nameById = new Map(
-      [...memberById.entries()].map(([id, m]) => [id, m.displayName]),
-    );
-
-    const buckets = new Map<string, ApiActivity[]>();
-    for (const activity of sortedActivities) {
-      const key = memberComboKey(activity.assignedMemberIds ?? []);
-      const list = buckets.get(key) ?? [];
-      list.push(activity);
-      buckets.set(key, list);
-    }
-
-    const comparator = comboSortComparator(memberOrder);
-    const sortedKeys = [...buckets.keys()].sort(comparator);
-
-    const rows: ListDisplayRow[] = [];
-    for (const key of sortedKeys) {
-      const activities = buckets.get(key)!;
-      const rawIds = key === UNASSIGNED_KEY ? [] : key.split(SEP);
-      const orderedIds = orderedComboIds(rawIds, memberOrder);
-      const label = key === UNASSIGNED_KEY ? 'Unassigned' : memberComboLabel(orderedIds, nameById);
-      const memberColors = orderedIds.map(id => {
-        const raw = memberById.get(id)?.color;
-        return resolveColorHex(raw ?? null) ?? 'var(--muted-foreground)';
-      });
-      rows.push({ kind: 'group', key, label, count: activities.length, memberColors });
-      if (!collapsedGroups.has(key)) {
-        for (const a of activities) rows.push({ kind: 'activity', activity: a, depth: 0, hasChildren: false, groupKey: key });
-      }
-    }
-    return rows;
-  }
-
-  if (groupBy === 'status') {
-    const groups = new Map<string, { label: string; activities: ApiActivity[] }>();
-    for (const activity of sortedActivities) {
-      const key = activity.statusId ?? '__no_status__';
-      const label = activity.statusId ? (statusById.get(activity.statusId)?.name ?? 'Unknown') : 'No status';
-      const group = groups.get(key) ?? { label, activities: [] };
-      group.activities.push(activity);
-      groups.set(key, group);
-    }
-    const rows: ListDisplayRow[] = [];
-    for (const s of timelineStatuses) {
-      const group = groups.get(s.id);
-      if (!group?.activities.length) continue;
-      rows.push({ kind: 'group', key: s.id, label: s.name, count: group.activities.length });
-      if (!collapsedGroups.has(s.id)) {
-        for (const a of group.activities) rows.push({ kind: 'activity', activity: a, depth: 0, hasChildren: false, groupKey: s.id });
-      }
-    }
-    const noStatus = groups.get('__no_status__');
-    if (noStatus?.activities.length) {
-      rows.push({ kind: 'group', key: '__no_status__', label: 'No status', count: noStatus.activities.length });
-      if (!collapsedGroups.has('__no_status__')) {
-        for (const a of noStatus.activities) rows.push({ kind: 'activity', activity: a, depth: 0, hasChildren: false, groupKey: '__no_status__' });
-      }
-    }
-    return rows;
-  }
-
-  if (groupBy === 'parent') {
-    // Tree nesting mirrors Gantt: parent rows are collapsible, children are indented.
-    // Activities whose parent is not in this view render as roots (orphan-safe).
-    const byId = new Map(sortedActivities.map(a => [a.id, a]));
-    const childrenByParent = new Map<string, ApiActivity[]>();
-    const roots: ApiActivity[] = [];
-    for (const a of sortedActivities) {
-      if (a.parentActivityId && byId.has(a.parentActivityId)) {
-        const list = childrenByParent.get(a.parentActivityId) ?? [];
-        list.push(a);
-        childrenByParent.set(a.parentActivityId, list);
-      } else {
-        roots.push(a);
-      }
-    }
-    const rows: ListDisplayRow[] = [];
-    const seen = new Set<string>();
-    const hidden = new Set<string>();
-    const markHidden = (a: ApiActivity) => {
-      if (hidden.has(a.id)) return;
-      hidden.add(a.id);
-      for (const k of childrenByParent.get(a.id) ?? []) markHidden(k);
-    };
-    const visit = (a: ApiActivity, depth: number) => {
-      if (seen.has(a.id)) return;
-      seen.add(a.id);
-      const kids = childrenByParent.get(a.id) ?? [];
-      const hasChildren = kids.length > 0;
-      rows.push({ kind: 'activity', activity: a, depth, hasChildren, groupKey: a.id });
-      if (!hasChildren) return;
-      if (collapsedGroups.has(a.id)) for (const k of kids) markHidden(k);
-      else for (const k of kids) visit(k, depth + 1);
-    };
-    for (const r of roots) visit(r, 0);
-    // Cycle-safe: any activity not yet visited (parent loop) renders at root depth
-    for (const a of sortedActivities) {
-      if (!seen.has(a.id) && !hidden.has(a.id)) visit(a, 0);
-    }
-    return rows;
-  }
-
-  return sortedActivities.map(emptyRow);
-}
-
-// ── Props ──────────────────────────────────────────────────────────────────────
-
-interface Props {
-  teamId: string;
-  timelineId: string;
-  groupBy: ListGroupBy;
-  sortBy: ListSortBy;
-  colorBy: ListColorBy;
-  density?: ListDensity;
-  timelineStatuses?: Status[];
-  savedFilters?: SavedFilter[];
-  tags?: Tag[];
-  onColumnsChange?: (configs: ColumnConfig[]) => void;
-  /** When set, the component applies the toggle and clears it on the next render. */
-  pendingColumnToggle?: { colId: string; visible: boolean; seq: number } | null;
-  onSelectActivity?: (id: string | null) => void;
-  onSelectApiActivity?: (a: ApiActivity | null) => void;
-  selectedActivityId?: string | null;
-  onMembersLoaded?: (members: Member[]) => void;
-  /** Increment to trigger inline creation of a new activity row. */
-  triggerNewRow?: number;
-}
-
-// ── Helpers ────────────────────────────────────────────────────────────────────
-
-/** Formats a genuine timestamp (createdAt, updatedAt) in the user's local timezone. */
-export function formatTimestamp(iso: string | null | undefined): string {
-  if (!iso) return '—';
-  const d = new Date(iso);
-  return isNaN(d.getTime()) ? '—' : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
-}
-
-/**
- * Formats an all-day activity date (startAt, endAt) in UTC so that
- * midnight-UTC dates like "2026-05-31T00:00:00Z" display as "May 31"
- * regardless of the viewer's local timezone.
- *
- * TODO: branch on allDay when timed events ship (Phase 15 calendar sync).
- */
-export function formatActivityDate(iso: string | null | undefined): string {
-  if (!iso) return '—';
-  const d = new Date(iso);
-  return isNaN(d.getTime()) ? '—' : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
-}
-
-export function formatDuration(startAt: string | null | undefined, endAt: string | null | undefined): string {
-  if (!startAt || !endAt) return '—';
-  const start = new Date(startAt);
-  const end = new Date(endAt);
-  const days = Math.round((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24));
-  if (days < 0) return '—';
-  if (days === 0) return '1 day';
-  return `${days + 1} days`;
-}
-
-function toDateInput(iso: string | null | undefined): string {
-  if (!iso) return '';
-  return iso.slice(0, 10);
-}
-
-// ── Draggable column header ────────────────────────────────────────────────────
-
-function SortableColHeader({ colId, children, style, onSort, sortDir, resizeHandler, isResizing }: {
-  colId: string;
-  children: React.ReactNode;
-  style?: React.CSSProperties;
-  onSort?: () => void;
-  sortDir?: 'asc' | 'desc' | false;
-  resizeHandler?: (e: React.MouseEvent | React.TouchEvent) => void;
-  isResizing?: boolean;
-}) {
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: colId });
-
-  return (
-    <th
-      ref={setNodeRef}
-      style={{
-        ...style,
-        transform: CSS.Transform.toString(transform),
-        transition,
-        opacity: isDragging ? 0.5 : 1,
-        position: 'sticky',
-        top: 0,
-        background: 'var(--card)',
-        borderBottom: '2px solid var(--border)',
-        userSelect: 'none',
-        whiteSpace: 'nowrap',
-        textOverflow: 'ellipsis',
-        cursor: onSort ? 'pointer' : 'default',
-        fontWeight: 600,
-        fontSize: 11,
-        color: 'var(--muted-foreground)',
-        padding: 0,
-        textTransform: 'uppercase',
-        letterSpacing: '0.05em',
-        textAlign: 'left',
-        overflow: 'visible', // needed for resize handle
-      }}
-      onClick={onSort}
-    >
-      <div style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '0 8px', overflow: 'hidden' }}>
-        {/* drag handle */}
-        <span
-          {...attributes}
-          {...listeners}
-          style={{ cursor: 'grab', color: 'var(--muted-foreground)', opacity: 0.4, flexShrink: 0, paddingRight: 2 }}
-          onClick={e => e.stopPropagation()}
-          title="Drag to reorder"
-        >
-          <GripVertical size={12} />
-        </span>
-        <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis' }}>{children}</span>
-        {sortDir === 'asc' && <span style={{ color: 'var(--primary)', flexShrink: 0, fontSize: 9, lineHeight: 1 }}>▲</span>}
-        {sortDir === 'desc' && <span style={{ color: 'var(--primary)', flexShrink: 0, fontSize: 9, lineHeight: 1 }}>▼</span>}
-      </div>
-      {/* Resize handle — absolutely positioned on right edge */}
-      {resizeHandler && (
-        <div
-          onMouseDown={resizeHandler}
-          onTouchStart={resizeHandler}
-          onClick={e => e.stopPropagation()}
-          style={{
-            position: 'absolute',
-            right: 0,
-            top: 0,
-            height: '100%',
-            width: 4,
-            cursor: 'col-resize',
-            background: isResizing ? 'var(--primary)' : 'transparent',
-            zIndex: 1,
-          }}
-          onMouseEnter={e => { if (!isResizing) (e.currentTarget as HTMLElement).style.background = 'var(--border)'; }}
-          onMouseLeave={e => { if (!isResizing) (e.currentTarget as HTMLElement).style.background = 'transparent'; }}
-        />
-      )}
-    </th>
-  );
-}
-
-// ── Status pill popover ────────────────────────────────────────────────────────
-
-function StatusPicker({
-  value,
-  statuses,
-  onChange,
-  onClose,
-  positionStyle,
-}: {
-  value: string | null | undefined;
-  statuses: Status[];
-  onChange: (id: string | null) => void;
-  onClose: () => void;
-  positionStyle?: React.CSSProperties;
-}) {
-  const ref = useRef<HTMLDivElement>(null);
-  const onCloseRef = useRef(onClose);
-  onCloseRef.current = onClose;
-  useEffect(() => {
-    function handler(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) onCloseRef.current();
-    }
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
-  }, []);
-
-  return (
-    <div
-      ref={ref}
-      style={{
-        ...positionStyle,
-        zIndex: 1000,
-        background: 'var(--card)',
-        border: '1px solid var(--border)',
-        borderRadius: 8,
-        boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
-        minWidth: 160,
-        padding: '6px 0',
-      }}
-    >
-      <div
-        onClick={() => { onChange(null); onClose(); }}
-        style={{
-          padding: '6px 12px',
-          cursor: 'pointer',
-          fontSize: 12,
-          color: 'var(--muted-foreground)',
-        }}
-        onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-        onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-      >
-        No status
-      </div>
-      {statuses.map(s => (
-        <div
-          key={s.id}
-          onClick={() => { onChange(s.id); onClose(); }}
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 8,
-            padding: '6px 12px',
-            cursor: 'pointer',
-            fontSize: 12,
-            color: 'var(--foreground)',
-            background: value === s.id ? 'var(--muted)' : 'transparent',
-          }}
-          onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-          onMouseLeave={e => (e.currentTarget.style.background = value === s.id ? 'var(--muted)' : 'transparent')}
-        >
-          <span
-            style={{
-              width: 10,
-              height: 10,
-              borderRadius: '50%',
-              background: resolveColorHex(s.color ?? null) ?? '#888',
-              flexShrink: 0,
-            }}
-          />
-          {s.name}
-        </div>
-      ))}
-    </div>
-  );
-}
-
-// ── Assignee picker popover ────────────────────────────────────────────────────
-
-function AssigneePicker({
-  members,
-  selectedIds,
-  onToggle,
-  onClose,
-  positionStyle,
-}: {
-  members: Member[];
-  selectedIds: string[];
-  onToggle: (id: string) => void;
-  onClose: () => void;
-  positionStyle?: React.CSSProperties;
-}) {
-  const ref = useRef<HTMLDivElement>(null);
-  const onCloseRef = useRef(onClose);
-  onCloseRef.current = onClose;
-  useEffect(() => {
-    function handler(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) onCloseRef.current();
-    }
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
-  }, []);
-
-  return (
-    <div
-      ref={ref}
-      style={{
-        ...positionStyle,
-        zIndex: 1000,
-        background: 'var(--card)',
-        border: '1px solid var(--border)',
-        borderRadius: 8,
-        boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
-        minWidth: 180,
-        padding: '6px 0',
-      }}
-    >
-      {members.length === 0 && (
-        <div style={{ padding: '6px 12px', fontSize: 12, color: 'var(--muted-foreground)' }}>
-          No team members
-        </div>
-      )}
-      {members.map(m => {
-        const assigned = selectedIds.includes(m.id);
-        return (
-          <div
-            key={m.id}
-            onClick={() => onToggle(m.id)}
-            style={{
-              display: 'flex', alignItems: 'center', gap: 8,
-              padding: '5px 12px', cursor: 'pointer', fontSize: 12,
-              background: assigned ? 'var(--muted)' : 'transparent',
-              color: 'var(--foreground)',
-            }}
-            onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-            onMouseLeave={e => (e.currentTarget.style.background = assigned ? 'var(--muted)' : 'transparent')}
-          >
-            <Badge
-              identity={{ color: m.color, icon: '__name_2__' }}
-              name={m.name}
-              shape="circle"
-              size={20}
-            />
-            <span style={{ flex: 1 }}>{m.name}</span>
-            {assigned && (
-              <span style={{
-                width: 6, height: 6, borderRadius: '50%',
-                background: m.color, flexShrink: 0, display: 'inline-block',
-              }} />
-            )}
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-// ── Tag picker popover ─────────────────────────────────────────────────────────
-
-function TagPicker({
-  teamId,
-  tags,
-  selectedTagIds,
-  onChange,
-  onClose,
-  positionStyle,
-}: {
-  teamId: string;
-  tags: Tag[];
-  selectedTagIds: string[];
-  onChange: (ids: string[]) => void;
-  onClose: () => void;
-  positionStyle?: React.CSSProperties;
-}) {
-  const ref = useRef<HTMLDivElement>(null);
-  const onCloseRef = useRef(onClose);
-  onCloseRef.current = onClose;
-  useEffect(() => {
-    function handler(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) onCloseRef.current();
-    }
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
-  }, []);
-
-  return (
-    <div
-      ref={ref}
-      style={{
-        ...positionStyle,
-        zIndex: 1000,
-        background: 'var(--card)',
-        border: '1px solid var(--border)',
-        borderRadius: 8,
-        boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
-        minWidth: 220,
-        padding: 8,
-      }}
-    >
-      <TagInput teamId={teamId} tags={tags} selectedTagIds={selectedTagIds} onChange={onChange} />
-    </div>
-  );
-}
-
-// ── Parent activity picker popover ─────────────────────────────────────────────
-
-function ParentPicker({
-  activities,
-  value,
-  onChange,
-  onClose,
-  positionStyle,
-}: {
-  activities: ApiActivity[];
-  value: string | null | undefined;
-  onChange: (id: string | null) => void;
-  onClose: () => void;
-  positionStyle?: React.CSSProperties;
-}) {
-  const ref = useRef<HTMLDivElement>(null);
-  const onCloseRef = useRef(onClose);
-  onCloseRef.current = onClose;
-  const [query, setQuery] = useState('');
-  const inputRef = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    function handler(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) onCloseRef.current();
-    }
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
-  }, []);
-
-  useEffect(() => { inputRef.current?.focus(); }, []);
-
-  const filtered = activities.filter(a =>
-    a.title.toLowerCase().includes(query.trim().toLowerCase()),
-  );
-
-  function choose(id: string | null) {
-    onChange(id);
-    onClose();
-  }
-
-  return (
-    <div
-      ref={ref}
-      style={{
-        ...positionStyle,
-        zIndex: 1000,
-        background: 'var(--card)',
-        border: '1px solid var(--border)',
-        borderRadius: 8,
-        boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
-        minWidth: 220,
-        overflow: 'hidden',
-      }}
-    >
-      <div style={{
-        display: 'flex', alignItems: 'center', gap: 6,
-        padding: '6px 8px', borderBottom: '1px solid var(--border)',
-      }}>
-        <Search size={12} strokeWidth={2} style={{ flexShrink: 0, color: 'var(--muted-foreground)' }} />
-        <input
-          ref={inputRef}
-          value={query}
-          onChange={e => setQuery(e.target.value)}
-          placeholder="Search activities…"
-          style={{
-            flex: 1, border: 'none', outline: 'none', background: 'none',
-            fontSize: 12, color: 'var(--foreground)', fontFamily: 'var(--font-sans)',
-          }}
-        />
-      </div>
-      <div style={{ maxHeight: 200, overflowY: 'auto' }}>
-        <div
-          onClick={() => choose(null)}
-          style={{
-            padding: '6px 10px', fontSize: 12, color: 'var(--muted-foreground)',
-            fontStyle: 'italic', cursor: 'pointer',
-            borderBottom: filtered.length > 0 ? '1px solid var(--border)' : 'none',
-          }}
-          onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-          onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-        >
-          — None —
-        </div>
-        {filtered.map(a => (
-          <div
-            key={a.id}
-            onClick={() => choose(a.id)}
-            style={{
-              display: 'flex', alignItems: 'center', gap: 8,
-              padding: '6px 10px', fontSize: 12, cursor: 'pointer',
-              background: a.id === value ? 'var(--muted)' : 'transparent',
-              fontWeight: a.id === value ? 600 : 400,
-            }}
-            onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-            onMouseLeave={e => (e.currentTarget.style.background = a.id === value ? 'var(--muted)' : 'transparent')}
-          >
-            <Badge
-              identity={{ color: a.color ?? '#288C9B', icon: a.icon ?? '__none__' }}
-              name={a.title}
-              size={16}
-            />
-            <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {a.title}
-            </span>
-          </div>
-        ))}
-        {filtered.length === 0 && (
-          <div style={{ padding: '8px 10px', fontSize: 11, color: 'var(--muted-foreground)', fontStyle: 'italic' }}>
-            No matching activities
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-// ── Row context menu ───────────────────────────────────────────────────────────
-
-function ContextMenu({
-  pos,
-  onArchive,
-  onDelete,
-  onClose,
-}: {
-  pos: { top: number; left: number };
-  onArchive: () => void;
-  onDelete: () => void;
-  onClose: () => void;
-}) {
-  const ref = useRef<HTMLDivElement>(null);
-  const onCloseRef = useRef(onClose);
-  onCloseRef.current = onClose;
-
-  useEffect(() => {
-    function handler(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) onCloseRef.current();
-    }
-    function keyHandler(e: globalThis.KeyboardEvent) {
-      if (e.key === 'Escape') onCloseRef.current();
-    }
-    document.addEventListener('mousedown', handler);
-    document.addEventListener('keydown', keyHandler);
-    return () => {
-      document.removeEventListener('mousedown', handler);
-      document.removeEventListener('keydown', keyHandler);
-    };
-  }, []);
-
-  // Clamp so menu doesn't overflow viewport
-  const menuW = 160;
-  const menuH = 80;
-  const left = Math.min(pos.left, window.innerWidth - menuW - 8);
-  const top = pos.top + menuH > window.innerHeight ? pos.top - menuH : pos.top;
-
-  const itemStyle: React.CSSProperties = {
-    display: 'flex', alignItems: 'center', gap: 8,
-    padding: '7px 12px', fontSize: 12, cursor: 'pointer',
-    color: 'var(--foreground)', background: 'transparent',
-    border: 'none', width: '100%', textAlign: 'left',
-    fontFamily: 'var(--font-sans)',
-  };
-
-  return (
-    <div
-      ref={ref}
-      style={{
-        position: 'fixed', top, left,
-        zIndex: 9999,
-        background: 'var(--card)',
-        border: '1px solid var(--border)',
-        borderRadius: 8,
-        boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
-        minWidth: menuW,
-        padding: '4px 0',
-      }}
-    >
-      <button
-        style={itemStyle}
-        onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-        onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-        onClick={onArchive}
-      >
-        <Archive size={13} strokeWidth={2} style={{ flexShrink: 0 }} />
-        Archive
-      </button>
-      <button
-        style={{ ...itemStyle, color: 'var(--destructive)' }}
-        onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-        onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-        onClick={onDelete}
-      >
-        <Trash2 size={13} strokeWidth={2} style={{ flexShrink: 0 }} />
-        Delete
-      </button>
-    </div>
-  );
-}
-
-// ── Helpers ────────────────────────────────────────────────────────────────────
-
-/** Position a popover below a cell, flipping above if there isn't enough space below. */
-function popoverPos(rect: DOMRect, w: number, h: number): { top: number; left: number } {
-  const spaceBelow = window.innerHeight - rect.bottom - 2;
-  const top = spaceBelow >= h
-    ? rect.bottom + 2
-    : Math.max(4, rect.top - h - 2);
-  return {
-    top,
-    left: Math.min(rect.left, window.innerWidth - w - 8),
-  };
-}
-
-// ── Sort helpers ───────────────────────────────────────────────────────────────
-
-function sortByToColId(s: ListSortBy): string {
-  switch (s) {
-    case 'startDate': return 'startAt';
-    case 'endDate':   return 'endAt';
-    case 'title':     return 'title';
-    case 'status':    return 'status';
-    case 'progress':  return 'progress';
-  }
-}
-
-// ── Main component ─────────────────────────────────────────────────────────────
-
-export default function ListView({
-  teamId,
-  timelineId,
-  groupBy,
-  sortBy,
-  colorBy,
-  density,
-  timelineStatuses = [],
-  savedFilters = [],
-  tags = [],
-  onColumnsChange,
-  pendingColumnToggle,
-  onSelectActivity,
-  selectedActivityId,
-  onMembersLoaded,
-  triggerNewRow,
-}: Props) {
-  const { user } = useAuth();
-  const { activeFilter } = useFilter();
-  const { debouncedQuery, registerMatches, matchedIds, activeMatchId } = useFind();
-
-  // ── Data fetching ──────────────────────────────────────────────────────────
-  const queryClient = useQueryClient();
-  const { data: rawActivities = [] } = useTimelineActivities(teamId, timelineId);
-  const { data: rawMembers = [] } = useTeamMembers(teamId);
-  const update = useUpdateActivity(timelineId);
-  const create = useCreateActivity(teamId, timelineId);
-  const deleteAct = useDeleteActivity(timelineId);
-  const archiveAct = useArchiveActivity(timelineId);
-
-  useEffect(() => {
-    if (rawMembers.length > 0 && onMembersLoaded) {
-      onMembersLoaded(rawMembers.map(m => ({
-        id: m.id,
-        name: m.displayName,
-        initials: m.displayName.split(/\s+/).map(w => w[0] ?? '').slice(0, 2).join('').toUpperCase(),
-        color: resolveColorHex(m.color ?? null) ?? '#888',
-      })));
-    }
-  }, [rawMembers, onMembersLoaded]);
-
-  function initialsFrom(name: string): string {
-    return name.split(/\s+/).map(w => w[0] ?? '').slice(0, 2).join('').toUpperCase();
-  }
-
-  const members: Member[] = useMemo(
-    () => rawMembers.map(m => ({
-      id: m.id,
-      name: m.displayName,
-      initials: initialsFrom(m.displayName),
-      color: resolveColorHex(m.color ?? null) ?? '#888',
-    })),
-    [rawMembers],
-  );
-
-  // ── Preference persistence ────────────────────────────────────────────────
-  const { isSuccess: prefsSettled } = usePreferences(timelineId);
-  const prefMap = usePreferenceMap(timelineId);
-  const upsert = useUpsertPreference();
-  const prefsApplied = useRef(false);
-
-  // Column state (managed by TanStack Table)
-  const [columnVisibility, setColumnVisibility] = useState<VisibilityState>(DEFAULT_VISIBILITY);
-  const [columnOrder, setColumnOrder] = useState<ColumnOrderState>(DEFAULT_COLUMN_ORDER);
-  const [columnSizing, setColumnSizing] = useState<ColumnSizingState>(DEFAULT_WIDTHS);
-  const [sorting, setSorting] = useState<SortingState>(() => [{ id: sortByToColId(sortBy), desc: false }]);
-
-  // Sync sort column when the toolbar's Sort By control changes
-  useEffect(() => {
-    setSorting([{ id: sortByToColId(sortBy), desc: false }]);
-  }, [sortBy]);
-
-  // Apply saved column prefs once after they load
-  useEffect(() => {
-    if (!prefsSettled || prefsApplied.current) return;
-    prefsApplied.current = true;
-    const raw = prefMap['list_columns'];
-    if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
-      const config = raw as { order?: string[]; hidden?: string[]; widths?: Record<string, number> };
-      if (Array.isArray(config.order) && config.order.length > 0) {
-        const saved = config.order as string[];
-        const allIds = COL_CATALOG.map(c => c.id);
-        const newCols = allIds.filter(id => !saved.includes(id));
-        setColumnOrder([...saved, ...newCols]);
-      }
-      if (Array.isArray(config.hidden)) {
-        const vis: VisibilityState = { ...DEFAULT_VISIBILITY };
-        for (const id of config.hidden as string[]) {
-          if (id in vis) vis[id] = false;
-        }
-        setColumnVisibility(vis);
-      }
-      if (config.widths && typeof config.widths === 'object') {
-        setColumnSizing(prev => ({ ...prev, ...config.widths }));
-      }
-    }
-  }, [prefsSettled, prefMap]);
-
-  // Persist column config on change (debounced via a ref guard)
-  const saveCols = useCallback(
-    (vis: VisibilityState, order: ColumnOrderState, sizing: ColumnSizingState) => {
-      if (!timelineId) return;
-      const hidden = Object.entries(vis).filter(([, v]) => !v).map(([k]) => k);
-      const config = { order, hidden, widths: sizing };
-      upsert.mutate({ key: 'list_columns', value: JSON.stringify(config), timelineId });
-    },
-    [timelineId, upsert.mutate], // eslint-disable-line react-hooks/exhaustive-deps
-  );
-
-  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const debouncedSaveCols = useCallback(
-    (vis: VisibilityState, order: ColumnOrderState, sizing: ColumnSizingState) => {
-      if (saveTimer.current) clearTimeout(saveTimer.current);
-      saveTimer.current = setTimeout(() => saveCols(vis, order, sizing), 400);
-    },
-    [saveCols],
-  );
-
-  const handleVisibilityChange = useCallback(
-    (updater: VisibilityState | ((prev: VisibilityState) => VisibilityState)) => {
-      setColumnVisibility(prev => {
-        const next = typeof updater === 'function' ? updater(prev) : updater;
-        if (prefsApplied.current) debouncedSaveCols(next, columnOrder, columnSizing);
-        return next;
-      });
-    },
-    [columnOrder, columnSizing, debouncedSaveCols],
-  );
-
-  const handleOrderChange = useCallback(
-    (updater: ColumnOrderState | ((prev: ColumnOrderState) => ColumnOrderState)) => {
-      setColumnOrder(prev => {
-        const next = typeof updater === 'function' ? updater(prev) : updater;
-        if (prefsApplied.current) debouncedSaveCols(columnVisibility, next, columnSizing);
-        return next;
-      });
-    },
-    [columnVisibility, columnSizing, debouncedSaveCols],
-  );
-
-  const handleSizingChange = useCallback(
-    (updater: ColumnSizingState | ((prev: ColumnSizingState) => ColumnSizingState)) => {
-      setColumnSizing(prev => {
-        const next = typeof updater === 'function' ? updater(prev) : updater;
-        if (prefsApplied.current) debouncedSaveCols(columnVisibility, columnOrder, next);
-        return next;
-      });
-    },
-    [columnVisibility, columnOrder, debouncedSaveCols],
-  );
-
-  // ── TanStack Table ─────────────────────────────────────────────────────────
-
-  const columnDefs = useMemo<ColumnDef<ApiActivity>[]>(
-    () =>
-      COL_CATALOG.map(meta => ({
-        id: meta.id,
-        header: meta.label,
-        size: DEFAULT_WIDTHS[meta.id] ?? 120,
-        // colorBar is a fixed-width structural column — lock it so TanStack's
-        // min-size enforcement never stretches it beyond its visual purpose.
-        minSize: meta.id === 'colorBar' ? 18 : 40,
-        maxSize: meta.id === 'colorBar' ? 18 : 800,
-        enableResizing: meta.id !== 'colorBar',
-        enableSorting: meta.editType !== 'none' || meta.id === 'duration',
-      })),
-    [],
-  );
-
-  const table = useReactTable({
-    data: rawActivities,
-    columns: columnDefs,
-    state: {
-      columnVisibility,
-      columnOrder,
-      columnSizing,
-      columnPinning: { left: ['colorBar', 'identity', 'title'] } as ColumnPinningState,
-      sorting,
-    },
-    onSortingChange: setSorting,
-    onColumnVisibilityChange: handleVisibilityChange,
-    onColumnOrderChange: handleOrderChange,
-    onColumnSizingChange: handleSizingChange,
-    getCoreRowModel: getCoreRowModel(),
-    getSortedRowModel: getSortedRowModel(),
-    columnResizeMode: 'onChange',
-  });
-
-  // Apply external column toggle from the toolbar (via DashboardPage)
-  const lastAppliedSeq = useRef<number | null>(null);
-  useEffect(() => {
-    if (!pendingColumnToggle) return;
-    if (pendingColumnToggle.seq === lastAppliedSeq.current) return;
-    lastAppliedSeq.current = pendingColumnToggle.seq;
-    setColumnVisibility(prev => {
-      const next = { ...prev, [pendingColumnToggle.colId]: pendingColumnToggle.visible };
-      if (prefsApplied.current) debouncedSaveCols(next, columnOrder, columnSizing);
-      return next;
-    });
-  }, [pendingColumnToggle, columnOrder, columnSizing, debouncedSaveCols]);
-
-  // Expose ALL column configs (visible + hidden) to toolbar via callback.
-  // Uses a ref-based equality check to avoid calling onColumnsChange (which
-  // typically calls setListColumns in DashboardPage) with a new array reference
-  // every render — that would create an infinite setState→re-render loop.
-  const lastColConfigsRef = useRef<ColumnConfig[] | null>(null);
-  useEffect(() => {
-    if (!onColumnsChange) return;
-    const configs: ColumnConfig[] = table.getAllLeafColumns()
-      .filter(col => !COL_CATALOG.find(c => c.id === col.id)?.noMenu)
-      .map(col => ({
-        id: col.id,
-        label: COL_CATALOG.find(c => c.id === col.id)?.label ?? col.id,
-        visible: col.getIsVisible(),
-      }));
-    const prev = lastColConfigsRef.current;
-    const changed = !prev || prev.length !== configs.length ||
-      prev.some((c, i) => c.id !== configs[i].id || c.visible !== configs[i].visible || c.label !== configs[i].label);
-    if (changed) {
-      lastColConfigsRef.current = configs;
-      onColumnsChange(configs);
-    }
-  }); // runs every render so order/visibility changes propagate immediately
-
-  // ── Filter + sort ──────────────────────────────────────────────────────────
-
-  const memberIdsByUserId = useMemo<Map<string, string[]>>(() => {
-    const map = new Map<string, string[]>();
-    for (const m of rawMembers) {
-      if (!m.userId) continue;
-      const list = map.get(m.userId) ?? [];
-      list.push(m.id);
-      map.set(m.userId, list);
-    }
-    return map;
-  }, [rawMembers]);
-
-  const closedStatusIds = useMemo(
-    () => new Set(timelineStatuses.filter(s => s.isClosed).map(s => s.id)),
-    [timelineStatuses],
-  );
-
-  const statusesByTimeline = useMemo(() => {
-    const m = new Map<string, Status[]>();
-    m.set(timelineId, timelineStatuses);
-    return m;
-  }, [timelineId, timelineStatuses]);
-
-  const filteredActivities = useMemo(
-    () =>
-      applyActiveFilter(rawActivities, activeFilter, memberIdsByUserId, {
-        closedStatusIds,
-        savedFilters,
-        statuses: statusesByTimeline,
-        tags,
-      }),
-    [rawActivities, activeFilter, memberIdsByUserId, closedStatusIds, savedFilters, statusesByTimeline, tags],
-  );
-
-  // Apply TanStack sorting
-  const sortedActivities = useMemo(() => {
-    const acts = [...filteredActivities];
-    const col = sorting[0];
-    if (!col) {
-      return acts.sort((a, b) => {
-        if (sortBy === 'startDate') return (a.startAt ?? '').localeCompare(b.startAt ?? '');
-        if (sortBy === 'endDate') return (a.endAt ?? '').localeCompare(b.endAt ?? '');
-        if (sortBy === 'title') return a.title.localeCompare(b.title);
-        if (sortBy === 'status') return (a.statusId ?? '').localeCompare(b.statusId ?? '');
-        if (sortBy === 'progress') return (b.percentComplete ?? 0) - (a.percentComplete ?? 0);
-        return 0;
-      });
-    }
-    return acts.sort((a, b) => {
-      let av: string | number = '';
-      let bv: string | number = '';
-      switch (col.id) {
-        case 'title': av = a.title; bv = b.title; break;
-        case 'startAt': av = a.startAt ?? ''; bv = b.startAt ?? ''; break;
-        case 'endAt': av = a.endAt ?? ''; bv = b.endAt ?? ''; break;
-        case 'status': av = a.statusId ?? ''; bv = b.statusId ?? ''; break;
-        case 'progress': av = a.percentComplete ?? 0; bv = b.percentComplete ?? 0; break;
-        default: av = a.title; bv = b.title;
-      }
-      const cmp = typeof av === 'number' ? av - (bv as number) : (av as string).localeCompare(bv as string);
-      return col.desc ? -cmp : cmp;
-    });
-  }, [filteredActivities, sorting, sortBy]);
-
-  // ── Group-by ───────────────────────────────────────────────────────────────
-
-  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
-  const toggleGroup = useCallback((key: string) => {
-    setCollapsedGroups(prev => {
-      const next = new Set(prev);
-      if (next.has(key)) next.delete(key); else next.add(key);
-      return next;
-    });
-  }, []);
-
-  const memberById = useMemo<Map<string, TeamMemberWithUser>>(
-    () => new Map(rawMembers.map(m => [m.id, m])),
-    [rawMembers],
-  );
-  const statusById = useMemo<Map<string, Status>>(
-    () => new Map(timelineStatuses.map(s => [s.id, s])),
-    [timelineStatuses],
-  );
-  const activityById = useMemo<Map<string, ApiActivity>>(
-    () => new Map(rawActivities.map(a => [a.id, a])),
-    [rawActivities],
-  );
-
-  const memberOrder = useMemo(() => members.map(m => m.id), [members]);
-
-  const displayRows = useMemo(
-    () => buildListRows(sortedActivities, groupBy, memberById, statusById, timelineStatuses, collapsedGroups, memberOrder),
-    [sortedActivities, groupBy, memberById, statusById, timelineStatuses, collapsedGroups, memberOrder],
-  );
-
-  // Flat list of activity rows (for keyboard navigation indices)
-  const activityRows = useMemo(
-    () => displayRows.filter((r): r is Extract<ListDisplayRow, { kind: 'activity' }> => r.kind === 'activity'),
-    [displayRows],
-  );
-
-  // ── Find integration ───────────────────────────────────────────────────────
-
-  useEffect(() => {
-    if (!debouncedQuery) {
-      registerMatches([], new Map());
-      return;
-    }
-    const results = matchEvents(debouncedQuery, filteredActivities, members, rawActivities);
-    const ids = results.map(r => r.activityId);
-    const reasons = new Map(results.map(r => [r.activityId, r.reasons]));
-    registerMatches(ids, reasons);
-  }, [debouncedQuery, filteredActivities, members, rawActivities, registerMatches]);
-
-  // Auto-scroll to active match
-  const activeRowRef = useRef<HTMLTableRowElement | null>(null);
-  useEffect(() => {
-    if (activeMatchId && activeRowRef.current) {
-      activeRowRef.current.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-    }
-  }, [activeMatchId]);
-
-  // ── Selection & editing state ──────────────────────────────────────────────
-
-  const [selectedRowIdx, setSelectedRowIdx] = useState<number | null>(null);
-  const [selectedColIdx, setSelectedColIdx] = useState<number>(0);
-  const [editingCell, setEditingCell] = useState<{
-    rowIdx: number;
-    colIdx: number;
-    value: string;
-  } | null>(null);
-  const editInputRef = useRef<HTMLInputElement | null>(null);
-  // Tracks which cell is currently open so the layout effect only focuses/selects
-  // on initial open, not on every value change while typing.
-  const editCellKeyRef = useRef<string | null>(null);
-  const containerRef = useRef<HTMLDivElement>(null);
-
-  // When a new activity is selected externally, sync row idx
-  useEffect(() => {
-    if (!selectedActivityId) { setSelectedRowIdx(null); return; }
-    const idx = activityRows.findIndex(r => r.activity.id === selectedActivityId);
-    if (idx >= 0) setSelectedRowIdx(idx);
-  }, [selectedActivityId, activityRows]);
-
-  // useLayoutEffect fires synchronously after DOM commit so the focus is set
-  // before any paint — no window in which another element can steal focus.
-  // Guard: only focus/select when the *cell* changes (new rowIdx:colIdx), not
-  // when the value changes while the user is typing — otherwise inp.select()
-  // would re-select-all after every keystroke, leaving only the last character.
-  useLayoutEffect(() => {
-    if (!editingCell) {
-      editCellKeyRef.current = null;
-      return;
-    }
-    // Include the row's activity id in the key so that when an optimistic row
-    // (optimistic_…) is swapped for its real record at the same index, React
-    // remounts the <tr> (keyed by activity.id) and destroys the focused input —
-    // the changed id forces us to re-focus the freshly mounted input rather than
-    // skip it as a value-only change.
-    const rowId = activityRows[editingCell.rowIdx]?.activity.id ?? '';
-    const cellKey = `${rowId}:${editingCell.colIdx}`;
-    if (editCellKeyRef.current === cellKey) return; // value-only change — skip
-    editCellKeyRef.current = cellKey;
-
-    const inp = editInputRef.current;
-    if (!inp) return;
-    inp.focus();
-    inp.scrollIntoView({ block: 'nearest' });
-    const colId = visibleColIds[editingCell.colIdx];
-    const meta = COL_CATALOG.find(c => c.id === colId);
-    if (meta?.editType === 'date') {
-      // showPicker() opens the calendar immediately. Deferred so the browser
-      // has processed the focus event first. Only one date input is ever in
-      // the DOM at a time (single-cell editing), so no range-picker pairing.
-      setTimeout(() => {
-        try { (inp as HTMLInputElement & { showPicker?(): void }).showPicker?.(); } catch { /* not all browsers */ }
-      }, 0);
-    } else {
-      inp.select();
-    }
-  }, [editingCell, activityRows]); // visibleColIds intentionally excluded — always current in this render cycle
-
-  // Visible column ids, in the SAME order the cells are rendered.
-  //
-  // Cells render from `table.getHeaderGroups()`, which moves pinned-left
-  // columns (colorBar, identity, title) to the front. `getVisibleLeafColumns()`
-  // does NOT apply pinning — it follows raw `columnOrder`. When a persisted
-  // `columnOrder` doesn't place the pinned columns first (e.g. a saved order
-  // from before `colorBar`/`identity` existed appends them at the end), the two
-  // orderings diverge and every colIdx→colId lookup (enterEdit, commitEdit,
-  // showPicker, keyboard nav) targets the wrong column. Deriving from the
-  // header groups keeps colIdx aligned with what the user actually clicked.
-  const visibleColIds = useMemo(
-    () => (table.getHeaderGroups()[0]?.headers ?? []).map(h => h.id),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [columnOrder, columnVisibility],
-  );
-
-  const commitEdit = useCallback(
-    (rowIdx: number, colId: string, value: string) => {
-      const row = activityRows[rowIdx];
-      if (!row) return;
-      const a = row.activity;
-
-      // Optimistic row not yet confirmed by server — queue title and return.
-      if (a.id.startsWith('optimistic_')) {
-        if (colId === 'title' && value.trim()) {
-          pendingTitleAfterCreate.current = value.trim();
-        }
-        return;
-      }
-
-      const patch: Partial<ApiActivity> & { notes?: string | null } = {};
-      if (colId === 'title' && value.trim() !== '') patch.title = value.trim();
-      else if (colId === 'startAt') patch.startAt = value ? `${value}T00:00:00Z` : undefined;
-      else if (colId === 'endAt') patch.endAt = value ? `${value}T00:00:00Z` : undefined;
-      else if (colId === 'description') patch.description = value || undefined;
-      else if (colId === 'location') patch.location = value || undefined;
-      else if (colId === 'url') patch.url = value || undefined;
-      else if (colId === 'notes') patch.notes = value || undefined;
-      else if (colId === 'progress') {
-        const n = parseInt(value, 10);
-        if (!isNaN(n) && n >= 0 && n <= 100) patch.percentComplete = n;
-      }
-
-      if (Object.keys(patch).length > 0) {
-        update.mutate({ activityId: a.id, patch });
-      }
-    },
-    [activityRows, update],
-  );
-
-  const enterEdit = useCallback((rowIdx: number, colIdx: number) => {
-    const row = activityRows[rowIdx];
-    if (!row) return;
-    const colId = visibleColIds[colIdx];
-    const meta = COL_CATALOG.find(c => c.id === colId);
-    if (!meta?.editable || meta.editType === 'status') return;
-    const a = row.activity;
-    let val = '';
-    if (colId === 'title') val = a.title;
-    else if (colId === 'startAt') val = toDateInput(a.startAt);
-    else if (colId === 'endAt') val = toDateInput(a.endAt);
-    else if (colId === 'description') val = a.description ?? '';
-    else if (colId === 'location') val = a.location ?? '';
-    else if (colId === 'url') val = a.url ?? '';
-    else if (colId === 'notes') val = (a as ApiActivity & { notes?: string | null }).notes ?? '';
-    else if (colId === 'progress') val = String(a.percentComplete ?? 0);
-    setEditingCell({ rowIdx, colIdx, value: val });
-  }, [activityRows, visibleColIds]);
-
-  const cancelEdit = useCallback(() => setEditingCell(null), []);
-
-  const commitAndMove = useCallback(
-    (dir: 'down' | 'right' | 'left') => {
-      if (!editingCell) return;
-      commitEdit(editingCell.rowIdx, visibleColIds[editingCell.colIdx], editingCell.value);
-      setEditingCell(null);
-
-      if (dir === 'down') {
-        const nextRow = Math.min(editingCell.rowIdx + 1, activityRows.length - 1);
-        setSelectedRowIdx(nextRow);
-      } else if (dir === 'right') {
-        let nextColIdx = editingCell.colIdx + 1;
-        let nextRowIdx = editingCell.rowIdx;
-        if (nextColIdx >= visibleColIds.length) {
-          if (editingCell.rowIdx < activityRows.length - 1) {
-            nextColIdx = 0;
-            nextRowIdx = editingCell.rowIdx + 1;
-          } else {
-            nextColIdx = visibleColIds.length - 1; // clamp at last cell of last row
-          }
-        }
-        setSelectedColIdx(nextColIdx);
-        setSelectedRowIdx(nextRowIdx);
-        const colId = visibleColIds[nextColIdx];
-        const meta = COL_CATALOG.find(c => c.id === colId);
-        const isText = meta?.editable && meta.editType !== 'status' && meta.editType !== 'none' &&
-          meta.editType !== 'identity' && meta.editType !== 'assignees' &&
-          meta.editType !== 'tags' && meta.editType !== 'parent';
-        if (isText) enterEdit(nextRowIdx, nextColIdx);
-      } else if (dir === 'left') {
-        let prevColIdx = editingCell.colIdx - 1;
-        let prevRowIdx = editingCell.rowIdx;
-        if (prevColIdx < 0) {
-          if (editingCell.rowIdx > 0) {
-            prevColIdx = visibleColIds.length - 1;
-            prevRowIdx = editingCell.rowIdx - 1;
-          } else {
-            prevColIdx = 0; // clamp at first cell of first row
-          }
-        }
-        setSelectedColIdx(prevColIdx);
-        setSelectedRowIdx(prevRowIdx);
-        const colId = visibleColIds[prevColIdx];
-        const meta = COL_CATALOG.find(c => c.id === colId);
-        const isText = meta?.editable && meta.editType !== 'status' && meta.editType !== 'none' &&
-          meta.editType !== 'identity' && meta.editType !== 'assignees' &&
-          meta.editType !== 'tags' && meta.editType !== 'parent';
-        if (isText) enterEdit(prevRowIdx, prevColIdx);
-      }
-    },
-    [editingCell, commitEdit, visibleColIds, activityRows.length, enterEdit],
-  );
-
-  const handleKeyDown = useCallback(
-    (e: KeyboardEvent<HTMLDivElement>) => {
-      if (editingCell) {
-        // Edit mode key handling is in the input's own onKeyDown
-        return;
-      }
-
-      if (e.key === 'Tab') {
-        e.preventDefault();
-        if (activityRows.length === 0) return;
-        if (selectedRowIdx === null) {
-          setSelectedRowIdx(0);
-          setSelectedColIdx(0);
-          return;
-        }
-        if (e.shiftKey) {
-          let prevCol = selectedColIdx - 1;
-          let prevRow = selectedRowIdx;
-          if (prevCol < 0) {
-            if (selectedRowIdx > 0) {
-              prevCol = visibleColIds.length - 1;
-              prevRow = selectedRowIdx - 1;
-            } else {
-              prevCol = 0; // clamp at first cell of first row
-            }
-          }
-          setSelectedColIdx(prevCol);
-          setSelectedRowIdx(prevRow);
-        } else {
-          let nextCol = selectedColIdx + 1;
-          let nextRow = selectedRowIdx;
-          if (nextCol >= visibleColIds.length) {
-            if (selectedRowIdx < activityRows.length - 1) {
-              nextCol = 0;
-              nextRow = selectedRowIdx + 1;
-            } else {
-              nextCol = visibleColIds.length - 1; // clamp at last cell of last row
-            }
-          }
-          setSelectedColIdx(nextCol);
-          setSelectedRowIdx(nextRow);
-        }
-        return;
-      }
-
-      if (selectedRowIdx === null) {
-        if (e.key === 'ArrowDown') { setSelectedRowIdx(0); e.preventDefault(); }
-        return;
-      }
-
-      if (e.key === 'ArrowDown') {
-        setSelectedRowIdx(r => Math.min((r ?? 0) + 1, activityRows.length - 1));
-        e.preventDefault();
-      } else if (e.key === 'ArrowUp') {
-        setSelectedRowIdx(r => Math.max((r ?? 0) - 1, 0));
-        e.preventDefault();
-      } else if (e.key === 'ArrowRight') {
-        setSelectedColIdx(c => Math.min(c + 1, visibleColIds.length - 1));
-        e.preventDefault();
-      } else if (e.key === 'ArrowLeft') {
-        setSelectedColIdx(c => Math.max(c - 1, 0));
-        e.preventDefault();
-      } else if (e.key === 'Enter' || e.key === 'F2') {
-        const colId = visibleColIds[selectedColIdx];
-        const meta = COL_CATALOG.find(c => c.id === colId);
-        const isTextEditable = meta?.editable && meta.editType !== 'none' &&
-          meta.editType !== 'status' && meta.editType !== 'identity' &&
-          meta.editType !== 'assignees' && meta.editType !== 'tags' && meta.editType !== 'parent';
-        if (isTextEditable) enterEdit(selectedRowIdx, selectedColIdx);
-        e.preventDefault();
-      } else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey) {
-        const colId = visibleColIds[selectedColIdx];
-        const meta = COL_CATALOG.find(c => c.id === colId);
-        const isTextEditable = meta?.editable && meta.editType !== 'none' &&
-          meta.editType !== 'status' && meta.editType !== 'identity' &&
-          meta.editType !== 'assignees' && meta.editType !== 'tags' && meta.editType !== 'parent';
-        if (isTextEditable) setEditingCell({ rowIdx: selectedRowIdx, colIdx: selectedColIdx, value: e.key });
-      }
-    },
-    [editingCell, selectedRowIdx, selectedColIdx, activityRows, visibleColIds, enterEdit],
-  );
-
-  // When triggerNewRow increments, optimistically insert a row and focus the title input
-  // immediately — no network round-trip before the UI responds.
-  useEffect(() => {
-    if (!triggerNewRow || triggerNewRow === prevTriggerNewRow.current) return;
-    prevTriggerNewRow.current = triggerNewRow;
-    const today = new Date().toISOString().slice(0, 10);
-    const startAt = `${today}T00:00:00Z`;
-    const now = new Date().toISOString();
-    const tempId = `optimistic_${Date.now()}`;
-    const optimisticActivity: ApiActivity = {
-      id: tempId,
-      timelineId,
-      title: 'New Activity',
-      startAt,
-      endAt: startAt,
-      allDay: false,
-      createdBy: user?.id ?? '',
-      createdAt: now,
-      updatedAt: now,
-      description: null,
-      notes: null,
-      icon: null,
-      color: null,
-      statusId: null,
-      parentActivityId: null,
-      percentComplete: null,
-      location: null,
-      url: null,
-      archivedAt: null,
-      assignedMemberIds: [],
-      tagIds: [],
-    };
-    queryClient.setQueriesData<ApiActivity[]>(
-      { queryKey: ['timelines', timelineId, 'activities'] },
-      (old) => (old ? [...old, optimisticActivity] : [optimisticActivity]),
-    );
-    pendingEditActivityId.current = tempId;
-    create.mutate(
-      { title: 'New Activity', startAt, endAt: startAt, _tempId: tempId },
-      {
-        onSuccess: (created) => {
-          if (pendingTitleAfterCreate.current !== null) {
-            const queued = pendingTitleAfterCreate.current;
-            pendingTitleAfterCreate.current = null;
-            if (queued && queued !== 'New Activity') {
-              update.mutate({ activityId: created.id, patch: { title: queued } });
-            }
-          }
-        },
-        onError: () => {
-          queryClient.setQueriesData<ApiActivity[]>(
-            { queryKey: ['timelines', timelineId, 'activities'] },
-            (old) => (old ? old.filter(a => a.id !== tempId) : []),
-          );
-          // Discard any queued title so it can't leak into the next create.
-          pendingTitleAfterCreate.current = null;
-          setEditingCell(null);
-        },
-      },
-    );
-  }, [triggerNewRow]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // After an activity (including an optimistic one) appears in activityRows, enter title-edit mode on it.
-  useEffect(() => {
-    if (!pendingEditActivityId.current) return;
-    const rowIdx = activityRows.findIndex(r => r.activity.id === pendingEditActivityId.current);
-    if (rowIdx < 0) return;
-    pendingEditActivityId.current = null;
-    setSelectedRowIdx(rowIdx);
-    const titleColIdx = visibleColIds.indexOf('title');
-    if (titleColIdx >= 0) {
-      setEditingCell({ rowIdx, colIdx: titleColIdx, value: 'New Activity' });
-    }
-  }, [activityRows, visibleColIds]);
-
-  // ── Color-by resolution ────────────────────────────────────────────────────
-
-  const getRowAccentColor = useCallback(
-    (activity: ApiActivity): string | null => {
-      if (colorBy === 'activity') return resolveColorHex(activity.color ?? null);
-      if (colorBy === 'member') {
-        const firstId = (activity.assignedMemberIds ?? [])[0];
-        if (!firstId) return null;
-        const m = memberById.get(firstId);
-        return resolveColorHex(m?.color ?? null);
-      }
-      if (colorBy === 'status') {
-        if (!activity.statusId) return null;
-        const s = statusById.get(activity.statusId);
-        return resolveColorHex(s?.color ?? null);
-      }
-      return null;
-    },
-    [colorBy, memberById, statusById],
-  );
-
-  // ── Picker state — all rendered as portals to escape table overflow ──────
-
-  const [statusPickerFor, setStatusPickerFor] = useState<string | null>(null);
-  const [statusPickerPos, setStatusPickerPos] = useState<{ top: number; left: number } | null>(null);
-  const closeStatusPicker = useCallback(() => {
-    setStatusPickerFor(null);
-    setStatusPickerPos(null);
-  }, []);
-
-  const [assigneePickerFor, setAssigneePickerFor] = useState<string | null>(null);
-  const [assigneePickerPos, setAssigneePickerPos] = useState<{ top: number; left: number } | null>(null);
-  const closeAssigneePicker = useCallback(() => {
-    setAssigneePickerFor(null);
-    setAssigneePickerPos(null);
-  }, []);
-
-  const [tagPickerFor, setTagPickerFor] = useState<string | null>(null);
-  const [tagPickerPos, setTagPickerPos] = useState<{ top: number; left: number } | null>(null);
-  const closeTagPicker = useCallback(() => {
-    setTagPickerFor(null);
-    setTagPickerPos(null);
-  }, []);
-
-  const [parentPickerFor, setParentPickerFor] = useState<string | null>(null);
-  const [parentPickerPos, setParentPickerPos] = useState<{ top: number; left: number } | null>(null);
-  const closeParentPicker = useCallback(() => {
-    setParentPickerFor(null);
-    setParentPickerPos(null);
-  }, []);
-
-  const [identityPickerFor, setIdentityPickerFor] = useState<string | null>(null);
-  const [identityPickerPos, setIdentityPickerPos] = useState<{ top: number; left: number } | null>(null);
-  const identityPickerRef = useRef<HTMLDivElement>(null);
-  const closeIdentityPicker = useCallback(() => {
-    setIdentityPickerFor(null);
-    setIdentityPickerPos(null);
-  }, []);
-
-  // Click-outside closes the identity picker
-  useEffect(() => {
-    if (!identityPickerFor) return;
-    function handler(e: MouseEvent) {
-      if (identityPickerRef.current && !identityPickerRef.current.contains(e.target as Node)) {
-        closeIdentityPicker();
-      }
-    }
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
-  }, [identityPickerFor, closeIdentityPicker]);
-
-  // Multi-select state for row checkboxes
-  const [selectedActivityIds, setSelectedActivityIds] = useState<Set<string>>(new Set());
-  const [hoveredRowId, setHoveredRowId] = useState<string | null>(null);
-
-  // Toast notification
-  const [toast, setToast] = useState<string | null>(null);
-  const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const showToast = useCallback((msg: string) => {
-    if (toastTimer.current) clearTimeout(toastTimer.current);
-    setToast(msg);
-    toastTimer.current = setTimeout(() => setToast(null), 2600);
-  }, []);
-
-  // Right-click context menu
-  const [contextMenuFor, setContextMenuFor] = useState<string | null>(null);
-  const [contextMenuPos, setContextMenuPos] = useState<{ top: number; left: number } | null>(null);
-  const closeContextMenu = useCallback(() => {
-    setContextMenuFor(null);
-    setContextMenuPos(null);
-  }, []);
-
-  // Holds the ID of a newly created activity (or optimistic temp ID) waiting to enter title-edit mode
-  const pendingEditActivityId = useRef<string | null>(null);
-  // Guards against re-firing triggerNewRow on re-renders
-  const prevTriggerNewRow = useRef<number>(0);
-  // Title typed while the row is still optimistic — flushed to the server once the real ID arrives
-  const pendingTitleAfterCreate = useRef<string | null>(null);
-
-  // ── Multi-select delete / archive ─────────────────────────────────────────
-
-  const handleDeleteSelected = useCallback(() => {
-    const ids = Array.from(selectedActivityIds);
-    for (const id of ids) {
-      deleteAct.mutate(id);
-    }
-    setSelectedActivityIds(new Set());
-    showToast(`${ids.length} ${ids.length === 1 ? 'activity' : 'activities'} deleted`);
-  }, [selectedActivityIds, deleteAct, showToast]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const handleArchiveSelected = useCallback(() => {
-    const ids = Array.from(selectedActivityIds);
-    for (const id of ids) {
-      archiveAct.mutate(id);
-    }
-    setSelectedActivityIds(new Set());
-    showToast(`${ids.length} ${ids.length === 1 ? 'activity' : 'activities'} archived`);
-  }, [selectedActivityIds, archiveAct, showToast]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // ── DnD column reorder ─────────────────────────────────────────────────────
-
-  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 8 } }));
-
-  function handleDragEnd(event: DragEndEvent) {
-    const { active, over } = event;
-    if (!over || active.id === over.id) return;
-    setColumnOrder(prev => {
-      const oldIdx = prev.indexOf(String(active.id));
-      const newIdx = prev.indexOf(String(over.id));
-      if (oldIdx === -1 || newIdx === -1) return prev;
-      // Pinned columns can't be reordered past each other
-      const pinnedIds = ['colorBar', 'identity', 'title'];
-      if (pinnedIds.includes(String(active.id)) || pinnedIds.includes(String(over.id))) return prev;
-      const next = arrayMove(prev, oldIdx, newIdx);
-      if (prefsApplied.current) debouncedSaveCols(columnVisibility, next, columnSizing);
-      return next;
-    });
-  }
-
-  // ── Render ─────────────────────────────────────────────────────────────────
-
-  const rowH = density === 'compact' ? 32 : 48;
-
-  const visibleHeaders = table.getHeaderGroups()[0]?.headers ?? [];
-
-  // Build a map from colId → left offset for sticky pinning
-  const pinnedLeft = useMemo(() => {
-    let left = 0;
-    const offsets: Record<string, number> = {};
-    for (const h of visibleHeaders) {
-      if (h.column.getIsPinned() === 'left') {
-        offsets[h.id] = left;
-        left += h.getSize();
-      }
-    }
-    return offsets;
-  }, [visibleHeaders]);
-
-  const tableWidth = visibleHeaders.reduce((acc, h) => acc + h.getSize(), 0);
-
-  // Status picker activity (for the portal)
-  const statusPickerActivity = statusPickerFor ? activityById.get(statusPickerFor) : null;
-
-  return (
-    <div
-      ref={containerRef}
-      tabIndex={0}
-      onKeyDown={handleKeyDown}
-      style={{
-        flex: 1,
-        overflow: 'auto',
-        outline: 'none',
-        background: 'var(--background)',
-        position: 'relative',
-      }}
-      onClick={e => {
-        if ((e.target as HTMLElement) === containerRef.current) {
-          setSelectedRowIdx(null);
-          setEditingCell(null);
-          onSelectActivity?.(null);
-        }
-      }}
-    >
-      {/* Selection action bar — appears above the table when rows are checked */}
-      {selectedActivityIds.size > 0 && (
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 10,
-            padding: '0 12px',
-            height: 36,
-            background: 'var(--card)',
-            borderBottom: '1px solid var(--border)',
-            flexShrink: 0,
-            position: 'sticky',
-            top: 0,
-            zIndex: 10,
-          }}
-        >
-          <span style={{ fontSize: 12, color: 'var(--muted-foreground)' }}>
-            {selectedActivityIds.size} selected
-          </span>
-          <button
-            onClick={handleArchiveSelected}
-            style={{
-              display: 'flex', alignItems: 'center', gap: 4,
-              padding: '3px 10px', fontSize: 12, cursor: 'pointer',
-              background: 'var(--card)', color: 'var(--foreground)',
-              border: '1px solid var(--border)', borderRadius: 4, fontFamily: 'var(--font-sans)',
-            }}
-          >
-            <Archive size={12} />
-            Archive
-          </button>
-          <button
-            onClick={handleDeleteSelected}
-            style={{
-              display: 'flex', alignItems: 'center', gap: 4,
-              padding: '3px 10px', fontSize: 12, cursor: 'pointer',
-              background: 'var(--destructive)', color: 'var(--destructive-foreground)',
-              border: 'none', borderRadius: 4, fontFamily: 'var(--font-sans)',
-            }}
-          >
-            <Trash2 size={12} />
-            Delete
-          </button>
-          <button
-            onClick={() => setSelectedActivityIds(new Set())}
-            style={{
-              display: 'flex', alignItems: 'center', gap: 4,
-              padding: '3px 10px', fontSize: 12, cursor: 'pointer',
-              background: 'none', color: 'var(--foreground)',
-              border: '1px solid var(--border)', borderRadius: 4, fontFamily: 'var(--font-sans)',
-            }}
-          >
-            Cancel
-          </button>
-        </div>
-      )}
-
-      {/* DndContext must be outside <table> — its accessibility <div> is invalid inside <thead>. */}
-      <DndContext sensors={sensors} onDragEnd={handleDragEnd}>
-      <table
-        style={{
-          width: tableWidth,
-          minWidth: '100%',
-          borderCollapse: 'separate',
-          borderSpacing: 0,
-          tableLayout: 'fixed',
-        }}
-      >
-        {/* Column sizing */}
-        <colgroup>
-          {visibleHeaders.map(h => (
-            <col key={h.id} style={{ width: h.getSize() }} />
-          ))}
-        </colgroup>
-
-        {/* Header */}
-        <thead>
-          <SortableContext
-            items={visibleHeaders.map(h => h.id)}
-            strategy={horizontalListSortingStrategy}
-          >
-            <tr style={{ height: 36 }}>
-              {visibleHeaders.map(header => {
-                  const colId = header.id;
-                  const isPinned = header.column.getIsPinned() === 'left';
-                  const sortState = sorting[0];
-                  const sortDir = sortState?.id === colId ? (sortState.desc ? 'desc' : 'asc') : false;
-                  const meta = COL_CATALOG.find(c => c.id === colId);
-
-                  if (colId === 'colorBar') {
-                    const allChecked = activityRows.length > 0 &&
-                      activityRows.every(r => selectedActivityIds.has(r.activity.id));
-                    const someChecked = !allChecked &&
-                      activityRows.some(r => selectedActivityIds.has(r.activity.id));
-                    return (
-                      <th
-                        key={colId}
-                        style={{
-                          width: 18,
-                          position: 'sticky',
-                          left: pinnedLeft[colId] ?? 0,
-                          top: 0,
-                          zIndex: 4, // below TopBar's stacking context (z-index:10) so dropdowns show above headers
-                          background: 'var(--card)',
-                          borderBottom: '2px solid var(--border)',
-                          padding: 0,
-                        }}
-                      >
-                        <div style={{ display: 'flex', alignItems: 'stretch', height: '100%' }}>
-                          <div style={{ width: 4, flexShrink: 0 }} />
-                          <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                            <input
-                              type="checkbox"
-                              checked={allChecked}
-                              ref={el => { if (el) el.indeterminate = someChecked; }}
-                              onChange={() => {
-                                if (allChecked || someChecked) {
-                                  setSelectedActivityIds(new Set());
-                                } else {
-                                  setSelectedActivityIds(new Set(activityRows.map(r => r.activity.id)));
-                                }
-                              }}
-                              style={{ cursor: 'pointer', width: 13, height: 13 }}
-                              title="Select all"
-                            />
-                          </div>
-                        </div>
-                      </th>
-                    );
-                  }
-
-                  return (
-                    <SortableColHeader
-                      key={colId}
-                      colId={colId}
-                      style={{
-                        width: header.getSize(),
-                        left: isPinned ? pinnedLeft[colId] : undefined,
-                        position: 'sticky',
-                        zIndex: isPinned ? 4 : 3, // below TopBar's z-index:10 stacking context
-                        boxShadow: isPinned ? '2px 0 4px rgba(0,0,0,0.06)' : undefined,
-                      }}
-                      sortDir={meta?.editType !== 'none' ? sortDir : false}
-                      onSort={meta?.editType !== 'none' ? () => {
-                        setSorting(prev => {
-                          if (prev[0]?.id !== colId) return [{ id: colId, desc: false }];
-                          if (!prev[0].desc) return [{ id: colId, desc: true }];
-                          return [];
-                        });
-                      } : undefined}
-                      resizeHandler={colId !== 'identity' ? (header.getResizeHandler() as unknown as (e: React.MouseEvent | React.TouchEvent) => void) : undefined}
-                      isResizing={header.column.getIsResizing()}
-                    >
-                      {header.column.columnDef.header as string}
-                    </SortableColHeader>
-                  );
-                })}
-              </tr>
-            </SortableContext>
-        </thead>
-
-        {/* Body */}
-        <tbody>
-          {displayRows.length === 0 && (
-            <tr>
-              <td
-                colSpan={visibleHeaders.length}
-                style={{
-                  textAlign: 'center',
-                  padding: '48px 0',
-                  color: 'var(--muted-foreground)',
-                  fontSize: 13,
-                }}
-              >
-                No activities to show.
-              </td>
-            </tr>
-          )}
-
-          {displayRows.map((row, displayIdx) => {
-            // ── Group header row ─────────────────────────────────────────────
-            if (row.kind === 'group') {
-              const collapsed = collapsedGroups.has(row.key);
-              return (
-                <tr key={`group-${row.key}`}>
-                  <td
-                    colSpan={visibleHeaders.length}
-                    style={{
-                      padding: '4px 8px',
-                      background: 'var(--muted)',
-                      borderBottom: '1px solid var(--border)',
-                      borderTop: displayIdx > 0 ? '1px solid var(--border)' : undefined,
-                      fontSize: 11,
-                      fontWeight: 600,
-                      color: 'var(--muted-foreground)',
-                      textTransform: 'uppercase',
-                      letterSpacing: '0.05em',
-                      cursor: 'pointer',
-                      userSelect: 'none',
-                    }}
-                    onClick={() => toggleGroup(row.key)}
-                  >
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                      {collapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
-                      {row.memberColors && row.memberColors.length > 0 && (
-                        <div style={{ display: 'flex', flexShrink: 0 }}>
-                          {row.memberColors.map((c, i) => (
-                            <div
-                              key={i}
-                              style={{
-                                width: 9,
-                                height: 9,
-                                borderRadius: '50%',
-                                background: c,
-                                marginLeft: i === 0 ? 0 : -3,
-                                outline: '1.5px solid var(--muted)',
-                              }}
-                            />
-                          ))}
-                        </div>
-                      )}
-                      {row.label}
-                      <span style={{ fontWeight: 400, opacity: 0.6 }}>({row.count})</span>
-                    </div>
-                  </td>
-                </tr>
-              );
-            }
-
-            // ── Activity row ─────────────────────────────────────────────────
-            const { activity, depth, hasChildren, groupKey } = row;
-            const actRowIdx = activityRows.indexOf(row);
-            const isSelected = actRowIdx === selectedRowIdx;
-            const isDetailOpen = activity.id === selectedActivityId;
-            const isMatch = debouncedQuery && matchedIds.includes(activity.id);
-            const isActiveMatch = activity.id === activeMatchId;
-            const isDimmed = debouncedQuery && matchedIds.length > 0 && !isMatch;
-
-            const rowStyle: React.CSSProperties = {
-              height: rowH,
-              opacity: isDimmed ? 0.3 : 1,
-              background: isDetailOpen
-                ? 'var(--muted)'
-                : isSelected
-                ? 'color-mix(in srgb, var(--primary) 8%, var(--background))'
-                : 'transparent',
-              cursor: 'default',
-              outline: isActiveMatch
-                ? '2px solid #f59e0b'
-                : isMatch
-                ? '1px solid rgba(245,158,11,0.6)'
-                : undefined,
-              transition: 'background 0.1s ease, opacity 0.15s ease',
-            };
-
-            return (
-              <tr
-                key={activity.id}
-                ref={isActiveMatch ? el => { (activeRowRef as React.MutableRefObject<HTMLTableRowElement | null>).current = el } : undefined}
-                style={rowStyle}
-                onMouseEnter={() => setHoveredRowId(activity.id)}
-                onMouseLeave={() => setHoveredRowId(null)}
-                onClick={e => {
-                  e.stopPropagation();
-                  setSelectedRowIdx(actRowIdx);
-                  onSelectActivity?.(activity.id);
-                  // intentionally no onSelectApiActivity — edits happen inline
-                }}
-                onContextMenu={e => {
-                  e.preventDefault();
-                  setContextMenuFor(activity.id);
-                  setContextMenuPos({ top: e.clientY, left: e.clientX });
-                }}
-              >
-                {visibleHeaders.map((header, colIdx) => {
-                  const colId = header.id;
-                  const isPinned = header.column.getIsPinned() === 'left';
-                  const isCellSelected = isSelected && colIdx === selectedColIdx;
-                  const isEditing = editingCell?.rowIdx === actRowIdx && editingCell.colIdx === colIdx;
-                  const meta = COL_CATALOG.find(c => c.id === colId)!;
-
-                  const cellStyle: React.CSSProperties = {
-                    width: header.getSize(),
-                    maxWidth: header.getSize(),
-                    padding: '0 8px',
-                    borderBottom: '1px solid color-mix(in srgb, var(--border) 60%, transparent)',
-                    fontSize: 12,
-                    color: 'var(--foreground)',
-                    overflow: 'hidden',
-                    whiteSpace: 'nowrap',
-                    textOverflow: 'ellipsis',
-                    position: isPinned ? 'sticky' : undefined,
-                    left: isPinned ? pinnedLeft[colId] : undefined,
-                    zIndex: isPinned ? 2 : undefined,
-                    background: isPinned
-                      ? (isDetailOpen ? 'var(--muted)' : isSelected ? 'color-mix(in srgb, var(--primary) 8%, var(--background))' : 'var(--background)')
-                      : undefined,
-                    boxShadow: isPinned ? '2px 0 4px rgba(0,0,0,0.06)' : undefined,
-                    outline: isCellSelected && !isEditing ? '2px solid var(--primary)' : undefined,
-                    outlineOffset: '-2px',
-                    verticalAlign: 'middle',
-                    cursor: (meta.editType === 'text' || meta.editType === 'date' || meta.editType === 'number')
-                      ? 'text'
-                      : (meta.editType !== 'none' ? 'pointer' : 'default'),
-                  };
-
-                  // ── Cell content ──────────────────────────────────────────
-
-                  // Editing mode — inline input
-                  if (isEditing && meta.editType !== 'none' && meta.editType !== 'status') {
-                    return (
-                      <td key={colId} style={{ ...cellStyle, padding: 0, overflow: 'visible' }}>
-                        <input
-                          ref={editInputRef}
-                          type={meta.editType === 'date' ? 'date' : meta.editType === 'number' ? 'number' : 'text'}
-                          min={meta.editType === 'number' ? 0 : undefined}
-                          max={meta.editType === 'number' ? 100 : undefined}
-                          value={editingCell.value}
-                          onChange={e => setEditingCell(prev => prev ? { ...prev, value: e.target.value } : prev)}
-                          onKeyDown={e => {
-                            e.stopPropagation();
-                            if (e.key === 'Escape') { cancelEdit(); e.preventDefault(); }
-                            else if (e.key === 'Enter') { commitAndMove('down'); e.preventDefault(); }
-                            else if (e.key === 'Tab') { commitAndMove(e.shiftKey ? 'left' : 'right'); e.preventDefault(); }
-                          }}
-                          onBlur={() => {
-                            commitEdit(editingCell.rowIdx, visibleColIds[editingCell.colIdx], editingCell.value);
-                            setEditingCell(null);
-                          }}
-                          style={{
-                            width: '100%',
-                            height: rowH,
-                            padding: '0 8px',
-                            background: 'var(--background)',
-                            border: 'none',
-                            outline: '2px solid var(--primary)',
-                            outlineOffset: '-2px',
-                            fontSize: 12,
-                            color: 'var(--foreground)',
-                            fontFamily: 'var(--font-sans)',
-                          }}
-                          onClick={e => e.stopPropagation()}
-                        />
-                      </td>
-                    );
-                  }
-
-                  // Color bar + row checkbox — 32px pinned cell
-                  if (colId === 'colorBar') {
-                    const isRowChecked = selectedActivityIds.has(activity.id);
-                    const showCb = isRowChecked || selectedActivityIds.size > 0 || hoveredRowId === activity.id;
-                    return (
-                      <td
-                        key={colId}
-                        style={{
-                          width: 18,
-                          maxWidth: 18,
-                          padding: 0,
-                          borderBottom: '1px solid color-mix(in srgb, var(--border) 60%, transparent)',
-                          position: 'sticky',
-                          left: pinnedLeft[colId] ?? 0,
-                          zIndex: 2, // pinned body cell — below header z-index (4)
-                          background: isDetailOpen
-                              ? 'var(--muted)'
-                              : isSelected
-                              ? 'color-mix(in srgb, var(--primary) 8%, var(--background))'
-                              : 'var(--background)',
-                          cursor: 'default',
-                        }}
-                        onClick={e => {
-                          e.stopPropagation();
-                          setSelectedActivityIds(prev => {
-                            const next = new Set(prev);
-                            if (next.has(activity.id)) next.delete(activity.id);
-                            else next.add(activity.id);
-                            return next;
-                          });
-                        }}
-                      >
-                        <div style={{
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          height: rowH,
-                          opacity: showCb ? 1 : 0,
-                          transition: 'opacity 0.1s',
-                        }}>
-                          <input
-                            type="checkbox"
-                            checked={isRowChecked}
-                            onChange={() => {}}
-                            onClick={e => e.stopPropagation()}
-                            style={{ cursor: 'pointer', width: 13, height: 13, pointerEvents: 'none' }}
-                          />
-                        </div>
-                      </td>
-                    );
-                  }
-
-                  // Identity cell — shows badge; click opens identity picker portal
-                  if (colId === 'identity') {
-                    return (
-                      <td
-                        key={colId}
-                        style={{ ...cellStyle, cursor: 'pointer' }}
-                        onClick={e => {
-                          e.stopPropagation();
-                          setSelectedRowIdx(actRowIdx);
-                          onSelectActivity?.(activity.id);
-                          if (identityPickerFor === activity.id) {
-                            closeIdentityPicker();
-                          } else {
-                            closeStatusPicker(); closeAssigneePicker(); closeTagPicker(); closeParentPicker();
-                            const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-                            setIdentityPickerFor(activity.id);
-                            setIdentityPickerPos(popoverPos(rect, 240, 320));
-                          }
-                        }}
-                      >
-                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                          <Badge
-                            identity={{
-                              color: getRowAccentColor(activity) ?? resolveColorHex(activity.color ?? null) ?? '#288C9B',
-                              icon: activity.icon ?? '__name_2__',
-                            }}
-                            name={activity.title}
-                            shape="square"
-                            size={28}
-                          />
-                        </div>
-                      </td>
-                    );
-                  }
-
-                  // Status cell — click to open picker (portal, escapes scroll overflow)
-                  if (colId === 'status') {
-                    const status = activity.statusId ? statusById.get(activity.statusId) : null;
-                    return (
-                      <td
-                        key={colId}
-                        style={{ ...cellStyle, cursor: 'pointer' }}
-                        onClick={e => {
-                          e.stopPropagation();
-                          setSelectedRowIdx(actRowIdx);
-                          onSelectActivity?.(activity.id);
-                          if (statusPickerFor === activity.id) {
-                            closeStatusPicker();
-                          } else {
-                            closeAssigneePicker(); closeTagPicker(); closeParentPicker(); closeIdentityPicker();
-                            const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-                            setStatusPickerFor(activity.id);
-                            setStatusPickerPos(popoverPos(rect, 160, 220));
-                          }
-                        }}
-                      >
-                        {status ? (
-                          <span
-                            style={{
-                              display: 'inline-flex',
-                              alignItems: 'center',
-                              gap: 5,
-                              padding: '2px 8px',
-                              borderRadius: 4,
-                              fontSize: 11,
-                              fontWeight: 500,
-                              background: `color-mix(in srgb, ${resolveColorHex(status.color ?? null) ?? '#888'} 15%, transparent)`,
-                              color: resolveColorHex(status.color ?? null) ?? 'var(--foreground)',
-                              border: `1px solid ${resolveColorHex(status.color ?? null) ?? '#888'}40`,
-                            }}
-                          >
-                            <span
-                              style={{
-                                width: 7,
-                                height: 7,
-                                borderRadius: '50%',
-                                background: resolveColorHex(status.color ?? null) ?? '#888',
-                                flexShrink: 0,
-                              }}
-                            />
-                            {status.name}
-                          </span>
-                        ) : (
-                          <span style={{ color: 'var(--muted-foreground)', fontSize: 12 }}>—</span>
-                        )}
-                      </td>
-                    );
-                  }
-
-                  // Assignees cell — overlapping badges; click opens picker
-                  if (colId === 'assignees') {
-                    const ids = activity.assignedMemberIds ?? [];
-                    return (
-                      <td key={colId} style={cellStyle} onClick={e => {
-                        e.stopPropagation();
-                        setSelectedRowIdx(actRowIdx);
-                        onSelectActivity?.(activity.id);
-                        if (assigneePickerFor === activity.id) {
-                          closeAssigneePicker();
-                        } else {
-                          closeStatusPicker(); closeTagPicker(); closeParentPicker(); closeIdentityPicker();
-                          const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-                          setAssigneePickerFor(activity.id);
-                          setAssigneePickerPos(popoverPos(rect, 180, 240));
-                        }
-                      }}>
-                        <div style={{ display: 'flex', alignItems: 'center', overflow: 'hidden' }}>
-                          {ids.slice(0, 4).map((mid, i) => {
-                            const m = memberById.get(mid);
-                            if (!m) return null;
-                            return (
-                              <div key={mid} style={{ marginLeft: i === 0 ? 0 : -6 }} title={m.displayName}>
-                                <Badge
-                                  identity={{ color: resolveColorHex(m.color ?? null) ?? '#288C9B', icon: m.icon ?? '__name_2__' }}
-                                  name={m.displayName}
-                                  shape="circle"
-                                  size={22}
-                                />
-                              </div>
-                            );
-                          })}
-                          {ids.length > 4 && (
-                            <span style={{ fontSize: 10, color: 'var(--muted-foreground)', marginLeft: 4 }}>+{ids.length - 4}</span>
-                          )}
-                          {ids.length === 0 && (
-                            <span style={{ color: 'var(--muted-foreground)', fontSize: 12 }}>—</span>
-                          )}
-                        </div>
-                      </td>
-                    );
-                  }
-
-                  // Tags cell — click opens tag picker
-                  if (colId === 'tags') {
-                    const tagList = (activity.tagIds ?? [])
-                      .map(tid => tags.find(t => t.id === tid))
-                      .filter(Boolean) as Tag[];
-                    return (
-                      <td key={colId} style={cellStyle} onClick={e => {
-                        e.stopPropagation();
-                        setSelectedRowIdx(actRowIdx);
-                        onSelectActivity?.(activity.id);
-                        if (tagPickerFor === activity.id) {
-                          closeTagPicker();
-                        } else {
-                          closeStatusPicker(); closeAssigneePicker(); closeParentPicker(); closeIdentityPicker();
-                          const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-                          setTagPickerFor(activity.id);
-                          setTagPickerPos(popoverPos(rect, 220, 300));
-                        }
-                      }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 4, overflow: 'hidden', flexWrap: 'nowrap' }}>
-                          {tagList.slice(0, 3).map(t => (
-                            <span
-                              key={t.id}
-                              style={{
-                                padding: '1px 6px',
-                                borderRadius: 4,
-                                fontSize: 10,
-                                background: resolveColorHex(t.color ?? null)
-                                  ? `color-mix(in srgb, ${resolveColorHex(t.color ?? null)} 18%, transparent)`
-                                  : 'var(--muted)',
-                                color: resolveColorHex(t.color ?? null) ?? 'var(--foreground)',
-                                border: `1px solid ${resolveColorHex(t.color ?? null) ?? 'var(--border)'}40`,
-                                whiteSpace: 'nowrap',
-                              }}
-                            >
-                              {t.name}
-                            </span>
-                          ))}
-                          {tagList.length > 3 && (
-                            <span style={{ fontSize: 10, color: 'var(--muted-foreground)' }}>+{tagList.length - 3}</span>
-                          )}
-                          {tagList.length === 0 && (
-                            <span style={{ color: 'var(--muted-foreground)', fontSize: 12 }}>—</span>
-                          )}
-                        </div>
-                      </td>
-                    );
-                  }
-
-                  // Progress cell
-                  if (colId === 'progress') {
-                    const pct = activity.percentComplete ?? 0;
-                    return (
-                      <td key={colId} style={cellStyle} onClick={e => {
-                          e.stopPropagation();
-                          setSelectedRowIdx(actRowIdx);
-                          onSelectActivity?.(activity.id);
-                          enterEdit(actRowIdx, colIdx);
-                        }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                          <div
-                            style={{
-                              flex: 1,
-                              height: 4,
-                              background: 'var(--border)',
-                              borderRadius: 2,
-                              overflow: 'hidden',
-                            }}
-                          >
-                            <div
-                              style={{
-                                height: '100%',
-                                width: `${pct}%`,
-                                background: 'var(--primary)',
-                                borderRadius: 2,
-                                transition: 'width 0.2s',
-                              }}
-                            />
-                          </div>
-                          <span style={{ fontSize: 11, color: 'var(--muted-foreground)', flexShrink: 0 }}>
-                            {pct}%
-                          </span>
-                        </div>
-                      </td>
-                    );
-                  }
-
-                  // Parent cell — click opens parent picker
-                  if (colId === 'parent') {
-                    const parent = activity.parentActivityId ? activityById.get(activity.parentActivityId) : null;
-                    return (
-                      <td key={colId} style={cellStyle} onClick={e => {
-                        e.stopPropagation();
-                        setSelectedRowIdx(actRowIdx);
-                        onSelectActivity?.(activity.id);
-                        if (parentPickerFor === activity.id) {
-                          closeParentPicker();
-                        } else {
-                          closeStatusPicker(); closeAssigneePicker(); closeTagPicker(); closeIdentityPicker();
-                          const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-                          setParentPickerFor(activity.id);
-                          setParentPickerPos(popoverPos(rect, 220, 280));
-                        }
-                      }}>
-                        <span style={{ color: parent ? 'var(--foreground)' : 'var(--muted-foreground)' }}>
-                          {parent ? parent.title : '—'}
-                        </span>
-                      </td>
-                    );
-                  }
-
-                  // Duration cell
-                  if (colId === 'duration') {
-                    return (
-                      <td key={colId} style={cellStyle}>
-                        <span style={{ color: 'var(--muted-foreground)' }}>
-                          {formatDuration(activity.startAt, activity.endAt)}
-                        </span>
-                      </td>
-                    );
-                  }
-
-                  // Date cells — single click to edit
-                  if (colId === 'startAt' || colId === 'endAt') {
-                    const iso = colId === 'startAt' ? activity.startAt : activity.endAt;
-                    return (
-                      <td
-                        key={colId}
-                        style={cellStyle}
-                        onClick={e => {
-                          e.stopPropagation();
-                          setSelectedRowIdx(actRowIdx);
-                          onSelectActivity?.(activity.id);
-                          enterEdit(actRowIdx, colIdx);
-                        }}
-                      >
-                        <span style={{ color: iso ? 'var(--foreground)' : 'var(--muted-foreground)' }}>
-                          {formatActivityDate(iso)}
-                        </span>
-                      </td>
-                    );
-                  }
-
-                  // Created/Updated cells
-                  if (colId === 'createdAt' || colId === 'updatedAt') {
-                    const iso = colId === 'createdAt' ? activity.createdAt : activity.updatedAt;
-                    return (
-                      <td key={colId} style={cellStyle}>
-                        <span style={{ color: 'var(--muted-foreground)' }}>
-                          {formatTimestamp(iso)}
-                        </span>
-                      </td>
-                    );
-                  }
-
-                  // Text cells (title, description, location, url, notes)
-                  let textVal = '';
-                  if (colId === 'title') textVal = activity.title;
-                  else if (colId === 'description') textVal = activity.description ?? '';
-                  else if (colId === 'location') textVal = activity.location ?? '';
-                  else if (colId === 'url') textVal = activity.url ?? '';
-                  else if (colId === 'notes') textVal = (activity as ApiActivity & { notes?: string | null }).notes ?? '';
-
-                  return (
-                    <td
-                      key={colId}
-                      style={{ ...cellStyle, fontWeight: colId === 'title' ? 500 : 400 }}
-                      onClick={e => {
-                        e.stopPropagation();
-                        setSelectedRowIdx(actRowIdx);
-                        onSelectActivity?.(activity.id);
-                        if (meta.editable && meta.editType === 'text') enterEdit(actRowIdx, colIdx);
-                      }}
-                    >
-                      {colId === 'title' && groupBy === 'parent' ? (
-                        // Parent-group mode: show indent + collapse toggle
-                        <span style={{ display: 'flex', alignItems: 'center', gap: 4, paddingLeft: depth * 16 }}>
-                          {hasChildren ? (
-                            <span
-                              onClick={e => { e.stopPropagation(); toggleGroup(groupKey); }}
-                              style={{ cursor: 'pointer', flexShrink: 0, color: 'var(--muted-foreground)', display: 'flex', alignItems: 'center' }}
-                            >
-                              {collapsedGroups.has(groupKey) ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
-                            </span>
-                          ) : depth > 0 ? (
-                            <span style={{ width: 13, flexShrink: 0 }} />
-                          ) : null}
-                          <span title={textVal} style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
-                            {textVal || '—'}
-                          </span>
-                        </span>
-                      ) : (
-                        <span
-                          title={textVal}
-                          style={{
-                            display: 'block',
-                            overflow: 'hidden',
-                            textOverflow: 'ellipsis',
-                            whiteSpace: 'nowrap',
-                            color: textVal ? 'var(--foreground)' : 'var(--muted-foreground)',
-                          }}
-                        >
-                          {textVal || '—'}
-                        </span>
-                      )}
-                    </td>
-                  );
-                })}
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-      </DndContext>
-
-      {/* Status picker portal */}
-      {statusPickerFor && statusPickerPos && statusPickerActivity &&
-        createPortal(
-          <StatusPicker
-            value={statusPickerActivity.statusId}
-            statuses={timelineStatuses}
-            onChange={statusId => {
-              update.mutate({ activityId: statusPickerFor, patch: { statusId } });
-              closeStatusPicker();
-            }}
-            onClose={closeStatusPicker}
-            positionStyle={{ position: 'fixed', top: statusPickerPos.top, left: statusPickerPos.left }}
-          />,
-          document.body,
-        )
-      }
-
-      {/* Assignee picker portal */}
-      {assigneePickerFor && assigneePickerPos &&
-        createPortal(
-          <AssigneePicker
-            members={members}
-            selectedIds={activityById.get(assigneePickerFor)?.assignedMemberIds ?? []}
-            onToggle={memberId => {
-              const activity = activityById.get(assigneePickerFor);
-              if (!activity) return;
-              const current = activity.assignedMemberIds ?? [];
-              const next = current.includes(memberId)
-                ? current.filter(id => id !== memberId)
-                : [...current, memberId];
-              update.mutate({ activityId: assigneePickerFor, patch: { assignedMemberIds: next } });
-            }}
-            onClose={closeAssigneePicker}
-            positionStyle={{ position: 'fixed', top: assigneePickerPos.top, left: assigneePickerPos.left }}
-          />,
-          document.body,
-        )
-      }
-
-      {/* Tag picker portal */}
-      {tagPickerFor && tagPickerPos &&
-        createPortal(
-          <TagPicker
-            teamId={teamId}
-            tags={tags}
-            selectedTagIds={(activityById.get(tagPickerFor)?.tagIds as string[] | undefined) ?? []}
-            onChange={ids => {
-              update.mutate({ activityId: tagPickerFor, patch: { tagIds: ids } as Partial<ApiActivity> });
-            }}
-            onClose={closeTagPicker}
-            positionStyle={{ position: 'fixed', top: tagPickerPos.top, left: tagPickerPos.left }}
-          />,
-          document.body,
-        )
-      }
-
-      {/* Parent picker portal */}
-      {parentPickerFor && parentPickerPos &&
-        createPortal(
-          <ParentPicker
-            activities={rawActivities.filter(a => a.id !== parentPickerFor)}
-            value={activityById.get(parentPickerFor)?.parentActivityId}
-            onChange={id => {
-              update.mutate({ activityId: parentPickerFor, patch: { parentActivityId: id } as Partial<ApiActivity> });
-              closeParentPicker();
-            }}
-            onClose={closeParentPicker}
-            positionStyle={{ position: 'fixed', top: parentPickerPos.top, left: parentPickerPos.left }}
-          />,
-          document.body,
-        )
-      }
-
-      {/* Identity picker portal */}
-      {identityPickerFor && identityPickerPos && (() => {
-        const identityActivity = activityById.get(identityPickerFor);
-        if (!identityActivity) return null;
-        return createPortal(
-          <div
-            ref={identityPickerRef}
-            style={{
-              position: 'fixed',
-              top: identityPickerPos.top,
-              left: identityPickerPos.left,
-              zIndex: 9999,
-              boxShadow: '0 8px 24px rgba(0,0,0,0.15)',
-              borderRadius: 10,
-              border: '1px solid var(--border)',
-              overflow: 'hidden',
-            }}
-          >
-            <IdentityPicker
-              identity={{
-                color: resolveColorHex(identityActivity.color ?? null) ?? '#288C9B',
-                icon: identityActivity.icon ?? '__name_2__',
-              }}
-              name={identityActivity.title}
-              shape="square"
-              onChange={(next: Identity) => {
-                update.mutate({ activityId: identityPickerFor, patch: { color: next.color, icon: next.icon } });
-              }}
-            />
-          </div>,
-          document.body,
-        );
-      })()}
-
-      {/* Row context menu portal */}
-      {contextMenuFor && contextMenuPos && createPortal(
-        <ContextMenu
-          pos={contextMenuPos}
-          onArchive={() => {
-            archiveAct.mutate(contextMenuFor, {
-              onSuccess: () => showToast('Activity archived'),
-            });
-            closeContextMenu();
-          }}
-          onDelete={() => {
-            deleteAct.mutate(contextMenuFor, {
-              onSuccess: () => showToast('Activity deleted'),
-            });
-            closeContextMenu();
-            if (contextMenuFor === selectedActivityId) onSelectActivity?.(null);
-          }}
-          onClose={closeContextMenu}
-        />,
-        document.body,
-      )}
-
-      {/* Toast notification */}
-      {toast && (
-        <div
-          style={{
-            position: 'fixed',
-            bottom: 20,
-            right: 20,
-            zIndex: 9999,
-            background: 'var(--card)',
-            border: '1px solid var(--border)',
-            borderRadius: 8,
-            padding: '8px 14px',
-            fontSize: 12,
-            color: 'var(--foreground)',
-            boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
-            display: 'flex',
-            alignItems: 'center',
-            gap: 8,
-            pointerEvents: 'none',
-          }}
-        >
-          <Check size={13} strokeWidth={2.5} style={{ color: 'var(--primary)', flexShrink: 0 }} />
-          {toast}
-        </div>
-      )}
-    </div>
-  );
-}
 ````
 
 ## File: packages/web/src/components/ShareModal.tsx
@@ -65574,6 +65585,19 @@ Includes both the webhook backend and the per-timeline connector sidebar UI (pre
 
 ---
 
+## 2026-06-11 — /review-phase 13.4: findings addressed
+
+Four-agent review (scope / security / conventions / test-coverage) of the 13.4 commit range. Conventions and scope came back clean; fixes applied for the rest:
+
+- **Revoked/expired feed paths now tested (was the one blocker):** `serveICSFeed` returns `410 Gone` for `revoked_at`/`expires_at`, but nothing exercised it. New `TestShareICS_RevokedAndExpiredFeeds_Gone` warms the feed cache, flips the row directly in the DB (no endpoint sets these fields until 13.5), and asserts 410 wins over the warm cache. Required a `newTestServerWithDB` harness variant exposing the in-memory `*sqlx.DB`.
+- **ICS escaping hardened:** `escapeText` now folds a bare CR into the `\n` escape and drops remaining C0/DEL control chars (HTAB kept) — a lenient parser splitting on stray CR could otherwise read injected property lines from user-controlled titles/descriptions. Covered by `TestCalendar_EscapesBareCRAndControlChars`.
+- **log.md scrubbed of host-specific values** (LAN hostname/port, SSH alias) per the REVIEW.md secrets grep — generic phrasing throughout, not just the 13.4 additions. The values remain in operational docs (TESTING.md, session-state, web CLAUDE.md, reset script) — a separate policy call.
+- **ROADMAP 13.4 updated** to document the shipped VEVENT payload (status/percent, assignee display names, tags in DESCRIPTION/CATEGORIES, assignees in SUMMARY on whole-timeline feeds).
+- Review also confirmed the warm-cache regenerate suggestion was already covered by `TestShareRegenerate_InvalidatesOldToken`; nits (predictable sample-data tokens, regenerate working for view shares too, no direct migration assertions) accepted as negligible.
+- `go test ./internal/ics/... ./internal/api/...` pass.
+
+---
+
 ## 2026-06-10 — Phase 13.4 feed polish (Thunderbird feedback): named URLs + event fields
 
 Second round of user-testing feedback: subscribing in Thunderbird defaulted the calendar name to the token hash, and events carried no draba fields.
@@ -65654,7 +65678,7 @@ User testing against the Docker instance surfaced two issues; both fixed, plus f
 
 **Checks:** `golangci-lint run` ✅ · `go test ./...` ✅ · `pnpm --filter web lint` ✅ · `pnpm --filter web build` ✅ · `pnpm --filter web test` ✅ (292).
 
-**Not browser-verified yet:** same as 13.2 — the running Docker instance (`epcot.lan:8081`) predates the gateway changes; deferred to the Docker rebuild pass. Suggest `/test-phase 13.3` and `/review-phase 13.3` to fan verification across subagents.
+**Not browser-verified yet:** same as 13.2 — the running Docker instance (the LAN test instance) predates the gateway changes; deferred to the Docker rebuild pass. Suggest `/test-phase 13.3` and `/review-phase 13.3` to fan verification across subagents.
 
 ---
 
@@ -65662,7 +65686,7 @@ User testing against the Docker instance surfaced two issues; both fixed, plus f
 
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
 - Result: 8 pass (ws-smoke: 3 assertions skipped — no websocat on Windows dev box; broadcast/isolation/full-heartbeat covered by unit tests)
-- Smoke target: http://epcot.lan:8081
+- Smoke target: the LAN test instance
 
 ---
 
@@ -65687,7 +65711,7 @@ User testing against the Docker instance surfaced two issues; both fixed, plus f
 
 **Checks:** `golangci-lint run` ✅ · `go test ./...` ✅ · `pnpm --filter web lint` ✅ · `pnpm --filter web build` ✅ · `pnpm --filter web test` ✅ (292).
 
-**Not browser-verified yet:** the running Docker instance (`epcot.lan:8081`) predates this work, so it can't exercise the new gateway; deferred to the Docker rebuild pass along with the other unverified phases.
+**Not browser-verified yet:** the running Docker instance (the LAN test instance) predates this work, so it can't exercise the new gateway; deferred to the Docker rebuild pass along with the other unverified phases.
 
 ---
 
@@ -65727,7 +65751,7 @@ User testing against the Docker instance surfaced two issues; both fixed, plus f
 
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
 - Result: 6 pass, 2 pass-with-skips (ws-smoke: heartbeat skipped per TESTING.md; web-e2e: live browser skipped, static assertions pass)
-- Smoke target: http://epcot.lan:8081
+- Smoke target: the LAN test instance
 - Note: security-review flagged a non-blocking PII concern — `share_handler.go:249` falls back to email as display name when `DisplayName` is unset, which can expose member emails in public share responses
 
 ---
@@ -65773,7 +65797,7 @@ User testing against the Docker instance surfaced two issues; both fixed, plus f
 
 ## 2026-06-04 — Phase 12: Communications Testing
 
-**Goal:** Automated coverage for every outbound email flow, then live end-to-end validation against Docker (`epcot.lan:8081`) with a real Gmail SMTP account.
+**Goal:** Automated coverage for every outbound email flow, then live end-to-end validation against Docker (the LAN test instance) with a real Gmail SMTP account.
 
 **Test infrastructure & coverage (`packages/api`):**
 - `internal/api/smtp_capture_test.go` (new): `newTestSMTPServer(t)` — an in-process TCP SMTP server that speaks just enough of the protocol (advertises no extensions, so the client uses the plain no-STARTTLS/no-auth path) and captures every message. Exposes `host()`/`port()`/`messages()`/`reset()`.
@@ -65784,13 +65808,13 @@ User testing against the Docker instance surfaced two issues; both fixed, plus f
 - `handleCreateInvite` (`team_handler.go`) now emails the invite link (`{DRABA_BASE_URL}/register?token=…`) when an address is supplied — best-effort, logged-not-fatal, no-op when SMTP is unconfigured or the invite is link-only. Previously it created the token but never sent mail, so the flow was untestable.
 
 **Bugs found during live validation & fixed:**
-- **Broken outbound links:** `getBaseURL()` falls back to `http://localhost:8080` when `DRABA_BASE_URL` is unset, so every emailed link (reset, invite) pointed at localhost. Documented the variable in `docker-compose.yml`; the live fix was adding `DRABA_BASE_URL=http://epcot.lan:8081` to the Portainer `api` stack and restarting.
+- **Broken outbound links:** `getBaseURL()` falls back to `http://localhost:8080` when `DRABA_BASE_URL` is unset, so every emailed link (reset, invite) pointed at localhost. Documented the variable in `docker-compose.yml`; the live fix was setting `DRABA_BASE_URL` to the instance public URL in the Portainer `api` stack and restarting.
 - **No reset-success feedback:** `ResetPasswordPage` routed a success message to `/login`, but `LoginPage` never read `location.state.message`, so a completed reset looked like a silent failure. `LoginPage` now renders the notice (green banner, suppressed once a server error shows).
 
 **Onboarding UX follow-up (Brian request):**
 - `RegisterPage` now requires password confirmation (enter twice) with a live "Passwords don't match" warning and a submit gated until they match. Verified in preview (mismatch → warning + disabled; match → enabled).
 
-**Live validation (Docker, real Gmail SMTP):** password-reset email ✓, invite email ✓ (created "TEST PERSON" via the invite → register flow), both links correctly `epcot.lan:8081`. SMTP connection confirmed via delivered mail.
+**Live validation (Docker, real Gmail SMTP):** password-reset email ✓, invite email ✓ (created "TEST PERSON" via the invite → register flow), both links correctly pointed at the LAN test instance. SMTP connection confirmed via delivered mail.
 
 **Checks:** `go test ./...` clean; `golangci-lint run` clean; `pnpm --filter web lint` clean.
 
@@ -65841,7 +65865,7 @@ User testing against the Docker instance surfaced two issues; both fixed, plus f
 
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
 - Result: 8/8 pass (web-e2e verified with live browser automation: unauthenticated redirect ✓, login + token stored ✓, 10+ API calls 200 OK ✓, zero WS errors ✓)
-- Smoke target: http://epcot.lan:8081
+- Smoke target: the LAN test instance
 
 ---
 
@@ -65849,7 +65873,7 @@ User testing against the Docker instance surfaced two issues; both fixed, plus f
 
 - Subagents run: static-check, unit-test (Go + Vitest), schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
 - Result: 7 pass, 1 skip (ws-smoke heartbeat 3rd cycle; 30s interval requires ~90s — unit tests cover at speed)
-- Smoke target: http://epcot.lan:8081
+- Smoke target: the LAN test instance
 - Notable: web-e2e confirmed calendar Month/Week layout, navigation, and tab switching; pre-existing `<TimelineItem>` render error in sidebar noted (unrelated to Phase 11.2)
 
 ---
@@ -65884,7 +65908,7 @@ User testing against the Docker instance surfaced two issues; both fixed, plus f
 
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
 - Result: all pass (1 skip — ws-smoke heartbeat; covered by unit tests)
-- Smoke target: http://epcot.lan:8081
+- Smoke target: the LAN test instance
 - Note: api-smoke assertion 18 (non-member authz) initially flagged as FAIL — investigated and confirmed false positive. The smoke subagent's "non-member" user had registered via the bootstrap-team invite and was therefore a member. Direct reproduction confirmed `requireTeamMember` returns 403 for a genuine non-member. TESTING.md Phase 3 assertion 18 updated with setup guidance.
 
 ---
@@ -65946,7 +65970,7 @@ User testing against the Docker instance surfaced two issues; both fixed, plus f
 
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
 - Result: all pass (schema-check and type-sync required fixes before passing — TESTING.md assertions corrected to match actual table names; generated index.ts re-committed)
-- Smoke target: http://epcot.lan:8081
+- Smoke target: the LAN test instance
 
 ---
 
@@ -66004,7 +66028,7 @@ User testing against the Docker instance surfaced two issues; both fixed, plus f
 
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
 - Result: all pass (0 fail, 0 skip)
-- Smoke target: http://epcot.lan:8081
+- Smoke target: the LAN test instance
 - Notes: type-sync notes activity endpoints are timeline-scoped (`/teams/{id}/timelines/{timelineId}/activities`) rather than the flat path in Phase 3 TESTING.md assertions — this is the accepted design; TESTING.md assertions for those two paths are outdated. web-e2e WS heartbeat not directly introspectable from browser JS (app WS client is encapsulated), but no WS errors present and unit tests cover heartbeat behavior.
 
 ---
@@ -66168,7 +66192,7 @@ User testing against the Docker instance surfaced two issues; both fixed, plus f
 
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
 - Result: 7 pass, 1 skip (ws-smoke — websocat/wscat not installed on dev box; heartbeat covered by unit tests)
-- Smoke target: http://epcot.lan:8081
+- Smoke target: the LAN test instance
 
 ---
 
@@ -66228,7 +66252,7 @@ User testing against the Docker instance surfaced two issues; both fixed, plus f
 
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke
 - Result: 7 pass, 0 fail, 0 skip (web-e2e not run — no Phase 10.4.2 assertions defined)
-- Smoke target: http://epcot.lan:8081
+- Smoke target: the LAN test instance
 
 ---
 
@@ -66295,7 +66319,7 @@ User testing against the Docker instance surfaced two issues; both fixed, plus f
 
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
 - Result: all pass (ws-smoke heartbeat 3-cycle skipped — 30s server interval exceeds smoke budget, mechanism verified in code; web-e2e browser runtime skipped — dev server not confirmed running, all assertions pass code-level)
-- Smoke target: http://epcot.lan:8081
+- Smoke target: the LAN test instance
 - Note: TESTING.md Phase 2 schema-check table list updated (old names `team_statuses`, `events`, `event_tags`, `event_assignments` → current names)
 
 ---
@@ -66341,7 +66365,7 @@ User testing against the Docker instance surfaced two issues; both fixed, plus f
 
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
 - Result: 8 pass (ws-smoke: assertion 2 skipped — single-team test DB; assertion 3 partial — 30s heartbeat cadence, unit tests cover at speed)
-- Smoke target: http://epcot.lan:8081
+- Smoke target: the LAN test instance
 - Notes: `GET /activities?from=&to=` returns 400 (param names differ from Phase 3 spec); `POST /auth/register` requires `displayName` field not in spec — both are spec gaps, not runtime failures
 
 ---
@@ -66377,7 +66401,7 @@ User testing against the Docker instance surfaced two issues; both fixed, plus f
 
 **Automated:** `golangci-lint run` clean, `go test ./...` all pass, `pnpm --filter web lint` clean.
 
-**Pending manual verification (against epcot.lan:8081):** see TASKS.md checklist.
+**Pending manual verification (against the LAN test instance):** see TASKS.md checklist.
 
 ---
 
@@ -66389,7 +66413,7 @@ User testing against the Docker instance surfaced two issues; both fixed, plus f
 - Rephrased `is_closed` checkbox label in `StatusTemplatesTab.tsx` to remove forward-reference to "Hide closed" filter (Phase 10.3 scope)
 - Replaced mojibake em-dashes (`â€"`) with hyphens in 4 test files: `team_handler_test.go`, `activity_handler_test.go`, `saved_filter_handler_test.go`, `timeline_handler_test.go`
 
-**Docker verification (epcot.lan:8081):** ✅ passed
+**Docker verification (the LAN test instance):** ✅ passed
 - Default template seeded on team create; template CRUD, item CRUD, and last-item/last-template guards all work from UI
 - New timeline correctly copies template statuses (verified via API)
 - Non-admin sees templates read-only
@@ -66402,7 +66426,7 @@ User testing against the Docker instance surfaced two issues; both fixed, plus f
 ## 2026-05-27 — /test-phase 10.2
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
 - Result: 7 pass, 1 partial-skip (ws-smoke: heartbeat full 3-cycle skipped per time budget; unit tests cover at speed)
-- Smoke target: http://epcot.lan:8081
+- Smoke target: the LAN test instance
 
 ---
 
@@ -66503,7 +66527,7 @@ Post-review fixes across security, tests, spec, and conventions:
 
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
 - Result: all pass (8/8)
-- Smoke target: http://epcot.lan:8081
+- Smoke target: the LAN test instance
 
 ---
 
@@ -66541,7 +66565,7 @@ Post-review fixes across security, tests, conventions, and ROADMAP:
 
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
 - Result: all pass (8/8)
-- Smoke target: http://epcot.lan:8081 (reset via `ssh draba-test` before run)
+- Smoke target: the LAN test instance (reset via SSH to the test host before run)
 
 ---
 
@@ -66764,7 +66788,7 @@ All checks pass: `go test ./...`, `golangci-lint run`, `pnpm --filter web lint`,
 
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
 - Result: all pass (0 fail, 0 skip)
-- Smoke target: http://epcot.lan:8081
+- Smoke target: the LAN test instance
 - Notes: ws-smoke code-verified (no wscat available); 2 cosmetic residuals in web (stale JSDoc in useWebSocket.ts:7, `matchEvents` function name in findMatcher.ts:27 — no runtime impact)
 
 ---
@@ -66906,7 +66930,7 @@ The token management **UI** is intentionally deferred to Phase 10.4 per ROADMAP.
 
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
 - Result: 8 pass (2 fixes applied mid-run: stale "Events for {label}" string in FilterDropdown.tsx; deleted dead EventPanel.tsx)
-- Smoke target: http://epcot.lan:8081
+- Smoke target: the LAN test instance
 
 ---
 
@@ -66914,7 +66938,7 @@ The token management **UI** is intentionally deferred to Phase 10.4 per ROADMAP.
 
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
 - Result: 8 pass (web-e2e ran manually after extension connectivity confirmed)
-- Smoke target: http://epcot.lan:8081
+- Smoke target: the LAN test instance
 - Bug found: auth middleware accepts JWTs for deleted/non-existent users — PUT preferences returns 500 (FK violation) instead of 401; filed as side task
 
 ---
@@ -66923,13 +66947,13 @@ The token management **UI** is intentionally deferred to Phase 10.4 per ROADMAP.
 
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
 - Result: 8 pass, 1 clean skip (ws-smoke team-isolation — only one team on test instance)
-- Smoke target: http://epcot.lan:8081
+- Smoke target: the LAN test instance
 
 ---
 
 ## 2026-05-20 — Phase 8.4 post-test fixes
 
-Three bugs found during live testing against localhost:5173 → epcot.lan:8081:
+Three bugs found during live testing against localhost:5173 → the LAN test instance:
 
 1. **Missing `/users` Vite proxy entry** — `vite.config.ts` had proxy rules for `/auth`, `/teams`, `/timelines`, `/events` but not `/users`. Every `GET /users/me/preferences` and `PUT /users/me/preferences` 404'd in dev. Since the GET failed, `isSuccess` was never `true`, the `prefsAppliedForTimeline` ref was never set, and the guard blocked all saves silently. Fix: added `/users` to the proxy map.
 
@@ -66948,7 +66972,7 @@ Also fixed during this session:
 
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
 - Result: 7 pass, 1 partial (web-e2e — stale JWT for DB-wiped user caused spurious 500 on PUT prefs; api-smoke confirmed endpoint works with a valid user)
-- Smoke target: http://epcot.lan:8081
+- Smoke target: the LAN test instance
 
 ---
 
@@ -67114,7 +67138,7 @@ Also fixed during this session:
 
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
 - Result: all pass (8 pass, 0 fail, 0 skip)
-- Smoke target: http://epcot.lan:8081
+- Smoke target: the LAN test instance
 - Notes: `scripts/reset-test-env.sh` seed INSERT fixed — added `id` column to `team_members` row (Migration 003 compat); all previously tracked unit-test gaps (auth, invite_repo, timeline_repo) now closed
 
 ---
@@ -67226,7 +67250,7 @@ First live preview revealed the person-lane resource view didn't match the inten
 - `go test ./...` — all pass
 - `golangci-lint run` — clean
 - `pnpm --filter web lint` — clean
-- Setup wizard verified end-to-end on epcot.lan container
+- Setup wizard verified end-to-end on the LAN test host container
 
 ---
 
@@ -67266,7 +67290,7 @@ First live preview revealed the person-lane resource view didn't match the inten
 
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
 - Result: 7 pass, 1 partial (ws-smoke heartbeat — slow manual check, per spec)
-- Smoke target: http://epcot.lan:8081 (went offline mid api-smoke run; remaining api-smoke assertions completed against local server on port 9191)
+- Smoke target: the LAN test instance (went offline mid api-smoke run; remaining api-smoke assertions completed against local server on port 9191)
 - Notes: auth + invite_repo gaps from Phase 2 now closed (tests exist and pass); Phase 6 timeline_repo gaps still open; web-e2e TanStack Query conditional pass (teamId placeholder — Phase 8 concern)
 
 ---
@@ -67296,7 +67320,7 @@ First live preview revealed the person-lane resource view didn't match the inten
 - Filter selection is UI-only — the active filter is not yet applied to the events list; real filtering wires in Phase 8 when views render
 - Right sidebar body is a placeholder; filter editor form to be designed and built in a follow-up
 - Saved filter `definition` is an opaque JSON string — schema is enforced by the client, not the server
-- New saved-filter endpoints are not yet deployed to epcot.lan — docker container rebuild required to exercise the full API flow in-browser
+- New saved-filter endpoints are not yet deployed to the LAN test host — docker container rebuild required to exercise the full API flow in-browser
 - golangci-lint clean; all Go tests pass; frontend `tsc --noEmit` + `vite build` clean
 
 ---
@@ -67310,7 +67334,7 @@ First live preview revealed the person-lane resource view didn't match the inten
 | Criterion | Status |
 |-----------|--------|
 | `/login` renders | ✅ verified in browser |
-| `/login` authenticates against live API (epcot.lan:8081) | ✅ logged in as brian@rieb.cc |
+| `/login` authenticates against live API (the LAN test instance) | ✅ logged in as brian@rieb.cc |
 | Protected routes redirect unauthenticated users to `/login` | ✅ ProtectedRoute confirmed |
 | TanStack Query hook fetches team events | ✅ hook wired; placeholder team ID pending Phase 8 |
 | WebSocket connects (browser DevTools) | ✅ hook confirmed; WS URL derives from API_BASE |
@@ -67754,14 +67778,14 @@ GitHub Actions warned that `actions/checkout`, `setup-go`, `setup-node`, etc. ru
 
 **Port conflict in homelab**
 Port 8080 was already in use on the host.
-→ Mapped container port 8080 to host port 8081 in Portainer. No code changes needed.
+→ Mapped container port 8080 to a dedicated host port in Portainer. No code changes needed.
 
 ---
 
 ## 2026-06-01 — /test-phase 11.1.1
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
 - Result: all pass
-- Smoke target: http://epcot.lan:8081
+- Smoke target: the LAN test instance
 - Note: api-smoke surfaced spec mismatch — TESTING.md says `POST /teams/:id/activities` but actual route is `POST /teams/:id/timelines/:timelineId/activities`; functionality correct, spec needs updating. Schema-check noted table renames (activities/activity_tags/activity_assignments/statuses vs legacy event_* names in TESTING.md).
 
 ---
@@ -67769,20 +67793,20 @@ Port 8080 was already in use on the host.
 ## 2026-05-30 — /test-phase 10.4.5
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
 - Result: all pass (web-e2e partial — code-verified, no live server; ws-smoke cross-team isolation skipped, covered by unit tests)
-- Smoke target: http://epcot.lan:8081
+- Smoke target: the LAN test instance
 - Note: type-sync initially failed (4 tag endpoints missing from openapi.yaml); fixed and committed before logging
 
 ## 2026-06-08 — /test-phase 13.3
 
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, web-e2e
 - Result: all pass (web-e2e initially skipped — Chrome extension not connected — re-run after reconnecting passed: List + Kanban shares render faithfully read-only, no over-exposure, Phase 7 auth-redirect regression holds; created two ad hoc QA share links live since the seeded fixture had no List/Kanban shares yet)
-- Smoke target: http://epcot.lan:8081 (reset via `ssh draba-test` — canonical sample dataset + bootstrap)
+- Smoke target: the LAN test instance (reset via SSH to the test host — canonical sample dataset + bootstrap)
 
 ## 2026-06-10 — /test-phase 13.4
 
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, web-e2e
 - Result: 7 pass, 1 skip (ws-smoke — slow manual check, heartbeat covered by TestHub_Heartbeat_* unit tests). web-e2e initially skipped (Chrome extension not connected); re-run after reconnecting passed 9/9: CalendarShareModal per-feed toggle list, named slug feed URL serves all-day VEVENTs, regenerate + toggle-off invalidate immediately, per-member feed isolation verified (Michelle's 3 activities only, Brian/Erik-only activity absent), Phase 7 auth-redirect regression holds
-- Smoke target: http://epcot.lan:8081 (reset via `ssh draba-test` — canonical sample dataset + bootstrap)
+- Smoke target: the LAN test instance (reset via SSH to the test host — canonical sample dataset + bootstrap)
 - Notes: api-smoke 35/35 incl. full 13.4 ICS suite (all-day VEVENTs w/ exclusive DTEND, named slug URL, per-member feed isolation, kind isolation, immediate regenerate/delete invalidation); security-review clean with two no-action notes (tokens in URLs land in access logs — rotate test tokens before launch; non-constant-time token lookup acceptable at 256-bit)
 
 ## 2026-06-10 — 13.4 post-test fix: ICS feed Cache-Control
@@ -69372,7 +69396,7 @@ Calendar diverges from the other views by design. What people want from a shared
 - **No view semantics.** No filter, no group-by, no color-by — "give me the whole thing and I'll slice it in my own calendar app, or give me just person X." That simplicity is the whole point of the divergence.
 - **Token is the secret — no password.** Calendar clients can't do interactive unlock on a subscription URL, so password protection (13.2) does not apply here. The revocation story is **regenerate the link** (rotates the token) or toggle public access off.
 - **A distinct modal.** Calendar's "Share" button opens a different surface than the view-share modal: a public-access **On/Off** toggle, a scope selector (whole timeline vs. a member), the feed URL, **Copy**, one-click **Add to Google / Apple / Outlook**, and **Regenerate link**.
-- **Live data, all-day events.** Served current (short cache, no frozen snapshot — calendar apps poll on their own cadence). Activities are all-day calendar dates (Phase 11.1.1), so VEVENTs use `DTSTART;VALUE=DATE` spanning start→end. No PII beyond member display name.
+- **Live data, all-day events.** Served current (short cache, no frozen snapshot — calendar apps poll on their own cadence). Activities are all-day calendar dates (Phase 11.1.1), so VEVENTs use `DTSTART;VALUE=DATE` spanning start→end. Each VEVENT also carries the activity's display fields — status (+ percent complete), assignee display names, and tags — in `DESCRIPTION`/`CATEGORIES`, with assignees appended to `SUMMARY` on whole-timeline feeds. No PII beyond member display name.
 
 **Implementation lean:** reuse the `shares` table with a `kind` discriminator (`view` | `ics`); ICS rows carry `scope` (`timeline` | `member`) + nullable `member_id` and no `view_config` / filter / password. Serve via `GET /shares/{token}.ics` (`text/calendar`) with a `webcal://` convenience variant.
 
