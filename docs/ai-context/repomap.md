@@ -101,6 +101,7 @@ docs/
     phase-11.2-calendar-view.md
     phase-11.3-kanban-view.md
     phase-13-shares.md
+    phase-14-export.md
   ARCHITECTURE.md
   CONVENTIONS.md
   GreatEventToActivity.md
@@ -31511,6 +31512,122 @@ components/kanban/
 5. **Configure pencil vs. full-card click** — v1 uses full-card click to open the edit panel; the hover pencil is optional polish, not required.
 ````
 
+## File: docs/plans/phase-14-export.md
+````markdown
+# Phase 14 — Export — Data, Textual & Visual
+
+**UI name:** "Export" (toolbar action in every view, alongside Share).
+
+**Status:** 🟢 Planned — scope settled (2026-06-11). This plan supersedes the ROADMAP §14 summary, including its original commitment to server-side gofpdf rendering.
+
+---
+
+## What we're actually building
+
+Get data *out* of draba in the four shapes people actually need:
+
+1. **Data** — CSV / xlsx to take into another tool, edit, and (Phase 15) re-import.
+2. **Image** — a PNG of the current view to drop into a slide deck.
+3. **Text** — Markdown / plain text / rich clipboard copy to paste into Slack or a prep document.
+4. **Print** — a clean, print-styled page the user prints to vector PDF from their own browser; plus a static `.ics` download.
+
+The unifying requirement, same as shares: **the export reflects what's on screen right now** — active filter, sort, group, visible columns. The deliverable is "this view," not "the raw activity list."
+
+### Decisions locked in the design discussion (2026-06-11)
+
+1. **Visual exports render client-side, from the live DOM. No gofpdf, no Chromium.** The ROADMAP's gofpdf plan meant reimplementing four layout engines in Go PDF primitives and keeping them in lockstep with the React views forever — every view feature would need a second implementation, and the "what I see on screen" requirement would mean re-deriving client layout state server-side. Rejected alternatives: **gofpdf** (dual layout engines, permanent drift tax), **chromedp/headless Chromium in the image** (breaks the single-binary promise, bloats the Docker image). A *server-side* pixel renderer, if ever needed (scheduled emailed PDFs, MCP-fetched images), is an **optional Chromium sidecar container** — explicitly deferred, never in the core image.
+2. **"PDF" means the printable view, not a raster download.** A client-rasterized PDF is just a PNG in a PDF wrapper (no selectable text, fuzzy at zoom) — cut entirely. Instead, **Export → Printable view** opens a dedicated print-styled route; the user prints to PDF from their browser, which emits true vector output (selectable text, crisp lines, correct pagination) in every modern browser. PNG remains the one raster format, for slide decks.
+3. **Data and ICS exports are server-side and API-first; textual and visual exports are client-side and UI-only for v1.** CSV/xlsx/ICS come from authenticated API endpoints a CLI/MCP can hit. Markdown/clipboard/PNG/print are generated in the browser from the already-filtered in-memory rows — guaranteed identical to the screen, zero server layout code. The API-first principle is consciously relaxed for *presentation* formats; the *data of record* formats stay on the API.
+4. **Filter fidelity reuses Phase 13 assets.** The export modal captures the current live toolbar state the same way "Share this view" does (resolved `FilterDefinition` + view config). Server-side tabular exports evaluate the frozen filter with the **existing Go `matchesFilter` port** and its golden-fixture parity suite — no new filter machinery.
+5. **One ExportDialog for all views, driven by a per-view capability descriptor.** Each view declares which formats it offers and which options apply. Adding a view later = adding a descriptor, not a new dialog.
+6. **Cut from scope:** Google Docs/Sheets native integration (xlsx opens in Sheets; a Drive OAuth connector belongs with the connectors phase), RTF (rich-HTML clipboard covers paste into Word/Google Docs), wall-calendar month-grid PDF (edge case; revisit on demand), raster PDF download (see #2).
+
+---
+
+## Reused infrastructure (do not rebuild)
+
+| Concern | Existing asset | Notes |
+|---|---|---|
+| Filter evaluation (Go) | `matchesFilter` Go port + golden-fixture parity suite (Phase 13.1) | Tabular export evaluates the frozen filter server-side, exactly like the share projection builder. |
+| View-state capture | Share-modal `view_config` snapshot (13.2) | Export captures the same resolved `{ filter, group, sort, color, visible columns }` from the live toolbar state. |
+| ICS generation | 13.4 feed generator | Static `.ics` export = same generator, authenticated route, `Content-Disposition: attachment`. |
+| Read-only render path | Public share viewer (`interactive=false` view modes) | Printable routes render the same non-interactive views with a print stylesheet instead of share chrome. |
+| Toolbar slot | Gantt "Export" stub (Phase 8.1); 11.1/11.2/11.3 toolbar slots | Becomes the real Export menu/dialog trigger in every view. |
+| Color/identity display | `resolveActivityColor`, `Badge`, `memberGroups.ts` | Same hues and grouping in PNG/print output as on screen. |
+
+---
+
+## The export capability matrix
+
+| Format | Gantt | List | Kanban | Calendar | Pipeline |
+|---|---|---|---|---|---|
+| CSV | ✓ | ✓ | ✓ | ✓ | Server (data — view-independent) |
+| xlsx | ✓ | ✓ | ✓ | ✓ | Server (data — view-independent) |
+| ICS | ✓ | ✓ | ✓ | ✓ | Server (13.4 generator) |
+| Markdown | — | ✓ | ✓ | ✓ (agenda) | Client (textual) |
+| Plain text / clipboard | — | ✓ | ✓ | ✓ (agenda) | Client (textual) |
+| PNG | ✓ | ✓ | ✓ | ✓ | Client (DOM rasterization) |
+| Printable view | ✓ | ✓ | ✓ | ✓ | Client (print route → user prints to vector PDF) |
+
+Gantt has no sensible textual shape — its Markdown/text need is served by the List view of the same data. Calendar's textual form is an agenda-style date-grouped list, not a grid.
+
+---
+
+## Sub-phases
+
+### 14.1 — Foundation + data exports (M, 2–3 days)
+
+*API:*
+- `POST /timelines/:id/export` — authenticated; body `{ format: "csv" | "xlsx" | "ics", viewConfig?: { filter?: FilterDefinition, sort?, group?, visibleColumns? } }`; streams the file with `Content-Disposition: attachment`. The frozen filter is evaluated in Go (reuse the 13.1 evaluator); omitted `viewConfig` = whole timeline.
+- `GET /timelines/:id/export.csv|.xlsx|.ics?filter=<savedFilterId>` — convenience GET for CLI/scripting; `?filter=` resolves a saved filter server-side (the 10.4.6 forward-compat hook).
+- CSV/xlsx columns match the Phase 15 import template (title, start, end, description, status name, assignee names, tags, parent title, progress, location, url) so the round-trip holds.
+- Sync (block and return the file) for v1 — these are bounded by timeline size; revisit only if real-world exports get slow.
+
+*Web:*
+- `ExportDialog` — single dialog, sections: format picker (from the active view's capability descriptor), scope (current view as filtered vs. whole timeline), per-format options. Wired into the Gantt toolbar Export stub and the List/Kanban/Calendar toolbar slots.
+- Per-view capability descriptor module (`lib/exportCapabilities.ts`) — declares formats + options per view type.
+
+### 14.2 — Textual exports (S, ~1 day)
+
+- Markdown: GitHub-flavored table for List/Kanban (Kanban = one section per column); agenda-style date-grouped list for Calendar. Header block: team, timeline, generated-at, filter description.
+- Plain text: same structures, aligned monospace.
+- **Copy to clipboard** with dual flavors (`text/plain` + `text/html`) so paste lands rich in Slack/Word/Google Docs and clean in editors. Download-as-file also offered for `.md`.
+- All generated client-side from the in-memory filtered rows — identical to screen by construction.
+
+### 14.3 — PNG snapshot (S–M, 1–2 days)
+
+- DOM rasterization via `html-to-image` (MIT) of the view container at current state; 2x pixel density for deck quality.
+- Header strip (team, timeline, generated-at, filter description) composited above the capture.
+- Known constraints to handle: capture full scrollable extent (temporarily unclamp the container), inline self-hosted fonts, force light theme for the capture frame (consistent with shares).
+
+### 14.4 — Printable views (M, 2–3 days)
+
+- Dedicated print routes (e.g. `/timelines/:id/print/:view`) rendering the non-interactive view components with a print stylesheet: fixed printable width, page-break-aware pagination, no app chrome, light theme, header strip on each page.
+- Gantt: landscape hint, date-range pagination across pages, member-color legend strip.
+- List: styled table, repeating column headers per page.
+- Kanban: columns at printable width, page-break between column groups when too wide.
+- Calendar: week/month layout paginated by period. (Wall-calendar *poster* layout remains cut.)
+- "Export → Printable view" opens the route in a new tab and triggers `window.print()`; the user saves as PDF from the browser dialog — vector output, no draba-side PDF engine.
+
+---
+
+## Open questions — resolved
+
+- **Sync vs. async exports:** sync for v1 (decision #3 / 14.1); no job queue.
+- **Find highlights:** filter only — Find is ephemeral (unchanged from ROADMAP).
+- **PDF engine:** none — printable views + browser print-to-PDF (decision #2).
+
+## Exit criteria — safe to pause when
+
+*(each sub-phase is independently pausable)*
+
+- **14.1:** CSV and xlsx exports contain exactly the activities visible under the active filter; `?filter=` GET works for a saved filter; static `.ics` imports cleanly into a calendar app; the Export dialog opens from all four view toolbars with formats scoped per view.
+- **14.2:** Markdown export renders correctly in a previewer and pastes rich into Slack/Google Docs via the clipboard flavors.
+- **14.3:** PNG of each view is recognizable, full-extent, correct colors, header strip present.
+- **14.4:** each view's printable route paginates correctly via browser print preview; Gantt bars positioned correctly with legend; output PDF has selectable text.
+- `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean.
+````
+
 ## File: packages/api/internal/api/ratelimit.go
 ````go
 package api
@@ -33863,6 +33980,207 @@ describe('formatTimestamp', () => {
 // without controlling process.env.TZ. The tests above independently verify
 // each function's contract — the key invariant is that midnight-UTC dates
 // never shift in formatActivityDate regardless of the runner's timezone.
+````
+
+## File: packages/web/src/components/list/ListView.tree.test.ts
+````typescript
+/**
+ * buildListRows — group-by and tree-nesting behaviour.
+ *
+ * Mirrors the pattern in GanttView.tree.test.ts: pure logic tests on the
+ * exported buildListRows function, no React rendering or hook mocks required.
+ */
+
+import { describe, it, expect } from 'vitest'
+import { buildListRows } from './ListView'
+import type { ListDisplayRow } from './ListView'
+import type { components } from '@draba/shared'
+
+type ApiActivity = components['schemas']['Activity']
+type Status = components['schemas']['Status']
+
+const NONE = new Set<string>()
+
+function act(
+  id: string,
+  opts: {
+    parentActivityId?: string | null
+    assignedMemberIds?: string[]
+    statusId?: string | null
+  } = {},
+): ApiActivity {
+  return {
+    id,
+    title: id,
+    timelineId: 'tl1',
+    startAt: '2026-01-01T00:00:00Z',
+    endAt: '2026-01-02T00:00:00Z',
+    allDay: false,
+    createdBy: 'user1',
+    createdAt: '2026-01-01T00:00:00Z',
+    updatedAt: '2026-01-01T00:00:00Z',
+    description: null,
+    notes: null,
+    icon: null,
+    color: null,
+    percentComplete: null,
+    location: null,
+    url: null,
+    archivedAt: null,
+    parentActivityId: opts.parentActivityId ?? null,
+    assignedMemberIds: opts.assignedMemberIds ?? [],
+    tagIds: [],
+    statusId: opts.statusId ?? null,
+  }
+}
+
+function status(id: string, name: string): Status {
+  return { id, name, color: '#000', timelineId: 'tl1', isClosed: false, position: 0, createdAt: '', updatedAt: '' }
+}
+
+function actRows(rows: ListDisplayRow[]) {
+  return rows
+    .filter((r): r is Extract<ListDisplayRow, { kind: 'activity' }> => r.kind === 'activity')
+    .map(r => ({ id: r.activity.id, depth: r.depth, hasChildren: r.hasChildren }))
+}
+
+function groupRows(rows: ListDisplayRow[]) {
+  return rows
+    .filter((r): r is Extract<ListDisplayRow, { kind: 'group' }> => r.kind === 'group')
+    .map(r => ({ key: r.key, label: r.label, count: r.count }))
+}
+
+const emptyMembers = new Map<string, { displayName: string }>()
+const emptyStatuses = new Map<string, { name: string }>()
+
+// ── groupBy: none ─────────────────────────────────────────────────────────────
+
+describe('buildListRows — groupBy: none', () => {
+  it('returns one activity row per activity in order', () => {
+    const activities = [act('a'), act('b'), act('c')]
+    const rows = buildListRows(activities, 'none', emptyMembers, emptyStatuses, [], NONE)
+    expect(actRows(rows).map(r => r.id)).toEqual(['a', 'b', 'c'])
+  })
+
+  it('returns an empty array for an empty list', () => {
+    expect(buildListRows([], 'none', emptyMembers, emptyStatuses, [], NONE)).toEqual([])
+  })
+})
+
+// ── groupBy: member ───────────────────────────────────────────────────────────
+
+describe('buildListRows — groupBy: member (combo-key)', () => {
+  const memberMap = new Map([
+    ['m1', { displayName: 'Alice', color: '#111' }],
+    ['m2', { displayName: 'Bob', color: '#222' }],
+  ])
+  const memberOrder = ['m1', 'm2']
+
+  const activities = [
+    act('a1', { assignedMemberIds: ['m1'] }),
+    act('a2', { assignedMemberIds: ['m1'] }),
+    act('b1', { assignedMemberIds: ['m2'] }),
+    act('ab1', { assignedMemberIds: ['m1', 'm2'] }),
+    act('u1'),  // unassigned
+  ]
+
+  it('emits one group per unique assignee combination in team order', () => {
+    const rows = buildListRows(activities, 'member', memberMap, emptyStatuses, [], NONE, memberOrder)
+    const groups = groupRows(rows)
+    expect(groups[0]).toMatchObject({ label: 'Alice', count: 2 })
+    // combo group Alice + Bob
+    expect(groups[1].label).toBe('Alice and Bob')
+    expect(groups[1].count).toBe(1)
+    expect(groups[2]).toMatchObject({ label: 'Bob', count: 1 })
+    expect(groups[3]).toMatchObject({ key: '__unassigned__', label: 'Unassigned', count: 1 })
+  })
+
+  it('places multi-assignee activity under its own combination group (no duplication)', () => {
+    const rows = buildListRows(activities, 'member', memberMap, emptyStatuses, [], NONE, memberOrder)
+    const actIds = rows.filter(r => r.kind === 'activity').map(r => (r as Extract<typeof r, { kind: 'activity' }>).activity.id)
+    expect(actIds.filter(id => id === 'ab1')).toHaveLength(1)
+    expect(actIds).toHaveLength(5)
+  })
+
+  it('carries memberColors on group rows for member combos', () => {
+    const rows = buildListRows(activities, 'member', memberMap, emptyStatuses, [], NONE, memberOrder)
+    const groups = rows.filter((r): r is Extract<typeof r, { kind: 'group' }> => r.kind === 'group')
+    const comboGroup = groups.find(g => g.label === 'Alice and Bob')
+    expect(comboGroup?.memberColors).toHaveLength(2)
+  })
+
+  it('hides collapsed group activities but keeps the group header', () => {
+    // Solo-member key is just the member id (since memberComboKey(['m1']) === 'm1')
+    const rows = buildListRows(activities, 'member', memberMap, emptyStatuses, [], new Set(['m1']), memberOrder)
+    const ids = rows.map(r => r.kind === 'group' ? `G:${r.key}` : `A:${(r as Extract<typeof r, { kind: 'activity' }>).activity.id}`)
+    expect(ids).not.toContain('A:a1')
+    expect(ids).not.toContain('A:a2')
+    expect(ids).toContain('G:m1')
+    expect(ids).toContain('A:b1')
+  })
+})
+
+// ── groupBy: status ───────────────────────────────────────────────────────────
+
+describe('buildListRows — groupBy: status', () => {
+  const statuses = [status('s1', 'In Progress'), status('s2', 'Done')]
+  const statusMap = new Map(statuses.map(s => [s.id, s]))
+  const activities = [
+    act('a', { statusId: 's1' }),
+    act('b', { statusId: 's2' }),
+    act('c'),  // no status
+  ]
+
+  it('emits statuses in ROADMAP order, no-status last', () => {
+    const rows = buildListRows(activities, 'status', emptyMembers, statusMap, statuses, NONE)
+    const groups = groupRows(rows)
+    expect(groups.map(g => g.label)).toEqual(['In Progress', 'Done', 'No status'])
+  })
+
+  it('skips statuses with no activities', () => {
+    const rows = buildListRows([act('a', { statusId: 's1' })], 'status', emptyMembers, statusMap, statuses, NONE)
+    const groups = groupRows(rows)
+    expect(groups.map(g => g.label)).toEqual(['In Progress'])
+  })
+})
+
+// ── groupBy: parent ───────────────────────────────────────────────────────────
+
+describe('buildListRows — groupBy: parent', () => {
+  const activities = [
+    act('a'),
+    act('b', { parentActivityId: 'a' }),
+    act('c', { parentActivityId: 'b' }),
+    act('d'),
+  ]
+
+  it('nests grandchildren at increasing depth', () => {
+    const rows = buildListRows(activities, 'parent', emptyMembers, emptyStatuses, [], NONE)
+    expect(actRows(rows)).toEqual([
+      { id: 'a', depth: 0, hasChildren: true },
+      { id: 'b', depth: 1, hasChildren: true },
+      { id: 'c', depth: 2, hasChildren: false },
+      { id: 'd', depth: 0, hasChildren: false },
+    ])
+  })
+
+  it('hides subtree when parent is collapsed', () => {
+    const rows = buildListRows(activities, 'parent', emptyMembers, emptyStatuses, [], new Set(['a']))
+    expect(actRows(rows).map(r => r.id)).toEqual(['a', 'd'])
+  })
+
+  it('treats an orphan (parent not in view) as a root', () => {
+    const rows = buildListRows([act('x', { parentActivityId: 'missing' })], 'parent', emptyMembers, emptyStatuses, [], NONE)
+    expect(actRows(rows)).toEqual([{ id: 'x', depth: 0, hasChildren: false }])
+  })
+
+  it('does not infinite-loop on a parent-pointer cycle', () => {
+    const x = act('x', { parentActivityId: 'y' })
+    const y = act('y', { parentActivityId: 'x' })
+    const rows = buildListRows([x, y], 'parent', emptyMembers, emptyStatuses, [], NONE)
+    expect(actRows(rows).map(r => r.id).sort()).toEqual(['x', 'y'])
+  })
+})
 ````
 
 ## File: packages/web/src/components/shared/activityPanelFields.tsx
@@ -38816,207 +39134,6 @@ export default function ActivityDetailPanel({
     </div>
   )
 }
-````
-
-## File: packages/web/src/components/list/ListView.tree.test.ts
-````typescript
-/**
- * buildListRows — group-by and tree-nesting behaviour.
- *
- * Mirrors the pattern in GanttView.tree.test.ts: pure logic tests on the
- * exported buildListRows function, no React rendering or hook mocks required.
- */
-
-import { describe, it, expect } from 'vitest'
-import { buildListRows } from './ListView'
-import type { ListDisplayRow } from './ListView'
-import type { components } from '@draba/shared'
-
-type ApiActivity = components['schemas']['Activity']
-type Status = components['schemas']['Status']
-
-const NONE = new Set<string>()
-
-function act(
-  id: string,
-  opts: {
-    parentActivityId?: string | null
-    assignedMemberIds?: string[]
-    statusId?: string | null
-  } = {},
-): ApiActivity {
-  return {
-    id,
-    title: id,
-    timelineId: 'tl1',
-    startAt: '2026-01-01T00:00:00Z',
-    endAt: '2026-01-02T00:00:00Z',
-    allDay: false,
-    createdBy: 'user1',
-    createdAt: '2026-01-01T00:00:00Z',
-    updatedAt: '2026-01-01T00:00:00Z',
-    description: null,
-    notes: null,
-    icon: null,
-    color: null,
-    percentComplete: null,
-    location: null,
-    url: null,
-    archivedAt: null,
-    parentActivityId: opts.parentActivityId ?? null,
-    assignedMemberIds: opts.assignedMemberIds ?? [],
-    tagIds: [],
-    statusId: opts.statusId ?? null,
-  }
-}
-
-function status(id: string, name: string): Status {
-  return { id, name, color: '#000', timelineId: 'tl1', isClosed: false, position: 0, createdAt: '', updatedAt: '' }
-}
-
-function actRows(rows: ListDisplayRow[]) {
-  return rows
-    .filter((r): r is Extract<ListDisplayRow, { kind: 'activity' }> => r.kind === 'activity')
-    .map(r => ({ id: r.activity.id, depth: r.depth, hasChildren: r.hasChildren }))
-}
-
-function groupRows(rows: ListDisplayRow[]) {
-  return rows
-    .filter((r): r is Extract<ListDisplayRow, { kind: 'group' }> => r.kind === 'group')
-    .map(r => ({ key: r.key, label: r.label, count: r.count }))
-}
-
-const emptyMembers = new Map<string, { displayName: string }>()
-const emptyStatuses = new Map<string, { name: string }>()
-
-// ── groupBy: none ─────────────────────────────────────────────────────────────
-
-describe('buildListRows — groupBy: none', () => {
-  it('returns one activity row per activity in order', () => {
-    const activities = [act('a'), act('b'), act('c')]
-    const rows = buildListRows(activities, 'none', emptyMembers, emptyStatuses, [], NONE)
-    expect(actRows(rows).map(r => r.id)).toEqual(['a', 'b', 'c'])
-  })
-
-  it('returns an empty array for an empty list', () => {
-    expect(buildListRows([], 'none', emptyMembers, emptyStatuses, [], NONE)).toEqual([])
-  })
-})
-
-// ── groupBy: member ───────────────────────────────────────────────────────────
-
-describe('buildListRows — groupBy: member (combo-key)', () => {
-  const memberMap = new Map([
-    ['m1', { displayName: 'Alice', color: '#111' }],
-    ['m2', { displayName: 'Bob', color: '#222' }],
-  ])
-  const memberOrder = ['m1', 'm2']
-
-  const activities = [
-    act('a1', { assignedMemberIds: ['m1'] }),
-    act('a2', { assignedMemberIds: ['m1'] }),
-    act('b1', { assignedMemberIds: ['m2'] }),
-    act('ab1', { assignedMemberIds: ['m1', 'm2'] }),
-    act('u1'),  // unassigned
-  ]
-
-  it('emits one group per unique assignee combination in team order', () => {
-    const rows = buildListRows(activities, 'member', memberMap, emptyStatuses, [], NONE, memberOrder)
-    const groups = groupRows(rows)
-    expect(groups[0]).toMatchObject({ label: 'Alice', count: 2 })
-    // combo group Alice + Bob
-    expect(groups[1].label).toBe('Alice and Bob')
-    expect(groups[1].count).toBe(1)
-    expect(groups[2]).toMatchObject({ label: 'Bob', count: 1 })
-    expect(groups[3]).toMatchObject({ key: '__unassigned__', label: 'Unassigned', count: 1 })
-  })
-
-  it('places multi-assignee activity under its own combination group (no duplication)', () => {
-    const rows = buildListRows(activities, 'member', memberMap, emptyStatuses, [], NONE, memberOrder)
-    const actIds = rows.filter(r => r.kind === 'activity').map(r => (r as Extract<typeof r, { kind: 'activity' }>).activity.id)
-    expect(actIds.filter(id => id === 'ab1')).toHaveLength(1)
-    expect(actIds).toHaveLength(5)
-  })
-
-  it('carries memberColors on group rows for member combos', () => {
-    const rows = buildListRows(activities, 'member', memberMap, emptyStatuses, [], NONE, memberOrder)
-    const groups = rows.filter((r): r is Extract<typeof r, { kind: 'group' }> => r.kind === 'group')
-    const comboGroup = groups.find(g => g.label === 'Alice and Bob')
-    expect(comboGroup?.memberColors).toHaveLength(2)
-  })
-
-  it('hides collapsed group activities but keeps the group header', () => {
-    // Solo-member key is just the member id (since memberComboKey(['m1']) === 'm1')
-    const rows = buildListRows(activities, 'member', memberMap, emptyStatuses, [], new Set(['m1']), memberOrder)
-    const ids = rows.map(r => r.kind === 'group' ? `G:${r.key}` : `A:${(r as Extract<typeof r, { kind: 'activity' }>).activity.id}`)
-    expect(ids).not.toContain('A:a1')
-    expect(ids).not.toContain('A:a2')
-    expect(ids).toContain('G:m1')
-    expect(ids).toContain('A:b1')
-  })
-})
-
-// ── groupBy: status ───────────────────────────────────────────────────────────
-
-describe('buildListRows — groupBy: status', () => {
-  const statuses = [status('s1', 'In Progress'), status('s2', 'Done')]
-  const statusMap = new Map(statuses.map(s => [s.id, s]))
-  const activities = [
-    act('a', { statusId: 's1' }),
-    act('b', { statusId: 's2' }),
-    act('c'),  // no status
-  ]
-
-  it('emits statuses in ROADMAP order, no-status last', () => {
-    const rows = buildListRows(activities, 'status', emptyMembers, statusMap, statuses, NONE)
-    const groups = groupRows(rows)
-    expect(groups.map(g => g.label)).toEqual(['In Progress', 'Done', 'No status'])
-  })
-
-  it('skips statuses with no activities', () => {
-    const rows = buildListRows([act('a', { statusId: 's1' })], 'status', emptyMembers, statusMap, statuses, NONE)
-    const groups = groupRows(rows)
-    expect(groups.map(g => g.label)).toEqual(['In Progress'])
-  })
-})
-
-// ── groupBy: parent ───────────────────────────────────────────────────────────
-
-describe('buildListRows — groupBy: parent', () => {
-  const activities = [
-    act('a'),
-    act('b', { parentActivityId: 'a' }),
-    act('c', { parentActivityId: 'b' }),
-    act('d'),
-  ]
-
-  it('nests grandchildren at increasing depth', () => {
-    const rows = buildListRows(activities, 'parent', emptyMembers, emptyStatuses, [], NONE)
-    expect(actRows(rows)).toEqual([
-      { id: 'a', depth: 0, hasChildren: true },
-      { id: 'b', depth: 1, hasChildren: true },
-      { id: 'c', depth: 2, hasChildren: false },
-      { id: 'd', depth: 0, hasChildren: false },
-    ])
-  })
-
-  it('hides subtree when parent is collapsed', () => {
-    const rows = buildListRows(activities, 'parent', emptyMembers, emptyStatuses, [], new Set(['a']))
-    expect(actRows(rows).map(r => r.id)).toEqual(['a', 'd'])
-  })
-
-  it('treats an orphan (parent not in view) as a root', () => {
-    const rows = buildListRows([act('x', { parentActivityId: 'missing' })], 'parent', emptyMembers, emptyStatuses, [], NONE)
-    expect(actRows(rows)).toEqual([{ id: 'x', depth: 0, hasChildren: false }])
-  })
-
-  it('does not infinite-loop on a parent-pointer cycle', () => {
-    const x = act('x', { parentActivityId: 'y' })
-    const y = act('y', { parentActivityId: 'x' })
-    const rows = buildListRows([x, y], 'parent', emptyMembers, emptyStatuses, [], NONE)
-    expect(actRows(rows).map(r => r.id).sort()).toEqual(['x', 'y'])
-  })
-})
 ````
 
 ## File: packages/web/src/hooks/useTeamActivities.ts
@@ -65618,26 +65735,36 @@ First-class Share entity. One timeline can host many shares, each frozen to a sp
 
 ---
 
-### Data Portability & Exports (Phase 14)
+### Export — Data, Textual & Visual (Phase 14)
 
-**Tabular (round-trip):**
-- [ ] `GET /timelines/:id/export.csv` and `GET /timelines/:id/export.xlsx`
-- [ ] `POST /teams/:id/events/import` — CSV/Excel import with preview + validation
-- [ ] Downloadable import template at `GET /import-template.csv` and `.xlsx`
+_Re-planned 2026-06-11 — see [docs/plans/phase-14-export.md](plans/phase-14-export.md). Visual exports are now client-side (no gofpdf, no Chromium); "PDF" is a printable route the user prints to vector PDF from their browser. Import bullets moved to [Phase 15 — Import](ROADMAP.md#phase-15--import--tabular)._
 
-**Visual exports (gofpdf):**
-- [ ] Gantt → PDF: landscape, paginated by date range, member-color legend strip
-- [ ] Gantt → PNG: single-page rasterized variant
-- [ ] Kanban → PDF: columns side-by-side, paginated when too wide
-- [ ] Kanban → PNG: single-page
-- [ ] List → Markdown (GitHub-flavored table) and PDF (styled table)
-- [ ] Calendar → PDF: one page per month / week depending on active layout
-- [ ] Header strip on every visual export: team name, timeline name, generated-at timestamp, applied filter description
-- [ ] All visual exports respect active filter / sort / group at time of export
+**14.1 Foundation + data exports (server, API-first):**
+- [ ] `POST /timelines/:id/export` — `{ format: csv|xlsx|ics, viewConfig? }`; frozen filter evaluated via the Phase 13 Go `matchesFilter` port; streams file, sync for v1
+- [ ] `GET /timelines/:id/export.csv|.xlsx|.ics?filter=<savedFilterId>` — convenience GET for CLI/scripting (10.4.6 hook)
+- [ ] CSV/xlsx columns match the Phase 15 import template (round-trip holds)
+- [ ] Static `.ics` download — reuse the 13.4 feed generator, authenticated, `Content-Disposition: attachment`
+- [ ] `ExportDialog` (single dialog, all views) + per-view capability descriptor (`lib/exportCapabilities.ts`)
+- [ ] Wire into the Gantt toolbar Export stub + 11.1 / 11.2 / 11.3 toolbar slots, formats scoped per view
 
-**Wiring:**
-- [ ] Gantt toolbar's existing "Export" stub becomes a real menu: CSV / xlsx / PDF / PNG
-- [ ] Same export menu in 11.1 / 11.2 / 11.3 toolbar slots, scoped to formats valid for that view
+**14.2 Textual exports (client):**
+- [ ] Markdown: GFM table (List), section-per-column (Kanban), agenda list (Calendar); header block with team / timeline / generated-at / filter description
+- [ ] Plain text variant (aligned monospace)
+- [ ] Copy to clipboard with dual `text/plain` + `text/html` flavors (rich paste into Slack / Word / Google Docs); `.md` file download
+
+**14.3 PNG snapshot (client):**
+- [ ] DOM rasterization via `html-to-image`: full scrollable extent, 2x density, light theme
+- [ ] Header strip composited above the capture
+
+**14.4 Printable views (client, vector PDF via browser print):**
+- [ ] Print routes per view (`/timelines/:id/print/:view`): non-interactive view components + print stylesheet, no app chrome, header strip per page
+- [ ] Gantt: landscape hint, date-range pagination, member-color legend
+- [ ] List: styled table with repeating column headers
+- [ ] Kanban: page breaks between column groups when too wide
+- [ ] Calendar: one page per week/month period
+- [ ] "Export → Printable view" opens the route in a new tab and triggers `window.print()`
+
+**Cut (2026-06-11):** Google Docs/Sheets integration, RTF, wall-calendar poster PDF, raster-PDF download, gofpdf/Chromium server rendering (optional Chromium *sidecar* deferred indefinitely).
 
 **SMTP & password reset (lands here because import errors / reset emails are first SMTP use):**
 - [ ] Password reset flow (email required — pick SMTP or transactional email provider)
@@ -68081,7 +68208,7 @@ This document organizes development into discrete phases with effort estimates a
 | 13.3 | [List + Kanban Read-Only](#phase-133--list--kanban-read-only) | M | ✅ |
 | 13.4 | [Calendar — ICS Feed Sharing](#phase-134--calendar--ics-feed-sharing) | M | ✅ |
 | 13.5 | [Lifecycle Tail](#phase-135--lifecycle-tail) | S | ✅ |
-| 14 | [Export — Tabular & Per-View](#phase-14--export--tabular--per-view) | M — 3–5 days | ⬜ |
+| 14 | [Export — Data, Textual & Visual](#phase-14--export--data-textual--visual) | L — 6–9 days (4 pausable sub-phases) | ⬜ |
 | 15 | [Import — Tabular](#phase-15--import--tabular) | M — 2–3 days | ⬜ |
 | 16 | [Backup & Restore](#phase-16--backup--restore) | M — 2–3 days | ⬜ |
 | 17 | [Global Search](#phase-17--global-search) | M — 2–3 days | ⬜ |
@@ -69628,49 +69755,35 @@ Re-scoped 2026-06-11 — most of the original tail was already built piecemeal d
 
 ---
 
-### Phase 14 — Export — Tabular & Per-View
-**Status:** ⬜ | **Effort:** M (3–5 days)
+### Phase 14 — Export — Data, Textual & Visual
+**Status:** ⬜ | **Effort:** L (6–9 days across four pausable sub-phases) | **Plan:** [docs/plans/phase-14-export.md](plans/phase-14-export.md)
 
-Get data *out* of draba — both raw tabular exports (CSV / xlsx) and view-aware visual exports (Gantt → PDF, Kanban → PDF, List → Markdown, Calendar → PDF, etc.). Each visual export respects the active filter / sort / group at time of export — the deliverable is "what's on the screen right now," not the raw activity list. Split from the former combined "Data Portability" phase so export (an immediate, lower-risk win) can ship ahead of [import](#phase-15--import--tabular).
+Get data *out* of draba in the four shapes people actually need: **data** (CSV / xlsx for another tool or the Phase 15 re-import round-trip), **text** (Markdown / plain text / rich clipboard for Slack and prep docs), **image** (PNG of the current view for slide decks), and **print** (a print-styled page the user prints to vector PDF from their own browser; plus a static `.ics` download). Every export reflects the active filter / sort / group / visible columns at time of export — the deliverable is "what's on the screen right now," not the raw activity list. Split from the former combined "Data Portability" phase so export ships ahead of [import](#phase-15--import--tabular).
 
-**Implementation note (PDF engine):**
-PDFs are generated server-side using **gofpdf** (pure-Go, no Chrome dependency in the Docker image). This keeps the binary lean at the cost of reimplementing Gantt / Kanban / Calendar layouts in PDF primitives — accepted tradeoff because the alternative (chromedp) significantly inflates the image size and breaks the "single binary" promise. Visual fidelity for the Gantt PDF will not match the live view pixel-for-pixel; the target is "readable and recognizable," not "screenshot quality."
+**Implementation note (rendering strategy — supersedes the earlier gofpdf plan, 2026-06-11):**
+Visual exports render **client-side from the live DOM** — no gofpdf, no Chromium in the image. gofpdf was rejected because it meant reimplementing four layout engines in Go PDF primitives and keeping them in lockstep with the React views forever; chromedp was rejected for image bloat / single-binary reasons (unchanged). "PDF" is delivered as a **printable view**: a dedicated print-styled route the user prints to PDF from their browser — true vector output (selectable text, correct pagination) with zero server-side layout code. PNG is the one raster format (DOM rasterization). Data/ICS exports stay server-side and API-first, evaluating the frozen filter with the **Phase 13 Go `matchesFilter` port**; textual/visual exports are client-side and UI-only for v1 (presentation formats, consciously exempt from API-first). A server-side pixel renderer, if ever needed, is an optional Chromium *sidecar* container — explicitly deferred. **Cut:** Google Docs/Sheets native integration (xlsx opens in Sheets), RTF (HTML clipboard covers rich paste), wall-calendar poster PDF, raster-PDF download (a PNG in a PDF wrapper helps no one).
 
-**Scope:**
+**Scope (sub-phases — detail in the [plan](plans/phase-14-export.md)):**
 
-*Tabular export:*
-- `GET /timelines/:id/export.csv` and `.xlsx` — all visible activities, honoring the active filter
-- Optional `?filter=` to scope the export to a saved filter ID (forward-compat hook from Phase 10.4.6)
+- **14.1 Foundation + data exports:** `POST /timelines/:id/export` (`csv` / `xlsx` / `ics`, optional frozen `viewConfig`, filter evaluated in Go) + convenience `GET …/export.csv?filter=<savedFilterId>` (the 10.4.6 hook); columns match the Phase 15 import template; sync for v1. Single `ExportDialog` driven by a per-view capability descriptor, wired into the Gantt toolbar Export stub and the 11.1/11.2/11.3 toolbar slots.
+- **14.2 Textual:** Markdown (GFM table; Kanban = section per column; Calendar = agenda list), plain text, and copy-to-clipboard with dual `text/plain` + `text/html` flavors so paste lands rich in Slack / Word / Google Docs. Client-generated from the in-memory filtered rows.
+- **14.3 PNG snapshot:** DOM rasterization (`html-to-image`) of the current view, full scrollable extent, 2x density, light theme, header strip (team, timeline, generated-at, filter description).
+- **14.4 Printable views:** print routes per view (non-interactive view components + print stylesheet): Gantt landscape with date-range pagination and member-color legend; List styled table; Kanban columns with page breaks; Calendar one page per period. "Export → Printable view" opens the route and triggers `window.print()`.
 
-*Visual / textual exports (per view):*
-- **Gantt → PDF:** landscape, paginated by date range; columns scale to fit a printable width per page; legend strip with member colors; export current filter/sort/group state. Gantt → PNG as a single-page variant.
-- **Kanban → PDF:** columns laid out side-by-side; if more columns than fit a printable width, paginate across pages with a column-overflow indicator. Kanban → PNG single-page.
-- **List → CSV, xlsx, Markdown, PDF.** Markdown export uses a GitHub-flavored table; PDF is a styled table with the same columns shown in the UI.
-- **Calendar → PDF:** Month layout → one page per month in range; Week layout → one page per week.
-- All visual exports include a header strip: team name, timeline name, generated-at timestamp, applied filter description.
+**Open questions:** resolved in the plan — sync exports for v1; filter only (Find is ephemeral); no draba-side PDF engine.
 
-*Wiring:*
-- The Gantt toolbar's existing "Export" stub (Phase 8.1) becomes a real menu: CSV / xlsx / PDF / PNG
-- Same menu in 11.1 / 11.2 / 11.3 toolbar slots, scoped to each view's relevant formats
-
-**Open questions (resolve before starting):**
-- Are exports synchronous (block and return the file) or async (job queue with a download link)? Probably sync for v1; revisit if multi-hundred-page PDFs become slow.
-- Do exports respect Find highlights or just the filter? (Filter only — Find is ephemeral.)
-
-**Exit criteria — safe to pause when:**
-- Exporting a timeline to CSV and xlsx produces files containing all visible activities with the active filter applied
-- Gantt → PDF renders a recognizable Gantt chart with bars in the correct positions and a member-color legend
-- Kanban → PDF renders the visible columns and cards in the same order shown on screen
-- List → Markdown produces a clean GitHub-flavored table that renders correctly in a Markdown previewer
-- Calendar → PDF in Month layout produces one page per month with activities in correct cells
-- All export menus are reachable from their respective view toolbars; format options match the view type
+**Exit criteria — safe to pause when** *(each sub-phase independently pausable)*:
+- **14.1:** CSV/xlsx contain exactly the activities visible under the active filter; `?filter=` works for a saved filter; static `.ics` imports cleanly into a calendar app; Export dialog reachable from all four view toolbars with formats scoped per view
+- **14.2:** Markdown renders correctly in a previewer and pastes rich into Slack / Google Docs via the clipboard flavors
+- **14.3:** PNG of each view is recognizable, full-extent, correct colors, header strip present
+- **14.4:** each view's printable route paginates correctly in browser print preview; Gantt bars positioned correctly with legend; the saved PDF has selectable text
 
 ---
 
 ### Phase 15 — Import — Tabular
 **Status:** ⬜ | **Effort:** M (2–3 days)
 
-Get data *into* draba from a spreadsheet — CSV / Excel import with a mandatory preview + validation step before any rows are written. The natural companion to [Phase 14 export](#phase-14--export--tabular--per-view) (round-trip: export → edit in a spreadsheet → re-import), and the seam through which teams migrate off whatever they're planning in today. Sequenced after export because the preview/validation/conflict surface is meaningfully more complex than a one-way dump.
+Get data *into* draba from a spreadsheet — CSV / Excel import with a mandatory preview + validation step before any rows are written. The natural companion to [Phase 14 export](#phase-14--export--data-textual--visual) (round-trip: export → edit in a spreadsheet → re-import), and the seam through which teams migrate off whatever they're planning in today. Sequenced after export because the preview/validation/conflict surface is meaningfully more complex than a one-way dump.
 
 **Scope:**
 
