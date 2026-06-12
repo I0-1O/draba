@@ -2,6 +2,20 @@
 
 ---
 
+## 2026-06-11 — /review-phase 13.5: findings addressed
+
+Four-agent review (scope / security / conventions / test-coverage) of the 13.5 commit range. Security and conventions came back clean; fixes applied for the rest:
+
+- **Frontend coverage for the three 13.5 UI paths (was the blocker group):** new `ShareModal.test.tsx` (footer meta columns: "Never" fallback, today-as-time vs. older-as-date last-viewed format, view total, "· you" creator marker) and `Sidebar.test.tsx` (share-count chip: count + plural/singular tooltip, hidden at zero/absent). `useShares.test.ts` gains a behavior test proving `useListShares` refetches on remount even under the app-wide 30s `staleTime` — the freshness override asserted as behavior, not config.
+- **Orphaned share → 404, not 500:** `shareTimelineLive` now maps `sql.ErrNoRows` from the timeline load to the same 404 body as every other dead-share case. The shares FK is `ON DELETE CASCADE` so a share row outliving its timeline should never happen, but a 500 there would be a state oracle on the public surface. `TestShareGateway_OrphanShare404` suspends FK enforcement to fabricate the orphan and covers both gateways (and guards against a vacuous pass by asserting the share rows survived the delete).
+- **Scope acknowledgement — unlock endpoint as a third archived-404 surface:** the phase scope named two gateways (JSON + ICS), but `handleUnlockShare` also got the `shareTimelineLive` check. Kept deliberately: without it, unlocking a protected share of an archived timeline would either succeed or answer `NOT_PROTECTED`/`INVALID_PASSWORD`, leaking protection state the gateways carefully hide. Defensive hardening in service of the scoped behavior, not new scope.
+
+Accepted as-is from the review: the `useListShares` freshness override slightly exceeds the "render only" re-scope wording (it directly serves last-viewed accuracy — nit, no change).
+
+**Checks:** `go test ./internal/api/` ✅ · `pnpm --filter web test` ✅ (new files 24/24).
+
+---
+
 ## 2026-06-11 — Phase 13.5: Lifecycle tail
 
 **Goal:** the re-scoped (same-day) half-day close-out of Phase 13: archived timelines stop serving their shares/feeds (reversibly), the timeline tile shows an active-share-count chip, and last-viewed renders in the share modal. Cut from scope: the expiry write path and any site-statistics subsystem.

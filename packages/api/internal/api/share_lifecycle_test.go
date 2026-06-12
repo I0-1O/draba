@@ -13,6 +13,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/I0-1O/draba/packages/api/internal/tier"
 )
 
 // TestShareArchive_ArchivedTimelineKillsSharesAndFeeds verifies the 13.5 exit
@@ -94,6 +96,66 @@ func TestShareArchive_UnlockArchivedTimeline404(t *testing.T) {
 		jsonBody(t, map[string]string{"password": "hunter22"})))
 	assert.Equal(t, http.StatusNotFound, wU.Code,
 		"correct password must not unlock a share of an archived timeline")
+}
+
+// TestShareGateway_OrphanShare404 verifies that a share row outliving a
+// hard-deleted timeline answers the same 404 as every other dead-share case
+// on both public gateways — not a 500, which would be a state oracle. The
+// shares FK is ON DELETE CASCADE so this state cannot arise through normal
+// deletes; the test suspends FK enforcement to orphan the rows directly.
+func TestShareGateway_OrphanShare404(t *testing.T) {
+	srv, database := newTestServerWithDB(t, tier.Unlimited)
+
+	token, _ := seedUser(t, srv, "alice@share.com", "password1", "Alice")
+
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, authReq(http.MethodPost, "/teams", map[string]string{"name": "Share Team"}, token))
+	require.Equal(t, http.StatusCreated, w.Code)
+	var team map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&team))
+	teamID := team["id"].(string)
+
+	w2 := httptest.NewRecorder()
+	srv.ServeHTTP(w2, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/timelines", teamID), map[string]any{
+		"name": "Doomed Timeline", "startDate": "2026-01-01", "endDate": "2026-12-31",
+	}, token))
+	require.Equal(t, http.StatusCreated, w2.Code)
+	var tl map[string]any
+	require.NoError(t, json.NewDecoder(w2.Body).Decode(&tl))
+	timelineID := tl["id"].(string)
+
+	wV := httptest.NewRecorder()
+	srv.ServeHTTP(wV, authReq(http.MethodPost, fmt.Sprintf("/timelines/%s/shares", timelineID), map[string]any{
+		"viewType": "gantt", "viewConfig": "{}",
+	}, token))
+	require.Equal(t, http.StatusCreated, wV.Code)
+	var viewShare map[string]any
+	require.NoError(t, json.NewDecoder(wV.Body).Decode(&viewShare))
+	viewToken := viewShare["token"].(string)
+
+	icsShare := createICSShare(t, srv, token, timelineID, map[string]any{"scope": "timeline"})
+	icsToken := icsShare["token"].(string)
+
+	_, err := database.Exec(`PRAGMA foreign_keys = OFF`)
+	require.NoError(t, err)
+	_, err = database.Exec(`DELETE FROM timelines WHERE id = ?`, timelineID)
+	require.NoError(t, err)
+	_, err = database.Exec(`PRAGMA foreign_keys = ON`)
+	require.NoError(t, err)
+
+	// Guard against a vacuous pass: if the CASCADE fired anyway, the gateway
+	// 404s from the share lookup and never reaches the orphan branch.
+	var n int
+	require.NoError(t, database.Get(&n, `SELECT COUNT(*) FROM shares WHERE timeline_id = ?`, timelineID))
+	require.Equal(t, 2, n, "share rows must survive the timeline delete for this test to mean anything")
+
+	wG := httptest.NewRecorder()
+	srv.ServeHTTP(wG, httptest.NewRequest(http.MethodGet, "/shares/"+viewToken, http.NoBody))
+	assert.Equal(t, http.StatusNotFound, wG.Code, "orphaned view share must 404, not 500")
+
+	wF := httptest.NewRecorder()
+	srv.ServeHTTP(wF, httptest.NewRequest(http.MethodGet, "/shares/"+icsToken+".ics", http.NoBody))
+	assert.Equal(t, http.StatusNotFound, wF.Code, "orphaned ICS feed must 404, not 500")
 }
 
 // TestTimelineShareCount verifies the derived shareCount on timeline reads:

@@ -2,7 +2,7 @@
 
 _Updated after each significant work session. Read this first to orient — it is intentionally short. Per-phase implementation detail lives in [docs/log.md](../log.md); this file is a current-state snapshot only._
 
-**Last updated:** 2026-06-11 (Phase 13.5 built and verified — Phase 13 is now fully built. Earlier same day: 13.5 re-scoped to a half-day close-out; `/review-phase 13.4` findings addressed.)
+**Last updated:** 2026-06-11 (`/review-phase 13.5` findings addressed: frontend tests for the chip/last-viewed/refetch paths, orphaned-share 404 hardening, unlock-surface scope acknowledgement. Earlier same day: 13.5 built and verified — Phase 13 is now fully built.)
 
 ---
 

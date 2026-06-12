@@ -69,6 +69,30 @@ describe('useListShares', () => {
     expect(result.current.data).toHaveLength(1)
   })
 
+  it('refetches on every mount despite a non-zero app-wide staleTime', async () => {
+    // Fresh Response per call — a Response body can only be consumed once.
+    vi.mocked(fetch).mockImplementation(() =>
+      Promise.resolve(new Response(JSON.stringify([SHARE_FIXTURE]), { status: 200 })),
+    )
+
+    // Mirror the app QueryClient's 30s default staleTime: the hook must
+    // override it (staleTime: 0 + refetchOnMount: 'always') so the view
+    // telemetry it renders (viewCount / lastViewedAt) is current every time
+    // a share modal opens.
+    const qc = new QueryClient({
+      defaultOptions: { queries: { retry: false, staleTime: 30_000 } },
+    })
+    const wrapper = ({ children }: { children: React.ReactNode }) =>
+      createElement(QueryClientProvider, { client: qc }, children)
+
+    const first = renderHook(() => useListShares('team-1', 'tl-1'), { wrapper })
+    await waitFor(() => expect(first.result.current.isSuccess).toBe(true))
+    first.unmount()
+
+    renderHook(() => useListShares('team-1', 'tl-1'), { wrapper })
+    await waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalledTimes(2))
+  })
+
   it('does not fetch when teamId is empty', () => {
     const { wrapper } = makeWrapper()
     renderHook(() => useListShares('', 'tl-1'), { wrapper })

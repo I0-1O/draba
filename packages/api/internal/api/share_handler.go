@@ -186,6 +186,13 @@ func (s *Server) handleGetShareProjection(w http.ResponseWriter, r *http.Request
 // archived-timeline response without leaking archive state.
 func (s *Server) shareTimelineLive(w http.ResponseWriter, share *models.Share) bool {
 	timeline, err := s.timelines.GetByID(share.TimelineID)
+	if errors.Is(err, sql.ErrNoRows) {
+		// A share row outliving a hard-deleted timeline answers the same 404 as
+		// every other dead-share case — a 500 here would be a state oracle on
+		// the public surface.
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+		return false
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load share")
 		return false
