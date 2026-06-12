@@ -44298,351 +44298,6 @@ export default function CalendarShareModal({ teamId, timelineId, timelineName, o
 }
 ````
 
-## File: packages/web/src/hooks/useShares.test.ts
-````typescript
-/**
- * useShares hooks — unit tests verifying query keys, mutation endpoints,
- * cache invalidation, and the public share projection fetch.
- * Uses a real QueryClient with fetch mocked globally.
- */
-
-import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { renderHook, waitFor } from '@testing-library/react'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { createElement } from 'react'
-import {
-  useListShares,
-  useCreateShare,
-  useDeleteShare,
-  useRegenerateShare,
-  useShareProjection,
-  useUnlockShare,
-} from './useShares'
-
-// ── Auth mock ─────────────────────────────────────────────────────────────────
-
-vi.mock('@/contexts/AuthContext', () => ({
-  useAuth: () => ({ getAccessToken: async () => 'test-token' }),
-}))
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-function makeWrapper() {
-  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-  return {
-    qc,
-    wrapper: ({ children }: { children: React.ReactNode }) =>
-      createElement(QueryClientProvider, { client: qc }, children),
-  }
-}
-
-const SHARE_FIXTURE = {
-  id: 'share-1',
-  timelineId: 'tl-1',
-  token: 'abc123',
-  viewType: 'gantt',
-  viewConfig: '{}',
-  createdBy: 'member-1',
-  createdAt: '2026-01-01T00:00:00Z',
-  viewCount: 0,
-}
-
-// ── useListShares ─────────────────────────────────────────────────────────────
-
-describe('useListShares', () => {
-  beforeEach(() => {
-    vi.stubGlobal('fetch', vi.fn())
-  })
-
-  it('fetches shares from the correct URL', async () => {
-    vi.mocked(fetch).mockResolvedValueOnce(
-      new Response(JSON.stringify([SHARE_FIXTURE]), { status: 200 }),
-    )
-
-    const { wrapper } = makeWrapper()
-    const { result } = renderHook(() => useListShares('team-1', 'tl-1'), { wrapper })
-
-    await waitFor(() => expect(result.current.isSuccess).toBe(true))
-
-    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
-      expect.stringContaining('/teams/team-1/timelines/tl-1/shares'),
-      expect.any(Object),
-    )
-    expect(result.current.data).toHaveLength(1)
-  })
-
-  it('does not fetch when teamId is empty', () => {
-    const { wrapper } = makeWrapper()
-    renderHook(() => useListShares('', 'tl-1'), { wrapper })
-    expect(vi.mocked(fetch)).not.toHaveBeenCalled()
-  })
-
-  it('does not fetch when timelineId is empty', () => {
-    const { wrapper } = makeWrapper()
-    renderHook(() => useListShares('team-1', ''), { wrapper })
-    expect(vi.mocked(fetch)).not.toHaveBeenCalled()
-  })
-})
-
-// ── useCreateShare ────────────────────────────────────────────────────────────
-
-describe('useCreateShare', () => {
-  beforeEach(() => {
-    vi.stubGlobal('fetch', vi.fn())
-  })
-
-  it('POSTs to the correct URL and invalidates the share list', async () => {
-    vi.mocked(fetch).mockResolvedValueOnce(
-      new Response(JSON.stringify(SHARE_FIXTURE), { status: 201 }),
-    )
-
-    const { wrapper, qc } = makeWrapper()
-    const invalidate = vi.spyOn(qc, 'invalidateQueries')
-
-    const { result } = renderHook(() => useCreateShare('team-1', 'tl-1'), { wrapper })
-    result.current.mutate({ viewType: 'gantt', viewConfig: '{}' })
-
-    await waitFor(() => expect(result.current.isSuccess).toBe(true))
-
-    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
-      expect.stringContaining('/timelines/tl-1/shares'),
-      expect.objectContaining({ method: 'POST' }),
-    )
-    expect(invalidate).toHaveBeenCalledWith(
-      expect.objectContaining({
-        queryKey: ['teams', 'team-1', 'timelines', 'tl-1', 'shares'],
-      }),
-    )
-  })
-})
-
-describe('useCreateShare (ICS feeds)', () => {
-  beforeEach(() => {
-    vi.stubGlobal('fetch', vi.fn())
-  })
-
-  it('sends kind/scope/memberId for a member-scoped ICS feed', async () => {
-    vi.mocked(fetch).mockResolvedValueOnce(
-      new Response(JSON.stringify({ ...SHARE_FIXTURE, kind: 'ics', scope: 'member', memberId: 'm-1' }), { status: 201 }),
-    )
-
-    const { wrapper } = makeWrapper()
-    const { result } = renderHook(() => useCreateShare('team-1', 'tl-1'), { wrapper })
-    result.current.mutate({ kind: 'ics', scope: 'member', memberId: 'm-1', name: 'Feed' })
-
-    await waitFor(() => expect(result.current.isSuccess).toBe(true))
-
-    const opts = vi.mocked(fetch).mock.calls[0][1] as RequestInit
-    expect(JSON.parse(String(opts.body))).toMatchObject({
-      kind: 'ics',
-      scope: 'member',
-      memberId: 'm-1',
-    })
-  })
-})
-
-// ── useRegenerateShare ────────────────────────────────────────────────────────
-
-describe('useRegenerateShare', () => {
-  beforeEach(() => {
-    vi.stubGlobal('fetch', vi.fn())
-  })
-
-  it('POSTs to the regenerate endpoint and invalidates the share list', async () => {
-    vi.mocked(fetch).mockResolvedValueOnce(
-      new Response(JSON.stringify({ ...SHARE_FIXTURE, token: 'rotated' }), { status: 200 }),
-    )
-
-    const { wrapper, qc } = makeWrapper()
-    const invalidate = vi.spyOn(qc, 'invalidateQueries')
-
-    const { result } = renderHook(() => useRegenerateShare('team-1', 'tl-1'), { wrapper })
-    result.current.mutate('share-1')
-
-    await waitFor(() => expect(result.current.isSuccess).toBe(true))
-
-    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
-      expect.stringContaining('/shares/share-1/regenerate'),
-      expect.objectContaining({ method: 'POST' }),
-    )
-    expect(result.current.data?.token).toBe('rotated')
-    expect(invalidate).toHaveBeenCalledWith(
-      expect.objectContaining({
-        queryKey: ['teams', 'team-1', 'timelines', 'tl-1', 'shares'],
-      }),
-    )
-  })
-})
-
-// ── useDeleteShare ────────────────────────────────────────────────────────────
-
-describe('useDeleteShare', () => {
-  beforeEach(() => {
-    vi.stubGlobal('fetch', vi.fn())
-  })
-
-  it('DELETEs the correct URL and invalidates the share list', async () => {
-    vi.mocked(fetch).mockResolvedValueOnce(new Response(null, { status: 204 }))
-
-    const { wrapper, qc } = makeWrapper()
-    const invalidate = vi.spyOn(qc, 'invalidateQueries')
-
-    const { result } = renderHook(() => useDeleteShare('team-1', 'tl-1'), { wrapper })
-    result.current.mutate('share-1')
-
-    await waitFor(() => expect(result.current.isSuccess).toBe(true))
-
-    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
-      expect.stringContaining('/shares/share-1'),
-      expect.objectContaining({ method: 'DELETE' }),
-    )
-    expect(invalidate).toHaveBeenCalledWith(
-      expect.objectContaining({
-        queryKey: ['teams', 'team-1', 'timelines', 'tl-1', 'shares'],
-      }),
-    )
-  })
-})
-
-// ── useShareProjection ────────────────────────────────────────────────────────
-
-const PROJECTION_FIXTURE = {
-  share: {
-    id: 'share-1',
-    timelineId: 'tl-1',
-    token: 'abc123',
-    viewType: 'gantt',
-    viewConfig: '{}',
-    createdAt: '2026-01-01T00:00:00Z',
-  },
-  teamName: 'Test Team',
-  timeline: { id: 'tl-1', name: 'Q1 Plan', startDate: '2026-01-01', endDate: '2026-12-31' },
-  members: [],
-  statuses: [],
-  tags: [],
-  activities: [],
-}
-
-describe('useShareProjection', () => {
-  beforeEach(() => {
-    vi.stubGlobal('fetch', vi.fn())
-  })
-
-  it('fetches the public projection without an auth header', async () => {
-    vi.mocked(fetch).mockResolvedValueOnce(
-      new Response(JSON.stringify(PROJECTION_FIXTURE), { status: 200 }),
-    )
-
-    const { wrapper } = makeWrapper()
-    const { result } = renderHook(() => useShareProjection('abc123'), { wrapper })
-
-    await waitFor(() => expect(result.current.isSuccess).toBe(true))
-
-    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
-      expect.stringContaining('/shares/abc123'),
-      expect.anything(),
-    )
-    // No Authorization header — this is a public endpoint (no view token passed).
-    const callArgs = vi.mocked(fetch).mock.calls[0]
-    const opts = callArgs[1] as RequestInit | undefined
-    const headers = (opts?.headers ?? {}) as Record<string, string>
-    expect(headers.Authorization).toBeUndefined()
-    expect(result.current.data?.teamName).toBe('Test Team')
-  })
-
-  it('does not fetch when token is undefined', () => {
-    const { wrapper } = makeWrapper()
-    renderHook(() => useShareProjection(undefined), { wrapper })
-    expect(vi.mocked(fetch)).not.toHaveBeenCalled()
-  })
-
-  it('throws an ApiError with the response status on non-200', async () => {
-    vi.mocked(fetch).mockResolvedValueOnce(
-      new Response(
-        JSON.stringify({ error: { code: 'NOT_FOUND', message: 'share not found' } }),
-        { status: 404 },
-      ),
-    )
-
-    const { wrapper } = makeWrapper()
-    const { result } = renderHook(() => useShareProjection('bad-token'), { wrapper })
-
-    await waitFor(() => expect(result.current.isError).toBe(true))
-
-    const err = result.current.error as { status?: number; code?: string }
-    expect(err.status).toBe(404)
-    expect(err.code).toBe('NOT_FOUND')
-  })
-
-  it('sends the view token as a Bearer header when provided', async () => {
-    vi.mocked(fetch).mockResolvedValueOnce(
-      new Response(JSON.stringify(PROJECTION_FIXTURE), { status: 200 }),
-    )
-
-    const { wrapper } = makeWrapper()
-    const { result } = renderHook(() => useShareProjection('abc123', 'view-jwt'), { wrapper })
-
-    await waitFor(() => expect(result.current.isSuccess).toBe(true))
-
-    const opts = vi.mocked(fetch).mock.calls[0][1] as RequestInit | undefined
-    const headers = (opts?.headers ?? {}) as Record<string, string>
-    expect(headers.Authorization).toBe('Bearer view-jwt')
-  })
-
-  it('maps a 401 { passwordRequired } response to a PASSWORD_REQUIRED error', async () => {
-    vi.mocked(fetch).mockResolvedValueOnce(
-      new Response(JSON.stringify({ passwordRequired: true }), { status: 401 }),
-    )
-
-    const { wrapper } = makeWrapper()
-    const { result } = renderHook(() => useShareProjection('locked-token'), { wrapper })
-
-    await waitFor(() => expect(result.current.isError).toBe(true))
-
-    const err = result.current.error as { status?: number; code?: string }
-    expect(err.status).toBe(401)
-    expect(err.code).toBe('PASSWORD_REQUIRED')
-  })
-})
-
-// ── useUnlockShare ──────────────────────────────────────────────────────────────
-
-describe('useUnlockShare', () => {
-  beforeEach(() => {
-    vi.stubGlobal('fetch', vi.fn())
-  })
-
-  it('POSTs the password to the unlock endpoint and returns the view token', async () => {
-    vi.mocked(fetch).mockResolvedValueOnce(
-      new Response(JSON.stringify({ token: 'view-jwt' }), { status: 200 }),
-    )
-
-    const { wrapper } = makeWrapper()
-    const { result } = renderHook(() => useUnlockShare('abc123'), { wrapper })
-
-    let token = ''
-    await waitFor(async () => { token = await result.current.mutateAsync('hunter2') })
-
-    expect(token).toBe('view-jwt')
-    const [url, opts] = vi.mocked(fetch).mock.calls[0]
-    expect(String(url)).toContain('/shares/abc123/unlock')
-    expect(opts?.method).toBe('POST')
-    expect(JSON.parse(String(opts?.body))).toEqual({ password: 'hunter2' })
-  })
-
-  it('throws an ApiError on a wrong password (401)', async () => {
-    vi.mocked(fetch).mockResolvedValueOnce(
-      new Response(JSON.stringify({ error: { code: 'INVALID_PASSWORD', message: 'incorrect password' } }), { status: 401 }),
-    )
-
-    const { wrapper } = makeWrapper()
-    const { result } = renderHook(() => useUnlockShare('abc123'), { wrapper })
-
-    await expect(result.current.mutateAsync('wrong')).rejects.toMatchObject({ status: 401 })
-  })
-})
-````
-
 ## File: packages/web/src/pages/LoginPage.tsx
 ````typescript
 import { useState } from 'react'
@@ -47209,961 +46864,6 @@ export default function KanbanBoard({
 }
 ````
 
-## File: packages/api/internal/api/server.go
-````go
-// Package api hosts the HTTP handlers, routing, and middleware for the
-// draba REST API. Handlers are intentionally thin: they decode requests,
-// delegate to repositories and services, and write responses. Business
-// logic belongs in the domain packages, not here.
-package api
-
-import (
-	"fmt"
-	"io/fs"
-	"net/http"
-	"strings"
-	"time"
-
-	"github.com/I0-1O/draba/packages/api/internal/auth"
-	"github.com/I0-1O/draba/packages/api/internal/db"
-	"github.com/I0-1O/draba/packages/api/internal/events"
-	"github.com/I0-1O/draba/packages/api/internal/mailer"
-	"github.com/I0-1O/draba/packages/api/internal/models"
-	"github.com/I0-1O/draba/packages/api/internal/tier"
-	"github.com/I0-1O/draba/packages/api/internal/ws"
-)
-
-// TimelineStore is the persistence interface required by timeline handlers.
-// The concrete implementation is *db.TimelineRepo; tests may substitute a fake.
-type TimelineStore interface {
-	Create(t *models.Timeline) error
-	GetByID(id string) (*models.Timeline, error)
-	GetByShareToken(token string) (*models.Timeline, error)
-	ListByTeam(teamID string, includeArchived bool) ([]*models.Timeline, error)
-	HasAccess(timelineID, teamMemberID string) (bool, error)
-	GrantAccess(timelineID, teamMemberID, role string) error
-	RevokeAccess(timelineID, teamMemberID string) error
-	GetAccessRole(timelineID, teamMemberID string) (string, error)
-	ListAccess(timelineID string) ([]*models.TimelineAccessEntry, error)
-	SetArchived(id string, at *time.Time) error
-	Update(t *models.Timeline) error
-	Delete(id string) error
-}
-
-// Server holds shared dependencies for all HTTP handlers.
-type Server struct {
-	users          *db.UserRepo
-	invites        *db.InviteRepo
-	teams          *db.TeamRepo
-	activities     *db.ActivityRepo
-	timelines      TimelineStore
-	savedFilters   *db.SavedFilterRepo
-	preferences    *db.UserPreferenceRepo
-	apiTokens      *db.APITokenRepo
-	instanceSets   *db.InstanceSettingsRepo
-	passwordTokens *db.PasswordResetTokenRepo
-	statuses       *db.StatusRepo
-	tags           *db.TagRepo
-	shares         *db.ShareRepo
-	shareCache     *shareCache
-	icsCache       *icsFeedCache
-	unlockLimiter  *rateLimiter
-	mailer         *mailer.Mailer
-	tokens         *auth.TokenService
-	tier           tier.Tier
-	bus            *events.Bus
-	hub            *ws.Hub
-	uiFS           fs.FS
-}
-
-// NewServer constructs a Server with its required dependencies. It does not
-// touch the network; call Routes to obtain the http.Handler to serve.
-func NewServer(
-	users *db.UserRepo,
-	invites *db.InviteRepo,
-	teams *db.TeamRepo,
-	activitiesRepo *db.ActivityRepo,
-	timelinesRepo TimelineStore,
-	savedFiltersRepo *db.SavedFilterRepo,
-	preferencesRepo *db.UserPreferenceRepo,
-	apiTokensRepo *db.APITokenRepo,
-	instanceSetsRepo *db.InstanceSettingsRepo,
-	passwordTokensRepo *db.PasswordResetTokenRepo,
-	statusesRepo *db.StatusRepo,
-	tagsRepo *db.TagRepo,
-	sharesRepo *db.ShareRepo,
-	m *mailer.Mailer,
-	tokens *auth.TokenService,
-	t tier.Tier,
-	bus *events.Bus,
-	hub *ws.Hub,
-) *Server {
-	// Both public-share caches share the DRABA_SHARE_CACHE_TTL setting.
-	sc := newShareCache()
-	return &Server{
-		users:          users,
-		invites:        invites,
-		teams:          teams,
-		activities:     activitiesRepo,
-		timelines:      timelinesRepo,
-		savedFilters:   savedFiltersRepo,
-		preferences:    preferencesRepo,
-		apiTokens:      apiTokensRepo,
-		instanceSets:   instanceSetsRepo,
-		passwordTokens: passwordTokensRepo,
-		statuses:       statusesRepo,
-		tags:           tagsRepo,
-		shares:         sharesRepo,
-		shareCache:     sc,
-		icsCache:       newICSFeedCache(sc.ttl),
-		unlockLimiter:  newRateLimiter(unlockMaxAttempts, time.Hour),
-		mailer:         m,
-		tokens:         tokens,
-		tier:           t,
-		bus:            bus,
-		hub:            hub,
-	}
-}
-
-// WithUI registers an embedded React SPA to be served at GET /. The FS must
-// be rooted at the build output directory (i.e. contain index.html directly).
-// When called, all unmatched GET paths fall back to index.html so React Router
-// handles client-side navigation. Safe to skip in dev (no-op when not called).
-func (s *Server) WithUI(uiFS fs.FS) *Server {
-	s.uiFS = uiFS
-	return s
-}
-
-// Routes returns the fully-wired HTTP handler for the API, including all
-// core routes plus any routes added by registered tier modules.
-func (s *Server) Routes() http.Handler {
-	mux := http.NewServeMux()
-
-	mux.HandleFunc("GET /setup/status", s.handleSetupStatus)
-	mux.HandleFunc("GET /version", s.handleVersion)
-
-	mux.HandleFunc("POST /auth/register", s.handleRegister)
-	mux.HandleFunc("POST /auth/login", s.handleLogin)
-	mux.HandleFunc("POST /auth/refresh", s.handleRefresh)
-	mux.HandleFunc("GET /auth/me", chain(s.handleMe, s.authMiddleware))
-	mux.HandleFunc("POST /auth/forgot-password", s.handleForgotPassword)
-	mux.HandleFunc("POST /auth/reset-password", s.handleResetPassword)
-
-	mux.HandleFunc("GET /users/me/preferences", chain(s.handleGetPreferences, s.authMiddleware))
-	mux.HandleFunc("PUT /users/me/preferences", chain(s.handleUpsertPreference, s.authMiddleware))
-	mux.HandleFunc("GET /users/me/stats", chain(s.handleGetMyStats, s.authMiddleware))
-	mux.HandleFunc("PATCH /users/me", chain(s.handleUpdateProfile, s.authMiddleware))
-	mux.HandleFunc("PUT /users/me/password", chain(s.handleChangePassword, s.authMiddleware))
-
-	mux.HandleFunc("GET /admin/smtp", chain(s.handleGetSMTP, s.authMiddleware))
-	mux.HandleFunc("PUT /admin/smtp", chain(s.handlePutSMTP, s.authMiddleware))
-	mux.HandleFunc("POST /admin/smtp/test", chain(s.handleTestSMTP, s.authMiddleware))
-	mux.HandleFunc("DELETE /admin/smtp", chain(s.handleDeleteSMTP, s.authMiddleware))
-	mux.HandleFunc("GET /admin/settings", chain(s.handleGetAdminSettings, s.authMiddleware))
-	mux.HandleFunc("PATCH /admin/settings", chain(s.handlePatchAdminSettings, s.authMiddleware))
-	mux.HandleFunc("GET /admin/users", chain(s.handleListAdminUsers, s.authMiddleware))
-
-	// Public — no auth required; used by the login page and shared views.
-	mux.HandleFunc("GET /settings/branding", s.handleGetPublicBranding)
-
-	mux.HandleFunc("POST /tokens", chain(s.handleCreateAPIToken, s.authMiddleware))
-	mux.HandleFunc("GET /tokens", chain(s.handleListAPITokens, s.authMiddleware))
-	mux.HandleFunc("DELETE /tokens/{id}", chain(s.handleDeleteAPIToken, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams", chain(s.handleListTeams, s.authMiddleware))
-	mux.HandleFunc("POST /teams", chain(s.handleCreateTeam, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}", chain(s.handleGetTeam, s.authMiddleware))
-	mux.HandleFunc("PATCH /teams/{id}", chain(s.handleUpdateTeam, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/archive", chain(s.handleArchiveTeam, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/unarchive", chain(s.handleUnarchiveTeam, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/invites", chain(s.handleCreateInvite, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/invites", chain(s.handleListInvites, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/invites/{inviteId}", chain(s.handleDeleteInvite, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/invite-link", chain(s.handleCreateInviteLink, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/invite-link/reset", chain(s.handleResetInviteLink, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/invite-link", chain(s.handleGetInviteLink, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/invite-link", chain(s.handleDeleteInviteLink, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/members", chain(s.handleListMembers, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/members/{memberId}", chain(s.handleGetMember, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/members/{memberId}/stats", chain(s.handleGetMemberStats, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/members", chain(s.handleAddMember, s.authMiddleware))
-	mux.HandleFunc("PATCH /teams/{id}/members/{memberId}", chain(s.handleUpdateMember, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/members/{memberId}", chain(s.handleDeleteMember, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/members/{memberId}/archive", chain(s.handleArchiveMember, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/members/{memberId}/unarchive", chain(s.handleUnarchiveMember, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/participants", chain(s.handleCreateParticipant, s.authMiddleware))
-	mux.HandleFunc("GET /users/search", chain(s.handleSearchUsers, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/promote", chain(s.handlePromoteUser, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/archive", chain(s.handleArchiveUser, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/unarchive", chain(s.handleUnarchiveUser, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/revoke", chain(s.handleRevokeUser, s.authMiddleware))
-	mux.HandleFunc("DELETE /users/{id}", chain(s.handleDeleteUser, s.authMiddleware))
-	// Activity routes use the team-scoped prefix (GET /teams/{id}/timelines/{timelineId}/...)
-	// to avoid a Go 1.22 mux conflict with GET /timelines/share/{token}: both are
-	// 3-segment GET paths and neither is more specific when the third segment differs.
-	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/activities", chain(s.handleCreateActivity, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/activities", chain(s.handleListActivities, s.authMiddleware))
-	mux.HandleFunc("PATCH /activities/{id}", chain(s.handleUpdateActivity, s.authMiddleware))
-	mux.HandleFunc("DELETE /activities/{id}", chain(s.handleDeleteActivity, s.authMiddleware))
-	mux.HandleFunc("POST /activities/{id}/archive", chain(s.handleArchiveActivity, s.authMiddleware))
-	mux.HandleFunc("POST /activities/{id}/unarchive", chain(s.handleUnarchiveActivity, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/tags", chain(s.handleListTags, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/tags", chain(s.handleCreateTag, s.authMiddleware))
-	mux.HandleFunc("PATCH /tags/{id}", chain(s.handleUpdateTag, s.authMiddleware))
-	mux.HandleFunc("DELETE /tags/{id}", chain(s.handleDeleteTag, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/saved_filters/all", chain(s.handleListAllTeamSavedFilters, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/saved_filters", chain(s.handleListSavedFilters, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/saved_filters", chain(s.handleCreateSavedFilter, s.authMiddleware))
-	mux.HandleFunc("PATCH /saved_filters/{id}", chain(s.handleUpdateSavedFilter, s.authMiddleware))
-	mux.HandleFunc("DELETE /saved_filters/{id}", chain(s.handleDeleteSavedFilter, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/status-templates", chain(s.handleListStatusTemplates, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/status-templates", chain(s.handleCreateStatusTemplate, s.authMiddleware))
-	mux.HandleFunc("PATCH /status-templates/{id}", chain(s.handleUpdateStatusTemplate, s.authMiddleware))
-	mux.HandleFunc("DELETE /status-templates/{id}", chain(s.handleDeleteStatusTemplate, s.authMiddleware))
-	mux.HandleFunc("POST /status-templates/{id}/items", chain(s.handleCreateTemplateItem, s.authMiddleware))
-	mux.HandleFunc("PATCH /status-template-items/{id}", chain(s.handleUpdateTemplateItem, s.authMiddleware))
-	mux.HandleFunc("DELETE /status-template-items/{id}", chain(s.handleDeleteTemplateItem, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/timelines", chain(s.handleListTimelines, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/timelines", chain(s.handleCreateTimeline, s.authMiddleware))
-	// GET /timelines/share/{token} must be registered before GET /timelines/{id} so
-	// the more-specific literal "share" segment takes precedence.
-	mux.HandleFunc("GET /timelines/share/{token}", s.handleGetTimelineByShareToken)
-	mux.HandleFunc("GET /timelines/{id}", chain(s.handleGetTimeline, s.authMiddleware))
-	// Timeline statuses are placed under /teams/{id}/timelines/{timelineId}/statuses
-	// rather than /timelines/{id}/statuses to avoid a Go 1.22 mux pattern conflict
-	// with GET /timelines/share/{token} (both are 3-segment paths and conflict on
-	// paths like /timelines/share/statuses).
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleListTimelineStatuses, s.authMiddleware))
-	mux.HandleFunc("POST /timelines/{id}/archive", chain(s.handleArchiveTimeline, s.authMiddleware))
-	mux.HandleFunc("POST /timelines/{id}/unarchive", chain(s.handleUnarchiveTimeline, s.authMiddleware))
-
-	mux.HandleFunc("PATCH /timelines/{id}", chain(s.handleUpdateTimeline, s.authMiddleware))
-	mux.HandleFunc("DELETE /timelines/{id}", chain(s.handleDeleteTimeline, s.authMiddleware))
-	// Access list routes use the team-scoped prefix to avoid a Go 1.22 mux
-	// conflict with GET /timelines/share/{token} on 3-segment GET paths.
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/access", chain(s.handleListTimelineAccess, s.authMiddleware))
-	mux.HandleFunc("PUT /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleGrantTimelineAccess, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleRevokeTimelineAccess, s.authMiddleware))
-	// Timeline status CRUD — POST shares the team-scoped prefix with GET statuses.
-	// PATCH and DELETE use a flat /statuses/{id} prefix (2 segments, no conflict).
-	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleCreateTimelineStatus, s.authMiddleware))
-	mux.HandleFunc("PATCH /statuses/{id}", chain(s.handleUpdateStatus, s.authMiddleware))
-	mux.HandleFunc("DELETE /statuses/{id}", chain(s.handleDeleteStatus, s.authMiddleware))
-
-	// Share routes.
-	// GET /shares/{token} is public — no auth. The token is the credential.
-	// POST /timelines/{id}/shares uses the same /timelines/{id}/... prefix
-	// as archive/unarchive so it avoids the Go 1.22 mux pattern conflict with
-	// GET /timelines/share/{token} (only GET-method paths conflict).
-	// GET /teams/{id}/timelines/{timelineId}/shares uses the team-scoped prefix
-	// to avoid the GET conflict described above.
-	mux.HandleFunc("GET /shares/{token}", s.handleGetShareProjection)
-	mux.HandleFunc("POST /shares/{token}/unlock", s.handleUnlockShare)
-	mux.HandleFunc("POST /timelines/{id}/shares", chain(s.handleCreateShare, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/shares", chain(s.handleListShares, s.authMiddleware))
-	mux.HandleFunc("PATCH /shares/{id}", chain(s.handleUpdateShare, s.authMiddleware))
-	mux.HandleFunc("DELETE /shares/{id}", chain(s.handleDeleteShare, s.authMiddleware))
-	// Token rotation — the revocation story for ICS feeds (no password gate).
-	// GET /shares/{token}.ics is served inside handleGetShareProjection: the
-	// {token} wildcard spans the whole segment, so the .ics suffix arrives in
-	// the path value and is dispatched there.
-	mux.HandleFunc("POST /shares/{id}/regenerate", chain(s.handleRegenerateShare, s.authMiddleware))
-	// Named feed variant: the {file} slug is cosmetic (calendar clients
-	// default the calendar name from the URL filename); the token is the key.
-	mux.HandleFunc("GET /shares/{token}/{file}", s.handleGetShareICSNamed)
-
-	// GET /ws is intentionally outside authMiddleware — ServeWS validates the
-	// JWT itself before upgrading, because WebSocket clients can't set headers.
-	mux.HandleFunc("GET /ws", s.hub.ServeWS)
-
-	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-	})
-
-	if s.uiFS != nil {
-		mux.Handle("GET /", spaHandler(s.uiFS))
-	}
-
-	ctx := &tier.ModuleContext{Mux: mux, Tier: s.tier}
-	for _, m := range tier.Registered() {
-		if err := m.Register(ctx); err != nil {
-			// Module registration is a startup invariant — a failure here is a programming error.
-			panic(fmt.Sprintf("tier module %q failed to register: %v", m.Name(), err))
-		}
-	}
-
-	return requestLogger(mux)
-}
-
-// chain applies a single middleware to a handler function.
-func chain(h http.HandlerFunc, m func(http.Handler) http.Handler) http.HandlerFunc {
-	return m(h).ServeHTTP
-}
-
-// spaHandler serves the embedded React SPA. Known static assets are served
-// directly; any unrecognised path falls back to index.html so React Router
-// handles client-side navigation.
-func spaHandler(uiFS fs.FS) http.Handler {
-	fserver := http.FileServer(http.FS(uiFS))
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		path := strings.TrimPrefix(r.URL.Path, "/")
-		if path == "" {
-			path = "index.html"
-		}
-		if _, err := uiFS.Open(path); err != nil {
-			// Unknown path — serve index.html and let React Router handle it.
-			r = r.Clone(r.Context())
-			r.URL.Path = "/"
-			fserver.ServeHTTP(w, r)
-			return
-		}
-		fserver.ServeHTTP(w, r)
-	})
-}
-````
-
-## File: packages/web/src/components/gantt/GanttView.tsx
-````typescript
-/**
- * GanttView — data container for the Gantt grid.
- *
- * Fetches events and members, applies grouping and sorting, builds the
- * GanttRow list, and passes everything to GanttGrid. The component owns
- * no layout state — granularity, groupBy, and sortBy come from DashboardPage.
- *
- * Also owns the find-match computation: it reads the debounced query from
- * FindContext, matches against the fetched API events, and registers the
- * ordered match list back into FindContext so GanttGrid can apply visual
- * treatment and auto-scroll.
- */
-
-import { useMemo, useRef, useState, useLayoutEffect, useEffect, useCallback } from 'react';
-import { useQueryClient } from '@tanstack/react-query';
-import GanttGrid, { type GanttActivity, type GanttRow, type FindState } from './GanttGrid';
-import { useTimelineActivities, useTeamMembers, useUpdateActivity } from '@/hooks/useTeamActivities';
-import type { components } from '@draba/shared';
-import { type Member, ACTIVITY_COLORS, MEMBER_COLORS } from '@/types';
-import { resolveColorHex } from '@/components/identity/identity-constants';
-import type { GroupBy, SortBy, TimeGranularity, ColorBy } from './GanttToolbar';
-import {
-  generateColumns,
-  positionInColumns,
-  todayColumnPosition,
-  autoFitGranularity,
-  type ColumnDef,
-} from './granularity';
-import { matchEvents } from '@/lib/findMatcher';
-import { memberComboKey, orderedComboIds, memberComboLabel, comboSortComparator, UNASSIGNED_KEY, SEP } from '@/lib/memberGroups';
-import { useFind } from '@/contexts/FindContext';
-import { useFilter } from '@/contexts/FilterContext';
-import { usePreferenceMap } from '@/hooks/usePreferences';
-import { applyActiveFilter } from '@/lib/presetFilters';
-
-type ApiActivity = components['schemas']['Activity'];
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
-type Status = components['schemas']['Status'];
-type SavedFilter = components['schemas']['SavedFilter'];
-type Tag = components['schemas']['Tag'];
-
-interface Props {
-  teamId: string;
-  /** Active timeline ID — activities are fetched scoped to this timeline. */
-  timelineId: string;
-  /** ISO date "YYYY-MM-DD" — defaults to 14 days before today. */
-  startDate?: string;
-  /** ISO date "YYYY-MM-DD" — defaults to 75 days after today. */
-  endDate?: string;
-  groupBy: GroupBy;
-  sortBy: SortBy;
-  granularity: TimeGranularity | 'auto';
-  colorBy: ColorBy;
-  /**
-   * Timeline statuses — used to derive closedStatusIds and resolve status names
-   * in the filter engine. Replaces the old closedStatusIds prop.
-   */
-  timelineStatuses?: Status[];
-  /** Saved filters for the active team — evaluated by the filter engine. */
-  savedFilters?: SavedFilter[];
-  /** Team tags — used to resolve tag names in the filter engine. */
-  tags?: Tag[];
-  selectedActivityId?: string | null;
-  onSelectActivity?: (id: string | null) => void;
-  /** Called when the user drags on an empty lane to create an activity. */
-  onLaneDrag?: (startDate: Date, endDate: Date, memberId: string | null) => void;
-  /** Called during a bar drag with live snapped dates — for sidebar preview. */
-  onBarDragProgress?: (activityId: string, newStart: Date, newEnd: Date) => void;
-  /** Called when a bar drag completes (before the PATCH fires). */
-  onBarDragEnd?: () => void;
-  /** Called once members are loaded, so the parent can access them for panels. */
-  onMembersLoaded?: (members: Member[]) => void;
-  /** Called when an activity is selected — passes the full API activity object. */
-  onSelectApiActivity?: (activity: ApiActivity | null) => void;
-  /** Label column width in px — passed through to GanttGrid for controlled persistence. */
-  labelColW?: number;
-  /** Called when the user drags the label column resize handle. */
-  onLabelColWChange?: (w: number) => void;
-  /**
-   * When false, all click and drag interactions are suppressed — bars, lane
-   * drags, and group toggles are inert. Used by the public share viewer.
-   * Default: true.
-   */
-  interactive?: boolean;
-}
-
-
-// ── Date helpers ────────────────────────────────────────────────────────────
-
-function toDateOnly(datetime: string): string {
-  return datetime.slice(0, 10);
-}
-
-function todayMidnight(): Date {
-  const d = new Date();
-  d.setUTCHours(0, 0, 0, 0); // UTC midnight so it aligns with UTC-stored activity dates
-  return d;
-}
-
-function initialsFrom(name: string): string {
-  return name
-    .split(/\s+/)
-    .map(w => w[0] ?? '')
-    .slice(0, 2)
-    .join('')
-    .toUpperCase();
-}
-
-// ── Type mapping ─────────────────────────────────────────────────────────────
-
-function toMember(m: TeamMemberWithUser, index: number): Member {
-  const name = m.displayName || m.email || 'Unknown';
-  const fallbackHex = MEMBER_COLORS[index % MEMBER_COLORS.length];
-  return {
-    id: m.id,
-    name,
-    initials: initialsFrom(name),
-    color: resolveColorHex(m.color) || fallbackHex,
-  };
-}
-
-/** Intermediate activity type that carries API fields alongside computed view-state. Exported for use by the public share viewer. */
-export interface RichActivity extends GanttActivity {
-  startAtMs: number;
-  endAtMs: number;
-  parentActivityId: string | null;
-  primaryMemberId: string | null;
-  assignedMemberIds: string[];
-  statusId: string | null;
-}
-
-function toRichActivity(
-  ev: ApiActivity,
-  index: number,
-  memberById: Record<string, Member>,
-  viewStart: Date,
-  viewEnd: Date,
-  columns: ColumnDef[],
-  colorBy: ColorBy,
-  statusColorById: Map<string, string>,
-): RichActivity | null {
-  const evStart = new Date(toDateOnly(ev.startAt));
-  const evEnd = new Date(toDateOnly(ev.endAt));
-
-  if (evEnd < viewStart || evStart > viewEnd) return null;
-
-  const clampedStart = evStart < viewStart ? viewStart : evStart;
-  const clampedEnd = evEnd > viewEnd ? viewEnd : evEnd;
-
-  const { startCol, span } = positionInColumns(clampedStart, clampedEnd, columns);
-  const assignedIds = ev.assignedMemberIds ?? [];
-  const members = assignedIds.map(id => memberById[id]).filter((m): m is Member => Boolean(m));
-
-  const color =
-    colorBy === 'member' ? (members[0]?.color ?? ev.color ?? ACTIVITY_COLORS[index % ACTIVITY_COLORS.length]) :
-    colorBy === 'status' ? (statusColorById.get((ev as ApiActivity & { statusId?: string | null }).statusId ?? '') ?? '#6b7280') :
-    /* activity */ (ev.color ?? ACTIVITY_COLORS[index % ACTIVITY_COLORS.length]);
-
-  return {
-    id: ev.id,
-    title: ev.title,
-    startCol,
-    span,
-    color,
-    icon: ev.icon ?? undefined,
-    members,
-    isChild: Boolean(ev.parentActivityId),
-    startAtMs: new Date(ev.startAt).getTime(),
-    endAtMs: new Date(ev.endAt).getTime(),
-    parentActivityId: ev.parentActivityId ?? null,
-    primaryMemberId: members[0]?.id ?? null,
-    assignedMemberIds: assignedIds,
-    statusId: (ev as ApiActivity & { statusId?: string | null }).statusId ?? null,
-  };
-}
-
-// ── Sorting ──────────────────────────────────────────────────────────────────
-
-function sortActivities(activities: RichActivity[], sortBy: SortBy): RichActivity[] {
-  return [...activities].sort((a, b) => {
-    if (sortBy === 'title') return a.title.localeCompare(b.title);
-    if (sortBy === 'endDate') return a.endAtMs - b.endAtMs;
-    return a.startAtMs - b.startAtMs;
-  });
-}
-
-// ── Grouping ─────────────────────────────────────────────────────────────────
-
-/**
- * Builds the flat GanttRow list from positioned activities, applying grouping,
- * sorting, parent→child nesting (arbitrary depth), and collapse state.
- * Exported for unit testing of the tree/collapse logic.
- */
-export function buildRows(
-  activities: RichActivity[],
-  members: Member[],
-  groupBy: GroupBy,
-  sortBy: SortBy,
-  collapsedParents: Set<string>,
-  collapsedGroups: Set<string>,
-  statuses?: Status[],
-): GanttRow[] {
-  const sorted = sortActivities(activities, sortBy);
-
-  if (groupBy === 'none') {
-    // Flat list — no parent nesting, so children are not indented.
-    return sorted.map(ev => ({ kind: 'activity' as const, event: { ...ev, isChild: false, depth: 0 } }));
-  }
-
-  if (groupBy === 'member') {
-    const memberOrder = members.map(m => m.id);
-    const nameById = new Map(members.map(m => [m.id, m.name]));
-    // Colors here are already resolved hex (from the Member type / toMember conversion).
-    // ListView applies resolveColorHex on the raw API color string instead — both
-    // produce hex, but the resolution step happens at different layers.
-    const colorById = new Map(members.map(m => [m.id, m.color]));
-
-    const buckets = new Map<string, RichActivity[]>();
-    for (const ev of sorted) {
-      const key = memberComboKey(ev.assignedMemberIds);
-      const list = buckets.get(key) ?? [];
-      list.push(ev);
-      buckets.set(key, list);
-    }
-
-    const comparator = comboSortComparator(memberOrder);
-    const sortedKeys = [...buckets.keys()].sort(comparator);
-
-    const rows: GanttRow[] = [];
-    for (const key of sortedKeys) {
-      const evs = buckets.get(key)!;
-      const rawIds = key === UNASSIGNED_KEY ? [] : key.split(SEP);
-      const orderedIds = orderedComboIds(rawIds, memberOrder);
-      const label = key === UNASSIGNED_KEY ? 'Unassigned' : memberComboLabel(orderedIds, nameById);
-      const memberColors = orderedIds.map(id => colorById.get(id) ?? 'var(--muted-foreground)');
-      const primaryColor = key === UNASSIGNED_KEY ? 'var(--muted-foreground)' : (memberColors[0] ?? 'var(--muted-foreground)');
-      const collapsed = collapsedGroups.has(key);
-      rows.push({ kind: 'group', id: key, label, color: primaryColor, memberColors, count: evs.length, collapsed });
-      if (collapsed) continue;
-      for (const ev of evs) rows.push({ kind: 'activity', event: { ...ev, isChild: false, depth: 0 } });
-    }
-    return rows;
-  }
-
-  if (groupBy === 'parent') {
-    // Build a parent→children index, then emit rows via depth-first traversal so
-    // grandchildren (and deeper) nest correctly. An activity is a "root" when it
-    // has no parent or its parent fell outside the current view.
-    const byId = new Map(sorted.map(a => [a.id, a]));
-    const childrenByParent = new Map<string, RichActivity[]>();
-    const roots: RichActivity[] = [];
-    for (const ev of sorted) {
-      const pid = ev.parentActivityId;
-      if (pid && byId.has(pid)) {
-        const list = childrenByParent.get(pid) ?? [];
-        list.push(ev);
-        childrenByParent.set(pid, list);
-      } else {
-        roots.push(ev);
-      }
-    }
-
-    const rows: GanttRow[] = [];
-    const seen = new Set<string>();   // emitted into rows (also guards cycles)
-    const hidden = new Set<string>(); // suppressed under a collapsed ancestor
-
-    // Recursively mark a collapsed node's descendants as hidden so the leftover
-    // sweep below doesn't resurrect them. The `hidden` guard also stops cycles.
-    const markHidden = (ev: RichActivity) => {
-      if (hidden.has(ev.id)) return;
-      hidden.add(ev.id);
-      for (const k of childrenByParent.get(ev.id) ?? []) markHidden(k);
-    };
-
-    const visit = (ev: RichActivity, depth: number) => {
-      if (seen.has(ev.id)) return;
-      seen.add(ev.id);
-      const kids = childrenByParent.get(ev.id) ?? [];
-      const hasChildren = kids.length > 0;
-      const collapsed = collapsedParents.has(ev.id);
-      rows.push({
-        kind: 'activity',
-        event: { ...ev, isChild: depth > 0, depth, hasChildren, collapsed },
-      });
-      if (!hasChildren) return;
-      if (collapsed) for (const k of kids) markHidden(k);
-      else for (const k of kids) visit(k, depth + 1);
-    };
-
-    for (const r of roots) visit(r, 0);
-    // Safety net: emit any activity unreachable from a root (e.g. a parent-
-    // pointer cycle where no node qualifies as a root) at depth 0, but never
-    // resurrect a node intentionally hidden under a collapsed ancestor.
-    for (const ev of sorted) {
-      if (!seen.has(ev.id) && !hidden.has(ev.id)) visit(ev, 0);
-    }
-    return rows;
-  }
-
-  if (groupBy === 'status') {
-    const buckets = new Map<string, RichActivity[]>();
-    for (const ev of sorted) {
-      const key = ev.statusId ?? '__no_status__';
-      const list = buckets.get(key) ?? [];
-      list.push(ev);
-      buckets.set(key, list);
-    }
-
-    const rows: GanttRow[] = [];
-    const pushStatusBucket = (id: string, label: string, color: string, evs: RichActivity[]) => {
-      const collapsed = collapsedGroups.has(id);
-      rows.push({ kind: 'group', id, label, color, count: evs.length, collapsed });
-      if (collapsed) return;
-      for (const ev of evs) rows.push({ kind: 'activity', event: { ...ev, isChild: false, depth: 0 } });
-    };
-
-    if (statuses) {
-      for (const s of statuses) {
-        const evs = buckets.get(s.id);
-        if (!evs?.length) continue;
-        pushStatusBucket(s.id, s.name, resolveColorHex(s.color ?? null) ?? 'var(--muted-foreground)', evs);
-      }
-    }
-    const noStatus = buckets.get('__no_status__');
-    if (noStatus?.length) {
-      pushStatusBucket('__no_status__', 'No status', 'var(--muted-foreground)', noStatus);
-    }
-    return rows;
-  }
-
-  return sorted.map(ev => ({ kind: 'activity' as const, event: ev }));
-}
-
-// ── Component ─────────────────────────────────────────────────────────────────
-
-/**
- * Returns only the activities whose status is not in closedStatusIds.
- * Extracted as a named export so the 'open' filter preset logic can be
- * unit-tested without mounting the full component.
- */
-export function filterOpenActivities<T extends { statusId?: string | null | undefined }>(
-  activities: T[],
-  closedStatusIds: Set<string>,
-): T[] {
-  return activities.filter(a => !a.statusId || !closedStatusIds.has(a.statusId))
-}
-
-export default function GanttView({
-  teamId,
-  timelineId,
-  startDate,
-  endDate,
-  groupBy,
-  sortBy,
-  granularity,
-  colorBy,
-  timelineStatuses,
-  savedFilters,
-  tags,
-  selectedActivityId = null,
-  onSelectActivity = () => {},
-  onLaneDrag,
-  onBarDragProgress,
-  onBarDragEnd,
-  onMembersLoaded,
-  onSelectApiActivity,
-  labelColW,
-  onLabelColWChange,
-  interactive = true,
-}: Props) {
-  const queryClient = useQueryClient();
-  const updateActivity = useUpdateActivity(timelineId);
-  const today = todayMidnight();
-
-  // Collapse state for the Gantt tree. `collapsedParents` hides an activity's
-  // child subtree (parent grouping); `collapsedGroups` hides a member bucket's
-  // activities (member grouping). Both persist across re-renders and view tweaks.
-  const [collapsedParents, setCollapsedParents] = useState<Set<string>>(new Set());
-  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
-
-  const toggleParent = useCallback((id: string) => {
-    setCollapsedParents(prev => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id); else next.add(id);
-      return next;
-    });
-  }, []);
-
-  const toggleGroup = useCallback((id: string) => {
-    setCollapsedGroups(prev => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id); else next.add(id);
-      return next;
-    });
-  }, []);
-  const containerRef = useRef<HTMLDivElement>(null);
-  const [containerWidth, setContainerWidth] = useState(800);
-
-  const { debouncedQuery, registerMatches, activeMatchId, matchedIds, matchReasons } = useFind();
-  const { activeFilter } = useFilter();
-
-  const globalPrefs = usePreferenceMap();
-  const prefWeekStart = (globalPrefs['week_start'] as string | undefined) === 'sunday' ? 'sunday' : 'monday';
-  // Map the stored date_format preference to a BCP 47 locale for Gantt column labels.
-  // DD/MM/YYYY users prefer day-first ordering (en-GB: "5 Jan"); all others get MM-first (en-US: "Jan 5").
-  const prefDateFormat = (globalPrefs['date_format'] as string | undefined) ?? 'MMM D, YYYY';
-  const prefLocale = prefDateFormat === 'DD/MM/YYYY' ? 'en-GB' : 'en-US';
-
-  useLayoutEffect(() => {
-    const el = containerRef.current;
-    if (!el) return;
-    const ro = new ResizeObserver(entries => {
-      const w = entries[0]?.contentRect.width;
-      if (w && w > 0) setContainerWidth(w);
-    });
-    ro.observe(el);
-    setContainerWidth(el.clientWidth || 800);
-    return () => ro.disconnect();
-  }, []);
-
-  const viewStart = useMemo<Date>(() => {
-    if (startDate) return new Date(startDate);
-    const d = new Date(today);
-    d.setUTCDate(d.getUTCDate() - 14);
-    return d;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [startDate]);
-
-  const viewEnd = useMemo<Date>(() => {
-    if (endDate) return new Date(endDate);
-    const d = new Date(today);
-    d.setUTCDate(d.getUTCDate() + 75);
-    return d;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [endDate]);
-
-  const resolvedGranularity = useMemo<TimeGranularity>(() => {
-    if (granularity !== 'auto') return granularity;
-    return autoFitGranularity(viewStart, viewEnd, containerWidth);
-  }, [granularity, viewStart, viewEnd, containerWidth]);
-
-  const columns = useMemo(
-    () => generateColumns(viewStart, viewEnd, resolvedGranularity, { weekStart: prefWeekStart, locale: prefLocale }),
-    [viewStart, viewEnd, resolvedGranularity, prefWeekStart, prefLocale],
-  );
-
-  const todayIdx = useMemo(
-    () => todayColumnPosition(columns),
-    [columns],
-  );
-
-  const from = viewStart.toISOString();
-  const to = viewEnd.toISOString();
-
-  const { data: apiMembers = [] } = useTeamMembers(teamId);
-  const { data: apiActivities = [], isLoading } = useTimelineActivities(teamId, timelineId, from, to);
-
-  const members: Member[] = useMemo(
-    () => apiMembers.map((m, i) => toMember(m, i)),
-    [apiMembers],
-  );
-
-  const memberById = useMemo<Record<string, Member>>(() => {
-    const map: Record<string, Member> = {};
-    members.forEach(m => { map[m.id] = m; });
-    return map;
-  }, [members]);
-
-  // Notify parent once the member list resolves.
-  useEffect(() => {
-    if (onMembersLoaded && members.length > 0) {
-      onMembersLoaded(members);
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [members]);
-
-  // Derive data needed by the unified filter engine from the passed-in statuses/tags/filters.
-  const closedStatusIds = useMemo(
-    () => new Set((timelineStatuses ?? []).filter(s => s.isClosed).map(s => s.id)),
-    [timelineStatuses],
-  );
-
-  const statusesByTimeline = useMemo(() => {
-    const m = new Map<string, Status[]>();
-    if (timelineStatuses?.length) m.set(timelineId, timelineStatuses);
-    return m;
-  }, [timelineId, timelineStatuses]);
-
-  // Map userId → team_member_id[] so the 'member' filter kind can resolve by userId.
-  const memberIdsByUserId = useMemo(() => {
-    const m = new Map<string, string[]>();
-    apiMembers.forEach(member => {
-      if (member.userId) {
-        const existing = m.get(member.userId) ?? [];
-        m.set(member.userId, [...existing, member.id]);
-      }
-    });
-    return m;
-  }, [apiMembers]);
-
-  const visibleActivities = useMemo(() => applyActiveFilter(
-    apiActivities,
-    activeFilter,
-    memberIdsByUserId,
-    {
-      closedStatusIds,
-      savedFilters: savedFilters ?? [],
-      statuses: statusesByTimeline,
-      tags: tags ?? [],
-    },
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  ), [apiActivities, activeFilter, memberIdsByUserId, closedStatusIds, savedFilters, statusesByTimeline, tags]);
-
-  const statusColorById = useMemo(
-    () => new Map((timelineStatuses ?? []).map(s => [s.id, s.color])),
-    [timelineStatuses],
-  );
-
-  const rows: GanttRow[] = useMemo(() => {
-    const richActivities = visibleActivities
-      .map((ev, i) => toRichActivity(ev, i, memberById, viewStart, viewEnd, columns, colorBy, statusColorById))
-      .filter((a): a is RichActivity => a !== null);
-    return buildRows(richActivities, members, groupBy, sortBy, collapsedParents, collapsedGroups, timelineStatuses);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visibleActivities, members, memberById, groupBy, sortBy, colorBy, statusColorById, viewStart, viewEnd, columns, collapsedParents, collapsedGroups, timelineStatuses]);
-
-  // ── Find: compute matches and register with context ───────────────────────
-
-  const matchResults = useMemo(
-    () => matchEvents(debouncedQuery, visibleActivities, members, visibleActivities),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [debouncedQuery, visibleActivities, members],
-  );
-
-  const matchedSet = useMemo(
-    () => new Set(matchResults.map(r => r.activityId)),
-    [matchResults],
-  );
-
-  const computedMatchReasons = useMemo(() => {
-    const map = new Map<string, string[]>();
-    matchResults.forEach(r => map.set(r.activityId, r.reasons));
-    return map;
-  }, [matchResults]);
-
-  // Ordered match IDs follow the current row order so prev/next walks the
-  // visual top-to-bottom sequence rather than the arbitrary API order.
-  const orderedMatchIds = useMemo(
-    () => rows
-      .filter(r => r.kind === 'activity' && matchedSet.has(r.event.id))
-      .map(r => (r as { kind: 'activity'; event: GanttActivity }).event.id),
-    [rows, matchedSet],
-  );
-
-  useEffect(() => {
-    registerMatches(orderedMatchIds, computedMatchReasons);
-  }, [orderedMatchIds, computedMatchReasons, registerMatches]);
-
-  // Build the FindState passed to GanttGrid
-  const hasQuery = debouncedQuery.trim().length > 0;
-  const filtersActive = activeFilter.kind !== 'preset' || activeFilter.id !== 'all';
-  const findState: FindState = useMemo(() => ({
-    hasQuery,
-    matchedIds: matchedSet,
-    activeMatchId,
-    matchReasons,
-    filtersActive,
-    matchCount: matchedIds.length,
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [hasQuery, matchedSet, activeMatchId, matchReasons, filtersActive, matchedIds.length]);
-
-  // ── Bar drag ─────────────────────────────────────────────────────────────
-
-  const handleBarDrag = useCallback((activityId: string, newStartDate: Date, newEndDate: Date) => {
-    const patch = {
-      startAt: newStartDate.toISOString(),
-      endAt: newEndDate.toISOString(),
-    };
-
-    // Synchronously update the cache so the bar doesn't flash back to old
-    // position when GanttGrid clears its drag state in the same render cycle.
-    queryClient.setQueriesData<ApiActivity[]>(
-      { queryKey: ['timelines', timelineId, 'activities'] },
-      (old) => old?.map((a) => (a.id === activityId ? { ...a, ...patch } : a)),
-    );
-
-    // Push updated activity to the sidebar so it shows new dates immediately
-    // instead of the stale snapshot from when the activity was selected.
-    if (onSelectApiActivity) {
-      const updated = apiActivities.find(a => a.id === activityId);
-      if (updated) onSelectApiActivity({ ...updated, ...patch });
-    }
-
-    onBarDragEnd?.();
-    updateActivity.mutate({ activityId, patch });
-  }, [updateActivity, onBarDragEnd, queryClient, timelineId, apiActivities, onSelectApiActivity]);
-
-  if (isLoading) {
-    return (
-      <div ref={containerRef} className="flex items-center justify-center h-full text-muted-foreground text-[13px]">
-        Loading activities…
-      </div>
-    );
-  }
-
-  return (
-    <div ref={containerRef} style={{ flex: 1, minHeight: 0 }}>
-      <GanttGrid
-        rows={rows}
-        columns={columns}
-        todayIndex={todayIdx}
-        selectedActivityId={selectedActivityId}
-        findState={findState}
-        onSelectActivity={(id) => {
-          onSelectActivity(id);
-          if (onSelectApiActivity) {
-            const found = id ? (apiActivities.find(a => a.id === id) ?? null) : null;
-            onSelectApiActivity(found);
-          }
-        }}
-        onLaneDrag={interactive ? onLaneDrag : undefined}
-        onBarDrag={interactive ? handleBarDrag : undefined}
-        onBarDragProgress={interactive ? onBarDragProgress : undefined}
-        resolvedGranularity={resolvedGranularity}
-        onClearFilters={filtersActive ? () => {} : undefined}
-        labelColW={labelColW}
-        onLabelColWChange={onLabelColWChange}
-        onToggleActivity={groupBy === 'parent' ? toggleParent : undefined}
-        onToggleGroup={groupBy === 'member' || groupBy === 'status' ? toggleGroup : undefined}
-        interactive={interactive}
-      />
-    </div>
-  );
-}
-````
-
 ## File: packages/web/src/components/layout/Sidebar.tsx
 ````typescript
 import { useState, useRef, useEffect } from 'react';
@@ -49353,6 +48053,1330 @@ export default function Sidebar({ collapsed, onToggle, onNewActivity, onBulkImpo
           />
         </div>
       )}
+    </div>
+  );
+}
+````
+
+## File: packages/web/src/hooks/useShares.test.ts
+````typescript
+/**
+ * useShares hooks — unit tests verifying query keys, mutation endpoints,
+ * cache invalidation, and the public share projection fetch.
+ * Uses a real QueryClient with fetch mocked globally.
+ */
+
+import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { renderHook, waitFor } from '@testing-library/react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { createElement } from 'react'
+import {
+  useListShares,
+  useCreateShare,
+  useDeleteShare,
+  useRegenerateShare,
+  useShareProjection,
+  useUnlockShare,
+} from './useShares'
+
+// ── Auth mock ─────────────────────────────────────────────────────────────────
+
+vi.mock('@/contexts/AuthContext', () => ({
+  useAuth: () => ({ getAccessToken: async () => 'test-token' }),
+}))
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function makeWrapper() {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  return {
+    qc,
+    wrapper: ({ children }: { children: React.ReactNode }) =>
+      createElement(QueryClientProvider, { client: qc }, children),
+  }
+}
+
+const SHARE_FIXTURE = {
+  id: 'share-1',
+  timelineId: 'tl-1',
+  token: 'abc123',
+  viewType: 'gantt',
+  viewConfig: '{}',
+  createdBy: 'member-1',
+  createdAt: '2026-01-01T00:00:00Z',
+  viewCount: 0,
+}
+
+// ── useListShares ─────────────────────────────────────────────────────────────
+
+describe('useListShares', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn())
+  })
+
+  it('fetches shares from the correct URL', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify([SHARE_FIXTURE]), { status: 200 }),
+    )
+
+    const { wrapper } = makeWrapper()
+    const { result } = renderHook(() => useListShares('team-1', 'tl-1'), { wrapper })
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+
+    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+      expect.stringContaining('/teams/team-1/timelines/tl-1/shares'),
+      expect.any(Object),
+    )
+    expect(result.current.data).toHaveLength(1)
+  })
+
+  it('refetches on every mount despite a non-zero app-wide staleTime', async () => {
+    // Fresh Response per call — a Response body can only be consumed once.
+    vi.mocked(fetch).mockImplementation(() =>
+      Promise.resolve(new Response(JSON.stringify([SHARE_FIXTURE]), { status: 200 })),
+    )
+
+    // Mirror the app QueryClient's 30s default staleTime: the hook must
+    // override it (staleTime: 0 + refetchOnMount: 'always') so the view
+    // telemetry it renders (viewCount / lastViewedAt) is current every time
+    // a share modal opens.
+    const qc = new QueryClient({
+      defaultOptions: { queries: { retry: false, staleTime: 30_000 } },
+    })
+    const wrapper = ({ children }: { children: React.ReactNode }) =>
+      createElement(QueryClientProvider, { client: qc }, children)
+
+    const first = renderHook(() => useListShares('team-1', 'tl-1'), { wrapper })
+    await waitFor(() => expect(first.result.current.isSuccess).toBe(true))
+    first.unmount()
+
+    renderHook(() => useListShares('team-1', 'tl-1'), { wrapper })
+    await waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalledTimes(2))
+  })
+
+  it('does not fetch when teamId is empty', () => {
+    const { wrapper } = makeWrapper()
+    renderHook(() => useListShares('', 'tl-1'), { wrapper })
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled()
+  })
+
+  it('does not fetch when timelineId is empty', () => {
+    const { wrapper } = makeWrapper()
+    renderHook(() => useListShares('team-1', ''), { wrapper })
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled()
+  })
+})
+
+// ── useCreateShare ────────────────────────────────────────────────────────────
+
+describe('useCreateShare', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn())
+  })
+
+  it('POSTs to the correct URL and invalidates the share list', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify(SHARE_FIXTURE), { status: 201 }),
+    )
+
+    const { wrapper, qc } = makeWrapper()
+    const invalidate = vi.spyOn(qc, 'invalidateQueries')
+
+    const { result } = renderHook(() => useCreateShare('team-1', 'tl-1'), { wrapper })
+    result.current.mutate({ viewType: 'gantt', viewConfig: '{}' })
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+
+    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+      expect.stringContaining('/timelines/tl-1/shares'),
+      expect.objectContaining({ method: 'POST' }),
+    )
+    expect(invalidate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        queryKey: ['teams', 'team-1', 'timelines', 'tl-1', 'shares'],
+      }),
+    )
+  })
+})
+
+describe('useCreateShare (ICS feeds)', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn())
+  })
+
+  it('sends kind/scope/memberId for a member-scoped ICS feed', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ ...SHARE_FIXTURE, kind: 'ics', scope: 'member', memberId: 'm-1' }), { status: 201 }),
+    )
+
+    const { wrapper } = makeWrapper()
+    const { result } = renderHook(() => useCreateShare('team-1', 'tl-1'), { wrapper })
+    result.current.mutate({ kind: 'ics', scope: 'member', memberId: 'm-1', name: 'Feed' })
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+
+    const opts = vi.mocked(fetch).mock.calls[0][1] as RequestInit
+    expect(JSON.parse(String(opts.body))).toMatchObject({
+      kind: 'ics',
+      scope: 'member',
+      memberId: 'm-1',
+    })
+  })
+})
+
+// ── useRegenerateShare ────────────────────────────────────────────────────────
+
+describe('useRegenerateShare', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn())
+  })
+
+  it('POSTs to the regenerate endpoint and invalidates the share list', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ ...SHARE_FIXTURE, token: 'rotated' }), { status: 200 }),
+    )
+
+    const { wrapper, qc } = makeWrapper()
+    const invalidate = vi.spyOn(qc, 'invalidateQueries')
+
+    const { result } = renderHook(() => useRegenerateShare('team-1', 'tl-1'), { wrapper })
+    result.current.mutate('share-1')
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+
+    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+      expect.stringContaining('/shares/share-1/regenerate'),
+      expect.objectContaining({ method: 'POST' }),
+    )
+    expect(result.current.data?.token).toBe('rotated')
+    expect(invalidate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        queryKey: ['teams', 'team-1', 'timelines', 'tl-1', 'shares'],
+      }),
+    )
+  })
+})
+
+// ── useDeleteShare ────────────────────────────────────────────────────────────
+
+describe('useDeleteShare', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn())
+  })
+
+  it('DELETEs the correct URL and invalidates the share list', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(new Response(null, { status: 204 }))
+
+    const { wrapper, qc } = makeWrapper()
+    const invalidate = vi.spyOn(qc, 'invalidateQueries')
+
+    const { result } = renderHook(() => useDeleteShare('team-1', 'tl-1'), { wrapper })
+    result.current.mutate('share-1')
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+
+    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+      expect.stringContaining('/shares/share-1'),
+      expect.objectContaining({ method: 'DELETE' }),
+    )
+    expect(invalidate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        queryKey: ['teams', 'team-1', 'timelines', 'tl-1', 'shares'],
+      }),
+    )
+  })
+})
+
+// ── useShareProjection ────────────────────────────────────────────────────────
+
+const PROJECTION_FIXTURE = {
+  share: {
+    id: 'share-1',
+    timelineId: 'tl-1',
+    token: 'abc123',
+    viewType: 'gantt',
+    viewConfig: '{}',
+    createdAt: '2026-01-01T00:00:00Z',
+  },
+  teamName: 'Test Team',
+  timeline: { id: 'tl-1', name: 'Q1 Plan', startDate: '2026-01-01', endDate: '2026-12-31' },
+  members: [],
+  statuses: [],
+  tags: [],
+  activities: [],
+}
+
+describe('useShareProjection', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn())
+  })
+
+  it('fetches the public projection without an auth header', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify(PROJECTION_FIXTURE), { status: 200 }),
+    )
+
+    const { wrapper } = makeWrapper()
+    const { result } = renderHook(() => useShareProjection('abc123'), { wrapper })
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+
+    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+      expect.stringContaining('/shares/abc123'),
+      expect.anything(),
+    )
+    // No Authorization header — this is a public endpoint (no view token passed).
+    const callArgs = vi.mocked(fetch).mock.calls[0]
+    const opts = callArgs[1] as RequestInit | undefined
+    const headers = (opts?.headers ?? {}) as Record<string, string>
+    expect(headers.Authorization).toBeUndefined()
+    expect(result.current.data?.teamName).toBe('Test Team')
+  })
+
+  it('does not fetch when token is undefined', () => {
+    const { wrapper } = makeWrapper()
+    renderHook(() => useShareProjection(undefined), { wrapper })
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled()
+  })
+
+  it('throws an ApiError with the response status on non-200', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({ error: { code: 'NOT_FOUND', message: 'share not found' } }),
+        { status: 404 },
+      ),
+    )
+
+    const { wrapper } = makeWrapper()
+    const { result } = renderHook(() => useShareProjection('bad-token'), { wrapper })
+
+    await waitFor(() => expect(result.current.isError).toBe(true))
+
+    const err = result.current.error as { status?: number; code?: string }
+    expect(err.status).toBe(404)
+    expect(err.code).toBe('NOT_FOUND')
+  })
+
+  it('sends the view token as a Bearer header when provided', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify(PROJECTION_FIXTURE), { status: 200 }),
+    )
+
+    const { wrapper } = makeWrapper()
+    const { result } = renderHook(() => useShareProjection('abc123', 'view-jwt'), { wrapper })
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+
+    const opts = vi.mocked(fetch).mock.calls[0][1] as RequestInit | undefined
+    const headers = (opts?.headers ?? {}) as Record<string, string>
+    expect(headers.Authorization).toBe('Bearer view-jwt')
+  })
+
+  it('maps a 401 { passwordRequired } response to a PASSWORD_REQUIRED error', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ passwordRequired: true }), { status: 401 }),
+    )
+
+    const { wrapper } = makeWrapper()
+    const { result } = renderHook(() => useShareProjection('locked-token'), { wrapper })
+
+    await waitFor(() => expect(result.current.isError).toBe(true))
+
+    const err = result.current.error as { status?: number; code?: string }
+    expect(err.status).toBe(401)
+    expect(err.code).toBe('PASSWORD_REQUIRED')
+  })
+})
+
+// ── useUnlockShare ──────────────────────────────────────────────────────────────
+
+describe('useUnlockShare', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn())
+  })
+
+  it('POSTs the password to the unlock endpoint and returns the view token', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ token: 'view-jwt' }), { status: 200 }),
+    )
+
+    const { wrapper } = makeWrapper()
+    const { result } = renderHook(() => useUnlockShare('abc123'), { wrapper })
+
+    let token = ''
+    await waitFor(async () => { token = await result.current.mutateAsync('hunter2') })
+
+    expect(token).toBe('view-jwt')
+    const [url, opts] = vi.mocked(fetch).mock.calls[0]
+    expect(String(url)).toContain('/shares/abc123/unlock')
+    expect(opts?.method).toBe('POST')
+    expect(JSON.parse(String(opts?.body))).toEqual({ password: 'hunter2' })
+  })
+
+  it('throws an ApiError on a wrong password (401)', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: { code: 'INVALID_PASSWORD', message: 'incorrect password' } }), { status: 401 }),
+    )
+
+    const { wrapper } = makeWrapper()
+    const { result } = renderHook(() => useUnlockShare('abc123'), { wrapper })
+
+    await expect(result.current.mutateAsync('wrong')).rejects.toMatchObject({ status: 401 })
+  })
+})
+````
+
+## File: packages/api/internal/api/server.go
+````go
+// Package api hosts the HTTP handlers, routing, and middleware for the
+// draba REST API. Handlers are intentionally thin: they decode requests,
+// delegate to repositories and services, and write responses. Business
+// logic belongs in the domain packages, not here.
+package api
+
+import (
+	"fmt"
+	"io/fs"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/auth"
+	"github.com/I0-1O/draba/packages/api/internal/db"
+	"github.com/I0-1O/draba/packages/api/internal/events"
+	"github.com/I0-1O/draba/packages/api/internal/mailer"
+	"github.com/I0-1O/draba/packages/api/internal/models"
+	"github.com/I0-1O/draba/packages/api/internal/tier"
+	"github.com/I0-1O/draba/packages/api/internal/ws"
+)
+
+// TimelineStore is the persistence interface required by timeline handlers.
+// The concrete implementation is *db.TimelineRepo; tests may substitute a fake.
+type TimelineStore interface {
+	Create(t *models.Timeline) error
+	GetByID(id string) (*models.Timeline, error)
+	GetByShareToken(token string) (*models.Timeline, error)
+	ListByTeam(teamID string, includeArchived bool) ([]*models.Timeline, error)
+	HasAccess(timelineID, teamMemberID string) (bool, error)
+	GrantAccess(timelineID, teamMemberID, role string) error
+	RevokeAccess(timelineID, teamMemberID string) error
+	GetAccessRole(timelineID, teamMemberID string) (string, error)
+	ListAccess(timelineID string) ([]*models.TimelineAccessEntry, error)
+	SetArchived(id string, at *time.Time) error
+	Update(t *models.Timeline) error
+	Delete(id string) error
+}
+
+// Server holds shared dependencies for all HTTP handlers.
+type Server struct {
+	users          *db.UserRepo
+	invites        *db.InviteRepo
+	teams          *db.TeamRepo
+	activities     *db.ActivityRepo
+	timelines      TimelineStore
+	savedFilters   *db.SavedFilterRepo
+	preferences    *db.UserPreferenceRepo
+	apiTokens      *db.APITokenRepo
+	instanceSets   *db.InstanceSettingsRepo
+	passwordTokens *db.PasswordResetTokenRepo
+	statuses       *db.StatusRepo
+	tags           *db.TagRepo
+	shares         *db.ShareRepo
+	shareCache     *shareCache
+	icsCache       *icsFeedCache
+	unlockLimiter  *rateLimiter
+	mailer         *mailer.Mailer
+	tokens         *auth.TokenService
+	tier           tier.Tier
+	bus            *events.Bus
+	hub            *ws.Hub
+	uiFS           fs.FS
+}
+
+// NewServer constructs a Server with its required dependencies. It does not
+// touch the network; call Routes to obtain the http.Handler to serve.
+func NewServer(
+	users *db.UserRepo,
+	invites *db.InviteRepo,
+	teams *db.TeamRepo,
+	activitiesRepo *db.ActivityRepo,
+	timelinesRepo TimelineStore,
+	savedFiltersRepo *db.SavedFilterRepo,
+	preferencesRepo *db.UserPreferenceRepo,
+	apiTokensRepo *db.APITokenRepo,
+	instanceSetsRepo *db.InstanceSettingsRepo,
+	passwordTokensRepo *db.PasswordResetTokenRepo,
+	statusesRepo *db.StatusRepo,
+	tagsRepo *db.TagRepo,
+	sharesRepo *db.ShareRepo,
+	m *mailer.Mailer,
+	tokens *auth.TokenService,
+	t tier.Tier,
+	bus *events.Bus,
+	hub *ws.Hub,
+) *Server {
+	// Both public-share caches share the DRABA_SHARE_CACHE_TTL setting.
+	sc := newShareCache()
+	return &Server{
+		users:          users,
+		invites:        invites,
+		teams:          teams,
+		activities:     activitiesRepo,
+		timelines:      timelinesRepo,
+		savedFilters:   savedFiltersRepo,
+		preferences:    preferencesRepo,
+		apiTokens:      apiTokensRepo,
+		instanceSets:   instanceSetsRepo,
+		passwordTokens: passwordTokensRepo,
+		statuses:       statusesRepo,
+		tags:           tagsRepo,
+		shares:         sharesRepo,
+		shareCache:     sc,
+		icsCache:       newICSFeedCache(sc.ttl),
+		unlockLimiter:  newRateLimiter(unlockMaxAttempts, time.Hour),
+		mailer:         m,
+		tokens:         tokens,
+		tier:           t,
+		bus:            bus,
+		hub:            hub,
+	}
+}
+
+// WithUI registers an embedded React SPA to be served at GET /. The FS must
+// be rooted at the build output directory (i.e. contain index.html directly).
+// When called, all unmatched GET paths fall back to index.html so React Router
+// handles client-side navigation. Safe to skip in dev (no-op when not called).
+func (s *Server) WithUI(uiFS fs.FS) *Server {
+	s.uiFS = uiFS
+	return s
+}
+
+// Routes returns the fully-wired HTTP handler for the API, including all
+// core routes plus any routes added by registered tier modules.
+func (s *Server) Routes() http.Handler {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("GET /setup/status", s.handleSetupStatus)
+	mux.HandleFunc("GET /version", s.handleVersion)
+
+	mux.HandleFunc("POST /auth/register", s.handleRegister)
+	mux.HandleFunc("POST /auth/login", s.handleLogin)
+	mux.HandleFunc("POST /auth/refresh", s.handleRefresh)
+	mux.HandleFunc("GET /auth/me", chain(s.handleMe, s.authMiddleware))
+	mux.HandleFunc("POST /auth/forgot-password", s.handleForgotPassword)
+	mux.HandleFunc("POST /auth/reset-password", s.handleResetPassword)
+
+	mux.HandleFunc("GET /users/me/preferences", chain(s.handleGetPreferences, s.authMiddleware))
+	mux.HandleFunc("PUT /users/me/preferences", chain(s.handleUpsertPreference, s.authMiddleware))
+	mux.HandleFunc("GET /users/me/stats", chain(s.handleGetMyStats, s.authMiddleware))
+	mux.HandleFunc("PATCH /users/me", chain(s.handleUpdateProfile, s.authMiddleware))
+	mux.HandleFunc("PUT /users/me/password", chain(s.handleChangePassword, s.authMiddleware))
+
+	mux.HandleFunc("GET /admin/smtp", chain(s.handleGetSMTP, s.authMiddleware))
+	mux.HandleFunc("PUT /admin/smtp", chain(s.handlePutSMTP, s.authMiddleware))
+	mux.HandleFunc("POST /admin/smtp/test", chain(s.handleTestSMTP, s.authMiddleware))
+	mux.HandleFunc("DELETE /admin/smtp", chain(s.handleDeleteSMTP, s.authMiddleware))
+	mux.HandleFunc("GET /admin/settings", chain(s.handleGetAdminSettings, s.authMiddleware))
+	mux.HandleFunc("PATCH /admin/settings", chain(s.handlePatchAdminSettings, s.authMiddleware))
+	mux.HandleFunc("GET /admin/users", chain(s.handleListAdminUsers, s.authMiddleware))
+
+	// Public — no auth required; used by the login page and shared views.
+	mux.HandleFunc("GET /settings/branding", s.handleGetPublicBranding)
+
+	mux.HandleFunc("POST /tokens", chain(s.handleCreateAPIToken, s.authMiddleware))
+	mux.HandleFunc("GET /tokens", chain(s.handleListAPITokens, s.authMiddleware))
+	mux.HandleFunc("DELETE /tokens/{id}", chain(s.handleDeleteAPIToken, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams", chain(s.handleListTeams, s.authMiddleware))
+	mux.HandleFunc("POST /teams", chain(s.handleCreateTeam, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}", chain(s.handleGetTeam, s.authMiddleware))
+	mux.HandleFunc("PATCH /teams/{id}", chain(s.handleUpdateTeam, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/archive", chain(s.handleArchiveTeam, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/unarchive", chain(s.handleUnarchiveTeam, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/invites", chain(s.handleCreateInvite, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/invites", chain(s.handleListInvites, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/invites/{inviteId}", chain(s.handleDeleteInvite, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/invite-link", chain(s.handleCreateInviteLink, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/invite-link/reset", chain(s.handleResetInviteLink, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/invite-link", chain(s.handleGetInviteLink, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/invite-link", chain(s.handleDeleteInviteLink, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/members", chain(s.handleListMembers, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/members/{memberId}", chain(s.handleGetMember, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/members/{memberId}/stats", chain(s.handleGetMemberStats, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/members", chain(s.handleAddMember, s.authMiddleware))
+	mux.HandleFunc("PATCH /teams/{id}/members/{memberId}", chain(s.handleUpdateMember, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/members/{memberId}", chain(s.handleDeleteMember, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/members/{memberId}/archive", chain(s.handleArchiveMember, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/members/{memberId}/unarchive", chain(s.handleUnarchiveMember, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/participants", chain(s.handleCreateParticipant, s.authMiddleware))
+	mux.HandleFunc("GET /users/search", chain(s.handleSearchUsers, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/promote", chain(s.handlePromoteUser, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/archive", chain(s.handleArchiveUser, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/unarchive", chain(s.handleUnarchiveUser, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/revoke", chain(s.handleRevokeUser, s.authMiddleware))
+	mux.HandleFunc("DELETE /users/{id}", chain(s.handleDeleteUser, s.authMiddleware))
+	// Activity routes use the team-scoped prefix (GET /teams/{id}/timelines/{timelineId}/...)
+	// to avoid a Go 1.22 mux conflict with GET /timelines/share/{token}: both are
+	// 3-segment GET paths and neither is more specific when the third segment differs.
+	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/activities", chain(s.handleCreateActivity, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/activities", chain(s.handleListActivities, s.authMiddleware))
+	mux.HandleFunc("PATCH /activities/{id}", chain(s.handleUpdateActivity, s.authMiddleware))
+	mux.HandleFunc("DELETE /activities/{id}", chain(s.handleDeleteActivity, s.authMiddleware))
+	mux.HandleFunc("POST /activities/{id}/archive", chain(s.handleArchiveActivity, s.authMiddleware))
+	mux.HandleFunc("POST /activities/{id}/unarchive", chain(s.handleUnarchiveActivity, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/tags", chain(s.handleListTags, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/tags", chain(s.handleCreateTag, s.authMiddleware))
+	mux.HandleFunc("PATCH /tags/{id}", chain(s.handleUpdateTag, s.authMiddleware))
+	mux.HandleFunc("DELETE /tags/{id}", chain(s.handleDeleteTag, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/saved_filters/all", chain(s.handleListAllTeamSavedFilters, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/saved_filters", chain(s.handleListSavedFilters, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/saved_filters", chain(s.handleCreateSavedFilter, s.authMiddleware))
+	mux.HandleFunc("PATCH /saved_filters/{id}", chain(s.handleUpdateSavedFilter, s.authMiddleware))
+	mux.HandleFunc("DELETE /saved_filters/{id}", chain(s.handleDeleteSavedFilter, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/status-templates", chain(s.handleListStatusTemplates, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/status-templates", chain(s.handleCreateStatusTemplate, s.authMiddleware))
+	mux.HandleFunc("PATCH /status-templates/{id}", chain(s.handleUpdateStatusTemplate, s.authMiddleware))
+	mux.HandleFunc("DELETE /status-templates/{id}", chain(s.handleDeleteStatusTemplate, s.authMiddleware))
+	mux.HandleFunc("POST /status-templates/{id}/items", chain(s.handleCreateTemplateItem, s.authMiddleware))
+	mux.HandleFunc("PATCH /status-template-items/{id}", chain(s.handleUpdateTemplateItem, s.authMiddleware))
+	mux.HandleFunc("DELETE /status-template-items/{id}", chain(s.handleDeleteTemplateItem, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/timelines", chain(s.handleListTimelines, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/timelines", chain(s.handleCreateTimeline, s.authMiddleware))
+	// GET /timelines/share/{token} must be registered before GET /timelines/{id} so
+	// the more-specific literal "share" segment takes precedence.
+	mux.HandleFunc("GET /timelines/share/{token}", s.handleGetTimelineByShareToken)
+	mux.HandleFunc("GET /timelines/{id}", chain(s.handleGetTimeline, s.authMiddleware))
+	// Timeline statuses are placed under /teams/{id}/timelines/{timelineId}/statuses
+	// rather than /timelines/{id}/statuses to avoid a Go 1.22 mux pattern conflict
+	// with GET /timelines/share/{token} (both are 3-segment paths and conflict on
+	// paths like /timelines/share/statuses).
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleListTimelineStatuses, s.authMiddleware))
+	mux.HandleFunc("POST /timelines/{id}/archive", chain(s.handleArchiveTimeline, s.authMiddleware))
+	mux.HandleFunc("POST /timelines/{id}/unarchive", chain(s.handleUnarchiveTimeline, s.authMiddleware))
+
+	mux.HandleFunc("PATCH /timelines/{id}", chain(s.handleUpdateTimeline, s.authMiddleware))
+	mux.HandleFunc("DELETE /timelines/{id}", chain(s.handleDeleteTimeline, s.authMiddleware))
+	// Access list routes use the team-scoped prefix to avoid a Go 1.22 mux
+	// conflict with GET /timelines/share/{token} on 3-segment GET paths.
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/access", chain(s.handleListTimelineAccess, s.authMiddleware))
+	mux.HandleFunc("PUT /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleGrantTimelineAccess, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleRevokeTimelineAccess, s.authMiddleware))
+	// Timeline status CRUD — POST shares the team-scoped prefix with GET statuses.
+	// PATCH and DELETE use a flat /statuses/{id} prefix (2 segments, no conflict).
+	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleCreateTimelineStatus, s.authMiddleware))
+	mux.HandleFunc("PATCH /statuses/{id}", chain(s.handleUpdateStatus, s.authMiddleware))
+	mux.HandleFunc("DELETE /statuses/{id}", chain(s.handleDeleteStatus, s.authMiddleware))
+
+	// Share routes.
+	// GET /shares/{token} is public — no auth. The token is the credential.
+	// POST /timelines/{id}/shares uses the same /timelines/{id}/... prefix
+	// as archive/unarchive so it avoids the Go 1.22 mux pattern conflict with
+	// GET /timelines/share/{token} (only GET-method paths conflict).
+	// GET /teams/{id}/timelines/{timelineId}/shares uses the team-scoped prefix
+	// to avoid the GET conflict described above.
+	mux.HandleFunc("GET /shares/{token}", s.handleGetShareProjection)
+	mux.HandleFunc("POST /shares/{token}/unlock", s.handleUnlockShare)
+	mux.HandleFunc("POST /timelines/{id}/shares", chain(s.handleCreateShare, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/shares", chain(s.handleListShares, s.authMiddleware))
+	mux.HandleFunc("PATCH /shares/{id}", chain(s.handleUpdateShare, s.authMiddleware))
+	mux.HandleFunc("DELETE /shares/{id}", chain(s.handleDeleteShare, s.authMiddleware))
+	// Token rotation — the revocation story for ICS feeds (no password gate).
+	// GET /shares/{token}.ics is served inside handleGetShareProjection: the
+	// {token} wildcard spans the whole segment, so the .ics suffix arrives in
+	// the path value and is dispatched there.
+	mux.HandleFunc("POST /shares/{id}/regenerate", chain(s.handleRegenerateShare, s.authMiddleware))
+	// Named feed variant: the {file} slug is cosmetic (calendar clients
+	// default the calendar name from the URL filename); the token is the key.
+	mux.HandleFunc("GET /shares/{token}/{file}", s.handleGetShareICSNamed)
+
+	// GET /ws is intentionally outside authMiddleware — ServeWS validates the
+	// JWT itself before upgrading, because WebSocket clients can't set headers.
+	mux.HandleFunc("GET /ws", s.hub.ServeWS)
+
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	})
+
+	if s.uiFS != nil {
+		mux.Handle("GET /", spaHandler(s.uiFS))
+	}
+
+	ctx := &tier.ModuleContext{Mux: mux, Tier: s.tier}
+	for _, m := range tier.Registered() {
+		if err := m.Register(ctx); err != nil {
+			// Module registration is a startup invariant — a failure here is a programming error.
+			panic(fmt.Sprintf("tier module %q failed to register: %v", m.Name(), err))
+		}
+	}
+
+	return requestLogger(mux)
+}
+
+// chain applies a single middleware to a handler function.
+func chain(h http.HandlerFunc, m func(http.Handler) http.Handler) http.HandlerFunc {
+	return m(h).ServeHTTP
+}
+
+// spaHandler serves the embedded React SPA. Known static assets are served
+// directly; any unrecognised path falls back to index.html so React Router
+// handles client-side navigation.
+func spaHandler(uiFS fs.FS) http.Handler {
+	fserver := http.FileServer(http.FS(uiFS))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := strings.TrimPrefix(r.URL.Path, "/")
+		if path == "" {
+			path = "index.html"
+		}
+		if _, err := uiFS.Open(path); err != nil {
+			// Unknown path — serve index.html and let React Router handle it.
+			r = r.Clone(r.Context())
+			r.URL.Path = "/"
+			fserver.ServeHTTP(w, r)
+			return
+		}
+		fserver.ServeHTTP(w, r)
+	})
+}
+````
+
+## File: packages/web/src/components/gantt/GanttView.tsx
+````typescript
+/**
+ * GanttView — data container for the Gantt grid.
+ *
+ * Fetches events and members, applies grouping and sorting, builds the
+ * GanttRow list, and passes everything to GanttGrid. The component owns
+ * no layout state — granularity, groupBy, and sortBy come from DashboardPage.
+ *
+ * Also owns the find-match computation: it reads the debounced query from
+ * FindContext, matches against the fetched API events, and registers the
+ * ordered match list back into FindContext so GanttGrid can apply visual
+ * treatment and auto-scroll.
+ */
+
+import { useMemo, useRef, useState, useLayoutEffect, useEffect, useCallback } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
+import GanttGrid, { type GanttActivity, type GanttRow, type FindState } from './GanttGrid';
+import { useTimelineActivities, useTeamMembers, useUpdateActivity } from '@/hooks/useTeamActivities';
+import type { components } from '@draba/shared';
+import { type Member, ACTIVITY_COLORS, MEMBER_COLORS } from '@/types';
+import { resolveColorHex } from '@/components/identity/identity-constants';
+import type { GroupBy, SortBy, TimeGranularity, ColorBy } from './GanttToolbar';
+import {
+  generateColumns,
+  positionInColumns,
+  todayColumnPosition,
+  autoFitGranularity,
+  type ColumnDef,
+} from './granularity';
+import { matchEvents } from '@/lib/findMatcher';
+import { memberComboKey, orderedComboIds, memberComboLabel, comboSortComparator, UNASSIGNED_KEY, SEP } from '@/lib/memberGroups';
+import { useFind } from '@/contexts/FindContext';
+import { useFilter } from '@/contexts/FilterContext';
+import { usePreferenceMap } from '@/hooks/usePreferences';
+import { applyActiveFilter } from '@/lib/presetFilters';
+
+type ApiActivity = components['schemas']['Activity'];
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
+type Status = components['schemas']['Status'];
+type SavedFilter = components['schemas']['SavedFilter'];
+type Tag = components['schemas']['Tag'];
+
+interface Props {
+  teamId: string;
+  /** Active timeline ID — activities are fetched scoped to this timeline. */
+  timelineId: string;
+  /** ISO date "YYYY-MM-DD" — defaults to 14 days before today. */
+  startDate?: string;
+  /** ISO date "YYYY-MM-DD" — defaults to 75 days after today. */
+  endDate?: string;
+  groupBy: GroupBy;
+  sortBy: SortBy;
+  granularity: TimeGranularity | 'auto';
+  colorBy: ColorBy;
+  /**
+   * Timeline statuses — used to derive closedStatusIds and resolve status names
+   * in the filter engine. Replaces the old closedStatusIds prop.
+   */
+  timelineStatuses?: Status[];
+  /** Saved filters for the active team — evaluated by the filter engine. */
+  savedFilters?: SavedFilter[];
+  /** Team tags — used to resolve tag names in the filter engine. */
+  tags?: Tag[];
+  selectedActivityId?: string | null;
+  onSelectActivity?: (id: string | null) => void;
+  /** Called when the user drags on an empty lane to create an activity. */
+  onLaneDrag?: (startDate: Date, endDate: Date, memberId: string | null) => void;
+  /** Called during a bar drag with live snapped dates — for sidebar preview. */
+  onBarDragProgress?: (activityId: string, newStart: Date, newEnd: Date) => void;
+  /** Called when a bar drag completes (before the PATCH fires). */
+  onBarDragEnd?: () => void;
+  /** Called once members are loaded, so the parent can access them for panels. */
+  onMembersLoaded?: (members: Member[]) => void;
+  /** Called when an activity is selected — passes the full API activity object. */
+  onSelectApiActivity?: (activity: ApiActivity | null) => void;
+  /** Label column width in px — passed through to GanttGrid for controlled persistence. */
+  labelColW?: number;
+  /** Called when the user drags the label column resize handle. */
+  onLabelColWChange?: (w: number) => void;
+  /**
+   * When false, all click and drag interactions are suppressed — bars, lane
+   * drags, and group toggles are inert. Used by the public share viewer.
+   * Default: true.
+   */
+  interactive?: boolean;
+}
+
+
+// ── Date helpers ────────────────────────────────────────────────────────────
+
+function toDateOnly(datetime: string): string {
+  return datetime.slice(0, 10);
+}
+
+function todayMidnight(): Date {
+  const d = new Date();
+  d.setUTCHours(0, 0, 0, 0); // UTC midnight so it aligns with UTC-stored activity dates
+  return d;
+}
+
+function initialsFrom(name: string): string {
+  return name
+    .split(/\s+/)
+    .map(w => w[0] ?? '')
+    .slice(0, 2)
+    .join('')
+    .toUpperCase();
+}
+
+// ── Type mapping ─────────────────────────────────────────────────────────────
+
+function toMember(m: TeamMemberWithUser, index: number): Member {
+  const name = m.displayName || m.email || 'Unknown';
+  const fallbackHex = MEMBER_COLORS[index % MEMBER_COLORS.length];
+  return {
+    id: m.id,
+    name,
+    initials: initialsFrom(name),
+    color: resolveColorHex(m.color) || fallbackHex,
+  };
+}
+
+/** Intermediate activity type that carries API fields alongside computed view-state. Exported for use by the public share viewer. */
+export interface RichActivity extends GanttActivity {
+  startAtMs: number;
+  endAtMs: number;
+  parentActivityId: string | null;
+  primaryMemberId: string | null;
+  assignedMemberIds: string[];
+  statusId: string | null;
+}
+
+function toRichActivity(
+  ev: ApiActivity,
+  index: number,
+  memberById: Record<string, Member>,
+  viewStart: Date,
+  viewEnd: Date,
+  columns: ColumnDef[],
+  colorBy: ColorBy,
+  statusColorById: Map<string, string>,
+): RichActivity | null {
+  const evStart = new Date(toDateOnly(ev.startAt));
+  const evEnd = new Date(toDateOnly(ev.endAt));
+
+  if (evEnd < viewStart || evStart > viewEnd) return null;
+
+  const clampedStart = evStart < viewStart ? viewStart : evStart;
+  const clampedEnd = evEnd > viewEnd ? viewEnd : evEnd;
+
+  const { startCol, span } = positionInColumns(clampedStart, clampedEnd, columns);
+  const assignedIds = ev.assignedMemberIds ?? [];
+  const members = assignedIds.map(id => memberById[id]).filter((m): m is Member => Boolean(m));
+
+  const color =
+    colorBy === 'member' ? (members[0]?.color ?? ev.color ?? ACTIVITY_COLORS[index % ACTIVITY_COLORS.length]) :
+    colorBy === 'status' ? (statusColorById.get((ev as ApiActivity & { statusId?: string | null }).statusId ?? '') ?? '#6b7280') :
+    /* activity */ (ev.color ?? ACTIVITY_COLORS[index % ACTIVITY_COLORS.length]);
+
+  return {
+    id: ev.id,
+    title: ev.title,
+    startCol,
+    span,
+    color,
+    icon: ev.icon ?? undefined,
+    members,
+    isChild: Boolean(ev.parentActivityId),
+    startAtMs: new Date(ev.startAt).getTime(),
+    endAtMs: new Date(ev.endAt).getTime(),
+    parentActivityId: ev.parentActivityId ?? null,
+    primaryMemberId: members[0]?.id ?? null,
+    assignedMemberIds: assignedIds,
+    statusId: (ev as ApiActivity & { statusId?: string | null }).statusId ?? null,
+  };
+}
+
+// ── Sorting ──────────────────────────────────────────────────────────────────
+
+function sortActivities(activities: RichActivity[], sortBy: SortBy): RichActivity[] {
+  return [...activities].sort((a, b) => {
+    if (sortBy === 'title') return a.title.localeCompare(b.title);
+    if (sortBy === 'endDate') return a.endAtMs - b.endAtMs;
+    return a.startAtMs - b.startAtMs;
+  });
+}
+
+// ── Grouping ─────────────────────────────────────────────────────────────────
+
+/**
+ * Builds the flat GanttRow list from positioned activities, applying grouping,
+ * sorting, parent→child nesting (arbitrary depth), and collapse state.
+ * Exported for unit testing of the tree/collapse logic.
+ */
+export function buildRows(
+  activities: RichActivity[],
+  members: Member[],
+  groupBy: GroupBy,
+  sortBy: SortBy,
+  collapsedParents: Set<string>,
+  collapsedGroups: Set<string>,
+  statuses?: Status[],
+): GanttRow[] {
+  const sorted = sortActivities(activities, sortBy);
+
+  if (groupBy === 'none') {
+    // Flat list — no parent nesting, so children are not indented.
+    return sorted.map(ev => ({ kind: 'activity' as const, event: { ...ev, isChild: false, depth: 0 } }));
+  }
+
+  if (groupBy === 'member') {
+    const memberOrder = members.map(m => m.id);
+    const nameById = new Map(members.map(m => [m.id, m.name]));
+    // Colors here are already resolved hex (from the Member type / toMember conversion).
+    // ListView applies resolveColorHex on the raw API color string instead — both
+    // produce hex, but the resolution step happens at different layers.
+    const colorById = new Map(members.map(m => [m.id, m.color]));
+
+    const buckets = new Map<string, RichActivity[]>();
+    for (const ev of sorted) {
+      const key = memberComboKey(ev.assignedMemberIds);
+      const list = buckets.get(key) ?? [];
+      list.push(ev);
+      buckets.set(key, list);
+    }
+
+    const comparator = comboSortComparator(memberOrder);
+    const sortedKeys = [...buckets.keys()].sort(comparator);
+
+    const rows: GanttRow[] = [];
+    for (const key of sortedKeys) {
+      const evs = buckets.get(key)!;
+      const rawIds = key === UNASSIGNED_KEY ? [] : key.split(SEP);
+      const orderedIds = orderedComboIds(rawIds, memberOrder);
+      const label = key === UNASSIGNED_KEY ? 'Unassigned' : memberComboLabel(orderedIds, nameById);
+      const memberColors = orderedIds.map(id => colorById.get(id) ?? 'var(--muted-foreground)');
+      const primaryColor = key === UNASSIGNED_KEY ? 'var(--muted-foreground)' : (memberColors[0] ?? 'var(--muted-foreground)');
+      const collapsed = collapsedGroups.has(key);
+      rows.push({ kind: 'group', id: key, label, color: primaryColor, memberColors, count: evs.length, collapsed });
+      if (collapsed) continue;
+      for (const ev of evs) rows.push({ kind: 'activity', event: { ...ev, isChild: false, depth: 0 } });
+    }
+    return rows;
+  }
+
+  if (groupBy === 'parent') {
+    // Build a parent→children index, then emit rows via depth-first traversal so
+    // grandchildren (and deeper) nest correctly. An activity is a "root" when it
+    // has no parent or its parent fell outside the current view.
+    const byId = new Map(sorted.map(a => [a.id, a]));
+    const childrenByParent = new Map<string, RichActivity[]>();
+    const roots: RichActivity[] = [];
+    for (const ev of sorted) {
+      const pid = ev.parentActivityId;
+      if (pid && byId.has(pid)) {
+        const list = childrenByParent.get(pid) ?? [];
+        list.push(ev);
+        childrenByParent.set(pid, list);
+      } else {
+        roots.push(ev);
+      }
+    }
+
+    const rows: GanttRow[] = [];
+    const seen = new Set<string>();   // emitted into rows (also guards cycles)
+    const hidden = new Set<string>(); // suppressed under a collapsed ancestor
+
+    // Recursively mark a collapsed node's descendants as hidden so the leftover
+    // sweep below doesn't resurrect them. The `hidden` guard also stops cycles.
+    const markHidden = (ev: RichActivity) => {
+      if (hidden.has(ev.id)) return;
+      hidden.add(ev.id);
+      for (const k of childrenByParent.get(ev.id) ?? []) markHidden(k);
+    };
+
+    const visit = (ev: RichActivity, depth: number) => {
+      if (seen.has(ev.id)) return;
+      seen.add(ev.id);
+      const kids = childrenByParent.get(ev.id) ?? [];
+      const hasChildren = kids.length > 0;
+      const collapsed = collapsedParents.has(ev.id);
+      rows.push({
+        kind: 'activity',
+        event: { ...ev, isChild: depth > 0, depth, hasChildren, collapsed },
+      });
+      if (!hasChildren) return;
+      if (collapsed) for (const k of kids) markHidden(k);
+      else for (const k of kids) visit(k, depth + 1);
+    };
+
+    for (const r of roots) visit(r, 0);
+    // Safety net: emit any activity unreachable from a root (e.g. a parent-
+    // pointer cycle where no node qualifies as a root) at depth 0, but never
+    // resurrect a node intentionally hidden under a collapsed ancestor.
+    for (const ev of sorted) {
+      if (!seen.has(ev.id) && !hidden.has(ev.id)) visit(ev, 0);
+    }
+    return rows;
+  }
+
+  if (groupBy === 'status') {
+    const buckets = new Map<string, RichActivity[]>();
+    for (const ev of sorted) {
+      const key = ev.statusId ?? '__no_status__';
+      const list = buckets.get(key) ?? [];
+      list.push(ev);
+      buckets.set(key, list);
+    }
+
+    const rows: GanttRow[] = [];
+    const pushStatusBucket = (id: string, label: string, color: string, evs: RichActivity[]) => {
+      const collapsed = collapsedGroups.has(id);
+      rows.push({ kind: 'group', id, label, color, count: evs.length, collapsed });
+      if (collapsed) return;
+      for (const ev of evs) rows.push({ kind: 'activity', event: { ...ev, isChild: false, depth: 0 } });
+    };
+
+    if (statuses) {
+      for (const s of statuses) {
+        const evs = buckets.get(s.id);
+        if (!evs?.length) continue;
+        pushStatusBucket(s.id, s.name, resolveColorHex(s.color ?? null) ?? 'var(--muted-foreground)', evs);
+      }
+    }
+    const noStatus = buckets.get('__no_status__');
+    if (noStatus?.length) {
+      pushStatusBucket('__no_status__', 'No status', 'var(--muted-foreground)', noStatus);
+    }
+    return rows;
+  }
+
+  return sorted.map(ev => ({ kind: 'activity' as const, event: ev }));
+}
+
+// ── Component ─────────────────────────────────────────────────────────────────
+
+/**
+ * Returns only the activities whose status is not in closedStatusIds.
+ * Extracted as a named export so the 'open' filter preset logic can be
+ * unit-tested without mounting the full component.
+ */
+export function filterOpenActivities<T extends { statusId?: string | null | undefined }>(
+  activities: T[],
+  closedStatusIds: Set<string>,
+): T[] {
+  return activities.filter(a => !a.statusId || !closedStatusIds.has(a.statusId))
+}
+
+export default function GanttView({
+  teamId,
+  timelineId,
+  startDate,
+  endDate,
+  groupBy,
+  sortBy,
+  granularity,
+  colorBy,
+  timelineStatuses,
+  savedFilters,
+  tags,
+  selectedActivityId = null,
+  onSelectActivity = () => {},
+  onLaneDrag,
+  onBarDragProgress,
+  onBarDragEnd,
+  onMembersLoaded,
+  onSelectApiActivity,
+  labelColW,
+  onLabelColWChange,
+  interactive = true,
+}: Props) {
+  const queryClient = useQueryClient();
+  const updateActivity = useUpdateActivity(timelineId);
+  const today = todayMidnight();
+
+  // Collapse state for the Gantt tree. `collapsedParents` hides an activity's
+  // child subtree (parent grouping); `collapsedGroups` hides a member bucket's
+  // activities (member grouping). Both persist across re-renders and view tweaks.
+  const [collapsedParents, setCollapsedParents] = useState<Set<string>>(new Set());
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
+
+  const toggleParent = useCallback((id: string) => {
+    setCollapsedParents(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }, []);
+
+  const toggleGroup = useCallback((id: string) => {
+    setCollapsedGroups(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }, []);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [containerWidth, setContainerWidth] = useState(800);
+
+  const { debouncedQuery, registerMatches, activeMatchId, matchedIds, matchReasons } = useFind();
+  const { activeFilter } = useFilter();
+
+  const globalPrefs = usePreferenceMap();
+  const prefWeekStart = (globalPrefs['week_start'] as string | undefined) === 'sunday' ? 'sunday' : 'monday';
+  // Map the stored date_format preference to a BCP 47 locale for Gantt column labels.
+  // DD/MM/YYYY users prefer day-first ordering (en-GB: "5 Jan"); all others get MM-first (en-US: "Jan 5").
+  const prefDateFormat = (globalPrefs['date_format'] as string | undefined) ?? 'MMM D, YYYY';
+  const prefLocale = prefDateFormat === 'DD/MM/YYYY' ? 'en-GB' : 'en-US';
+
+  useLayoutEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(entries => {
+      const w = entries[0]?.contentRect.width;
+      if (w && w > 0) setContainerWidth(w);
+    });
+    ro.observe(el);
+    setContainerWidth(el.clientWidth || 800);
+    return () => ro.disconnect();
+  }, []);
+
+  const viewStart = useMemo<Date>(() => {
+    if (startDate) return new Date(startDate);
+    const d = new Date(today);
+    d.setUTCDate(d.getUTCDate() - 14);
+    return d;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [startDate]);
+
+  const viewEnd = useMemo<Date>(() => {
+    if (endDate) return new Date(endDate);
+    const d = new Date(today);
+    d.setUTCDate(d.getUTCDate() + 75);
+    return d;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [endDate]);
+
+  const resolvedGranularity = useMemo<TimeGranularity>(() => {
+    if (granularity !== 'auto') return granularity;
+    return autoFitGranularity(viewStart, viewEnd, containerWidth);
+  }, [granularity, viewStart, viewEnd, containerWidth]);
+
+  const columns = useMemo(
+    () => generateColumns(viewStart, viewEnd, resolvedGranularity, { weekStart: prefWeekStart, locale: prefLocale }),
+    [viewStart, viewEnd, resolvedGranularity, prefWeekStart, prefLocale],
+  );
+
+  const todayIdx = useMemo(
+    () => todayColumnPosition(columns),
+    [columns],
+  );
+
+  const from = viewStart.toISOString();
+  const to = viewEnd.toISOString();
+
+  const { data: apiMembers = [] } = useTeamMembers(teamId);
+  const { data: apiActivities = [], isLoading } = useTimelineActivities(teamId, timelineId, from, to);
+
+  const members: Member[] = useMemo(
+    () => apiMembers.map((m, i) => toMember(m, i)),
+    [apiMembers],
+  );
+
+  const memberById = useMemo<Record<string, Member>>(() => {
+    const map: Record<string, Member> = {};
+    members.forEach(m => { map[m.id] = m; });
+    return map;
+  }, [members]);
+
+  // Notify parent once the member list resolves.
+  useEffect(() => {
+    if (onMembersLoaded && members.length > 0) {
+      onMembersLoaded(members);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [members]);
+
+  // Derive data needed by the unified filter engine from the passed-in statuses/tags/filters.
+  const closedStatusIds = useMemo(
+    () => new Set((timelineStatuses ?? []).filter(s => s.isClosed).map(s => s.id)),
+    [timelineStatuses],
+  );
+
+  const statusesByTimeline = useMemo(() => {
+    const m = new Map<string, Status[]>();
+    if (timelineStatuses?.length) m.set(timelineId, timelineStatuses);
+    return m;
+  }, [timelineId, timelineStatuses]);
+
+  // Map userId → team_member_id[] so the 'member' filter kind can resolve by userId.
+  const memberIdsByUserId = useMemo(() => {
+    const m = new Map<string, string[]>();
+    apiMembers.forEach(member => {
+      if (member.userId) {
+        const existing = m.get(member.userId) ?? [];
+        m.set(member.userId, [...existing, member.id]);
+      }
+    });
+    return m;
+  }, [apiMembers]);
+
+  const visibleActivities = useMemo(() => applyActiveFilter(
+    apiActivities,
+    activeFilter,
+    memberIdsByUserId,
+    {
+      closedStatusIds,
+      savedFilters: savedFilters ?? [],
+      statuses: statusesByTimeline,
+      tags: tags ?? [],
+    },
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  ), [apiActivities, activeFilter, memberIdsByUserId, closedStatusIds, savedFilters, statusesByTimeline, tags]);
+
+  const statusColorById = useMemo(
+    () => new Map((timelineStatuses ?? []).map(s => [s.id, s.color])),
+    [timelineStatuses],
+  );
+
+  const rows: GanttRow[] = useMemo(() => {
+    const richActivities = visibleActivities
+      .map((ev, i) => toRichActivity(ev, i, memberById, viewStart, viewEnd, columns, colorBy, statusColorById))
+      .filter((a): a is RichActivity => a !== null);
+    return buildRows(richActivities, members, groupBy, sortBy, collapsedParents, collapsedGroups, timelineStatuses);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visibleActivities, members, memberById, groupBy, sortBy, colorBy, statusColorById, viewStart, viewEnd, columns, collapsedParents, collapsedGroups, timelineStatuses]);
+
+  // ── Find: compute matches and register with context ───────────────────────
+
+  const matchResults = useMemo(
+    () => matchEvents(debouncedQuery, visibleActivities, members, visibleActivities),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [debouncedQuery, visibleActivities, members],
+  );
+
+  const matchedSet = useMemo(
+    () => new Set(matchResults.map(r => r.activityId)),
+    [matchResults],
+  );
+
+  const computedMatchReasons = useMemo(() => {
+    const map = new Map<string, string[]>();
+    matchResults.forEach(r => map.set(r.activityId, r.reasons));
+    return map;
+  }, [matchResults]);
+
+  // Ordered match IDs follow the current row order so prev/next walks the
+  // visual top-to-bottom sequence rather than the arbitrary API order.
+  const orderedMatchIds = useMemo(
+    () => rows
+      .filter(r => r.kind === 'activity' && matchedSet.has(r.event.id))
+      .map(r => (r as { kind: 'activity'; event: GanttActivity }).event.id),
+    [rows, matchedSet],
+  );
+
+  useEffect(() => {
+    registerMatches(orderedMatchIds, computedMatchReasons);
+  }, [orderedMatchIds, computedMatchReasons, registerMatches]);
+
+  // Build the FindState passed to GanttGrid
+  const hasQuery = debouncedQuery.trim().length > 0;
+  const filtersActive = activeFilter.kind !== 'preset' || activeFilter.id !== 'all';
+  const findState: FindState = useMemo(() => ({
+    hasQuery,
+    matchedIds: matchedSet,
+    activeMatchId,
+    matchReasons,
+    filtersActive,
+    matchCount: matchedIds.length,
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), [hasQuery, matchedSet, activeMatchId, matchReasons, filtersActive, matchedIds.length]);
+
+  // ── Bar drag ─────────────────────────────────────────────────────────────
+
+  const handleBarDrag = useCallback((activityId: string, newStartDate: Date, newEndDate: Date) => {
+    const patch = {
+      startAt: newStartDate.toISOString(),
+      endAt: newEndDate.toISOString(),
+    };
+
+    // Synchronously update the cache so the bar doesn't flash back to old
+    // position when GanttGrid clears its drag state in the same render cycle.
+    queryClient.setQueriesData<ApiActivity[]>(
+      { queryKey: ['timelines', timelineId, 'activities'] },
+      (old) => old?.map((a) => (a.id === activityId ? { ...a, ...patch } : a)),
+    );
+
+    // Push updated activity to the sidebar so it shows new dates immediately
+    // instead of the stale snapshot from when the activity was selected.
+    if (onSelectApiActivity) {
+      const updated = apiActivities.find(a => a.id === activityId);
+      if (updated) onSelectApiActivity({ ...updated, ...patch });
+    }
+
+    onBarDragEnd?.();
+    updateActivity.mutate({ activityId, patch });
+  }, [updateActivity, onBarDragEnd, queryClient, timelineId, apiActivities, onSelectApiActivity]);
+
+  if (isLoading) {
+    return (
+      <div ref={containerRef} className="flex items-center justify-center h-full text-muted-foreground text-[13px]">
+        Loading activities…
+      </div>
+    );
+  }
+
+  return (
+    <div ref={containerRef} style={{ flex: 1, minHeight: 0 }}>
+      <GanttGrid
+        rows={rows}
+        columns={columns}
+        todayIndex={todayIdx}
+        selectedActivityId={selectedActivityId}
+        findState={findState}
+        onSelectActivity={(id) => {
+          onSelectActivity(id);
+          if (onSelectApiActivity) {
+            const found = id ? (apiActivities.find(a => a.id === id) ?? null) : null;
+            onSelectApiActivity(found);
+          }
+        }}
+        onLaneDrag={interactive ? onLaneDrag : undefined}
+        onBarDrag={interactive ? handleBarDrag : undefined}
+        onBarDragProgress={interactive ? onBarDragProgress : undefined}
+        resolvedGranularity={resolvedGranularity}
+        onClearFilters={filtersActive ? () => {} : undefined}
+        labelColW={labelColW}
+        onLabelColWChange={onLabelColWChange}
+        onToggleActivity={groupBy === 'parent' ? toggleParent : undefined}
+        onToggleGroup={groupBy === 'member' || groupBy === 'status' ? toggleGroup : undefined}
+        interactive={interactive}
+      />
     </div>
   );
 }
@@ -63073,6 +63097,529 @@ export default function DashboardPage() {
 }
 ````
 
+## File: packages/web/src/components/ShareModal.tsx
+````typescript
+/**
+ * ShareModal — manage the share links for the current timeline view.
+ *
+ * Rebuilt to the "Share this view" design handoff (docs/design/handoffs/share-modal):
+ * an active-links list with per-row creator/date/view-count meta and an inline
+ * delete-confirm, plus an inline create form with optional password protection.
+ * One timeline can host many named shares; each is a frozen view snapshot.
+ *
+ * Styled with Tailwind utility classes against the project's design tokens
+ * (see index.css `@theme`) and shadcn/ui primitives — the handoff is a visual
+ * reference, not production code, so its inline styles were not ported.
+ *
+ * Delete is intentionally not permission-gated — a share is a read-only
+ * projection that cannot mutate app data, so any team member may manage any
+ * link (Phase 13.2 decision).
+ */
+
+import { useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
+import {
+  Link as LinkIcon, Link2, Lock, KeyRound, Copy, Check, Eye, EyeOff,
+  Trash2, Plus, PlusCircle, X, Users,
+} from 'lucide-react'
+import { useCreateShare, useListShares, useDeleteShare } from '@/hooks/useShares'
+import { useTeamMembers } from '@/hooks/useTeamActivities'
+import { useAuth } from '@/contexts/AuthContext'
+import { Badge } from '@/components/identity/Badge'
+import { resolveColorHex } from '@/components/identity/identity-constants'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { cn } from '@/lib/utils'
+import { MEMBER_COLORS } from '@/types'
+import type { FilterDefinition } from '@/lib/filterTypes'
+import type { components } from '@draba/shared'
+
+type Share = components['schemas']['Share']
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
+
+export interface ShareViewConfig {
+  groupBy: string
+  sortBy: string
+  colorBy: string
+  granularity: string
+  filter: FilterDefinition | null
+  /** List shares only — column visibility snapshot; drives the "notes" projection nuance. */
+  columns?: { id: string; visible: boolean }[]
+  /** Kanban shares only — which fields render on each card. */
+  cardFields?: string[]
+  /** Kanban shares only — whether child activities nest under their parent. */
+  showHierarchy?: boolean
+  /** Kanban shares only — column IDs collapsed at share-creation time. */
+  collapsedColumns?: string[]
+}
+
+interface Props {
+  teamId: string
+  timelineId: string
+  viewType: 'gantt' | 'list' | 'calendar' | 'kanban'
+  viewConfig: ShareViewConfig
+  /** Display name of the timeline, shown in the header subtitle. */
+  timelineName?: string
+  onClose: () => void
+}
+
+interface CreatePayload {
+  title: string
+  description: string
+  password: string | null
+}
+
+// ── Shared token-styled bits ──────────────────────────────────────────────────
+//
+// The handoff colors a share's "type tile" teal (open link) or amber
+// (password-protected). Those tints aren't semantic tokens on their own, so
+// they're expressed as arbitrary-value Tailwind classes derived from the
+// existing `--primary` / `--secondary` HSL values rather than ported hex.
+
+const TILE_TEAL = 'bg-[hsl(188_59%_38%/0.12)] text-primary'
+const TILE_AMBER = 'bg-[hsl(30_87%_62%/0.16)] text-secondary'
+const BADGE_AMBER = 'bg-[hsl(30_87%_62%/0.22)] text-secondary-foreground'
+
+function MiniAvatar({ member, size = 20 }: { member: TeamMemberWithUser | undefined; size?: number }) {
+  if (!member) return null
+  const name = member.displayName || 'Team member'
+  const color = resolveColorHex(member.color) || MEMBER_COLORS[0]
+  return (
+    <Badge identity={{ color, icon: member.icon ?? '__name_1__' }} name={name} size={size} shape="circle" />
+  )
+}
+
+function formatCreated(iso: string): string {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ''
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+}
+
+/**
+ * Short "last viewed" label for a share row: time of day when the last view
+ * was today, otherwise the same short date format as the created date.
+ */
+function formatLastViewed(iso: string): string {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ''
+  const now = new Date()
+  if (d.toDateString() === now.toDateString()) {
+    return d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
+  }
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+}
+
+// ── A single share row ─────────────────────────────────────────────────────────
+
+function ShareRow({
+  share,
+  creator,
+  isOwn,
+  onDelete,
+}: {
+  share: Share
+  creator: TeamMemberWithUser | undefined
+  isOwn: boolean
+  onDelete: (id: string) => void
+}) {
+  const url = `${window.location.host}/s/${share.token}`
+  const [copied, setCopied] = useState(false)
+  const [confirming, setConfirming] = useState(false)
+  const protectedShare = Boolean(share.protected)
+
+  const copy = () => {
+    void navigator.clipboard.writeText(`${window.location.origin}/s/${share.token}`).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1600)
+    })
+  }
+
+  return (
+    <div className="relative rounded-[var(--radius-lg)] border border-border bg-card p-3.5 shadow-sm">
+      {/* Top: type tile + title + delete */}
+      <div className="flex items-start gap-2.5">
+        <div className={cn('flex h-8 w-8 shrink-0 items-center justify-center rounded-[var(--radius-md)]', protectedShare ? TILE_AMBER : TILE_TEAL)}>
+          {protectedShare ? <Lock size={16} strokeWidth={2.2} /> : <LinkIcon size={16} strokeWidth={2.2} />}
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-sm font-semibold text-foreground">{share.name || 'Untitled link'}</span>
+            {protectedShare && (
+              <span className={cn('inline-flex items-center gap-1 rounded-[var(--radius-full)] px-2 py-px text-[11px] font-semibold', BADGE_AMBER)}>
+                <Lock size={10} strokeWidth={2.4} /> password
+              </span>
+            )}
+          </div>
+          {share.description && (
+            <p className="mt-[3px] text-[12.5px] leading-[1.45] text-muted-foreground">{share.description}</p>
+          )}
+        </div>
+        <button
+          onClick={() => setConfirming(true)}
+          title="Delete share"
+          className="flex h-7 w-7 shrink-0 cursor-pointer items-center justify-center rounded-[var(--radius-md)] border-none bg-transparent text-muted-foreground transition-colors hover:bg-[hsl(0_72%_51%/0.1)] hover:text-destructive"
+        >
+          <Trash2 size={15} strokeWidth={2} />
+        </button>
+      </div>
+
+      {/* URL row */}
+      <div className="mt-[11px] flex items-center gap-2">
+        <div className="flex min-w-0 flex-1 items-center gap-2 rounded-[var(--radius-md)] bg-muted px-[11px] py-[7px] font-mono text-[12.5px] text-foreground">
+          <Link2 size={13} className="shrink-0 text-muted-foreground" strokeWidth={2} />
+          <span className="overflow-hidden text-ellipsis whitespace-nowrap">{url}</span>
+        </div>
+        <button
+          onClick={copy}
+          className={cn(
+            'flex shrink-0 items-center gap-[5px] rounded-[var(--radius-md)] border px-3 py-[7px] text-[12.5px] font-semibold transition-colors',
+            copied ? 'border-success bg-[hsl(145_63%_42%/0.12)] text-success' : 'border-border bg-card text-foreground',
+          )}
+        >
+          {copied ? <Check size={13} strokeWidth={2.2} /> : <Copy size={13} strokeWidth={2.2} />}
+          {copied ? 'Copied' : 'Copy'}
+        </button>
+      </div>
+
+      {/* Footer meta — labeled columns so each value carries its own context */}
+      <div className="mt-[11px] grid grid-cols-3 gap-2 border-t border-border pt-2.5">
+        <div title={`Created ${formatCreated(share.createdAt)}`}>
+          <div className="text-[10px] font-semibold uppercase tracking-[0.06em] text-muted-foreground">Created by</div>
+          <div className="mt-1 flex min-w-0 items-center gap-1.5 text-xs">
+            <MiniAvatar member={creator} size={16} />
+            <span className="truncate font-semibold text-foreground">
+              {creator?.displayName ?? 'Team member'}
+              {isOwn && <span className="font-normal text-muted-foreground"> · you</span>}
+            </span>
+          </div>
+        </div>
+        <div title={share.lastViewedAt ? new Date(share.lastViewedAt).toLocaleString() : undefined}>
+          <div className="text-[10px] font-semibold uppercase tracking-[0.06em] text-muted-foreground">Last viewed</div>
+          <div className="mt-1 text-xs text-foreground">
+            {share.lastViewedAt ? formatLastViewed(share.lastViewedAt) : 'Never'}
+          </div>
+        </div>
+        <div>
+          <div className="text-[10px] font-semibold uppercase tracking-[0.06em] text-muted-foreground">View total</div>
+          <div className="mt-1 inline-flex items-center gap-1 text-xs text-foreground">
+            <Eye size={12} strokeWidth={2} className="text-muted-foreground" />
+            {share.viewCount}
+          </div>
+        </div>
+      </div>
+
+      {/* Inline delete confirm */}
+      {confirming && (
+        <div className="absolute inset-0 flex flex-col justify-center gap-2.5 rounded-[var(--radius-lg)] border border-destructive bg-card px-4 py-3.5">
+          <div className="flex items-start gap-2.5">
+            <div className="flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-[var(--radius-md)] bg-[hsl(0_72%_51%/0.1)] text-destructive">
+              <Trash2 size={15} strokeWidth={2.2} />
+            </div>
+            <div>
+              <div className="text-[13.5px] font-semibold text-foreground">Delete this share?</div>
+              <div className="mt-0.5 text-xs text-muted-foreground">Anyone with the link will immediately lose access. This can&apos;t be undone.</div>
+            </div>
+          </div>
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" size="sm" onClick={() => setConfirming(false)}>Cancel</Button>
+            <Button variant="destructive" size="sm" onClick={() => { onDelete(share.id); setConfirming(false) }}>Delete link</Button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── The add-share inline form ───────────────────────────────────────────────────
+
+/**
+ * No shadcn Textarea exists yet, so this mirrors Input's class string —
+ * keeps the field visually consistent without inline styles.
+ */
+const TEXTAREA_CLASSES = 'flex w-full resize-y rounded-md border border-[var(--border)] bg-[var(--background)] px-3 py-2 text-sm leading-relaxed text-[var(--foreground)] shadow-sm transition-colors placeholder:text-[var(--muted-foreground)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)]'
+
+function AddShareForm({
+  currentMember,
+  onCreate,
+  onCancel,
+  isPending,
+  isError,
+}: {
+  currentMember: TeamMemberWithUser | undefined
+  onCreate: (payload: CreatePayload) => void
+  onCancel: () => void
+  isPending: boolean
+  isError: boolean
+}) {
+  const [title, setTitle] = useState('')
+  const [desc, setDesc] = useState('')
+  const [pwOn, setPwOn] = useState(false)
+  const [pw, setPw] = useState('')
+  const [showPw, setShowPw] = useState(false)
+  const titleRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => { titleRef.current?.focus() }, [])
+
+  const valid = title.trim().length > 0 && (!pwOn || pw.trim().length > 0)
+
+  const submit = () => {
+    if (!valid || isPending) return
+    onCreate({ title: title.trim(), description: desc.trim(), password: pwOn ? pw : null })
+  }
+
+  return (
+    <div className="rounded-[var(--radius-lg)] border-[1.5px] border-primary bg-card p-4 shadow-[0_0_0_3px_hsl(188_59%_38%/0.08)]">
+      <div className="mb-3.5 flex items-center gap-2">
+        <PlusCircle size={16} className="text-primary" strokeWidth={2.2} />
+        <span className="text-[13.5px] font-bold text-foreground">New share link</span>
+      </div>
+
+      <div className="mb-3 flex flex-col gap-1.5">
+        <Label htmlFor="share-title">Title</Label>
+        <Input
+          id="share-title"
+          ref={titleRef}
+          value={title}
+          onChange={e => setTitle(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') submit() }}
+          placeholder="e.g. Acme stakeholder view"
+        />
+      </div>
+
+      <div className="mb-3 flex flex-col gap-1.5">
+        <Label htmlFor="share-description">
+          Description <span className="lowercase font-normal">· optional</span>
+        </Label>
+        <textarea
+          id="share-description"
+          value={desc}
+          onChange={e => setDesc(e.target.value)}
+          rows={2}
+          placeholder="What's this link for, and who is it shared with?"
+          className={TEXTAREA_CLASSES}
+        />
+      </div>
+
+      {/* Password protect */}
+      <div className="overflow-hidden rounded-[var(--radius-md)] border border-border">
+        <div className="flex items-center gap-2.5 px-3 py-2.5">
+          <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[var(--radius-md)] bg-muted text-muted-foreground">
+            <Lock size={14} strokeWidth={2} />
+          </div>
+          <div className="flex-1">
+            <div className="text-[13px] font-semibold text-foreground">Password protect</div>
+            <div className="text-[11.5px] text-muted-foreground">Require a password to open the link</div>
+          </div>
+          <button
+            onClick={() => setPwOn(v => !v)}
+            role="switch"
+            aria-checked={pwOn}
+            aria-label="Password protect"
+            className={cn(
+              'relative h-[22px] w-10 shrink-0 cursor-pointer rounded-[var(--radius-full)] border-none p-0 transition-colors',
+              pwOn ? 'bg-primary' : 'bg-border',
+            )}
+          >
+            <span className={cn(
+              'absolute top-[2px] h-[18px] w-[18px] rounded-full bg-white shadow-sm transition-[left] duration-150',
+              pwOn ? 'left-5' : 'left-[2px]',
+            )} />
+          </button>
+        </div>
+        {pwOn && (
+          <div className="border-t border-border px-3 py-3">
+            <div className="flex items-center gap-2 rounded-[var(--radius-md)] border border-input bg-card px-2.5">
+              <KeyRound size={14} className="text-muted-foreground" strokeWidth={2} />
+              <input
+                value={pw}
+                onChange={e => setPw(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') submit() }}
+                type={showPw ? 'text' : 'password'}
+                placeholder="Set a password"
+                className="flex-1 border-none bg-transparent py-2 text-[13px] text-foreground outline-none placeholder:text-muted-foreground"
+              />
+              <button
+                onClick={() => setShowPw(v => !v)}
+                aria-label={showPw ? 'Hide password' : 'Show password'}
+                className="flex cursor-pointer border-none bg-transparent p-1 text-muted-foreground"
+              >
+                {showPw ? <EyeOff size={14} strokeWidth={2} /> : <Eye size={14} strokeWidth={2} />}
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {isError && (
+        <p className="mt-2.5 text-[11px] text-destructive">Failed to create share. Please try again.</p>
+      )}
+
+      {/* Actions */}
+      <div className="mt-4 flex items-center gap-2.5">
+        <div className="mr-auto flex items-center gap-[7px] text-xs text-muted-foreground">
+          <MiniAvatar member={currentMember} size={20} />
+          <span>Sharing as {currentMember?.displayName ?? 'you'}</span>
+        </div>
+        <Button variant="outline" onClick={onCancel}>Cancel</Button>
+        <Button onClick={submit} disabled={!valid || isPending}>
+          <LinkIcon size={14} strokeWidth={2.2} /> {isPending ? 'Creating…' : 'Create link'}
+        </Button>
+      </div>
+    </div>
+  )
+}
+
+// ── The modal shell ──────────────────────────────────────────────────────────
+
+export default function ShareModal({ teamId, timelineId, viewType, viewConfig, timelineName, onClose }: Props) {
+  const { user } = useAuth()
+  const { data: allShares = [], isLoading } = useListShares(teamId, timelineId)
+  // Scoped to this exact view — a share is a frozen snapshot of one view's
+  // config, so a Gantt link can't usefully stand in for a List or Kanban one.
+  // Showing only same-type links keeps "active links" literal and leaves room
+  // to tailor the modal per view type (e.g. Calendar/ICS in 13.4) without
+  // having to reconcile it against unrelated shares.
+  // kind === 'view' also keeps ICS calendar feeds (13.4) out of this list —
+  // they live in CalendarShareModal, a different surface entirely.
+  const shares = allShares.filter(s => s.kind === 'view' && s.viewType === viewType)
+  const { data: members = [] } = useTeamMembers(teamId)
+  const createShare = useCreateShare(teamId, timelineId)
+  const deleteShare = useDeleteShare(teamId, timelineId)
+  const [adding, setAdding] = useState(false)
+  const bodyRef = useRef<HTMLDivElement>(null)
+
+  const memberByID = new Map(members.map(m => [m.id, m]))
+  const currentMember = members.find(m => m.userId && m.userId === user?.id)
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  const configString = JSON.stringify({
+    groupBy: viewConfig.groupBy,
+    sortBy: viewConfig.sortBy,
+    colorBy: viewConfig.colorBy,
+    granularity: viewConfig.granularity,
+    filter: viewConfig.filter ?? { logic: 'and', conditions: [] },
+    ...(viewConfig.columns ? { columns: viewConfig.columns } : {}),
+    ...(viewConfig.cardFields ? { cardFields: viewConfig.cardFields } : {}),
+    ...(viewConfig.showHierarchy !== undefined ? { showHierarchy: viewConfig.showHierarchy } : {}),
+    ...(viewConfig.collapsedColumns ? { collapsedColumns: viewConfig.collapsedColumns } : {}),
+  })
+
+  const handleCreate = (payload: CreatePayload) => {
+    createShare.mutate(
+      {
+        name: payload.title,
+        description: payload.description || null,
+        viewType,
+        viewConfig: configString,
+        password: payload.password ?? undefined,
+      },
+      {
+        onSuccess: () => {
+          setAdding(false)
+          setTimeout(() => { if (bodyRef.current) bodyRef.current.scrollTop = 0 }, 0)
+        },
+      },
+    )
+  }
+
+  return createPortal(
+    <div
+      className="fixed inset-0 z-[1000] flex items-center justify-center bg-[hsl(200_24%_11%/0.55)] p-6 backdrop-blur-[2px]"
+    >
+      <div
+        className="flex max-h-[88vh] w-[min(580px,100%)] flex-col overflow-hidden rounded-[var(--radius-xl)] bg-card shadow-[var(--shadow-lg)]"
+      >
+        {/* Header */}
+        <div className="flex shrink-0 items-start gap-3 border-b border-border px-5 py-[18px]">
+          <div className={cn('flex h-[38px] w-[38px] shrink-0 items-center justify-center rounded-[var(--radius-md)]', TILE_TEAL)}>
+            <LinkIcon size={19} strokeWidth={2.2} />
+          </div>
+          <div className="min-w-0 flex-1">
+            <h2 className="m-0 text-[17px] font-bold leading-tight text-foreground">Share this view</h2>
+            <div className="mt-0.5 flex items-center gap-1.5 text-[12.5px] text-muted-foreground">
+              <span className="inline-block h-2 w-2 shrink-0 rounded-sm bg-secondary" />
+              {timelineName ? `${timelineName} · ` : ''}anyone with a link can view
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            aria-label="Close"
+            className="flex h-[30px] w-[30px] shrink-0 cursor-pointer items-center justify-center rounded-[var(--radius-md)] border-none bg-muted text-muted-foreground"
+          >
+            <X size={16} strokeWidth={2.2} />
+          </button>
+        </div>
+
+        {/* Section bar */}
+        <div className="flex shrink-0 items-center gap-2 px-5 pb-[11px] pt-[13px]">
+          <span className="text-[11px] font-bold uppercase tracking-[0.06em] text-muted-foreground">Active links</span>
+          <span className="min-w-[20px] rounded-[var(--radius-full)] bg-muted px-2 py-px text-center text-[11px] font-bold text-muted-foreground">{shares.length}</span>
+          <div className="ml-auto">
+            {!adding && (
+              <Button size="sm" onClick={() => setAdding(true)}>
+                <Plus size={14} strokeWidth={2.4} /> New share
+              </Button>
+            )}
+          </div>
+        </div>
+
+        {/* Body */}
+        <div ref={bodyRef} className="flex min-h-[120px] flex-1 flex-col gap-3 overflow-y-auto px-5 pb-5">
+          {adding && (
+            <AddShareForm
+              currentMember={currentMember}
+              onCreate={handleCreate}
+              onCancel={() => setAdding(false)}
+              isPending={createShare.isPending}
+              isError={createShare.isError}
+            />
+          )}
+
+          {!isLoading && shares.length === 0 && !adding && (
+            <div className="flex flex-1 flex-col items-center justify-center rounded-[var(--radius-lg)] border border-dashed border-border px-5 py-9 text-center">
+              <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-[var(--radius-lg)] bg-muted text-muted-foreground">
+                <LinkIcon size={22} strokeWidth={1.8} />
+              </div>
+              <div className="text-sm font-semibold text-foreground">No share links yet</div>
+              <div className="mt-1 max-w-[280px] text-[12.5px] text-muted-foreground">Create a link to let people outside your team view this timeline.</div>
+              <Button size="sm" className="mt-4" onClick={() => setAdding(true)}>
+                <Plus size={14} strokeWidth={2.4} /> Create share link
+              </Button>
+            </div>
+          )}
+
+          {shares.map(s => (
+            <ShareRow
+              key={s.id}
+              share={s}
+              creator={s.createdBy ? memberByID.get(s.createdBy) : undefined}
+              isOwn={Boolean(currentMember && s.createdBy === currentMember.id)}
+              onDelete={(id) => deleteShare.mutate(id)}
+            />
+          ))}
+        </div>
+
+        {/* Footer */}
+        <div className="flex shrink-0 items-center gap-2.5 border-t border-border px-5 py-[13px]">
+          <div className="flex items-center gap-[7px] text-xs text-muted-foreground">
+            <Users size={14} strokeWidth={2} />
+            Read-only links · anyone on your team can manage them
+          </div>
+          <Button variant="outline" className="ml-auto" onClick={onClose}>Done</Button>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  )
+}
+````
+
 ## File: packages/api/internal/api/share_handler.go
 ````go
 package api
@@ -63263,6 +63810,13 @@ func (s *Server) handleGetShareProjection(w http.ResponseWriter, r *http.Request
 // archived-timeline response without leaking archive state.
 func (s *Server) shareTimelineLive(w http.ResponseWriter, share *models.Share) bool {
 	timeline, err := s.timelines.GetByID(share.TimelineID)
+	if errors.Is(err, sql.ErrNoRows) {
+		// A share row outliving a hard-deleted timeline answers the same 404 as
+		// every other dead-share case — a 500 here would be a state oracle on
+		// the public surface.
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+		return false
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load share")
 		return false
@@ -63833,529 +64387,6 @@ type patchShareBody struct {
 
 type unlockShareBody struct {
 	Password string `json:"password"`
-}
-````
-
-## File: packages/web/src/components/ShareModal.tsx
-````typescript
-/**
- * ShareModal — manage the share links for the current timeline view.
- *
- * Rebuilt to the "Share this view" design handoff (docs/design/handoffs/share-modal):
- * an active-links list with per-row creator/date/view-count meta and an inline
- * delete-confirm, plus an inline create form with optional password protection.
- * One timeline can host many named shares; each is a frozen view snapshot.
- *
- * Styled with Tailwind utility classes against the project's design tokens
- * (see index.css `@theme`) and shadcn/ui primitives — the handoff is a visual
- * reference, not production code, so its inline styles were not ported.
- *
- * Delete is intentionally not permission-gated — a share is a read-only
- * projection that cannot mutate app data, so any team member may manage any
- * link (Phase 13.2 decision).
- */
-
-import { useEffect, useRef, useState } from 'react'
-import { createPortal } from 'react-dom'
-import {
-  Link as LinkIcon, Link2, Lock, KeyRound, Copy, Check, Eye, EyeOff,
-  Trash2, Plus, PlusCircle, X, Users,
-} from 'lucide-react'
-import { useCreateShare, useListShares, useDeleteShare } from '@/hooks/useShares'
-import { useTeamMembers } from '@/hooks/useTeamActivities'
-import { useAuth } from '@/contexts/AuthContext'
-import { Badge } from '@/components/identity/Badge'
-import { resolveColorHex } from '@/components/identity/identity-constants'
-import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import { cn } from '@/lib/utils'
-import { MEMBER_COLORS } from '@/types'
-import type { FilterDefinition } from '@/lib/filterTypes'
-import type { components } from '@draba/shared'
-
-type Share = components['schemas']['Share']
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
-
-export interface ShareViewConfig {
-  groupBy: string
-  sortBy: string
-  colorBy: string
-  granularity: string
-  filter: FilterDefinition | null
-  /** List shares only — column visibility snapshot; drives the "notes" projection nuance. */
-  columns?: { id: string; visible: boolean }[]
-  /** Kanban shares only — which fields render on each card. */
-  cardFields?: string[]
-  /** Kanban shares only — whether child activities nest under their parent. */
-  showHierarchy?: boolean
-  /** Kanban shares only — column IDs collapsed at share-creation time. */
-  collapsedColumns?: string[]
-}
-
-interface Props {
-  teamId: string
-  timelineId: string
-  viewType: 'gantt' | 'list' | 'calendar' | 'kanban'
-  viewConfig: ShareViewConfig
-  /** Display name of the timeline, shown in the header subtitle. */
-  timelineName?: string
-  onClose: () => void
-}
-
-interface CreatePayload {
-  title: string
-  description: string
-  password: string | null
-}
-
-// ── Shared token-styled bits ──────────────────────────────────────────────────
-//
-// The handoff colors a share's "type tile" teal (open link) or amber
-// (password-protected). Those tints aren't semantic tokens on their own, so
-// they're expressed as arbitrary-value Tailwind classes derived from the
-// existing `--primary` / `--secondary` HSL values rather than ported hex.
-
-const TILE_TEAL = 'bg-[hsl(188_59%_38%/0.12)] text-primary'
-const TILE_AMBER = 'bg-[hsl(30_87%_62%/0.16)] text-secondary'
-const BADGE_AMBER = 'bg-[hsl(30_87%_62%/0.22)] text-secondary-foreground'
-
-function MiniAvatar({ member, size = 20 }: { member: TeamMemberWithUser | undefined; size?: number }) {
-  if (!member) return null
-  const name = member.displayName || 'Team member'
-  const color = resolveColorHex(member.color) || MEMBER_COLORS[0]
-  return (
-    <Badge identity={{ color, icon: member.icon ?? '__name_1__' }} name={name} size={size} shape="circle" />
-  )
-}
-
-function formatCreated(iso: string): string {
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return ''
-  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
-}
-
-/**
- * Short "last viewed" label for a share row: time of day when the last view
- * was today, otherwise the same short date format as the created date.
- */
-function formatLastViewed(iso: string): string {
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return ''
-  const now = new Date()
-  if (d.toDateString() === now.toDateString()) {
-    return d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
-  }
-  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
-}
-
-// ── A single share row ─────────────────────────────────────────────────────────
-
-function ShareRow({
-  share,
-  creator,
-  isOwn,
-  onDelete,
-}: {
-  share: Share
-  creator: TeamMemberWithUser | undefined
-  isOwn: boolean
-  onDelete: (id: string) => void
-}) {
-  const url = `${window.location.host}/s/${share.token}`
-  const [copied, setCopied] = useState(false)
-  const [confirming, setConfirming] = useState(false)
-  const protectedShare = Boolean(share.protected)
-
-  const copy = () => {
-    void navigator.clipboard.writeText(`${window.location.origin}/s/${share.token}`).then(() => {
-      setCopied(true)
-      setTimeout(() => setCopied(false), 1600)
-    })
-  }
-
-  return (
-    <div className="relative rounded-[var(--radius-lg)] border border-border bg-card p-3.5 shadow-sm">
-      {/* Top: type tile + title + delete */}
-      <div className="flex items-start gap-2.5">
-        <div className={cn('flex h-8 w-8 shrink-0 items-center justify-center rounded-[var(--radius-md)]', protectedShare ? TILE_AMBER : TILE_TEAL)}>
-          {protectedShare ? <Lock size={16} strokeWidth={2.2} /> : <LinkIcon size={16} strokeWidth={2.2} />}
-        </div>
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="text-sm font-semibold text-foreground">{share.name || 'Untitled link'}</span>
-            {protectedShare && (
-              <span className={cn('inline-flex items-center gap-1 rounded-[var(--radius-full)] px-2 py-px text-[11px] font-semibold', BADGE_AMBER)}>
-                <Lock size={10} strokeWidth={2.4} /> password
-              </span>
-            )}
-          </div>
-          {share.description && (
-            <p className="mt-[3px] text-[12.5px] leading-[1.45] text-muted-foreground">{share.description}</p>
-          )}
-        </div>
-        <button
-          onClick={() => setConfirming(true)}
-          title="Delete share"
-          className="flex h-7 w-7 shrink-0 cursor-pointer items-center justify-center rounded-[var(--radius-md)] border-none bg-transparent text-muted-foreground transition-colors hover:bg-[hsl(0_72%_51%/0.1)] hover:text-destructive"
-        >
-          <Trash2 size={15} strokeWidth={2} />
-        </button>
-      </div>
-
-      {/* URL row */}
-      <div className="mt-[11px] flex items-center gap-2">
-        <div className="flex min-w-0 flex-1 items-center gap-2 rounded-[var(--radius-md)] bg-muted px-[11px] py-[7px] font-mono text-[12.5px] text-foreground">
-          <Link2 size={13} className="shrink-0 text-muted-foreground" strokeWidth={2} />
-          <span className="overflow-hidden text-ellipsis whitespace-nowrap">{url}</span>
-        </div>
-        <button
-          onClick={copy}
-          className={cn(
-            'flex shrink-0 items-center gap-[5px] rounded-[var(--radius-md)] border px-3 py-[7px] text-[12.5px] font-semibold transition-colors',
-            copied ? 'border-success bg-[hsl(145_63%_42%/0.12)] text-success' : 'border-border bg-card text-foreground',
-          )}
-        >
-          {copied ? <Check size={13} strokeWidth={2.2} /> : <Copy size={13} strokeWidth={2.2} />}
-          {copied ? 'Copied' : 'Copy'}
-        </button>
-      </div>
-
-      {/* Footer meta — labeled columns so each value carries its own context */}
-      <div className="mt-[11px] grid grid-cols-3 gap-2 border-t border-border pt-2.5">
-        <div title={`Created ${formatCreated(share.createdAt)}`}>
-          <div className="text-[10px] font-semibold uppercase tracking-[0.06em] text-muted-foreground">Created by</div>
-          <div className="mt-1 flex min-w-0 items-center gap-1.5 text-xs">
-            <MiniAvatar member={creator} size={16} />
-            <span className="truncate font-semibold text-foreground">
-              {creator?.displayName ?? 'Team member'}
-              {isOwn && <span className="font-normal text-muted-foreground"> · you</span>}
-            </span>
-          </div>
-        </div>
-        <div title={share.lastViewedAt ? new Date(share.lastViewedAt).toLocaleString() : undefined}>
-          <div className="text-[10px] font-semibold uppercase tracking-[0.06em] text-muted-foreground">Last viewed</div>
-          <div className="mt-1 text-xs text-foreground">
-            {share.lastViewedAt ? formatLastViewed(share.lastViewedAt) : 'Never'}
-          </div>
-        </div>
-        <div>
-          <div className="text-[10px] font-semibold uppercase tracking-[0.06em] text-muted-foreground">View total</div>
-          <div className="mt-1 inline-flex items-center gap-1 text-xs text-foreground">
-            <Eye size={12} strokeWidth={2} className="text-muted-foreground" />
-            {share.viewCount}
-          </div>
-        </div>
-      </div>
-
-      {/* Inline delete confirm */}
-      {confirming && (
-        <div className="absolute inset-0 flex flex-col justify-center gap-2.5 rounded-[var(--radius-lg)] border border-destructive bg-card px-4 py-3.5">
-          <div className="flex items-start gap-2.5">
-            <div className="flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-[var(--radius-md)] bg-[hsl(0_72%_51%/0.1)] text-destructive">
-              <Trash2 size={15} strokeWidth={2.2} />
-            </div>
-            <div>
-              <div className="text-[13.5px] font-semibold text-foreground">Delete this share?</div>
-              <div className="mt-0.5 text-xs text-muted-foreground">Anyone with the link will immediately lose access. This can&apos;t be undone.</div>
-            </div>
-          </div>
-          <div className="flex justify-end gap-2">
-            <Button variant="outline" size="sm" onClick={() => setConfirming(false)}>Cancel</Button>
-            <Button variant="destructive" size="sm" onClick={() => { onDelete(share.id); setConfirming(false) }}>Delete link</Button>
-          </div>
-        </div>
-      )}
-    </div>
-  )
-}
-
-// ── The add-share inline form ───────────────────────────────────────────────────
-
-/**
- * No shadcn Textarea exists yet, so this mirrors Input's class string —
- * keeps the field visually consistent without inline styles.
- */
-const TEXTAREA_CLASSES = 'flex w-full resize-y rounded-md border border-[var(--border)] bg-[var(--background)] px-3 py-2 text-sm leading-relaxed text-[var(--foreground)] shadow-sm transition-colors placeholder:text-[var(--muted-foreground)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)]'
-
-function AddShareForm({
-  currentMember,
-  onCreate,
-  onCancel,
-  isPending,
-  isError,
-}: {
-  currentMember: TeamMemberWithUser | undefined
-  onCreate: (payload: CreatePayload) => void
-  onCancel: () => void
-  isPending: boolean
-  isError: boolean
-}) {
-  const [title, setTitle] = useState('')
-  const [desc, setDesc] = useState('')
-  const [pwOn, setPwOn] = useState(false)
-  const [pw, setPw] = useState('')
-  const [showPw, setShowPw] = useState(false)
-  const titleRef = useRef<HTMLInputElement>(null)
-
-  useEffect(() => { titleRef.current?.focus() }, [])
-
-  const valid = title.trim().length > 0 && (!pwOn || pw.trim().length > 0)
-
-  const submit = () => {
-    if (!valid || isPending) return
-    onCreate({ title: title.trim(), description: desc.trim(), password: pwOn ? pw : null })
-  }
-
-  return (
-    <div className="rounded-[var(--radius-lg)] border-[1.5px] border-primary bg-card p-4 shadow-[0_0_0_3px_hsl(188_59%_38%/0.08)]">
-      <div className="mb-3.5 flex items-center gap-2">
-        <PlusCircle size={16} className="text-primary" strokeWidth={2.2} />
-        <span className="text-[13.5px] font-bold text-foreground">New share link</span>
-      </div>
-
-      <div className="mb-3 flex flex-col gap-1.5">
-        <Label htmlFor="share-title">Title</Label>
-        <Input
-          id="share-title"
-          ref={titleRef}
-          value={title}
-          onChange={e => setTitle(e.target.value)}
-          onKeyDown={e => { if (e.key === 'Enter') submit() }}
-          placeholder="e.g. Acme stakeholder view"
-        />
-      </div>
-
-      <div className="mb-3 flex flex-col gap-1.5">
-        <Label htmlFor="share-description">
-          Description <span className="lowercase font-normal">· optional</span>
-        </Label>
-        <textarea
-          id="share-description"
-          value={desc}
-          onChange={e => setDesc(e.target.value)}
-          rows={2}
-          placeholder="What's this link for, and who is it shared with?"
-          className={TEXTAREA_CLASSES}
-        />
-      </div>
-
-      {/* Password protect */}
-      <div className="overflow-hidden rounded-[var(--radius-md)] border border-border">
-        <div className="flex items-center gap-2.5 px-3 py-2.5">
-          <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[var(--radius-md)] bg-muted text-muted-foreground">
-            <Lock size={14} strokeWidth={2} />
-          </div>
-          <div className="flex-1">
-            <div className="text-[13px] font-semibold text-foreground">Password protect</div>
-            <div className="text-[11.5px] text-muted-foreground">Require a password to open the link</div>
-          </div>
-          <button
-            onClick={() => setPwOn(v => !v)}
-            role="switch"
-            aria-checked={pwOn}
-            aria-label="Password protect"
-            className={cn(
-              'relative h-[22px] w-10 shrink-0 cursor-pointer rounded-[var(--radius-full)] border-none p-0 transition-colors',
-              pwOn ? 'bg-primary' : 'bg-border',
-            )}
-          >
-            <span className={cn(
-              'absolute top-[2px] h-[18px] w-[18px] rounded-full bg-white shadow-sm transition-[left] duration-150',
-              pwOn ? 'left-5' : 'left-[2px]',
-            )} />
-          </button>
-        </div>
-        {pwOn && (
-          <div className="border-t border-border px-3 py-3">
-            <div className="flex items-center gap-2 rounded-[var(--radius-md)] border border-input bg-card px-2.5">
-              <KeyRound size={14} className="text-muted-foreground" strokeWidth={2} />
-              <input
-                value={pw}
-                onChange={e => setPw(e.target.value)}
-                onKeyDown={e => { if (e.key === 'Enter') submit() }}
-                type={showPw ? 'text' : 'password'}
-                placeholder="Set a password"
-                className="flex-1 border-none bg-transparent py-2 text-[13px] text-foreground outline-none placeholder:text-muted-foreground"
-              />
-              <button
-                onClick={() => setShowPw(v => !v)}
-                aria-label={showPw ? 'Hide password' : 'Show password'}
-                className="flex cursor-pointer border-none bg-transparent p-1 text-muted-foreground"
-              >
-                {showPw ? <EyeOff size={14} strokeWidth={2} /> : <Eye size={14} strokeWidth={2} />}
-              </button>
-            </div>
-          </div>
-        )}
-      </div>
-
-      {isError && (
-        <p className="mt-2.5 text-[11px] text-destructive">Failed to create share. Please try again.</p>
-      )}
-
-      {/* Actions */}
-      <div className="mt-4 flex items-center gap-2.5">
-        <div className="mr-auto flex items-center gap-[7px] text-xs text-muted-foreground">
-          <MiniAvatar member={currentMember} size={20} />
-          <span>Sharing as {currentMember?.displayName ?? 'you'}</span>
-        </div>
-        <Button variant="outline" onClick={onCancel}>Cancel</Button>
-        <Button onClick={submit} disabled={!valid || isPending}>
-          <LinkIcon size={14} strokeWidth={2.2} /> {isPending ? 'Creating…' : 'Create link'}
-        </Button>
-      </div>
-    </div>
-  )
-}
-
-// ── The modal shell ──────────────────────────────────────────────────────────
-
-export default function ShareModal({ teamId, timelineId, viewType, viewConfig, timelineName, onClose }: Props) {
-  const { user } = useAuth()
-  const { data: allShares = [], isLoading } = useListShares(teamId, timelineId)
-  // Scoped to this exact view — a share is a frozen snapshot of one view's
-  // config, so a Gantt link can't usefully stand in for a List or Kanban one.
-  // Showing only same-type links keeps "active links" literal and leaves room
-  // to tailor the modal per view type (e.g. Calendar/ICS in 13.4) without
-  // having to reconcile it against unrelated shares.
-  // kind === 'view' also keeps ICS calendar feeds (13.4) out of this list —
-  // they live in CalendarShareModal, a different surface entirely.
-  const shares = allShares.filter(s => s.kind === 'view' && s.viewType === viewType)
-  const { data: members = [] } = useTeamMembers(teamId)
-  const createShare = useCreateShare(teamId, timelineId)
-  const deleteShare = useDeleteShare(teamId, timelineId)
-  const [adding, setAdding] = useState(false)
-  const bodyRef = useRef<HTMLDivElement>(null)
-
-  const memberByID = new Map(members.map(m => [m.id, m]))
-  const currentMember = members.find(m => m.userId && m.userId === user?.id)
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [onClose])
-
-  const configString = JSON.stringify({
-    groupBy: viewConfig.groupBy,
-    sortBy: viewConfig.sortBy,
-    colorBy: viewConfig.colorBy,
-    granularity: viewConfig.granularity,
-    filter: viewConfig.filter ?? { logic: 'and', conditions: [] },
-    ...(viewConfig.columns ? { columns: viewConfig.columns } : {}),
-    ...(viewConfig.cardFields ? { cardFields: viewConfig.cardFields } : {}),
-    ...(viewConfig.showHierarchy !== undefined ? { showHierarchy: viewConfig.showHierarchy } : {}),
-    ...(viewConfig.collapsedColumns ? { collapsedColumns: viewConfig.collapsedColumns } : {}),
-  })
-
-  const handleCreate = (payload: CreatePayload) => {
-    createShare.mutate(
-      {
-        name: payload.title,
-        description: payload.description || null,
-        viewType,
-        viewConfig: configString,
-        password: payload.password ?? undefined,
-      },
-      {
-        onSuccess: () => {
-          setAdding(false)
-          setTimeout(() => { if (bodyRef.current) bodyRef.current.scrollTop = 0 }, 0)
-        },
-      },
-    )
-  }
-
-  return createPortal(
-    <div
-      className="fixed inset-0 z-[1000] flex items-center justify-center bg-[hsl(200_24%_11%/0.55)] p-6 backdrop-blur-[2px]"
-    >
-      <div
-        className="flex max-h-[88vh] w-[min(580px,100%)] flex-col overflow-hidden rounded-[var(--radius-xl)] bg-card shadow-[var(--shadow-lg)]"
-      >
-        {/* Header */}
-        <div className="flex shrink-0 items-start gap-3 border-b border-border px-5 py-[18px]">
-          <div className={cn('flex h-[38px] w-[38px] shrink-0 items-center justify-center rounded-[var(--radius-md)]', TILE_TEAL)}>
-            <LinkIcon size={19} strokeWidth={2.2} />
-          </div>
-          <div className="min-w-0 flex-1">
-            <h2 className="m-0 text-[17px] font-bold leading-tight text-foreground">Share this view</h2>
-            <div className="mt-0.5 flex items-center gap-1.5 text-[12.5px] text-muted-foreground">
-              <span className="inline-block h-2 w-2 shrink-0 rounded-sm bg-secondary" />
-              {timelineName ? `${timelineName} · ` : ''}anyone with a link can view
-            </div>
-          </div>
-          <button
-            onClick={onClose}
-            aria-label="Close"
-            className="flex h-[30px] w-[30px] shrink-0 cursor-pointer items-center justify-center rounded-[var(--radius-md)] border-none bg-muted text-muted-foreground"
-          >
-            <X size={16} strokeWidth={2.2} />
-          </button>
-        </div>
-
-        {/* Section bar */}
-        <div className="flex shrink-0 items-center gap-2 px-5 pb-[11px] pt-[13px]">
-          <span className="text-[11px] font-bold uppercase tracking-[0.06em] text-muted-foreground">Active links</span>
-          <span className="min-w-[20px] rounded-[var(--radius-full)] bg-muted px-2 py-px text-center text-[11px] font-bold text-muted-foreground">{shares.length}</span>
-          <div className="ml-auto">
-            {!adding && (
-              <Button size="sm" onClick={() => setAdding(true)}>
-                <Plus size={14} strokeWidth={2.4} /> New share
-              </Button>
-            )}
-          </div>
-        </div>
-
-        {/* Body */}
-        <div ref={bodyRef} className="flex min-h-[120px] flex-1 flex-col gap-3 overflow-y-auto px-5 pb-5">
-          {adding && (
-            <AddShareForm
-              currentMember={currentMember}
-              onCreate={handleCreate}
-              onCancel={() => setAdding(false)}
-              isPending={createShare.isPending}
-              isError={createShare.isError}
-            />
-          )}
-
-          {!isLoading && shares.length === 0 && !adding && (
-            <div className="flex flex-1 flex-col items-center justify-center rounded-[var(--radius-lg)] border border-dashed border-border px-5 py-9 text-center">
-              <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-[var(--radius-lg)] bg-muted text-muted-foreground">
-                <LinkIcon size={22} strokeWidth={1.8} />
-              </div>
-              <div className="text-sm font-semibold text-foreground">No share links yet</div>
-              <div className="mt-1 max-w-[280px] text-[12.5px] text-muted-foreground">Create a link to let people outside your team view this timeline.</div>
-              <Button size="sm" className="mt-4" onClick={() => setAdding(true)}>
-                <Plus size={14} strokeWidth={2.4} /> Create share link
-              </Button>
-            </div>
-          )}
-
-          {shares.map(s => (
-            <ShareRow
-              key={s.id}
-              share={s}
-              creator={s.createdBy ? memberByID.get(s.createdBy) : undefined}
-              isOwn={Boolean(currentMember && s.createdBy === currentMember.id)}
-              onDelete={(id) => deleteShare.mutate(id)}
-            />
-          ))}
-        </div>
-
-        {/* Footer */}
-        <div className="flex shrink-0 items-center gap-2.5 border-t border-border px-5 py-[13px]">
-          <div className="flex items-center gap-[7px] text-xs text-muted-foreground">
-            <Users size={14} strokeWidth={2} />
-            Read-only links · anyone on your team can manage them
-          </div>
-          <Button variant="outline" className="ml-auto" onClick={onClose}>Done</Button>
-        </div>
-      </div>
-    </div>,
-    document.body,
-  )
 }
 ````
 
@@ -65713,6 +65744,20 @@ Includes both the webhook backend and the per-timeline connector sidebar UI (pre
 ## File: docs/log.md
 ````markdown
 # Development Log
+
+---
+
+## 2026-06-11 — /review-phase 13.5: findings addressed
+
+Four-agent review (scope / security / conventions / test-coverage) of the 13.5 commit range. Security and conventions came back clean; fixes applied for the rest:
+
+- **Frontend coverage for the three 13.5 UI paths (was the blocker group):** new `ShareModal.test.tsx` (footer meta columns: "Never" fallback, today-as-time vs. older-as-date last-viewed format, view total, "· you" creator marker) and `Sidebar.test.tsx` (share-count chip: count + plural/singular tooltip, hidden at zero/absent). `useShares.test.ts` gains a behavior test proving `useListShares` refetches on remount even under the app-wide 30s `staleTime` — the freshness override asserted as behavior, not config.
+- **Orphaned share → 404, not 500:** `shareTimelineLive` now maps `sql.ErrNoRows` from the timeline load to the same 404 body as every other dead-share case. The shares FK is `ON DELETE CASCADE` so a share row outliving its timeline should never happen, but a 500 there would be a state oracle on the public surface. `TestShareGateway_OrphanShare404` suspends FK enforcement to fabricate the orphan and covers both gateways (and guards against a vacuous pass by asserting the share rows survived the delete).
+- **Scope acknowledgement — unlock endpoint as a third archived-404 surface:** the phase scope named two gateways (JSON + ICS), but `handleUnlockShare` also got the `shareTimelineLive` check. Kept deliberately: without it, unlocking a protected share of an archived timeline would either succeed or answer `NOT_PROTECTED`/`INVALID_PASSWORD`, leaking protection state the gateways carefully hide. Defensive hardening in service of the scoped behavior, not new scope.
+
+Accepted as-is from the review: the `useListShares` freshness override slightly exceeds the "render only" re-scope wording (it directly serves last-viewed accuracy — nit, no change).
+
+**Checks:** `go test ./internal/api/` ✅ · `pnpm --filter web test` ✅ (new files 24/24).
 
 ---
 
