@@ -7876,6 +7876,503 @@ func runResetPassword(args []string) {
 }
 ````
 
+## File: packages/api/internal/api/activity_handler.go
+````go
+package api
+
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/db"
+	"github.com/I0-1O/draba/packages/api/internal/events"
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// handleCreateActivity handles POST /teams/{id}/timelines/{timelineId}/activities.
+// The authenticated user must be a member of the team.
+func (s *Server) handleCreateActivity(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	timelineID := r.PathValue("timelineId")
+
+	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
+		return
+	}
+
+	claims := claimsFromContext(r.Context())
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create activity")
+		return
+	}
+	if timeline.TeamID != teamID {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+		return
+	}
+
+	var req CreateActivityJSONBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	if req.Title == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "title is required")
+		return
+	}
+	if req.StartAt.IsZero() || req.EndAt.IsZero() {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "startAt and endAt are required")
+		return
+	}
+	if req.EndAt.Before(req.StartAt) {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "endAt must not be before startAt")
+		return
+	}
+
+	allDay := false
+	if req.AllDay != nil {
+		allDay = *req.AllDay
+	}
+
+	now := time.Now()
+	activity := &models.Activity{
+		ID:               newID(),
+		TimelineID:       timelineID,
+		Title:            req.Title,
+		Description:      req.Description,
+		Notes:            req.Notes,
+		Icon:             req.Icon,
+		Color:            req.Color,
+		StartAt:          req.StartAt,
+		EndAt:            req.EndAt,
+		AllDay:           allDay,
+		StatusID:         req.StatusId,
+		ParentActivityID: req.ParentActivityId,
+		PercentComplete:  req.PercentComplete,
+		Location:         req.Location,
+		URL:              req.Url,
+		Rrule:            req.Rrule,
+		CreatedBy:        claims.UserID,
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}
+	if err := s.activities.Create(activity); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create activity")
+		return
+	}
+
+	if req.AssignedMemberIds != nil {
+		if err := s.activities.SetAssignments(activity.ID, *req.AssignedMemberIds); err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity assignments")
+			return
+		}
+		activity.AssignedMemberIDs = *req.AssignedMemberIds
+	} else {
+		activity.AssignedMemberIDs = []string{}
+	}
+
+	if req.TagIds != nil {
+		if err := s.tags.ValidateTeamOwnership(timeline.TeamID, *req.TagIds); err != nil {
+			if errors.Is(err, db.ErrTagOwnership) {
+				writeError(w, http.StatusBadRequest, "INVALID_TAGS", "one or more tag IDs do not belong to this team")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to validate tags")
+			return
+		}
+		if err := s.activities.SetTags(activity.ID, *req.TagIds); err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity tags")
+			return
+		}
+		activity.TagIDs = *req.TagIds
+	} else {
+		activity.TagIDs = []string{}
+	}
+
+	s.bus.Publish(events.Message{Type: events.ActivityCreated, TeamID: timeline.TeamID, Payload: activity})
+	writeJSON(w, http.StatusCreated, activity)
+}
+
+// handleListActivities handles GET /teams/{id}/timelines/{timelineId}/activities.
+// Optional query params ?from=<RFC3339> and ?to=<RFC3339> bound the result by start_at.
+func (s *Server) handleListActivities(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	timelineID := r.PathValue("timelineId")
+
+	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
+		return
+	}
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list activities")
+		return
+	}
+	if timeline.TeamID != teamID {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+		return
+	}
+
+	var from, to *time.Time
+	if v := r.URL.Query().Get("from"); v != "" {
+		t, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "from must be RFC3339 (e.g. 2006-01-02T15:04:05Z)")
+			return
+		}
+		from = &t
+	}
+	if v := r.URL.Query().Get("to"); v != "" {
+		t, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "to must be RFC3339 (e.g. 2006-01-02T15:04:05Z)")
+			return
+		}
+		to = &t
+	}
+
+	includeArchived := r.URL.Query().Get("archived") == "true"
+	acts, err := s.activities.ListByTimeline(timelineID, from, to, includeArchived)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list activities")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, acts)
+}
+
+// handleUpdateActivity handles PATCH /activities/{id}. Only fields present in
+// the request body are applied; the caller must be a member of the activity's team.
+func (s *Server) handleUpdateActivity(w http.ResponseWriter, r *http.Request) {
+	activityID := r.PathValue("id")
+
+	activity, err := s.activities.GetByID(activityID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "activity not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update activity")
+		return
+	}
+
+	timeline, err := s.timelines.GetByID(activity.TimelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update activity")
+		return
+	}
+
+	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
+		return
+	}
+
+	// Decode into a map so we can detect which fields the caller provided.
+	var patch map[string]json.RawMessage
+	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	if v, ok := patch["title"]; ok {
+		if err := json.Unmarshal(v, &activity.Title); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid title")
+			return
+		}
+	}
+	if v, ok := patch["description"]; ok {
+		if err := json.Unmarshal(v, &activity.Description); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid description")
+			return
+		}
+	}
+	if v, ok := patch["notes"]; ok {
+		if err := json.Unmarshal(v, &activity.Notes); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid notes")
+			return
+		}
+	}
+	if v, ok := patch["icon"]; ok {
+		if err := json.Unmarshal(v, &activity.Icon); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid icon")
+			return
+		}
+	}
+	if v, ok := patch["color"]; ok {
+		if err := json.Unmarshal(v, &activity.Color); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid color")
+			return
+		}
+	}
+	if v, ok := patch["startAt"]; ok {
+		if err := json.Unmarshal(v, &activity.StartAt); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid startAt")
+			return
+		}
+	}
+	if v, ok := patch["endAt"]; ok {
+		if err := json.Unmarshal(v, &activity.EndAt); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid endAt")
+			return
+		}
+	}
+	if v, ok := patch["allDay"]; ok {
+		if err := json.Unmarshal(v, &activity.AllDay); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid allDay")
+			return
+		}
+	}
+	if v, ok := patch["statusId"]; ok {
+		if err := json.Unmarshal(v, &activity.StatusID); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid statusId")
+			return
+		}
+	}
+	if v, ok := patch["parentActivityId"]; ok {
+		if err := json.Unmarshal(v, &activity.ParentActivityID); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid parentActivityId")
+			return
+		}
+	}
+	if v, ok := patch["percentComplete"]; ok {
+		if err := json.Unmarshal(v, &activity.PercentComplete); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid percentComplete")
+			return
+		}
+	}
+	if v, ok := patch["location"]; ok {
+		if err := json.Unmarshal(v, &activity.Location); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid location")
+			return
+		}
+	}
+	if v, ok := patch["url"]; ok {
+		if err := json.Unmarshal(v, &activity.URL); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid url")
+			return
+		}
+	}
+	if v, ok := patch["rrule"]; ok {
+		if err := json.Unmarshal(v, &activity.Rrule); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid rrule")
+			return
+		}
+	}
+
+	var newAssignees *[]string
+	if v, ok := patch["assignedMemberIds"]; ok {
+		var ids []string
+		if err := json.Unmarshal(v, &ids); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid assignedMemberIds")
+			return
+		}
+		newAssignees = &ids
+	}
+
+	var newTagIDs *[]string
+	if v, ok := patch["tagIds"]; ok {
+		var ids []string
+		if err := json.Unmarshal(v, &ids); err != nil {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid tagIds")
+			return
+		}
+		newTagIDs = &ids
+	}
+
+	if activity.Title == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "title must not be empty")
+		return
+	}
+	if activity.EndAt.Before(activity.StartAt) {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "endAt must not be before startAt")
+		return
+	}
+
+	activity.UpdatedAt = time.Now()
+	if err := s.activities.Update(activity); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update activity")
+		return
+	}
+
+	if newAssignees != nil {
+		if err := s.activities.SetAssignments(activity.ID, *newAssignees); err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity assignments")
+			return
+		}
+		activity.AssignedMemberIDs = *newAssignees
+	} else {
+		// Populate current assignments so the response always includes them.
+		existing, err := s.activities.GetAssignments(activity.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get activity assignments")
+			return
+		}
+		activity.AssignedMemberIDs = existing
+	}
+
+	if newTagIDs != nil {
+		if err := s.tags.ValidateTeamOwnership(timeline.TeamID, *newTagIDs); err != nil {
+			if errors.Is(err, db.ErrTagOwnership) {
+				writeError(w, http.StatusBadRequest, "INVALID_TAGS", "one or more tag IDs do not belong to this team")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to validate tags")
+			return
+		}
+		if err := s.activities.SetTags(activity.ID, *newTagIDs); err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity tags")
+			return
+		}
+		activity.TagIDs = *newTagIDs
+	} else {
+		existing, err := s.activities.GetTags(activity.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get activity tags")
+			return
+		}
+		activity.TagIDs = existing
+	}
+
+	s.bus.Publish(events.Message{Type: events.ActivityUpdated, TeamID: timeline.TeamID, Payload: activity})
+	writeJSON(w, http.StatusOK, activity)
+}
+
+// handleArchiveActivity handles POST /activities/{id}/archive. Any team member
+// may archive an activity; the row is soft-deleted (archived_at set) so it is
+// hidden from list responses by default but can be restored.
+func (s *Server) handleArchiveActivity(w http.ResponseWriter, r *http.Request) {
+	s.setActivityArchive(w, r, true)
+}
+
+// handleUnarchiveActivity handles POST /activities/{id}/unarchive.
+func (s *Server) handleUnarchiveActivity(w http.ResponseWriter, r *http.Request) {
+	s.setActivityArchive(w, r, false)
+}
+
+// setActivityArchive is the shared implementation for the archive/unarchive
+// endpoints. When archive is true, archived_at is set to now; otherwise it
+// is cleared.
+func (s *Server) setActivityArchive(w http.ResponseWriter, r *http.Request, archive bool) {
+	activityID := r.PathValue("id")
+
+	activity, err := s.activities.GetByID(activityID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "activity not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
+		return
+	}
+
+	timeline, err := s.timelines.GetByID(activity.TimelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
+		return
+	}
+
+	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
+		return
+	}
+
+	var at *time.Time
+	if archive {
+		now := time.Now().UTC()
+		at = &now
+		if err := s.activities.ClearParentRefs(activityID); err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
+			return
+		}
+	}
+	if err := s.activities.SetArchived(activityID, at); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
+		return
+	}
+	activity.ArchivedAt = at
+	activity.UpdatedAt = time.Now().UTC()
+
+	// Re-populate assignments and tags for a stable response shape.
+	if ids, err := s.activities.GetAssignments(activity.ID); err == nil {
+		activity.AssignedMemberIDs = ids
+	} else {
+		activity.AssignedMemberIDs = []string{}
+	}
+	if ids, err := s.activities.GetTags(activity.ID); err == nil {
+		activity.TagIDs = ids
+	} else {
+		activity.TagIDs = []string{}
+	}
+
+	s.bus.Publish(events.Message{Type: events.ActivityUpdated, TeamID: timeline.TeamID, Payload: activity})
+	writeJSON(w, http.StatusOK, activity)
+}
+
+// handleDeleteActivity handles DELETE /activities/{id}. Any member of the
+// activity's team may delete it.
+func (s *Server) handleDeleteActivity(w http.ResponseWriter, r *http.Request) {
+	activityID := r.PathValue("id")
+
+	activity, err := s.activities.GetByID(activityID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "activity not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
+		return
+	}
+
+	timeline, err := s.timelines.GetByID(activity.TimelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
+		return
+	}
+
+	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
+		return
+	}
+
+	if err := s.activities.ClearParentRefs(activityID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
+		return
+	}
+	if err := s.activities.Delete(activityID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
+		return
+	}
+
+	s.bus.Publish(events.Message{
+		Type:    events.ActivityDeleted,
+		TeamID:  timeline.TeamID,
+		Payload: map[string]string{"id": activityID},
+	})
+	w.WriteHeader(http.StatusNoContent)
+}
+````
+
 ## File: packages/api/internal/api/admin_handler.go
 ````go
 package api
@@ -31014,503 +31511,6 @@ components/kanban/
 5. **Configure pencil vs. full-card click** — v1 uses full-card click to open the edit panel; the hover pencil is optional polish, not required.
 ````
 
-## File: packages/api/internal/api/activity_handler.go
-````go
-package api
-
-import (
-	"database/sql"
-	"encoding/json"
-	"errors"
-	"net/http"
-	"time"
-
-	"github.com/I0-1O/draba/packages/api/internal/db"
-	"github.com/I0-1O/draba/packages/api/internal/events"
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// handleCreateActivity handles POST /teams/{id}/timelines/{timelineId}/activities.
-// The authenticated user must be a member of the team.
-func (s *Server) handleCreateActivity(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-	timelineID := r.PathValue("timelineId")
-
-	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
-		return
-	}
-
-	claims := claimsFromContext(r.Context())
-
-	timeline, err := s.timelines.GetByID(timelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create activity")
-		return
-	}
-	if timeline.TeamID != teamID {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-		return
-	}
-
-	var req CreateActivityJSONBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	if req.Title == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "title is required")
-		return
-	}
-	if req.StartAt.IsZero() || req.EndAt.IsZero() {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "startAt and endAt are required")
-		return
-	}
-	if req.EndAt.Before(req.StartAt) {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "endAt must not be before startAt")
-		return
-	}
-
-	allDay := false
-	if req.AllDay != nil {
-		allDay = *req.AllDay
-	}
-
-	now := time.Now()
-	activity := &models.Activity{
-		ID:               newID(),
-		TimelineID:       timelineID,
-		Title:            req.Title,
-		Description:      req.Description,
-		Notes:            req.Notes,
-		Icon:             req.Icon,
-		Color:            req.Color,
-		StartAt:          req.StartAt,
-		EndAt:            req.EndAt,
-		AllDay:           allDay,
-		StatusID:         req.StatusId,
-		ParentActivityID: req.ParentActivityId,
-		PercentComplete:  req.PercentComplete,
-		Location:         req.Location,
-		URL:              req.Url,
-		Rrule:            req.Rrule,
-		CreatedBy:        claims.UserID,
-		CreatedAt:        now,
-		UpdatedAt:        now,
-	}
-	if err := s.activities.Create(activity); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create activity")
-		return
-	}
-
-	if req.AssignedMemberIds != nil {
-		if err := s.activities.SetAssignments(activity.ID, *req.AssignedMemberIds); err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity assignments")
-			return
-		}
-		activity.AssignedMemberIDs = *req.AssignedMemberIds
-	} else {
-		activity.AssignedMemberIDs = []string{}
-	}
-
-	if req.TagIds != nil {
-		if err := s.tags.ValidateTeamOwnership(timeline.TeamID, *req.TagIds); err != nil {
-			if errors.Is(err, db.ErrTagOwnership) {
-				writeError(w, http.StatusBadRequest, "INVALID_TAGS", "one or more tag IDs do not belong to this team")
-				return
-			}
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to validate tags")
-			return
-		}
-		if err := s.activities.SetTags(activity.ID, *req.TagIds); err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity tags")
-			return
-		}
-		activity.TagIDs = *req.TagIds
-	} else {
-		activity.TagIDs = []string{}
-	}
-
-	s.bus.Publish(events.Message{Type: events.ActivityCreated, TeamID: timeline.TeamID, Payload: activity})
-	writeJSON(w, http.StatusCreated, activity)
-}
-
-// handleListActivities handles GET /teams/{id}/timelines/{timelineId}/activities.
-// Optional query params ?from=<RFC3339> and ?to=<RFC3339> bound the result by start_at.
-func (s *Server) handleListActivities(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-	timelineID := r.PathValue("timelineId")
-
-	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
-		return
-	}
-
-	timeline, err := s.timelines.GetByID(timelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list activities")
-		return
-	}
-	if timeline.TeamID != teamID {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-		return
-	}
-
-	var from, to *time.Time
-	if v := r.URL.Query().Get("from"); v != "" {
-		t, err := time.Parse(time.RFC3339, v)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "from must be RFC3339 (e.g. 2006-01-02T15:04:05Z)")
-			return
-		}
-		from = &t
-	}
-	if v := r.URL.Query().Get("to"); v != "" {
-		t, err := time.Parse(time.RFC3339, v)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "to must be RFC3339 (e.g. 2006-01-02T15:04:05Z)")
-			return
-		}
-		to = &t
-	}
-
-	includeArchived := r.URL.Query().Get("archived") == "true"
-	acts, err := s.activities.ListByTimeline(timelineID, from, to, includeArchived)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list activities")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, acts)
-}
-
-// handleUpdateActivity handles PATCH /activities/{id}. Only fields present in
-// the request body are applied; the caller must be a member of the activity's team.
-func (s *Server) handleUpdateActivity(w http.ResponseWriter, r *http.Request) {
-	activityID := r.PathValue("id")
-
-	activity, err := s.activities.GetByID(activityID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "activity not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update activity")
-		return
-	}
-
-	timeline, err := s.timelines.GetByID(activity.TimelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update activity")
-		return
-	}
-
-	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
-		return
-	}
-
-	// Decode into a map so we can detect which fields the caller provided.
-	var patch map[string]json.RawMessage
-	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	if v, ok := patch["title"]; ok {
-		if err := json.Unmarshal(v, &activity.Title); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid title")
-			return
-		}
-	}
-	if v, ok := patch["description"]; ok {
-		if err := json.Unmarshal(v, &activity.Description); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid description")
-			return
-		}
-	}
-	if v, ok := patch["notes"]; ok {
-		if err := json.Unmarshal(v, &activity.Notes); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid notes")
-			return
-		}
-	}
-	if v, ok := patch["icon"]; ok {
-		if err := json.Unmarshal(v, &activity.Icon); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid icon")
-			return
-		}
-	}
-	if v, ok := patch["color"]; ok {
-		if err := json.Unmarshal(v, &activity.Color); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid color")
-			return
-		}
-	}
-	if v, ok := patch["startAt"]; ok {
-		if err := json.Unmarshal(v, &activity.StartAt); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid startAt")
-			return
-		}
-	}
-	if v, ok := patch["endAt"]; ok {
-		if err := json.Unmarshal(v, &activity.EndAt); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid endAt")
-			return
-		}
-	}
-	if v, ok := patch["allDay"]; ok {
-		if err := json.Unmarshal(v, &activity.AllDay); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid allDay")
-			return
-		}
-	}
-	if v, ok := patch["statusId"]; ok {
-		if err := json.Unmarshal(v, &activity.StatusID); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid statusId")
-			return
-		}
-	}
-	if v, ok := patch["parentActivityId"]; ok {
-		if err := json.Unmarshal(v, &activity.ParentActivityID); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid parentActivityId")
-			return
-		}
-	}
-	if v, ok := patch["percentComplete"]; ok {
-		if err := json.Unmarshal(v, &activity.PercentComplete); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid percentComplete")
-			return
-		}
-	}
-	if v, ok := patch["location"]; ok {
-		if err := json.Unmarshal(v, &activity.Location); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid location")
-			return
-		}
-	}
-	if v, ok := patch["url"]; ok {
-		if err := json.Unmarshal(v, &activity.URL); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid url")
-			return
-		}
-	}
-	if v, ok := patch["rrule"]; ok {
-		if err := json.Unmarshal(v, &activity.Rrule); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid rrule")
-			return
-		}
-	}
-
-	var newAssignees *[]string
-	if v, ok := patch["assignedMemberIds"]; ok {
-		var ids []string
-		if err := json.Unmarshal(v, &ids); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid assignedMemberIds")
-			return
-		}
-		newAssignees = &ids
-	}
-
-	var newTagIDs *[]string
-	if v, ok := patch["tagIds"]; ok {
-		var ids []string
-		if err := json.Unmarshal(v, &ids); err != nil {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid tagIds")
-			return
-		}
-		newTagIDs = &ids
-	}
-
-	if activity.Title == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "title must not be empty")
-		return
-	}
-	if activity.EndAt.Before(activity.StartAt) {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "endAt must not be before startAt")
-		return
-	}
-
-	activity.UpdatedAt = time.Now()
-	if err := s.activities.Update(activity); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update activity")
-		return
-	}
-
-	if newAssignees != nil {
-		if err := s.activities.SetAssignments(activity.ID, *newAssignees); err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity assignments")
-			return
-		}
-		activity.AssignedMemberIDs = *newAssignees
-	} else {
-		// Populate current assignments so the response always includes them.
-		existing, err := s.activities.GetAssignments(activity.ID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get activity assignments")
-			return
-		}
-		activity.AssignedMemberIDs = existing
-	}
-
-	if newTagIDs != nil {
-		if err := s.tags.ValidateTeamOwnership(timeline.TeamID, *newTagIDs); err != nil {
-			if errors.Is(err, db.ErrTagOwnership) {
-				writeError(w, http.StatusBadRequest, "INVALID_TAGS", "one or more tag IDs do not belong to this team")
-				return
-			}
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to validate tags")
-			return
-		}
-		if err := s.activities.SetTags(activity.ID, *newTagIDs); err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to set activity tags")
-			return
-		}
-		activity.TagIDs = *newTagIDs
-	} else {
-		existing, err := s.activities.GetTags(activity.ID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get activity tags")
-			return
-		}
-		activity.TagIDs = existing
-	}
-
-	s.bus.Publish(events.Message{Type: events.ActivityUpdated, TeamID: timeline.TeamID, Payload: activity})
-	writeJSON(w, http.StatusOK, activity)
-}
-
-// handleArchiveActivity handles POST /activities/{id}/archive. Any team member
-// may archive an activity; the row is soft-deleted (archived_at set) so it is
-// hidden from list responses by default but can be restored.
-func (s *Server) handleArchiveActivity(w http.ResponseWriter, r *http.Request) {
-	s.setActivityArchive(w, r, true)
-}
-
-// handleUnarchiveActivity handles POST /activities/{id}/unarchive.
-func (s *Server) handleUnarchiveActivity(w http.ResponseWriter, r *http.Request) {
-	s.setActivityArchive(w, r, false)
-}
-
-// setActivityArchive is the shared implementation for the archive/unarchive
-// endpoints. When archive is true, archived_at is set to now; otherwise it
-// is cleared.
-func (s *Server) setActivityArchive(w http.ResponseWriter, r *http.Request, archive bool) {
-	activityID := r.PathValue("id")
-
-	activity, err := s.activities.GetByID(activityID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "activity not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
-		return
-	}
-
-	timeline, err := s.timelines.GetByID(activity.TimelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
-		return
-	}
-
-	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
-		return
-	}
-
-	var at *time.Time
-	if archive {
-		now := time.Now().UTC()
-		at = &now
-		if err := s.activities.ClearParentRefs(activityID); err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
-			return
-		}
-	}
-	if err := s.activities.SetArchived(activityID, at); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive activity")
-		return
-	}
-	activity.ArchivedAt = at
-	activity.UpdatedAt = time.Now().UTC()
-
-	// Re-populate assignments and tags for a stable response shape.
-	if ids, err := s.activities.GetAssignments(activity.ID); err == nil {
-		activity.AssignedMemberIDs = ids
-	} else {
-		activity.AssignedMemberIDs = []string{}
-	}
-	if ids, err := s.activities.GetTags(activity.ID); err == nil {
-		activity.TagIDs = ids
-	} else {
-		activity.TagIDs = []string{}
-	}
-
-	s.bus.Publish(events.Message{Type: events.ActivityUpdated, TeamID: timeline.TeamID, Payload: activity})
-	writeJSON(w, http.StatusOK, activity)
-}
-
-// handleDeleteActivity handles DELETE /activities/{id}. Any member of the
-// activity's team may delete it.
-func (s *Server) handleDeleteActivity(w http.ResponseWriter, r *http.Request) {
-	activityID := r.PathValue("id")
-
-	activity, err := s.activities.GetByID(activityID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "activity not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
-		return
-	}
-
-	timeline, err := s.timelines.GetByID(activity.TimelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
-		return
-	}
-
-	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
-		return
-	}
-
-	if err := s.activities.ClearParentRefs(activityID); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
-		return
-	}
-	if err := s.activities.Delete(activityID); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete activity")
-		return
-	}
-
-	s.bus.Publish(events.Message{
-		Type:    events.ActivityDeleted,
-		TeamID:  timeline.TeamID,
-		Payload: map[string]string{"id": activityID},
-	})
-	w.WriteHeader(http.StatusNoContent)
-}
-````
-
 ## File: packages/api/internal/api/ratelimit.go
 ````go
 package api
@@ -33602,6 +33602,196 @@ export function autoFitGranularity(
   }
 
   return best;
+}
+````
+
+## File: packages/web/src/components/list/ListToolbar.tsx
+````typescript
+/**
+ * ListToolbar — sub-toolbar for the List view.
+ *
+ * Provides Columns (hide/show menu), Density toggle, Group by, Sort by, and
+ * Color by controls. The Columns menu includes drag-reorder handles (implemented
+ * via @dnd-kit) so column order can be changed from the menu as well as by
+ * dragging the table headers.
+ */
+
+import { useState, useRef, useEffect } from 'react';
+import { Columns2, ChevronDown, Download, Share2, AlignJustify } from 'lucide-react';
+import { cn } from '@/lib/utils';
+
+export type ListGroupBy = 'none' | 'member' | 'parent' | 'status';
+export type ListSortBy = 'startDate' | 'endDate' | 'title' | 'status' | 'progress';
+export type ListColorBy = 'activity' | 'member' | 'status';
+export type ListDensity = 'comfortable' | 'compact';
+
+export interface ColumnConfig {
+  id: string;
+  label: string;
+  visible: boolean;
+}
+
+interface Props {
+  columns: ColumnConfig[];
+  onColumnVisibilityChange: (columnId: string, visible: boolean) => void;
+  density: ListDensity;
+  onDensityChange: (d: ListDensity) => void;
+  groupBy: ListGroupBy;
+  onGroupByChange: (g: ListGroupBy) => void;
+  sortBy: ListSortBy;
+  onSortByChange: (s: ListSortBy) => void;
+  colorBy: ListColorBy;
+  onColorByChange: (c: ListColorBy) => void;
+  onExport?: () => void;
+  onShare?: () => void;
+}
+
+const ctrlBtn = 'flex items-center justify-center gap-[5px] h-[26px] px-2 border border-border rounded-md bg-card text-foreground text-xs font-medium cursor-pointer shrink-0';
+const divider  = 'w-px h-4 bg-border shrink-0';
+const label    = 'text-[11px] text-muted-foreground shrink-0';
+const select   = 'h-[26px] px-1.5 border border-border rounded-md bg-card text-foreground text-xs cursor-pointer shrink-0';
+
+export default function ListToolbar({
+  columns,
+  onColumnVisibilityChange,
+  density,
+  onDensityChange,
+  groupBy,
+  onGroupByChange,
+  sortBy: _sortBy,
+  onSortByChange: _onSortByChange,
+  colorBy,
+  onColorByChange,
+  onShare,
+}: Props) {
+  const [colMenuOpen, setColMenuOpen] = useState(false);
+  const colMenuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (colMenuRef.current && !colMenuRef.current.contains(e.target as Node)) {
+        setColMenuOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  return (
+    <div className="flex items-center gap-2 px-3 h-9 bg-card border-b border-border shrink-0" style={{ position: 'relative', zIndex: 30 }}>
+      {/* Columns menu */}
+      <div ref={colMenuRef} className="relative">
+        <button
+          onClick={() => setColMenuOpen(o => !o)}
+          className={cn(ctrlBtn, colMenuOpen && 'bg-muted')}
+          title="Show/hide columns"
+        >
+          <Columns2 size={13} strokeWidth={1.8} />
+          Columns
+          <ChevronDown size={11} strokeWidth={2} className={cn('transition-transform', colMenuOpen && 'rotate-180')} />
+        </button>
+
+        {colMenuOpen && (
+          <div
+            style={{
+              position: 'absolute',
+              top: 'calc(100% + 4px)',
+              left: 0,
+              zIndex: 50,
+              background: 'var(--card)',
+              border: '1px solid var(--border)',
+              borderRadius: 8,
+              boxShadow: '0 4px 16px rgba(0,0,0,0.12)',
+              minWidth: 180,
+              padding: '6px 0',
+            }}
+          >
+            {columns.map(col => (
+              <label
+                key={col.id}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  padding: '5px 12px',
+                  cursor: 'pointer',
+                  fontSize: 12,
+                  color: 'var(--foreground)',
+                }}
+                onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+                onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+              >
+                <input
+                  type="checkbox"
+                  checked={col.visible}
+                  onChange={e => onColumnVisibilityChange(col.id, e.target.checked)}
+                  style={{ cursor: 'pointer' }}
+                />
+                {col.label}
+              </label>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className={divider} />
+
+      {/* Group by */}
+      <span className={label}>Group by</span>
+      <select
+        className={select}
+        value={groupBy}
+        onChange={e => onGroupByChange(e.target.value as ListGroupBy)}
+      >
+        <option value="none">None</option>
+        <option value="member">Member</option>
+        <option value="parent">Parent activity</option>
+        <option value="status">Status</option>
+      </select>
+
+      <div className={divider} />
+
+      {/* Color by */}
+      <span className={label}>Color by</span>
+      <select
+        className={select}
+        value={colorBy}
+        onChange={e => onColorByChange(e.target.value as ListColorBy)}
+      >
+        <option value="activity">Activity</option>
+        <option value="member">Member</option>
+        <option value="status">Status</option>
+      </select>
+
+      <div className={divider} />
+
+      {/* Density toggle */}
+      <button
+        onClick={() => onDensityChange(density === 'comfortable' ? 'compact' : 'comfortable')}
+        className={ctrlBtn}
+        title={density === 'comfortable' ? 'Switch to compact rows' : 'Switch to comfortable rows'}
+      >
+        <AlignJustify size={13} strokeWidth={1.8} />
+        {density === 'comfortable' ? 'Comfortable' : 'Compact'}
+      </button>
+
+      <div className="flex-1" />
+
+      <button
+        className={cn(ctrlBtn, 'opacity-40 cursor-not-allowed')}
+        disabled
+        title="Coming soon"
+      >
+        <Download size={13} strokeWidth={1.8} />
+        Export
+      </button>
+
+      <button className={ctrlBtn} onClick={onShare} title="Share this view">
+        <Share2 size={13} strokeWidth={1.8} />
+        Share
+      </button>
+    </div>
+  );
 }
 ````
 
@@ -38628,194 +38818,205 @@ export default function ActivityDetailPanel({
 }
 ````
 
-## File: packages/web/src/components/list/ListToolbar.tsx
+## File: packages/web/src/components/list/ListView.tree.test.ts
 ````typescript
 /**
- * ListToolbar — sub-toolbar for the List view.
+ * buildListRows — group-by and tree-nesting behaviour.
  *
- * Provides Columns (hide/show menu), Density toggle, Group by, Sort by, and
- * Color by controls. The Columns menu includes drag-reorder handles (implemented
- * via @dnd-kit) so column order can be changed from the menu as well as by
- * dragging the table headers.
+ * Mirrors the pattern in GanttView.tree.test.ts: pure logic tests on the
+ * exported buildListRows function, no React rendering or hook mocks required.
  */
 
-import { useState, useRef, useEffect } from 'react';
-import { Columns2, ChevronDown, Download, Share2, AlignJustify } from 'lucide-react';
-import { cn } from '@/lib/utils';
+import { describe, it, expect } from 'vitest'
+import { buildListRows } from './ListView'
+import type { ListDisplayRow } from './ListView'
+import type { components } from '@draba/shared'
 
-export type ListGroupBy = 'none' | 'member' | 'parent' | 'status';
-export type ListSortBy = 'startDate' | 'endDate' | 'title' | 'status' | 'progress';
-export type ListColorBy = 'activity' | 'member' | 'status';
-export type ListDensity = 'comfortable' | 'compact';
+type ApiActivity = components['schemas']['Activity']
+type Status = components['schemas']['Status']
 
-export interface ColumnConfig {
-  id: string;
-  label: string;
-  visible: boolean;
+const NONE = new Set<string>()
+
+function act(
+  id: string,
+  opts: {
+    parentActivityId?: string | null
+    assignedMemberIds?: string[]
+    statusId?: string | null
+  } = {},
+): ApiActivity {
+  return {
+    id,
+    title: id,
+    timelineId: 'tl1',
+    startAt: '2026-01-01T00:00:00Z',
+    endAt: '2026-01-02T00:00:00Z',
+    allDay: false,
+    createdBy: 'user1',
+    createdAt: '2026-01-01T00:00:00Z',
+    updatedAt: '2026-01-01T00:00:00Z',
+    description: null,
+    notes: null,
+    icon: null,
+    color: null,
+    percentComplete: null,
+    location: null,
+    url: null,
+    archivedAt: null,
+    parentActivityId: opts.parentActivityId ?? null,
+    assignedMemberIds: opts.assignedMemberIds ?? [],
+    tagIds: [],
+    statusId: opts.statusId ?? null,
+  }
 }
 
-interface Props {
-  columns: ColumnConfig[];
-  onColumnVisibilityChange: (columnId: string, visible: boolean) => void;
-  density: ListDensity;
-  onDensityChange: (d: ListDensity) => void;
-  groupBy: ListGroupBy;
-  onGroupByChange: (g: ListGroupBy) => void;
-  sortBy: ListSortBy;
-  onSortByChange: (s: ListSortBy) => void;
-  colorBy: ListColorBy;
-  onColorByChange: (c: ListColorBy) => void;
-  onExport?: () => void;
-  onShare?: () => void;
+function status(id: string, name: string): Status {
+  return { id, name, color: '#000', timelineId: 'tl1', isClosed: false, position: 0, createdAt: '', updatedAt: '' }
 }
 
-const ctrlBtn = 'flex items-center justify-center gap-[5px] h-[26px] px-2 border border-border rounded-md bg-card text-foreground text-xs font-medium cursor-pointer shrink-0';
-const divider  = 'w-px h-4 bg-border shrink-0';
-const label    = 'text-[11px] text-muted-foreground shrink-0';
-const select   = 'h-[26px] px-1.5 border border-border rounded-md bg-card text-foreground text-xs cursor-pointer shrink-0';
-
-export default function ListToolbar({
-  columns,
-  onColumnVisibilityChange,
-  density,
-  onDensityChange,
-  groupBy,
-  onGroupByChange,
-  sortBy: _sortBy,
-  onSortByChange: _onSortByChange,
-  colorBy,
-  onColorByChange,
-  onShare,
-}: Props) {
-  const [colMenuOpen, setColMenuOpen] = useState(false);
-  const colMenuRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    function handleClickOutside(e: MouseEvent) {
-      if (colMenuRef.current && !colMenuRef.current.contains(e.target as Node)) {
-        setColMenuOpen(false);
-      }
-    }
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, []);
-
-  return (
-    <div className="flex items-center gap-2 px-3 h-9 bg-card border-b border-border shrink-0" style={{ position: 'relative', zIndex: 30 }}>
-      {/* Columns menu */}
-      <div ref={colMenuRef} className="relative">
-        <button
-          onClick={() => setColMenuOpen(o => !o)}
-          className={cn(ctrlBtn, colMenuOpen && 'bg-muted')}
-          title="Show/hide columns"
-        >
-          <Columns2 size={13} strokeWidth={1.8} />
-          Columns
-          <ChevronDown size={11} strokeWidth={2} className={cn('transition-transform', colMenuOpen && 'rotate-180')} />
-        </button>
-
-        {colMenuOpen && (
-          <div
-            style={{
-              position: 'absolute',
-              top: 'calc(100% + 4px)',
-              left: 0,
-              zIndex: 50,
-              background: 'var(--card)',
-              border: '1px solid var(--border)',
-              borderRadius: 8,
-              boxShadow: '0 4px 16px rgba(0,0,0,0.12)',
-              minWidth: 180,
-              padding: '6px 0',
-            }}
-          >
-            {columns.map(col => (
-              <label
-                key={col.id}
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 8,
-                  padding: '5px 12px',
-                  cursor: 'pointer',
-                  fontSize: 12,
-                  color: 'var(--foreground)',
-                }}
-                onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-                onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-              >
-                <input
-                  type="checkbox"
-                  checked={col.visible}
-                  onChange={e => onColumnVisibilityChange(col.id, e.target.checked)}
-                  style={{ cursor: 'pointer' }}
-                />
-                {col.label}
-              </label>
-            ))}
-          </div>
-        )}
-      </div>
-
-      <div className={divider} />
-
-      {/* Group by */}
-      <span className={label}>Group by</span>
-      <select
-        className={select}
-        value={groupBy}
-        onChange={e => onGroupByChange(e.target.value as ListGroupBy)}
-      >
-        <option value="none">None</option>
-        <option value="member">Member</option>
-        <option value="parent">Parent activity</option>
-        <option value="status">Status</option>
-      </select>
-
-      <div className={divider} />
-
-      {/* Color by */}
-      <span className={label}>Color by</span>
-      <select
-        className={select}
-        value={colorBy}
-        onChange={e => onColorByChange(e.target.value as ListColorBy)}
-      >
-        <option value="activity">Activity</option>
-        <option value="member">Member</option>
-        <option value="status">Status</option>
-      </select>
-
-      <div className={divider} />
-
-      {/* Density toggle */}
-      <button
-        onClick={() => onDensityChange(density === 'comfortable' ? 'compact' : 'comfortable')}
-        className={ctrlBtn}
-        title={density === 'comfortable' ? 'Switch to compact rows' : 'Switch to comfortable rows'}
-      >
-        <AlignJustify size={13} strokeWidth={1.8} />
-        {density === 'comfortable' ? 'Comfortable' : 'Compact'}
-      </button>
-
-      <div className="flex-1" />
-
-      <button
-        className={cn(ctrlBtn, 'opacity-40 cursor-not-allowed')}
-        disabled
-        title="Coming soon"
-      >
-        <Download size={13} strokeWidth={1.8} />
-        Export
-      </button>
-
-      <button className={ctrlBtn} onClick={onShare} title="Share this view">
-        <Share2 size={13} strokeWidth={1.8} />
-        Share
-      </button>
-    </div>
-  );
+function actRows(rows: ListDisplayRow[]) {
+  return rows
+    .filter((r): r is Extract<ListDisplayRow, { kind: 'activity' }> => r.kind === 'activity')
+    .map(r => ({ id: r.activity.id, depth: r.depth, hasChildren: r.hasChildren }))
 }
+
+function groupRows(rows: ListDisplayRow[]) {
+  return rows
+    .filter((r): r is Extract<ListDisplayRow, { kind: 'group' }> => r.kind === 'group')
+    .map(r => ({ key: r.key, label: r.label, count: r.count }))
+}
+
+const emptyMembers = new Map<string, { displayName: string }>()
+const emptyStatuses = new Map<string, { name: string }>()
+
+// ── groupBy: none ─────────────────────────────────────────────────────────────
+
+describe('buildListRows — groupBy: none', () => {
+  it('returns one activity row per activity in order', () => {
+    const activities = [act('a'), act('b'), act('c')]
+    const rows = buildListRows(activities, 'none', emptyMembers, emptyStatuses, [], NONE)
+    expect(actRows(rows).map(r => r.id)).toEqual(['a', 'b', 'c'])
+  })
+
+  it('returns an empty array for an empty list', () => {
+    expect(buildListRows([], 'none', emptyMembers, emptyStatuses, [], NONE)).toEqual([])
+  })
+})
+
+// ── groupBy: member ───────────────────────────────────────────────────────────
+
+describe('buildListRows — groupBy: member (combo-key)', () => {
+  const memberMap = new Map([
+    ['m1', { displayName: 'Alice', color: '#111' }],
+    ['m2', { displayName: 'Bob', color: '#222' }],
+  ])
+  const memberOrder = ['m1', 'm2']
+
+  const activities = [
+    act('a1', { assignedMemberIds: ['m1'] }),
+    act('a2', { assignedMemberIds: ['m1'] }),
+    act('b1', { assignedMemberIds: ['m2'] }),
+    act('ab1', { assignedMemberIds: ['m1', 'm2'] }),
+    act('u1'),  // unassigned
+  ]
+
+  it('emits one group per unique assignee combination in team order', () => {
+    const rows = buildListRows(activities, 'member', memberMap, emptyStatuses, [], NONE, memberOrder)
+    const groups = groupRows(rows)
+    expect(groups[0]).toMatchObject({ label: 'Alice', count: 2 })
+    // combo group Alice + Bob
+    expect(groups[1].label).toBe('Alice and Bob')
+    expect(groups[1].count).toBe(1)
+    expect(groups[2]).toMatchObject({ label: 'Bob', count: 1 })
+    expect(groups[3]).toMatchObject({ key: '__unassigned__', label: 'Unassigned', count: 1 })
+  })
+
+  it('places multi-assignee activity under its own combination group (no duplication)', () => {
+    const rows = buildListRows(activities, 'member', memberMap, emptyStatuses, [], NONE, memberOrder)
+    const actIds = rows.filter(r => r.kind === 'activity').map(r => (r as Extract<typeof r, { kind: 'activity' }>).activity.id)
+    expect(actIds.filter(id => id === 'ab1')).toHaveLength(1)
+    expect(actIds).toHaveLength(5)
+  })
+
+  it('carries memberColors on group rows for member combos', () => {
+    const rows = buildListRows(activities, 'member', memberMap, emptyStatuses, [], NONE, memberOrder)
+    const groups = rows.filter((r): r is Extract<typeof r, { kind: 'group' }> => r.kind === 'group')
+    const comboGroup = groups.find(g => g.label === 'Alice and Bob')
+    expect(comboGroup?.memberColors).toHaveLength(2)
+  })
+
+  it('hides collapsed group activities but keeps the group header', () => {
+    // Solo-member key is just the member id (since memberComboKey(['m1']) === 'm1')
+    const rows = buildListRows(activities, 'member', memberMap, emptyStatuses, [], new Set(['m1']), memberOrder)
+    const ids = rows.map(r => r.kind === 'group' ? `G:${r.key}` : `A:${(r as Extract<typeof r, { kind: 'activity' }>).activity.id}`)
+    expect(ids).not.toContain('A:a1')
+    expect(ids).not.toContain('A:a2')
+    expect(ids).toContain('G:m1')
+    expect(ids).toContain('A:b1')
+  })
+})
+
+// ── groupBy: status ───────────────────────────────────────────────────────────
+
+describe('buildListRows — groupBy: status', () => {
+  const statuses = [status('s1', 'In Progress'), status('s2', 'Done')]
+  const statusMap = new Map(statuses.map(s => [s.id, s]))
+  const activities = [
+    act('a', { statusId: 's1' }),
+    act('b', { statusId: 's2' }),
+    act('c'),  // no status
+  ]
+
+  it('emits statuses in ROADMAP order, no-status last', () => {
+    const rows = buildListRows(activities, 'status', emptyMembers, statusMap, statuses, NONE)
+    const groups = groupRows(rows)
+    expect(groups.map(g => g.label)).toEqual(['In Progress', 'Done', 'No status'])
+  })
+
+  it('skips statuses with no activities', () => {
+    const rows = buildListRows([act('a', { statusId: 's1' })], 'status', emptyMembers, statusMap, statuses, NONE)
+    const groups = groupRows(rows)
+    expect(groups.map(g => g.label)).toEqual(['In Progress'])
+  })
+})
+
+// ── groupBy: parent ───────────────────────────────────────────────────────────
+
+describe('buildListRows — groupBy: parent', () => {
+  const activities = [
+    act('a'),
+    act('b', { parentActivityId: 'a' }),
+    act('c', { parentActivityId: 'b' }),
+    act('d'),
+  ]
+
+  it('nests grandchildren at increasing depth', () => {
+    const rows = buildListRows(activities, 'parent', emptyMembers, emptyStatuses, [], NONE)
+    expect(actRows(rows)).toEqual([
+      { id: 'a', depth: 0, hasChildren: true },
+      { id: 'b', depth: 1, hasChildren: true },
+      { id: 'c', depth: 2, hasChildren: false },
+      { id: 'd', depth: 0, hasChildren: false },
+    ])
+  })
+
+  it('hides subtree when parent is collapsed', () => {
+    const rows = buildListRows(activities, 'parent', emptyMembers, emptyStatuses, [], new Set(['a']))
+    expect(actRows(rows).map(r => r.id)).toEqual(['a', 'd'])
+  })
+
+  it('treats an orphan (parent not in view) as a root', () => {
+    const rows = buildListRows([act('x', { parentActivityId: 'missing' })], 'parent', emptyMembers, emptyStatuses, [], NONE)
+    expect(actRows(rows)).toEqual([{ id: 'x', depth: 0, hasChildren: false }])
+  })
+
+  it('does not infinite-loop on a parent-pointer cycle', () => {
+    const x = act('x', { parentActivityId: 'y' })
+    const y = act('y', { parentActivityId: 'x' })
+    const rows = buildListRows([x, y], 'parent', emptyMembers, emptyStatuses, [], NONE)
+    expect(actRows(rows).map(r => r.id).sort()).toEqual(['x', 'y'])
+  })
+})
 ````
 
 ## File: packages/web/src/hooks/useTeamActivities.ts
@@ -43794,207 +43995,6 @@ export default function KanbanView({
     />
   );
 }
-````
-
-## File: packages/web/src/components/list/ListView.tree.test.ts
-````typescript
-/**
- * buildListRows — group-by and tree-nesting behaviour.
- *
- * Mirrors the pattern in GanttView.tree.test.ts: pure logic tests on the
- * exported buildListRows function, no React rendering or hook mocks required.
- */
-
-import { describe, it, expect } from 'vitest'
-import { buildListRows } from './ListView'
-import type { ListDisplayRow } from './ListView'
-import type { components } from '@draba/shared'
-
-type ApiActivity = components['schemas']['Activity']
-type Status = components['schemas']['Status']
-
-const NONE = new Set<string>()
-
-function act(
-  id: string,
-  opts: {
-    parentActivityId?: string | null
-    assignedMemberIds?: string[]
-    statusId?: string | null
-  } = {},
-): ApiActivity {
-  return {
-    id,
-    title: id,
-    timelineId: 'tl1',
-    startAt: '2026-01-01T00:00:00Z',
-    endAt: '2026-01-02T00:00:00Z',
-    allDay: false,
-    createdBy: 'user1',
-    createdAt: '2026-01-01T00:00:00Z',
-    updatedAt: '2026-01-01T00:00:00Z',
-    description: null,
-    notes: null,
-    icon: null,
-    color: null,
-    percentComplete: null,
-    location: null,
-    url: null,
-    archivedAt: null,
-    parentActivityId: opts.parentActivityId ?? null,
-    assignedMemberIds: opts.assignedMemberIds ?? [],
-    tagIds: [],
-    statusId: opts.statusId ?? null,
-  }
-}
-
-function status(id: string, name: string): Status {
-  return { id, name, color: '#000', timelineId: 'tl1', isClosed: false, position: 0, createdAt: '', updatedAt: '' }
-}
-
-function actRows(rows: ListDisplayRow[]) {
-  return rows
-    .filter((r): r is Extract<ListDisplayRow, { kind: 'activity' }> => r.kind === 'activity')
-    .map(r => ({ id: r.activity.id, depth: r.depth, hasChildren: r.hasChildren }))
-}
-
-function groupRows(rows: ListDisplayRow[]) {
-  return rows
-    .filter((r): r is Extract<ListDisplayRow, { kind: 'group' }> => r.kind === 'group')
-    .map(r => ({ key: r.key, label: r.label, count: r.count }))
-}
-
-const emptyMembers = new Map<string, { displayName: string }>()
-const emptyStatuses = new Map<string, { name: string }>()
-
-// ── groupBy: none ─────────────────────────────────────────────────────────────
-
-describe('buildListRows — groupBy: none', () => {
-  it('returns one activity row per activity in order', () => {
-    const activities = [act('a'), act('b'), act('c')]
-    const rows = buildListRows(activities, 'none', emptyMembers, emptyStatuses, [], NONE)
-    expect(actRows(rows).map(r => r.id)).toEqual(['a', 'b', 'c'])
-  })
-
-  it('returns an empty array for an empty list', () => {
-    expect(buildListRows([], 'none', emptyMembers, emptyStatuses, [], NONE)).toEqual([])
-  })
-})
-
-// ── groupBy: member ───────────────────────────────────────────────────────────
-
-describe('buildListRows — groupBy: member (combo-key)', () => {
-  const memberMap = new Map([
-    ['m1', { displayName: 'Alice', color: '#111' }],
-    ['m2', { displayName: 'Bob', color: '#222' }],
-  ])
-  const memberOrder = ['m1', 'm2']
-
-  const activities = [
-    act('a1', { assignedMemberIds: ['m1'] }),
-    act('a2', { assignedMemberIds: ['m1'] }),
-    act('b1', { assignedMemberIds: ['m2'] }),
-    act('ab1', { assignedMemberIds: ['m1', 'm2'] }),
-    act('u1'),  // unassigned
-  ]
-
-  it('emits one group per unique assignee combination in team order', () => {
-    const rows = buildListRows(activities, 'member', memberMap, emptyStatuses, [], NONE, memberOrder)
-    const groups = groupRows(rows)
-    expect(groups[0]).toMatchObject({ label: 'Alice', count: 2 })
-    // combo group Alice + Bob
-    expect(groups[1].label).toBe('Alice and Bob')
-    expect(groups[1].count).toBe(1)
-    expect(groups[2]).toMatchObject({ label: 'Bob', count: 1 })
-    expect(groups[3]).toMatchObject({ key: '__unassigned__', label: 'Unassigned', count: 1 })
-  })
-
-  it('places multi-assignee activity under its own combination group (no duplication)', () => {
-    const rows = buildListRows(activities, 'member', memberMap, emptyStatuses, [], NONE, memberOrder)
-    const actIds = rows.filter(r => r.kind === 'activity').map(r => (r as Extract<typeof r, { kind: 'activity' }>).activity.id)
-    expect(actIds.filter(id => id === 'ab1')).toHaveLength(1)
-    expect(actIds).toHaveLength(5)
-  })
-
-  it('carries memberColors on group rows for member combos', () => {
-    const rows = buildListRows(activities, 'member', memberMap, emptyStatuses, [], NONE, memberOrder)
-    const groups = rows.filter((r): r is Extract<typeof r, { kind: 'group' }> => r.kind === 'group')
-    const comboGroup = groups.find(g => g.label === 'Alice and Bob')
-    expect(comboGroup?.memberColors).toHaveLength(2)
-  })
-
-  it('hides collapsed group activities but keeps the group header', () => {
-    // Solo-member key is just the member id (since memberComboKey(['m1']) === 'm1')
-    const rows = buildListRows(activities, 'member', memberMap, emptyStatuses, [], new Set(['m1']), memberOrder)
-    const ids = rows.map(r => r.kind === 'group' ? `G:${r.key}` : `A:${(r as Extract<typeof r, { kind: 'activity' }>).activity.id}`)
-    expect(ids).not.toContain('A:a1')
-    expect(ids).not.toContain('A:a2')
-    expect(ids).toContain('G:m1')
-    expect(ids).toContain('A:b1')
-  })
-})
-
-// ── groupBy: status ───────────────────────────────────────────────────────────
-
-describe('buildListRows — groupBy: status', () => {
-  const statuses = [status('s1', 'In Progress'), status('s2', 'Done')]
-  const statusMap = new Map(statuses.map(s => [s.id, s]))
-  const activities = [
-    act('a', { statusId: 's1' }),
-    act('b', { statusId: 's2' }),
-    act('c'),  // no status
-  ]
-
-  it('emits statuses in ROADMAP order, no-status last', () => {
-    const rows = buildListRows(activities, 'status', emptyMembers, statusMap, statuses, NONE)
-    const groups = groupRows(rows)
-    expect(groups.map(g => g.label)).toEqual(['In Progress', 'Done', 'No status'])
-  })
-
-  it('skips statuses with no activities', () => {
-    const rows = buildListRows([act('a', { statusId: 's1' })], 'status', emptyMembers, statusMap, statuses, NONE)
-    const groups = groupRows(rows)
-    expect(groups.map(g => g.label)).toEqual(['In Progress'])
-  })
-})
-
-// ── groupBy: parent ───────────────────────────────────────────────────────────
-
-describe('buildListRows — groupBy: parent', () => {
-  const activities = [
-    act('a'),
-    act('b', { parentActivityId: 'a' }),
-    act('c', { parentActivityId: 'b' }),
-    act('d'),
-  ]
-
-  it('nests grandchildren at increasing depth', () => {
-    const rows = buildListRows(activities, 'parent', emptyMembers, emptyStatuses, [], NONE)
-    expect(actRows(rows)).toEqual([
-      { id: 'a', depth: 0, hasChildren: true },
-      { id: 'b', depth: 1, hasChildren: true },
-      { id: 'c', depth: 2, hasChildren: false },
-      { id: 'd', depth: 0, hasChildren: false },
-    ])
-  })
-
-  it('hides subtree when parent is collapsed', () => {
-    const rows = buildListRows(activities, 'parent', emptyMembers, emptyStatuses, [], new Set(['a']))
-    expect(actRows(rows).map(r => r.id)).toEqual(['a', 'd'])
-  })
-
-  it('treats an orphan (parent not in view) as a root', () => {
-    const rows = buildListRows([act('x', { parentActivityId: 'missing' })], 'parent', emptyMembers, emptyStatuses, [], NONE)
-    expect(actRows(rows)).toEqual([{ id: 'x', depth: 0, hasChildren: false }])
-  })
-
-  it('does not infinite-loop on a parent-pointer cycle', () => {
-    const x = act('x', { parentActivityId: 'y' })
-    const y = act('y', { parentActivityId: 'x' })
-    const rows = buildListRows([x, y], 'parent', emptyMembers, emptyStatuses, [], NONE)
-    expect(actRows(rows).map(r => r.id).sort()).toEqual(['x', 'y'])
-  })
-})
 ````
 
 ## File: packages/web/src/components/CalendarShareModal.tsx
@@ -49358,157 +49358,6 @@ export default function Sidebar({ collapsed, onToggle, onNewActivity, onBulkImpo
 }
 ````
 
-## File: packages/web/src/hooks/useShares.ts
-````typescript
-/**
- * TanStack Query hooks for Share CRUD and the public share projection.
- *
- * Authenticated hooks (useCreateShare, useListShares, useDeleteShare) require
- * an auth token. useShareProjection is public and uses a plain fetch.
- */
-
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import type { components } from '@draba/shared'
-import { createAuthFetch, API_BASE, ApiError } from '@/lib/api'
-import { useAuth } from '@/contexts/AuthContext'
-
-type Share = components['schemas']['Share']
-type ShareProjection = components['schemas']['ShareProjection']
-
-const sharesKey = (teamId: string, timelineId: string) =>
-  ['teams', teamId, 'timelines', timelineId, 'shares'] as const
-
-// ── Authenticated hooks ───────────────────────────────────────────────────────
-
-/** Lists all shares for a timeline. */
-export function useListShares(teamId: string, timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  return useQuery({
-    queryKey: sharesKey(teamId, timelineId),
-    queryFn: () =>
-      authFetch<Share[]>(`/teams/${teamId}/timelines/${timelineId}/shares`),
-    enabled: Boolean(teamId) && Boolean(timelineId),
-    // The share modals are this query's only consumers and mount on demand —
-    // override the app-wide 30s staleTime so the view telemetry they render
-    // (viewCount / lastViewedAt) is current every time a modal opens.
-    staleTime: 0,
-    refetchOnMount: 'always',
-  })
-}
-
-interface CreateShareInput {
-  /** "view" (default) or "ics" — ICS shares are live calendar feeds. */
-  kind?: 'view' | 'ics'
-  /** ICS shares only: "timeline" (every activity) or "member" (one member's). */
-  scope?: 'timeline' | 'member'
-  /** ICS shares with scope "member" only. */
-  memberId?: string
-  name?: string | null
-  description?: string | null
-  viewType?: string
-  viewConfig?: string
-  /** When set, the share is locked and requires unlocking to view. View shares only. */
-  password?: string
-}
-
-/** Creates a share and invalidates the list. */
-export function useCreateShare(teamId: string, timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: (input: CreateShareInput) =>
-      authFetch<Share>(`/timelines/${timelineId}/shares`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(input),
-      }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: sharesKey(teamId, timelineId) }),
-  })
-}
-
-/**
- * Rotates a share's token, immediately invalidating the old URL — the
- * revocation story for ICS feeds, which have no password gate.
- */
-export function useRegenerateShare(teamId: string, timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: (shareId: string) =>
-      authFetch<Share>(`/shares/${shareId}/regenerate`, { method: 'POST' }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: sharesKey(teamId, timelineId) }),
-  })
-}
-
-/** Deletes a share and invalidates the list. */
-export function useDeleteShare(teamId: string, timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: (shareId: string) =>
-      authFetch<void>(`/shares/${shareId}`, { method: 'DELETE' }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: sharesKey(teamId, timelineId) }),
-  })
-}
-
-// ── Public hooks (no auth) ────────────────────────────────────────────────────
-
-/**
- * Fetches a public share projection. No authentication required.
- *
- * For password-protected shares, pass the `viewToken` obtained from
- * {@link useUnlockShare}; it is sent as a Bearer credential. Without a valid
- * token a locked share responds 401 — surfaced here as an ApiError with code
- * `PASSWORD_REQUIRED` so the viewer can render an unlock prompt.
- */
-export function useShareProjection(token: string | undefined, viewToken?: string | null) {
-  return useQuery({
-    queryKey: ['shares', token, viewToken ?? null] as const,
-    queryFn: async () => {
-      const headers: HeadersInit = viewToken ? { Authorization: `Bearer ${viewToken}` } : {}
-      const res = await fetch(`${API_BASE}/shares/${token}`, { headers })
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}))
-        // A locked share returns { passwordRequired: true } (no error envelope).
-        if (res.status === 401 && body?.passwordRequired) {
-          throw new ApiError(401, 'PASSWORD_REQUIRED', 'password required')
-        }
-        throw new ApiError(res.status, body?.error?.code ?? 'ERROR', body?.error?.message ?? res.statusText)
-      }
-      return res.json() as Promise<ShareProjection>
-    },
-    enabled: Boolean(token),
-    staleTime: 60_000,
-    retry: false,
-  })
-}
-
-/**
- * Exchanges a share password for a short-lived view token. No authentication
- * required. The returned token is scoped to this share and expires server-side.
- */
-export function useUnlockShare(token: string | undefined) {
-  return useMutation({
-    mutationFn: async (password: string): Promise<string> => {
-      const res = await fetch(`${API_BASE}/shares/${token}/unlock`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ password }),
-      })
-      const body = await res.json().catch(() => ({}))
-      if (!res.ok) {
-        throw new ApiError(res.status, body?.error?.code ?? 'ERROR', body?.error?.message ?? res.statusText)
-      }
-      return (body as { token: string }).token
-    },
-  })
-}
-````
-
 ## File: packages/web/src/components/list/ListView.tsx
 ````typescript
 /**
@@ -52104,6 +51953,157 @@ export default function ListView({
       )}
     </div>
   );
+}
+````
+
+## File: packages/web/src/hooks/useShares.ts
+````typescript
+/**
+ * TanStack Query hooks for Share CRUD and the public share projection.
+ *
+ * Authenticated hooks (useCreateShare, useListShares, useDeleteShare) require
+ * an auth token. useShareProjection is public and uses a plain fetch.
+ */
+
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import type { components } from '@draba/shared'
+import { createAuthFetch, API_BASE, ApiError } from '@/lib/api'
+import { useAuth } from '@/contexts/AuthContext'
+
+type Share = components['schemas']['Share']
+type ShareProjection = components['schemas']['ShareProjection']
+
+const sharesKey = (teamId: string, timelineId: string) =>
+  ['teams', teamId, 'timelines', timelineId, 'shares'] as const
+
+// ── Authenticated hooks ───────────────────────────────────────────────────────
+
+/** Lists all shares for a timeline. */
+export function useListShares(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  return useQuery({
+    queryKey: sharesKey(teamId, timelineId),
+    queryFn: () =>
+      authFetch<Share[]>(`/teams/${teamId}/timelines/${timelineId}/shares`),
+    enabled: Boolean(teamId) && Boolean(timelineId),
+    // The share modals are this query's only consumers and mount on demand —
+    // override the app-wide 30s staleTime so the view telemetry they render
+    // (viewCount / lastViewedAt) is current every time a modal opens.
+    staleTime: 0,
+    refetchOnMount: 'always',
+  })
+}
+
+interface CreateShareInput {
+  /** "view" (default) or "ics" — ICS shares are live calendar feeds. */
+  kind?: 'view' | 'ics'
+  /** ICS shares only: "timeline" (every activity) or "member" (one member's). */
+  scope?: 'timeline' | 'member'
+  /** ICS shares with scope "member" only. */
+  memberId?: string
+  name?: string | null
+  description?: string | null
+  viewType?: string
+  viewConfig?: string
+  /** When set, the share is locked and requires unlocking to view. View shares only. */
+  password?: string
+}
+
+/** Creates a share and invalidates the list. */
+export function useCreateShare(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (input: CreateShareInput) =>
+      authFetch<Share>(`/timelines/${timelineId}/shares`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(input),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: sharesKey(teamId, timelineId) }),
+  })
+}
+
+/**
+ * Rotates a share's token, immediately invalidating the old URL — the
+ * revocation story for ICS feeds, which have no password gate.
+ */
+export function useRegenerateShare(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (shareId: string) =>
+      authFetch<Share>(`/shares/${shareId}/regenerate`, { method: 'POST' }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: sharesKey(teamId, timelineId) }),
+  })
+}
+
+/** Deletes a share and invalidates the list. */
+export function useDeleteShare(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (shareId: string) =>
+      authFetch<void>(`/shares/${shareId}`, { method: 'DELETE' }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: sharesKey(teamId, timelineId) }),
+  })
+}
+
+// ── Public hooks (no auth) ────────────────────────────────────────────────────
+
+/**
+ * Fetches a public share projection. No authentication required.
+ *
+ * For password-protected shares, pass the `viewToken` obtained from
+ * {@link useUnlockShare}; it is sent as a Bearer credential. Without a valid
+ * token a locked share responds 401 — surfaced here as an ApiError with code
+ * `PASSWORD_REQUIRED` so the viewer can render an unlock prompt.
+ */
+export function useShareProjection(token: string | undefined, viewToken?: string | null) {
+  return useQuery({
+    queryKey: ['shares', token, viewToken ?? null] as const,
+    queryFn: async () => {
+      const headers: HeadersInit = viewToken ? { Authorization: `Bearer ${viewToken}` } : {}
+      const res = await fetch(`${API_BASE}/shares/${token}`, { headers })
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}))
+        // A locked share returns { passwordRequired: true } (no error envelope).
+        if (res.status === 401 && body?.passwordRequired) {
+          throw new ApiError(401, 'PASSWORD_REQUIRED', 'password required')
+        }
+        throw new ApiError(res.status, body?.error?.code ?? 'ERROR', body?.error?.message ?? res.statusText)
+      }
+      return res.json() as Promise<ShareProjection>
+    },
+    enabled: Boolean(token),
+    staleTime: 60_000,
+    retry: false,
+  })
+}
+
+/**
+ * Exchanges a share password for a short-lived view token. No authentication
+ * required. The returned token is scoped to this share and expires server-side.
+ */
+export function useUnlockShare(token: string | undefined) {
+  return useMutation({
+    mutationFn: async (password: string): Promise<string> => {
+      const res = await fetch(`${API_BASE}/shares/${token}/unlock`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password }),
+      })
+      const body = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        throw new ApiError(res.status, body?.error?.code ?? 'ERROR', body?.error?.message ?? res.statusText)
+      }
+      return (body as { token: string }).token
+    },
+  })
 }
 ````
 
@@ -67965,6 +67965,13 @@ Port 8080 was already in use on the host.
 - web-e2e observed a regenerated feed's OLD URL briefly serving 200 from the browser HTTP cache (server correctly 404'd). Cause: `Cache-Control: max-age=60` on the feed response.
 - Fix: feed now sends `Cache-Control: no-store` — the token is the secret and rotate/delete is the only kill switch, so revocation must be client-immediate too. Server load still absorbed by the in-memory icsCache (DRABA_SHARE_CACHE_TTL).
 - Test: header asserted in share_ics_handler_test.go. `go test ./internal/api/` + `golangci-lint run` clean.
+
+## 2026-06-11 — /test-phase 13.5
+
+- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
+- Result: all pass (3 in-suite skips: docker compose config — Docker not on dev box, CI covers; ws-smoke 3-cycle heartbeat — covered by TestHub_Heartbeat_* unit tests; api-smoke expired-share 410 — sample data seeds no expires_at and the write path was cut from 13.5 scope)
+- Smoke target: the LAN test instance (reset via SSH to the test host — canonical sample dataset + bootstrap)
+- Notes: api-smoke 47/47 incl. full 13.5 lifecycle suite (archive → 404 on JSON gateway, ICS feed, and legacy timeline share route; unarchive restores all three; shareCount accurate; lastViewedAt null → timestamp after public view). ws-smoke ran live for the first time in a while via a throwaway gorilla/websocket client: delta fan-out to two team-A clients in 12ms, team-B isolation clean. web-e2e 7/7 live: tile chip matches API share count, modal last-viewed refetches on open, archive/restore round-trip via UI. security-review clean with two no-action items: legacy unauthenticated `GET /timelines/share/:token` serializes raw `models.Timeline` (now emits a hardcoded `shareCount: 0`; pre-existing pattern, worth migrating to a Public* projection) and `shareTimelineLive` returns 500 instead of 404 for an orphaned share's missing timeline row.
 ````
 
 ## File: docs/ROADMAP.md
