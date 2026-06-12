@@ -14,7 +14,7 @@ _Updated after each significant work session. Read this first to orient — it i
 
 | Next phase | Scope | Plan |
 |------------|-------|------|
-| **14** | Export — tabular (CSV/xlsx) + per-view visual exports (Gantt/Kanban/Calendar → PDF via gofpdf, List → Markdown). Resolve open questions (sync vs. async) before starting | [ROADMAP §14](../ROADMAP.md#phase-14--export--tabular--per-view) (no plan file yet) |
+| **14** | Export — re-planned 2026-06-11 into four pausable sub-phases: 14.1 data (CSV/xlsx/ICS, server, API-first, Go filter eval) + ExportDialog; 14.2 textual (Markdown/text/rich clipboard, client); 14.3 PNG snapshot (DOM rasterization); 14.4 printable views (vector PDF via browser print). **gofpdf/Chromium dropped** — visuals render client-side. Open questions resolved (sync v1, filter-only) | [docs/plans/phase-14-export.md](../plans/phase-14-export.md) |
 
 **Phase 13 back-half re-sequenced (2026-06-05):** 13.2 = share-modal overhaul + password (pulled forward); 13.3 = List + Kanban read-only; 13.4 = Calendar **ICS feed** sharing (whole-timeline or per-member, token-as-secret, no password/filter — a different model from view-shares); 13.5 = lifecycle tail (expiry, tile chip). The handoff design lives in [`docs/design/handoffs/share-modal/`](../design/handoffs/share-modal/design_handoff_share_modal/README.md). See [ROADMAP re-sequencing note](../ROADMAP.md#phase-13--shares--multi-share-views-with-passwords) and [plan §13.2 overhaul](../plans/phase-13-shares.md#the-share-module-overhaul-132).
 

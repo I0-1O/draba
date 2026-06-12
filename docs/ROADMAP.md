@@ -58,7 +58,7 @@ This document organizes development into discrete phases with effort estimates a
 | 13.3 | [List + Kanban Read-Only](#phase-133--list--kanban-read-only) | M | ✅ |
 | 13.4 | [Calendar — ICS Feed Sharing](#phase-134--calendar--ics-feed-sharing) | M | ✅ |
 | 13.5 | [Lifecycle Tail](#phase-135--lifecycle-tail) | S | ✅ |
-| 14 | [Export — Tabular & Per-View](#phase-14--export--tabular--per-view) | M — 3–5 days | ⬜ |
+| 14 | [Export — Data, Textual & Visual](#phase-14--export--data-textual--visual) | L — 6–9 days (4 pausable sub-phases) | ⬜ |
 | 15 | [Import — Tabular](#phase-15--import--tabular) | M — 2–3 days | ⬜ |
 | 16 | [Backup & Restore](#phase-16--backup--restore) | M — 2–3 days | ⬜ |
 | 17 | [Global Search](#phase-17--global-search) | M — 2–3 days | ⬜ |
@@ -1605,49 +1605,35 @@ Re-scoped 2026-06-11 — most of the original tail was already built piecemeal d
 
 ---
 
-### Phase 14 — Export — Tabular & Per-View
-**Status:** ⬜ | **Effort:** M (3–5 days)
+### Phase 14 — Export — Data, Textual & Visual
+**Status:** ⬜ | **Effort:** L (6–9 days across four pausable sub-phases) | **Plan:** [docs/plans/phase-14-export.md](plans/phase-14-export.md)
 
-Get data *out* of draba — both raw tabular exports (CSV / xlsx) and view-aware visual exports (Gantt → PDF, Kanban → PDF, List → Markdown, Calendar → PDF, etc.). Each visual export respects the active filter / sort / group at time of export — the deliverable is "what's on the screen right now," not the raw activity list. Split from the former combined "Data Portability" phase so export (an immediate, lower-risk win) can ship ahead of [import](#phase-15--import--tabular).
+Get data *out* of draba in the four shapes people actually need: **data** (CSV / xlsx for another tool or the Phase 15 re-import round-trip), **text** (Markdown / plain text / rich clipboard for Slack and prep docs), **image** (PNG of the current view for slide decks), and **print** (a print-styled page the user prints to vector PDF from their own browser; plus a static `.ics` download). Every export reflects the active filter / sort / group / visible columns at time of export — the deliverable is "what's on the screen right now," not the raw activity list. Split from the former combined "Data Portability" phase so export ships ahead of [import](#phase-15--import--tabular).
 
-**Implementation note (PDF engine):**
-PDFs are generated server-side using **gofpdf** (pure-Go, no Chrome dependency in the Docker image). This keeps the binary lean at the cost of reimplementing Gantt / Kanban / Calendar layouts in PDF primitives — accepted tradeoff because the alternative (chromedp) significantly inflates the image size and breaks the "single binary" promise. Visual fidelity for the Gantt PDF will not match the live view pixel-for-pixel; the target is "readable and recognizable," not "screenshot quality."
+**Implementation note (rendering strategy — supersedes the earlier gofpdf plan, 2026-06-11):**
+Visual exports render **client-side from the live DOM** — no gofpdf, no Chromium in the image. gofpdf was rejected because it meant reimplementing four layout engines in Go PDF primitives and keeping them in lockstep with the React views forever; chromedp was rejected for image bloat / single-binary reasons (unchanged). "PDF" is delivered as a **printable view**: a dedicated print-styled route the user prints to PDF from their browser — true vector output (selectable text, correct pagination) with zero server-side layout code. PNG is the one raster format (DOM rasterization). Data/ICS exports stay server-side and API-first, evaluating the frozen filter with the **Phase 13 Go `matchesFilter` port**; textual/visual exports are client-side and UI-only for v1 (presentation formats, consciously exempt from API-first). A server-side pixel renderer, if ever needed, is an optional Chromium *sidecar* container — explicitly deferred. **Cut:** Google Docs/Sheets native integration (xlsx opens in Sheets), RTF (HTML clipboard covers rich paste), wall-calendar poster PDF, raster-PDF download (a PNG in a PDF wrapper helps no one).
 
-**Scope:**
+**Scope (sub-phases — detail in the [plan](plans/phase-14-export.md)):**
 
-*Tabular export:*
-- `GET /timelines/:id/export.csv` and `.xlsx` — all visible activities, honoring the active filter
-- Optional `?filter=` to scope the export to a saved filter ID (forward-compat hook from Phase 10.4.6)
+- **14.1 Foundation + data exports:** `POST /timelines/:id/export` (`csv` / `xlsx` / `ics`, optional frozen `viewConfig`, filter evaluated in Go) + convenience `GET …/export.csv?filter=<savedFilterId>` (the 10.4.6 hook); columns match the Phase 15 import template; sync for v1. Single `ExportDialog` driven by a per-view capability descriptor, wired into the Gantt toolbar Export stub and the 11.1/11.2/11.3 toolbar slots.
+- **14.2 Textual:** Markdown (GFM table; Kanban = section per column; Calendar = agenda list), plain text, and copy-to-clipboard with dual `text/plain` + `text/html` flavors so paste lands rich in Slack / Word / Google Docs. Client-generated from the in-memory filtered rows.
+- **14.3 PNG snapshot:** DOM rasterization (`html-to-image`) of the current view, full scrollable extent, 2x density, light theme, header strip (team, timeline, generated-at, filter description).
+- **14.4 Printable views:** print routes per view (non-interactive view components + print stylesheet): Gantt landscape with date-range pagination and member-color legend; List styled table; Kanban columns with page breaks; Calendar one page per period. "Export → Printable view" opens the route and triggers `window.print()`.
 
-*Visual / textual exports (per view):*
-- **Gantt → PDF:** landscape, paginated by date range; columns scale to fit a printable width per page; legend strip with member colors; export current filter/sort/group state. Gantt → PNG as a single-page variant.
-- **Kanban → PDF:** columns laid out side-by-side; if more columns than fit a printable width, paginate across pages with a column-overflow indicator. Kanban → PNG single-page.
-- **List → CSV, xlsx, Markdown, PDF.** Markdown export uses a GitHub-flavored table; PDF is a styled table with the same columns shown in the UI.
-- **Calendar → PDF:** Month layout → one page per month in range; Week layout → one page per week.
-- All visual exports include a header strip: team name, timeline name, generated-at timestamp, applied filter description.
+**Open questions:** resolved in the plan — sync exports for v1; filter only (Find is ephemeral); no draba-side PDF engine.
 
-*Wiring:*
-- The Gantt toolbar's existing "Export" stub (Phase 8.1) becomes a real menu: CSV / xlsx / PDF / PNG
-- Same menu in 11.1 / 11.2 / 11.3 toolbar slots, scoped to each view's relevant formats
-
-**Open questions (resolve before starting):**
-- Are exports synchronous (block and return the file) or async (job queue with a download link)? Probably sync for v1; revisit if multi-hundred-page PDFs become slow.
-- Do exports respect Find highlights or just the filter? (Filter only — Find is ephemeral.)
-
-**Exit criteria — safe to pause when:**
-- Exporting a timeline to CSV and xlsx produces files containing all visible activities with the active filter applied
-- Gantt → PDF renders a recognizable Gantt chart with bars in the correct positions and a member-color legend
-- Kanban → PDF renders the visible columns and cards in the same order shown on screen
-- List → Markdown produces a clean GitHub-flavored table that renders correctly in a Markdown previewer
-- Calendar → PDF in Month layout produces one page per month with activities in correct cells
-- All export menus are reachable from their respective view toolbars; format options match the view type
+**Exit criteria — safe to pause when** *(each sub-phase independently pausable)*:
+- **14.1:** CSV/xlsx contain exactly the activities visible under the active filter; `?filter=` works for a saved filter; static `.ics` imports cleanly into a calendar app; Export dialog reachable from all four view toolbars with formats scoped per view
+- **14.2:** Markdown renders correctly in a previewer and pastes rich into Slack / Google Docs via the clipboard flavors
+- **14.3:** PNG of each view is recognizable, full-extent, correct colors, header strip present
+- **14.4:** each view's printable route paginates correctly in browser print preview; Gantt bars positioned correctly with legend; the saved PDF has selectable text
 
 ---
 
 ### Phase 15 — Import — Tabular
 **Status:** ⬜ | **Effort:** M (2–3 days)
 
-Get data *into* draba from a spreadsheet — CSV / Excel import with a mandatory preview + validation step before any rows are written. The natural companion to [Phase 14 export](#phase-14--export--tabular--per-view) (round-trip: export → edit in a spreadsheet → re-import), and the seam through which teams migrate off whatever they're planning in today. Sequenced after export because the preview/validation/conflict surface is meaningfully more complex than a one-way dump.
+Get data *into* draba from a spreadsheet — CSV / Excel import with a mandatory preview + validation step before any rows are written. The natural companion to [Phase 14 export](#phase-14--export--data-textual--visual) (round-trip: export → edit in a spreadsheet → re-import), and the seam through which teams migrate off whatever they're planning in today. Sequenced after export because the preview/validation/conflict surface is meaningfully more complex than a one-way dump.
 
 **Scope:**
 

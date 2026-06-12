@@ -1224,26 +1224,36 @@ First-class Share entity. One timeline can host many shares, each frozen to a sp
 
 ---
 
-### Data Portability & Exports (Phase 14)
+### Export — Data, Textual & Visual (Phase 14)
 
-**Tabular (round-trip):**
-- [ ] `GET /timelines/:id/export.csv` and `GET /timelines/:id/export.xlsx`
-- [ ] `POST /teams/:id/events/import` — CSV/Excel import with preview + validation
-- [ ] Downloadable import template at `GET /import-template.csv` and `.xlsx`
+_Re-planned 2026-06-11 — see [docs/plans/phase-14-export.md](plans/phase-14-export.md). Visual exports are now client-side (no gofpdf, no Chromium); "PDF" is a printable route the user prints to vector PDF from their browser. Import bullets moved to [Phase 15 — Import](ROADMAP.md#phase-15--import--tabular)._
 
-**Visual exports (gofpdf):**
-- [ ] Gantt → PDF: landscape, paginated by date range, member-color legend strip
-- [ ] Gantt → PNG: single-page rasterized variant
-- [ ] Kanban → PDF: columns side-by-side, paginated when too wide
-- [ ] Kanban → PNG: single-page
-- [ ] List → Markdown (GitHub-flavored table) and PDF (styled table)
-- [ ] Calendar → PDF: one page per month / week depending on active layout
-- [ ] Header strip on every visual export: team name, timeline name, generated-at timestamp, applied filter description
-- [ ] All visual exports respect active filter / sort / group at time of export
+**14.1 Foundation + data exports (server, API-first):**
+- [ ] `POST /timelines/:id/export` — `{ format: csv|xlsx|ics, viewConfig? }`; frozen filter evaluated via the Phase 13 Go `matchesFilter` port; streams file, sync for v1
+- [ ] `GET /timelines/:id/export.csv|.xlsx|.ics?filter=<savedFilterId>` — convenience GET for CLI/scripting (10.4.6 hook)
+- [ ] CSV/xlsx columns match the Phase 15 import template (round-trip holds)
+- [ ] Static `.ics` download — reuse the 13.4 feed generator, authenticated, `Content-Disposition: attachment`
+- [ ] `ExportDialog` (single dialog, all views) + per-view capability descriptor (`lib/exportCapabilities.ts`)
+- [ ] Wire into the Gantt toolbar Export stub + 11.1 / 11.2 / 11.3 toolbar slots, formats scoped per view
 
-**Wiring:**
-- [ ] Gantt toolbar's existing "Export" stub becomes a real menu: CSV / xlsx / PDF / PNG
-- [ ] Same export menu in 11.1 / 11.2 / 11.3 toolbar slots, scoped to formats valid for that view
+**14.2 Textual exports (client):**
+- [ ] Markdown: GFM table (List), section-per-column (Kanban), agenda list (Calendar); header block with team / timeline / generated-at / filter description
+- [ ] Plain text variant (aligned monospace)
+- [ ] Copy to clipboard with dual `text/plain` + `text/html` flavors (rich paste into Slack / Word / Google Docs); `.md` file download
+
+**14.3 PNG snapshot (client):**
+- [ ] DOM rasterization via `html-to-image`: full scrollable extent, 2x density, light theme
+- [ ] Header strip composited above the capture
+
+**14.4 Printable views (client, vector PDF via browser print):**
+- [ ] Print routes per view (`/timelines/:id/print/:view`): non-interactive view components + print stylesheet, no app chrome, header strip per page
+- [ ] Gantt: landscape hint, date-range pagination, member-color legend
+- [ ] List: styled table with repeating column headers
+- [ ] Kanban: page breaks between column groups when too wide
+- [ ] Calendar: one page per week/month period
+- [ ] "Export → Printable view" opens the route in a new tab and triggers `window.print()`
+
+**Cut (2026-06-11):** Google Docs/Sheets integration, RTF, wall-calendar poster PDF, raster-PDF download, gofpdf/Chromium server rendering (optional Chromium *sidecar* deferred indefinitely).
 
 **SMTP & password reset (lands here because import errors / reset emails are first SMTP use):**
 - [ ] Password reset flow (email required — pick SMTP or transactional email provider)
