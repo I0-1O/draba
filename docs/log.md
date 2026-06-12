@@ -2251,3 +2251,10 @@ Port 8080 was already in use on the host.
 - web-e2e observed a regenerated feed's OLD URL briefly serving 200 from the browser HTTP cache (server correctly 404'd). Cause: `Cache-Control: max-age=60` on the feed response.
 - Fix: feed now sends `Cache-Control: no-store` — the token is the secret and rotate/delete is the only kill switch, so revocation must be client-immediate too. Server load still absorbed by the in-memory icsCache (DRABA_SHARE_CACHE_TTL).
 - Test: header asserted in share_ics_handler_test.go. `go test ./internal/api/` + `golangci-lint run` clean.
+
+## 2026-06-11 — /test-phase 13.5
+
+- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
+- Result: all pass (3 in-suite skips: docker compose config — Docker not on dev box, CI covers; ws-smoke 3-cycle heartbeat — covered by TestHub_Heartbeat_* unit tests; api-smoke expired-share 410 — sample data seeds no expires_at and the write path was cut from 13.5 scope)
+- Smoke target: the LAN test instance (reset via SSH to the test host — canonical sample dataset + bootstrap)
+- Notes: api-smoke 47/47 incl. full 13.5 lifecycle suite (archive → 404 on JSON gateway, ICS feed, and legacy timeline share route; unarchive restores all three; shareCount accurate; lastViewedAt null → timestamp after public view). ws-smoke ran live for the first time in a while via a throwaway gorilla/websocket client: delta fan-out to two team-A clients in 12ms, team-B isolation clean. web-e2e 7/7 live: tile chip matches API share count, modal last-viewed refetches on open, archive/restore round-trip via UI. security-review clean with two no-action items: legacy unauthenticated `GET /timelines/share/:token` serializes raw `models.Timeline` (now emits a hardcoded `shareCount: 0`; pre-existing pattern, worth migrating to a Public* projection) and `shareTimelineLive` returns 500 instead of 404 for an orphaned share's missing timeline row.
