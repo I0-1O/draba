@@ -68,7 +68,7 @@ Gantt has no sensible textual shape — its Markdown/text need is served by the 
 - Sync (block and return the file) for v1 — these are bounded by timeline size; revisit only if real-world exports get slow.
 
 *Web:*
-- `ExportDialog` — single dialog, sections: format picker (from the active view's capability descriptor), scope (current view as filtered vs. whole timeline), per-format options. Wired into the Gantt toolbar Export stub and the List/Kanban/Calendar toolbar slots.
+- `ExportDialog` — single dialog, sections: format picker (from the active view's capability descriptor), scope (current view as filtered vs. whole timeline), per-format options. Wired into the Gantt toolbar Export stub and the List/Kanban/Calendar toolbar slots. **Design handoff (claude design, 2026-06-12):** [`docs/design/handoffs/export-modal/`](../design/handoffs/export-modal/design_handoff_export_modal/README.md) — format rail + options pane, filter-context strip, verb-distinct actions (download/copy/print), empty-view warning. High-fidelity but directional: recreate with the codebase's Dialog/Button/etc., per the handoff README.
 - Per-view capability descriptor module (`lib/exportCapabilities.ts`) — declares formats + options per view type.
 
 ### 14.2 — Textual exports (S, ~1 day)

@@ -1233,7 +1233,7 @@ _Re-planned 2026-06-11 — see [docs/plans/phase-14-export.md](plans/phase-14-ex
 - [ ] `GET /timelines/:id/export.csv|.xlsx|.ics?filter=<savedFilterId>` — convenience GET for CLI/scripting (10.4.6 hook)
 - [ ] CSV/xlsx columns match the Phase 15 import template (round-trip holds)
 - [ ] Static `.ics` download — reuse the 13.4 feed generator, authenticated, `Content-Disposition: attachment`
-- [ ] `ExportDialog` (single dialog, all views) + per-view capability descriptor (`lib/exportCapabilities.ts`)
+- [ ] `ExportDialog` (single dialog, all views) + per-view capability descriptor (`lib/exportCapabilities.ts`) — per the [export-modal design handoff](design/handoffs/export-modal/design_handoff_export_modal/README.md)
 - [ ] Wire into the Gantt toolbar Export stub + 11.1 / 11.2 / 11.3 toolbar slots, formats scoped per view
 
 **14.2 Textual exports (client):**
