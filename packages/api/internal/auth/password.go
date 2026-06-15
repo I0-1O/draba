@@ -4,13 +4,24 @@ package auth
 
 import (
 	"fmt"
+	"testing"
 
 	"golang.org/x/crypto/bcrypt"
 )
 
 // bcryptCost is the work factor for password hashing. 12 is the project
 // baseline — raise only after benchmarking on the slowest deployment target.
-const bcryptCost = 12
+// Under `go test -race`, bcrypt's iterated Blowfish key schedule becomes
+// extremely expensive due to race-detector memory-access instrumentation;
+// dozens of test setups hashing passwords at cost 12 pushed the suite over
+// the CI timeout, so it's lowered to the bcrypt minimum during tests.
+var bcryptCost = 12
+
+func init() {
+	if testing.Testing() {
+		bcryptCost = bcrypt.MinCost
+	}
+}
 
 // HashPassword returns a bcrypt hash of password using bcryptCost.
 func HashPassword(password string) (string, error) {
