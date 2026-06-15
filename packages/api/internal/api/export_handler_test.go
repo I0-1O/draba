@@ -52,157 +52,147 @@ func exportTestSetup(t *testing.T) (srv http.Handler, token, teamID, timelineID 
 	return srv, token, teamID, timelineID
 }
 
-func TestExportPost_CSV_ContainsAllActivities(t *testing.T) {
-	srv, token, _, timelineID := exportTestSetup(t)
+// TestExportHandlers covers the export endpoints with a single shared
+// server/timeline/activity fixture (one in-memory DB + migration run),
+// run as ordered subtests. "ArchivedTimeline" mutates the timeline and
+// must run last since the other subtests depend on it being live.
+func TestExportHandlers(t *testing.T) {
+	srv, token, teamID, timelineID := exportTestSetup(t)
 
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, authReq(http.MethodPost, fmt.Sprintf("/timelines/%s/export", timelineID), map[string]any{
-		"format": "csv",
-	}, token))
-	require.Equal(t, http.StatusOK, w.Code)
-	assert.Equal(t, "text/csv; charset=utf-8", w.Header().Get("Content-Type"))
-	assert.Contains(t, w.Header().Get("Content-Disposition"), "attachment;")
-	assert.Contains(t, w.Header().Get("Content-Disposition"), ".csv")
+	t.Run("PostCSV_ContainsAllActivities", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, authReq(http.MethodPost, fmt.Sprintf("/timelines/%s/export", timelineID), map[string]any{
+			"format": "csv",
+		}, token))
+		require.Equal(t, http.StatusOK, w.Code)
+		assert.Equal(t, "text/csv; charset=utf-8", w.Header().Get("Content-Type"))
+		assert.Contains(t, w.Header().Get("Content-Disposition"), "attachment;")
+		assert.Contains(t, w.Header().Get("Content-Disposition"), ".csv")
 
-	records, err := csv.NewReader(strings.NewReader(w.Body.String())).ReadAll()
-	require.NoError(t, err)
-	require.Len(t, records, 3) // header + 2 activities
+		records, err := csv.NewReader(strings.NewReader(w.Body.String())).ReadAll()
+		require.NoError(t, err)
+		require.Len(t, records, 3) // header + 2 activities
 
-	assert.Equal(t, "Title", records[0][0])
-	titles := []string{records[1][0], records[2][0]}
-	assert.ElementsMatch(t, []string{"Alpha", "Beta"}, titles)
-}
+		assert.Equal(t, "Title", records[0][0])
+		titles := []string{records[1][0], records[2][0]}
+		assert.ElementsMatch(t, []string{"Alpha", "Beta"}, titles)
+	})
 
-func TestExportPost_XLSX_ContainsAllActivities(t *testing.T) {
-	srv, token, _, timelineID := exportTestSetup(t)
+	t.Run("PostXLSX_ContainsAllActivities", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, authReq(http.MethodPost, fmt.Sprintf("/timelines/%s/export", timelineID), map[string]any{
+			"format": "xlsx",
+		}, token))
+		require.Equal(t, http.StatusOK, w.Code)
+		assert.Equal(t, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", w.Header().Get("Content-Type"))
+		assert.Contains(t, w.Header().Get("Content-Disposition"), ".xlsx")
 
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, authReq(http.MethodPost, fmt.Sprintf("/timelines/%s/export", timelineID), map[string]any{
-		"format": "xlsx",
-	}, token))
-	require.Equal(t, http.StatusOK, w.Code)
-	assert.Equal(t, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", w.Header().Get("Content-Type"))
-	assert.Contains(t, w.Header().Get("Content-Disposition"), ".xlsx")
+		f, err := excelize.OpenReader(strings.NewReader(w.Body.String()))
+		require.NoError(t, err)
+		defer func() { _ = f.Close() }()
 
-	f, err := excelize.OpenReader(strings.NewReader(w.Body.String()))
-	require.NoError(t, err)
-	defer func() { _ = f.Close() }()
+		rows, err := f.GetRows("Activities")
+		require.NoError(t, err)
+		require.Len(t, rows, 3)
+	})
 
-	rows, err := f.GetRows("Activities")
-	require.NoError(t, err)
-	require.Len(t, rows, 3)
-}
+	t.Run("PostICS_ContainsActivities", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, authReq(http.MethodPost, fmt.Sprintf("/timelines/%s/export", timelineID), map[string]any{
+			"format": "ics",
+		}, token))
+		require.Equal(t, http.StatusOK, w.Code)
+		assert.Equal(t, "text/calendar; charset=utf-8", w.Header().Get("Content-Type"))
+		assert.Contains(t, w.Header().Get("Content-Disposition"), ".ics")
 
-func TestExportPost_ICS_ContainsActivities(t *testing.T) {
-	srv, token, _, timelineID := exportTestSetup(t)
+		body := w.Body.String()
+		assert.Contains(t, body, "BEGIN:VCALENDAR")
+		assert.Contains(t, body, "SUMMARY:Alpha")
+		assert.Contains(t, body, "SUMMARY:Beta")
+	})
 
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, authReq(http.MethodPost, fmt.Sprintf("/timelines/%s/export", timelineID), map[string]any{
-		"format": "ics",
-	}, token))
-	require.Equal(t, http.StatusOK, w.Code)
-	assert.Equal(t, "text/calendar; charset=utf-8", w.Header().Get("Content-Type"))
-	assert.Contains(t, w.Header().Get("Content-Disposition"), ".ics")
-
-	body := w.Body.String()
-	assert.Contains(t, body, "BEGIN:VCALENDAR")
-	assert.Contains(t, body, "SUMMARY:Alpha")
-	assert.Contains(t, body, "SUMMARY:Beta")
-}
-
-func TestExportPost_FilterAppliesServerSide(t *testing.T) {
-	srv, token, _, timelineID := exportTestSetup(t)
-
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, authReq(http.MethodPost, fmt.Sprintf("/timelines/%s/export", timelineID), map[string]any{
-		"format": "csv",
-		"viewConfig": map[string]any{
-			"filter": map[string]any{
-				"logic":      "and",
-				"conditions": []map[string]any{{"field": "title", "op": "equals", "value": "Alpha"}},
+	t.Run("PostCSV_FilterAppliesServerSide", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, authReq(http.MethodPost, fmt.Sprintf("/timelines/%s/export", timelineID), map[string]any{
+			"format": "csv",
+			"viewConfig": map[string]any{
+				"filter": map[string]any{
+					"logic":      "and",
+					"conditions": []map[string]any{{"field": "title", "op": "equals", "value": "Alpha"}},
+				},
 			},
-		},
-	}, token))
-	require.Equal(t, http.StatusOK, w.Code)
+		}, token))
+		require.Equal(t, http.StatusOK, w.Code)
 
-	records, err := csv.NewReader(strings.NewReader(w.Body.String())).ReadAll()
-	require.NoError(t, err)
-	require.Len(t, records, 2) // header + 1 activity
-	assert.Equal(t, "Alpha", records[1][0])
-}
+		records, err := csv.NewReader(strings.NewReader(w.Body.String())).ReadAll()
+		require.NoError(t, err)
+		require.Len(t, records, 2) // header + 1 activity
+		assert.Equal(t, "Alpha", records[1][0])
+	})
 
-func TestExportPost_InvalidFormat(t *testing.T) {
-	srv, token, _, timelineID := exportTestSetup(t)
+	t.Run("PostInvalidFormat", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, authReq(http.MethodPost, fmt.Sprintf("/timelines/%s/export", timelineID), map[string]any{
+			"format": "pdf",
+		}, token))
+		assert.Equal(t, http.StatusBadRequest, w.Code)
+	})
 
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, authReq(http.MethodPost, fmt.Sprintf("/timelines/%s/export", timelineID), map[string]any{
-		"format": "pdf",
-	}, token))
-	assert.Equal(t, http.StatusBadRequest, w.Code)
-}
+	t.Run("PostUnauthenticated", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/timelines/%s/export", timelineID), strings.NewReader(`{"format":"csv"}`))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, req)
+		assert.Equal(t, http.StatusUnauthorized, w.Code)
+	})
 
-func TestExportPost_Unauthenticated(t *testing.T) {
-	srv, _, _, timelineID := exportTestSetup(t)
+	t.Run("GetCSV_Convenience", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, authReq(http.MethodGet, fmt.Sprintf("/teams/%s/timelines/%s/export.csv", teamID, timelineID), nil, token))
+		require.Equal(t, http.StatusOK, w.Code)
 
-	req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/timelines/%s/export", timelineID), strings.NewReader(`{"format":"csv"}`))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-	assert.Equal(t, http.StatusUnauthorized, w.Code)
-}
+		records, err := csv.NewReader(strings.NewReader(w.Body.String())).ReadAll()
+		require.NoError(t, err)
+		require.Len(t, records, 3)
+	})
 
-func TestExportGet_CSV_Convenience(t *testing.T) {
-	srv, token, teamID, timelineID := exportTestSetup(t)
+	var savedFilterID string
+	t.Run("GetCSV_WithSavedFilter", func(t *testing.T) {
+		// Create a saved filter that only matches "Alpha".
+		wF := httptest.NewRecorder()
+		srv.ServeHTTP(wF, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/saved_filters", teamID), map[string]any{
+			"name":       "Only Alpha",
+			"definition": `{"logic":"and","conditions":[{"field":"title","op":"equals","value":"Alpha"}]}`,
+		}, token))
+		require.Equal(t, http.StatusCreated, wF.Code)
+		var saved map[string]any
+		require.NoError(t, json.NewDecoder(wF.Body).Decode(&saved))
+		savedFilterID = saved["id"].(string)
 
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, authReq(http.MethodGet, fmt.Sprintf("/teams/%s/timelines/%s/export.csv", teamID, timelineID), nil, token))
-	require.Equal(t, http.StatusOK, w.Code)
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, authReq(http.MethodGet, fmt.Sprintf("/teams/%s/timelines/%s/export.csv?filter=%s", teamID, timelineID, savedFilterID), nil, token))
+		require.Equal(t, http.StatusOK, w.Code)
 
-	records, err := csv.NewReader(strings.NewReader(w.Body.String())).ReadAll()
-	require.NoError(t, err)
-	require.Len(t, records, 3)
-}
+		records, err := csv.NewReader(strings.NewReader(w.Body.String())).ReadAll()
+		require.NoError(t, err)
+		require.Len(t, records, 2)
+		assert.Equal(t, "Alpha", records[1][0])
+	})
 
-func TestExportGet_WithSavedFilter(t *testing.T) {
-	srv, token, teamID, timelineID := exportTestSetup(t)
+	t.Run("GetCSV_UnknownSavedFilter", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, authReq(http.MethodGet, fmt.Sprintf("/teams/%s/timelines/%s/export.csv?filter=nope", teamID, timelineID), nil, token))
+		assert.Equal(t, http.StatusBadRequest, w.Code)
+	})
 
-	// Create a saved filter that only matches "Alpha".
-	wF := httptest.NewRecorder()
-	srv.ServeHTTP(wF, authReq(http.MethodPost, fmt.Sprintf("/teams/%s/saved_filters", teamID), map[string]any{
-		"name":       "Only Alpha",
-		"definition": `{"logic":"and","conditions":[{"field":"title","op":"equals","value":"Alpha"}]}`,
-	}, token))
-	require.Equal(t, http.StatusCreated, wF.Code)
-	var saved map[string]any
-	require.NoError(t, json.NewDecoder(wF.Body).Decode(&saved))
-	filterID := saved["id"].(string)
+	// Archives the timeline — must run last, the prior subtests depend on it being live.
+	t.Run("GetCSV_ArchivedTimeline_NotFound", func(t *testing.T) {
+		wArchive := httptest.NewRecorder()
+		srv.ServeHTTP(wArchive, authReq(http.MethodPost, fmt.Sprintf("/timelines/%s/archive", timelineID), nil, token))
+		require.Equal(t, http.StatusOK, wArchive.Code)
 
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, authReq(http.MethodGet, fmt.Sprintf("/teams/%s/timelines/%s/export.csv?filter=%s", teamID, timelineID, filterID), nil, token))
-	require.Equal(t, http.StatusOK, w.Code)
-
-	records, err := csv.NewReader(strings.NewReader(w.Body.String())).ReadAll()
-	require.NoError(t, err)
-	require.Len(t, records, 2)
-	assert.Equal(t, "Alpha", records[1][0])
-}
-
-func TestExportGet_UnknownSavedFilter(t *testing.T) {
-	srv, token, teamID, timelineID := exportTestSetup(t)
-
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, authReq(http.MethodGet, fmt.Sprintf("/teams/%s/timelines/%s/export.csv?filter=nope", teamID, timelineID), nil, token))
-	assert.Equal(t, http.StatusBadRequest, w.Code)
-}
-
-func TestExportGet_ArchivedTimeline_NotFound(t *testing.T) {
-	srv, token, teamID, timelineID := exportTestSetup(t)
-
-	wArchive := httptest.NewRecorder()
-	srv.ServeHTTP(wArchive, authReq(http.MethodPost, fmt.Sprintf("/timelines/%s/archive", timelineID), nil, token))
-	require.Equal(t, http.StatusOK, wArchive.Code)
-
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, authReq(http.MethodGet, fmt.Sprintf("/teams/%s/timelines/%s/export.csv", teamID, timelineID), nil, token))
-	assert.Equal(t, http.StatusNotFound, w.Code)
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, authReq(http.MethodGet, fmt.Sprintf("/teams/%s/timelines/%s/export.csv", teamID, timelineID), nil, token))
+		assert.Equal(t, http.StatusNotFound, w.Code)
+	})
 }
