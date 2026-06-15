@@ -199,7 +199,7 @@ export default function GanttToolbar({
 
       <div className="flex-1" />
 
-      <button className={ctrlBtn} onClick={onExport} title="Export activities (coming soon)">
+      <button className={ctrlBtn} onClick={onExport} title="Export activities">
         <Download size={13} strokeWidth={1.8} />
         Export
       </button>

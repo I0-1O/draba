@@ -1034,6 +1034,86 @@ export interface paths {
         patch: operations["updateStatus"];
         trace?: never;
     };
+    "/timelines/{id}/export": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Export a timeline's activities as CSV, xlsx, or ICS
+         * @description Streams the exported file with Content-Disposition: attachment. The frozen filter (if any) is evaluated server-side; an omitted viewConfig exports the whole timeline. Synchronous for v1.
+         */
+        post: operations["exportTimeline"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/teams/{id}/timelines/{timelineId}/export.csv": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Download a timeline's activities as CSV
+         * @description Convenience GET for CLI/scripting. `?filter=<savedFilterId>` resolves a saved filter server-side; omitted exports the whole timeline.
+         */
+        get: operations["exportTimelineCSV"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/teams/{id}/timelines/{timelineId}/export.xlsx": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Download a timeline's activities as xlsx
+         * @description Convenience GET for CLI/scripting. `?filter=<savedFilterId>` resolves a saved filter server-side; omitted exports the whole timeline.
+         */
+        get: operations["exportTimelineXLSX"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/teams/{id}/timelines/{timelineId}/export.ics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Download a static ICS file of a timeline's activities
+         * @description Convenience GET for CLI/scripting. `?filter=<savedFilterId>` resolves a saved filter server-side; omitted exports the whole timeline. Unlike the live share feed, this is a static, authenticated, one-time download.
+         */
+        get: operations["exportTimelineICS"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/timelines/{id}/shares": {
         parameters: {
             query?: never;
@@ -1661,6 +1741,20 @@ export interface components {
             viewConfig?: string;
             /** @description Optional password. When set, the share is locked and requires unlocking via POST /shares/{token}/unlock. Never returned in any response. */
             password?: string | null;
+        };
+        ExportRequest: {
+            /**
+             * @description The exported file format.
+             * @enum {string}
+             */
+            format: "csv" | "xlsx" | "ics";
+            /** @description Frozen view state captured by the export dialog. An omitted viewConfig (or an omitted/empty filter) exports the whole timeline; otherwise the filter is evaluated server-side and only matching activities are exported. */
+            viewConfig?: {
+                /** @description A FilterDefinition (`{ logic, conditions }`), matching the shape used by saved filters and share view configs. */
+                filter?: {
+                    [key: string]: unknown;
+                } | null;
+            } | null;
         };
         PatchShareInput: {
             name?: string | null;
@@ -4282,6 +4376,139 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Status"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    exportTimeline: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Timeline ID. */
+                id: components["parameters"]["timelineId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ExportRequest"];
+            };
+        };
+        responses: {
+            /** @description The exported file. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/csv": string;
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": string;
+                    "text/calendar": string;
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    exportTimelineCSV: {
+        parameters: {
+            query?: {
+                /** @description Saved filter ID to evaluate server-side. */
+                filter?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Team ID. */
+                id: components["parameters"]["teamId"];
+                /** @description Timeline ID (nested under team). */
+                timelineId: components["parameters"]["timelineIdNested"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The exported CSV file. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/csv": string;
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    exportTimelineXLSX: {
+        parameters: {
+            query?: {
+                /** @description Saved filter ID to evaluate server-side. */
+                filter?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Team ID. */
+                id: components["parameters"]["teamId"];
+                /** @description Timeline ID (nested under team). */
+                timelineId: components["parameters"]["timelineIdNested"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The exported xlsx file. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": string;
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    exportTimelineICS: {
+        parameters: {
+            query?: {
+                /** @description Saved filter ID to evaluate server-side. */
+                filter?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Team ID. */
+                id: components["parameters"]["teamId"];
+                /** @description Timeline ID (nested under team). */
+                timelineId: components["parameters"]["timelineIdNested"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The exported ICS file. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/calendar": string;
                 };
             };
             400: components["responses"]["BadRequest"];

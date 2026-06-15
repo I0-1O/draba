@@ -263,10 +263,10 @@ export default function KanbanToolbar({
         Hierarchy
       </button>
 
-      {/* Stubs — pushed to the right */}
+      {/* Export + share — pushed to the right */}
       <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
         <div className={divider} />
-        <button className={btn} onClick={onExport} title="Export (coming soon)">
+        <button className={btn} onClick={onExport} title="Export activities">
           <Download size={12} strokeWidth={1.8} />
           Export
         </button>

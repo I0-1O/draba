@@ -28,7 +28,7 @@ import { usePreferences, usePreferenceMap, useUpsertPreference } from '@/hooks/u
 import { Settings, Moon, Sun, LogOut } from 'lucide-react'
 import { Badge } from '@/components/identity/Badge'
 import type { Identity } from '@/components/identity/identity-constants'
-import { useMyTeams, useTeamTimelines, useTeamTimelinesWithArchived, useTeamActivitySync, useUnarchiveTeam, useUnarchiveTimeline, useTeamMembers } from '@/hooks/useTeamActivities'
+import { useMyTeams, useTeamTimelines, useTeamTimelinesWithArchived, useTeamActivitySync, useUnarchiveTeam, useUnarchiveTimeline, useTeamMembers, useTimelineActivities } from '@/hooks/useTeamActivities'
 import { useTimelineStatuses } from '@/hooks/useStatusTemplates'
 import { useSavedFilters } from '@/hooks/useSavedFilters'
 import { useTags } from '@/hooks/useTags'
@@ -38,6 +38,8 @@ import TimelineModal from '@/components/TimelineModal'
 import FilterManageModal from '@/components/filters/FilterManageModal'
 import ShareModal from '@/components/ShareModal'
 import CalendarShareModal from '@/components/CalendarShareModal'
+import ExportDialog from '@/components/ExportDialog'
+import { matchesFilter } from '@/lib/filterEngine'
 import { useNavigate } from 'react-router-dom'
 import type { components } from '@draba/shared'
 import type { Member } from '@/types'
@@ -82,6 +84,7 @@ function DashboardShell() {
   const [createDefaults, setCreateDefaults] = useState<{ start: string; end: string; memberId: string | null; statusId?: string | null } | null>(null)
   const [filterModalOpen, setFilterModalOpen] = useState(false)
   const [shareModalOpen, setShareModalOpen] = useState(false)
+  const [exportDialogOpen, setExportDialogOpen] = useState(false)
   // Calendar gets its own share surface — an ICS feed configurator, not the
   // active-links list (Phase 13.4).
   const [calendarShareModalOpen, setCalendarShareModalOpen] = useState(false)
@@ -263,6 +266,25 @@ function DashboardShell() {
     if (!sf) return null
     try { return JSON.parse(sf.definition) as import('@/lib/filterTypes').FilterDefinition } catch { return null }
   }, [activeFilter, savedFilters])
+
+  // Unbounded activity list for the active timeline — used by the export
+  // dialog's filter-context strip and "scope" counts. Cached separately from
+  // each view's (possibly date-bounded) activity query.
+  const { data: allActivities = [] } = useTimelineActivities(teamId, activeTimelineId ?? '')
+
+  // Export dialog inputs: a human-readable filter label (only saved filters
+  // produce a server-evaluable FilterDefinition, same constraint as Share),
+  // and matched/total activity counts for the scope picker.
+  const exportFilterInfo = useMemo(() => {
+    const totalCount = allActivities.length
+    if (activeFilter.kind === 'saved' && activeShareFilter) {
+      const saved = savedFilters.find(f => f.id === activeFilter.id)
+      const statusesByTimeline = new Map(activeTimelineId ? [[activeTimelineId, activeTimelineStatuses]] as const : [])
+      const filteredCount = allActivities.filter(a => matchesFilter(a, activeShareFilter, { statusesByTimeline, tags })).length
+      return { filterLabel: saved?.name ?? 'Saved filter', filterDefinition: activeShareFilter, filteredCount, totalCount }
+    }
+    return { filterLabel: null, filterDefinition: null, filteredCount: totalCount, totalCount }
+  }, [allActivities, activeFilter, activeShareFilter, savedFilters, activeTimelineId, activeTimelineStatuses, tags])
 
   // Close the activity detail panel whenever the active filter changes so the
   // filtered view is unobstructed by a stale selection.
@@ -590,7 +612,7 @@ function DashboardShell() {
             onGranularityChange={setGranularity}
             colorBy={colorBy}
             onColorByChange={setColorBy}
-            onExport={() => {}}
+            onExport={() => setExportDialogOpen(true)}
             onShare={() => setShareModalOpen(true)}
           />
         )}
@@ -612,7 +634,7 @@ function DashboardShell() {
             onSortByChange={setListSortBy}
             colorBy={listColorBy}
             onColorByChange={setListColorBy}
-            onExport={() => {}}
+            onExport={() => setExportDialogOpen(true)}
             onShare={() => setShareModalOpen(true)}
           />
         )}
@@ -628,7 +650,7 @@ function DashboardShell() {
             onToday={calendarToday}
             colorBy={colorBy}
             onColorByChange={setColorBy}
-            onExport={() => {}}
+            onExport={() => setExportDialogOpen(true)}
             onShare={() => setCalendarShareModalOpen(true)}
           />
         )}
@@ -646,7 +668,7 @@ function DashboardShell() {
             onCardFieldsChange={setKanbanCardFields}
             showHierarchy={kanbanShowHierarchy}
             onShowHierarchyChange={setKanbanShowHierarchy}
-            onExport={() => {}}
+            onExport={() => setExportDialogOpen(true)}
             onShare={() => setShareModalOpen(true)}
           />
         )}
@@ -890,6 +912,21 @@ function DashboardShell() {
                 }
           }
           onClose={() => setShareModalOpen(false)}
+        />
+      )}
+
+      {/* Export dialog — download the active view as CSV/Excel/ICS */}
+      {exportDialogOpen && activeTimelineId && teamId && (
+        <ExportDialog
+          view={view}
+          teamId={teamId}
+          timelineId={activeTimelineId}
+          timelineName={activeTimelineName}
+          filterLabel={exportFilterInfo.filterLabel}
+          filterDefinition={exportFilterInfo.filterDefinition}
+          filteredCount={exportFilterInfo.filteredCount}
+          totalCount={exportFilterInfo.totalCount}
+          onClose={() => setExportDialogOpen(false)}
         />
       )}
 

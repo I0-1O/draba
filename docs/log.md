@@ -2,6 +2,30 @@
 
 ---
 
+## 2026-06-15 — Phase 14.1: Foundation + data exports
+
+**Goal:** server-side CSV/xlsx/ICS export of timeline activities behind a single `ExportDialog`, reachable from all four view toolbars (Gantt/List/Kanban/Calendar). Frozen filter (saved filters only) evaluated server-side via the Phase 13 Go `matchesFilter` port; columns match the Phase 15 import template.
+
+**Backend (`packages/api`):**
+- New `internal/export` package: `Row`/`Columns`/`BuildRows` project activities (with IDs resolved to display names) into the export schema (Title, Start, End, Description, Status, Assignees, Tags, Parent, Progress, Location, URL); `WriteCSV` (encoding/csv) and `WriteXLSX` (excelize) writers.
+- `POST /timelines/{id}/export` (`handlePostTimelineExport`) — `{ format: csv|xlsx|ics, viewConfig?: { filter } }`; applies the frozen filter via `matchesFilter` before building rows; streams the file with `Content-Disposition: attachment` and a generated filename.
+- `GET /teams/{id}/timelines/{timelineId}/export.csv|.xlsx|.ics?filter=<savedFilterId>` convenience routes (10.4.6 hook) for CLI/scripting; ICS reuses the 13.4 whole-timeline feed generator.
+- OpenAPI spec updated for the new endpoints; TS types regenerated.
+- New tests for `internal/export` (row projection, CSV/xlsx output) and the export handlers (filter application, format dispatch, convenience GET routes).
+
+**Frontend (`packages/web`):**
+- `lib/exportCapabilities.ts` — `ExportFormatDescriptor` registry (CSV/Excel/ICS for 14.1; Markdown/text/PNG/printable land in 14.2–14.4 additively) + `buildExportFilename`.
+- `ExportDialog.tsx` — portal modal per the [export-modal design handoff](design/handoffs/export-modal/design_handoff_export_modal/README.md): header, filter-context strip ("Filtered: **<name>**" with live counts, or "Exporting the <View> view as you see it"), format rail + options pane, scope picker (Current view vs. Entire timeline), filename chip, Download/Downloading/Downloaded footer button. Overlay click does not close (Esc/Cancel/X only), unlike `ShareModal`.
+- `useExport` hook + `apiFetchBlob`/`createAuthFetchBlob` (api.ts) — blob-download with the same 401-silent-refresh retry as `apiFetch`; `saveBlob` triggers the browser download via a temporary `<a download>`.
+- Wired into `DashboardPage.tsx`: all four toolbars' `onExport` now open `ExportDialog`; filter/count context derived from `activeShareFilter` (only `'saved'` filters produce a server-evaluable `FilterDefinition`, matching the Share modal's constraint) plus a new unbounded `useTimelineActivities` query for live counts via `matchesFilter`.
+- Removed "(coming soon)" titles/disabled state from the Export buttons in all four toolbars (`GanttToolbar`, `ListToolbar`, `CalendarToolbar`, `KanbanToolbar`).
+
+**Verified in browser** (dev server against Docker backend): logged in, opened the List view, clicked Export — dialog renders correctly (header, filter strip showing "All 10 activities", CSV/Excel/ICS format rail, scope picker, filename chip `sales-kick-off-2026-06-15.csv`); switching to "Calendar (.ics)" updates the heading, description, and filename live. Triggering the actual download returned `405 Method Not Allowed` from the Docker test backend — that container is running a pre-14.1 binary without the new `POST /timelines/{id}/export` route, so the live download round-trip needs a Docker rebuild/redeploy to verify. All client-side dialog behavior is confirmed working.
+
+**Checks:** `golangci-lint run` ✅ · `go test ./...` ✅ · `pnpm --filter web lint` ✅ · `pnpm --filter web build` ✅.
+
+---
+
 ## 2026-06-11 — /review-phase 13.5: findings addressed
 
 Four-agent review (scope / security / conventions / test-coverage) of the 13.5 commit range. Security and conventions came back clean; fixes applied for the rest:

@@ -90,6 +90,34 @@ export async function apiFetch<T>(
   return res.json() as Promise<T>
 }
 
+/** Extracts the filename from a Content-Disposition header, if present. */
+function filenameFromContentDisposition(header: string | null): string | null {
+  if (!header) return null
+  const match = /filename="?([^";]+)"?/.exec(header)
+  return match ? match[1] : null
+}
+
+/** Low-level fetch for binary responses (file downloads). Throws ApiError on non-2xx. */
+export async function apiFetchBlob(
+  path: string,
+  init: RequestInit & { accessToken?: string } = {},
+): Promise<{ blob: Blob; filename: string | null }> {
+  const { accessToken, ...rest } = init
+  const headers = new Headers(rest.headers)
+  headers.set('Content-Type', 'application/json')
+  if (accessToken) {
+    headers.set('Authorization', `Bearer ${accessToken}`)
+  }
+
+  const res = await fetch(`${API_BASE}${path}`, { ...rest, headers })
+
+  if (!res.ok) {
+    throw await parseError(res)
+  }
+
+  return { blob: await res.blob(), filename: filenameFromContentDisposition(res.headers.get('Content-Disposition')) }
+}
+
 // ── Silent refresh ───────────────────────────────────────────────────────────
 
 /**
@@ -135,6 +163,22 @@ export function createAuthFetch(getToken: () => string | null) {
         if (!newToken) throw err
         // Retry with the freshly-issued token.
         return apiFetch<T>(path, { ...init, accessToken: newToken })
+      }
+      throw err
+    }
+  }
+}
+
+/** Same silent-refresh behavior as createAuthFetch, for binary (blob) responses. */
+export function createAuthFetchBlob(getToken: () => string | null) {
+  return async function authFetchBlob(path: string, init: RequestInit = {}): Promise<{ blob: Blob; filename: string | null }> {
+    try {
+      return await apiFetchBlob(path, { ...init, accessToken: getToken() ?? undefined })
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401 && _silentRefresh) {
+        const newToken = await doSilentRefresh()
+        if (!newToken) throw err
+        return apiFetchBlob(path, { ...init, accessToken: newToken })
       }
       throw err
     }

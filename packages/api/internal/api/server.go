@@ -263,6 +263,19 @@ func (s *Server) Routes() http.Handler {
 	// default the calendar name from the URL filename); the token is the key.
 	mux.HandleFunc("GET /shares/{token}/{file}", s.handleGetShareICSNamed)
 
+	// Export routes (Phase 14.1).
+	// POST /timelines/{id}/export shares the /timelines/{id}/... prefix with
+	// archive/unarchive/shares — fine, since only GET-method paths conflict
+	// with GET /timelines/share/{token}.
+	// The GET convenience endpoints use the team-scoped prefix (like
+	// activities/statuses/access above) to avoid that same GET conflict:
+	// /teams/{id}/timelines/{timelineId}/export.csv is 4 segments, so it
+	// can't collide with the 3-segment GET /timelines/share/{token}.
+	mux.HandleFunc("POST /timelines/{id}/export", chain(s.handlePostTimelineExport, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/export.csv", chain(s.handleGetTimelineExportCSV, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/export.xlsx", chain(s.handleGetTimelineExportXLSX, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/export.ics", chain(s.handleGetTimelineExportICS, s.authMiddleware))
+
 	// GET /ws is intentionally outside authMiddleware — ServeWS validates the
 	// JWT itself before upgrading, because WebSocket clients can't set headers.
 	mux.HandleFunc("GET /ws", s.hub.ServeWS)

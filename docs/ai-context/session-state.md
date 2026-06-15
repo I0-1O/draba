@@ -2,7 +2,7 @@
 
 _Updated after each significant work session. Read this first to orient — it is intentionally short. Per-phase implementation detail lives in [docs/log.md](../log.md); this file is a current-state snapshot only._
 
-**Last updated:** 2026-06-11 (`/review-phase 13.5` findings addressed: frontend tests for the chip/last-viewed/refetch paths, orphaned-share 404 hardening, unlock-surface scope acknowledgement. Earlier same day: 13.5 built and verified — Phase 13 is now fully built.)
+**Last updated:** 2026-06-15 (Phase 14.1 — Foundation + data exports — built and passing all automated checks; ExportDialog verified in browser. Live download round-trip needs Docker rebuild.)
 
 ---
 
@@ -12,9 +12,11 @@ _Updated after each significant work session. Read this first to orient — it i
 
 **Phase 13 (13.1–13.5) is fully built and passes all automated checks.** 13.1 Shares MVP, 13.2 modal overhaul + password, 13.3 List + Kanban read-only, 13.4 Calendar ICS feeds, and 13.5 lifecycle tail (archived timeline → shares/feeds `404`, reversible; `Timeline.shareCount` chip on the tile; last-viewed in the modal + `useListShares` refetch-on-open). 13.5 was additionally verified live against a local seeded API. Awaiting Docker verification as a batch. Detail in [log.md](../log.md).
 
+**Phase 14.1 (Export — Foundation + data exports) is built and passes all automated checks.** `POST /timelines/:id/export` (CSV/xlsx/ICS, frozen-filter eval via `matchesFilter`) + convenience `GET .../export.csv|.xlsx|.ics?filter=`; `ExportDialog` wired into all four view toolbars. Browser-verified for dialog rendering/format switching; the actual download 405s against the current Docker test backend (pre-14.1 binary) — needs Docker rebuild to verify the live round-trip. Detail in [log.md](../log.md).
+
 | Next phase | Scope | Plan |
 |------------|-------|------|
-| **14** | Export — re-planned 2026-06-11 into four pausable sub-phases: 14.1 data (CSV/xlsx/ICS, server, API-first, Go filter eval) + ExportDialog; 14.2 textual (Markdown/text/rich clipboard, client); 14.3 PNG snapshot (DOM rasterization); 14.4 printable views (vector PDF via browser print). **gofpdf/Chromium dropped** — visuals render client-side. Open questions resolved (sync v1, filter-only) | [docs/plans/phase-14-export.md](../plans/phase-14-export.md) |
+| **14.2** | Textual exports (client): Markdown (GFM table / Kanban section-per-column / Calendar agenda list), plain text, copy-to-clipboard with `text/plain` + `text/html` flavors | [docs/plans/phase-14-export.md](../plans/phase-14-export.md) |
 
 **Phase 13 back-half re-sequenced (2026-06-05):** 13.2 = share-modal overhaul + password (pulled forward); 13.3 = List + Kanban read-only; 13.4 = Calendar **ICS feed** sharing (whole-timeline or per-member, token-as-secret, no password/filter — a different model from view-shares); 13.5 = lifecycle tail (expiry, tile chip). The handoff design lives in [`docs/design/handoffs/share-modal/`](../design/handoffs/share-modal/design_handoff_share_modal/README.md). See [ROADMAP re-sequencing note](../ROADMAP.md#phase-13--shares--multi-share-views-with-passwords) and [plan §13.2 overhaul](../plans/phase-13-shares.md#the-share-module-overhaul-132).
 
@@ -22,7 +24,7 @@ _Updated after each significant work session. Read this first to orient — it i
 
 ## Open Issues
 
-None surfaced. Manual verification items for 10.4.6, 11.1, 11.1.1, 11.1.2, 11.2, 11.3, 12, and 13.1–13.5 tracked in TASKS.md — 13.4's headline item (subscribe from a real Google/Apple calendar) additionally needs the feed URL reachable by Google's fetcher, not just the LAN.
+Manual verification items for 10.4.6, 11.1, 11.1.1, 11.1.2, 11.2, 11.3, 12, and 13.1–13.5 tracked in TASKS.md — 13.4's headline item (subscribe from a real Google/Apple calendar) additionally needs the feed URL reachable by Google's fetcher, not just the LAN. 14.1's `POST /timelines/:id/export` 405s on the Docker test backend (stale pre-14.1 binary) — rebuild/redeploy the container, then re-test the download from `ExportDialog` (CSV/Excel/ICS, both scopes).
 
 (Process backlog — e.g. revisiting `repomap.md` generation vs. Graphify after Phase 13 lands — now lives in the [TASKS.md Parking Lot](../TASKS.md#parking-lot), where it stays visible across sessions instead of aging out of this snapshot.)
 

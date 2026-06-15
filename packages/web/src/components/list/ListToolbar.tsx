@@ -53,6 +53,7 @@ export default function ListToolbar({
   onSortByChange: _onSortByChange,
   colorBy,
   onColorByChange,
+  onExport,
   onShare,
 }: Props) {
   const [colMenuOpen, setColMenuOpen] = useState(false);
@@ -168,11 +169,7 @@ export default function ListToolbar({
 
       <div className="flex-1" />
 
-      <button
-        className={cn(ctrlBtn, 'opacity-40 cursor-not-allowed')}
-        disabled
-        title="Coming soon"
-      >
+      <button className={ctrlBtn} onClick={onExport} title="Export activities">
         <Download size={13} strokeWidth={1.8} />
         Export
       </button>

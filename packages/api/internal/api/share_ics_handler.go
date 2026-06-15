@@ -189,6 +189,19 @@ func (s *Server) buildICSFeed(share *models.Share) (string, error) {
 		}
 	}
 
+	// A member feed is one person's calendar — repeating their name on every
+	// event is noise. The whole-timeline feed is the team overview, where
+	// who-owns-what belongs in the month grid.
+	events := activitiesToICSEvents(acts, memberName, tagName, statusName, !memberScoped)
+	return ics.Calendar(name, events), nil
+}
+
+// activitiesToICSEvents projects activities into iCalendar VEVENTs. Each
+// event's DESCRIPTION carries structured field lines (status + percent
+// complete, assignee display names, tag names) followed by the free-text
+// activity description; CATEGORIES carries tag names. If
+// includeAssigneesInSummary is set, assignee names are appended to SUMMARY.
+func activitiesToICSEvents(acts []*models.Activity, memberName, tagName, statusName map[string]string, includeAssigneesInSummary bool) []ics.Event {
 	events := make([]ics.Event, 0, len(acts))
 	for _, a := range acts {
 		assignees := make([]string, 0, len(a.AssignedMemberIDs))
@@ -205,10 +218,7 @@ func (s *Server) buildICSFeed(share *models.Share) (string, error) {
 		}
 
 		summary := a.Title
-		// A member feed is one person's calendar — repeating their name on
-		// every event is noise. The whole-timeline feed is the team overview,
-		// where who-owns-what belongs in the month grid.
-		if !memberScoped && len(assignees) > 0 {
+		if includeAssigneesInSummary && len(assignees) > 0 {
 			summary += " — " + strings.Join(assignees, ", ")
 		}
 
@@ -250,7 +260,7 @@ func (s *Server) buildICSFeed(share *models.Share) (string, error) {
 			Stamp:       a.UpdatedAt,
 		})
 	}
-	return ics.Calendar(name, events), nil
+	return events
 }
 
 // handleGetShareICSNamed handles GET /shares/{token}/{file}. The file segment

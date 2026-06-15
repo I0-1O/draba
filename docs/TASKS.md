@@ -1229,12 +1229,12 @@ First-class Share entity. One timeline can host many shares, each frozen to a sp
 _Re-planned 2026-06-11 — see [docs/plans/phase-14-export.md](plans/phase-14-export.md). Visual exports are now client-side (no gofpdf, no Chromium); "PDF" is a printable route the user prints to vector PDF from their browser. Import bullets moved to [Phase 15 — Import](ROADMAP.md#phase-15--import--tabular)._
 
 **14.1 Foundation + data exports (server, API-first):**
-- [ ] `POST /timelines/:id/export` — `{ format: csv|xlsx|ics, viewConfig? }`; frozen filter evaluated via the Phase 13 Go `matchesFilter` port; streams file, sync for v1
-- [ ] `GET /timelines/:id/export.csv|.xlsx|.ics?filter=<savedFilterId>` — convenience GET for CLI/scripting (10.4.6 hook)
-- [ ] CSV/xlsx columns match the Phase 15 import template (round-trip holds)
-- [ ] Static `.ics` download — reuse the 13.4 feed generator, authenticated, `Content-Disposition: attachment`
-- [ ] `ExportDialog` (single dialog, all views) + per-view capability descriptor (`lib/exportCapabilities.ts`) — per the [export-modal design handoff](design/handoffs/export-modal/design_handoff_export_modal/README.md)
-- [ ] Wire into the Gantt toolbar Export stub + 11.1 / 11.2 / 11.3 toolbar slots, formats scoped per view
+- [x] `POST /timelines/:id/export` — `{ format: csv|xlsx|ics, viewConfig? }`; frozen filter evaluated via the Phase 13 Go `matchesFilter` port; streams file, sync for v1
+- [x] `GET /timelines/:id/export.csv|.xlsx|.ics?filter=<savedFilterId>` — convenience GET for CLI/scripting (10.4.6 hook)
+- [x] CSV/xlsx columns match the Phase 15 import template (round-trip holds)
+- [x] Static `.ics` download — reuse the 13.4 feed generator, authenticated, `Content-Disposition: attachment`
+- [x] `ExportDialog` (single dialog, all views) + per-view capability descriptor (`lib/exportCapabilities.ts`) — per the [export-modal design handoff](design/handoffs/export-modal/design_handoff_export_modal/README.md)
+- [x] Wire into the Gantt toolbar Export stub + 11.1 / 11.2 / 11.3 toolbar slots, formats scoped per view
 
 **14.2 Textual exports (client):**
 - [ ] Markdown: GFM table (List), section-per-column (Kanban), agenda list (Calendar); header block with team / timeline / generated-at / filter description

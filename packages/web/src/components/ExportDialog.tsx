@@ -1,0 +1,253 @@
+/**
+ * ExportDialog — "Export this view" modal (Phase 14.1).
+ *
+ * Built to the export-modal design handoff (docs/design/handoffs/export-modal):
+ * a format rail + options pane two-pane body, a filter context strip that
+ * makes "export what I'm seeing" visible, and a scope picker (current view vs
+ * entire timeline) for the data formats. Modeled on ShareModal's portal shell,
+ * but — per the handoff — the overlay click does not close the dialog, only
+ * Esc / the close button / Cancel do.
+ *
+ * 14.1 implements only the data/calendar formats (CSV, Excel, ICS), all with
+ * verb "download"; copy/print formats (Markdown, plain text, PNG, printable
+ * view) land in 14.2-14.4 and will appear automatically once added to
+ * lib/exportCapabilities.ts.
+ */
+
+import { useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
+import { FileOutput, Filter, AlertTriangle, Download, FileDown, Check, X } from 'lucide-react'
+import { Button } from '@/components/ui/button'
+import { cn } from '@/lib/utils'
+import { useExport } from '@/hooks/useExport'
+import { getExportFormats, buildExportFilename, type ExportFormatId, type ExportViewType } from '@/lib/exportCapabilities'
+import type { FilterDefinition } from '@/lib/filterTypes'
+
+export interface ExportDialogProps {
+  view: ExportViewType
+  teamId: string
+  timelineId: string
+  timelineName: string
+  /** Display label for the active filter (e.g. a saved filter's name), or null if no filter is active. */
+  filterLabel: string | null
+  /** The active filter's definition, sent to the server when scope is "view". Null when filterLabel is null. */
+  filterDefinition: FilterDefinition | null
+  /** Number of activities matching the active filter (or totalCount when no filter is active). */
+  filteredCount: number
+  /** Total number of activities in the timeline, regardless of filter. */
+  totalCount: number
+  onClose: () => void
+}
+
+const VIEW_LABELS: Record<ExportViewType, string> = {
+  gantt: 'Gantt',
+  list: 'List',
+  kanban: 'Kanban',
+  calendar: 'Calendar',
+}
+
+type Scope = 'view' | 'all'
+
+export default function ExportDialog({
+  view,
+  timelineId,
+  timelineName,
+  filterLabel,
+  filterDefinition,
+  filteredCount,
+  totalCount,
+  onClose,
+}: ExportDialogProps) {
+  const formats = getExportFormats(view)
+  const [formatId, setFormatId] = useState<ExportFormatId>('csv')
+  const [scope, setScope] = useState<Scope>('view')
+  const [done, setDone] = useState(false)
+  const { download, isPending } = useExport(timelineId, timelineName)
+  const doneTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const format = formats.find(f => f.id === formatId) ?? formats[0]
+  const Icon = format.icon
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  useEffect(() => () => { if (doneTimer.current) clearTimeout(doneTimer.current) }, [])
+
+  const selectFormat = (id: ExportFormatId) => {
+    setFormatId(id)
+    setDone(false)
+  }
+
+  const handleDownload = () => {
+    void download(format.id, format.ext, {
+      filter: scope === 'view' ? filterDefinition : null,
+    }).then(() => {
+      setDone(true)
+      doneTimer.current = setTimeout(() => setDone(false), 1600)
+    })
+  }
+
+  const emptyView = filteredCount === 0
+  const subWithFilter = filterLabel !== null
+    ? `${filteredCount} of ${totalCount} activities · matches your filter`
+    : `All ${totalCount} activities · nothing filtered out`
+
+  return createPortal(
+    <div className="fixed inset-0 z-[1000] flex items-center justify-center bg-[hsl(200_24%_11%/0.55)] p-6 backdrop-blur-[2px]">
+      <div className="flex max-h-[88vh] w-[min(620px,100%)] flex-col overflow-hidden rounded-[var(--radius-xl)] bg-card shadow-[var(--shadow-lg)]">
+        {/* Header */}
+        <div className="flex shrink-0 items-start gap-3 px-5 py-[18px]">
+          <div className="flex h-[38px] w-[38px] shrink-0 items-center justify-center rounded-[var(--radius-md)] bg-[hsl(188_59%_38%/0.12)] text-primary">
+            <FileOutput size={19} strokeWidth={2.2} />
+          </div>
+          <div className="min-w-0 flex-1">
+            <h2 className="m-0 text-[17px] font-bold leading-tight text-foreground">Export this view</h2>
+            <div className="mt-0.5 flex items-center gap-1.5 text-[12.5px] text-muted-foreground">
+              <span className="inline-block h-2 w-2 shrink-0 rounded-sm bg-secondary" />
+              {timelineName ? `${timelineName} · ` : ''}{VIEW_LABELS[view]} view
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            aria-label="Close"
+            className="flex h-[30px] w-[30px] shrink-0 cursor-pointer items-center justify-center rounded-[var(--radius-md)] border-none bg-muted text-muted-foreground"
+          >
+            <X size={16} strokeWidth={2.2} />
+          </button>
+        </div>
+
+        {/* Filter context strip */}
+        <div className="shrink-0 border-b border-border px-5 pb-[14px]">
+          <div className={cn(
+            'rounded-[var(--radius-lg)] px-3 py-[9px]',
+            emptyView ? 'bg-[color-mix(in_srgb,var(--warning)_13%,transparent)]' : 'bg-muted',
+          )}>
+            <div className="flex items-center gap-2 text-[12.5px]">
+              {emptyView
+                ? <AlertTriangle size={14} className="shrink-0 text-warning" strokeWidth={2} />
+                : <Filter size={14} className="shrink-0 text-muted-foreground" strokeWidth={2} />}
+              <span className="flex-1 text-foreground">
+                {filterLabel !== null
+                  ? <>Filtered: <span className="font-semibold">{filterLabel}</span></>
+                  : `Exporting the ${VIEW_LABELS[view]} view as you see it`}
+              </span>
+              <span className={cn('shrink-0 text-[11.5px] font-semibold', emptyView ? 'text-warning' : 'text-muted-foreground')}>
+                {filterLabel !== null ? `${filteredCount} of ${totalCount} activities` : `All ${totalCount} activities`}
+              </span>
+            </div>
+            {emptyView && (
+              <div className="ml-[22px] mt-1 text-[12px] text-muted-foreground">
+                This view has no activities — the export will be empty or headers-only.
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Body — format rail + options pane */}
+        <div className="flex flex-1 overflow-hidden">
+          <div role="listbox" aria-label="Export format" className="flex w-[196px] shrink-0 flex-col gap-0.5 overflow-y-auto border-r border-border p-2.5">
+            {formats.map(f => {
+              const FIcon = f.icon
+              const selected = f.id === formatId
+              return (
+                <button
+                  key={f.id}
+                  role="option"
+                  aria-selected={selected}
+                  onClick={() => selectFormat(f.id)}
+                  className={cn(
+                    'flex items-center gap-[9px] rounded-[var(--radius-md)] border-none px-[9px] py-2 text-left text-[13px] transition-colors',
+                    selected ? 'bg-[hsl(188_59%_38%/0.1)] text-foreground font-semibold' : 'bg-transparent text-foreground hover:bg-muted',
+                  )}
+                >
+                  <FIcon size={15} strokeWidth={selected ? 2.2 : 1.8} className={selected ? 'shrink-0 text-primary' : 'shrink-0 text-muted-foreground'} />
+                  <span className="flex-1 truncate">{f.name}</span>
+                  <span title="Download" className={cn('shrink-0 text-muted-foreground', selected ? 'opacity-90' : 'opacity-65')}>
+                    <Download size={11} strokeWidth={2} />
+                  </span>
+                </button>
+              )
+            })}
+          </div>
+
+          <div className="flex flex-1 flex-col gap-3.5 overflow-y-auto p-4">
+            {/* Format heading */}
+            <div className="flex items-start gap-2.5">
+              <Icon size={16} strokeWidth={2} className="mt-0.5 shrink-0 text-muted-foreground" />
+              <div>
+                <div className="text-[14px] font-bold text-foreground">{format.name}</div>
+                <div className="mt-0.5 text-[12.5px] leading-[1.5] text-muted-foreground">{format.desc}</div>
+              </div>
+            </div>
+
+            {/* Scope picker */}
+            {format.scope && (
+              <div>
+                <div className="mb-1.5 text-[11px] font-bold uppercase tracking-[0.06em] text-muted-foreground">Activities to export</div>
+                <div className="overflow-hidden rounded-[var(--radius-lg)] border border-border">
+                  <ScopeRow
+                    label="Current view"
+                    sub={subWithFilter}
+                    selected={scope === 'view'}
+                    onSelect={() => setScope('view')}
+                  />
+                  <div className="border-t border-border" />
+                  <ScopeRow
+                    label="Entire timeline"
+                    sub={`All ${totalCount} activities · ignores filters`}
+                    selected={scope === 'all'}
+                    onSelect={() => setScope('all')}
+                  />
+                </div>
+              </div>
+            )}
+
+            {/* Filename chip */}
+            <div>
+              <div className="mb-1.5 text-[11px] font-bold uppercase tracking-[0.06em] text-muted-foreground">File</div>
+              <div className="flex items-center gap-2 rounded-[var(--radius-md)] bg-muted px-[11px] py-[7px] font-mono text-[12px] text-foreground">
+                <FileDown size={13} strokeWidth={2} className="shrink-0 text-muted-foreground" />
+                <span className="truncate">{buildExportFilename(timelineName, format.ext)}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Footer */}
+        <div className="flex shrink-0 items-center justify-end gap-2.5 border-t border-border px-5 py-[13px]">
+          <Button variant="outline" onClick={onClose}>Cancel</Button>
+          <Button onClick={handleDownload} disabled={isPending} className="min-w-[168px] justify-center">
+            {done
+              ? <><Check size={14} strokeWidth={2.2} /> Downloaded</>
+              : <><Download size={14} strokeWidth={2.2} /> {isPending ? 'Downloading…' : `Download ${format.ext}`}</>}
+          </Button>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  )
+}
+
+function ScopeRow({ label, sub, selected, onSelect }: { label: string; sub: string; selected: boolean; onSelect: () => void }) {
+  return (
+    <button
+      onClick={onSelect}
+      className={cn(
+        'flex w-full items-start gap-2.5 px-3 py-2.5 text-left transition-colors',
+        selected ? 'bg-[hsl(188_59%_38%/0.09)]' : 'bg-transparent hover:bg-muted',
+      )}
+    >
+      <span className={cn(
+        'mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border-[1.5px]',
+        selected ? 'border-[5px] border-primary' : 'border-input',
+      )} />
+      <span>
+        <div className="text-[13px] font-semibold text-foreground">{label}</div>
+        <div className="text-[11.5px] text-muted-foreground">{sub}</div>
+      </span>
+    </button>
+  )
+}

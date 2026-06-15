@@ -936,6 +936,31 @@ components:
             unlocking via POST /shares/{token}/unlock. Never returned in any
             response.
 
+    ExportRequest:
+      type: object
+      required: [format]
+      properties:
+        format:
+          type: string
+          enum: [csv, xlsx, ics]
+          description: The exported file format.
+        viewConfig:
+          type: object
+          nullable: true
+          description: >
+            Frozen view state captured by the export dialog. An omitted
+            viewConfig (or an omitted/empty filter) exports the whole
+            timeline; otherwise the filter is evaluated server-side and only
+            matching activities are exported.
+          properties:
+            filter:
+              type: object
+              nullable: true
+              additionalProperties: true
+              description: >
+                A FilterDefinition (`{ logic, conditions }`), matching the
+                shape used by saved filters and share view configs.
+
     PatchShareInput:
       type: object
       properties:
@@ -3665,6 +3690,162 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ── Export ──────────────────────────────────────────────────────────────────
+
+  /timelines/{id}/export:
+    post:
+      operationId: exportTimeline
+      summary: Export a timeline's activities as CSV, xlsx, or ICS
+      description: >
+        Streams the exported file with Content-Disposition: attachment. The
+        frozen filter (if any) is evaluated server-side; an omitted
+        viewConfig exports the whole timeline. Synchronous for v1.
+      tags: [export]
+      parameters:
+        - $ref: "#/components/parameters/timelineId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExportRequest"
+      responses:
+        "200":
+          description: The exported file.
+          content:
+            text/csv:
+              schema:
+                type: string
+                format: binary
+            application/vnd.openxmlformats-officedocument.spreadsheetml.sheet:
+              schema:
+                type: string
+                format: binary
+            text/calendar:
+              schema:
+                type: string
+                format: binary
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /teams/{id}/timelines/{timelineId}/export.csv:
+    get:
+      operationId: exportTimelineCSV
+      summary: Download a timeline's activities as CSV
+      description: >
+        Convenience GET for CLI/scripting. `?filter=<savedFilterId>` resolves
+        a saved filter server-side; omitted exports the whole timeline.
+      tags: [export]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+        - $ref: "#/components/parameters/timelineIdNested"
+        - name: filter
+          in: query
+          required: false
+          description: Saved filter ID to evaluate server-side.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The exported CSV file.
+          content:
+            text/csv:
+              schema:
+                type: string
+                format: binary
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /teams/{id}/timelines/{timelineId}/export.xlsx:
+    get:
+      operationId: exportTimelineXLSX
+      summary: Download a timeline's activities as xlsx
+      description: >
+        Convenience GET for CLI/scripting. `?filter=<savedFilterId>` resolves
+        a saved filter server-side; omitted exports the whole timeline.
+      tags: [export]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+        - $ref: "#/components/parameters/timelineIdNested"
+        - name: filter
+          in: query
+          required: false
+          description: Saved filter ID to evaluate server-side.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The exported xlsx file.
+          content:
+            application/vnd.openxmlformats-officedocument.spreadsheetml.sheet:
+              schema:
+                type: string
+                format: binary
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /teams/{id}/timelines/{timelineId}/export.ics:
+    get:
+      operationId: exportTimelineICS
+      summary: Download a static ICS file of a timeline's activities
+      description: >
+        Convenience GET for CLI/scripting. `?filter=<savedFilterId>` resolves
+        a saved filter server-side; omitted exports the whole timeline. Unlike
+        the live share feed, this is a static, authenticated, one-time
+        download.
+      tags: [export]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+        - $ref: "#/components/parameters/timelineIdNested"
+        - name: filter
+          in: query
+          required: false
+          description: Saved filter ID to evaluate server-side.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The exported ICS file.
+          content:
+            text/calendar:
+              schema:
+                type: string
+                format: binary
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
         "500":
           $ref: "#/components/responses/InternalError"
 
