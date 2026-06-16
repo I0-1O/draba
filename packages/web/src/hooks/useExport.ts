@@ -15,6 +15,10 @@ import type { FilterDefinition } from '@/lib/filterTypes'
 
 export interface ExportViewConfig {
   filter?: FilterDefinition | null
+  /** Ordered activity IDs to export (preset/member filters, list sort order). Overrides filter when non-empty. */
+  activityIds?: string[] | null
+  /** Export column names to include (list view column visibility). All columns when absent. */
+  columns?: string[] | null
 }
 
 /** Triggers the browser to save a Blob with the given filename. */
@@ -39,11 +43,16 @@ export function useExport(timelineId: string, timelineName: string) {
     setIsPending(true)
     setError(null)
     try {
+      const vc: Record<string, unknown> = {}
+      if (viewConfig?.activityIds?.length) vc.activityIds = viewConfig.activityIds
+      else if (viewConfig?.filter) vc.filter = viewConfig.filter
+      if (viewConfig?.columns?.length) vc.columns = viewConfig.columns
+
       const { blob } = await authFetchBlob(`/timelines/${timelineId}/export`, {
         method: 'POST',
         body: JSON.stringify({
           format,
-          ...(viewConfig?.filter ? { viewConfig: { filter: viewConfig.filter } } : {}),
+          ...(Object.keys(vc).length ? { viewConfig: vc } : {}),
         }),
       })
       saveBlob(blob, buildExportFilename(timelineName, ext))

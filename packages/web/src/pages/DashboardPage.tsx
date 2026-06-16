@@ -40,6 +40,7 @@ import ShareModal from '@/components/ShareModal'
 import CalendarShareModal from '@/components/CalendarShareModal'
 import ExportDialog from '@/components/ExportDialog'
 import { matchesFilter } from '@/lib/filterEngine'
+import { applyActiveFilter } from '@/lib/presetFilters'
 import { useNavigate } from 'react-router-dom'
 import type { components } from '@draba/shared'
 import type { Member } from '@/types'
@@ -272,19 +273,88 @@ function DashboardShell() {
   // each view's (possibly date-bounded) activity query.
   const { data: allActivities = [] } = useTimelineActivities(teamId, activeTimelineId ?? '')
 
-  // Export dialog inputs: a human-readable filter label (only saved filters
-  // produce a server-evaluable FilterDefinition, same constraint as Share),
-  // and matched/total activity counts for the scope picker.
+  // Export dialog: filter context, counts, and the filtered activity list.
+  // filteredActivities is exposed so exportViewActivityIds can sort it for list view.
   const exportFilterInfo = useMemo(() => {
     const totalCount = allActivities.length
+    const closedStatusIds = new Set(activeTimelineStatuses.filter(s => s.isClosed).map(s => s.id))
+    const memberIdsByUserId = new Map<string, string[]>()
+    for (const m of teamMembers) {
+      if (!m.userId) continue
+      const list = memberIdsByUserId.get(m.userId) ?? []
+      list.push(m.id)
+      memberIdsByUserId.set(m.userId, list)
+    }
+    const filterCtx = {
+      closedStatusIds,
+      savedFilters,
+      statuses: new Map(activeTimelineId ? [[activeTimelineId, activeTimelineStatuses]] as const : []),
+      tags,
+    }
+
+    if (activeFilter.kind === 'preset' && activeFilter.id !== 'all') {
+      const PRESET_LABELS: Record<string, string> = {
+        open: 'Open only', upcoming: 'Upcoming', overdue: 'Overdue', noassign: 'No one assigned',
+      }
+      const filterLabel = PRESET_LABELS[activeFilter.id] ?? activeFilter.id
+      const filteredActivities = applyActiveFilter(allActivities, activeFilter, memberIdsByUserId, filterCtx)
+      return { filterLabel, filterDefinition: null, filteredCount: filteredActivities.length, totalCount, filteredActivities }
+    }
+
+    if (activeFilter.kind === 'member') {
+      const member = teamMembers.find(m => m.userId === (activeFilter as { kind: 'member'; userId: string }).userId)
+      const filterLabel = member?.displayName ?? 'Team member'
+      const filteredActivities = applyActiveFilter(allActivities, activeFilter, memberIdsByUserId, filterCtx)
+      return { filterLabel, filterDefinition: null, filteredCount: filteredActivities.length, totalCount, filteredActivities }
+    }
+
     if (activeFilter.kind === 'saved' && activeShareFilter) {
       const saved = savedFilters.find(f => f.id === activeFilter.id)
       const statusesByTimeline = new Map(activeTimelineId ? [[activeTimelineId, activeTimelineStatuses]] as const : [])
-      const filteredCount = allActivities.filter(a => matchesFilter(a, activeShareFilter, { statusesByTimeline, tags })).length
-      return { filterLabel: saved?.name ?? 'Saved filter', filterDefinition: activeShareFilter, filteredCount, totalCount }
+      const filteredActivities = allActivities.filter(a => matchesFilter(a, activeShareFilter, { statusesByTimeline, tags }))
+      return { filterLabel: saved?.name ?? 'Saved filter', filterDefinition: activeShareFilter, filteredCount: filteredActivities.length, totalCount, filteredActivities }
     }
-    return { filterLabel: null, filterDefinition: null, filteredCount: totalCount, totalCount }
-  }, [allActivities, activeFilter, activeShareFilter, savedFilters, activeTimelineId, activeTimelineStatuses, tags])
+
+    return { filterLabel: null, filterDefinition: null, filteredCount: totalCount, totalCount, filteredActivities: allActivities }
+  }, [allActivities, activeFilter, activeShareFilter, savedFilters, activeTimelineId, activeTimelineStatuses, tags, teamMembers])
+
+  // Ordered activity IDs for the export "current view" scope.
+  // Sent as activityIds in the request when: a preset/member filter is active
+  // (can't be evaluated server-side), or we're in list view (to preserve sort order).
+  const exportViewActivityIds = useMemo<string[] | null>(() => {
+    const hasNonSavedFilter = activeFilter.kind === 'preset' ? activeFilter.id !== 'all' : activeFilter.kind === 'member'
+    const needsIds = hasNonSavedFilter || view === 'list'
+    if (!needsIds) return null
+
+    let acts = exportFilterInfo.filteredActivities
+    if (view === 'list') {
+      acts = [...acts].sort((a, b) => {
+        if (listSortBy === 'startDate') return (a.startAt ?? '').localeCompare(b.startAt ?? '')
+        if (listSortBy === 'endDate') return (a.endAt ?? '').localeCompare(b.endAt ?? '')
+        if (listSortBy === 'title') return a.title.localeCompare(b.title)
+        if (listSortBy === 'status') return (a.statusId ?? '').localeCompare(b.statusId ?? '')
+        if (listSortBy === 'progress') return (b.percentComplete ?? 0) - (a.percentComplete ?? 0)
+        return 0
+      })
+    }
+    return acts.map(a => a.id)
+  }, [exportFilterInfo.filteredActivities, activeFilter, view, listSortBy])
+
+  // List-view column visibility mapped to export column names.
+  // Null when not in list view or when all columns are visible (server defaults to all).
+  const exportListColumns = useMemo<string[] | null>(() => {
+    if (view !== 'list' || listColumns.length === 0) return null
+    const COL_MAP: Record<string, string> = {
+      title: 'Title', startAt: 'Start', endAt: 'End', description: 'Description',
+      status: 'Status', assignees: 'Assignees', tags: 'Tags', parent: 'Parent',
+      progress: 'Progress', location: 'Location', url: 'URL',
+    }
+    const cols = listColumns.filter(c => c.visible && COL_MAP[c.id]).map(c => COL_MAP[c.id])
+    // If all mappable columns are visible, skip sending — server defaults to all
+    const allExportCols = Object.values(COL_MAP)
+    if (cols.length === allExportCols.length) return null
+    return cols
+  }, [view, listColumns])
 
   // Close the activity detail panel whenever the active filter changes so the
   // filtered view is unobstructed by a stale selection.
@@ -926,6 +996,8 @@ function DashboardShell() {
           filterDefinition={exportFilterInfo.filterDefinition}
           filteredCount={exportFilterInfo.filteredCount}
           totalCount={exportFilterInfo.totalCount}
+          viewActivityIds={exportViewActivityIds}
+          listExportColumns={exportListColumns}
           onClose={() => setExportDialogOpen(false)}
         />
       )}

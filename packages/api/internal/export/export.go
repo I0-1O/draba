@@ -50,6 +50,41 @@ func (r *Row) Values() []string {
 	}
 }
 
+// ValuesByColumns returns the row's field values for the specified column names.
+// Unknown column names produce an empty string.
+func (r *Row) ValuesByColumns(columns []string) []string {
+	fields := map[string]string{
+		"Title": r.Title, "Start": r.Start, "End": r.End,
+		"Description": r.Description, "Status": r.Status, "Assignees": r.Assignees,
+		"Tags": r.Tags, "Parent": r.Parent, "Progress": r.Progress,
+		"Location": r.Location, "URL": r.URL,
+	}
+	out := make([]string, len(columns))
+	for i, col := range columns {
+		out[i] = fields[col]
+	}
+	return out
+}
+
+// SelectColumns returns the subset of Columns matching the requested names, in
+// canonical order. If names is nil or empty, all Columns are returned.
+func SelectColumns(names []string) []string {
+	if len(names) == 0 {
+		return Columns
+	}
+	want := make(map[string]bool, len(names))
+	for _, n := range names {
+		want[n] = true
+	}
+	out := make([]string, 0, len(names))
+	for _, c := range Columns {
+		if want[c] {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
 // dateFormat is the calendar-date format used for Start/End columns.
 // Activities are all-day (Person + Time Range + Work — no time-of-day
 // editor exists), so times are dropped.

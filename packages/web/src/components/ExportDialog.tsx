@@ -30,12 +30,23 @@ export interface ExportDialogProps {
   timelineName: string
   /** Display label for the active filter (e.g. a saved filter's name), or null if no filter is active. */
   filterLabel: string | null
-  /** The active filter's definition, sent to the server when scope is "view". Null when filterLabel is null. */
+  /** The active filter's definition, sent to the server when scope is "view" and activityIds is absent. */
   filterDefinition: FilterDefinition | null
   /** Number of activities matching the active filter (or totalCount when no filter is active). */
   filteredCount: number
   /** Total number of activities in the timeline, regardless of filter. */
   totalCount: number
+  /**
+   * Ordered activity IDs for the "current view" scope — covers preset/member
+   * filters (which can't be sent as a FilterDefinition) and list-view sort order.
+   * When non-null, takes precedence over filterDefinition in the request body.
+   */
+  viewActivityIds: string[] | null
+  /**
+   * Export column names to include in CSV/Excel (list view column visibility).
+   * Null means all columns. Only meaningful for csv/xlsx formats.
+   */
+  listExportColumns: string[] | null
   onClose: () => void
 }
 
@@ -56,6 +67,8 @@ export default function ExportDialog({
   filterDefinition,
   filteredCount,
   totalCount,
+  viewActivityIds,
+  listExportColumns,
   onClose,
 }: ExportDialogProps) {
   const formats = getExportFormats(view)
@@ -82,8 +95,11 @@ export default function ExportDialog({
   }
 
   const handleDownload = () => {
+    const isDataFormat = format.id === 'csv' || format.id === 'xlsx'
     void download(format.id, format.ext, {
-      filter: scope === 'view' ? filterDefinition : null,
+      activityIds: scope === 'view' ? viewActivityIds : null,
+      filter: scope === 'view' && !viewActivityIds ? filterDefinition : null,
+      columns: isDataFormat ? listExportColumns : null,
     }).then(() => {
       setDone(true)
       doneTimer.current = setTimeout(() => setDone(false), 1600)

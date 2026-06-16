@@ -20,11 +20,19 @@ type exportRequestBody struct {
 	ViewConfig *exportViewConfigJSON `json:"viewConfig,omitempty"`
 }
 
-// exportViewConfigJSON is the frozen view state captured by the export
-// dialog. Only Filter affects the Phase 14.1 data formats (CSV/xlsx/ICS);
-// an omitted or empty filter exports the whole timeline.
+// exportViewConfigJSON is the frozen view state captured by the export dialog.
+//
+// ActivityIDs, when non-empty, takes precedence over Filter: only those
+// activities are exported, in the given order. This lets the client send
+// preset-filtered or list-view-sorted rows without requiring server-side
+// awareness of client-only filter kinds or sort state.
+//
+// Columns, when non-empty, restricts CSV/XLSX output to the named columns
+// (matching export.Columns entries) in canonical order.
 type exportViewConfigJSON struct {
-	Filter *filters.FilterDefinition `json:"filter,omitempty"`
+	Filter      *filters.FilterDefinition `json:"filter,omitempty"`
+	ActivityIDs []string                  `json:"activityIds,omitempty"`
+	Columns     []string                  `json:"columns,omitempty"`
 }
 
 func isValidExportFormat(format string) bool {
@@ -88,12 +96,7 @@ func (s *Server) handlePostTimelineExport(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	var filterDef *filters.FilterDefinition
-	if req.ViewConfig != nil {
-		filterDef = req.ViewConfig.Filter
-	}
-
-	s.writeTimelineExport(w, timeline, req.Format, filterDef)
+	s.writeTimelineExport(w, timeline, req.Format, req.ViewConfig)
 }
 
 // handleGetTimelineExportCSV handles GET /teams/{id}/timelines/{timelineId}/export.csv.
@@ -136,7 +139,7 @@ func (s *Server) handleGetTimelineExport(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	var filterDef *filters.FilterDefinition
+	var viewCfg *exportViewConfigJSON
 	if filterID := r.URL.Query().Get("filter"); filterID != "" {
 		saved, err := s.savedFilters.GetByID(filterID)
 		if err != nil {
@@ -156,15 +159,16 @@ func (s *Server) handleGetTimelineExport(w http.ResponseWriter, r *http.Request,
 			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to parse filter")
 			return
 		}
-		filterDef = &def
+		viewCfg = &exportViewConfigJSON{Filter: &def}
 	}
 
-	s.writeTimelineExport(w, timeline, format, filterDef)
+	s.writeTimelineExport(w, timeline, format, viewCfg)
 }
 
 // writeTimelineExport loads the timeline's activities and lookup data,
-// applies the optional frozen filter, and streams the requested format.
-func (s *Server) writeTimelineExport(w http.ResponseWriter, timeline *models.Timeline, format string, filterDef *filters.FilterDefinition) {
+// applies the optional view config (filter or explicit activity IDs), and
+// streams the requested format.
+func (s *Server) writeTimelineExport(w http.ResponseWriter, timeline *models.Timeline, format string, viewCfg *exportViewConfigJSON) {
 	acts, err := s.activities.ListByTimeline(timeline.ID, nil, nil, false)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load activities")
@@ -194,7 +198,20 @@ func (s *Server) writeTimelineExport(w http.ResponseWriter, timeline *models.Tim
 	}
 
 	filtered := acts
-	if filterDef != nil && len(filterDef.Conditions) > 0 {
+	if viewCfg != nil && len(viewCfg.ActivityIDs) > 0 {
+		// Client-supplied ordered ID list (used for preset/member filters and
+		// list-view sort order, which the server cannot evaluate independently).
+		actByID := make(map[string]*models.Activity, len(acts))
+		for _, a := range acts {
+			actByID[a.ID] = a
+		}
+		filtered = make([]*models.Activity, 0, len(viewCfg.ActivityIDs))
+		for _, id := range viewCfg.ActivityIDs {
+			if a, ok := actByID[id]; ok {
+				filtered = append(filtered, a)
+			}
+		}
+	} else if viewCfg != nil && viewCfg.Filter != nil && len(viewCfg.Filter.Conditions) > 0 {
 		statusesByTL := map[string][]models.Status{timeline.ID: make([]models.Status, 0, len(statuses))}
 		for _, st := range statuses {
 			statusesByTL[timeline.ID] = append(statusesByTL[timeline.ID], *st)
@@ -207,10 +224,15 @@ func (s *Server) writeTimelineExport(w http.ResponseWriter, timeline *models.Tim
 
 		filtered = make([]*models.Activity, 0, len(acts))
 		for _, a := range acts {
-			if filters.MatchesFilter(a, filterDef, ctx) {
+			if filters.MatchesFilter(a, viewCfg.Filter, ctx) {
 				filtered = append(filtered, a)
 			}
 		}
+	}
+
+	var columns []string
+	if viewCfg != nil {
+		columns = viewCfg.Columns
 	}
 
 	filename := exportFilename(timeline.Name, format)
@@ -221,13 +243,13 @@ func (s *Server) writeTimelineExport(w http.ResponseWriter, timeline *models.Tim
 	case "csv":
 		statusNames, memberNames, tagNames := exportNameMaps(statuses, members, tags)
 		rows := export.BuildRows(filtered, statusNames, memberNames, tagNames, activityTitles)
-		if err := export.WriteCSV(w, rows); err != nil {
+		if err := export.WriteCSVColumns(w, rows, columns); err != nil {
 			slog.Error("export: failed to write csv", "err", err)
 		}
 	case "xlsx":
 		statusNames, memberNames, tagNames := exportNameMaps(statuses, members, tags)
 		rows := export.BuildRows(filtered, statusNames, memberNames, tagNames, activityTitles)
-		if err := export.WriteXLSX(w, rows); err != nil {
+		if err := export.WriteXLSXColumns(w, rows, columns); err != nil {
 			slog.Error("export: failed to write xlsx", "err", err)
 		}
 	case "ics":
