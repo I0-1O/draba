@@ -140,6 +140,7 @@ packages/
         export_handler.go
         helpers.go
         middleware.go
+        oidc_handler.go
         ratelimit.go
         saved_filter_handler.go
         server.go
@@ -158,6 +159,7 @@ packages/
       auth/
         api_token.go
         jwt.go
+        oidc.go
         password.go
       buildinfo/
         buildinfo.go
@@ -186,6 +188,7 @@ packages/
           021_share_description.sql
           022_share_kind.sql
           023_share_created_by_nullable.sql
+          024_oidc_identity.sql
         activity_repo.go
         api_token_repo.go
         db.go
@@ -383,6 +386,7 @@ packages/
         DashboardPage.tsx
         ForgotPasswordPage.tsx
         LoginPage.tsx
+        OIDCCallbackPage.tsx
         RegisterPage.tsx
         ResetPasswordPage.tsx
         SettingsPage.tsx
@@ -416,6 +420,7 @@ skills/
 CLAUDE.md
 docker-compose.yml
 LICENSE
+OIDC_PR.md
 package.json
 pnpm-workspace.yaml
 README.md
@@ -8395,250 +8400,6 @@ func (s *Server) handleDeleteActivity(w http.ResponseWriter, r *http.Request) {
 }
 ````
 
-## File: packages/api/internal/api/admin_handler.go
-````go
-package api
-
-import (
-	"encoding/json"
-	"log/slog"
-	"net/http"
-
-	"github.com/I0-1O/draba/packages/api/internal/mailer"
-)
-
-// requireSuperadmin is a shared guard for admin endpoints. Returns false
-// and writes a 403 if the caller is not a superadmin.
-func (s *Server) requireSuperadmin(w http.ResponseWriter, r *http.Request) bool {
-	claims := claimsFromContext(r.Context())
-	caller, err := s.users.GetByID(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to verify permissions")
-		return false
-	}
-	if !caller.IsSuperadmin {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
-		return false
-	}
-	return true
-}
-
-// handleGetSMTP handles GET /admin/smtp. Returns the current SMTP config
-// with the password masked. Superadmin-only.
-func (s *Server) handleGetSMTP(w http.ResponseWriter, r *http.Request) {
-	if !s.requireSuperadmin(w, r) {
-		return
-	}
-
-	cfg, err := s.mailer.LoadConfig()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load SMTP config")
-		return
-	}
-	if cfg == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"smtp": nil})
-		return
-	}
-
-	// Mask the password in the response.
-	masked := *cfg
-	if masked.Password != "" {
-		masked.Password = "••••••••"
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"smtp": masked})
-}
-
-// handlePutSMTP handles PUT /admin/smtp. Saves the SMTP configuration and
-// validates it by sending a test email to the caller's address. Superadmin-only.
-func (s *Server) handlePutSMTP(w http.ResponseWriter, r *http.Request) {
-	if !s.requireSuperadmin(w, r) {
-		return
-	}
-
-	var cfg mailer.SMTPConfig
-	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-	if cfg.Host == "" || cfg.Port == 0 || cfg.FromEmail == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "host, port, and fromEmail are required")
-		return
-	}
-
-	// Fetch caller email for the validation test.
-	claims := claimsFromContext(r.Context())
-	caller, err := s.users.GetByID(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to send test email")
-		return
-	}
-
-	// Validate by sending a test email before persisting.
-	if err := mailer.SendWithConfig(&cfg, caller.Email, "draba SMTP test", smtpTestBody()); err != nil {
-		slog.Warn("smtp validation failed", "err", err)
-		writeError(w, http.StatusBadRequest, "SMTP_SEND_FAILED", "SMTP validation failed; check server logs for details")
-		return
-	}
-
-	if err := s.mailer.SaveConfig(&cfg); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to save SMTP config")
-		return
-	}
-
-	masked := cfg
-	if masked.Password != "" {
-		masked.Password = "••••••••"
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"smtp": masked})
-}
-
-// handleTestSMTP handles POST /admin/smtp/test. Sends a test email using the
-// provided config without persisting it. Superadmin-only.
-func (s *Server) handleTestSMTP(w http.ResponseWriter, r *http.Request) {
-	if !s.requireSuperadmin(w, r) {
-		return
-	}
-
-	var cfg mailer.SMTPConfig
-	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	claims := claimsFromContext(r.Context())
-	caller, err := s.users.GetByID(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to fetch caller")
-		return
-	}
-
-	if err := mailer.SendWithConfig(&cfg, caller.Email, "draba SMTP test", smtpTestBody()); err != nil {
-		slog.Warn("smtp test failed", "err", err)
-		writeError(w, http.StatusBadRequest, "SMTP_SEND_FAILED", "SMTP test failed; check server logs for details")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]string{"status": "sent", "to": caller.Email})
-}
-
-// handleDeleteSMTP handles DELETE /admin/smtp. Clears the SMTP config.
-// Superadmin-only.
-func (s *Server) handleDeleteSMTP(w http.ResponseWriter, r *http.Request) {
-	if !s.requireSuperadmin(w, r) {
-		return
-	}
-	if err := s.mailer.DeleteConfig(); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to clear SMTP config")
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
-// handleGetAdminSettings handles GET /admin/settings. Returns instance-level
-// defaults. Superadmin-only.
-func (s *Server) handleGetAdminSettings(w http.ResponseWriter, r *http.Request) {
-	if !s.requireSuperadmin(w, r) {
-		return
-	}
-
-	keys := []string{"registration_policy", "default_timezone", "default_date_format", "default_week_start", "instance_name", "accent_color"}
-	settings := make(map[string]string, len(keys))
-	for _, k := range keys {
-		v, err := s.instanceSets.Get(k)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load settings")
-			return
-		}
-		settings[k] = v
-	}
-
-	// Apply defaults for missing keys.
-	if settings["registration_policy"] == "" {
-		settings["registration_policy"] = "invite_only"
-	}
-	if settings["default_timezone"] == "" {
-		settings["default_timezone"] = "UTC"
-	}
-	if settings["default_date_format"] == "" {
-		settings["default_date_format"] = "MMM D, YYYY"
-	}
-	if settings["default_week_start"] == "" {
-		settings["default_week_start"] = "monday"
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{"settings": settings})
-}
-
-// handlePatchAdminSettings handles PATCH /admin/settings. Updates one or more
-// instance-level settings. Superadmin-only.
-func (s *Server) handlePatchAdminSettings(w http.ResponseWriter, r *http.Request) {
-	if !s.requireSuperadmin(w, r) {
-		return
-	}
-
-	var body map[string]string
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	// Validate known keys and values.
-	allowed := map[string]bool{
-		"registration_policy": true,
-		"default_timezone":    true,
-		"default_date_format": true,
-		"default_week_start":  true,
-		"instance_name":       true,
-		"accent_color":        true,
-	}
-	for k := range body {
-		if !allowed[k] {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "unknown setting key: "+k)
-			return
-		}
-	}
-	if v, ok := body["registration_policy"]; ok && v != "invite_only" && v != "open" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "registration_policy must be invite_only or open")
-		return
-	}
-	if v, ok := body["default_week_start"]; ok && v != "monday" && v != "sunday" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "default_week_start must be monday or sunday")
-		return
-	}
-
-	for k, v := range body {
-		if err := s.instanceSets.Set(k, v); err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to save settings")
-			return
-		}
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{"settings": body})
-}
-
-// handleGetPublicBranding handles GET /settings/branding. Returns the
-// instance name and accent color without requiring authentication, so the
-// login page and shared timeline views can display branding before sign-in.
-//
-// Only cosmetic settings are exposed here. Never add sensitive keys (SMTP
-// credentials, JWT secrets, registration policy, etc.) to this handler.
-func (s *Server) handleGetPublicBranding(w http.ResponseWriter, _ *http.Request) {
-	name, _ := s.instanceSets.Get("instance_name")
-	accent, _ := s.instanceSets.Get("accent_color")
-	writeJSON(w, http.StatusOK, map[string]any{
-		"instanceName": name,
-		"accentColor":  accent,
-	})
-}
-
-func smtpTestBody() string {
-	return `<html><body>
-<p>This is a test email from <strong>draba</strong>.</p>
-<p>If you received this, your SMTP configuration is working correctly.</p>
-</body></html>`
-}
-````
-
 ## File: packages/api/internal/api/api_token_handler.go
 ````go
 package api
@@ -9278,376 +9039,6 @@ type CreateSavedFilterJSONRequestBody CreateSavedFilterJSONBody
 
 // CreateTimelineJSONRequestBody defines body for CreateTimeline for application/json ContentType.
 type CreateTimelineJSONRequestBody CreateTimelineJSONBody
-````
-
-## File: packages/api/internal/api/auth_handler.go
-````go
-package api
-
-import (
-	"database/sql"
-	"encoding/json"
-	"errors"
-	"log/slog"
-	"net/http"
-	"net/url"
-	"os"
-	"strings"
-	"time"
-	"unicode"
-
-	openapi_types "github.com/oapi-codegen/runtime/types"
-
-	"github.com/I0-1O/draba/packages/api/internal/auth"
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// handleRegister handles POST /auth/register. The first user on a fresh
-// install registers without an invite (bootstrap); every subsequent user
-// must present a valid invite token. Tier user limits are enforced before
-// hashing the password to avoid wasted bcrypt work.
-func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
-	var req RegisterJSONRequestBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	req.Email = openapi_types.Email(strings.ToLower(strings.TrimSpace(string(req.Email))))
-	req.DisplayName = strings.TrimSpace(req.DisplayName)
-
-	if req.Email == "" || req.Password == "" || req.DisplayName == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "email, password, and displayName are required")
-		return
-	}
-	if !isValidPassword(req.Password) {
-		writeError(w, http.StatusBadRequest, "WEAK_PASSWORD", "password must be at least 8 characters")
-		return
-	}
-
-	// First user may register without an invite; all subsequent users require one.
-	count, err := s.users.Count()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "registration failed")
-		return
-	}
-
-	if err := s.tier.CheckUserLimit(count); err != nil {
-		writeError(w, http.StatusPaymentRequired, "TIER_USER_LIMIT", "user limit reached for current tier")
-		return
-	}
-
-	var invite *models.Invite
-	var inviteLinkTeamID string // non-empty when a reusable invite link was used
-	if count > 0 {
-		if req.InviteToken == nil || *req.InviteToken == "" {
-			writeError(w, http.StatusForbidden, "INVITE_REQUIRED", "an invite token is required to register")
-			return
-		}
-		// Try as a one-time invite first.
-		inv, err := s.invites.GetValid(*req.InviteToken)
-		if err != nil {
-			// Not a valid one-time invite — check if it's a reusable invite link token.
-			team, linkErr := s.teams.GetByInviteLinkToken(*req.InviteToken)
-			if linkErr != nil {
-				writeError(w, http.StatusForbidden, "INVITE_INVALID", "invite token is invalid or expired")
-				return
-			}
-			inviteLinkTeamID = team.ID
-		} else {
-			if inv.Email != "" && !strings.EqualFold(inv.Email, string(req.Email)) {
-				writeError(w, http.StatusForbidden, "INVITE_EMAIL_MISMATCH", "this invite was issued to a different email address")
-				return
-			}
-			invite = inv
-		}
-	}
-
-	hash, err := auth.HashPassword(req.Password)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "registration failed")
-		return
-	}
-
-	now := time.Now()
-	user := &models.User{
-		ID:           newID(),
-		Email:        string(req.Email),
-		PasswordHash: hash,
-		DisplayName:  req.DisplayName,
-		IsSuperadmin: count == 0,
-		CreatedAt:    now,
-		UpdatedAt:    now,
-	}
-	if err := s.users.Create(user); err != nil {
-		writeError(w, http.StatusConflict, "EMAIL_TAKEN", "an account with that email already exists")
-		return
-	}
-
-	if invite != nil {
-		if err := s.invites.MarkAccepted(invite.ID); err != nil {
-			// User and tokens are still returned — email uniqueness prevents a
-			// second registration. Log so the open invite is visible in monitoring.
-			slog.Error("failed to mark invite accepted", "invite_id", invite.ID, "err", err)
-		}
-		userID := user.ID
-		member := &models.TeamMember{
-			ID:       newID(),
-			TeamID:   invite.TeamID,
-			UserID:   &userID,
-			Role:     invite.Role,
-			JoinedAt: now,
-		}
-		if err := s.teams.AddMember(member); err != nil {
-			slog.Error("failed to add user to team after invite", "team_id", invite.TeamID, "user_id", user.ID, "err", err)
-		}
-	} else if inviteLinkTeamID != "" {
-		userID := user.ID
-		member := &models.TeamMember{
-			ID:       newID(),
-			TeamID:   inviteLinkTeamID,
-			UserID:   &userID,
-			Role:     "member",
-			JoinedAt: now,
-		}
-		if err := s.teams.AddMember(member); err != nil {
-			slog.Error("failed to add user to team via invite link", "team_id", inviteLinkTeamID, "user_id", user.ID, "err", err)
-		}
-	}
-
-	access, err := s.tokens.IssueAccessToken(user.ID, user.Email)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "registration failed")
-		return
-	}
-	refresh, err := s.tokens.IssueRefreshToken(user.ID, user.Email)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "registration failed")
-		return
-	}
-
-	writeJSON(w, http.StatusCreated, map[string]any{
-		"user":         user,
-		"accessToken":  access,
-		"refreshToken": refresh,
-	})
-}
-
-// handleLogin handles POST /auth/login. Returns the same generic
-// INVALID_CREDENTIALS error for both unknown email and bad password so
-// the endpoint cannot be used as an account-existence oracle.
-func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
-	var req LoginJSONRequestBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	req.Email = openapi_types.Email(strings.ToLower(strings.TrimSpace(string(req.Email))))
-	if req.Email == "" || req.Password == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "email and password are required")
-		return
-	}
-
-	user, err := s.users.GetByEmail(string(req.Email))
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusUnauthorized, "INVALID_CREDENTIALS", "invalid email or password")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "login failed")
-		return
-	}
-
-	if user.ArchivedAt != nil {
-		writeError(w, http.StatusForbidden, "ACCOUNT_INACTIVE", "this account has been deactivated")
-		return
-	}
-
-	if err := auth.CheckPassword(user.PasswordHash, req.Password); err != nil {
-		writeError(w, http.StatusUnauthorized, "INVALID_CREDENTIALS", "invalid email or password")
-		return
-	}
-
-	access, err := s.tokens.IssueAccessToken(user.ID, user.Email)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "login failed")
-		return
-	}
-	refresh, err := s.tokens.IssueRefreshToken(user.ID, user.Email)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "login failed")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{
-		"user":         user,
-		"accessToken":  access,
-		"refreshToken": refresh,
-	})
-}
-
-// handleRefresh handles POST /auth/refresh. It exchanges a valid refresh
-// token for a new access token; the refresh token itself is not rotated.
-func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
-	var req RefreshTokenJSONBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	claims, err := s.tokens.Validate(req.RefreshToken, "refresh")
-	if err != nil {
-		writeError(w, http.StatusUnauthorized, "INVALID_TOKEN", "refresh token is invalid or expired")
-		return
-	}
-
-	access, err := s.tokens.IssueAccessToken(claims.UserID, claims.Email)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "token refresh failed")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{
-		"accessToken": access,
-	})
-}
-
-// handleMe handles GET /auth/me and returns the authenticated user's
-// profile. Must be mounted behind authMiddleware.
-func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
-	claims := claimsFromContext(r.Context())
-	user, err := s.users.GetByID(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to fetch user")
-		return
-	}
-	writeJSON(w, http.StatusOK, user)
-}
-
-// handleForgotPassword handles POST /auth/forgot-password. Accepts an email
-// address, generates a 1-hour reset token, stores the hash, and sends a
-// reset link via SMTP. Always returns 200 to prevent email enumeration.
-// When SMTP is not configured the email is silently skipped.
-func (s *Server) handleForgotPassword(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Email string `json:"email"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-	body.Email = strings.ToLower(strings.TrimSpace(body.Email))
-	if body.Email == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "email is required")
-		return
-	}
-
-	// Always return 200 regardless of whether the email exists.
-	w.Header().Set("Content-Type", "application/json")
-	defer func() { _, _ = w.Write([]byte(`{"status":"ok"}`)) }()
-
-	user, err := s.users.GetByEmail(body.Email)
-	if err != nil {
-		// No user — return 200 without error (prevent enumeration).
-		return
-	}
-	if user.ArchivedAt != nil {
-		return
-	}
-
-	rawToken := newToken()
-	expiresAt := time.Now().Add(time.Hour)
-	if _, err := s.passwordTokens.Create(newID(), user.ID, rawToken, expiresAt); err != nil {
-		slog.Error("forgot-password: failed to create token", "user_id", user.ID, "err", err)
-		return
-	}
-
-	// DRABA_BASE_URL is used to build the reset link. Fall back to a placeholder
-	// when not set so the email still contains useful info.
-	baseURL := strings.TrimRight(getBaseURL(), "/")
-	resetLink := baseURL + "/reset-password?token=" + url.QueryEscape(rawToken)
-
-	subject := "Reset your draba password"
-	body2 := "<html><body>" +
-		"<p>You requested a password reset for your draba account.</p>" +
-		"<p><a href=\"" + resetLink + "\">Click here to reset your password</a></p>" +
-		"<p>This link expires in 1 hour. If you did not request this, you can ignore this email.</p>" +
-		"</body></html>"
-
-	if err := s.mailer.Send(user.Email, subject, body2); err != nil {
-		slog.Error("forgot-password: failed to send email", "user_id", user.ID, "err", err)
-	}
-}
-
-// handleResetPassword handles POST /auth/reset-password. Accepts a token and
-// new password; validates the token, hashes the new password, and marks the
-// token used. Returns 400 TOKEN_INVALID when the token is not found, expired,
-// or already used.
-func (s *Server) handleResetPassword(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Token       string `json:"token"`
-		NewPassword string `json:"newPassword"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-	if body.Token == "" || body.NewPassword == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "token and newPassword are required")
-		return
-	}
-	if !isValidPassword(body.NewPassword) {
-		writeError(w, http.StatusBadRequest, "WEAK_PASSWORD", "password must be at least 8 characters")
-		return
-	}
-
-	resetToken, err := s.passwordTokens.GetValid(body.Token)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "TOKEN_INVALID", "reset token is invalid or expired")
-		return
-	}
-
-	hash, err := auth.HashPassword(body.NewPassword)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reset password")
-		return
-	}
-
-	if err := s.users.UpdatePassword(resetToken.UserID, hash); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reset password")
-		return
-	}
-
-	if err := s.passwordTokens.MarkUsed(resetToken.ID); err != nil {
-		slog.Warn("reset-password: failed to mark token used", "token_id", resetToken.ID, "err", err)
-	}
-
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-}
-
-// getBaseURL returns DRABA_BASE_URL or a localhost fallback.
-func getBaseURL() string {
-	if v := os.Getenv("DRABA_BASE_URL"); v != "" {
-		return v
-	}
-	return "http://localhost:8080"
-}
-
-// isValidPassword applies the minimum policy: at least 8 characters and
-// no whitespace. Strength rules beyond length are intentionally lenient —
-// length is what matters most against offline cracking.
-func isValidPassword(p string) bool {
-	if len(p) < 8 {
-		return false
-	}
-	for _, r := range p {
-		if unicode.IsSpace(r) {
-			return false
-		}
-	}
-	return true
-}
 ````
 
 ## File: packages/api/internal/api/authz.go
@@ -11492,353 +10883,6 @@ type GrantTimelineAccessJSONBody struct {
 }
 ````
 
-## File: packages/api/internal/api/user_handler.go
-````go
-package api
-
-import (
-	"database/sql"
-	"encoding/json"
-	"errors"
-	"net/http"
-	"strings"
-	"time"
-
-	"github.com/I0-1O/draba/packages/api/internal/auth"
-)
-
-// handleUpdateProfile handles PATCH /users/me. Updates display_name, color,
-// and icon for the authenticated user. Color/icon changes propagate to all
-// team_members rows that have not been explicitly overridden.
-func (s *Server) handleUpdateProfile(w http.ResponseWriter, r *http.Request) {
-	claims := claimsFromContext(r.Context())
-
-	var body struct {
-		DisplayName *string `json:"displayName"`
-		Color       *string `json:"color"`
-		Icon        *string `json:"icon"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	user, err := s.users.GetByID(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update profile")
-		return
-	}
-
-	// Apply changes only for fields that were provided.
-	displayName := user.DisplayName
-	if body.DisplayName != nil {
-		displayName = strings.TrimSpace(*body.DisplayName)
-		if displayName == "" {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "displayName cannot be empty")
-			return
-		}
-	}
-
-	color := user.Color
-	if body.Color != nil {
-		color = body.Color
-	}
-	icon := user.Icon
-	if body.Icon != nil {
-		icon = body.Icon
-	}
-
-	if err := s.users.UpdateProfile(user.ID, displayName, color, icon); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update profile")
-		return
-	}
-
-	user.DisplayName = displayName
-	user.Color = color
-	user.Icon = icon
-	writeJSON(w, http.StatusOK, user)
-}
-
-// handleGetMyStats handles GET /users/me/stats. Returns aggregated activity and
-// timeline counts across all of the authenticated user's team memberships.
-func (s *Server) handleGetMyStats(w http.ResponseWriter, r *http.Request) {
-	claims := claimsFromContext(r.Context())
-	stats, err := s.teams.GetUserStats(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get stats")
-		return
-	}
-	writeJSON(w, http.StatusOK, stats)
-}
-
-// handleChangePassword handles PUT /users/me/password. Requires the caller
-// to supply the current password before setting a new one.
-func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
-	claims := claimsFromContext(r.Context())
-
-	var body struct {
-		CurrentPassword string `json:"currentPassword"`
-		NewPassword     string `json:"newPassword"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-	if body.CurrentPassword == "" || body.NewPassword == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "currentPassword and newPassword are required")
-		return
-	}
-	if !isValidPassword(body.NewPassword) {
-		writeError(w, http.StatusBadRequest, "WEAK_PASSWORD", "new password must be at least 8 characters")
-		return
-	}
-
-	user, err := s.users.GetByID(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to change password")
-		return
-	}
-
-	// Verify the current password before allowing the change.
-	if err := auth.CheckPassword(user.PasswordHash, body.CurrentPassword); err != nil {
-		writeError(w, http.StatusUnauthorized, "WRONG_PASSWORD", "current password is incorrect")
-		return
-	}
-
-	hash, err := auth.HashPassword(body.NewPassword)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to change password")
-		return
-	}
-
-	if err := s.users.UpdatePassword(user.ID, hash); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to change password")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-}
-
-// handleListAdminUsers handles GET /admin/users. Returns all users with team
-// membership counts. Supports ?orphaned=true to filter to zero-membership users.
-// Superadmin-only.
-func (s *Server) handleListAdminUsers(w http.ResponseWriter, r *http.Request) {
-	claims := claimsFromContext(r.Context())
-
-	caller, err := s.users.GetByID(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list users")
-		return
-	}
-	if !caller.IsSuperadmin {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
-		return
-	}
-
-	orphanedOnly := r.URL.Query().Get("orphaned") == "true"
-	rows, err := s.users.ListAll(orphanedOnly)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list users")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{"users": rows})
-}
-
-// handlePromoteUser sets is_superadmin=true on a user. Superadmin-only.
-// Participants (no user account) cannot be promoted.
-func (s *Server) handlePromoteUser(w http.ResponseWriter, r *http.Request) {
-	userID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	caller, err := s.users.GetByID(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to promote user")
-		return
-	}
-	if !caller.IsSuperadmin {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
-		return
-	}
-
-	target, err := s.users.GetByID(userID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "user not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to promote user")
-		return
-	}
-
-	if err := s.users.SetSuperadmin(target.ID, true); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to promote user")
-		return
-	}
-
-	target.IsSuperadmin = true
-	writeJSON(w, http.StatusOK, target)
-}
-
-// handleArchiveUser inactivates a user account. Superadmin-only.
-// Archived users cannot log in; their data is preserved.
-func (s *Server) handleArchiveUser(w http.ResponseWriter, r *http.Request) {
-	userID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	caller, err := s.users.GetByID(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive user")
-		return
-	}
-	if !caller.IsSuperadmin {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
-		return
-	}
-	if userID == claims.UserID {
-		writeError(w, http.StatusBadRequest, "CANNOT_SELF_ARCHIVE", "cannot archive your own account")
-		return
-	}
-
-	target, err := s.users.GetByID(userID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "user not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive user")
-		return
-	}
-
-	now := time.Now()
-	if err := s.users.SetArchived(target.ID, &now); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive user")
-		return
-	}
-
-	target.ArchivedAt = &now
-	writeJSON(w, http.StatusOK, target)
-}
-
-// handleUnarchiveUser reactivates an inactivated user account. Superadmin-only.
-func (s *Server) handleUnarchiveUser(w http.ResponseWriter, r *http.Request) {
-	userID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	caller, err := s.users.GetByID(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reactivate user")
-		return
-	}
-	if !caller.IsSuperadmin {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
-		return
-	}
-
-	target, err := s.users.GetByID(userID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "user not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reactivate user")
-		return
-	}
-
-	if err := s.users.SetArchived(target.ID, nil); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reactivate user")
-		return
-	}
-
-	target.ArchivedAt = nil
-	writeJSON(w, http.StatusOK, target)
-}
-
-// handleRevokeUser atomically revokes all access for a user. Superadmin-only.
-// Self-revoke is blocked to prevent a superadmin from locking themselves out.
-func (s *Server) handleRevokeUser(w http.ResponseWriter, r *http.Request) {
-	userID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	caller, err := s.users.GetByID(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke user")
-		return
-	}
-	if !caller.IsSuperadmin {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
-		return
-	}
-	if userID == claims.UserID {
-		writeError(w, http.StatusBadRequest, "CANNOT_SELF_REVOKE", "cannot revoke your own account")
-		return
-	}
-
-	target, err := s.users.GetByID(userID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "user not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke user")
-		return
-	}
-
-	result, err := s.users.RevokeUser(target.ID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke user")
-		return
-	}
-	writeJSON(w, http.StatusOK, result)
-}
-
-// handleDeleteUser hard-deletes a user. Superadmin-only. Only permitted when
-// the user has no active activity assignments and belongs to a single team.
-func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
-	userID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	caller, err := s.users.GetByID(claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete user")
-		return
-	}
-	if !caller.IsSuperadmin {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
-		return
-	}
-	if userID == claims.UserID {
-		writeError(w, http.StatusBadRequest, "CANNOT_SELF_DELETE", "cannot delete your own account")
-		return
-	}
-
-	if _, err := s.users.GetByID(userID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "user not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete user")
-		return
-	}
-
-	teamCount, err := s.teams.CountTeamsForUser(userID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete user")
-		return
-	}
-	if teamCount > 1 {
-		writeError(w, http.StatusConflict, "MULTI_TEAM", "user belongs to multiple teams; remove them from each team first")
-		return
-	}
-
-	if err := s.users.Delete(userID); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete user")
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-````
-
 ## File: packages/api/internal/api/user_preference_handler.go
 ````go
 package api
@@ -13025,84 +12069,6 @@ func (r *InviteRepo) GetByToken(token string) (*models.Invite, error) {
 }
 ````
 
-## File: packages/api/internal/db/migrations.go
-````go
-package db
-
-import (
-	"embed"
-	"fmt"
-	"sort"
-	"strconv"
-	"strings"
-
-	"github.com/jmoiron/sqlx"
-)
-
-//go:embed migrations/*.sql
-var migrationFiles embed.FS
-
-// Migrate applies any unapplied SQL migration files in order. It is idempotent.
-func Migrate(database *sqlx.DB) error {
-	if _, err := database.Exec(`
-		CREATE TABLE IF NOT EXISTS schema_migrations (
-			version    INTEGER PRIMARY KEY,
-			applied_at DATETIME NOT NULL DEFAULT (datetime('now'))
-		)
-	`); err != nil {
-		return fmt.Errorf("ensuring schema_migrations table: %w", err)
-	}
-
-	entries, err := migrationFiles.ReadDir("migrations")
-	if err != nil {
-		return fmt.Errorf("reading migrations: %w", err)
-	}
-
-	type migration struct {
-		version int
-		name    string
-	}
-	var pending []migration
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".sql") {
-			continue
-		}
-		vStr := strings.SplitN(e.Name(), "_", 2)[0]
-		v, err := strconv.Atoi(vStr)
-		if err != nil {
-			continue
-		}
-		pending = append(pending, migration{version: v, name: e.Name()})
-	}
-	sort.Slice(pending, func(i, j int) bool { return pending[i].version < pending[j].version })
-
-	for _, m := range pending {
-		var count int
-		if err := database.Get(&count, `SELECT COUNT(*) FROM schema_migrations WHERE version = ?`, m.version); err != nil {
-			return fmt.Errorf("checking migration %d: %w", m.version, err)
-		}
-		if count > 0 {
-			continue
-		}
-
-		sql, err := migrationFiles.ReadFile("migrations/" + m.name)
-		if err != nil {
-			return fmt.Errorf("reading migration %s: %w", m.name, err)
-		}
-
-		if _, err := database.Exec(string(sql)); err != nil {
-			return fmt.Errorf("applying migration %s: %w", m.name, err)
-		}
-
-		if _, err := database.Exec(`INSERT INTO schema_migrations (version) VALUES (?)`, m.version); err != nil {
-			return fmt.Errorf("recording migration %d: %w", m.version, err)
-		}
-	}
-
-	return nil
-}
-````
-
 ## File: packages/api/internal/db/password_reset_token_repo.go
 ````go
 package db
@@ -14286,323 +13252,6 @@ func (r *UserPreferenceRepo) Upsert(p *models.UserPreference) error {
 		return fmt.Errorf("upserting user preference: %w", err)
 	}
 	return nil
-}
-````
-
-## File: packages/api/internal/db/user_repo.go
-````go
-package db
-
-import (
-	"fmt"
-	"time"
-
-	"github.com/jmoiron/sqlx"
-
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// UserRepo is the persistence layer for User records.
-type UserRepo struct {
-	db *sqlx.DB
-}
-
-// NewUserRepo returns a UserRepo backed by db.
-func NewUserRepo(db *sqlx.DB) *UserRepo {
-	return &UserRepo{db: db}
-}
-
-// Create inserts u. Returns an error if the email already exists
-// (the users.email UNIQUE constraint surfaces as a wrapped driver error).
-func (r *UserRepo) Create(u *models.User) error {
-	_, err := r.db.NamedExec(`
-		INSERT INTO users (id, email, password_hash, display_name, avatar_url, is_superadmin, created_at, updated_at)
-		VALUES (:id, :email, :password_hash, :display_name, :avatar_url, :is_superadmin, :created_at, :updated_at)
-	`, u)
-	if err != nil {
-		return fmt.Errorf("creating user: %w", err)
-	}
-	return nil
-}
-
-// GetByEmail looks up a user by exact email match. Callers are expected to
-// normalize (lowercase, trim) before calling. Returns sql.ErrNoRows wrapped
-// when no row matches.
-func (r *UserRepo) GetByEmail(email string) (*models.User, error) {
-	var u models.User
-	err := r.db.Get(&u, `SELECT * FROM users WHERE email = ?`, email)
-	if err != nil {
-		return nil, fmt.Errorf("getting user by email: %w", err)
-	}
-	return &u, nil
-}
-
-// GetByID looks up a user by primary key.
-func (r *UserRepo) GetByID(id string) (*models.User, error) {
-	var u models.User
-	err := r.db.Get(&u, `SELECT * FROM users WHERE id = ?`, id)
-	if err != nil {
-		return nil, fmt.Errorf("getting user by id: %w", err)
-	}
-	return &u, nil
-}
-
-// UpdatePasswordByEmail replaces the password hash for the user with the
-// given email. Returns sql.ErrNoRows (wrapped) when no matching user exists.
-func (r *UserRepo) UpdatePasswordByEmail(email, passwordHash string) error {
-	res, err := r.db.Exec(
-		`UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE email = ?`,
-		passwordHash, email,
-	)
-	if err != nil {
-		return fmt.Errorf("updating password: %w", err)
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("updating password: %w", err)
-	}
-	if n == 0 {
-		return fmt.Errorf("updating password: no user with email %q", email)
-	}
-	return nil
-}
-
-// Count returns the total number of users. Used by the registration flow
-// to detect first-user bootstrap and to enforce tier user limits.
-func (r *UserRepo) Count() (int, error) {
-	var count int
-	err := r.db.Get(&count, `SELECT COUNT(*) FROM users`)
-	if err != nil {
-		return 0, fmt.Errorf("counting users: %w", err)
-	}
-	return count, nil
-}
-
-// SearchByNameOrEmail returns up to 20 users whose display_name or email
-// contains the query (case-insensitive). Archived users are excluded.
-func (r *UserRepo) SearchByNameOrEmail(q string) ([]*models.User, error) {
-	var users []*models.User
-	like := "%" + q + "%"
-	err := r.db.Select(&users, `
-		SELECT * FROM users
-		WHERE archived_at IS NULL
-		  AND (display_name LIKE ? OR email LIKE ?)
-		ORDER BY display_name ASC
-		LIMIT 20
-	`, like, like)
-	if err != nil {
-		return nil, fmt.Errorf("searching users: %w", err)
-	}
-	return users, nil
-}
-
-// SetSuperadmin sets or clears the is_superadmin flag on a user.
-func (r *UserRepo) SetSuperadmin(id string, isSuperadmin bool) error {
-	_, err := r.db.Exec(
-		`UPDATE users SET is_superadmin = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-		isSuperadmin, id,
-	)
-	if err != nil {
-		return fmt.Errorf("setting superadmin: %w", err)
-	}
-	return nil
-}
-
-// SetArchived sets or clears archived_at on a user. Archived users cannot log in.
-func (r *UserRepo) SetArchived(id string, at *time.Time) error {
-	_, err := r.db.Exec(
-		`UPDATE users SET archived_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-		at, id,
-	)
-	if err != nil {
-		return fmt.Errorf("setting user archived: %w", err)
-	}
-	return nil
-}
-
-// Delete hard-deletes a user row. The caller must verify the user is deletable
-// (no active activities, single team membership) before calling this.
-func (r *UserRepo) Delete(id string) error {
-	_, err := r.db.Exec(`DELETE FROM users WHERE id = ?`, id)
-	if err != nil {
-		return fmt.Errorf("deleting user: %w", err)
-	}
-	return nil
-}
-
-// UpdateProfile sets display_name, color, and icon on a user. When color or
-// icon changes, the new value is propagated to all team_members rows for the
-// user where the member's value currently matches the user's old value or is NULL
-// (i.e. has not been explicitly overridden by a team admin).
-func (r *UserRepo) UpdateProfile(id, displayName string, color, icon *string) error {
-	// Fetch old values for propagation comparison.
-	var old models.User
-	if err := r.db.Get(&old, `SELECT * FROM users WHERE id = ?`, id); err != nil {
-		return fmt.Errorf("fetching user for profile update: %w", err)
-	}
-
-	tx, err := r.db.Beginx()
-	if err != nil {
-		return fmt.Errorf("beginning profile update transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	_, err = tx.Exec(
-		`UPDATE users SET display_name = ?, color = ?, icon = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-		displayName, color, icon, id,
-	)
-	if err != nil {
-		return fmt.Errorf("updating user profile: %w", err)
-	}
-
-	// Propagate color if changed: update team_members rows where color matches
-	// the old value or is NULL (not explicitly overridden).
-	if !ptrEqual(old.Color, color) {
-		_, err = tx.Exec(
-			`UPDATE team_members SET color = ? WHERE user_id = ? AND (color IS NULL OR color = ?)`,
-			color, id, old.Color,
-		)
-		if err != nil {
-			return fmt.Errorf("propagating color to team_members: %w", err)
-		}
-	}
-
-	if !ptrEqual(old.Icon, icon) {
-		_, err = tx.Exec(
-			`UPDATE team_members SET icon = ? WHERE user_id = ? AND (icon IS NULL OR icon = ?)`,
-			icon, id, old.Icon,
-		)
-		if err != nil {
-			return fmt.Errorf("propagating icon to team_members: %w", err)
-		}
-	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("committing profile update: %w", err)
-	}
-	return nil
-}
-
-// UpdatePassword sets the password_hash on a user.
-func (r *UserRepo) UpdatePassword(id, passwordHash string) error {
-	_, err := r.db.Exec(
-		`UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-		passwordHash, id,
-	)
-	if err != nil {
-		return fmt.Errorf("updating password: %w", err)
-	}
-	return nil
-}
-
-// ListAll returns all users with their active team membership count.
-// When orphanedOnly is true, only users with zero active memberships are returned.
-func (r *UserRepo) ListAll(orphanedOnly bool) ([]*models.AdminUserRow, error) {
-	q := `
-		SELECT u.*,
-		       (SELECT COUNT(*) FROM team_members tm WHERE tm.user_id = u.id AND tm.archived_at IS NULL) AS team_count
-		FROM users u
-		ORDER BY u.display_name ASC
-	`
-	if orphanedOnly {
-		q = `
-			SELECT u.*,
-			       0 AS team_count
-			FROM users u
-			WHERE (SELECT COUNT(*) FROM team_members tm WHERE tm.user_id = u.id AND tm.archived_at IS NULL) = 0
-			ORDER BY u.display_name ASC
-		`
-	}
-	var rows []*models.AdminUserRow
-	if err := r.db.Select(&rows, q); err != nil {
-		return nil, fmt.Errorf("listing admin users: %w", err)
-	}
-	return rows, nil
-}
-
-// RevokeUser atomically revokes all access for a user:
-//  1. Sets users.archived_at (blocks login everywhere).
-//  2. For each team_members row for the user:
-//     – if assignment count is 0: deletes timeline_access then the row.
-//     – otherwise: sets team_members.archived_at (inactivates without data loss).
-//
-// Returns a summary of the actions taken. The caller must ensure the user
-// exists and is not a participant before calling.
-func (r *UserRepo) RevokeUser(userID string) (*models.RevokeUserResult, error) {
-	tx, err := r.db.Beginx()
-	if err != nil {
-		return nil, fmt.Errorf("beginning revoke transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	now := time.Now()
-
-	// Step 1: deactivate the account.
-	if _, err := tx.Exec(
-		`UPDATE users SET archived_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-		now, userID,
-	); err != nil {
-		return nil, fmt.Errorf("deactivating user account: %w", err)
-	}
-
-	// Step 2: collect all team_members rows for the user.
-	var memberIDs []string
-	if err := tx.Select(&memberIDs,
-		`SELECT id FROM team_members WHERE user_id = ?`, userID,
-	); err != nil {
-		return nil, fmt.Errorf("listing memberships: %w", err)
-	}
-
-	result := &models.RevokeUserResult{AccountDeactivated: true}
-
-	for _, memberID := range memberIDs {
-		var assignCount int
-		if err := tx.Get(&assignCount,
-			`SELECT COUNT(*) FROM activity_assignments WHERE team_member_id = ?`, memberID,
-		); err != nil {
-			return nil, fmt.Errorf("counting assignments for member %s: %w", memberID, err)
-		}
-
-		if assignCount == 0 {
-			// No history — delete timeline_access then the member row.
-			if _, err := tx.Exec(
-				`DELETE FROM timeline_access WHERE team_member_id = ?`, memberID,
-			); err != nil {
-				return nil, fmt.Errorf("deleting timeline access for member %s: %w", memberID, err)
-			}
-			if _, err := tx.Exec(
-				`DELETE FROM team_members WHERE id = ?`, memberID,
-			); err != nil {
-				return nil, fmt.Errorf("deleting member %s: %w", memberID, err)
-			}
-			result.MembershipsRemoved++
-		} else {
-			// Has activity history — inactivate without deleting.
-			if _, err := tx.Exec(
-				`UPDATE team_members SET archived_at = ? WHERE id = ?`, now, memberID,
-			); err != nil {
-				return nil, fmt.Errorf("inactivating member %s: %w", memberID, err)
-			}
-			result.MembershipsInactivated++
-		}
-	}
-
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("committing revoke transaction: %w", err)
-	}
-	return result, nil
-}
-
-// ptrEqual reports whether two string pointers point to equal values,
-// treating nil and a pointer to "" as distinct.
-func ptrEqual(a, b *string) bool {
-	if a == nil && b == nil {
-		return true
-	}
-	if a == nil || b == nil {
-		return false
-	}
-	return *a == *b
 }
 ````
 
@@ -23575,194 +22224,6 @@ export default function TimelineModal({ mode, teamId, timeline, canAdmin = false
 }
 ````
 
-## File: packages/web/src/contexts/AuthContext.tsx
-````typescript
-/**
- * Auth context: current user + access token in memory, refresh token in localStorage.
- *
- * Provides login, logout, and register actions so any component can
- * authenticate without knowing about token storage details.
- */
-
-import {
-  createContext,
-  useCallback,
-  useContext,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from 'react'
-import type { components } from '@draba/shared'
-import {
-  API_BASE,
-  ApiError,
-  clearStoredRefreshToken,
-  configureSilentRefresh,
-  getStoredRefreshToken,
-  storeRefreshToken,
-} from '@/lib/api'
-
-type User = components['schemas']['User']
-type AuthResponse = components['schemas']['AuthResponse']
-type RefreshResponse = components['schemas']['RefreshResponse']
-
-interface AuthState {
-  user: User | null
-  accessToken: string | null
-  /** True while checking the stored refresh token on initial mount. */
-  initializing: boolean
-}
-
-interface AuthContextValue extends AuthState {
-  getAccessToken: () => string | null
-  login: (email: string, password: string) => Promise<void>
-  /** Registers a new account and returns the fresh access token directly,
-   *  avoiding a race against the async setState that follows. */
-  register: (email: string, password: string, displayName: string, inviteToken?: string) => Promise<string>
-  logout: () => void
-  /** Merges fields into the current user object — used after profile updates. */
-  patchUser: (patch: Partial<User>) => void
-}
-
-const AuthContext = createContext<AuthContextValue | null>(null)
-
-async function postJson<T>(path: string, body: unknown): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  })
-  const data = await res.json()
-  if (!res.ok) {
-    const err = data as { error: { code: string; message: string } }
-    throw new ApiError(res.status, err.error?.code ?? 'UNKNOWN', err.error?.message ?? res.statusText)
-  }
-  return data as T
-}
-
-export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [state, setState] = useState<AuthState>({
-    user: null,
-    accessToken: null,
-    initializing: true,
-  })
-
-  // Stable ref so callbacks never capture a stale token.
-  const tokenRef = useRef<string | null>(null)
-  tokenRef.current = state.accessToken
-
-  const getAccessToken = useCallback(() => tokenRef.current, [])
-
-  // On mount, attempt to restore session via the stored refresh token.
-  // After exchanging the refresh token we also fetch /auth/me so that `user`
-  // is populated — without it, admin checks (canEditTeam etc.) always fail
-  // because userId is '' and no member's userId matches an empty string.
-  useEffect(() => {
-    const refresh = getStoredRefreshToken()
-    if (!refresh) {
-      setState(s => ({ ...s, initializing: false }))
-      return
-    }
-    postJson<RefreshResponse>('/auth/refresh', { refreshToken: refresh })
-      .then(async ({ accessToken }) => {
-        try {
-          const res = await fetch(`${API_BASE}/auth/me`, {
-            headers: { Authorization: `Bearer ${accessToken}` },
-          })
-          const user: User | null = res.ok ? (await res.json() as User) : null
-          setState({ user, accessToken, initializing: false })
-        } catch {
-          // /auth/me failed but the token is still valid — set what we have.
-          setState(s => ({ ...s, accessToken, initializing: false }))
-        }
-      })
-      .catch(() => {
-        clearStoredRefreshToken()
-        setState(s => ({ ...s, initializing: false }))
-      })
-  }, [])
-
-  const login = useCallback(async (email: string, password: string) => {
-    const { user, accessToken, refreshToken } = await postJson<AuthResponse>('/auth/login', {
-      email,
-      password,
-    })
-    storeRefreshToken(refreshToken)
-    setState({ user, accessToken, initializing: false })
-  }, [])
-
-  const register = useCallback(
-    async (
-      email: string,
-      password: string,
-      displayName: string,
-      inviteToken?: string,
-    ): Promise<string> => {
-      const { user, accessToken, refreshToken } = await postJson<AuthResponse>(
-        '/auth/register',
-        { email, password, displayName, inviteToken },
-      )
-      storeRefreshToken(refreshToken)
-      setState({ user, accessToken, initializing: false })
-      // Return the token directly so callers don't race against the async
-      // setState — tokenRef won't update until the next render cycle.
-      return accessToken
-    },
-    [],
-  )
-
-  const logout = useCallback(() => {
-    clearStoredRefreshToken()
-    setState({ user: null, accessToken: null, initializing: false })
-  }, [])
-
-  // Register a silent-refresh callback with the API layer so that any 401
-  // anywhere in the app triggers a token refresh rather than a hard failure.
-  // On refresh failure, clear the session and redirect to /login.
-  useEffect(() => {
-    const silentRefresh = async (): Promise<string | null> => {
-      const refresh = getStoredRefreshToken()
-      if (!refresh) {
-        logout()
-        window.location.replace('/login')
-        return null
-      }
-      try {
-        const { accessToken: newToken } = await postJson<RefreshResponse>('/auth/refresh', { refreshToken: refresh })
-        setState(s => ({ ...s, accessToken: newToken }))
-        return newToken
-      } catch {
-        clearStoredRefreshToken()
-        setState({ user: null, accessToken: null, initializing: false })
-        window.location.replace('/login')
-        return null
-      }
-    }
-    configureSilentRefresh(silentRefresh)
-    return () => configureSilentRefresh(null)
-  }, [logout])
-
-  const patchUser = useCallback((patch: Partial<User>) => {
-    setState(s => s.user ? { ...s, user: { ...s.user, ...patch } } : s)
-  }, [])
-
-  const value = useMemo<AuthContextValue>(
-    () => ({ ...state, getAccessToken, login, register, logout, patchUser }),
-    [state, getAccessToken, login, register, logout, patchUser],
-  )
-
-  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
-}
-
-/** Returns the auth context. Throws if used outside of AuthProvider. */
-export function useAuth(): AuthContextValue {
-  const ctx = useContext(AuthContext)
-  if (!ctx) throw new Error('useAuth must be used inside AuthProvider')
-  return ctx
-}
-````
-
 ## File: packages/web/src/contexts/FilterContext.tsx
 ````typescript
 /**
@@ -24437,32 +22898,6 @@ export function usePreferenceMap(timelineId?: string): Record<string, unknown> {
     }
   }
   return map
-}
-````
-
-## File: packages/web/src/hooks/usePublicSettings.ts
-````typescript
-/**
- * usePublicSettings — fetches /settings/branding without authentication.
- *
- * Used by LoginPage and App.tsx to display instance name and apply
- * the admin-configured accent color before the user has signed in.
- */
-
-import { useQuery } from '@tanstack/react-query'
-import { apiFetch } from '@/lib/api'
-
-interface PublicBranding {
-  instanceName: string
-  accentColor: string
-}
-
-export function usePublicSettings() {
-  return useQuery({
-    queryKey: ['settings', 'branding'],
-    queryFn: () => apiFetch<PublicBranding>('/settings/branding'),
-    staleTime: 5 * 60 * 1000,
-  })
 }
 ````
 
@@ -27408,122 +25843,6 @@ export default function ProfilePage() {
             {updateProfile.isPending ? 'Saving…' : 'Save profile'}
           </button>
         </div>
-      </div>
-    </div>
-  )
-}
-````
-
-## File: packages/web/src/pages/settings/SecurityPage.tsx
-````typescript
-/**
- * /settings/security — Change password form.
- */
-
-import { useState } from 'react'
-import { useChangePassword } from '@/hooks/useSettings'
-import { ApiError } from '@/lib/api'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import { Button } from '@/components/ui/button'
-
-export default function SecurityPage() {
-  const changePassword = useChangePassword()
-
-  const [current, setCurrent] = useState('')
-  const [next, setNext] = useState('')
-  const [confirm, setConfirm] = useState('')
-  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
-
-  const mismatch = next !== confirm && confirm !== ''
-  const tooShort = next.length > 0 && next.length < 8
-  const canSave = current !== '' && next.length >= 8 && next === confirm
-
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault()
-    if (!canSave) return
-    setFeedback(null)
-    try {
-      await changePassword.mutateAsync({ currentPassword: current, newPassword: next })
-      setFeedback({ type: 'success', msg: 'Password updated successfully.' })
-      setCurrent('')
-      setNext('')
-      setConfirm('')
-    } catch (err) {
-      const code = err instanceof ApiError ? err.code : ''
-      const msg =
-        code === 'WRONG_PASSWORD'
-          ? 'Current password is incorrect.'
-          : err instanceof ApiError
-          ? err.message
-          : 'Failed to change password.'
-      setFeedback({ type: 'error', msg })
-    }
-  }
-
-  return (
-    <div>
-      <h2 className="text-[17px] font-semibold text-foreground mb-1">Security</h2>
-      <p className="text-sm text-muted-foreground mb-6">
-        Update your password. You'll need to enter your current password to confirm the change.
-      </p>
-
-      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
-        <form onSubmit={handleSubmit}>
-          <div className="flex flex-col gap-1.5 mb-4">
-            <Label htmlFor="currentPw">Current password</Label>
-            <Input
-              id="currentPw"
-              type="password"
-              value={current}
-              onChange={e => setCurrent(e.target.value)}
-              autoComplete="current-password"
-              className="max-w-[360px]"
-            />
-          </div>
-
-          <div className="flex flex-col gap-1.5 mb-4">
-            <Label htmlFor="newPw">New password</Label>
-            <Input
-              id="newPw"
-              type="password"
-              value={next}
-              onChange={e => setNext(e.target.value)}
-              autoComplete="new-password"
-              className={`max-w-[360px]${tooShort ? ' border-destructive' : ''}`}
-            />
-            {tooShort && (
-              <p className="text-xs text-destructive m-0">
-                Password must be at least 8 characters.
-              </p>
-            )}
-          </div>
-
-          <div className="flex flex-col gap-1.5 mb-4">
-            <Label htmlFor="confirmPw">Confirm new password</Label>
-            <Input
-              id="confirmPw"
-              type="password"
-              value={confirm}
-              onChange={e => setConfirm(e.target.value)}
-              autoComplete="new-password"
-              className={`max-w-[360px]${mismatch ? ' border-destructive' : ''}`}
-            />
-            {mismatch && (
-              <p className="text-xs text-destructive m-0">Passwords don't match.</p>
-            )}
-          </div>
-
-          {feedback && (
-            <p className={`text-[13px] mb-3 ${feedback.type === 'success' ? 'text-success' : 'text-destructive'}`}>
-              {feedback.msg}
-            </p>
-          )}
-
-          <Button type="submit" disabled={!canSave || changePassword.isPending}>
-            {changePassword.isPending ? 'Updating…' : 'Update password'}
-          </Button>
-        </form>
       </div>
     </div>
   )
@@ -34626,6 +32945,992 @@ components/kanban/
 5. **Configure pencil vs. full-card click** — v1 uses full-card click to open the edit panel; the hover pencil is optional polish, not required.
 ````
 
+## File: packages/api/internal/api/admin_handler.go
+````go
+package api
+
+import (
+	"encoding/json"
+	"log/slog"
+	"net/http"
+
+	"github.com/I0-1O/draba/packages/api/internal/mailer"
+)
+
+// requireSuperadmin is a shared guard for admin endpoints. Returns false
+// and writes a 403 if the caller is not a superadmin.
+func (s *Server) requireSuperadmin(w http.ResponseWriter, r *http.Request) bool {
+	claims := claimsFromContext(r.Context())
+	caller, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to verify permissions")
+		return false
+	}
+	if !caller.IsSuperadmin {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
+		return false
+	}
+	return true
+}
+
+// handleGetSMTP handles GET /admin/smtp. Returns the current SMTP config
+// with the password masked. Superadmin-only.
+func (s *Server) handleGetSMTP(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSuperadmin(w, r) {
+		return
+	}
+
+	cfg, err := s.mailer.LoadConfig()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load SMTP config")
+		return
+	}
+	if cfg == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"smtp": nil})
+		return
+	}
+
+	// Mask the password in the response.
+	masked := *cfg
+	if masked.Password != "" {
+		masked.Password = "••••••••"
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"smtp": masked})
+}
+
+// handlePutSMTP handles PUT /admin/smtp. Saves the SMTP configuration and
+// validates it by sending a test email to the caller's address. Superadmin-only.
+func (s *Server) handlePutSMTP(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSuperadmin(w, r) {
+		return
+	}
+
+	var cfg mailer.SMTPConfig
+	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+	if cfg.Host == "" || cfg.Port == 0 || cfg.FromEmail == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "host, port, and fromEmail are required")
+		return
+	}
+
+	// Fetch caller email for the validation test.
+	claims := claimsFromContext(r.Context())
+	caller, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to send test email")
+		return
+	}
+
+	// Validate by sending a test email before persisting.
+	if err := mailer.SendWithConfig(&cfg, caller.Email, "draba SMTP test", smtpTestBody()); err != nil {
+		slog.Warn("smtp validation failed", "err", err)
+		writeError(w, http.StatusBadRequest, "SMTP_SEND_FAILED", "SMTP validation failed; check server logs for details")
+		return
+	}
+
+	if err := s.mailer.SaveConfig(&cfg); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to save SMTP config")
+		return
+	}
+
+	masked := cfg
+	if masked.Password != "" {
+		masked.Password = "••••••••"
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"smtp": masked})
+}
+
+// handleTestSMTP handles POST /admin/smtp/test. Sends a test email using the
+// provided config without persisting it. Superadmin-only.
+func (s *Server) handleTestSMTP(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSuperadmin(w, r) {
+		return
+	}
+
+	var cfg mailer.SMTPConfig
+	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	claims := claimsFromContext(r.Context())
+	caller, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to fetch caller")
+		return
+	}
+
+	if err := mailer.SendWithConfig(&cfg, caller.Email, "draba SMTP test", smtpTestBody()); err != nil {
+		slog.Warn("smtp test failed", "err", err)
+		writeError(w, http.StatusBadRequest, "SMTP_SEND_FAILED", "SMTP test failed; check server logs for details")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "sent", "to": caller.Email})
+}
+
+// handleDeleteSMTP handles DELETE /admin/smtp. Clears the SMTP config.
+// Superadmin-only.
+func (s *Server) handleDeleteSMTP(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSuperadmin(w, r) {
+		return
+	}
+	if err := s.mailer.DeleteConfig(); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to clear SMTP config")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleGetAdminSettings handles GET /admin/settings. Returns instance-level
+// defaults. Superadmin-only.
+func (s *Server) handleGetAdminSettings(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSuperadmin(w, r) {
+		return
+	}
+
+	keys := []string{"registration_policy", "default_timezone", "default_date_format", "default_week_start", "instance_name", "accent_color"}
+	settings := make(map[string]string, len(keys))
+	for _, k := range keys {
+		v, err := s.instanceSets.Get(k)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load settings")
+			return
+		}
+		settings[k] = v
+	}
+
+	// Apply defaults for missing keys.
+	if settings["registration_policy"] == "" {
+		settings["registration_policy"] = "invite_only"
+	}
+	if settings["default_timezone"] == "" {
+		settings["default_timezone"] = "UTC"
+	}
+	if settings["default_date_format"] == "" {
+		settings["default_date_format"] = "MMM D, YYYY"
+	}
+	if settings["default_week_start"] == "" {
+		settings["default_week_start"] = "monday"
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"settings": settings})
+}
+
+// handlePatchAdminSettings handles PATCH /admin/settings. Updates one or more
+// instance-level settings. Superadmin-only.
+func (s *Server) handlePatchAdminSettings(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSuperadmin(w, r) {
+		return
+	}
+
+	var body map[string]string
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	// Validate known keys and values.
+	allowed := map[string]bool{
+		"registration_policy": true,
+		"default_timezone":    true,
+		"default_date_format": true,
+		"default_week_start":  true,
+		"instance_name":       true,
+		"accent_color":        true,
+	}
+	for k := range body {
+		if !allowed[k] {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "unknown setting key: "+k)
+			return
+		}
+	}
+	if v, ok := body["registration_policy"]; ok && v != "invite_only" && v != "open" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "registration_policy must be invite_only or open")
+		return
+	}
+	if v, ok := body["default_week_start"]; ok && v != "monday" && v != "sunday" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "default_week_start must be monday or sunday")
+		return
+	}
+
+	for k, v := range body {
+		if err := s.instanceSets.Set(k, v); err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to save settings")
+			return
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"settings": body})
+}
+
+// handleGetPublicBranding handles GET /settings/branding. Returns the
+// instance name and accent color without requiring authentication, so the
+// login page and shared timeline views can display branding before sign-in.
+//
+// Only cosmetic settings are exposed here. Never add sensitive keys (SMTP
+// credentials, JWT secrets, registration policy, etc.) to this handler.
+func (s *Server) handleGetPublicBranding(w http.ResponseWriter, _ *http.Request) {
+	name, _ := s.instanceSets.Get("instance_name")
+	accent, _ := s.instanceSets.Get("accent_color")
+	writeJSON(w, http.StatusOK, map[string]any{
+		"instanceName": name,
+		"accentColor":  accent,
+		// ssoEnabled lets the login page decide whether to show the "Sign in
+		// with SSO" button. It is not sensitive — the same fact is observable
+		// by probing /auth/oidc/login.
+		"ssoEnabled": s.oidcEnabled(),
+	})
+}
+
+func smtpTestBody() string {
+	return `<html><body>
+<p>This is a test email from <strong>draba</strong>.</p>
+<p>If you received this, your SMTP configuration is working correctly.</p>
+</body></html>`
+}
+````
+
+## File: packages/api/internal/api/auth_handler.go
+````go
+package api
+
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"log/slog"
+	"net/http"
+	"net/url"
+	"os"
+	"strings"
+	"time"
+	"unicode"
+
+	openapi_types "github.com/oapi-codegen/runtime/types"
+
+	"github.com/I0-1O/draba/packages/api/internal/auth"
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// handleRegister handles POST /auth/register. The first user on a fresh
+// install registers without an invite (bootstrap); every subsequent user
+// must present a valid invite token. Tier user limits are enforced before
+// hashing the password to avoid wasted bcrypt work.
+func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
+	var req RegisterJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	req.Email = openapi_types.Email(strings.ToLower(strings.TrimSpace(string(req.Email))))
+	req.DisplayName = strings.TrimSpace(req.DisplayName)
+
+	if req.Email == "" || req.Password == "" || req.DisplayName == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "email, password, and displayName are required")
+		return
+	}
+	if !isValidPassword(req.Password) {
+		writeError(w, http.StatusBadRequest, "WEAK_PASSWORD", "password must be at least 8 characters")
+		return
+	}
+
+	// First user may register without an invite; all subsequent users require one.
+	count, err := s.users.Count()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "registration failed")
+		return
+	}
+
+	if err := s.tier.CheckUserLimit(count); err != nil {
+		writeError(w, http.StatusPaymentRequired, "TIER_USER_LIMIT", "user limit reached for current tier")
+		return
+	}
+
+	var invite *models.Invite
+	var inviteLinkTeamID string // non-empty when a reusable invite link was used
+	if count > 0 {
+		if req.InviteToken == nil || *req.InviteToken == "" {
+			writeError(w, http.StatusForbidden, "INVITE_REQUIRED", "an invite token is required to register")
+			return
+		}
+		// Try as a one-time invite first.
+		inv, err := s.invites.GetValid(*req.InviteToken)
+		if err != nil {
+			// Not a valid one-time invite — check if it's a reusable invite link token.
+			team, linkErr := s.teams.GetByInviteLinkToken(*req.InviteToken)
+			if linkErr != nil {
+				writeError(w, http.StatusForbidden, "INVITE_INVALID", "invite token is invalid or expired")
+				return
+			}
+			inviteLinkTeamID = team.ID
+		} else {
+			if inv.Email != "" && !strings.EqualFold(inv.Email, string(req.Email)) {
+				writeError(w, http.StatusForbidden, "INVITE_EMAIL_MISMATCH", "this invite was issued to a different email address")
+				return
+			}
+			invite = inv
+		}
+	}
+
+	hash, err := auth.HashPassword(req.Password)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "registration failed")
+		return
+	}
+
+	now := time.Now()
+	user := &models.User{
+		ID:           newID(),
+		Email:        string(req.Email),
+		PasswordHash: &hash,
+		DisplayName:  req.DisplayName,
+		AuthProvider: "local",
+		IsSuperadmin: count == 0,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+	if err := s.users.Create(user); err != nil {
+		writeError(w, http.StatusConflict, "EMAIL_TAKEN", "an account with that email already exists")
+		return
+	}
+
+	if invite != nil {
+		if err := s.invites.MarkAccepted(invite.ID); err != nil {
+			// User and tokens are still returned — email uniqueness prevents a
+			// second registration. Log so the open invite is visible in monitoring.
+			slog.Error("failed to mark invite accepted", "invite_id", invite.ID, "err", err)
+		}
+		userID := user.ID
+		member := &models.TeamMember{
+			ID:       newID(),
+			TeamID:   invite.TeamID,
+			UserID:   &userID,
+			Role:     invite.Role,
+			JoinedAt: now,
+		}
+		if err := s.teams.AddMember(member); err != nil {
+			slog.Error("failed to add user to team after invite", "team_id", invite.TeamID, "user_id", user.ID, "err", err)
+		}
+	} else if inviteLinkTeamID != "" {
+		userID := user.ID
+		member := &models.TeamMember{
+			ID:       newID(),
+			TeamID:   inviteLinkTeamID,
+			UserID:   &userID,
+			Role:     "member",
+			JoinedAt: now,
+		}
+		if err := s.teams.AddMember(member); err != nil {
+			slog.Error("failed to add user to team via invite link", "team_id", inviteLinkTeamID, "user_id", user.ID, "err", err)
+		}
+	}
+
+	access, err := s.tokens.IssueAccessToken(user.ID, user.Email)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "registration failed")
+		return
+	}
+	refresh, err := s.tokens.IssueRefreshToken(user.ID, user.Email)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "registration failed")
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"user":         user,
+		"accessToken":  access,
+		"refreshToken": refresh,
+	})
+}
+
+// handleLogin handles POST /auth/login. Returns the same generic
+// INVALID_CREDENTIALS error for both unknown email and bad password so
+// the endpoint cannot be used as an account-existence oracle.
+func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	var req LoginJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	req.Email = openapi_types.Email(strings.ToLower(strings.TrimSpace(string(req.Email))))
+	if req.Email == "" || req.Password == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "email and password are required")
+		return
+	}
+
+	user, err := s.users.GetByEmail(string(req.Email))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusUnauthorized, "INVALID_CREDENTIALS", "invalid email or password")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "login failed")
+		return
+	}
+
+	if user.ArchivedAt != nil {
+		writeError(w, http.StatusForbidden, "ACCOUNT_INACTIVE", "this account has been deactivated")
+		return
+	}
+
+	// An OIDC (SSO) account has no password and must never authenticate via
+	// this endpoint — it can only log in through the OIDC flow. Same generic
+	// error as a bad password so the endpoint cannot reveal that an address
+	// belongs to an SSO account.
+	if user.PasswordHash == nil {
+		writeError(w, http.StatusUnauthorized, "INVALID_CREDENTIALS", "invalid email or password")
+		return
+	}
+
+	if err := auth.CheckPassword(*user.PasswordHash, req.Password); err != nil {
+		writeError(w, http.StatusUnauthorized, "INVALID_CREDENTIALS", "invalid email or password")
+		return
+	}
+
+	access, err := s.tokens.IssueAccessToken(user.ID, user.Email)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "login failed")
+		return
+	}
+	refresh, err := s.tokens.IssueRefreshToken(user.ID, user.Email)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "login failed")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"user":         user,
+		"accessToken":  access,
+		"refreshToken": refresh,
+	})
+}
+
+// handleRefresh handles POST /auth/refresh. It exchanges a valid refresh
+// token for a new access token; the refresh token itself is not rotated.
+func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
+	var req RefreshTokenJSONBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	claims, err := s.tokens.Validate(req.RefreshToken, "refresh")
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "INVALID_TOKEN", "refresh token is invalid or expired")
+		return
+	}
+
+	access, err := s.tokens.IssueAccessToken(claims.UserID, claims.Email)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "token refresh failed")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"accessToken": access,
+	})
+}
+
+// handleMe handles GET /auth/me and returns the authenticated user's
+// profile. Must be mounted behind authMiddleware.
+func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFromContext(r.Context())
+	user, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to fetch user")
+		return
+	}
+	writeJSON(w, http.StatusOK, user)
+}
+
+// handleForgotPassword handles POST /auth/forgot-password. Accepts an email
+// address, generates a 1-hour reset token, stores the hash, and sends a
+// reset link via SMTP. Always returns 200 to prevent email enumeration.
+// When SMTP is not configured the email is silently skipped.
+func (s *Server) handleForgotPassword(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Email string `json:"email"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+	body.Email = strings.ToLower(strings.TrimSpace(body.Email))
+	if body.Email == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "email is required")
+		return
+	}
+
+	// Always return 200 regardless of whether the email exists.
+	w.Header().Set("Content-Type", "application/json")
+	defer func() { _, _ = w.Write([]byte(`{"status":"ok"}`)) }()
+
+	user, err := s.users.GetByEmail(body.Email)
+	if err != nil {
+		// No user — return 200 without error (prevent enumeration).
+		return
+	}
+	if user.ArchivedAt != nil {
+		return
+	}
+	// OIDC accounts have no local password to reset; issuing a reset token
+	// would let an SSO user install a password_hash and bypass SSO. Return the
+	// same silent 200 as the no-user case so enumeration is still impossible.
+	if user.AuthProvider == "oidc" {
+		return
+	}
+
+	rawToken := newToken()
+	expiresAt := time.Now().Add(time.Hour)
+	if _, err := s.passwordTokens.Create(newID(), user.ID, rawToken, expiresAt); err != nil {
+		slog.Error("forgot-password: failed to create token", "user_id", user.ID, "err", err)
+		return
+	}
+
+	// DRABA_BASE_URL is used to build the reset link. Fall back to a placeholder
+	// when not set so the email still contains useful info.
+	baseURL := strings.TrimRight(getBaseURL(), "/")
+	resetLink := baseURL + "/reset-password?token=" + url.QueryEscape(rawToken)
+
+	subject := "Reset your draba password"
+	body2 := "<html><body>" +
+		"<p>You requested a password reset for your draba account.</p>" +
+		"<p><a href=\"" + resetLink + "\">Click here to reset your password</a></p>" +
+		"<p>This link expires in 1 hour. If you did not request this, you can ignore this email.</p>" +
+		"</body></html>"
+
+	if err := s.mailer.Send(user.Email, subject, body2); err != nil {
+		slog.Error("forgot-password: failed to send email", "user_id", user.ID, "err", err)
+	}
+}
+
+// handleResetPassword handles POST /auth/reset-password. Accepts a token and
+// new password; validates the token, hashes the new password, and marks the
+// token used. Returns 400 TOKEN_INVALID when the token is not found, expired,
+// or already used.
+func (s *Server) handleResetPassword(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Token       string `json:"token"`
+		NewPassword string `json:"newPassword"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+	if body.Token == "" || body.NewPassword == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "token and newPassword are required")
+		return
+	}
+	if !isValidPassword(body.NewPassword) {
+		writeError(w, http.StatusBadRequest, "WEAK_PASSWORD", "password must be at least 8 characters")
+		return
+	}
+
+	resetToken, err := s.passwordTokens.GetValid(body.Token)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "TOKEN_INVALID", "reset token is invalid or expired")
+		return
+	}
+
+	// Defence in depth: even though handleForgotPassword won't issue a token for
+	// an OIDC account, reject resets here too so a token can never be used to
+	// install a local password on an SSO-managed account (which would bypass
+	// the OIDC-only login invariant).
+	if user, err := s.users.GetByID(resetToken.UserID); err == nil && user.AuthProvider == "oidc" {
+		writeError(w, http.StatusBadRequest, "OIDC_ACCOUNT", "this account signs in via SSO and has no password to reset")
+		return
+	}
+
+	hash, err := auth.HashPassword(body.NewPassword)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reset password")
+		return
+	}
+
+	if err := s.users.UpdatePassword(resetToken.UserID, hash); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reset password")
+		return
+	}
+
+	if err := s.passwordTokens.MarkUsed(resetToken.ID); err != nil {
+		slog.Warn("reset-password: failed to mark token used", "token_id", resetToken.ID, "err", err)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// getBaseURL returns DRABA_BASE_URL or a localhost fallback.
+func getBaseURL() string {
+	if v := os.Getenv("DRABA_BASE_URL"); v != "" {
+		return v
+	}
+	return "http://localhost:8080"
+}
+
+// isValidPassword applies the minimum policy: at least 8 characters and
+// no whitespace. Strength rules beyond length are intentionally lenient —
+// length is what matters most against offline cracking.
+func isValidPassword(p string) bool {
+	if len(p) < 8 {
+		return false
+	}
+	for _, r := range p {
+		if unicode.IsSpace(r) {
+			return false
+		}
+	}
+	return true
+}
+````
+
+## File: packages/api/internal/api/oidc_handler.go
+````go
+package api
+
+import (
+	"database/sql"
+	"errors"
+	"log/slog"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/auth"
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// OIDC transient cookie names. These carry the state, nonce, and PKCE verifier
+// across the redirect to the IdP and back. They are httpOnly (never read by JS),
+// short-lived (auth.FlowCookieTTL), and SameSite=Lax so they survive the
+// top-level redirect back from the provider while still resisting CSRF.
+const (
+	oidcStateCookie = "draba_oidc_state"
+	oidcNonceCookie = "draba_oidc_nonce"
+	oidcPKCECookie  = "draba_oidc_pkce"
+)
+
+// oidcEnabled reports whether SSO is configured. A nil service means the
+// operator did not set DRABA_OIDC_ISSUER, so every OIDC route is a 404 and no
+// SSO machinery runs.
+func (s *Server) oidcEnabled() bool { return s.oidc != nil }
+
+// handleOIDCLogin handles GET /auth/oidc/login. It begins the authorization
+// code flow and redirects the user agent to the identity provider, stashing
+// the state/nonce/PKCE verifier in short-lived httpOnly cookies for the
+// callback to verify.
+func (s *Server) handleOIDCLogin(w http.ResponseWriter, r *http.Request) {
+	if !s.oidcEnabled() {
+		writeError(w, http.StatusNotFound, "OIDC_DISABLED", "SSO is not enabled on this instance")
+		return
+	}
+
+	flow, err := s.oidc.Begin()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to start SSO login")
+		return
+	}
+
+	secure := isSecureRequest(r)
+	s.setFlowCookie(w, oidcStateCookie, flow.State, secure)
+	s.setFlowCookie(w, oidcNonceCookie, flow.Nonce, secure)
+	s.setFlowCookie(w, oidcPKCECookie, flow.PKCEVerifier, secure)
+
+	http.Redirect(w, r, flow.AuthURL, http.StatusFound)
+}
+
+// handleOIDCCallback handles GET /auth/oidc/callback. It validates the state
+// against the cookie, exchanges the code for tokens, verifies the ID token,
+// finds-or-provisions the local user, and redirects back to the SPA with
+// freshly issued draba access and refresh tokens in the URL fragment.
+//
+// On any failure it redirects to /login?sso_error=... rather than rendering an
+// API error, because the user agent is a browser following a redirect, not an
+// API client expecting JSON.
+func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
+	if !s.oidcEnabled() {
+		writeError(w, http.StatusNotFound, "OIDC_DISABLED", "SSO is not enabled on this instance")
+		return
+	}
+
+	// Clear the transient cookies regardless of outcome.
+	defer func() {
+		secure := isSecureRequest(r)
+		s.clearFlowCookie(w, oidcStateCookie, secure)
+		s.clearFlowCookie(w, oidcNonceCookie, secure)
+		s.clearFlowCookie(w, oidcPKCECookie, secure)
+	}()
+
+	// If the IdP reported an error, surface a fixed reason — never the raw
+	// IdP-supplied value, which is attacker-influenceable.
+	if r.URL.Query().Get("error") != "" {
+		s.redirectSSOError(w, r, "idp_error")
+		return
+	}
+
+	// CSRF defence: the state echoed by the IdP must equal the one we set.
+	stateCookie, err := r.Cookie(oidcStateCookie)
+	if err != nil || stateCookie.Value == "" || r.URL.Query().Get("state") != stateCookie.Value {
+		s.redirectSSOError(w, r, "state_mismatch")
+		return
+	}
+
+	nonceCookie, err := r.Cookie(oidcNonceCookie)
+	if err != nil || nonceCookie.Value == "" {
+		s.redirectSSOError(w, r, "missing_nonce")
+		return
+	}
+	pkceCookie, err := r.Cookie(oidcPKCECookie)
+	if err != nil || pkceCookie.Value == "" {
+		s.redirectSSOError(w, r, "missing_pkce")
+		return
+	}
+
+	code := r.URL.Query().Get("code")
+	if code == "" {
+		s.redirectSSOError(w, r, "missing_code")
+		return
+	}
+
+	claims, err := s.oidc.Exchange(r.Context(), code, pkceCookie.Value, nonceCookie.Value)
+	if err != nil {
+		s.redirectSSOError(w, r, "exchange_failed")
+		return
+	}
+
+	user, err := s.findOrProvisionOIDCUser(claims)
+	if err != nil {
+		switch {
+		case errors.Is(err, errOIDCProvisioningClosed):
+			s.redirectSSOError(w, r, "provisioning_disabled")
+		case errors.Is(err, errOIDCUserLimit):
+			s.redirectSSOError(w, r, "user_limit")
+		case errors.Is(err, errOIDCNoEmail):
+			s.redirectSSOError(w, r, "no_email")
+		default:
+			s.redirectSSOError(w, r, "login_failed")
+		}
+		return
+	}
+
+	if user.ArchivedAt != nil {
+		s.redirectSSOError(w, r, "account_inactive")
+		return
+	}
+
+	access, err := s.tokens.IssueAccessToken(user.ID, user.Email)
+	if err != nil {
+		s.redirectSSOError(w, r, "login_failed")
+		return
+	}
+	refresh, err := s.tokens.IssueRefreshToken(user.ID, user.Email)
+	if err != nil {
+		s.redirectSSOError(w, r, "login_failed")
+		return
+	}
+
+	// Hand the tokens to the SPA via the URL fragment (never the query string,
+	// so they are not sent to the server or logged in access logs). The SPA's
+	// /auth/callback route reads them from location.hash and stores them.
+	base := strings.TrimRight(getBaseURL(), "/")
+	target := base + "/auth/callback#access_token=" + access + "&refresh_token=" + refresh
+	http.Redirect(w, r, target, http.StatusFound)
+}
+
+// Sentinel errors distinguishing why OIDC provisioning was refused, so the
+// callback can map each to a distinct login-page message.
+var (
+	errOIDCProvisioningClosed = errors.New("oidc auto-provisioning disabled")
+	errOIDCUserLimit          = errors.New("user limit reached")
+	errOIDCNoEmail            = errors.New("oidc id_token has no email claim")
+)
+
+// findOrProvisionOIDCUser returns the local user for the given external
+// identity, creating one on first login when auto-provisioning is enabled.
+// The (issuer, subject) pair is the stable key; email/name are refreshed from
+// claims each login. New-user creation respects the same tier user limit the
+// password registration path enforces.
+func (s *Server) findOrProvisionOIDCUser(claims *auth.OIDCClaims) (*models.User, error) {
+	issuer := s.oidc.Issuer()
+
+	existing, err := s.users.GetByOIDCSubject(issuer, claims.Subject)
+	if err == nil {
+		// Returning user — refresh profile from latest claims (best-effort).
+		// An empty email here means the IdP stopped releasing it; keep the
+		// stored one rather than overwriting a valid value with "".
+		email := normalizeEmail(claims.Email)
+		name := displayNameFromClaims(claims)
+		if email != "" && (email != existing.Email || name != existing.DisplayName) {
+			if uerr := s.users.UpdateOIDCProfile(existing.ID, email, name); uerr != nil {
+				// Non-fatal: log and continue so a transient profile-refresh
+				// failure never blocks an otherwise-valid login.
+				slog.Warn("oidc: profile refresh failed", "user_id", existing.ID, "err", uerr)
+				return existing, nil
+			}
+			existing.Email = email
+			existing.DisplayName = name
+		}
+		return existing, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
+	}
+
+	// First login for this identity — provision if allowed.
+	if !s.oidcAutoCreate() {
+		return nil, errOIDCProvisioningClosed
+	}
+
+	// A new account needs an email: users.email is NOT NULL UNIQUE and the
+	// issued JWT carries it. Provisioning with "" would let the first user in
+	// but collide every subsequent emailless user on the unique constraint.
+	// Require the IdP to release an email scope for first-login provisioning.
+	email := normalizeEmail(claims.Email)
+	if email == "" {
+		return nil, errOIDCNoEmail
+	}
+
+	count, err := s.users.Count()
+	if err != nil {
+		return nil, err
+	}
+	if err := s.tier.CheckUserLimit(count); err != nil {
+		return nil, errOIDCUserLimit
+	}
+
+	now := time.Now()
+	issuerCopy, subjectCopy := issuer, claims.Subject
+	user := &models.User{
+		ID:          newID(),
+		Email:       email,
+		DisplayName: displayNameFromClaims(claims),
+		// SSO users are never auto-promoted to superadmin. The first-user-admin
+		// bootstrap was designed for local registration (a deliberate operator
+		// act); OIDC provisioning is passive and automatic, so "first one in
+		// wins" is raceable — two different identities hitting /callback on an
+		// empty DB would both read count==0 and both become superadmin. Grant
+		// superadmin via the admin UI after first login instead.
+		IsSuperadmin: false,
+		AuthProvider: "oidc",
+		OIDCIssuer:   &issuerCopy,
+		OIDCSubject:  &subjectCopy,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+	if err := s.users.CreateOIDC(user); err != nil {
+		// A concurrent first login for the same subject, or an email already
+		// taken by a local account, surfaces here.
+		if isUniqueConstraintError(err) {
+			// Re-fetch: the row may now exist (race) — prefer returning it.
+			if u, gerr := s.users.GetByOIDCSubject(issuer, claims.Subject); gerr == nil {
+				return u, nil
+			}
+			return nil, errors.New("oidc: email or identity already in use")
+		}
+		return nil, err
+	}
+	return user, nil
+}
+
+// ssoErrorReasons is the closed set of reason codes redirectSSOError may emit.
+// Every reason the callback produces is a fixed internal string (never an
+// IdP-supplied value), so the login page can map each to a friendly message
+// and no externally-influenced data reaches the redirect URL.
+var ssoErrorReasons = map[string]bool{
+	"idp_error":             true,
+	"state_mismatch":        true,
+	"missing_nonce":         true,
+	"missing_pkce":          true,
+	"missing_code":          true,
+	"exchange_failed":       true,
+	"provisioning_disabled": true,
+	"user_limit":            true,
+	"no_email":              true,
+	"account_inactive":      true,
+	"login_failed":          true,
+}
+
+// redirectSSOError sends the browser back to the SPA login page with a stable
+// machine-readable reason code it can map to a friendly message. The reason is
+// validated against a fixed allow-list and the URL is built with net/url, so
+// no caller mistake or IdP-supplied value can inject into the query string.
+func (s *Server) redirectSSOError(w http.ResponseWriter, r *http.Request, reason string) {
+	if !ssoErrorReasons[reason] {
+		reason = "login_failed"
+	}
+	base := strings.TrimRight(getBaseURL(), "/")
+	u, err := url.Parse(base + "/login")
+	if err != nil {
+		http.Redirect(w, r, "/login", http.StatusFound)
+		return
+	}
+	u.RawQuery = url.Values{"sso_error": {reason}}.Encode()
+	http.Redirect(w, r, u.String(), http.StatusFound)
+}
+
+// setFlowCookie writes a short-lived httpOnly cookie for the OIDC flow.
+func (s *Server) setFlowCookie(w http.ResponseWriter, name, value string, secure bool) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     name,
+		Value:    value,
+		Path:     "/auth/oidc",
+		MaxAge:   int(auth.FlowCookieTTL.Seconds()),
+		HttpOnly: true,
+		Secure:   secure,
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
+// clearFlowCookie expires an OIDC flow cookie.
+func (s *Server) clearFlowCookie(w http.ResponseWriter, name string, secure bool) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     name,
+		Value:    "",
+		Path:     "/auth/oidc",
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   secure,
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
+// isSecureRequest reports whether the request arrived over HTTPS, honouring a
+// terminating proxy's X-Forwarded-Proto header. Controls the cookie Secure
+// flag so transient OIDC cookies are not marked Secure on a plain-HTTP dev
+// instance (where the browser would then refuse to send them back).
+func isSecureRequest(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	return strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
+}
+
+// normalizeEmail lowercases and trims an email claim. May be empty if the IdP
+// did not release an email scope.
+func normalizeEmail(email string) string {
+	return strings.ToLower(strings.TrimSpace(email))
+}
+
+// displayNameFromClaims picks the best available display name: the name claim,
+// else the local-part of the email, else the subject.
+func displayNameFromClaims(c *auth.OIDCClaims) string {
+	if n := strings.TrimSpace(c.Name); n != "" {
+		return n
+	}
+	if c.Email != "" {
+		if at := strings.IndexByte(c.Email, '@'); at > 0 {
+			return c.Email[:at]
+		}
+	}
+	return c.Subject
+}
+````
+
 ## File: packages/api/internal/api/ratelimit.go
 ````go
 package api
@@ -34703,6 +34008,360 @@ func clientIP(r *http.Request) string {
 		return r.RemoteAddr
 	}
 	return host
+}
+````
+
+## File: packages/api/internal/api/user_handler.go
+````go
+package api
+
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/auth"
+)
+
+// handleUpdateProfile handles PATCH /users/me. Updates display_name, color,
+// and icon for the authenticated user. Color/icon changes propagate to all
+// team_members rows that have not been explicitly overridden.
+func (s *Server) handleUpdateProfile(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFromContext(r.Context())
+
+	var body struct {
+		DisplayName *string `json:"displayName"`
+		Color       *string `json:"color"`
+		Icon        *string `json:"icon"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	user, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update profile")
+		return
+	}
+
+	// Apply changes only for fields that were provided.
+	displayName := user.DisplayName
+	if body.DisplayName != nil {
+		displayName = strings.TrimSpace(*body.DisplayName)
+		if displayName == "" {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "displayName cannot be empty")
+			return
+		}
+	}
+
+	color := user.Color
+	if body.Color != nil {
+		color = body.Color
+	}
+	icon := user.Icon
+	if body.Icon != nil {
+		icon = body.Icon
+	}
+
+	if err := s.users.UpdateProfile(user.ID, displayName, color, icon); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update profile")
+		return
+	}
+
+	user.DisplayName = displayName
+	user.Color = color
+	user.Icon = icon
+	writeJSON(w, http.StatusOK, user)
+}
+
+// handleGetMyStats handles GET /users/me/stats. Returns aggregated activity and
+// timeline counts across all of the authenticated user's team memberships.
+func (s *Server) handleGetMyStats(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFromContext(r.Context())
+	stats, err := s.teams.GetUserStats(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get stats")
+		return
+	}
+	writeJSON(w, http.StatusOK, stats)
+}
+
+// handleChangePassword handles PUT /users/me/password. Requires the caller
+// to supply the current password before setting a new one.
+func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFromContext(r.Context())
+
+	var body struct {
+		CurrentPassword string `json:"currentPassword"`
+		NewPassword     string `json:"newPassword"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+	if body.CurrentPassword == "" || body.NewPassword == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "currentPassword and newPassword are required")
+		return
+	}
+	if !isValidPassword(body.NewPassword) {
+		writeError(w, http.StatusBadRequest, "WEAK_PASSWORD", "new password must be at least 8 characters")
+		return
+	}
+
+	user, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to change password")
+		return
+	}
+
+	// An OIDC (SSO) account has no local password to change; password
+	// management lives at the identity provider.
+	if user.PasswordHash == nil {
+		writeError(w, http.StatusBadRequest, "OIDC_ACCOUNT", "this account signs in via SSO and has no password to change")
+		return
+	}
+
+	// Verify the current password before allowing the change.
+	if err := auth.CheckPassword(*user.PasswordHash, body.CurrentPassword); err != nil {
+		writeError(w, http.StatusUnauthorized, "WRONG_PASSWORD", "current password is incorrect")
+		return
+	}
+
+	hash, err := auth.HashPassword(body.NewPassword)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to change password")
+		return
+	}
+
+	if err := s.users.UpdatePassword(user.ID, hash); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to change password")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// handleListAdminUsers handles GET /admin/users. Returns all users with team
+// membership counts. Supports ?orphaned=true to filter to zero-membership users.
+// Superadmin-only.
+func (s *Server) handleListAdminUsers(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFromContext(r.Context())
+
+	caller, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list users")
+		return
+	}
+	if !caller.IsSuperadmin {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
+		return
+	}
+
+	orphanedOnly := r.URL.Query().Get("orphaned") == "true"
+	rows, err := s.users.ListAll(orphanedOnly)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list users")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"users": rows})
+}
+
+// handlePromoteUser sets is_superadmin=true on a user. Superadmin-only.
+// Participants (no user account) cannot be promoted.
+func (s *Server) handlePromoteUser(w http.ResponseWriter, r *http.Request) {
+	userID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	caller, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to promote user")
+		return
+	}
+	if !caller.IsSuperadmin {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
+		return
+	}
+
+	target, err := s.users.GetByID(userID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "user not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to promote user")
+		return
+	}
+
+	if err := s.users.SetSuperadmin(target.ID, true); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to promote user")
+		return
+	}
+
+	target.IsSuperadmin = true
+	writeJSON(w, http.StatusOK, target)
+}
+
+// handleArchiveUser inactivates a user account. Superadmin-only.
+// Archived users cannot log in; their data is preserved.
+func (s *Server) handleArchiveUser(w http.ResponseWriter, r *http.Request) {
+	userID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	caller, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive user")
+		return
+	}
+	if !caller.IsSuperadmin {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
+		return
+	}
+	if userID == claims.UserID {
+		writeError(w, http.StatusBadRequest, "CANNOT_SELF_ARCHIVE", "cannot archive your own account")
+		return
+	}
+
+	target, err := s.users.GetByID(userID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "user not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive user")
+		return
+	}
+
+	now := time.Now()
+	if err := s.users.SetArchived(target.ID, &now); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive user")
+		return
+	}
+
+	target.ArchivedAt = &now
+	writeJSON(w, http.StatusOK, target)
+}
+
+// handleUnarchiveUser reactivates an inactivated user account. Superadmin-only.
+func (s *Server) handleUnarchiveUser(w http.ResponseWriter, r *http.Request) {
+	userID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	caller, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reactivate user")
+		return
+	}
+	if !caller.IsSuperadmin {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
+		return
+	}
+
+	target, err := s.users.GetByID(userID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "user not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reactivate user")
+		return
+	}
+
+	if err := s.users.SetArchived(target.ID, nil); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reactivate user")
+		return
+	}
+
+	target.ArchivedAt = nil
+	writeJSON(w, http.StatusOK, target)
+}
+
+// handleRevokeUser atomically revokes all access for a user. Superadmin-only.
+// Self-revoke is blocked to prevent a superadmin from locking themselves out.
+func (s *Server) handleRevokeUser(w http.ResponseWriter, r *http.Request) {
+	userID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	caller, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke user")
+		return
+	}
+	if !caller.IsSuperadmin {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
+		return
+	}
+	if userID == claims.UserID {
+		writeError(w, http.StatusBadRequest, "CANNOT_SELF_REVOKE", "cannot revoke your own account")
+		return
+	}
+
+	target, err := s.users.GetByID(userID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "user not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke user")
+		return
+	}
+
+	result, err := s.users.RevokeUser(target.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke user")
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+// handleDeleteUser hard-deletes a user. Superadmin-only. Only permitted when
+// the user has no active activity assignments and belongs to a single team.
+func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
+	userID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	caller, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete user")
+		return
+	}
+	if !caller.IsSuperadmin {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "superadmin required")
+		return
+	}
+	if userID == claims.UserID {
+		writeError(w, http.StatusBadRequest, "CANNOT_SELF_DELETE", "cannot delete your own account")
+		return
+	}
+
+	if _, err := s.users.GetByID(userID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "user not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete user")
+		return
+	}
+
+	teamCount, err := s.teams.CountTeamsForUser(userID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete user")
+		return
+	}
+	if teamCount > 1 {
+		writeError(w, http.StatusConflict, "MULTI_TEAM", "user belongs to multiple teams; remove them from each team first")
+		return
+	}
+
+	if err := s.users.Delete(userID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete user")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 ````
 
@@ -34859,6 +34518,207 @@ func (s *TokenService) Validate(tokenStr, expectedType string) (*Claims, error) 
 		return nil, fmt.Errorf("wrong token type")
 	}
 	return claims, nil
+}
+````
+
+## File: packages/api/internal/auth/oidc.go
+````go
+// OIDC / SSO support. This file is the ONLY place draba talks to an external
+// identity provider. It is entirely inert unless OIDC is configured: when
+// NewOIDCService is given an empty issuer it returns (nil, nil) and every
+// caller treats a nil *OIDCService as "SSO disabled", so no discovery request,
+// no network traffic, and no behaviour change occurs on a default install.
+//
+// Security posture:
+//   - The provider's ID token signature is verified against the IdP's JWKS by
+//     go-oidc's verifier (RS256/ES256/etc.) — draba never trusts an unsigned
+//     or self-asserted token.
+//   - The OAuth2 "state" parameter is bound to the caller's cookie to stop
+//     CSRF on the callback; "nonce" is bound into the ID token to stop replay.
+//   - PKCE (S256) is always used, so an intercepted authorization code cannot
+//     be redeemed without the original verifier.
+//   - The client secret is read once from the environment and never leaves the
+//     server; it is not exposed by any API.
+package auth
+
+import (
+	"context"
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/base64"
+	"fmt"
+	"time"
+
+	"github.com/coreos/go-oidc/v3/oidc"
+	"golang.org/x/oauth2"
+)
+
+// OIDCConfig is the deploy-time configuration for SSO. All fields are required
+// when SSO is enabled; an empty Issuer means SSO is disabled.
+type OIDCConfig struct {
+	Issuer       string
+	ClientID     string
+	ClientSecret string
+	RedirectURL  string
+	// Scopes requested in addition to "openid". Defaults to {"profile","email"}
+	// when empty.
+	Scopes []string
+}
+
+// OIDCService performs the OpenID Connect authorization-code flow against a
+// single configured provider. It is safe for concurrent use.
+type OIDCService struct {
+	issuer   string
+	provider *oidc.Provider
+	verifier *oidc.IDTokenVerifier
+	oauth    oauth2.Config
+}
+
+// OIDCClaims is the subset of ID-token claims draba consumes. Subject is the
+// stable per-user identifier; Email/Name seed the local account on first login.
+type OIDCClaims struct {
+	Subject       string `json:"sub"`
+	Email         string `json:"email"`
+	EmailVerified bool   `json:"email_verified"`
+	Name          string `json:"name"`
+	Nonce         string `json:"nonce"`
+}
+
+// AuthCodeFlow carries the per-request secrets the caller must store (in
+// short-lived httpOnly cookies) and replay on the callback. The State and
+// Nonce defend against CSRF and replay; the PKCEVerifier is exchanged for
+// tokens at the callback.
+type AuthCodeFlow struct {
+	// AuthURL is where the user agent is redirected to authenticate.
+	AuthURL string
+	// State must be echoed back by the IdP and matched on callback.
+	State string
+	// Nonce must equal the nonce claim in the returned ID token.
+	Nonce string
+	// PKCEVerifier is the code_verifier matching the code_challenge sent in
+	// AuthURL; required at the token exchange.
+	PKCEVerifier string
+}
+
+// NewOIDCService constructs an OIDCService by performing OIDC discovery against
+// cfg.Issuer. It returns (nil, nil) when cfg.Issuer is empty so that a default
+// (SSO-disabled) install incurs no network access and no dependency activation.
+// A non-nil error means SSO was requested but the provider is unreachable or
+// misconfigured — the caller should treat that as a fatal startup error so a
+// broken SSO setup fails loudly instead of silently serving a dead login button.
+func NewOIDCService(ctx context.Context, cfg OIDCConfig) (*OIDCService, error) {
+	if cfg.Issuer == "" {
+		return nil, nil // SSO disabled — inert.
+	}
+	if cfg.ClientID == "" || cfg.ClientSecret == "" || cfg.RedirectURL == "" {
+		return nil, fmt.Errorf("oidc: issuer set but client_id, client_secret, or redirect_url is missing")
+	}
+
+	provider, err := oidc.NewProvider(ctx, cfg.Issuer)
+	if err != nil {
+		return nil, fmt.Errorf("oidc: discovery against %q failed: %w", cfg.Issuer, err)
+	}
+
+	scopes := cfg.Scopes
+	if len(scopes) == 0 {
+		scopes = []string{"profile", "email"}
+	}
+
+	return &OIDCService{
+		issuer:   cfg.Issuer,
+		provider: provider,
+		verifier: provider.Verifier(&oidc.Config{ClientID: cfg.ClientID}),
+		oauth: oauth2.Config{
+			ClientID:     cfg.ClientID,
+			ClientSecret: cfg.ClientSecret,
+			RedirectURL:  cfg.RedirectURL,
+			Endpoint:     provider.Endpoint(),
+			Scopes:       append([]string{oidc.ScopeOpenID}, scopes...),
+		},
+	}, nil
+}
+
+// Begin produces the authorization URL plus the state/nonce/PKCE-verifier the
+// caller must persist for the matching callback. Every value is generated with
+// a CSPRNG.
+func (s *OIDCService) Begin() (*AuthCodeFlow, error) {
+	state, err := randomURLToken()
+	if err != nil {
+		return nil, err
+	}
+	nonce, err := randomURLToken()
+	if err != nil {
+		return nil, err
+	}
+	verifier := oauth2.GenerateVerifier()
+
+	url := s.oauth.AuthCodeURL(
+		state,
+		oidc.Nonce(nonce),
+		oauth2.S256ChallengeOption(verifier),
+	)
+	return &AuthCodeFlow{
+		AuthURL:      url,
+		State:        state,
+		Nonce:        nonce,
+		PKCEVerifier: verifier,
+	}, nil
+}
+
+// Exchange completes the flow: it redeems code for tokens (sending the PKCE
+// verifier), verifies the ID token's signature against the provider JWKS,
+// checks the nonce, and returns the validated claims. expectedNonce must be
+// the value originally produced by Begin and stored by the caller.
+func (s *OIDCService) Exchange(ctx context.Context, code, pkceVerifier, expectedNonce string) (*OIDCClaims, error) {
+	token, err := s.oauth.Exchange(ctx, code, oauth2.VerifierOption(pkceVerifier))
+	if err != nil {
+		return nil, fmt.Errorf("oidc: token exchange failed: %w", err)
+	}
+
+	rawID, ok := token.Extra("id_token").(string)
+	if !ok || rawID == "" {
+		return nil, fmt.Errorf("oidc: provider response contained no id_token")
+	}
+
+	idToken, err := s.verifier.Verify(ctx, rawID)
+	if err != nil {
+		return nil, fmt.Errorf("oidc: id_token verification failed: %w", err)
+	}
+
+	var claims OIDCClaims
+	if err := idToken.Claims(&claims); err != nil {
+		return nil, fmt.Errorf("oidc: parsing id_token claims: %w", err)
+	}
+
+	// Replay defence: the nonce minted in Begin must match the one the IdP
+	// embedded in the signed ID token. Constant-time compare avoids leaking
+	// the nonce through timing.
+	if claims.Nonce == "" || subtle.ConstantTimeCompare([]byte(claims.Nonce), []byte(expectedNonce)) != 1 {
+		return nil, fmt.Errorf("oidc: id_token nonce mismatch")
+	}
+	if claims.Subject == "" {
+		return nil, fmt.Errorf("oidc: id_token has no subject claim")
+	}
+	return &claims, nil
+}
+
+// Issuer returns the configured provider issuer URL — used as the stable
+// namespace half of a user's (issuer, subject) identity key.
+func (s *OIDCService) Issuer() string {
+	return s.issuer
+}
+
+// FlowCookieTTL bounds how long a started OIDC flow may sit before the user
+// completes it; the state/nonce/PKCE cookies expire after this window.
+const FlowCookieTTL = 10 * time.Minute
+
+// randomURLToken returns 32 bytes of CSPRNG entropy, base64url-encoded.
+func randomURLToken() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("oidc: reading random: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 ````
 
@@ -35104,6 +34964,201 @@ ALTER TABLE shares_new RENAME TO shares;
 
 CREATE INDEX idx_shares_timeline_id ON shares(timeline_id);
 CREATE INDEX idx_shares_token       ON shares(token);
+````
+
+## File: packages/api/internal/db/migrations/024_oidc_identity.sql
+````sql
+-- Migration 024: OIDC / SSO identity support.
+--
+-- Adds the columns needed to authenticate a user via an external OpenID
+-- Connect provider instead of (or in addition to) a local password:
+--
+--   auth_provider  'local' | 'oidc'  — how this account authenticates.
+--   oidc_issuer    the IdP's issuer URL (only set for oidc accounts).
+--   oidc_subject   the IdP's stable subject claim (sub) for this user.
+--
+-- An OIDC-only user has no password, so password_hash must become nullable.
+-- SQLite cannot drop a NOT NULL constraint in place, so this is a table
+-- rebuild (see migration 023). UNLIKE the shares rebuild in 023, ~17 tables
+-- hold foreign keys REFERENCES users(id), several with ON DELETE CASCADE.
+-- Dropping users with foreign_keys=ON would therefore cascade-delete every
+-- dependent row (team_members, activities, preferences, …) — catastrophic
+-- data loss.
+--
+-- We follow the official SQLite "Making Other Kinds Of Table Schema Changes"
+-- procedure (sqlite.org/lang_altertable.html §8):
+--   1. foreign_keys=OFF  (so the DROP does not cascade)
+--   2. rebuild the table preserving every column
+--   3. foreign_key_check  (assert no FK was orphaned by the rebuild)
+--   4. foreign_keys=ON
+--
+-- NOTE on transactions: PRAGMA foreign_keys is a no-op inside a transaction,
+-- so this migration must NOT be wrapped in BEGIN/COMMIT. draba's migrator
+-- runs each file as a bare Exec on a single-connection pool, which is exactly
+-- the context this procedure requires. The accompanying migration test asserts
+-- that a user with dependent rows survives this migration intact.
+
+PRAGMA foreign_keys=OFF;
+
+CREATE TABLE users_new (
+    id            TEXT PRIMARY KEY,
+    email         TEXT NOT NULL UNIQUE,
+    password_hash TEXT,
+    display_name  TEXT NOT NULL,
+    avatar_url    TEXT,
+    color         TEXT,
+    icon          TEXT,
+    is_superadmin BOOLEAN NOT NULL DEFAULT 0,
+    auth_provider TEXT NOT NULL DEFAULT 'local' CHECK (auth_provider IN ('local', 'oidc')),
+    oidc_issuer   TEXT,
+    oidc_subject  TEXT,
+    created_at    DATETIME NOT NULL DEFAULT (datetime('now')),
+    updated_at    DATETIME NOT NULL DEFAULT (datetime('now')),
+    archived_at   DATETIME,
+    -- A local account must carry a password; an oidc account must carry an
+    -- issuer+subject. Enforced at the row level so a malformed account can
+    -- never be inserted regardless of which code path writes it.
+    CHECK (
+        (auth_provider = 'local' AND password_hash IS NOT NULL)
+        OR
+        (auth_provider = 'oidc'  AND oidc_issuer IS NOT NULL AND oidc_subject IS NOT NULL)
+    )
+);
+
+-- Every existing row is a local password user. Column order is pinned
+-- explicitly (not SELECT *) so a future column added to users before this
+-- migration runs cannot silently shift values into the wrong column.
+INSERT INTO users_new (
+    id, email, password_hash, display_name, avatar_url, color, icon,
+    is_superadmin, auth_provider, oidc_issuer, oidc_subject,
+    created_at, updated_at, archived_at
+)
+SELECT
+    id, email, password_hash, display_name, avatar_url, color, icon,
+    is_superadmin, 'local', NULL, NULL,
+    created_at, updated_at, archived_at
+FROM users;
+
+DROP TABLE users;
+ALTER TABLE users_new RENAME TO users;
+
+-- One external identity maps to exactly one account. SQLite treats NULLs as
+-- distinct in a UNIQUE index, so the many local rows with NULL/NULL coexist
+-- freely while any concrete (issuer, subject) pair is forced unique.
+CREATE UNIQUE INDEX idx_users_oidc ON users(oidc_issuer, oidc_subject);
+CREATE INDEX idx_users_email ON users(email);
+
+-- Re-enable enforcement. The migrator runs PRAGMA foreign_key_check after each
+-- migration and aborts if it returns any rows (see db.checkForeignKeys), so an
+-- orphaned FK from a bad rebuild fails the migration rather than leaving a
+-- corrupt schema. This rebuild intends zero violations.
+PRAGMA foreign_keys=ON;
+````
+
+## File: packages/api/internal/db/migrations.go
+````go
+package db
+
+import (
+	"embed"
+	"fmt"
+	"sort"
+	"strconv"
+	"strings"
+
+	"github.com/jmoiron/sqlx"
+)
+
+//go:embed migrations/*.sql
+var migrationFiles embed.FS
+
+// Migrate applies any unapplied SQL migration files in order. It is idempotent.
+func Migrate(database *sqlx.DB) error {
+	if _, err := database.Exec(`
+		CREATE TABLE IF NOT EXISTS schema_migrations (
+			version    INTEGER PRIMARY KEY,
+			applied_at DATETIME NOT NULL DEFAULT (datetime('now'))
+		)
+	`); err != nil {
+		return fmt.Errorf("ensuring schema_migrations table: %w", err)
+	}
+
+	entries, err := migrationFiles.ReadDir("migrations")
+	if err != nil {
+		return fmt.Errorf("reading migrations: %w", err)
+	}
+
+	type migration struct {
+		version int
+		name    string
+	}
+	var pending []migration
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".sql") {
+			continue
+		}
+		vStr := strings.SplitN(e.Name(), "_", 2)[0]
+		v, err := strconv.Atoi(vStr)
+		if err != nil {
+			continue
+		}
+		pending = append(pending, migration{version: v, name: e.Name()})
+	}
+	sort.Slice(pending, func(i, j int) bool { return pending[i].version < pending[j].version })
+
+	for _, m := range pending {
+		var count int
+		if err := database.Get(&count, `SELECT COUNT(*) FROM schema_migrations WHERE version = ?`, m.version); err != nil {
+			return fmt.Errorf("checking migration %d: %w", m.version, err)
+		}
+		if count > 0 {
+			continue
+		}
+
+		sql, err := migrationFiles.ReadFile("migrations/" + m.name)
+		if err != nil {
+			return fmt.Errorf("reading migration %s: %w", m.name, err)
+		}
+
+		if _, err := database.Exec(string(sql)); err != nil {
+			return fmt.Errorf("applying migration %s: %w", m.name, err)
+		}
+
+		// A migration that rebuilds a referenced table (drop + recreate) can
+		// orphan foreign keys if it gets the row copy wrong. PRAGMA
+		// foreign_key_check returns one row per violation; treat any as a
+		// failed migration rather than silently leaving a corrupt schema.
+		if err := checkForeignKeys(database, m.name); err != nil {
+			return err
+		}
+
+		if _, err := database.Exec(`INSERT INTO schema_migrations (version) VALUES (?)`, m.version); err != nil {
+			return fmt.Errorf("recording migration %d: %w", m.version, err)
+		}
+	}
+
+	return nil
+}
+
+// checkForeignKeys runs PRAGMA foreign_key_check and returns an error naming
+// the migration if any foreign key is left orphaned. Each result row is a
+// violation (table, rowid, referenced table, fk index); a non-empty result
+// means the schema is inconsistent.
+func checkForeignKeys(database *sqlx.DB, migration string) error {
+	rows, err := database.Query(`PRAGMA foreign_key_check`)
+	if err != nil {
+		return fmt.Errorf("foreign_key_check after %s: %w", migration, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	if rows.Next() {
+		return fmt.Errorf("migration %s left orphaned foreign keys (foreign_key_check returned violations)", migration)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("foreign_key_check after %s: %w", migration, err)
+	}
+	return nil
+}
 ````
 
 ## File: packages/api/internal/db/seed.go
@@ -35359,6 +35414,372 @@ func (r *TimelineRepo) Delete(id string) error {
 		return fmt.Errorf("deleting timeline: %w", err)
 	}
 	return nil
+}
+````
+
+## File: packages/api/internal/db/user_repo.go
+````go
+package db
+
+import (
+	"fmt"
+	"time"
+
+	"github.com/jmoiron/sqlx"
+
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// UserRepo is the persistence layer for User records.
+type UserRepo struct {
+	db *sqlx.DB
+}
+
+// NewUserRepo returns a UserRepo backed by db.
+func NewUserRepo(db *sqlx.DB) *UserRepo {
+	return &UserRepo{db: db}
+}
+
+// Create inserts u. Returns an error if the email already exists
+// (the users.email UNIQUE constraint surfaces as a wrapped driver error).
+func (r *UserRepo) Create(u *models.User) error {
+	_, err := r.db.NamedExec(`
+		INSERT INTO users (id, email, password_hash, display_name, avatar_url, is_superadmin, created_at, updated_at)
+		VALUES (:id, :email, :password_hash, :display_name, :avatar_url, :is_superadmin, :created_at, :updated_at)
+	`, u)
+	if err != nil {
+		return fmt.Errorf("creating user: %w", err)
+	}
+	return nil
+}
+
+// GetByEmail looks up a user by exact email match. Callers are expected to
+// normalize (lowercase, trim) before calling. Returns sql.ErrNoRows wrapped
+// when no row matches.
+func (r *UserRepo) GetByEmail(email string) (*models.User, error) {
+	var u models.User
+	err := r.db.Get(&u, `SELECT * FROM users WHERE email = ?`, email)
+	if err != nil {
+		return nil, fmt.Errorf("getting user by email: %w", err)
+	}
+	return &u, nil
+}
+
+// GetByOIDCSubject looks up a user by their external identity — the
+// (issuer, subject) pair from the IdP. This is the stable key for an SSO
+// account: email or display name may change at the IdP, but the subject does
+// not. Returns sql.ErrNoRows (wrapped) when no row matches.
+func (r *UserRepo) GetByOIDCSubject(issuer, subject string) (*models.User, error) {
+	var u models.User
+	err := r.db.Get(&u,
+		`SELECT * FROM users WHERE oidc_issuer = ? AND oidc_subject = ?`,
+		issuer, subject,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("getting user by oidc subject: %w", err)
+	}
+	return &u, nil
+}
+
+// CreateOIDC inserts a new SSO user. The account has no password; identity is
+// the (issuer, subject) pair. The row-level CHECK added in migration 024
+// rejects an oidc account missing either field, so a malformed insert fails at
+// the database rather than producing a half-formed account.
+func (r *UserRepo) CreateOIDC(u *models.User) error {
+	u.AuthProvider = "oidc"
+	u.PasswordHash = nil
+	_, err := r.db.NamedExec(`
+		INSERT INTO users (id, email, display_name, avatar_url, is_superadmin,
+		                   auth_provider, oidc_issuer, oidc_subject, created_at, updated_at)
+		VALUES (:id, :email, :display_name, :avatar_url, :is_superadmin,
+		        :auth_provider, :oidc_issuer, :oidc_subject, :created_at, :updated_at)
+	`, u)
+	if err != nil {
+		return fmt.Errorf("creating oidc user: %w", err)
+	}
+	return nil
+}
+
+// UpdateOIDCProfile refreshes the email and display name of an existing SSO
+// user from their latest IdP claims, so a name/email change upstream is
+// reflected on next login. The (issuer, subject) identity is never changed.
+func (r *UserRepo) UpdateOIDCProfile(id, email, displayName string) error {
+	_, err := r.db.Exec(
+		`UPDATE users SET email = ?, display_name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		email, displayName, id,
+	)
+	if err != nil {
+		return fmt.Errorf("updating oidc profile: %w", err)
+	}
+	return nil
+}
+
+// GetByID looks up a user by primary key.
+func (r *UserRepo) GetByID(id string) (*models.User, error) {
+	var u models.User
+	err := r.db.Get(&u, `SELECT * FROM users WHERE id = ?`, id)
+	if err != nil {
+		return nil, fmt.Errorf("getting user by id: %w", err)
+	}
+	return &u, nil
+}
+
+// UpdatePasswordByEmail replaces the password hash for the user with the
+// given email. Returns sql.ErrNoRows (wrapped) when no matching user exists.
+func (r *UserRepo) UpdatePasswordByEmail(email, passwordHash string) error {
+	res, err := r.db.Exec(
+		`UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE email = ?`,
+		passwordHash, email,
+	)
+	if err != nil {
+		return fmt.Errorf("updating password: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("updating password: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("updating password: no user with email %q", email)
+	}
+	return nil
+}
+
+// Count returns the total number of users. Used by the registration flow
+// to detect first-user bootstrap and to enforce tier user limits.
+func (r *UserRepo) Count() (int, error) {
+	var count int
+	err := r.db.Get(&count, `SELECT COUNT(*) FROM users`)
+	if err != nil {
+		return 0, fmt.Errorf("counting users: %w", err)
+	}
+	return count, nil
+}
+
+// SearchByNameOrEmail returns up to 20 users whose display_name or email
+// contains the query (case-insensitive). Archived users are excluded.
+func (r *UserRepo) SearchByNameOrEmail(q string) ([]*models.User, error) {
+	var users []*models.User
+	like := "%" + q + "%"
+	err := r.db.Select(&users, `
+		SELECT * FROM users
+		WHERE archived_at IS NULL
+		  AND (display_name LIKE ? OR email LIKE ?)
+		ORDER BY display_name ASC
+		LIMIT 20
+	`, like, like)
+	if err != nil {
+		return nil, fmt.Errorf("searching users: %w", err)
+	}
+	return users, nil
+}
+
+// SetSuperadmin sets or clears the is_superadmin flag on a user.
+func (r *UserRepo) SetSuperadmin(id string, isSuperadmin bool) error {
+	_, err := r.db.Exec(
+		`UPDATE users SET is_superadmin = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		isSuperadmin, id,
+	)
+	if err != nil {
+		return fmt.Errorf("setting superadmin: %w", err)
+	}
+	return nil
+}
+
+// SetArchived sets or clears archived_at on a user. Archived users cannot log in.
+func (r *UserRepo) SetArchived(id string, at *time.Time) error {
+	_, err := r.db.Exec(
+		`UPDATE users SET archived_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		at, id,
+	)
+	if err != nil {
+		return fmt.Errorf("setting user archived: %w", err)
+	}
+	return nil
+}
+
+// Delete hard-deletes a user row. The caller must verify the user is deletable
+// (no active activities, single team membership) before calling this.
+func (r *UserRepo) Delete(id string) error {
+	_, err := r.db.Exec(`DELETE FROM users WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("deleting user: %w", err)
+	}
+	return nil
+}
+
+// UpdateProfile sets display_name, color, and icon on a user. When color or
+// icon changes, the new value is propagated to all team_members rows for the
+// user where the member's value currently matches the user's old value or is NULL
+// (i.e. has not been explicitly overridden by a team admin).
+func (r *UserRepo) UpdateProfile(id, displayName string, color, icon *string) error {
+	// Fetch old values for propagation comparison.
+	var old models.User
+	if err := r.db.Get(&old, `SELECT * FROM users WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("fetching user for profile update: %w", err)
+	}
+
+	tx, err := r.db.Beginx()
+	if err != nil {
+		return fmt.Errorf("beginning profile update transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	_, err = tx.Exec(
+		`UPDATE users SET display_name = ?, color = ?, icon = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		displayName, color, icon, id,
+	)
+	if err != nil {
+		return fmt.Errorf("updating user profile: %w", err)
+	}
+
+	// Propagate color if changed: update team_members rows where color matches
+	// the old value or is NULL (not explicitly overridden).
+	if !ptrEqual(old.Color, color) {
+		_, err = tx.Exec(
+			`UPDATE team_members SET color = ? WHERE user_id = ? AND (color IS NULL OR color = ?)`,
+			color, id, old.Color,
+		)
+		if err != nil {
+			return fmt.Errorf("propagating color to team_members: %w", err)
+		}
+	}
+
+	if !ptrEqual(old.Icon, icon) {
+		_, err = tx.Exec(
+			`UPDATE team_members SET icon = ? WHERE user_id = ? AND (icon IS NULL OR icon = ?)`,
+			icon, id, old.Icon,
+		)
+		if err != nil {
+			return fmt.Errorf("propagating icon to team_members: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing profile update: %w", err)
+	}
+	return nil
+}
+
+// UpdatePassword sets the password_hash on a user.
+func (r *UserRepo) UpdatePassword(id, passwordHash string) error {
+	_, err := r.db.Exec(
+		`UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		passwordHash, id,
+	)
+	if err != nil {
+		return fmt.Errorf("updating password: %w", err)
+	}
+	return nil
+}
+
+// ListAll returns all users with their active team membership count.
+// When orphanedOnly is true, only users with zero active memberships are returned.
+func (r *UserRepo) ListAll(orphanedOnly bool) ([]*models.AdminUserRow, error) {
+	q := `
+		SELECT u.*,
+		       (SELECT COUNT(*) FROM team_members tm WHERE tm.user_id = u.id AND tm.archived_at IS NULL) AS team_count
+		FROM users u
+		ORDER BY u.display_name ASC
+	`
+	if orphanedOnly {
+		q = `
+			SELECT u.*,
+			       0 AS team_count
+			FROM users u
+			WHERE (SELECT COUNT(*) FROM team_members tm WHERE tm.user_id = u.id AND tm.archived_at IS NULL) = 0
+			ORDER BY u.display_name ASC
+		`
+	}
+	var rows []*models.AdminUserRow
+	if err := r.db.Select(&rows, q); err != nil {
+		return nil, fmt.Errorf("listing admin users: %w", err)
+	}
+	return rows, nil
+}
+
+// RevokeUser atomically revokes all access for a user:
+//  1. Sets users.archived_at (blocks login everywhere).
+//  2. For each team_members row for the user:
+//     – if assignment count is 0: deletes timeline_access then the row.
+//     – otherwise: sets team_members.archived_at (inactivates without data loss).
+//
+// Returns a summary of the actions taken. The caller must ensure the user
+// exists and is not a participant before calling.
+func (r *UserRepo) RevokeUser(userID string) (*models.RevokeUserResult, error) {
+	tx, err := r.db.Beginx()
+	if err != nil {
+		return nil, fmt.Errorf("beginning revoke transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	now := time.Now()
+
+	// Step 1: deactivate the account.
+	if _, err := tx.Exec(
+		`UPDATE users SET archived_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		now, userID,
+	); err != nil {
+		return nil, fmt.Errorf("deactivating user account: %w", err)
+	}
+
+	// Step 2: collect all team_members rows for the user.
+	var memberIDs []string
+	if err := tx.Select(&memberIDs,
+		`SELECT id FROM team_members WHERE user_id = ?`, userID,
+	); err != nil {
+		return nil, fmt.Errorf("listing memberships: %w", err)
+	}
+
+	result := &models.RevokeUserResult{AccountDeactivated: true}
+
+	for _, memberID := range memberIDs {
+		var assignCount int
+		if err := tx.Get(&assignCount,
+			`SELECT COUNT(*) FROM activity_assignments WHERE team_member_id = ?`, memberID,
+		); err != nil {
+			return nil, fmt.Errorf("counting assignments for member %s: %w", memberID, err)
+		}
+
+		if assignCount == 0 {
+			// No history — delete timeline_access then the member row.
+			if _, err := tx.Exec(
+				`DELETE FROM timeline_access WHERE team_member_id = ?`, memberID,
+			); err != nil {
+				return nil, fmt.Errorf("deleting timeline access for member %s: %w", memberID, err)
+			}
+			if _, err := tx.Exec(
+				`DELETE FROM team_members WHERE id = ?`, memberID,
+			); err != nil {
+				return nil, fmt.Errorf("deleting member %s: %w", memberID, err)
+			}
+			result.MembershipsRemoved++
+		} else {
+			// Has activity history — inactivate without deleting.
+			if _, err := tx.Exec(
+				`UPDATE team_members SET archived_at = ? WHERE id = ?`, now, memberID,
+			); err != nil {
+				return nil, fmt.Errorf("inactivating member %s: %w", memberID, err)
+			}
+			result.MembershipsInactivated++
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("committing revoke transaction: %w", err)
+	}
+	return result, nil
+}
+
+// ptrEqual reports whether two string pointers point to equal values,
+// treating nil and a pointer to "" as distinct.
+func ptrEqual(a, b *string) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return *a == *b
 }
 ````
 
@@ -35839,48 +36260,6 @@ WORKDIR /data
 USER draba
 EXPOSE 8080
 CMD ["draba"]
-````
-
-## File: packages/api/go.mod
-````
-module github.com/I0-1O/draba/packages/api
-
-go 1.24.0
-
-require (
-	github.com/golang-jwt/jwt/v5 v5.3.1
-	github.com/gorilla/websocket v1.5.3
-	github.com/jmoiron/sqlx v1.4.0
-	github.com/mattn/go-sqlite3 v1.14.22
-	github.com/oapi-codegen/runtime v1.4.0
-	github.com/stretchr/testify v1.11.1
-	golang.org/x/crypto v0.48.0
-	modernc.org/sqlite v1.34.5
-)
-
-require (
-	github.com/davecgh/go-spew v1.1.1 // indirect
-	github.com/dustin/go-humanize v1.0.1 // indirect
-	github.com/google/uuid v1.6.0 // indirect
-	github.com/mattn/go-isatty v0.0.20 // indirect
-	github.com/ncruces/go-strftime v1.0.0 // indirect
-	github.com/pmezard/go-difflib v1.0.0 // indirect
-	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
-	github.com/richardlehane/mscfb v1.0.6 // indirect
-	github.com/richardlehane/msoleps v1.0.6 // indirect
-	github.com/tiendc/go-deepcopy v1.7.2 // indirect
-	github.com/xuri/efp v0.0.1 // indirect
-	github.com/xuri/excelize/v2 v2.10.1 // indirect
-	github.com/xuri/nfp v0.0.2-0.20250530014748-2ddeb826f9a9 // indirect
-	golang.org/x/exp v0.0.0-20230315142452-642cacee5cc0 // indirect
-	golang.org/x/net v0.50.0 // indirect
-	golang.org/x/sys v0.41.0 // indirect
-	golang.org/x/text v0.34.0 // indirect
-	gopkg.in/yaml.v3 v3.0.1 // indirect
-	modernc.org/libc v1.61.6 // indirect
-	modernc.org/mathutil v1.7.1 // indirect
-	modernc.org/memory v1.8.0 // indirect
-)
 ````
 
 ## File: packages/shared/testdata/filter-fixtures.json
@@ -40803,6 +41182,214 @@ export function ActivityFieldsBody(props: ActivityFieldsBodyProps) {
 }
 ````
 
+## File: packages/web/src/contexts/AuthContext.tsx
+````typescript
+/**
+ * Auth context: current user + access token in memory, refresh token in localStorage.
+ *
+ * Provides login, logout, and register actions so any component can
+ * authenticate without knowing about token storage details.
+ */
+
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
+import type { components } from '@draba/shared'
+import {
+  API_BASE,
+  ApiError,
+  clearStoredRefreshToken,
+  configureSilentRefresh,
+  getStoredRefreshToken,
+  storeRefreshToken,
+} from '@/lib/api'
+
+type User = components['schemas']['User']
+type AuthResponse = components['schemas']['AuthResponse']
+type RefreshResponse = components['schemas']['RefreshResponse']
+
+interface AuthState {
+  user: User | null
+  accessToken: string | null
+  /** True while checking the stored refresh token on initial mount. */
+  initializing: boolean
+}
+
+interface AuthContextValue extends AuthState {
+  getAccessToken: () => string | null
+  login: (email: string, password: string) => Promise<void>
+  /** Registers a new account and returns the fresh access token directly,
+   *  avoiding a race against the async setState that follows. */
+  register: (email: string, password: string, displayName: string, inviteToken?: string) => Promise<string>
+  /** Establishes a session directly from tokens obtained out-of-band (e.g. the
+   *  OIDC callback's URL fragment), persisting the refresh token and loading
+   *  the user. Avoids a full-page reload that would race the mount restore. */
+  loginWithTokens: (accessToken: string, refreshToken: string) => Promise<void>
+  logout: () => void
+  /** Merges fields into the current user object — used after profile updates. */
+  patchUser: (patch: Partial<User>) => void
+}
+
+const AuthContext = createContext<AuthContextValue | null>(null)
+
+async function postJson<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  const data = await res.json()
+  if (!res.ok) {
+    const err = data as { error: { code: string; message: string } }
+    throw new ApiError(res.status, err.error?.code ?? 'UNKNOWN', err.error?.message ?? res.statusText)
+  }
+  return data as T
+}
+
+export function AuthProvider({ children }: { children: React.ReactNode }) {
+  const [state, setState] = useState<AuthState>({
+    user: null,
+    accessToken: null,
+    initializing: true,
+  })
+
+  // Stable ref so callbacks never capture a stale token.
+  const tokenRef = useRef<string | null>(null)
+  tokenRef.current = state.accessToken
+
+  const getAccessToken = useCallback(() => tokenRef.current, [])
+
+  // On mount, attempt to restore session via the stored refresh token.
+  // After exchanging the refresh token we also fetch /auth/me so that `user`
+  // is populated — without it, admin checks (canEditTeam etc.) always fail
+  // because userId is '' and no member's userId matches an empty string.
+  useEffect(() => {
+    const refresh = getStoredRefreshToken()
+    if (!refresh) {
+      setState(s => ({ ...s, initializing: false }))
+      return
+    }
+    postJson<RefreshResponse>('/auth/refresh', { refreshToken: refresh })
+      .then(async ({ accessToken }) => {
+        try {
+          const res = await fetch(`${API_BASE}/auth/me`, {
+            headers: { Authorization: `Bearer ${accessToken}` },
+          })
+          const user: User | null = res.ok ? (await res.json() as User) : null
+          setState({ user, accessToken, initializing: false })
+        } catch {
+          // /auth/me failed but the token is still valid — set what we have.
+          setState(s => ({ ...s, accessToken, initializing: false }))
+        }
+      })
+      .catch(() => {
+        clearStoredRefreshToken()
+        setState(s => ({ ...s, initializing: false }))
+      })
+  }, [])
+
+  const login = useCallback(async (email: string, password: string) => {
+    const { user, accessToken, refreshToken } = await postJson<AuthResponse>('/auth/login', {
+      email,
+      password,
+    })
+    storeRefreshToken(refreshToken)
+    setState({ user, accessToken, initializing: false })
+  }, [])
+
+  const register = useCallback(
+    async (
+      email: string,
+      password: string,
+      displayName: string,
+      inviteToken?: string,
+    ): Promise<string> => {
+      const { user, accessToken, refreshToken } = await postJson<AuthResponse>(
+        '/auth/register',
+        { email, password, displayName, inviteToken },
+      )
+      storeRefreshToken(refreshToken)
+      setState({ user, accessToken, initializing: false })
+      // Return the token directly so callers don't race against the async
+      // setState — tokenRef won't update until the next render cycle.
+      return accessToken
+    },
+    [],
+  )
+
+  const loginWithTokens = useCallback(async (accessToken: string, refreshToken: string) => {
+    storeRefreshToken(refreshToken)
+    // Load the user with the access token we already hold; tolerate failure
+    // (the token is still valid) the same way the mount restore does.
+    let user: User | null = null
+    try {
+      const res = await fetch(`${API_BASE}/auth/me`, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      })
+      if (res.ok) user = (await res.json()) as User
+    } catch {
+      // keep user null; session still works via the access token
+    }
+    setState({ user, accessToken, initializing: false })
+  }, [])
+
+  const logout = useCallback(() => {
+    clearStoredRefreshToken()
+    setState({ user: null, accessToken: null, initializing: false })
+  }, [])
+
+  // Register a silent-refresh callback with the API layer so that any 401
+  // anywhere in the app triggers a token refresh rather than a hard failure.
+  // On refresh failure, clear the session and redirect to /login.
+  useEffect(() => {
+    const silentRefresh = async (): Promise<string | null> => {
+      const refresh = getStoredRefreshToken()
+      if (!refresh) {
+        logout()
+        window.location.replace('/login')
+        return null
+      }
+      try {
+        const { accessToken: newToken } = await postJson<RefreshResponse>('/auth/refresh', { refreshToken: refresh })
+        setState(s => ({ ...s, accessToken: newToken }))
+        return newToken
+      } catch {
+        clearStoredRefreshToken()
+        setState({ user: null, accessToken: null, initializing: false })
+        window.location.replace('/login')
+        return null
+      }
+    }
+    configureSilentRefresh(silentRefresh)
+    return () => configureSilentRefresh(null)
+  }, [logout])
+
+  const patchUser = useCallback((patch: Partial<User>) => {
+    setState(s => s.user ? { ...s, user: { ...s.user, ...patch } } : s)
+  }, [])
+
+  const value = useMemo<AuthContextValue>(
+    () => ({ ...state, getAccessToken, login, register, loginWithTokens, logout, patchUser }),
+    [state, getAccessToken, login, register, loginWithTokens, logout, patchUser],
+  )
+
+  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
+}
+
+/** Returns the auth context. Throws if used outside of AuthProvider. */
+export function useAuth(): AuthContextValue {
+  const ctx = useContext(AuthContext)
+  if (!ctx) throw new Error('useAuth must be used inside AuthProvider')
+  return ctx
+}
+````
+
 ## File: packages/web/src/hooks/useExport.test.ts
 ````typescript
 /**
@@ -40941,6 +41528,35 @@ describe('useExport', () => {
     expect(body.viewConfig).toBeUndefined()
   })
 })
+````
+
+## File: packages/web/src/hooks/usePublicSettings.ts
+````typescript
+/**
+ * usePublicSettings — fetches /settings/branding without authentication.
+ *
+ * Used by LoginPage and App.tsx to display instance name and apply
+ * the admin-configured accent color before the user has signed in.
+ */
+
+import { useQuery } from '@tanstack/react-query'
+import { apiFetch } from '@/lib/api'
+
+interface PublicBranding {
+  instanceName: string
+  accentColor: string
+  /** True when the instance has SSO (OIDC) configured. Drives the login-page
+   *  "Sign in with SSO" button. */
+  ssoEnabled: boolean
+}
+
+export function usePublicSettings() {
+  return useQuery({
+    queryKey: ['settings', 'branding'],
+    queryFn: () => apiFetch<PublicBranding>('/settings/branding'),
+    staleTime: 5 * 60 * 1000,
+  })
+}
 ````
 
 ## File: packages/web/src/lib/activityColor.test.ts
@@ -42230,64 +42846,201 @@ export function matchesFilter(
 }
 ````
 
-## File: packages/web/src/App.tsx
+## File: packages/web/src/pages/settings/SecurityPage.tsx
 ````typescript
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { AuthProvider } from '@/contexts/AuthContext'
-import ProtectedRoute from '@/components/ProtectedRoute'
-import ThemeSync from '@/components/ThemeSync'
-import BrandingSync from '@/components/BrandingSync'
-import LoginPage from '@/pages/LoginPage'
-import RegisterPage from '@/pages/RegisterPage'
-import DashboardPage from '@/pages/DashboardPage'
-import SetupPage from '@/pages/SetupPage'
-import SettingsPage from '@/pages/SettingsPage'
-import ForgotPasswordPage from '@/pages/ForgotPasswordPage'
-import ResetPasswordPage from '@/pages/ResetPasswordPage'
-import ShareViewPage from '@/pages/ShareViewPage'
+/**
+ * /settings/security — Change password form.
+ */
 
-const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: {
-      staleTime: 30_000,
-      retry: 1,
-    },
-  },
-})
+import { useState } from 'react'
+import { useChangePassword } from '@/hooks/useSettings'
+import { useAuth } from '@/contexts/AuthContext'
+import { ApiError } from '@/lib/api'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Button } from '@/components/ui/button'
 
-export default function App() {
+export default function SecurityPage() {
+  const { user } = useAuth()
+  const changePassword = useChangePassword()
+
+  // SSO-managed accounts have no local password; the API rejects a change with
+  // OIDC_ACCOUNT, so don't show a form that can never succeed.
+  if (user?.authProvider === 'oidc') {
+    return (
+      <div>
+        <h2 className="text-[17px] font-semibold text-foreground mb-1">Security</h2>
+        <p className="text-sm text-muted-foreground mb-6">
+          Your account signs in via single sign-on (SSO). Password management is handled by your
+          identity provider — there's no password to change here.
+        </p>
+      </div>
+    )
+  }
+
+  const [current, setCurrent] = useState('')
+  const [next, setNext] = useState('')
+  const [confirm, setConfirm] = useState('')
+  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
+
+  const mismatch = next !== confirm && confirm !== ''
+  const tooShort = next.length > 0 && next.length < 8
+  const canSave = current !== '' && next.length >= 8 && next === confirm
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    if (!canSave) return
+    setFeedback(null)
+    try {
+      await changePassword.mutateAsync({ currentPassword: current, newPassword: next })
+      setFeedback({ type: 'success', msg: 'Password updated successfully.' })
+      setCurrent('')
+      setNext('')
+      setConfirm('')
+    } catch (err) {
+      const code = err instanceof ApiError ? err.code : ''
+      const msg =
+        code === 'WRONG_PASSWORD'
+          ? 'Current password is incorrect.'
+          : err instanceof ApiError
+          ? err.message
+          : 'Failed to change password.'
+      setFeedback({ type: 'error', msg })
+    }
+  }
+
   return (
-    <QueryClientProvider client={queryClient}>
-      <BrowserRouter>
-        <AuthProvider>
-          {/* Side-effect components — render nothing but apply global state. */}
-          <ThemeSync />
-          <BrandingSync />
-          <Routes>
-            {/* First-run setup — public, shown before any users exist */}
-            <Route path="/setup" element={<SetupPage />} />
+    <div>
+      <h2 className="text-[17px] font-semibold text-foreground mb-1">Security</h2>
+      <p className="text-sm text-muted-foreground mb-6">
+        Update your password. You'll need to enter your current password to confirm the change.
+      </p>
 
-            {/* Public routes */}
-            <Route path="/login" element={<LoginPage />} />
-            <Route path="/register" element={<RegisterPage />} />
-            <Route path="/forgot-password" element={<ForgotPasswordPage />} />
-            <Route path="/reset-password" element={<ResetPasswordPage />} />
-            {/* Public share viewer — no auth required */}
-            <Route path="/s/:token" element={<ShareViewPage />} />
+      <div className="bg-card border border-border rounded-[10px] p-6 mb-5">
+        <form onSubmit={handleSubmit}>
+          <div className="flex flex-col gap-1.5 mb-4">
+            <Label htmlFor="currentPw">Current password</Label>
+            <Input
+              id="currentPw"
+              type="password"
+              value={current}
+              onChange={e => setCurrent(e.target.value)}
+              autoComplete="current-password"
+              className="max-w-[360px]"
+            />
+          </div>
 
-            {/* Protected routes */}
-            <Route element={<ProtectedRoute />}>
-              <Route path="/" element={<DashboardPage />} />
-              <Route path="/settings/*" element={<SettingsPage />} />
-            </Route>
+          <div className="flex flex-col gap-1.5 mb-4">
+            <Label htmlFor="newPw">New password</Label>
+            <Input
+              id="newPw"
+              type="password"
+              value={next}
+              onChange={e => setNext(e.target.value)}
+              autoComplete="new-password"
+              className={`max-w-[360px]${tooShort ? ' border-destructive' : ''}`}
+            />
+            {tooShort && (
+              <p className="text-xs text-destructive m-0">
+                Password must be at least 8 characters.
+              </p>
+            )}
+          </div>
 
-            {/* Fallback */}
-            <Route path="*" element={<Navigate to="/" replace />} />
-          </Routes>
-        </AuthProvider>
-      </BrowserRouter>
-    </QueryClientProvider>
+          <div className="flex flex-col gap-1.5 mb-4">
+            <Label htmlFor="confirmPw">Confirm new password</Label>
+            <Input
+              id="confirmPw"
+              type="password"
+              value={confirm}
+              onChange={e => setConfirm(e.target.value)}
+              autoComplete="new-password"
+              className={`max-w-[360px]${mismatch ? ' border-destructive' : ''}`}
+            />
+            {mismatch && (
+              <p className="text-xs text-destructive m-0">Passwords don't match.</p>
+            )}
+          </div>
+
+          {feedback && (
+            <p className={`text-[13px] mb-3 ${feedback.type === 'success' ? 'text-success' : 'text-destructive'}`}>
+              {feedback.msg}
+            </p>
+          )}
+
+          <Button type="submit" disabled={!canSave || changePassword.isPending}>
+            {changePassword.isPending ? 'Updating…' : 'Update password'}
+          </Button>
+        </form>
+      </div>
+    </div>
+  )
+}
+````
+
+## File: packages/web/src/pages/OIDCCallbackPage.tsx
+````typescript
+/**
+ * OIDCCallbackPage — lands the browser after a successful SSO login.
+ *
+ * The API's /auth/oidc/callback redirects here with the freshly issued tokens
+ * in the URL fragment (#access_token=…&refresh_token=…). The fragment is used
+ * rather than the query string so the tokens are never sent to a server or
+ * written to an access log.
+ *
+ * We hand the tokens straight to the auth context and navigate via the router.
+ * We deliberately do NOT do a full-page reload: a hard navigation aborts the
+ * in-flight session-restore request (surfacing as "TypeError: Failed to fetch")
+ * and races the AuthProvider mount, which previously bounced the user back to
+ * the login page even though SSO had succeeded.
+ */
+
+import { useEffect, useRef, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
+import { useAuth } from '@/contexts/AuthContext'
+
+export default function OIDCCallbackPage() {
+  const { loginWithTokens } = useAuth()
+  const navigate = useNavigate()
+  const [error, setError] = useState<string | null>(null)
+  // Guard against React StrictMode double-invocation consuming the hash twice.
+  const ran = useRef(false)
+
+  useEffect(() => {
+    if (ran.current) return
+    ran.current = true
+
+    const params = new URLSearchParams(window.location.hash.replace(/^#/, ''))
+    const accessToken = params.get('access_token')
+    const refreshToken = params.get('refresh_token')
+
+    if (!accessToken || !refreshToken) {
+      navigate('/login?sso_error=missing_tokens', { replace: true })
+      return
+    }
+
+    // Clear the tokens from the address bar immediately.
+    window.history.replaceState(null, '', '/auth/callback')
+
+    loginWithTokens(accessToken, refreshToken)
+      .then(() => navigate('/', { replace: true }))
+      .catch((e) => setError((e as Error).message || 'Sign-in failed'))
+  }, [loginWithTokens, navigate])
+
+  return (
+    <div
+      style={{
+        minHeight: '100vh',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        background: 'var(--background)',
+        color: 'var(--muted-foreground)',
+        fontSize: 14,
+      }}
+    >
+      {error ? `Sign-in failed: ${error}` : 'Signing you in…'}
+    </div>
   )
 }
 ````
@@ -42383,6 +43136,107 @@ export default defineConfig(({ mode }) => {
     },
   }
 })
+````
+
+## File: OIDC_PR.md
+````markdown
+# Add OIDC / SSO login (opt-in, security-first)
+
+Adds optional OpenID Connect single sign-on alongside the existing local
+password auth. SSO is **disabled by default** and fully inert — no new network
+calls, no behaviour change — unless `DRABA_OIDC_ISSUER` is set. Built to slot
+into the existing patterns rather than reshape them.
+
+## Why
+
+Draba is a great fit for self-hosted stacks where every tool federates to one
+identity provider (Authentik, Keycloak, Zitadel, Auth0, Google…). Today draba
+is the only piece that needs its own accounts. This lets an operator point draba
+at their IdP and have "Sign in with SSO" just work, while keeping local accounts
+as the default and as a break-glass.
+
+## What it does
+
+- New routes (public, registered only-as-handlers; both 404 when SSO is off):
+  - `GET /auth/oidc/login` → redirects to the IdP (PKCE + state + nonce).
+  - `GET /auth/oidc/callback` → verifies the ID token, finds-or-provisions the
+    local user, issues the **same** draba access/refresh JWTs as password login,
+    and hands them to the SPA via the URL fragment.
+- First SSO login auto-provisions a local account (respecting the tier user
+  limit); the first user on a fresh install becomes the superadmin, exactly like
+  password registration. Set `DRABA_OIDC_AUTO_CREATE=0` to require accounts be
+  pre-created.
+- Returning users are matched on the stable `(issuer, subject)` pair; email and
+  display name are refreshed from claims each login.
+- Login page shows a "Sign in with SSO" button only when the instance reports
+  `ssoEnabled` (added to the public `/settings/branding` response).
+
+## Security posture
+
+- **ID token signature is verified** against the IdP JWKS via `go-oidc`
+  (`coreos/go-oidc/v3`). No unsigned/self-asserted tokens are trusted.
+- **PKCE (S256)** on every flow, **state** bound to an httpOnly cookie (CSRF),
+  **nonce** bound into the ID token and compared in constant time (replay).
+- Transient flow cookies are httpOnly, `SameSite=Lax`, `Secure` when the request
+  is HTTPS (honouring `X-Forwarded-Proto`), scoped to `/auth/oidc`, 10-min TTL,
+  cleared on callback.
+- The client secret is read once from the env and never leaves the process or
+  any API response.
+- An OIDC account (no password) can **never** authenticate via `POST /auth/login`
+  or change a password — both reject `nil`-password users with the same generic
+  error, so the endpoints don't become an account-type oracle.
+- Tokens are returned to the SPA in the URL **fragment** (`#…`), never the query
+  string, so they are not sent to a server or written to access logs.
+
+## Opt-in dependency note
+
+OIDC pulls in `github.com/coreos/go-oidc/v3` and `golang.org/x/oauth2`. They are
+compiled in but **dormant** unless SSO is configured (`NewOIDCService` returns
+`nil` for an empty issuer, and every handler treats a nil service as disabled),
+so a default install does no OIDC work. Versions are pinned to the newest that
+keep the module on **`go 1.24.0`** (`go-oidc v3.16.0`, `oauth2 v0.34.0`) — the
+toolchain directive is unchanged.
+
+## Database
+
+Migration `024_oidc_identity.sql`:
+- Makes `users.password_hash` nullable (OIDC users have no password).
+- Adds `auth_provider ('local'|'oidc')`, `oidc_issuer`, `oidc_subject`, with a
+  row-level `CHECK` (local ⇒ password; oidc ⇒ issuer+subject) and a unique index
+  on `(oidc_issuer, oidc_subject)`.
+- **Safety:** `users` is referenced by ~17 foreign keys, several
+  `ON DELETE CASCADE`. The rebuild follows the official SQLite procedure
+  (`foreign_keys=OFF` → rebuild → `foreign_key_check` → `foreign_keys=ON`) so the
+  `DROP TABLE` cannot cascade-delete dependent rows. A migration test seeds a
+  user with team/membership rows and asserts they survive the rebuild.
+
+## Config (all optional)
+
+| Env var | Purpose |
+|---|---|
+| `DRABA_OIDC_ISSUER` | IdP issuer URL. **Unset = SSO disabled.** |
+| `DRABA_OIDC_CLIENT_ID` / `_CLIENT_SECRET` | OAuth2 client credentials |
+| `DRABA_OIDC_REDIRECT_URL` | Callback URL (defaults to `DRABA_BASE_URL` + `/auth/oidc/callback`) |
+| `DRABA_OIDC_AUTO_CREATE` | `0` to disable first-login provisioning |
+
+## Tests / checks
+
+- `go build ./...`, `go vet ./...`, full `go test ./...` — all green.
+- New: `oidc_handler_test.go` (disabled→404, `ssoEnabled` flag, OIDC user can't
+  password-login, create/lookup/unique round-trip) and the migration safety test.
+- `gofmt` clean. Web `tsc --noEmit` (the `lint` script) clean.
+- Not run locally: `golangci-lint` (not installed in my env) — worth a final pass
+  before merge.
+
+## Open questions for you
+
+1. **Dependency appetite** — happy with `go-oidc` + `oauth2`, or would you prefer
+   a leaner hand-rolled discovery/JWKS path? I went with the audited libraries
+   given the security surface, but it's your call on the dep philosophy.
+2. **`go 1.24` pin** — kept it. If you're open to `go 1.25`, I can bump to the
+   latest `go-oidc`/`oauth2`.
+3. **Auto-provisioning default** — defaults ON to mirror password registration.
+   Reasonable, or default OFF?
 ````
 
 ## File: .claude/commands/test-phase.md
@@ -44191,6 +45045,50 @@ See `docs/SAMPLE_DATA.md` for the full dataset specification and identity rules.
 All user passwords: `password`
 ````
 
+## File: packages/api/go.mod
+````
+module github.com/I0-1O/draba/packages/api
+
+go 1.24.0
+
+require (
+	github.com/coreos/go-oidc/v3 v3.18.0
+	github.com/golang-jwt/jwt/v5 v5.3.1
+	github.com/gorilla/websocket v1.5.3
+	github.com/jmoiron/sqlx v1.4.0
+	github.com/oapi-codegen/runtime v1.4.0
+	github.com/stretchr/testify v1.11.1
+	github.com/xuri/excelize/v2 v2.10.1
+	golang.org/x/crypto v0.48.0
+	golang.org/x/oauth2 v0.36.0
+	modernc.org/sqlite v1.34.5
+)
+
+require (
+	github.com/davecgh/go-spew v1.1.1 // indirect
+	github.com/dustin/go-humanize v1.0.1 // indirect
+	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
+	github.com/google/uuid v1.6.0 // indirect
+	github.com/mattn/go-isatty v0.0.20 // indirect
+	github.com/ncruces/go-strftime v1.0.0 // indirect
+	github.com/pmezard/go-difflib v1.0.0 // indirect
+	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
+	github.com/richardlehane/mscfb v1.0.6 // indirect
+	github.com/richardlehane/msoleps v1.0.6 // indirect
+	github.com/tiendc/go-deepcopy v1.7.2 // indirect
+	github.com/xuri/efp v0.0.1 // indirect
+	github.com/xuri/nfp v0.0.2-0.20250530014748-2ddeb826f9a9 // indirect
+	golang.org/x/exp v0.0.0-20230315142452-642cacee5cc0 // indirect
+	golang.org/x/net v0.50.0 // indirect
+	golang.org/x/sys v0.41.0 // indirect
+	golang.org/x/text v0.34.0 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
+	modernc.org/libc v1.61.6 // indirect
+	modernc.org/mathutil v1.7.1 // indirect
+	modernc.org/memory v1.8.0 // indirect
+)
+````
+
 ## File: packages/web/src/components/calendar/CalendarView.tsx
 ````typescript
 /**
@@ -45810,6 +46708,1200 @@ export default function GanttView({
 }
 ````
 
+## File: packages/web/src/components/layout/Sidebar.tsx
+````typescript
+import { useState, useRef, useEffect } from 'react';
+import {
+  ChevronRight,
+  ChevronLeft,
+  ChevronDown,
+  ChevronsDownUp,
+  ChevronsUpDown,
+  Plus,
+  Settings2,
+  Upload,
+  CalendarPlus,
+  Plug,
+  Link2,
+} from 'lucide-react';
+import { Badge } from '@/components/identity/Badge';
+import { useAuth } from '@/contexts/AuthContext';
+import type { components } from '@draba/shared';
+
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
+
+const SIDEBAR_MIN = 220;
+const SIDEBAR_MAX = 360;
+
+interface ApiTeam {
+  id: string;
+  name: string;
+  color?: string | null;
+  icon?: string | null;
+  archivedAt?: string | null;
+}
+
+interface ApiTimeline {
+  id: string;
+  name: string;
+  startDate?: string;
+  endDate?: string;
+  color?: string | null;
+  icon?: string | null;
+  archivedAt?: string | null;
+  shareCount?: number;
+}
+
+interface Props {
+  collapsed: boolean;
+  onToggle: () => void;
+  onNewActivity?: () => void;
+  /** Stub: bulk-import activities. Surfaced in the "New activity" combo dropdown. */
+  onBulkImport?: () => void;
+  apiTimelines?: ApiTimeline[];
+  archivedTimelines?: ApiTimeline[];
+  activeTimelineId?: string;
+  onActiveTimelineChange?: (id: string) => void;
+  onNewTimeline?: () => void;
+  onEditTimeline?: (timelineId: string) => void;
+  // Team management
+  activeTeam?: ApiTeam;
+  /** All non-archived teams. Used to render the switchable team list. */
+  activeTeams?: ApiTeam[];
+  archivedTeams?: ApiTeam[];
+  onNewTeam?: () => void;
+  onEditTeam?: (team: ApiTeam) => void;
+  onSelectTeam?: (teamId: string) => void;
+  onUnarchiveTeam?: (teamId: string) => void;
+  /** True when the current user is an admin of the active team. */
+  canEditTeam?: boolean;
+  /** Live member list from the API. */
+  members?: TeamMemberWithUser[];
+  /** Called when the user clicks the gear icon on a member row. */
+  onEditMember?: (member: TeamMemberWithUser) => void;
+}
+
+const ICON = { width: 15, height: 15, strokeWidth: 1.8 } as const;
+const ICON_SM = { width: 13, height: 13, strokeWidth: 1.8 } as const;
+const ICON_XS = { width: 11, height: 11, strokeWidth: 2 } as const;
+
+interface Timeline {
+  id: string;
+  name: string;
+  color: string;
+  icon: string | null;
+  startDate?: string;
+  endDate?: string;
+  /** Active (non-revoked, non-expired) share links — drives the tile chip. */
+  shareCount?: number;
+}
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+
+function formatDateRange(startDate?: string, endDate?: string): string {
+  if (!startDate || !endDate) return ''
+  const s = new Date(startDate + 'T00:00:00')
+  const e = new Date(endDate + 'T00:00:00')
+  const diffDays = (e.getTime() - s.getTime()) / 86_400_000
+  if (diffDays < 90) {
+    return `${MONTHS[s.getMonth()]} ${s.getDate()} – ${MONTHS[e.getMonth()]} ${e.getDate()} ${e.getFullYear()}`
+  }
+  return `${MONTHS[s.getMonth()]} ${s.getFullYear()} – ${MONTHS[e.getMonth()]} ${e.getFullYear()}`
+}
+
+
+interface TimelineItemProps {
+  timeline: Timeline;
+  active: boolean;
+  collapsed: boolean;
+  showDate?: boolean;
+  canEdit?: boolean;
+  onClick: () => void;
+  onSettings: () => void;
+}
+
+function TimelineItem({ timeline, active, collapsed, showDate = true, canEdit = false, onClick, onSettings }: TimelineItemProps) {
+  const [hovered, setHovered] = useState(false);
+  const dateRange = !collapsed && showDate ? formatDateRange(timeline.startDate, timeline.endDate) : ''
+
+  return (
+    <div
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        background: active
+          ? 'rgba(255,255,255,0.10)'
+          : hovered
+          ? 'rgba(255,255,255,0.05)'
+          : 'transparent',
+        borderLeft: active ? `2px solid ${timeline.color}` : '2px solid transparent',
+        transition: 'background 0.12s',
+        cursor: 'pointer',
+        minHeight: 34,
+      }}
+    >
+      <button
+        onClick={onClick}
+        title={collapsed ? timeline.name : undefined}
+        style={{
+          flex: 1,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          padding: collapsed ? '7px 14px' : '6px 8px 6px 16px',
+          background: 'none',
+          border: 'none',
+          color: active ? 'white' : 'rgba(255,255,255,0.65)',
+          fontSize: 13,
+          fontWeight: active ? 600 : 400,
+          cursor: 'pointer',
+          fontFamily: 'var(--font-sans)',
+          textAlign: 'left',
+          minWidth: 0,
+        }}
+      >
+        <Badge
+          identity={{ color: timeline.color, icon: timeline.icon ?? '__none__' }}
+          name={timeline.name}
+          shape="square"
+          size={20}
+        />
+        {!collapsed && (
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {timeline.name}
+            </div>
+            {dateRange && (
+              <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)', marginTop: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {dateRange}
+              </div>
+            )}
+          </div>
+        )}
+        {/* Active-share-count chip — an affordance that this timeline has live
+            public links (view shares + ICS feeds). Hidden at zero. */}
+        {!collapsed && (timeline.shareCount ?? 0) > 0 && (
+          <span
+            title={`${timeline.shareCount} active share ${timeline.shareCount === 1 ? 'link' : 'links'}`}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 3,
+              padding: '1px 6px',
+              borderRadius: 999,
+              background: 'rgba(255,255,255,0.10)',
+              color: 'rgba(255,255,255,0.55)',
+              fontSize: 10,
+              fontWeight: 600,
+              flexShrink: 0,
+            }}
+          >
+            <Link2 width={10} height={10} strokeWidth={2.2} />
+            {timeline.shareCount}
+          </span>
+        )}
+      </button>
+
+      {!collapsed && canEdit && (
+        <button
+          onClick={e => { e.stopPropagation(); onSettings(); }}
+          title={`Configure ${timeline.name}`}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            width: 26,
+            height: 26,
+            marginRight: 6,
+            background: 'none',
+            border: 'none',
+            borderRadius: 5,
+            color: 'rgba(255,255,255,0.4)',
+            cursor: 'pointer',
+            opacity: hovered ? 1 : 0,
+            transition: 'opacity 0.12s',
+            flexShrink: 0,
+          }}
+          onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.8)')}
+          onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.4)')}
+        >
+          <Settings2 {...ICON_SM} />
+        </button>
+      )}
+    </div>
+  );
+}
+
+function ConnectorItem({ name, status, color }: { name: string; status: string; color: string }) {
+  const [hovered, setHovered] = useState(false);
+
+  return (
+    <div
+      style={{
+        display: 'flex', alignItems: 'center', gap: 8,
+        padding: '6px 6px 6px 16px',
+        cursor: 'pointer',
+        background: hovered ? 'rgba(255,255,255,0.05)' : 'transparent',
+        transition: 'background 0.12s',
+      }}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+    >
+      <div style={{
+        width: 20, height: 20, borderRadius: 4,
+        background: color,
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        flexShrink: 0,
+      }}>
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="white">
+          <rect x="1" y="1" width="9" height="18" rx="1.5" />
+          <rect x="14" y="1" width="9" height="12" rx="1.5" />
+        </svg>
+      </div>
+      <div style={{ minWidth: 0, flex: 1 }}>
+        <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.65)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {name}
+        </div>
+        <div style={{ fontSize: 9, color: 'rgba(255,255,255,0.25)', marginTop: 1 }}>
+          {status}
+        </div>
+      </div>
+      <button
+        title={`Configure ${name}`}
+        style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          width: 26, height: 26, marginRight: 0,
+          background: 'none', border: 'none', borderRadius: 5,
+          color: 'rgba(255,255,255,0.4)', cursor: 'pointer',
+          opacity: hovered ? 1 : 0, transition: 'opacity 0.12s',
+          flexShrink: 0,
+        }}
+        onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.8)')}
+        onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.4)')}
+      >
+        <Settings2 {...ICON_SM} />
+      </button>
+    </div>
+  );
+}
+
+// ── TeamRow ──────────────────────────────────────────────────────────────────
+
+interface TeamRowProps {
+  team: ApiTeam;
+  isActive: boolean;
+  canEdit: boolean;
+  onSelect?: () => void;
+  onEdit?: () => void;
+}
+
+function TeamRow({ team, isActive, canEdit, onSelect, onEdit }: TeamRowProps) {
+  const [hovered, setHovered] = useState(false);
+
+  return (
+    <div
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      onClick={() => { if (!isActive) onSelect?.(); }}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        padding: '5px 6px 5px 16px',
+        borderLeft: isActive ? `2px solid ${team.color ?? 'var(--primary)'}` : '2px solid transparent',
+        background: isActive ? 'rgba(255,255,255,0.07)' : hovered ? 'rgba(255,255,255,0.03)' : 'transparent',
+        cursor: isActive ? 'default' : 'pointer',
+        minHeight: 34,
+        transition: 'background 0.12s',
+      }}
+    >
+      <Badge
+        identity={{ color: team.color ?? 'var(--primary)', icon: team.icon ?? '__name_1__' }}
+        name={team.name}
+        shape="square"
+        size={20}
+      />
+      <span style={{
+        fontSize: 13,
+        fontWeight: isActive ? 600 : 400,
+        color: isActive ? 'white' : 'rgba(255,255,255,0.65)',
+        flex: 1,
+        marginLeft: 8,
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        whiteSpace: 'nowrap',
+        minWidth: 0,
+      }}>
+        {team.name}
+      </span>
+      {canEdit && (
+        <button
+          title="Team settings"
+          onClick={e => { e.stopPropagation(); onEdit?.(); }}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            width: 26,
+            height: 26,
+            marginRight: 6,
+            background: 'none',
+            border: 'none',
+            borderRadius: 5,
+            color: 'rgba(255,255,255,0.4)',
+            cursor: 'pointer',
+            opacity: hovered ? 1 : 0,
+            transition: 'opacity 0.12s',
+            flexShrink: 0,
+          }}
+          onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.8)')}
+          onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.4)')}
+        >
+          <Settings2 {...ICON_SM} />
+        </button>
+      )}
+    </div>
+  );
+}
+
+// ── MemberSidebarRow ──────────────────────────────────────────────────────────
+
+interface MemberSidebarRowProps {
+  displayName: string;
+  color: string;
+  icon?: string | null;
+  isInactive?: boolean;
+  onEdit?: () => void;
+}
+
+function MemberSidebarRow({ displayName, color, icon, isInactive = false, onEdit }: MemberSidebarRowProps) {
+  const [hovered, setHovered] = useState(false);
+  return (
+    <div
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        display: 'flex', alignItems: 'center', gap: 8,
+        padding: '4px 6px 4px 16px', cursor: 'default',
+        background: hovered ? 'rgba(255,255,255,0.05)' : 'transparent',
+        opacity: isInactive ? 0.45 : 1,
+      }}
+    >
+      <Badge
+        identity={{ color, icon: icon ?? '__name_words__' }}
+        name={displayName}
+        shape="circle"
+        size={20}
+      />
+      <span style={{ fontSize: 13, color: 'rgba(255,255,255,0.65)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
+        {displayName}
+      </span>
+      {onEdit && (
+        <button
+          onClick={e => { e.stopPropagation(); onEdit(); }}
+          title={`Edit ${displayName}`}
+          style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            width: 22, height: 22, marginRight: 6,
+            background: 'none', border: 'none', borderRadius: 4,
+            color: 'rgba(255,255,255,0.4)', cursor: 'pointer', flexShrink: 0,
+            opacity: hovered ? 1 : 0,
+            transition: 'opacity 0.12s',
+            pointerEvents: hovered ? 'auto' : 'none',
+          }}
+          onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.8)')}
+          onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.4)')}
+        >
+          <Settings2 width={12} height={12} strokeWidth={1.8} />
+        </button>
+      )}
+    </div>
+  );
+}
+
+// ── Sidebar ───────────────────────────────────────────────────────────────────
+
+/**
+ * Left navigation rail: brand, team selector with members, and timeline list.
+ * Collapsed/expanded state is driven by the parent.
+ */
+const TIMELINE_COLORS = ['#1A97A2', '#6366F1', '#F17B2B', '#E11D48', '#10B981', '#F59E0B']
+
+export default function Sidebar({ collapsed, onToggle, onNewActivity, onBulkImport, apiTimelines, archivedTimelines = [], activeTimelineId, onActiveTimelineChange, onNewTimeline, onEditTimeline, activeTeam, activeTeams = [], archivedTeams = [], onNewTeam, onEditTeam, onSelectTeam, canEditTeam = false, members: apiMembers, onEditMember }: Props) {
+  const { user } = useAuth();
+  const currentUserId = (user as { id?: string } | null)?.id;
+  const [internalActiveId, setInternalActiveId] = useState('');
+  const [teamOpen, setTeamOpen] = useState(true);
+  const [connectorsOpen, setConnectorsOpen] = useState(true);
+  // Combo "New activity" dropdown (expanded + collapsed share this state).
+  const [newMenuOpen, setNewMenuOpen] = useState(false);
+  const newMenuRef = useRef<HTMLDivElement>(null);
+  // Collapsed-mode menu is rendered fixed (the rail clips overflow), so we
+  // capture the trigger's viewport rect when it opens.
+  const [collapsedMenuPos, setCollapsedMenuPos] = useState<{ top: number; left: number } | null>(null);
+  // Primary accent for the "New activity" combo button.
+  const NEW_BTN_BG = 'var(--primary)';
+  const NEW_BTN_FG = 'var(--primary-foreground)';
+  const [archivedOpen, setArchivedOpen] = useState(false);
+  const [timelinesOpen, setTimelinesOpen] = useState(true);
+  const [membersOpen, setMembersOpen] = useState(true);
+  const [archivedTeamsOpen, setArchivedTeamsOpen] = useState(false);
+
+  const allExpanded = teamOpen && timelinesOpen && connectorsOpen && membersOpen;
+  function toggleAllSections() {
+    const next = !allExpanded;
+    setTeamOpen(next);
+    setTimelinesOpen(next);
+    setConnectorsOpen(next);
+    setMembersOpen(next);
+    if (!next) {
+      setArchivedOpen(false);
+      setArchivedTeamsOpen(false);
+    }
+  }
+
+  const timelines: Timeline[] = (apiTimelines ?? []).map((t, i) => ({
+    id: t.id,
+    name: t.name,
+    color: t.color ?? TIMELINE_COLORS[i % TIMELINE_COLORS.length],
+    icon: t.icon ?? null,
+    startDate: t.startDate,
+    endDate: t.endDate,
+    shareCount: t.shareCount,
+  }))
+
+  const archivedTimelineItems: Timeline[] = archivedTimelines.map((t) => ({
+    id: t.id,
+    name: t.name,
+    color: t.color ?? '#64748B',
+    icon: t.icon ?? null,
+    startDate: t.startDate,
+    endDate: t.endDate,
+  }))
+  const activeId = activeTimelineId ?? internalActiveId
+  // timelines[0] is typed as Timeline (not T | undefined) because
+  // noUncheckedIndexedAccess is off in the tsconfig, but at runtime an empty
+  // array produces undefined. The explicit type annotation + length guard make
+  // the null case visible to TypeScript so the collapsed-section render below
+  // can safely guard against it.
+  const activeTimeline: Timeline | null =
+    timelines.find(t => t.id === activeId) ??
+    (timelines.length > 0 ? timelines[0] : null);
+
+  const [sidebarWidth, setSidebarWidth] = useState(SIDEBAR_MIN);
+  const dragging = useRef(false);
+  const startX = useRef(0);
+  const startW = useRef(SIDEBAR_MIN);
+
+  useEffect(() => {
+    function onMouseMove(e: MouseEvent) {
+      if (!dragging.current) return;
+      const delta = e.clientX - startX.current;
+      setSidebarWidth(Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, startW.current + delta)));
+    }
+    function onMouseUp() {
+      if (!dragging.current) return;
+      dragging.current = false;
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    }
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+    return () => {
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onMouseUp);
+    };
+  }, []);
+
+  // Close the "New activity" dropdown on outside click or Escape.
+  useEffect(() => {
+    if (!newMenuOpen) return;
+    function onDocMouseDown(e: MouseEvent) {
+      if (newMenuRef.current && !newMenuRef.current.contains(e.target as Node)) {
+        setNewMenuOpen(false);
+      }
+    }
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key === 'Escape') setNewMenuOpen(false);
+    }
+    document.addEventListener('mousedown', onDocMouseDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', onDocMouseDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [newMenuOpen]);
+
+  function onHandleMouseDown(e: React.MouseEvent) {
+    e.preventDefault();
+    dragging.current = true;
+    startX.current = e.clientX;
+    startW.current = sidebarWidth;
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+  }
+
+  return (
+    <div
+      style={{
+        position: 'relative',
+        width: collapsed ? 52 : sidebarWidth,
+        flexShrink: 0,
+        background: 'var(--color-charcoal)',
+        color: 'white',
+        display: 'flex',
+        flexDirection: 'column',
+        transition: 'width 0.2s ease',
+        overflow: 'hidden',
+        borderRight: '1px solid rgba(255,255,255,0.06)',
+      }}
+    >
+      {/* Logo + collapse toggle */}
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: collapsed ? 'center' : 'space-between',
+          padding: collapsed ? '0 13px' : '0 8px 0 16px',
+          borderBottom: '1px solid rgba(255,255,255,0.08)',
+          height: 'var(--topbar-h)',
+          flexShrink: 0,
+        }}
+      >
+        {!collapsed && (
+          <div
+            onClick={onToggle}
+            style={{ display: 'flex', alignItems: 'center', gap: 9, cursor: 'pointer' }}
+          >
+            <img src="/logo-orange-white.svg" alt="Draba" style={{ width: 28, height: 28, marginTop: 3 }} />
+            <span style={{ fontSize: 22, fontWeight: 700, letterSpacing: '-0.02em', color: 'white' }}>
+              draba
+            </span>
+          </div>
+        )}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+          {!collapsed && (
+            <button
+              onClick={toggleAllSections}
+              title={allExpanded ? 'Collapse all sections' : 'Expand all sections'}
+              style={{
+                background: 'none',
+                border: 'none',
+                color: 'rgba(255,255,255,0.45)',
+                borderRadius: 6,
+                width: 26,
+                height: 26,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                cursor: 'pointer',
+                flexShrink: 0,
+              }}
+              onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.8)')}
+              onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.45)')}
+            >
+              {allExpanded ? <ChevronsDownUp width={14} height={14} strokeWidth={1.8} /> : <ChevronsUpDown width={14} height={14} strokeWidth={1.8} />}
+            </button>
+          )}
+          <button
+            onClick={onToggle}
+            style={{
+              background: 'rgba(255,255,255,0.08)',
+              border: 'none',
+              color: 'rgba(255,255,255,0.7)',
+              borderRadius: 6,
+              width: 26,
+              height: 26,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              cursor: 'pointer',
+              flexShrink: 0,
+            }}
+          >
+            {collapsed ? <ChevronRight {...ICON} /> : <ChevronLeft {...ICON} />}
+          </button>
+        </div>
+      </div>
+
+      {/* Primary "New activity" combo button — sits directly under the brand. */}
+      {!collapsed && (
+        <div
+          ref={newMenuRef}
+          style={{ position: 'relative', padding: '12px 16px 2px', flexShrink: 0 }}
+        >
+          <div style={{ display: 'flex', alignItems: 'stretch' }}>
+            <button
+              onClick={onNewActivity}
+              style={{
+                flex: 1,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: 8,
+                padding: '9px 12px',
+                background: NEW_BTN_BG,
+                border: 'none',
+                borderRadius: '7px 0 0 7px',
+                color: NEW_BTN_FG,
+                fontSize: 13,
+                fontWeight: 600,
+                cursor: 'pointer',
+                fontFamily: 'var(--font-sans)',
+              }}
+              onMouseEnter={e => (e.currentTarget.style.filter = 'brightness(1.08)')}
+              onMouseLeave={e => (e.currentTarget.style.filter = 'none')}
+            >
+              <CalendarPlus width={15} height={15} strokeWidth={2} />
+              New activity
+            </button>
+            <button
+              title="More activity options"
+              aria-haspopup="menu"
+              aria-expanded={newMenuOpen}
+              onClick={() => setNewMenuOpen(o => !o)}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                width: 32,
+                background: NEW_BTN_BG,
+                border: 'none',
+                borderLeft: '1px solid rgba(0,0,0,0.18)',
+                borderRadius: '0 7px 7px 0',
+                color: NEW_BTN_FG,
+                cursor: 'pointer',
+              }}
+              onMouseEnter={e => (e.currentTarget.style.filter = 'brightness(1.08)')}
+              onMouseLeave={e => (e.currentTarget.style.filter = 'none')}
+            >
+              <ChevronDown
+                width={14}
+                height={14}
+                strokeWidth={2}
+                style={{ transform: newMenuOpen ? 'rotate(180deg)' : 'none', transition: 'transform 0.12s' }}
+              />
+            </button>
+          </div>
+
+          {newMenuOpen && (
+            <div
+              role="menu"
+              style={{
+                position: 'absolute',
+                top: 'calc(100% - 4px)',
+                left: 16,
+                right: 16,
+                background: 'var(--color-charcoal)',
+                border: '1px solid rgba(255,255,255,0.12)',
+                borderRadius: 7,
+                boxShadow: '0 8px 24px rgba(0,0,0,0.45)',
+                padding: 4,
+                zIndex: 30,
+              }}
+            >
+              <button
+                role="menuitem"
+                onClick={() => { setNewMenuOpen(false); onBulkImport?.(); }}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 8,
+                  padding: '8px 10px', width: '100%',
+                  background: 'none', border: 'none', borderRadius: 5,
+                  color: 'rgba(255,255,255,0.75)', fontSize: 13,
+                  cursor: 'pointer', fontFamily: 'var(--font-sans)', textAlign: 'left',
+                }}
+                onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.07)')}
+                onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+              >
+                <Upload width={14} height={14} strokeWidth={1.8} />
+                Bulk import
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      <div style={{ flex: 1, overflowY: 'auto' }}>
+
+        {/* Collapsed: team + timeline icons only */}
+        {collapsed && (
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6, padding: '10px 0' }}>
+            {/* Active team badge — click to expand */}
+            <div
+              title={activeTeam?.name ?? 'Team'}
+              onClick={onToggle}
+              style={{ cursor: 'pointer', flexShrink: 0 }}
+            >
+              <Badge
+                identity={{ color: activeTeam?.color ?? 'var(--primary)', icon: activeTeam?.icon ?? '__name_1__' }}
+                name={activeTeam?.name ?? ''}
+                shape="square"
+                size={28}
+              />
+            </div>
+            {/* Active timeline — click to expand */}
+            {activeTimeline && (
+              <div
+                title={activeTimeline.name}
+                onClick={onToggle}
+                style={{ cursor: 'pointer' }}
+              >
+                <Badge
+                  identity={{ color: activeTimeline.color, icon: activeTimeline.icon ?? '__none__' }}
+                  name={activeTimeline.name}
+                  shape="square"
+                  size={28}
+                />
+              </div>
+            )}
+
+            {/* New activity combo — icon button opens a menu with both actions.
+                order:-1 keeps it at the top, matching the expanded layout. */}
+            <div ref={newMenuRef} style={{ position: 'relative', flexShrink: 0, order: -1, marginBottom: 2 }}>
+              <button
+                title="New activity"
+                aria-haspopup="menu"
+                aria-expanded={newMenuOpen}
+                onClick={e => {
+                  if (newMenuOpen) { setNewMenuOpen(false); return; }
+                  const r = e.currentTarget.getBoundingClientRect();
+                  setCollapsedMenuPos({ top: r.top, left: r.right + 6 });
+                  setNewMenuOpen(true);
+                }}
+                style={{
+                  width: 30,
+                  height: 30,
+                  borderRadius: 7,
+                  background: NEW_BTN_BG,
+                  border: 'none',
+                  color: NEW_BTN_FG,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  cursor: 'pointer',
+                }}
+                onMouseEnter={e => (e.currentTarget.style.filter = 'brightness(1.08)')}
+                onMouseLeave={e => (e.currentTarget.style.filter = 'none')}
+              >
+                <CalendarPlus width={16} height={16} strokeWidth={2} />
+              </button>
+
+              {newMenuOpen && collapsedMenuPos && (
+                <div
+                  role="menu"
+                  style={{
+                    position: 'fixed',
+                    top: collapsedMenuPos.top,
+                    left: collapsedMenuPos.left,
+                    minWidth: 160,
+                    background: 'var(--color-charcoal)',
+                    border: '1px solid rgba(255,255,255,0.12)',
+                    borderRadius: 7,
+                    boxShadow: '0 8px 24px rgba(0,0,0,0.45)',
+                    padding: 4,
+                    zIndex: 30,
+                  }}
+                >
+                  <button
+                    role="menuitem"
+                    onClick={() => { setNewMenuOpen(false); onNewActivity?.(); }}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: 8,
+                      padding: '8px 10px', width: '100%',
+                      background: 'none', border: 'none', borderRadius: 5,
+                      color: 'rgba(255,255,255,0.75)', fontSize: 13,
+                      cursor: 'pointer', fontFamily: 'var(--font-sans)', textAlign: 'left',
+                    }}
+                    onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.07)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                  >
+                    <CalendarPlus width={14} height={14} strokeWidth={1.8} />
+                    New activity
+                  </button>
+                  <button
+                    role="menuitem"
+                    onClick={() => { setNewMenuOpen(false); onBulkImport?.(); }}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: 8,
+                      padding: '8px 10px', width: '100%',
+                      background: 'none', border: 'none', borderRadius: 5,
+                      color: 'rgba(255,255,255,0.75)', fontSize: 13,
+                      cursor: 'pointer', fontFamily: 'var(--font-sans)', textAlign: 'left',
+                    }}
+                    onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.07)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                  >
+                    <Upload width={14} height={14} strokeWidth={1.8} />
+                    Bulk import
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Team section */}
+        {!collapsed && (
+          <div style={{ borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
+            {/* Section header — collapsible, same pattern as TIMELINE */}
+            <button
+              onClick={() => setTeamOpen(o => !o)}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                width: '100%',
+                padding: '6px 12px 6px 16px',
+                background: 'none',
+                border: 'none',
+                cursor: 'pointer',
+                color: 'rgba(255,255,255,0.35)',
+                fontFamily: 'var(--font-sans)',
+              }}
+            >
+              <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                Team
+              </span>
+              {teamOpen
+                ? <ChevronDown width={12} height={12} strokeWidth={2} />
+                : <ChevronRight width={12} height={12} strokeWidth={2} />}
+            </button>
+
+            {/* Team rows — active team highlighted; others clickable to switch */}
+            {(teamOpen ? activeTeams : activeTeam ? [activeTeam] : []).map(t => (
+              <TeamRow
+                key={t.id}
+                team={t}
+                isActive={t.id === activeTeam?.id}
+                canEdit={canEditTeam}
+                onSelect={() => onSelectTeam?.(t.id)}
+                onEdit={() => onEditTeam?.(t)}
+              />
+            ))}
+            {/* Fallback when activeTeams not yet loaded but activeTeam is known */}
+            {!activeTeams.length && activeTeam && (
+              <TeamRow
+                team={activeTeam}
+                isActive
+                canEdit={canEditTeam}
+                onEdit={() => onEditTeam?.(activeTeam)}
+              />
+            )}
+
+            {/* New team button — only superadmins get onNewTeam passed from the parent */}
+            {teamOpen && onNewTeam && (
+              <button
+                onClick={onNewTeam}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 8,
+                  padding: '4px 16px', background: 'none', border: 'none',
+                  color: 'rgba(255,255,255,0.35)', fontSize: 12,
+                  cursor: 'pointer', width: '100%', fontFamily: 'var(--font-sans)',
+                }}
+                onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.7)')}
+                onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.35)')}
+              >
+                <Plus {...ICON_SM} />
+                New team
+              </button>
+            )}
+
+            {/* Archived teams — collapsible sub-section, shown when team section is open */}
+            {teamOpen && archivedTeams.length > 0 && (
+              <div>
+                <button
+                  onClick={() => setArchivedTeamsOpen(o => !o)}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 5,
+                    width: '100%', padding: '4px 8px 4px 16px',
+                    background: 'none', border: 'none', cursor: 'pointer',
+                    color: 'rgba(255,255,255,0.25)', fontFamily: 'var(--font-sans)',
+                  }}
+                  onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.5)')}
+                  onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.25)')}
+                >
+                  {archivedTeamsOpen
+                    ? <ChevronDown {...ICON_XS} />
+                    : <ChevronRight {...ICON_XS} />}
+                  <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                    Archived ({archivedTeams.length})
+                  </span>
+                </button>
+                {archivedTeamsOpen && archivedTeams.map(t => (
+                  <TeamRow
+                    key={t.id}
+                    team={t}
+                    isActive={false}
+                    canEdit={Boolean(onNewTeam)}
+                    onEdit={() => onEditTeam?.(t)}
+                  />
+                ))}
+              </div>
+            )}
+
+            {/* Members — only when team section is expanded */}
+            {teamOpen && (
+              <>
+                <button
+                  onClick={() => setMembersOpen(o => !o)}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 5,
+                    width: '100%',
+                    padding: '6px 8px 4px 16px',
+                    background: 'none',
+                    border: 'none',
+                    cursor: 'pointer',
+                    color: 'rgba(255,255,255,0.35)',
+                    fontFamily: 'var(--font-sans)',
+                  }}
+                >
+                  {membersOpen
+                    ? <ChevronDown {...ICON_XS} />
+                    : <ChevronRight {...ICON_XS} />}
+                  <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                    Members
+                  </span>
+                </button>
+
+                {membersOpen && (
+                  <div style={{ paddingBottom: 8 }}>
+                    {(apiMembers ?? []).map(m => {
+                      const displayName = (m as TeamMemberWithUser).displayName || m.id;
+                      const color = m.color ?? '#8b949e';
+                      const icon = (m as TeamMemberWithUser).icon ?? null;
+                      return (
+                        <MemberSidebarRow
+                          key={m.id}
+                          displayName={displayName}
+                          color={color}
+                          icon={icon}
+                          isInactive={Boolean((m as TeamMemberWithUser).archivedAt)}
+                          onEdit={onEditMember && (m as TeamMemberWithUser).userId !== currentUserId
+                            ? () => onEditMember(m as TeamMemberWithUser)
+                            : undefined}
+                        />
+                      );
+                    })}
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        )}
+
+        {/* Timelines section */}
+        <div style={{ padding: '8px 0' }}>
+          {!collapsed ? (
+            <button
+              onClick={() => setTimelinesOpen(o => !o)}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                width: '100%',
+                padding: '6px 12px 4px 16px',
+                background: 'none',
+                border: 'none',
+                cursor: 'pointer',
+                color: 'rgba(255,255,255,0.35)',
+                fontFamily: 'var(--font-sans)',
+              }}
+            >
+              <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                Timeline
+              </span>
+              {timelinesOpen
+                ? <ChevronDown width={12} height={12} strokeWidth={2} />
+                : <ChevronRight width={12} height={12} strokeWidth={2} />}
+            </button>
+          ) : (
+            <div style={{ height: 8 }} />
+          )}
+
+          {!collapsed && (timelinesOpen ? (
+            <>
+              {timelines.map(tl => (
+                <TimelineItem
+                  key={tl.id}
+                  timeline={tl}
+                  active={activeId === tl.id}
+                  collapsed={false}
+                  canEdit={canEditTeam}
+                  onClick={() => { setInternalActiveId(tl.id); onActiveTimelineChange?.(tl.id); }}
+                  onSettings={() => onEditTimeline?.(tl.id)}
+                />
+              ))}
+              <button
+                onClick={onNewTimeline}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  padding: '6px 16px',
+                  background: 'none',
+                  border: 'none',
+                  color: 'rgba(255,255,255,0.35)',
+                  fontSize: 12,
+                  cursor: onNewTimeline ? 'pointer' : 'default',
+                  width: '100%',
+                  fontFamily: 'var(--font-sans)',
+                  marginTop: 2,
+                }}
+                onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.7)')}
+                onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.35)')}
+              >
+                <Plus {...ICON_SM} />
+                New timeline
+              </button>
+
+              {/* Archived sub-section */}
+              {archivedTimelineItems.length > 0 && (
+                <>
+                  <button
+                    onClick={() => setArchivedOpen(o => !o)}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: 5,
+                      width: '100%', padding: '6px 12px 4px 16px',
+                      background: 'none', border: 'none', cursor: 'pointer',
+                      color: 'rgba(255,255,255,0.25)', fontFamily: 'var(--font-sans)',
+                      marginTop: 4,
+                    }}
+                    onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.45)')}
+                    onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.25)')}
+                  >
+                    {archivedOpen
+                      ? <ChevronDown {...ICON_XS} />
+                      : <ChevronRight {...ICON_XS} />}
+                    <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                      Archived
+                    </span>
+                    <span style={{ fontSize: 10, marginLeft: 4 }}>({archivedTimelineItems.length})</span>
+                  </button>
+
+                  {archivedOpen && (
+                    <div style={{ opacity: 0.6 }}>
+                      {archivedTimelineItems.map(tl => (
+                        <TimelineItem
+                          key={tl.id}
+                          timeline={tl}
+                          active={false}
+                          collapsed={false}
+                          canEdit={canEditTeam}
+                          onClick={() => {}}
+                          onSettings={() => onEditTimeline?.(tl.id)}
+                        />
+                      ))}
+                    </div>
+                  )}
+                </>
+              )}
+            </>
+          ) : activeTimeline ? (
+            /* Section collapsed: show just the active timeline.
+               Guard required because activeTimeline is null when the timeline
+               list is empty — that state is briefly true on initial load. */
+            <TimelineItem
+              timeline={activeTimeline}
+              active={true}
+              collapsed={false}
+              showDate={false}
+              canEdit={canEditTeam}
+              onClick={() => setTimelinesOpen(true)}
+              onSettings={() => onEditTimeline?.(activeTimeline.id)}
+            />
+          ) : null)}
+        </div>
+        {/* Connectors section — contextual to active timeline */}
+        {!collapsed && (
+          <div style={{ padding: '8px 0', borderTop: '1px solid rgba(255,255,255,0.08)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', padding: '6px 6px 4px 16px' }}>
+              <button
+                onClick={() => setConnectorsOpen(o => !o)}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 6, flex: 1,
+                  background: 'none', border: 'none', cursor: 'pointer',
+                  color: 'rgba(255,255,255,0.35)', fontFamily: 'var(--font-sans)',
+                  padding: 0,
+                }}
+              >
+                <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                  Connectors
+                </span>
+                {connectorsOpen
+                  ? <ChevronDown width={12} height={12} strokeWidth={2} />
+                  : <ChevronRight width={12} height={12} strokeWidth={2} />}
+              </button>
+            </div>
+
+            {connectorsOpen && (
+              <>
+                <div style={{
+                  padding: '0 16px 4px',
+                  fontSize: 10,
+                  color: 'rgba(255,255,255,0.22)',
+                  letterSpacing: '0.02em',
+                }}>
+                  {activeTimeline?.name}
+                </div>
+                {/* Stub: connected Trello board */}
+                <ConnectorItem name="Trello — Launch Board" status="Synced · 2 min ago" color="#0079BF" />
+                <button
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 8,
+                    padding: '6px 16px', background: 'none', border: 'none',
+                    color: 'rgba(255,255,255,0.35)', fontSize: 12,
+                    cursor: 'pointer', width: '100%', fontFamily: 'var(--font-sans)',
+                  }}
+                  onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.7)')}
+                  onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.35)')}
+                >
+                  <Plug width={13} height={13} strokeWidth={1.8} />
+                  Add connector
+                </button>
+              </>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Resize handle */}
+      {!collapsed && (
+        <div
+          onMouseDown={onHandleMouseDown}
+          style={{
+            position: 'absolute',
+            top: 0,
+            right: 0,
+            width: 5,
+            height: '100%',
+            cursor: 'col-resize',
+            zIndex: 20,
+          }}
+          onMouseEnter={e => ((e.currentTarget.lastElementChild as HTMLElement).style.background = 'var(--primary)')}
+          onMouseLeave={e => ((e.currentTarget.lastElementChild as HTMLElement).style.background = 'transparent')}
+        >
+          <div
+            style={{
+              position: 'absolute',
+              top: 0,
+              right: 0,
+              width: 2,
+              height: '100%',
+              background: 'transparent',
+              transition: 'background 0.15s',
+              pointerEvents: 'none',
+            }}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+````
+
 ## File: packages/web/src/components/list/ListToolbar.tsx
 ````typescript
 /**
@@ -47135,436 +49227,6 @@ export function segmentsForDay(row: WeekRow, col: number): CalendarSegment[] {
 }
 ````
 
-## File: packages/web/src/pages/LoginPage.tsx
-````typescript
-import { useState } from 'react'
-import { useNavigate, useLocation, Link } from 'react-router-dom'
-import { Eye, EyeOff, Check, Loader2 } from 'lucide-react'
-import { useAuth } from '@/contexts/AuthContext'
-import { ApiError } from '@/lib/api'
-import DarkModeToggle from '@/components/DarkModeToggle'
-import { usePublicSettings } from '@/hooks/usePublicSettings'
-
-// ── Floating-label input ─────────────────────────────────────────────────────
-
-interface FloatInputProps {
-  id: string
-  label: string
-  type: string
-  value: string
-  autoComplete: string
-  error?: string | null
-  onChange: (v: string) => void
-  onKeyDown?: (e: React.KeyboardEvent) => void
-  rightSlot?: React.ReactNode
-}
-
-function FloatInput({ id, label, type, value, autoComplete, error, onChange, onKeyDown, rightSlot }: FloatInputProps) {
-  const [focused, setFocused] = useState(false)
-  const floated = focused || value.length > 0
-
-  const borderColor = error
-    ? '#e74c3c'
-    : focused
-    ? '#288C9B'
-    : 'hsl(210 15% 24%)'
-
-  const boxShadow = error
-    ? '0 0 0 3px rgba(231,76,60,0.15)'
-    : focused
-    ? '0 0 0 3px rgba(40,140,155,0.18)'
-    : 'none'
-
-  const labelColor = error
-    ? '#e74c3c'
-    : focused
-    ? '#5BC0DE'
-    : 'hsl(210 15% 65%)'
-
-  return (
-    <div>
-      <div style={{
-        position: 'relative',
-        borderRadius: 8,
-        border: `1px solid ${borderColor}`,
-        background: 'hsl(210 15% 17%)',
-        transition: 'border-color 180ms ease, box-shadow 180ms ease',
-        boxShadow,
-      }}>
-        {/* Floating label */}
-        <label
-          htmlFor={id}
-          style={{
-            position: 'absolute',
-            left: 14,
-            top: floated ? 8 : '50%',
-            transform: floated ? 'none' : 'translateY(-50%)',
-            fontSize: floated ? 11 : 14,
-            letterSpacing: floated ? '0.06em' : 0,
-            textTransform: floated ? 'uppercase' : 'none',
-            fontWeight: 600,
-            color: labelColor,
-            transition: 'all 160ms cubic-bezier(0.4, 0, 0.2, 1)',
-            pointerEvents: 'none',
-            userSelect: 'none',
-          }}
-        >
-          {label}
-        </label>
-
-        <input
-          id={id}
-          type={type}
-          autoComplete={autoComplete}
-          value={value}
-          onChange={e => onChange(e.target.value)}
-          onFocus={() => setFocused(true)}
-          onBlur={() => setFocused(false)}
-          onKeyDown={onKeyDown}
-          style={{
-            width: '100%',
-            padding: '22px 42px 8px 14px',
-            background: 'transparent',
-            border: 'none',
-            outline: 'none',
-            fontSize: 15,
-            color: 'hsl(210 17% 93%)',
-            fontFamily: 'inherit',
-            lineHeight: 1.4,
-            boxSizing: 'border-box',
-          }}
-        />
-
-        {rightSlot && (
-          <div style={{
-            position: 'absolute',
-            right: 12,
-            top: '50%',
-            transform: 'translateY(-50%)',
-          }}>
-            {rightSlot}
-          </div>
-        )}
-      </div>
-
-      {error && (
-        <p style={{ fontSize: 12, color: '#e74c3c', margin: '5px 0 0 2px' }}>{error}</p>
-      )}
-    </div>
-  )
-}
-
-// ── Spinner ──────────────────────────────────────────────────────────────────
-
-function Spinner() {
-  return (
-    <Loader2
-      size={16}
-      strokeWidth={2.5}
-      color="rgba(255,255,255,0.8)"
-      style={{ animation: 'spin 0.8s linear infinite' }}
-    />
-  )
-}
-
-// ── Main page ────────────────────────────────────────────────────────────────
-
-export default function LoginPage() {
-  const { login } = useAuth()
-  const navigate = useNavigate()
-  const location = useLocation()
-  const from = (location.state as { from?: { pathname: string } } | null)?.from?.pathname ?? '/'
-  // A success message routed here from another page (e.g. password reset).
-  // Derived from navigation state, so it clears naturally on a full reload.
-  const notice = (location.state as { message?: string } | null)?.message ?? null
-  const { data: branding } = usePublicSettings()
-  const instanceName = branding?.instanceName || 'draba'
-
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
-  const [showPassword, setShowPassword] = useState(false)
-  const [emailError, setEmailError] = useState<string | null>(null)
-  const [passwordError, setPasswordError] = useState<string | null>(null)
-  const [serverError, setServerError] = useState<string | null>(null)
-  const [loading, setLoading] = useState(false)
-  const [success, setSuccess] = useState(false)
-
-  function validateAndSubmit() {
-    let valid = true
-    setServerError(null)
-
-    if (!email.trim()) {
-      setEmailError('Email is required')
-      valid = false
-    } else if (!/\S+@\S+\.\S+/.test(email)) {
-      setEmailError('Enter a valid email')
-      valid = false
-    } else {
-      setEmailError(null)
-    }
-
-    if (!password) {
-      setPasswordError('Password is required')
-      valid = false
-    } else if (password.length < 6) {
-      setPasswordError('Password must be at least 6 characters')
-      valid = false
-    } else {
-      setPasswordError(null)
-    }
-
-    if (!valid) return
-    doLogin()
-  }
-
-  async function doLogin() {
-    setLoading(true)
-    try {
-      await login(email, password)
-      setSuccess(true)
-      // Brief success flash then navigate
-      setTimeout(() => navigate(from, { replace: true }), 600)
-    } catch (err) {
-      if (err instanceof ApiError) {
-        setServerError(err.message)
-      } else {
-        setServerError('Something went wrong. Please try again.')
-      }
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  function handleSubmit(e: React.FormEvent) {
-    e.preventDefault()
-    validateAndSubmit()
-  }
-
-  return (
-    <div style={{
-      minHeight: '100vh',
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      background: 'var(--background)',
-      padding: '24px',
-      position: 'relative',
-    }}>
-      {/* Teal radial glow behind card */}
-      <div style={{
-        position: 'fixed',
-        inset: 0,
-        background: 'radial-gradient(ellipse 60% 50% at 20% 50%, rgba(40,140,155,0.12) 0%, transparent 70%)',
-        pointerEvents: 'none',
-      }} />
-
-      {/* Dark mode toggle */}
-      <div style={{ position: 'fixed', top: 16, right: 16, zIndex: 10 }}>
-        <DarkModeToggle />
-      </div>
-
-      {/* Card */}
-      <div style={{
-        width: '100%',
-        maxWidth: 860,
-        minHeight: 520,
-        borderRadius: 16,
-        overflow: 'hidden',
-        display: 'flex',
-        boxShadow: '0 32px 80px -12px rgba(0,0,0,0.55), 0 0 0 1px rgba(255,255,255,0.06)',
-        position: 'relative',
-        zIndex: 1,
-      }}>
-
-        {/* ── Left panel — brand ─────────────────────────────────────── */}
-        <div style={{
-          width: '38%',
-          flexShrink: 0,
-          background: 'linear-gradient(155deg, #2aa5b8 0%, #1c7585 60%, #145f6e 100%)',
-          display: 'flex',
-          flexDirection: 'column',
-          alignItems: 'center',
-          justifyContent: 'center',
-          gap: 4,
-          padding: '48px 32px',
-          position: 'relative',
-          overflow: 'hidden',
-        }}>
-          {/* Decorative circles */}
-          <div style={{ width: 220, height: 220, borderRadius: '50%', background: 'rgba(255,255,255,0.07)', position: 'absolute', top: -60, left: -60, pointerEvents: 'none' }} />
-          <div style={{ width: 160, height: 160, borderRadius: '50%', background: 'rgba(255,255,255,0.05)', position: 'absolute', bottom: -40, right: -40, pointerEvents: 'none' }} />
-
-          {/* Logo — 2× the handoff's 88px */}
-          <img
-            src="/logo-color.svg"
-            alt="draba"
-            style={{ width: 270, height: 270, filter: 'drop-shadow(0 4px 16px rgba(0,0,0,0.25))', position: 'relative', marginTop: '-15px', marginBottom: '-47px' }}
-          />
-
-          <div style={{ position: 'relative', textAlign: 'center' }}>
-            <div style={{ fontSize: 28, fontWeight: 700, color: '#fff', letterSpacing: '-0.01em', textShadow: '0 2px 8px rgba(0,0,0,0.2)' }}>
-              {instanceName}
-            </div>
-            <div style={{ fontSize: 13, fontWeight: 400, color: 'rgba(255,255,255,0.72)', lineHeight: 1.5, marginTop: 8 }}>
-              Team coordination,<br />simplified.
-            </div>
-          </div>
-        </div>
-
-        {/* ── Right panel — form ─────────────────────────────────────── */}
-        <div style={{
-          flex: 1,
-          background: 'var(--card)',
-          padding: '52px 48px',
-          display: 'flex',
-          flexDirection: 'column',
-          justifyContent: 'center',
-        }}>
-          {success ? (
-            /* Success state */
-            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', textAlign: 'center', gap: 0 }}>
-              <div style={{
-                width: 56, height: 56, borderRadius: '50%',
-                background: 'rgba(40,140,155,0.15)', border: '2px solid #288C9B',
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                margin: '0 auto 20px',
-              }}>
-                <Check size={24} color="#288C9B" strokeWidth={2.5} />
-              </div>
-              <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--foreground)', marginBottom: 8 }}>
-                You're signed in
-              </div>
-              <div style={{ fontSize: 14, color: 'var(--muted-foreground)' }}>
-                Redirecting to your timeline…
-              </div>
-            </div>
-          ) : (
-            <form onSubmit={handleSubmit} noValidate>
-              {/* Heading */}
-              <div style={{ marginBottom: 28 }}>
-                <h1 style={{ fontSize: 28, fontWeight: 700, color: 'hsl(210 17% 93%)', letterSpacing: '-0.02em', margin: '0 0 6px' }}>
-                  Sign in
-                </h1>
-                <p style={{ fontSize: 14, color: 'hsl(210 15% 52%)', margin: 0 }}>
-                  Welcome back — sign in to your account.
-                </p>
-              </div>
-
-              {/* Success notice routed from another page (e.g. password reset).
-                  Suppressed once a server error is shown so it can't go stale. */}
-              {notice && !serverError && (
-                <div className="mb-5 rounded-lg border border-emerald-500/35 bg-emerald-500/10 px-3 py-2.5 text-[13px] text-emerald-400">
-                  {notice}
-                </div>
-              )}
-
-              {/* Fields */}
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 14, marginBottom: 24 }}>
-                <FloatInput
-                  id="email"
-                  label="Email"
-                  type="email"
-                  autoComplete="email"
-                  value={email}
-                  error={emailError}
-                  onChange={v => { setEmail(v); if (emailError) setEmailError(null) }}
-                />
-
-                <FloatInput
-                  id="password"
-                  label="Password"
-                  type={showPassword ? 'text' : 'password'}
-                  autoComplete="current-password"
-                  value={password}
-                  error={passwordError}
-                  onChange={v => { setPassword(v); if (passwordError) setPasswordError(null) }}
-                  rightSlot={
-                    <button
-                      type="button"
-                      onClick={() => setShowPassword(s => !s)}
-                      style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'hsl(210 15% 52%)', display: 'flex', padding: 0 }}
-                    >
-                      {showPassword ? <EyeOff size={18} strokeWidth={1.5} /> : <Eye size={18} strokeWidth={1.5} />}
-                    </button>
-                  }
-                />
-              </div>
-
-              {/* Forgot password */}
-              <div style={{ textAlign: 'right', marginBottom: 22, marginTop: -6 }}>
-                <Link
-                  to="/forgot-password"
-                  style={{ fontSize: 13, fontWeight: 600, color: '#5BC0DE', textDecoration: 'none' }}
-                  onMouseEnter={e => (e.currentTarget.style.textDecoration = 'underline')}
-                  onMouseLeave={e => (e.currentTarget.style.textDecoration = 'none')}
-                >
-                  Forgot password?
-                </Link>
-              </div>
-
-              {/* Server error */}
-              {serverError && (
-                <p style={{ fontSize: 13, color: '#e74c3c', margin: '0 0 16px' }}>{serverError}</p>
-              )}
-
-              {/* Sign in button */}
-              <button
-                type="submit"
-                disabled={loading}
-                style={{
-                  width: '100%',
-                  padding: '14px',
-                  borderRadius: 8,
-                  border: 'none',
-                  background: loading
-                    ? 'hsl(188 40% 35%)'
-                    : 'linear-gradient(135deg, #2aa5b8 0%, #1e8a9c 100%)',
-                  color: '#fff',
-                  fontSize: 15,
-                  fontWeight: 700,
-                  letterSpacing: '0.01em',
-                  boxShadow: loading ? 'none' : '0 4px 20px rgba(40,140,155,0.35)',
-                  cursor: loading ? 'not-allowed' : 'pointer',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  gap: 8,
-                  fontFamily: 'inherit',
-                  transition: 'opacity 160ms ease, transform 160ms ease, box-shadow 160ms ease',
-                }}
-                onMouseEnter={e => { if (!loading) { e.currentTarget.style.opacity = '0.92'; e.currentTarget.style.transform = 'translateY(-1px)' } }}
-                onMouseLeave={e => { e.currentTarget.style.opacity = '1'; e.currentTarget.style.transform = 'translateY(0)' }}
-                onMouseDown={e => { if (!loading) e.currentTarget.style.transform = 'scale(0.98)' }}
-                onMouseUp={e => { if (!loading) e.currentTarget.style.transform = 'translateY(-1px)' }}
-              >
-                {loading && <Spinner />}
-                {loading ? 'Signing in…' : 'Sign in'}
-              </button>
-
-              {/* Register link */}
-              <p style={{ marginTop: 24, fontSize: 13, textAlign: 'center', color: 'hsl(210 15% 52%)' }}>
-                Have an invite?{' '}
-                <Link
-                  to="/register"
-                  style={{ color: '#5BC0DE', fontWeight: 600, textDecoration: 'none' }}
-                  onMouseEnter={e => (e.currentTarget.style.textDecoration = 'underline')}
-                  onMouseLeave={e => (e.currentTarget.style.textDecoration = 'none')}
-                >
-                  Create an account
-                </Link>
-              </p>
-            </form>
-          )}
-        </div>
-      </div>
-
-      {/* Keyframe for spinner */}
-      <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
-    </div>
-  )
-}
-````
-
 ## File: packages/web/src/pages/RegisterPage.tsx
 ````typescript
 import { useState } from 'react'
@@ -47748,6 +49410,71 @@ export default function RegisterPage() {
         </CardContent>
       </Card>
     </div>
+  )
+}
+````
+
+## File: packages/web/src/App.tsx
+````typescript
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { AuthProvider } from '@/contexts/AuthContext'
+import ProtectedRoute from '@/components/ProtectedRoute'
+import ThemeSync from '@/components/ThemeSync'
+import BrandingSync from '@/components/BrandingSync'
+import LoginPage from '@/pages/LoginPage'
+import RegisterPage from '@/pages/RegisterPage'
+import DashboardPage from '@/pages/DashboardPage'
+import SetupPage from '@/pages/SetupPage'
+import SettingsPage from '@/pages/SettingsPage'
+import ForgotPasswordPage from '@/pages/ForgotPasswordPage'
+import ResetPasswordPage from '@/pages/ResetPasswordPage'
+import ShareViewPage from '@/pages/ShareViewPage'
+import OIDCCallbackPage from '@/pages/OIDCCallbackPage'
+
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      staleTime: 30_000,
+      retry: 1,
+    },
+  },
+})
+
+export default function App() {
+  return (
+    <QueryClientProvider client={queryClient}>
+      <BrowserRouter>
+        <AuthProvider>
+          {/* Side-effect components — render nothing but apply global state. */}
+          <ThemeSync />
+          <BrandingSync />
+          <Routes>
+            {/* First-run setup — public, shown before any users exist */}
+            <Route path="/setup" element={<SetupPage />} />
+
+            {/* Public routes */}
+            <Route path="/login" element={<LoginPage />} />
+            <Route path="/register" element={<RegisterPage />} />
+            <Route path="/forgot-password" element={<ForgotPasswordPage />} />
+            <Route path="/reset-password" element={<ResetPasswordPage />} />
+            {/* SSO landing — receives tokens in the URL fragment after OIDC login */}
+            <Route path="/auth/callback" element={<OIDCCallbackPage />} />
+            {/* Public share viewer — no auth required */}
+            <Route path="/s/:token" element={<ShareViewPage />} />
+
+            {/* Protected routes */}
+            <Route element={<ProtectedRoute />}>
+              <Route path="/" element={<DashboardPage />} />
+              <Route path="/settings/*" element={<SettingsPage />} />
+            </Route>
+
+            {/* Fallback */}
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </AuthProvider>
+      </BrowserRouter>
+    </QueryClientProvider>
   )
 }
 ````
@@ -48134,179 +49861,6 @@ Resolved 2026-06-05 (re-sequencing):
 - Editing or any mutation through a share link.
 - **Calendar view-shares** — Calendar is ICS-only (13.4); there is no `interactive=false` Calendar web-share.
 - **Password on ICS feeds** — calendar clients can't unlock interactively; the token is the secret.
-````
-
-## File: packages/api/cmd/draba/main.go
-````go
-// Command draba is the API server entry point. It wires repositories,
-// the auth token service, and tier configuration into the HTTP server,
-// then listens for requests until the process is killed.
-package main
-
-import (
-	"fmt"
-	"io/fs"
-	"log/slog"
-	"net/http"
-	"os"
-	"strings"
-
-	"github.com/I0-1O/draba/packages/api/internal/api"
-	"github.com/I0-1O/draba/packages/api/internal/auth"
-	"github.com/I0-1O/draba/packages/api/internal/buildinfo"
-	"github.com/I0-1O/draba/packages/api/internal/db"
-	"github.com/I0-1O/draba/packages/api/internal/events"
-	"github.com/I0-1O/draba/packages/api/internal/mailer"
-	"github.com/I0-1O/draba/packages/api/internal/tier"
-	"github.com/I0-1O/draba/packages/api/internal/ws"
-	sampledata "github.com/I0-1O/draba/packages/api/sample_data"
-	drabui "github.com/I0-1O/draba/packages/api/ui"
-)
-
-const banner = "\n" +
-	"      _           _\n" +
-	"     | |         | |\n" +
-	"   __| |_ __ __ _| |__   __ _\n" +
-	"  / _` | '__/ _` | '_ \\ / _` |\n" +
-	" | (_| | | | (_| | |_) | (_| |\n" +
-	"  \\__,_|_|  \\__,_|_.__/ \\__,_|\n" +
-	"\n" +
-	"  see who's doing what, when.\n\n"
-
-func main() {
-	if len(os.Args) > 1 && os.Args[1] == "reset-password" {
-		runResetPassword(os.Args[2:])
-		return
-	}
-
-	setupLogger()
-	fmt.Print(banner)
-	slog.Info("build", "commit", buildinfo.Short(), "built", buildinfo.Built)
-
-	port := getenv("DRABA_PORT", "8080")
-	dsn := getenv("DRABA_DB_DSN", "/data/draba.db")
-	jwtSecret := os.Getenv("DRABA_JWT_SECRET")
-	if jwtSecret == "" {
-		slog.Error("DRABA_JWT_SECRET must be set")
-		os.Exit(1)
-	}
-
-	t, err := tier.Load()
-	if err != nil {
-		slog.Error("tier load failed", "err", err)
-		os.Exit(1)
-	}
-	l := t.Limits()
-	if l.MaxUsers == 0 {
-		slog.Info("tier", "tier", t)
-	} else {
-		slog.Info("tier", "tier", t, "maxUsers", l.MaxUsers, "maxTeams", l.MaxTeams)
-	}
-
-	database, err := db.Open(dsn)
-	if err != nil {
-		slog.Error("db: open failed", "err", err)
-		os.Exit(1)
-	}
-	slog.Info("db: opened", "dsn", dsn)
-
-	if err := db.Migrate(database); err != nil {
-		slog.Error("db: migrate failed", "err", err)
-		os.Exit(1)
-	}
-	slog.Info("db: migrations applied")
-
-	// Optional pre-launch convenience: seed the canonical sample dataset into an
-	// empty database so a freshly-wiped dev/test instance comes up populated.
-	// Gated by DRABA_SEED_SAMPLE_DATA and a no-op once the DB has any users — it
-	// must stay unset in any real deployment.
-	if os.Getenv("DRABA_SEED_SAMPLE_DATA") == "1" {
-		sql, err := sampledata.SQL()
-		if err != nil {
-			slog.Error("db: reading embedded sample data failed", "err", err)
-			os.Exit(1)
-		}
-		seeded, err := db.SeedSampleDataIfEmpty(database, sql)
-		if err != nil {
-			slog.Error("db: sample-data seed failed", "err", err)
-			os.Exit(1)
-		}
-		if seeded {
-			slog.Info("db: sample data seeded (database was empty)")
-		} else {
-			slog.Info("db: sample-data seed skipped (database already populated)")
-		}
-	}
-
-	users := db.NewUserRepo(database)
-	invites := db.NewInviteRepo(database)
-	teams := db.NewTeamRepo(database)
-	activityRepo := db.NewActivityRepo(database)
-	timelineRepo := db.NewTimelineRepo(database)
-	savedFilterRepo := db.NewSavedFilterRepo(database)
-	preferenceRepo := db.NewUserPreferenceRepo(database)
-	apiTokenRepo := db.NewAPITokenRepo(database)
-	instanceSetsRepo := db.NewInstanceSettingsRepo(database)
-	passwordTokensRepo := db.NewPasswordResetTokenRepo(database)
-	statusRepo := db.NewStatusRepo(database)
-	tagRepo := db.NewTagRepo(database)
-	shareRepo := db.NewShareRepo(database)
-	m := mailer.New(instanceSetsRepo, []byte(jwtSecret))
-	tokens := auth.NewTokenService(jwtSecret)
-
-	bus := events.NewBus()
-	hub := ws.NewHub(bus, tokens, func(teamID, userID string) error {
-		_, err := teams.GetMember(teamID, userID)
-		return err
-	})
-	go hub.Run()
-	slog.Info("ws: hub running")
-
-	if mods := tier.Registered(); len(mods) > 0 {
-		slog.Info("modules loaded", "count", len(mods))
-	}
-
-	srv := api.NewServer(users, invites, teams, activityRepo, timelineRepo, savedFilterRepo, preferenceRepo, apiTokenRepo, instanceSetsRepo, passwordTokensRepo, statusRepo, tagRepo, shareRepo, m, tokens, t, bus, hub)
-
-	// Wire up the embedded React SPA when a production build is present.
-	// In dev the static/ directory only has .gitkeep so this is a no-op.
-	if sub, err := fs.Sub(drabui.FS, "static"); err == nil {
-		if _, err := sub.Open("index.html"); err == nil {
-			srv.WithUI(sub)
-			slog.Info("ui: serving embedded SPA")
-		}
-	}
-
-	slog.Info("listening", "port", port)
-	if err := http.ListenAndServe(":"+port, srv.Routes()); err != nil {
-		slog.Error("server error", "err", err)
-		os.Exit(1)
-	}
-}
-
-// setupLogger initialises the global slog logger. Level is controlled by
-// DRABA_LOG_LEVEL (debug | info | warn | error); default is info.
-// All output goes to stdout so Docker captures it in `docker logs`.
-func setupLogger() {
-	level := slog.LevelInfo
-	switch strings.ToLower(os.Getenv("DRABA_LOG_LEVEL")) {
-	case "debug":
-		level = slog.LevelDebug
-	case "warn":
-		level = slog.LevelWarn
-	case "error":
-		level = slog.LevelError
-	}
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level})))
-}
-
-// getenv returns the env var value or fallback when unset/empty.
-func getenv(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
-}
 ````
 
 ## File: packages/api/internal/api/export_handler.go
@@ -51752,1200 +53306,6 @@ export default function KanbanView({
 }
 ````
 
-## File: packages/web/src/components/layout/Sidebar.tsx
-````typescript
-import { useState, useRef, useEffect } from 'react';
-import {
-  ChevronRight,
-  ChevronLeft,
-  ChevronDown,
-  ChevronsDownUp,
-  ChevronsUpDown,
-  Plus,
-  Settings2,
-  Upload,
-  CalendarPlus,
-  Plug,
-  Link2,
-} from 'lucide-react';
-import { Badge } from '@/components/identity/Badge';
-import { useAuth } from '@/contexts/AuthContext';
-import type { components } from '@draba/shared';
-
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
-
-const SIDEBAR_MIN = 220;
-const SIDEBAR_MAX = 360;
-
-interface ApiTeam {
-  id: string;
-  name: string;
-  color?: string | null;
-  icon?: string | null;
-  archivedAt?: string | null;
-}
-
-interface ApiTimeline {
-  id: string;
-  name: string;
-  startDate?: string;
-  endDate?: string;
-  color?: string | null;
-  icon?: string | null;
-  archivedAt?: string | null;
-  shareCount?: number;
-}
-
-interface Props {
-  collapsed: boolean;
-  onToggle: () => void;
-  onNewActivity?: () => void;
-  /** Stub: bulk-import activities. Surfaced in the "New activity" combo dropdown. */
-  onBulkImport?: () => void;
-  apiTimelines?: ApiTimeline[];
-  archivedTimelines?: ApiTimeline[];
-  activeTimelineId?: string;
-  onActiveTimelineChange?: (id: string) => void;
-  onNewTimeline?: () => void;
-  onEditTimeline?: (timelineId: string) => void;
-  // Team management
-  activeTeam?: ApiTeam;
-  /** All non-archived teams. Used to render the switchable team list. */
-  activeTeams?: ApiTeam[];
-  archivedTeams?: ApiTeam[];
-  onNewTeam?: () => void;
-  onEditTeam?: (team: ApiTeam) => void;
-  onSelectTeam?: (teamId: string) => void;
-  onUnarchiveTeam?: (teamId: string) => void;
-  /** True when the current user is an admin of the active team. */
-  canEditTeam?: boolean;
-  /** Live member list from the API. */
-  members?: TeamMemberWithUser[];
-  /** Called when the user clicks the gear icon on a member row. */
-  onEditMember?: (member: TeamMemberWithUser) => void;
-}
-
-const ICON = { width: 15, height: 15, strokeWidth: 1.8 } as const;
-const ICON_SM = { width: 13, height: 13, strokeWidth: 1.8 } as const;
-const ICON_XS = { width: 11, height: 11, strokeWidth: 2 } as const;
-
-interface Timeline {
-  id: string;
-  name: string;
-  color: string;
-  icon: string | null;
-  startDate?: string;
-  endDate?: string;
-  /** Active (non-revoked, non-expired) share links — drives the tile chip. */
-  shareCount?: number;
-}
-
-const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-
-function formatDateRange(startDate?: string, endDate?: string): string {
-  if (!startDate || !endDate) return ''
-  const s = new Date(startDate + 'T00:00:00')
-  const e = new Date(endDate + 'T00:00:00')
-  const diffDays = (e.getTime() - s.getTime()) / 86_400_000
-  if (diffDays < 90) {
-    return `${MONTHS[s.getMonth()]} ${s.getDate()} – ${MONTHS[e.getMonth()]} ${e.getDate()} ${e.getFullYear()}`
-  }
-  return `${MONTHS[s.getMonth()]} ${s.getFullYear()} – ${MONTHS[e.getMonth()]} ${e.getFullYear()}`
-}
-
-
-interface TimelineItemProps {
-  timeline: Timeline;
-  active: boolean;
-  collapsed: boolean;
-  showDate?: boolean;
-  canEdit?: boolean;
-  onClick: () => void;
-  onSettings: () => void;
-}
-
-function TimelineItem({ timeline, active, collapsed, showDate = true, canEdit = false, onClick, onSettings }: TimelineItemProps) {
-  const [hovered, setHovered] = useState(false);
-  const dateRange = !collapsed && showDate ? formatDateRange(timeline.startDate, timeline.endDate) : ''
-
-  return (
-    <div
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        background: active
-          ? 'rgba(255,255,255,0.10)'
-          : hovered
-          ? 'rgba(255,255,255,0.05)'
-          : 'transparent',
-        borderLeft: active ? `2px solid ${timeline.color}` : '2px solid transparent',
-        transition: 'background 0.12s',
-        cursor: 'pointer',
-        minHeight: 34,
-      }}
-    >
-      <button
-        onClick={onClick}
-        title={collapsed ? timeline.name : undefined}
-        style={{
-          flex: 1,
-          display: 'flex',
-          alignItems: 'center',
-          gap: 8,
-          padding: collapsed ? '7px 14px' : '6px 8px 6px 16px',
-          background: 'none',
-          border: 'none',
-          color: active ? 'white' : 'rgba(255,255,255,0.65)',
-          fontSize: 13,
-          fontWeight: active ? 600 : 400,
-          cursor: 'pointer',
-          fontFamily: 'var(--font-sans)',
-          textAlign: 'left',
-          minWidth: 0,
-        }}
-      >
-        <Badge
-          identity={{ color: timeline.color, icon: timeline.icon ?? '__none__' }}
-          name={timeline.name}
-          shape="square"
-          size={20}
-        />
-        {!collapsed && (
-          <div style={{ minWidth: 0, flex: 1 }}>
-            <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {timeline.name}
-            </div>
-            {dateRange && (
-              <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)', marginTop: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {dateRange}
-              </div>
-            )}
-          </div>
-        )}
-        {/* Active-share-count chip — an affordance that this timeline has live
-            public links (view shares + ICS feeds). Hidden at zero. */}
-        {!collapsed && (timeline.shareCount ?? 0) > 0 && (
-          <span
-            title={`${timeline.shareCount} active share ${timeline.shareCount === 1 ? 'link' : 'links'}`}
-            style={{
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: 3,
-              padding: '1px 6px',
-              borderRadius: 999,
-              background: 'rgba(255,255,255,0.10)',
-              color: 'rgba(255,255,255,0.55)',
-              fontSize: 10,
-              fontWeight: 600,
-              flexShrink: 0,
-            }}
-          >
-            <Link2 width={10} height={10} strokeWidth={2.2} />
-            {timeline.shareCount}
-          </span>
-        )}
-      </button>
-
-      {!collapsed && canEdit && (
-        <button
-          onClick={e => { e.stopPropagation(); onSettings(); }}
-          title={`Configure ${timeline.name}`}
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            width: 26,
-            height: 26,
-            marginRight: 6,
-            background: 'none',
-            border: 'none',
-            borderRadius: 5,
-            color: 'rgba(255,255,255,0.4)',
-            cursor: 'pointer',
-            opacity: hovered ? 1 : 0,
-            transition: 'opacity 0.12s',
-            flexShrink: 0,
-          }}
-          onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.8)')}
-          onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.4)')}
-        >
-          <Settings2 {...ICON_SM} />
-        </button>
-      )}
-    </div>
-  );
-}
-
-function ConnectorItem({ name, status, color }: { name: string; status: string; color: string }) {
-  const [hovered, setHovered] = useState(false);
-
-  return (
-    <div
-      style={{
-        display: 'flex', alignItems: 'center', gap: 8,
-        padding: '6px 6px 6px 16px',
-        cursor: 'pointer',
-        background: hovered ? 'rgba(255,255,255,0.05)' : 'transparent',
-        transition: 'background 0.12s',
-      }}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-    >
-      <div style={{
-        width: 20, height: 20, borderRadius: 4,
-        background: color,
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-        flexShrink: 0,
-      }}>
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="white">
-          <rect x="1" y="1" width="9" height="18" rx="1.5" />
-          <rect x="14" y="1" width="9" height="12" rx="1.5" />
-        </svg>
-      </div>
-      <div style={{ minWidth: 0, flex: 1 }}>
-        <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.65)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {name}
-        </div>
-        <div style={{ fontSize: 9, color: 'rgba(255,255,255,0.25)', marginTop: 1 }}>
-          {status}
-        </div>
-      </div>
-      <button
-        title={`Configure ${name}`}
-        style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          width: 26, height: 26, marginRight: 0,
-          background: 'none', border: 'none', borderRadius: 5,
-          color: 'rgba(255,255,255,0.4)', cursor: 'pointer',
-          opacity: hovered ? 1 : 0, transition: 'opacity 0.12s',
-          flexShrink: 0,
-        }}
-        onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.8)')}
-        onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.4)')}
-      >
-        <Settings2 {...ICON_SM} />
-      </button>
-    </div>
-  );
-}
-
-// ── TeamRow ──────────────────────────────────────────────────────────────────
-
-interface TeamRowProps {
-  team: ApiTeam;
-  isActive: boolean;
-  canEdit: boolean;
-  onSelect?: () => void;
-  onEdit?: () => void;
-}
-
-function TeamRow({ team, isActive, canEdit, onSelect, onEdit }: TeamRowProps) {
-  const [hovered, setHovered] = useState(false);
-
-  return (
-    <div
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-      onClick={() => { if (!isActive) onSelect?.(); }}
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        padding: '5px 6px 5px 16px',
-        borderLeft: isActive ? `2px solid ${team.color ?? 'var(--primary)'}` : '2px solid transparent',
-        background: isActive ? 'rgba(255,255,255,0.07)' : hovered ? 'rgba(255,255,255,0.03)' : 'transparent',
-        cursor: isActive ? 'default' : 'pointer',
-        minHeight: 34,
-        transition: 'background 0.12s',
-      }}
-    >
-      <Badge
-        identity={{ color: team.color ?? 'var(--primary)', icon: team.icon ?? '__name_1__' }}
-        name={team.name}
-        shape="square"
-        size={20}
-      />
-      <span style={{
-        fontSize: 13,
-        fontWeight: isActive ? 600 : 400,
-        color: isActive ? 'white' : 'rgba(255,255,255,0.65)',
-        flex: 1,
-        marginLeft: 8,
-        overflow: 'hidden',
-        textOverflow: 'ellipsis',
-        whiteSpace: 'nowrap',
-        minWidth: 0,
-      }}>
-        {team.name}
-      </span>
-      {canEdit && (
-        <button
-          title="Team settings"
-          onClick={e => { e.stopPropagation(); onEdit?.(); }}
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            width: 26,
-            height: 26,
-            marginRight: 6,
-            background: 'none',
-            border: 'none',
-            borderRadius: 5,
-            color: 'rgba(255,255,255,0.4)',
-            cursor: 'pointer',
-            opacity: hovered ? 1 : 0,
-            transition: 'opacity 0.12s',
-            flexShrink: 0,
-          }}
-          onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.8)')}
-          onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.4)')}
-        >
-          <Settings2 {...ICON_SM} />
-        </button>
-      )}
-    </div>
-  );
-}
-
-// ── MemberSidebarRow ──────────────────────────────────────────────────────────
-
-interface MemberSidebarRowProps {
-  displayName: string;
-  color: string;
-  icon?: string | null;
-  isInactive?: boolean;
-  onEdit?: () => void;
-}
-
-function MemberSidebarRow({ displayName, color, icon, isInactive = false, onEdit }: MemberSidebarRowProps) {
-  const [hovered, setHovered] = useState(false);
-  return (
-    <div
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-      style={{
-        display: 'flex', alignItems: 'center', gap: 8,
-        padding: '4px 6px 4px 16px', cursor: 'default',
-        background: hovered ? 'rgba(255,255,255,0.05)' : 'transparent',
-        opacity: isInactive ? 0.45 : 1,
-      }}
-    >
-      <Badge
-        identity={{ color, icon: icon ?? '__name_words__' }}
-        name={displayName}
-        shape="circle"
-        size={20}
-      />
-      <span style={{ fontSize: 13, color: 'rgba(255,255,255,0.65)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
-        {displayName}
-      </span>
-      {onEdit && (
-        <button
-          onClick={e => { e.stopPropagation(); onEdit(); }}
-          title={`Edit ${displayName}`}
-          style={{
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            width: 22, height: 22, marginRight: 6,
-            background: 'none', border: 'none', borderRadius: 4,
-            color: 'rgba(255,255,255,0.4)', cursor: 'pointer', flexShrink: 0,
-            opacity: hovered ? 1 : 0,
-            transition: 'opacity 0.12s',
-            pointerEvents: hovered ? 'auto' : 'none',
-          }}
-          onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.8)')}
-          onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.4)')}
-        >
-          <Settings2 width={12} height={12} strokeWidth={1.8} />
-        </button>
-      )}
-    </div>
-  );
-}
-
-// ── Sidebar ───────────────────────────────────────────────────────────────────
-
-/**
- * Left navigation rail: brand, team selector with members, and timeline list.
- * Collapsed/expanded state is driven by the parent.
- */
-const TIMELINE_COLORS = ['#1A97A2', '#6366F1', '#F17B2B', '#E11D48', '#10B981', '#F59E0B']
-
-export default function Sidebar({ collapsed, onToggle, onNewActivity, onBulkImport, apiTimelines, archivedTimelines = [], activeTimelineId, onActiveTimelineChange, onNewTimeline, onEditTimeline, activeTeam, activeTeams = [], archivedTeams = [], onNewTeam, onEditTeam, onSelectTeam, canEditTeam = false, members: apiMembers, onEditMember }: Props) {
-  const { user } = useAuth();
-  const currentUserId = (user as { id?: string } | null)?.id;
-  const [internalActiveId, setInternalActiveId] = useState('');
-  const [teamOpen, setTeamOpen] = useState(true);
-  const [connectorsOpen, setConnectorsOpen] = useState(true);
-  // Combo "New activity" dropdown (expanded + collapsed share this state).
-  const [newMenuOpen, setNewMenuOpen] = useState(false);
-  const newMenuRef = useRef<HTMLDivElement>(null);
-  // Collapsed-mode menu is rendered fixed (the rail clips overflow), so we
-  // capture the trigger's viewport rect when it opens.
-  const [collapsedMenuPos, setCollapsedMenuPos] = useState<{ top: number; left: number } | null>(null);
-  // Primary accent for the "New activity" combo button.
-  const NEW_BTN_BG = 'var(--primary)';
-  const NEW_BTN_FG = 'var(--primary-foreground)';
-  const [archivedOpen, setArchivedOpen] = useState(false);
-  const [timelinesOpen, setTimelinesOpen] = useState(true);
-  const [membersOpen, setMembersOpen] = useState(true);
-  const [archivedTeamsOpen, setArchivedTeamsOpen] = useState(false);
-
-  const allExpanded = teamOpen && timelinesOpen && connectorsOpen && membersOpen;
-  function toggleAllSections() {
-    const next = !allExpanded;
-    setTeamOpen(next);
-    setTimelinesOpen(next);
-    setConnectorsOpen(next);
-    setMembersOpen(next);
-    if (!next) {
-      setArchivedOpen(false);
-      setArchivedTeamsOpen(false);
-    }
-  }
-
-  const timelines: Timeline[] = (apiTimelines ?? []).map((t, i) => ({
-    id: t.id,
-    name: t.name,
-    color: t.color ?? TIMELINE_COLORS[i % TIMELINE_COLORS.length],
-    icon: t.icon ?? null,
-    startDate: t.startDate,
-    endDate: t.endDate,
-    shareCount: t.shareCount,
-  }))
-
-  const archivedTimelineItems: Timeline[] = archivedTimelines.map((t) => ({
-    id: t.id,
-    name: t.name,
-    color: t.color ?? '#64748B',
-    icon: t.icon ?? null,
-    startDate: t.startDate,
-    endDate: t.endDate,
-  }))
-  const activeId = activeTimelineId ?? internalActiveId
-  // timelines[0] is typed as Timeline (not T | undefined) because
-  // noUncheckedIndexedAccess is off in the tsconfig, but at runtime an empty
-  // array produces undefined. The explicit type annotation + length guard make
-  // the null case visible to TypeScript so the collapsed-section render below
-  // can safely guard against it.
-  const activeTimeline: Timeline | null =
-    timelines.find(t => t.id === activeId) ??
-    (timelines.length > 0 ? timelines[0] : null);
-
-  const [sidebarWidth, setSidebarWidth] = useState(SIDEBAR_MIN);
-  const dragging = useRef(false);
-  const startX = useRef(0);
-  const startW = useRef(SIDEBAR_MIN);
-
-  useEffect(() => {
-    function onMouseMove(e: MouseEvent) {
-      if (!dragging.current) return;
-      const delta = e.clientX - startX.current;
-      setSidebarWidth(Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, startW.current + delta)));
-    }
-    function onMouseUp() {
-      if (!dragging.current) return;
-      dragging.current = false;
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
-    }
-    document.addEventListener('mousemove', onMouseMove);
-    document.addEventListener('mouseup', onMouseUp);
-    return () => {
-      document.removeEventListener('mousemove', onMouseMove);
-      document.removeEventListener('mouseup', onMouseUp);
-    };
-  }, []);
-
-  // Close the "New activity" dropdown on outside click or Escape.
-  useEffect(() => {
-    if (!newMenuOpen) return;
-    function onDocMouseDown(e: MouseEvent) {
-      if (newMenuRef.current && !newMenuRef.current.contains(e.target as Node)) {
-        setNewMenuOpen(false);
-      }
-    }
-    function onKeyDown(e: KeyboardEvent) {
-      if (e.key === 'Escape') setNewMenuOpen(false);
-    }
-    document.addEventListener('mousedown', onDocMouseDown);
-    document.addEventListener('keydown', onKeyDown);
-    return () => {
-      document.removeEventListener('mousedown', onDocMouseDown);
-      document.removeEventListener('keydown', onKeyDown);
-    };
-  }, [newMenuOpen]);
-
-  function onHandleMouseDown(e: React.MouseEvent) {
-    e.preventDefault();
-    dragging.current = true;
-    startX.current = e.clientX;
-    startW.current = sidebarWidth;
-    document.body.style.cursor = 'col-resize';
-    document.body.style.userSelect = 'none';
-  }
-
-  return (
-    <div
-      style={{
-        position: 'relative',
-        width: collapsed ? 52 : sidebarWidth,
-        flexShrink: 0,
-        background: 'var(--color-charcoal)',
-        color: 'white',
-        display: 'flex',
-        flexDirection: 'column',
-        transition: 'width 0.2s ease',
-        overflow: 'hidden',
-        borderRight: '1px solid rgba(255,255,255,0.06)',
-      }}
-    >
-      {/* Logo + collapse toggle */}
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: collapsed ? 'center' : 'space-between',
-          padding: collapsed ? '0 13px' : '0 8px 0 16px',
-          borderBottom: '1px solid rgba(255,255,255,0.08)',
-          height: 'var(--topbar-h)',
-          flexShrink: 0,
-        }}
-      >
-        {!collapsed && (
-          <div
-            onClick={onToggle}
-            style={{ display: 'flex', alignItems: 'center', gap: 9, cursor: 'pointer' }}
-          >
-            <img src="/logo-orange-white.svg" alt="Draba" style={{ width: 28, height: 28, marginTop: 3 }} />
-            <span style={{ fontSize: 22, fontWeight: 700, letterSpacing: '-0.02em', color: 'white' }}>
-              draba
-            </span>
-          </div>
-        )}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-          {!collapsed && (
-            <button
-              onClick={toggleAllSections}
-              title={allExpanded ? 'Collapse all sections' : 'Expand all sections'}
-              style={{
-                background: 'none',
-                border: 'none',
-                color: 'rgba(255,255,255,0.45)',
-                borderRadius: 6,
-                width: 26,
-                height: 26,
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                cursor: 'pointer',
-                flexShrink: 0,
-              }}
-              onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.8)')}
-              onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.45)')}
-            >
-              {allExpanded ? <ChevronsDownUp width={14} height={14} strokeWidth={1.8} /> : <ChevronsUpDown width={14} height={14} strokeWidth={1.8} />}
-            </button>
-          )}
-          <button
-            onClick={onToggle}
-            style={{
-              background: 'rgba(255,255,255,0.08)',
-              border: 'none',
-              color: 'rgba(255,255,255,0.7)',
-              borderRadius: 6,
-              width: 26,
-              height: 26,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              cursor: 'pointer',
-              flexShrink: 0,
-            }}
-          >
-            {collapsed ? <ChevronRight {...ICON} /> : <ChevronLeft {...ICON} />}
-          </button>
-        </div>
-      </div>
-
-      {/* Primary "New activity" combo button — sits directly under the brand. */}
-      {!collapsed && (
-        <div
-          ref={newMenuRef}
-          style={{ position: 'relative', padding: '12px 16px 2px', flexShrink: 0 }}
-        >
-          <div style={{ display: 'flex', alignItems: 'stretch' }}>
-            <button
-              onClick={onNewActivity}
-              style={{
-                flex: 1,
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                gap: 8,
-                padding: '9px 12px',
-                background: NEW_BTN_BG,
-                border: 'none',
-                borderRadius: '7px 0 0 7px',
-                color: NEW_BTN_FG,
-                fontSize: 13,
-                fontWeight: 600,
-                cursor: 'pointer',
-                fontFamily: 'var(--font-sans)',
-              }}
-              onMouseEnter={e => (e.currentTarget.style.filter = 'brightness(1.08)')}
-              onMouseLeave={e => (e.currentTarget.style.filter = 'none')}
-            >
-              <CalendarPlus width={15} height={15} strokeWidth={2} />
-              New activity
-            </button>
-            <button
-              title="More activity options"
-              aria-haspopup="menu"
-              aria-expanded={newMenuOpen}
-              onClick={() => setNewMenuOpen(o => !o)}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                width: 32,
-                background: NEW_BTN_BG,
-                border: 'none',
-                borderLeft: '1px solid rgba(0,0,0,0.18)',
-                borderRadius: '0 7px 7px 0',
-                color: NEW_BTN_FG,
-                cursor: 'pointer',
-              }}
-              onMouseEnter={e => (e.currentTarget.style.filter = 'brightness(1.08)')}
-              onMouseLeave={e => (e.currentTarget.style.filter = 'none')}
-            >
-              <ChevronDown
-                width={14}
-                height={14}
-                strokeWidth={2}
-                style={{ transform: newMenuOpen ? 'rotate(180deg)' : 'none', transition: 'transform 0.12s' }}
-              />
-            </button>
-          </div>
-
-          {newMenuOpen && (
-            <div
-              role="menu"
-              style={{
-                position: 'absolute',
-                top: 'calc(100% - 4px)',
-                left: 16,
-                right: 16,
-                background: 'var(--color-charcoal)',
-                border: '1px solid rgba(255,255,255,0.12)',
-                borderRadius: 7,
-                boxShadow: '0 8px 24px rgba(0,0,0,0.45)',
-                padding: 4,
-                zIndex: 30,
-              }}
-            >
-              <button
-                role="menuitem"
-                onClick={() => { setNewMenuOpen(false); onBulkImport?.(); }}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: 8,
-                  padding: '8px 10px', width: '100%',
-                  background: 'none', border: 'none', borderRadius: 5,
-                  color: 'rgba(255,255,255,0.75)', fontSize: 13,
-                  cursor: 'pointer', fontFamily: 'var(--font-sans)', textAlign: 'left',
-                }}
-                onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.07)')}
-                onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-              >
-                <Upload width={14} height={14} strokeWidth={1.8} />
-                Bulk import
-              </button>
-            </div>
-          )}
-        </div>
-      )}
-
-      <div style={{ flex: 1, overflowY: 'auto' }}>
-
-        {/* Collapsed: team + timeline icons only */}
-        {collapsed && (
-          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6, padding: '10px 0' }}>
-            {/* Active team badge — click to expand */}
-            <div
-              title={activeTeam?.name ?? 'Team'}
-              onClick={onToggle}
-              style={{ cursor: 'pointer', flexShrink: 0 }}
-            >
-              <Badge
-                identity={{ color: activeTeam?.color ?? 'var(--primary)', icon: activeTeam?.icon ?? '__name_1__' }}
-                name={activeTeam?.name ?? ''}
-                shape="square"
-                size={28}
-              />
-            </div>
-            {/* Active timeline — click to expand */}
-            {activeTimeline && (
-              <div
-                title={activeTimeline.name}
-                onClick={onToggle}
-                style={{ cursor: 'pointer' }}
-              >
-                <Badge
-                  identity={{ color: activeTimeline.color, icon: activeTimeline.icon ?? '__none__' }}
-                  name={activeTimeline.name}
-                  shape="square"
-                  size={28}
-                />
-              </div>
-            )}
-
-            {/* New activity combo — icon button opens a menu with both actions.
-                order:-1 keeps it at the top, matching the expanded layout. */}
-            <div ref={newMenuRef} style={{ position: 'relative', flexShrink: 0, order: -1, marginBottom: 2 }}>
-              <button
-                title="New activity"
-                aria-haspopup="menu"
-                aria-expanded={newMenuOpen}
-                onClick={e => {
-                  if (newMenuOpen) { setNewMenuOpen(false); return; }
-                  const r = e.currentTarget.getBoundingClientRect();
-                  setCollapsedMenuPos({ top: r.top, left: r.right + 6 });
-                  setNewMenuOpen(true);
-                }}
-                style={{
-                  width: 30,
-                  height: 30,
-                  borderRadius: 7,
-                  background: NEW_BTN_BG,
-                  border: 'none',
-                  color: NEW_BTN_FG,
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  cursor: 'pointer',
-                }}
-                onMouseEnter={e => (e.currentTarget.style.filter = 'brightness(1.08)')}
-                onMouseLeave={e => (e.currentTarget.style.filter = 'none')}
-              >
-                <CalendarPlus width={16} height={16} strokeWidth={2} />
-              </button>
-
-              {newMenuOpen && collapsedMenuPos && (
-                <div
-                  role="menu"
-                  style={{
-                    position: 'fixed',
-                    top: collapsedMenuPos.top,
-                    left: collapsedMenuPos.left,
-                    minWidth: 160,
-                    background: 'var(--color-charcoal)',
-                    border: '1px solid rgba(255,255,255,0.12)',
-                    borderRadius: 7,
-                    boxShadow: '0 8px 24px rgba(0,0,0,0.45)',
-                    padding: 4,
-                    zIndex: 30,
-                  }}
-                >
-                  <button
-                    role="menuitem"
-                    onClick={() => { setNewMenuOpen(false); onNewActivity?.(); }}
-                    style={{
-                      display: 'flex', alignItems: 'center', gap: 8,
-                      padding: '8px 10px', width: '100%',
-                      background: 'none', border: 'none', borderRadius: 5,
-                      color: 'rgba(255,255,255,0.75)', fontSize: 13,
-                      cursor: 'pointer', fontFamily: 'var(--font-sans)', textAlign: 'left',
-                    }}
-                    onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.07)')}
-                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-                  >
-                    <CalendarPlus width={14} height={14} strokeWidth={1.8} />
-                    New activity
-                  </button>
-                  <button
-                    role="menuitem"
-                    onClick={() => { setNewMenuOpen(false); onBulkImport?.(); }}
-                    style={{
-                      display: 'flex', alignItems: 'center', gap: 8,
-                      padding: '8px 10px', width: '100%',
-                      background: 'none', border: 'none', borderRadius: 5,
-                      color: 'rgba(255,255,255,0.75)', fontSize: 13,
-                      cursor: 'pointer', fontFamily: 'var(--font-sans)', textAlign: 'left',
-                    }}
-                    onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.07)')}
-                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-                  >
-                    <Upload width={14} height={14} strokeWidth={1.8} />
-                    Bulk import
-                  </button>
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-
-        {/* Team section */}
-        {!collapsed && (
-          <div style={{ borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
-            {/* Section header — collapsible, same pattern as TIMELINE */}
-            <button
-              onClick={() => setTeamOpen(o => !o)}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                width: '100%',
-                padding: '6px 12px 6px 16px',
-                background: 'none',
-                border: 'none',
-                cursor: 'pointer',
-                color: 'rgba(255,255,255,0.35)',
-                fontFamily: 'var(--font-sans)',
-              }}
-            >
-              <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
-                Team
-              </span>
-              {teamOpen
-                ? <ChevronDown width={12} height={12} strokeWidth={2} />
-                : <ChevronRight width={12} height={12} strokeWidth={2} />}
-            </button>
-
-            {/* Team rows — active team highlighted; others clickable to switch */}
-            {(teamOpen ? activeTeams : activeTeam ? [activeTeam] : []).map(t => (
-              <TeamRow
-                key={t.id}
-                team={t}
-                isActive={t.id === activeTeam?.id}
-                canEdit={canEditTeam}
-                onSelect={() => onSelectTeam?.(t.id)}
-                onEdit={() => onEditTeam?.(t)}
-              />
-            ))}
-            {/* Fallback when activeTeams not yet loaded but activeTeam is known */}
-            {!activeTeams.length && activeTeam && (
-              <TeamRow
-                team={activeTeam}
-                isActive
-                canEdit={canEditTeam}
-                onEdit={() => onEditTeam?.(activeTeam)}
-              />
-            )}
-
-            {/* New team button — only superadmins get onNewTeam passed from the parent */}
-            {teamOpen && onNewTeam && (
-              <button
-                onClick={onNewTeam}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: 8,
-                  padding: '4px 16px', background: 'none', border: 'none',
-                  color: 'rgba(255,255,255,0.35)', fontSize: 12,
-                  cursor: 'pointer', width: '100%', fontFamily: 'var(--font-sans)',
-                }}
-                onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.7)')}
-                onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.35)')}
-              >
-                <Plus {...ICON_SM} />
-                New team
-              </button>
-            )}
-
-            {/* Archived teams — collapsible sub-section, shown when team section is open */}
-            {teamOpen && archivedTeams.length > 0 && (
-              <div>
-                <button
-                  onClick={() => setArchivedTeamsOpen(o => !o)}
-                  style={{
-                    display: 'flex', alignItems: 'center', gap: 5,
-                    width: '100%', padding: '4px 8px 4px 16px',
-                    background: 'none', border: 'none', cursor: 'pointer',
-                    color: 'rgba(255,255,255,0.25)', fontFamily: 'var(--font-sans)',
-                  }}
-                  onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.5)')}
-                  onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.25)')}
-                >
-                  {archivedTeamsOpen
-                    ? <ChevronDown {...ICON_XS} />
-                    : <ChevronRight {...ICON_XS} />}
-                  <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
-                    Archived ({archivedTeams.length})
-                  </span>
-                </button>
-                {archivedTeamsOpen && archivedTeams.map(t => (
-                  <TeamRow
-                    key={t.id}
-                    team={t}
-                    isActive={false}
-                    canEdit={Boolean(onNewTeam)}
-                    onEdit={() => onEditTeam?.(t)}
-                  />
-                ))}
-              </div>
-            )}
-
-            {/* Members — only when team section is expanded */}
-            {teamOpen && (
-              <>
-                <button
-                  onClick={() => setMembersOpen(o => !o)}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 5,
-                    width: '100%',
-                    padding: '6px 8px 4px 16px',
-                    background: 'none',
-                    border: 'none',
-                    cursor: 'pointer',
-                    color: 'rgba(255,255,255,0.35)',
-                    fontFamily: 'var(--font-sans)',
-                  }}
-                >
-                  {membersOpen
-                    ? <ChevronDown {...ICON_XS} />
-                    : <ChevronRight {...ICON_XS} />}
-                  <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
-                    Members
-                  </span>
-                </button>
-
-                {membersOpen && (
-                  <div style={{ paddingBottom: 8 }}>
-                    {(apiMembers ?? []).map(m => {
-                      const displayName = (m as TeamMemberWithUser).displayName || m.id;
-                      const color = m.color ?? '#8b949e';
-                      const icon = (m as TeamMemberWithUser).icon ?? null;
-                      return (
-                        <MemberSidebarRow
-                          key={m.id}
-                          displayName={displayName}
-                          color={color}
-                          icon={icon}
-                          isInactive={Boolean((m as TeamMemberWithUser).archivedAt)}
-                          onEdit={onEditMember && (m as TeamMemberWithUser).userId !== currentUserId
-                            ? () => onEditMember(m as TeamMemberWithUser)
-                            : undefined}
-                        />
-                      );
-                    })}
-                  </div>
-                )}
-              </>
-            )}
-          </div>
-        )}
-
-        {/* Timelines section */}
-        <div style={{ padding: '8px 0' }}>
-          {!collapsed ? (
-            <button
-              onClick={() => setTimelinesOpen(o => !o)}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                width: '100%',
-                padding: '6px 12px 4px 16px',
-                background: 'none',
-                border: 'none',
-                cursor: 'pointer',
-                color: 'rgba(255,255,255,0.35)',
-                fontFamily: 'var(--font-sans)',
-              }}
-            >
-              <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
-                Timeline
-              </span>
-              {timelinesOpen
-                ? <ChevronDown width={12} height={12} strokeWidth={2} />
-                : <ChevronRight width={12} height={12} strokeWidth={2} />}
-            </button>
-          ) : (
-            <div style={{ height: 8 }} />
-          )}
-
-          {!collapsed && (timelinesOpen ? (
-            <>
-              {timelines.map(tl => (
-                <TimelineItem
-                  key={tl.id}
-                  timeline={tl}
-                  active={activeId === tl.id}
-                  collapsed={false}
-                  canEdit={canEditTeam}
-                  onClick={() => { setInternalActiveId(tl.id); onActiveTimelineChange?.(tl.id); }}
-                  onSettings={() => onEditTimeline?.(tl.id)}
-                />
-              ))}
-              <button
-                onClick={onNewTimeline}
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 8,
-                  padding: '6px 16px',
-                  background: 'none',
-                  border: 'none',
-                  color: 'rgba(255,255,255,0.35)',
-                  fontSize: 12,
-                  cursor: onNewTimeline ? 'pointer' : 'default',
-                  width: '100%',
-                  fontFamily: 'var(--font-sans)',
-                  marginTop: 2,
-                }}
-                onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.7)')}
-                onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.35)')}
-              >
-                <Plus {...ICON_SM} />
-                New timeline
-              </button>
-
-              {/* Archived sub-section */}
-              {archivedTimelineItems.length > 0 && (
-                <>
-                  <button
-                    onClick={() => setArchivedOpen(o => !o)}
-                    style={{
-                      display: 'flex', alignItems: 'center', gap: 5,
-                      width: '100%', padding: '6px 12px 4px 16px',
-                      background: 'none', border: 'none', cursor: 'pointer',
-                      color: 'rgba(255,255,255,0.25)', fontFamily: 'var(--font-sans)',
-                      marginTop: 4,
-                    }}
-                    onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.45)')}
-                    onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.25)')}
-                  >
-                    {archivedOpen
-                      ? <ChevronDown {...ICON_XS} />
-                      : <ChevronRight {...ICON_XS} />}
-                    <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
-                      Archived
-                    </span>
-                    <span style={{ fontSize: 10, marginLeft: 4 }}>({archivedTimelineItems.length})</span>
-                  </button>
-
-                  {archivedOpen && (
-                    <div style={{ opacity: 0.6 }}>
-                      {archivedTimelineItems.map(tl => (
-                        <TimelineItem
-                          key={tl.id}
-                          timeline={tl}
-                          active={false}
-                          collapsed={false}
-                          canEdit={canEditTeam}
-                          onClick={() => {}}
-                          onSettings={() => onEditTimeline?.(tl.id)}
-                        />
-                      ))}
-                    </div>
-                  )}
-                </>
-              )}
-            </>
-          ) : activeTimeline ? (
-            /* Section collapsed: show just the active timeline.
-               Guard required because activeTimeline is null when the timeline
-               list is empty — that state is briefly true on initial load. */
-            <TimelineItem
-              timeline={activeTimeline}
-              active={true}
-              collapsed={false}
-              showDate={false}
-              canEdit={canEditTeam}
-              onClick={() => setTimelinesOpen(true)}
-              onSettings={() => onEditTimeline?.(activeTimeline.id)}
-            />
-          ) : null)}
-        </div>
-        {/* Connectors section — contextual to active timeline */}
-        {!collapsed && (
-          <div style={{ padding: '8px 0', borderTop: '1px solid rgba(255,255,255,0.08)' }}>
-            <div style={{ display: 'flex', alignItems: 'center', padding: '6px 6px 4px 16px' }}>
-              <button
-                onClick={() => setConnectorsOpen(o => !o)}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: 6, flex: 1,
-                  background: 'none', border: 'none', cursor: 'pointer',
-                  color: 'rgba(255,255,255,0.35)', fontFamily: 'var(--font-sans)',
-                  padding: 0,
-                }}
-              >
-                <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
-                  Connectors
-                </span>
-                {connectorsOpen
-                  ? <ChevronDown width={12} height={12} strokeWidth={2} />
-                  : <ChevronRight width={12} height={12} strokeWidth={2} />}
-              </button>
-            </div>
-
-            {connectorsOpen && (
-              <>
-                <div style={{
-                  padding: '0 16px 4px',
-                  fontSize: 10,
-                  color: 'rgba(255,255,255,0.22)',
-                  letterSpacing: '0.02em',
-                }}>
-                  {activeTimeline?.name}
-                </div>
-                {/* Stub: connected Trello board */}
-                <ConnectorItem name="Trello — Launch Board" status="Synced · 2 min ago" color="#0079BF" />
-                <button
-                  style={{
-                    display: 'flex', alignItems: 'center', gap: 8,
-                    padding: '6px 16px', background: 'none', border: 'none',
-                    color: 'rgba(255,255,255,0.35)', fontSize: 12,
-                    cursor: 'pointer', width: '100%', fontFamily: 'var(--font-sans)',
-                  }}
-                  onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.7)')}
-                  onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.35)')}
-                >
-                  <Plug width={13} height={13} strokeWidth={1.8} />
-                  Add connector
-                </button>
-              </>
-            )}
-          </div>
-        )}
-      </div>
-
-      {/* Resize handle */}
-      {!collapsed && (
-        <div
-          onMouseDown={onHandleMouseDown}
-          style={{
-            position: 'absolute',
-            top: 0,
-            right: 0,
-            width: 5,
-            height: '100%',
-            cursor: 'col-resize',
-            zIndex: 20,
-          }}
-          onMouseEnter={e => ((e.currentTarget.lastElementChild as HTMLElement).style.background = 'var(--primary)')}
-          onMouseLeave={e => ((e.currentTarget.lastElementChild as HTMLElement).style.background = 'transparent')}
-        >
-          <div
-            style={{
-              position: 'absolute',
-              top: 0,
-              right: 0,
-              width: 2,
-              height: '100%',
-              background: 'transparent',
-              transition: 'background 0.15s',
-              pointerEvents: 'none',
-            }}
-          />
-        </div>
-      )}
-    </div>
-  );
-}
-````
-
 ## File: packages/web/src/components/CalendarShareModal.tsx
 ````typescript
 /**
@@ -53244,6 +53604,693 @@ export default function CalendarShareModal({ teamId, timelineId, timelineName, o
     </div>,
     document.body,
   )
+}
+````
+
+## File: packages/web/src/pages/LoginPage.tsx
+````typescript
+import { useState } from 'react'
+import { useNavigate, useLocation, Link } from 'react-router-dom'
+import { Eye, EyeOff, Check, Loader2 } from 'lucide-react'
+import { useAuth } from '@/contexts/AuthContext'
+import { ApiError, API_BASE } from '@/lib/api'
+import DarkModeToggle from '@/components/DarkModeToggle'
+import { usePublicSettings } from '@/hooks/usePublicSettings'
+
+// ── Floating-label input ─────────────────────────────────────────────────────
+
+interface FloatInputProps {
+  id: string
+  label: string
+  type: string
+  value: string
+  autoComplete: string
+  error?: string | null
+  onChange: (v: string) => void
+  onKeyDown?: (e: React.KeyboardEvent) => void
+  rightSlot?: React.ReactNode
+}
+
+function FloatInput({ id, label, type, value, autoComplete, error, onChange, onKeyDown, rightSlot }: FloatInputProps) {
+  const [focused, setFocused] = useState(false)
+  const floated = focused || value.length > 0
+
+  const borderColor = error
+    ? '#e74c3c'
+    : focused
+    ? '#288C9B'
+    : 'hsl(210 15% 24%)'
+
+  const boxShadow = error
+    ? '0 0 0 3px rgba(231,76,60,0.15)'
+    : focused
+    ? '0 0 0 3px rgba(40,140,155,0.18)'
+    : 'none'
+
+  const labelColor = error
+    ? '#e74c3c'
+    : focused
+    ? '#5BC0DE'
+    : 'hsl(210 15% 65%)'
+
+  return (
+    <div>
+      <div style={{
+        position: 'relative',
+        borderRadius: 8,
+        border: `1px solid ${borderColor}`,
+        background: 'hsl(210 15% 17%)',
+        transition: 'border-color 180ms ease, box-shadow 180ms ease',
+        boxShadow,
+      }}>
+        {/* Floating label */}
+        <label
+          htmlFor={id}
+          style={{
+            position: 'absolute',
+            left: 14,
+            top: floated ? 8 : '50%',
+            transform: floated ? 'none' : 'translateY(-50%)',
+            fontSize: floated ? 11 : 14,
+            letterSpacing: floated ? '0.06em' : 0,
+            textTransform: floated ? 'uppercase' : 'none',
+            fontWeight: 600,
+            color: labelColor,
+            transition: 'all 160ms cubic-bezier(0.4, 0, 0.2, 1)',
+            pointerEvents: 'none',
+            userSelect: 'none',
+          }}
+        >
+          {label}
+        </label>
+
+        <input
+          id={id}
+          type={type}
+          autoComplete={autoComplete}
+          value={value}
+          onChange={e => onChange(e.target.value)}
+          onFocus={() => setFocused(true)}
+          onBlur={() => setFocused(false)}
+          onKeyDown={onKeyDown}
+          style={{
+            width: '100%',
+            padding: '22px 42px 8px 14px',
+            background: 'transparent',
+            border: 'none',
+            outline: 'none',
+            fontSize: 15,
+            color: 'hsl(210 17% 93%)',
+            fontFamily: 'inherit',
+            lineHeight: 1.4,
+            boxSizing: 'border-box',
+          }}
+        />
+
+        {rightSlot && (
+          <div style={{
+            position: 'absolute',
+            right: 12,
+            top: '50%',
+            transform: 'translateY(-50%)',
+          }}>
+            {rightSlot}
+          </div>
+        )}
+      </div>
+
+      {error && (
+        <p style={{ fontSize: 12, color: '#e74c3c', margin: '5px 0 0 2px' }}>{error}</p>
+      )}
+    </div>
+  )
+}
+
+// ── Spinner ──────────────────────────────────────────────────────────────────
+
+function Spinner() {
+  return (
+    <Loader2
+      size={16}
+      strokeWidth={2.5}
+      color="rgba(255,255,255,0.8)"
+      style={{ animation: 'spin 0.8s linear infinite' }}
+    />
+  )
+}
+
+// setSSOHighlight toggles the SSO button's hover/focus highlight. Shared by the
+// mouse and keyboard handlers so both input methods get the same affordance.
+function setSSOHighlight(el: HTMLButtonElement, on: boolean) {
+  el.style.borderColor = on ? '#288C9B' : 'hsl(210 15% 24%)'
+  el.style.background = on ? 'hsl(210 15% 19%)' : 'hsl(210 15% 17%)'
+}
+
+// ── Main page ────────────────────────────────────────────────────────────────
+
+export default function LoginPage() {
+  const { login } = useAuth()
+  const navigate = useNavigate()
+  const location = useLocation()
+  const from = (location.state as { from?: { pathname: string } } | null)?.from?.pathname ?? '/'
+  // A success message routed here from another page (e.g. password reset).
+  // Derived from navigation state, so it clears naturally on a full reload.
+  const notice = (location.state as { message?: string } | null)?.message ?? null
+  const { data: branding } = usePublicSettings()
+  const instanceName = branding?.instanceName || 'draba'
+
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [showPassword, setShowPassword] = useState(false)
+  const [emailError, setEmailError] = useState<string | null>(null)
+  const [passwordError, setPasswordError] = useState<string | null>(null)
+  const [serverError, setServerError] = useState<string | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [success, setSuccess] = useState(false)
+
+  function validateAndSubmit() {
+    let valid = true
+    setServerError(null)
+
+    if (!email.trim()) {
+      setEmailError('Email is required')
+      valid = false
+    } else if (!/\S+@\S+\.\S+/.test(email)) {
+      setEmailError('Enter a valid email')
+      valid = false
+    } else {
+      setEmailError(null)
+    }
+
+    if (!password) {
+      setPasswordError('Password is required')
+      valid = false
+    } else if (password.length < 6) {
+      setPasswordError('Password must be at least 6 characters')
+      valid = false
+    } else {
+      setPasswordError(null)
+    }
+
+    if (!valid) return
+    doLogin()
+  }
+
+  async function doLogin() {
+    setLoading(true)
+    try {
+      await login(email, password)
+      setSuccess(true)
+      // Brief success flash then navigate
+      setTimeout(() => navigate(from, { replace: true }), 600)
+    } catch (err) {
+      if (err instanceof ApiError) {
+        setServerError(err.message)
+      } else {
+        setServerError('Something went wrong. Please try again.')
+      }
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  function handleSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    validateAndSubmit()
+  }
+
+  return (
+    <div style={{
+      minHeight: '100vh',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      background: 'var(--background)',
+      padding: '24px',
+      position: 'relative',
+    }}>
+      {/* Teal radial glow behind card */}
+      <div style={{
+        position: 'fixed',
+        inset: 0,
+        background: 'radial-gradient(ellipse 60% 50% at 20% 50%, rgba(40,140,155,0.12) 0%, transparent 70%)',
+        pointerEvents: 'none',
+      }} />
+
+      {/* Dark mode toggle */}
+      <div style={{ position: 'fixed', top: 16, right: 16, zIndex: 10 }}>
+        <DarkModeToggle />
+      </div>
+
+      {/* Card */}
+      <div style={{
+        width: '100%',
+        maxWidth: 860,
+        minHeight: 520,
+        borderRadius: 16,
+        overflow: 'hidden',
+        display: 'flex',
+        boxShadow: '0 32px 80px -12px rgba(0,0,0,0.55), 0 0 0 1px rgba(255,255,255,0.06)',
+        position: 'relative',
+        zIndex: 1,
+      }}>
+
+        {/* ── Left panel — brand ─────────────────────────────────────── */}
+        <div style={{
+          width: '38%',
+          flexShrink: 0,
+          background: 'linear-gradient(155deg, #2aa5b8 0%, #1c7585 60%, #145f6e 100%)',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: 4,
+          padding: '48px 32px',
+          position: 'relative',
+          overflow: 'hidden',
+        }}>
+          {/* Decorative circles */}
+          <div style={{ width: 220, height: 220, borderRadius: '50%', background: 'rgba(255,255,255,0.07)', position: 'absolute', top: -60, left: -60, pointerEvents: 'none' }} />
+          <div style={{ width: 160, height: 160, borderRadius: '50%', background: 'rgba(255,255,255,0.05)', position: 'absolute', bottom: -40, right: -40, pointerEvents: 'none' }} />
+
+          {/* Logo — 2× the handoff's 88px */}
+          <img
+            src="/logo-color.svg"
+            alt="draba"
+            style={{ width: 270, height: 270, filter: 'drop-shadow(0 4px 16px rgba(0,0,0,0.25))', position: 'relative', marginTop: '-15px', marginBottom: '-47px' }}
+          />
+
+          <div style={{ position: 'relative', textAlign: 'center' }}>
+            <div style={{ fontSize: 28, fontWeight: 700, color: '#fff', letterSpacing: '-0.01em', textShadow: '0 2px 8px rgba(0,0,0,0.2)' }}>
+              {instanceName}
+            </div>
+            <div style={{ fontSize: 13, fontWeight: 400, color: 'rgba(255,255,255,0.72)', lineHeight: 1.5, marginTop: 8 }}>
+              Team coordination,<br />simplified.
+            </div>
+          </div>
+        </div>
+
+        {/* ── Right panel — form ─────────────────────────────────────── */}
+        <div style={{
+          flex: 1,
+          background: 'var(--card)',
+          padding: '52px 48px',
+          display: 'flex',
+          flexDirection: 'column',
+          justifyContent: 'center',
+        }}>
+          {success ? (
+            /* Success state */
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', textAlign: 'center', gap: 0 }}>
+              <div style={{
+                width: 56, height: 56, borderRadius: '50%',
+                background: 'rgba(40,140,155,0.15)', border: '2px solid #288C9B',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                margin: '0 auto 20px',
+              }}>
+                <Check size={24} color="#288C9B" strokeWidth={2.5} />
+              </div>
+              <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--foreground)', marginBottom: 8 }}>
+                You're signed in
+              </div>
+              <div style={{ fontSize: 14, color: 'var(--muted-foreground)' }}>
+                Redirecting to your timeline…
+              </div>
+            </div>
+          ) : (
+            <form onSubmit={handleSubmit} noValidate>
+              {/* Heading */}
+              <div style={{ marginBottom: 28 }}>
+                <h1 style={{ fontSize: 28, fontWeight: 700, color: 'hsl(210 17% 93%)', letterSpacing: '-0.02em', margin: '0 0 6px' }}>
+                  Sign in
+                </h1>
+                <p style={{ fontSize: 14, color: 'hsl(210 15% 52%)', margin: 0 }}>
+                  Welcome back — sign in to your account.
+                </p>
+              </div>
+
+              {/* Success notice routed from another page (e.g. password reset).
+                  Suppressed once a server error is shown so it can't go stale. */}
+              {notice && !serverError && (
+                <div className="mb-5 rounded-lg border border-emerald-500/35 bg-emerald-500/10 px-3 py-2.5 text-[13px] text-emerald-400">
+                  {notice}
+                </div>
+              )}
+
+              {/* Fields */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 14, marginBottom: 24 }}>
+                <FloatInput
+                  id="email"
+                  label="Email"
+                  type="email"
+                  autoComplete="email"
+                  value={email}
+                  error={emailError}
+                  onChange={v => { setEmail(v); if (emailError) setEmailError(null) }}
+                />
+
+                <FloatInput
+                  id="password"
+                  label="Password"
+                  type={showPassword ? 'text' : 'password'}
+                  autoComplete="current-password"
+                  value={password}
+                  error={passwordError}
+                  onChange={v => { setPassword(v); if (passwordError) setPasswordError(null) }}
+                  rightSlot={
+                    <button
+                      type="button"
+                      onClick={() => setShowPassword(s => !s)}
+                      style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'hsl(210 15% 52%)', display: 'flex', padding: 0 }}
+                    >
+                      {showPassword ? <EyeOff size={18} strokeWidth={1.5} /> : <Eye size={18} strokeWidth={1.5} />}
+                    </button>
+                  }
+                />
+              </div>
+
+              {/* Forgot password */}
+              <div style={{ textAlign: 'right', marginBottom: 22, marginTop: -6 }}>
+                <Link
+                  to="/forgot-password"
+                  style={{ fontSize: 13, fontWeight: 600, color: '#5BC0DE', textDecoration: 'none' }}
+                  onMouseEnter={e => (e.currentTarget.style.textDecoration = 'underline')}
+                  onMouseLeave={e => (e.currentTarget.style.textDecoration = 'none')}
+                >
+                  Forgot password?
+                </Link>
+              </div>
+
+              {/* Server error */}
+              {serverError && (
+                <p style={{ fontSize: 13, color: '#e74c3c', margin: '0 0 16px' }}>{serverError}</p>
+              )}
+
+              {/* Sign in button */}
+              <button
+                type="submit"
+                disabled={loading}
+                style={{
+                  width: '100%',
+                  padding: '14px',
+                  borderRadius: 8,
+                  border: 'none',
+                  background: loading
+                    ? 'hsl(188 40% 35%)'
+                    : 'linear-gradient(135deg, #2aa5b8 0%, #1e8a9c 100%)',
+                  color: '#fff',
+                  fontSize: 15,
+                  fontWeight: 700,
+                  letterSpacing: '0.01em',
+                  boxShadow: loading ? 'none' : '0 4px 20px rgba(40,140,155,0.35)',
+                  cursor: loading ? 'not-allowed' : 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: 8,
+                  fontFamily: 'inherit',
+                  transition: 'opacity 160ms ease, transform 160ms ease, box-shadow 160ms ease',
+                }}
+                onMouseEnter={e => { if (!loading) { e.currentTarget.style.opacity = '0.92'; e.currentTarget.style.transform = 'translateY(-1px)' } }}
+                onMouseLeave={e => { e.currentTarget.style.opacity = '1'; e.currentTarget.style.transform = 'translateY(0)' }}
+                onMouseDown={e => { if (!loading) e.currentTarget.style.transform = 'scale(0.98)' }}
+                onMouseUp={e => { if (!loading) e.currentTarget.style.transform = 'translateY(-1px)' }}
+              >
+                {loading && <Spinner />}
+                {loading ? 'Signing in…' : 'Sign in'}
+              </button>
+
+              {/* SSO — shown only when the instance has OIDC configured. A
+                  full-page navigation to the API begins the OIDC redirect flow;
+                  the browser returns to /auth/callback with tokens. */}
+              {branding?.ssoEnabled && (
+                <>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 12, margin: '20px 0' }}>
+                    <div style={{ flex: 1, height: 1, background: 'hsl(210 15% 24%)' }} />
+                    <span style={{ fontSize: 12, color: 'hsl(210 15% 52%)', fontWeight: 600 }}>OR</span>
+                    <div style={{ flex: 1, height: 1, background: 'hsl(210 15% 24%)' }} />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => { window.location.href = `${API_BASE}/auth/oidc/login` }}
+                    style={{
+                      width: '100%',
+                      padding: '13px',
+                      borderRadius: 8,
+                      border: '1px solid hsl(210 15% 24%)',
+                      background: 'hsl(210 15% 17%)',
+                      color: 'hsl(210 17% 93%)',
+                      fontSize: 14,
+                      fontWeight: 600,
+                      cursor: 'pointer',
+                      fontFamily: 'inherit',
+                      transition: 'border-color 160ms ease, background 160ms ease',
+                    }}
+                    // Hover AND focus both apply the highlight so keyboard users
+                    // get the same affordance as mouse users.
+                    onMouseEnter={e => setSSOHighlight(e.currentTarget, true)}
+                    onMouseLeave={e => setSSOHighlight(e.currentTarget, false)}
+                    onFocus={e => setSSOHighlight(e.currentTarget, true)}
+                    onBlur={e => setSSOHighlight(e.currentTarget, false)}
+                  >
+                    Sign in with SSO
+                  </button>
+                </>
+              )}
+
+              {/* Register link */}
+              <p style={{ marginTop: 24, fontSize: 13, textAlign: 'center', color: 'hsl(210 15% 52%)' }}>
+                Have an invite?{' '}
+                <Link
+                  to="/register"
+                  style={{ color: '#5BC0DE', fontWeight: 600, textDecoration: 'none' }}
+                  onMouseEnter={e => (e.currentTarget.style.textDecoration = 'underline')}
+                  onMouseLeave={e => (e.currentTarget.style.textDecoration = 'none')}
+                >
+                  Create an account
+                </Link>
+              </p>
+            </form>
+          )}
+        </div>
+      </div>
+
+      {/* Keyframe for spinner */}
+      <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
+    </div>
+  )
+}
+````
+
+## File: packages/api/cmd/draba/main.go
+````go
+// Command draba is the API server entry point. It wires repositories,
+// the auth token service, and tier configuration into the HTTP server,
+// then listens for requests until the process is killed.
+package main
+
+import (
+	"context"
+	"fmt"
+	"io/fs"
+	"log/slog"
+	"net/http"
+	"os"
+	"strings"
+
+	"github.com/I0-1O/draba/packages/api/internal/api"
+	"github.com/I0-1O/draba/packages/api/internal/auth"
+	"github.com/I0-1O/draba/packages/api/internal/buildinfo"
+	"github.com/I0-1O/draba/packages/api/internal/db"
+	"github.com/I0-1O/draba/packages/api/internal/events"
+	"github.com/I0-1O/draba/packages/api/internal/mailer"
+	"github.com/I0-1O/draba/packages/api/internal/tier"
+	"github.com/I0-1O/draba/packages/api/internal/ws"
+	sampledata "github.com/I0-1O/draba/packages/api/sample_data"
+	drabui "github.com/I0-1O/draba/packages/api/ui"
+)
+
+const banner = "\n" +
+	"      _           _\n" +
+	"     | |         | |\n" +
+	"   __| |_ __ __ _| |__   __ _\n" +
+	"  / _` | '__/ _` | '_ \\ / _` |\n" +
+	" | (_| | | | (_| | |_) | (_| |\n" +
+	"  \\__,_|_|  \\__,_|_.__/ \\__,_|\n" +
+	"\n" +
+	"  see who's doing what, when.\n\n"
+
+func main() {
+	if len(os.Args) > 1 && os.Args[1] == "reset-password" {
+		runResetPassword(os.Args[2:])
+		return
+	}
+
+	setupLogger()
+	fmt.Print(banner)
+	slog.Info("build", "commit", buildinfo.Short(), "built", buildinfo.Built)
+
+	port := getenv("DRABA_PORT", "8080")
+	dsn := getenv("DRABA_DB_DSN", "/data/draba.db")
+	jwtSecret := os.Getenv("DRABA_JWT_SECRET")
+	if jwtSecret == "" {
+		slog.Error("DRABA_JWT_SECRET must be set")
+		os.Exit(1)
+	}
+
+	t, err := tier.Load()
+	if err != nil {
+		slog.Error("tier load failed", "err", err)
+		os.Exit(1)
+	}
+	l := t.Limits()
+	if l.MaxUsers == 0 {
+		slog.Info("tier", "tier", t)
+	} else {
+		slog.Info("tier", "tier", t, "maxUsers", l.MaxUsers, "maxTeams", l.MaxTeams)
+	}
+
+	database, err := db.Open(dsn)
+	if err != nil {
+		slog.Error("db: open failed", "err", err)
+		os.Exit(1)
+	}
+	slog.Info("db: opened", "dsn", dsn)
+
+	if err := db.Migrate(database); err != nil {
+		slog.Error("db: migrate failed", "err", err)
+		os.Exit(1)
+	}
+	slog.Info("db: migrations applied")
+
+	// Optional pre-launch convenience: seed the canonical sample dataset into an
+	// empty database so a freshly-wiped dev/test instance comes up populated.
+	// Gated by DRABA_SEED_SAMPLE_DATA and a no-op once the DB has any users — it
+	// must stay unset in any real deployment.
+	if os.Getenv("DRABA_SEED_SAMPLE_DATA") == "1" {
+		sql, err := sampledata.SQL()
+		if err != nil {
+			slog.Error("db: reading embedded sample data failed", "err", err)
+			os.Exit(1)
+		}
+		seeded, err := db.SeedSampleDataIfEmpty(database, sql)
+		if err != nil {
+			slog.Error("db: sample-data seed failed", "err", err)
+			os.Exit(1)
+		}
+		if seeded {
+			slog.Info("db: sample data seeded (database was empty)")
+		} else {
+			slog.Info("db: sample-data seed skipped (database already populated)")
+		}
+	}
+
+	users := db.NewUserRepo(database)
+	invites := db.NewInviteRepo(database)
+	teams := db.NewTeamRepo(database)
+	activityRepo := db.NewActivityRepo(database)
+	timelineRepo := db.NewTimelineRepo(database)
+	savedFilterRepo := db.NewSavedFilterRepo(database)
+	preferenceRepo := db.NewUserPreferenceRepo(database)
+	apiTokenRepo := db.NewAPITokenRepo(database)
+	instanceSetsRepo := db.NewInstanceSettingsRepo(database)
+	passwordTokensRepo := db.NewPasswordResetTokenRepo(database)
+	statusRepo := db.NewStatusRepo(database)
+	tagRepo := db.NewTagRepo(database)
+	shareRepo := db.NewShareRepo(database)
+	m := mailer.New(instanceSetsRepo, []byte(jwtSecret))
+	tokens := auth.NewTokenService(jwtSecret)
+
+	bus := events.NewBus()
+	hub := ws.NewHub(bus, tokens, func(teamID, userID string) error {
+		_, err := teams.GetMember(teamID, userID)
+		return err
+	})
+	go hub.Run()
+	slog.Info("ws: hub running")
+
+	if mods := tier.Registered(); len(mods) > 0 {
+		slog.Info("modules loaded", "count", len(mods))
+	}
+
+	srv := api.NewServer(users, invites, teams, activityRepo, timelineRepo, savedFilterRepo, preferenceRepo, apiTokenRepo, instanceSetsRepo, passwordTokensRepo, statusRepo, tagRepo, shareRepo, m, tokens, t, bus, hub)
+
+	// Wire up the embedded React SPA when a production build is present.
+	// In dev the static/ directory only has .gitkeep so this is a no-op.
+	if sub, err := fs.Sub(drabui.FS, "static"); err == nil {
+		if _, err := sub.Open("index.html"); err == nil {
+			srv.WithUI(sub)
+			slog.Info("ui: serving embedded SPA")
+		}
+	}
+
+	// Optional SSO. OIDC is disabled unless DRABA_OIDC_ISSUER is set. When it
+	// is, discovery runs against the issuer at startup; a failure here is fatal
+	// so a broken SSO setup is caught at boot rather than presenting users a
+	// dead login button. The client secret is read once and never leaves the
+	// process.
+	oidcSvc, err := auth.NewOIDCService(context.Background(), auth.OIDCConfig{
+		Issuer:       os.Getenv("DRABA_OIDC_ISSUER"),
+		ClientID:     os.Getenv("DRABA_OIDC_CLIENT_ID"),
+		ClientSecret: os.Getenv("DRABA_OIDC_CLIENT_SECRET"),
+		RedirectURL:  oidcRedirectURL(),
+	})
+	if err != nil {
+		slog.Error("oidc: configuration failed", "err", err)
+		os.Exit(1)
+	}
+	if oidcSvc != nil {
+		// Auto-provisioning defaults ON (first SSO login creates the account),
+		// matching the password-register bootstrap. Set DRABA_OIDC_AUTO_CREATE=0
+		// to require accounts be pre-created before SSO login is allowed.
+		autoCreate := os.Getenv("DRABA_OIDC_AUTO_CREATE") != "0"
+		srv.WithOIDC(oidcSvc, autoCreate)
+		slog.Info("oidc: SSO enabled", "issuer", os.Getenv("DRABA_OIDC_ISSUER"), "autoCreate", autoCreate)
+	}
+
+	slog.Info("listening", "port", port)
+	if err := http.ListenAndServe(":"+port, srv.Routes()); err != nil {
+		slog.Error("server error", "err", err)
+		os.Exit(1)
+	}
+}
+
+// oidcRedirectURL returns the OIDC callback URL the IdP must redirect back to.
+// It honours an explicit DRABA_OIDC_REDIRECT_URL override, otherwise derives it
+// from DRABA_BASE_URL so a single base-URL setting covers both the app and the
+// SSO callback.
+func oidcRedirectURL() string {
+	if v := os.Getenv("DRABA_OIDC_REDIRECT_URL"); v != "" {
+		return v
+	}
+	if os.Getenv("DRABA_OIDC_ISSUER") == "" {
+		return "" // SSO disabled; no redirect needed.
+	}
+	return strings.TrimRight(getenv("DRABA_BASE_URL", "http://localhost:8080"), "/") + "/auth/oidc/callback"
+}
+
+// setupLogger initialises the global slog logger. Level is controlled by
+// DRABA_LOG_LEVEL (debug | info | warn | error); default is info.
+// All output goes to stdout so Docker captures it in `docker logs`.
+func setupLogger() {
+	level := slog.LevelInfo
+	switch strings.ToLower(os.Getenv("DRABA_LOG_LEVEL")) {
+	case "debug":
+		level = slog.LevelDebug
+	case "warn":
+		level = slog.LevelWarn
+	case "error":
+		level = slog.LevelError
+	}
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level})))
+}
+
+// getenv returns the env var value or fallback when unset/empty.
+func getenv(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
 }
 ````
 
@@ -54912,6 +55959,13 @@ type Server struct {
 	bus            *events.Bus
 	hub            *ws.Hub
 	uiFS           fs.FS
+	// oidc is non-nil only when SSO is configured (DRABA_OIDC_ISSUER set).
+	// When nil, the /auth/oidc/* routes report SSO as disabled and no external
+	// identity provider is ever contacted. Set via WithOIDC.
+	oidc *auth.OIDCService
+	// oidcAutoCreateUsers controls whether an unknown external identity is
+	// auto-provisioned a local account on first SSO login.
+	oidcAutoCreateUsers bool
 }
 
 // NewServer constructs a Server with its required dependencies. It does not
@@ -54972,6 +56026,19 @@ func (s *Server) WithUI(uiFS fs.FS) *Server {
 	return s
 }
 
+// WithOIDC enables SSO. Passing a nil service leaves SSO disabled (the zero
+// value), so callers can wire it unconditionally from a possibly-nil
+// constructor result. autoCreate controls first-login auto-provisioning.
+func (s *Server) WithOIDC(svc *auth.OIDCService, autoCreate bool) *Server {
+	s.oidc = svc
+	s.oidcAutoCreateUsers = autoCreate
+	return s
+}
+
+// oidcAutoCreate reports whether unknown external identities are provisioned a
+// local account on first SSO login.
+func (s *Server) oidcAutoCreate() bool { return s.oidcAutoCreateUsers }
+
 // Routes returns the fully-wired HTTP handler for the API, including all
 // core routes plus any routes added by registered tier modules.
 func (s *Server) Routes() http.Handler {
@@ -54986,6 +56053,10 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /auth/me", chain(s.handleMe, s.authMiddleware))
 	mux.HandleFunc("POST /auth/forgot-password", s.handleForgotPassword)
 	mux.HandleFunc("POST /auth/reset-password", s.handleResetPassword)
+	// OIDC / SSO. Public (no auth): they start and complete the external login
+	// flow. Both report SSO disabled with 404 when DRABA_OIDC_ISSUER is unset.
+	mux.HandleFunc("GET /auth/oidc/login", s.handleOIDCLogin)
+	mux.HandleFunc("GET /auth/oidc/callback", s.handleOIDCCallback)
 
 	mux.HandleFunc("GET /users/me/preferences", chain(s.handleGetPreferences, s.authMiddleware))
 	mux.HandleFunc("PUT /users/me/preferences", chain(s.handleUpsertPreference, s.authMiddleware))
@@ -55174,440 +56245,6 @@ func spaHandler(uiFS fs.FS) http.Handler {
 		}
 		fserver.ServeHTTP(w, r)
 	})
-}
-````
-
-## File: packages/api/internal/models/models.go
-````go
-// Package models holds the domain types shared across the API, db,
-// and event-bus packages. These types are persisted directly via sqlx
-// (db tags) and serialised on the wire (json tags); changing tags is a
-// schema change.
-package models
-
-import "time"
-
-// Activity is a scheduled item of work belonging to a Timeline. ArchivedAt is
-// non-nil when the activity is soft-deleted; list endpoints exclude archived
-// activities by default.
-//
-// AssignedMemberIDs is not stored on the activities table; it is populated by
-// the repository from activity_assignments after every list query.
-//
-// GoogleEventID and CaldavUID are preserved as-is — they identify the
-// corresponding records in external calendar systems (VEVENT identifiers).
-type Activity struct {
-	ID                string     `db:"id"                  json:"id"`
-	TimelineID        string     `db:"timeline_id"         json:"timelineId"`
-	Title             string     `db:"title"               json:"title"`
-	Description       *string    `db:"description"         json:"description,omitempty"`
-	Notes             *string    `db:"notes"               json:"notes,omitempty"`
-	Icon              *string    `db:"icon"                json:"icon,omitempty"`
-	Color             *string    `db:"color"               json:"color,omitempty"`
-	StartAt           time.Time  `db:"start_at"            json:"startAt"`
-	EndAt             time.Time  `db:"end_at"              json:"endAt"`
-	AllDay            bool       `db:"all_day"             json:"allDay"`
-	StatusID          *string    `db:"status_id"           json:"statusId,omitempty"`
-	ParentActivityID  *string    `db:"parent_activity_id"  json:"parentActivityId,omitempty"`
-	PercentComplete   *int       `db:"percent_complete"    json:"percentComplete,omitempty"`
-	Location          *string    `db:"location"            json:"location,omitempty"`
-	URL               *string    `db:"url"                 json:"url,omitempty"`
-	Rrule             *string    `db:"rrule"               json:"rrule,omitempty"`
-	CaldavUID         *string    `db:"caldav_uid"          json:"caldavUid,omitempty"`
-	GoogleEventID     *string    `db:"google_event_id"     json:"googleEventId,omitempty"`
-	CreatedBy         string     `db:"created_by"          json:"createdBy"`
-	CreatedAt         time.Time  `db:"created_at"          json:"createdAt"`
-	UpdatedAt         time.Time  `db:"updated_at"          json:"updatedAt"`
-	ArchivedAt        *time.Time `db:"archived_at"         json:"archivedAt,omitempty"`
-	AssignedMemberIDs []string   `db:"-"                   json:"assignedMemberIds"`
-	TagIDs            []string   `db:"-"                   json:"tagIds"`
-}
-
-// TeamMemberWithUser joins a TeamMember row with its associated User so
-// callers receive display names and emails in a single query. Participants
-// (no user account) have empty email and avatar; their display_name comes
-// from team_members.display_name via COALESCE in the query.
-type TeamMemberWithUser struct {
-	TeamMember
-	Email       string  `db:"email"        json:"email"`
-	DisplayName string  `db:"display_name" json:"displayName"`
-	AvatarURL   *string `db:"avatar_url"   json:"avatarUrl,omitempty"`
-}
-
-// User is an authenticated account. PasswordHash is omitted from JSON
-// to avoid leaking it through any handler that returns a User.
-// ArchivedAt is non-nil when the account is inactivated; login is rejected
-// for archived users. Color and Icon are user-level identity fields (migration
-// 010); they propagate to team_members rows for the user when changed.
-type User struct {
-	ID           string     `db:"id"             json:"id"`
-	Email        string     `db:"email"          json:"email"`
-	PasswordHash string     `db:"password_hash"  json:"-"`
-	DisplayName  string     `db:"display_name"   json:"displayName"`
-	AvatarURL    *string    `db:"avatar_url"     json:"avatarUrl,omitempty"`
-	Color        *string    `db:"color"          json:"color,omitempty"`
-	Icon         *string    `db:"icon"           json:"icon,omitempty"`
-	IsSuperadmin bool       `db:"is_superadmin"  json:"isSuperadmin"`
-	CreatedAt    time.Time  `db:"created_at"     json:"createdAt"`
-	UpdatedAt    time.Time  `db:"updated_at"     json:"updatedAt"`
-	ArchivedAt   *time.Time `db:"archived_at"    json:"archivedAt,omitempty"`
-}
-
-// Team is a workspace that groups users and their scheduled work. Color and
-// Icon are identity fields added in migration 006; both are nullable until
-// explicitly set by an admin. Description, Notes, and ArchivedAt are added in
-// migration 008; ArchivedAt is non-nil when the team is soft-deleted.
-// InviteLinkToken is a stable, reusable token added in migration 009; when
-// non-nil it can be used by anyone to join the team during registration.
-type Team struct {
-	ID              string     `db:"id"                  json:"id"`
-	Name            string     `db:"name"                json:"name"`
-	Slug            string     `db:"slug"                json:"slug"`
-	Description     *string    `db:"description"         json:"description,omitempty"`
-	Notes           *string    `db:"notes"               json:"notes,omitempty"`
-	Color           *string    `db:"color"               json:"color,omitempty"`
-	Icon            *string    `db:"icon"                json:"icon,omitempty"`
-	InviteLinkToken *string    `db:"invite_link_token"   json:"inviteLinkToken,omitempty"`
-	CreatedAt       time.Time  `db:"created_at"          json:"createdAt"`
-	UpdatedAt       time.Time  `db:"updated_at"          json:"updatedAt"`
-	ArchivedAt      *time.Time `db:"archived_at"         json:"archivedAt,omitempty"`
-}
-
-// TeamMember is the join row that puts a person in a Team. UserID is nil
-// for login-less Participants; DisplayName is populated for them instead.
-// Role is the team-level role: "admin" or "member". Color and Icon are
-// identity fields (migration 006); Color stores a color ID (e.g. "teal").
-// ArchivedAt is non-nil when the member is inactivated (migration 009);
-// inactivated members lose access but their data and assignments are preserved.
-type TeamMember struct {
-	ID          string     `db:"id"           json:"id"`
-	TeamID      string     `db:"team_id"      json:"teamId"`
-	UserID      *string    `db:"user_id"      json:"userId,omitempty"`
-	DisplayName *string    `db:"display_name" json:"displayName,omitempty"`
-	Role        string     `db:"role"         json:"role"`
-	Color       *string    `db:"color"        json:"color,omitempty"`
-	Icon        *string    `db:"icon"         json:"icon,omitempty"`
-	JoinedAt    time.Time  `db:"joined_at"    json:"joinedAt"`
-	ArchivedAt  *time.Time `db:"archived_at"  json:"archivedAt,omitempty"`
-}
-
-// MemberStats holds computed activity and timeline counts for a member.
-// All counts are date-relative and scoped to activities the member is assigned to.
-type MemberStats struct {
-	ActiveTimelines    int `json:"activeTimelines"`
-	ArchivedTimelines  int `json:"archivedTimelines"`
-	PastDue            int `json:"pastDue"`
-	Running            int `json:"running"`
-	Upcoming           int `json:"upcoming"`
-	Unscheduled        int `json:"unscheduled"`
-	ArchivedActivities int `json:"archivedActivities"`
-}
-
-// MemberDetail combines a TeamMemberWithUser with computed stats and the
-// member's full list of team memberships. Returned by GET /teams/:id/members/:memberId.
-// UserArchivedAt reflects users.archived_at (account-level deactivation), distinct
-// from ArchivedAt which is team_members.archived_at (membership-level inactivation).
-type MemberDetail struct {
-	TeamMemberWithUser
-	Stats          MemberStats          `json:"stats"`
-	Teams          []TeamMemberWithUser `json:"teams"`
-	Deletable      bool                 `json:"deletable"`
-	UserArchivedAt *time.Time           `json:"userArchivedAt,omitempty"`
-}
-
-// Timeline is a named date range over a team's events. It is not a data
-// container — it is a view over a team's events for a given date window.
-// Access is governed by timeline_access + team role; share_token allows
-// unauthenticated read access via a stable public URL. Color and Icon are
-// identity fields (migration 006). Description and Notes are free-text fields
-// added in migration 013.
-type Timeline struct {
-	ID          string     `db:"id"          json:"id"`
-	TeamID      string     `db:"team_id"     json:"teamId"`
-	Name        string     `db:"name"        json:"name"`
-	Description *string    `db:"description" json:"description,omitempty"`
-	Notes       *string    `db:"notes"       json:"notes,omitempty"`
-	StartDate   string     `db:"start_date"  json:"startDate"`
-	EndDate     string     `db:"end_date"    json:"endDate"`
-	Color       *string    `db:"color"       json:"color,omitempty"`
-	Icon        *string    `db:"icon"        json:"icon,omitempty"`
-	ShareToken  string     `db:"share_token" json:"shareToken"`
-	IcalToken   string     `db:"ical_token"  json:"icalToken"`
-	CreatedBy   string     `db:"created_by"  json:"createdBy"`
-	CreatedAt   time.Time  `db:"created_at"  json:"createdAt"`
-	UpdatedAt   time.Time  `db:"updated_at"  json:"updatedAt"`
-	ArchivedAt  *time.Time `db:"archived_at" json:"archivedAt,omitempty"`
-	// ShareCount is a derived count of the timeline's active (non-revoked,
-	// non-expired) share links — view shares and ICS feeds alike. Populated by
-	// the repo read queries; it backs the timeline tile's share chip (13.5).
-	ShareCount int `db:"share_count" json:"shareCount"`
-}
-
-// SavedFilter is a user-owned, team-scoped named filter spec. Definition is
-// an opaque JSON string interpreted by the client; the server treats it as
-// arbitrary text and only validates that it parses as JSON.
-type SavedFilter struct {
-	ID           string    `db:"id"             json:"id"`
-	TeamID       string    `db:"team_id"        json:"teamId"`
-	UserID       string    `db:"user_id"        json:"userId"`
-	Name         string    `db:"name"           json:"name"`
-	Definition   string    `db:"definition"     json:"definition"`
-	IsTeamFilter bool      `db:"is_team_filter" json:"isTeamFilter"`
-	CreatedAt    time.Time `db:"created_at"     json:"createdAt"`
-	UpdatedAt    time.Time `db:"updated_at"     json:"updatedAt"`
-}
-
-// UserPreference stores a single key/value setting for a user, optionally
-// scoped to a timeline. TimelineID is “” for global preferences so the
-// UNIQUE(user_id, timeline_id, key) DB constraint works without NULL handling.
-// Serialised JSON omits TimelineID when empty so callers see null for global prefs.
-type UserPreference struct {
-	ID         string    `db:"id"          json:"id"`
-	UserID     string    `db:"user_id"     json:"userId"`
-	TimelineID string    `db:"timeline_id" json:"timelineId,omitempty"`
-	Key        string    `db:"key"         json:"key"`
-	Value      string    `db:"value"       json:"value"`
-	UpdatedAt  time.Time `db:"updated_at"  json:"updatedAt"`
-}
-
-// APIToken is a long-lived Bearer credential a user issues for programmatic
-// access. token_hash stores SHA-256(rawToken); the raw value is shown to the
-// caller only once on creation. RevokedAt is non-nil when the token has been
-// revoked; revoked tokens are not deleted so listing remains stable.
-type APIToken struct {
-	ID         string     `db:"id"           json:"id"`
-	UserID     string     `db:"user_id"      json:"userId"`
-	Name       string     `db:"name"         json:"name"`
-	TokenHash  string     `db:"token_hash"   json:"-"`
-	Scope      string     `db:"scope"        json:"scope"`
-	LastUsedAt *time.Time `db:"last_used_at" json:"lastUsedAt,omitempty"`
-	CreatedAt  time.Time  `db:"created_at"   json:"createdAt"`
-	RevokedAt  *time.Time `db:"revoked_at"   json:"revokedAt,omitempty"`
-}
-
-// InstanceSetting stores a single instance-level configuration value.
-// SMTP config and defaults live here. The value column is plain text;
-// the mailer package handles decryption of the SMTP password field.
-type InstanceSetting struct {
-	Key       string    `db:"key"        json:"key"`
-	Value     string    `db:"value"      json:"value"`
-	UpdatedAt time.Time `db:"updated_at" json:"updatedAt"`
-}
-
-// PasswordResetToken is a single-use token for the forgot-password flow.
-// TokenHash stores SHA-256 of the raw token; the raw value is sent by email
-// and never stored. UsedAt is set when the token is consumed.
-type PasswordResetToken struct {
-	ID        string     `db:"id"         json:"id"`
-	UserID    string     `db:"user_id"    json:"userId"`
-	TokenHash string     `db:"token_hash" json:"-"`
-	ExpiresAt time.Time  `db:"expires_at" json:"expiresAt"`
-	UsedAt    *time.Time `db:"used_at"    json:"usedAt,omitempty"`
-	CreatedAt time.Time  `db:"created_at" json:"createdAt"`
-}
-
-// AdminUserRow is a flat view of a user for the admin users list. It includes
-// the user's fields plus the count of active team memberships.
-type AdminUserRow struct {
-	User
-	TeamCount int `db:"team_count" json:"teamCount"`
-}
-
-// Valid Share.Kind and Share.Scope values.
-const (
-	ShareKindView      = "view"
-	ShareKindICS       = "ics"
-	ShareScopeTimeline = "timeline"
-	ShareScopeMember   = "member"
-)
-
-// Share is a public read-only link scoped to one timeline. Kind discriminates
-// the two flavors (migration 022): "view" shares freeze one view configuration
-// and are served as a web snapshot at /s/{token}; "ics" shares are live
-// subscribable calendar feeds served at GET /shares/{token}.ics. ICS shares
-// carry Scope ("timeline" | "member") + MemberID and never a view config,
-// filter, or password — the unguessable token is their only secret.
-// PasswordHash is set only when a view share requires a password (Phase 13.2);
-// ExpiresAt and RevokedAt support lifecycle management (Phase 13.4/13.5).
-type Share struct {
-	ID           string     `db:"id"             json:"id"`
-	TimelineID   string     `db:"timeline_id"    json:"timelineId"`
-	Token        string     `db:"token"          json:"token"`
-	Kind         string     `db:"kind"           json:"kind"`
-	Scope        *string    `db:"scope"          json:"scope,omitempty"`
-	MemberID     *string    `db:"member_id"      json:"memberId,omitempty"`
-	Name         *string    `db:"name"           json:"name,omitempty"`
-	Description  *string    `db:"description"    json:"description,omitempty"`
-	ViewType     string     `db:"view_type"      json:"viewType"`
-	ViewConfig   string     `db:"view_config"    json:"viewConfig"`
-	PasswordHash *string    `db:"password_hash"  json:"-"`
-	ExpiresAt    *time.Time `db:"expires_at"     json:"expiresAt,omitempty"`
-	// CreatedBy is nil when the share was created by a superadmin who holds
-	// no team_members row in the timeline's team (migration 023).
-	CreatedBy    *string    `db:"created_by"     json:"createdBy,omitempty"`
-	CreatedAt    time.Time  `db:"created_at"     json:"createdAt"`
-	LastViewedAt *time.Time `db:"last_viewed_at" json:"lastViewedAt,omitempty"`
-	ViewCount    int        `db:"view_count"     json:"viewCount"`
-	RevokedAt    *time.Time `db:"revoked_at"     json:"revokedAt,omitempty"`
-	// Protected is a derived, read-only flag (password_hash is never serialized).
-	// It is populated by the repo read methods so clients can show a lock badge
-	// without ever seeing the hash.
-	Protected bool `db:"-" json:"protected"`
-}
-
-// PublicMember is the safe projection of a team member for public share
-// responses. It exposes only display fields — never email, role, or user_id.
-type PublicMember struct {
-	ID          string  `json:"id"`
-	DisplayName string  `json:"displayName"`
-	Color       *string `json:"color,omitempty"`
-	Icon        *string `json:"icon,omitempty"`
-}
-
-// PublicActivity is the safe projection of an activity for public share
-// responses. It includes standard display fields but omits notes (unless
-// explicitly included for List shares with Notes enabled), caldav/google
-// identifiers, and any internal fields.
-type PublicActivity struct {
-	ID                string    `json:"id"`
-	Title             string    `json:"title"`
-	Description       *string   `json:"description,omitempty"`
-	Notes             *string   `json:"notes,omitempty"`
-	Icon              *string   `json:"icon,omitempty"`
-	Color             *string   `json:"color,omitempty"`
-	StartAt           time.Time `json:"startAt"`
-	EndAt             time.Time `json:"endAt"`
-	AllDay            bool      `json:"allDay"`
-	StatusID          *string   `json:"statusId,omitempty"`
-	ParentActivityID  *string   `json:"parentActivityId,omitempty"`
-	PercentComplete   *int      `json:"percentComplete,omitempty"`
-	AssignedMemberIDs []string  `json:"assignedMemberIds"`
-	TagIDs            []string  `json:"tagIds"`
-}
-
-// PublicTimeline is the safe timeline projection for share responses.
-type PublicTimeline struct {
-	ID        string  `json:"id"`
-	Name      string  `json:"name"`
-	Color     *string `json:"color,omitempty"`
-	Icon      *string `json:"icon,omitempty"`
-	StartDate string  `json:"startDate"`
-	EndDate   string  `json:"endDate"`
-}
-
-// PublicShare is the safe projection of a share row for the unauthenticated
-// gateway response. It omits operational telemetry (view_count, last_viewed_at)
-// and internal fields (created_by, revoked_at) that must not reach anonymous callers.
-type PublicShare struct {
-	ID         string     `json:"id"`
-	TimelineID string     `json:"timelineId"`
-	Token      string     `json:"token"`
-	Name       *string    `json:"name,omitempty"`
-	ViewType   string     `json:"viewType"`
-	ViewConfig string     `json:"viewConfig"`
-	CreatedAt  time.Time  `json:"createdAt"`
-	ExpiresAt  *time.Time `json:"expiresAt,omitempty"`
-}
-
-// ShareProjection is the full aggregate returned by GET /shares/{token}.
-// It contains all data the public viewer needs to render the configured view.
-type ShareProjection struct {
-	Share      PublicShare      `json:"share"`
-	Timeline   PublicTimeline   `json:"timeline"`
-	TeamName   string           `json:"teamName"`
-	Members    []PublicMember   `json:"members"`
-	Statuses   []Status         `json:"statuses"`
-	Tags       []Tag            `json:"tags"`
-	Activities []PublicActivity `json:"activities"`
-}
-
-// RevokeUserResult summarizes the outcome of POST /users/:id/revoke.
-// The three counters let the caller show a meaningful summary in the UI.
-type RevokeUserResult struct {
-	AccountDeactivated     bool `json:"accountDeactivated"`
-	MembershipsInactivated int  `json:"membershipsInactivated"`
-	MembershipsRemoved     int  `json:"membershipsRemoved"`
-}
-
-// StatusTemplate is a reusable named preset of statuses owned by a team.
-// When a timeline is created the team's chosen template's items are copied
-// into live Status rows for that timeline.
-type StatusTemplate struct {
-	ID          string    `db:"id"          json:"id"`
-	TeamID      string    `db:"team_id"     json:"teamId"`
-	Name        string    `db:"name"        json:"name"`
-	Description *string   `db:"description" json:"description,omitempty"`
-	Position    int       `db:"position"    json:"position"`
-	CreatedBy   string    `db:"created_by"  json:"createdBy"`
-	CreatedAt   time.Time `db:"created_at"  json:"createdAt"`
-	UpdatedAt   time.Time `db:"updated_at"  json:"updatedAt"`
-	// Items is populated by the repository when listing templates.
-	Items []StatusTemplateItem `db:"-" json:"items"`
-}
-
-// StatusTemplateItem is one status value within a StatusTemplate.
-type StatusTemplateItem struct {
-	ID         string  `db:"id"          json:"id"`
-	TemplateID string  `db:"template_id" json:"templateId"`
-	Name       string  `db:"name"        json:"name"`
-	Color      string  `db:"color"       json:"color"`
-	Icon       *string `db:"icon"        json:"icon,omitempty"`
-	IsClosed   bool    `db:"is_closed"   json:"isClosed"`
-	Position   int     `db:"position"    json:"position"`
-}
-
-// Status is a live status value on a specific timeline. Rows are copied from a
-// StatusTemplate's items when the timeline is created and then evolve independently.
-type Status struct {
-	ID         string    `db:"id"          json:"id"`
-	TimelineID string    `db:"timeline_id" json:"timelineId"`
-	Name       string    `db:"name"        json:"name"`
-	Color      string    `db:"color"       json:"color"`
-	Icon       *string   `db:"icon"        json:"icon,omitempty"`
-	IsClosed   bool      `db:"is_closed"   json:"isClosed"`
-	Position   int       `db:"position"    json:"position"`
-	CreatedAt  time.Time `db:"created_at"  json:"createdAt"`
-	UpdatedAt  time.Time `db:"updated_at"  json:"updatedAt"`
-}
-
-// TimelineAccessEntry is a single timeline access grant joined with the team
-// member's display info. Returned by GET /teams/:id/timelines/:timelineId/access.
-type TimelineAccessEntry struct {
-	TimelineID   string  `db:"timeline_id"    json:"timelineId"`
-	TeamMemberID string  `db:"team_member_id" json:"teamMemberId"`
-	Role         string  `db:"role"           json:"role"`
-	DisplayName  string  `db:"display_name"   json:"displayName"`
-	Email        string  `db:"email"          json:"email"`
-	Color        *string `db:"color"          json:"color,omitempty"`
-	Icon         *string `db:"icon"           json:"icon,omitempty"`
-	UserID       *string `db:"user_id"        json:"userId,omitempty"`
-}
-
-// Tag is a team-scoped label that can be applied to activities. Tags are
-// normalized: a team_id+name pair is unique, enabling rename-all and
-// name-based filter matching across timelines.
-type Tag struct {
-	ID        string    `db:"id"         json:"id"`
-	TeamID    string    `db:"team_id"    json:"teamId"`
-	Name      string    `db:"name"       json:"name"`
-	Color     *string   `db:"color"      json:"color,omitempty"`
-	CreatedBy string    `db:"created_by" json:"createdBy"`
-	CreatedAt time.Time `db:"created_at" json:"createdAt"`
-}
-
-// Invite is a single-use token that grants an email address the right to
-// join a Team. AcceptedAt is non-nil once consumed; expired or accepted
-// invites are rejected by the registration handler.
-type Invite struct {
-	ID         string     `db:"id"          json:"id"`
-	TeamID     string     `db:"team_id"     json:"teamId"`
-	Email      string     `db:"email"       json:"email"`
-	Token      string     `db:"token"       json:"token"`
-	Role       string     `db:"role"        json:"role"`
-	InvitedBy  string     `db:"invited_by"  json:"invitedBy"`
-	ExpiresAt  time.Time  `db:"expires_at"  json:"expiresAt"`
-	AcceptedAt *time.Time `db:"accepted_at" json:"acceptedAt,omitempty"`
-	CreatedAt  time.Time  `db:"created_at"  json:"createdAt"`
 }
 ````
 
@@ -56541,6 +57178,1741 @@ export default function ShareViewPage() {
       )}
     </div>
   )
+}
+````
+
+## File: packages/api/internal/models/models.go
+````go
+// Package models holds the domain types shared across the API, db,
+// and event-bus packages. These types are persisted directly via sqlx
+// (db tags) and serialised on the wire (json tags); changing tags is a
+// schema change.
+package models
+
+import "time"
+
+// Activity is a scheduled item of work belonging to a Timeline. ArchivedAt is
+// non-nil when the activity is soft-deleted; list endpoints exclude archived
+// activities by default.
+//
+// AssignedMemberIDs is not stored on the activities table; it is populated by
+// the repository from activity_assignments after every list query.
+//
+// GoogleEventID and CaldavUID are preserved as-is — they identify the
+// corresponding records in external calendar systems (VEVENT identifiers).
+type Activity struct {
+	ID                string     `db:"id"                  json:"id"`
+	TimelineID        string     `db:"timeline_id"         json:"timelineId"`
+	Title             string     `db:"title"               json:"title"`
+	Description       *string    `db:"description"         json:"description,omitempty"`
+	Notes             *string    `db:"notes"               json:"notes,omitempty"`
+	Icon              *string    `db:"icon"                json:"icon,omitempty"`
+	Color             *string    `db:"color"               json:"color,omitempty"`
+	StartAt           time.Time  `db:"start_at"            json:"startAt"`
+	EndAt             time.Time  `db:"end_at"              json:"endAt"`
+	AllDay            bool       `db:"all_day"             json:"allDay"`
+	StatusID          *string    `db:"status_id"           json:"statusId,omitempty"`
+	ParentActivityID  *string    `db:"parent_activity_id"  json:"parentActivityId,omitempty"`
+	PercentComplete   *int       `db:"percent_complete"    json:"percentComplete,omitempty"`
+	Location          *string    `db:"location"            json:"location,omitempty"`
+	URL               *string    `db:"url"                 json:"url,omitempty"`
+	Rrule             *string    `db:"rrule"               json:"rrule,omitempty"`
+	CaldavUID         *string    `db:"caldav_uid"          json:"caldavUid,omitempty"`
+	GoogleEventID     *string    `db:"google_event_id"     json:"googleEventId,omitempty"`
+	CreatedBy         string     `db:"created_by"          json:"createdBy"`
+	CreatedAt         time.Time  `db:"created_at"          json:"createdAt"`
+	UpdatedAt         time.Time  `db:"updated_at"          json:"updatedAt"`
+	ArchivedAt        *time.Time `db:"archived_at"         json:"archivedAt,omitempty"`
+	AssignedMemberIDs []string   `db:"-"                   json:"assignedMemberIds"`
+	TagIDs            []string   `db:"-"                   json:"tagIds"`
+}
+
+// TeamMemberWithUser joins a TeamMember row with its associated User so
+// callers receive display names and emails in a single query. Participants
+// (no user account) have empty email and avatar; their display_name comes
+// from team_members.display_name via COALESCE in the query.
+type TeamMemberWithUser struct {
+	TeamMember
+	Email       string  `db:"email"        json:"email"`
+	DisplayName string  `db:"display_name" json:"displayName"`
+	AvatarURL   *string `db:"avatar_url"   json:"avatarUrl,omitempty"`
+}
+
+// User is an authenticated account. PasswordHash is omitted from JSON
+// to avoid leaking it through any handler that returns a User.
+// ArchivedAt is non-nil when the account is inactivated; login is rejected
+// for archived users. Color and Icon are user-level identity fields (migration
+// 010); they propagate to team_members rows for the user when changed.
+//
+// AuthProvider, OIDCIssuer, and OIDCSubject are added in migration 024. A
+// local user has AuthProvider "local" and a non-nil PasswordHash. An OIDC
+// (SSO) user has AuthProvider "oidc", a nil PasswordHash, and a non-nil
+// (OIDCIssuer, OIDCSubject) pair identifying them at the external IdP.
+type User struct {
+	ID           string     `db:"id"             json:"id"`
+	Email        string     `db:"email"          json:"email"`
+	PasswordHash *string    `db:"password_hash"  json:"-"`
+	DisplayName  string     `db:"display_name"   json:"displayName"`
+	AvatarURL    *string    `db:"avatar_url"     json:"avatarUrl,omitempty"`
+	Color        *string    `db:"color"          json:"color,omitempty"`
+	Icon         *string    `db:"icon"           json:"icon,omitempty"`
+	IsSuperadmin bool       `db:"is_superadmin"  json:"isSuperadmin"`
+	AuthProvider string     `db:"auth_provider"  json:"authProvider"`
+	OIDCIssuer   *string    `db:"oidc_issuer"    json:"-"`
+	OIDCSubject  *string    `db:"oidc_subject"   json:"-"`
+	CreatedAt    time.Time  `db:"created_at"     json:"createdAt"`
+	UpdatedAt    time.Time  `db:"updated_at"     json:"updatedAt"`
+	ArchivedAt   *time.Time `db:"archived_at"    json:"archivedAt,omitempty"`
+}
+
+// Team is a workspace that groups users and their scheduled work. Color and
+// Icon are identity fields added in migration 006; both are nullable until
+// explicitly set by an admin. Description, Notes, and ArchivedAt are added in
+// migration 008; ArchivedAt is non-nil when the team is soft-deleted.
+// InviteLinkToken is a stable, reusable token added in migration 009; when
+// non-nil it can be used by anyone to join the team during registration.
+type Team struct {
+	ID              string     `db:"id"                  json:"id"`
+	Name            string     `db:"name"                json:"name"`
+	Slug            string     `db:"slug"                json:"slug"`
+	Description     *string    `db:"description"         json:"description,omitempty"`
+	Notes           *string    `db:"notes"               json:"notes,omitempty"`
+	Color           *string    `db:"color"               json:"color,omitempty"`
+	Icon            *string    `db:"icon"                json:"icon,omitempty"`
+	InviteLinkToken *string    `db:"invite_link_token"   json:"inviteLinkToken,omitempty"`
+	CreatedAt       time.Time  `db:"created_at"          json:"createdAt"`
+	UpdatedAt       time.Time  `db:"updated_at"          json:"updatedAt"`
+	ArchivedAt      *time.Time `db:"archived_at"         json:"archivedAt,omitempty"`
+}
+
+// TeamMember is the join row that puts a person in a Team. UserID is nil
+// for login-less Participants; DisplayName is populated for them instead.
+// Role is the team-level role: "admin" or "member". Color and Icon are
+// identity fields (migration 006); Color stores a color ID (e.g. "teal").
+// ArchivedAt is non-nil when the member is inactivated (migration 009);
+// inactivated members lose access but their data and assignments are preserved.
+type TeamMember struct {
+	ID          string     `db:"id"           json:"id"`
+	TeamID      string     `db:"team_id"      json:"teamId"`
+	UserID      *string    `db:"user_id"      json:"userId,omitempty"`
+	DisplayName *string    `db:"display_name" json:"displayName,omitempty"`
+	Role        string     `db:"role"         json:"role"`
+	Color       *string    `db:"color"        json:"color,omitempty"`
+	Icon        *string    `db:"icon"         json:"icon,omitempty"`
+	JoinedAt    time.Time  `db:"joined_at"    json:"joinedAt"`
+	ArchivedAt  *time.Time `db:"archived_at"  json:"archivedAt,omitempty"`
+}
+
+// MemberStats holds computed activity and timeline counts for a member.
+// All counts are date-relative and scoped to activities the member is assigned to.
+type MemberStats struct {
+	ActiveTimelines    int `json:"activeTimelines"`
+	ArchivedTimelines  int `json:"archivedTimelines"`
+	PastDue            int `json:"pastDue"`
+	Running            int `json:"running"`
+	Upcoming           int `json:"upcoming"`
+	Unscheduled        int `json:"unscheduled"`
+	ArchivedActivities int `json:"archivedActivities"`
+}
+
+// MemberDetail combines a TeamMemberWithUser with computed stats and the
+// member's full list of team memberships. Returned by GET /teams/:id/members/:memberId.
+// UserArchivedAt reflects users.archived_at (account-level deactivation), distinct
+// from ArchivedAt which is team_members.archived_at (membership-level inactivation).
+type MemberDetail struct {
+	TeamMemberWithUser
+	Stats          MemberStats          `json:"stats"`
+	Teams          []TeamMemberWithUser `json:"teams"`
+	Deletable      bool                 `json:"deletable"`
+	UserArchivedAt *time.Time           `json:"userArchivedAt,omitempty"`
+}
+
+// Timeline is a named date range over a team's events. It is not a data
+// container — it is a view over a team's events for a given date window.
+// Access is governed by timeline_access + team role; share_token allows
+// unauthenticated read access via a stable public URL. Color and Icon are
+// identity fields (migration 006). Description and Notes are free-text fields
+// added in migration 013.
+type Timeline struct {
+	ID          string     `db:"id"          json:"id"`
+	TeamID      string     `db:"team_id"     json:"teamId"`
+	Name        string     `db:"name"        json:"name"`
+	Description *string    `db:"description" json:"description,omitempty"`
+	Notes       *string    `db:"notes"       json:"notes,omitempty"`
+	StartDate   string     `db:"start_date"  json:"startDate"`
+	EndDate     string     `db:"end_date"    json:"endDate"`
+	Color       *string    `db:"color"       json:"color,omitempty"`
+	Icon        *string    `db:"icon"        json:"icon,omitempty"`
+	ShareToken  string     `db:"share_token" json:"shareToken"`
+	IcalToken   string     `db:"ical_token"  json:"icalToken"`
+	CreatedBy   string     `db:"created_by"  json:"createdBy"`
+	CreatedAt   time.Time  `db:"created_at"  json:"createdAt"`
+	UpdatedAt   time.Time  `db:"updated_at"  json:"updatedAt"`
+	ArchivedAt  *time.Time `db:"archived_at" json:"archivedAt,omitempty"`
+	// ShareCount is a derived count of the timeline's active (non-revoked,
+	// non-expired) share links — view shares and ICS feeds alike. Populated by
+	// the repo read queries; it backs the timeline tile's share chip (13.5).
+	ShareCount int `db:"share_count" json:"shareCount"`
+}
+
+// SavedFilter is a user-owned, team-scoped named filter spec. Definition is
+// an opaque JSON string interpreted by the client; the server treats it as
+// arbitrary text and only validates that it parses as JSON.
+type SavedFilter struct {
+	ID           string    `db:"id"             json:"id"`
+	TeamID       string    `db:"team_id"        json:"teamId"`
+	UserID       string    `db:"user_id"        json:"userId"`
+	Name         string    `db:"name"           json:"name"`
+	Definition   string    `db:"definition"     json:"definition"`
+	IsTeamFilter bool      `db:"is_team_filter" json:"isTeamFilter"`
+	CreatedAt    time.Time `db:"created_at"     json:"createdAt"`
+	UpdatedAt    time.Time `db:"updated_at"     json:"updatedAt"`
+}
+
+// UserPreference stores a single key/value setting for a user, optionally
+// scoped to a timeline. TimelineID is “” for global preferences so the
+// UNIQUE(user_id, timeline_id, key) DB constraint works without NULL handling.
+// Serialised JSON omits TimelineID when empty so callers see null for global prefs.
+type UserPreference struct {
+	ID         string    `db:"id"          json:"id"`
+	UserID     string    `db:"user_id"     json:"userId"`
+	TimelineID string    `db:"timeline_id" json:"timelineId,omitempty"`
+	Key        string    `db:"key"         json:"key"`
+	Value      string    `db:"value"       json:"value"`
+	UpdatedAt  time.Time `db:"updated_at"  json:"updatedAt"`
+}
+
+// APIToken is a long-lived Bearer credential a user issues for programmatic
+// access. token_hash stores SHA-256(rawToken); the raw value is shown to the
+// caller only once on creation. RevokedAt is non-nil when the token has been
+// revoked; revoked tokens are not deleted so listing remains stable.
+type APIToken struct {
+	ID         string     `db:"id"           json:"id"`
+	UserID     string     `db:"user_id"      json:"userId"`
+	Name       string     `db:"name"         json:"name"`
+	TokenHash  string     `db:"token_hash"   json:"-"`
+	Scope      string     `db:"scope"        json:"scope"`
+	LastUsedAt *time.Time `db:"last_used_at" json:"lastUsedAt,omitempty"`
+	CreatedAt  time.Time  `db:"created_at"   json:"createdAt"`
+	RevokedAt  *time.Time `db:"revoked_at"   json:"revokedAt,omitempty"`
+}
+
+// InstanceSetting stores a single instance-level configuration value.
+// SMTP config and defaults live here. The value column is plain text;
+// the mailer package handles decryption of the SMTP password field.
+type InstanceSetting struct {
+	Key       string    `db:"key"        json:"key"`
+	Value     string    `db:"value"      json:"value"`
+	UpdatedAt time.Time `db:"updated_at" json:"updatedAt"`
+}
+
+// PasswordResetToken is a single-use token for the forgot-password flow.
+// TokenHash stores SHA-256 of the raw token; the raw value is sent by email
+// and never stored. UsedAt is set when the token is consumed.
+type PasswordResetToken struct {
+	ID        string     `db:"id"         json:"id"`
+	UserID    string     `db:"user_id"    json:"userId"`
+	TokenHash string     `db:"token_hash" json:"-"`
+	ExpiresAt time.Time  `db:"expires_at" json:"expiresAt"`
+	UsedAt    *time.Time `db:"used_at"    json:"usedAt,omitempty"`
+	CreatedAt time.Time  `db:"created_at" json:"createdAt"`
+}
+
+// AdminUserRow is a flat view of a user for the admin users list. It includes
+// the user's fields plus the count of active team memberships.
+type AdminUserRow struct {
+	User
+	TeamCount int `db:"team_count" json:"teamCount"`
+}
+
+// Valid Share.Kind and Share.Scope values.
+const (
+	ShareKindView      = "view"
+	ShareKindICS       = "ics"
+	ShareScopeTimeline = "timeline"
+	ShareScopeMember   = "member"
+)
+
+// Share is a public read-only link scoped to one timeline. Kind discriminates
+// the two flavors (migration 022): "view" shares freeze one view configuration
+// and are served as a web snapshot at /s/{token}; "ics" shares are live
+// subscribable calendar feeds served at GET /shares/{token}.ics. ICS shares
+// carry Scope ("timeline" | "member") + MemberID and never a view config,
+// filter, or password — the unguessable token is their only secret.
+// PasswordHash is set only when a view share requires a password (Phase 13.2);
+// ExpiresAt and RevokedAt support lifecycle management (Phase 13.4/13.5).
+type Share struct {
+	ID           string     `db:"id"             json:"id"`
+	TimelineID   string     `db:"timeline_id"    json:"timelineId"`
+	Token        string     `db:"token"          json:"token"`
+	Kind         string     `db:"kind"           json:"kind"`
+	Scope        *string    `db:"scope"          json:"scope,omitempty"`
+	MemberID     *string    `db:"member_id"      json:"memberId,omitempty"`
+	Name         *string    `db:"name"           json:"name,omitempty"`
+	Description  *string    `db:"description"    json:"description,omitempty"`
+	ViewType     string     `db:"view_type"      json:"viewType"`
+	ViewConfig   string     `db:"view_config"    json:"viewConfig"`
+	PasswordHash *string    `db:"password_hash"  json:"-"`
+	ExpiresAt    *time.Time `db:"expires_at"     json:"expiresAt,omitempty"`
+	// CreatedBy is nil when the share was created by a superadmin who holds
+	// no team_members row in the timeline's team (migration 023).
+	CreatedBy    *string    `db:"created_by"     json:"createdBy,omitempty"`
+	CreatedAt    time.Time  `db:"created_at"     json:"createdAt"`
+	LastViewedAt *time.Time `db:"last_viewed_at" json:"lastViewedAt,omitempty"`
+	ViewCount    int        `db:"view_count"     json:"viewCount"`
+	RevokedAt    *time.Time `db:"revoked_at"     json:"revokedAt,omitempty"`
+	// Protected is a derived, read-only flag (password_hash is never serialized).
+	// It is populated by the repo read methods so clients can show a lock badge
+	// without ever seeing the hash.
+	Protected bool `db:"-" json:"protected"`
+}
+
+// PublicMember is the safe projection of a team member for public share
+// responses. It exposes only display fields — never email, role, or user_id.
+type PublicMember struct {
+	ID          string  `json:"id"`
+	DisplayName string  `json:"displayName"`
+	Color       *string `json:"color,omitempty"`
+	Icon        *string `json:"icon,omitempty"`
+}
+
+// PublicActivity is the safe projection of an activity for public share
+// responses. It includes standard display fields but omits notes (unless
+// explicitly included for List shares with Notes enabled), caldav/google
+// identifiers, and any internal fields.
+type PublicActivity struct {
+	ID                string    `json:"id"`
+	Title             string    `json:"title"`
+	Description       *string   `json:"description,omitempty"`
+	Notes             *string   `json:"notes,omitempty"`
+	Icon              *string   `json:"icon,omitempty"`
+	Color             *string   `json:"color,omitempty"`
+	StartAt           time.Time `json:"startAt"`
+	EndAt             time.Time `json:"endAt"`
+	AllDay            bool      `json:"allDay"`
+	StatusID          *string   `json:"statusId,omitempty"`
+	ParentActivityID  *string   `json:"parentActivityId,omitempty"`
+	PercentComplete   *int      `json:"percentComplete,omitempty"`
+	AssignedMemberIDs []string  `json:"assignedMemberIds"`
+	TagIDs            []string  `json:"tagIds"`
+}
+
+// PublicTimeline is the safe timeline projection for share responses.
+type PublicTimeline struct {
+	ID        string  `json:"id"`
+	Name      string  `json:"name"`
+	Color     *string `json:"color,omitempty"`
+	Icon      *string `json:"icon,omitempty"`
+	StartDate string  `json:"startDate"`
+	EndDate   string  `json:"endDate"`
+}
+
+// PublicShare is the safe projection of a share row for the unauthenticated
+// gateway response. It omits operational telemetry (view_count, last_viewed_at)
+// and internal fields (created_by, revoked_at) that must not reach anonymous callers.
+type PublicShare struct {
+	ID         string     `json:"id"`
+	TimelineID string     `json:"timelineId"`
+	Token      string     `json:"token"`
+	Name       *string    `json:"name,omitempty"`
+	ViewType   string     `json:"viewType"`
+	ViewConfig string     `json:"viewConfig"`
+	CreatedAt  time.Time  `json:"createdAt"`
+	ExpiresAt  *time.Time `json:"expiresAt,omitempty"`
+}
+
+// ShareProjection is the full aggregate returned by GET /shares/{token}.
+// It contains all data the public viewer needs to render the configured view.
+type ShareProjection struct {
+	Share      PublicShare      `json:"share"`
+	Timeline   PublicTimeline   `json:"timeline"`
+	TeamName   string           `json:"teamName"`
+	Members    []PublicMember   `json:"members"`
+	Statuses   []Status         `json:"statuses"`
+	Tags       []Tag            `json:"tags"`
+	Activities []PublicActivity `json:"activities"`
+}
+
+// RevokeUserResult summarizes the outcome of POST /users/:id/revoke.
+// The three counters let the caller show a meaningful summary in the UI.
+type RevokeUserResult struct {
+	AccountDeactivated     bool `json:"accountDeactivated"`
+	MembershipsInactivated int  `json:"membershipsInactivated"`
+	MembershipsRemoved     int  `json:"membershipsRemoved"`
+}
+
+// StatusTemplate is a reusable named preset of statuses owned by a team.
+// When a timeline is created the team's chosen template's items are copied
+// into live Status rows for that timeline.
+type StatusTemplate struct {
+	ID          string    `db:"id"          json:"id"`
+	TeamID      string    `db:"team_id"     json:"teamId"`
+	Name        string    `db:"name"        json:"name"`
+	Description *string   `db:"description" json:"description,omitempty"`
+	Position    int       `db:"position"    json:"position"`
+	CreatedBy   string    `db:"created_by"  json:"createdBy"`
+	CreatedAt   time.Time `db:"created_at"  json:"createdAt"`
+	UpdatedAt   time.Time `db:"updated_at"  json:"updatedAt"`
+	// Items is populated by the repository when listing templates.
+	Items []StatusTemplateItem `db:"-" json:"items"`
+}
+
+// StatusTemplateItem is one status value within a StatusTemplate.
+type StatusTemplateItem struct {
+	ID         string  `db:"id"          json:"id"`
+	TemplateID string  `db:"template_id" json:"templateId"`
+	Name       string  `db:"name"        json:"name"`
+	Color      string  `db:"color"       json:"color"`
+	Icon       *string `db:"icon"        json:"icon,omitempty"`
+	IsClosed   bool    `db:"is_closed"   json:"isClosed"`
+	Position   int     `db:"position"    json:"position"`
+}
+
+// Status is a live status value on a specific timeline. Rows are copied from a
+// StatusTemplate's items when the timeline is created and then evolve independently.
+type Status struct {
+	ID         string    `db:"id"          json:"id"`
+	TimelineID string    `db:"timeline_id" json:"timelineId"`
+	Name       string    `db:"name"        json:"name"`
+	Color      string    `db:"color"       json:"color"`
+	Icon       *string   `db:"icon"        json:"icon,omitempty"`
+	IsClosed   bool      `db:"is_closed"   json:"isClosed"`
+	Position   int       `db:"position"    json:"position"`
+	CreatedAt  time.Time `db:"created_at"  json:"createdAt"`
+	UpdatedAt  time.Time `db:"updated_at"  json:"updatedAt"`
+}
+
+// TimelineAccessEntry is a single timeline access grant joined with the team
+// member's display info. Returned by GET /teams/:id/timelines/:timelineId/access.
+type TimelineAccessEntry struct {
+	TimelineID   string  `db:"timeline_id"    json:"timelineId"`
+	TeamMemberID string  `db:"team_member_id" json:"teamMemberId"`
+	Role         string  `db:"role"           json:"role"`
+	DisplayName  string  `db:"display_name"   json:"displayName"`
+	Email        string  `db:"email"          json:"email"`
+	Color        *string `db:"color"          json:"color,omitempty"`
+	Icon         *string `db:"icon"           json:"icon,omitempty"`
+	UserID       *string `db:"user_id"        json:"userId,omitempty"`
+}
+
+// Tag is a team-scoped label that can be applied to activities. Tags are
+// normalized: a team_id+name pair is unique, enabling rename-all and
+// name-based filter matching across timelines.
+type Tag struct {
+	ID        string    `db:"id"         json:"id"`
+	TeamID    string    `db:"team_id"    json:"teamId"`
+	Name      string    `db:"name"       json:"name"`
+	Color     *string   `db:"color"      json:"color,omitempty"`
+	CreatedBy string    `db:"created_by" json:"createdBy"`
+	CreatedAt time.Time `db:"created_at" json:"createdAt"`
+}
+
+// Invite is a single-use token that grants an email address the right to
+// join a Team. AcceptedAt is non-nil once consumed; expired or accepted
+// invites are rejected by the registration handler.
+type Invite struct {
+	ID         string     `db:"id"          json:"id"`
+	TeamID     string     `db:"team_id"     json:"teamId"`
+	Email      string     `db:"email"       json:"email"`
+	Token      string     `db:"token"       json:"token"`
+	Role       string     `db:"role"        json:"role"`
+	InvitedBy  string     `db:"invited_by"  json:"invitedBy"`
+	ExpiresAt  time.Time  `db:"expires_at"  json:"expiresAt"`
+	AcceptedAt *time.Time `db:"accepted_at" json:"acceptedAt,omitempty"`
+	CreatedAt  time.Time  `db:"created_at"  json:"createdAt"`
+}
+````
+
+## File: packages/web/src/components/ShareModal.tsx
+````typescript
+/**
+ * ShareModal — manage the share links for the current timeline view.
+ *
+ * Rebuilt to the "Share this view" design handoff (docs/design/handoffs/share-modal):
+ * an active-links list with per-row creator/date/view-count meta and an inline
+ * delete-confirm, plus an inline create form with optional password protection.
+ * One timeline can host many named shares; each is a frozen view snapshot.
+ *
+ * Styled with Tailwind utility classes against the project's design tokens
+ * (see index.css `@theme`) and shadcn/ui primitives — the handoff is a visual
+ * reference, not production code, so its inline styles were not ported.
+ *
+ * Delete is intentionally not permission-gated — a share is a read-only
+ * projection that cannot mutate app data, so any team member may manage any
+ * link (Phase 13.2 decision).
+ */
+
+import { useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
+import {
+  Link as LinkIcon, Link2, Lock, KeyRound, Copy, Check, Eye, EyeOff,
+  Trash2, Plus, PlusCircle, X, Users,
+} from 'lucide-react'
+import { useCreateShare, useListShares, useDeleteShare } from '@/hooks/useShares'
+import { useTeamMembers } from '@/hooks/useTeamActivities'
+import { useAuth } from '@/contexts/AuthContext'
+import { Badge } from '@/components/identity/Badge'
+import { resolveColorHex } from '@/components/identity/identity-constants'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { cn } from '@/lib/utils'
+import { MEMBER_COLORS } from '@/types'
+import type { FilterDefinition } from '@/lib/filterTypes'
+import type { components } from '@draba/shared'
+
+type Share = components['schemas']['Share']
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
+
+export interface ShareViewConfig {
+  groupBy: string
+  sortBy: string
+  colorBy: string
+  granularity: string
+  filter: FilterDefinition | null
+  /** List shares only — column visibility snapshot; drives the "notes" projection nuance. */
+  columns?: { id: string; visible: boolean }[]
+  /** Kanban shares only — which fields render on each card. */
+  cardFields?: string[]
+  /** Kanban shares only — whether child activities nest under their parent. */
+  showHierarchy?: boolean
+  /** Kanban shares only — column IDs collapsed at share-creation time. */
+  collapsedColumns?: string[]
+}
+
+interface Props {
+  teamId: string
+  timelineId: string
+  viewType: 'gantt' | 'list' | 'calendar' | 'kanban'
+  viewConfig: ShareViewConfig
+  /** Display name of the timeline, shown in the header subtitle. */
+  timelineName?: string
+  onClose: () => void
+}
+
+interface CreatePayload {
+  title: string
+  description: string
+  password: string | null
+}
+
+// ── Shared token-styled bits ──────────────────────────────────────────────────
+//
+// The handoff colors a share's "type tile" teal (open link) or amber
+// (password-protected). Those tints aren't semantic tokens on their own, so
+// they're expressed as arbitrary-value Tailwind classes derived from the
+// existing `--primary` / `--secondary` HSL values rather than ported hex.
+
+const TILE_TEAL = 'bg-[hsl(188_59%_38%/0.12)] text-primary'
+const TILE_AMBER = 'bg-[hsl(30_87%_62%/0.16)] text-secondary'
+const BADGE_AMBER = 'bg-[hsl(30_87%_62%/0.22)] text-secondary-foreground'
+
+function MiniAvatar({ member, size = 20 }: { member: TeamMemberWithUser | undefined; size?: number }) {
+  if (!member) return null
+  const name = member.displayName || 'Team member'
+  const color = resolveColorHex(member.color) || MEMBER_COLORS[0]
+  return (
+    <Badge identity={{ color, icon: member.icon ?? '__name_1__' }} name={name} size={size} shape="circle" />
+  )
+}
+
+function formatCreated(iso: string): string {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ''
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+}
+
+/**
+ * Short "last viewed" label for a share row: time of day when the last view
+ * was today, otherwise the same short date format as the created date.
+ */
+function formatLastViewed(iso: string): string {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ''
+  const now = new Date()
+  if (d.toDateString() === now.toDateString()) {
+    return d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
+  }
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+}
+
+// ── A single share row ─────────────────────────────────────────────────────────
+
+function ShareRow({
+  share,
+  creator,
+  isOwn,
+  onDelete,
+}: {
+  share: Share
+  creator: TeamMemberWithUser | undefined
+  isOwn: boolean
+  onDelete: (id: string) => void
+}) {
+  const url = `${window.location.host}/s/${share.token}`
+  const [copied, setCopied] = useState(false)
+  const [confirming, setConfirming] = useState(false)
+  const protectedShare = Boolean(share.protected)
+
+  const copy = () => {
+    void navigator.clipboard.writeText(`${window.location.origin}/s/${share.token}`).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1600)
+    })
+  }
+
+  return (
+    <div className="relative rounded-[var(--radius-lg)] border border-border bg-card p-3.5 shadow-sm">
+      {/* Top: type tile + title + delete */}
+      <div className="flex items-start gap-2.5">
+        <div className={cn('flex h-8 w-8 shrink-0 items-center justify-center rounded-[var(--radius-md)]', protectedShare ? TILE_AMBER : TILE_TEAL)}>
+          {protectedShare ? <Lock size={16} strokeWidth={2.2} /> : <LinkIcon size={16} strokeWidth={2.2} />}
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-sm font-semibold text-foreground">{share.name || 'Untitled link'}</span>
+            {protectedShare && (
+              <span className={cn('inline-flex items-center gap-1 rounded-[var(--radius-full)] px-2 py-px text-[11px] font-semibold', BADGE_AMBER)}>
+                <Lock size={10} strokeWidth={2.4} /> password
+              </span>
+            )}
+          </div>
+          {share.description && (
+            <p className="mt-[3px] text-[12.5px] leading-[1.45] text-muted-foreground">{share.description}</p>
+          )}
+        </div>
+        <button
+          onClick={() => setConfirming(true)}
+          title="Delete share"
+          className="flex h-7 w-7 shrink-0 cursor-pointer items-center justify-center rounded-[var(--radius-md)] border-none bg-transparent text-muted-foreground transition-colors hover:bg-[hsl(0_72%_51%/0.1)] hover:text-destructive"
+        >
+          <Trash2 size={15} strokeWidth={2} />
+        </button>
+      </div>
+
+      {/* URL row */}
+      <div className="mt-[11px] flex items-center gap-2">
+        <div className="flex min-w-0 flex-1 items-center gap-2 rounded-[var(--radius-md)] bg-muted px-[11px] py-[7px] font-mono text-[12.5px] text-foreground">
+          <Link2 size={13} className="shrink-0 text-muted-foreground" strokeWidth={2} />
+          <span className="overflow-hidden text-ellipsis whitespace-nowrap">{url}</span>
+        </div>
+        <button
+          onClick={copy}
+          className={cn(
+            'flex shrink-0 items-center gap-[5px] rounded-[var(--radius-md)] border px-3 py-[7px] text-[12.5px] font-semibold transition-colors',
+            copied ? 'border-success bg-[hsl(145_63%_42%/0.12)] text-success' : 'border-border bg-card text-foreground',
+          )}
+        >
+          {copied ? <Check size={13} strokeWidth={2.2} /> : <Copy size={13} strokeWidth={2.2} />}
+          {copied ? 'Copied' : 'Copy'}
+        </button>
+      </div>
+
+      {/* Footer meta — labeled columns so each value carries its own context */}
+      <div className="mt-[11px] grid grid-cols-3 gap-2 border-t border-border pt-2.5">
+        <div title={`Created ${formatCreated(share.createdAt)}`}>
+          <div className="text-[10px] font-semibold uppercase tracking-[0.06em] text-muted-foreground">Created by</div>
+          <div className="mt-1 flex min-w-0 items-center gap-1.5 text-xs">
+            <MiniAvatar member={creator} size={16} />
+            <span className="truncate font-semibold text-foreground">
+              {creator?.displayName ?? 'Team member'}
+              {isOwn && <span className="font-normal text-muted-foreground"> · you</span>}
+            </span>
+          </div>
+        </div>
+        <div title={share.lastViewedAt ? new Date(share.lastViewedAt).toLocaleString() : undefined}>
+          <div className="text-[10px] font-semibold uppercase tracking-[0.06em] text-muted-foreground">Last viewed</div>
+          <div className="mt-1 text-xs text-foreground">
+            {share.lastViewedAt ? formatLastViewed(share.lastViewedAt) : 'Never'}
+          </div>
+        </div>
+        <div>
+          <div className="text-[10px] font-semibold uppercase tracking-[0.06em] text-muted-foreground">View total</div>
+          <div className="mt-1 inline-flex items-center gap-1 text-xs text-foreground">
+            <Eye size={12} strokeWidth={2} className="text-muted-foreground" />
+            {share.viewCount}
+          </div>
+        </div>
+      </div>
+
+      {/* Inline delete confirm */}
+      {confirming && (
+        <div className="absolute inset-0 flex flex-col justify-center gap-2.5 rounded-[var(--radius-lg)] border border-destructive bg-card px-4 py-3.5">
+          <div className="flex items-start gap-2.5">
+            <div className="flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-[var(--radius-md)] bg-[hsl(0_72%_51%/0.1)] text-destructive">
+              <Trash2 size={15} strokeWidth={2.2} />
+            </div>
+            <div>
+              <div className="text-[13.5px] font-semibold text-foreground">Delete this share?</div>
+              <div className="mt-0.5 text-xs text-muted-foreground">Anyone with the link will immediately lose access. This can&apos;t be undone.</div>
+            </div>
+          </div>
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" size="sm" onClick={() => setConfirming(false)}>Cancel</Button>
+            <Button variant="destructive" size="sm" onClick={() => { onDelete(share.id); setConfirming(false) }}>Delete link</Button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── The add-share inline form ───────────────────────────────────────────────────
+
+/**
+ * No shadcn Textarea exists yet, so this mirrors Input's class string —
+ * keeps the field visually consistent without inline styles.
+ */
+const TEXTAREA_CLASSES = 'flex w-full resize-y rounded-md border border-[var(--border)] bg-[var(--background)] px-3 py-2 text-sm leading-relaxed text-[var(--foreground)] shadow-sm transition-colors placeholder:text-[var(--muted-foreground)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)]'
+
+function AddShareForm({
+  currentMember,
+  onCreate,
+  onCancel,
+  isPending,
+  isError,
+}: {
+  currentMember: TeamMemberWithUser | undefined
+  onCreate: (payload: CreatePayload) => void
+  onCancel: () => void
+  isPending: boolean
+  isError: boolean
+}) {
+  const [title, setTitle] = useState('')
+  const [desc, setDesc] = useState('')
+  const [pwOn, setPwOn] = useState(false)
+  const [pw, setPw] = useState('')
+  const [showPw, setShowPw] = useState(false)
+  const titleRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => { titleRef.current?.focus() }, [])
+
+  const valid = title.trim().length > 0 && (!pwOn || pw.trim().length > 0)
+
+  const submit = () => {
+    if (!valid || isPending) return
+    onCreate({ title: title.trim(), description: desc.trim(), password: pwOn ? pw : null })
+  }
+
+  return (
+    <div className="rounded-[var(--radius-lg)] border-[1.5px] border-primary bg-card p-4 shadow-[0_0_0_3px_hsl(188_59%_38%/0.08)]">
+      <div className="mb-3.5 flex items-center gap-2">
+        <PlusCircle size={16} className="text-primary" strokeWidth={2.2} />
+        <span className="text-[13.5px] font-bold text-foreground">New share link</span>
+      </div>
+
+      <div className="mb-3 flex flex-col gap-1.5">
+        <Label htmlFor="share-title">Title</Label>
+        <Input
+          id="share-title"
+          ref={titleRef}
+          value={title}
+          onChange={e => setTitle(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') submit() }}
+          placeholder="e.g. Acme stakeholder view"
+        />
+      </div>
+
+      <div className="mb-3 flex flex-col gap-1.5">
+        <Label htmlFor="share-description">
+          Description <span className="lowercase font-normal">· optional</span>
+        </Label>
+        <textarea
+          id="share-description"
+          value={desc}
+          onChange={e => setDesc(e.target.value)}
+          rows={2}
+          placeholder="What's this link for, and who is it shared with?"
+          className={TEXTAREA_CLASSES}
+        />
+      </div>
+
+      {/* Password protect */}
+      <div className="overflow-hidden rounded-[var(--radius-md)] border border-border">
+        <div className="flex items-center gap-2.5 px-3 py-2.5">
+          <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[var(--radius-md)] bg-muted text-muted-foreground">
+            <Lock size={14} strokeWidth={2} />
+          </div>
+          <div className="flex-1">
+            <div className="text-[13px] font-semibold text-foreground">Password protect</div>
+            <div className="text-[11.5px] text-muted-foreground">Require a password to open the link</div>
+          </div>
+          <button
+            onClick={() => setPwOn(v => !v)}
+            role="switch"
+            aria-checked={pwOn}
+            aria-label="Password protect"
+            className={cn(
+              'relative h-[22px] w-10 shrink-0 cursor-pointer rounded-[var(--radius-full)] border-none p-0 transition-colors',
+              pwOn ? 'bg-primary' : 'bg-border',
+            )}
+          >
+            <span className={cn(
+              'absolute top-[2px] h-[18px] w-[18px] rounded-full bg-white shadow-sm transition-[left] duration-150',
+              pwOn ? 'left-5' : 'left-[2px]',
+            )} />
+          </button>
+        </div>
+        {pwOn && (
+          <div className="border-t border-border px-3 py-3">
+            <div className="flex items-center gap-2 rounded-[var(--radius-md)] border border-input bg-card px-2.5">
+              <KeyRound size={14} className="text-muted-foreground" strokeWidth={2} />
+              <input
+                value={pw}
+                onChange={e => setPw(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') submit() }}
+                type={showPw ? 'text' : 'password'}
+                placeholder="Set a password"
+                className="flex-1 border-none bg-transparent py-2 text-[13px] text-foreground outline-none placeholder:text-muted-foreground"
+              />
+              <button
+                onClick={() => setShowPw(v => !v)}
+                aria-label={showPw ? 'Hide password' : 'Show password'}
+                className="flex cursor-pointer border-none bg-transparent p-1 text-muted-foreground"
+              >
+                {showPw ? <EyeOff size={14} strokeWidth={2} /> : <Eye size={14} strokeWidth={2} />}
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {isError && (
+        <p className="mt-2.5 text-[11px] text-destructive">Failed to create share. Please try again.</p>
+      )}
+
+      {/* Actions */}
+      <div className="mt-4 flex items-center gap-2.5">
+        <div className="mr-auto flex items-center gap-[7px] text-xs text-muted-foreground">
+          <MiniAvatar member={currentMember} size={20} />
+          <span>Sharing as {currentMember?.displayName ?? 'you'}</span>
+        </div>
+        <Button variant="outline" onClick={onCancel}>Cancel</Button>
+        <Button onClick={submit} disabled={!valid || isPending}>
+          <LinkIcon size={14} strokeWidth={2.2} /> {isPending ? 'Creating…' : 'Create link'}
+        </Button>
+      </div>
+    </div>
+  )
+}
+
+// ── The modal shell ──────────────────────────────────────────────────────────
+
+export default function ShareModal({ teamId, timelineId, viewType, viewConfig, timelineName, onClose }: Props) {
+  const { user } = useAuth()
+  const { data: allShares = [], isLoading } = useListShares(teamId, timelineId)
+  // Scoped to this exact view — a share is a frozen snapshot of one view's
+  // config, so a Gantt link can't usefully stand in for a List or Kanban one.
+  // Showing only same-type links keeps "active links" literal and leaves room
+  // to tailor the modal per view type (e.g. Calendar/ICS in 13.4) without
+  // having to reconcile it against unrelated shares.
+  // kind === 'view' also keeps ICS calendar feeds (13.4) out of this list —
+  // they live in CalendarShareModal, a different surface entirely.
+  const shares = allShares.filter(s => s.kind === 'view' && s.viewType === viewType)
+  const { data: members = [] } = useTeamMembers(teamId)
+  const createShare = useCreateShare(teamId, timelineId)
+  const deleteShare = useDeleteShare(teamId, timelineId)
+  const [adding, setAdding] = useState(false)
+  const bodyRef = useRef<HTMLDivElement>(null)
+
+  const memberByID = new Map(members.map(m => [m.id, m]))
+  const currentMember = members.find(m => m.userId && m.userId === user?.id)
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  const configString = JSON.stringify({
+    groupBy: viewConfig.groupBy,
+    sortBy: viewConfig.sortBy,
+    colorBy: viewConfig.colorBy,
+    granularity: viewConfig.granularity,
+    filter: viewConfig.filter ?? { logic: 'and', conditions: [] },
+    ...(viewConfig.columns ? { columns: viewConfig.columns } : {}),
+    ...(viewConfig.cardFields ? { cardFields: viewConfig.cardFields } : {}),
+    ...(viewConfig.showHierarchy !== undefined ? { showHierarchy: viewConfig.showHierarchy } : {}),
+    ...(viewConfig.collapsedColumns ? { collapsedColumns: viewConfig.collapsedColumns } : {}),
+  })
+
+  const handleCreate = (payload: CreatePayload) => {
+    createShare.mutate(
+      {
+        name: payload.title,
+        description: payload.description || null,
+        viewType,
+        viewConfig: configString,
+        password: payload.password ?? undefined,
+      },
+      {
+        onSuccess: () => {
+          setAdding(false)
+          setTimeout(() => { if (bodyRef.current) bodyRef.current.scrollTop = 0 }, 0)
+        },
+      },
+    )
+  }
+
+  return createPortal(
+    <div
+      className="fixed inset-0 z-[1000] flex items-center justify-center bg-[hsl(200_24%_11%/0.55)] p-6 backdrop-blur-[2px]"
+    >
+      <div
+        className="flex max-h-[88vh] w-[min(580px,100%)] flex-col overflow-hidden rounded-[var(--radius-xl)] bg-card shadow-[var(--shadow-lg)]"
+      >
+        {/* Header */}
+        <div className="flex shrink-0 items-start gap-3 border-b border-border px-5 py-[18px]">
+          <div className={cn('flex h-[38px] w-[38px] shrink-0 items-center justify-center rounded-[var(--radius-md)]', TILE_TEAL)}>
+            <LinkIcon size={19} strokeWidth={2.2} />
+          </div>
+          <div className="min-w-0 flex-1">
+            <h2 className="m-0 text-[17px] font-bold leading-tight text-foreground">Share this view</h2>
+            <div className="mt-0.5 flex items-center gap-1.5 text-[12.5px] text-muted-foreground">
+              <span className="inline-block h-2 w-2 shrink-0 rounded-sm bg-secondary" />
+              {timelineName ? `${timelineName} · ` : ''}anyone with a link can view
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            aria-label="Close"
+            className="flex h-[30px] w-[30px] shrink-0 cursor-pointer items-center justify-center rounded-[var(--radius-md)] border-none bg-muted text-muted-foreground"
+          >
+            <X size={16} strokeWidth={2.2} />
+          </button>
+        </div>
+
+        {/* Section bar */}
+        <div className="flex shrink-0 items-center gap-2 px-5 pb-[11px] pt-[13px]">
+          <span className="text-[11px] font-bold uppercase tracking-[0.06em] text-muted-foreground">Active links</span>
+          <span className="min-w-[20px] rounded-[var(--radius-full)] bg-muted px-2 py-px text-center text-[11px] font-bold text-muted-foreground">{shares.length}</span>
+          <div className="ml-auto">
+            {!adding && (
+              <Button size="sm" onClick={() => setAdding(true)}>
+                <Plus size={14} strokeWidth={2.4} /> New share
+              </Button>
+            )}
+          </div>
+        </div>
+
+        {/* Body */}
+        <div ref={bodyRef} className="flex min-h-[120px] flex-1 flex-col gap-3 overflow-y-auto px-5 pb-5">
+          {adding && (
+            <AddShareForm
+              currentMember={currentMember}
+              onCreate={handleCreate}
+              onCancel={() => setAdding(false)}
+              isPending={createShare.isPending}
+              isError={createShare.isError}
+            />
+          )}
+
+          {!isLoading && shares.length === 0 && !adding && (
+            <div className="flex flex-1 flex-col items-center justify-center rounded-[var(--radius-lg)] border border-dashed border-border px-5 py-9 text-center">
+              <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-[var(--radius-lg)] bg-muted text-muted-foreground">
+                <LinkIcon size={22} strokeWidth={1.8} />
+              </div>
+              <div className="text-sm font-semibold text-foreground">No share links yet</div>
+              <div className="mt-1 max-w-[280px] text-[12.5px] text-muted-foreground">Create a link to let people outside your team view this timeline.</div>
+              <Button size="sm" className="mt-4" onClick={() => setAdding(true)}>
+                <Plus size={14} strokeWidth={2.4} /> Create share link
+              </Button>
+            </div>
+          )}
+
+          {shares.map(s => (
+            <ShareRow
+              key={s.id}
+              share={s}
+              creator={s.createdBy ? memberByID.get(s.createdBy) : undefined}
+              isOwn={Boolean(currentMember && s.createdBy === currentMember.id)}
+              onDelete={(id) => deleteShare.mutate(id)}
+            />
+          ))}
+        </div>
+
+        {/* Footer */}
+        <div className="flex shrink-0 items-center gap-2.5 border-t border-border px-5 py-[13px]">
+          <div className="flex items-center gap-[7px] text-xs text-muted-foreground">
+            <Users size={14} strokeWidth={2} />
+            Read-only links · anyone on your team can manage them
+          </div>
+          <Button variant="outline" className="ml-auto" onClick={onClose}>Done</Button>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  )
+}
+````
+
+## File: packages/api/internal/api/share_handler.go
+````go
+package api
+
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"os"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/auth"
+	"github.com/I0-1O/draba/packages/api/internal/filters"
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// unlockMaxAttempts caps password-unlock attempts per client IP per hour. The
+// limit is per-share-independent (keyed on IP only) so cycling tokens cannot
+// multiply an attacker's budget.
+const unlockMaxAttempts = 10
+
+// ── In-memory share cache ─────────────────────────────────────────────────────
+
+type shareCacheEntry struct {
+	builtAt time.Time
+	payload models.ShareProjection
+}
+
+// shareCache is a lightweight TTL cache keyed by share token. It avoids a DB
+// hit on every warm request. The TTL is read from DRABA_SHARE_CACHE_TTL at
+// startup (default 60s); a PATCH or DELETE invalidates the entry immediately.
+type shareCache struct {
+	mu      sync.RWMutex
+	entries map[string]*shareCacheEntry
+	ttl     time.Duration
+}
+
+func newShareCache() *shareCache {
+	ttl := 60 * time.Second
+	if v := os.Getenv("DRABA_SHARE_CACHE_TTL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			ttl = d
+		}
+	}
+	return &shareCache{entries: make(map[string]*shareCacheEntry), ttl: ttl}
+}
+
+func (c *shareCache) get(token string) (*models.ShareProjection, bool) {
+	c.mu.RLock()
+	e, ok := c.entries[token]
+	c.mu.RUnlock()
+	if !ok {
+		return nil, false
+	}
+	if time.Since(e.builtAt) > c.ttl {
+		return nil, false
+	}
+	p := e.payload
+	return &p, true
+}
+
+func (c *shareCache) set(token string, p *models.ShareProjection) {
+	c.mu.Lock()
+	c.entries[token] = &shareCacheEntry{builtAt: time.Now(), payload: *p}
+	c.mu.Unlock()
+}
+
+func (c *shareCache) invalidate(token string) {
+	c.mu.Lock()
+	delete(c.entries, token)
+	c.mu.Unlock()
+}
+
+// ── viewConfig sub-types ──────────────────────────────────────────────────────
+
+// viewConfigJSON is the shape stored in shares.view_config. The filter field
+// is evaluated server-side by the Go filter engine; the other fields are
+// forwarded to the client as-is so the public viewer can apply them.
+//
+// columns carries the List view's column visibility snapshot — it drives the
+// "notes" projection nuance below (and lets the public viewer render exactly
+// the columns the share creator chose).
+type viewConfigJSON struct {
+	Filter  *filters.FilterDefinition `json:"filter,omitempty"`
+	Columns []shareColumnConfig       `json:"columns,omitempty"`
+}
+
+type shareColumnConfig struct {
+	ID      string `json:"id"`
+	Visible bool   `json:"visible"`
+}
+
+// ── Handlers ──────────────────────────────────────────────────────────────────
+
+// handleGetShareProjection handles GET /shares/{token}. No authentication is
+// required. It is the public data gateway: the scope is hard-locked to the
+// single timeline referenced by the share row; no client-supplied selector can
+// widen it.
+func (s *Server) handleGetShareProjection(w http.ResponseWriter, r *http.Request) {
+	token := r.PathValue("token")
+
+	// GET /shares/{token}.ics — Go 1.22 mux wildcards span the whole path
+	// segment, so the ICS feed's .ics suffix arrives inside {token}; dispatch
+	// it to the calendar-feed handler (Phase 13.4).
+	if strings.HasSuffix(token, ".ics") {
+		s.serveICSFeed(w, r, strings.TrimSuffix(token, ".ics"))
+		return
+	}
+
+	// ── 1. Resolve the share row ──────────────────────────────────────────────
+	share, err := s.shares.GetByToken(token)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load share")
+		return
+	}
+
+	// An ICS feed is only reachable through the .ics endpoint. Serving it as a
+	// JSON projection would expose the whole timeline for member-scoped feeds
+	// (the projection has no member filter), so the kinds never cross over.
+	if share.Kind != models.ShareKindView {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+		return
+	}
+
+	// Phase 13.4 — revocation / expiry handled here (fields exist in schema now).
+	if share.RevokedAt != nil {
+		writeError(w, http.StatusGone, "GONE", "this share has been revoked")
+		return
+	}
+	if share.ExpiresAt != nil && time.Now().After(*share.ExpiresAt) {
+		writeError(w, http.StatusGone, "GONE", "this share has expired")
+		return
+	}
+
+	// Archived timeline → its shares stop serving (Phase 13.5). Checked on
+	// every request — before the cache read — so archiving takes effect
+	// immediately regardless of a warm projection cache.
+	if !s.shareTimelineLive(w, share) {
+		return
+	}
+
+	// Password gate (Phase 13.2). A locked share serves no data without a valid
+	// view token — obtained by exchanging the password at POST /shares/{token}/unlock.
+	// NOTE: this check must stay above the cache read. PATCH invalidates the cache
+	// entry immediately (see handleUpdateShare), so a newly-added password_hash is
+	// never served from a stale cache. Moving the check below the cache read would
+	// silently bypass the password gate for the TTL window. The 401 body carries no
+	// projection data — only the passwordRequired signal the viewer needs.
+	if share.PasswordHash != nil {
+		vt := bearerToken(r)
+		if vt == "" || s.tokens.ValidateShareViewToken(vt, share.ID) != nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]bool{"passwordRequired": true})
+			return
+		}
+	}
+
+	// ── 2. Serve from cache if warm ───────────────────────────────────────────
+	if proj, ok := s.shareCache.get(token); ok {
+		go func() { _ = s.shares.RecordView(share.ID) }()
+		writeJSON(w, http.StatusOK, proj)
+		return
+	}
+
+	// ── 3. Build projection (cache miss) ─────────────────────────────────────
+	proj, err := s.buildShareProjection(share)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to build share projection")
+		return
+	}
+
+	s.shareCache.set(token, proj)
+	go func() { _ = s.shares.RecordView(share.ID) }()
+	writeJSON(w, http.StatusOK, proj)
+}
+
+// shareTimelineLive loads the share's timeline and reports whether it is
+// servable on the public surface, writing the error response when it is not.
+// An archived timeline answers 404, not 410: archiving is reversible —
+// unarchiving must resurrect existing links — and 410 tells calendar clients
+// to drop a subscription permanently. 404 also matches handleCreateShare's
+// archived-timeline response without leaking archive state.
+func (s *Server) shareTimelineLive(w http.ResponseWriter, share *models.Share) bool {
+	timeline, err := s.timelines.GetByID(share.TimelineID)
+	if errors.Is(err, sql.ErrNoRows) {
+		// A share row outliving a hard-deleted timeline answers the same 404 as
+		// every other dead-share case — a 500 here would be a state oracle on
+		// the public surface.
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+		return false
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load share")
+		return false
+	}
+	if timeline.ArchivedAt != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+		return false
+	}
+	return true
+}
+
+// buildShareProjection assembles the full ShareProjection for a share.
+// The scope is hard-locked to share.TimelineID; the caller cannot supply a
+// different timeline ID. Filter evaluation runs in Go before any data leaves
+// the server.
+func (s *Server) buildShareProjection(share *models.Share) (*models.ShareProjection, error) {
+	// Get timeline — using the share's TimelineID, never a client-supplied value.
+	timeline, err := s.timelines.GetByID(share.TimelineID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Get all non-archived activities for this timeline.
+	acts, err := s.activities.ListByTimeline(share.TimelineID, nil, nil, false)
+	if err != nil {
+		return nil, err
+	}
+
+	// Get statuses and tags for filter context + projection.
+	statuses, err := s.statuses.ListStatuses(share.TimelineID)
+	if err != nil {
+		return nil, err
+	}
+	tags, err := s.tags.ListByTeam(timeline.TeamID)
+	if err != nil {
+		return nil, err
+	}
+	members, err := s.teams.ListMembers(timeline.TeamID)
+	if err != nil {
+		return nil, err
+	}
+	team, err := s.teams.GetByID(timeline.TeamID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Parse the frozen filter from view_config and evaluate it server-side.
+	var vc viewConfigJSON
+	if share.ViewConfig != "" && share.ViewConfig != "{}" {
+		_ = json.Unmarshal([]byte(share.ViewConfig), &vc)
+	}
+
+	var filteredActs []*models.Activity
+	if vc.Filter != nil && len(vc.Filter.Conditions) > 0 {
+		// Build filter context.
+		statusesByTL := map[string][]models.Status{share.TimelineID: {}}
+		for _, st := range statuses {
+			statusesByTL[share.TimelineID] = append(statusesByTL[share.TimelineID], *st)
+		}
+		modelTags := make([]models.Tag, 0, len(tags))
+		for _, t := range tags {
+			modelTags = append(modelTags, *t)
+		}
+		ctx := &filters.FilterContext{
+			StatusesByTimelineID: statusesByTL,
+			Tags:                 modelTags,
+		}
+		for _, a := range acts {
+			if filters.MatchesFilter(a, vc.Filter, ctx) {
+				filteredActs = append(filteredActs, a)
+			}
+		}
+	} else {
+		filteredActs = acts
+	}
+
+	// Build referenced-entity sets (prune to what surviving activities reference).
+	usedMemberIDs := make(map[string]bool)
+	usedStatusIDs := make(map[string]bool)
+	usedTagIDs := make(map[string]bool)
+	for _, a := range filteredActs {
+		for _, id := range a.AssignedMemberIDs {
+			usedMemberIDs[id] = true
+		}
+		if a.StatusID != nil {
+			usedStatusIDs[*a.StatusID] = true
+		}
+		for _, id := range a.TagIDs {
+			usedTagIDs[id] = true
+		}
+	}
+
+	// notes is included only for List shares whose creator left the Notes
+	// column visible — the only projection nuance beyond scope-locking and
+	// field-pruning (Phase 13.3 exit criteria).
+	notesEnabled := false
+	if share.ViewType == "list" {
+		for _, c := range vc.Columns {
+			if c.ID == "notes" && c.Visible {
+				notesEnabled = true
+				break
+			}
+		}
+	}
+
+	// Build PublicActivity slice.
+	pubActivities := make([]models.PublicActivity, 0, len(filteredActs))
+	for _, a := range filteredActs {
+		pub := models.PublicActivity{
+			ID:                a.ID,
+			Title:             a.Title,
+			Description:       a.Description,
+			Icon:              a.Icon,
+			Color:             a.Color,
+			StartAt:           a.StartAt,
+			EndAt:             a.EndAt,
+			AllDay:            a.AllDay,
+			StatusID:          a.StatusID,
+			ParentActivityID:  a.ParentActivityID,
+			PercentComplete:   a.PercentComplete,
+			AssignedMemberIDs: a.AssignedMemberIDs,
+			TagIDs:            a.TagIDs,
+		}
+		if notesEnabled {
+			pub.Notes = a.Notes
+		}
+		if pub.AssignedMemberIDs == nil {
+			pub.AssignedMemberIDs = []string{}
+		}
+		if pub.TagIDs == nil {
+			pub.TagIDs = []string{}
+		}
+		pubActivities = append(pubActivities, pub)
+	}
+
+	// Build PublicMember slice — never email/role/userId.
+	pubMembers := make([]models.PublicMember, 0)
+	for _, m := range members {
+		if !usedMemberIDs[m.ID] {
+			continue
+		}
+		name := m.DisplayName
+		if name == "" {
+			// The register endpoint requires a non-empty displayName, so this
+			// branch only fires for rows migrated from older data. Never fall
+			// back to the email address — this response is public and
+			// unauthenticated.
+			name = "Team member"
+		}
+		pubMembers = append(pubMembers, models.PublicMember{
+			ID:          m.ID,
+			DisplayName: name,
+			Color:       m.Color,
+			Icon:        m.Icon,
+		})
+	}
+
+	// Prune statuses to referenced ones — except for Kanban shares, where
+	// every status is a column regardless of whether it currently holds any
+	// activities (mirrors the in-app board, which always renders one column
+	// per timeline status). Pruning there would silently drop empty columns
+	// that anonymous viewers would otherwise see, e.g. an empty "Deferred"
+	// column that's still meaningful to the team.
+	pubStatuses := make([]models.Status, 0)
+	for _, st := range statuses {
+		if share.ViewType == "kanban" || usedStatusIDs[st.ID] {
+			pubStatuses = append(pubStatuses, *st)
+		}
+	}
+
+	// Prune tags to referenced ones.
+	pubTags := make([]models.Tag, 0)
+	for _, tg := range tags {
+		if usedTagIDs[tg.ID] {
+			pubTags = append(pubTags, *tg)
+		}
+	}
+
+	// Build the public share — only the fields anonymous callers need.
+	// Operational telemetry (view_count, last_viewed_at) and internal fields
+	// (created_by, revoked_at) are excluded from the public response.
+	pubShare := models.PublicShare{
+		ID:         share.ID,
+		TimelineID: share.TimelineID,
+		Token:      share.Token,
+		Name:       share.Name,
+		ViewType:   share.ViewType,
+		ViewConfig: share.ViewConfig,
+		CreatedAt:  share.CreatedAt,
+		ExpiresAt:  share.ExpiresAt,
+	}
+	proj := &models.ShareProjection{
+		Share:    pubShare,
+		TeamName: team.Name,
+		Timeline: models.PublicTimeline{
+			ID:        timeline.ID,
+			Name:      timeline.Name,
+			Color:     timeline.Color,
+			Icon:      timeline.Icon,
+			StartDate: timeline.StartDate,
+			EndDate:   timeline.EndDate,
+		},
+		Members:    pubMembers,
+		Statuses:   pubStatuses,
+		Tags:       pubTags,
+		Activities: pubActivities,
+	}
+	return proj, nil
+}
+
+// handleCreateShare handles POST /timelines/{id}/shares. The caller must be a
+// member of the timeline's team. The share captures the current view config.
+func (s *Server) handleCreateShare(w http.ResponseWriter, r *http.Request) {
+	timelineID := r.PathValue("id")
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
+		return
+	}
+	if timeline.ArchivedAt != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+		return
+	}
+
+	member, ok := s.requireTeamMember(w, r, timeline.TeamID)
+	if !ok {
+		return
+	}
+
+	var req createShareBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+	if req.Kind == "" {
+		req.Kind = models.ShareKindView
+	}
+	if req.Kind != models.ShareKindView && req.Kind != models.ShareKindICS {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "kind must be 'view' or 'ics'")
+		return
+	}
+	if req.ViewType == "" {
+		req.ViewType = "gantt"
+	}
+	if req.ViewConfig == "" {
+		req.ViewConfig = "{}"
+	}
+
+	now := time.Now().UTC()
+	share := &models.Share{
+		ID:          newID(),
+		TimelineID:  timelineID,
+		Token:       newToken(),
+		Kind:        req.Kind,
+		Name:        req.Name,
+		Description: req.Description,
+		ViewType:    req.ViewType,
+		ViewConfig:  req.ViewConfig,
+		CreatedAt:   now,
+		ViewCount:   0,
+	}
+	// A superadmin managing a team they're not in arrives as a synthetic
+	// member with an empty ID (see requireTeamMember); created_by stays NULL
+	// for them rather than violating the team_members FK.
+	if member.ID != "" {
+		share.CreatedBy = &member.ID
+	}
+
+	if req.Kind == models.ShareKindICS {
+		// An ICS feed has no view semantics and no password — the token is the
+		// secret (calendar clients cannot unlock interactively). Scope is the
+		// only configuration: the whole timeline, or one member's assignments.
+		if req.Password != nil && strings.TrimSpace(*req.Password) != "" {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "ICS feeds cannot be password protected")
+			return
+		}
+		if req.Scope != models.ShareScopeTimeline && req.Scope != models.ShareScopeMember {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "scope must be 'timeline' or 'member' for ICS shares")
+			return
+		}
+		share.Scope = &req.Scope
+		share.ViewType = "calendar"
+		share.ViewConfig = "{}"
+		if req.Scope == models.ShareScopeMember {
+			if req.MemberID == nil || *req.MemberID == "" {
+				writeError(w, http.StatusBadRequest, "BAD_REQUEST", "memberId is required for member-scoped ICS shares")
+				return
+			}
+			// The member must belong to this timeline's team — a feed must not
+			// be creatable for an arbitrary member ID from another team.
+			feedMember, err := s.teams.GetMemberByID(*req.MemberID)
+			if err != nil || feedMember.TeamID != timeline.TeamID {
+				writeError(w, http.StatusBadRequest, "BAD_REQUEST", "memberId does not belong to this timeline's team")
+				return
+			}
+			share.MemberID = req.MemberID
+		}
+	}
+
+	// Optional password protection (view shares only). An empty/whitespace
+	// string means "no password" — the field stays NULL and the share is open.
+	if req.Kind == models.ShareKindView && req.Password != nil && strings.TrimSpace(*req.Password) != "" {
+		hash, err := auth.HashPassword(*req.Password)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to secure share")
+			return
+		}
+		share.PasswordHash = &hash
+	}
+
+	if err := s.shares.Create(share); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create share")
+		return
+	}
+
+	// Surface the derived flag in the create response (the repo sets it on reads).
+	share.Protected = share.PasswordHash != nil
+	writeJSON(w, http.StatusCreated, share)
+}
+
+// handleListShares handles GET /teams/{id}/timelines/{timelineId}/shares.
+// Only team members with access to the timeline may list its shares.
+func (s *Server) handleListShares(w http.ResponseWriter, r *http.Request) {
+	timelineID := r.PathValue("timelineId")
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
+		return
+	}
+
+	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
+		return
+	}
+
+	shares, err := s.shares.ListByTimeline(timelineID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list shares")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, shares)
+}
+
+// handleUpdateShare handles PATCH /shares/{id}. Any member of the timeline's
+// team may update it (shares are read-only projections — no creator/admin gate).
+func (s *Server) handleUpdateShare(w http.ResponseWriter, r *http.Request) {
+	shareID := r.PathValue("id")
+
+	share, err := s.shares.GetByID(shareID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
+		return
+	}
+
+	timeline, err := s.timelines.GetByID(share.TimelineID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
+		return
+	}
+
+	// Any member of the timeline's team may manage its shares. A share is a
+	// read-only projection that can never mutate app data, so there is no
+	// creator/admin gate (Phase 13.2 re-sequencing decision).
+	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
+		return
+	}
+
+	var req patchShareBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	if req.Name != nil {
+		share.Name = req.Name
+	}
+	if req.Description != nil {
+		share.Description = req.Description
+	}
+	if req.ViewType != nil {
+		share.ViewType = *req.ViewType
+	}
+	if req.ViewConfig != nil {
+		share.ViewConfig = *req.ViewConfig
+	}
+	// Password: nil leaves it unchanged; an empty string clears protection; a
+	// non-empty string sets/replaces it. ICS feeds can never carry one —
+	// calendar clients have no interactive unlock.
+	if req.Password != nil && share.Kind == models.ShareKindICS && strings.TrimSpace(*req.Password) != "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "ICS feeds cannot be password protected")
+		return
+	}
+	if req.Password != nil {
+		if strings.TrimSpace(*req.Password) == "" {
+			share.PasswordHash = nil
+		} else {
+			hash, err := auth.HashPassword(*req.Password)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to secure share")
+				return
+			}
+			share.PasswordHash = &hash
+		}
+	}
+
+	if err := s.shares.Update(share); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update share")
+		return
+	}
+
+	// Invalidate caches so the next public request picks up the new config.
+	s.shareCache.invalidate(share.Token)
+	s.icsCache.invalidate(share.Token)
+
+	// Refresh the derived flag — the password may have just been set/cleared.
+	share.Protected = share.PasswordHash != nil
+	writeJSON(w, http.StatusOK, share)
+}
+
+// handleDeleteShare handles DELETE /shares/{id}. Any member of the timeline's
+// team may delete it (see handleUpdateShare).
+func (s *Server) handleDeleteShare(w http.ResponseWriter, r *http.Request) {
+	shareID := r.PathValue("id")
+
+	share, err := s.shares.GetByID(shareID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
+		return
+	}
+
+	timeline, err := s.timelines.GetByID(share.TimelineID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
+		return
+	}
+
+	// Any member of the timeline's team may delete its shares — no creator/admin
+	// gate (see handleUpdateShare).
+	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
+		return
+	}
+
+	if err := s.shares.Delete(shareID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete share")
+		return
+	}
+
+	s.shareCache.invalidate(share.Token)
+	s.icsCache.invalidate(share.Token)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleUnlockShare handles POST /shares/{token}/unlock. It is public (no auth
+// middleware): an anonymous viewer exchanges the share password for a
+// short-lived view token, which they then present on GET /shares/{token}.
+// Attempts are rate-limited per client IP to blunt brute-force guessing.
+func (s *Server) handleUnlockShare(w http.ResponseWriter, r *http.Request) {
+	if !s.unlockLimiter.allow(clientIP(r)) {
+		writeError(w, http.StatusTooManyRequests, "RATE_LIMITED", "too many unlock attempts; try again later")
+		return
+	}
+
+	token := r.PathValue("token")
+
+	share, err := s.shares.GetByToken(token)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load share")
+		return
+	}
+
+	// Mirror the GET gateway's revocation/expiry checks so a dead share cannot
+	// be unlocked.
+	if share.RevokedAt != nil {
+		writeError(w, http.StatusGone, "GONE", "this share has been revoked")
+		return
+	}
+	if share.ExpiresAt != nil && time.Now().After(*share.ExpiresAt) {
+		writeError(w, http.StatusGone, "GONE", "this share has expired")
+		return
+	}
+	// ICS feeds are never password protected; mirror the projection gateway's
+	// 404 rather than confirming the token exists in another mode.
+	if share.Kind != models.ShareKindView {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+		return
+	}
+	// Mirror the GET gateway's archived-timeline 404 (Phase 13.5) — a dead
+	// share must not be unlockable, and the check precedes NOT_PROTECTED so an
+	// archived timeline reveals nothing about its shares' protection state.
+	if !s.shareTimelineLive(w, share) {
+		return
+	}
+	if share.PasswordHash == nil {
+		writeError(w, http.StatusBadRequest, "NOT_PROTECTED", "this share is not password protected")
+		return
+	}
+
+	var req unlockShareBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+	if auth.CheckPassword(*share.PasswordHash, req.Password) != nil {
+		writeError(w, http.StatusUnauthorized, "INVALID_PASSWORD", "incorrect password")
+		return
+	}
+
+	viewToken, err := s.tokens.IssueShareViewToken(share.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to issue view token")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"token": viewToken})
+}
+
+// bearerToken extracts a Bearer credential from the Authorization header, or
+// returns "" when absent or malformed.
+func bearerToken(r *http.Request) string {
+	header := r.Header.Get("Authorization")
+	if !strings.HasPrefix(header, "Bearer ") {
+		return ""
+	}
+	return strings.TrimPrefix(header, "Bearer ")
+}
+
+// ── Request bodies ────────────────────────────────────────────────────────────
+
+type createShareBody struct {
+	Kind        string  `json:"kind,omitempty"`
+	Scope       string  `json:"scope,omitempty"`
+	MemberID    *string `json:"memberId,omitempty"`
+	Name        *string `json:"name,omitempty"`
+	Description *string `json:"description,omitempty"`
+	ViewType    string  `json:"viewType"`
+	ViewConfig  string  `json:"viewConfig"`
+	Password    *string `json:"password,omitempty"`
+}
+
+type patchShareBody struct {
+	Name        *string `json:"name,omitempty"`
+	Description *string `json:"description,omitempty"`
+	ViewType    *string `json:"viewType,omitempty"`
+	ViewConfig  *string `json:"viewConfig,omitempty"`
+	Password    *string `json:"password,omitempty"`
+}
+
+type unlockShareBody struct {
+	Password string `json:"password"`
 }
 ````
 
@@ -57849,6 +60221,11 @@ export interface components {
             /** @description User-level identity icon ID. Propagates to team memberships. */
             icon?: string | null;
             isSuperadmin: boolean;
+            /**
+             * @description How this account authenticates. SSO-managed (oidc) accounts have no local password.
+             * @enum {string}
+             */
+            authProvider: "local" | "oidc";
             /** Format: date-time */
             createdAt: string;
             /** Format: date-time */
@@ -61449,7 +63826,7 @@ components:
 
     User:
       type: object
-      required: [id, email, displayName, isSuperadmin, createdAt, updatedAt]
+      required: [id, email, displayName, isSuperadmin, authProvider, createdAt, updatedAt]
       properties:
         id:
           type: string
@@ -61471,6 +63848,10 @@ components:
           description: User-level identity icon ID. Propagates to team memberships.
         isSuperadmin:
           type: boolean
+        authProvider:
+          type: string
+          enum: [local, oidc]
+          description: How this account authenticates. SSO-managed (oidc) accounts have no local password.
         createdAt:
           type: string
           format: date-time
@@ -65615,1299 +67996,6 @@ paths:
           $ref: "#/components/responses/NotFound"
         "500":
           $ref: "#/components/responses/InternalError"
-````
-
-## File: packages/web/src/components/ShareModal.tsx
-````typescript
-/**
- * ShareModal — manage the share links for the current timeline view.
- *
- * Rebuilt to the "Share this view" design handoff (docs/design/handoffs/share-modal):
- * an active-links list with per-row creator/date/view-count meta and an inline
- * delete-confirm, plus an inline create form with optional password protection.
- * One timeline can host many named shares; each is a frozen view snapshot.
- *
- * Styled with Tailwind utility classes against the project's design tokens
- * (see index.css `@theme`) and shadcn/ui primitives — the handoff is a visual
- * reference, not production code, so its inline styles were not ported.
- *
- * Delete is intentionally not permission-gated — a share is a read-only
- * projection that cannot mutate app data, so any team member may manage any
- * link (Phase 13.2 decision).
- */
-
-import { useEffect, useRef, useState } from 'react'
-import { createPortal } from 'react-dom'
-import {
-  Link as LinkIcon, Link2, Lock, KeyRound, Copy, Check, Eye, EyeOff,
-  Trash2, Plus, PlusCircle, X, Users,
-} from 'lucide-react'
-import { useCreateShare, useListShares, useDeleteShare } from '@/hooks/useShares'
-import { useTeamMembers } from '@/hooks/useTeamActivities'
-import { useAuth } from '@/contexts/AuthContext'
-import { Badge } from '@/components/identity/Badge'
-import { resolveColorHex } from '@/components/identity/identity-constants'
-import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import { cn } from '@/lib/utils'
-import { MEMBER_COLORS } from '@/types'
-import type { FilterDefinition } from '@/lib/filterTypes'
-import type { components } from '@draba/shared'
-
-type Share = components['schemas']['Share']
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
-
-export interface ShareViewConfig {
-  groupBy: string
-  sortBy: string
-  colorBy: string
-  granularity: string
-  filter: FilterDefinition | null
-  /** List shares only — column visibility snapshot; drives the "notes" projection nuance. */
-  columns?: { id: string; visible: boolean }[]
-  /** Kanban shares only — which fields render on each card. */
-  cardFields?: string[]
-  /** Kanban shares only — whether child activities nest under their parent. */
-  showHierarchy?: boolean
-  /** Kanban shares only — column IDs collapsed at share-creation time. */
-  collapsedColumns?: string[]
-}
-
-interface Props {
-  teamId: string
-  timelineId: string
-  viewType: 'gantt' | 'list' | 'calendar' | 'kanban'
-  viewConfig: ShareViewConfig
-  /** Display name of the timeline, shown in the header subtitle. */
-  timelineName?: string
-  onClose: () => void
-}
-
-interface CreatePayload {
-  title: string
-  description: string
-  password: string | null
-}
-
-// ── Shared token-styled bits ──────────────────────────────────────────────────
-//
-// The handoff colors a share's "type tile" teal (open link) or amber
-// (password-protected). Those tints aren't semantic tokens on their own, so
-// they're expressed as arbitrary-value Tailwind classes derived from the
-// existing `--primary` / `--secondary` HSL values rather than ported hex.
-
-const TILE_TEAL = 'bg-[hsl(188_59%_38%/0.12)] text-primary'
-const TILE_AMBER = 'bg-[hsl(30_87%_62%/0.16)] text-secondary'
-const BADGE_AMBER = 'bg-[hsl(30_87%_62%/0.22)] text-secondary-foreground'
-
-function MiniAvatar({ member, size = 20 }: { member: TeamMemberWithUser | undefined; size?: number }) {
-  if (!member) return null
-  const name = member.displayName || 'Team member'
-  const color = resolveColorHex(member.color) || MEMBER_COLORS[0]
-  return (
-    <Badge identity={{ color, icon: member.icon ?? '__name_1__' }} name={name} size={size} shape="circle" />
-  )
-}
-
-function formatCreated(iso: string): string {
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return ''
-  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
-}
-
-/**
- * Short "last viewed" label for a share row: time of day when the last view
- * was today, otherwise the same short date format as the created date.
- */
-function formatLastViewed(iso: string): string {
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return ''
-  const now = new Date()
-  if (d.toDateString() === now.toDateString()) {
-    return d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
-  }
-  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
-}
-
-// ── A single share row ─────────────────────────────────────────────────────────
-
-function ShareRow({
-  share,
-  creator,
-  isOwn,
-  onDelete,
-}: {
-  share: Share
-  creator: TeamMemberWithUser | undefined
-  isOwn: boolean
-  onDelete: (id: string) => void
-}) {
-  const url = `${window.location.host}/s/${share.token}`
-  const [copied, setCopied] = useState(false)
-  const [confirming, setConfirming] = useState(false)
-  const protectedShare = Boolean(share.protected)
-
-  const copy = () => {
-    void navigator.clipboard.writeText(`${window.location.origin}/s/${share.token}`).then(() => {
-      setCopied(true)
-      setTimeout(() => setCopied(false), 1600)
-    })
-  }
-
-  return (
-    <div className="relative rounded-[var(--radius-lg)] border border-border bg-card p-3.5 shadow-sm">
-      {/* Top: type tile + title + delete */}
-      <div className="flex items-start gap-2.5">
-        <div className={cn('flex h-8 w-8 shrink-0 items-center justify-center rounded-[var(--radius-md)]', protectedShare ? TILE_AMBER : TILE_TEAL)}>
-          {protectedShare ? <Lock size={16} strokeWidth={2.2} /> : <LinkIcon size={16} strokeWidth={2.2} />}
-        </div>
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="text-sm font-semibold text-foreground">{share.name || 'Untitled link'}</span>
-            {protectedShare && (
-              <span className={cn('inline-flex items-center gap-1 rounded-[var(--radius-full)] px-2 py-px text-[11px] font-semibold', BADGE_AMBER)}>
-                <Lock size={10} strokeWidth={2.4} /> password
-              </span>
-            )}
-          </div>
-          {share.description && (
-            <p className="mt-[3px] text-[12.5px] leading-[1.45] text-muted-foreground">{share.description}</p>
-          )}
-        </div>
-        <button
-          onClick={() => setConfirming(true)}
-          title="Delete share"
-          className="flex h-7 w-7 shrink-0 cursor-pointer items-center justify-center rounded-[var(--radius-md)] border-none bg-transparent text-muted-foreground transition-colors hover:bg-[hsl(0_72%_51%/0.1)] hover:text-destructive"
-        >
-          <Trash2 size={15} strokeWidth={2} />
-        </button>
-      </div>
-
-      {/* URL row */}
-      <div className="mt-[11px] flex items-center gap-2">
-        <div className="flex min-w-0 flex-1 items-center gap-2 rounded-[var(--radius-md)] bg-muted px-[11px] py-[7px] font-mono text-[12.5px] text-foreground">
-          <Link2 size={13} className="shrink-0 text-muted-foreground" strokeWidth={2} />
-          <span className="overflow-hidden text-ellipsis whitespace-nowrap">{url}</span>
-        </div>
-        <button
-          onClick={copy}
-          className={cn(
-            'flex shrink-0 items-center gap-[5px] rounded-[var(--radius-md)] border px-3 py-[7px] text-[12.5px] font-semibold transition-colors',
-            copied ? 'border-success bg-[hsl(145_63%_42%/0.12)] text-success' : 'border-border bg-card text-foreground',
-          )}
-        >
-          {copied ? <Check size={13} strokeWidth={2.2} /> : <Copy size={13} strokeWidth={2.2} />}
-          {copied ? 'Copied' : 'Copy'}
-        </button>
-      </div>
-
-      {/* Footer meta — labeled columns so each value carries its own context */}
-      <div className="mt-[11px] grid grid-cols-3 gap-2 border-t border-border pt-2.5">
-        <div title={`Created ${formatCreated(share.createdAt)}`}>
-          <div className="text-[10px] font-semibold uppercase tracking-[0.06em] text-muted-foreground">Created by</div>
-          <div className="mt-1 flex min-w-0 items-center gap-1.5 text-xs">
-            <MiniAvatar member={creator} size={16} />
-            <span className="truncate font-semibold text-foreground">
-              {creator?.displayName ?? 'Team member'}
-              {isOwn && <span className="font-normal text-muted-foreground"> · you</span>}
-            </span>
-          </div>
-        </div>
-        <div title={share.lastViewedAt ? new Date(share.lastViewedAt).toLocaleString() : undefined}>
-          <div className="text-[10px] font-semibold uppercase tracking-[0.06em] text-muted-foreground">Last viewed</div>
-          <div className="mt-1 text-xs text-foreground">
-            {share.lastViewedAt ? formatLastViewed(share.lastViewedAt) : 'Never'}
-          </div>
-        </div>
-        <div>
-          <div className="text-[10px] font-semibold uppercase tracking-[0.06em] text-muted-foreground">View total</div>
-          <div className="mt-1 inline-flex items-center gap-1 text-xs text-foreground">
-            <Eye size={12} strokeWidth={2} className="text-muted-foreground" />
-            {share.viewCount}
-          </div>
-        </div>
-      </div>
-
-      {/* Inline delete confirm */}
-      {confirming && (
-        <div className="absolute inset-0 flex flex-col justify-center gap-2.5 rounded-[var(--radius-lg)] border border-destructive bg-card px-4 py-3.5">
-          <div className="flex items-start gap-2.5">
-            <div className="flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-[var(--radius-md)] bg-[hsl(0_72%_51%/0.1)] text-destructive">
-              <Trash2 size={15} strokeWidth={2.2} />
-            </div>
-            <div>
-              <div className="text-[13.5px] font-semibold text-foreground">Delete this share?</div>
-              <div className="mt-0.5 text-xs text-muted-foreground">Anyone with the link will immediately lose access. This can&apos;t be undone.</div>
-            </div>
-          </div>
-          <div className="flex justify-end gap-2">
-            <Button variant="outline" size="sm" onClick={() => setConfirming(false)}>Cancel</Button>
-            <Button variant="destructive" size="sm" onClick={() => { onDelete(share.id); setConfirming(false) }}>Delete link</Button>
-          </div>
-        </div>
-      )}
-    </div>
-  )
-}
-
-// ── The add-share inline form ───────────────────────────────────────────────────
-
-/**
- * No shadcn Textarea exists yet, so this mirrors Input's class string —
- * keeps the field visually consistent without inline styles.
- */
-const TEXTAREA_CLASSES = 'flex w-full resize-y rounded-md border border-[var(--border)] bg-[var(--background)] px-3 py-2 text-sm leading-relaxed text-[var(--foreground)] shadow-sm transition-colors placeholder:text-[var(--muted-foreground)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)]'
-
-function AddShareForm({
-  currentMember,
-  onCreate,
-  onCancel,
-  isPending,
-  isError,
-}: {
-  currentMember: TeamMemberWithUser | undefined
-  onCreate: (payload: CreatePayload) => void
-  onCancel: () => void
-  isPending: boolean
-  isError: boolean
-}) {
-  const [title, setTitle] = useState('')
-  const [desc, setDesc] = useState('')
-  const [pwOn, setPwOn] = useState(false)
-  const [pw, setPw] = useState('')
-  const [showPw, setShowPw] = useState(false)
-  const titleRef = useRef<HTMLInputElement>(null)
-
-  useEffect(() => { titleRef.current?.focus() }, [])
-
-  const valid = title.trim().length > 0 && (!pwOn || pw.trim().length > 0)
-
-  const submit = () => {
-    if (!valid || isPending) return
-    onCreate({ title: title.trim(), description: desc.trim(), password: pwOn ? pw : null })
-  }
-
-  return (
-    <div className="rounded-[var(--radius-lg)] border-[1.5px] border-primary bg-card p-4 shadow-[0_0_0_3px_hsl(188_59%_38%/0.08)]">
-      <div className="mb-3.5 flex items-center gap-2">
-        <PlusCircle size={16} className="text-primary" strokeWidth={2.2} />
-        <span className="text-[13.5px] font-bold text-foreground">New share link</span>
-      </div>
-
-      <div className="mb-3 flex flex-col gap-1.5">
-        <Label htmlFor="share-title">Title</Label>
-        <Input
-          id="share-title"
-          ref={titleRef}
-          value={title}
-          onChange={e => setTitle(e.target.value)}
-          onKeyDown={e => { if (e.key === 'Enter') submit() }}
-          placeholder="e.g. Acme stakeholder view"
-        />
-      </div>
-
-      <div className="mb-3 flex flex-col gap-1.5">
-        <Label htmlFor="share-description">
-          Description <span className="lowercase font-normal">· optional</span>
-        </Label>
-        <textarea
-          id="share-description"
-          value={desc}
-          onChange={e => setDesc(e.target.value)}
-          rows={2}
-          placeholder="What's this link for, and who is it shared with?"
-          className={TEXTAREA_CLASSES}
-        />
-      </div>
-
-      {/* Password protect */}
-      <div className="overflow-hidden rounded-[var(--radius-md)] border border-border">
-        <div className="flex items-center gap-2.5 px-3 py-2.5">
-          <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[var(--radius-md)] bg-muted text-muted-foreground">
-            <Lock size={14} strokeWidth={2} />
-          </div>
-          <div className="flex-1">
-            <div className="text-[13px] font-semibold text-foreground">Password protect</div>
-            <div className="text-[11.5px] text-muted-foreground">Require a password to open the link</div>
-          </div>
-          <button
-            onClick={() => setPwOn(v => !v)}
-            role="switch"
-            aria-checked={pwOn}
-            aria-label="Password protect"
-            className={cn(
-              'relative h-[22px] w-10 shrink-0 cursor-pointer rounded-[var(--radius-full)] border-none p-0 transition-colors',
-              pwOn ? 'bg-primary' : 'bg-border',
-            )}
-          >
-            <span className={cn(
-              'absolute top-[2px] h-[18px] w-[18px] rounded-full bg-white shadow-sm transition-[left] duration-150',
-              pwOn ? 'left-5' : 'left-[2px]',
-            )} />
-          </button>
-        </div>
-        {pwOn && (
-          <div className="border-t border-border px-3 py-3">
-            <div className="flex items-center gap-2 rounded-[var(--radius-md)] border border-input bg-card px-2.5">
-              <KeyRound size={14} className="text-muted-foreground" strokeWidth={2} />
-              <input
-                value={pw}
-                onChange={e => setPw(e.target.value)}
-                onKeyDown={e => { if (e.key === 'Enter') submit() }}
-                type={showPw ? 'text' : 'password'}
-                placeholder="Set a password"
-                className="flex-1 border-none bg-transparent py-2 text-[13px] text-foreground outline-none placeholder:text-muted-foreground"
-              />
-              <button
-                onClick={() => setShowPw(v => !v)}
-                aria-label={showPw ? 'Hide password' : 'Show password'}
-                className="flex cursor-pointer border-none bg-transparent p-1 text-muted-foreground"
-              >
-                {showPw ? <EyeOff size={14} strokeWidth={2} /> : <Eye size={14} strokeWidth={2} />}
-              </button>
-            </div>
-          </div>
-        )}
-      </div>
-
-      {isError && (
-        <p className="mt-2.5 text-[11px] text-destructive">Failed to create share. Please try again.</p>
-      )}
-
-      {/* Actions */}
-      <div className="mt-4 flex items-center gap-2.5">
-        <div className="mr-auto flex items-center gap-[7px] text-xs text-muted-foreground">
-          <MiniAvatar member={currentMember} size={20} />
-          <span>Sharing as {currentMember?.displayName ?? 'you'}</span>
-        </div>
-        <Button variant="outline" onClick={onCancel}>Cancel</Button>
-        <Button onClick={submit} disabled={!valid || isPending}>
-          <LinkIcon size={14} strokeWidth={2.2} /> {isPending ? 'Creating…' : 'Create link'}
-        </Button>
-      </div>
-    </div>
-  )
-}
-
-// ── The modal shell ──────────────────────────────────────────────────────────
-
-export default function ShareModal({ teamId, timelineId, viewType, viewConfig, timelineName, onClose }: Props) {
-  const { user } = useAuth()
-  const { data: allShares = [], isLoading } = useListShares(teamId, timelineId)
-  // Scoped to this exact view — a share is a frozen snapshot of one view's
-  // config, so a Gantt link can't usefully stand in for a List or Kanban one.
-  // Showing only same-type links keeps "active links" literal and leaves room
-  // to tailor the modal per view type (e.g. Calendar/ICS in 13.4) without
-  // having to reconcile it against unrelated shares.
-  // kind === 'view' also keeps ICS calendar feeds (13.4) out of this list —
-  // they live in CalendarShareModal, a different surface entirely.
-  const shares = allShares.filter(s => s.kind === 'view' && s.viewType === viewType)
-  const { data: members = [] } = useTeamMembers(teamId)
-  const createShare = useCreateShare(teamId, timelineId)
-  const deleteShare = useDeleteShare(teamId, timelineId)
-  const [adding, setAdding] = useState(false)
-  const bodyRef = useRef<HTMLDivElement>(null)
-
-  const memberByID = new Map(members.map(m => [m.id, m]))
-  const currentMember = members.find(m => m.userId && m.userId === user?.id)
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [onClose])
-
-  const configString = JSON.stringify({
-    groupBy: viewConfig.groupBy,
-    sortBy: viewConfig.sortBy,
-    colorBy: viewConfig.colorBy,
-    granularity: viewConfig.granularity,
-    filter: viewConfig.filter ?? { logic: 'and', conditions: [] },
-    ...(viewConfig.columns ? { columns: viewConfig.columns } : {}),
-    ...(viewConfig.cardFields ? { cardFields: viewConfig.cardFields } : {}),
-    ...(viewConfig.showHierarchy !== undefined ? { showHierarchy: viewConfig.showHierarchy } : {}),
-    ...(viewConfig.collapsedColumns ? { collapsedColumns: viewConfig.collapsedColumns } : {}),
-  })
-
-  const handleCreate = (payload: CreatePayload) => {
-    createShare.mutate(
-      {
-        name: payload.title,
-        description: payload.description || null,
-        viewType,
-        viewConfig: configString,
-        password: payload.password ?? undefined,
-      },
-      {
-        onSuccess: () => {
-          setAdding(false)
-          setTimeout(() => { if (bodyRef.current) bodyRef.current.scrollTop = 0 }, 0)
-        },
-      },
-    )
-  }
-
-  return createPortal(
-    <div
-      className="fixed inset-0 z-[1000] flex items-center justify-center bg-[hsl(200_24%_11%/0.55)] p-6 backdrop-blur-[2px]"
-    >
-      <div
-        className="flex max-h-[88vh] w-[min(580px,100%)] flex-col overflow-hidden rounded-[var(--radius-xl)] bg-card shadow-[var(--shadow-lg)]"
-      >
-        {/* Header */}
-        <div className="flex shrink-0 items-start gap-3 border-b border-border px-5 py-[18px]">
-          <div className={cn('flex h-[38px] w-[38px] shrink-0 items-center justify-center rounded-[var(--radius-md)]', TILE_TEAL)}>
-            <LinkIcon size={19} strokeWidth={2.2} />
-          </div>
-          <div className="min-w-0 flex-1">
-            <h2 className="m-0 text-[17px] font-bold leading-tight text-foreground">Share this view</h2>
-            <div className="mt-0.5 flex items-center gap-1.5 text-[12.5px] text-muted-foreground">
-              <span className="inline-block h-2 w-2 shrink-0 rounded-sm bg-secondary" />
-              {timelineName ? `${timelineName} · ` : ''}anyone with a link can view
-            </div>
-          </div>
-          <button
-            onClick={onClose}
-            aria-label="Close"
-            className="flex h-[30px] w-[30px] shrink-0 cursor-pointer items-center justify-center rounded-[var(--radius-md)] border-none bg-muted text-muted-foreground"
-          >
-            <X size={16} strokeWidth={2.2} />
-          </button>
-        </div>
-
-        {/* Section bar */}
-        <div className="flex shrink-0 items-center gap-2 px-5 pb-[11px] pt-[13px]">
-          <span className="text-[11px] font-bold uppercase tracking-[0.06em] text-muted-foreground">Active links</span>
-          <span className="min-w-[20px] rounded-[var(--radius-full)] bg-muted px-2 py-px text-center text-[11px] font-bold text-muted-foreground">{shares.length}</span>
-          <div className="ml-auto">
-            {!adding && (
-              <Button size="sm" onClick={() => setAdding(true)}>
-                <Plus size={14} strokeWidth={2.4} /> New share
-              </Button>
-            )}
-          </div>
-        </div>
-
-        {/* Body */}
-        <div ref={bodyRef} className="flex min-h-[120px] flex-1 flex-col gap-3 overflow-y-auto px-5 pb-5">
-          {adding && (
-            <AddShareForm
-              currentMember={currentMember}
-              onCreate={handleCreate}
-              onCancel={() => setAdding(false)}
-              isPending={createShare.isPending}
-              isError={createShare.isError}
-            />
-          )}
-
-          {!isLoading && shares.length === 0 && !adding && (
-            <div className="flex flex-1 flex-col items-center justify-center rounded-[var(--radius-lg)] border border-dashed border-border px-5 py-9 text-center">
-              <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-[var(--radius-lg)] bg-muted text-muted-foreground">
-                <LinkIcon size={22} strokeWidth={1.8} />
-              </div>
-              <div className="text-sm font-semibold text-foreground">No share links yet</div>
-              <div className="mt-1 max-w-[280px] text-[12.5px] text-muted-foreground">Create a link to let people outside your team view this timeline.</div>
-              <Button size="sm" className="mt-4" onClick={() => setAdding(true)}>
-                <Plus size={14} strokeWidth={2.4} /> Create share link
-              </Button>
-            </div>
-          )}
-
-          {shares.map(s => (
-            <ShareRow
-              key={s.id}
-              share={s}
-              creator={s.createdBy ? memberByID.get(s.createdBy) : undefined}
-              isOwn={Boolean(currentMember && s.createdBy === currentMember.id)}
-              onDelete={(id) => deleteShare.mutate(id)}
-            />
-          ))}
-        </div>
-
-        {/* Footer */}
-        <div className="flex shrink-0 items-center gap-2.5 border-t border-border px-5 py-[13px]">
-          <div className="flex items-center gap-[7px] text-xs text-muted-foreground">
-            <Users size={14} strokeWidth={2} />
-            Read-only links · anyone on your team can manage them
-          </div>
-          <Button variant="outline" className="ml-auto" onClick={onClose}>Done</Button>
-        </div>
-      </div>
-    </div>,
-    document.body,
-  )
-}
-````
-
-## File: packages/api/internal/api/share_handler.go
-````go
-package api
-
-import (
-	"database/sql"
-	"encoding/json"
-	"errors"
-	"net/http"
-	"os"
-	"strings"
-	"sync"
-	"time"
-
-	"github.com/I0-1O/draba/packages/api/internal/auth"
-	"github.com/I0-1O/draba/packages/api/internal/filters"
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// unlockMaxAttempts caps password-unlock attempts per client IP per hour. The
-// limit is per-share-independent (keyed on IP only) so cycling tokens cannot
-// multiply an attacker's budget.
-const unlockMaxAttempts = 10
-
-// ── In-memory share cache ─────────────────────────────────────────────────────
-
-type shareCacheEntry struct {
-	builtAt time.Time
-	payload models.ShareProjection
-}
-
-// shareCache is a lightweight TTL cache keyed by share token. It avoids a DB
-// hit on every warm request. The TTL is read from DRABA_SHARE_CACHE_TTL at
-// startup (default 60s); a PATCH or DELETE invalidates the entry immediately.
-type shareCache struct {
-	mu      sync.RWMutex
-	entries map[string]*shareCacheEntry
-	ttl     time.Duration
-}
-
-func newShareCache() *shareCache {
-	ttl := 60 * time.Second
-	if v := os.Getenv("DRABA_SHARE_CACHE_TTL"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			ttl = d
-		}
-	}
-	return &shareCache{entries: make(map[string]*shareCacheEntry), ttl: ttl}
-}
-
-func (c *shareCache) get(token string) (*models.ShareProjection, bool) {
-	c.mu.RLock()
-	e, ok := c.entries[token]
-	c.mu.RUnlock()
-	if !ok {
-		return nil, false
-	}
-	if time.Since(e.builtAt) > c.ttl {
-		return nil, false
-	}
-	p := e.payload
-	return &p, true
-}
-
-func (c *shareCache) set(token string, p *models.ShareProjection) {
-	c.mu.Lock()
-	c.entries[token] = &shareCacheEntry{builtAt: time.Now(), payload: *p}
-	c.mu.Unlock()
-}
-
-func (c *shareCache) invalidate(token string) {
-	c.mu.Lock()
-	delete(c.entries, token)
-	c.mu.Unlock()
-}
-
-// ── viewConfig sub-types ──────────────────────────────────────────────────────
-
-// viewConfigJSON is the shape stored in shares.view_config. The filter field
-// is evaluated server-side by the Go filter engine; the other fields are
-// forwarded to the client as-is so the public viewer can apply them.
-//
-// columns carries the List view's column visibility snapshot — it drives the
-// "notes" projection nuance below (and lets the public viewer render exactly
-// the columns the share creator chose).
-type viewConfigJSON struct {
-	Filter  *filters.FilterDefinition `json:"filter,omitempty"`
-	Columns []shareColumnConfig       `json:"columns,omitempty"`
-}
-
-type shareColumnConfig struct {
-	ID      string `json:"id"`
-	Visible bool   `json:"visible"`
-}
-
-// ── Handlers ──────────────────────────────────────────────────────────────────
-
-// handleGetShareProjection handles GET /shares/{token}. No authentication is
-// required. It is the public data gateway: the scope is hard-locked to the
-// single timeline referenced by the share row; no client-supplied selector can
-// widen it.
-func (s *Server) handleGetShareProjection(w http.ResponseWriter, r *http.Request) {
-	token := r.PathValue("token")
-
-	// GET /shares/{token}.ics — Go 1.22 mux wildcards span the whole path
-	// segment, so the ICS feed's .ics suffix arrives inside {token}; dispatch
-	// it to the calendar-feed handler (Phase 13.4).
-	if strings.HasSuffix(token, ".ics") {
-		s.serveICSFeed(w, r, strings.TrimSuffix(token, ".ics"))
-		return
-	}
-
-	// ── 1. Resolve the share row ──────────────────────────────────────────────
-	share, err := s.shares.GetByToken(token)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load share")
-		return
-	}
-
-	// An ICS feed is only reachable through the .ics endpoint. Serving it as a
-	// JSON projection would expose the whole timeline for member-scoped feeds
-	// (the projection has no member filter), so the kinds never cross over.
-	if share.Kind != models.ShareKindView {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
-		return
-	}
-
-	// Phase 13.4 — revocation / expiry handled here (fields exist in schema now).
-	if share.RevokedAt != nil {
-		writeError(w, http.StatusGone, "GONE", "this share has been revoked")
-		return
-	}
-	if share.ExpiresAt != nil && time.Now().After(*share.ExpiresAt) {
-		writeError(w, http.StatusGone, "GONE", "this share has expired")
-		return
-	}
-
-	// Archived timeline → its shares stop serving (Phase 13.5). Checked on
-	// every request — before the cache read — so archiving takes effect
-	// immediately regardless of a warm projection cache.
-	if !s.shareTimelineLive(w, share) {
-		return
-	}
-
-	// Password gate (Phase 13.2). A locked share serves no data without a valid
-	// view token — obtained by exchanging the password at POST /shares/{token}/unlock.
-	// NOTE: this check must stay above the cache read. PATCH invalidates the cache
-	// entry immediately (see handleUpdateShare), so a newly-added password_hash is
-	// never served from a stale cache. Moving the check below the cache read would
-	// silently bypass the password gate for the TTL window. The 401 body carries no
-	// projection data — only the passwordRequired signal the viewer needs.
-	if share.PasswordHash != nil {
-		vt := bearerToken(r)
-		if vt == "" || s.tokens.ValidateShareViewToken(vt, share.ID) != nil {
-			writeJSON(w, http.StatusUnauthorized, map[string]bool{"passwordRequired": true})
-			return
-		}
-	}
-
-	// ── 2. Serve from cache if warm ───────────────────────────────────────────
-	if proj, ok := s.shareCache.get(token); ok {
-		go func() { _ = s.shares.RecordView(share.ID) }()
-		writeJSON(w, http.StatusOK, proj)
-		return
-	}
-
-	// ── 3. Build projection (cache miss) ─────────────────────────────────────
-	proj, err := s.buildShareProjection(share)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to build share projection")
-		return
-	}
-
-	s.shareCache.set(token, proj)
-	go func() { _ = s.shares.RecordView(share.ID) }()
-	writeJSON(w, http.StatusOK, proj)
-}
-
-// shareTimelineLive loads the share's timeline and reports whether it is
-// servable on the public surface, writing the error response when it is not.
-// An archived timeline answers 404, not 410: archiving is reversible —
-// unarchiving must resurrect existing links — and 410 tells calendar clients
-// to drop a subscription permanently. 404 also matches handleCreateShare's
-// archived-timeline response without leaking archive state.
-func (s *Server) shareTimelineLive(w http.ResponseWriter, share *models.Share) bool {
-	timeline, err := s.timelines.GetByID(share.TimelineID)
-	if errors.Is(err, sql.ErrNoRows) {
-		// A share row outliving a hard-deleted timeline answers the same 404 as
-		// every other dead-share case — a 500 here would be a state oracle on
-		// the public surface.
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
-		return false
-	}
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load share")
-		return false
-	}
-	if timeline.ArchivedAt != nil {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
-		return false
-	}
-	return true
-}
-
-// buildShareProjection assembles the full ShareProjection for a share.
-// The scope is hard-locked to share.TimelineID; the caller cannot supply a
-// different timeline ID. Filter evaluation runs in Go before any data leaves
-// the server.
-func (s *Server) buildShareProjection(share *models.Share) (*models.ShareProjection, error) {
-	// Get timeline — using the share's TimelineID, never a client-supplied value.
-	timeline, err := s.timelines.GetByID(share.TimelineID)
-	if err != nil {
-		return nil, err
-	}
-
-	// Get all non-archived activities for this timeline.
-	acts, err := s.activities.ListByTimeline(share.TimelineID, nil, nil, false)
-	if err != nil {
-		return nil, err
-	}
-
-	// Get statuses and tags for filter context + projection.
-	statuses, err := s.statuses.ListStatuses(share.TimelineID)
-	if err != nil {
-		return nil, err
-	}
-	tags, err := s.tags.ListByTeam(timeline.TeamID)
-	if err != nil {
-		return nil, err
-	}
-	members, err := s.teams.ListMembers(timeline.TeamID)
-	if err != nil {
-		return nil, err
-	}
-	team, err := s.teams.GetByID(timeline.TeamID)
-	if err != nil {
-		return nil, err
-	}
-
-	// Parse the frozen filter from view_config and evaluate it server-side.
-	var vc viewConfigJSON
-	if share.ViewConfig != "" && share.ViewConfig != "{}" {
-		_ = json.Unmarshal([]byte(share.ViewConfig), &vc)
-	}
-
-	var filteredActs []*models.Activity
-	if vc.Filter != nil && len(vc.Filter.Conditions) > 0 {
-		// Build filter context.
-		statusesByTL := map[string][]models.Status{share.TimelineID: {}}
-		for _, st := range statuses {
-			statusesByTL[share.TimelineID] = append(statusesByTL[share.TimelineID], *st)
-		}
-		modelTags := make([]models.Tag, 0, len(tags))
-		for _, t := range tags {
-			modelTags = append(modelTags, *t)
-		}
-		ctx := &filters.FilterContext{
-			StatusesByTimelineID: statusesByTL,
-			Tags:                 modelTags,
-		}
-		for _, a := range acts {
-			if filters.MatchesFilter(a, vc.Filter, ctx) {
-				filteredActs = append(filteredActs, a)
-			}
-		}
-	} else {
-		filteredActs = acts
-	}
-
-	// Build referenced-entity sets (prune to what surviving activities reference).
-	usedMemberIDs := make(map[string]bool)
-	usedStatusIDs := make(map[string]bool)
-	usedTagIDs := make(map[string]bool)
-	for _, a := range filteredActs {
-		for _, id := range a.AssignedMemberIDs {
-			usedMemberIDs[id] = true
-		}
-		if a.StatusID != nil {
-			usedStatusIDs[*a.StatusID] = true
-		}
-		for _, id := range a.TagIDs {
-			usedTagIDs[id] = true
-		}
-	}
-
-	// notes is included only for List shares whose creator left the Notes
-	// column visible — the only projection nuance beyond scope-locking and
-	// field-pruning (Phase 13.3 exit criteria).
-	notesEnabled := false
-	if share.ViewType == "list" {
-		for _, c := range vc.Columns {
-			if c.ID == "notes" && c.Visible {
-				notesEnabled = true
-				break
-			}
-		}
-	}
-
-	// Build PublicActivity slice.
-	pubActivities := make([]models.PublicActivity, 0, len(filteredActs))
-	for _, a := range filteredActs {
-		pub := models.PublicActivity{
-			ID:                a.ID,
-			Title:             a.Title,
-			Description:       a.Description,
-			Icon:              a.Icon,
-			Color:             a.Color,
-			StartAt:           a.StartAt,
-			EndAt:             a.EndAt,
-			AllDay:            a.AllDay,
-			StatusID:          a.StatusID,
-			ParentActivityID:  a.ParentActivityID,
-			PercentComplete:   a.PercentComplete,
-			AssignedMemberIDs: a.AssignedMemberIDs,
-			TagIDs:            a.TagIDs,
-		}
-		if notesEnabled {
-			pub.Notes = a.Notes
-		}
-		if pub.AssignedMemberIDs == nil {
-			pub.AssignedMemberIDs = []string{}
-		}
-		if pub.TagIDs == nil {
-			pub.TagIDs = []string{}
-		}
-		pubActivities = append(pubActivities, pub)
-	}
-
-	// Build PublicMember slice — never email/role/userId.
-	pubMembers := make([]models.PublicMember, 0)
-	for _, m := range members {
-		if !usedMemberIDs[m.ID] {
-			continue
-		}
-		name := m.DisplayName
-		if name == "" {
-			// The register endpoint requires a non-empty displayName, so this
-			// branch only fires for rows migrated from older data. Never fall
-			// back to the email address — this response is public and
-			// unauthenticated.
-			name = "Team member"
-		}
-		pubMembers = append(pubMembers, models.PublicMember{
-			ID:          m.ID,
-			DisplayName: name,
-			Color:       m.Color,
-			Icon:        m.Icon,
-		})
-	}
-
-	// Prune statuses to referenced ones — except for Kanban shares, where
-	// every status is a column regardless of whether it currently holds any
-	// activities (mirrors the in-app board, which always renders one column
-	// per timeline status). Pruning there would silently drop empty columns
-	// that anonymous viewers would otherwise see, e.g. an empty "Deferred"
-	// column that's still meaningful to the team.
-	pubStatuses := make([]models.Status, 0)
-	for _, st := range statuses {
-		if share.ViewType == "kanban" || usedStatusIDs[st.ID] {
-			pubStatuses = append(pubStatuses, *st)
-		}
-	}
-
-	// Prune tags to referenced ones.
-	pubTags := make([]models.Tag, 0)
-	for _, tg := range tags {
-		if usedTagIDs[tg.ID] {
-			pubTags = append(pubTags, *tg)
-		}
-	}
-
-	// Build the public share — only the fields anonymous callers need.
-	// Operational telemetry (view_count, last_viewed_at) and internal fields
-	// (created_by, revoked_at) are excluded from the public response.
-	pubShare := models.PublicShare{
-		ID:         share.ID,
-		TimelineID: share.TimelineID,
-		Token:      share.Token,
-		Name:       share.Name,
-		ViewType:   share.ViewType,
-		ViewConfig: share.ViewConfig,
-		CreatedAt:  share.CreatedAt,
-		ExpiresAt:  share.ExpiresAt,
-	}
-	proj := &models.ShareProjection{
-		Share:    pubShare,
-		TeamName: team.Name,
-		Timeline: models.PublicTimeline{
-			ID:        timeline.ID,
-			Name:      timeline.Name,
-			Color:     timeline.Color,
-			Icon:      timeline.Icon,
-			StartDate: timeline.StartDate,
-			EndDate:   timeline.EndDate,
-		},
-		Members:    pubMembers,
-		Statuses:   pubStatuses,
-		Tags:       pubTags,
-		Activities: pubActivities,
-	}
-	return proj, nil
-}
-
-// handleCreateShare handles POST /timelines/{id}/shares. The caller must be a
-// member of the timeline's team. The share captures the current view config.
-func (s *Server) handleCreateShare(w http.ResponseWriter, r *http.Request) {
-	timelineID := r.PathValue("id")
-
-	timeline, err := s.timelines.GetByID(timelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
-		return
-	}
-	if timeline.ArchivedAt != nil {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-		return
-	}
-
-	member, ok := s.requireTeamMember(w, r, timeline.TeamID)
-	if !ok {
-		return
-	}
-
-	var req createShareBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-	if req.Kind == "" {
-		req.Kind = models.ShareKindView
-	}
-	if req.Kind != models.ShareKindView && req.Kind != models.ShareKindICS {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "kind must be 'view' or 'ics'")
-		return
-	}
-	if req.ViewType == "" {
-		req.ViewType = "gantt"
-	}
-	if req.ViewConfig == "" {
-		req.ViewConfig = "{}"
-	}
-
-	now := time.Now().UTC()
-	share := &models.Share{
-		ID:          newID(),
-		TimelineID:  timelineID,
-		Token:       newToken(),
-		Kind:        req.Kind,
-		Name:        req.Name,
-		Description: req.Description,
-		ViewType:    req.ViewType,
-		ViewConfig:  req.ViewConfig,
-		CreatedAt:   now,
-		ViewCount:   0,
-	}
-	// A superadmin managing a team they're not in arrives as a synthetic
-	// member with an empty ID (see requireTeamMember); created_by stays NULL
-	// for them rather than violating the team_members FK.
-	if member.ID != "" {
-		share.CreatedBy = &member.ID
-	}
-
-	if req.Kind == models.ShareKindICS {
-		// An ICS feed has no view semantics and no password — the token is the
-		// secret (calendar clients cannot unlock interactively). Scope is the
-		// only configuration: the whole timeline, or one member's assignments.
-		if req.Password != nil && strings.TrimSpace(*req.Password) != "" {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "ICS feeds cannot be password protected")
-			return
-		}
-		if req.Scope != models.ShareScopeTimeline && req.Scope != models.ShareScopeMember {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "scope must be 'timeline' or 'member' for ICS shares")
-			return
-		}
-		share.Scope = &req.Scope
-		share.ViewType = "calendar"
-		share.ViewConfig = "{}"
-		if req.Scope == models.ShareScopeMember {
-			if req.MemberID == nil || *req.MemberID == "" {
-				writeError(w, http.StatusBadRequest, "BAD_REQUEST", "memberId is required for member-scoped ICS shares")
-				return
-			}
-			// The member must belong to this timeline's team — a feed must not
-			// be creatable for an arbitrary member ID from another team.
-			feedMember, err := s.teams.GetMemberByID(*req.MemberID)
-			if err != nil || feedMember.TeamID != timeline.TeamID {
-				writeError(w, http.StatusBadRequest, "BAD_REQUEST", "memberId does not belong to this timeline's team")
-				return
-			}
-			share.MemberID = req.MemberID
-		}
-	}
-
-	// Optional password protection (view shares only). An empty/whitespace
-	// string means "no password" — the field stays NULL and the share is open.
-	if req.Kind == models.ShareKindView && req.Password != nil && strings.TrimSpace(*req.Password) != "" {
-		hash, err := auth.HashPassword(*req.Password)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to secure share")
-			return
-		}
-		share.PasswordHash = &hash
-	}
-
-	if err := s.shares.Create(share); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create share")
-		return
-	}
-
-	// Surface the derived flag in the create response (the repo sets it on reads).
-	share.Protected = share.PasswordHash != nil
-	writeJSON(w, http.StatusCreated, share)
-}
-
-// handleListShares handles GET /teams/{id}/timelines/{timelineId}/shares.
-// Only team members with access to the timeline may list its shares.
-func (s *Server) handleListShares(w http.ResponseWriter, r *http.Request) {
-	timelineID := r.PathValue("timelineId")
-
-	timeline, err := s.timelines.GetByID(timelineID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
-		return
-	}
-
-	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
-		return
-	}
-
-	shares, err := s.shares.ListByTimeline(timelineID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list shares")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, shares)
-}
-
-// handleUpdateShare handles PATCH /shares/{id}. Any member of the timeline's
-// team may update it (shares are read-only projections — no creator/admin gate).
-func (s *Server) handleUpdateShare(w http.ResponseWriter, r *http.Request) {
-	shareID := r.PathValue("id")
-
-	share, err := s.shares.GetByID(shareID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
-		return
-	}
-
-	timeline, err := s.timelines.GetByID(share.TimelineID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
-		return
-	}
-
-	// Any member of the timeline's team may manage its shares. A share is a
-	// read-only projection that can never mutate app data, so there is no
-	// creator/admin gate (Phase 13.2 re-sequencing decision).
-	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
-		return
-	}
-
-	var req patchShareBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	if req.Name != nil {
-		share.Name = req.Name
-	}
-	if req.Description != nil {
-		share.Description = req.Description
-	}
-	if req.ViewType != nil {
-		share.ViewType = *req.ViewType
-	}
-	if req.ViewConfig != nil {
-		share.ViewConfig = *req.ViewConfig
-	}
-	// Password: nil leaves it unchanged; an empty string clears protection; a
-	// non-empty string sets/replaces it. ICS feeds can never carry one —
-	// calendar clients have no interactive unlock.
-	if req.Password != nil && share.Kind == models.ShareKindICS && strings.TrimSpace(*req.Password) != "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "ICS feeds cannot be password protected")
-		return
-	}
-	if req.Password != nil {
-		if strings.TrimSpace(*req.Password) == "" {
-			share.PasswordHash = nil
-		} else {
-			hash, err := auth.HashPassword(*req.Password)
-			if err != nil {
-				writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to secure share")
-				return
-			}
-			share.PasswordHash = &hash
-		}
-	}
-
-	if err := s.shares.Update(share); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update share")
-		return
-	}
-
-	// Invalidate caches so the next public request picks up the new config.
-	s.shareCache.invalidate(share.Token)
-	s.icsCache.invalidate(share.Token)
-
-	// Refresh the derived flag — the password may have just been set/cleared.
-	share.Protected = share.PasswordHash != nil
-	writeJSON(w, http.StatusOK, share)
-}
-
-// handleDeleteShare handles DELETE /shares/{id}. Any member of the timeline's
-// team may delete it (see handleUpdateShare).
-func (s *Server) handleDeleteShare(w http.ResponseWriter, r *http.Request) {
-	shareID := r.PathValue("id")
-
-	share, err := s.shares.GetByID(shareID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
-		return
-	}
-
-	timeline, err := s.timelines.GetByID(share.TimelineID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
-		return
-	}
-
-	// Any member of the timeline's team may delete its shares — no creator/admin
-	// gate (see handleUpdateShare).
-	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
-		return
-	}
-
-	if err := s.shares.Delete(shareID); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete share")
-		return
-	}
-
-	s.shareCache.invalidate(share.Token)
-	s.icsCache.invalidate(share.Token)
-	w.WriteHeader(http.StatusNoContent)
-}
-
-// handleUnlockShare handles POST /shares/{token}/unlock. It is public (no auth
-// middleware): an anonymous viewer exchanges the share password for a
-// short-lived view token, which they then present on GET /shares/{token}.
-// Attempts are rate-limited per client IP to blunt brute-force guessing.
-func (s *Server) handleUnlockShare(w http.ResponseWriter, r *http.Request) {
-	if !s.unlockLimiter.allow(clientIP(r)) {
-		writeError(w, http.StatusTooManyRequests, "RATE_LIMITED", "too many unlock attempts; try again later")
-		return
-	}
-
-	token := r.PathValue("token")
-
-	share, err := s.shares.GetByToken(token)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load share")
-		return
-	}
-
-	// Mirror the GET gateway's revocation/expiry checks so a dead share cannot
-	// be unlocked.
-	if share.RevokedAt != nil {
-		writeError(w, http.StatusGone, "GONE", "this share has been revoked")
-		return
-	}
-	if share.ExpiresAt != nil && time.Now().After(*share.ExpiresAt) {
-		writeError(w, http.StatusGone, "GONE", "this share has expired")
-		return
-	}
-	// ICS feeds are never password protected; mirror the projection gateway's
-	// 404 rather than confirming the token exists in another mode.
-	if share.Kind != models.ShareKindView {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
-		return
-	}
-	// Mirror the GET gateway's archived-timeline 404 (Phase 13.5) — a dead
-	// share must not be unlockable, and the check precedes NOT_PROTECTED so an
-	// archived timeline reveals nothing about its shares' protection state.
-	if !s.shareTimelineLive(w, share) {
-		return
-	}
-	if share.PasswordHash == nil {
-		writeError(w, http.StatusBadRequest, "NOT_PROTECTED", "this share is not password protected")
-		return
-	}
-
-	var req unlockShareBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-	if auth.CheckPassword(*share.PasswordHash, req.Password) != nil {
-		writeError(w, http.StatusUnauthorized, "INVALID_PASSWORD", "incorrect password")
-		return
-	}
-
-	viewToken, err := s.tokens.IssueShareViewToken(share.ID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to issue view token")
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"token": viewToken})
-}
-
-// bearerToken extracts a Bearer credential from the Authorization header, or
-// returns "" when absent or malformed.
-func bearerToken(r *http.Request) string {
-	header := r.Header.Get("Authorization")
-	if !strings.HasPrefix(header, "Bearer ") {
-		return ""
-	}
-	return strings.TrimPrefix(header, "Bearer ")
-}
-
-// ── Request bodies ────────────────────────────────────────────────────────────
-
-type createShareBody struct {
-	Kind        string  `json:"kind,omitempty"`
-	Scope       string  `json:"scope,omitempty"`
-	MemberID    *string `json:"memberId,omitempty"`
-	Name        *string `json:"name,omitempty"`
-	Description *string `json:"description,omitempty"`
-	ViewType    string  `json:"viewType"`
-	ViewConfig  string  `json:"viewConfig"`
-	Password    *string `json:"password,omitempty"`
-}
-
-type patchShareBody struct {
-	Name        *string `json:"name,omitempty"`
-	Description *string `json:"description,omitempty"`
-	ViewType    *string `json:"viewType,omitempty"`
-	ViewConfig  *string `json:"viewConfig,omitempty"`
-	Password    *string `json:"password,omitempty"`
-}
-
-type unlockShareBody struct {
-	Password string `json:"password"`
-}
 ````
 
 ## File: packages/web/src/pages/DashboardPage.tsx
