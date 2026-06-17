@@ -7,5 +7,6 @@ package ui
 import "embed"
 
 // FS is the embedded filesystem containing the built React application.
+//
 //go:embed all:static
 var FS embed.FS
