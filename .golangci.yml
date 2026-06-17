@@ -1,7 +1,10 @@
+version: "2"
+
 run:
   timeout: 5m
 
 linters:
+  default: none
   enable:
     - errcheck
     - govet
@@ -14,24 +17,25 @@ linters:
     - misspell
     - nolintlint
 
-linters-settings:
-  goimports:
-    local-prefixes: github.com/I0-1O/draba
-  gocritic:
-    enabled-tags:
-      - diagnostic
-      - style
-      - performance
-  revive:
-    rules:
-      - name: exported
-        severity: warning
-  nolintlint:
-    require-explanation: true
-    require-specific: true
+  settings:
+    goimports:
+      local-prefixes: github.com/I0-1O/draba
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - style
+        - performance
+    revive:
+      rules:
+        - name: exported
+          severity: warning
+    nolintlint:
+      require-explanation: true
+      require-specific: true
 
 issues:
-  exclude-rules:
-    - path: _test\.go
-      linters:
-        - errcheck
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - errcheck
