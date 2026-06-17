@@ -55394,48 +55394,6 @@ export default function LoginPage() {
 }
 ````
 
-## File: .golangci.yml
-````yaml
-version: "2"
-
-run:
-  timeout: 5m
-
-linters:
-  default: none
-  enable:
-    - errcheck
-    - govet
-    - staticcheck
-    - ineffassign
-    - gofmt
-    - goimports
-    - gocritic
-    - revive
-    - misspell
-    - nolintlint
-
-  settings:
-    gocritic:
-      enabled-tags:
-        - diagnostic
-        - style
-        - performance
-    revive:
-      rules:
-        - name: exported
-          severity: warning
-    nolintlint:
-      require-explanation: true
-      require-specific: true
-
-  exclusions:
-    rules:
-      - path: _test\.go
-        linters:
-          - errcheck
-````
-
 ## File: packages/api/cmd/draba/main.go
 ````go
 // Command draba is the API server entry point. It wires repositories,
@@ -56595,6 +56553,51 @@ describe('useUnlockShare', () => {
     await expect(result.current.mutateAsync('wrong')).rejects.toMatchObject({ status: 401 })
   })
 })
+````
+
+## File: .golangci.yml
+````yaml
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - staticcheck
+    - ineffassign
+    - gocritic
+    - revive
+    - misspell
+    - nolintlint
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+
+  settings:
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - style
+        - performance
+    revive:
+      rules:
+        - name: exported
+          severity: warning
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - errcheck
 ````
 
 ## File: packages/api/internal/api/share_ics_handler.go
