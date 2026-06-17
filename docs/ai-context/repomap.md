@@ -9252,68 +9252,6 @@ user_preferences — set by users at runtime
 ```
 ````
 
-## File: packages/api/cmd/draba/reset_password.go
-````go
-package main
-
-import (
-	"flag"
-	"fmt"
-	"os"
-	"strings"
-
-	"github.com/I0-1O/draba/packages/api/internal/auth"
-	"github.com/I0-1O/draba/packages/api/internal/db"
-)
-
-// runResetPassword is the handler for the reset-password subcommand.
-// It opens the database, hashes the supplied password, and updates the user record.
-func runResetPassword(args []string) {
-	fs := flag.NewFlagSet("reset-password", flag.ExitOnError)
-	email := fs.String("email", "", "email address of the user (required)")
-	password := fs.String("password", "", "new password — minimum 8 characters (required)")
-	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, "Usage: draba reset-password --email <email> --password <password>")
-		fs.PrintDefaults()
-	}
-	_ = fs.Parse(args)
-
-	*email = strings.ToLower(strings.TrimSpace(*email))
-	if *email == "" || *password == "" {
-		fs.Usage()
-		os.Exit(1)
-	}
-	if len(*password) < 8 {
-		fmt.Fprintln(os.Stderr, "error: password must be at least 8 characters")
-		os.Exit(1)
-	}
-
-	dsn := getenv("DRABA_DB_DSN", "/data/draba.db")
-	database, err := db.Open(dsn)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: open db: %v\n", err)
-		os.Exit(1)
-	}
-
-	hash, err := auth.HashPassword(*password)
-	if err != nil {
-		database.Close()
-		fmt.Fprintf(os.Stderr, "error: hash password: %v\n", err)
-		os.Exit(1)
-	}
-
-	users := db.NewUserRepo(database)
-	if err := users.UpdatePasswordByEmail(*email, hash); err != nil {
-		database.Close()
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
-	}
-
-	database.Close()
-	fmt.Printf("password updated for %s\n", *email)
-}
-````
-
 ## File: packages/api/internal/api/activity_handler.go
 ````go
 package api
@@ -10752,230 +10690,6 @@ func requestLogger(next http.Handler) http.Handler {
 			"ms", time.Since(start).Milliseconds(),
 		)
 	})
-}
-````
-
-## File: packages/api/internal/api/saved_filter_handler.go
-````go
-package api
-
-import (
-	"database/sql"
-	"encoding/json"
-	"errors"
-	"net/http"
-	"time"
-
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// handleListSavedFilters handles GET /teams/{id}/saved_filters. Returns
-// only filters owned by the calling user within the given team.
-func (s *Server) handleListSavedFilters(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
-		return
-	}
-
-	filters, err := s.savedFilters.ListByTeamUser(teamID, claims.UserID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list saved filters")
-		return
-	}
-	writeJSON(w, http.StatusOK, filters)
-}
-
-// handleListAllTeamSavedFilters handles GET /teams/{id}/saved_filters/all.
-// Returns every saved filter in the team (private + team). Admin-only.
-func (s *Server) handleListAllTeamSavedFilters(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-
-	member, ok := s.requireTeamMember(w, r, teamID)
-	if !ok {
-		return
-	}
-	if member.Role != "admin" {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "only team admins can list all team filters")
-		return
-	}
-
-	filters, err := s.savedFilters.ListAllByTeam(teamID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list saved filters")
-		return
-	}
-	writeJSON(w, http.StatusOK, filters)
-}
-
-// handleCreateSavedFilter handles POST /teams/{id}/saved_filters. The
-// authenticated user must be a member of the team and becomes the owner.
-// Setting isTeamFilter=true at creation time requires admin role.
-func (s *Server) handleCreateSavedFilter(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	member, ok := s.requireTeamMember(w, r, teamID)
-	if !ok {
-		return
-	}
-
-	var req CreateSavedFilterJSONBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-	if req.Name == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name is required")
-		return
-	}
-	if !json.Valid([]byte(req.Definition)) {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "definition must be valid JSON")
-		return
-	}
-
-	isTeamFilter := false
-	if req.IsTeamFilter != nil && *req.IsTeamFilter {
-		if member.Role != "admin" {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "only team admins can create team filters")
-			return
-		}
-		isTeamFilter = true
-	}
-
-	now := time.Now()
-	filter := &models.SavedFilter{
-		ID:           newID(),
-		TeamID:       teamID,
-		UserID:       claims.UserID,
-		Name:         req.Name,
-		Definition:   req.Definition,
-		IsTeamFilter: isTeamFilter,
-		CreatedAt:    now,
-		UpdatedAt:    now,
-	}
-	if err := s.savedFilters.Create(filter); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create saved filter")
-		return
-	}
-	writeJSON(w, http.StatusCreated, filter)
-}
-
-// handleUpdateSavedFilter handles PATCH /saved_filters/{id}. Owners may
-// update name and definition. Setting isTeamFilter=true is admin-only;
-// admins may also update filters they don't own when the filter is already
-// a team filter.
-func (s *Server) handleUpdateSavedFilter(w http.ResponseWriter, r *http.Request) {
-	filterID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	filter, err := s.savedFilters.GetByID(filterID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "saved filter not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update saved filter")
-		return
-	}
-
-	var req UpdateSavedFilterJSONBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	// Determine whether the caller is a team admin for permission checks.
-	isAdmin := false
-	if adminMember, ok := s.requireTeamMember(w, r, filter.TeamID); ok {
-		isAdmin = adminMember.Role == "admin"
-	} else {
-		return
-	}
-
-	isOwner := filter.UserID == claims.UserID
-
-	// Name and definition can be updated by the owner or by a team admin, but
-	// only after the filter has been promoted. This prevents admins from silently
-	// editing a member's private filter before they decide to share it — promotion
-	// is the explicit consent step.
-	wantsNameOrDef := req.Name != nil || req.Definition != nil
-	if wantsNameOrDef && !isOwner {
-		if !isAdmin || !filter.IsTeamFilter {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "not the owner of this saved filter")
-			return
-		}
-	}
-
-	if req.Name != nil {
-		if *req.Name == "" {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name must not be empty")
-			return
-		}
-		filter.Name = *req.Name
-	}
-	if req.Definition != nil {
-		if !json.Valid([]byte(*req.Definition)) {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "definition must be valid JSON")
-			return
-		}
-		filter.Definition = *req.Definition
-	}
-	// Only admins may promote or demote isTeamFilter — setting it back to false
-	// is just as impactful as promoting, since it silently removes the filter
-	// from all members' views.
-	if req.IsTeamFilter != nil {
-		if !isAdmin {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "only team admins can change team filter status")
-			return
-		}
-		filter.IsTeamFilter = *req.IsTeamFilter
-	}
-	filter.UpdatedAt = time.Now()
-
-	if err := s.savedFilters.Update(filter); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update saved filter")
-		return
-	}
-	writeJSON(w, http.StatusOK, filter)
-}
-
-// handleDeleteSavedFilter handles DELETE /saved_filters/{id}. The owner may
-// always delete their own filter. Team admins may additionally delete any
-// team filter (is_team_filter = true) even if they aren't the owner.
-func (s *Server) handleDeleteSavedFilter(w http.ResponseWriter, r *http.Request) {
-	filterID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	filter, err := s.savedFilters.GetByID(filterID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "saved filter not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete saved filter")
-		return
-	}
-
-	// Check membership to determine admin status.
-	adminMember, ok := s.requireTeamMember(w, r, filter.TeamID)
-	if !ok {
-		return
-	}
-	isAdmin := adminMember.Role == "admin"
-
-	// Owner can always delete; admin can delete team filters they don't own.
-	if filter.UserID != claims.UserID && !(isAdmin && filter.IsTeamFilter) {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "not the owner of this saved filter")
-		return
-	}
-
-	if err := s.savedFilters.Delete(filterID); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete saved filter")
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
 }
 ````
 
@@ -14156,461 +13870,6 @@ func (r *TagRepo) ValidateTeamOwnership(teamID string, tagIDs []string) error {
 }
 ````
 
-## File: packages/api/internal/db/team_repo.go
-````go
-package db
-
-import (
-	"errors"
-	"fmt"
-	"strings"
-	"time"
-
-	"github.com/jmoiron/sqlx"
-
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// ErrDuplicateName is returned by TeamRepo.Create when the generated slug
-// collides with an existing team's slug (UNIQUE constraint on teams.slug).
-var ErrDuplicateName = errors.New("team name already taken")
-
-// TeamRepo is the persistence layer for Team records and their membership
-// join table.
-type TeamRepo struct {
-	db *sqlx.DB
-}
-
-// NewTeamRepo returns a TeamRepo backed by db.
-func NewTeamRepo(db *sqlx.DB) *TeamRepo {
-	return &TeamRepo{db: db}
-}
-
-// Create inserts a new Team row. Returns ErrDuplicateName if the slug is
-// already taken.
-func (r *TeamRepo) Create(team *models.Team) error {
-	_, err := r.db.NamedExec(`
-		INSERT INTO teams (id, name, slug, description, notes, color, icon, created_at, updated_at)
-		VALUES (:id, :name, :slug, :description, :notes, :color, :icon, :created_at, :updated_at)
-	`, team)
-	if err != nil {
-		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
-			return ErrDuplicateName
-		}
-		return fmt.Errorf("creating team: %w", err)
-	}
-	return nil
-}
-
-// Update writes mutable team fields (name, slug, description, notes, color,
-// icon, updated_at). It does not touch archived_at or created_at.
-func (r *TeamRepo) Update(team *models.Team) error {
-	_, err := r.db.NamedExec(`
-		UPDATE teams
-		SET name = :name, slug = :slug, description = :description, notes = :notes,
-		    color = :color, icon = :icon, updated_at = :updated_at
-		WHERE id = :id
-	`, team)
-	if err != nil {
-		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
-			return ErrDuplicateName
-		}
-		return fmt.Errorf("updating team: %w", err)
-	}
-	return nil
-}
-
-// SetArchived sets or clears the archived_at timestamp on a team.
-func (r *TeamRepo) SetArchived(id string, at *time.Time) error {
-	_, err := r.db.Exec(`UPDATE teams SET archived_at = ?, updated_at = ? WHERE id = ?`,
-		at, time.Now(), id)
-	if err != nil {
-		return fmt.Errorf("setting team archived: %w", err)
-	}
-	return nil
-}
-
-// GetByID fetches a Team by primary key.
-func (r *TeamRepo) GetByID(id string) (*models.Team, error) {
-	var t models.Team
-	err := r.db.Get(&t, `SELECT * FROM teams WHERE id = ?`, id)
-	if err != nil {
-		return nil, fmt.Errorf("getting team: %w", err)
-	}
-	return &t, nil
-}
-
-// AddMember inserts a team_members row. m.ID must be pre-populated by the caller.
-func (r *TeamRepo) AddMember(m *models.TeamMember) error {
-	_, err := r.db.NamedExec(`
-		INSERT INTO team_members (id, team_id, user_id, display_name, role, color, icon, joined_at)
-		VALUES (:id, :team_id, :user_id, :display_name, :role, :color, :icon, :joined_at)
-	`, m)
-	if err != nil {
-		return fmt.Errorf("adding team member: %w", err)
-	}
-	return nil
-}
-
-// GetMember returns the team_members row for a given (team, user) pair.
-func (r *TeamRepo) GetMember(teamID, userID string) (*models.TeamMember, error) {
-	var m models.TeamMember
-	err := r.db.Get(&m, `
-		SELECT * FROM team_members WHERE team_id = ? AND user_id = ?
-	`, teamID, userID)
-	if err != nil {
-		return nil, fmt.Errorf("getting team member: %w", err)
-	}
-	return &m, nil
-}
-
-// ListMembers returns active (non-archived) members of a team, including
-// login-less Participants. A LEFT JOIN handles Participants who have no users
-// row; COALESCE prefers the per-team display_name override, then falls back to users.
-func (r *TeamRepo) ListMembers(teamID string) ([]*models.TeamMemberWithUser, error) {
-	return r.listMembers(teamID, false)
-}
-
-// ListMembersAll returns all members of a team, including inactivated members.
-func (r *TeamRepo) ListMembersAll(teamID string) ([]*models.TeamMemberWithUser, error) {
-	return r.listMembers(teamID, true)
-}
-
-func (r *TeamRepo) listMembers(teamID string, includeArchived bool) ([]*models.TeamMemberWithUser, error) {
-	var members []*models.TeamMemberWithUser
-	query := `
-		SELECT
-			tm.id, tm.team_id, tm.user_id, tm.role, tm.color, tm.icon, tm.joined_at, tm.archived_at,
-			COALESCE(u.email, '')                          AS email,
-			COALESCE(tm.display_name, u.display_name, '') AS display_name,
-			u.avatar_url
-		FROM team_members tm
-		LEFT JOIN users u ON u.id = tm.user_id
-		WHERE tm.team_id = ?`
-	if !includeArchived {
-		query += ` AND tm.archived_at IS NULL`
-	}
-	query += ` ORDER BY tm.joined_at ASC`
-	if err := r.db.Select(&members, query, teamID); err != nil {
-		return nil, fmt.Errorf("listing team members: %w", err)
-	}
-	return members, nil
-}
-
-// ListByUserID returns all teams the given user belongs to, ordered by
-// creation date ascending. When includeArchived is false (the default),
-// archived teams are excluded.
-func (r *TeamRepo) ListByUserID(userID string, includeArchived bool) ([]*models.Team, error) {
-	teams := make([]*models.Team, 0)
-	query := `
-		SELECT t.* FROM teams t
-		JOIN team_members tm ON tm.team_id = t.id
-		WHERE tm.user_id = ?`
-	if !includeArchived {
-		query += ` AND t.archived_at IS NULL`
-	}
-	query += ` ORDER BY t.created_at ASC`
-	if err := r.db.Select(&teams, query, userID); err != nil {
-		return nil, fmt.Errorf("listing teams for user: %w", err)
-	}
-	return teams, nil
-}
-
-// ListAll returns every team in the system, optionally including archived ones.
-// Used by superadmin callers who need visibility across all teams.
-func (r *TeamRepo) ListAll(includeArchived bool) ([]*models.Team, error) {
-	teams := make([]*models.Team, 0)
-	query := `SELECT * FROM teams`
-	if !includeArchived {
-		query += ` WHERE archived_at IS NULL`
-	}
-	query += ` ORDER BY created_at ASC`
-	if err := r.db.Select(&teams, query); err != nil {
-		return nil, fmt.Errorf("listing all teams: %w", err)
-	}
-	return teams, nil
-}
-
-// Count returns the total number of teams.
-func (r *TeamRepo) Count() (int, error) {
-	var count int
-	err := r.db.Get(&count, `SELECT COUNT(*) FROM teams`)
-	if err != nil {
-		return 0, fmt.Errorf("counting teams: %w", err)
-	}
-	return count, nil
-}
-
-// GetMemberByID fetches a team_members row by its primary key. Unlike
-// GetMember (which looks up by team+userID pair), this is the canonical
-// lookup used by member-scoped routes that receive a memberId path param.
-func (r *TeamRepo) GetMemberByID(memberID string) (*models.TeamMemberWithUser, error) {
-	var m models.TeamMemberWithUser
-	err := r.db.Get(&m, `
-		SELECT
-			tm.id, tm.team_id, tm.user_id, tm.role, tm.color, tm.icon, tm.joined_at, tm.archived_at,
-			COALESCE(u.email, '')                          AS email,
-			COALESCE(tm.display_name, u.display_name, '') AS display_name,
-			u.avatar_url
-		FROM team_members tm
-		LEFT JOIN users u ON u.id = tm.user_id
-		WHERE tm.id = ?
-	`, memberID)
-	if err != nil {
-		return nil, fmt.Errorf("getting team member by id: %w", err)
-	}
-	return &m, nil
-}
-
-// UpdateMember applies mutable identity and role fields to a team_members row.
-// Only non-nil arguments are written; nil fields retain their current values.
-func (r *TeamRepo) UpdateMember(memberID string, displayName, color, icon, role *string) error {
-	// Fetch current values so we can apply the partial update.
-	type row struct {
-		DisplayName *string `db:"display_name"`
-		Color       *string `db:"color"`
-		Icon        *string `db:"icon"`
-		Role        string  `db:"role"`
-	}
-	var cur row
-	if err := r.db.Get(&cur, `SELECT display_name, color, icon, role FROM team_members WHERE id = ?`, memberID); err != nil {
-		return fmt.Errorf("fetching member for update: %w", err)
-	}
-	if displayName != nil {
-		cur.DisplayName = displayName
-	}
-	if color != nil {
-		cur.Color = color
-	}
-	if icon != nil {
-		cur.Icon = icon
-	}
-	if role != nil {
-		cur.Role = *role
-	}
-	_, err := r.db.Exec(`
-		UPDATE team_members SET display_name = ?, color = ?, icon = ?, role = ? WHERE id = ?
-	`, cur.DisplayName, cur.Color, cur.Icon, cur.Role, memberID)
-	if err != nil {
-		return fmt.Errorf("updating team member: %w", err)
-	}
-	return nil
-}
-
-// DeleteMember removes a team_members row. The caller is responsible for
-// verifying that the member is not the last admin before calling this, and
-// must delete the member's timeline_access rows first (RESTRICT FK).
-func (r *TeamRepo) DeleteMember(memberID string) error {
-	_, err := r.db.Exec(`DELETE FROM team_members WHERE id = ?`, memberID)
-	if err != nil {
-		return fmt.Errorf("deleting team member: %w", err)
-	}
-	return nil
-}
-
-// CountMemberAssignments returns how many activity_assignments rows reference
-// this team member. Callers use this count to block hard-delete when history exists.
-func (r *TeamRepo) CountMemberAssignments(memberID string) (int, error) {
-	var count int
-	err := r.db.Get(&count, `
-		SELECT COUNT(*) FROM activity_assignments WHERE team_member_id = ?
-	`, memberID)
-	if err != nil {
-		return 0, fmt.Errorf("counting member assignments: %w", err)
-	}
-	return count, nil
-}
-
-// DeleteMemberTimelineAccess removes all timeline_access entries for a member.
-// Must be called before DeleteMember; the RESTRICT FK on
-// timeline_access.team_member_id blocks the team_members deletion otherwise.
-func (r *TeamRepo) DeleteMemberTimelineAccess(memberID string) error {
-	_, err := r.db.Exec(`DELETE FROM timeline_access WHERE team_member_id = ?`, memberID)
-	if err != nil {
-		return fmt.Errorf("deleting member timeline access: %w", err)
-	}
-	return nil
-}
-
-// SetMemberArchived sets or clears archived_at on a team_members row.
-func (r *TeamRepo) SetMemberArchived(memberID string, at *time.Time) error {
-	_, err := r.db.Exec(`UPDATE team_members SET archived_at = ? WHERE id = ?`, at, memberID)
-	if err != nil {
-		return fmt.Errorf("setting member archived: %w", err)
-	}
-	return nil
-}
-
-// CountAdmins counts non-archived admin members of a team. Used to enforce
-// the "cannot remove last admin" constraint.
-func (r *TeamRepo) CountAdmins(teamID string) (int, error) {
-	var count int
-	err := r.db.Get(&count, `
-		SELECT COUNT(*) FROM team_members
-		WHERE team_id = ? AND role = 'admin' AND archived_at IS NULL
-	`, teamID)
-	if err != nil {
-		return 0, fmt.Errorf("counting admins: %w", err)
-	}
-	return count, nil
-}
-
-// CountTeamsForUser returns how many teams a user belongs to. Used to enforce
-// the "single team" constraint for hard deletion.
-func (r *TeamRepo) CountTeamsForUser(userID string) (int, error) {
-	var count int
-	err := r.db.Get(&count, `
-		SELECT COUNT(*) FROM team_members WHERE user_id = ? AND archived_at IS NULL
-	`, userID)
-	if err != nil {
-		return 0, fmt.Errorf("counting user teams: %w", err)
-	}
-	return count, nil
-}
-
-// GetMemberStats computes activity and timeline counts for a team member.
-func (r *TeamRepo) GetMemberStats(memberID string) (*models.MemberStats, error) {
-	now := time.Now()
-	var stats models.MemberStats
-
-	// Timeline counts via timeline_access.
-	if err := r.db.Get(&stats.ActiveTimelines, `
-		SELECT COUNT(*) FROM timeline_access ta
-		JOIN timelines t ON t.id = ta.timeline_id
-		WHERE ta.team_member_id = ? AND t.archived_at IS NULL
-	`, memberID); err != nil {
-		return nil, fmt.Errorf("counting active timelines: %w", err)
-	}
-	if err := r.db.Get(&stats.ArchivedTimelines, `
-		SELECT COUNT(*) FROM timeline_access ta
-		JOIN timelines t ON t.id = ta.timeline_id
-		WHERE ta.team_member_id = ? AND t.archived_at IS NOT NULL
-	`, memberID); err != nil {
-		return nil, fmt.Errorf("counting archived timelines: %w", err)
-	}
-
-	// Activity counts from activity_assignments.
-	rows, err := r.db.Query(`
-		SELECT
-			COALESCE(SUM(CASE WHEN a.archived_at IS NOT NULL                                                     THEN 1 ELSE 0 END), 0) AS archived,
-			COALESCE(SUM(CASE WHEN a.archived_at IS NULL AND a.end_at   <  ?                                     THEN 1 ELSE 0 END), 0) AS past_due,
-			COALESCE(SUM(CASE WHEN a.archived_at IS NULL AND a.start_at <= ? AND a.end_at >= ?                   THEN 1 ELSE 0 END), 0) AS running,
-			COALESCE(SUM(CASE WHEN a.archived_at IS NULL AND a.start_at >  ?                                     THEN 1 ELSE 0 END), 0) AS upcoming
-		FROM activity_assignments aa
-		JOIN activities a ON a.id = aa.activity_id
-		WHERE aa.team_member_id = ?
-	`, now, now, now, now, memberID)
-	if err != nil {
-		return nil, fmt.Errorf("computing activity stats: %w", err)
-	}
-	defer rows.Close()
-	if rows.Next() {
-		if err := rows.Scan(&stats.ArchivedActivities, &stats.PastDue, &stats.Running, &stats.Upcoming); err != nil {
-			return nil, fmt.Errorf("scanning activity stats: %w", err)
-		}
-	}
-
-	return &stats, nil
-}
-
-// GetUserStats aggregates activity and timeline counts across all of a user's
-// team memberships. Used by GET /users/me/stats for the profile page.
-func (r *TeamRepo) GetUserStats(userID string) (*models.MemberStats, error) {
-	now := time.Now()
-	var stats models.MemberStats
-
-	if err := r.db.Get(&stats.ActiveTimelines, `
-		SELECT COUNT(*) FROM timeline_access ta
-		JOIN timelines t ON t.id = ta.timeline_id
-		JOIN team_members tm ON tm.id = ta.team_member_id
-		WHERE tm.user_id = ? AND t.archived_at IS NULL
-	`, userID); err != nil {
-		return nil, fmt.Errorf("counting active timelines: %w", err)
-	}
-	if err := r.db.Get(&stats.ArchivedTimelines, `
-		SELECT COUNT(*) FROM timeline_access ta
-		JOIN timelines t ON t.id = ta.timeline_id
-		JOIN team_members tm ON tm.id = ta.team_member_id
-		WHERE tm.user_id = ? AND t.archived_at IS NOT NULL
-	`, userID); err != nil {
-		return nil, fmt.Errorf("counting archived timelines: %w", err)
-	}
-
-	rows, err := r.db.Query(`
-		SELECT
-			COALESCE(SUM(CASE WHEN a.archived_at IS NOT NULL                                   THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN a.archived_at IS NULL AND a.end_at   <  ?                   THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN a.archived_at IS NULL AND a.start_at <= ? AND a.end_at >= ? THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN a.archived_at IS NULL AND a.start_at >  ?                   THEN 1 ELSE 0 END), 0)
-		FROM activity_assignments aa
-		JOIN activities a ON a.id = aa.activity_id
-		JOIN team_members tm ON tm.id = aa.team_member_id
-		WHERE tm.user_id = ?
-	`, now, now, now, now, userID)
-	if err != nil {
-		return nil, fmt.Errorf("computing activity stats: %w", err)
-	}
-	defer rows.Close()
-	if rows.Next() {
-		if err := rows.Scan(&stats.ArchivedActivities, &stats.PastDue, &stats.Running, &stats.Upcoming); err != nil {
-			return nil, fmt.Errorf("scanning activity stats: %w", err)
-		}
-	}
-
-	return &stats, nil
-}
-
-// GetMemberAllTeams returns all team memberships for a user (across all teams).
-// Used to populate the "Teams" section of the Member Edit Modal.
-func (r *TeamRepo) GetMemberAllTeams(userID string) ([]*models.TeamMemberWithUser, error) {
-	var members []*models.TeamMemberWithUser
-	err := r.db.Select(&members, `
-		SELECT
-			tm.id, tm.team_id, tm.user_id, tm.role, tm.color, tm.icon, tm.joined_at, tm.archived_at,
-			COALESCE(u.email, '')                          AS email,
-			COALESCE(tm.display_name, u.display_name, '') AS display_name,
-			u.avatar_url
-		FROM team_members tm
-		LEFT JOIN users u ON u.id = tm.user_id
-		WHERE tm.user_id = ?
-		ORDER BY tm.joined_at ASC
-	`, userID)
-	if err != nil {
-		return nil, fmt.Errorf("getting member all teams: %w", err)
-	}
-	return members, nil
-}
-
-// SetInviteLinkToken sets the reusable invite link token on a team. Passing
-// nil clears it (revoking the link).
-func (r *TeamRepo) SetInviteLinkToken(teamID string, token *string) error {
-	_, err := r.db.Exec(
-		`UPDATE teams SET invite_link_token = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-		token, teamID,
-	)
-	if err != nil {
-		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
-			return fmt.Errorf("invite link token collision: %w", err)
-		}
-		return fmt.Errorf("setting invite link token: %w", err)
-	}
-	return nil
-}
-
-// GetByInviteLinkToken looks up a team by its invite_link_token. Returns
-// sql.ErrNoRows (wrapped) when no matching team is found.
-func (r *TeamRepo) GetByInviteLinkToken(token string) (*models.Team, error) {
-	var t models.Team
-	err := r.db.Get(&t, `
-		SELECT * FROM teams WHERE invite_link_token = ? AND archived_at IS NULL
-	`, token)
-	if err != nil {
-		return nil, fmt.Errorf("getting team by invite link: %w", err)
-	}
-	return &t, nil
-}
-````
-
 ## File: packages/api/internal/db/user_preference_repo.go
 ````go
 package db
@@ -14757,301 +14016,6 @@ func (b *Bus) Publish(msg Message) {
 }
 ````
 
-## File: packages/api/internal/mailer/mailer.go
-````go
-// Package mailer sends email via SMTP. Configuration is read from
-// instance_settings at send time so changes take effect without a restart.
-// When SMTP is not configured, Send returns nil (not an error) so callers
-// can treat "no mailer" as a no-op — the forgot-password flow still returns
-// 200 to prevent email enumeration.
-package mailer
-
-import (
-	"crypto/aes"
-	"crypto/cipher"
-	"crypto/rand"
-	"crypto/sha256"
-	"crypto/tls"
-	"encoding/base64"
-	"encoding/json"
-	"fmt"
-	"io"
-	"log/slog"
-	"net/smtp"
-	"strings"
-)
-
-// encPrefix marks values encrypted with AES-256-GCM so LoadConfig can
-// distinguish them from legacy plaintext values written before encryption
-// was introduced.
-const encPrefix = "enc:v1:"
-
-// SMTPConfig holds the full SMTP configuration for the instance.
-type SMTPConfig struct {
-	Host       string `json:"host"`
-	Port       int    `json:"port"`
-	Username   string `json:"username"`
-	Password   string `json:"password"` // stored encrypted at rest via AES-256-GCM
-	FromName   string `json:"fromName"`
-	FromEmail  string `json:"fromEmail"`
-	Encryption string `json:"encryption"` // "none" | "tls" | "starttls"
-}
-
-// SettingsReader is the subset of InstanceSettingsRepo used by Mailer.
-type SettingsReader interface {
-	Get(key string) (string, error)
-	Set(key, value string) error
-}
-
-// Mailer sends email via SMTP. The zero value is valid; calling Send on an
-// unconfigured Mailer is a no-op.
-type Mailer struct {
-	settings SettingsReader
-	encKey   []byte // 32-byte AES-256 key derived from keyMaterial; nil disables encryption
-}
-
-// New returns a Mailer that reads config from settings at send time.
-// keyMaterial is used to derive an AES-256 key for encrypting stored SMTP
-// passwords. Pass nil to disable encryption (tests, zero-value usage).
-func New(settings SettingsReader, keyMaterial []byte) *Mailer {
-	var encKey []byte
-	if len(keyMaterial) > 0 {
-		k := sha256.Sum256(keyMaterial)
-		encKey = k[:]
-	}
-	return &Mailer{settings: settings, encKey: encKey}
-}
-
-// LoadConfig reads the SMTP configuration from instance_settings.
-// Returns nil when SMTP has not been configured.
-func (m *Mailer) LoadConfig() (*SMTPConfig, error) {
-	raw, err := m.settings.Get("smtp_config")
-	if err != nil {
-		return nil, fmt.Errorf("loading smtp config: %w", err)
-	}
-	if raw == "" {
-		return nil, nil
-	}
-	var cfg SMTPConfig
-	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
-		return nil, fmt.Errorf("parsing smtp config: %w", err)
-	}
-	if cfg.Password != "" {
-		dec, err := m.decryptPassword(cfg.Password)
-		if err != nil {
-			return nil, fmt.Errorf("decrypting smtp password: %w", err)
-		}
-		cfg.Password = dec
-	}
-	return &cfg, nil
-}
-
-// IsConfigured reports whether SMTP has been set up.
-func (m *Mailer) IsConfigured() bool {
-	cfg, err := m.LoadConfig()
-	return err == nil && cfg != nil && cfg.Host != ""
-}
-
-// SaveConfig serialises cfg and stores it in instance_settings.
-// The password field is encrypted before storage when an encryption key is set.
-func (m *Mailer) SaveConfig(cfg *SMTPConfig) error {
-	toStore := *cfg
-	if cfg.Password != "" {
-		enc, err := m.encryptPassword(cfg.Password)
-		if err != nil {
-			return fmt.Errorf("encrypting smtp password: %w", err)
-		}
-		toStore.Password = enc
-	}
-	b, err := json.Marshal(toStore)
-	if err != nil {
-		return fmt.Errorf("serialising smtp config: %w", err)
-	}
-	return m.settings.Set("smtp_config", string(b))
-}
-
-// DeleteConfig removes the SMTP configuration.
-func (m *Mailer) DeleteConfig() error {
-	return m.settings.Set("smtp_config", "")
-}
-
-// Send sends a plain-text / HTML email to a single recipient.
-// Returns nil without sending when SMTP is not configured.
-func (m *Mailer) Send(to, subject, htmlBody string) error {
-	cfg, err := m.LoadConfig()
-	if err != nil {
-		slog.Warn("mailer: failed to load config", "err", err)
-		return nil
-	}
-	if cfg == nil || cfg.Host == "" {
-		slog.Debug("mailer: no smtp config — email skipped", "subject", subject)
-		return nil
-	}
-
-	return sendViaConfig(cfg, to, subject, htmlBody)
-}
-
-// SendWithConfig sends using an explicit config object, bypassing the stored
-// config. Used by the SMTP test endpoint before saving.
-func SendWithConfig(cfg *SMTPConfig, to, subject, htmlBody string) error {
-	return sendViaConfig(cfg, to, subject, htmlBody)
-}
-
-// encryptPassword encrypts plaintext with AES-256-GCM and returns a
-// base64-encoded ciphertext prefixed with encPrefix. Returns plaintext
-// unchanged when no encryption key is set.
-func (m *Mailer) encryptPassword(plaintext string) (string, error) {
-	if len(m.encKey) == 0 {
-		return plaintext, nil
-	}
-	block, err := aes.NewCipher(m.encKey)
-	if err != nil {
-		return "", fmt.Errorf("creating cipher: %w", err)
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return "", fmt.Errorf("creating gcm: %w", err)
-	}
-	nonce := make([]byte, gcm.NonceSize())
-	if _, err = io.ReadFull(rand.Reader, nonce); err != nil {
-		return "", fmt.Errorf("generating nonce: %w", err)
-	}
-	ciphertext := gcm.Seal(nonce, nonce, []byte(plaintext), nil)
-	return encPrefix + base64.StdEncoding.EncodeToString(ciphertext), nil
-}
-
-// decryptPassword reverses encryptPassword. Values without encPrefix are
-// returned as-is — this handles configs saved before encryption was added.
-func (m *Mailer) decryptPassword(encoded string) (string, error) {
-	if !strings.HasPrefix(encoded, encPrefix) {
-		// Plaintext fallback — encrypts on next SaveConfig call.
-		return encoded, nil
-	}
-	if len(m.encKey) == 0 {
-		return "", fmt.Errorf("encryption key not set; cannot decrypt smtp password")
-	}
-	data, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(encoded, encPrefix))
-	if err != nil {
-		return "", fmt.Errorf("decoding encrypted password: %w", err)
-	}
-	block, err := aes.NewCipher(m.encKey)
-	if err != nil {
-		return "", fmt.Errorf("creating cipher: %w", err)
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return "", fmt.Errorf("creating gcm: %w", err)
-	}
-	nonceSize := gcm.NonceSize()
-	if len(data) < nonceSize {
-		return "", fmt.Errorf("ciphertext too short")
-	}
-	plain, err := gcm.Open(nil, data[:nonceSize], data[nonceSize:], nil)
-	if err != nil {
-		return "", fmt.Errorf("decrypting password: %w", err)
-	}
-	return string(plain), nil
-}
-
-func sendViaConfig(cfg *SMTPConfig, to, subject, htmlBody string) error {
-	from := fmt.Sprintf("%s <%s>", cfg.FromName, cfg.FromEmail)
-	msg := buildMessage(from, to, subject, htmlBody)
-	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
-
-	switch strings.ToLower(cfg.Encryption) {
-	case "tls":
-		return sendTLS(cfg, addr, from, to, msg)
-	case "starttls":
-		return sendSTARTTLS(cfg, addr, from, to, msg)
-	default:
-		return sendPlain(cfg, addr, from, to, msg)
-	}
-}
-
-func buildMessage(from, to, subject, htmlBody string) string {
-	var b strings.Builder
-	b.WriteString("From: " + from + "\r\n")
-	b.WriteString("To: " + to + "\r\n")
-	b.WriteString("Subject: " + subject + "\r\n")
-	b.WriteString("MIME-Version: 1.0\r\n")
-	b.WriteString("Content-Type: text/html; charset=UTF-8\r\n")
-	b.WriteString("\r\n")
-	b.WriteString(htmlBody)
-	return b.String()
-}
-
-func sendPlain(cfg *SMTPConfig, addr, from, to, msg string) error {
-	var auth smtp.Auth
-	if cfg.Username != "" {
-		auth = smtp.PlainAuth("", cfg.Username, cfg.Password, cfg.Host)
-	}
-	if err := smtp.SendMail(addr, auth, cfg.FromEmail, []string{to}, []byte(msg)); err != nil {
-		return fmt.Errorf("smtp send: %w", err)
-	}
-	return nil
-}
-
-func sendTLS(cfg *SMTPConfig, addr, from, to, msg string) error {
-	tlsCfg := &tls.Config{ServerName: cfg.Host} //nolint:gosec // InsecureSkipVerify not set; ServerName ensures cert validation
-	conn, err := tls.Dial("tcp", addr, tlsCfg)
-	if err != nil {
-		return fmt.Errorf("smtp tls dial: %w", err)
-	}
-	defer conn.Close()
-
-	c, err := smtp.NewClient(conn, cfg.Host)
-	if err != nil {
-		return fmt.Errorf("smtp new client: %w", err)
-	}
-	defer c.Quit() //nolint:errcheck // SMTP Quit errors are not actionable at this point
-
-	if cfg.Username != "" {
-		auth := smtp.PlainAuth("", cfg.Username, cfg.Password, cfg.Host)
-		if err := c.Auth(auth); err != nil {
-			return fmt.Errorf("smtp auth: %w", err)
-		}
-	}
-	return doSend(c, cfg.FromEmail, to, msg)
-}
-
-func sendSTARTTLS(cfg *SMTPConfig, addr, from, to, msg string) error {
-	c, err := smtp.Dial(addr)
-	if err != nil {
-		return fmt.Errorf("smtp dial: %w", err)
-	}
-	defer c.Quit() //nolint:errcheck // SMTP Quit errors are not actionable at this point
-
-	tlsCfg := &tls.Config{ServerName: cfg.Host} //nolint:gosec // InsecureSkipVerify not set; this is standard TLS
-	if err := c.StartTLS(tlsCfg); err != nil {
-		return fmt.Errorf("smtp starttls: %w", err)
-	}
-	if cfg.Username != "" {
-		auth := smtp.PlainAuth("", cfg.Username, cfg.Password, cfg.Host)
-		if err := c.Auth(auth); err != nil {
-			return fmt.Errorf("smtp auth: %w", err)
-		}
-	}
-	return doSend(c, cfg.FromEmail, to, msg)
-}
-
-func doSend(c *smtp.Client, from, to, msg string) error {
-	if err := c.Mail(from); err != nil {
-		return fmt.Errorf("smtp MAIL: %w", err)
-	}
-	if err := c.Rcpt(to); err != nil {
-		return fmt.Errorf("smtp RCPT: %w", err)
-	}
-	w, err := c.Data()
-	if err != nil {
-		return fmt.Errorf("smtp DATA: %w", err)
-	}
-	if _, err := fmt.Fprint(w, msg); err != nil {
-		return fmt.Errorf("smtp write body: %w", err)
-	}
-	return w.Close()
-}
-````
-
 ## File: packages/api/internal/tier/enforce.go
 ````go
 package tier
@@ -15116,351 +14080,6 @@ func Register(m Module) {
 // Registered returns all modules added via Register.
 func Registered() []Module {
 	return registered
-}
-````
-
-## File: packages/api/internal/tier/tier.go
-````go
-// Package tier defines the deployment tiers (Unlimited, Team, Business,
-// Enterprise) and the per-tier limits and capability gates the API enforces.
-// Pro modules register through this package so they can read the active Tier
-// at startup. See registry.go for the module registration contract.
-package tier
-
-import (
-	"fmt"
-	"os"
-)
-
-// Tier is a deployment tier identifier. The zero value (empty string) is
-// Unlimited, which is what self-hosted/free installs run as.
-type Tier string
-
-const (
-	Unlimited  Tier = ""
-	Team       Tier = "team"
-	Business   Tier = "business"
-	Enterprise Tier = "enterprise"
-)
-
-// Limits holds the maximums for a tier. 0 means unlimited.
-type Limits struct {
-	MaxUsers int
-	MaxTeams int
-}
-
-var tierLimits = map[Tier]Limits{
-	Unlimited:  {MaxUsers: 0, MaxTeams: 0},
-	Team:       {MaxUsers: 5, MaxTeams: 1},
-	Business:   {MaxUsers: 15, MaxTeams: 3},
-	Enterprise: {MaxUsers: 0, MaxTeams: 0},
-}
-
-// tierOrder is used by AtLeast to compare capability levels.
-var tierOrder = map[Tier]int{
-	Unlimited:  0,
-	Team:       1,
-	Business:   2,
-	Enterprise: 3,
-}
-
-// Load reads DRABA_TIER from the environment. Unset returns Unlimited.
-// An unrecognised value is an error — fail closed, don't silently default.
-func Load() (Tier, error) {
-	v := os.Getenv("DRABA_TIER")
-	if v == "" {
-		return Unlimited, nil
-	}
-	t := Tier(v)
-	if _, ok := tierLimits[t]; !ok {
-		return "", fmt.Errorf("unknown DRABA_TIER %q: must be team, business, or enterprise", v)
-	}
-	return t, nil
-}
-
-// Limits returns the user/team caps for this tier. Unknown tiers return
-// the zero value, which is interpreted as "unlimited".
-func (t Tier) Limits() Limits {
-	return tierLimits[t]
-}
-
-// AtLeast reports whether t is at least as capable as other.
-// Unlimited (self-host, free) is the lowest; Enterprise is the highest.
-func (t Tier) AtLeast(other Tier) bool {
-	return tierOrder[t] >= tierOrder[other]
-}
-
-// String returns the tier name for logs and error messages. Unlimited
-// renders as "unlimited" rather than the empty string.
-func (t Tier) String() string {
-	if t == Unlimited {
-		return "unlimited"
-	}
-	return string(t)
-}
-````
-
-## File: packages/api/internal/ws/hub.go
-````go
-// Package ws implements the WebSocket hub and per-client read/write pumps.
-// The hub maintains a team-scoped subscription map and fans out domain event
-// messages to all clients that have subscribed to a given team.
-package ws
-
-import (
-	"encoding/json"
-	"log/slog"
-	"net/http"
-	"sync"
-	"time"
-
-	"github.com/gorilla/websocket"
-
-	"github.com/I0-1O/draba/packages/api/internal/auth"
-	"github.com/I0-1O/draba/packages/api/internal/events"
-)
-
-const (
-	// defaultHeartbeatInterval is the ping cadence in production.
-	defaultHeartbeatInterval = 30 * time.Second
-	// writeTimeout is the maximum time allowed to write a single message.
-	writeTimeout = 10 * time.Second
-	// defaultReadTimeout is the read deadline reset after every pong. It is
-	// long enough for a client to respond to at least two ping cycles.
-	defaultReadTimeout = 70 * time.Second
-	// maxMessageBytes caps inbound frame size; subscribe and pong messages are
-	// tiny JSON blobs so 512 bytes is generous.
-	maxMessageBytes = 512
-)
-
-// MemberChecker reports whether userID belongs to teamID.
-// A non-nil error (including sql.ErrNoRows) means the user is not a member.
-// It is satisfied in production by wrapping (*db.TeamRepo).GetMember.
-type MemberChecker func(teamID, userID string) error
-
-var upgrader = websocket.Upgrader{
-	// Origin check is intentionally permissive; auth is enforced via JWT.
-	CheckOrigin:     func(_ *http.Request) bool { return true },
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
-}
-
-// inboundMsg is a client-to-server WebSocket message.
-type inboundMsg struct {
-	Type   string `json:"type"`
-	TeamID string `json:"teamId,omitempty"`
-}
-
-// OutboundMsg is a server-to-client WebSocket message. It is exported so
-// tests can assert on the wire shape without duplicating the type.
-type OutboundMsg struct {
-	Type    string `json:"type"`
-	Payload any    `json:"payload,omitempty"`
-}
-
-// client represents one active WebSocket connection.
-type client struct {
-	conn    *websocket.Conn
-	send    chan OutboundMsg
-	mu      sync.RWMutex
-	teamIDs map[string]struct{}
-	userID  string
-}
-
-// Hub manages all connected WebSocket clients and routes broadcast messages
-// to team-subscribed clients. Call Run in a goroutine before serving requests.
-type Hub struct {
-	tokens  *auth.TokenService
-	members MemberChecker
-	bus     *events.Bus
-
-	// heartbeatInterval controls how often writePump sends a ping frame.
-	// readTimeout is the read deadline extended after each pong. Both default
-	// to production values and are overridden in tests to keep them fast.
-	heartbeatInterval time.Duration
-	readTimeout       time.Duration
-
-	mu    sync.RWMutex
-	teams map[string]map[*client]struct{} // teamID → set of clients
-}
-
-// NewHub returns a Hub wired to the given event bus, auth token service, and
-// member checker. The checker gates subscribe messages: only users who are
-// members of a team may subscribe to its real-time feed.
-func NewHub(bus *events.Bus, tokens *auth.TokenService, members MemberChecker) *Hub {
-	return &Hub{
-		tokens:            tokens,
-		members:           members,
-		bus:               bus,
-		heartbeatInterval: defaultHeartbeatInterval,
-		readTimeout:       defaultReadTimeout,
-		teams:             make(map[string]map[*client]struct{}),
-	}
-}
-
-// Run subscribes to the event bus and broadcasts domain events to the
-// appropriate team subscribers. It blocks until the bus subscription channel
-// is closed; call it in its own goroutine.
-func (h *Hub) Run() {
-	ch := h.bus.Subscribe()
-	defer h.bus.Unsubscribe(ch)
-	for msg := range ch {
-		h.broadcast(msg.TeamID, OutboundMsg{Type: string(msg.Type), Payload: msg.Payload})
-	}
-}
-
-// ServeWS upgrades an HTTP request to a WebSocket connection, validates the
-// JWT from the ?token query parameter, and drives the client read/write pumps.
-func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
-	tokenStr := r.URL.Query().Get("token")
-	if tokenStr == "" {
-		http.Error(w, "missing token", http.StatusUnauthorized)
-		return
-	}
-	claims, err := h.tokens.Validate(tokenStr, "access")
-	if err != nil {
-		http.Error(w, "invalid or expired token", http.StatusUnauthorized)
-		return
-	}
-
-	conn, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		// Upgrade wrote the HTTP error; log and return.
-		slog.Error("ws: upgrade failed", "err", err)
-		return
-	}
-
-	c := &client{
-		conn:    conn,
-		send:    make(chan OutboundMsg, 64),
-		teamIDs: make(map[string]struct{}),
-		userID:  claims.UserID,
-	}
-	slog.Debug("ws: client connected", "userID", claims.UserID)
-
-	go c.writePump(h)
-	c.readPump(h)
-}
-
-// subscribe adds c to the subscription set for teamID.
-func (h *Hub) subscribe(c *client, teamID string) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.teams[teamID] == nil {
-		h.teams[teamID] = make(map[*client]struct{})
-	}
-	h.teams[teamID][c] = struct{}{}
-
-	c.mu.Lock()
-	c.teamIDs[teamID] = struct{}{}
-	c.mu.Unlock()
-}
-
-// unsubscribeAll removes c from every team subscription set it belongs to
-// and logs the disconnect.
-func (h *Hub) unsubscribeAll(c *client) {
-	slog.Debug("ws: client disconnected", "userID", c.userID)
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	for teamID := range c.teamIDs {
-		delete(h.teams[teamID], c)
-		if len(h.teams[teamID]) == 0 {
-			delete(h.teams, teamID)
-		}
-	}
-}
-
-// broadcast delivers msg to every client subscribed to teamID. Sends are
-// non-blocking; slow clients are skipped rather than stalling the broadcast.
-func (h *Hub) broadcast(teamID string, msg OutboundMsg) {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	for c := range h.teams[teamID] {
-		select {
-		case c.send <- msg:
-		default:
-			// Slow client — drop rather than block.
-		}
-	}
-}
-
-// readPump reads inbound messages from the WebSocket connection and handles
-// the subscribe and pong message types. It returns when the connection closes,
-// triggering deferred cleanup.
-func (c *client) readPump(h *Hub) {
-	defer func() {
-		h.unsubscribeAll(c)
-		c.conn.Close()
-	}()
-
-	c.conn.SetReadLimit(maxMessageBytes)
-	_ = c.conn.SetReadDeadline(time.Now().Add(h.readTimeout))
-
-	for {
-		_, raw, err := c.conn.ReadMessage()
-		if err != nil {
-			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				slog.Warn("ws: unexpected close", "userID", c.userID, "err", err)
-			}
-			return
-		}
-
-		var msg inboundMsg
-		if err := json.Unmarshal(raw, &msg); err != nil {
-			continue
-		}
-
-		switch msg.Type {
-		case "subscribe":
-			if msg.TeamID != "" {
-				if err := h.members(msg.TeamID, c.userID); err != nil {
-					slog.Debug("ws: subscribe denied", "userID", c.userID, "teamID", msg.TeamID)
-					select {
-					case c.send <- OutboundMsg{Type: "error", Payload: "not a member of team " + msg.TeamID}:
-					default:
-					}
-				} else {
-					slog.Debug("ws: subscribed", "userID", c.userID, "teamID", msg.TeamID)
-					h.subscribe(c, msg.TeamID)
-				}
-			}
-		case "pong":
-			// Extend the read deadline when the client acknowledges a ping.
-			_ = c.conn.SetReadDeadline(time.Now().Add(h.readTimeout))
-		}
-	}
-}
-
-// writePump sends outgoing messages and heartbeat pings to the WebSocket
-// connection. It returns when the send channel is closed or a write fails,
-// triggering a connection close that causes readPump to return too.
-func (c *client) writePump(h *Hub) {
-	ticker := time.NewTicker(h.heartbeatInterval)
-	defer func() {
-		ticker.Stop()
-		c.conn.Close()
-	}()
-
-	for {
-		select {
-		case msg, ok := <-c.send:
-			_ = c.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
-			if !ok {
-				_ = c.conn.WriteMessage(websocket.CloseMessage, []byte{})
-				return
-			}
-			if err := c.conn.WriteJSON(msg); err != nil {
-				return
-			}
-		case <-ticker.C:
-			_ = c.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
-			if err := c.conn.WriteJSON(OutboundMsg{Type: "ping"}); err != nil {
-				return
-			}
-		}
-	}
 }
 ````
 
@@ -16172,20 +14791,6 @@ INSERT INTO activity_tags (activity_id, tag_id) VALUES
 ## File: packages/api/ui/static/.gitkeep
 ````
 
-````
-
-## File: packages/api/ui/embed.go
-````go
-// Package ui holds the embedded React build artifacts served by the API in
-// production. The static/ directory is populated by the Docker build process
-// (web-builder stage copies packages/web/dist here); it is otherwise empty in
-// development so the handler in server.go self-disables when index.html is absent.
-package ui
-
-import "embed"
-
-//go:embed all:static
-var FS embed.FS
 ````
 
 ## File: packages/api/.air.toml
@@ -37783,6 +36388,68 @@ Object.assign(window, {
 });
 ````
 
+## File: packages/api/cmd/draba/reset_password.go
+````go
+package main
+
+import (
+	"flag"
+	"fmt"
+	"os"
+	"strings"
+
+	"github.com/I0-1O/draba/packages/api/internal/auth"
+	"github.com/I0-1O/draba/packages/api/internal/db"
+)
+
+// runResetPassword is the handler for the reset-password subcommand.
+// It opens the database, hashes the supplied password, and updates the user record.
+func runResetPassword(args []string) {
+	fs := flag.NewFlagSet("reset-password", flag.ExitOnError)
+	email := fs.String("email", "", "email address of the user (required)")
+	password := fs.String("password", "", "new password — minimum 8 characters (required)")
+	fs.Usage = func() {
+		fmt.Fprintln(os.Stderr, "Usage: draba reset-password --email <email> --password <password>")
+		fs.PrintDefaults()
+	}
+	_ = fs.Parse(args)
+
+	*email = strings.ToLower(strings.TrimSpace(*email))
+	if *email == "" || *password == "" {
+		fs.Usage()
+		os.Exit(1)
+	}
+	if len(*password) < 8 {
+		fmt.Fprintln(os.Stderr, "error: password must be at least 8 characters")
+		os.Exit(1)
+	}
+
+	dsn := getenv("DRABA_DB_DSN", "/data/draba.db")
+	database, err := db.Open(dsn)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: open db: %v\n", err)
+		os.Exit(1)
+	}
+
+	hash, err := auth.HashPassword(*password)
+	if err != nil {
+		_ = database.Close()
+		fmt.Fprintf(os.Stderr, "error: hash password: %v\n", err)
+		os.Exit(1)
+	}
+
+	users := db.NewUserRepo(database)
+	if err := users.UpdatePasswordByEmail(*email, hash); err != nil {
+		_ = database.Close()
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	_ = database.Close()
+	fmt.Printf("password updated for %s\n", *email)
+}
+````
+
 ## File: packages/api/internal/api/admin_handler.go
 ````go
 package api
@@ -38849,6 +37516,1165 @@ func clientIP(r *http.Request) string {
 }
 ````
 
+## File: packages/api/internal/api/saved_filter_handler.go
+````go
+package api
+
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// handleListSavedFilters handles GET /teams/{id}/saved_filters. Returns
+// only filters owned by the calling user within the given team.
+func (s *Server) handleListSavedFilters(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
+		return
+	}
+
+	filters, err := s.savedFilters.ListByTeamUser(teamID, claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list saved filters")
+		return
+	}
+	writeJSON(w, http.StatusOK, filters)
+}
+
+// handleListAllTeamSavedFilters handles GET /teams/{id}/saved_filters/all.
+// Returns every saved filter in the team (private + team). Admin-only.
+func (s *Server) handleListAllTeamSavedFilters(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+
+	member, ok := s.requireTeamMember(w, r, teamID)
+	if !ok {
+		return
+	}
+	if member.Role != "admin" {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "only team admins can list all team filters")
+		return
+	}
+
+	filters, err := s.savedFilters.ListAllByTeam(teamID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list saved filters")
+		return
+	}
+	writeJSON(w, http.StatusOK, filters)
+}
+
+// handleCreateSavedFilter handles POST /teams/{id}/saved_filters. The
+// authenticated user must be a member of the team and becomes the owner.
+// Setting isTeamFilter=true at creation time requires admin role.
+func (s *Server) handleCreateSavedFilter(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	member, ok := s.requireTeamMember(w, r, teamID)
+	if !ok {
+		return
+	}
+
+	var req CreateSavedFilterJSONBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+	if req.Name == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name is required")
+		return
+	}
+	if !json.Valid([]byte(req.Definition)) {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "definition must be valid JSON")
+		return
+	}
+
+	isTeamFilter := false
+	if req.IsTeamFilter != nil && *req.IsTeamFilter {
+		if member.Role != "admin" {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "only team admins can create team filters")
+			return
+		}
+		isTeamFilter = true
+	}
+
+	now := time.Now()
+	filter := &models.SavedFilter{
+		ID:           newID(),
+		TeamID:       teamID,
+		UserID:       claims.UserID,
+		Name:         req.Name,
+		Definition:   req.Definition,
+		IsTeamFilter: isTeamFilter,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+	if err := s.savedFilters.Create(filter); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create saved filter")
+		return
+	}
+	writeJSON(w, http.StatusCreated, filter)
+}
+
+// handleUpdateSavedFilter handles PATCH /saved_filters/{id}. Owners may
+// update name and definition. Setting isTeamFilter=true is admin-only;
+// admins may also update filters they don't own when the filter is already
+// a team filter.
+func (s *Server) handleUpdateSavedFilter(w http.ResponseWriter, r *http.Request) {
+	filterID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	filter, err := s.savedFilters.GetByID(filterID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "saved filter not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update saved filter")
+		return
+	}
+
+	var req UpdateSavedFilterJSONBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	// Determine whether the caller is a team admin for permission checks.
+	isAdmin := false
+	if adminMember, ok := s.requireTeamMember(w, r, filter.TeamID); ok {
+		isAdmin = adminMember.Role == "admin"
+	} else {
+		return
+	}
+
+	isOwner := filter.UserID == claims.UserID
+
+	// Name and definition can be updated by the owner or by a team admin, but
+	// only after the filter has been promoted. This prevents admins from silently
+	// editing a member's private filter before they decide to share it — promotion
+	// is the explicit consent step.
+	wantsNameOrDef := req.Name != nil || req.Definition != nil
+	if wantsNameOrDef && !isOwner {
+		if !isAdmin || !filter.IsTeamFilter {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "not the owner of this saved filter")
+			return
+		}
+	}
+
+	if req.Name != nil {
+		if *req.Name == "" {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name must not be empty")
+			return
+		}
+		filter.Name = *req.Name
+	}
+	if req.Definition != nil {
+		if !json.Valid([]byte(*req.Definition)) {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "definition must be valid JSON")
+			return
+		}
+		filter.Definition = *req.Definition
+	}
+	// Only admins may promote or demote isTeamFilter — setting it back to false
+	// is just as impactful as promoting, since it silently removes the filter
+	// from all members' views.
+	if req.IsTeamFilter != nil {
+		if !isAdmin {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "only team admins can change team filter status")
+			return
+		}
+		filter.IsTeamFilter = *req.IsTeamFilter
+	}
+	filter.UpdatedAt = time.Now()
+
+	if err := s.savedFilters.Update(filter); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update saved filter")
+		return
+	}
+	writeJSON(w, http.StatusOK, filter)
+}
+
+// handleDeleteSavedFilter handles DELETE /saved_filters/{id}. The owner may
+// always delete their own filter. Team admins may additionally delete any
+// team filter (is_team_filter = true) even if they aren't the owner.
+func (s *Server) handleDeleteSavedFilter(w http.ResponseWriter, r *http.Request) {
+	filterID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	filter, err := s.savedFilters.GetByID(filterID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "saved filter not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete saved filter")
+		return
+	}
+
+	// Check membership to determine admin status.
+	adminMember, ok := s.requireTeamMember(w, r, filter.TeamID)
+	if !ok {
+		return
+	}
+	isAdmin := adminMember.Role == "admin"
+
+	// Owner can always delete; admin can delete team filters they don't own.
+	if filter.UserID != claims.UserID && (!isAdmin || !filter.IsTeamFilter) {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "not the owner of this saved filter")
+		return
+	}
+
+	if err := s.savedFilters.Delete(filterID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete saved filter")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+````
+
+## File: packages/api/internal/api/team_handler.go
+````go
+package api
+
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"html"
+	"log/slog"
+	"net/http"
+	"net/url"
+	"regexp"
+	"strings"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/db"
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// slugRe matches any run of characters that are not lowercase ASCII alphanumeric.
+var slugRe = regexp.MustCompile(`[^a-z0-9]+`)
+
+func (s *Server) handleListTeams(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFromContext(r.Context())
+	includeArchived := r.URL.Query().Get("archived") == "true"
+
+	// Superadmins see all teams system-wide, not just the ones they belong to.
+	caller, err := s.users.GetByID(claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list teams")
+		return
+	}
+
+	var teams []*models.Team
+	if caller.IsSuperadmin {
+		teams, err = s.teams.ListAll(includeArchived)
+	} else {
+		teams, err = s.teams.ListByUserID(claims.UserID, includeArchived)
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list teams")
+		return
+	}
+	writeJSON(w, http.StatusOK, teams)
+}
+
+func (s *Server) handleCreateTeam(w http.ResponseWriter, r *http.Request) {
+	var req CreateTeamJSONBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	req.Name = strings.TrimSpace(req.Name)
+	if req.Name == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name is required")
+		return
+	}
+
+	count, err := s.teams.Count()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create team")
+		return
+	}
+	if err := s.tier.CheckTeamLimit(count); err != nil {
+		writeError(w, http.StatusPaymentRequired, "TIER_TEAM_LIMIT", "team limit reached for current tier")
+		return
+	}
+
+	claims := claimsFromContext(r.Context())
+	now := time.Now()
+	id := newID()
+	team := &models.Team{
+		ID:          id,
+		Name:        req.Name,
+		Slug:        slugify(req.Name) + "-" + id[:8],
+		Description: req.Description,
+		Notes:       req.Notes,
+		Color:       req.Color,
+		Icon:        req.Icon,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	if err := s.teams.Create(team); err != nil {
+		if errors.Is(err, db.ErrDuplicateName) {
+			writeError(w, http.StatusConflict, "TEAM_NAME_TAKEN", "a team with that name already exists")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create team")
+		return
+	}
+
+	userID := claims.UserID
+	member := &models.TeamMember{
+		ID:       newID(),
+		TeamID:   team.ID,
+		UserID:   &userID,
+		Role:     "admin",
+		JoinedAt: now,
+	}
+	if err := s.teams.AddMember(member); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create team")
+		return
+	}
+
+	// Seed the default "Simple" status template for the new team.
+	if err := s.statuses.SeedDefaultTemplate(team.ID, claims.UserID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create team")
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, team)
+}
+
+func (s *Server) handleCreateInvite(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	claims := claimsFromContext(r.Context())
+
+	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
+		return
+	}
+
+	var req CreateInviteJSONBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	var email string
+	if req.Email != nil {
+		email = strings.ToLower(strings.TrimSpace(string(*req.Email)))
+	}
+
+	role := "member"
+	if req.Role != nil {
+		role = string(*req.Role)
+	}
+	if role != "admin" && role != "member" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "role must be admin or member")
+		return
+	}
+
+	now := time.Now()
+	invite := &models.Invite{
+		ID:        newID(),
+		TeamID:    teamID,
+		Email:     email,
+		Token:     newToken(),
+		Role:      role,
+		InvitedBy: claims.UserID,
+		ExpiresAt: now.Add(7 * 24 * time.Hour),
+		CreatedAt: now,
+	}
+	if err := s.invites.Create(invite); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create invite")
+		return
+	}
+
+	// Email the invite link when an address was supplied. Best-effort: a send
+	// failure (or no SMTP configured) must not fail invite creation — the
+	// admin can still copy the link from the UI.
+	if email != "" {
+		s.sendInviteEmail(email, invite.Token)
+	}
+
+	writeJSON(w, http.StatusCreated, invite)
+}
+
+// sendInviteEmail sends the team invite link to the invitee. Errors are logged,
+// not returned: invite creation already succeeded and the link is also shown in
+// the UI, so a mail failure should not surface to the caller.
+func (s *Server) sendInviteEmail(email, token string) {
+	baseURL := strings.TrimRight(getBaseURL(), "/")
+	inviteLink := baseURL + "/register?token=" + url.QueryEscape(token)
+
+	subject := "You've been invited to draba"
+	// html.EscapeString prevents a malformed href if the link ever contains
+	// HTML-special characters (shouldn't happen with url.QueryEscape tokens,
+	// but defence-in-depth for the email body).
+	body := "<html><body>" +
+		"<p>You've been invited to join a team on draba.</p>" +
+		"<p><a href=\"" + html.EscapeString(inviteLink) + "\">Click here to accept the invitation</a></p>" +
+		"<p>This invitation expires in 7 days.</p>" +
+		"</body></html>"
+
+	if err := s.mailer.Send(email, subject, body); err != nil {
+		slog.Error("invite: failed to send email", "email", email, "err", err)
+	}
+}
+
+// handleGetTeam checks membership before fetching the team row to avoid leaking
+// team existence to non-members (a 403 is returned whether the team is missing
+// or the caller is just not on it).
+func (s *Server) handleGetTeam(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+
+	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
+		return
+	}
+
+	team, err := s.teams.GetByID(teamID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "team not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get team")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, team)
+}
+
+func (s *Server) handleListMembers(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+
+	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
+		return
+	}
+
+	members, err := s.teams.ListMembers(teamID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list members")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, members)
+}
+
+// handleUpdateTeam applies partial updates — nil fields in the request body are
+// ignored, not cleared. The caller does not need to fetch the current team state
+// before patching.
+func (s *Server) handleUpdateTeam(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+
+	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
+		return
+	}
+
+	team, err := s.teams.GetByID(teamID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "team not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update team")
+		return
+	}
+
+	var req UpdateTeamJSONBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	if req.Name != nil {
+		name := strings.TrimSpace(*req.Name)
+		if name == "" {
+			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name cannot be empty")
+			return
+		}
+		team.Name = name
+		team.Slug = slugify(name) + "-" + team.ID[:8]
+	}
+	if req.Description != nil {
+		team.Description = req.Description
+	}
+	if req.Notes != nil {
+		team.Notes = req.Notes
+	}
+	if req.Color != nil {
+		team.Color = req.Color
+	}
+	if req.Icon != nil {
+		team.Icon = req.Icon
+	}
+	team.UpdatedAt = time.Now()
+
+	if err := s.teams.Update(team); err != nil {
+		if errors.Is(err, db.ErrDuplicateName) {
+			writeError(w, http.StatusConflict, "TEAM_NAME_TAKEN", "a team with that name already exists")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update team")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, team)
+}
+
+// handleArchiveTeam soft-deletes by setting archived_at rather than removing
+// the row, so activity history on the team is preserved and recovery is possible.
+func (s *Server) handleArchiveTeam(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+
+	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
+		return
+	}
+
+	now := time.Now()
+	if err := s.teams.SetArchived(teamID, &now); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive team")
+		return
+	}
+
+	team, err := s.teams.GetByID(teamID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "team not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive team")
+		return
+	}
+	writeJSON(w, http.StatusOK, team)
+}
+
+func (s *Server) handleUnarchiveTeam(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+
+	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
+		return
+	}
+
+	if err := s.teams.SetArchived(teamID, nil); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to unarchive team")
+		return
+	}
+
+	team, err := s.teams.GetByID(teamID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "team not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to unarchive team")
+		return
+	}
+	writeJSON(w, http.StatusOK, team)
+}
+
+// slugify converts a team name to a URL-safe slug by lowercasing, replacing
+// spaces and punctuation with hyphens, and collapsing consecutive hyphens.
+func slugify(name string) string {
+	s := slugRe.ReplaceAllString(strings.ToLower(name), "-")
+	s = strings.Trim(s, "-")
+	if s == "" {
+		s = newID()[:8]
+	}
+	return s
+}
+
+// ── Member CRUD ───────────────────────────────────────────────────────────────
+
+// handleGetMember fetches a single team member with computed stats.
+func (s *Server) handleGetMember(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	memberID := r.PathValue("memberId")
+
+	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
+		return
+	}
+
+	m, err := s.teams.GetMemberByID(memberID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "member not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get member")
+		return
+	}
+	if m.TeamID != teamID {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "member not found")
+		return
+	}
+
+	stats, err := s.teams.GetMemberStats(memberID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to compute member stats")
+		return
+	}
+
+	var teams []*models.TeamMemberWithUser
+	if m.UserID != nil {
+		teams, err = s.teams.GetMemberAllTeams(*m.UserID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get member teams")
+			return
+		}
+	}
+
+	// Deletable: zero active assignments and single-team membership.
+	activeActivities := stats.PastDue + stats.Running + stats.Upcoming + stats.Unscheduled
+	deletable := activeActivities == 0 && len(teams) <= 1
+
+	// Expose users.archived_at separately from team_members.archived_at so the
+	// client can distinguish account deactivation from membership inactivation.
+	var userArchivedAt *time.Time
+	if m.UserID != nil {
+		if u, err := s.users.GetByID(*m.UserID); err == nil {
+			userArchivedAt = u.ArchivedAt
+		}
+	}
+
+	detail := &models.MemberDetail{
+		TeamMemberWithUser: *m,
+		Stats:              *stats,
+		Teams:              flatten(teams),
+		Deletable:          deletable,
+		UserArchivedAt:     userArchivedAt,
+	}
+	writeJSON(w, http.StatusOK, detail)
+}
+
+// handleAddMember adds an existing registered user to the team by their userID.
+func (s *Server) handleAddMember(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+
+	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
+		return
+	}
+
+	var req struct {
+		UserID string `json:"userId"`
+		Role   string `json:"role"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+	req.UserID = strings.TrimSpace(req.UserID)
+	if req.UserID == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "userId is required")
+		return
+	}
+	if req.Role == "" {
+		req.Role = "member"
+	}
+	if req.Role != "admin" && req.Role != "member" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "role must be admin or member")
+		return
+	}
+
+	// Verify the user exists.
+	if _, err := s.users.GetByID(req.UserID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "user not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to add member")
+		return
+	}
+
+	now := time.Now()
+	uid := req.UserID
+	member := &models.TeamMember{
+		ID:       newID(),
+		TeamID:   teamID,
+		UserID:   &uid,
+		Role:     req.Role,
+		JoinedAt: now,
+	}
+	if err := s.teams.AddMember(member); err != nil {
+		writeError(w, http.StatusConflict, "ALREADY_MEMBER", "user is already a member of this team")
+		return
+	}
+
+	m, err := s.teams.GetMemberByID(member.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get created member")
+		return
+	}
+	writeJSON(w, http.StatusCreated, m)
+}
+
+// handleUpdateMember updates display_name, color, icon, and/or role.
+// Admins can change any field; regular members can only update their own
+// display_name, color, and icon (not their role).
+func (s *Server) handleUpdateMember(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	memberID := r.PathValue("memberId")
+	claims := claimsFromContext(r.Context())
+
+	callerMember, ok := s.requireTeamMember(w, r, teamID)
+	if !ok {
+		return
+	}
+
+	target, err := s.teams.GetMemberByID(memberID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "member not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update member")
+		return
+	}
+	if target.TeamID != teamID {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "member not found")
+		return
+	}
+
+	var req struct {
+		DisplayName *string `json:"displayName"`
+		Color       *string `json:"color"`
+		Icon        *string `json:"icon"`
+		Role        *string `json:"role"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+
+	// Only admins can change role.
+	if req.Role != nil && callerMember.Role != "admin" {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "only admins can change roles")
+		return
+	}
+	// Members can only update their own identity.
+	if callerMember.Role != "admin" && callerMember.ID != memberID {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "members can only update their own profile")
+		return
+	}
+	if req.Role != nil && *req.Role != "admin" && *req.Role != "member" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "role must be admin or member")
+		return
+	}
+
+	// Admins cannot change their own role — another admin must do it.
+	if req.Role != nil && target.UserID != nil && *target.UserID == claims.UserID {
+		writeError(w, http.StatusConflict, "SELF_ROLE_CHANGE", "cannot change your own role")
+		return
+	}
+
+	if err := s.teams.UpdateMember(memberID, req.DisplayName, req.Color, req.Icon, req.Role); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update member")
+		return
+	}
+
+	m, err := s.teams.GetMemberByID(memberID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get updated member")
+		return
+	}
+	writeJSON(w, http.StatusOK, m)
+}
+
+// handleDeleteMember removes a team member row. Rejects if the member is the
+// last admin or has activity assignments (to prevent data loss on hard-delete).
+func (s *Server) handleDeleteMember(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	memberID := r.PathValue("memberId")
+
+	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
+		return
+	}
+
+	target, err := s.teams.GetMemberByID(memberID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "member not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to remove member")
+		return
+	}
+	if target.TeamID != teamID {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "member not found")
+		return
+	}
+
+	if target.Role == "admin" {
+		admins, err := s.teams.CountAdmins(teamID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to remove member")
+			return
+		}
+		if admins <= 1 {
+			writeError(w, http.StatusConflict, "LAST_ADMIN", "cannot remove the last admin")
+			return
+		}
+	}
+
+	// Reject hard-delete when assignments exist: the RESTRICT FK would block it
+	// anyway, but we surface a 409 with the count so the UI can offer
+	// "Inactivate instead" rather than a generic error.
+	assignCount, err := s.teams.CountMemberAssignments(memberID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to remove member")
+		return
+	}
+	if assignCount > 0 {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"error": map[string]string{
+				"code":    "MEMBER_HAS_ASSIGNMENTS",
+				"message": "member has activity assignments; inactivate instead of removing",
+			},
+			"assignmentCount": assignCount,
+		})
+		return
+	}
+
+	// Delete timeline_access first so the RESTRICT FK on team_members is satisfied.
+	if err := s.teams.DeleteMemberTimelineAccess(memberID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to remove member")
+		return
+	}
+
+	if err := s.teams.DeleteMember(memberID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to remove member")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleArchiveMember inactivates a team member (sets archived_at).
+func (s *Server) handleArchiveMember(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	memberID := r.PathValue("memberId")
+
+	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
+		return
+	}
+
+	target, err := s.teams.GetMemberByID(memberID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "member not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive member")
+		return
+	}
+	if target.TeamID != teamID {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "member not found")
+		return
+	}
+
+	if target.Role == "admin" {
+		admins, err := s.teams.CountAdmins(teamID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive member")
+			return
+		}
+		if admins <= 1 {
+			writeError(w, http.StatusConflict, "LAST_ADMIN", "cannot inactivate the last admin")
+			return
+		}
+	}
+
+	now := time.Now()
+	if err := s.teams.SetMemberArchived(memberID, &now); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive member")
+		return
+	}
+
+	m, err := s.teams.GetMemberByID(memberID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get archived member")
+		return
+	}
+	writeJSON(w, http.StatusOK, m)
+}
+
+// handleUnarchiveMember reactivates an inactivated team member.
+func (s *Server) handleUnarchiveMember(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	memberID := r.PathValue("memberId")
+
+	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
+		return
+	}
+
+	target, err := s.teams.GetMemberByID(memberID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "member not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reactivate member")
+		return
+	}
+	if target.TeamID != teamID {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "member not found")
+		return
+	}
+
+	if err := s.teams.SetMemberArchived(memberID, nil); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reactivate member")
+		return
+	}
+
+	m, err := s.teams.GetMemberByID(memberID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get reactivated member")
+		return
+	}
+	writeJSON(w, http.StatusOK, m)
+}
+
+// handleCreateParticipant creates a login-less team member (Participant).
+func (s *Server) handleCreateParticipant(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+
+	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
+		return
+	}
+
+	var req struct {
+		Name  string  `json:"name"`
+		Color *string `json:"color"`
+		Icon  *string `json:"icon"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
+		return
+	}
+	req.Name = strings.TrimSpace(req.Name)
+	if req.Name == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name is required")
+		return
+	}
+
+	now := time.Now()
+	name := req.Name
+	member := &models.TeamMember{
+		ID:          newID(),
+		TeamID:      teamID,
+		UserID:      nil,
+		DisplayName: &name,
+		Role:        "member",
+		Color:       req.Color,
+		Icon:        req.Icon,
+		JoinedAt:    now,
+	}
+	if err := s.teams.AddMember(member); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create participant")
+		return
+	}
+
+	m, err := s.teams.GetMemberByID(member.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get created participant")
+		return
+	}
+	writeJSON(w, http.StatusCreated, m)
+}
+
+// ── Invites ───────────────────────────────────────────────────────────────────
+
+// handleListInvites returns all pending invites for the team.
+func (s *Server) handleListInvites(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+
+	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
+		return
+	}
+
+	invites, err := s.invites.ListByTeam(teamID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list invites")
+		return
+	}
+	writeJSON(w, http.StatusOK, invites)
+}
+
+// handleDeleteInvite revokes a pending invite.
+func (s *Server) handleDeleteInvite(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	inviteID := r.PathValue("inviteId")
+
+	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
+		return
+	}
+
+	if err := s.invites.DeleteByID(inviteID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke invite")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// ── Invite link ───────────────────────────────────────────────────────────────
+
+// handleCreateInviteLink generates or regenerates the reusable invite link
+// token for the team. Each call replaces the previous token.
+//
+// Design decision: tokens have no server-side expiry and are valid until an
+// admin explicitly revokes (DELETE) or resets (POST /reset) them. This keeps
+// the URL stable for onboarding docs and Slack pins. If time-bounded links are
+// needed, add an invite_link_expires_at column to teams and check it in the
+// registration handler.
+func (s *Server) handleCreateInviteLink(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+
+	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
+		return
+	}
+
+	token := newToken()
+	if err := s.teams.SetInviteLinkToken(teamID, &token); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create invite link")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"token": token})
+}
+
+// handleGetInviteLink returns the current invite link token for the team, or
+// null if none is set.
+func (s *Server) handleGetInviteLink(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+
+	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
+		return
+	}
+
+	team, err := s.teams.GetByID(teamID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "team not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get invite link")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"token": team.InviteLinkToken})
+}
+
+// handleResetInviteLink invalidates the current token and generates a fresh one.
+// Semantically identical to POST /invite-link; the distinct URL makes client
+// intent (reset vs. first-time create) explicit without a separate code path.
+func (s *Server) handleResetInviteLink(w http.ResponseWriter, r *http.Request) {
+	s.handleCreateInviteLink(w, r)
+}
+
+// handleDeleteInviteLink revokes the current invite link by clearing the token.
+func (s *Server) handleDeleteInviteLink(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+
+	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
+		return
+	}
+
+	if err := s.teams.SetInviteLinkToken(teamID, nil); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke invite link")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// userSearchResult is the safe public projection returned by GET /users/search.
+// It intentionally omits isSuperadmin, archivedAt, createdAt, updatedAt, and
+// passwordHash so that search results are safe to expose to any team member.
+type userSearchResult struct {
+	ID          string  `json:"id"`
+	Email       string  `json:"email"`
+	DisplayName string  `json:"displayName"`
+	AvatarURL   *string `json:"avatarUrl,omitempty"`
+}
+
+// handleSearchUsers handles GET /users/search?q= and returns matching users.
+func (s *Server) handleSearchUsers(w http.ResponseWriter, r *http.Request) {
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	if len(q) < 2 {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "query must be at least 2 characters")
+		return
+	}
+	users, err := s.users.SearchByNameOrEmail(q)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "search failed")
+		return
+	}
+	results := make([]userSearchResult, len(users))
+	for i, u := range users {
+		results[i] = userSearchResult{
+			ID:          u.ID,
+			Email:       u.Email,
+			DisplayName: u.DisplayName,
+			AvatarURL:   u.AvatarURL,
+		}
+	}
+	writeJSON(w, http.StatusOK, results)
+}
+
+// handleGetMemberStats returns computed activity and timeline counts for a
+// single team member. The full MemberDetail (with teams list) is available via
+// GET /teams/:id/members/:memberId; this endpoint is for lightweight stat polling.
+func (s *Server) handleGetMemberStats(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	memberID := r.PathValue("memberId")
+
+	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
+		return
+	}
+
+	m, err := s.teams.GetMemberByID(memberID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "member not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get member stats")
+		return
+	}
+	if m.TeamID != teamID {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "member not found")
+		return
+	}
+
+	stats, err := s.teams.GetMemberStats(memberID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to compute member stats")
+		return
+	}
+	writeJSON(w, http.StatusOK, stats)
+}
+
+// flatten converts a nil slice to an empty slice for clean JSON serialisation.
+func flatten[T any](s []*T) []T {
+	out := make([]T, 0, len(s))
+	for _, v := range s {
+		if v != nil {
+			out = append(out, *v)
+		}
+	}
+	return out
+}
+````
+
 ## File: packages/api/internal/api/user_handler.go
 ````go
 package api
@@ -39356,207 +39182,6 @@ func (s *TokenService) Validate(tokenStr, expectedType string) (*Claims, error) 
 		return nil, fmt.Errorf("wrong token type")
 	}
 	return claims, nil
-}
-````
-
-## File: packages/api/internal/auth/oidc.go
-````go
-// OIDC / SSO support. This file is the ONLY place draba talks to an external
-// identity provider. It is entirely inert unless OIDC is configured: when
-// NewOIDCService is given an empty issuer it returns (nil, nil) and every
-// caller treats a nil *OIDCService as "SSO disabled", so no discovery request,
-// no network traffic, and no behaviour change occurs on a default install.
-//
-// Security posture:
-//   - The provider's ID token signature is verified against the IdP's JWKS by
-//     go-oidc's verifier (RS256/ES256/etc.) — draba never trusts an unsigned
-//     or self-asserted token.
-//   - The OAuth2 "state" parameter is bound to the caller's cookie to stop
-//     CSRF on the callback; "nonce" is bound into the ID token to stop replay.
-//   - PKCE (S256) is always used, so an intercepted authorization code cannot
-//     be redeemed without the original verifier.
-//   - The client secret is read once from the environment and never leaves the
-//     server; it is not exposed by any API.
-package auth
-
-import (
-	"context"
-	"crypto/rand"
-	"crypto/subtle"
-	"encoding/base64"
-	"fmt"
-	"time"
-
-	"github.com/coreos/go-oidc/v3/oidc"
-	"golang.org/x/oauth2"
-)
-
-// OIDCConfig is the deploy-time configuration for SSO. All fields are required
-// when SSO is enabled; an empty Issuer means SSO is disabled.
-type OIDCConfig struct {
-	Issuer       string
-	ClientID     string
-	ClientSecret string
-	RedirectURL  string
-	// Scopes requested in addition to "openid". Defaults to {"profile","email"}
-	// when empty.
-	Scopes []string
-}
-
-// OIDCService performs the OpenID Connect authorization-code flow against a
-// single configured provider. It is safe for concurrent use.
-type OIDCService struct {
-	issuer   string
-	provider *oidc.Provider
-	verifier *oidc.IDTokenVerifier
-	oauth    oauth2.Config
-}
-
-// OIDCClaims is the subset of ID-token claims draba consumes. Subject is the
-// stable per-user identifier; Email/Name seed the local account on first login.
-type OIDCClaims struct {
-	Subject       string `json:"sub"`
-	Email         string `json:"email"`
-	EmailVerified bool   `json:"email_verified"`
-	Name          string `json:"name"`
-	Nonce         string `json:"nonce"`
-}
-
-// AuthCodeFlow carries the per-request secrets the caller must store (in
-// short-lived httpOnly cookies) and replay on the callback. The State and
-// Nonce defend against CSRF and replay; the PKCEVerifier is exchanged for
-// tokens at the callback.
-type AuthCodeFlow struct {
-	// AuthURL is where the user agent is redirected to authenticate.
-	AuthURL string
-	// State must be echoed back by the IdP and matched on callback.
-	State string
-	// Nonce must equal the nonce claim in the returned ID token.
-	Nonce string
-	// PKCEVerifier is the code_verifier matching the code_challenge sent in
-	// AuthURL; required at the token exchange.
-	PKCEVerifier string
-}
-
-// NewOIDCService constructs an OIDCService by performing OIDC discovery against
-// cfg.Issuer. It returns (nil, nil) when cfg.Issuer is empty so that a default
-// (SSO-disabled) install incurs no network access and no dependency activation.
-// A non-nil error means SSO was requested but the provider is unreachable or
-// misconfigured — the caller should treat that as a fatal startup error so a
-// broken SSO setup fails loudly instead of silently serving a dead login button.
-func NewOIDCService(ctx context.Context, cfg OIDCConfig) (*OIDCService, error) {
-	if cfg.Issuer == "" {
-		return nil, nil // SSO disabled — inert.
-	}
-	if cfg.ClientID == "" || cfg.ClientSecret == "" || cfg.RedirectURL == "" {
-		return nil, fmt.Errorf("oidc: issuer set but client_id, client_secret, or redirect_url is missing")
-	}
-
-	provider, err := oidc.NewProvider(ctx, cfg.Issuer)
-	if err != nil {
-		return nil, fmt.Errorf("oidc: discovery against %q failed: %w", cfg.Issuer, err)
-	}
-
-	scopes := cfg.Scopes
-	if len(scopes) == 0 {
-		scopes = []string{"profile", "email"}
-	}
-
-	return &OIDCService{
-		issuer:   cfg.Issuer,
-		provider: provider,
-		verifier: provider.Verifier(&oidc.Config{ClientID: cfg.ClientID}),
-		oauth: oauth2.Config{
-			ClientID:     cfg.ClientID,
-			ClientSecret: cfg.ClientSecret,
-			RedirectURL:  cfg.RedirectURL,
-			Endpoint:     provider.Endpoint(),
-			Scopes:       append([]string{oidc.ScopeOpenID}, scopes...),
-		},
-	}, nil
-}
-
-// Begin produces the authorization URL plus the state/nonce/PKCE-verifier the
-// caller must persist for the matching callback. Every value is generated with
-// a CSPRNG.
-func (s *OIDCService) Begin() (*AuthCodeFlow, error) {
-	state, err := randomURLToken()
-	if err != nil {
-		return nil, err
-	}
-	nonce, err := randomURLToken()
-	if err != nil {
-		return nil, err
-	}
-	verifier := oauth2.GenerateVerifier()
-
-	url := s.oauth.AuthCodeURL(
-		state,
-		oidc.Nonce(nonce),
-		oauth2.S256ChallengeOption(verifier),
-	)
-	return &AuthCodeFlow{
-		AuthURL:      url,
-		State:        state,
-		Nonce:        nonce,
-		PKCEVerifier: verifier,
-	}, nil
-}
-
-// Exchange completes the flow: it redeems code for tokens (sending the PKCE
-// verifier), verifies the ID token's signature against the provider JWKS,
-// checks the nonce, and returns the validated claims. expectedNonce must be
-// the value originally produced by Begin and stored by the caller.
-func (s *OIDCService) Exchange(ctx context.Context, code, pkceVerifier, expectedNonce string) (*OIDCClaims, error) {
-	token, err := s.oauth.Exchange(ctx, code, oauth2.VerifierOption(pkceVerifier))
-	if err != nil {
-		return nil, fmt.Errorf("oidc: token exchange failed: %w", err)
-	}
-
-	rawID, ok := token.Extra("id_token").(string)
-	if !ok || rawID == "" {
-		return nil, fmt.Errorf("oidc: provider response contained no id_token")
-	}
-
-	idToken, err := s.verifier.Verify(ctx, rawID)
-	if err != nil {
-		return nil, fmt.Errorf("oidc: id_token verification failed: %w", err)
-	}
-
-	var claims OIDCClaims
-	if err := idToken.Claims(&claims); err != nil {
-		return nil, fmt.Errorf("oidc: parsing id_token claims: %w", err)
-	}
-
-	// Replay defence: the nonce minted in Begin must match the one the IdP
-	// embedded in the signed ID token. Constant-time compare avoids leaking
-	// the nonce through timing.
-	if claims.Nonce == "" || subtle.ConstantTimeCompare([]byte(claims.Nonce), []byte(expectedNonce)) != 1 {
-		return nil, fmt.Errorf("oidc: id_token nonce mismatch")
-	}
-	if claims.Subject == "" {
-		return nil, fmt.Errorf("oidc: id_token has no subject claim")
-	}
-	return &claims, nil
-}
-
-// Issuer returns the configured provider issuer URL — used as the stable
-// namespace half of a user's (issuer, subject) identity key.
-func (s *OIDCService) Issuer() string {
-	return s.issuer
-}
-
-// FlowCookieTTL bounds how long a started OIDC flow may sit before the user
-// completes it; the state/nonce/PKCE cookies expire after this window.
-const FlowCookieTTL = 10 * time.Minute
-
-// randomURLToken returns 32 bytes of CSPRNG entropy, base64url-encoded.
-func randomURLToken() (string, error) {
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		return "", fmt.Errorf("oidc: reading random: %w", err)
-	}
-	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 ````
 
@@ -40340,6 +39965,461 @@ func SeedSampleDataIfEmpty(database *sqlx.DB, sql string) (bool, error) {
 }
 ````
 
+## File: packages/api/internal/db/team_repo.go
+````go
+package db
+
+import (
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/jmoiron/sqlx"
+
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// ErrDuplicateName is returned by TeamRepo.Create when the generated slug
+// collides with an existing team's slug (UNIQUE constraint on teams.slug).
+var ErrDuplicateName = errors.New("team name already taken")
+
+// TeamRepo is the persistence layer for Team records and their membership
+// join table.
+type TeamRepo struct {
+	db *sqlx.DB
+}
+
+// NewTeamRepo returns a TeamRepo backed by db.
+func NewTeamRepo(db *sqlx.DB) *TeamRepo {
+	return &TeamRepo{db: db}
+}
+
+// Create inserts a new Team row. Returns ErrDuplicateName if the slug is
+// already taken.
+func (r *TeamRepo) Create(team *models.Team) error {
+	_, err := r.db.NamedExec(`
+		INSERT INTO teams (id, name, slug, description, notes, color, icon, created_at, updated_at)
+		VALUES (:id, :name, :slug, :description, :notes, :color, :icon, :created_at, :updated_at)
+	`, team)
+	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			return ErrDuplicateName
+		}
+		return fmt.Errorf("creating team: %w", err)
+	}
+	return nil
+}
+
+// Update writes mutable team fields (name, slug, description, notes, color,
+// icon, updated_at). It does not touch archived_at or created_at.
+func (r *TeamRepo) Update(team *models.Team) error {
+	_, err := r.db.NamedExec(`
+		UPDATE teams
+		SET name = :name, slug = :slug, description = :description, notes = :notes,
+		    color = :color, icon = :icon, updated_at = :updated_at
+		WHERE id = :id
+	`, team)
+	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			return ErrDuplicateName
+		}
+		return fmt.Errorf("updating team: %w", err)
+	}
+	return nil
+}
+
+// SetArchived sets or clears the archived_at timestamp on a team.
+func (r *TeamRepo) SetArchived(id string, at *time.Time) error {
+	_, err := r.db.Exec(`UPDATE teams SET archived_at = ?, updated_at = ? WHERE id = ?`,
+		at, time.Now(), id)
+	if err != nil {
+		return fmt.Errorf("setting team archived: %w", err)
+	}
+	return nil
+}
+
+// GetByID fetches a Team by primary key.
+func (r *TeamRepo) GetByID(id string) (*models.Team, error) {
+	var t models.Team
+	err := r.db.Get(&t, `SELECT * FROM teams WHERE id = ?`, id)
+	if err != nil {
+		return nil, fmt.Errorf("getting team: %w", err)
+	}
+	return &t, nil
+}
+
+// AddMember inserts a team_members row. m.ID must be pre-populated by the caller.
+func (r *TeamRepo) AddMember(m *models.TeamMember) error {
+	_, err := r.db.NamedExec(`
+		INSERT INTO team_members (id, team_id, user_id, display_name, role, color, icon, joined_at)
+		VALUES (:id, :team_id, :user_id, :display_name, :role, :color, :icon, :joined_at)
+	`, m)
+	if err != nil {
+		return fmt.Errorf("adding team member: %w", err)
+	}
+	return nil
+}
+
+// GetMember returns the team_members row for a given (team, user) pair.
+func (r *TeamRepo) GetMember(teamID, userID string) (*models.TeamMember, error) {
+	var m models.TeamMember
+	err := r.db.Get(&m, `
+		SELECT * FROM team_members WHERE team_id = ? AND user_id = ?
+	`, teamID, userID)
+	if err != nil {
+		return nil, fmt.Errorf("getting team member: %w", err)
+	}
+	return &m, nil
+}
+
+// ListMembers returns active (non-archived) members of a team, including
+// login-less Participants. A LEFT JOIN handles Participants who have no users
+// row; COALESCE prefers the per-team display_name override, then falls back to users.
+func (r *TeamRepo) ListMembers(teamID string) ([]*models.TeamMemberWithUser, error) {
+	return r.listMembers(teamID, false)
+}
+
+// ListMembersAll returns all members of a team, including inactivated members.
+func (r *TeamRepo) ListMembersAll(teamID string) ([]*models.TeamMemberWithUser, error) {
+	return r.listMembers(teamID, true)
+}
+
+func (r *TeamRepo) listMembers(teamID string, includeArchived bool) ([]*models.TeamMemberWithUser, error) {
+	var members []*models.TeamMemberWithUser
+	query := `
+		SELECT
+			tm.id, tm.team_id, tm.user_id, tm.role, tm.color, tm.icon, tm.joined_at, tm.archived_at,
+			COALESCE(u.email, '')                          AS email,
+			COALESCE(tm.display_name, u.display_name, '') AS display_name,
+			u.avatar_url
+		FROM team_members tm
+		LEFT JOIN users u ON u.id = tm.user_id
+		WHERE tm.team_id = ?`
+	if !includeArchived {
+		query += ` AND tm.archived_at IS NULL`
+	}
+	query += ` ORDER BY tm.joined_at ASC`
+	if err := r.db.Select(&members, query, teamID); err != nil {
+		return nil, fmt.Errorf("listing team members: %w", err)
+	}
+	return members, nil
+}
+
+// ListByUserID returns all teams the given user belongs to, ordered by
+// creation date ascending. When includeArchived is false (the default),
+// archived teams are excluded.
+func (r *TeamRepo) ListByUserID(userID string, includeArchived bool) ([]*models.Team, error) {
+	teams := make([]*models.Team, 0)
+	query := `
+		SELECT t.* FROM teams t
+		JOIN team_members tm ON tm.team_id = t.id
+		WHERE tm.user_id = ?`
+	if !includeArchived {
+		query += ` AND t.archived_at IS NULL`
+	}
+	query += ` ORDER BY t.created_at ASC`
+	if err := r.db.Select(&teams, query, userID); err != nil {
+		return nil, fmt.Errorf("listing teams for user: %w", err)
+	}
+	return teams, nil
+}
+
+// ListAll returns every team in the system, optionally including archived ones.
+// Used by superadmin callers who need visibility across all teams.
+func (r *TeamRepo) ListAll(includeArchived bool) ([]*models.Team, error) {
+	teams := make([]*models.Team, 0)
+	query := `SELECT * FROM teams`
+	if !includeArchived {
+		query += ` WHERE archived_at IS NULL`
+	}
+	query += ` ORDER BY created_at ASC`
+	if err := r.db.Select(&teams, query); err != nil {
+		return nil, fmt.Errorf("listing all teams: %w", err)
+	}
+	return teams, nil
+}
+
+// Count returns the total number of teams.
+func (r *TeamRepo) Count() (int, error) {
+	var count int
+	err := r.db.Get(&count, `SELECT COUNT(*) FROM teams`)
+	if err != nil {
+		return 0, fmt.Errorf("counting teams: %w", err)
+	}
+	return count, nil
+}
+
+// GetMemberByID fetches a team_members row by its primary key. Unlike
+// GetMember (which looks up by team+userID pair), this is the canonical
+// lookup used by member-scoped routes that receive a memberId path param.
+func (r *TeamRepo) GetMemberByID(memberID string) (*models.TeamMemberWithUser, error) {
+	var m models.TeamMemberWithUser
+	err := r.db.Get(&m, `
+		SELECT
+			tm.id, tm.team_id, tm.user_id, tm.role, tm.color, tm.icon, tm.joined_at, tm.archived_at,
+			COALESCE(u.email, '')                          AS email,
+			COALESCE(tm.display_name, u.display_name, '') AS display_name,
+			u.avatar_url
+		FROM team_members tm
+		LEFT JOIN users u ON u.id = tm.user_id
+		WHERE tm.id = ?
+	`, memberID)
+	if err != nil {
+		return nil, fmt.Errorf("getting team member by id: %w", err)
+	}
+	return &m, nil
+}
+
+// UpdateMember applies mutable identity and role fields to a team_members row.
+// Only non-nil arguments are written; nil fields retain their current values.
+func (r *TeamRepo) UpdateMember(memberID string, displayName, color, icon, role *string) error {
+	// Fetch current values so we can apply the partial update.
+	type row struct {
+		DisplayName *string `db:"display_name"`
+		Color       *string `db:"color"`
+		Icon        *string `db:"icon"`
+		Role        string  `db:"role"`
+	}
+	var cur row
+	if err := r.db.Get(&cur, `SELECT display_name, color, icon, role FROM team_members WHERE id = ?`, memberID); err != nil {
+		return fmt.Errorf("fetching member for update: %w", err)
+	}
+	if displayName != nil {
+		cur.DisplayName = displayName
+	}
+	if color != nil {
+		cur.Color = color
+	}
+	if icon != nil {
+		cur.Icon = icon
+	}
+	if role != nil {
+		cur.Role = *role
+	}
+	_, err := r.db.Exec(`
+		UPDATE team_members SET display_name = ?, color = ?, icon = ?, role = ? WHERE id = ?
+	`, cur.DisplayName, cur.Color, cur.Icon, cur.Role, memberID)
+	if err != nil {
+		return fmt.Errorf("updating team member: %w", err)
+	}
+	return nil
+}
+
+// DeleteMember removes a team_members row. The caller is responsible for
+// verifying that the member is not the last admin before calling this, and
+// must delete the member's timeline_access rows first (RESTRICT FK).
+func (r *TeamRepo) DeleteMember(memberID string) error {
+	_, err := r.db.Exec(`DELETE FROM team_members WHERE id = ?`, memberID)
+	if err != nil {
+		return fmt.Errorf("deleting team member: %w", err)
+	}
+	return nil
+}
+
+// CountMemberAssignments returns how many activity_assignments rows reference
+// this team member. Callers use this count to block hard-delete when history exists.
+func (r *TeamRepo) CountMemberAssignments(memberID string) (int, error) {
+	var count int
+	err := r.db.Get(&count, `
+		SELECT COUNT(*) FROM activity_assignments WHERE team_member_id = ?
+	`, memberID)
+	if err != nil {
+		return 0, fmt.Errorf("counting member assignments: %w", err)
+	}
+	return count, nil
+}
+
+// DeleteMemberTimelineAccess removes all timeline_access entries for a member.
+// Must be called before DeleteMember; the RESTRICT FK on
+// timeline_access.team_member_id blocks the team_members deletion otherwise.
+func (r *TeamRepo) DeleteMemberTimelineAccess(memberID string) error {
+	_, err := r.db.Exec(`DELETE FROM timeline_access WHERE team_member_id = ?`, memberID)
+	if err != nil {
+		return fmt.Errorf("deleting member timeline access: %w", err)
+	}
+	return nil
+}
+
+// SetMemberArchived sets or clears archived_at on a team_members row.
+func (r *TeamRepo) SetMemberArchived(memberID string, at *time.Time) error {
+	_, err := r.db.Exec(`UPDATE team_members SET archived_at = ? WHERE id = ?`, at, memberID)
+	if err != nil {
+		return fmt.Errorf("setting member archived: %w", err)
+	}
+	return nil
+}
+
+// CountAdmins counts non-archived admin members of a team. Used to enforce
+// the "cannot remove last admin" constraint.
+func (r *TeamRepo) CountAdmins(teamID string) (int, error) {
+	var count int
+	err := r.db.Get(&count, `
+		SELECT COUNT(*) FROM team_members
+		WHERE team_id = ? AND role = 'admin' AND archived_at IS NULL
+	`, teamID)
+	if err != nil {
+		return 0, fmt.Errorf("counting admins: %w", err)
+	}
+	return count, nil
+}
+
+// CountTeamsForUser returns how many teams a user belongs to. Used to enforce
+// the "single team" constraint for hard deletion.
+func (r *TeamRepo) CountTeamsForUser(userID string) (int, error) {
+	var count int
+	err := r.db.Get(&count, `
+		SELECT COUNT(*) FROM team_members WHERE user_id = ? AND archived_at IS NULL
+	`, userID)
+	if err != nil {
+		return 0, fmt.Errorf("counting user teams: %w", err)
+	}
+	return count, nil
+}
+
+// GetMemberStats computes activity and timeline counts for a team member.
+func (r *TeamRepo) GetMemberStats(memberID string) (*models.MemberStats, error) {
+	now := time.Now()
+	var stats models.MemberStats
+
+	// Timeline counts via timeline_access.
+	if err := r.db.Get(&stats.ActiveTimelines, `
+		SELECT COUNT(*) FROM timeline_access ta
+		JOIN timelines t ON t.id = ta.timeline_id
+		WHERE ta.team_member_id = ? AND t.archived_at IS NULL
+	`, memberID); err != nil {
+		return nil, fmt.Errorf("counting active timelines: %w", err)
+	}
+	if err := r.db.Get(&stats.ArchivedTimelines, `
+		SELECT COUNT(*) FROM timeline_access ta
+		JOIN timelines t ON t.id = ta.timeline_id
+		WHERE ta.team_member_id = ? AND t.archived_at IS NOT NULL
+	`, memberID); err != nil {
+		return nil, fmt.Errorf("counting archived timelines: %w", err)
+	}
+
+	// Activity counts from activity_assignments.
+	rows, err := r.db.Query(`
+		SELECT
+			COALESCE(SUM(CASE WHEN a.archived_at IS NOT NULL                                                     THEN 1 ELSE 0 END), 0) AS archived,
+			COALESCE(SUM(CASE WHEN a.archived_at IS NULL AND a.end_at   <  ?                                     THEN 1 ELSE 0 END), 0) AS past_due,
+			COALESCE(SUM(CASE WHEN a.archived_at IS NULL AND a.start_at <= ? AND a.end_at >= ?                   THEN 1 ELSE 0 END), 0) AS running,
+			COALESCE(SUM(CASE WHEN a.archived_at IS NULL AND a.start_at >  ?                                     THEN 1 ELSE 0 END), 0) AS upcoming
+		FROM activity_assignments aa
+		JOIN activities a ON a.id = aa.activity_id
+		WHERE aa.team_member_id = ?
+	`, now, now, now, now, memberID)
+	if err != nil {
+		return nil, fmt.Errorf("computing activity stats: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	if rows.Next() {
+		if err := rows.Scan(&stats.ArchivedActivities, &stats.PastDue, &stats.Running, &stats.Upcoming); err != nil {
+			return nil, fmt.Errorf("scanning activity stats: %w", err)
+		}
+	}
+
+	return &stats, nil
+}
+
+// GetUserStats aggregates activity and timeline counts across all of a user's
+// team memberships. Used by GET /users/me/stats for the profile page.
+func (r *TeamRepo) GetUserStats(userID string) (*models.MemberStats, error) {
+	now := time.Now()
+	var stats models.MemberStats
+
+	if err := r.db.Get(&stats.ActiveTimelines, `
+		SELECT COUNT(*) FROM timeline_access ta
+		JOIN timelines t ON t.id = ta.timeline_id
+		JOIN team_members tm ON tm.id = ta.team_member_id
+		WHERE tm.user_id = ? AND t.archived_at IS NULL
+	`, userID); err != nil {
+		return nil, fmt.Errorf("counting active timelines: %w", err)
+	}
+	if err := r.db.Get(&stats.ArchivedTimelines, `
+		SELECT COUNT(*) FROM timeline_access ta
+		JOIN timelines t ON t.id = ta.timeline_id
+		JOIN team_members tm ON tm.id = ta.team_member_id
+		WHERE tm.user_id = ? AND t.archived_at IS NOT NULL
+	`, userID); err != nil {
+		return nil, fmt.Errorf("counting archived timelines: %w", err)
+	}
+
+	rows, err := r.db.Query(`
+		SELECT
+			COALESCE(SUM(CASE WHEN a.archived_at IS NOT NULL                                   THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN a.archived_at IS NULL AND a.end_at   <  ?                   THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN a.archived_at IS NULL AND a.start_at <= ? AND a.end_at >= ? THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN a.archived_at IS NULL AND a.start_at >  ?                   THEN 1 ELSE 0 END), 0)
+		FROM activity_assignments aa
+		JOIN activities a ON a.id = aa.activity_id
+		JOIN team_members tm ON tm.id = aa.team_member_id
+		WHERE tm.user_id = ?
+	`, now, now, now, now, userID)
+	if err != nil {
+		return nil, fmt.Errorf("computing activity stats: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	if rows.Next() {
+		if err := rows.Scan(&stats.ArchivedActivities, &stats.PastDue, &stats.Running, &stats.Upcoming); err != nil {
+			return nil, fmt.Errorf("scanning activity stats: %w", err)
+		}
+	}
+
+	return &stats, nil
+}
+
+// GetMemberAllTeams returns all team memberships for a user (across all teams).
+// Used to populate the "Teams" section of the Member Edit Modal.
+func (r *TeamRepo) GetMemberAllTeams(userID string) ([]*models.TeamMemberWithUser, error) {
+	var members []*models.TeamMemberWithUser
+	err := r.db.Select(&members, `
+		SELECT
+			tm.id, tm.team_id, tm.user_id, tm.role, tm.color, tm.icon, tm.joined_at, tm.archived_at,
+			COALESCE(u.email, '')                          AS email,
+			COALESCE(tm.display_name, u.display_name, '') AS display_name,
+			u.avatar_url
+		FROM team_members tm
+		LEFT JOIN users u ON u.id = tm.user_id
+		WHERE tm.user_id = ?
+		ORDER BY tm.joined_at ASC
+	`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("getting member all teams: %w", err)
+	}
+	return members, nil
+}
+
+// SetInviteLinkToken sets the reusable invite link token on a team. Passing
+// nil clears it (revoking the link).
+func (r *TeamRepo) SetInviteLinkToken(teamID string, token *string) error {
+	_, err := r.db.Exec(
+		`UPDATE teams SET invite_link_token = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		token, teamID,
+	)
+	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			return fmt.Errorf("invite link token collision: %w", err)
+		}
+		return fmt.Errorf("setting invite link token: %w", err)
+	}
+	return nil
+}
+
+// GetByInviteLinkToken looks up a team by its invite_link_token. Returns
+// sql.ErrNoRows (wrapped) when no matching team is found.
+func (r *TeamRepo) GetByInviteLinkToken(token string) (*models.Team, error) {
+	var t models.Team
+	err := r.db.Get(&t, `
+		SELECT * FROM teams WHERE invite_link_token = ? AND archived_at IS NULL
+	`, token)
+	if err != nil {
+		return nil, fmt.Errorf("getting team by invite link: %w", err)
+	}
+	return &t, nil
+}
+````
+
 ## File: packages/api/internal/db/timeline_repo.go
 ````go
 package db
@@ -40930,353 +41010,644 @@ func ptrEqual(a, b *string) bool {
 }
 ````
 
-## File: packages/api/internal/filters/engine.go
+## File: packages/api/internal/mailer/mailer.go
 ````go
-// Package filters provides the server-side activity filter evaluator.
-//
-// It is a Go port of the TypeScript matchesFilter function in
-// packages/web/src/lib/filterEngine.ts. Both implementations must agree on
-// every test case in packages/shared/testdata/filter-fixtures.json — that file
-// is the single source of truth for expected behaviour.
-package filters
+// Package mailer sends email via SMTP. Configuration is read from
+// instance_settings at send time so changes take effect without a restart.
+// When SMTP is not configured, Send returns nil (not an error) so callers
+// can treat "no mailer" as a no-op — the forgot-password flow still returns
+// 200 to prevent email enumeration.
+package mailer
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/tls"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/smtp"
 	"strings"
-	"time"
-
-	"github.com/I0-1O/draba/packages/api/internal/models"
 )
 
-// FilterLogic controls how conditions in a FilterDefinition are combined.
-type FilterLogic string
+// encPrefix marks values encrypted with AES-256-GCM so LoadConfig can
+// distinguish them from legacy plaintext values written before encryption
+// was introduced.
+const encPrefix = "enc:v1:"
 
-const (
-	LogicAnd FilterLogic = "and"
-	LogicOr  FilterLogic = "or"
-)
-
-// FilterDefinition is the top-level filter object, matching the TypeScript type
-// of the same name. Conditions are evaluated with the specified Logic.
-type FilterDefinition struct {
-	Logic      FilterLogic `json:"logic"`
-	Conditions []Condition `json:"conditions"`
+// SMTPConfig holds the full SMTP configuration for the instance.
+type SMTPConfig struct {
+	Host       string `json:"host"`
+	Port       int    `json:"port"`
+	Username   string `json:"username"`
+	Password   string `json:"password"` // stored encrypted at rest via AES-256-GCM
+	FromName   string `json:"fromName"`
+	FromEmail  string `json:"fromEmail"`
+	Encryption string `json:"encryption"` // "none" | "tls" | "starttls"
 }
 
-// Condition is a single filter rule. Field determines which activity field is
-// tested; Op and Value carry the operator and operand(s). The exact types mirror
-// the TypeScript FilterCondition union.
-type Condition struct {
-	Field string `json:"field"`
-	Op    string `json:"op"`
-	// Value is the raw JSON value for the condition's operand. Its concrete Go
-	// type depends on the field: string, []string, float64, or []string pair.
-	// We unmarshal as interface{} and interpret per-field below.
-	Value interface{} `json:"value,omitempty"`
+// SettingsReader is the subset of InstanceSettingsRepo used by Mailer.
+type SettingsReader interface {
+	Get(key string) (string, error)
+	Set(key, value string) error
 }
 
-// FilterContext carries the reference data needed to evaluate status-name and
-// tag-name conditions without performing additional DB lookups.
-type FilterContext struct {
-	// StatusesByTimelineID maps timeline_id → that timeline's live statuses.
-	StatusesByTimelineID map[string][]models.Status
-	// Tags holds all team tags (for resolving tagIds → names).
-	Tags []models.Tag
+// Mailer sends email via SMTP. The zero value is valid; calling Send on an
+// unconfigured Mailer is a no-op.
+type Mailer struct {
+	settings SettingsReader
+	encKey   []byte // 32-byte AES-256 key derived from keyMaterial; nil disables encryption
 }
 
-// MatchesFilter reports whether activity satisfies def given ctx.
-// An empty conditions slice always matches (no filtering applied).
-func MatchesFilter(activity *models.Activity, def *FilterDefinition, ctx *FilterContext) bool {
-	if len(def.Conditions) == 0 {
-		return true
+// New returns a Mailer that reads config from settings at send time.
+// keyMaterial is used to derive an AES-256 key for encrypting stored SMTP
+// passwords. Pass nil to disable encryption (tests, zero-value usage).
+func New(settings SettingsReader, keyMaterial []byte) *Mailer {
+	var encKey []byte
+	if len(keyMaterial) > 0 {
+		k := sha256.Sum256(keyMaterial)
+		encKey = k[:]
 	}
-
-	results := make([]bool, len(def.Conditions))
-	for i, c := range def.Conditions {
-		results[i] = evalCondition(&c, activity, ctx)
-	}
-
-	if def.Logic == LogicOr {
-		for _, r := range results {
-			if r {
-				return true
-			}
-		}
-		return false
-	}
-	// default: "and"
-	for _, r := range results {
-		if !r {
-			return false
-		}
-	}
-	return true
+	return &Mailer{settings: settings, encKey: encKey}
 }
 
-// ── Condition evaluation ──────────────────────────────────────────────────────
-
-func evalCondition(c *Condition, a *models.Activity, ctx *FilterContext) bool {
-	switch c.Field {
-	case "status":
-		statuses := ctx.StatusesByTimelineID[a.TimelineID]
-		statusName := ""
-		if a.StatusID != nil {
-			for i := range statuses {
-				if statuses[i].ID == *a.StatusID {
-					statusName = strings.ToLower(statuses[i].Name)
-					break
-				}
-			}
-		}
-		var haystack []string
-		if statusName != "" {
-			haystack = []string{statusName}
-		}
-		needles := toLowerStrings(toStringSlice(c.Value))
-		return evalSetOp(c.Op, haystack, needles)
-
-	case "tag":
-		tagMap := make(map[string]string, len(ctx.Tags))
-		for _, t := range ctx.Tags {
-			tagMap[t.ID] = strings.ToLower(t.Name)
-		}
-		actTagNames := make([]string, 0, len(a.TagIDs))
-		for _, id := range a.TagIDs {
-			if name, ok := tagMap[id]; ok {
-				actTagNames = append(actTagNames, name)
-			} else {
-				actTagNames = append(actTagNames, strings.ToLower(id))
-			}
-		}
-		needles := toLowerStrings(toStringSlice(c.Value))
-		return evalSetOp(c.Op, actTagNames, needles)
-
-	case "assignee":
-		needles := toStringSlice(c.Value)
-		return evalSetOp(c.Op, a.AssignedMemberIDs, needles)
-
-	case "title":
-		return evalStringOp(c.Op, a.Title, toString(c.Value))
-
-	case "progress":
-		var v *float64
-		if a.PercentComplete != nil {
-			f := float64(*a.PercentComplete)
-			v = &f
-		}
-		return evalNumberOp(c.Op, v, toFloat(c.Value))
-
-	case "hasParent":
-		return evalBoolOp(c.Op, a.ParentActivityID != nil)
-
-	case "startDate":
-		return evalDateOp(c.Op, a.StartAt.Format(time.RFC3339), c.Value)
-
-	case "endDate":
-		return evalDateOp(c.Op, a.EndAt.Format(time.RFC3339), c.Value)
-	}
-	return false
-}
-
-// ── Operator helpers ──────────────────────────────────────────────────────────
-
-func evalSetOp(op string, haystack, needles []string) bool {
-	switch op {
-	case "in":
-		for _, n := range needles {
-			for _, h := range haystack {
-				if h == n {
-					return true
-				}
-			}
-		}
-		return false
-	case "not_in":
-		for _, n := range needles {
-			for _, h := range haystack {
-				if h == n {
-					return false
-				}
-			}
-		}
-		return true
-	case "is_empty":
-		return len(haystack) == 0
-	case "is_not_empty":
-		return len(haystack) > 0
-	}
-	return false
-}
-
-func evalStringOp(op, value, target string) bool {
-	v := strings.ToLower(strings.TrimSpace(value))
-	t := strings.ToLower(target)
-	switch op {
-	case "equals":
-		return v == t
-	case "not_equals":
-		return v != t
-	case "contains":
-		return strings.Contains(v, t)
-	case "not_contains":
-		return !strings.Contains(v, t)
-	case "is_empty":
-		return strings.TrimSpace(v) == ""
-	case "is_not_empty":
-		return strings.TrimSpace(v) != ""
-	}
-	return false
-}
-
-func evalNumberOp(op string, value *float64, target float64) bool {
-	if op == "is_empty" {
-		return value == nil
-	}
-	if op == "is_not_empty" {
-		return value != nil
-	}
-	if value == nil {
-		return false
-	}
-	v := *value
-	switch op {
-	case "equals":
-		return v == target
-	case "not_equals":
-		return v != target
-	case "gt":
-		return v > target
-	case "gte":
-		return v >= target
-	case "lt":
-		return v < target
-	case "lte":
-		return v <= target
-	}
-	return false
-}
-
-func evalBoolOp(op string, value bool) bool {
-	return (op == "is_true") == value
-}
-
-func evalDateOp(op, dateStr string, target interface{}) bool {
-	if op == "is_empty" {
-		return dateStr == ""
-	}
-	if op == "is_not_empty" {
-		return dateStr != ""
-	}
-	if dateStr == "" || target == nil {
-		return false
-	}
-
-	date, err := parseDate(dateStr)
+// LoadConfig reads the SMTP configuration from instance_settings.
+// Returns nil when SMTP has not been configured.
+func (m *Mailer) LoadConfig() (*SMTPConfig, error) {
+	raw, err := m.settings.Get("smtp_config")
 	if err != nil {
-		return false
+		return nil, fmt.Errorf("loading smtp config: %w", err)
 	}
-
-	if op == "between" {
-		pair, ok := toStringPair(target)
-		if !ok {
-			return false
-		}
-		from, err1 := parseDate(pair[0])
-		to, err2 := parseDate(pair[1])
-		if err1 != nil || err2 != nil {
-			return false
-		}
-		return !date.Before(from) && !date.After(to)
+	if raw == "" {
+		return nil, nil
 	}
+	var cfg SMTPConfig
+	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
+		return nil, fmt.Errorf("parsing smtp config: %w", err)
+	}
+	if cfg.Password != "" {
+		dec, err := m.decryptPassword(cfg.Password)
+		if err != nil {
+			return nil, fmt.Errorf("decrypting smtp password: %w", err)
+		}
+		cfg.Password = dec
+	}
+	return &cfg, nil
+}
 
-	targetDate, err := parseDate(toString(target))
+// IsConfigured reports whether SMTP has been set up.
+func (m *Mailer) IsConfigured() bool {
+	cfg, err := m.LoadConfig()
+	return err == nil && cfg != nil && cfg.Host != ""
+}
+
+// SaveConfig serialises cfg and stores it in instance_settings.
+// The password field is encrypted before storage when an encryption key is set.
+func (m *Mailer) SaveConfig(cfg *SMTPConfig) error {
+	toStore := *cfg
+	if cfg.Password != "" {
+		enc, err := m.encryptPassword(cfg.Password)
+		if err != nil {
+			return fmt.Errorf("encrypting smtp password: %w", err)
+		}
+		toStore.Password = enc
+	}
+	b, err := json.Marshal(toStore)
 	if err != nil {
-		return false
+		return fmt.Errorf("serialising smtp config: %w", err)
 	}
-	switch op {
-	case "before":
-		return date.Before(targetDate)
-	case "after":
-		return date.After(targetDate)
-	}
-	return false
+	return m.settings.Set("smtp_config", string(b))
 }
 
-// ── Type coercion helpers ─────────────────────────────────────────────────────
-
-func toString(v interface{}) string {
-	if v == nil {
-		return ""
-	}
-	if s, ok := v.(string); ok {
-		return s
-	}
-	return ""
+// DeleteConfig removes the SMTP configuration.
+func (m *Mailer) DeleteConfig() error {
+	return m.settings.Set("smtp_config", "")
 }
 
-func toFloat(v interface{}) float64 {
-	if v == nil {
-		return 0
-	}
-	switch n := v.(type) {
-	case float64:
-		return n
-	case int:
-		return float64(n)
-	case int64:
-		return float64(n)
-	}
-	return 0
-}
-
-func toStringSlice(v interface{}) []string {
-	if v == nil {
+// Send sends a plain-text / HTML email to a single recipient.
+// Returns nil without sending when SMTP is not configured.
+func (m *Mailer) Send(to, subject, htmlBody string) error {
+	cfg, err := m.LoadConfig()
+	if err != nil {
+		slog.Warn("mailer: failed to load config", "err", err)
 		return nil
 	}
-	if s, ok := v.(string); ok {
-		return []string{s}
+	if cfg == nil || cfg.Host == "" {
+		slog.Debug("mailer: no smtp config — email skipped", "subject", subject)
+		return nil
 	}
-	if arr, ok := v.([]interface{}); ok {
-		out := make([]string, 0, len(arr))
-		for _, el := range arr {
-			if s, ok := el.(string); ok {
-				out = append(out, s)
-			}
-		}
-		return out
+
+	return sendViaConfig(cfg, to, subject, htmlBody)
+}
+
+// SendWithConfig sends using an explicit config object, bypassing the stored
+// config. Used by the SMTP test endpoint before saving.
+func SendWithConfig(cfg *SMTPConfig, to, subject, htmlBody string) error {
+	return sendViaConfig(cfg, to, subject, htmlBody)
+}
+
+// encryptPassword encrypts plaintext with AES-256-GCM and returns a
+// base64-encoded ciphertext prefixed with encPrefix. Returns plaintext
+// unchanged when no encryption key is set.
+func (m *Mailer) encryptPassword(plaintext string) (string, error) {
+	if len(m.encKey) == 0 {
+		return plaintext, nil
 	}
-	if ss, ok := v.([]string); ok {
-		return ss
+	block, err := aes.NewCipher(m.encKey)
+	if err != nil {
+		return "", fmt.Errorf("creating cipher: %w", err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", fmt.Errorf("creating gcm: %w", err)
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err = io.ReadFull(rand.Reader, nonce); err != nil {
+		return "", fmt.Errorf("generating nonce: %w", err)
+	}
+	ciphertext := gcm.Seal(nonce, nonce, []byte(plaintext), nil)
+	return encPrefix + base64.StdEncoding.EncodeToString(ciphertext), nil
+}
+
+// decryptPassword reverses encryptPassword. Values without encPrefix are
+// returned as-is — this handles configs saved before encryption was added.
+func (m *Mailer) decryptPassword(encoded string) (string, error) {
+	if !strings.HasPrefix(encoded, encPrefix) {
+		// Plaintext fallback — encrypts on next SaveConfig call.
+		return encoded, nil
+	}
+	if len(m.encKey) == 0 {
+		return "", fmt.Errorf("encryption key not set; cannot decrypt smtp password")
+	}
+	data, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(encoded, encPrefix))
+	if err != nil {
+		return "", fmt.Errorf("decoding encrypted password: %w", err)
+	}
+	block, err := aes.NewCipher(m.encKey)
+	if err != nil {
+		return "", fmt.Errorf("creating cipher: %w", err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", fmt.Errorf("creating gcm: %w", err)
+	}
+	nonceSize := gcm.NonceSize()
+	if len(data) < nonceSize {
+		return "", fmt.Errorf("ciphertext too short")
+	}
+	plain, err := gcm.Open(nil, data[:nonceSize], data[nonceSize:], nil)
+	if err != nil {
+		return "", fmt.Errorf("decrypting password: %w", err)
+	}
+	return string(plain), nil
+}
+
+func sendViaConfig(cfg *SMTPConfig, to, subject, htmlBody string) error {
+	from := fmt.Sprintf("%s <%s>", cfg.FromName, cfg.FromEmail)
+	msg := buildMessage(from, to, subject, htmlBody)
+	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
+
+	switch strings.ToLower(cfg.Encryption) {
+	case "tls":
+		return sendTLS(cfg, addr, from, to, msg)
+	case "starttls":
+		return sendSTARTTLS(cfg, addr, from, to, msg)
+	default:
+		return sendPlain(cfg, addr, from, to, msg)
+	}
+}
+
+func buildMessage(from, to, subject, htmlBody string) string {
+	var b strings.Builder
+	b.WriteString("From: " + from + "\r\n")
+	b.WriteString("To: " + to + "\r\n")
+	b.WriteString("Subject: " + subject + "\r\n")
+	b.WriteString("MIME-Version: 1.0\r\n")
+	b.WriteString("Content-Type: text/html; charset=UTF-8\r\n")
+	b.WriteString("\r\n")
+	b.WriteString(htmlBody)
+	return b.String()
+}
+
+func sendPlain(cfg *SMTPConfig, addr, from, to, msg string) error {
+	var auth smtp.Auth
+	if cfg.Username != "" {
+		auth = smtp.PlainAuth("", cfg.Username, cfg.Password, cfg.Host)
+	}
+	if err := smtp.SendMail(addr, auth, cfg.FromEmail, []string{to}, []byte(msg)); err != nil {
+		return fmt.Errorf("smtp send: %w", err)
 	}
 	return nil
 }
 
-func toStringPair(v interface{}) ([2]string, bool) {
-	arr, ok := v.([]interface{})
-	if !ok || len(arr) != 2 {
-		return [2]string{}, false
+func sendTLS(cfg *SMTPConfig, addr, from, to, msg string) error {
+	tlsCfg := &tls.Config{ServerName: cfg.Host} //nolint:gosec // InsecureSkipVerify not set; ServerName ensures cert validation
+	conn, err := tls.Dial("tcp", addr, tlsCfg)
+	if err != nil {
+		return fmt.Errorf("smtp tls dial: %w", err)
 	}
-	a, ok1 := arr[0].(string)
-	b, ok2 := arr[1].(string)
-	if !ok1 || !ok2 {
-		return [2]string{}, false
+	defer func() { _ = conn.Close() }()
+
+	c, err := smtp.NewClient(conn, cfg.Host)
+	if err != nil {
+		return fmt.Errorf("smtp new client: %w", err)
 	}
-	return [2]string{a, b}, true
+	defer c.Quit() //nolint:errcheck // SMTP Quit errors are not actionable at this point
+
+	if cfg.Username != "" {
+		auth := smtp.PlainAuth("", cfg.Username, cfg.Password, cfg.Host)
+		if err := c.Auth(auth); err != nil {
+			return fmt.Errorf("smtp auth: %w", err)
+		}
+	}
+	return doSend(c, cfg.FromEmail, to, msg)
 }
 
-func toLowerStrings(ss []string) []string {
-	out := make([]string, len(ss))
-	for i, s := range ss {
-		out[i] = strings.ToLower(s)
+func sendSTARTTLS(cfg *SMTPConfig, addr, from, to, msg string) error {
+	c, err := smtp.Dial(addr)
+	if err != nil {
+		return fmt.Errorf("smtp dial: %w", err)
 	}
-	return out
+	defer c.Quit() //nolint:errcheck // SMTP Quit errors are not actionable at this point
+
+	tlsCfg := &tls.Config{ServerName: cfg.Host} //nolint:gosec // InsecureSkipVerify not set; this is standard TLS
+	if err := c.StartTLS(tlsCfg); err != nil {
+		return fmt.Errorf("smtp starttls: %w", err)
+	}
+	if cfg.Username != "" {
+		auth := smtp.PlainAuth("", cfg.Username, cfg.Password, cfg.Host)
+		if err := c.Auth(auth); err != nil {
+			return fmt.Errorf("smtp auth: %w", err)
+		}
+	}
+	return doSend(c, cfg.FromEmail, to, msg)
 }
 
-func parseDate(s string) (time.Time, error) {
-	// Try RFC3339 first (e.g. "2026-05-01T00:00:00Z"), then date-only.
-	if t, err := time.Parse(time.RFC3339, s); err == nil {
-		return t, nil
+func doSend(c *smtp.Client, from, to, msg string) error {
+	if err := c.Mail(from); err != nil {
+		return fmt.Errorf("smtp MAIL: %w", err)
 	}
-	return time.Parse("2006-01-02", s)
+	if err := c.Rcpt(to); err != nil {
+		return fmt.Errorf("smtp RCPT: %w", err)
+	}
+	w, err := c.Data()
+	if err != nil {
+		return fmt.Errorf("smtp DATA: %w", err)
+	}
+	if _, err := fmt.Fprint(w, msg); err != nil {
+		return fmt.Errorf("smtp write body: %w", err)
+	}
+	return w.Close()
+}
+````
+
+## File: packages/api/internal/tier/tier.go
+````go
+// Package tier defines the deployment tiers (Unlimited, Team, Business,
+// Enterprise) and the per-tier limits and capability gates the API enforces.
+// Pro modules register through this package so they can read the active Tier
+// at startup. See registry.go for the module registration contract.
+package tier
+
+import (
+	"fmt"
+	"os"
+)
+
+// Tier is a deployment tier identifier. The zero value (empty string) is
+// Unlimited, which is what self-hosted/free installs run as.
+type Tier string
+
+// Unlimited, Team, Business, and Enterprise are the supported deployment tiers.
+const (
+	Unlimited  Tier = ""
+	Team       Tier = "team"
+	Business   Tier = "business"
+	Enterprise Tier = "enterprise"
+)
+
+// Limits holds the maximums for a tier. 0 means unlimited.
+type Limits struct {
+	MaxUsers int
+	MaxTeams int
+}
+
+var tierLimits = map[Tier]Limits{
+	Unlimited:  {MaxUsers: 0, MaxTeams: 0},
+	Team:       {MaxUsers: 5, MaxTeams: 1},
+	Business:   {MaxUsers: 15, MaxTeams: 3},
+	Enterprise: {MaxUsers: 0, MaxTeams: 0},
+}
+
+// tierOrder is used by AtLeast to compare capability levels.
+var tierOrder = map[Tier]int{
+	Unlimited:  0,
+	Team:       1,
+	Business:   2,
+	Enterprise: 3,
+}
+
+// Load reads DRABA_TIER from the environment. Unset returns Unlimited.
+// An unrecognised value is an error — fail closed, don't silently default.
+func Load() (Tier, error) {
+	v := os.Getenv("DRABA_TIER")
+	if v == "" {
+		return Unlimited, nil
+	}
+	t := Tier(v)
+	if _, ok := tierLimits[t]; !ok {
+		return "", fmt.Errorf("unknown DRABA_TIER %q: must be team, business, or enterprise", v)
+	}
+	return t, nil
+}
+
+// Limits returns the user/team caps for this tier. Unknown tiers return
+// the zero value, which is interpreted as "unlimited".
+func (t Tier) Limits() Limits {
+	return tierLimits[t]
+}
+
+// AtLeast reports whether t is at least as capable as other.
+// Unlimited (self-host, free) is the lowest; Enterprise is the highest.
+func (t Tier) AtLeast(other Tier) bool {
+	return tierOrder[t] >= tierOrder[other]
+}
+
+// String returns the tier name for logs and error messages. Unlimited
+// renders as "unlimited" rather than the empty string.
+func (t Tier) String() string {
+	if t == Unlimited {
+		return "unlimited"
+	}
+	return string(t)
+}
+````
+
+## File: packages/api/internal/ws/hub.go
+````go
+// Package ws implements the WebSocket hub and per-client read/write pumps.
+// The hub maintains a team-scoped subscription map and fans out domain event
+// messages to all clients that have subscribed to a given team.
+package ws
+
+import (
+	"encoding/json"
+	"log/slog"
+	"net/http"
+	"sync"
+	"time"
+
+	"github.com/gorilla/websocket"
+
+	"github.com/I0-1O/draba/packages/api/internal/auth"
+	"github.com/I0-1O/draba/packages/api/internal/events"
+)
+
+const (
+	// defaultHeartbeatInterval is the ping cadence in production.
+	defaultHeartbeatInterval = 30 * time.Second
+	// writeTimeout is the maximum time allowed to write a single message.
+	writeTimeout = 10 * time.Second
+	// defaultReadTimeout is the read deadline reset after every pong. It is
+	// long enough for a client to respond to at least two ping cycles.
+	defaultReadTimeout = 70 * time.Second
+	// maxMessageBytes caps inbound frame size; subscribe and pong messages are
+	// tiny JSON blobs so 512 bytes is generous.
+	maxMessageBytes = 512
+)
+
+// MemberChecker reports whether userID belongs to teamID.
+// A non-nil error (including sql.ErrNoRows) means the user is not a member.
+// It is satisfied in production by wrapping (*db.TeamRepo).GetMember.
+type MemberChecker func(teamID, userID string) error
+
+var upgrader = websocket.Upgrader{
+	// Origin check is intentionally permissive; auth is enforced via JWT.
+	CheckOrigin:     func(_ *http.Request) bool { return true },
+	ReadBufferSize:  1024,
+	WriteBufferSize: 1024,
+}
+
+// inboundMsg is a client-to-server WebSocket message.
+type inboundMsg struct {
+	Type   string `json:"type"`
+	TeamID string `json:"teamId,omitempty"`
+}
+
+// OutboundMsg is a server-to-client WebSocket message. It is exported so
+// tests can assert on the wire shape without duplicating the type.
+type OutboundMsg struct {
+	Type    string `json:"type"`
+	Payload any    `json:"payload,omitempty"`
+}
+
+// client represents one active WebSocket connection.
+type client struct {
+	conn    *websocket.Conn
+	send    chan OutboundMsg
+	mu      sync.RWMutex
+	teamIDs map[string]struct{}
+	userID  string
+}
+
+// Hub manages all connected WebSocket clients and routes broadcast messages
+// to team-subscribed clients. Call Run in a goroutine before serving requests.
+type Hub struct {
+	tokens  *auth.TokenService
+	members MemberChecker
+	bus     *events.Bus
+
+	// heartbeatInterval controls how often writePump sends a ping frame.
+	// readTimeout is the read deadline extended after each pong. Both default
+	// to production values and are overridden in tests to keep them fast.
+	heartbeatInterval time.Duration
+	readTimeout       time.Duration
+
+	mu    sync.RWMutex
+	teams map[string]map[*client]struct{} // teamID → set of clients
+}
+
+// NewHub returns a Hub wired to the given event bus, auth token service, and
+// member checker. The checker gates subscribe messages: only users who are
+// members of a team may subscribe to its real-time feed.
+func NewHub(bus *events.Bus, tokens *auth.TokenService, members MemberChecker) *Hub {
+	return &Hub{
+		tokens:            tokens,
+		members:           members,
+		bus:               bus,
+		heartbeatInterval: defaultHeartbeatInterval,
+		readTimeout:       defaultReadTimeout,
+		teams:             make(map[string]map[*client]struct{}),
+	}
+}
+
+// Run subscribes to the event bus and broadcasts domain events to the
+// appropriate team subscribers. It blocks until the bus subscription channel
+// is closed; call it in its own goroutine.
+func (h *Hub) Run() {
+	ch := h.bus.Subscribe()
+	defer h.bus.Unsubscribe(ch)
+	for msg := range ch {
+		h.broadcast(msg.TeamID, OutboundMsg{Type: string(msg.Type), Payload: msg.Payload})
+	}
+}
+
+// ServeWS upgrades an HTTP request to a WebSocket connection, validates the
+// JWT from the ?token query parameter, and drives the client read/write pumps.
+func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
+	tokenStr := r.URL.Query().Get("token")
+	if tokenStr == "" {
+		http.Error(w, "missing token", http.StatusUnauthorized)
+		return
+	}
+	claims, err := h.tokens.Validate(tokenStr, "access")
+	if err != nil {
+		http.Error(w, "invalid or expired token", http.StatusUnauthorized)
+		return
+	}
+
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		// Upgrade wrote the HTTP error; log and return.
+		slog.Error("ws: upgrade failed", "err", err)
+		return
+	}
+
+	c := &client{
+		conn:    conn,
+		send:    make(chan OutboundMsg, 64),
+		teamIDs: make(map[string]struct{}),
+		userID:  claims.UserID,
+	}
+	slog.Debug("ws: client connected", "userID", claims.UserID)
+
+	go c.writePump(h)
+	c.readPump(h)
+}
+
+// subscribe adds c to the subscription set for teamID.
+func (h *Hub) subscribe(c *client, teamID string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.teams[teamID] == nil {
+		h.teams[teamID] = make(map[*client]struct{})
+	}
+	h.teams[teamID][c] = struct{}{}
+
+	c.mu.Lock()
+	c.teamIDs[teamID] = struct{}{}
+	c.mu.Unlock()
+}
+
+// unsubscribeAll removes c from every team subscription set it belongs to
+// and logs the disconnect.
+func (h *Hub) unsubscribeAll(c *client) {
+	slog.Debug("ws: client disconnected", "userID", c.userID)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	for teamID := range c.teamIDs {
+		delete(h.teams[teamID], c)
+		if len(h.teams[teamID]) == 0 {
+			delete(h.teams, teamID)
+		}
+	}
+}
+
+// broadcast delivers msg to every client subscribed to teamID. Sends are
+// non-blocking; slow clients are skipped rather than stalling the broadcast.
+func (h *Hub) broadcast(teamID string, msg OutboundMsg) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for c := range h.teams[teamID] {
+		select {
+		case c.send <- msg:
+		default:
+			// Slow client — drop rather than block.
+		}
+	}
+}
+
+// readPump reads inbound messages from the WebSocket connection and handles
+// the subscribe and pong message types. It returns when the connection closes,
+// triggering deferred cleanup.
+func (c *client) readPump(h *Hub) {
+	defer func() {
+		h.unsubscribeAll(c)
+		_ = c.conn.Close()
+	}()
+
+	c.conn.SetReadLimit(maxMessageBytes)
+	_ = c.conn.SetReadDeadline(time.Now().Add(h.readTimeout))
+
+	for {
+		_, raw, err := c.conn.ReadMessage()
+		if err != nil {
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+				slog.Warn("ws: unexpected close", "userID", c.userID, "err", err)
+			}
+			return
+		}
+
+		var msg inboundMsg
+		if err := json.Unmarshal(raw, &msg); err != nil {
+			continue
+		}
+
+		switch msg.Type {
+		case "subscribe":
+			if msg.TeamID != "" {
+				if err := h.members(msg.TeamID, c.userID); err != nil {
+					slog.Debug("ws: subscribe denied", "userID", c.userID, "teamID", msg.TeamID)
+					select {
+					case c.send <- OutboundMsg{Type: "error", Payload: "not a member of team " + msg.TeamID}:
+					default:
+					}
+				} else {
+					slog.Debug("ws: subscribed", "userID", c.userID, "teamID", msg.TeamID)
+					h.subscribe(c, msg.TeamID)
+				}
+			}
+		case "pong":
+			// Extend the read deadline when the client acknowledges a ping.
+			_ = c.conn.SetReadDeadline(time.Now().Add(h.readTimeout))
+		}
+	}
+}
+
+// writePump sends outgoing messages and heartbeat pings to the WebSocket
+// connection. It returns when the send channel is closed or a write fails,
+// triggering a connection close that causes readPump to return too.
+func (c *client) writePump(h *Hub) {
+	ticker := time.NewTicker(h.heartbeatInterval)
+	defer func() {
+		ticker.Stop()
+		_ = c.conn.Close()
+	}()
+
+	for {
+		select {
+		case msg, ok := <-c.send:
+			_ = c.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
+			if !ok {
+				_ = c.conn.WriteMessage(websocket.CloseMessage, []byte{})
+				return
+			}
+			if err := c.conn.WriteJSON(msg); err != nil {
+				return
+			}
+		case <-ticker.C:
+			_ = c.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
+			if err := c.conn.WriteJSON(OutboundMsg{Type: "ping"}); err != nil {
+				return
+			}
+		}
+	}
 }
 ````
 
@@ -41347,6 +41718,21 @@ func SQL() (string, error) {
 	}
 	return b.String(), nil
 }
+````
+
+## File: packages/api/ui/embed.go
+````go
+// Package ui holds the embedded React build artifacts served by the API in
+// production. The static/ directory is populated by the Docker build process
+// (web-builder stage copies packages/web/dist here); it is otherwise empty in
+// development so the handler in server.go self-disables when index.html is absent.
+package ui
+
+import "embed"
+
+// FS is the embedded filesystem containing the built React application.
+//go:embed all:static
+var FS embed.FS
 ````
 
 ## File: packages/api/Dockerfile
@@ -49215,6 +49601,50 @@ export default defineConfig(({ mode }) => {
 })
 ````
 
+## File: docker-compose.yml
+````yaml
+services:
+  api:
+    build:
+      context: .
+      dockerfile: packages/api/Dockerfile
+      target: dev
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./packages/api:/app
+    environment:
+      - DRABA_PORT=8080
+      - DRABA_DB_DRIVER=sqlite
+      - DRABA_DB_DSN=./draba.db
+      - DRABA_JWT_SECRET=dev-secret-change-in-prod
+      - DRABA_LOG_LEVEL=debug
+      # Pre-launch convenience: seed the canonical sample dataset (incl. shares)
+      # into an empty DB on boot. No-op once the DB has users. Turn OFF before
+      # any real users exist. See docs/TESTING.md.
+      - DRABA_SEED_SAMPLE_DATA=1
+      # Public base URL used to build links in outbound email (password reset,
+      # team invites). MUST be the externally reachable URL in any real
+      # deployment — when unset it falls back to http://localhost:8080 and
+      # emailed links point at localhost (broken for recipients).
+      - DRABA_BASE_URL=http://localhost:8080
+
+  web:
+    build:
+      context: .
+      dockerfile: packages/web/Dockerfile
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./packages/web/src:/app/packages/web/src
+      - ./packages/web/public:/app/packages/web/public
+      - ./packages/web/index.html:/app/packages/web/index.html
+    environment:
+      - VITE_API_URL=http://api:8080
+    depends_on:
+      - api
+````
+
 ## File: OIDC_PR.md
 ````markdown
 # Add OIDC / SSO login (opt-in, security-first)
@@ -49767,938 +50197,204 @@ No Vitest / Testing Library setup exists yet. Components (`TimelineGrid`, `Event
 4. That's it — `/test-phase` will pick it up on the next run.
 ````
 
-## File: packages/api/internal/api/team_handler.go
+## File: packages/api/internal/auth/oidc.go
 ````go
-package api
+// OIDC / SSO support. This file is the ONLY place draba talks to an external
+// identity provider. It is entirely inert unless OIDC is configured: when
+// NewOIDCService is given an empty issuer it returns (nil, nil) and every
+// caller treats a nil *OIDCService as "SSO disabled", so no discovery request,
+// no network traffic, and no behaviour change occurs on a default install.
+//
+// Security posture:
+//   - The provider's ID token signature is verified against the IdP's JWKS by
+//     go-oidc's verifier (RS256/ES256/etc.) — draba never trusts an unsigned
+//     or self-asserted token.
+//   - The OAuth2 "state" parameter is bound to the caller's cookie to stop
+//     CSRF on the callback; "nonce" is bound into the ID token to stop replay.
+//   - PKCE (S256) is always used, so an intercepted authorization code cannot
+//     be redeemed without the original verifier.
+//   - The client secret is read once from the environment and never leaves the
+//     server; it is not exposed by any API.
+package auth
 
 import (
-	"database/sql"
-	"encoding/json"
-	"errors"
-	"html"
-	"log/slog"
-	"net/http"
-	"net/url"
-	"regexp"
-	"strings"
+	"context"
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/base64"
+	"fmt"
 	"time"
 
-	"github.com/I0-1O/draba/packages/api/internal/db"
-	"github.com/I0-1O/draba/packages/api/internal/models"
+	"github.com/coreos/go-oidc/v3/oidc"
+	"golang.org/x/oauth2"
 )
 
-// slugRe matches any run of characters that are not lowercase ASCII alphanumeric.
-var slugRe = regexp.MustCompile(`[^a-z0-9]+`)
+// OIDCConfig is the deploy-time configuration for SSO. All fields are required
+// when SSO is enabled; an empty Issuer means SSO is disabled.
+type OIDCConfig struct {
+	Issuer       string
+	ClientID     string
+	ClientSecret string
+	RedirectURL  string
+	// Scopes requested in addition to "openid". Defaults to {"profile","email"}
+	// when empty.
+	Scopes []string
+}
 
-func (s *Server) handleListTeams(w http.ResponseWriter, r *http.Request) {
-	claims := claimsFromContext(r.Context())
-	includeArchived := r.URL.Query().Get("archived") == "true"
+// OIDCService performs the OpenID Connect authorization-code flow against a
+// single configured provider. It is safe for concurrent use.
+type OIDCService struct {
+	issuer   string
+	provider *oidc.Provider
+	verifier *oidc.IDTokenVerifier
+	oauth    oauth2.Config
+}
 
-	// Superadmins see all teams system-wide, not just the ones they belong to.
-	caller, err := s.users.GetByID(claims.UserID)
+// OIDCClaims is the subset of ID-token claims draba consumes. Subject is the
+// stable per-user identifier; Email/Name seed the local account on first login.
+type OIDCClaims struct {
+	Subject       string `json:"sub"`
+	Email         string `json:"email"`
+	EmailVerified bool   `json:"email_verified"`
+	Name          string `json:"name"`
+	Nonce         string `json:"nonce"`
+}
+
+// CodeFlow carries the per-request secrets the caller must store (in
+// short-lived httpOnly cookies) and replay on the callback. The State and
+// Nonce defend against CSRF and replay; the PKCEVerifier is exchanged for
+// tokens at the callback.
+type CodeFlow struct {
+	// AuthURL is where the user agent is redirected to authenticate.
+	AuthURL string
+	// State must be echoed back by the IdP and matched on callback.
+	State string
+	// Nonce must equal the nonce claim in the returned ID token.
+	Nonce string
+	// PKCEVerifier is the code_verifier matching the code_challenge sent in
+	// AuthURL; required at the token exchange.
+	PKCEVerifier string
+}
+
+// NewOIDCService constructs an OIDCService by performing OIDC discovery against
+// cfg.Issuer. It returns (nil, nil) when cfg.Issuer is empty so that a default
+// (SSO-disabled) install incurs no network access and no dependency activation.
+// A non-nil error means SSO was requested but the provider is unreachable or
+// misconfigured — the caller should treat that as a fatal startup error so a
+// broken SSO setup fails loudly instead of silently serving a dead login button.
+func NewOIDCService(ctx context.Context, cfg *OIDCConfig) (*OIDCService, error) {
+	if cfg.Issuer == "" {
+		return nil, nil // SSO disabled — inert.
+	}
+	if cfg.ClientID == "" || cfg.ClientSecret == "" || cfg.RedirectURL == "" {
+		return nil, fmt.Errorf("oidc: issuer set but client_id, client_secret, or redirect_url is missing")
+	}
+
+	provider, err := oidc.NewProvider(ctx, cfg.Issuer)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list teams")
-		return
+		return nil, fmt.Errorf("oidc: discovery against %q failed: %w", cfg.Issuer, err)
 	}
 
-	var teams []*models.Team
-	if caller.IsSuperadmin {
-		teams, err = s.teams.ListAll(includeArchived)
-	} else {
-		teams, err = s.teams.ListByUserID(claims.UserID, includeArchived)
+	scopes := cfg.Scopes
+	if len(scopes) == 0 {
+		scopes = []string{"profile", "email"}
 	}
+
+	return &OIDCService{
+		issuer:   cfg.Issuer,
+		provider: provider,
+		verifier: provider.Verifier(&oidc.Config{ClientID: cfg.ClientID}),
+		oauth: oauth2.Config{
+			ClientID:     cfg.ClientID,
+			ClientSecret: cfg.ClientSecret,
+			RedirectURL:  cfg.RedirectURL,
+			Endpoint:     provider.Endpoint(),
+			Scopes:       append([]string{oidc.ScopeOpenID}, scopes...),
+		},
+	}, nil
+}
+
+// Begin produces the authorization URL plus the state/nonce/PKCE-verifier the
+// caller must persist for the matching callback. Every value is generated with
+// a CSPRNG.
+func (s *OIDCService) Begin() (*CodeFlow, error) {
+	state, err := randomURLToken()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list teams")
-		return
+		return nil, err
 	}
-	writeJSON(w, http.StatusOK, teams)
-}
-
-func (s *Server) handleCreateTeam(w http.ResponseWriter, r *http.Request) {
-	var req CreateTeamJSONBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	req.Name = strings.TrimSpace(req.Name)
-	if req.Name == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name is required")
-		return
-	}
-
-	count, err := s.teams.Count()
+	nonce, err := randomURLToken()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create team")
-		return
+		return nil, err
 	}
-	if err := s.tier.CheckTeamLimit(count); err != nil {
-		writeError(w, http.StatusPaymentRequired, "TIER_TEAM_LIMIT", "team limit reached for current tier")
-		return
-	}
+	verifier := oauth2.GenerateVerifier()
 
-	claims := claimsFromContext(r.Context())
-	now := time.Now()
-	id := newID()
-	team := &models.Team{
-		ID:          id,
-		Name:        req.Name,
-		Slug:        slugify(req.Name) + "-" + id[:8],
-		Description: req.Description,
-		Notes:       req.Notes,
-		Color:       req.Color,
-		Icon:        req.Icon,
-		CreatedAt:   now,
-		UpdatedAt:   now,
-	}
-	if err := s.teams.Create(team); err != nil {
-		if errors.Is(err, db.ErrDuplicateName) {
-			writeError(w, http.StatusConflict, "TEAM_NAME_TAKEN", "a team with that name already exists")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create team")
-		return
-	}
-
-	userID := claims.UserID
-	member := &models.TeamMember{
-		ID:       newID(),
-		TeamID:   team.ID,
-		UserID:   &userID,
-		Role:     "admin",
-		JoinedAt: now,
-	}
-	if err := s.teams.AddMember(member); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create team")
-		return
-	}
-
-	// Seed the default "Simple" status template for the new team.
-	if err := s.statuses.SeedDefaultTemplate(team.ID, claims.UserID); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create team")
-		return
-	}
-
-	writeJSON(w, http.StatusCreated, team)
+	url := s.oauth.AuthCodeURL(
+		state,
+		oidc.Nonce(nonce),
+		oauth2.S256ChallengeOption(verifier),
+	)
+	return &CodeFlow{
+		AuthURL:      url,
+		State:        state,
+		Nonce:        nonce,
+		PKCEVerifier: verifier,
+	}, nil
 }
 
-func (s *Server) handleCreateInvite(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-	claims := claimsFromContext(r.Context())
-
-	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
-		return
-	}
-
-	var req CreateInviteJSONBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	var email string
-	if req.Email != nil {
-		email = strings.ToLower(strings.TrimSpace(string(*req.Email)))
-	}
-
-	role := "member"
-	if req.Role != nil {
-		role = string(*req.Role)
-	}
-	if role != "admin" && role != "member" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "role must be admin or member")
-		return
-	}
-
-	now := time.Now()
-	invite := &models.Invite{
-		ID:        newID(),
-		TeamID:    teamID,
-		Email:     email,
-		Token:     newToken(),
-		Role:      role,
-		InvitedBy: claims.UserID,
-		ExpiresAt: now.Add(7 * 24 * time.Hour),
-		CreatedAt: now,
-	}
-	if err := s.invites.Create(invite); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create invite")
-		return
-	}
-
-	// Email the invite link when an address was supplied. Best-effort: a send
-	// failure (or no SMTP configured) must not fail invite creation — the
-	// admin can still copy the link from the UI.
-	if email != "" {
-		s.sendInviteEmail(email, invite.Token)
-	}
-
-	writeJSON(w, http.StatusCreated, invite)
-}
-
-// sendInviteEmail sends the team invite link to the invitee. Errors are logged,
-// not returned: invite creation already succeeded and the link is also shown in
-// the UI, so a mail failure should not surface to the caller.
-func (s *Server) sendInviteEmail(email, token string) {
-	baseURL := strings.TrimRight(getBaseURL(), "/")
-	inviteLink := baseURL + "/register?token=" + url.QueryEscape(token)
-
-	subject := "You've been invited to draba"
-	// html.EscapeString prevents a malformed href if the link ever contains
-	// HTML-special characters (shouldn't happen with url.QueryEscape tokens,
-	// but defence-in-depth for the email body).
-	body := "<html><body>" +
-		"<p>You've been invited to join a team on draba.</p>" +
-		"<p><a href=\"" + html.EscapeString(inviteLink) + "\">Click here to accept the invitation</a></p>" +
-		"<p>This invitation expires in 7 days.</p>" +
-		"</body></html>"
-
-	if err := s.mailer.Send(email, subject, body); err != nil {
-		slog.Error("invite: failed to send email", "email", email, "err", err)
-	}
-}
-
-// handleGetTeam checks membership before fetching the team row to avoid leaking
-// team existence to non-members (a 403 is returned whether the team is missing
-// or the caller is just not on it).
-func (s *Server) handleGetTeam(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-
-	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
-		return
-	}
-
-	team, err := s.teams.GetByID(teamID)
+// Exchange completes the flow: it redeems code for tokens (sending the PKCE
+// verifier), verifies the ID token's signature against the provider JWKS,
+// checks the nonce, and returns the validated claims. expectedNonce must be
+// the value originally produced by Begin and stored by the caller.
+func (s *OIDCService) Exchange(ctx context.Context, code, pkceVerifier, expectedNonce string) (*OIDCClaims, error) {
+	token, err := s.oauth.Exchange(ctx, code, oauth2.VerifierOption(pkceVerifier))
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "team not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get team")
-		return
+		return nil, fmt.Errorf("oidc: token exchange failed: %w", err)
 	}
 
-	writeJSON(w, http.StatusOK, team)
-}
-
-func (s *Server) handleListMembers(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-
-	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
-		return
+	rawID, ok := token.Extra("id_token").(string)
+	if !ok || rawID == "" {
+		return nil, fmt.Errorf("oidc: provider response contained no id_token")
 	}
 
-	members, err := s.teams.ListMembers(teamID)
+	idToken, err := s.verifier.Verify(ctx, rawID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list members")
-		return
+		return nil, fmt.Errorf("oidc: id_token verification failed: %w", err)
 	}
 
-	writeJSON(w, http.StatusOK, members)
+	var claims OIDCClaims
+	if err := idToken.Claims(&claims); err != nil {
+		return nil, fmt.Errorf("oidc: parsing id_token claims: %w", err)
+	}
+
+	// Replay defence: the nonce minted in Begin must match the one the IdP
+	// embedded in the signed ID token. Constant-time compare avoids leaking
+	// the nonce through timing.
+	if claims.Nonce == "" || subtle.ConstantTimeCompare([]byte(claims.Nonce), []byte(expectedNonce)) != 1 {
+		return nil, fmt.Errorf("oidc: id_token nonce mismatch")
+	}
+	if claims.Subject == "" {
+		return nil, fmt.Errorf("oidc: id_token has no subject claim")
+	}
+	return &claims, nil
 }
 
-// handleUpdateTeam applies partial updates — nil fields in the request body are
-// ignored, not cleared. The caller does not need to fetch the current team state
-// before patching.
-func (s *Server) handleUpdateTeam(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-
-	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
-		return
-	}
-
-	team, err := s.teams.GetByID(teamID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "team not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update team")
-		return
-	}
-
-	var req UpdateTeamJSONBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	if req.Name != nil {
-		name := strings.TrimSpace(*req.Name)
-		if name == "" {
-			writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name cannot be empty")
-			return
-		}
-		team.Name = name
-		team.Slug = slugify(name) + "-" + team.ID[:8]
-	}
-	if req.Description != nil {
-		team.Description = req.Description
-	}
-	if req.Notes != nil {
-		team.Notes = req.Notes
-	}
-	if req.Color != nil {
-		team.Color = req.Color
-	}
-	if req.Icon != nil {
-		team.Icon = req.Icon
-	}
-	team.UpdatedAt = time.Now()
-
-	if err := s.teams.Update(team); err != nil {
-		if errors.Is(err, db.ErrDuplicateName) {
-			writeError(w, http.StatusConflict, "TEAM_NAME_TAKEN", "a team with that name already exists")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update team")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, team)
+// Issuer returns the configured provider issuer URL — used as the stable
+// namespace half of a user's (issuer, subject) identity key.
+func (s *OIDCService) Issuer() string {
+	return s.issuer
 }
 
-// handleArchiveTeam soft-deletes by setting archived_at rather than removing
-// the row, so activity history on the team is preserved and recovery is possible.
-func (s *Server) handleArchiveTeam(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-
-	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
-		return
-	}
-
-	now := time.Now()
-	if err := s.teams.SetArchived(teamID, &now); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive team")
-		return
-	}
-
-	team, err := s.teams.GetByID(teamID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "team not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive team")
-		return
-	}
-	writeJSON(w, http.StatusOK, team)
-}
-
-func (s *Server) handleUnarchiveTeam(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-
-	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
-		return
-	}
-
-	if err := s.teams.SetArchived(teamID, nil); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to unarchive team")
-		return
-	}
-
-	team, err := s.teams.GetByID(teamID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "team not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to unarchive team")
-		return
-	}
-	writeJSON(w, http.StatusOK, team)
-}
-
-// slugify converts a team name to a URL-safe slug by lowercasing, replacing
-// spaces and punctuation with hyphens, and collapsing consecutive hyphens.
-func slugify(name string) string {
-	s := slugRe.ReplaceAllString(strings.ToLower(name), "-")
-	s = strings.Trim(s, "-")
-	if s == "" {
-		s = newID()[:8]
-	}
-	return s
-}
-
-// ── Member CRUD ───────────────────────────────────────────────────────────────
-
-// handleGetMember fetches a single team member with computed stats.
-func (s *Server) handleGetMember(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-	memberID := r.PathValue("memberId")
-
-	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
-		return
-	}
-
-	m, err := s.teams.GetMemberByID(memberID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "member not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get member")
-		return
-	}
-	if m.TeamID != teamID {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "member not found")
-		return
-	}
-
-	stats, err := s.teams.GetMemberStats(memberID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to compute member stats")
-		return
-	}
-
-	var teams []*models.TeamMemberWithUser
-	if m.UserID != nil {
-		teams, err = s.teams.GetMemberAllTeams(*m.UserID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get member teams")
-			return
-		}
-	}
-
-	// Deletable: zero active assignments and single-team membership.
-	activeActivities := stats.PastDue + stats.Running + stats.Upcoming + stats.Unscheduled
-	deletable := activeActivities == 0 && len(teams) <= 1
-
-	// Expose users.archived_at separately from team_members.archived_at so the
-	// client can distinguish account deactivation from membership inactivation.
-	var userArchivedAt *time.Time
-	if m.UserID != nil {
-		if u, err := s.users.GetByID(*m.UserID); err == nil {
-			userArchivedAt = u.ArchivedAt
-		}
-	}
-
-	detail := &models.MemberDetail{
-		TeamMemberWithUser: *m,
-		Stats:              *stats,
-		Teams:              flatten(teams),
-		Deletable:          deletable,
-		UserArchivedAt:     userArchivedAt,
-	}
-	writeJSON(w, http.StatusOK, detail)
-}
-
-// handleAddMember adds an existing registered user to the team by their userID.
-func (s *Server) handleAddMember(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-
-	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
-		return
-	}
-
-	var req struct {
-		UserID string `json:"userId"`
-		Role   string `json:"role"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-	req.UserID = strings.TrimSpace(req.UserID)
-	if req.UserID == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "userId is required")
-		return
-	}
-	if req.Role == "" {
-		req.Role = "member"
-	}
-	if req.Role != "admin" && req.Role != "member" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "role must be admin or member")
-		return
-	}
-
-	// Verify the user exists.
-	if _, err := s.users.GetByID(req.UserID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "user not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to add member")
-		return
-	}
-
-	now := time.Now()
-	uid := req.UserID
-	member := &models.TeamMember{
-		ID:       newID(),
-		TeamID:   teamID,
-		UserID:   &uid,
-		Role:     req.Role,
-		JoinedAt: now,
-	}
-	if err := s.teams.AddMember(member); err != nil {
-		writeError(w, http.StatusConflict, "ALREADY_MEMBER", "user is already a member of this team")
-		return
-	}
-
-	m, err := s.teams.GetMemberByID(member.ID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get created member")
-		return
-	}
-	writeJSON(w, http.StatusCreated, m)
-}
-
-// handleUpdateMember updates display_name, color, icon, and/or role.
-// Admins can change any field; regular members can only update their own
-// display_name, color, and icon (not their role).
-func (s *Server) handleUpdateMember(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-	memberID := r.PathValue("memberId")
-	claims := claimsFromContext(r.Context())
-
-	callerMember, ok := s.requireTeamMember(w, r, teamID)
-	if !ok {
-		return
-	}
-
-	target, err := s.teams.GetMemberByID(memberID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "member not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update member")
-		return
-	}
-	if target.TeamID != teamID {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "member not found")
-		return
-	}
-
-	var req struct {
-		DisplayName *string `json:"displayName"`
-		Color       *string `json:"color"`
-		Icon        *string `json:"icon"`
-		Role        *string `json:"role"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	// Only admins can change role.
-	if req.Role != nil && callerMember.Role != "admin" {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "only admins can change roles")
-		return
-	}
-	// Members can only update their own identity.
-	if callerMember.Role != "admin" && callerMember.ID != memberID {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "members can only update their own profile")
-		return
-	}
-	if req.Role != nil && *req.Role != "admin" && *req.Role != "member" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "role must be admin or member")
-		return
-	}
-
-	// Admins cannot change their own role — another admin must do it.
-	if req.Role != nil && target.UserID != nil && *target.UserID == claims.UserID {
-		writeError(w, http.StatusConflict, "SELF_ROLE_CHANGE", "cannot change your own role")
-		return
-	}
-
-	if err := s.teams.UpdateMember(memberID, req.DisplayName, req.Color, req.Icon, req.Role); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update member")
-		return
-	}
-
-	m, err := s.teams.GetMemberByID(memberID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get updated member")
-		return
-	}
-	writeJSON(w, http.StatusOK, m)
-}
-
-// handleDeleteMember removes a team member row. Rejects if the member is the
-// last admin or has activity assignments (to prevent data loss on hard-delete).
-func (s *Server) handleDeleteMember(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-	memberID := r.PathValue("memberId")
-
-	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
-		return
-	}
-
-	target, err := s.teams.GetMemberByID(memberID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "member not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to remove member")
-		return
-	}
-	if target.TeamID != teamID {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "member not found")
-		return
-	}
-
-	if target.Role == "admin" {
-		admins, err := s.teams.CountAdmins(teamID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to remove member")
-			return
-		}
-		if admins <= 1 {
-			writeError(w, http.StatusConflict, "LAST_ADMIN", "cannot remove the last admin")
-			return
-		}
-	}
-
-	// Reject hard-delete when assignments exist: the RESTRICT FK would block it
-	// anyway, but we surface a 409 with the count so the UI can offer
-	// "Inactivate instead" rather than a generic error.
-	assignCount, err := s.teams.CountMemberAssignments(memberID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to remove member")
-		return
-	}
-	if assignCount > 0 {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusConflict)
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"error": map[string]string{
-				"code":    "MEMBER_HAS_ASSIGNMENTS",
-				"message": "member has activity assignments; inactivate instead of removing",
-			},
-			"assignmentCount": assignCount,
-		})
-		return
-	}
-
-	// Delete timeline_access first so the RESTRICT FK on team_members is satisfied.
-	if err := s.teams.DeleteMemberTimelineAccess(memberID); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to remove member")
-		return
-	}
-
-	if err := s.teams.DeleteMember(memberID); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to remove member")
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
-// handleArchiveMember inactivates a team member (sets archived_at).
-func (s *Server) handleArchiveMember(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-	memberID := r.PathValue("memberId")
-
-	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
-		return
-	}
-
-	target, err := s.teams.GetMemberByID(memberID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "member not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive member")
-		return
-	}
-	if target.TeamID != teamID {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "member not found")
-		return
-	}
-
-	if target.Role == "admin" {
-		admins, err := s.teams.CountAdmins(teamID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive member")
-			return
-		}
-		if admins <= 1 {
-			writeError(w, http.StatusConflict, "LAST_ADMIN", "cannot inactivate the last admin")
-			return
-		}
-	}
-
-	now := time.Now()
-	if err := s.teams.SetMemberArchived(memberID, &now); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to archive member")
-		return
-	}
-
-	m, err := s.teams.GetMemberByID(memberID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get archived member")
-		return
-	}
-	writeJSON(w, http.StatusOK, m)
-}
-
-// handleUnarchiveMember reactivates an inactivated team member.
-func (s *Server) handleUnarchiveMember(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-	memberID := r.PathValue("memberId")
-
-	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
-		return
-	}
-
-	target, err := s.teams.GetMemberByID(memberID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "member not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reactivate member")
-		return
-	}
-	if target.TeamID != teamID {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "member not found")
-		return
-	}
-
-	if err := s.teams.SetMemberArchived(memberID, nil); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reactivate member")
-		return
-	}
-
-	m, err := s.teams.GetMemberByID(memberID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get reactivated member")
-		return
-	}
-	writeJSON(w, http.StatusOK, m)
-}
-
-// handleCreateParticipant creates a login-less team member (Participant).
-func (s *Server) handleCreateParticipant(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-
-	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
-		return
-	}
-
-	var req struct {
-		Name  string  `json:"name"`
-		Color *string `json:"color"`
-		Icon  *string `json:"icon"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-	req.Name = strings.TrimSpace(req.Name)
-	if req.Name == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name is required")
-		return
-	}
-
-	now := time.Now()
-	name := req.Name
-	member := &models.TeamMember{
-		ID:          newID(),
-		TeamID:      teamID,
-		UserID:      nil,
-		DisplayName: &name,
-		Role:        "member",
-		Color:       req.Color,
-		Icon:        req.Icon,
-		JoinedAt:    now,
-	}
-	if err := s.teams.AddMember(member); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create participant")
-		return
-	}
-
-	m, err := s.teams.GetMemberByID(member.ID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get created participant")
-		return
-	}
-	writeJSON(w, http.StatusCreated, m)
-}
-
-// ── Invites ───────────────────────────────────────────────────────────────────
-
-// handleListInvites returns all pending invites for the team.
-func (s *Server) handleListInvites(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-
-	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
-		return
-	}
-
-	invites, err := s.invites.ListByTeam(teamID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list invites")
-		return
-	}
-	writeJSON(w, http.StatusOK, invites)
-}
-
-// handleDeleteInvite revokes a pending invite.
-func (s *Server) handleDeleteInvite(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-	inviteID := r.PathValue("inviteId")
-
-	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
-		return
-	}
-
-	if err := s.invites.DeleteByID(inviteID); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke invite")
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
-// ── Invite link ───────────────────────────────────────────────────────────────
-
-// handleCreateInviteLink generates or regenerates the reusable invite link
-// token for the team. Each call replaces the previous token.
-//
-// Design decision: tokens have no server-side expiry and are valid until an
-// admin explicitly revokes (DELETE) or resets (POST /reset) them. This keeps
-// the URL stable for onboarding docs and Slack pins. If time-bounded links are
-// needed, add an invite_link_expires_at column to teams and check it in the
-// registration handler.
-func (s *Server) handleCreateInviteLink(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-
-	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
-		return
-	}
-
-	token := newToken()
-	if err := s.teams.SetInviteLinkToken(teamID, &token); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create invite link")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]string{"token": token})
-}
-
-// handleGetInviteLink returns the current invite link token for the team, or
-// null if none is set.
-func (s *Server) handleGetInviteLink(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-
-	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
-		return
-	}
-
-	team, err := s.teams.GetByID(teamID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "team not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get invite link")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{"token": team.InviteLinkToken})
-}
-
-// handleResetInviteLink invalidates the current token and generates a fresh one.
-// Semantically identical to POST /invite-link; the distinct URL makes client
-// intent (reset vs. first-time create) explicit without a separate code path.
-func (s *Server) handleResetInviteLink(w http.ResponseWriter, r *http.Request) {
-	s.handleCreateInviteLink(w, r)
-}
-
-// handleDeleteInviteLink revokes the current invite link by clearing the token.
-func (s *Server) handleDeleteInviteLink(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-
-	if _, ok := s.requireTeamAdmin(w, r, teamID); !ok {
-		return
-	}
-
-	if err := s.teams.SetInviteLinkToken(teamID, nil); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke invite link")
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
-// userSearchResult is the safe public projection returned by GET /users/search.
-// It intentionally omits isSuperadmin, archivedAt, createdAt, updatedAt, and
-// passwordHash so that search results are safe to expose to any team member.
-type userSearchResult struct {
-	ID          string  `json:"id"`
-	Email       string  `json:"email"`
-	DisplayName string  `json:"displayName"`
-	AvatarURL   *string `json:"avatarUrl,omitempty"`
-}
-
-// handleSearchUsers handles GET /users/search?q= and returns matching users.
-func (s *Server) handleSearchUsers(w http.ResponseWriter, r *http.Request) {
-	q := strings.TrimSpace(r.URL.Query().Get("q"))
-	if len(q) < 2 {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "query must be at least 2 characters")
-		return
-	}
-	users, err := s.users.SearchByNameOrEmail(q)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "search failed")
-		return
-	}
-	results := make([]userSearchResult, len(users))
-	for i, u := range users {
-		results[i] = userSearchResult{
-			ID:          u.ID,
-			Email:       u.Email,
-			DisplayName: u.DisplayName,
-			AvatarURL:   u.AvatarURL,
-		}
-	}
-	writeJSON(w, http.StatusOK, results)
-}
-
-// handleGetMemberStats returns computed activity and timeline counts for a
-// single team member. The full MemberDetail (with teams list) is available via
-// GET /teams/:id/members/:memberId; this endpoint is for lightweight stat polling.
-func (s *Server) handleGetMemberStats(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("id")
-	memberID := r.PathValue("memberId")
-
-	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
-		return
-	}
-
-	m, err := s.teams.GetMemberByID(memberID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "member not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get member stats")
-		return
-	}
-	if m.TeamID != teamID {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "member not found")
-		return
-	}
-
-	stats, err := s.teams.GetMemberStats(memberID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to compute member stats")
-		return
-	}
-	writeJSON(w, http.StatusOK, stats)
-}
-
-// flatten converts a nil slice to an empty slice for clean JSON serialisation.
-func flatten[T any](s []*T) []T {
-	out := make([]T, 0, len(s))
-	for _, v := range s {
-		if v != nil {
-			out = append(out, *v)
-		}
-	}
-	return out
+// FlowCookieTTL bounds how long a started OIDC flow may sit before the user
+// completes it; the state/nonce/PKCE cookies expire after this window.
+const FlowCookieTTL = 10 * time.Minute
+
+// randomURLToken returns 32 bytes of CSPRNG entropy, base64url-encoded.
+func randomURLToken() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("oidc: reading random: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 ````
 
@@ -50934,6 +50630,357 @@ func WriteXLSXColumns(w io.Writer, rows []Row, columns []string) error {
 	}
 
 	return f.Write(w)
+}
+````
+
+## File: packages/api/internal/filters/engine.go
+````go
+// Package filters provides the server-side activity filter evaluator.
+//
+// It is a Go port of the TypeScript matchesFilter function in
+// packages/web/src/lib/filterEngine.ts. Both implementations must agree on
+// every test case in packages/shared/testdata/filter-fixtures.json — that file
+// is the single source of truth for expected behaviour.
+package filters
+
+import (
+	"strings"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// FilterLogic controls how conditions in a FilterDefinition are combined.
+type FilterLogic string
+
+// LogicAnd and LogicOr are the two values for FilterLogic.
+const (
+	LogicAnd FilterLogic = "and"
+	LogicOr  FilterLogic = "or"
+)
+
+// FilterDefinition is the top-level filter object, matching the TypeScript type
+// of the same name. Conditions are evaluated with the specified Logic.
+type FilterDefinition struct {
+	Logic      FilterLogic `json:"logic"`
+	Conditions []Condition `json:"conditions"`
+}
+
+// Condition is a single filter rule. Field determines which activity field is
+// tested; Op and Value carry the operator and operand(s). The exact types mirror
+// the TypeScript FilterCondition union.
+type Condition struct {
+	Field string `json:"field"`
+	Op    string `json:"op"`
+	// Value is the raw JSON value for the condition's operand. Its concrete Go
+	// type depends on the field: string, []string, float64, or []string pair.
+	// We unmarshal as interface{} and interpret per-field below.
+	Value interface{} `json:"value,omitempty"`
+}
+
+// FilterContext carries the reference data needed to evaluate status-name and
+// tag-name conditions without performing additional DB lookups.
+type FilterContext struct {
+	// StatusesByTimelineID maps timeline_id → that timeline's live statuses.
+	StatusesByTimelineID map[string][]models.Status
+	// Tags holds all team tags (for resolving tagIds → names).
+	Tags []models.Tag
+}
+
+// MatchesFilter reports whether activity satisfies def given ctx.
+// An empty conditions slice always matches (no filtering applied).
+func MatchesFilter(activity *models.Activity, def *FilterDefinition, ctx *FilterContext) bool {
+	if len(def.Conditions) == 0 {
+		return true
+	}
+
+	results := make([]bool, len(def.Conditions))
+	for i, c := range def.Conditions {
+		results[i] = evalCondition(&c, activity, ctx)
+	}
+
+	if def.Logic == LogicOr {
+		for _, r := range results {
+			if r {
+				return true
+			}
+		}
+		return false
+	}
+	// default: "and"
+	for _, r := range results {
+		if !r {
+			return false
+		}
+	}
+	return true
+}
+
+// ── Condition evaluation ──────────────────────────────────────────────────────
+
+func evalCondition(c *Condition, a *models.Activity, ctx *FilterContext) bool {
+	switch c.Field {
+	case "status":
+		statuses := ctx.StatusesByTimelineID[a.TimelineID]
+		statusName := ""
+		if a.StatusID != nil {
+			for i := range statuses {
+				if statuses[i].ID == *a.StatusID {
+					statusName = strings.ToLower(statuses[i].Name)
+					break
+				}
+			}
+		}
+		var haystack []string
+		if statusName != "" {
+			haystack = []string{statusName}
+		}
+		needles := toLowerStrings(toStringSlice(c.Value))
+		return evalSetOp(c.Op, haystack, needles)
+
+	case "tag":
+		tagMap := make(map[string]string, len(ctx.Tags))
+		for _, t := range ctx.Tags {
+			tagMap[t.ID] = strings.ToLower(t.Name)
+		}
+		actTagNames := make([]string, 0, len(a.TagIDs))
+		for _, id := range a.TagIDs {
+			if name, ok := tagMap[id]; ok {
+				actTagNames = append(actTagNames, name)
+			} else {
+				actTagNames = append(actTagNames, strings.ToLower(id))
+			}
+		}
+		needles := toLowerStrings(toStringSlice(c.Value))
+		return evalSetOp(c.Op, actTagNames, needles)
+
+	case "assignee":
+		needles := toStringSlice(c.Value)
+		return evalSetOp(c.Op, a.AssignedMemberIDs, needles)
+
+	case "title":
+		return evalStringOp(c.Op, a.Title, toString(c.Value))
+
+	case "progress":
+		var v *float64
+		if a.PercentComplete != nil {
+			f := float64(*a.PercentComplete)
+			v = &f
+		}
+		return evalNumberOp(c.Op, v, toFloat(c.Value))
+
+	case "hasParent":
+		return evalBoolOp(c.Op, a.ParentActivityID != nil)
+
+	case "startDate":
+		return evalDateOp(c.Op, a.StartAt.Format(time.RFC3339), c.Value)
+
+	case "endDate":
+		return evalDateOp(c.Op, a.EndAt.Format(time.RFC3339), c.Value)
+	}
+	return false
+}
+
+// ── Operator helpers ──────────────────────────────────────────────────────────
+
+func evalSetOp(op string, haystack, needles []string) bool {
+	switch op {
+	case "in":
+		for _, n := range needles {
+			for _, h := range haystack {
+				if h == n {
+					return true
+				}
+			}
+		}
+		return false
+	case "not_in":
+		for _, n := range needles {
+			for _, h := range haystack {
+				if h == n {
+					return false
+				}
+			}
+		}
+		return true
+	case "is_empty":
+		return len(haystack) == 0
+	case "is_not_empty":
+		return len(haystack) > 0
+	}
+	return false
+}
+
+func evalStringOp(op, value, target string) bool {
+	v := strings.ToLower(strings.TrimSpace(value))
+	t := strings.ToLower(target)
+	switch op {
+	case "equals":
+		return v == t
+	case "not_equals":
+		return v != t
+	case "contains":
+		return strings.Contains(v, t)
+	case "not_contains":
+		return !strings.Contains(v, t)
+	case "is_empty":
+		return strings.TrimSpace(v) == ""
+	case "is_not_empty":
+		return strings.TrimSpace(v) != ""
+	}
+	return false
+}
+
+func evalNumberOp(op string, value *float64, target float64) bool {
+	if op == "is_empty" {
+		return value == nil
+	}
+	if op == "is_not_empty" {
+		return value != nil
+	}
+	if value == nil {
+		return false
+	}
+	v := *value
+	switch op {
+	case "equals":
+		return v == target
+	case "not_equals":
+		return v != target
+	case "gt":
+		return v > target
+	case "gte":
+		return v >= target
+	case "lt":
+		return v < target
+	case "lte":
+		return v <= target
+	}
+	return false
+}
+
+func evalBoolOp(op string, value bool) bool {
+	return (op == "is_true") == value
+}
+
+func evalDateOp(op, dateStr string, target interface{}) bool {
+	if op == "is_empty" {
+		return dateStr == ""
+	}
+	if op == "is_not_empty" {
+		return dateStr != ""
+	}
+	if dateStr == "" || target == nil {
+		return false
+	}
+
+	date, err := parseDate(dateStr)
+	if err != nil {
+		return false
+	}
+
+	if op == "between" {
+		pair, ok := toStringPair(target)
+		if !ok {
+			return false
+		}
+		from, err1 := parseDate(pair[0])
+		to, err2 := parseDate(pair[1])
+		if err1 != nil || err2 != nil {
+			return false
+		}
+		return !date.Before(from) && !date.After(to)
+	}
+
+	targetDate, err := parseDate(toString(target))
+	if err != nil {
+		return false
+	}
+	switch op {
+	case "before":
+		return date.Before(targetDate)
+	case "after":
+		return date.After(targetDate)
+	}
+	return false
+}
+
+// ── Type coercion helpers ─────────────────────────────────────────────────────
+
+func toString(v interface{}) string {
+	if v == nil {
+		return ""
+	}
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return ""
+}
+
+func toFloat(v interface{}) float64 {
+	if v == nil {
+		return 0
+	}
+	switch n := v.(type) {
+	case float64:
+		return n
+	case int:
+		return float64(n)
+	case int64:
+		return float64(n)
+	}
+	return 0
+}
+
+func toStringSlice(v interface{}) []string {
+	if v == nil {
+		return nil
+	}
+	if s, ok := v.(string); ok {
+		return []string{s}
+	}
+	if arr, ok := v.([]interface{}); ok {
+		out := make([]string, 0, len(arr))
+		for _, el := range arr {
+			if s, ok := el.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	if ss, ok := v.([]string); ok {
+		return ss
+	}
+	return nil
+}
+
+func toStringPair(v interface{}) ([2]string, bool) {
+	arr, ok := v.([]interface{})
+	if !ok || len(arr) != 2 {
+		return [2]string{}, false
+	}
+	a, ok1 := arr[0].(string)
+	b, ok2 := arr[1].(string)
+	if !ok1 || !ok2 {
+		return [2]string{}, false
+	}
+	return [2]string{a, b}, true
+}
+
+func toLowerStrings(ss []string) []string {
+	out := make([]string, len(ss))
+	for i, s := range ss {
+		out[i] = strings.ToLower(s)
+	}
+	return out
+}
+
+func parseDate(s string) (time.Time, error) {
+	// Try RFC3339 first (e.g. "2026-05-01T00:00:00Z"), then date-only.
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t, nil
+	}
+	return time.Parse("2006-01-02", s)
 }
 ````
 
@@ -53429,6 +53476,481 @@ export function buildCalendarHtml(
 }
 ````
 
+## File: packages/web/src/pages/LoginPage.tsx
+````typescript
+import { useState } from 'react'
+import { useNavigate, useLocation, Link } from 'react-router-dom'
+import { Eye, EyeOff, Check, Loader2 } from 'lucide-react'
+import { useAuth } from '@/contexts/AuthContext'
+import { ApiError, API_BASE } from '@/lib/api'
+import DarkModeToggle from '@/components/DarkModeToggle'
+import { usePublicSettings } from '@/hooks/usePublicSettings'
+
+// ── Floating-label input ─────────────────────────────────────────────────────
+
+interface FloatInputProps {
+  id: string
+  label: string
+  type: string
+  value: string
+  autoComplete: string
+  error?: string | null
+  onChange: (v: string) => void
+  onKeyDown?: (e: React.KeyboardEvent) => void
+  rightSlot?: React.ReactNode
+}
+
+function FloatInput({ id, label, type, value, autoComplete, error, onChange, onKeyDown, rightSlot }: FloatInputProps) {
+  const [focused, setFocused] = useState(false)
+  const floated = focused || value.length > 0
+
+  const borderColor = error
+    ? '#e74c3c'
+    : focused
+    ? '#288C9B'
+    : 'hsl(210 15% 24%)'
+
+  const boxShadow = error
+    ? '0 0 0 3px rgba(231,76,60,0.15)'
+    : focused
+    ? '0 0 0 3px rgba(40,140,155,0.18)'
+    : 'none'
+
+  const labelColor = error
+    ? '#e74c3c'
+    : focused
+    ? '#5BC0DE'
+    : 'hsl(210 15% 65%)'
+
+  return (
+    <div>
+      <div style={{
+        position: 'relative',
+        borderRadius: 8,
+        border: `1px solid ${borderColor}`,
+        background: 'hsl(210 15% 17%)',
+        transition: 'border-color 180ms ease, box-shadow 180ms ease',
+        boxShadow,
+      }}>
+        {/* Floating label */}
+        <label
+          htmlFor={id}
+          style={{
+            position: 'absolute',
+            left: 14,
+            top: floated ? 8 : '50%',
+            transform: floated ? 'none' : 'translateY(-50%)',
+            fontSize: floated ? 11 : 14,
+            letterSpacing: floated ? '0.06em' : 0,
+            textTransform: floated ? 'uppercase' : 'none',
+            fontWeight: 600,
+            color: labelColor,
+            transition: 'all 160ms cubic-bezier(0.4, 0, 0.2, 1)',
+            pointerEvents: 'none',
+            userSelect: 'none',
+          }}
+        >
+          {label}
+        </label>
+
+        <input
+          id={id}
+          type={type}
+          autoComplete={autoComplete}
+          value={value}
+          onChange={e => onChange(e.target.value)}
+          onFocus={() => setFocused(true)}
+          onBlur={() => setFocused(false)}
+          onKeyDown={onKeyDown}
+          style={{
+            width: '100%',
+            padding: '22px 42px 8px 14px',
+            background: 'transparent',
+            border: 'none',
+            outline: 'none',
+            fontSize: 15,
+            color: 'hsl(210 17% 93%)',
+            fontFamily: 'inherit',
+            lineHeight: 1.4,
+            boxSizing: 'border-box',
+          }}
+        />
+
+        {rightSlot && (
+          <div style={{
+            position: 'absolute',
+            right: 12,
+            top: '50%',
+            transform: 'translateY(-50%)',
+          }}>
+            {rightSlot}
+          </div>
+        )}
+      </div>
+
+      {error && (
+        <p style={{ fontSize: 12, color: '#e74c3c', margin: '5px 0 0 2px' }}>{error}</p>
+      )}
+    </div>
+  )
+}
+
+// ── Spinner ──────────────────────────────────────────────────────────────────
+
+function Spinner() {
+  return (
+    <Loader2
+      size={16}
+      strokeWidth={2.5}
+      color="rgba(255,255,255,0.8)"
+      style={{ animation: 'spin 0.8s linear infinite' }}
+    />
+  )
+}
+
+// setSSOHighlight toggles the SSO button's hover/focus highlight. Shared by the
+// mouse and keyboard handlers so both input methods get the same affordance.
+function setSSOHighlight(el: HTMLButtonElement, on: boolean) {
+  el.style.borderColor = on ? '#288C9B' : 'hsl(210 15% 24%)'
+  el.style.background = on ? 'hsl(210 15% 19%)' : 'hsl(210 15% 17%)'
+}
+
+// ── Main page ────────────────────────────────────────────────────────────────
+
+export default function LoginPage() {
+  const { login } = useAuth()
+  const navigate = useNavigate()
+  const location = useLocation()
+  const from = (location.state as { from?: { pathname: string } } | null)?.from?.pathname ?? '/'
+  // A success message routed here from another page (e.g. password reset).
+  // Derived from navigation state, so it clears naturally on a full reload.
+  const notice = (location.state as { message?: string } | null)?.message ?? null
+  const { data: branding } = usePublicSettings()
+  const instanceName = branding?.instanceName || 'draba'
+
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [showPassword, setShowPassword] = useState(false)
+  const [emailError, setEmailError] = useState<string | null>(null)
+  const [passwordError, setPasswordError] = useState<string | null>(null)
+  const [serverError, setServerError] = useState<string | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [success, setSuccess] = useState(false)
+
+  function validateAndSubmit() {
+    let valid = true
+    setServerError(null)
+
+    if (!email.trim()) {
+      setEmailError('Email is required')
+      valid = false
+    } else if (!/\S+@\S+\.\S+/.test(email)) {
+      setEmailError('Enter a valid email')
+      valid = false
+    } else {
+      setEmailError(null)
+    }
+
+    if (!password) {
+      setPasswordError('Password is required')
+      valid = false
+    } else if (password.length < 6) {
+      setPasswordError('Password must be at least 6 characters')
+      valid = false
+    } else {
+      setPasswordError(null)
+    }
+
+    if (!valid) return
+    doLogin()
+  }
+
+  async function doLogin() {
+    setLoading(true)
+    try {
+      await login(email, password)
+      setSuccess(true)
+      // Brief success flash then navigate
+      setTimeout(() => navigate(from, { replace: true }), 600)
+    } catch (err) {
+      if (err instanceof ApiError) {
+        setServerError(err.message)
+      } else {
+        setServerError('Something went wrong. Please try again.')
+      }
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  function handleSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    validateAndSubmit()
+  }
+
+  return (
+    <div style={{
+      minHeight: '100vh',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      background: 'var(--background)',
+      padding: '24px',
+      position: 'relative',
+    }}>
+      {/* Teal radial glow behind card */}
+      <div style={{
+        position: 'fixed',
+        inset: 0,
+        background: 'radial-gradient(ellipse 60% 50% at 20% 50%, rgba(40,140,155,0.12) 0%, transparent 70%)',
+        pointerEvents: 'none',
+      }} />
+
+      {/* Dark mode toggle */}
+      <div style={{ position: 'fixed', top: 16, right: 16, zIndex: 10 }}>
+        <DarkModeToggle />
+      </div>
+
+      {/* Card */}
+      <div style={{
+        width: '100%',
+        maxWidth: 860,
+        minHeight: 520,
+        borderRadius: 16,
+        overflow: 'hidden',
+        display: 'flex',
+        boxShadow: '0 32px 80px -12px rgba(0,0,0,0.55), 0 0 0 1px rgba(255,255,255,0.06)',
+        position: 'relative',
+        zIndex: 1,
+      }}>
+
+        {/* ── Left panel — brand ─────────────────────────────────────── */}
+        <div style={{
+          width: '38%',
+          flexShrink: 0,
+          background: 'linear-gradient(155deg, #2aa5b8 0%, #1c7585 60%, #145f6e 100%)',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: 4,
+          padding: '48px 32px',
+          position: 'relative',
+          overflow: 'hidden',
+        }}>
+          {/* Decorative circles */}
+          <div style={{ width: 220, height: 220, borderRadius: '50%', background: 'rgba(255,255,255,0.07)', position: 'absolute', top: -60, left: -60, pointerEvents: 'none' }} />
+          <div style={{ width: 160, height: 160, borderRadius: '50%', background: 'rgba(255,255,255,0.05)', position: 'absolute', bottom: -40, right: -40, pointerEvents: 'none' }} />
+
+          {/* Logo — 2× the handoff's 88px */}
+          <img
+            src="/logo-color.svg"
+            alt="draba"
+            style={{ width: 270, height: 270, filter: 'drop-shadow(0 4px 16px rgba(0,0,0,0.25))', position: 'relative', marginTop: '-15px', marginBottom: '-47px' }}
+          />
+
+          <div style={{ position: 'relative', textAlign: 'center' }}>
+            <div style={{ fontSize: 28, fontWeight: 700, color: '#fff', letterSpacing: '-0.01em', textShadow: '0 2px 8px rgba(0,0,0,0.2)' }}>
+              {instanceName}
+            </div>
+            <div style={{ fontSize: 13, fontWeight: 400, color: 'rgba(255,255,255,0.72)', lineHeight: 1.5, marginTop: 8 }}>
+              Team coordination,<br />simplified.
+            </div>
+          </div>
+        </div>
+
+        {/* ── Right panel — form ─────────────────────────────────────── */}
+        <div style={{
+          flex: 1,
+          background: 'var(--card)',
+          padding: '52px 48px',
+          display: 'flex',
+          flexDirection: 'column',
+          justifyContent: 'center',
+        }}>
+          {success ? (
+            /* Success state */
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', textAlign: 'center', gap: 0 }}>
+              <div style={{
+                width: 56, height: 56, borderRadius: '50%',
+                background: 'rgba(40,140,155,0.15)', border: '2px solid #288C9B',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                margin: '0 auto 20px',
+              }}>
+                <Check size={24} color="#288C9B" strokeWidth={2.5} />
+              </div>
+              <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--foreground)', marginBottom: 8 }}>
+                You're signed in
+              </div>
+              <div style={{ fontSize: 14, color: 'var(--muted-foreground)' }}>
+                Redirecting to your timeline…
+              </div>
+            </div>
+          ) : (
+            <form onSubmit={handleSubmit} noValidate>
+              {/* Heading */}
+              <div style={{ marginBottom: 28 }}>
+                <h1 style={{ fontSize: 28, fontWeight: 700, color: 'hsl(210 17% 93%)', letterSpacing: '-0.02em', margin: '0 0 6px' }}>
+                  Sign in
+                </h1>
+                <p style={{ fontSize: 14, color: 'hsl(210 15% 52%)', margin: 0 }}>
+                  Welcome back — sign in to your account.
+                </p>
+              </div>
+
+              {/* Success notice routed from another page (e.g. password reset).
+                  Suppressed once a server error is shown so it can't go stale. */}
+              {notice && !serverError && (
+                <div className="mb-5 rounded-lg border border-emerald-500/35 bg-emerald-500/10 px-3 py-2.5 text-[13px] text-emerald-400">
+                  {notice}
+                </div>
+              )}
+
+              {/* Fields */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 14, marginBottom: 24 }}>
+                <FloatInput
+                  id="email"
+                  label="Email"
+                  type="email"
+                  autoComplete="email"
+                  value={email}
+                  error={emailError}
+                  onChange={v => { setEmail(v); if (emailError) setEmailError(null) }}
+                />
+
+                <FloatInput
+                  id="password"
+                  label="Password"
+                  type={showPassword ? 'text' : 'password'}
+                  autoComplete="current-password"
+                  value={password}
+                  error={passwordError}
+                  onChange={v => { setPassword(v); if (passwordError) setPasswordError(null) }}
+                  rightSlot={
+                    <button
+                      type="button"
+                      onClick={() => setShowPassword(s => !s)}
+                      style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'hsl(210 15% 52%)', display: 'flex', padding: 0 }}
+                    >
+                      {showPassword ? <EyeOff size={18} strokeWidth={1.5} /> : <Eye size={18} strokeWidth={1.5} />}
+                    </button>
+                  }
+                />
+              </div>
+
+              {/* Forgot password */}
+              <div style={{ textAlign: 'right', marginBottom: 22, marginTop: -6 }}>
+                <Link
+                  to="/forgot-password"
+                  style={{ fontSize: 13, fontWeight: 600, color: '#5BC0DE', textDecoration: 'none' }}
+                  onMouseEnter={e => (e.currentTarget.style.textDecoration = 'underline')}
+                  onMouseLeave={e => (e.currentTarget.style.textDecoration = 'none')}
+                >
+                  Forgot password?
+                </Link>
+              </div>
+
+              {/* Server error */}
+              {serverError && (
+                <p style={{ fontSize: 13, color: '#e74c3c', margin: '0 0 16px' }}>{serverError}</p>
+              )}
+
+              {/* Sign in button */}
+              <button
+                type="submit"
+                disabled={loading}
+                style={{
+                  width: '100%',
+                  padding: '14px',
+                  borderRadius: 8,
+                  border: 'none',
+                  background: loading
+                    ? 'hsl(188 40% 35%)'
+                    : 'linear-gradient(135deg, #2aa5b8 0%, #1e8a9c 100%)',
+                  color: '#fff',
+                  fontSize: 15,
+                  fontWeight: 700,
+                  letterSpacing: '0.01em',
+                  boxShadow: loading ? 'none' : '0 4px 20px rgba(40,140,155,0.35)',
+                  cursor: loading ? 'not-allowed' : 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: 8,
+                  fontFamily: 'inherit',
+                  transition: 'opacity 160ms ease, transform 160ms ease, box-shadow 160ms ease',
+                }}
+                onMouseEnter={e => { if (!loading) { e.currentTarget.style.opacity = '0.92'; e.currentTarget.style.transform = 'translateY(-1px)' } }}
+                onMouseLeave={e => { e.currentTarget.style.opacity = '1'; e.currentTarget.style.transform = 'translateY(0)' }}
+                onMouseDown={e => { if (!loading) e.currentTarget.style.transform = 'scale(0.98)' }}
+                onMouseUp={e => { if (!loading) e.currentTarget.style.transform = 'translateY(-1px)' }}
+              >
+                {loading && <Spinner />}
+                {loading ? 'Signing in…' : 'Sign in'}
+              </button>
+
+              {/* SSO — shown only when the instance has OIDC configured. A
+                  full-page navigation to the API begins the OIDC redirect flow;
+                  the browser returns to /auth/callback with tokens. */}
+              {branding?.ssoEnabled && (
+                <>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 12, margin: '20px 0' }}>
+                    <div style={{ flex: 1, height: 1, background: 'hsl(210 15% 24%)' }} />
+                    <span style={{ fontSize: 12, color: 'hsl(210 15% 52%)', fontWeight: 600 }}>OR</span>
+                    <div style={{ flex: 1, height: 1, background: 'hsl(210 15% 24%)' }} />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => { window.location.href = `${API_BASE}/auth/oidc/login` }}
+                    style={{
+                      width: '100%',
+                      padding: '13px',
+                      borderRadius: 8,
+                      border: '1px solid hsl(210 15% 24%)',
+                      background: 'hsl(210 15% 17%)',
+                      color: 'hsl(210 17% 93%)',
+                      fontSize: 14,
+                      fontWeight: 600,
+                      cursor: 'pointer',
+                      fontFamily: 'inherit',
+                      transition: 'border-color 160ms ease, background 160ms ease',
+                    }}
+                    // Hover AND focus both apply the highlight so keyboard users
+                    // get the same affordance as mouse users.
+                    onMouseEnter={e => setSSOHighlight(e.currentTarget, true)}
+                    onMouseLeave={e => setSSOHighlight(e.currentTarget, false)}
+                    onFocus={e => setSSOHighlight(e.currentTarget, true)}
+                    onBlur={e => setSSOHighlight(e.currentTarget, false)}
+                  >
+                    Sign in with SSO
+                  </button>
+                </>
+              )}
+
+              {/* Register link */}
+              <p style={{ marginTop: 24, fontSize: 13, textAlign: 'center', color: 'hsl(210 15% 52%)' }}>
+                Have an invite?{' '}
+                <Link
+                  to="/register"
+                  style={{ color: '#5BC0DE', fontWeight: 600, textDecoration: 'none' }}
+                  onMouseEnter={e => (e.currentTarget.style.textDecoration = 'underline')}
+                  onMouseLeave={e => (e.currentTarget.style.textDecoration = 'none')}
+                >
+                  Create an account
+                </Link>
+              </p>
+            </form>
+          )}
+        </div>
+      </div>
+
+      {/* Keyframe for spinner */}
+      <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
+    </div>
+  )
+}
+````
+
 ## File: packages/web/src/pages/RegisterPage.tsx
 ````typescript
 import { useState } from 'react'
@@ -53804,50 +54326,6 @@ echo "[6/6] Restarting container..."
 docker start "$DRABA_CONTAINER" >/dev/null
 
 echo "Done. Test invite token is ready. The api-smoke subagent can now register against it."
-````
-
-## File: docker-compose.yml
-````yaml
-services:
-  api:
-    build:
-      context: .
-      dockerfile: packages/api/Dockerfile
-      target: dev
-    ports:
-      - "8080:8080"
-    volumes:
-      - ./packages/api:/app
-    environment:
-      - DRABA_PORT=8080
-      - DRABA_DB_DRIVER=sqlite
-      - DRABA_DB_DSN=./draba.db
-      - DRABA_JWT_SECRET=dev-secret-change-in-prod
-      - DRABA_LOG_LEVEL=debug
-      # Pre-launch convenience: seed the canonical sample dataset (incl. shares)
-      # into an empty DB on boot. No-op once the DB has users. Turn OFF before
-      # any real users exist. See docs/TESTING.md.
-      - DRABA_SEED_SAMPLE_DATA=1
-      # Public base URL used to build links in outbound email (password reset,
-      # team invites). MUST be the externally reachable URL in any real
-      # deployment — when unset it falls back to http://localhost:8080 and
-      # emailed links point at localhost (broken for recipients).
-      - DRABA_BASE_URL=http://localhost:8080
-
-  web:
-    build:
-      context: .
-      dockerfile: packages/web/Dockerfile
-    ports:
-      - "5173:5173"
-    volumes:
-      - ./packages/web/src:/app/packages/web/src
-      - ./packages/web/public:/app/packages/web/public
-      - ./packages/web/index.html:/app/packages/web/index.html
-    environment:
-      - VITE_API_URL=http://api:8080
-    depends_on:
-      - api
 ````
 
 ## File: docs/plans/phase-13-shares.md
@@ -54919,693 +55397,6 @@ export default function CalendarShareModal({ teamId, timelineId, timelineName, o
 }
 ````
 
-## File: packages/web/src/pages/LoginPage.tsx
-````typescript
-import { useState } from 'react'
-import { useNavigate, useLocation, Link } from 'react-router-dom'
-import { Eye, EyeOff, Check, Loader2 } from 'lucide-react'
-import { useAuth } from '@/contexts/AuthContext'
-import { ApiError, API_BASE } from '@/lib/api'
-import DarkModeToggle from '@/components/DarkModeToggle'
-import { usePublicSettings } from '@/hooks/usePublicSettings'
-
-// ── Floating-label input ─────────────────────────────────────────────────────
-
-interface FloatInputProps {
-  id: string
-  label: string
-  type: string
-  value: string
-  autoComplete: string
-  error?: string | null
-  onChange: (v: string) => void
-  onKeyDown?: (e: React.KeyboardEvent) => void
-  rightSlot?: React.ReactNode
-}
-
-function FloatInput({ id, label, type, value, autoComplete, error, onChange, onKeyDown, rightSlot }: FloatInputProps) {
-  const [focused, setFocused] = useState(false)
-  const floated = focused || value.length > 0
-
-  const borderColor = error
-    ? '#e74c3c'
-    : focused
-    ? '#288C9B'
-    : 'hsl(210 15% 24%)'
-
-  const boxShadow = error
-    ? '0 0 0 3px rgba(231,76,60,0.15)'
-    : focused
-    ? '0 0 0 3px rgba(40,140,155,0.18)'
-    : 'none'
-
-  const labelColor = error
-    ? '#e74c3c'
-    : focused
-    ? '#5BC0DE'
-    : 'hsl(210 15% 65%)'
-
-  return (
-    <div>
-      <div style={{
-        position: 'relative',
-        borderRadius: 8,
-        border: `1px solid ${borderColor}`,
-        background: 'hsl(210 15% 17%)',
-        transition: 'border-color 180ms ease, box-shadow 180ms ease',
-        boxShadow,
-      }}>
-        {/* Floating label */}
-        <label
-          htmlFor={id}
-          style={{
-            position: 'absolute',
-            left: 14,
-            top: floated ? 8 : '50%',
-            transform: floated ? 'none' : 'translateY(-50%)',
-            fontSize: floated ? 11 : 14,
-            letterSpacing: floated ? '0.06em' : 0,
-            textTransform: floated ? 'uppercase' : 'none',
-            fontWeight: 600,
-            color: labelColor,
-            transition: 'all 160ms cubic-bezier(0.4, 0, 0.2, 1)',
-            pointerEvents: 'none',
-            userSelect: 'none',
-          }}
-        >
-          {label}
-        </label>
-
-        <input
-          id={id}
-          type={type}
-          autoComplete={autoComplete}
-          value={value}
-          onChange={e => onChange(e.target.value)}
-          onFocus={() => setFocused(true)}
-          onBlur={() => setFocused(false)}
-          onKeyDown={onKeyDown}
-          style={{
-            width: '100%',
-            padding: '22px 42px 8px 14px',
-            background: 'transparent',
-            border: 'none',
-            outline: 'none',
-            fontSize: 15,
-            color: 'hsl(210 17% 93%)',
-            fontFamily: 'inherit',
-            lineHeight: 1.4,
-            boxSizing: 'border-box',
-          }}
-        />
-
-        {rightSlot && (
-          <div style={{
-            position: 'absolute',
-            right: 12,
-            top: '50%',
-            transform: 'translateY(-50%)',
-          }}>
-            {rightSlot}
-          </div>
-        )}
-      </div>
-
-      {error && (
-        <p style={{ fontSize: 12, color: '#e74c3c', margin: '5px 0 0 2px' }}>{error}</p>
-      )}
-    </div>
-  )
-}
-
-// ── Spinner ──────────────────────────────────────────────────────────────────
-
-function Spinner() {
-  return (
-    <Loader2
-      size={16}
-      strokeWidth={2.5}
-      color="rgba(255,255,255,0.8)"
-      style={{ animation: 'spin 0.8s linear infinite' }}
-    />
-  )
-}
-
-// setSSOHighlight toggles the SSO button's hover/focus highlight. Shared by the
-// mouse and keyboard handlers so both input methods get the same affordance.
-function setSSOHighlight(el: HTMLButtonElement, on: boolean) {
-  el.style.borderColor = on ? '#288C9B' : 'hsl(210 15% 24%)'
-  el.style.background = on ? 'hsl(210 15% 19%)' : 'hsl(210 15% 17%)'
-}
-
-// ── Main page ────────────────────────────────────────────────────────────────
-
-export default function LoginPage() {
-  const { login } = useAuth()
-  const navigate = useNavigate()
-  const location = useLocation()
-  const from = (location.state as { from?: { pathname: string } } | null)?.from?.pathname ?? '/'
-  // A success message routed here from another page (e.g. password reset).
-  // Derived from navigation state, so it clears naturally on a full reload.
-  const notice = (location.state as { message?: string } | null)?.message ?? null
-  const { data: branding } = usePublicSettings()
-  const instanceName = branding?.instanceName || 'draba'
-
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
-  const [showPassword, setShowPassword] = useState(false)
-  const [emailError, setEmailError] = useState<string | null>(null)
-  const [passwordError, setPasswordError] = useState<string | null>(null)
-  const [serverError, setServerError] = useState<string | null>(null)
-  const [loading, setLoading] = useState(false)
-  const [success, setSuccess] = useState(false)
-
-  function validateAndSubmit() {
-    let valid = true
-    setServerError(null)
-
-    if (!email.trim()) {
-      setEmailError('Email is required')
-      valid = false
-    } else if (!/\S+@\S+\.\S+/.test(email)) {
-      setEmailError('Enter a valid email')
-      valid = false
-    } else {
-      setEmailError(null)
-    }
-
-    if (!password) {
-      setPasswordError('Password is required')
-      valid = false
-    } else if (password.length < 6) {
-      setPasswordError('Password must be at least 6 characters')
-      valid = false
-    } else {
-      setPasswordError(null)
-    }
-
-    if (!valid) return
-    doLogin()
-  }
-
-  async function doLogin() {
-    setLoading(true)
-    try {
-      await login(email, password)
-      setSuccess(true)
-      // Brief success flash then navigate
-      setTimeout(() => navigate(from, { replace: true }), 600)
-    } catch (err) {
-      if (err instanceof ApiError) {
-        setServerError(err.message)
-      } else {
-        setServerError('Something went wrong. Please try again.')
-      }
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  function handleSubmit(e: React.FormEvent) {
-    e.preventDefault()
-    validateAndSubmit()
-  }
-
-  return (
-    <div style={{
-      minHeight: '100vh',
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      background: 'var(--background)',
-      padding: '24px',
-      position: 'relative',
-    }}>
-      {/* Teal radial glow behind card */}
-      <div style={{
-        position: 'fixed',
-        inset: 0,
-        background: 'radial-gradient(ellipse 60% 50% at 20% 50%, rgba(40,140,155,0.12) 0%, transparent 70%)',
-        pointerEvents: 'none',
-      }} />
-
-      {/* Dark mode toggle */}
-      <div style={{ position: 'fixed', top: 16, right: 16, zIndex: 10 }}>
-        <DarkModeToggle />
-      </div>
-
-      {/* Card */}
-      <div style={{
-        width: '100%',
-        maxWidth: 860,
-        minHeight: 520,
-        borderRadius: 16,
-        overflow: 'hidden',
-        display: 'flex',
-        boxShadow: '0 32px 80px -12px rgba(0,0,0,0.55), 0 0 0 1px rgba(255,255,255,0.06)',
-        position: 'relative',
-        zIndex: 1,
-      }}>
-
-        {/* ── Left panel — brand ─────────────────────────────────────── */}
-        <div style={{
-          width: '38%',
-          flexShrink: 0,
-          background: 'linear-gradient(155deg, #2aa5b8 0%, #1c7585 60%, #145f6e 100%)',
-          display: 'flex',
-          flexDirection: 'column',
-          alignItems: 'center',
-          justifyContent: 'center',
-          gap: 4,
-          padding: '48px 32px',
-          position: 'relative',
-          overflow: 'hidden',
-        }}>
-          {/* Decorative circles */}
-          <div style={{ width: 220, height: 220, borderRadius: '50%', background: 'rgba(255,255,255,0.07)', position: 'absolute', top: -60, left: -60, pointerEvents: 'none' }} />
-          <div style={{ width: 160, height: 160, borderRadius: '50%', background: 'rgba(255,255,255,0.05)', position: 'absolute', bottom: -40, right: -40, pointerEvents: 'none' }} />
-
-          {/* Logo — 2× the handoff's 88px */}
-          <img
-            src="/logo-color.svg"
-            alt="draba"
-            style={{ width: 270, height: 270, filter: 'drop-shadow(0 4px 16px rgba(0,0,0,0.25))', position: 'relative', marginTop: '-15px', marginBottom: '-47px' }}
-          />
-
-          <div style={{ position: 'relative', textAlign: 'center' }}>
-            <div style={{ fontSize: 28, fontWeight: 700, color: '#fff', letterSpacing: '-0.01em', textShadow: '0 2px 8px rgba(0,0,0,0.2)' }}>
-              {instanceName}
-            </div>
-            <div style={{ fontSize: 13, fontWeight: 400, color: 'rgba(255,255,255,0.72)', lineHeight: 1.5, marginTop: 8 }}>
-              Team coordination,<br />simplified.
-            </div>
-          </div>
-        </div>
-
-        {/* ── Right panel — form ─────────────────────────────────────── */}
-        <div style={{
-          flex: 1,
-          background: 'var(--card)',
-          padding: '52px 48px',
-          display: 'flex',
-          flexDirection: 'column',
-          justifyContent: 'center',
-        }}>
-          {success ? (
-            /* Success state */
-            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', textAlign: 'center', gap: 0 }}>
-              <div style={{
-                width: 56, height: 56, borderRadius: '50%',
-                background: 'rgba(40,140,155,0.15)', border: '2px solid #288C9B',
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                margin: '0 auto 20px',
-              }}>
-                <Check size={24} color="#288C9B" strokeWidth={2.5} />
-              </div>
-              <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--foreground)', marginBottom: 8 }}>
-                You're signed in
-              </div>
-              <div style={{ fontSize: 14, color: 'var(--muted-foreground)' }}>
-                Redirecting to your timeline…
-              </div>
-            </div>
-          ) : (
-            <form onSubmit={handleSubmit} noValidate>
-              {/* Heading */}
-              <div style={{ marginBottom: 28 }}>
-                <h1 style={{ fontSize: 28, fontWeight: 700, color: 'hsl(210 17% 93%)', letterSpacing: '-0.02em', margin: '0 0 6px' }}>
-                  Sign in
-                </h1>
-                <p style={{ fontSize: 14, color: 'hsl(210 15% 52%)', margin: 0 }}>
-                  Welcome back — sign in to your account.
-                </p>
-              </div>
-
-              {/* Success notice routed from another page (e.g. password reset).
-                  Suppressed once a server error is shown so it can't go stale. */}
-              {notice && !serverError && (
-                <div className="mb-5 rounded-lg border border-emerald-500/35 bg-emerald-500/10 px-3 py-2.5 text-[13px] text-emerald-400">
-                  {notice}
-                </div>
-              )}
-
-              {/* Fields */}
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 14, marginBottom: 24 }}>
-                <FloatInput
-                  id="email"
-                  label="Email"
-                  type="email"
-                  autoComplete="email"
-                  value={email}
-                  error={emailError}
-                  onChange={v => { setEmail(v); if (emailError) setEmailError(null) }}
-                />
-
-                <FloatInput
-                  id="password"
-                  label="Password"
-                  type={showPassword ? 'text' : 'password'}
-                  autoComplete="current-password"
-                  value={password}
-                  error={passwordError}
-                  onChange={v => { setPassword(v); if (passwordError) setPasswordError(null) }}
-                  rightSlot={
-                    <button
-                      type="button"
-                      onClick={() => setShowPassword(s => !s)}
-                      style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'hsl(210 15% 52%)', display: 'flex', padding: 0 }}
-                    >
-                      {showPassword ? <EyeOff size={18} strokeWidth={1.5} /> : <Eye size={18} strokeWidth={1.5} />}
-                    </button>
-                  }
-                />
-              </div>
-
-              {/* Forgot password */}
-              <div style={{ textAlign: 'right', marginBottom: 22, marginTop: -6 }}>
-                <Link
-                  to="/forgot-password"
-                  style={{ fontSize: 13, fontWeight: 600, color: '#5BC0DE', textDecoration: 'none' }}
-                  onMouseEnter={e => (e.currentTarget.style.textDecoration = 'underline')}
-                  onMouseLeave={e => (e.currentTarget.style.textDecoration = 'none')}
-                >
-                  Forgot password?
-                </Link>
-              </div>
-
-              {/* Server error */}
-              {serverError && (
-                <p style={{ fontSize: 13, color: '#e74c3c', margin: '0 0 16px' }}>{serverError}</p>
-              )}
-
-              {/* Sign in button */}
-              <button
-                type="submit"
-                disabled={loading}
-                style={{
-                  width: '100%',
-                  padding: '14px',
-                  borderRadius: 8,
-                  border: 'none',
-                  background: loading
-                    ? 'hsl(188 40% 35%)'
-                    : 'linear-gradient(135deg, #2aa5b8 0%, #1e8a9c 100%)',
-                  color: '#fff',
-                  fontSize: 15,
-                  fontWeight: 700,
-                  letterSpacing: '0.01em',
-                  boxShadow: loading ? 'none' : '0 4px 20px rgba(40,140,155,0.35)',
-                  cursor: loading ? 'not-allowed' : 'pointer',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  gap: 8,
-                  fontFamily: 'inherit',
-                  transition: 'opacity 160ms ease, transform 160ms ease, box-shadow 160ms ease',
-                }}
-                onMouseEnter={e => { if (!loading) { e.currentTarget.style.opacity = '0.92'; e.currentTarget.style.transform = 'translateY(-1px)' } }}
-                onMouseLeave={e => { e.currentTarget.style.opacity = '1'; e.currentTarget.style.transform = 'translateY(0)' }}
-                onMouseDown={e => { if (!loading) e.currentTarget.style.transform = 'scale(0.98)' }}
-                onMouseUp={e => { if (!loading) e.currentTarget.style.transform = 'translateY(-1px)' }}
-              >
-                {loading && <Spinner />}
-                {loading ? 'Signing in…' : 'Sign in'}
-              </button>
-
-              {/* SSO — shown only when the instance has OIDC configured. A
-                  full-page navigation to the API begins the OIDC redirect flow;
-                  the browser returns to /auth/callback with tokens. */}
-              {branding?.ssoEnabled && (
-                <>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 12, margin: '20px 0' }}>
-                    <div style={{ flex: 1, height: 1, background: 'hsl(210 15% 24%)' }} />
-                    <span style={{ fontSize: 12, color: 'hsl(210 15% 52%)', fontWeight: 600 }}>OR</span>
-                    <div style={{ flex: 1, height: 1, background: 'hsl(210 15% 24%)' }} />
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => { window.location.href = `${API_BASE}/auth/oidc/login` }}
-                    style={{
-                      width: '100%',
-                      padding: '13px',
-                      borderRadius: 8,
-                      border: '1px solid hsl(210 15% 24%)',
-                      background: 'hsl(210 15% 17%)',
-                      color: 'hsl(210 17% 93%)',
-                      fontSize: 14,
-                      fontWeight: 600,
-                      cursor: 'pointer',
-                      fontFamily: 'inherit',
-                      transition: 'border-color 160ms ease, background 160ms ease',
-                    }}
-                    // Hover AND focus both apply the highlight so keyboard users
-                    // get the same affordance as mouse users.
-                    onMouseEnter={e => setSSOHighlight(e.currentTarget, true)}
-                    onMouseLeave={e => setSSOHighlight(e.currentTarget, false)}
-                    onFocus={e => setSSOHighlight(e.currentTarget, true)}
-                    onBlur={e => setSSOHighlight(e.currentTarget, false)}
-                  >
-                    Sign in with SSO
-                  </button>
-                </>
-              )}
-
-              {/* Register link */}
-              <p style={{ marginTop: 24, fontSize: 13, textAlign: 'center', color: 'hsl(210 15% 52%)' }}>
-                Have an invite?{' '}
-                <Link
-                  to="/register"
-                  style={{ color: '#5BC0DE', fontWeight: 600, textDecoration: 'none' }}
-                  onMouseEnter={e => (e.currentTarget.style.textDecoration = 'underline')}
-                  onMouseLeave={e => (e.currentTarget.style.textDecoration = 'none')}
-                >
-                  Create an account
-                </Link>
-              </p>
-            </form>
-          )}
-        </div>
-      </div>
-
-      {/* Keyframe for spinner */}
-      <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
-    </div>
-  )
-}
-````
-
-## File: packages/api/cmd/draba/main.go
-````go
-// Command draba is the API server entry point. It wires repositories,
-// the auth token service, and tier configuration into the HTTP server,
-// then listens for requests until the process is killed.
-package main
-
-import (
-	"context"
-	"fmt"
-	"io/fs"
-	"log/slog"
-	"net/http"
-	"os"
-	"strings"
-
-	"github.com/I0-1O/draba/packages/api/internal/api"
-	"github.com/I0-1O/draba/packages/api/internal/auth"
-	"github.com/I0-1O/draba/packages/api/internal/buildinfo"
-	"github.com/I0-1O/draba/packages/api/internal/db"
-	"github.com/I0-1O/draba/packages/api/internal/events"
-	"github.com/I0-1O/draba/packages/api/internal/mailer"
-	"github.com/I0-1O/draba/packages/api/internal/tier"
-	"github.com/I0-1O/draba/packages/api/internal/ws"
-	sampledata "github.com/I0-1O/draba/packages/api/sample_data"
-	drabui "github.com/I0-1O/draba/packages/api/ui"
-)
-
-const banner = "\n" +
-	"      _           _\n" +
-	"     | |         | |\n" +
-	"   __| |_ __ __ _| |__   __ _\n" +
-	"  / _` | '__/ _` | '_ \\ / _` |\n" +
-	" | (_| | | | (_| | |_) | (_| |\n" +
-	"  \\__,_|_|  \\__,_|_.__/ \\__,_|\n" +
-	"\n" +
-	"  see who's doing what, when.\n\n"
-
-func main() {
-	if len(os.Args) > 1 && os.Args[1] == "reset-password" {
-		runResetPassword(os.Args[2:])
-		return
-	}
-
-	setupLogger()
-	fmt.Print(banner)
-	slog.Info("build", "commit", buildinfo.Short(), "built", buildinfo.Built)
-
-	port := getenv("DRABA_PORT", "8080")
-	dsn := getenv("DRABA_DB_DSN", "/data/draba.db")
-	jwtSecret := os.Getenv("DRABA_JWT_SECRET")
-	if jwtSecret == "" {
-		slog.Error("DRABA_JWT_SECRET must be set")
-		os.Exit(1)
-	}
-
-	t, err := tier.Load()
-	if err != nil {
-		slog.Error("tier load failed", "err", err)
-		os.Exit(1)
-	}
-	l := t.Limits()
-	if l.MaxUsers == 0 {
-		slog.Info("tier", "tier", t)
-	} else {
-		slog.Info("tier", "tier", t, "maxUsers", l.MaxUsers, "maxTeams", l.MaxTeams)
-	}
-
-	database, err := db.Open(dsn)
-	if err != nil {
-		slog.Error("db: open failed", "err", err)
-		os.Exit(1)
-	}
-	slog.Info("db: opened", "dsn", dsn)
-
-	if err := db.Migrate(database); err != nil {
-		slog.Error("db: migrate failed", "err", err)
-		os.Exit(1)
-	}
-	slog.Info("db: migrations applied")
-
-	// Optional pre-launch convenience: seed the canonical sample dataset into an
-	// empty database so a freshly-wiped dev/test instance comes up populated.
-	// Gated by DRABA_SEED_SAMPLE_DATA and a no-op once the DB has any users — it
-	// must stay unset in any real deployment.
-	if os.Getenv("DRABA_SEED_SAMPLE_DATA") == "1" {
-		sql, err := sampledata.SQL()
-		if err != nil {
-			slog.Error("db: reading embedded sample data failed", "err", err)
-			os.Exit(1)
-		}
-		seeded, err := db.SeedSampleDataIfEmpty(database, sql)
-		if err != nil {
-			slog.Error("db: sample-data seed failed", "err", err)
-			os.Exit(1)
-		}
-		if seeded {
-			slog.Info("db: sample data seeded (database was empty)")
-		} else {
-			slog.Info("db: sample-data seed skipped (database already populated)")
-		}
-	}
-
-	users := db.NewUserRepo(database)
-	invites := db.NewInviteRepo(database)
-	teams := db.NewTeamRepo(database)
-	activityRepo := db.NewActivityRepo(database)
-	timelineRepo := db.NewTimelineRepo(database)
-	savedFilterRepo := db.NewSavedFilterRepo(database)
-	preferenceRepo := db.NewUserPreferenceRepo(database)
-	apiTokenRepo := db.NewAPITokenRepo(database)
-	instanceSetsRepo := db.NewInstanceSettingsRepo(database)
-	passwordTokensRepo := db.NewPasswordResetTokenRepo(database)
-	statusRepo := db.NewStatusRepo(database)
-	tagRepo := db.NewTagRepo(database)
-	shareRepo := db.NewShareRepo(database)
-	m := mailer.New(instanceSetsRepo, []byte(jwtSecret))
-	tokens := auth.NewTokenService(jwtSecret)
-
-	bus := events.NewBus()
-	hub := ws.NewHub(bus, tokens, func(teamID, userID string) error {
-		_, err := teams.GetMember(teamID, userID)
-		return err
-	})
-	go hub.Run()
-	slog.Info("ws: hub running")
-
-	if mods := tier.Registered(); len(mods) > 0 {
-		slog.Info("modules loaded", "count", len(mods))
-	}
-
-	srv := api.NewServer(users, invites, teams, activityRepo, timelineRepo, savedFilterRepo, preferenceRepo, apiTokenRepo, instanceSetsRepo, passwordTokensRepo, statusRepo, tagRepo, shareRepo, m, tokens, t, bus, hub)
-
-	// Wire up the embedded React SPA when a production build is present.
-	// In dev the static/ directory only has .gitkeep so this is a no-op.
-	if sub, err := fs.Sub(drabui.FS, "static"); err == nil {
-		if _, err := sub.Open("index.html"); err == nil {
-			srv.WithUI(sub)
-			slog.Info("ui: serving embedded SPA")
-		}
-	}
-
-	// Optional SSO. OIDC is disabled unless DRABA_OIDC_ISSUER is set. When it
-	// is, discovery runs against the issuer at startup; a failure here is fatal
-	// so a broken SSO setup is caught at boot rather than presenting users a
-	// dead login button. The client secret is read once and never leaves the
-	// process.
-	oidcSvc, err := auth.NewOIDCService(context.Background(), auth.OIDCConfig{
-		Issuer:       os.Getenv("DRABA_OIDC_ISSUER"),
-		ClientID:     os.Getenv("DRABA_OIDC_CLIENT_ID"),
-		ClientSecret: os.Getenv("DRABA_OIDC_CLIENT_SECRET"),
-		RedirectURL:  oidcRedirectURL(),
-	})
-	if err != nil {
-		slog.Error("oidc: configuration failed", "err", err)
-		os.Exit(1)
-	}
-	if oidcSvc != nil {
-		// Auto-provisioning defaults ON (first SSO login creates the account),
-		// matching the password-register bootstrap. Set DRABA_OIDC_AUTO_CREATE=0
-		// to require accounts be pre-created before SSO login is allowed.
-		autoCreate := os.Getenv("DRABA_OIDC_AUTO_CREATE") != "0"
-		srv.WithOIDC(oidcSvc, autoCreate)
-		slog.Info("oidc: SSO enabled", "issuer", os.Getenv("DRABA_OIDC_ISSUER"), "autoCreate", autoCreate)
-	}
-
-	slog.Info("listening", "port", port)
-	if err := http.ListenAndServe(":"+port, srv.Routes()); err != nil {
-		slog.Error("server error", "err", err)
-		os.Exit(1)
-	}
-}
-
-// oidcRedirectURL returns the OIDC callback URL the IdP must redirect back to.
-// It honours an explicit DRABA_OIDC_REDIRECT_URL override, otherwise derives it
-// from DRABA_BASE_URL so a single base-URL setting covers both the app and the
-// SSO callback.
-func oidcRedirectURL() string {
-	if v := os.Getenv("DRABA_OIDC_REDIRECT_URL"); v != "" {
-		return v
-	}
-	if os.Getenv("DRABA_OIDC_ISSUER") == "" {
-		return "" // SSO disabled; no redirect needed.
-	}
-	return strings.TrimRight(getenv("DRABA_BASE_URL", "http://localhost:8080"), "/") + "/auth/oidc/callback"
-}
-
-// setupLogger initialises the global slog logger. Level is controlled by
-// DRABA_LOG_LEVEL (debug | info | warn | error); default is info.
-// All output goes to stdout so Docker captures it in `docker logs`.
-func setupLogger() {
-	level := slog.LevelInfo
-	switch strings.ToLower(os.Getenv("DRABA_LOG_LEVEL")) {
-	case "debug":
-		level = slog.LevelDebug
-	case "warn":
-		level = slog.LevelWarn
-	case "error":
-		level = slog.LevelError
-	}
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level})))
-}
-
-// getenv returns the env var value or fallback when unset/empty.
-func getenv(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
-}
-````
-
 ## File: packages/api/internal/db/share_repo.go
 ````go
 // Package db contains the persistence layer for draba.
@@ -56553,6 +56344,218 @@ describe('useUnlockShare', () => {
     await expect(result.current.mutateAsync('wrong')).rejects.toMatchObject({ status: 401 })
   })
 })
+````
+
+## File: packages/api/cmd/draba/main.go
+````go
+// Command draba is the API server entry point. It wires repositories,
+// the auth token service, and tier configuration into the HTTP server,
+// then listens for requests until the process is killed.
+package main
+
+import (
+	"context"
+	"fmt"
+	"io/fs"
+	"log/slog"
+	"net/http"
+	"os"
+	"strings"
+
+	"github.com/I0-1O/draba/packages/api/internal/api"
+	"github.com/I0-1O/draba/packages/api/internal/auth"
+	"github.com/I0-1O/draba/packages/api/internal/buildinfo"
+	"github.com/I0-1O/draba/packages/api/internal/db"
+	"github.com/I0-1O/draba/packages/api/internal/events"
+	"github.com/I0-1O/draba/packages/api/internal/mailer"
+	"github.com/I0-1O/draba/packages/api/internal/tier"
+	"github.com/I0-1O/draba/packages/api/internal/ws"
+	sampledata "github.com/I0-1O/draba/packages/api/sample_data"
+	drabui "github.com/I0-1O/draba/packages/api/ui"
+)
+
+const banner = "\n" +
+	"      _           _\n" +
+	"     | |         | |\n" +
+	"   __| |_ __ __ _| |__   __ _\n" +
+	"  / _` | '__/ _` | '_ \\ / _` |\n" +
+	" | (_| | | | (_| | |_) | (_| |\n" +
+	"  \\__,_|_|  \\__,_|_.__/ \\__,_|\n" +
+	"\n" +
+	"  see who's doing what, when.\n\n"
+
+func main() {
+	if len(os.Args) > 1 && os.Args[1] == "reset-password" {
+		runResetPassword(os.Args[2:])
+		return
+	}
+
+	setupLogger()
+	fmt.Print(banner)
+	slog.Info("build", "commit", buildinfo.Short(), "built", buildinfo.Built)
+
+	port := getenv("DRABA_PORT", "8080")
+	dsn := getenv("DRABA_DB_DSN", "/data/draba.db")
+	jwtSecret := os.Getenv("DRABA_JWT_SECRET")
+	if jwtSecret == "" {
+		slog.Error("DRABA_JWT_SECRET must be set")
+		os.Exit(1)
+	}
+
+	t, err := tier.Load()
+	if err != nil {
+		slog.Error("tier load failed", "err", err)
+		os.Exit(1)
+	}
+	l := t.Limits()
+	if l.MaxUsers == 0 {
+		slog.Info("tier", "tier", t)
+	} else {
+		slog.Info("tier", "tier", t, "maxUsers", l.MaxUsers, "maxTeams", l.MaxTeams)
+	}
+
+	database, err := db.Open(dsn)
+	if err != nil {
+		slog.Error("db: open failed", "err", err)
+		os.Exit(1)
+	}
+	slog.Info("db: opened", "dsn", dsn)
+
+	if err := db.Migrate(database); err != nil {
+		slog.Error("db: migrate failed", "err", err)
+		os.Exit(1)
+	}
+	slog.Info("db: migrations applied")
+
+	// Optional pre-launch convenience: seed the canonical sample dataset into an
+	// empty database so a freshly-wiped dev/test instance comes up populated.
+	// Gated by DRABA_SEED_SAMPLE_DATA and a no-op once the DB has any users — it
+	// must stay unset in any real deployment.
+	if os.Getenv("DRABA_SEED_SAMPLE_DATA") == "1" {
+		sql, err := sampledata.SQL()
+		if err != nil {
+			slog.Error("db: reading embedded sample data failed", "err", err)
+			os.Exit(1)
+		}
+		seeded, err := db.SeedSampleDataIfEmpty(database, sql)
+		if err != nil {
+			slog.Error("db: sample-data seed failed", "err", err)
+			os.Exit(1)
+		}
+		if seeded {
+			slog.Info("db: sample data seeded (database was empty)")
+		} else {
+			slog.Info("db: sample-data seed skipped (database already populated)")
+		}
+	}
+
+	users := db.NewUserRepo(database)
+	invites := db.NewInviteRepo(database)
+	teams := db.NewTeamRepo(database)
+	activityRepo := db.NewActivityRepo(database)
+	timelineRepo := db.NewTimelineRepo(database)
+	savedFilterRepo := db.NewSavedFilterRepo(database)
+	preferenceRepo := db.NewUserPreferenceRepo(database)
+	apiTokenRepo := db.NewAPITokenRepo(database)
+	instanceSetsRepo := db.NewInstanceSettingsRepo(database)
+	passwordTokensRepo := db.NewPasswordResetTokenRepo(database)
+	statusRepo := db.NewStatusRepo(database)
+	tagRepo := db.NewTagRepo(database)
+	shareRepo := db.NewShareRepo(database)
+	m := mailer.New(instanceSetsRepo, []byte(jwtSecret))
+	tokens := auth.NewTokenService(jwtSecret)
+
+	bus := events.NewBus()
+	hub := ws.NewHub(bus, tokens, func(teamID, userID string) error {
+		_, err := teams.GetMember(teamID, userID)
+		return err
+	})
+	go hub.Run()
+	slog.Info("ws: hub running")
+
+	if mods := tier.Registered(); len(mods) > 0 {
+		slog.Info("modules loaded", "count", len(mods))
+	}
+
+	srv := api.NewServer(users, invites, teams, activityRepo, timelineRepo, savedFilterRepo, preferenceRepo, apiTokenRepo, instanceSetsRepo, passwordTokensRepo, statusRepo, tagRepo, shareRepo, m, tokens, t, bus, hub)
+
+	// Wire up the embedded React SPA when a production build is present.
+	// In dev the static/ directory only has .gitkeep so this is a no-op.
+	if sub, err := fs.Sub(drabui.FS, "static"); err == nil {
+		if _, err := sub.Open("index.html"); err == nil {
+			srv.WithUI(sub)
+			slog.Info("ui: serving embedded SPA")
+		}
+	}
+
+	// Optional SSO. OIDC is disabled unless DRABA_OIDC_ISSUER is set. When it
+	// is, discovery runs against the issuer at startup; a failure here is fatal
+	// so a broken SSO setup is caught at boot rather than presenting users a
+	// dead login button. The client secret is read once and never leaves the
+	// process.
+	oidcSvc, err := auth.NewOIDCService(context.Background(), &auth.OIDCConfig{
+		Issuer:       os.Getenv("DRABA_OIDC_ISSUER"),
+		ClientID:     os.Getenv("DRABA_OIDC_CLIENT_ID"),
+		ClientSecret: os.Getenv("DRABA_OIDC_CLIENT_SECRET"),
+		RedirectURL:  oidcRedirectURL(),
+	})
+	if err != nil {
+		slog.Error("oidc: configuration failed", "err", err)
+		os.Exit(1)
+	}
+	if oidcSvc != nil {
+		// Auto-provisioning defaults ON (first SSO login creates the account),
+		// matching the password-register bootstrap. Set DRABA_OIDC_AUTO_CREATE=0
+		// to require accounts be pre-created before SSO login is allowed.
+		autoCreate := os.Getenv("DRABA_OIDC_AUTO_CREATE") != "0"
+		srv.WithOIDC(oidcSvc, autoCreate)
+		slog.Info("oidc: SSO enabled", "issuer", os.Getenv("DRABA_OIDC_ISSUER"), "autoCreate", autoCreate)
+	}
+
+	slog.Info("listening", "port", port)
+	if err := http.ListenAndServe(":"+port, srv.Routes()); err != nil {
+		slog.Error("server error", "err", err)
+		os.Exit(1)
+	}
+}
+
+// oidcRedirectURL returns the OIDC callback URL the IdP must redirect back to.
+// It honours an explicit DRABA_OIDC_REDIRECT_URL override, otherwise derives it
+// from DRABA_BASE_URL so a single base-URL setting covers both the app and the
+// SSO callback.
+func oidcRedirectURL() string {
+	if v := os.Getenv("DRABA_OIDC_REDIRECT_URL"); v != "" {
+		return v
+	}
+	if os.Getenv("DRABA_OIDC_ISSUER") == "" {
+		return "" // SSO disabled; no redirect needed.
+	}
+	return strings.TrimRight(getenv("DRABA_BASE_URL", "http://localhost:8080"), "/") + "/auth/oidc/callback"
+}
+
+// setupLogger initialises the global slog logger. Level is controlled by
+// DRABA_LOG_LEVEL (debug | info | warn | error); default is info.
+// All output goes to stdout so Docker captures it in `docker logs`.
+func setupLogger() {
+	level := slog.LevelInfo
+	switch strings.ToLower(os.Getenv("DRABA_LOG_LEVEL")) {
+	case "debug":
+		level = slog.LevelDebug
+	case "warn":
+		level = slog.LevelWarn
+	case "error":
+		level = slog.LevelError
+	}
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level})))
+}
+
+// getenv returns the env var value or fallback when unset/empty.
+func getenv(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
 ````
 
 ## File: packages/api/internal/api/share_ics_handler.go
