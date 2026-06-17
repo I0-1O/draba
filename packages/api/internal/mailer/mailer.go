@@ -236,7 +236,7 @@ func sendTLS(cfg *SMTPConfig, addr, from, to, msg string) error {
 	if err != nil {
 		return fmt.Errorf("smtp tls dial: %w", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	c, err := smtp.NewClient(conn, cfg.Host)
 	if err != nil {

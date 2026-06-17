@@ -137,7 +137,7 @@ func TestOIDC_DisabledReturns404(t *testing.T) {
 	handler, _ := newTestServerNoOIDC(t)
 
 	for _, path := range []string{"/auth/oidc/login", "/auth/oidc/callback"} {
-		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req := httptest.NewRequest(http.MethodGet, path, http.NoBody)
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, req)
 		assert.Equal(t, http.StatusNotFound, rec.Code, "%s should report SSO disabled", path)
@@ -150,7 +150,7 @@ func TestOIDC_DisabledReturns404(t *testing.T) {
 func TestOIDC_BrandingExposesSSOFlag(t *testing.T) {
 	handler, _ := newTestServerNoOIDC(t)
 
-	req := httptest.NewRequest(http.MethodGet, "/settings/branding", nil)
+	req := httptest.NewRequest(http.MethodGet, "/settings/branding", http.NoBody)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 

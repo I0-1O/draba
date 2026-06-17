@@ -143,7 +143,7 @@ func main() {
 	// so a broken SSO setup is caught at boot rather than presenting users a
 	// dead login button. The client secret is read once and never leaves the
 	// process.
-	oidcSvc, err := auth.NewOIDCService(context.Background(), auth.OIDCConfig{
+	oidcSvc, err := auth.NewOIDCService(context.Background(), &auth.OIDCConfig{
 		Issuer:       os.Getenv("DRABA_OIDC_ISSUER"),
 		ClientID:     os.Getenv("DRABA_OIDC_CLIENT_ID"),
 		ClientSecret: os.Getenv("DRABA_OIDC_CLIENT_SECRET"),

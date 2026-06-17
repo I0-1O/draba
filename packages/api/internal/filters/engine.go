@@ -16,6 +16,7 @@ import (
 // FilterLogic controls how conditions in a FilterDefinition are combined.
 type FilterLogic string
 
+// LogicAnd and LogicOr are the two values for FilterLogic.
 const (
 	LogicAnd FilterLogic = "and"
 	LogicOr  FilterLogic = "or"

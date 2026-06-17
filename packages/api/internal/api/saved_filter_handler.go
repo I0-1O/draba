@@ -207,7 +207,7 @@ func (s *Server) handleDeleteSavedFilter(w http.ResponseWriter, r *http.Request)
 	isAdmin := adminMember.Role == "admin"
 
 	// Owner can always delete; admin can delete team filters they don't own.
-	if filter.UserID != claims.UserID && !(isAdmin && filter.IsTeamFilter) {
+	if filter.UserID != claims.UserID && (!isAdmin || !filter.IsTeamFilter) {
 		writeError(w, http.StatusForbidden, "FORBIDDEN", "not the owner of this saved filter")
 		return
 	}

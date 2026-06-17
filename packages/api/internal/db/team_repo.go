@@ -343,7 +343,7 @@ func (r *TeamRepo) GetMemberStats(memberID string) (*models.MemberStats, error) 
 	if err != nil {
 		return nil, fmt.Errorf("computing activity stats: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	if rows.Next() {
 		if err := rows.Scan(&stats.ArchivedActivities, &stats.PastDue, &stats.Running, &stats.Upcoming); err != nil {
 			return nil, fmt.Errorf("scanning activity stats: %w", err)
@@ -390,7 +390,7 @@ func (r *TeamRepo) GetUserStats(userID string) (*models.MemberStats, error) {
 	if err != nil {
 		return nil, fmt.Errorf("computing activity stats: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	if rows.Next() {
 		if err := rows.Scan(&stats.ArchivedActivities, &stats.PastDue, &stats.Running, &stats.Upcoming); err != nil {
 			return nil, fmt.Errorf("scanning activity stats: %w", err)

@@ -13,6 +13,7 @@ import (
 // Unlimited, which is what self-hosted/free installs run as.
 type Tier string
 
+// Unlimited, Team, Business, and Enterprise are the supported deployment tiers.
 const (
 	Unlimited  Tier = ""
 	Team       Tier = "team"

@@ -41,18 +41,18 @@ func runResetPassword(args []string) {
 
 	hash, err := auth.HashPassword(*password)
 	if err != nil {
-		database.Close()
+		_ = database.Close()
 		fmt.Fprintf(os.Stderr, "error: hash password: %v\n", err)
 		os.Exit(1)
 	}
 
 	users := db.NewUserRepo(database)
 	if err := users.UpdatePasswordByEmail(*email, hash); err != nil {
-		database.Close()
+		_ = database.Close()
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
 
-	database.Close()
+	_ = database.Close()
 	fmt.Printf("password updated for %s\n", *email)
 }

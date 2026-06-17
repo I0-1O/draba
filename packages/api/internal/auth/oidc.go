@@ -59,11 +59,11 @@ type OIDCClaims struct {
 	Nonce         string `json:"nonce"`
 }
 
-// AuthCodeFlow carries the per-request secrets the caller must store (in
+// CodeFlow carries the per-request secrets the caller must store (in
 // short-lived httpOnly cookies) and replay on the callback. The State and
 // Nonce defend against CSRF and replay; the PKCEVerifier is exchanged for
 // tokens at the callback.
-type AuthCodeFlow struct {
+type CodeFlow struct {
 	// AuthURL is where the user agent is redirected to authenticate.
 	AuthURL string
 	// State must be echoed back by the IdP and matched on callback.
@@ -81,7 +81,7 @@ type AuthCodeFlow struct {
 // A non-nil error means SSO was requested but the provider is unreachable or
 // misconfigured — the caller should treat that as a fatal startup error so a
 // broken SSO setup fails loudly instead of silently serving a dead login button.
-func NewOIDCService(ctx context.Context, cfg OIDCConfig) (*OIDCService, error) {
+func NewOIDCService(ctx context.Context, cfg *OIDCConfig) (*OIDCService, error) {
 	if cfg.Issuer == "" {
 		return nil, nil // SSO disabled — inert.
 	}
@@ -116,7 +116,7 @@ func NewOIDCService(ctx context.Context, cfg OIDCConfig) (*OIDCService, error) {
 // Begin produces the authorization URL plus the state/nonce/PKCE-verifier the
 // caller must persist for the matching callback. Every value is generated with
 // a CSPRNG.
-func (s *OIDCService) Begin() (*AuthCodeFlow, error) {
+func (s *OIDCService) Begin() (*CodeFlow, error) {
 	state, err := randomURLToken()
 	if err != nil {
 		return nil, err
@@ -132,7 +132,7 @@ func (s *OIDCService) Begin() (*AuthCodeFlow, error) {
 		oidc.Nonce(nonce),
 		oauth2.S256ChallengeOption(verifier),
 	)
-	return &AuthCodeFlow{
+	return &CodeFlow{
 		AuthURL:      url,
 		State:        state,
 		Nonce:        nonce,

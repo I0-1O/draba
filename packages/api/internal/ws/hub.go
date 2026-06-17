@@ -188,7 +188,7 @@ func (h *Hub) broadcast(teamID string, msg OutboundMsg) {
 func (c *client) readPump(h *Hub) {
 	defer func() {
 		h.unsubscribeAll(c)
-		c.conn.Close()
+		_ = c.conn.Close()
 	}()
 
 	c.conn.SetReadLimit(maxMessageBytes)
@@ -236,7 +236,7 @@ func (c *client) writePump(h *Hub) {
 	ticker := time.NewTicker(h.heartbeatInterval)
 	defer func() {
 		ticker.Stop()
-		c.conn.Close()
+		_ = c.conn.Close()
 	}()
 
 	for {
