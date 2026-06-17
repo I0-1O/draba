@@ -46000,51 +46000,6 @@ export default defineConfig(({ mode }) => {
 })
 ````
 
-## File: .golangci.yml
-````yaml
-version: "2"
-
-run:
-  timeout: 5m
-
-linters:
-  default: none
-  enable:
-    - errcheck
-    - govet
-    - staticcheck
-    - ineffassign
-    - gofmt
-    - goimports
-    - gocritic
-    - revive
-    - misspell
-    - nolintlint
-
-  settings:
-    goimports:
-      local-prefixes: github.com/I0-1O/draba
-    gocritic:
-      enabled-tags:
-        - diagnostic
-        - style
-        - performance
-    revive:
-      rules:
-        - name: exported
-          severity: warning
-    nolintlint:
-      require-explanation: true
-      require-specific: true
-
-issues:
-  exclusions:
-    rules:
-      - path: _test\.go
-        linters:
-          - errcheck
-````
-
 ## File: OIDC_PR.md
 ````markdown
 # Add OIDC / SSO login (opt-in, security-first)
@@ -49164,6 +49119,1853 @@ export default function GanttView({
 }
 ````
 
+## File: packages/web/src/components/kanban/KanbanCard.tsx
+````typescript
+/**
+ * KanbanCard — a single draggable activity card.
+ *
+ * Renders the card accent border (driven by colorBy), title, and the
+ * configured optional fields. Uses @dnd-kit useDraggable for drag support.
+ */
+
+import { useDraggable } from '@dnd-kit/core';
+import { Calendar, GitBranch, ChevronDown, ChevronRight } from 'lucide-react';
+import { formatActivityDate } from '@/components/list/ListView';
+import { resolveColorHex } from '@/components/identity/identity-constants';
+import { Badge } from '@/components/identity/Badge';
+import type { Member } from '@/types';
+import type { components } from '@draba/shared';
+import type { KanbanCardField } from './kanbanColumns';
+
+type ApiActivity = components['schemas']['Activity'];
+type Status = components['schemas']['Status'];
+type Tag = components['schemas']['Tag'];
+
+interface Props {
+  activity: ApiActivity;
+  accentColor: string;
+  members: Member[];
+  statusById: Map<string, Status>;
+  tagById: Map<string, Tag>;
+  /** Activity ID → title, used to show the parent's name when "Parent" field is on. */
+  activityTitleById?: Map<string, string>;
+  cardFields: KanbanCardField[];
+  /** Fields suppressed because they duplicate the current Group by axis. */
+  suppressedFields: Set<KanbanCardField>;
+  isSelected: boolean;
+  /** True when Find is active and this card doesn't match. */
+  dimmed: boolean;
+  /** True when Find is active and this card is the active match. */
+  activeMatch: boolean;
+  isDragOverlay?: boolean;
+  onClick: () => void;
+
+  // ── Hierarchy ────────────────────────────────────────────────────────────────
+  /** True when hierarchy mode is on and this card has children to show/hide. */
+  hasHierarchyChildren?: boolean;
+  /** Whether the children are currently hidden. */
+  isHierarchyCollapsed?: boolean;
+  /**
+   * Click handler for the collapse/expand chevron.
+   * Receives the mouse event so the handler can stopPropagation (prevents
+   * the card-click from also opening the detail panel).
+   */
+  onToggleHierarchy?: (e: React.MouseEvent) => void;
+  /** True when this card is nested under a parent — disables drag. */
+  isChildCard?: boolean;
+  /** When false (public share viewer), drag and clicks are inert. Defaults to true. */
+  interactive?: boolean;
+}
+
+export default function KanbanCard({
+  activity,
+  accentColor,
+  members,
+  statusById,
+  tagById,
+  cardFields,
+  suppressedFields,
+  isSelected,
+  dimmed,
+  activeMatch,
+  isDragOverlay = false,
+  onClick,
+  hasHierarchyChildren = false,
+  isHierarchyCollapsed = false,
+  onToggleHierarchy,
+  isChildCard = false,
+  activityTitleById,
+  interactive = true,
+}: Props) {
+  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
+    id: activity.id,
+    data: { activityId: activity.id },
+    // Drag overlay renders separately, and child cards travel with their parent.
+    disabled: isDragOverlay || isChildCard || !interactive,
+  });
+
+  // Do NOT apply the dnd-kit transform to the original card.
+  //
+  // We use DragOverlay for the visual movement, so the overlay card floats as
+  // the user drags and the original stays in place as an invisible placeholder.
+  // Applying the transform here causes the column's overflow container to expand
+  // its scroll area as the mouse moves, producing a growing scrollbar.
+  const style: React.CSSProperties = isDragging && !isDragOverlay
+    ? { visibility: 'hidden' }   // placeholder: preserves layout space, no transform, no scrollbar growth
+    : { opacity: dimmed ? 0.3 : 1, transition: dimmed ? 'opacity 150ms' : undefined };
+
+  const showField = (f: KanbanCardField) =>
+    cardFields.includes(f) && !suppressedFields.has(f);
+
+  const status = activity.statusId ? statusById.get(activity.statusId) : undefined;
+  const statusColor = status?.color ? resolveColorHex(status.color) : undefined;
+
+  const assignedMembers = (activity.assignedMemberIds ?? [])
+    .map(id => members.find(m => m.id === id))
+    .filter((m): m is Member => Boolean(m));
+
+  const tags = (activity.tagIds ?? [])
+    .map(id => tagById.get(id))
+    .filter((t): t is Tag => Boolean(t));
+
+  const formatDate = (iso: string | null | undefined) =>
+    iso ? formatActivityDate(iso) : null;
+
+  const startLabel = formatDate(activity.startAt);
+  const endLabel   = formatDate(activity.endAt);
+  const dateLabel  = startLabel && endLabel
+    ? startLabel === endLabel ? startLabel : `${startLabel} – ${endLabel}`
+    : startLabel ?? endLabel ?? null;
+
+  const cardStyle: React.CSSProperties = {
+    ...style,
+    background: 'var(--card)',
+    border: `1px solid ${isSelected ? accentColor : activeMatch ? '#f59e0b' : 'var(--border)'}`,
+    borderLeft: `3px solid ${accentColor}`,
+    borderRadius: 6,
+    padding: '8px 10px',
+    cursor: !interactive ? 'default' : isDragOverlay ? 'grabbing' : 'pointer',
+    boxShadow: isDragOverlay
+      ? '0 8px 24px rgba(0,0,0,0.2)'
+      : isSelected
+      ? `0 0 0 2px ${accentColor}40`
+      : activeMatch
+      ? '0 0 0 2px #f59e0b80'
+      : undefined,
+    userSelect: 'none',
+    marginBottom: 6,
+    transition: 'box-shadow 100ms, border-color 100ms',
+  };
+
+  return (
+    <div
+      ref={setNodeRef}
+      {...(interactive ? listeners : {})}
+      {...(interactive ? attributes : {})}
+      style={cardStyle}
+      onClick={interactive ? onClick : undefined}
+      role={interactive ? 'button' : undefined}
+      tabIndex={interactive ? 0 : undefined}
+      onKeyDown={interactive ? (e => { if (e.key === 'Enter' || e.key === ' ') onClick(); }) : undefined}
+    >
+      {/* Title row — with optional collapse chevron for hierarchy parents */}
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 4, marginBottom: 4 }}>
+        {hasHierarchyChildren && (
+          <button
+            onClick={interactive ? (e => { e.stopPropagation(); onToggleHierarchy?.(e); }) : undefined}
+            title={isHierarchyCollapsed ? 'Expand children' : 'Collapse children'}
+            style={{
+              flexShrink: 0,
+              marginTop: 1,
+              background: 'none',
+              border: 'none',
+              padding: 0,
+              cursor: interactive ? 'pointer' : 'default',
+              color: 'var(--muted-foreground)',
+              display: 'flex',
+              alignItems: 'center',
+            }}
+          >
+            {isHierarchyCollapsed
+              ? <ChevronRight size={13} strokeWidth={2} />
+              : <ChevronDown  size={13} strokeWidth={2} />
+            }
+          </button>
+        )}
+        <div
+          style={{
+            flex: 1,
+            fontSize: 13,
+            fontWeight: 500,
+            color: 'var(--foreground)',
+            lineHeight: 1.4,
+            display: '-webkit-box',
+            WebkitLineClamp: 2,
+            WebkitBoxOrient: 'vertical',
+            overflow: 'hidden',
+          }}
+        >
+          {activity.title}
+        </div>
+      </div>
+
+      {/* Description snippet */}
+      {showField('description') && activity.description && (
+        <div
+          style={{
+            fontSize: 11,
+            color: 'var(--muted-foreground)',
+            whiteSpace: 'nowrap',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            marginBottom: 4,
+          }}
+        >
+          {activity.description}
+        </div>
+      )}
+
+      {/* Status pill */}
+      {showField('status') && status && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 4 }}>
+          <span
+            style={{
+              width: 8,
+              height: 8,
+              borderRadius: '50%',
+              background: statusColor ?? '#6b7280',
+              flexShrink: 0,
+            }}
+          />
+          <span style={{ fontSize: 11, color: 'var(--muted-foreground)' }}>{status.name}</span>
+        </div>
+      )}
+
+      {/* Date range */}
+      {showField('dateRange') && dateLabel && (
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 4,
+            fontSize: 11,
+            color: 'var(--muted-foreground)',
+            marginBottom: 4,
+          }}
+        >
+          <Calendar size={11} strokeWidth={1.6} />
+          {dateLabel}
+        </div>
+      )}
+
+      {/* Tags */}
+      {showField('tags') && tags.length > 0 && (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 3, marginBottom: 4 }}>
+          {tags.slice(0, 3).map(t => (
+            <span
+              key={t.id}
+              style={{
+                fontSize: 10,
+                fontWeight: 500,
+                padding: '1px 6px',
+                borderRadius: 10,
+                background: resolveColorHex(t.color ?? null) ? `${resolveColorHex(t.color ?? null)}22` : 'var(--muted)',
+                color: resolveColorHex(t.color ?? null) ?? 'var(--muted-foreground)',
+                border: `1px solid ${resolveColorHex(t.color ?? null) ?? 'var(--border)'}44`,
+              }}
+            >
+              {t.name}
+            </span>
+          ))}
+          {tags.length > 3 && (
+            <span style={{ fontSize: 10, color: 'var(--muted-foreground)' }}>+{tags.length - 3}</span>
+          )}
+        </div>
+      )}
+
+      {/* % complete bar */}
+      {showField('percentComplete') && activity.percentComplete != null && (
+        <div style={{ marginBottom: 4 }}>
+          <div
+            style={{
+              height: 3,
+              background: 'var(--muted)',
+              borderRadius: 2,
+              overflow: 'hidden',
+            }}
+          >
+            <div
+              style={{
+                height: '100%',
+                width: `${activity.percentComplete}%`,
+                background: accentColor,
+                borderRadius: 2,
+                transition: 'width 200ms',
+              }}
+            />
+          </div>
+        </div>
+      )}
+
+      {/* Footer: parent pill + member avatars */}
+      {(showField('parent') || showField('members')) && (
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 2 }}>
+          {/* Parent badge — shows the parent activity's title */}
+          {showField('parent') && activity.parentActivityId && (
+            <span
+              style={{
+                fontSize: 10,
+                color: 'var(--muted-foreground)',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 3,
+                overflow: 'hidden',
+                flex: 1,
+              }}
+            >
+              <GitBranch size={9} strokeWidth={1.6} style={{ flexShrink: 0 }} />
+              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {activityTitleById?.get(activity.parentActivityId) ?? 'Parent'}
+              </span>
+            </span>
+          )}
+
+          {/* Member avatars */}
+          {showField('members') && assignedMembers.length > 0 && (
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                marginLeft: 'auto',
+              }}
+            >
+              {assignedMembers.slice(0, 3).map((m, i) => (
+                <div
+                  key={m.id}
+                  style={{
+                    marginLeft: i === 0 ? 0 : -6,
+                    zIndex: assignedMembers.length - i,
+                    outline: '2px solid var(--card)',
+                    borderRadius: '50%',
+                  }}
+                  title={m.name}
+                >
+                  <Badge
+                    identity={{ color: m.color, icon: '__name_2__' }}
+                    name={m.name}
+                    shape="circle"
+                    size={20}
+                  />
+                </div>
+              ))}
+              {assignedMembers.length > 3 && (
+                <span style={{ fontSize: 10, color: 'var(--muted-foreground)', marginLeft: 4 }}>
+                  +{assignedMembers.length - 3}
+                </span>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+````
+
+## File: packages/web/src/components/kanban/KanbanColumn.tsx
+````typescript
+/**
+ * KanbanColumn — a single droppable column with a header, card list, and "+ Add" affordance.
+ *
+ * Uses @dnd-kit useDroppable. When the column is non-droppable (combination/none grouping),
+ * the drop-target is simply not registered and DnD events are ignored.
+ *
+ * Hierarchy: when showHierarchy is on, CardTree renders each root activity plus
+ * its descendants indented beneath it. CardTree is defined at module level (outside
+ * KanbanColumn) to give it a stable identity across re-renders — defining a component
+ * inside another component causes React to unmount/remount the subtree on every render.
+ */
+
+import { useDroppable } from '@dnd-kit/core';
+import { ChevronDown, ChevronRight, Plus } from 'lucide-react';
+import { resolveColorHex } from '@/components/identity/identity-constants';
+import KanbanCard from './KanbanCard';
+import type { KanbanColumn as Column, KanbanCardField } from './kanbanColumns';
+import type { Member } from '@/types';
+import type { components } from '@draba/shared';
+
+type ApiActivity = components['schemas']['Activity'];
+type Status = components['schemas']['Status'];
+type Tag = components['schemas']['Tag'];
+
+// ── CardTree ──────────────────────────────────────────────────────────────────
+
+/**
+ * Renders one activity card and, when hierarchy is on, its children indented
+ * beneath it (recursively). Defined at module level so React gives it a stable
+ * component identity and doesn't unmount/remount on every KanbanColumn render.
+ */
+interface CardTreeProps {
+  activity: ApiActivity;
+  depth: number;
+  // Column rendering context
+  accentColor: string;
+  colorMap: Map<string, string>;
+  members: Member[];
+  statusById: Map<string, Status>;
+  tagById: Map<string, Tag>;
+  activityTitleById: Map<string, string>;
+  cardFields: KanbanCardField[];
+  suppressedFields: Set<KanbanCardField>;
+  selectedActivityId: string | null;
+  matchedIds: Set<string>;
+  activeMatchId: string | null;
+  hasQuery: boolean;
+  onCardClick: (activity: ApiActivity) => void;
+  // Hierarchy context
+  showHierarchy: boolean;
+  childrenByParentId: Map<string, ApiActivity[]>;
+  collapsedParents: Set<string>;
+  onToggleParent: (activityId: string) => void;
+  interactive: boolean;
+}
+
+function CardTree({
+  activity,
+  depth,
+  accentColor,
+  colorMap,
+  members,
+  statusById,
+  tagById,
+  activityTitleById,
+  cardFields,
+  suppressedFields,
+  selectedActivityId,
+  matchedIds,
+  activeMatchId,
+  hasQuery,
+  onCardClick,
+  showHierarchy,
+  childrenByParentId,
+  collapsedParents,
+  onToggleParent,
+  interactive,
+}: CardTreeProps) {
+  const children = showHierarchy ? (childrenByParentId.get(activity.id) ?? []) : [];
+  const hasChildren = children.length > 0;
+  const isCollapsed = collapsedParents.has(activity.id);
+  const indentPx = Math.min(depth, 2) * 16;
+
+  const cardTreeProps = {
+    accentColor,
+    colorMap,
+    members,
+    statusById,
+    tagById,
+    activityTitleById,
+    cardFields,
+    suppressedFields,
+    selectedActivityId,
+    matchedIds,
+    activeMatchId,
+    hasQuery,
+    onCardClick,
+    showHierarchy,
+    childrenByParentId,
+    collapsedParents,
+    onToggleParent,
+    interactive,
+  };
+
+  return (
+    <>
+      <div style={depth > 0 ? { paddingLeft: indentPx } : undefined}>
+        <KanbanCard
+          activity={activity}
+          accentColor={colorMap.get(activity.id) ?? accentColor}
+          members={members}
+          statusById={statusById}
+          tagById={tagById}
+          activityTitleById={activityTitleById}
+          cardFields={cardFields}
+          suppressedFields={suppressedFields}
+          isSelected={selectedActivityId === activity.id}
+          dimmed={hasQuery && !matchedIds.has(activity.id)}
+          activeMatch={activeMatchId === activity.id}
+          isChildCard={depth > 0}
+          hasHierarchyChildren={hasChildren}
+          isHierarchyCollapsed={isCollapsed}
+          onToggleHierarchy={() => onToggleParent(activity.id)}
+          onClick={() => onCardClick(activity)}
+          interactive={interactive}
+        />
+      </div>
+      {hasChildren && !isCollapsed && children.map(child => (
+        <CardTree
+          key={child.id}
+          activity={child}
+          depth={depth + 1}
+          {...cardTreeProps}
+        />
+      ))}
+    </>
+  );
+}
+
+interface Props {
+  column: Column;
+  members: Member[];
+  statusById: Map<string, Status>;
+  tagById: Map<string, Tag>;
+  /** Per-activity resolved hex color for card accent borders. */
+  colorMap: Map<string, string>;
+  /** Activity ID → title, for showing the parent name on child cards. */
+  activityTitleById: Map<string, string>;
+  cardFields: KanbanCardField[];
+  suppressedFields: Set<KanbanCardField>;
+  selectedActivityId: string | null;
+  matchedIds: Set<string>;
+  activeMatchId: string | null;
+  hasQuery: boolean;
+  isOver: boolean;
+  isCollapsed: boolean;
+  onToggleCollapse: () => void;
+  onCardClick: (activity: ApiActivity) => void;
+  onAddClick: () => void;
+  // ── Hierarchy ────────────────────────────────────────────────────────────────
+  showHierarchy: boolean;
+  /** Maps parentActivityId → direct child activities. */
+  childrenByParentId: Map<string, ApiActivity[]>;
+  /** Set of parent activity IDs whose children are hidden. */
+  collapsedParents: Set<string>;
+  onToggleParent: (activityId: string) => void;
+  /** When false (public share viewer), drag, drop, and clicks are inert. Defaults to true. */
+  interactive?: boolean;
+}
+
+const COLUMN_WIDTH = 260;
+const COLLAPSED_WIDTH = 40;
+
+export default function KanbanColumn({
+  column,
+  members,
+  statusById,
+  tagById,
+  colorMap,
+  activityTitleById,
+  cardFields,
+  suppressedFields,
+  selectedActivityId,
+  matchedIds,
+  activeMatchId,
+  hasQuery,
+  isOver,
+  isCollapsed,
+  onToggleCollapse,
+  onCardClick,
+  onAddClick,
+  showHierarchy,
+  childrenByParentId,
+  collapsedParents,
+  onToggleParent,
+  interactive = true,
+}: Props) {
+  const { setNodeRef, isOver: dndIsOver } = useDroppable({
+    id: column.id,
+    disabled: !column.droppable || !interactive,
+    data: { columnId: column.id },
+  });
+
+  const accentColor = column.color
+    ? (resolveColorHex(column.color) ?? column.color)
+    : '#6b7280';
+
+  const highlighted = isOver || dndIsOver;
+
+  // Shared props forwarded to each CardTree node.
+  const treeProps = {
+    accentColor,
+    colorMap,
+    members,
+    statusById,
+    tagById,
+    activityTitleById,
+    cardFields,
+    suppressedFields,
+    selectedActivityId,
+    matchedIds,
+    activeMatchId,
+    hasQuery,
+    onCardClick,
+    showHierarchy,
+    childrenByParentId,
+    collapsedParents,
+    onToggleParent,
+    interactive,
+  };
+
+  if (isCollapsed) {
+    return (
+      <div
+        style={{
+          width: COLLAPSED_WIDTH,
+          flexShrink: 0,
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          background: 'var(--muted)',
+          borderRadius: 8,
+          padding: '8px 0',
+          cursor: interactive ? 'pointer' : 'default',
+          border: '1px solid var(--border)',
+          minHeight: 120,
+          gap: 8,
+        }}
+        onClick={interactive ? onToggleCollapse : undefined}
+        title={`${column.label} (${column.items.length})`}
+      >
+        <ChevronRight size={14} strokeWidth={2} style={{ color: 'var(--muted-foreground)' }} />
+        <span
+          style={{
+            fontSize: 11,
+            fontWeight: 600,
+            color: 'var(--muted-foreground)',
+            writingMode: 'vertical-rl',
+            transform: 'rotate(180deg)',
+            letterSpacing: '0.04em',
+          }}
+        >
+          {column.label}
+        </span>
+        <span
+          style={{
+            fontSize: 10,
+            color: 'var(--muted-foreground)',
+            background: 'var(--border)',
+            borderRadius: 9,
+            padding: '1px 5px',
+          }}
+        >
+          {column.items.length}
+        </span>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      ref={setNodeRef}
+      style={{
+        width: COLUMN_WIDTH,
+        flexShrink: 0,
+        display: 'flex',
+        flexDirection: 'column',
+        background: highlighted ? `${accentColor}0d` : 'var(--muted)',
+        border: `1px solid ${highlighted ? accentColor + '80' : 'var(--border)'}`,
+        borderRadius: 8,
+        transition: 'background 120ms, border-color 120ms',
+        maxHeight: '100%',
+      }}
+    >
+      {/* Column header */}
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 6,
+          padding: '8px 10px',
+          borderBottom: '1px solid var(--border)',
+          flexShrink: 0,
+        }}
+      >
+        {/* Accent dot */}
+        <span
+          style={{
+            width: 9,
+            height: 9,
+            borderRadius: '50%',
+            background: accentColor,
+            flexShrink: 0,
+          }}
+        />
+
+        {/* Column label */}
+        <span
+          style={{
+            flex: 1,
+            fontSize: 12,
+            fontWeight: 600,
+            color: 'var(--foreground)',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+          }}
+        >
+          {column.label}
+        </span>
+
+        {/* Count badge */}
+        <span
+          style={{
+            fontSize: 11,
+            color: 'var(--muted-foreground)',
+            background: 'var(--border)',
+            borderRadius: 9,
+            padding: '1px 6px',
+            fontWeight: 600,
+          }}
+        >
+          {column.items.length}
+        </span>
+
+        {/* Collapse toggle — hidden in read-only public views */}
+        {interactive && (
+        <button
+          onClick={onToggleCollapse}
+          title="Collapse column"
+          style={{
+            background: 'none',
+            border: 'none',
+            cursor: 'pointer',
+            padding: 2,
+            color: 'var(--muted-foreground)',
+            display: 'flex',
+            alignItems: 'center',
+          }}
+        >
+          <ChevronDown size={13} strokeWidth={2} />
+        </button>
+        )}
+      </div>
+
+      {/* Card list — scrolls independently */}
+      <div
+        style={{
+          flex: 1,
+          overflowY: 'auto',
+          padding: '8px 8px 4px',
+          minHeight: 80,
+        }}
+      >
+        {column.items.length === 0 ? (
+          <div
+            style={{
+              padding: '12px 8px',
+              fontSize: 12,
+              color: 'var(--muted-foreground)',
+              textAlign: 'center',
+              fontStyle: 'italic',
+            }}
+          >
+            No activities
+          </div>
+        ) : (
+          column.items.map(act => (
+            <CardTree
+              key={act.id}
+              activity={act}
+              depth={0}
+              {...treeProps}
+            />
+          ))
+        )}
+      </div>
+
+      {/* + Add affordance — hidden in read-only public views */}
+      {interactive && (
+      <div style={{ padding: '4px 8px 8px', flexShrink: 0 }}>
+        <button
+          onClick={onAddClick}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 4,
+            width: '100%',
+            padding: '5px 8px',
+            background: 'none',
+            border: '1px dashed var(--border)',
+            borderRadius: 6,
+            cursor: 'pointer',
+            fontSize: 12,
+            color: 'var(--muted-foreground)',
+            transition: 'border-color 120ms, color 120ms',
+          }}
+          onMouseEnter={e => {
+            e.currentTarget.style.borderColor = accentColor;
+            e.currentTarget.style.color = accentColor;
+          }}
+          onMouseLeave={e => {
+            e.currentTarget.style.borderColor = 'var(--border)';
+            e.currentTarget.style.color = 'var(--muted-foreground)';
+          }}
+        >
+          <Plus size={12} strokeWidth={2} />
+          Add
+        </button>
+      </div>
+      )}
+    </div>
+  );
+}
+````
+
+## File: packages/web/src/components/kanban/kanbanColumns.ts
+````typescript
+/**
+ * kanbanColumns — pure column-building and sort logic for the Kanban view.
+ *
+ * Given a groupBy mode plus the visible activities, team members, and timeline
+ * statuses, produces an ordered list of KanbanColumn objects ready for rendering.
+ * All grouping/labeling/ordering lives here; the React components stay thin.
+ */
+
+import type { components } from '@draba/shared';
+import {
+  memberComboKey,
+  orderedComboIds,
+  memberComboLabel,
+  comboSortComparator,
+  UNASSIGNED_KEY,
+} from '@/lib/memberGroups';
+
+type ApiActivity = components['schemas']['Activity'];
+type Status = components['schemas']['Status'];
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
+
+// ── Public types ───────────────────────────────────────────────────────────────
+
+export type KanbanGroupBy =
+  | 'status'
+  | 'member'
+  | 'member-combination';
+
+export type KanbanSortBy =
+  | 'startDate'
+  | 'endDate'
+  | 'title'
+  | 'percentComplete'
+  | 'updatedAt';
+
+export type KanbanCardField =
+  | 'dateRange'
+  | 'status'
+  | 'tags'
+  | 'members'
+  | 'percentComplete'
+  | 'parent'
+  | 'description';
+
+export const DEFAULT_CARD_FIELDS: KanbanCardField[] = [
+  'dateRange',
+  'status',
+  'tags',
+  'members',
+];
+
+/** Sentinel IDs for "bucket with no value" columns. */
+export const NO_STATUS_ID  = '__no-status__';
+export const UNASSIGNED_ID = '__unassigned__';
+
+/**
+ * A resolved column, ready for rendering.
+ *
+ * `droppable: false` for combination and None groupings (drop semantics are
+ * ambiguous or undefined). `dropValue` encodes what patch to apply on drop.
+ */
+export interface KanbanColumn {
+  id: string;
+  label: string;
+  /** Hex color for the column accent (header dot, drop-highlight tint). */
+  color?: string;
+  icon?: string;
+  droppable: boolean;
+  /** The patch values to apply when a card is dropped into this column. */
+  dropValue?: {
+    statusId?: string | null;
+    assignedMemberIds?: string[];
+    parentActivityId?: string | null;
+  };
+  items: ApiActivity[];
+}
+
+// ── Sort comparators ───────────────────────────────────────────────────────────
+
+function cmp<T>(a: T, b: T, dir: 1 | -1 = 1): number {
+  if (a == null && b == null) return 0;
+  if (a == null) return 1;  // nulls last
+  if (b == null) return -1;
+  return a < b ? -dir : a > b ? dir : 0;
+}
+
+/** Sort activities within a column according to the chosen sort mode. */
+export function sortActivities(
+  activities: ApiActivity[],
+  sortBy: KanbanSortBy,
+): ApiActivity[] {
+  const sorted = [...activities];
+  switch (sortBy) {
+    case 'startDate':
+      // cmp with string comparison; null/undefined treated as nulls-last
+      sorted.sort((a, b) => {
+        const av = a.startAt ?? null;
+        const bv = b.startAt ?? null;
+        return cmp(av, bv);
+      });
+      break;
+    case 'endDate':
+      sorted.sort((a, b) => {
+        const av = a.endAt ?? null;
+        const bv = b.endAt ?? null;
+        return cmp(av, bv);
+      });
+      break;
+    case 'title':
+      sorted.sort((a, b) => a.title.localeCompare(b.title));
+      break;
+    case 'percentComplete':
+      // Descending: highest first, nulls last.
+      sorted.sort((a, b) => {
+        const av = a.percentComplete ?? null;
+        const bv = b.percentComplete ?? null;
+        if (av === null && bv === null) return 0;
+        if (av === null) return 1;
+        if (bv === null) return -1;
+        return bv - av;
+      });
+      break;
+    case 'updatedAt':
+      // Most-recently-updated first
+      sorted.sort((a, b) => cmp(b.updatedAt, a.updatedAt));
+      break;
+  }
+  return sorted;
+}
+
+// ── Hierarchy helpers ─────────────────────────────────────────────────────────
+
+/**
+ * Compute parent→children and child-id maps for the hierarchy display mode.
+ *
+ * Only considers children whose parent is also present in `activities` — an
+ * orphaned child (parent filtered out) stays visible as a root card.
+ */
+export function buildHierarchyMaps(
+  activities: ApiActivity[],
+): { childrenByParentId: Map<string, ApiActivity[]>; childIds: Set<string> } {
+  const visibleIds = new Set(activities.map(a => a.id));
+  const childrenByParentId = new Map<string, ApiActivity[]>();
+  for (const act of activities) {
+    const pid = (act as ApiActivity & { parentActivityId?: string | null }).parentActivityId ?? null;
+    if (pid && visibleIds.has(pid)) {
+      if (!childrenByParentId.has(pid)) childrenByParentId.set(pid, []);
+      childrenByParentId.get(pid)!.push(act);
+    }
+  }
+  const childIds = new Set<string>();
+  childrenByParentId.forEach(children => children.forEach(c => childIds.add(c.id)));
+  return { childrenByParentId, childIds };
+}
+
+/**
+ * Toggle a column ID in/out of the collapsed set.
+ * Returns a new array — does not mutate the input.
+ */
+export function toggleCollapsedColumn(collapsedIds: string[], columnId: string): string[] {
+  return collapsedIds.includes(columnId)
+    ? collapsedIds.filter(id => id !== columnId)
+    : [...collapsedIds, columnId];
+}
+
+// ── buildColumns ──────────────────────────────────────────────────────────────
+
+/**
+ * Build the ordered column list from the active groupBy, activities, members,
+ * and statuses. Applies `sortBy` within each column.
+ */
+export function buildColumns(
+  groupBy: KanbanGroupBy,
+  activities: ApiActivity[],
+  members: TeamMemberWithUser[],
+  statuses: Status[],
+  sortBy: KanbanSortBy,
+): KanbanColumn[] {
+  switch (groupBy) {
+    case 'status':             return buildStatusColumns(activities, statuses, sortBy);
+    case 'member':             return buildMemberColumns(activities, members, sortBy);
+    case 'member-combination': return buildCombinationColumns(activities, members, sortBy);
+  }
+}
+
+// ── Status columns ─────────────────────────────────────────────────────────────
+
+function buildStatusColumns(
+  activities: ApiActivity[],
+  statuses: Status[],
+  sortBy: KanbanSortBy,
+): KanbanColumn[] {
+  // Bucket activities by statusId (null → no-status bucket).
+  const byStatus = new Map<string | null, ApiActivity[]>();
+  byStatus.set(null, []);
+  for (const s of statuses) byStatus.set(s.id, []);
+  for (const act of activities) {
+    const key = (act as ApiActivity & { statusId?: string | null }).statusId ?? null;
+    const bucket = byStatus.get(key) ?? byStatus.get(null)!;
+    bucket.push(act);
+  }
+
+  // "No status" column first, then statuses in position order.
+  const noStatusItems = sortActivities(byStatus.get(null) ?? [], sortBy);
+  const statusCols: KanbanColumn[] = statuses
+    .slice()
+    .sort((a, b) => (a.position ?? 0) - (b.position ?? 0))
+    .map(s => ({
+      id: s.id,
+      label: s.name,
+      color: s.color ?? undefined,
+      icon: s.icon ?? undefined,
+      droppable: true,
+      dropValue: { statusId: s.id },
+      items: sortActivities(byStatus.get(s.id) ?? [], sortBy),
+    }));
+
+  return [
+    {
+      id: NO_STATUS_ID,
+      label: 'No status',
+      droppable: true,
+      dropValue: { statusId: null },
+      items: noStatusItems,
+    },
+    ...statusCols,
+  ];
+}
+
+// ── Member columns ─────────────────────────────────────────────────────────────
+
+function buildMemberColumns(
+  activities: ApiActivity[],
+  members: TeamMemberWithUser[],
+  sortBy: KanbanSortBy,
+): KanbanColumn[] {
+  // Assign each activity to its first (primary) member; multi-member cards
+  // appear only once in the primary member's column. Unassigned → UNASSIGNED_ID.
+  const byMember = new Map<string, ApiActivity[]>();
+  byMember.set(UNASSIGNED_ID, []);
+  for (const m of members) byMember.set(m.id, []);
+  for (const act of activities) {
+    const ids = act.assignedMemberIds ?? [];
+    const key = ids.length > 0 ? ids[0] : UNASSIGNED_ID;
+    const bucket = byMember.get(key) ?? byMember.get(UNASSIGNED_ID)!;
+    bucket.push(act);
+  }
+
+  const memberCols: KanbanColumn[] = members.map(m => ({
+    id: m.id,
+    label: m.displayName || m.email || 'Unknown',
+    color: m.color ?? undefined,
+    droppable: true,
+    dropValue: { assignedMemberIds: [m.id] },
+    items: sortActivities(byMember.get(m.id) ?? [], sortBy),
+  }));
+
+  return [
+    {
+      id: UNASSIGNED_ID,
+      label: 'Unassigned',
+      droppable: true,
+      dropValue: { assignedMemberIds: [] },
+      items: sortActivities(byMember.get(UNASSIGNED_ID) ?? [], sortBy),
+    },
+    ...memberCols,
+  ];
+}
+
+// ── Combination columns ────────────────────────────────────────────────────────
+
+function buildCombinationColumns(
+  activities: ApiActivity[],
+  members: TeamMemberWithUser[],
+  sortBy: KanbanSortBy,
+): KanbanColumn[] {
+  const memberOrder = members.map(m => m.id);
+  const nameById = new Map(members.map(m => [m.id, m.displayName || m.email || 'Unknown']));
+
+  const byCombo = new Map<string, ApiActivity[]>();
+  for (const act of activities) {
+    const key = memberComboKey(act.assignedMemberIds ?? []);
+    if (!byCombo.has(key)) byCombo.set(key, []);
+    byCombo.get(key)!.push(act);
+  }
+
+  const comparator = comboSortComparator(memberOrder);
+  const sortedKeys = [...byCombo.keys()].sort(comparator);
+
+  return sortedKeys.map(key => {
+    const orderedIds = key === UNASSIGNED_KEY
+      ? []
+      : orderedComboIds(key.split('|'), memberOrder);
+    const label = key === UNASSIGNED_KEY
+      ? 'Unassigned'
+      : memberComboLabel(orderedIds, nameById);
+    return {
+      id: key,
+      label,
+      // Combination columns are non-droppable.
+      droppable: false,
+      items: sortActivities(byCombo.get(key) ?? [], sortBy),
+    };
+  });
+}
+````
+
+## File: packages/web/src/components/kanban/KanbanView.test.ts
+````typescript
+/**
+ * Unit tests for kanbanColumns pure logic.
+ * Mirrors the pattern used by calendarLanes.test.ts.
+ */
+
+import { describe, it, expect } from 'vitest';
+import {
+  buildColumns,
+  sortActivities,
+  buildHierarchyMaps,
+  toggleCollapsedColumn,
+  NO_STATUS_ID,
+  UNASSIGNED_ID,
+  type KanbanGroupBy,
+} from './kanbanColumns';
+import type { components } from '@draba/shared';
+
+type ApiActivity = components['schemas']['Activity'];
+type Status = components['schemas']['Status'];
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
+
+// ── Fixtures ──────────────────────────────────────────────────────────────────
+
+function makeActivity(overrides: Partial<ApiActivity> & { id: string }): ApiActivity {
+  return {
+    id: overrides.id,
+    title: overrides.title ?? `Activity ${overrides.id}`,
+    timelineId: 'tl1',
+    startAt: overrides.startAt ?? '2026-01-01T00:00:00Z',
+    endAt: overrides.endAt ?? '2026-01-07T00:00:00Z',
+    color: overrides.color ?? '#288C9B',
+    createdAt: '2026-01-01T00:00:00Z',
+    updatedAt: overrides.updatedAt ?? '2026-01-01T00:00:00Z',
+    assignedMemberIds: overrides.assignedMemberIds ?? [],
+    tagIds: overrides.tagIds ?? [],
+    percentComplete: overrides.percentComplete ?? null,
+    archivedAt: null,
+    description: overrides.description ?? null,
+    icon: overrides.icon ?? null,
+    location: overrides.location ?? null,
+    notes: overrides.notes ?? null,
+    statusId: overrides.statusId ?? null,
+    parentActivityId: overrides.parentActivityId ?? null,
+    url: overrides.url ?? null,
+  } as ApiActivity;
+}
+
+function makeStatus(id: string, name: string, position: number, color = '#288C9B'): Status {
+  return { id, name, position, color, icon: null, isClosed: false, timelineId: 'tl1', createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' } as Status;
+}
+
+function makeMember(id: string, displayName: string): TeamMemberWithUser {
+  return { id, displayName, email: `${id}@test.com`, role: 'member', userId: id, color: null, icon: null, archivedAt: null, joinedAt: '2026-01-01T00:00:00Z', teamId: 'team1' } as unknown as TeamMemberWithUser;
+}
+
+const statuses = [
+  makeStatus('s1', 'Planned', 0, '#888'),
+  makeStatus('s2', 'In Progress', 1, '#1A97A2'),
+  makeStatus('s3', 'Done', 2, '#22c55e'),
+];
+
+const members = [
+  makeMember('m1', 'Alice'),
+  makeMember('m2', 'Bob'),
+  makeMember('m3', 'Carol'),
+];
+
+// ── sortActivities ─────────────────────────────────────────────────────────────
+
+describe('sortActivities', () => {
+  it('sorts by startDate ascending', () => {
+    const acts = [
+      makeActivity({ id: 'c', startAt: '2026-03-01T00:00:00Z' }),
+      makeActivity({ id: 'a', startAt: '2026-01-01T00:00:00Z' }),
+      makeActivity({ id: 'b', startAt: '2026-02-01T00:00:00Z' }),
+    ];
+    const result = sortActivities(acts, 'startDate');
+    expect(result.map(a => a.id)).toEqual(['a', 'b', 'c']);
+  });
+
+  it('sorts by title A-Z', () => {
+    const acts = [
+      makeActivity({ id: '1', title: 'Zebra' }),
+      makeActivity({ id: '2', title: 'Alpha' }),
+      makeActivity({ id: '3', title: 'Mango' }),
+    ];
+    const result = sortActivities(acts, 'title');
+    expect(result.map(a => a.title)).toEqual(['Alpha', 'Mango', 'Zebra']);
+  });
+
+  it('sorts percentComplete descending, nulls last', () => {
+    const acts = [
+      makeActivity({ id: 'a', percentComplete: 50 }),
+      makeActivity({ id: 'b', percentComplete: null }),
+      makeActivity({ id: 'c', percentComplete: 100 }),
+    ];
+    const result = sortActivities(acts, 'percentComplete');
+    expect(result.map(a => a.id)).toEqual(['c', 'a', 'b']);
+  });
+
+  it('sorts updatedAt descending (most recent first)', () => {
+    const acts = [
+      makeActivity({ id: 'old', updatedAt: '2026-01-01T00:00:00Z' }),
+      makeActivity({ id: 'new', updatedAt: '2026-06-01T00:00:00Z' }),
+    ];
+    const result = sortActivities(acts, 'updatedAt');
+    expect(result[0].id).toBe('new');
+  });
+});
+
+// ── buildColumns — status ──────────────────────────────────────────────────────
+
+describe('buildColumns: status', () => {
+  it('creates No-status column plus one column per status in position order', () => {
+    const acts = [makeActivity({ id: 'a1', statusId: 's1' })];
+    const cols = buildColumns('status', acts, [], statuses, 'startDate');
+    expect(cols[0].id).toBe(NO_STATUS_ID);
+    expect(cols[0].label).toBe('No status');
+    expect(cols.slice(1).map(c => c.id)).toEqual(['s1', 's2', 's3']);
+  });
+
+  it('routes activities to the correct status column', () => {
+    const acts = [
+      makeActivity({ id: 'a1', statusId: 's2' }),
+      makeActivity({ id: 'a2', statusId: null }),
+      makeActivity({ id: 'a3', statusId: 's1' }),
+    ];
+    const cols = buildColumns('status', acts, [], statuses, 'startDate');
+    expect(cols.find(c => c.id === NO_STATUS_ID)!.items.map(a => a.id)).toEqual(['a2']);
+    expect(cols.find(c => c.id === 's1')!.items.map(a => a.id)).toEqual(['a3']);
+    expect(cols.find(c => c.id === 's2')!.items.map(a => a.id)).toEqual(['a1']);
+  });
+
+  it('status columns are droppable; no-status column is droppable with null statusId', () => {
+    const cols = buildColumns('status', [], [], statuses, 'startDate');
+    const noStatus = cols.find(c => c.id === NO_STATUS_ID)!;
+    expect(noStatus.droppable).toBe(true);
+    expect(noStatus.dropValue).toEqual({ statusId: null });
+    const s1 = cols.find(c => c.id === 's1')!;
+    expect(s1.droppable).toBe(true);
+    expect(s1.dropValue).toEqual({ statusId: 's1' });
+  });
+
+  it('handles unknown statusId gracefully (routes to no-status)', () => {
+    const acts = [makeActivity({ id: 'x', statusId: 'deleted-status' })];
+    const cols = buildColumns('status', acts, [], statuses, 'startDate');
+    expect(cols.find(c => c.id === NO_STATUS_ID)!.items.map(a => a.id)).toEqual(['x']);
+  });
+});
+
+// ── buildColumns — member ──────────────────────────────────────────────────────
+
+describe('buildColumns: member', () => {
+  it('creates Unassigned column first, then one column per member', () => {
+    const cols = buildColumns('member', [], members, [], 'startDate');
+    expect(cols[0].id).toBe(UNASSIGNED_ID);
+    expect(cols.slice(1).map(c => c.id)).toEqual(['m1', 'm2', 'm3']);
+  });
+
+  it('routes activity to primary (first) member column', () => {
+    const acts = [makeActivity({ id: 'a', assignedMemberIds: ['m2', 'm1'] })];
+    const cols = buildColumns('member', acts, members, [], 'startDate');
+    expect(cols.find(c => c.id === 'm2')!.items.map(a => a.id)).toEqual(['a']);
+    expect(cols.find(c => c.id === 'm1')!.items).toHaveLength(0);
+  });
+
+  it('routes unassigned activity to Unassigned column', () => {
+    const acts = [makeActivity({ id: 'u', assignedMemberIds: [] })];
+    const cols = buildColumns('member', acts, members, [], 'startDate');
+    expect(cols.find(c => c.id === UNASSIGNED_ID)!.items.map(a => a.id)).toEqual(['u']);
+  });
+
+  it('dropValue for member column sets assignedMemberIds to singleton', () => {
+    const cols = buildColumns('member', [], members, [], 'startDate');
+    const m1col = cols.find(c => c.id === 'm1')!;
+    expect(m1col.dropValue).toEqual({ assignedMemberIds: ['m1'] });
+  });
+
+  it('dropValue for Unassigned column sets assignedMemberIds to empty', () => {
+    const cols = buildColumns('member', [], members, [], 'startDate');
+    const unassigned = cols.find(c => c.id === UNASSIGNED_ID)!;
+    expect(unassigned.dropValue).toEqual({ assignedMemberIds: [] });
+  });
+});
+
+// ── buildColumns — member-combination ─────────────────────────────────────────
+
+describe('buildColumns: member-combination', () => {
+  it('groups by exact assignee set, not primary member', () => {
+    const acts = [
+      makeActivity({ id: 'solo-alice', assignedMemberIds: ['m1'] }),
+      makeActivity({ id: 'alice-bob', assignedMemberIds: ['m1', 'm2'] }),
+      makeActivity({ id: 'solo-alice-2', assignedMemberIds: ['m1'] }),
+    ];
+    const cols = buildColumns('member-combination', acts, members, [], 'startDate');
+    const aliceCol = cols.find(c => c.label === 'Alice')!;
+    expect(aliceCol.items).toHaveLength(2);
+    const combCol = cols.find(c => c.label === 'Alice and Bob')!;
+    expect(combCol.items).toHaveLength(1);
+  });
+
+  it('combination columns are non-droppable', () => {
+    const acts = [makeActivity({ id: 'a', assignedMemberIds: ['m1', 'm2'] })];
+    const cols = buildColumns('member-combination', acts, members, [], 'startDate');
+    expect(cols.every(c => !c.droppable)).toBe(true);
+  });
+
+  it('empty assignee set maps to Unassigned column', () => {
+    const acts = [makeActivity({ id: 'u', assignedMemberIds: [] })];
+    const cols = buildColumns('member-combination', acts, members, [], 'startDate');
+    const unassigned = cols.find(c => c.label === 'Unassigned');
+    expect(unassigned).toBeDefined();
+    expect(unassigned!.items).toHaveLength(1);
+  });
+});
+
+// ── empty activities ───────────────────────────────────────────────────────────
+
+describe('buildColumns with no activities', () => {
+  const emptyActs: ApiActivity[] = [];
+
+  (['status', 'member', 'member-combination'] as KanbanGroupBy[]).forEach(mode => {
+    it(`${mode} groupBy produces columns without throwing`, () => {
+      expect(() =>
+        buildColumns(mode, emptyActs, members, statuses, 'startDate'),
+      ).not.toThrow();
+    });
+  });
+});
+
+// ── buildHierarchyMaps ─────────────────────────────────────────────────────────
+
+describe('buildHierarchyMaps', () => {
+  it('returns empty maps when there are no parent-child relationships', () => {
+    const acts = [
+      makeActivity({ id: 'a' }),
+      makeActivity({ id: 'b' }),
+    ];
+    const { childrenByParentId, childIds } = buildHierarchyMaps(acts);
+    expect(childrenByParentId.size).toBe(0);
+    expect(childIds.size).toBe(0);
+  });
+
+  it('maps children to their parent', () => {
+    const acts = [
+      makeActivity({ id: 'parent' }),
+      makeActivity({ id: 'child1', parentActivityId: 'parent' }),
+      makeActivity({ id: 'child2', parentActivityId: 'parent' }),
+    ];
+    const { childrenByParentId, childIds } = buildHierarchyMaps(acts);
+    expect(childrenByParentId.get('parent')?.map(a => a.id)).toEqual(['child1', 'child2']);
+    expect(childIds).toEqual(new Set(['child1', 'child2']));
+  });
+
+  it('orphaned child (parent filtered out) is not placed in childrenByParentId', () => {
+    // Only the child is in the visible set; parent is absent (filtered).
+    const acts = [makeActivity({ id: 'child', parentActivityId: 'absent-parent' })];
+    const { childrenByParentId, childIds } = buildHierarchyMaps(acts);
+    expect(childrenByParentId.size).toBe(0);
+    // The child is NOT in childIds, so it surfaces as a root card.
+    expect(childIds.has('child')).toBe(false);
+  });
+
+  it('supports multi-level nesting', () => {
+    const acts = [
+      makeActivity({ id: 'root' }),
+      makeActivity({ id: 'mid', parentActivityId: 'root' }),
+      makeActivity({ id: 'leaf', parentActivityId: 'mid' }),
+    ];
+    const { childrenByParentId, childIds } = buildHierarchyMaps(acts);
+    expect(childrenByParentId.get('root')?.map(a => a.id)).toEqual(['mid']);
+    expect(childrenByParentId.get('mid')?.map(a => a.id)).toEqual(['leaf']);
+    expect(childIds).toEqual(new Set(['mid', 'leaf']));
+  });
+});
+
+// ── toggleCollapsedColumn ─────────────────────────────────────────────────────
+
+describe('toggleCollapsedColumn', () => {
+  it('adds a column ID when it is not yet collapsed', () => {
+    expect(toggleCollapsedColumn([], 'col-1')).toEqual(['col-1']);
+    expect(toggleCollapsedColumn(['col-2'], 'col-1')).toEqual(['col-2', 'col-1']);
+  });
+
+  it('removes a column ID when it is already collapsed', () => {
+    expect(toggleCollapsedColumn(['col-1'], 'col-1')).toEqual([]);
+    expect(toggleCollapsedColumn(['col-1', 'col-2'], 'col-1')).toEqual(['col-2']);
+  });
+
+  it('does not mutate the input array', () => {
+    const original = ['col-1'];
+    toggleCollapsedColumn(original, 'col-2');
+    expect(original).toEqual(['col-1']);
+  });
+});
+
+// ── handleAddInColumn prefill ─────────────────────────────────────────────────
+
+describe('column dropValue encodes correct prefill context', () => {
+  it('status column dropValue carries statusId for create prefill', () => {
+    const cols = buildColumns('status', [], [], statuses, 'startDate');
+    const s1 = cols.find(c => c.id === 's1')!;
+    // dropValue.statusId is what handleAddInColumn passes as the default statusId.
+    expect(s1.dropValue?.statusId).toBe('s1');
+    expect('statusId' in (s1.dropValue ?? {})).toBe(true);
+  });
+
+  it('no-status column dropValue has statusId: null', () => {
+    const cols = buildColumns('status', [], [], statuses, 'startDate');
+    const noStatus = cols.find(c => c.id === NO_STATUS_ID)!;
+    expect(noStatus.dropValue?.statusId).toBeNull();
+    expect('statusId' in (noStatus.dropValue ?? {})).toBe(true);
+  });
+
+  it('member column dropValue carries assignedMemberIds singleton', () => {
+    const cols = buildColumns('member', [], members, [], 'startDate');
+    const m1 = cols.find(c => c.id === 'm1')!;
+    expect(m1.dropValue?.assignedMemberIds).toEqual(['m1']);
+  });
+
+  it('unassigned column dropValue has empty assignedMemberIds and no statusId key', () => {
+    const cols = buildColumns('member', [], members, [], 'startDate');
+    const unassigned = cols.find(c => c.id === UNASSIGNED_ID)!;
+    expect(unassigned.dropValue?.assignedMemberIds).toEqual([]);
+    expect('statusId' in (unassigned.dropValue ?? {})).toBe(false);
+  });
+});
+````
+
+## File: packages/web/src/components/kanban/KanbanView.tsx
+````typescript
+/**
+ * KanbanView — data container for the Kanban board.
+ *
+ * Mirrors CalendarView: fetches activities + members, applies the active filter
+ * and Find query, builds columns via kanbanColumns, and hands off to KanbanBoard
+ * for rendering. Owns no layout chrome — groupBy, sortBy, colorBy, and cardFields
+ * come from DashboardPage.
+ */
+
+import { useMemo, useEffect, useCallback, useState } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
+import KanbanBoard from './KanbanBoard';
+import {
+  buildColumns,
+  buildHierarchyMaps,
+  toggleCollapsedColumn,
+  DEFAULT_CARD_FIELDS,
+  type KanbanGroupBy,
+  type KanbanSortBy,
+  type KanbanCardField,
+} from './kanbanColumns';
+import { resolveActivityColor } from '@/lib/activityColor';
+import { useTimelineActivities, useTeamMembers, useUpdateActivity } from '@/hooks/useTeamActivities';
+import { matchEvents } from '@/lib/findMatcher';
+import { useFind } from '@/contexts/FindContext';
+import { useFilter } from '@/contexts/FilterContext';
+import { applyActiveFilter } from '@/lib/presetFilters';
+import { useUpsertPreference } from '@/hooks/usePreferences';
+import { resolveColorHex } from '@/components/identity/identity-constants';
+import type { ColorBy } from '@/components/gantt/GanttToolbar';
+import type { components } from '@draba/shared';
+import type { Member } from '@/types';
+import { MEMBER_COLORS } from '@/types';
+import type { DropPayload } from './KanbanBoard';
+
+type ApiActivity = components['schemas']['Activity'];
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
+type Status = components['schemas']['Status'];
+type SavedFilter = components['schemas']['SavedFilter'];
+type Tag = components['schemas']['Tag'];
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function initialsFrom(name: string): string {
+  return name.split(/\s+/).map(w => w[0] ?? '').slice(0, 2).join('').toUpperCase();
+}
+
+function toMember(m: TeamMemberWithUser, index: number): Member {
+  const name = m.displayName || m.email || 'Unknown';
+  return {
+    id: m.id,
+    name,
+    initials: initialsFrom(name),
+    color: resolveColorHex(m.color) || MEMBER_COLORS[index % MEMBER_COLORS.length],
+  };
+}
+
+// ── Props ─────────────────────────────────────────────────────────────────────
+
+interface Props {
+  teamId: string;
+  timelineId: string;
+  groupBy: KanbanGroupBy;
+  sortBy: KanbanSortBy;
+  colorBy: ColorBy;
+  cardFields: KanbanCardField[];
+  collapsedColumnIds: string[];
+  onCollapsedColumnIdsChange: (ids: string[]) => void;
+  /** When true, child activities nest beneath their parent in the parent's column. */
+  showHierarchy: boolean;
+  timelineStatuses?: Status[];
+  savedFilters?: SavedFilter[];
+  tags?: Tag[];
+  selectedActivityId?: string | null;
+  onSelectActivity?: (id: string | null) => void;
+  onSelectApiActivity?: (activity: ApiActivity | null) => void;
+  /** Called when "+ Add" is clicked in a column; provides pre-fill context. */
+  onAddActivity?: (defaults: { start: string; end: string; memberId: string | null; statusId?: string | null }) => void;
+  onMembersLoaded?: (members: Member[]) => void;
+}
+
+// ── KanbanView ────────────────────────────────────────────────────────────────
+
+export default function KanbanView({
+  teamId,
+  timelineId,
+  groupBy,
+  sortBy,
+  colorBy,
+  cardFields,
+  collapsedColumnIds,
+  onCollapsedColumnIdsChange,
+  showHierarchy,
+  timelineStatuses,
+  savedFilters,
+  tags,
+  selectedActivityId,
+  onSelectActivity,
+  onSelectApiActivity,
+  onAddActivity,
+  onMembersLoaded,
+}: Props) {
+  const queryClient = useQueryClient();
+  const { debouncedQuery, registerMatches, activeMatchId } = useFind();
+  const { activeFilter } = useFilter();
+  const upsert = useUpsertPreference();
+
+  // Fetch data — no date bounds for Kanban (show all activities on the timeline).
+  const { data: apiMembers = [] } = useTeamMembers(teamId);
+  const { data: apiActivities = [], isLoading } = useTimelineActivities(teamId, timelineId);
+  const updateActivity = useUpdateActivity(timelineId);
+
+  const members: Member[] = useMemo(
+    () => apiMembers.map((m, i) => toMember(m, i)),
+    [apiMembers],
+  );
+
+  const memberById = useMemo<Record<string, Member>>(() => {
+    const map: Record<string, Member> = {};
+    members.forEach(m => { map[m.id] = m; });
+    return map;
+  }, [members]);
+
+  useEffect(() => {
+    if (onMembersLoaded && members.length > 0) onMembersLoaded(members);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [members]);
+
+  // Filter engine context.
+  const closedStatusIds = useMemo(
+    () => new Set((timelineStatuses ?? []).filter(s => s.isClosed).map(s => s.id)),
+    [timelineStatuses],
+  );
+  const statusesByTimeline = useMemo(() => {
+    const m = new Map<string, Status[]>();
+    if (timelineStatuses?.length) m.set(timelineId, timelineStatuses);
+    return m;
+  }, [timelineId, timelineStatuses]);
+  const memberIdsByUserId = useMemo(() => {
+    const m = new Map<string, string[]>();
+    apiMembers.forEach(mem => {
+      if (mem.userId) {
+        const existing = m.get(mem.userId) ?? [];
+        m.set(mem.userId, [...existing, mem.id]);
+      }
+    });
+    return m;
+  }, [apiMembers]);
+
+  const visibleActivities = useMemo(
+    () => applyActiveFilter(
+      apiActivities,
+      activeFilter,
+      memberIdsByUserId,
+      {
+        closedStatusIds,
+        savedFilters: savedFilters ?? [],
+        statuses: statusesByTimeline,
+        tags: tags ?? [],
+      },
+    ),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [apiActivities, activeFilter, memberIdsByUserId, closedStatusIds, savedFilters, statusesByTimeline, tags],
+  );
+
+  const statusById = useMemo(
+    () => new Map((timelineStatuses ?? []).map(s => [s.id, s])),
+    [timelineStatuses],
+  );
+  const statusColorById = useMemo(
+    () => new Map((timelineStatuses ?? []).map(s => [s.id, s.color ?? ''])),
+    [timelineStatuses],
+  );
+  const tagById = useMemo(
+    () => new Map((tags ?? []).map(t => [t.id, t])),
+    [tags],
+  );
+
+  // Per-activity resolved hex color (driven by colorBy) — used as card accent border.
+  const colorMap = useMemo<Map<string, string>>(() => {
+    const map = new Map<string, string>();
+    visibleActivities.forEach((act, i) => {
+      map.set(act.id, resolveActivityColor(act, i, memberById, colorBy, statusColorById));
+    });
+    return map;
+  }, [visibleActivities, memberById, colorBy, statusColorById]);
+
+  // ── Hierarchy ────────────────────────────────────────────────────────────────
+
+  const { childrenByParentId, childIds } = useMemo(
+    () => showHierarchy ? buildHierarchyMaps(visibleActivities) : { childrenByParentId: new Map<string, ApiActivity[]>(), childIds: new Set<string>() },
+    [visibleActivities, showHierarchy],
+  );
+
+  /**
+   * Activities used for column building.
+   * When hierarchy is on, only root activities (not nested children) get a
+   * column slot — children are rendered under their parent by KanbanColumn.
+   */
+  const columnActivities = useMemo(
+    () => showHierarchy
+      ? visibleActivities.filter(a => !childIds.has(a.id))
+      : visibleActivities,
+    [visibleActivities, showHierarchy, childIds],
+  );
+
+  /** Per-parent collapse state — ephemeral (not persisted). Starts fully expanded. */
+  const [collapsedParents, setCollapsedParents] = useState<Set<string>>(new Set());
+
+  const handleToggleParent = useCallback((activityId: string) => {
+    setCollapsedParents(prev => {
+      const next = new Set(prev);
+      if (next.has(activityId)) next.delete(activityId);
+      else next.add(activityId);
+      return next;
+    });
+  }, []);
+
+  // Build columns.
+  const columns = useMemo(
+    () => buildColumns(
+      groupBy,
+      columnActivities,
+      apiMembers,
+      timelineStatuses ?? [],
+      sortBy,
+    ),
+    [groupBy, columnActivities, apiMembers, timelineStatuses, sortBy],
+  );
+
+  // Activity ID → ApiActivity map for drag overlay and optimistic updates.
+  const activityById = useMemo<Map<string, ApiActivity>>(
+    () => new Map(apiActivities.map(a => [a.id, a])),
+    [apiActivities],
+  );
+
+  // Activity ID → title lookup for the "Parent" card field.
+  // Uses apiActivities (all activities, not just visible) so the parent title
+  // still shows when the parent activity is filtered out by the active filter.
+  const activityTitleById = useMemo<Map<string, string>>(
+    () => new Map(apiActivities.map(a => [a.id, a.title])),
+    [apiActivities],
+  );
+
+  // Collapsed column persistence.
+  const collapsedSet = useMemo(() => new Set(collapsedColumnIds), [collapsedColumnIds]);
+
+  const handleToggleCollapse = useCallback((columnId: string) => {
+    const next = toggleCollapsedColumn(collapsedColumnIds, columnId);
+    onCollapsedColumnIdsChange(next);
+    if (timelineId) {
+      upsert.mutate({
+        key: 'kanban_collapsed',
+        value: JSON.stringify(next),
+        timelineId,
+      });
+    }
+  }, [collapsedSet, collapsedColumnIds, onCollapsedColumnIdsChange, timelineId, upsert]);
+
+  // Find: compute matches.
+  const matchResults = useMemo(
+    () => matchEvents(debouncedQuery, visibleActivities, members, visibleActivities),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [debouncedQuery, visibleActivities, members],
+  );
+  const matchedSet = useMemo(() => new Set(matchResults.map(r => r.activityId)), [matchResults]);
+
+  // Register ordered match IDs walking the full tree (root + children).
+  const orderedMatchIds = useMemo(() => {
+    const ids: string[] = [];
+
+    function walkActivity(act: ApiActivity) {
+      if (matchedSet.has(act.id)) ids.push(act.id);
+      if (showHierarchy) {
+        const children = childrenByParentId.get(act.id) ?? [];
+        children.forEach(walkActivity);
+      }
+    }
+
+    for (const col of columns) {
+      if (collapsedSet.has(col.id)) continue;
+      col.items.forEach(walkActivity);
+    }
+    return ids;
+  }, [columns, collapsedSet, matchedSet, showHierarchy, childrenByParentId]);
+
+  useEffect(() => {
+    registerMatches(orderedMatchIds, new Map());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [orderedMatchIds]);
+
+  // Auto-expand a collapsed column that contains the active match.
+  useEffect(() => {
+    if (!activeMatchId) return;
+    // Expand collapsed column.
+    const containingCol = columns.find(col =>
+      collapsedSet.has(col.id) && col.items.some(a => a.id === activeMatchId),
+    );
+    if (containingCol) handleToggleCollapse(containingCol.id);
+
+    // Auto-expand a collapsed parent whose descendant is the active match.
+    if (showHierarchy) {
+      for (const [parentId, children] of childrenByParentId) {
+        if (collapsedParents.has(parentId)) {
+          function isDescendant(id: string): boolean {
+            if (id === activeMatchId) return true;
+            return (childrenByParentId.get(id) ?? []).some(c => isDescendant(c.id));
+          }
+          if (children.some(c => isDescendant(c.id))) {
+            handleToggleParent(parentId);
+          }
+        }
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeMatchId]);
+
+  // Derive which field is the current Group by axis (auto-suppressed on cards).
+  const suppressedFields = useMemo((): Set<KanbanCardField> => {
+    const s = new Set<KanbanCardField>();
+    if (groupBy === 'status') s.add('status');
+    if (groupBy === 'member' || groupBy === 'member-combination') s.add('members');
+    return s;
+  }, [groupBy]);
+
+  // Card click → open detail panel.
+  const handleCardClick = useCallback((activity: ApiActivity) => {
+    if (onSelectApiActivity) onSelectApiActivity(activity);
+    if (onSelectActivity)    onSelectActivity(activity.id);
+  }, [onSelectApiActivity, onSelectActivity]);
+
+  // "+ Add" in a column → open create panel prefilled with the column's context.
+  const handleAddInColumn = useCallback((column: { id: string; dropValue?: { statusId?: string | null; assignedMemberIds?: string[] } }) => {
+    const today = new Date().toISOString().slice(0, 10);
+    const memberId = column.dropValue?.assignedMemberIds?.[0] ?? null;
+    // Pass statusId only when it's explicitly present in dropValue (status grouping).
+    const statusId = 'statusId' in (column.dropValue ?? {}) ? column.dropValue!.statusId : undefined;
+    if (onAddActivity) {
+      onAddActivity({ start: today, end: today, memberId, statusId });
+    }
+  }, [onAddActivity]);
+
+  // Drag commit.
+  const handleDrop = useCallback((payload: DropPayload) => {
+    const existing = activityById.get(payload.activityId);
+    const merged: ApiActivity | undefined = existing
+      ? { ...existing, ...payload.patch }
+      : undefined;
+
+    // Optimistic cache update.
+    queryClient.setQueriesData<ApiActivity[]>(
+      { queryKey: ['timelines', timelineId, 'activities'] },
+      old => old?.map(a => a.id === payload.activityId ? (merged ?? a) : a),
+    );
+
+    // If the dragged card is currently open in the edit panel, sync the panel
+    // immediately so the user sees the new status / assignee without closing and
+    // re-opening the sidebar.
+    if (merged && selectedActivityId === payload.activityId && onSelectApiActivity) {
+      onSelectApiActivity(merged);
+    }
+
+    updateActivity.mutate({ activityId: payload.activityId, patch: payload.patch });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [queryClient, timelineId, updateActivity, activityById, selectedActivityId, onSelectApiActivity]);
+
+  const hasQuery = debouncedQuery.trim().length > 0;
+
+  // ── Effective card fields: apply context-aware suppression at render time ────
+  const effectiveCardFields = useMemo(
+    () => (cardFields.length > 0 ? cardFields : DEFAULT_CARD_FIELDS),
+    [cardFields],
+  );
+
+  // ── Loading ────────────────────────────────────────────────────────────────
+
+  if (isLoading) {
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: 'var(--muted-foreground)', fontSize: 13 }}>
+        Loading activities…
+      </div>
+    );
+  }
+
+  return (
+    <KanbanBoard
+      columns={columns}
+      groupBy={groupBy}
+      members={members}
+      statusById={statusById}
+      tagById={tagById}
+      colorMap={colorMap}
+      cardFields={effectiveCardFields}
+      suppressedFields={suppressedFields}
+      selectedActivityId={selectedActivityId ?? null}
+      matchedIds={matchedSet}
+      activeMatchId={activeMatchId}
+      hasQuery={hasQuery}
+      collapsedColumnIds={collapsedSet}
+      onToggleCollapse={handleToggleCollapse}
+      onCardClick={handleCardClick}
+      onAddInColumn={handleAddInColumn}
+      onDrop={handleDrop}
+      activityById={activityById}
+      activityTitleById={activityTitleById}
+      showHierarchy={showHierarchy}
+      childrenByParentId={childrenByParentId}
+      collapsedParents={collapsedParents}
+      onToggleParent={handleToggleParent}
+    />
+  );
+}
+````
+
 ## File: packages/web/src/components/list/ListToolbar.tsx
 ````typescript
 /**
@@ -51503,6 +53305,51 @@ docker start "$DRABA_CONTAINER" >/dev/null
 echo "Done. Test invite token is ready. The api-smoke subagent can now register against it."
 ````
 
+## File: .golangci.yml
+````yaml
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - staticcheck
+    - ineffassign
+    - gofmt
+    - goimports
+    - gocritic
+    - revive
+    - misspell
+    - nolintlint
+
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/I0-1O/draba
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - style
+        - performance
+    revive:
+      rules:
+        - name: exported
+          severity: warning
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - errcheck
+````
+
 ## File: docker-compose.yml
 ````yaml
 services:
@@ -52315,378 +54162,21 @@ require (
 )
 ````
 
-## File: packages/web/src/components/kanban/KanbanCard.tsx
+## File: packages/web/src/components/kanban/KanbanBoard.tsx
 ````typescript
 /**
- * KanbanCard — a single draggable activity card.
+ * KanbanBoard — the DndContext host that owns all columns and the drag overlay.
  *
- * Renders the card accent border (driven by colorBy), title, and the
- * configured optional fields. Uses @dnd-kit useDraggable for drag support.
+ * Renders columns in a horizontal scrolling row. On drag-end, derives the
+ * correct PATCH payload for the active groupBy and calls onDrop.
  */
 
-import { useDraggable } from '@dnd-kit/core';
-import { Calendar, GitBranch, ChevronDown, ChevronRight } from 'lucide-react';
-import { formatActivityDate } from '@/components/list/ListView';
-import { resolveColorHex } from '@/components/identity/identity-constants';
-import { Badge } from '@/components/identity/Badge';
-import type { Member } from '@/types';
-import type { components } from '@draba/shared';
-import type { KanbanCardField } from './kanbanColumns';
-
-type ApiActivity = components['schemas']['Activity'];
-type Status = components['schemas']['Status'];
-type Tag = components['schemas']['Tag'];
-
-interface Props {
-  activity: ApiActivity;
-  accentColor: string;
-  members: Member[];
-  statusById: Map<string, Status>;
-  tagById: Map<string, Tag>;
-  /** Activity ID → title, used to show the parent's name when "Parent" field is on. */
-  activityTitleById?: Map<string, string>;
-  cardFields: KanbanCardField[];
-  /** Fields suppressed because they duplicate the current Group by axis. */
-  suppressedFields: Set<KanbanCardField>;
-  isSelected: boolean;
-  /** True when Find is active and this card doesn't match. */
-  dimmed: boolean;
-  /** True when Find is active and this card is the active match. */
-  activeMatch: boolean;
-  isDragOverlay?: boolean;
-  onClick: () => void;
-
-  // ── Hierarchy ────────────────────────────────────────────────────────────────
-  /** True when hierarchy mode is on and this card has children to show/hide. */
-  hasHierarchyChildren?: boolean;
-  /** Whether the children are currently hidden. */
-  isHierarchyCollapsed?: boolean;
-  /**
-   * Click handler for the collapse/expand chevron.
-   * Receives the mouse event so the handler can stopPropagation (prevents
-   * the card-click from also opening the detail panel).
-   */
-  onToggleHierarchy?: (e: React.MouseEvent) => void;
-  /** True when this card is nested under a parent — disables drag. */
-  isChildCard?: boolean;
-  /** When false (public share viewer), drag and clicks are inert. Defaults to true. */
-  interactive?: boolean;
-}
-
-export default function KanbanCard({
-  activity,
-  accentColor,
-  members,
-  statusById,
-  tagById,
-  cardFields,
-  suppressedFields,
-  isSelected,
-  dimmed,
-  activeMatch,
-  isDragOverlay = false,
-  onClick,
-  hasHierarchyChildren = false,
-  isHierarchyCollapsed = false,
-  onToggleHierarchy,
-  isChildCard = false,
-  activityTitleById,
-  interactive = true,
-}: Props) {
-  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
-    id: activity.id,
-    data: { activityId: activity.id },
-    // Drag overlay renders separately, and child cards travel with their parent.
-    disabled: isDragOverlay || isChildCard || !interactive,
-  });
-
-  // Do NOT apply the dnd-kit transform to the original card.
-  //
-  // We use DragOverlay for the visual movement, so the overlay card floats as
-  // the user drags and the original stays in place as an invisible placeholder.
-  // Applying the transform here causes the column's overflow container to expand
-  // its scroll area as the mouse moves, producing a growing scrollbar.
-  const style: React.CSSProperties = isDragging && !isDragOverlay
-    ? { visibility: 'hidden' }   // placeholder: preserves layout space, no transform, no scrollbar growth
-    : { opacity: dimmed ? 0.3 : 1, transition: dimmed ? 'opacity 150ms' : undefined };
-
-  const showField = (f: KanbanCardField) =>
-    cardFields.includes(f) && !suppressedFields.has(f);
-
-  const status = activity.statusId ? statusById.get(activity.statusId) : undefined;
-  const statusColor = status?.color ? resolveColorHex(status.color) : undefined;
-
-  const assignedMembers = (activity.assignedMemberIds ?? [])
-    .map(id => members.find(m => m.id === id))
-    .filter((m): m is Member => Boolean(m));
-
-  const tags = (activity.tagIds ?? [])
-    .map(id => tagById.get(id))
-    .filter((t): t is Tag => Boolean(t));
-
-  const formatDate = (iso: string | null | undefined) =>
-    iso ? formatActivityDate(iso) : null;
-
-  const startLabel = formatDate(activity.startAt);
-  const endLabel   = formatDate(activity.endAt);
-  const dateLabel  = startLabel && endLabel
-    ? startLabel === endLabel ? startLabel : `${startLabel} – ${endLabel}`
-    : startLabel ?? endLabel ?? null;
-
-  const cardStyle: React.CSSProperties = {
-    ...style,
-    background: 'var(--card)',
-    border: `1px solid ${isSelected ? accentColor : activeMatch ? '#f59e0b' : 'var(--border)'}`,
-    borderLeft: `3px solid ${accentColor}`,
-    borderRadius: 6,
-    padding: '8px 10px',
-    cursor: !interactive ? 'default' : isDragOverlay ? 'grabbing' : 'pointer',
-    boxShadow: isDragOverlay
-      ? '0 8px 24px rgba(0,0,0,0.2)'
-      : isSelected
-      ? `0 0 0 2px ${accentColor}40`
-      : activeMatch
-      ? '0 0 0 2px #f59e0b80'
-      : undefined,
-    userSelect: 'none',
-    marginBottom: 6,
-    transition: 'box-shadow 100ms, border-color 100ms',
-  };
-
-  return (
-    <div
-      ref={setNodeRef}
-      {...(interactive ? listeners : {})}
-      {...(interactive ? attributes : {})}
-      style={cardStyle}
-      onClick={interactive ? onClick : undefined}
-      role={interactive ? 'button' : undefined}
-      tabIndex={interactive ? 0 : undefined}
-      onKeyDown={interactive ? (e => { if (e.key === 'Enter' || e.key === ' ') onClick(); }) : undefined}
-    >
-      {/* Title row — with optional collapse chevron for hierarchy parents */}
-      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 4, marginBottom: 4 }}>
-        {hasHierarchyChildren && (
-          <button
-            onClick={interactive ? (e => { e.stopPropagation(); onToggleHierarchy?.(e); }) : undefined}
-            title={isHierarchyCollapsed ? 'Expand children' : 'Collapse children'}
-            style={{
-              flexShrink: 0,
-              marginTop: 1,
-              background: 'none',
-              border: 'none',
-              padding: 0,
-              cursor: interactive ? 'pointer' : 'default',
-              color: 'var(--muted-foreground)',
-              display: 'flex',
-              alignItems: 'center',
-            }}
-          >
-            {isHierarchyCollapsed
-              ? <ChevronRight size={13} strokeWidth={2} />
-              : <ChevronDown  size={13} strokeWidth={2} />
-            }
-          </button>
-        )}
-        <div
-          style={{
-            flex: 1,
-            fontSize: 13,
-            fontWeight: 500,
-            color: 'var(--foreground)',
-            lineHeight: 1.4,
-            display: '-webkit-box',
-            WebkitLineClamp: 2,
-            WebkitBoxOrient: 'vertical',
-            overflow: 'hidden',
-          }}
-        >
-          {activity.title}
-        </div>
-      </div>
-
-      {/* Description snippet */}
-      {showField('description') && activity.description && (
-        <div
-          style={{
-            fontSize: 11,
-            color: 'var(--muted-foreground)',
-            whiteSpace: 'nowrap',
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            marginBottom: 4,
-          }}
-        >
-          {activity.description}
-        </div>
-      )}
-
-      {/* Status pill */}
-      {showField('status') && status && (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 4 }}>
-          <span
-            style={{
-              width: 8,
-              height: 8,
-              borderRadius: '50%',
-              background: statusColor ?? '#6b7280',
-              flexShrink: 0,
-            }}
-          />
-          <span style={{ fontSize: 11, color: 'var(--muted-foreground)' }}>{status.name}</span>
-        </div>
-      )}
-
-      {/* Date range */}
-      {showField('dateRange') && dateLabel && (
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 4,
-            fontSize: 11,
-            color: 'var(--muted-foreground)',
-            marginBottom: 4,
-          }}
-        >
-          <Calendar size={11} strokeWidth={1.6} />
-          {dateLabel}
-        </div>
-      )}
-
-      {/* Tags */}
-      {showField('tags') && tags.length > 0 && (
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 3, marginBottom: 4 }}>
-          {tags.slice(0, 3).map(t => (
-            <span
-              key={t.id}
-              style={{
-                fontSize: 10,
-                fontWeight: 500,
-                padding: '1px 6px',
-                borderRadius: 10,
-                background: resolveColorHex(t.color ?? null) ? `${resolveColorHex(t.color ?? null)}22` : 'var(--muted)',
-                color: resolveColorHex(t.color ?? null) ?? 'var(--muted-foreground)',
-                border: `1px solid ${resolveColorHex(t.color ?? null) ?? 'var(--border)'}44`,
-              }}
-            >
-              {t.name}
-            </span>
-          ))}
-          {tags.length > 3 && (
-            <span style={{ fontSize: 10, color: 'var(--muted-foreground)' }}>+{tags.length - 3}</span>
-          )}
-        </div>
-      )}
-
-      {/* % complete bar */}
-      {showField('percentComplete') && activity.percentComplete != null && (
-        <div style={{ marginBottom: 4 }}>
-          <div
-            style={{
-              height: 3,
-              background: 'var(--muted)',
-              borderRadius: 2,
-              overflow: 'hidden',
-            }}
-          >
-            <div
-              style={{
-                height: '100%',
-                width: `${activity.percentComplete}%`,
-                background: accentColor,
-                borderRadius: 2,
-                transition: 'width 200ms',
-              }}
-            />
-          </div>
-        </div>
-      )}
-
-      {/* Footer: parent pill + member avatars */}
-      {(showField('parent') || showField('members')) && (
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 2 }}>
-          {/* Parent badge — shows the parent activity's title */}
-          {showField('parent') && activity.parentActivityId && (
-            <span
-              style={{
-                fontSize: 10,
-                color: 'var(--muted-foreground)',
-                display: 'flex',
-                alignItems: 'center',
-                gap: 3,
-                overflow: 'hidden',
-                flex: 1,
-              }}
-            >
-              <GitBranch size={9} strokeWidth={1.6} style={{ flexShrink: 0 }} />
-              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {activityTitleById?.get(activity.parentActivityId) ?? 'Parent'}
-              </span>
-            </span>
-          )}
-
-          {/* Member avatars */}
-          {showField('members') && assignedMembers.length > 0 && (
-            <div
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                marginLeft: 'auto',
-              }}
-            >
-              {assignedMembers.slice(0, 3).map((m, i) => (
-                <div
-                  key={m.id}
-                  style={{
-                    marginLeft: i === 0 ? 0 : -6,
-                    zIndex: assignedMembers.length - i,
-                    outline: '2px solid var(--card)',
-                    borderRadius: '50%',
-                  }}
-                  title={m.name}
-                >
-                  <Badge
-                    identity={{ color: m.color, icon: '__name_2__' }}
-                    name={m.name}
-                    shape="circle"
-                    size={20}
-                  />
-                </div>
-              ))}
-              {assignedMembers.length > 3 && (
-                <span style={{ fontSize: 10, color: 'var(--muted-foreground)', marginLeft: 4 }}>
-                  +{assignedMembers.length - 3}
-                </span>
-              )}
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-````
-
-## File: packages/web/src/components/kanban/KanbanColumn.tsx
-````typescript
-/**
- * KanbanColumn — a single droppable column with a header, card list, and "+ Add" affordance.
- *
- * Uses @dnd-kit useDroppable. When the column is non-droppable (combination/none grouping),
- * the drop-target is simply not registered and DnD events are ignored.
- *
- * Hierarchy: when showHierarchy is on, CardTree renders each root activity plus
- * its descendants indented beneath it. CardTree is defined at module level (outside
- * KanbanColumn) to give it a stable identity across re-renders — defining a component
- * inside another component causes React to unmount/remount the subtree on every render.
- */
-
-import { useDroppable } from '@dnd-kit/core';
-import { ChevronDown, ChevronRight, Plus } from 'lucide-react';
-import { resolveColorHex } from '@/components/identity/identity-constants';
+import { DndContext, DragOverlay, PointerSensor, useSensor, useSensors } from '@dnd-kit/core';
+import type { DragEndEvent, DragStartEvent, DragOverEvent } from '@dnd-kit/core';
+import { useState } from 'react';
+import KanbanColumn from './KanbanColumn';
 import KanbanCard from './KanbanCard';
-import type { KanbanColumn as Column, KanbanCardField } from './kanbanColumns';
+import type { KanbanColumn as Column, KanbanCardField, KanbanGroupBy } from './kanbanColumns';
 import type { Member } from '@/types';
 import type { components } from '@draba/shared';
 
@@ -52694,1470 +54184,481 @@ type ApiActivity = components['schemas']['Activity'];
 type Status = components['schemas']['Status'];
 type Tag = components['schemas']['Tag'];
 
-// ── CardTree ──────────────────────────────────────────────────────────────────
-
-/**
- * Renders one activity card and, when hierarchy is on, its children indented
- * beneath it (recursively). Defined at module level so React gives it a stable
- * component identity and doesn't unmount/remount on every KanbanColumn render.
- */
-interface CardTreeProps {
-  activity: ApiActivity;
-  depth: number;
-  // Column rendering context
-  accentColor: string;
-  colorMap: Map<string, string>;
-  members: Member[];
-  statusById: Map<string, Status>;
-  tagById: Map<string, Tag>;
-  activityTitleById: Map<string, string>;
-  cardFields: KanbanCardField[];
-  suppressedFields: Set<KanbanCardField>;
-  selectedActivityId: string | null;
-  matchedIds: Set<string>;
-  activeMatchId: string | null;
-  hasQuery: boolean;
-  onCardClick: (activity: ApiActivity) => void;
-  // Hierarchy context
-  showHierarchy: boolean;
-  childrenByParentId: Map<string, ApiActivity[]>;
-  collapsedParents: Set<string>;
-  onToggleParent: (activityId: string) => void;
-  interactive: boolean;
-}
-
-function CardTree({
-  activity,
-  depth,
-  accentColor,
-  colorMap,
-  members,
-  statusById,
-  tagById,
-  activityTitleById,
-  cardFields,
-  suppressedFields,
-  selectedActivityId,
-  matchedIds,
-  activeMatchId,
-  hasQuery,
-  onCardClick,
-  showHierarchy,
-  childrenByParentId,
-  collapsedParents,
-  onToggleParent,
-  interactive,
-}: CardTreeProps) {
-  const children = showHierarchy ? (childrenByParentId.get(activity.id) ?? []) : [];
-  const hasChildren = children.length > 0;
-  const isCollapsed = collapsedParents.has(activity.id);
-  const indentPx = Math.min(depth, 2) * 16;
-
-  const cardTreeProps = {
-    accentColor,
-    colorMap,
-    members,
-    statusById,
-    tagById,
-    activityTitleById,
-    cardFields,
-    suppressedFields,
-    selectedActivityId,
-    matchedIds,
-    activeMatchId,
-    hasQuery,
-    onCardClick,
-    showHierarchy,
-    childrenByParentId,
-    collapsedParents,
-    onToggleParent,
-    interactive,
+export interface DropPayload {
+  activityId: string;
+  patch: {
+    statusId?: string | null;
+    assignedMemberIds?: string[];
+    parentActivityId?: string | null;
   };
-
-  return (
-    <>
-      <div style={depth > 0 ? { paddingLeft: indentPx } : undefined}>
-        <KanbanCard
-          activity={activity}
-          accentColor={colorMap.get(activity.id) ?? accentColor}
-          members={members}
-          statusById={statusById}
-          tagById={tagById}
-          activityTitleById={activityTitleById}
-          cardFields={cardFields}
-          suppressedFields={suppressedFields}
-          isSelected={selectedActivityId === activity.id}
-          dimmed={hasQuery && !matchedIds.has(activity.id)}
-          activeMatch={activeMatchId === activity.id}
-          isChildCard={depth > 0}
-          hasHierarchyChildren={hasChildren}
-          isHierarchyCollapsed={isCollapsed}
-          onToggleHierarchy={() => onToggleParent(activity.id)}
-          onClick={() => onCardClick(activity)}
-          interactive={interactive}
-        />
-      </div>
-      {hasChildren && !isCollapsed && children.map(child => (
-        <CardTree
-          key={child.id}
-          activity={child}
-          depth={depth + 1}
-          {...cardTreeProps}
-        />
-      ))}
-    </>
-  );
 }
 
 interface Props {
-  column: Column;
+  columns: Column[];
+  groupBy: KanbanGroupBy;
   members: Member[];
   statusById: Map<string, Status>;
   tagById: Map<string, Tag>;
-  /** Per-activity resolved hex color for card accent borders. */
+  /** Per-activity resolved hex color for the card accent border. */
   colorMap: Map<string, string>;
-  /** Activity ID → title, for showing the parent name on child cards. */
-  activityTitleById: Map<string, string>;
   cardFields: KanbanCardField[];
   suppressedFields: Set<KanbanCardField>;
   selectedActivityId: string | null;
   matchedIds: Set<string>;
   activeMatchId: string | null;
   hasQuery: boolean;
-  isOver: boolean;
-  isCollapsed: boolean;
-  onToggleCollapse: () => void;
+  collapsedColumnIds: Set<string>;
+  onToggleCollapse: (columnId: string) => void;
   onCardClick: (activity: ApiActivity) => void;
-  onAddClick: () => void;
+  onAddInColumn: (column: Column) => void;
+  onDrop: (payload: DropPayload) => void;
+  /** Map of activity ID → ApiActivity for drag overlay lookup. */
+  activityById: Map<string, ApiActivity>;
+  /** Map of activity ID → title, for showing parent names on child cards. */
+  activityTitleById: Map<string, string>;
   // ── Hierarchy ────────────────────────────────────────────────────────────────
   showHierarchy: boolean;
-  /** Maps parentActivityId → direct child activities. */
   childrenByParentId: Map<string, ApiActivity[]>;
-  /** Set of parent activity IDs whose children are hidden. */
   collapsedParents: Set<string>;
   onToggleParent: (activityId: string) => void;
   /** When false (public share viewer), drag, drop, and clicks are inert. Defaults to true. */
   interactive?: boolean;
 }
 
-const COLUMN_WIDTH = 260;
-const COLLAPSED_WIDTH = 40;
-
-export default function KanbanColumn({
-  column,
+export default function KanbanBoard({
+  columns,
+  groupBy,
   members,
   statusById,
   tagById,
   colorMap,
-  activityTitleById,
   cardFields,
   suppressedFields,
-  selectedActivityId,
-  matchedIds,
-  activeMatchId,
-  hasQuery,
-  isOver,
-  isCollapsed,
-  onToggleCollapse,
-  onCardClick,
-  onAddClick,
   showHierarchy,
   childrenByParentId,
   collapsedParents,
   onToggleParent,
+  selectedActivityId,
+  matchedIds,
+  activeMatchId,
+  hasQuery,
+  collapsedColumnIds,
+  onToggleCollapse,
+  onCardClick,
+  onAddInColumn,
+  onDrop,
+  activityById,
+  activityTitleById,
   interactive = true,
 }: Props) {
-  const { setNodeRef, isOver: dndIsOver } = useDroppable({
-    id: column.id,
-    disabled: !column.droppable || !interactive,
-    data: { columnId: column.id },
-  });
+  const [draggingId, setDraggingId] = useState<string | null>(null);
+  const [overColumnId, setOverColumnId] = useState<string | null>(null);
 
-  const accentColor = column.color
-    ? (resolveColorHex(column.color) ?? column.color)
-    : '#6b7280';
+  // Require a 5px drag threshold to prevent accidental drags on card clicks.
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
+  );
 
-  const highlighted = isOver || dndIsOver;
+  function handleDragStart({ active }: DragStartEvent) {
+    setDraggingId(active.id as string);
+  }
 
-  // Shared props forwarded to each CardTree node.
-  const treeProps = {
-    accentColor,
-    colorMap,
-    members,
-    statusById,
-    tagById,
-    activityTitleById,
-    cardFields,
-    suppressedFields,
-    selectedActivityId,
-    matchedIds,
-    activeMatchId,
-    hasQuery,
-    onCardClick,
-    showHierarchy,
-    childrenByParentId,
-    collapsedParents,
-    onToggleParent,
-    interactive,
-  };
+  function handleDragEnd({ active, over }: DragEndEvent) {
+    setDraggingId(null);
+    setOverColumnId(null);
+    if (!over) return;
 
-  if (isCollapsed) {
-    return (
+    const activityId = typeof active.id === 'string' ? active.id : String(active.id);
+    const columnId = typeof over.id === 'string' ? over.id : String(over.id);
+
+    const column = columns.find(c => c.id === columnId);
+    if (!column || !column.droppable || !column.dropValue) return;
+
+    // Determine if anything actually changed before issuing a PATCH.
+    const activity = activityById.get(activityId);
+    if (!activity) return;
+
+    // Skip if the card is already in this column (no-op drop).
+    const isAlreadyHere = (() => {
+      switch (groupBy) {
+        case 'status': {
+          const currentStatus = (activity as ApiActivity & { statusId?: string | null }).statusId ?? null;
+          return currentStatus === (column.dropValue.statusId ?? null);
+        }
+        case 'member': {
+          const primary = activity.assignedMemberIds?.[0] ?? null;
+          const target = column.dropValue.assignedMemberIds?.[0] ?? null;
+          return primary === target;
+        }
+        default:
+          return false;
+      }
+    })();
+
+    if (isAlreadyHere) return;
+
+    onDrop({ activityId, patch: column.dropValue });
+  }
+
+  function handleDragOver({ over }: DragOverEvent) {
+    setOverColumnId(over ? String(over.id) : null);
+  }
+
+  const draggingActivity = draggingId ? activityById.get(draggingId) : undefined;
+
+  return (
+    <DndContext
+      sensors={sensors}
+      onDragStart={handleDragStart}
+      onDragEnd={handleDragEnd}
+      onDragOver={handleDragOver}
+    >
       <div
         style={{
-          width: COLLAPSED_WIDTH,
-          flexShrink: 0,
           display: 'flex',
-          flexDirection: 'column',
-          alignItems: 'center',
-          background: 'var(--muted)',
-          borderRadius: 8,
-          padding: '8px 0',
-          cursor: interactive ? 'pointer' : 'default',
-          border: '1px solid var(--border)',
-          minHeight: 120,
-          gap: 8,
+          flexDirection: 'row',
+          gap: 12,
+          padding: '12px 16px 16px',
+          overflowX: 'auto',
+          overflowY: 'hidden',
+          height: '100%',
+          alignItems: 'flex-start',
+          boxSizing: 'border-box',
         }}
-        onClick={interactive ? onToggleCollapse : undefined}
-        title={`${column.label} (${column.items.length})`}
       >
-        <ChevronRight size={14} strokeWidth={2} style={{ color: 'var(--muted-foreground)' }} />
-        <span
-          style={{
-            fontSize: 11,
-            fontWeight: 600,
-            color: 'var(--muted-foreground)',
-            writingMode: 'vertical-rl',
-            transform: 'rotate(180deg)',
-            letterSpacing: '0.04em',
-          }}
-        >
-          {column.label}
-        </span>
-        <span
-          style={{
-            fontSize: 10,
-            color: 'var(--muted-foreground)',
-            background: 'var(--border)',
-            borderRadius: 9,
-            padding: '1px 5px',
-          }}
-        >
-          {column.items.length}
-        </span>
+        {columns.map(col => (
+          <KanbanColumn
+            key={col.id}
+            column={col}
+            members={members}
+            statusById={statusById}
+            tagById={tagById}
+            colorMap={colorMap}
+            activityTitleById={activityTitleById}
+            cardFields={cardFields}
+            suppressedFields={suppressedFields}
+            showHierarchy={showHierarchy}
+            childrenByParentId={childrenByParentId}
+            collapsedParents={collapsedParents}
+            onToggleParent={onToggleParent}
+            selectedActivityId={selectedActivityId}
+            matchedIds={matchedIds}
+            activeMatchId={activeMatchId}
+            hasQuery={hasQuery}
+            isOver={overColumnId === col.id && col.droppable}
+            isCollapsed={collapsedColumnIds.has(col.id)}
+            onToggleCollapse={() => onToggleCollapse(col.id)}
+            onCardClick={onCardClick}
+            onAddClick={() => onAddInColumn(col)}
+            interactive={interactive}
+          />
+        ))}
       </div>
-    );
+
+      {/* Drag overlay — floats above everything while dragging */}
+      <DragOverlay dropAnimation={null}>
+        {interactive && draggingActivity ? (
+          <KanbanCard
+            activity={draggingActivity}
+            accentColor={colorMap.get(draggingActivity.id) ?? '#6b7280'}
+            members={members}
+            statusById={statusById}
+            tagById={tagById}
+            cardFields={cardFields}
+            suppressedFields={suppressedFields}
+            isSelected={false}
+            dimmed={false}
+            activeMatch={false}
+            isDragOverlay
+            onClick={() => {}}
+          />
+        ) : null}
+      </DragOverlay>
+    </DndContext>
+  );
+}
+````
+
+## File: packages/web/src/components/kanban/KanbanToolbar.tsx
+````typescript
+/**
+ * KanbanToolbar — sub-toolbar for the Kanban view.
+ *
+ * Controls: Group by · Sort by · Color by · Card fields multi-select · Export/Share stubs.
+ * Follows the same visual idiom as GanttToolbar and CalendarToolbar.
+ */
+
+import { useState, useRef, useEffect } from 'react';
+import { Download, Share2, ChevronDown, Check, Network } from 'lucide-react';
+import type { ColorBy } from '@/components/gantt/GanttToolbar';
+import type { KanbanGroupBy, KanbanSortBy, KanbanCardField } from './kanbanColumns';
+import { DEFAULT_CARD_FIELDS } from './kanbanColumns';
+
+export type { KanbanGroupBy, KanbanSortBy, KanbanCardField };
+
+interface Props {
+  groupBy: KanbanGroupBy;
+  onGroupByChange: (g: KanbanGroupBy) => void;
+  sortBy: KanbanSortBy;
+  onSortByChange: (s: KanbanSortBy) => void;
+  colorBy: ColorBy;
+  onColorByChange: (c: ColorBy) => void;
+  cardFields: KanbanCardField[];
+  onCardFieldsChange: (fields: KanbanCardField[]) => void;
+  showHierarchy: boolean;
+  onShowHierarchyChange: (on: boolean) => void;
+  onExport?: () => void;
+  onShare?: () => void;
+}
+
+const btn = 'flex items-center justify-center gap-[5px] h-[26px] px-2 border border-border rounded-md bg-card text-foreground text-xs font-medium cursor-pointer shrink-0 hover:bg-muted transition-colors';
+const divider = 'w-px h-4 bg-border shrink-0';
+const label = 'text-[11px] text-muted-foreground shrink-0';
+const select = 'h-[26px] px-1.5 border border-border rounded-md bg-card text-foreground text-xs cursor-pointer shrink-0';
+
+const ALL_CARD_FIELDS: { id: KanbanCardField; label: string }[] = [
+  { id: 'dateRange',       label: 'Date range' },
+  { id: 'status',          label: 'Status' },
+  { id: 'tags',            label: 'Tags' },
+  { id: 'members',         label: 'Assigned to' },
+  { id: 'percentComplete', label: '% Complete' },
+  { id: 'parent',          label: 'Parent' },
+  { id: 'description',     label: 'Description' },
+];
+
+export default function KanbanToolbar({
+  groupBy,
+  onGroupByChange,
+  sortBy,
+  onSortByChange,
+  colorBy,
+  onColorByChange,
+  cardFields,
+  onCardFieldsChange,
+  showHierarchy,
+  onShowHierarchyChange,
+  onExport,
+  onShare,
+}: Props) {
+  const [cardFieldsOpen, setCardFieldsOpen] = useState(false);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!cardFieldsOpen) return;
+    function handleClick(e: MouseEvent) {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
+        setCardFieldsOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, [cardFieldsOpen]);
+
+  function toggleField(id: KanbanCardField) {
+    if (cardFields.includes(id)) {
+      onCardFieldsChange(cardFields.filter(f => f !== id));
+    } else {
+      onCardFieldsChange([...cardFields, id]);
+    }
   }
+
+  const activeFieldCount = cardFields.length;
 
   return (
     <div
-      ref={setNodeRef}
       style={{
-        width: COLUMN_WIDTH,
-        flexShrink: 0,
         display: 'flex',
-        flexDirection: 'column',
-        background: highlighted ? `${accentColor}0d` : 'var(--muted)',
-        border: `1px solid ${highlighted ? accentColor + '80' : 'var(--border)'}`,
-        borderRadius: 8,
-        transition: 'background 120ms, border-color 120ms',
-        maxHeight: '100%',
+        alignItems: 'center',
+        gap: 8,
+        padding: '0 12px',
+        height: 36,
+        background: 'var(--card)',
+        borderBottom: '1px solid var(--border)',
+        flexShrink: 0,
       }}
     >
-      {/* Column header */}
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 6,
-          padding: '8px 10px',
-          borderBottom: '1px solid var(--border)',
-          flexShrink: 0,
-        }}
+      {/* Group by */}
+      <span className={label}>Group by</span>
+      <select
+        className={select}
+        value={groupBy}
+        onChange={e => onGroupByChange(e.target.value as KanbanGroupBy)}
       >
-        {/* Accent dot */}
-        <span
-          style={{
-            width: 9,
-            height: 9,
-            borderRadius: '50%',
-            background: accentColor,
-            flexShrink: 0,
-          }}
-        />
+        <option value="status">Status</option>
+        <option value="member">Assigned to</option>
+        <option value="member-combination">Assigned to (combo)</option>
+      </select>
 
-        {/* Column label */}
-        <span
-          style={{
-            flex: 1,
-            fontSize: 12,
-            fontWeight: 600,
-            color: 'var(--foreground)',
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            whiteSpace: 'nowrap',
-          }}
-        >
-          {column.label}
-        </span>
+      <div className={divider} />
 
-        {/* Count badge */}
-        <span
-          style={{
-            fontSize: 11,
-            color: 'var(--muted-foreground)',
-            background: 'var(--border)',
-            borderRadius: 9,
-            padding: '1px 6px',
-            fontWeight: 600,
-          }}
-        >
-          {column.items.length}
-        </span>
+      {/* Sort by */}
+      <span className={label}>Sort by</span>
+      <select
+        className={select}
+        value={sortBy}
+        onChange={e => onSortByChange(e.target.value as KanbanSortBy)}
+      >
+        <option value="startDate">Start date</option>
+        <option value="endDate">End date</option>
+        <option value="title">Title</option>
+        <option value="percentComplete">% Complete</option>
+        <option value="updatedAt">Recently updated</option>
+      </select>
 
-        {/* Collapse toggle — hidden in read-only public views */}
-        {interactive && (
+      <div className={divider} />
+
+      {/* Color by */}
+      <span className={label}>Color by</span>
+      <select
+        className={select}
+        value={colorBy}
+        onChange={e => onColorByChange(e.target.value as ColorBy)}
+      >
+        <option value="activity">Activity</option>
+        <option value="member">Member</option>
+        <option value="status">Status</option>
+      </select>
+
+      <div className={divider} />
+
+      {/* Card fields multi-select */}
+      <div ref={dropdownRef} style={{ position: 'relative' }}>
         <button
-          onClick={onToggleCollapse}
-          title="Collapse column"
-          style={{
-            background: 'none',
-            border: 'none',
-            cursor: 'pointer',
-            padding: 2,
-            color: 'var(--muted-foreground)',
-            display: 'flex',
-            alignItems: 'center',
-          }}
+          className={btn}
+          onClick={() => setCardFieldsOpen(o => !o)}
+          title="Configure card fields"
         >
-          <ChevronDown size={13} strokeWidth={2} />
+          Card fields
+          {activeFieldCount > 0 && (
+            <span
+              style={{
+                background: 'var(--primary)',
+                color: 'var(--primary-foreground)',
+                borderRadius: 9,
+                fontSize: 10,
+                fontWeight: 700,
+                padding: '0 5px',
+                lineHeight: '16px',
+              }}
+            >
+              {activeFieldCount}
+            </span>
+          )}
+          <ChevronDown size={11} strokeWidth={2} />
         </button>
-        )}
-      </div>
 
-      {/* Card list — scrolls independently */}
-      <div
-        style={{
-          flex: 1,
-          overflowY: 'auto',
-          padding: '8px 8px 4px',
-          minHeight: 80,
-        }}
-      >
-        {column.items.length === 0 ? (
+        {cardFieldsOpen && (
           <div
             style={{
-              padding: '12px 8px',
-              fontSize: 12,
-              color: 'var(--muted-foreground)',
-              textAlign: 'center',
-              fontStyle: 'italic',
+              position: 'absolute',
+              top: 'calc(100% + 4px)',
+              left: 0,
+              background: 'var(--card)',
+              border: '1px solid var(--border)',
+              borderRadius: 8,
+              boxShadow: '0 4px 16px rgba(0,0,0,0.12)',
+              zIndex: 50,
+              minWidth: 160,
+              padding: '4px 0',
             }}
           >
-            No activities
+            {ALL_CARD_FIELDS.map(f => {
+              const checked = cardFields.includes(f.id);
+              return (
+                <button
+                  key={f.id}
+                  onClick={() => toggleField(f.id)}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 8,
+                    width: '100%',
+                    padding: '6px 12px',
+                    background: 'none',
+                    border: 'none',
+                    cursor: 'pointer',
+                    fontSize: 12,
+                    color: 'var(--foreground)',
+                    textAlign: 'left',
+                  }}
+                  onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+                  onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                >
+                  <span
+                    style={{
+                      width: 14,
+                      height: 14,
+                      border: '1.5px solid var(--border)',
+                      borderRadius: 3,
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      background: checked ? 'var(--primary)' : 'transparent',
+                      borderColor: checked ? 'var(--primary)' : 'var(--border)',
+                      flexShrink: 0,
+                    }}
+                  >
+                    {checked && <Check size={9} strokeWidth={3} color="var(--primary-foreground)" />}
+                  </span>
+                  {f.label}
+                </button>
+              );
+            })}
+            <div style={{ height: 1, background: 'var(--border)', margin: '4px 0' }} />
+            <button
+              onClick={() => onCardFieldsChange(DEFAULT_CARD_FIELDS)}
+              style={{
+                display: 'flex',
+                width: '100%',
+                padding: '6px 12px',
+                background: 'none',
+                border: 'none',
+                cursor: 'pointer',
+                fontSize: 11,
+                color: 'var(--muted-foreground)',
+                textAlign: 'left',
+              }}
+              onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+              onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+            >
+              Reset to defaults
+            </button>
           </div>
-        ) : (
-          column.items.map(act => (
-            <CardTree
-              key={act.id}
-              activity={act}
-              depth={0}
-              {...treeProps}
-            />
-          ))
         )}
       </div>
 
-      {/* + Add affordance — hidden in read-only public views */}
-      {interactive && (
-      <div style={{ padding: '4px 8px 8px', flexShrink: 0 }}>
-        <button
-          onClick={onAddClick}
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 4,
-            width: '100%',
-            padding: '5px 8px',
-            background: 'none',
-            border: '1px dashed var(--border)',
-            borderRadius: 6,
-            cursor: 'pointer',
-            fontSize: 12,
-            color: 'var(--muted-foreground)',
-            transition: 'border-color 120ms, color 120ms',
-          }}
-          onMouseEnter={e => {
-            e.currentTarget.style.borderColor = accentColor;
-            e.currentTarget.style.color = accentColor;
-          }}
-          onMouseLeave={e => {
-            e.currentTarget.style.borderColor = 'var(--border)';
-            e.currentTarget.style.color = 'var(--muted-foreground)';
-          }}
-        >
-          <Plus size={12} strokeWidth={2} />
-          Add
+      <div className={divider} />
+
+      {/* Hierarchy toggle */}
+      <button
+        className={btn}
+        onClick={() => onShowHierarchyChange(!showHierarchy)}
+        title={showHierarchy
+          ? 'Hierarchy on: child activities nest under their parent. Click to show flat list.'
+          : 'Hierarchy off: all activities shown at top level. Click to nest children under parents.'}
+        style={{
+          background: showHierarchy ? 'var(--primary)' : undefined,
+          color: showHierarchy ? 'var(--primary-foreground)' : undefined,
+          borderColor: showHierarchy ? 'var(--primary)' : undefined,
+        }}
+      >
+        <Network size={12} strokeWidth={1.8} />
+        Hierarchy
+      </button>
+
+      {/* Export + share — pushed to the right */}
+      <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
+        <div className={divider} />
+        <button className={btn} onClick={onExport} title="Export activities">
+          <Download size={12} strokeWidth={1.8} />
+          Export
+        </button>
+        <button className={btn} onClick={onShare} title="Share this view">
+          <Share2 size={12} strokeWidth={1.8} />
+          Share
         </button>
       </div>
-      )}
     </div>
-  );
-}
-````
-
-## File: packages/web/src/components/kanban/kanbanColumns.ts
-````typescript
-/**
- * kanbanColumns — pure column-building and sort logic for the Kanban view.
- *
- * Given a groupBy mode plus the visible activities, team members, and timeline
- * statuses, produces an ordered list of KanbanColumn objects ready for rendering.
- * All grouping/labeling/ordering lives here; the React components stay thin.
- */
-
-import type { components } from '@draba/shared';
-import {
-  memberComboKey,
-  orderedComboIds,
-  memberComboLabel,
-  comboSortComparator,
-  UNASSIGNED_KEY,
-} from '@/lib/memberGroups';
-
-type ApiActivity = components['schemas']['Activity'];
-type Status = components['schemas']['Status'];
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
-
-// ── Public types ───────────────────────────────────────────────────────────────
-
-export type KanbanGroupBy =
-  | 'status'
-  | 'member'
-  | 'member-combination';
-
-export type KanbanSortBy =
-  | 'startDate'
-  | 'endDate'
-  | 'title'
-  | 'percentComplete'
-  | 'updatedAt';
-
-export type KanbanCardField =
-  | 'dateRange'
-  | 'status'
-  | 'tags'
-  | 'members'
-  | 'percentComplete'
-  | 'parent'
-  | 'description';
-
-export const DEFAULT_CARD_FIELDS: KanbanCardField[] = [
-  'dateRange',
-  'status',
-  'tags',
-  'members',
-];
-
-/** Sentinel IDs for "bucket with no value" columns. */
-export const NO_STATUS_ID  = '__no-status__';
-export const UNASSIGNED_ID = '__unassigned__';
-
-/**
- * A resolved column, ready for rendering.
- *
- * `droppable: false` for combination and None groupings (drop semantics are
- * ambiguous or undefined). `dropValue` encodes what patch to apply on drop.
- */
-export interface KanbanColumn {
-  id: string;
-  label: string;
-  /** Hex color for the column accent (header dot, drop-highlight tint). */
-  color?: string;
-  icon?: string;
-  droppable: boolean;
-  /** The patch values to apply when a card is dropped into this column. */
-  dropValue?: {
-    statusId?: string | null;
-    assignedMemberIds?: string[];
-    parentActivityId?: string | null;
-  };
-  items: ApiActivity[];
-}
-
-// ── Sort comparators ───────────────────────────────────────────────────────────
-
-function cmp<T>(a: T, b: T, dir: 1 | -1 = 1): number {
-  if (a == null && b == null) return 0;
-  if (a == null) return 1;  // nulls last
-  if (b == null) return -1;
-  return a < b ? -dir : a > b ? dir : 0;
-}
-
-/** Sort activities within a column according to the chosen sort mode. */
-export function sortActivities(
-  activities: ApiActivity[],
-  sortBy: KanbanSortBy,
-): ApiActivity[] {
-  const sorted = [...activities];
-  switch (sortBy) {
-    case 'startDate':
-      // cmp with string comparison; null/undefined treated as nulls-last
-      sorted.sort((a, b) => {
-        const av = a.startAt ?? null;
-        const bv = b.startAt ?? null;
-        return cmp(av, bv);
-      });
-      break;
-    case 'endDate':
-      sorted.sort((a, b) => {
-        const av = a.endAt ?? null;
-        const bv = b.endAt ?? null;
-        return cmp(av, bv);
-      });
-      break;
-    case 'title':
-      sorted.sort((a, b) => a.title.localeCompare(b.title));
-      break;
-    case 'percentComplete':
-      // Descending: highest first, nulls last.
-      sorted.sort((a, b) => {
-        const av = a.percentComplete ?? null;
-        const bv = b.percentComplete ?? null;
-        if (av === null && bv === null) return 0;
-        if (av === null) return 1;
-        if (bv === null) return -1;
-        return bv - av;
-      });
-      break;
-    case 'updatedAt':
-      // Most-recently-updated first
-      sorted.sort((a, b) => cmp(b.updatedAt, a.updatedAt));
-      break;
-  }
-  return sorted;
-}
-
-// ── Hierarchy helpers ─────────────────────────────────────────────────────────
-
-/**
- * Compute parent→children and child-id maps for the hierarchy display mode.
- *
- * Only considers children whose parent is also present in `activities` — an
- * orphaned child (parent filtered out) stays visible as a root card.
- */
-export function buildHierarchyMaps(
-  activities: ApiActivity[],
-): { childrenByParentId: Map<string, ApiActivity[]>; childIds: Set<string> } {
-  const visibleIds = new Set(activities.map(a => a.id));
-  const childrenByParentId = new Map<string, ApiActivity[]>();
-  for (const act of activities) {
-    const pid = (act as ApiActivity & { parentActivityId?: string | null }).parentActivityId ?? null;
-    if (pid && visibleIds.has(pid)) {
-      if (!childrenByParentId.has(pid)) childrenByParentId.set(pid, []);
-      childrenByParentId.get(pid)!.push(act);
-    }
-  }
-  const childIds = new Set<string>();
-  childrenByParentId.forEach(children => children.forEach(c => childIds.add(c.id)));
-  return { childrenByParentId, childIds };
-}
-
-/**
- * Toggle a column ID in/out of the collapsed set.
- * Returns a new array — does not mutate the input.
- */
-export function toggleCollapsedColumn(collapsedIds: string[], columnId: string): string[] {
-  return collapsedIds.includes(columnId)
-    ? collapsedIds.filter(id => id !== columnId)
-    : [...collapsedIds, columnId];
-}
-
-// ── buildColumns ──────────────────────────────────────────────────────────────
-
-/**
- * Build the ordered column list from the active groupBy, activities, members,
- * and statuses. Applies `sortBy` within each column.
- */
-export function buildColumns(
-  groupBy: KanbanGroupBy,
-  activities: ApiActivity[],
-  members: TeamMemberWithUser[],
-  statuses: Status[],
-  sortBy: KanbanSortBy,
-): KanbanColumn[] {
-  switch (groupBy) {
-    case 'status':             return buildStatusColumns(activities, statuses, sortBy);
-    case 'member':             return buildMemberColumns(activities, members, sortBy);
-    case 'member-combination': return buildCombinationColumns(activities, members, sortBy);
-  }
-}
-
-// ── Status columns ─────────────────────────────────────────────────────────────
-
-function buildStatusColumns(
-  activities: ApiActivity[],
-  statuses: Status[],
-  sortBy: KanbanSortBy,
-): KanbanColumn[] {
-  // Bucket activities by statusId (null → no-status bucket).
-  const byStatus = new Map<string | null, ApiActivity[]>();
-  byStatus.set(null, []);
-  for (const s of statuses) byStatus.set(s.id, []);
-  for (const act of activities) {
-    const key = (act as ApiActivity & { statusId?: string | null }).statusId ?? null;
-    const bucket = byStatus.get(key) ?? byStatus.get(null)!;
-    bucket.push(act);
-  }
-
-  // "No status" column first, then statuses in position order.
-  const noStatusItems = sortActivities(byStatus.get(null) ?? [], sortBy);
-  const statusCols: KanbanColumn[] = statuses
-    .slice()
-    .sort((a, b) => (a.position ?? 0) - (b.position ?? 0))
-    .map(s => ({
-      id: s.id,
-      label: s.name,
-      color: s.color ?? undefined,
-      icon: s.icon ?? undefined,
-      droppable: true,
-      dropValue: { statusId: s.id },
-      items: sortActivities(byStatus.get(s.id) ?? [], sortBy),
-    }));
-
-  return [
-    {
-      id: NO_STATUS_ID,
-      label: 'No status',
-      droppable: true,
-      dropValue: { statusId: null },
-      items: noStatusItems,
-    },
-    ...statusCols,
-  ];
-}
-
-// ── Member columns ─────────────────────────────────────────────────────────────
-
-function buildMemberColumns(
-  activities: ApiActivity[],
-  members: TeamMemberWithUser[],
-  sortBy: KanbanSortBy,
-): KanbanColumn[] {
-  // Assign each activity to its first (primary) member; multi-member cards
-  // appear only once in the primary member's column. Unassigned → UNASSIGNED_ID.
-  const byMember = new Map<string, ApiActivity[]>();
-  byMember.set(UNASSIGNED_ID, []);
-  for (const m of members) byMember.set(m.id, []);
-  for (const act of activities) {
-    const ids = act.assignedMemberIds ?? [];
-    const key = ids.length > 0 ? ids[0] : UNASSIGNED_ID;
-    const bucket = byMember.get(key) ?? byMember.get(UNASSIGNED_ID)!;
-    bucket.push(act);
-  }
-
-  const memberCols: KanbanColumn[] = members.map(m => ({
-    id: m.id,
-    label: m.displayName || m.email || 'Unknown',
-    color: m.color ?? undefined,
-    droppable: true,
-    dropValue: { assignedMemberIds: [m.id] },
-    items: sortActivities(byMember.get(m.id) ?? [], sortBy),
-  }));
-
-  return [
-    {
-      id: UNASSIGNED_ID,
-      label: 'Unassigned',
-      droppable: true,
-      dropValue: { assignedMemberIds: [] },
-      items: sortActivities(byMember.get(UNASSIGNED_ID) ?? [], sortBy),
-    },
-    ...memberCols,
-  ];
-}
-
-// ── Combination columns ────────────────────────────────────────────────────────
-
-function buildCombinationColumns(
-  activities: ApiActivity[],
-  members: TeamMemberWithUser[],
-  sortBy: KanbanSortBy,
-): KanbanColumn[] {
-  const memberOrder = members.map(m => m.id);
-  const nameById = new Map(members.map(m => [m.id, m.displayName || m.email || 'Unknown']));
-
-  const byCombo = new Map<string, ApiActivity[]>();
-  for (const act of activities) {
-    const key = memberComboKey(act.assignedMemberIds ?? []);
-    if (!byCombo.has(key)) byCombo.set(key, []);
-    byCombo.get(key)!.push(act);
-  }
-
-  const comparator = comboSortComparator(memberOrder);
-  const sortedKeys = [...byCombo.keys()].sort(comparator);
-
-  return sortedKeys.map(key => {
-    const orderedIds = key === UNASSIGNED_KEY
-      ? []
-      : orderedComboIds(key.split('|'), memberOrder);
-    const label = key === UNASSIGNED_KEY
-      ? 'Unassigned'
-      : memberComboLabel(orderedIds, nameById);
-    return {
-      id: key,
-      label,
-      // Combination columns are non-droppable.
-      droppable: false,
-      items: sortActivities(byCombo.get(key) ?? [], sortBy),
-    };
-  });
-}
-````
-
-## File: packages/web/src/components/kanban/KanbanView.test.ts
-````typescript
-/**
- * Unit tests for kanbanColumns pure logic.
- * Mirrors the pattern used by calendarLanes.test.ts.
- */
-
-import { describe, it, expect } from 'vitest';
-import {
-  buildColumns,
-  sortActivities,
-  buildHierarchyMaps,
-  toggleCollapsedColumn,
-  NO_STATUS_ID,
-  UNASSIGNED_ID,
-  type KanbanGroupBy,
-} from './kanbanColumns';
-import type { components } from '@draba/shared';
-
-type ApiActivity = components['schemas']['Activity'];
-type Status = components['schemas']['Status'];
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
-
-// ── Fixtures ──────────────────────────────────────────────────────────────────
-
-function makeActivity(overrides: Partial<ApiActivity> & { id: string }): ApiActivity {
-  return {
-    id: overrides.id,
-    title: overrides.title ?? `Activity ${overrides.id}`,
-    timelineId: 'tl1',
-    startAt: overrides.startAt ?? '2026-01-01T00:00:00Z',
-    endAt: overrides.endAt ?? '2026-01-07T00:00:00Z',
-    color: overrides.color ?? '#288C9B',
-    createdAt: '2026-01-01T00:00:00Z',
-    updatedAt: overrides.updatedAt ?? '2026-01-01T00:00:00Z',
-    assignedMemberIds: overrides.assignedMemberIds ?? [],
-    tagIds: overrides.tagIds ?? [],
-    percentComplete: overrides.percentComplete ?? null,
-    archivedAt: null,
-    description: overrides.description ?? null,
-    icon: overrides.icon ?? null,
-    location: overrides.location ?? null,
-    notes: overrides.notes ?? null,
-    statusId: overrides.statusId ?? null,
-    parentActivityId: overrides.parentActivityId ?? null,
-    url: overrides.url ?? null,
-  } as ApiActivity;
-}
-
-function makeStatus(id: string, name: string, position: number, color = '#288C9B'): Status {
-  return { id, name, position, color, icon: null, isClosed: false, timelineId: 'tl1', createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' } as Status;
-}
-
-function makeMember(id: string, displayName: string): TeamMemberWithUser {
-  return { id, displayName, email: `${id}@test.com`, role: 'member', userId: id, color: null, icon: null, archivedAt: null, joinedAt: '2026-01-01T00:00:00Z', teamId: 'team1' } as unknown as TeamMemberWithUser;
-}
-
-const statuses = [
-  makeStatus('s1', 'Planned', 0, '#888'),
-  makeStatus('s2', 'In Progress', 1, '#1A97A2'),
-  makeStatus('s3', 'Done', 2, '#22c55e'),
-];
-
-const members = [
-  makeMember('m1', 'Alice'),
-  makeMember('m2', 'Bob'),
-  makeMember('m3', 'Carol'),
-];
-
-// ── sortActivities ─────────────────────────────────────────────────────────────
-
-describe('sortActivities', () => {
-  it('sorts by startDate ascending', () => {
-    const acts = [
-      makeActivity({ id: 'c', startAt: '2026-03-01T00:00:00Z' }),
-      makeActivity({ id: 'a', startAt: '2026-01-01T00:00:00Z' }),
-      makeActivity({ id: 'b', startAt: '2026-02-01T00:00:00Z' }),
-    ];
-    const result = sortActivities(acts, 'startDate');
-    expect(result.map(a => a.id)).toEqual(['a', 'b', 'c']);
-  });
-
-  it('sorts by title A-Z', () => {
-    const acts = [
-      makeActivity({ id: '1', title: 'Zebra' }),
-      makeActivity({ id: '2', title: 'Alpha' }),
-      makeActivity({ id: '3', title: 'Mango' }),
-    ];
-    const result = sortActivities(acts, 'title');
-    expect(result.map(a => a.title)).toEqual(['Alpha', 'Mango', 'Zebra']);
-  });
-
-  it('sorts percentComplete descending, nulls last', () => {
-    const acts = [
-      makeActivity({ id: 'a', percentComplete: 50 }),
-      makeActivity({ id: 'b', percentComplete: null }),
-      makeActivity({ id: 'c', percentComplete: 100 }),
-    ];
-    const result = sortActivities(acts, 'percentComplete');
-    expect(result.map(a => a.id)).toEqual(['c', 'a', 'b']);
-  });
-
-  it('sorts updatedAt descending (most recent first)', () => {
-    const acts = [
-      makeActivity({ id: 'old', updatedAt: '2026-01-01T00:00:00Z' }),
-      makeActivity({ id: 'new', updatedAt: '2026-06-01T00:00:00Z' }),
-    ];
-    const result = sortActivities(acts, 'updatedAt');
-    expect(result[0].id).toBe('new');
-  });
-});
-
-// ── buildColumns — status ──────────────────────────────────────────────────────
-
-describe('buildColumns: status', () => {
-  it('creates No-status column plus one column per status in position order', () => {
-    const acts = [makeActivity({ id: 'a1', statusId: 's1' })];
-    const cols = buildColumns('status', acts, [], statuses, 'startDate');
-    expect(cols[0].id).toBe(NO_STATUS_ID);
-    expect(cols[0].label).toBe('No status');
-    expect(cols.slice(1).map(c => c.id)).toEqual(['s1', 's2', 's3']);
-  });
-
-  it('routes activities to the correct status column', () => {
-    const acts = [
-      makeActivity({ id: 'a1', statusId: 's2' }),
-      makeActivity({ id: 'a2', statusId: null }),
-      makeActivity({ id: 'a3', statusId: 's1' }),
-    ];
-    const cols = buildColumns('status', acts, [], statuses, 'startDate');
-    expect(cols.find(c => c.id === NO_STATUS_ID)!.items.map(a => a.id)).toEqual(['a2']);
-    expect(cols.find(c => c.id === 's1')!.items.map(a => a.id)).toEqual(['a3']);
-    expect(cols.find(c => c.id === 's2')!.items.map(a => a.id)).toEqual(['a1']);
-  });
-
-  it('status columns are droppable; no-status column is droppable with null statusId', () => {
-    const cols = buildColumns('status', [], [], statuses, 'startDate');
-    const noStatus = cols.find(c => c.id === NO_STATUS_ID)!;
-    expect(noStatus.droppable).toBe(true);
-    expect(noStatus.dropValue).toEqual({ statusId: null });
-    const s1 = cols.find(c => c.id === 's1')!;
-    expect(s1.droppable).toBe(true);
-    expect(s1.dropValue).toEqual({ statusId: 's1' });
-  });
-
-  it('handles unknown statusId gracefully (routes to no-status)', () => {
-    const acts = [makeActivity({ id: 'x', statusId: 'deleted-status' })];
-    const cols = buildColumns('status', acts, [], statuses, 'startDate');
-    expect(cols.find(c => c.id === NO_STATUS_ID)!.items.map(a => a.id)).toEqual(['x']);
-  });
-});
-
-// ── buildColumns — member ──────────────────────────────────────────────────────
-
-describe('buildColumns: member', () => {
-  it('creates Unassigned column first, then one column per member', () => {
-    const cols = buildColumns('member', [], members, [], 'startDate');
-    expect(cols[0].id).toBe(UNASSIGNED_ID);
-    expect(cols.slice(1).map(c => c.id)).toEqual(['m1', 'm2', 'm3']);
-  });
-
-  it('routes activity to primary (first) member column', () => {
-    const acts = [makeActivity({ id: 'a', assignedMemberIds: ['m2', 'm1'] })];
-    const cols = buildColumns('member', acts, members, [], 'startDate');
-    expect(cols.find(c => c.id === 'm2')!.items.map(a => a.id)).toEqual(['a']);
-    expect(cols.find(c => c.id === 'm1')!.items).toHaveLength(0);
-  });
-
-  it('routes unassigned activity to Unassigned column', () => {
-    const acts = [makeActivity({ id: 'u', assignedMemberIds: [] })];
-    const cols = buildColumns('member', acts, members, [], 'startDate');
-    expect(cols.find(c => c.id === UNASSIGNED_ID)!.items.map(a => a.id)).toEqual(['u']);
-  });
-
-  it('dropValue for member column sets assignedMemberIds to singleton', () => {
-    const cols = buildColumns('member', [], members, [], 'startDate');
-    const m1col = cols.find(c => c.id === 'm1')!;
-    expect(m1col.dropValue).toEqual({ assignedMemberIds: ['m1'] });
-  });
-
-  it('dropValue for Unassigned column sets assignedMemberIds to empty', () => {
-    const cols = buildColumns('member', [], members, [], 'startDate');
-    const unassigned = cols.find(c => c.id === UNASSIGNED_ID)!;
-    expect(unassigned.dropValue).toEqual({ assignedMemberIds: [] });
-  });
-});
-
-// ── buildColumns — member-combination ─────────────────────────────────────────
-
-describe('buildColumns: member-combination', () => {
-  it('groups by exact assignee set, not primary member', () => {
-    const acts = [
-      makeActivity({ id: 'solo-alice', assignedMemberIds: ['m1'] }),
-      makeActivity({ id: 'alice-bob', assignedMemberIds: ['m1', 'm2'] }),
-      makeActivity({ id: 'solo-alice-2', assignedMemberIds: ['m1'] }),
-    ];
-    const cols = buildColumns('member-combination', acts, members, [], 'startDate');
-    const aliceCol = cols.find(c => c.label === 'Alice')!;
-    expect(aliceCol.items).toHaveLength(2);
-    const combCol = cols.find(c => c.label === 'Alice and Bob')!;
-    expect(combCol.items).toHaveLength(1);
-  });
-
-  it('combination columns are non-droppable', () => {
-    const acts = [makeActivity({ id: 'a', assignedMemberIds: ['m1', 'm2'] })];
-    const cols = buildColumns('member-combination', acts, members, [], 'startDate');
-    expect(cols.every(c => !c.droppable)).toBe(true);
-  });
-
-  it('empty assignee set maps to Unassigned column', () => {
-    const acts = [makeActivity({ id: 'u', assignedMemberIds: [] })];
-    const cols = buildColumns('member-combination', acts, members, [], 'startDate');
-    const unassigned = cols.find(c => c.label === 'Unassigned');
-    expect(unassigned).toBeDefined();
-    expect(unassigned!.items).toHaveLength(1);
-  });
-});
-
-// ── empty activities ───────────────────────────────────────────────────────────
-
-describe('buildColumns with no activities', () => {
-  const emptyActs: ApiActivity[] = [];
-
-  (['status', 'member', 'member-combination'] as KanbanGroupBy[]).forEach(mode => {
-    it(`${mode} groupBy produces columns without throwing`, () => {
-      expect(() =>
-        buildColumns(mode, emptyActs, members, statuses, 'startDate'),
-      ).not.toThrow();
-    });
-  });
-});
-
-// ── buildHierarchyMaps ─────────────────────────────────────────────────────────
-
-describe('buildHierarchyMaps', () => {
-  it('returns empty maps when there are no parent-child relationships', () => {
-    const acts = [
-      makeActivity({ id: 'a' }),
-      makeActivity({ id: 'b' }),
-    ];
-    const { childrenByParentId, childIds } = buildHierarchyMaps(acts);
-    expect(childrenByParentId.size).toBe(0);
-    expect(childIds.size).toBe(0);
-  });
-
-  it('maps children to their parent', () => {
-    const acts = [
-      makeActivity({ id: 'parent' }),
-      makeActivity({ id: 'child1', parentActivityId: 'parent' }),
-      makeActivity({ id: 'child2', parentActivityId: 'parent' }),
-    ];
-    const { childrenByParentId, childIds } = buildHierarchyMaps(acts);
-    expect(childrenByParentId.get('parent')?.map(a => a.id)).toEqual(['child1', 'child2']);
-    expect(childIds).toEqual(new Set(['child1', 'child2']));
-  });
-
-  it('orphaned child (parent filtered out) is not placed in childrenByParentId', () => {
-    // Only the child is in the visible set; parent is absent (filtered).
-    const acts = [makeActivity({ id: 'child', parentActivityId: 'absent-parent' })];
-    const { childrenByParentId, childIds } = buildHierarchyMaps(acts);
-    expect(childrenByParentId.size).toBe(0);
-    // The child is NOT in childIds, so it surfaces as a root card.
-    expect(childIds.has('child')).toBe(false);
-  });
-
-  it('supports multi-level nesting', () => {
-    const acts = [
-      makeActivity({ id: 'root' }),
-      makeActivity({ id: 'mid', parentActivityId: 'root' }),
-      makeActivity({ id: 'leaf', parentActivityId: 'mid' }),
-    ];
-    const { childrenByParentId, childIds } = buildHierarchyMaps(acts);
-    expect(childrenByParentId.get('root')?.map(a => a.id)).toEqual(['mid']);
-    expect(childrenByParentId.get('mid')?.map(a => a.id)).toEqual(['leaf']);
-    expect(childIds).toEqual(new Set(['mid', 'leaf']));
-  });
-});
-
-// ── toggleCollapsedColumn ─────────────────────────────────────────────────────
-
-describe('toggleCollapsedColumn', () => {
-  it('adds a column ID when it is not yet collapsed', () => {
-    expect(toggleCollapsedColumn([], 'col-1')).toEqual(['col-1']);
-    expect(toggleCollapsedColumn(['col-2'], 'col-1')).toEqual(['col-2', 'col-1']);
-  });
-
-  it('removes a column ID when it is already collapsed', () => {
-    expect(toggleCollapsedColumn(['col-1'], 'col-1')).toEqual([]);
-    expect(toggleCollapsedColumn(['col-1', 'col-2'], 'col-1')).toEqual(['col-2']);
-  });
-
-  it('does not mutate the input array', () => {
-    const original = ['col-1'];
-    toggleCollapsedColumn(original, 'col-2');
-    expect(original).toEqual(['col-1']);
-  });
-});
-
-// ── handleAddInColumn prefill ─────────────────────────────────────────────────
-
-describe('column dropValue encodes correct prefill context', () => {
-  it('status column dropValue carries statusId for create prefill', () => {
-    const cols = buildColumns('status', [], [], statuses, 'startDate');
-    const s1 = cols.find(c => c.id === 's1')!;
-    // dropValue.statusId is what handleAddInColumn passes as the default statusId.
-    expect(s1.dropValue?.statusId).toBe('s1');
-    expect('statusId' in (s1.dropValue ?? {})).toBe(true);
-  });
-
-  it('no-status column dropValue has statusId: null', () => {
-    const cols = buildColumns('status', [], [], statuses, 'startDate');
-    const noStatus = cols.find(c => c.id === NO_STATUS_ID)!;
-    expect(noStatus.dropValue?.statusId).toBeNull();
-    expect('statusId' in (noStatus.dropValue ?? {})).toBe(true);
-  });
-
-  it('member column dropValue carries assignedMemberIds singleton', () => {
-    const cols = buildColumns('member', [], members, [], 'startDate');
-    const m1 = cols.find(c => c.id === 'm1')!;
-    expect(m1.dropValue?.assignedMemberIds).toEqual(['m1']);
-  });
-
-  it('unassigned column dropValue has empty assignedMemberIds and no statusId key', () => {
-    const cols = buildColumns('member', [], members, [], 'startDate');
-    const unassigned = cols.find(c => c.id === UNASSIGNED_ID)!;
-    expect(unassigned.dropValue?.assignedMemberIds).toEqual([]);
-    expect('statusId' in (unassigned.dropValue ?? {})).toBe(false);
-  });
-});
-````
-
-## File: packages/web/src/components/kanban/KanbanView.tsx
-````typescript
-/**
- * KanbanView — data container for the Kanban board.
- *
- * Mirrors CalendarView: fetches activities + members, applies the active filter
- * and Find query, builds columns via kanbanColumns, and hands off to KanbanBoard
- * for rendering. Owns no layout chrome — groupBy, sortBy, colorBy, and cardFields
- * come from DashboardPage.
- */
-
-import { useMemo, useEffect, useCallback, useState } from 'react';
-import { useQueryClient } from '@tanstack/react-query';
-import KanbanBoard from './KanbanBoard';
-import {
-  buildColumns,
-  buildHierarchyMaps,
-  toggleCollapsedColumn,
-  DEFAULT_CARD_FIELDS,
-  type KanbanGroupBy,
-  type KanbanSortBy,
-  type KanbanCardField,
-} from './kanbanColumns';
-import { resolveActivityColor } from '@/lib/activityColor';
-import { useTimelineActivities, useTeamMembers, useUpdateActivity } from '@/hooks/useTeamActivities';
-import { matchEvents } from '@/lib/findMatcher';
-import { useFind } from '@/contexts/FindContext';
-import { useFilter } from '@/contexts/FilterContext';
-import { applyActiveFilter } from '@/lib/presetFilters';
-import { useUpsertPreference } from '@/hooks/usePreferences';
-import { resolveColorHex } from '@/components/identity/identity-constants';
-import type { ColorBy } from '@/components/gantt/GanttToolbar';
-import type { components } from '@draba/shared';
-import type { Member } from '@/types';
-import { MEMBER_COLORS } from '@/types';
-import type { DropPayload } from './KanbanBoard';
-
-type ApiActivity = components['schemas']['Activity'];
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
-type Status = components['schemas']['Status'];
-type SavedFilter = components['schemas']['SavedFilter'];
-type Tag = components['schemas']['Tag'];
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-function initialsFrom(name: string): string {
-  return name.split(/\s+/).map(w => w[0] ?? '').slice(0, 2).join('').toUpperCase();
-}
-
-function toMember(m: TeamMemberWithUser, index: number): Member {
-  const name = m.displayName || m.email || 'Unknown';
-  return {
-    id: m.id,
-    name,
-    initials: initialsFrom(name),
-    color: resolveColorHex(m.color) || MEMBER_COLORS[index % MEMBER_COLORS.length],
-  };
-}
-
-// ── Props ─────────────────────────────────────────────────────────────────────
-
-interface Props {
-  teamId: string;
-  timelineId: string;
-  groupBy: KanbanGroupBy;
-  sortBy: KanbanSortBy;
-  colorBy: ColorBy;
-  cardFields: KanbanCardField[];
-  collapsedColumnIds: string[];
-  onCollapsedColumnIdsChange: (ids: string[]) => void;
-  /** When true, child activities nest beneath their parent in the parent's column. */
-  showHierarchy: boolean;
-  timelineStatuses?: Status[];
-  savedFilters?: SavedFilter[];
-  tags?: Tag[];
-  selectedActivityId?: string | null;
-  onSelectActivity?: (id: string | null) => void;
-  onSelectApiActivity?: (activity: ApiActivity | null) => void;
-  /** Called when "+ Add" is clicked in a column; provides pre-fill context. */
-  onAddActivity?: (defaults: { start: string; end: string; memberId: string | null; statusId?: string | null }) => void;
-  onMembersLoaded?: (members: Member[]) => void;
-}
-
-// ── KanbanView ────────────────────────────────────────────────────────────────
-
-export default function KanbanView({
-  teamId,
-  timelineId,
-  groupBy,
-  sortBy,
-  colorBy,
-  cardFields,
-  collapsedColumnIds,
-  onCollapsedColumnIdsChange,
-  showHierarchy,
-  timelineStatuses,
-  savedFilters,
-  tags,
-  selectedActivityId,
-  onSelectActivity,
-  onSelectApiActivity,
-  onAddActivity,
-  onMembersLoaded,
-}: Props) {
-  const queryClient = useQueryClient();
-  const { debouncedQuery, registerMatches, activeMatchId } = useFind();
-  const { activeFilter } = useFilter();
-  const upsert = useUpsertPreference();
-
-  // Fetch data — no date bounds for Kanban (show all activities on the timeline).
-  const { data: apiMembers = [] } = useTeamMembers(teamId);
-  const { data: apiActivities = [], isLoading } = useTimelineActivities(teamId, timelineId);
-  const updateActivity = useUpdateActivity(timelineId);
-
-  const members: Member[] = useMemo(
-    () => apiMembers.map((m, i) => toMember(m, i)),
-    [apiMembers],
-  );
-
-  const memberById = useMemo<Record<string, Member>>(() => {
-    const map: Record<string, Member> = {};
-    members.forEach(m => { map[m.id] = m; });
-    return map;
-  }, [members]);
-
-  useEffect(() => {
-    if (onMembersLoaded && members.length > 0) onMembersLoaded(members);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [members]);
-
-  // Filter engine context.
-  const closedStatusIds = useMemo(
-    () => new Set((timelineStatuses ?? []).filter(s => s.isClosed).map(s => s.id)),
-    [timelineStatuses],
-  );
-  const statusesByTimeline = useMemo(() => {
-    const m = new Map<string, Status[]>();
-    if (timelineStatuses?.length) m.set(timelineId, timelineStatuses);
-    return m;
-  }, [timelineId, timelineStatuses]);
-  const memberIdsByUserId = useMemo(() => {
-    const m = new Map<string, string[]>();
-    apiMembers.forEach(mem => {
-      if (mem.userId) {
-        const existing = m.get(mem.userId) ?? [];
-        m.set(mem.userId, [...existing, mem.id]);
-      }
-    });
-    return m;
-  }, [apiMembers]);
-
-  const visibleActivities = useMemo(
-    () => applyActiveFilter(
-      apiActivities,
-      activeFilter,
-      memberIdsByUserId,
-      {
-        closedStatusIds,
-        savedFilters: savedFilters ?? [],
-        statuses: statusesByTimeline,
-        tags: tags ?? [],
-      },
-    ),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [apiActivities, activeFilter, memberIdsByUserId, closedStatusIds, savedFilters, statusesByTimeline, tags],
-  );
-
-  const statusById = useMemo(
-    () => new Map((timelineStatuses ?? []).map(s => [s.id, s])),
-    [timelineStatuses],
-  );
-  const statusColorById = useMemo(
-    () => new Map((timelineStatuses ?? []).map(s => [s.id, s.color ?? ''])),
-    [timelineStatuses],
-  );
-  const tagById = useMemo(
-    () => new Map((tags ?? []).map(t => [t.id, t])),
-    [tags],
-  );
-
-  // Per-activity resolved hex color (driven by colorBy) — used as card accent border.
-  const colorMap = useMemo<Map<string, string>>(() => {
-    const map = new Map<string, string>();
-    visibleActivities.forEach((act, i) => {
-      map.set(act.id, resolveActivityColor(act, i, memberById, colorBy, statusColorById));
-    });
-    return map;
-  }, [visibleActivities, memberById, colorBy, statusColorById]);
-
-  // ── Hierarchy ────────────────────────────────────────────────────────────────
-
-  const { childrenByParentId, childIds } = useMemo(
-    () => showHierarchy ? buildHierarchyMaps(visibleActivities) : { childrenByParentId: new Map<string, ApiActivity[]>(), childIds: new Set<string>() },
-    [visibleActivities, showHierarchy],
-  );
-
-  /**
-   * Activities used for column building.
-   * When hierarchy is on, only root activities (not nested children) get a
-   * column slot — children are rendered under their parent by KanbanColumn.
-   */
-  const columnActivities = useMemo(
-    () => showHierarchy
-      ? visibleActivities.filter(a => !childIds.has(a.id))
-      : visibleActivities,
-    [visibleActivities, showHierarchy, childIds],
-  );
-
-  /** Per-parent collapse state — ephemeral (not persisted). Starts fully expanded. */
-  const [collapsedParents, setCollapsedParents] = useState<Set<string>>(new Set());
-
-  const handleToggleParent = useCallback((activityId: string) => {
-    setCollapsedParents(prev => {
-      const next = new Set(prev);
-      if (next.has(activityId)) next.delete(activityId);
-      else next.add(activityId);
-      return next;
-    });
-  }, []);
-
-  // Build columns.
-  const columns = useMemo(
-    () => buildColumns(
-      groupBy,
-      columnActivities,
-      apiMembers,
-      timelineStatuses ?? [],
-      sortBy,
-    ),
-    [groupBy, columnActivities, apiMembers, timelineStatuses, sortBy],
-  );
-
-  // Activity ID → ApiActivity map for drag overlay and optimistic updates.
-  const activityById = useMemo<Map<string, ApiActivity>>(
-    () => new Map(apiActivities.map(a => [a.id, a])),
-    [apiActivities],
-  );
-
-  // Activity ID → title lookup for the "Parent" card field.
-  // Uses apiActivities (all activities, not just visible) so the parent title
-  // still shows when the parent activity is filtered out by the active filter.
-  const activityTitleById = useMemo<Map<string, string>>(
-    () => new Map(apiActivities.map(a => [a.id, a.title])),
-    [apiActivities],
-  );
-
-  // Collapsed column persistence.
-  const collapsedSet = useMemo(() => new Set(collapsedColumnIds), [collapsedColumnIds]);
-
-  const handleToggleCollapse = useCallback((columnId: string) => {
-    const next = toggleCollapsedColumn(collapsedColumnIds, columnId);
-    onCollapsedColumnIdsChange(next);
-    if (timelineId) {
-      upsert.mutate({
-        key: 'kanban_collapsed',
-        value: JSON.stringify(next),
-        timelineId,
-      });
-    }
-  }, [collapsedSet, collapsedColumnIds, onCollapsedColumnIdsChange, timelineId, upsert]);
-
-  // Find: compute matches.
-  const matchResults = useMemo(
-    () => matchEvents(debouncedQuery, visibleActivities, members, visibleActivities),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [debouncedQuery, visibleActivities, members],
-  );
-  const matchedSet = useMemo(() => new Set(matchResults.map(r => r.activityId)), [matchResults]);
-
-  // Register ordered match IDs walking the full tree (root + children).
-  const orderedMatchIds = useMemo(() => {
-    const ids: string[] = [];
-
-    function walkActivity(act: ApiActivity) {
-      if (matchedSet.has(act.id)) ids.push(act.id);
-      if (showHierarchy) {
-        const children = childrenByParentId.get(act.id) ?? [];
-        children.forEach(walkActivity);
-      }
-    }
-
-    for (const col of columns) {
-      if (collapsedSet.has(col.id)) continue;
-      col.items.forEach(walkActivity);
-    }
-    return ids;
-  }, [columns, collapsedSet, matchedSet, showHierarchy, childrenByParentId]);
-
-  useEffect(() => {
-    registerMatches(orderedMatchIds, new Map());
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [orderedMatchIds]);
-
-  // Auto-expand a collapsed column that contains the active match.
-  useEffect(() => {
-    if (!activeMatchId) return;
-    // Expand collapsed column.
-    const containingCol = columns.find(col =>
-      collapsedSet.has(col.id) && col.items.some(a => a.id === activeMatchId),
-    );
-    if (containingCol) handleToggleCollapse(containingCol.id);
-
-    // Auto-expand a collapsed parent whose descendant is the active match.
-    if (showHierarchy) {
-      for (const [parentId, children] of childrenByParentId) {
-        if (collapsedParents.has(parentId)) {
-          function isDescendant(id: string): boolean {
-            if (id === activeMatchId) return true;
-            return (childrenByParentId.get(id) ?? []).some(c => isDescendant(c.id));
-          }
-          if (children.some(c => isDescendant(c.id))) {
-            handleToggleParent(parentId);
-          }
-        }
-      }
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeMatchId]);
-
-  // Derive which field is the current Group by axis (auto-suppressed on cards).
-  const suppressedFields = useMemo((): Set<KanbanCardField> => {
-    const s = new Set<KanbanCardField>();
-    if (groupBy === 'status') s.add('status');
-    if (groupBy === 'member' || groupBy === 'member-combination') s.add('members');
-    return s;
-  }, [groupBy]);
-
-  // Card click → open detail panel.
-  const handleCardClick = useCallback((activity: ApiActivity) => {
-    if (onSelectApiActivity) onSelectApiActivity(activity);
-    if (onSelectActivity)    onSelectActivity(activity.id);
-  }, [onSelectApiActivity, onSelectActivity]);
-
-  // "+ Add" in a column → open create panel prefilled with the column's context.
-  const handleAddInColumn = useCallback((column: { id: string; dropValue?: { statusId?: string | null; assignedMemberIds?: string[] } }) => {
-    const today = new Date().toISOString().slice(0, 10);
-    const memberId = column.dropValue?.assignedMemberIds?.[0] ?? null;
-    // Pass statusId only when it's explicitly present in dropValue (status grouping).
-    const statusId = 'statusId' in (column.dropValue ?? {}) ? column.dropValue!.statusId : undefined;
-    if (onAddActivity) {
-      onAddActivity({ start: today, end: today, memberId, statusId });
-    }
-  }, [onAddActivity]);
-
-  // Drag commit.
-  const handleDrop = useCallback((payload: DropPayload) => {
-    const existing = activityById.get(payload.activityId);
-    const merged: ApiActivity | undefined = existing
-      ? { ...existing, ...payload.patch }
-      : undefined;
-
-    // Optimistic cache update.
-    queryClient.setQueriesData<ApiActivity[]>(
-      { queryKey: ['timelines', timelineId, 'activities'] },
-      old => old?.map(a => a.id === payload.activityId ? (merged ?? a) : a),
-    );
-
-    // If the dragged card is currently open in the edit panel, sync the panel
-    // immediately so the user sees the new status / assignee without closing and
-    // re-opening the sidebar.
-    if (merged && selectedActivityId === payload.activityId && onSelectApiActivity) {
-      onSelectApiActivity(merged);
-    }
-
-    updateActivity.mutate({ activityId: payload.activityId, patch: payload.patch });
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [queryClient, timelineId, updateActivity, activityById, selectedActivityId, onSelectApiActivity]);
-
-  const hasQuery = debouncedQuery.trim().length > 0;
-
-  // ── Effective card fields: apply context-aware suppression at render time ────
-  const effectiveCardFields = useMemo(
-    () => (cardFields.length > 0 ? cardFields : DEFAULT_CARD_FIELDS),
-    [cardFields],
-  );
-
-  // ── Loading ────────────────────────────────────────────────────────────────
-
-  if (isLoading) {
-    return (
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: 'var(--muted-foreground)', fontSize: 13 }}>
-        Loading activities…
-      </div>
-    );
-  }
-
-  return (
-    <KanbanBoard
-      columns={columns}
-      groupBy={groupBy}
-      members={members}
-      statusById={statusById}
-      tagById={tagById}
-      colorMap={colorMap}
-      cardFields={effectiveCardFields}
-      suppressedFields={suppressedFields}
-      selectedActivityId={selectedActivityId ?? null}
-      matchedIds={matchedSet}
-      activeMatchId={activeMatchId}
-      hasQuery={hasQuery}
-      collapsedColumnIds={collapsedSet}
-      onToggleCollapse={handleToggleCollapse}
-      onCardClick={handleCardClick}
-      onAddInColumn={handleAddInColumn}
-      onDrop={handleDrop}
-      activityById={activityById}
-      activityTitleById={activityTitleById}
-      showHierarchy={showHierarchy}
-      childrenByParentId={childrenByParentId}
-      collapsedParents={collapsedParents}
-      onToggleParent={handleToggleParent}
-    />
   );
 }
 ````
@@ -55273,507 +55774,6 @@ func (r *ShareRepo) RecordView(id string) error {
 		return fmt.Errorf("recording share view: %w", err)
 	}
 	return nil
-}
-````
-
-## File: packages/web/src/components/kanban/KanbanBoard.tsx
-````typescript
-/**
- * KanbanBoard — the DndContext host that owns all columns and the drag overlay.
- *
- * Renders columns in a horizontal scrolling row. On drag-end, derives the
- * correct PATCH payload for the active groupBy and calls onDrop.
- */
-
-import { DndContext, DragOverlay, PointerSensor, useSensor, useSensors } from '@dnd-kit/core';
-import type { DragEndEvent, DragStartEvent, DragOverEvent } from '@dnd-kit/core';
-import { useState } from 'react';
-import KanbanColumn from './KanbanColumn';
-import KanbanCard from './KanbanCard';
-import type { KanbanColumn as Column, KanbanCardField, KanbanGroupBy } from './kanbanColumns';
-import type { Member } from '@/types';
-import type { components } from '@draba/shared';
-
-type ApiActivity = components['schemas']['Activity'];
-type Status = components['schemas']['Status'];
-type Tag = components['schemas']['Tag'];
-
-export interface DropPayload {
-  activityId: string;
-  patch: {
-    statusId?: string | null;
-    assignedMemberIds?: string[];
-    parentActivityId?: string | null;
-  };
-}
-
-interface Props {
-  columns: Column[];
-  groupBy: KanbanGroupBy;
-  members: Member[];
-  statusById: Map<string, Status>;
-  tagById: Map<string, Tag>;
-  /** Per-activity resolved hex color for the card accent border. */
-  colorMap: Map<string, string>;
-  cardFields: KanbanCardField[];
-  suppressedFields: Set<KanbanCardField>;
-  selectedActivityId: string | null;
-  matchedIds: Set<string>;
-  activeMatchId: string | null;
-  hasQuery: boolean;
-  collapsedColumnIds: Set<string>;
-  onToggleCollapse: (columnId: string) => void;
-  onCardClick: (activity: ApiActivity) => void;
-  onAddInColumn: (column: Column) => void;
-  onDrop: (payload: DropPayload) => void;
-  /** Map of activity ID → ApiActivity for drag overlay lookup. */
-  activityById: Map<string, ApiActivity>;
-  /** Map of activity ID → title, for showing parent names on child cards. */
-  activityTitleById: Map<string, string>;
-  // ── Hierarchy ────────────────────────────────────────────────────────────────
-  showHierarchy: boolean;
-  childrenByParentId: Map<string, ApiActivity[]>;
-  collapsedParents: Set<string>;
-  onToggleParent: (activityId: string) => void;
-  /** When false (public share viewer), drag, drop, and clicks are inert. Defaults to true. */
-  interactive?: boolean;
-}
-
-export default function KanbanBoard({
-  columns,
-  groupBy,
-  members,
-  statusById,
-  tagById,
-  colorMap,
-  cardFields,
-  suppressedFields,
-  showHierarchy,
-  childrenByParentId,
-  collapsedParents,
-  onToggleParent,
-  selectedActivityId,
-  matchedIds,
-  activeMatchId,
-  hasQuery,
-  collapsedColumnIds,
-  onToggleCollapse,
-  onCardClick,
-  onAddInColumn,
-  onDrop,
-  activityById,
-  activityTitleById,
-  interactive = true,
-}: Props) {
-  const [draggingId, setDraggingId] = useState<string | null>(null);
-  const [overColumnId, setOverColumnId] = useState<string | null>(null);
-
-  // Require a 5px drag threshold to prevent accidental drags on card clicks.
-  const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
-  );
-
-  function handleDragStart({ active }: DragStartEvent) {
-    setDraggingId(active.id as string);
-  }
-
-  function handleDragEnd({ active, over }: DragEndEvent) {
-    setDraggingId(null);
-    setOverColumnId(null);
-    if (!over) return;
-
-    const activityId = typeof active.id === 'string' ? active.id : String(active.id);
-    const columnId = typeof over.id === 'string' ? over.id : String(over.id);
-
-    const column = columns.find(c => c.id === columnId);
-    if (!column || !column.droppable || !column.dropValue) return;
-
-    // Determine if anything actually changed before issuing a PATCH.
-    const activity = activityById.get(activityId);
-    if (!activity) return;
-
-    // Skip if the card is already in this column (no-op drop).
-    const isAlreadyHere = (() => {
-      switch (groupBy) {
-        case 'status': {
-          const currentStatus = (activity as ApiActivity & { statusId?: string | null }).statusId ?? null;
-          return currentStatus === (column.dropValue.statusId ?? null);
-        }
-        case 'member': {
-          const primary = activity.assignedMemberIds?.[0] ?? null;
-          const target = column.dropValue.assignedMemberIds?.[0] ?? null;
-          return primary === target;
-        }
-        default:
-          return false;
-      }
-    })();
-
-    if (isAlreadyHere) return;
-
-    onDrop({ activityId, patch: column.dropValue });
-  }
-
-  function handleDragOver({ over }: DragOverEvent) {
-    setOverColumnId(over ? String(over.id) : null);
-  }
-
-  const draggingActivity = draggingId ? activityById.get(draggingId) : undefined;
-
-  return (
-    <DndContext
-      sensors={sensors}
-      onDragStart={handleDragStart}
-      onDragEnd={handleDragEnd}
-      onDragOver={handleDragOver}
-    >
-      <div
-        style={{
-          display: 'flex',
-          flexDirection: 'row',
-          gap: 12,
-          padding: '12px 16px 16px',
-          overflowX: 'auto',
-          overflowY: 'hidden',
-          height: '100%',
-          alignItems: 'flex-start',
-          boxSizing: 'border-box',
-        }}
-      >
-        {columns.map(col => (
-          <KanbanColumn
-            key={col.id}
-            column={col}
-            members={members}
-            statusById={statusById}
-            tagById={tagById}
-            colorMap={colorMap}
-            activityTitleById={activityTitleById}
-            cardFields={cardFields}
-            suppressedFields={suppressedFields}
-            showHierarchy={showHierarchy}
-            childrenByParentId={childrenByParentId}
-            collapsedParents={collapsedParents}
-            onToggleParent={onToggleParent}
-            selectedActivityId={selectedActivityId}
-            matchedIds={matchedIds}
-            activeMatchId={activeMatchId}
-            hasQuery={hasQuery}
-            isOver={overColumnId === col.id && col.droppable}
-            isCollapsed={collapsedColumnIds.has(col.id)}
-            onToggleCollapse={() => onToggleCollapse(col.id)}
-            onCardClick={onCardClick}
-            onAddClick={() => onAddInColumn(col)}
-            interactive={interactive}
-          />
-        ))}
-      </div>
-
-      {/* Drag overlay — floats above everything while dragging */}
-      <DragOverlay dropAnimation={null}>
-        {interactive && draggingActivity ? (
-          <KanbanCard
-            activity={draggingActivity}
-            accentColor={colorMap.get(draggingActivity.id) ?? '#6b7280'}
-            members={members}
-            statusById={statusById}
-            tagById={tagById}
-            cardFields={cardFields}
-            suppressedFields={suppressedFields}
-            isSelected={false}
-            dimmed={false}
-            activeMatch={false}
-            isDragOverlay
-            onClick={() => {}}
-          />
-        ) : null}
-      </DragOverlay>
-    </DndContext>
-  );
-}
-````
-
-## File: packages/web/src/components/kanban/KanbanToolbar.tsx
-````typescript
-/**
- * KanbanToolbar — sub-toolbar for the Kanban view.
- *
- * Controls: Group by · Sort by · Color by · Card fields multi-select · Export/Share stubs.
- * Follows the same visual idiom as GanttToolbar and CalendarToolbar.
- */
-
-import { useState, useRef, useEffect } from 'react';
-import { Download, Share2, ChevronDown, Check, Network } from 'lucide-react';
-import type { ColorBy } from '@/components/gantt/GanttToolbar';
-import type { KanbanGroupBy, KanbanSortBy, KanbanCardField } from './kanbanColumns';
-import { DEFAULT_CARD_FIELDS } from './kanbanColumns';
-
-export type { KanbanGroupBy, KanbanSortBy, KanbanCardField };
-
-interface Props {
-  groupBy: KanbanGroupBy;
-  onGroupByChange: (g: KanbanGroupBy) => void;
-  sortBy: KanbanSortBy;
-  onSortByChange: (s: KanbanSortBy) => void;
-  colorBy: ColorBy;
-  onColorByChange: (c: ColorBy) => void;
-  cardFields: KanbanCardField[];
-  onCardFieldsChange: (fields: KanbanCardField[]) => void;
-  showHierarchy: boolean;
-  onShowHierarchyChange: (on: boolean) => void;
-  onExport?: () => void;
-  onShare?: () => void;
-}
-
-const btn = 'flex items-center justify-center gap-[5px] h-[26px] px-2 border border-border rounded-md bg-card text-foreground text-xs font-medium cursor-pointer shrink-0 hover:bg-muted transition-colors';
-const divider = 'w-px h-4 bg-border shrink-0';
-const label = 'text-[11px] text-muted-foreground shrink-0';
-const select = 'h-[26px] px-1.5 border border-border rounded-md bg-card text-foreground text-xs cursor-pointer shrink-0';
-
-const ALL_CARD_FIELDS: { id: KanbanCardField; label: string }[] = [
-  { id: 'dateRange',       label: 'Date range' },
-  { id: 'status',          label: 'Status' },
-  { id: 'tags',            label: 'Tags' },
-  { id: 'members',         label: 'Assigned to' },
-  { id: 'percentComplete', label: '% Complete' },
-  { id: 'parent',          label: 'Parent' },
-  { id: 'description',     label: 'Description' },
-];
-
-export default function KanbanToolbar({
-  groupBy,
-  onGroupByChange,
-  sortBy,
-  onSortByChange,
-  colorBy,
-  onColorByChange,
-  cardFields,
-  onCardFieldsChange,
-  showHierarchy,
-  onShowHierarchyChange,
-  onExport,
-  onShare,
-}: Props) {
-  const [cardFieldsOpen, setCardFieldsOpen] = useState(false);
-  const dropdownRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!cardFieldsOpen) return;
-    function handleClick(e: MouseEvent) {
-      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
-        setCardFieldsOpen(false);
-      }
-    }
-    document.addEventListener('mousedown', handleClick);
-    return () => document.removeEventListener('mousedown', handleClick);
-  }, [cardFieldsOpen]);
-
-  function toggleField(id: KanbanCardField) {
-    if (cardFields.includes(id)) {
-      onCardFieldsChange(cardFields.filter(f => f !== id));
-    } else {
-      onCardFieldsChange([...cardFields, id]);
-    }
-  }
-
-  const activeFieldCount = cardFields.length;
-
-  return (
-    <div
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 8,
-        padding: '0 12px',
-        height: 36,
-        background: 'var(--card)',
-        borderBottom: '1px solid var(--border)',
-        flexShrink: 0,
-      }}
-    >
-      {/* Group by */}
-      <span className={label}>Group by</span>
-      <select
-        className={select}
-        value={groupBy}
-        onChange={e => onGroupByChange(e.target.value as KanbanGroupBy)}
-      >
-        <option value="status">Status</option>
-        <option value="member">Assigned to</option>
-        <option value="member-combination">Assigned to (combo)</option>
-      </select>
-
-      <div className={divider} />
-
-      {/* Sort by */}
-      <span className={label}>Sort by</span>
-      <select
-        className={select}
-        value={sortBy}
-        onChange={e => onSortByChange(e.target.value as KanbanSortBy)}
-      >
-        <option value="startDate">Start date</option>
-        <option value="endDate">End date</option>
-        <option value="title">Title</option>
-        <option value="percentComplete">% Complete</option>
-        <option value="updatedAt">Recently updated</option>
-      </select>
-
-      <div className={divider} />
-
-      {/* Color by */}
-      <span className={label}>Color by</span>
-      <select
-        className={select}
-        value={colorBy}
-        onChange={e => onColorByChange(e.target.value as ColorBy)}
-      >
-        <option value="activity">Activity</option>
-        <option value="member">Member</option>
-        <option value="status">Status</option>
-      </select>
-
-      <div className={divider} />
-
-      {/* Card fields multi-select */}
-      <div ref={dropdownRef} style={{ position: 'relative' }}>
-        <button
-          className={btn}
-          onClick={() => setCardFieldsOpen(o => !o)}
-          title="Configure card fields"
-        >
-          Card fields
-          {activeFieldCount > 0 && (
-            <span
-              style={{
-                background: 'var(--primary)',
-                color: 'var(--primary-foreground)',
-                borderRadius: 9,
-                fontSize: 10,
-                fontWeight: 700,
-                padding: '0 5px',
-                lineHeight: '16px',
-              }}
-            >
-              {activeFieldCount}
-            </span>
-          )}
-          <ChevronDown size={11} strokeWidth={2} />
-        </button>
-
-        {cardFieldsOpen && (
-          <div
-            style={{
-              position: 'absolute',
-              top: 'calc(100% + 4px)',
-              left: 0,
-              background: 'var(--card)',
-              border: '1px solid var(--border)',
-              borderRadius: 8,
-              boxShadow: '0 4px 16px rgba(0,0,0,0.12)',
-              zIndex: 50,
-              minWidth: 160,
-              padding: '4px 0',
-            }}
-          >
-            {ALL_CARD_FIELDS.map(f => {
-              const checked = cardFields.includes(f.id);
-              return (
-                <button
-                  key={f.id}
-                  onClick={() => toggleField(f.id)}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 8,
-                    width: '100%',
-                    padding: '6px 12px',
-                    background: 'none',
-                    border: 'none',
-                    cursor: 'pointer',
-                    fontSize: 12,
-                    color: 'var(--foreground)',
-                    textAlign: 'left',
-                  }}
-                  onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-                  onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-                >
-                  <span
-                    style={{
-                      width: 14,
-                      height: 14,
-                      border: '1.5px solid var(--border)',
-                      borderRadius: 3,
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      background: checked ? 'var(--primary)' : 'transparent',
-                      borderColor: checked ? 'var(--primary)' : 'var(--border)',
-                      flexShrink: 0,
-                    }}
-                  >
-                    {checked && <Check size={9} strokeWidth={3} color="var(--primary-foreground)" />}
-                  </span>
-                  {f.label}
-                </button>
-              );
-            })}
-            <div style={{ height: 1, background: 'var(--border)', margin: '4px 0' }} />
-            <button
-              onClick={() => onCardFieldsChange(DEFAULT_CARD_FIELDS)}
-              style={{
-                display: 'flex',
-                width: '100%',
-                padding: '6px 12px',
-                background: 'none',
-                border: 'none',
-                cursor: 'pointer',
-                fontSize: 11,
-                color: 'var(--muted-foreground)',
-                textAlign: 'left',
-              }}
-              onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-              onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-            >
-              Reset to defaults
-            </button>
-          </div>
-        )}
-      </div>
-
-      <div className={divider} />
-
-      {/* Hierarchy toggle */}
-      <button
-        className={btn}
-        onClick={() => onShowHierarchyChange(!showHierarchy)}
-        title={showHierarchy
-          ? 'Hierarchy on: child activities nest under their parent. Click to show flat list.'
-          : 'Hierarchy off: all activities shown at top level. Click to nest children under parents.'}
-        style={{
-          background: showHierarchy ? 'var(--primary)' : undefined,
-          color: showHierarchy ? 'var(--primary-foreground)' : undefined,
-          borderColor: showHierarchy ? 'var(--primary)' : undefined,
-        }}
-      >
-        <Network size={12} strokeWidth={1.8} />
-        Hierarchy
-      </button>
-
-      {/* Export + share — pushed to the right */}
-      <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
-        <div className={divider} />
-        <button className={btn} onClick={onExport} title="Export activities">
-          <Download size={12} strokeWidth={1.8} />
-          Export
-        </button>
-        <button className={btn} onClick={onShare} title="Share this view">
-          <Share2 size={12} strokeWidth={1.8} />
-          Share
-        </button>
-      </div>
-    </div>
-  );
 }
 ````
 
@@ -58802,529 +58802,6 @@ type Invite struct {
 }
 ````
 
-## File: packages/web/src/components/ShareModal.tsx
-````typescript
-/**
- * ShareModal — manage the share links for the current timeline view.
- *
- * Rebuilt to the "Share this view" design handoff (docs/design/handoffs/share-modal):
- * an active-links list with per-row creator/date/view-count meta and an inline
- * delete-confirm, plus an inline create form with optional password protection.
- * One timeline can host many named shares; each is a frozen view snapshot.
- *
- * Styled with Tailwind utility classes against the project's design tokens
- * (see index.css `@theme`) and shadcn/ui primitives — the handoff is a visual
- * reference, not production code, so its inline styles were not ported.
- *
- * Delete is intentionally not permission-gated — a share is a read-only
- * projection that cannot mutate app data, so any team member may manage any
- * link (Phase 13.2 decision).
- */
-
-import { useEffect, useRef, useState } from 'react'
-import { createPortal } from 'react-dom'
-import {
-  Link as LinkIcon, Link2, Lock, KeyRound, Copy, Check, Eye, EyeOff,
-  Trash2, Plus, PlusCircle, X, Users,
-} from 'lucide-react'
-import { useCreateShare, useListShares, useDeleteShare } from '@/hooks/useShares'
-import { useTeamMembers } from '@/hooks/useTeamActivities'
-import { useAuth } from '@/contexts/AuthContext'
-import { Badge } from '@/components/identity/Badge'
-import { resolveColorHex } from '@/components/identity/identity-constants'
-import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import { cn } from '@/lib/utils'
-import { MEMBER_COLORS } from '@/types'
-import type { FilterDefinition } from '@/lib/filterTypes'
-import type { components } from '@draba/shared'
-
-type Share = components['schemas']['Share']
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
-
-export interface ShareViewConfig {
-  groupBy: string
-  sortBy: string
-  colorBy: string
-  granularity: string
-  filter: FilterDefinition | null
-  /** List shares only — column visibility snapshot; drives the "notes" projection nuance. */
-  columns?: { id: string; visible: boolean }[]
-  /** Kanban shares only — which fields render on each card. */
-  cardFields?: string[]
-  /** Kanban shares only — whether child activities nest under their parent. */
-  showHierarchy?: boolean
-  /** Kanban shares only — column IDs collapsed at share-creation time. */
-  collapsedColumns?: string[]
-}
-
-interface Props {
-  teamId: string
-  timelineId: string
-  viewType: 'gantt' | 'list' | 'calendar' | 'kanban'
-  viewConfig: ShareViewConfig
-  /** Display name of the timeline, shown in the header subtitle. */
-  timelineName?: string
-  onClose: () => void
-}
-
-interface CreatePayload {
-  title: string
-  description: string
-  password: string | null
-}
-
-// ── Shared token-styled bits ──────────────────────────────────────────────────
-//
-// The handoff colors a share's "type tile" teal (open link) or amber
-// (password-protected). Those tints aren't semantic tokens on their own, so
-// they're expressed as arbitrary-value Tailwind classes derived from the
-// existing `--primary` / `--secondary` HSL values rather than ported hex.
-
-const TILE_TEAL = 'bg-[hsl(188_59%_38%/0.12)] text-primary'
-const TILE_AMBER = 'bg-[hsl(30_87%_62%/0.16)] text-secondary'
-const BADGE_AMBER = 'bg-[hsl(30_87%_62%/0.22)] text-secondary-foreground'
-
-function MiniAvatar({ member, size = 20 }: { member: TeamMemberWithUser | undefined; size?: number }) {
-  if (!member) return null
-  const name = member.displayName || 'Team member'
-  const color = resolveColorHex(member.color) || MEMBER_COLORS[0]
-  return (
-    <Badge identity={{ color, icon: member.icon ?? '__name_1__' }} name={name} size={size} shape="circle" />
-  )
-}
-
-function formatCreated(iso: string): string {
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return ''
-  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
-}
-
-/**
- * Short "last viewed" label for a share row: time of day when the last view
- * was today, otherwise the same short date format as the created date.
- */
-function formatLastViewed(iso: string): string {
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return ''
-  const now = new Date()
-  if (d.toDateString() === now.toDateString()) {
-    return d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
-  }
-  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
-}
-
-// ── A single share row ─────────────────────────────────────────────────────────
-
-function ShareRow({
-  share,
-  creator,
-  isOwn,
-  onDelete,
-}: {
-  share: Share
-  creator: TeamMemberWithUser | undefined
-  isOwn: boolean
-  onDelete: (id: string) => void
-}) {
-  const url = `${window.location.host}/s/${share.token}`
-  const [copied, setCopied] = useState(false)
-  const [confirming, setConfirming] = useState(false)
-  const protectedShare = Boolean(share.protected)
-
-  const copy = () => {
-    void navigator.clipboard.writeText(`${window.location.origin}/s/${share.token}`).then(() => {
-      setCopied(true)
-      setTimeout(() => setCopied(false), 1600)
-    })
-  }
-
-  return (
-    <div className="relative rounded-[var(--radius-lg)] border border-border bg-card p-3.5 shadow-sm">
-      {/* Top: type tile + title + delete */}
-      <div className="flex items-start gap-2.5">
-        <div className={cn('flex h-8 w-8 shrink-0 items-center justify-center rounded-[var(--radius-md)]', protectedShare ? TILE_AMBER : TILE_TEAL)}>
-          {protectedShare ? <Lock size={16} strokeWidth={2.2} /> : <LinkIcon size={16} strokeWidth={2.2} />}
-        </div>
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="text-sm font-semibold text-foreground">{share.name || 'Untitled link'}</span>
-            {protectedShare && (
-              <span className={cn('inline-flex items-center gap-1 rounded-[var(--radius-full)] px-2 py-px text-[11px] font-semibold', BADGE_AMBER)}>
-                <Lock size={10} strokeWidth={2.4} /> password
-              </span>
-            )}
-          </div>
-          {share.description && (
-            <p className="mt-[3px] text-[12.5px] leading-[1.45] text-muted-foreground">{share.description}</p>
-          )}
-        </div>
-        <button
-          onClick={() => setConfirming(true)}
-          title="Delete share"
-          className="flex h-7 w-7 shrink-0 cursor-pointer items-center justify-center rounded-[var(--radius-md)] border-none bg-transparent text-muted-foreground transition-colors hover:bg-[hsl(0_72%_51%/0.1)] hover:text-destructive"
-        >
-          <Trash2 size={15} strokeWidth={2} />
-        </button>
-      </div>
-
-      {/* URL row */}
-      <div className="mt-[11px] flex items-center gap-2">
-        <div className="flex min-w-0 flex-1 items-center gap-2 rounded-[var(--radius-md)] bg-muted px-[11px] py-[7px] font-mono text-[12.5px] text-foreground">
-          <Link2 size={13} className="shrink-0 text-muted-foreground" strokeWidth={2} />
-          <span className="overflow-hidden text-ellipsis whitespace-nowrap">{url}</span>
-        </div>
-        <button
-          onClick={copy}
-          className={cn(
-            'flex shrink-0 items-center gap-[5px] rounded-[var(--radius-md)] border px-3 py-[7px] text-[12.5px] font-semibold transition-colors',
-            copied ? 'border-success bg-[hsl(145_63%_42%/0.12)] text-success' : 'border-border bg-card text-foreground',
-          )}
-        >
-          {copied ? <Check size={13} strokeWidth={2.2} /> : <Copy size={13} strokeWidth={2.2} />}
-          {copied ? 'Copied' : 'Copy'}
-        </button>
-      </div>
-
-      {/* Footer meta — labeled columns so each value carries its own context */}
-      <div className="mt-[11px] grid grid-cols-3 gap-2 border-t border-border pt-2.5">
-        <div title={`Created ${formatCreated(share.createdAt)}`}>
-          <div className="text-[10px] font-semibold uppercase tracking-[0.06em] text-muted-foreground">Created by</div>
-          <div className="mt-1 flex min-w-0 items-center gap-1.5 text-xs">
-            <MiniAvatar member={creator} size={16} />
-            <span className="truncate font-semibold text-foreground">
-              {creator?.displayName ?? 'Team member'}
-              {isOwn && <span className="font-normal text-muted-foreground"> · you</span>}
-            </span>
-          </div>
-        </div>
-        <div title={share.lastViewedAt ? new Date(share.lastViewedAt).toLocaleString() : undefined}>
-          <div className="text-[10px] font-semibold uppercase tracking-[0.06em] text-muted-foreground">Last viewed</div>
-          <div className="mt-1 text-xs text-foreground">
-            {share.lastViewedAt ? formatLastViewed(share.lastViewedAt) : 'Never'}
-          </div>
-        </div>
-        <div>
-          <div className="text-[10px] font-semibold uppercase tracking-[0.06em] text-muted-foreground">View total</div>
-          <div className="mt-1 inline-flex items-center gap-1 text-xs text-foreground">
-            <Eye size={12} strokeWidth={2} className="text-muted-foreground" />
-            {share.viewCount}
-          </div>
-        </div>
-      </div>
-
-      {/* Inline delete confirm */}
-      {confirming && (
-        <div className="absolute inset-0 flex flex-col justify-center gap-2.5 rounded-[var(--radius-lg)] border border-destructive bg-card px-4 py-3.5">
-          <div className="flex items-start gap-2.5">
-            <div className="flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-[var(--radius-md)] bg-[hsl(0_72%_51%/0.1)] text-destructive">
-              <Trash2 size={15} strokeWidth={2.2} />
-            </div>
-            <div>
-              <div className="text-[13.5px] font-semibold text-foreground">Delete this share?</div>
-              <div className="mt-0.5 text-xs text-muted-foreground">Anyone with the link will immediately lose access. This can&apos;t be undone.</div>
-            </div>
-          </div>
-          <div className="flex justify-end gap-2">
-            <Button variant="outline" size="sm" onClick={() => setConfirming(false)}>Cancel</Button>
-            <Button variant="destructive" size="sm" onClick={() => { onDelete(share.id); setConfirming(false) }}>Delete link</Button>
-          </div>
-        </div>
-      )}
-    </div>
-  )
-}
-
-// ── The add-share inline form ───────────────────────────────────────────────────
-
-/**
- * No shadcn Textarea exists yet, so this mirrors Input's class string —
- * keeps the field visually consistent without inline styles.
- */
-const TEXTAREA_CLASSES = 'flex w-full resize-y rounded-md border border-[var(--border)] bg-[var(--background)] px-3 py-2 text-sm leading-relaxed text-[var(--foreground)] shadow-sm transition-colors placeholder:text-[var(--muted-foreground)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)]'
-
-function AddShareForm({
-  currentMember,
-  onCreate,
-  onCancel,
-  isPending,
-  isError,
-}: {
-  currentMember: TeamMemberWithUser | undefined
-  onCreate: (payload: CreatePayload) => void
-  onCancel: () => void
-  isPending: boolean
-  isError: boolean
-}) {
-  const [title, setTitle] = useState('')
-  const [desc, setDesc] = useState('')
-  const [pwOn, setPwOn] = useState(false)
-  const [pw, setPw] = useState('')
-  const [showPw, setShowPw] = useState(false)
-  const titleRef = useRef<HTMLInputElement>(null)
-
-  useEffect(() => { titleRef.current?.focus() }, [])
-
-  const valid = title.trim().length > 0 && (!pwOn || pw.trim().length > 0)
-
-  const submit = () => {
-    if (!valid || isPending) return
-    onCreate({ title: title.trim(), description: desc.trim(), password: pwOn ? pw : null })
-  }
-
-  return (
-    <div className="rounded-[var(--radius-lg)] border-[1.5px] border-primary bg-card p-4 shadow-[0_0_0_3px_hsl(188_59%_38%/0.08)]">
-      <div className="mb-3.5 flex items-center gap-2">
-        <PlusCircle size={16} className="text-primary" strokeWidth={2.2} />
-        <span className="text-[13.5px] font-bold text-foreground">New share link</span>
-      </div>
-
-      <div className="mb-3 flex flex-col gap-1.5">
-        <Label htmlFor="share-title">Title</Label>
-        <Input
-          id="share-title"
-          ref={titleRef}
-          value={title}
-          onChange={e => setTitle(e.target.value)}
-          onKeyDown={e => { if (e.key === 'Enter') submit() }}
-          placeholder="e.g. Acme stakeholder view"
-        />
-      </div>
-
-      <div className="mb-3 flex flex-col gap-1.5">
-        <Label htmlFor="share-description">
-          Description <span className="lowercase font-normal">· optional</span>
-        </Label>
-        <textarea
-          id="share-description"
-          value={desc}
-          onChange={e => setDesc(e.target.value)}
-          rows={2}
-          placeholder="What's this link for, and who is it shared with?"
-          className={TEXTAREA_CLASSES}
-        />
-      </div>
-
-      {/* Password protect */}
-      <div className="overflow-hidden rounded-[var(--radius-md)] border border-border">
-        <div className="flex items-center gap-2.5 px-3 py-2.5">
-          <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[var(--radius-md)] bg-muted text-muted-foreground">
-            <Lock size={14} strokeWidth={2} />
-          </div>
-          <div className="flex-1">
-            <div className="text-[13px] font-semibold text-foreground">Password protect</div>
-            <div className="text-[11.5px] text-muted-foreground">Require a password to open the link</div>
-          </div>
-          <button
-            onClick={() => setPwOn(v => !v)}
-            role="switch"
-            aria-checked={pwOn}
-            aria-label="Password protect"
-            className={cn(
-              'relative h-[22px] w-10 shrink-0 cursor-pointer rounded-[var(--radius-full)] border-none p-0 transition-colors',
-              pwOn ? 'bg-primary' : 'bg-border',
-            )}
-          >
-            <span className={cn(
-              'absolute top-[2px] h-[18px] w-[18px] rounded-full bg-white shadow-sm transition-[left] duration-150',
-              pwOn ? 'left-5' : 'left-[2px]',
-            )} />
-          </button>
-        </div>
-        {pwOn && (
-          <div className="border-t border-border px-3 py-3">
-            <div className="flex items-center gap-2 rounded-[var(--radius-md)] border border-input bg-card px-2.5">
-              <KeyRound size={14} className="text-muted-foreground" strokeWidth={2} />
-              <input
-                value={pw}
-                onChange={e => setPw(e.target.value)}
-                onKeyDown={e => { if (e.key === 'Enter') submit() }}
-                type={showPw ? 'text' : 'password'}
-                placeholder="Set a password"
-                className="flex-1 border-none bg-transparent py-2 text-[13px] text-foreground outline-none placeholder:text-muted-foreground"
-              />
-              <button
-                onClick={() => setShowPw(v => !v)}
-                aria-label={showPw ? 'Hide password' : 'Show password'}
-                className="flex cursor-pointer border-none bg-transparent p-1 text-muted-foreground"
-              >
-                {showPw ? <EyeOff size={14} strokeWidth={2} /> : <Eye size={14} strokeWidth={2} />}
-              </button>
-            </div>
-          </div>
-        )}
-      </div>
-
-      {isError && (
-        <p className="mt-2.5 text-[11px] text-destructive">Failed to create share. Please try again.</p>
-      )}
-
-      {/* Actions */}
-      <div className="mt-4 flex items-center gap-2.5">
-        <div className="mr-auto flex items-center gap-[7px] text-xs text-muted-foreground">
-          <MiniAvatar member={currentMember} size={20} />
-          <span>Sharing as {currentMember?.displayName ?? 'you'}</span>
-        </div>
-        <Button variant="outline" onClick={onCancel}>Cancel</Button>
-        <Button onClick={submit} disabled={!valid || isPending}>
-          <LinkIcon size={14} strokeWidth={2.2} /> {isPending ? 'Creating…' : 'Create link'}
-        </Button>
-      </div>
-    </div>
-  )
-}
-
-// ── The modal shell ──────────────────────────────────────────────────────────
-
-export default function ShareModal({ teamId, timelineId, viewType, viewConfig, timelineName, onClose }: Props) {
-  const { user } = useAuth()
-  const { data: allShares = [], isLoading } = useListShares(teamId, timelineId)
-  // Scoped to this exact view — a share is a frozen snapshot of one view's
-  // config, so a Gantt link can't usefully stand in for a List or Kanban one.
-  // Showing only same-type links keeps "active links" literal and leaves room
-  // to tailor the modal per view type (e.g. Calendar/ICS in 13.4) without
-  // having to reconcile it against unrelated shares.
-  // kind === 'view' also keeps ICS calendar feeds (13.4) out of this list —
-  // they live in CalendarShareModal, a different surface entirely.
-  const shares = allShares.filter(s => s.kind === 'view' && s.viewType === viewType)
-  const { data: members = [] } = useTeamMembers(teamId)
-  const createShare = useCreateShare(teamId, timelineId)
-  const deleteShare = useDeleteShare(teamId, timelineId)
-  const [adding, setAdding] = useState(false)
-  const bodyRef = useRef<HTMLDivElement>(null)
-
-  const memberByID = new Map(members.map(m => [m.id, m]))
-  const currentMember = members.find(m => m.userId && m.userId === user?.id)
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [onClose])
-
-  const configString = JSON.stringify({
-    groupBy: viewConfig.groupBy,
-    sortBy: viewConfig.sortBy,
-    colorBy: viewConfig.colorBy,
-    granularity: viewConfig.granularity,
-    filter: viewConfig.filter ?? { logic: 'and', conditions: [] },
-    ...(viewConfig.columns ? { columns: viewConfig.columns } : {}),
-    ...(viewConfig.cardFields ? { cardFields: viewConfig.cardFields } : {}),
-    ...(viewConfig.showHierarchy !== undefined ? { showHierarchy: viewConfig.showHierarchy } : {}),
-    ...(viewConfig.collapsedColumns ? { collapsedColumns: viewConfig.collapsedColumns } : {}),
-  })
-
-  const handleCreate = (payload: CreatePayload) => {
-    createShare.mutate(
-      {
-        name: payload.title,
-        description: payload.description || null,
-        viewType,
-        viewConfig: configString,
-        password: payload.password ?? undefined,
-      },
-      {
-        onSuccess: () => {
-          setAdding(false)
-          setTimeout(() => { if (bodyRef.current) bodyRef.current.scrollTop = 0 }, 0)
-        },
-      },
-    )
-  }
-
-  return createPortal(
-    <div
-      className="fixed inset-0 z-[1000] flex items-center justify-center bg-[hsl(200_24%_11%/0.55)] p-6 backdrop-blur-[2px]"
-    >
-      <div
-        className="flex max-h-[88vh] w-[min(580px,100%)] flex-col overflow-hidden rounded-[var(--radius-xl)] bg-card shadow-[var(--shadow-lg)]"
-      >
-        {/* Header */}
-        <div className="flex shrink-0 items-start gap-3 border-b border-border px-5 py-[18px]">
-          <div className={cn('flex h-[38px] w-[38px] shrink-0 items-center justify-center rounded-[var(--radius-md)]', TILE_TEAL)}>
-            <LinkIcon size={19} strokeWidth={2.2} />
-          </div>
-          <div className="min-w-0 flex-1">
-            <h2 className="m-0 text-[17px] font-bold leading-tight text-foreground">Share this view</h2>
-            <div className="mt-0.5 flex items-center gap-1.5 text-[12.5px] text-muted-foreground">
-              <span className="inline-block h-2 w-2 shrink-0 rounded-sm bg-secondary" />
-              {timelineName ? `${timelineName} · ` : ''}anyone with a link can view
-            </div>
-          </div>
-          <button
-            onClick={onClose}
-            aria-label="Close"
-            className="flex h-[30px] w-[30px] shrink-0 cursor-pointer items-center justify-center rounded-[var(--radius-md)] border-none bg-muted text-muted-foreground"
-          >
-            <X size={16} strokeWidth={2.2} />
-          </button>
-        </div>
-
-        {/* Section bar */}
-        <div className="flex shrink-0 items-center gap-2 px-5 pb-[11px] pt-[13px]">
-          <span className="text-[11px] font-bold uppercase tracking-[0.06em] text-muted-foreground">Active links</span>
-          <span className="min-w-[20px] rounded-[var(--radius-full)] bg-muted px-2 py-px text-center text-[11px] font-bold text-muted-foreground">{shares.length}</span>
-          <div className="ml-auto">
-            {!adding && (
-              <Button size="sm" onClick={() => setAdding(true)}>
-                <Plus size={14} strokeWidth={2.4} /> New share
-              </Button>
-            )}
-          </div>
-        </div>
-
-        {/* Body */}
-        <div ref={bodyRef} className="flex min-h-[120px] flex-1 flex-col gap-3 overflow-y-auto px-5 pb-5">
-          {adding && (
-            <AddShareForm
-              currentMember={currentMember}
-              onCreate={handleCreate}
-              onCancel={() => setAdding(false)}
-              isPending={createShare.isPending}
-              isError={createShare.isError}
-            />
-          )}
-
-          {!isLoading && shares.length === 0 && !adding && (
-            <div className="flex flex-1 flex-col items-center justify-center rounded-[var(--radius-lg)] border border-dashed border-border px-5 py-9 text-center">
-              <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-[var(--radius-lg)] bg-muted text-muted-foreground">
-                <LinkIcon size={22} strokeWidth={1.8} />
-              </div>
-              <div className="text-sm font-semibold text-foreground">No share links yet</div>
-              <div className="mt-1 max-w-[280px] text-[12.5px] text-muted-foreground">Create a link to let people outside your team view this timeline.</div>
-              <Button size="sm" className="mt-4" onClick={() => setAdding(true)}>
-                <Plus size={14} strokeWidth={2.4} /> Create share link
-              </Button>
-            </div>
-          )}
-
-          {shares.map(s => (
-            <ShareRow
-              key={s.id}
-              share={s}
-              creator={s.createdBy ? memberByID.get(s.createdBy) : undefined}
-              isOwn={Boolean(currentMember && s.createdBy === currentMember.id)}
-              onDelete={(id) => deleteShare.mutate(id)}
-            />
-          ))}
-        </div>
-
-        {/* Footer */}
-        <div className="flex shrink-0 items-center gap-2.5 border-t border-border px-5 py-[13px]">
-          <div className="flex items-center gap-[7px] text-xs text-muted-foreground">
-            <Users size={14} strokeWidth={2} />
-            Read-only links · anyone on your team can manage them
-          </div>
-          <Button variant="outline" className="ml-auto" onClick={onClose}>Done</Button>
-        </div>
-      </div>
-    </div>,
-    document.body,
-  )
-}
-````
-
 ## File: packages/web/src/pages/DashboardPage.tsx
 ````typescript
 /**
@@ -60441,6 +59918,1890 @@ export default function DashboardPage() {
     </FindProvider>
   )
 }
+````
+
+## File: packages/web/src/components/ShareModal.tsx
+````typescript
+/**
+ * ShareModal — manage the share links for the current timeline view.
+ *
+ * Rebuilt to the "Share this view" design handoff (docs/design/handoffs/share-modal):
+ * an active-links list with per-row creator/date/view-count meta and an inline
+ * delete-confirm, plus an inline create form with optional password protection.
+ * One timeline can host many named shares; each is a frozen view snapshot.
+ *
+ * Styled with Tailwind utility classes against the project's design tokens
+ * (see index.css `@theme`) and shadcn/ui primitives — the handoff is a visual
+ * reference, not production code, so its inline styles were not ported.
+ *
+ * Delete is intentionally not permission-gated — a share is a read-only
+ * projection that cannot mutate app data, so any team member may manage any
+ * link (Phase 13.2 decision).
+ */
+
+import { useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
+import {
+  Link as LinkIcon, Link2, Lock, KeyRound, Copy, Check, Eye, EyeOff,
+  Trash2, Plus, PlusCircle, X, Users,
+} from 'lucide-react'
+import { useCreateShare, useListShares, useDeleteShare } from '@/hooks/useShares'
+import { useTeamMembers } from '@/hooks/useTeamActivities'
+import { useAuth } from '@/contexts/AuthContext'
+import { Badge } from '@/components/identity/Badge'
+import { resolveColorHex } from '@/components/identity/identity-constants'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { cn } from '@/lib/utils'
+import { MEMBER_COLORS } from '@/types'
+import type { FilterDefinition } from '@/lib/filterTypes'
+import type { components } from '@draba/shared'
+
+type Share = components['schemas']['Share']
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
+
+export interface ShareViewConfig {
+  groupBy: string
+  sortBy: string
+  colorBy: string
+  granularity: string
+  filter: FilterDefinition | null
+  /** List shares only — column visibility snapshot; drives the "notes" projection nuance. */
+  columns?: { id: string; visible: boolean }[]
+  /** Kanban shares only — which fields render on each card. */
+  cardFields?: string[]
+  /** Kanban shares only — whether child activities nest under their parent. */
+  showHierarchy?: boolean
+  /** Kanban shares only — column IDs collapsed at share-creation time. */
+  collapsedColumns?: string[]
+}
+
+interface Props {
+  teamId: string
+  timelineId: string
+  viewType: 'gantt' | 'list' | 'calendar' | 'kanban'
+  viewConfig: ShareViewConfig
+  /** Display name of the timeline, shown in the header subtitle. */
+  timelineName?: string
+  onClose: () => void
+}
+
+interface CreatePayload {
+  title: string
+  description: string
+  password: string | null
+}
+
+// ── Shared token-styled bits ──────────────────────────────────────────────────
+//
+// The handoff colors a share's "type tile" teal (open link) or amber
+// (password-protected). Those tints aren't semantic tokens on their own, so
+// they're expressed as arbitrary-value Tailwind classes derived from the
+// existing `--primary` / `--secondary` HSL values rather than ported hex.
+
+const TILE_TEAL = 'bg-[hsl(188_59%_38%/0.12)] text-primary'
+const TILE_AMBER = 'bg-[hsl(30_87%_62%/0.16)] text-secondary'
+const BADGE_AMBER = 'bg-[hsl(30_87%_62%/0.22)] text-secondary-foreground'
+
+function MiniAvatar({ member, size = 20 }: { member: TeamMemberWithUser | undefined; size?: number }) {
+  if (!member) return null
+  const name = member.displayName || 'Team member'
+  const color = resolveColorHex(member.color) || MEMBER_COLORS[0]
+  return (
+    <Badge identity={{ color, icon: member.icon ?? '__name_1__' }} name={name} size={size} shape="circle" />
+  )
+}
+
+function formatCreated(iso: string): string {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ''
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+}
+
+/**
+ * Short "last viewed" label for a share row: time of day when the last view
+ * was today, otherwise the same short date format as the created date.
+ */
+function formatLastViewed(iso: string): string {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ''
+  const now = new Date()
+  if (d.toDateString() === now.toDateString()) {
+    return d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
+  }
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+}
+
+// ── A single share row ─────────────────────────────────────────────────────────
+
+function ShareRow({
+  share,
+  creator,
+  isOwn,
+  onDelete,
+}: {
+  share: Share
+  creator: TeamMemberWithUser | undefined
+  isOwn: boolean
+  onDelete: (id: string) => void
+}) {
+  const url = `${window.location.host}/s/${share.token}`
+  const [copied, setCopied] = useState(false)
+  const [confirming, setConfirming] = useState(false)
+  const protectedShare = Boolean(share.protected)
+
+  const copy = () => {
+    void navigator.clipboard.writeText(`${window.location.origin}/s/${share.token}`).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1600)
+    })
+  }
+
+  return (
+    <div className="relative rounded-[var(--radius-lg)] border border-border bg-card p-3.5 shadow-sm">
+      {/* Top: type tile + title + delete */}
+      <div className="flex items-start gap-2.5">
+        <div className={cn('flex h-8 w-8 shrink-0 items-center justify-center rounded-[var(--radius-md)]', protectedShare ? TILE_AMBER : TILE_TEAL)}>
+          {protectedShare ? <Lock size={16} strokeWidth={2.2} /> : <LinkIcon size={16} strokeWidth={2.2} />}
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-sm font-semibold text-foreground">{share.name || 'Untitled link'}</span>
+            {protectedShare && (
+              <span className={cn('inline-flex items-center gap-1 rounded-[var(--radius-full)] px-2 py-px text-[11px] font-semibold', BADGE_AMBER)}>
+                <Lock size={10} strokeWidth={2.4} /> password
+              </span>
+            )}
+          </div>
+          {share.description && (
+            <p className="mt-[3px] text-[12.5px] leading-[1.45] text-muted-foreground">{share.description}</p>
+          )}
+        </div>
+        <button
+          onClick={() => setConfirming(true)}
+          title="Delete share"
+          className="flex h-7 w-7 shrink-0 cursor-pointer items-center justify-center rounded-[var(--radius-md)] border-none bg-transparent text-muted-foreground transition-colors hover:bg-[hsl(0_72%_51%/0.1)] hover:text-destructive"
+        >
+          <Trash2 size={15} strokeWidth={2} />
+        </button>
+      </div>
+
+      {/* URL row */}
+      <div className="mt-[11px] flex items-center gap-2">
+        <div className="flex min-w-0 flex-1 items-center gap-2 rounded-[var(--radius-md)] bg-muted px-[11px] py-[7px] font-mono text-[12.5px] text-foreground">
+          <Link2 size={13} className="shrink-0 text-muted-foreground" strokeWidth={2} />
+          <span className="overflow-hidden text-ellipsis whitespace-nowrap">{url}</span>
+        </div>
+        <button
+          onClick={copy}
+          className={cn(
+            'flex shrink-0 items-center gap-[5px] rounded-[var(--radius-md)] border px-3 py-[7px] text-[12.5px] font-semibold transition-colors',
+            copied ? 'border-success bg-[hsl(145_63%_42%/0.12)] text-success' : 'border-border bg-card text-foreground',
+          )}
+        >
+          {copied ? <Check size={13} strokeWidth={2.2} /> : <Copy size={13} strokeWidth={2.2} />}
+          {copied ? 'Copied' : 'Copy'}
+        </button>
+      </div>
+
+      {/* Footer meta — labeled columns so each value carries its own context */}
+      <div className="mt-[11px] grid grid-cols-3 gap-2 border-t border-border pt-2.5">
+        <div title={`Created ${formatCreated(share.createdAt)}`}>
+          <div className="text-[10px] font-semibold uppercase tracking-[0.06em] text-muted-foreground">Created by</div>
+          <div className="mt-1 flex min-w-0 items-center gap-1.5 text-xs">
+            <MiniAvatar member={creator} size={16} />
+            <span className="truncate font-semibold text-foreground">
+              {creator?.displayName ?? 'Team member'}
+              {isOwn && <span className="font-normal text-muted-foreground"> · you</span>}
+            </span>
+          </div>
+        </div>
+        <div title={share.lastViewedAt ? new Date(share.lastViewedAt).toLocaleString() : undefined}>
+          <div className="text-[10px] font-semibold uppercase tracking-[0.06em] text-muted-foreground">Last viewed</div>
+          <div className="mt-1 text-xs text-foreground">
+            {share.lastViewedAt ? formatLastViewed(share.lastViewedAt) : 'Never'}
+          </div>
+        </div>
+        <div>
+          <div className="text-[10px] font-semibold uppercase tracking-[0.06em] text-muted-foreground">View total</div>
+          <div className="mt-1 inline-flex items-center gap-1 text-xs text-foreground">
+            <Eye size={12} strokeWidth={2} className="text-muted-foreground" />
+            {share.viewCount}
+          </div>
+        </div>
+      </div>
+
+      {/* Inline delete confirm */}
+      {confirming && (
+        <div className="absolute inset-0 flex flex-col justify-center gap-2.5 rounded-[var(--radius-lg)] border border-destructive bg-card px-4 py-3.5">
+          <div className="flex items-start gap-2.5">
+            <div className="flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-[var(--radius-md)] bg-[hsl(0_72%_51%/0.1)] text-destructive">
+              <Trash2 size={15} strokeWidth={2.2} />
+            </div>
+            <div>
+              <div className="text-[13.5px] font-semibold text-foreground">Delete this share?</div>
+              <div className="mt-0.5 text-xs text-muted-foreground">Anyone with the link will immediately lose access. This can&apos;t be undone.</div>
+            </div>
+          </div>
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" size="sm" onClick={() => setConfirming(false)}>Cancel</Button>
+            <Button variant="destructive" size="sm" onClick={() => { onDelete(share.id); setConfirming(false) }}>Delete link</Button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── The add-share inline form ───────────────────────────────────────────────────
+
+/**
+ * No shadcn Textarea exists yet, so this mirrors Input's class string —
+ * keeps the field visually consistent without inline styles.
+ */
+const TEXTAREA_CLASSES = 'flex w-full resize-y rounded-md border border-[var(--border)] bg-[var(--background)] px-3 py-2 text-sm leading-relaxed text-[var(--foreground)] shadow-sm transition-colors placeholder:text-[var(--muted-foreground)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)]'
+
+function AddShareForm({
+  currentMember,
+  onCreate,
+  onCancel,
+  isPending,
+  isError,
+}: {
+  currentMember: TeamMemberWithUser | undefined
+  onCreate: (payload: CreatePayload) => void
+  onCancel: () => void
+  isPending: boolean
+  isError: boolean
+}) {
+  const [title, setTitle] = useState('')
+  const [desc, setDesc] = useState('')
+  const [pwOn, setPwOn] = useState(false)
+  const [pw, setPw] = useState('')
+  const [showPw, setShowPw] = useState(false)
+  const titleRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => { titleRef.current?.focus() }, [])
+
+  const valid = title.trim().length > 0 && (!pwOn || pw.trim().length > 0)
+
+  const submit = () => {
+    if (!valid || isPending) return
+    onCreate({ title: title.trim(), description: desc.trim(), password: pwOn ? pw : null })
+  }
+
+  return (
+    <div className="rounded-[var(--radius-lg)] border-[1.5px] border-primary bg-card p-4 shadow-[0_0_0_3px_hsl(188_59%_38%/0.08)]">
+      <div className="mb-3.5 flex items-center gap-2">
+        <PlusCircle size={16} className="text-primary" strokeWidth={2.2} />
+        <span className="text-[13.5px] font-bold text-foreground">New share link</span>
+      </div>
+
+      <div className="mb-3 flex flex-col gap-1.5">
+        <Label htmlFor="share-title">Title</Label>
+        <Input
+          id="share-title"
+          ref={titleRef}
+          value={title}
+          onChange={e => setTitle(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') submit() }}
+          placeholder="e.g. Acme stakeholder view"
+        />
+      </div>
+
+      <div className="mb-3 flex flex-col gap-1.5">
+        <Label htmlFor="share-description">
+          Description <span className="lowercase font-normal">· optional</span>
+        </Label>
+        <textarea
+          id="share-description"
+          value={desc}
+          onChange={e => setDesc(e.target.value)}
+          rows={2}
+          placeholder="What's this link for, and who is it shared with?"
+          className={TEXTAREA_CLASSES}
+        />
+      </div>
+
+      {/* Password protect */}
+      <div className="overflow-hidden rounded-[var(--radius-md)] border border-border">
+        <div className="flex items-center gap-2.5 px-3 py-2.5">
+          <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[var(--radius-md)] bg-muted text-muted-foreground">
+            <Lock size={14} strokeWidth={2} />
+          </div>
+          <div className="flex-1">
+            <div className="text-[13px] font-semibold text-foreground">Password protect</div>
+            <div className="text-[11.5px] text-muted-foreground">Require a password to open the link</div>
+          </div>
+          <button
+            onClick={() => setPwOn(v => !v)}
+            role="switch"
+            aria-checked={pwOn}
+            aria-label="Password protect"
+            className={cn(
+              'relative h-[22px] w-10 shrink-0 cursor-pointer rounded-[var(--radius-full)] border-none p-0 transition-colors',
+              pwOn ? 'bg-primary' : 'bg-border',
+            )}
+          >
+            <span className={cn(
+              'absolute top-[2px] h-[18px] w-[18px] rounded-full bg-white shadow-sm transition-[left] duration-150',
+              pwOn ? 'left-5' : 'left-[2px]',
+            )} />
+          </button>
+        </div>
+        {pwOn && (
+          <div className="border-t border-border px-3 py-3">
+            <div className="flex items-center gap-2 rounded-[var(--radius-md)] border border-input bg-card px-2.5">
+              <KeyRound size={14} className="text-muted-foreground" strokeWidth={2} />
+              <input
+                value={pw}
+                onChange={e => setPw(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') submit() }}
+                type={showPw ? 'text' : 'password'}
+                placeholder="Set a password"
+                className="flex-1 border-none bg-transparent py-2 text-[13px] text-foreground outline-none placeholder:text-muted-foreground"
+              />
+              <button
+                onClick={() => setShowPw(v => !v)}
+                aria-label={showPw ? 'Hide password' : 'Show password'}
+                className="flex cursor-pointer border-none bg-transparent p-1 text-muted-foreground"
+              >
+                {showPw ? <EyeOff size={14} strokeWidth={2} /> : <Eye size={14} strokeWidth={2} />}
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {isError && (
+        <p className="mt-2.5 text-[11px] text-destructive">Failed to create share. Please try again.</p>
+      )}
+
+      {/* Actions */}
+      <div className="mt-4 flex items-center gap-2.5">
+        <div className="mr-auto flex items-center gap-[7px] text-xs text-muted-foreground">
+          <MiniAvatar member={currentMember} size={20} />
+          <span>Sharing as {currentMember?.displayName ?? 'you'}</span>
+        </div>
+        <Button variant="outline" onClick={onCancel}>Cancel</Button>
+        <Button onClick={submit} disabled={!valid || isPending}>
+          <LinkIcon size={14} strokeWidth={2.2} /> {isPending ? 'Creating…' : 'Create link'}
+        </Button>
+      </div>
+    </div>
+  )
+}
+
+// ── The modal shell ──────────────────────────────────────────────────────────
+
+export default function ShareModal({ teamId, timelineId, viewType, viewConfig, timelineName, onClose }: Props) {
+  const { user } = useAuth()
+  const { data: allShares = [], isLoading } = useListShares(teamId, timelineId)
+  // Scoped to this exact view — a share is a frozen snapshot of one view's
+  // config, so a Gantt link can't usefully stand in for a List or Kanban one.
+  // Showing only same-type links keeps "active links" literal and leaves room
+  // to tailor the modal per view type (e.g. Calendar/ICS in 13.4) without
+  // having to reconcile it against unrelated shares.
+  // kind === 'view' also keeps ICS calendar feeds (13.4) out of this list —
+  // they live in CalendarShareModal, a different surface entirely.
+  const shares = allShares.filter(s => s.kind === 'view' && s.viewType === viewType)
+  const { data: members = [] } = useTeamMembers(teamId)
+  const createShare = useCreateShare(teamId, timelineId)
+  const deleteShare = useDeleteShare(teamId, timelineId)
+  const [adding, setAdding] = useState(false)
+  const bodyRef = useRef<HTMLDivElement>(null)
+
+  const memberByID = new Map(members.map(m => [m.id, m]))
+  const currentMember = members.find(m => m.userId && m.userId === user?.id)
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  const configString = JSON.stringify({
+    groupBy: viewConfig.groupBy,
+    sortBy: viewConfig.sortBy,
+    colorBy: viewConfig.colorBy,
+    granularity: viewConfig.granularity,
+    filter: viewConfig.filter ?? { logic: 'and', conditions: [] },
+    ...(viewConfig.columns ? { columns: viewConfig.columns } : {}),
+    ...(viewConfig.cardFields ? { cardFields: viewConfig.cardFields } : {}),
+    ...(viewConfig.showHierarchy !== undefined ? { showHierarchy: viewConfig.showHierarchy } : {}),
+    ...(viewConfig.collapsedColumns ? { collapsedColumns: viewConfig.collapsedColumns } : {}),
+  })
+
+  const handleCreate = (payload: CreatePayload) => {
+    createShare.mutate(
+      {
+        name: payload.title,
+        description: payload.description || null,
+        viewType,
+        viewConfig: configString,
+        password: payload.password ?? undefined,
+      },
+      {
+        onSuccess: () => {
+          setAdding(false)
+          setTimeout(() => { if (bodyRef.current) bodyRef.current.scrollTop = 0 }, 0)
+        },
+      },
+    )
+  }
+
+  return createPortal(
+    <div
+      className="fixed inset-0 z-[1000] flex items-center justify-center bg-[hsl(200_24%_11%/0.55)] p-6 backdrop-blur-[2px]"
+    >
+      <div
+        className="flex max-h-[88vh] w-[min(580px,100%)] flex-col overflow-hidden rounded-[var(--radius-xl)] bg-card shadow-[var(--shadow-lg)]"
+      >
+        {/* Header */}
+        <div className="flex shrink-0 items-start gap-3 border-b border-border px-5 py-[18px]">
+          <div className={cn('flex h-[38px] w-[38px] shrink-0 items-center justify-center rounded-[var(--radius-md)]', TILE_TEAL)}>
+            <LinkIcon size={19} strokeWidth={2.2} />
+          </div>
+          <div className="min-w-0 flex-1">
+            <h2 className="m-0 text-[17px] font-bold leading-tight text-foreground">Share this view</h2>
+            <div className="mt-0.5 flex items-center gap-1.5 text-[12.5px] text-muted-foreground">
+              <span className="inline-block h-2 w-2 shrink-0 rounded-sm bg-secondary" />
+              {timelineName ? `${timelineName} · ` : ''}anyone with a link can view
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            aria-label="Close"
+            className="flex h-[30px] w-[30px] shrink-0 cursor-pointer items-center justify-center rounded-[var(--radius-md)] border-none bg-muted text-muted-foreground"
+          >
+            <X size={16} strokeWidth={2.2} />
+          </button>
+        </div>
+
+        {/* Section bar */}
+        <div className="flex shrink-0 items-center gap-2 px-5 pb-[11px] pt-[13px]">
+          <span className="text-[11px] font-bold uppercase tracking-[0.06em] text-muted-foreground">Active links</span>
+          <span className="min-w-[20px] rounded-[var(--radius-full)] bg-muted px-2 py-px text-center text-[11px] font-bold text-muted-foreground">{shares.length}</span>
+          <div className="ml-auto">
+            {!adding && (
+              <Button size="sm" onClick={() => setAdding(true)}>
+                <Plus size={14} strokeWidth={2.4} /> New share
+              </Button>
+            )}
+          </div>
+        </div>
+
+        {/* Body */}
+        <div ref={bodyRef} className="flex min-h-[120px] flex-1 flex-col gap-3 overflow-y-auto px-5 pb-5">
+          {adding && (
+            <AddShareForm
+              currentMember={currentMember}
+              onCreate={handleCreate}
+              onCancel={() => setAdding(false)}
+              isPending={createShare.isPending}
+              isError={createShare.isError}
+            />
+          )}
+
+          {!isLoading && shares.length === 0 && !adding && (
+            <div className="flex flex-1 flex-col items-center justify-center rounded-[var(--radius-lg)] border border-dashed border-border px-5 py-9 text-center">
+              <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-[var(--radius-lg)] bg-muted text-muted-foreground">
+                <LinkIcon size={22} strokeWidth={1.8} />
+              </div>
+              <div className="text-sm font-semibold text-foreground">No share links yet</div>
+              <div className="mt-1 max-w-[280px] text-[12.5px] text-muted-foreground">Create a link to let people outside your team view this timeline.</div>
+              <Button size="sm" className="mt-4" onClick={() => setAdding(true)}>
+                <Plus size={14} strokeWidth={2.4} /> Create share link
+              </Button>
+            </div>
+          )}
+
+          {shares.map(s => (
+            <ShareRow
+              key={s.id}
+              share={s}
+              creator={s.createdBy ? memberByID.get(s.createdBy) : undefined}
+              isOwn={Boolean(currentMember && s.createdBy === currentMember.id)}
+              onDelete={(id) => deleteShare.mutate(id)}
+            />
+          ))}
+        </div>
+
+        {/* Footer */}
+        <div className="flex shrink-0 items-center gap-2.5 border-t border-border px-5 py-[13px]">
+          <div className="flex items-center gap-[7px] text-xs text-muted-foreground">
+            <Users size={14} strokeWidth={2} />
+            Read-only links · anyone on your team can manage them
+          </div>
+          <Button variant="outline" className="ml-auto" onClick={onClose}>Done</Button>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  )
+}
+````
+
+## File: docs/TASKS.md
+````markdown
+# Tasks
+
+## Current Sprint — Foundation
+
+### Repo & Tooling
+- [x] Initialize Go module (`packages/api/`) with basic project structure — 2026-04-29
+- [x] Initialize React + TypeScript + Vite project (`packages/web/`) — 2026-04-29
+- [x] Set up pnpm workspace (`pnpm-workspace.yaml`) — 2026-04-29
+- [x] Add `golangci-lint` config (`.golangci.yml`) — 2026-04-29
+- [x] Set up GitHub Actions CI: lint + test on PR — 2026-04-29
+- [x] Write `docker-compose.yml` for local development — 2026-04-29
+
+### API — Core
+- [x] DB abstraction layer with SQLite adapter (sqlx + modernc.org/sqlite) — 2026-04-30
+- [x] Migration runner (auto-runs on startup) — 2026-04-30
+- [x] Initial schema migrations: users, teams, team_members, invites, events, event_tags, event_assignments, timelines, timeline_access, calendar_connections, api_tokens — 2026-04-30
+- [x] Auth: JWT issue/validate, password hash/verify, invite token generate/validate — 2026-04-30
+- [x] `POST /auth/register` (invite token required) — 2026-04-30
+- [x] `POST /auth/login` — 2026-04-30
+- [x] `POST /auth/refresh` — 2026-04-30
+- [x] `POST /teams` — create team — 2026-05-03
+- [x] `POST /teams/:id/invites` — send invite — 2026-05-03
+- [x] `GET /teams/:id/members` — 2026-05-03
+- [x] `POST /teams/:id/events` — create event — 2026-05-03
+- [x] `GET /teams/:id/events` — list events (date range filter) — 2026-05-03
+- [x] `PATCH /events/:id` — update event — 2026-05-03
+- [x] `DELETE /events/:id` — delete event — 2026-05-03
+
+### API — Real-Time
+- [x] WebSocket hub (`internal/ws/`) — 2026-05-14
+- [x] Team-scoped subscription model — 2026-05-14
+- [x] Broadcast on `events.*` internal bus events — 2026-05-14
+
+### API — Timelines
+- [x] `POST /teams/:id/timelines` — create timeline — 2026-05-15
+- [x] `GET /timelines/:id` — fetch timeline (public or auth-gated) — 2026-05-15
+- [x] `GET /timelines/share/:token` — public share link handler — 2026-05-15
+- [x] Timeline access list enforcement — 2026-05-15
+
+### Web — Scaffold
+- [x] Initialize shadcn/ui: `pnpm dlx shadcn@latest init` — 2026-05-16
+- [x] Set color tokens in `src/index.css` once palette is decided — 2026-05-16
+- [x] Set up dark mode toggle (localStorage + `prefers-color-scheme`) — 2026-05-16
+- [x] Routing setup (React Router) — 2026-05-16
+- [x] Auth flow: login, register (via invite), token storage — 2026-05-16
+- [x] API client (TanStack Query + fetch wrapper using generated types) — 2026-05-16
+- [x] WebSocket client hook (`useWebSocket`) — 2026-05-16
+- [x] Embed React build in Go binary (`//go:embed`); API serves SPA at `GET /` — 2026-05-16
+
+### RBAC Refactor + First-Run Setup (Phase 8.0)
+- [x] Migration 003: `team_members` PK, nullable `user_id`, `display_name` — 2026-05-18
+- [x] Migration 003: `event_assignments` + `timeline_access` swap `user_id` FK for `team_member_id` — 2026-05-18
+- [x] Migration 003: `timeline_access` gains `role (admin|member)`; `visibility` dropped from `timelines` — 2026-05-18
+- [x] `User.IsSuperadmin`: first registered user auto-granted superadmin — 2026-05-18
+- [x] `GET /setup/status` — public endpoint (`{ needsSetup: bool }`) — 2026-05-18
+- [x] Timeline access: team admins bypass check; members require explicit `timeline_access` entry — 2026-05-18
+- [x] `SetupPage`: 3-step first-run wizard (account → team → timeline) — 2026-05-18
+- [x] `ProtectedRoute`: redirect to `/setup` when `needsSetup` is true — 2026-05-18
+- [x] Production Dockerfile: run as non-root `draba` user (uid 1000) — 2026-05-18
+
+### Web — Timeline View (Phase 8.1: Shell & Rendering — Gantt pivot)
+- [x] API: `GET /teams`, `GET /teams/:id/timelines`, `assignedMemberIds[]` on Event — 2026-05-18
+- [x] `TimelineView` + `TimelineGrid` (person-lane prototype, later pivoted) — 2026-05-18
+- [x] Pixel ↔ date math (map date range to X offset/width) — 2026-05-18
+- [x] Wire to `GET /teams/:id/events?start=&end=` and `GET /teams/:id/members` — 2026-05-18
+- [x] `TimelineGrid` rewrite: Gantt layout — one row per event, sticky label col, member avatars — 2026-05-18
+- [x] `TimelineToolbar` component: zoom in/out, group-by, sort-by, export stub — 2026-05-18
+- [x] `TimelineView` update: build `GanttRow[]` with grouping + sorting logic — 2026-05-18
+- [x] Group by Member: section headers per assignee, events under primary assignee — 2026-05-18
+- [x] Group by Parent: root events first, children indented below their parent — 2026-05-18
+- [x] Sort by: start date, end date, title A–Z — 2026-05-18
+- [x] Zoom: variable `colWidth` stepped through [40, 60, 80, 120, 160] px/day — 2026-05-18
+- [x] `DashboardPage`: render `TimelineToolbar`, pass group/sort/zoom state to `TimelineView` — 2026-05-18
+
+### Web — Timeline View (Phase 8.2: Interactions)
+- [x] Click event block → open `EventDetailPanel` (view mode) — 2026-05-19
+- [x] Edit form in panel (title, description, date range, status, assignees); save via `PATCH /events/:id` — 2026-05-19
+- [x] Delete event with confirm dialog; remove from timeline — 2026-05-19
+- [x] Drag on empty lane cell → open `EventCreateForm` pre-filled with date range + lane member — 2026-05-19
+- [x] Submit create form → `POST /teams/:id/events`, insert block into timeline — 2026-05-19
+
+### Web — Gantt Bar Drag (Phase 8.2.1: Resize & Move)
+- [x] Detect mousedown on left/right edge (8px zone) vs. bar body — 2026-05-19
+- [x] Edge drag: update start or end date live as user drags; snap to active granularity column — 2026-05-19
+- [x] Body drag: shift both start and end dates by the same column delta — 2026-05-19
+- [x] Show date tooltip during drag (start date for left edge, end date for right edge, both for body) — 2026-05-19
+- [x] PATCH `/events/:id` with new startAt/endAt on mouseup; optimistic update in cache — 2026-05-19
+- [x] Block drag on `is_external` events (read-only; Phase 14 flag) — 2026-05-19
+
+### Web — Timeline View (Phase 8.3: Real-Time Sync)
+- [x] Connect `useWebSocket` to subscribe to `events.*` for active team — 2026-05-19
+- [x] `events.created` delta: insert block into TanStack Query cache — 2026-05-19
+- [x] `events.updated` delta: update block in cache — 2026-05-19
+- [x] `events.deleted` delta: remove block from cache — 2026-05-19
+- [x] Handle optimistic update conflicts (in-flight local edit vs. arriving WS delta) — 2026-05-19
+
+### OpenAPI
+- [x] Write initial `openapi.yaml` in `packages/shared/` — 2026-05-04
+- [x] Set up TypeScript type generation from spec (openapi-typescript) — 2026-05-04
+- [x] Set up Go type generation from spec (`oapi-codegen`) — 2026-05-16
+- [x] Refactor existing Go handlers to use generated OpenAPI models — 2026-05-16
+
+### Web — Persistent View Settings (Phase 8.4)
+- [x] Migration 004: `user_preferences` table with empty-string sentinel for global scope — 2026-05-20
+- [x] `UserPreference` model (`models.go`) — 2026-05-20
+- [x] `UserPreferenceRepo`: `List` and `Upsert` methods — 2026-05-20
+- [x] `GET /users/me/preferences?timeline_id=` — returns scoped or global prefs — 2026-05-20
+- [x] `PUT /users/me/preferences` — upsert single key/value, validates JSON — 2026-05-20
+- [x] OpenAPI spec: `UserPreference` schema + two endpoints — 2026-05-20
+- [x] TypeScript types regenerated from spec — 2026-05-20
+- [x] `usePreferences` / `useUpsertPreference` / `usePreferenceMap` hooks — 2026-05-20
+- [x] `DashboardPage`: restore toolbar state from per-timeline prefs on timeline switch — 2026-05-20
+- [x] `DashboardPage`: save toolbar state (group_by, sort_by, zoom_granularity, color_by) on change — 2026-05-20
+- [x] `DashboardPage`: persist dark mode preference globally — 2026-05-20
+
+### Web — Find (Phase 8.5)
+In-view "find in page" with highlight + match navigation. Scoped to already-loaded events; respects active filters. Global cross-team search is deferred to Phase 15.
+
+**Find bar:**
+- [x] `FindBar` component in the TopBar (between FilterDropdown and ProfileMenu) — query input, match counter (`N / M`), prev/next chevrons, close (×) — 2026-05-20
+- [x] Open via `Ctrl/Cmd+F` global keybinding and via a search icon in the TopBar; close via `Esc` or × — 2026-05-20
+- [x] Debounced (~150ms) client-side matcher over already-fetched events — 2026-05-20
+
+**Match scope:**
+- [x] Case-insensitive match against: event title, description, assignee display names, parent event title — 2026-05-20
+- [x] Respect active filters — only events already visible in the current view are candidates — 2026-05-20
+
+**Visual treatment:**
+- [x] Matching events: amber outline / glow using existing design tokens — 2026-05-20
+- [x] Non-matching events: dimmed to ~0.3 opacity — 2026-05-20
+- [x] Active match (prev/next cursor position): stronger outline + subtle pulse to distinguish from other matches — 2026-05-20
+- [x] On hover, non-title matches show a "why matched" hint (e.g. `matched assignee Jane`) — 2026-05-20
+
+**Navigation:**
+- [x] `Enter` / `Shift+Enter` and ◀ ▶ chevrons walk forward/backward through matches — 2026-05-20
+- [x] Auto-scroll the Gantt on each step — horizontal pan to event's date range, vertical scroll to its row, centered in viewport — 2026-05-20
+
+**Empty / edge cases:**
+- [x] Zero matches, no filters active → bar shows `No matches` — 2026-05-20
+- [x] Zero matches in view, filters active → soft callout: *"No matches in current view. [Clear filters]"* — 2026-05-20
+- [x] Find query is ephemeral (not persisted across navigation/reload); bar open-state also ephemeral — 2026-05-20
+
+**Testing:**
+- [x] Unit: matcher returns correct hits across all match fields, case-insensitive — 2026-05-20
+- [ ] Integration: Find works at every granularity level and every group-by mode (requires live data — manual)
+- [ ] Keyboard: full prev/next cycle reachable with keyboard only (manual verification with live events)
+
+## Up Next
+
+> **Member management work is split across Phase 10.1.1 (Teams — CRUD) and Phase 10.1.2 (Members — Management & Editing)**. Team entity CRUD (create, edit, archive) is in 10.1.1; member lifecycle (add, edit, roles, invites, stubs, inactivation, admin actions) is in 10.1.2. The previously enumerated sidebar gear-icon + add-member-sheet tasks are absorbed into 10.1.2.
+
+### Web — Filter Scoping (FilterDropdown + API)
+Reorganizes the filter dropdown into four explicit sections. Filters are stored as personal by default; admins can promote any filter to team or timeline scope; members can nominate their filters for admin review.
+
+**Data model:**
+- Single `saved_filters` table: `(id, team_id, timeline_id nullable, created_by, name, definition JSON, scope ENUM(personal|nominated|team|timeline), status ENUM(active|pending_review))`
+- `scope=personal` — visible only to creator; `scope=team` — visible to all team members; `scope=timeline` — visible to all members of that timeline; `scope=nominated` — personal filter flagged by member for admin review (visible to admins)
+
+**API:**
+- [ ] Migration: replace current `saved_filters` shape with the unified schema above
+- [ ] `GET /teams/:id/filters` — returns filters scoped `team` or `timeline` (for the active timeline), plus the calling user's `personal` and `nominated` filters
+- [ ] `POST /teams/:id/filters` — create a new personal filter; `definition` is the filter JSON
+- [ ] `PATCH /filters/:id` — update name or definition (creator or admin)
+- [ ] `PATCH /filters/:id/scope` — promote/demote scope; admin-only for `team`/`timeline`; any member can set `nominated`
+- [ ] `DELETE /filters/:id` — creator or admin
+
+**Web — FilterDropdown layout:**
+- [ ] Reorganize dropdown into four labeled sections, each hidden when empty:
+  1. **Default** — All events / Upcoming / My events (hardcoded presets, always present)
+  2. **Team** — filters with `scope=team` from API
+  3. **Timeline** — filters with `scope=timeline` for the active timeline
+  4. **Mine** — caller's `personal` filters; nominated filters shown with a "Pending" badge
+- [ ] Filter names truncate with ellipsis at a max width; full name in tooltip on hover
+- [ ] "New filter…" opens filter editor (personal scope by default); "Share…" action on existing personal filters lets the member nominate it or (if admin) promote directly to team/timeline
+- [ ] Pass active timeline ID through context so the dropdown can fetch timeline-scoped filters
+- [ ] Admin-visible section at bottom of "Mine": nominated filters awaiting review, with Approve / Reject actions
+
+---
+
+> **Connectors sidebar + per-timeline connector model is absorbed into the External Connectors (Inbound Webhooks) task block further down** — that section now carries both the webhook backend and the sidebar UI work.
+
+### API — Token Auth (Phase 9)
+- [x] `POST /tokens` — create API token (returns value once) — 2026-05-20
+- [x] `GET /tokens` — list tokens for current user — 2026-05-20
+- [x] `DELETE /tokens/:id` — revoke token (preserved row, sets revoked_at) — 2026-05-20
+- [x] Middleware: accept Bearer token (JWT or API token) on all authenticated routes — 2026-05-20
+- [x] Enforce token scope on writes (read-only tokens blocked from mutations) — 2026-05-20
+
+### API — Archive (Phase 9)
+- [x] `POST /events/:id/archive` and `POST /events/:id/unarchive` — 2026-05-20
+- [x] `POST /timelines/:id/archive` and `POST /timelines/:id/unarchive` (team-admin only) — 2026-05-20
+- [x] List endpoints exclude archived records by default; `?archived=true` to include — 2026-05-20
+
+### The Great Event → Activity Rename (Phase 9.5)
+Rename the domain entity `Event` → `Activity` everywhere. Runbook: [GreatEventToActivity.md](GreatEventToActivity.md). Roadmap: [Phase 9.5](ROADMAP.md#phase-95--rename-event--activity-the-great-rename).
+
+> **Historical note:** Phase 3 / 8.x / 9 task entries above use "event" because that was the entity's name when those phases shipped. Do not rewrite them. Phase 9.5 is the formal cutover; all later entries use "activity".
+
+**DB:**
+- [x] Write migration `005_rename_events_to_activities.sql` — 2026-05-21 (`ALTER TABLE ... RENAME`)
+- [x] Rename indexes containing `event` in their name — 2026-05-21
+- [x] Update `migrations_test.go` to assert new table + column names — 2026-05-21
+- [ ] Verify against a copy of the prod DB: row counts unchanged, `PRAGMA foreign_key_check` clean
+
+**Go API:**
+- [x] `models.Event` → `models.Activity` — 2026-05-21
+- [x] Rename file `internal/db/event_repo.go` → `activity_repo.go`; `EventRepo` → `ActivityRepo` — 2026-05-21
+- [x] Rename file `internal/api/event_handler.go` → `activity_handler.go`; all `handle*Event*` functions — 2026-05-21
+- [x] `server.go`: routes `/events*` → `/activities*` — 2026-05-21
+- [x] `internal/events/bus.go`: rename constants `EventCreated/Updated/Deleted` — 2026-05-21 → `ActivityCreated/Updated/Deleted` + wire strings (`event.*` → `activity.*`). **Keep** package name and `TimelineCreated/Updated`.
+- [x] Update `bus_test.go`, `hub_test.go` wire-string assertions — 2026-05-21
+- [x] `golangci-lint run` clean, `go test ./...` passes — 2026-05-21
+
+**OpenAPI + generated types:**
+- [x] `packages/shared/openapi.yaml`: schema, paths, operationIds — 2026-05-21, tags, body types. **Keep** `googleEventId` and `caldavUid` fields.
+- [x] Run `pnpm --filter shared generate`; verify `Activity` exports — 2026-05-21, zero `Event` exports
+
+**Web:**
+- [x] `src/types/index.ts`: `DrabaEvent`/`EventStatus`/`EVENT_COLORS` — 2026-05-21 → `DrabaActivity`/`ActivityStatus`/`ACTIVITY_COLORS`
+- [x] Rename `useTeamEvents.ts` → `useTeamActivities.ts`; hooks + query keys — 2026-05-21
+- [x] `useWebSocket.ts`: update message-type switch to `activity.*` — 2026-05-21
+- [x] Rename `EventDetailPanel`, `EventCreatePanel`, `EventPanel` → `Activity*` — 2026-05-21; fix imports
+- [x] UI copy sweep: sidebar label, panel titles, empty state, ARIA, button labels — 2026-05-21
+- [x] `pnpm --filter web lint` clean — 2026-05-21
+
+**Tests + seed:**
+- [x] Rename `event_handler_test.go` → `activity_handler_test.go` — 2026-05-21
+- [x] Rename `scripts/seed-find-test-events.sql` → `seed-find-test-activities.sql` — 2026-05-21; update INSERTs + cleanup
+
+**Docs:**
+- [x] Sweep ROADMAP.md, REQUIREMENTS.md, ARCHITECTURE.md, CONVENTIONS.md, TESTING.md, design/UX_PATTERNS.md — 2026-05-21
+- [x] Hand-review: ROADMAP Phase 3 title — 2026-05-21 → "Core API — Activities & Teams (originally Events; renamed in Phase 9.5)"
+- [x] Do **not** rewrite `docs/log.md` historical entries — 2026-05-21
+- [x] Add Phase 9.5 entry to `docs/log.md` — 2026-05-21
+
+**Verification (smoke against http://epcot.lan:8081):**
+- [ ] Create / edit / archive / unarchive / delete an Activity end-to-end
+- [ ] WebSocket frames arrive as `activity.created` / `.updated` / `.deleted`
+- [ ] Final sweep `rg "\bevent" packages/ docs/` returns only expected hits (bus package, calendar fields, log.md)
+
+### Identity System (Phase 9.6)
+Reusable Identity component system (color + icon) for all entities. Design spec: [IDENTITY_SYSTEM.md](design/IDENTITY_SYSTEM.md). Prototype: `docs/design/assets/identity-widget-prototype.html`.
+
+**Schema (migration 006):**
+- [x] Write migration `006_identity_fields.sql` — 2026-05-24
+- [x] Update `migrations_test.go` to assert new columns exist — 2026-05-24
+
+**Go API:**
+- [x] `models.go`: add `Icon *string` + `Color *string` to `Team`; add `Icon *string` + `Color *string` to `Timeline`; add `Icon *string` to `TeamMember` — 2026-05-24
+- [x] Update `TeamMemberWithUser` to surface the new `Icon` field (via embedding) — 2026-05-24
+- [x] Update OpenAPI spec: add `icon`/`color` to `Team`, `Timeline`, `TeamMember` schemas — 2026-05-24
+- [x] Regenerate TypeScript types (`pnpm --filter shared generate`) — 2026-05-24
+- [x] `golangci-lint run` clean; `go test ./...` passes — 2026-05-24
+
+**Web — component library (`src/components/identity/`):**
+- [x] `identity-constants.ts` — 2026-05-24
+- [x] `Badge.tsx` — 2026-05-24
+- [x] `IdentityTrigger.tsx` — 2026-05-24
+- [x] `IdentityPicker.tsx` — 2026-05-24
+- [x] `IdentityWidget.tsx` — 2026-05-24
+
+**Web — replace existing color/icon UI:**
+- [x] `ActivityDetailPanel`: `<IdentityWidget>` replacing icon stub + 8-color swatch — 2026-05-24
+- [x] `ActivityCreatePanel`: `<IdentityWidget>` replacing color swatch — 2026-05-24
+- [x] Gantt bar label column: `<Badge size={20} shape="square">` — 2026-05-24
+- [x] Sidebar timeline rows: `<Badge size={20} shape="square">` — 2026-05-24
+- [x] Sidebar member rows: `<Badge size={20} shape="circle">` — 2026-05-24
+
+**Web — MemberAvatar migration:**
+- [x] Refactor `MemberAvatar.tsx` to delegate to `<Badge>` — 2026-05-24
+- [ ] Verify all existing MemberAvatar call sites render correctly (manual)
+
+**Web — palette consolidation:**
+- [x] Update `types/index.ts`: re-export `ACTIVITY_COLORS` and `MEMBER_COLORS` from `identity-constants.ts` — 2026-05-24
+- [x] Update `index.css`: `--member-N-*` → 16 `--identity-<name>` custom properties — 2026-05-24
+- [x] Update `DESIGN_SYSTEM.md`: 8-color → 16-color identity palette reference — 2026-05-24
+
+**Testing & verification:**
+- [x] `pnpm --filter web lint` clean — 2026-05-24
+- [x] `golangci-lint run` clean — 2026-05-24
+- [x] `go test ./...` passes — 2026-05-24
+- [ ] Badge renders all four modes (Lucide icon, 1-letter, 2-letter, none) at sizes 20–40px, both shapes (manual)
+- [ ] IdentityWidget popover opens/closes; color, name option, and icon selection fire onChange (manual)
+- [ ] Legacy hex colors in existing activities display correctly via `hexToColorId()` mapping (manual — test on Docker)
+- [ ] Manual: ActivityDetailPanel uses IdentityWidget; changes persist as color IDs (manual — test on Docker)
+- [ ] Manual: sidebar member + timeline rows use Badge (manual)
+
+**Docs:**
+- [x] Add Phase 9.6 entry to `docs/log.md` — 2026-05-24
+
+---
+
+### Phase 10 — Entity Management (data-cornerstone CRUD)
+
+Closes CRUD gaps for the three core data entities. Activities (renamed from Events in Phase 9.5) are already CRUD-complete (Phases 3 / 8.2 / 8.2.1 + Phase 9 archive); Teams and Timelines are not, so 10.x focuses on them.
+
+Design references:
+- Team Modal: `docs/design/handoffs/team-modal/` — Settings tab, Members tab, archive flow
+- Member Edit Modal: `docs/design/handoffs/member-modal/` — member profile, stats, admin actions
+
+---
+
+### Teams — CRUD & Management (Phase 10.1.1)
+Closes the Teams data entity. Ships the Team Modal with Settings tab functional; Members tab scaffolded as locked/placeholder until 10.1.2.
+
+**Schema (migration 008):**
+- [x] Add `description TEXT` column to `teams` (nullable) — 2026-05-25
+- [x] Add `notes TEXT` column to `teams` (nullable) — 2026-05-25
+- [x] Add `archived_at DATETIME` column to `teams` (nullable) — 2026-05-25
+- [x] Update `migrations_test.go` to assert new columns — 2026-05-25
+
+**API — team-level:**
+- [x] `GET /teams/:id` — full team detail (name, description, notes, icon, color, archived_at) — 2026-05-25
+- [x] `PATCH /teams/:id` — update name, description, notes, icon, color (admin only) — 2026-05-25
+- [x] `POST /teams/:id/archive` and `POST /teams/:id/unarchive` — 2026-05-25
+- [x] Update `POST /teams` to accept `description`, `notes`, `icon`, `color` — 2026-05-25
+- [x] Update `GET /teams` — add `?archived=true` to include archived teams — 2026-05-25
+
+**OpenAPI + types:**
+- [x] Update `Team` schema: add `description`, `notes`, `archivedAt` — 2026-05-25
+- [x] Update `CreateTeamInput` and `PatchTeamInput` request bodies — 2026-05-25
+- [x] Regenerate TypeScript types (`pnpm --filter shared generate`) — 2026-05-25
+
+**Web — Team Modal (`<TeamModal>`):**
+- [x] Modal shell: portal, backdrop, panel (580px, dark theme), header, tab bar, scrollable content, footer — 2026-05-25
+- [x] Header: identity badge (36px square) + label ("NEW TEAM" / "EDIT TEAM") + team name + close button — 2026-05-25
+- [x] Tab bar: Settings (active) + Members (locked/placeholder in this phase) — 2026-05-25
+- [x] Members tab locked state: opacity 0.45, not-allowed cursor, tooltip "Save the team first to add members" — 2026-05-25
+- [x] Settings tab: `<IdentityPicker>` (square shape), name (required), description, notes (textarea) — 2026-05-25
+- [x] Footer: Archive team button (edit mode, left side), Cancel + Create team / Save changes (right side, team-color primary button) — 2026-05-25
+- [x] "Saved" banner: appears after new team creation, auto-dismisses after 3s — 2026-05-25
+- [x] New-team flow: Settings tab → Create team → banner → Members tab unlocks (placeholder content) — 2026-05-25
+- [x] Edit-team flow: pre-populated Settings tab, Members tab unlocked (placeholder) — 2026-05-25
+- [x] Archive confirmation dialog: replaces modal content, amber styling, icon, title, body, Cancel + Archive team buttons — 2026-05-25
+
+**Web — team picker + settings shell:**
+- [x] "New team" affordance in team picker dropdown → opens `<TeamModal mode="new">` — 2026-05-25
+- [x] Team edit affordance (gear icon or similar) → opens `<TeamModal mode="edit" team={...}>` — 2026-05-25
+- [x] `/settings` route shell with left-nav layout (foundation for 10.1.2–10.4.2) — 2026-05-25
+- [x] Archived teams in picker under collapsed "Archived" section with unarchive action — 2026-05-25
+- [x] `GET /teams` query includes archived teams for the picker's Archived section — 2026-05-25
+
+**Testing & verification:**
+- [x] `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean — 2026-05-25
+- [ ] Manual: create second team from picker, edit existing team, archive/unarchive
+- [ ] Manual: Team Modal opens in both modes with correct Settings tab behavior
+- [x] `docs/log.md` Phase 10.1.1 entry written — 2026-05-25
+
+---
+
+### Members — Management & Editing (Phase 10.1.2)
+Fills in the Team Modal Members tab and adds the Member Edit Modal. Full member lifecycle: add, edit, roles, stubs, invites, reusable invite link, stats, inactivation, superadmin actions. Depends on 10.1.1 (Team Modal shell).
+
+**Terminology:** "Participant" = login-less team member (backend: `user_id = NULL`). Design handoffs use "stub" but we use "Participant" — established in Phase 8.0, more user-friendly. "Inactivate" = `archived_at`-based disabling. "Super Admin" = `is_superadmin`.
+
+**Schema (migration 009):**
+- [x] Add `archived_at DATETIME` column to `team_members` (nullable) — member inactivation — 2026-05-25
+- [x] Add `archived_at DATETIME` column to `users` (nullable) — account-level inactivation — 2026-05-25
+- [x] Add `invite_link_token TEXT UNIQUE` column to `teams` (nullable) — reusable invite link — 2026-05-25
+- [x] Update `migrations_test.go` to assert new columns — 2026-05-25
+
+**API — member CRUD:**
+- [x] `GET /teams/:id/members/:memberId` — full member detail with computed stats — 2026-05-25
+- [x] `POST /teams/:id/members` — add existing registered user by `userId` (admin only) — 2026-05-25
+- [x] `PATCH /teams/:id/members/:memberId` — update display name, color, icon, role (admin for role; self for own name/color/icon) — 2026-05-25
+- [x] `DELETE /teams/:id/members/:memberId` — remove from team; reject if last admin — 2026-05-25
+- [x] `POST /teams/:id/members/:memberId/archive` — inactivate member (set `archived_at`) — 2026-05-25
+- [x] `POST /teams/:id/members/:memberId/unarchive` — reactivate member (clear `archived_at`) — 2026-05-25
+
+**API — participant CRUD:**
+- [x] `POST /teams/:id/participants` — create login-less participant (admin only); name, icon, color, optional email — 2026-05-25
+- [x] Participants managed via same PATCH/DELETE member endpoints (role always `member`, `user_id` stays NULL) — 2026-05-25
+
+**API — invites:**
+- [x] `GET /teams/:id/invites` — list pending invites (email, sent date) — 2026-05-25
+- [x] `DELETE /teams/:id/invites/:inviteId` — revoke/cancel pending invite — 2026-05-25
+- [x] `POST /teams/:id/invite-link` — generate or regenerate reusable team invite link token — 2026-05-25
+- [x] `GET /teams/:id/invite-link` — get current invite link (or null) — 2026-05-25
+- [x] `DELETE /teams/:id/invite-link` — revoke current invite link — 2026-05-25
+- [x] Update `POST /auth/register` to accept reusable invite link tokens alongside existing one-time tokens — 2026-05-25
+
+**API — member stats (computed per request, not stored):**
+- [x] Timeline counts: active, archived (per member) — 2026-05-25
+- [x] Activity counts: past due, running, upcoming, unscheduled, archived (date-relative, not status-relative) — 2026-05-25
+
+**API — superadmin actions:**
+- [x] `POST /users/:id/promote` — set `is_superadmin = true` (superadmin only, not applicable to participants) — 2026-05-25
+- [x] `POST /users/:id/archive` — inactivate user account (superadmin only) — 2026-05-25
+- [x] `POST /users/:id/unarchive` — reactivate user account (superadmin only) — 2026-05-25
+- [x] `DELETE /users/:id` — hard delete user (superadmin only; zero active activities + single team only) — 2026-05-25
+- [x] Auth middleware: reject login from archived users with clear error — 2026-05-25
+
+**OpenAPI + types:**
+- [x] Add `MemberDetail` schema with stats, teams list, archived_at — 2026-05-25
+- [x] Add invite link endpoints to spec — 2026-05-25
+- [x] Add superadmin action endpoints to spec — 2026-05-25
+- [x] Update `TeamMember` schema with `archivedAt` — 2026-05-25
+- [x] Regenerate TypeScript types — 2026-05-25
+
+**Web — Team Modal Members tab:**
+- [x] Search/add input: search users by name/email, or type email to invite; clear button — 2026-05-25
+- [x] Search results dropdown: user matches with "Add" / "Already added" / "Invite pending"; email-only with "Invite" — 2026-05-25
+- [x] Participant creation: expandable inline form — identity picker (circle), name (required), optional email, "Create participant" button (amber) — 2026-05-25
+- [x] Member list: avatar (dashed border for stubs), name, "No login" pill (stubs, amber), email, `<RoleDropdown>`, remove (×) — 2026-05-25
+- [x] `<RoleDropdown>`: Admin (teal), Member (muted), Participant (amber) — with descriptions; portal-rendered; role changes save immediately — 2026-05-25
+- [x] Pending invitations section: rows with dashed-circle mail icon, email, sent date, "Revoke" button (red) — 2026-05-25
+- [x] Invite link section: URL display + "Copy link" button (teal transition to "Copied!"), explanatory note below — 2026-05-25
+- [x] Member count badge on Members tab label — 2026-05-25
+
+**Web — Member Edit Modal (`<MemberModal>`):**
+- [x] Modal shell: portal, backdrop, 560px panel, header / scrollable content / footer — 2026-05-25
+- [x] Header: `<IdentityPicker>` (40px circle), subline (participant/team member + viewer role label), name + badges ("No login" amber) — 2026-05-25
+- [x] Name + email row: 2-column grid; email read-only for participants ("No email — participant" placeholder) — 2026-05-25
+- [x] Timeline stats: 2 chips — Active (teal border), Archived (muted border) — 2026-05-25
+- [x] Activity stats: 5 chips — Past due (red if >0), Running (teal), Upcoming (blue), Unscheduled (muted), Archived (muted) — 2026-05-25
+- [x] Joined date: read-only pill with icon — 2026-05-25
+- [x] Teams list: each row with team badge (square, initials), team name, role pill — 2026-05-25
+- [x] Account section (team admin + non-participant): password reset button — shows "SMTP not configured" until Phase 14 — 2026-05-25
+- [x] Super Admin actions section (superadmin viewer only): Promote to Super Admin button (indigo), Inactivate (amber) / Delete (red) based on deletability — 2026-05-25
+- [x] Promote confirmation dialog: indigo icon, title, body, Cancel + Promote — 2026-05-25
+- [x] Inactivate confirmation dialog: amber icon, title, body, Cancel + Inactivate — 2026-05-25
+- [x] Delete confirmation dialog: red icon, title, body, Cancel + Delete — 2026-05-25
+- [x] Footer: Cancel + Save changes (member identity color) — 2026-05-25
+- [x] Deletable rule: zero active activities AND single team membership — 2026-05-25
+- [x] Role permission matrix enforcement: team admin vs superadmin capability differences — 2026-05-25
+
+**Web — sidebar integration:**
+- [x] Member rows: gear icon on hover → opens `<MemberModal>` for that member — 2026-05-25
+- [x] Inactivated members: reduced opacity — 2026-05-25
+
+**Testing & verification:**
+- [x] `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean — 2026-05-25
+- [ ] Manual: add user, invite email, create participant, change roles, remove member
+- [ ] Manual: generate invite link, copy, register new user via link
+- [ ] Manual: Member Modal shows correct stats, admin actions work with confirmations
+- [ ] Manual: inactivated user cannot log in; reactivation restores access
+- [x] `docs/log.md` Phase 10.1.2 entry written — 2026-05-25
+
+---
+
+### Settings — Profile, Tokens & Admin (Phase 10.1.3)
+Builds out the `/settings` page into a working settings experience. Users get profile + identity management, security (password change), preferences, and API token management. Superadmins get SMTP config, instance defaults, and an orphaned-users view. Also ships forgot-password flow.
+
+**Design reference:** `docs/design/handoffs/settings-modal.zip` — directional prototype. Using the visual language (sidebar nav, field styling, token palette) but as a full page (existing `/settings` route), not a modal. Skipping Notifications panel (no infrastructure), Organization panel (multi-tenant concept doesn't apply), Billing panel (self-hosted), and Sessions section (JWTs are stateless). Security panel scoped to password change only.
+
+**Schema (migration 010):**
+- [x] Add `color TEXT` and `icon TEXT` columns to `users` table — user-level identity — 2026-05-26
+- [x] Create `instance_settings` table (`key TEXT PRIMARY KEY`, `value TEXT`, `updated_at DATETIME`) — 2026-05-26
+- [x] Create `password_reset_tokens` table (`id TEXT PK`, `user_id TEXT FK`, `token_hash TEXT`, `expires_at DATETIME`, `used_at DATETIME`, `created_at DATETIME`) — 2026-05-26
+- [x] Update `migrations_test.go` to assert new columns and tables — 2026-05-26
+
+**API — profile management:**
+- [x] `PATCH /users/me` — update `display_name`, `color`, `icon`; validate non-empty name; trim whitespace — 2026-05-26
+- [x] Identity propagation: when color/icon changes, update all `team_members` rows for the user where the member's value matches the user's old value or is NULL — 2026-05-26
+- [x] Add `UpdateProfile` repo method with propagation logic — 2026-05-26
+- [x] Test: happy path — name change persists; color change propagates to team_members — 2026-05-26
+- [x] Test: error path — empty name returns 400 — 2026-05-26
+
+**API — password change:**
+- [x] `PUT /users/me/password` — requires `{ currentPassword, newPassword }`; verify current hash; update; return 200 — 2026-05-26
+- [x] Return 401 `WRONG_PASSWORD` on mismatch; 400 `WEAK_PASSWORD` if < 8 chars — 2026-05-26
+- [x] Test: happy path — password changed — 2026-05-26
+- [x] Test: error path — wrong current password returns 401 — 2026-05-26
+
+**API — forgot password:**
+- [x] `POST /auth/forgot-password` — accepts `{ email }`; generate 1-hour reset token; store hash in `password_reset_tokens`; send email via mailer if configured; always return 200 — 2026-05-26
+- [x] `POST /auth/reset-password` — accepts `{ token, newPassword }`; validate token not expired/used; hash new password; update user; mark token used; return 200 — 2026-05-26
+- [x] Return 400 `TOKEN_INVALID` or `TOKEN_EXPIRED` on bad/expired token — 2026-05-26
+- [x] Test: invalid token returns TOKEN_INVALID — 2026-05-26
+- [x] Test: forgot-password always returns 200 (no enumeration) — 2026-05-26
+
+**API — SMTP configuration (superadmin only):**
+- [x] Internal `mailer` package (`internal/mailer/`): wraps `net/smtp`; reads config from `instance_settings` at send time; exposes `Send(to, subject, htmlBody) error` and `IsConfigured() bool` — 2026-05-26
+- [x] `GET /admin/smtp` — return current SMTP config with password masked; 403 if not superadmin — 2026-05-26
+- [x] `PUT /admin/smtp` — upsert config (host, port, username, password, from_name, from_email, encryption); validate by sending test email to caller; 403 if not superadmin — 2026-05-26
+- [x] `POST /admin/smtp/test` — send test email without saving; 403 if not superadmin — 2026-05-26
+- [x] `DELETE /admin/smtp` — clear SMTP config; 403 if not superadmin — 2026-05-26
+- [ ] SMTP password encrypted at rest (currently stored as JSON in instance_settings; encryption deferred)
+- [x] Test: 403 for non-superadmin on admin settings endpoints — 2026-05-26
+
+**API — instance settings (superadmin only):**
+- [x] `GET /admin/settings` — return all instance settings (registration_policy, default_timezone, default_date_format, default_week_start); 403 if not superadmin — 2026-05-26
+- [x] `PATCH /admin/settings` — update one or more settings; validate values; 403 if not superadmin — 2026-05-26
+- [ ] Test: set registration_policy to "open" → registration without invite succeeds (manual only)
+
+**API — orphaned users (superadmin only):**
+- [x] `GET /admin/users` — return all users with team membership count and status; support `?orphaned=true` filter; 403 if not superadmin — 2026-05-26
+- [x] Test: superadmin can list all users — 2026-05-26
+
+**OpenAPI + types:**
+- [x] Add `PATCH /users/me` to spec (UpdateProfile request/response) — 2026-05-26
+- [x] Add `PUT /users/me/password` to spec (ChangePassword request/response) — 2026-05-26
+- [x] Add `POST /auth/forgot-password` and `POST /auth/reset-password` to spec — 2026-05-26
+- [x] Add `GET/PUT/DELETE /admin/smtp` and `POST /admin/smtp/test` to spec — 2026-05-26
+- [x] Add `GET/PATCH /admin/settings` to spec — 2026-05-26
+- [x] Add `GET /admin/users` to spec — 2026-05-26
+- [x] Regenerate TypeScript types — 2026-05-26
+
+**Web — Settings page layout:**
+- [x] Rework `SettingsPage.tsx`: sidebar nav with grouped nav items, active state styling — 2026-05-26
+- [x] Route structure: `/settings/profile`, `/settings/security`, `/settings/preferences`, `/settings/tokens`, `/settings/admin` (superadmin only) — 2026-05-26
+- [x] Admin nav items hidden for non-superadmin users — 2026-05-26
+- [x] Sub-route content renders in right panel with title + subtitle header pattern — 2026-05-26
+
+**Web — Profile (`/settings/profile`):**
+- [x] Display name field with save button; calls `PATCH /users/me` — 2026-05-26
+- [x] Identity picker (reuse `IdentityWidget` from 9.6): color + icon selection; changes call `PATCH /users/me` with new color/icon — 2026-05-26
+- [x] Identity badge preview (avatar at current color/icon) — 2026-05-26
+- [x] Email shown read-only with explanatory note ("Email changes are not yet supported") — 2026-05-26
+- [x] Inline success/error feedback on save — 2026-05-26
+
+**Web — Security (`/settings/security`):**
+- [x] Change password form: current password, new password (min 8 chars), confirm new password — 2026-05-26
+- [x] Validation: new + confirm must match; save disabled until valid — 2026-05-26
+- [x] On success: show success message, clear form — 2026-05-26
+- [x] On 401 WRONG_PASSWORD: show "Current password is incorrect" error — 2026-05-26
+- [x] Calls `PUT /users/me/password` — 2026-05-26
+
+**Web — Preferences (`/settings/preferences`):**
+- [x] Regional section: timezone (IANA selector), date format dropdown, week starts on — 2026-05-26
+- [x] Appearance section: theme toggle (Light / Dark / System) — 2026-05-26
+- [x] All values read/written via existing `GET/PUT /users/me/preferences` endpoints — 2026-05-26
+- [x] Theme change applies immediately — 2026-05-26
+- [ ] Defaults section: default team/timeline dropdowns (deferred — requires loading teams/timelines)
+
+**Web — API Tokens (`/settings/tokens`):**
+- [x] Table: name, scope badge, last used (relative time or "Never"), created date, revoke button — 2026-05-26
+- [x] Create form: name input + scope picker with descriptions (read-only / add / edit-own / edit-all) — 2026-05-26
+- [x] On creation: one-time secret reveal with copy-to-clipboard button; close dismisses — 2026-05-26
+- [x] Revoke: inline confirmation → `DELETE /tokens/:id` → remove from list — 2026-05-26
+- [x] Empty state when no tokens exist — 2026-05-26
+
+**Web — Admin: Instance (`/settings/admin`):**
+- [x] Instance defaults form: default timezone, default week start — calls `PATCH /admin/settings` — 2026-05-26
+- [x] Registration policy toggle: invite-only vs open — calls `PATCH /admin/settings` — 2026-05-26
+- [x] Instance name field — 2026-05-26
+- [x] Save button with inline success feedback — 2026-05-26
+
+**Web — Admin: Email / SMTP (`/settings/admin`):**
+- [x] SMTP form: host, port (2-column), username, password (masked with eye toggle), from name, from email (2-column), encryption dropdown — 2026-05-26
+- [x] "Save SMTP settings" button → `PUT /admin/smtp` — 2026-05-26
+- [x] "Send test email" button → `POST /admin/smtp/test`; transitions through Sending → Sent/Failed — 2026-05-26
+- [x] Info note: "When SMTP is not configured, password resets and email invitations are unavailable" — 2026-05-26
+
+**Web — Admin: Users (`/settings/admin`):**
+- [x] Orphaned alert banner (when count > 0): warning-colored, count + "View" button — 2026-05-26
+- [x] Tabs: "All (N)" / "Orphaned (N)" — segmented control — 2026-05-26
+- [x] Search input: filter by name or email — 2026-05-26
+- [x] User rows: avatar, name, email, team count, status badge — 2026-05-26
+- [ ] Click user row → opens existing `MemberModal` (deferred — requires passing modal state up)
+- [ ] Orphaned users: "Assign team" action (deferred)
+
+**Web — Forgot password flow:**
+- [x] `/forgot-password` public page: email input → shows "If an account exists, a reset link has been sent" — 2026-05-26
+- [x] `/reset-password?token=...` public page: new password + confirm → success redirects to `/login` — 2026-05-26
+- [x] Login page: "Forgot password?" link below the password field — 2026-05-26
+- [ ] When SMTP not configured: `/forgot-password` shows "contact admin" (deferred — requires public SMTP status endpoint)
+
+**Testing & verification:**
+- [x] `golangci-lint run` clean — 2026-05-26
+- [x] `go test ./...` passes — 2026-05-26
+- [x] `pnpm --filter web lint` clean — 2026-05-26
+- [ ] Manual: change display name → visible in sidebar and team member lists after refresh
+- [ ] Manual: change identity color/icon → propagated to team memberships; visible on Gantt bars
+- [ ] Manual: change password → old password rejected, new password works
+- [ ] Manual: forgot-password → email received → click link → set new password → login works
+- [ ] Manual: create API token → secret shown once → copy → use in curl → works; revoke → rejected
+- [ ] Manual: configure SMTP → test email arrives → save persists across restart
+- [ ] Manual: set instance defaults → values persist
+- [ ] Manual: view all users; filter orphaned
+- [ ] Manual: toggle registration policy → test with/without invite
+- [ ] Manual: non-superadmin does not see admin sections
+- [x] `docs/log.md` Phase 10.1.3 entry written — 2026-05-26
+
+---
+
+### Member Access & Data Lifecycle (Phase 10.1.4)
+Closes data-integrity and access-revocation gaps from 10.1.2. Protects historical activity data, defines the three membership lifecycle states, and gives superadmins a single "revoke all access" action.
+
+**Schema (migration 011):**
+- [x] Verify `activity_assignments.team_member_id` FK has `ON DELETE RESTRICT`; add explicit constraint in migration if missing — 2026-05-27
+- [x] Same check for `timeline_access.team_member_id` — 2026-05-27
+- [x] Enable `PRAGMA foreign_keys = ON` in DB initialization (`internal/db/`) — already set since early phases — 2026-05-27
+- [x] Update `migrations_test.go` to assert FK pragma is on and both FKs are RESTRICT — 2026-05-27
+
+**API — removal guard:**
+- [x] `DELETE /teams/:id/members/:memberId` — count `activity_assignments` before deleting; if count > 0, return 409 `MEMBER_HAS_ASSIGNMENTS` with `{ "assignmentCount": N }` — 2026-05-27
+- [x] Zero-assignment removal continues to hard-delete as before (deletes timeline_access first due to RESTRICT FK) — 2026-05-27
+- [x] Add `MemberHasAssignments` error handling to OpenAPI spec via `RevokeUserResult` and inline error response — 2026-05-27
+
+**API — full revoke (superadmin only):**
+- [x] `POST /users/:id/revoke` — new endpoint; superadmin only; atomically: set `users.archived_at`, set `archived_at` on all `team_members` for the user, hard-delete `team_members` rows where assignment count is 0; return `{ accountDeactivated: bool, membershipsInactivated: int, membershipsRemoved: int }` — 2026-05-27
+- [x] Add `RevokeUser` repo method: wraps the three steps in a transaction — 2026-05-27
+- [x] 403 if caller is not superadmin; 404 if user not found — 2026-05-27
+- [x] Add `POST /users/{id}/revoke` to OpenAPI spec; regenerate TypeScript types — 2026-05-27
+
+**Web — TeamModal Members tab:**
+- [x] On 409 `MEMBER_HAS_ASSIGNMENTS` from the remove (×) button, show inline error beneath the member row: "N assignment(s) — [Inactivate instead]" where the bracketed link calls `POST /teams/:id/members/:memberId/archive` — 2026-05-27
+- [x] On inactivate success from the inline error, dismiss the error and re-fetch the member list — 2026-05-27
+- [x] Clear the inline error before each new removal attempt for the same member — 2026-05-27
+
+**Web — MemberModal:**
+- [x] Add "Revoke all access" button to Super Admin Actions section (red, below Delete) — 2026-05-27
+- [x] Button hidden when user is already fully inactivated (`users.archived_at` set) — 2026-05-27
+- [x] Confirmation dialog: lists all three effects (account deactivated, memberships inactivated, zero-history memberships removed) — 2026-05-27
+- [x] On confirm: call `POST /users/:id/revoke`; on success show a summary chip for 2s, then close modal — 2026-05-27
+- [x] Invalidate `['teams']` query cache on success — 2026-05-27
+
+**Testing & verification:**
+- [ ] Manual: remove a member with assignments → 409; inline error appears; "Inactivate instead" button works
+- [ ] Manual: remove a member with zero assignments → success
+- [ ] Manual: superadmin uses "Revoke all access" → account deactivated; user can no longer log in; existing Gantt bars still show their avatar name
+- [ ] Manual: inactivated members' avatars still render on Gantt bars (data preserved)
+- [x] `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean — 2026-05-27
+- [x] `docs/log.md` Phase 10.1.4 entry written — 2026-05-27
+
+---
+
+### Status Templates & Timeline Statuses (Phase 10.2)
+API + UI bundled. Required before Phase 11.3 (Kanban). Depends on 10.1.2 (Members).
+
+**Schema (migration 012):**
+- [x] Create `status_templates` (team-level), `status_template_items`, `statuses` (timeline-level) tables — 2026-05-27
+- [x] Rebuild `activities` table so `status_id` references `statuses` instead of `team_statuses`; drop `team_statuses` — 2026-05-27
+- [x] Update `migrations_test.go` — 2026-05-27
+
+**Go API:**
+- [x] `StatusTemplate`, `StatusTemplateItem`, `Status` models — 2026-05-27
+- [x] `StatusRepo`: list/get/create/update/delete templates; list/get/create/update/delete items; `SeedDefaultTemplate`; `CopyTemplateToTimeline` — 2026-05-27
+- [x] `handleCreateTeam` — seeds "Simple" template (Planned / In Progress / Done) on team creation — 2026-05-27
+- [x] `handleCreateTimeline` — copies first template's items into live statuses on timeline creation — 2026-05-27
+- [x] `GET /teams/:id/status-templates` — list templates with items — 2026-05-27
+- [x] `POST /teams/:id/status-templates` — create template — 2026-05-27
+- [x] `PATCH /status-templates/:id` — rename, reorder — 2026-05-27
+- [x] `DELETE /status-templates/:id` — blocked if last template on team — 2026-05-27
+- [x] `POST /status-templates/:id/items` — add item — 2026-05-27
+- [x] `PATCH /status-template-items/:id` — rename, recolor, reicon, toggle is_closed, reorder — 2026-05-27
+- [x] `DELETE /status-template-items/:id` — blocked if last item in template — 2026-05-27
+- [x] `GET /teams/:id/timelines/:timelineId/statuses` — list statuses for a timeline — 2026-05-27
+
+**OpenAPI + types:**
+- [x] `StatusTemplate`, `StatusTemplateItem`, `Status` schemas + input types — 2026-05-27
+- [x] All new endpoint paths — 2026-05-27
+- [x] Regenerate TypeScript types — 2026-05-27
+
+**Web:**
+- [x] `useStatusTemplates.ts` — hooks for all status template and statuses endpoints — 2026-05-27
+- [x] `StatusTemplatesTab.tsx` — template list with expandable item rows, inline editing, color picker, is_closed toggle, add/delete guards — 2026-05-27
+- [x] `TeamModal.tsx` — "Status Templates" tab added (locked until team saved) — 2026-05-27
+
+**Testing & verification:**
+- [x] `status_handler_test.go` — default seeding, admin-only create, last-template guard, item add/delete, statuses copied to timeline — 2026-05-27
+- [x] `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean — 2026-05-27
+- [ ] Manual: new team gets "Simple" template; open TeamModal → Status Templates tab shows Planned / In Progress / Done
+- [ ] Manual: create second template, add items, rename/recolor items
+- [ ] Manual: delete non-last template → success; delete last template → blocked with 409
+- [ ] Manual: create timeline → GET statuses returns 3 rows matching Simple template
+- [x] `docs/log.md` Phase 10.2 entry written — 2026-05-27
+
+---
+
+### Timelines — Full CRUD (Phase 10.3)
+Closes the Timelines cornerstone. Today timelines can be created in the wizard and never managed afterward; access lists exist in schema but have no CRUD endpoints.
+
+**API — timeline-level:**
+- [x] `PATCH /timelines/:id` — rename, change start/end date, color, icon (team or timeline admin) — 2026-05-27
+- [x] `DELETE /timelines/:id` — hard delete; team admin only — 2026-05-27
+- [x] Archive endpoints already in Phase 9
+
+**API — timeline statuses (editing):**
+- [x] `POST /teams/:id/timelines/:timelineId/statuses` — add a status — 2026-05-27
+- [x] `PATCH /statuses/:id` — rename, recolor, reicon, toggle is_closed, reorder — 2026-05-27
+- [x] `DELETE /statuses/:id` — requires replacementStatusId if activities reference it; blocked if last status — 2026-05-27
+
+**API — access list:**
+- [x] `GET /teams/:id/timelines/:timelineId/access` — list current grants (team member + role) — 2026-05-27
+- [x] `PUT /teams/:id/timelines/:timelineId/access/:memberId` — grant or update role (admin / member) — 2026-05-27
+- [x] `DELETE /teams/:id/timelines/:timelineId/access/:memberId` — revoke grant — 2026-05-27
+
+**Web:**
+- [x] "New timeline" affordance in the sidebar timelines list → `TimelineModal` in create mode (name, date range, identity, template preview) — 2026-05-27
+- [x] Edit-timeline modal from the sidebar gear icon: rename, change date range, identity, archive, delete — 2026-05-27
+- [x] `TimelineModal` Statuses tab: add/edit/delete live statuses; delete-with-replacement dialog — 2026-05-27
+- [x] `TimelineModal` Access tab: search-pick team members, role toggle, remove — 2026-05-27
+- [x] Archived timelines under a collapsed "Archived" group in the sidebar; Restore button for unarchive — 2026-05-27
+- [x] Activity detail panel: status dropdown populated from live timeline statuses — 2026-05-27
+- [x] "Hide closed" toggle in GanttToolbar (shown when timeline has closed statuses) — 2026-05-27
+- [x] `TimelineAccessEntry` model + `TimelineStore` interface expanded; `canAdminTimeline` helper — 2026-05-27
+
+**Testing & verification:**
+- [x] `TestUpdateTimeline_AdminCanRename`, `TestUpdateTimeline_NonAdminForbidden` — 2026-05-27
+- [x] `TestDeleteTimeline_AdminCanDelete`, `TestDeleteTimeline_NonAdminForbidden` — 2026-05-27
+- [x] `TestTimelineAccessList_GrantAndRevoke` — 2026-05-27
+- [x] `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean — 2026-05-27
+- [ ] Manual: create second timeline from sidebar → modal opens → create → new timeline appears
+- [ ] Manual: edit timeline name, date range → save → sidebar reflects changes
+- [ ] Manual: add/edit/delete statuses via Statuses tab → activity detail panel shows updated list
+- [ ] Manual: grant/revoke member access via Access tab → member can/cannot access timeline
+- [ ] Manual: archive timeline → disappears from active list → appears in Archived → Restore restores it
+- [ ] Manual: delete timeline → confirm → gone from sidebar
+- [ ] Manual: hide-closed toggle hides activities with closed status; unchecking restores them
+- [x] `docs/log.md` Phase 10.3 entry written — 2026-05-27
+
+---
+
+### Preference Consumption & Session Handling (Phase 10.4.1)
+Wires user and instance preferences (stored in 10.1.3) into views. Fixes the broken session lifecycle (access tokens expire after 15 min with no refresh interceptor). Adds cosmetic branding for admins.
+
+**Session lifecycle:**
+- [x] Add 401 interceptor to `apiFetch` (`packages/web/src/lib/api.ts`): on 401, attempt silent refresh via stored refresh token, retry original request; if refresh also fails, clear tokens and redirect to `/login`
+- [x] Mutex/queue so concurrent 401s don't fire multiple refresh calls
+- [x] Invisible to user — no toast, no banner (standard SPA pattern)
+
+**Preference consumption:**
+- [x] Create `useFormatDate()` hook — reads user's `date_format` preference, returns a formatter
+- [x] Gantt `granularity.ts` `formatLabel()`: replace hardcoded `en-US` with user's date format preference
+- [x] Gantt `granularity.ts` `startOfWeek()`: replace hardcoded Monday with user's `week_start` preference; Gantt columns align to user's chosen start day
+- [ ] `ActivityDetailPanel` and other date displays: consume date format preference (date inputs are native browser — no explicit text formatting needed until a read-only date display surface is added)
+- [ ] Public/shared timeline views: fall back to instance-level defaults when no user is logged in (deferred — shared views ship in Phase 13)
+- [x] Theme: sync server-side preference on login (`useDarkMode.ts` — added `applyTheme`; `ThemeSync` component applies server value on auth init)
+
+**Admin — branding (`/settings/admin`):**
+- [x] Instance name field (stored in `instance_settings`); shown in browser tab title and login page
+- [x] Accent color override (stored in `instance_settings`); applies globally via CSS custom property
+- [ ] Optional logo upload (stretch — deferred)
+
+---
+
+### Activity Schema Normalization — Drop team_id (Phase 10.4.2)
+Removes `activities.team_id` (redundant now that `timeline_id` is stored). Hardens `timeline_id` to NOT NULL. Moves activity routes to `/teams/{id}/timelines/{timelineId}/activities` (team-scoped prefix avoids Go 1.22 mux conflict with `GET /timelines/share/{token}`).
+
+**Schema (migration 015):**
+- [x] Backfill NULL `timeline_id` rows (assign to team's oldest timeline) — 2026-05-28
+- [x] Rebuild `activities` table without `team_id`, with `timeline_id TEXT NOT NULL REFERENCES timelines(id) ON DELETE CASCADE` — 2026-05-28
+- [x] Recreate `idx_activities_timeline_id` on the new table — 2026-05-28
+
+**API — Go:**
+- [x] `models.Activity`: remove `TeamID` field; change `TimelineID` from `*string` to `string` — 2026-05-28
+- [x] `ActivityRepo.Create`: remove `team_id` from INSERT — 2026-05-28
+- [x] `ActivityRepo.ListByTeam` → `ListByTimeline(timelineID string, ...)`: query becomes `WHERE timeline_id = ?` — 2026-05-28
+- [x] `handleCreateActivity`, `handleListActivities`: path params are `teamId` + `timelineId`; look up timeline to verify ownership — 2026-05-28
+- [x] `handleUpdateActivity`, `handleDeleteActivity`, `handleArchive/Unarchive`: replace `activity.TeamID` with timeline lookup — 2026-05-28
+- [x] WebSocket broadcasts: derive `TeamID` from timeline lookup — 2026-05-28
+- [x] Move activity routes: `POST /teams/{id}/timelines/{timelineId}/activities`, `GET /teams/{id}/timelines/{timelineId}/activities` — 2026-05-28
+
+**OpenAPI + types:**
+- [x] Update `Activity` schema: replace `teamId` with `timelineId` (required, non-nullable) — 2026-05-28
+- [x] Update activity endpoints to new team-scoped path — 2026-05-28
+- [x] Regenerate TypeScript types — 2026-05-28
+
+**Frontend:**
+- [x] Rename `useTeamActivities` → `useTimelineActivities(teamId, timelineId, from, to)` — cache key `['timelines', timelineId, 'activities']` — 2026-05-28
+- [x] `useCreateActivity(teamId, timelineId)`: URL becomes `/teams/${teamId}/timelines/${timelineId}/activities`; no `timelineId` in request body — 2026-05-28
+- [x] `useUpdateActivity(timelineId)`, `useDeleteActivity(timelineId)`: cache key updated — 2026-05-28
+- [x] `useTeamActivitySync`: update cache key lookups to `['timelines', timelineId, 'activities']` — 2026-05-28
+- [x] `GanttView`: use `useTimelineActivities`; `timelineId` prop is now required (not optional) — 2026-05-28
+- [x] `ActivityCreatePanel`: `teamId` + `timelineId` passed to `useCreateActivity`; no `timelineId` in body — 2026-05-28
+- [x] `ActivityDetailPanel`: `timelineId` required; passed to `useUpdateActivity`/`useDeleteActivity` — 2026-05-28
+- [x] `DashboardPage`: updated GanttView/ActivityCreatePanel/ActivityDetailPanel prop signatures — 2026-05-28
+
+**Tests:**
+- [x] `activity_repo_test.go`: `makeActivity` uses `timelineID`; all `ListByTeam` calls → `ListByTimeline` — 2026-05-28
+- [x] Added `TestActivityRepo_ListByTimeline_Filter` — 2026-05-28
+- [x] `activity_handler_test.go`: `activityTestSetup` creates a timeline; all routes updated — 2026-05-28
+- [x] `archive_test.go`, `revoke_user_test.go`, `team_handler_test.go`: create timeline before activity; use new routes — 2026-05-28
+- [x] `user_repo_test.go`, `migrations_test.go`: activity INSERTs use `timeline_id` instead of `team_id` — 2026-05-28
+
+**Testing & verification:**
+- [x] `golangci-lint run` clean — 2026-05-28
+- [x] `go test ./...` passes — 2026-05-28
+- [x] `pnpm --filter web lint` clean — 2026-05-28
+- [ ] Manual: Gantt view loads activities for the active timeline
+- [ ] Manual: Creating an activity from the panel associates it with the correct timeline
+- [ ] Manual: `PRAGMA foreign_key_check` returns no rows after migration on Docker DB
+
+---
+
+### UI Consistency — Modals, Sidebar & Toolbar (Phase 10.4.3) [was mislabeled 10.4.2]
+Standardizes visual patterns across TeamModal, MemberModal, TimelineModal, sidebar, and Gantt toolbar. Eliminates three different inline-editing patterns, three different archive button styles, three different confirmation dialog implementations, and mixed hardcoded hex colors vs CSS variables.
+
+**Inline name editing (3 → 1):**
+- [x] Extract shared `InlineEditableTitle` component: always-input with subtle bottom border on hover/focus — 2026-05-28
+- [x] Replace `MemberModal.tsx` name editing (focus underline pattern) with `InlineEditableTitle` — 2026-05-28
+- [x] Replace `TeamModal.tsx` name editing (toggle div/input state machine) with `InlineEditableTitle` — 2026-05-28
+- [x] Replace `TimelineModal.tsx` name editing (no visual cue) with `InlineEditableTitle` — 2026-05-28
+
+**Archive/restore buttons (3 → 1):**
+- [x] Standardize archive button: amber bg+border+icon (aligned with MemberModal prominence) — 2026-05-28
+- [x] Standardize restore button: teal bg+border+RotateCcw icon — 2026-05-28
+- [x] Fix `TeamModal.tsx` archive button (was neutral gray) — 2026-05-28
+- [x] Fix `TimelineModal.tsx` archive button (was border-only, no icon) — 2026-05-28
+
+**Confirmation dialogs (3 → 1):**
+- [x] Consolidate into shared `ConfirmDialog` component with color variants (red, amber, indigo, teal) — 2026-05-28
+- [x] Replace `MemberModal.tsx` custom ConfirmDialog — 2026-05-28
+- [x] Replace `TeamModal.tsx` ArchiveDialog — 2026-05-28
+- [x] Replace `TimelineModal.tsx` inline confirmation panels — 2026-05-28
+
+**Color system (mixed → CSS variables):**
+- [x] Migrate `TeamModal.tsx` hardcoded hex colors to CSS variables — 2026-05-28
+- [x] Migrate `MemberModal.tsx` hardcoded hex colors to CSS variables — 2026-05-28
+- [x] Verified `TimelineModal.tsx` CSS variable usage is consistent — 2026-05-28
+
+**Sidebar & toolbar audit:**
+- [x] Sidebar member/timeline rows: Badge usage, hover states, gear icon consistency verified — 2026-05-28
+- [x] Gantt toolbar controls: Tailwind + CSS vars, consistent with modal footer patterns — 2026-05-28
+- [x] No inconsistencies requiring fixes found — 2026-05-28
+
+---
+
+### Gantt Interaction & Activity Edit Polish (Phase 10.4.4)
+
+**Schema (migration 016):**
+- [x] Add `notes TEXT` column to `activities` (nullable) — 2026-05-29
+
+**Go API:**
+- [x] `Activity` model: add `Notes *string` field — 2026-05-29
+- [x] `ActivityRepo.Update`: include `notes` in UPDATE SET — 2026-05-29
+- [x] `handleUpdateActivity`: parse `notes` from PATCH body — 2026-05-29
+
+**OpenAPI + types:**
+- [x] Add `notes` to `Activity` schema and PATCH body — 2026-05-29
+- [x] Regenerate TypeScript types — 2026-05-29
+- [x] Add `notes` to `UpdateActivityInput` patch type in `useTeamActivities.ts` — 2026-05-29
+
+**Gantt — resizable activity column:**
+- [x] Label column drag handle on right edge; min 140px, max 400px; live resize — 2026-05-29
+
+**Gantt — click-to-activate before drag:**
+- [x] Unselected bars show `cursor: pointer`; drag/resize only starts when bar is selected — 2026-05-29
+- [x] Resize handles (left/right edge) visible only on selected bars — 2026-05-29
+
+**Gantt — bar drag updates sidebar dates live:**
+- [x] `onBarDragProgress` callback fires during mousemove with current snapped dates — 2026-05-29
+- [x] `DashboardPage` stores `liveDragDates` and passes to `ActivityDetailPanel` — 2026-05-29
+- [x] `ActivityDetailPanel` shows live dates in date inputs without triggering saves — 2026-05-29
+- [x] `onBarDragEnd` callback clears live dates when drag completes — 2026-05-29
+
+**Gantt — finer-grained snap during drag:**
+- [x] `snapDivisorFor(granularity)`: day→1, week→7, month→4, quarter→3, year→4 — 2026-05-29
+- [x] `colFracToDate` interpolates fractional column positions for accurate date mapping — 2026-05-29
+- [x] Drag mousemove uses `Math.round(x / step) * step` with finer step — 2026-05-29
+- [x] `resolvedGranularity` prop passed from GanttView → GanttGrid — 2026-05-29
+
+**Gantt — "Hide closed" moves to filter preset:**
+- [x] Remove `hideClosed` checkbox and props from `GanttToolbar` — 2026-05-29
+- [x] Add `'open'` preset to `FilterDropdown` ("Open only — Hide activities with a closed status") — 2026-05-29
+- [x] Add `'open'` to `ActiveFilter` preset type in `FilterContext` — 2026-05-29
+- [x] `GanttView` reads `activeFilter.id === 'open'` to activate closed-status filtering — 2026-05-29
+- [x] Remove `hideClosed` state from `DashboardPage` — 2026-05-29
+
+**Activity Edit Sidebar — layout and field changes:**
+- [x] Remove "All day" checkbox — 2026-05-29
+- [x] Remove human-readable date summary line — 2026-05-29
+- [x] Move Description field directly below date pickers — 2026-05-29
+- [x] Restyle Assigned To with bordered card style matching create panel — 2026-05-29
+- [x] Status dropdown: replaced plain `<select>` with rich dropdown (color dot + name + CLOSED badge) — 2026-05-29
+- [x] Remove "Identity" line from Classify section — 2026-05-29
+- [x] Rename "Details" → "Advanced" — 2026-05-29
+- [x] Add Notes textarea (multi-line, resizable) backed by new `notes` column — 2026-05-29
+
+**Testing & verification:**
+- [x] `golangci-lint run` clean — 2026-05-29
+- [x] `go test ./...` passes — 2026-05-29
+- [x] `pnpm --filter web lint` clean — 2026-05-29
+- [ ] Manual: drag label column edge → width changes and persists during session
+- [ ] Manual: click bar (unselected) → selects it; second drag moves/resizes it
+- [ ] Manual: drag bar at week zoom → date tooltip shows day-level changes, not week-level
+- [ ] Manual: drag bar at month zoom → snaps to week boundaries
+- [ ] Manual: select "Open only" filter → closed-status activities hidden; clearing restores them
+- [ ] Manual: edit panel shows only date pickers (no allDay, no date summary)
+- [ ] Manual: description moves below dates; matches create panel layout
+- [ ] Manual: assignees use bordered card style (colored border + tint when selected)
+- [ ] Manual: status dropdown shows color dot + name; selection persists
+- [ ] Manual: notes textarea saves and loads correctly
+- [ ] Manual: bar drag → sidebar date inputs update live; stop drag → dates reset to server value
+
+---
+
+### Activity Tags, Parent & Progress Fields (Phase 10.4.5)
+Replaces the three "coming soon" stubs in the activity edit panel with functional fields. Tags are normalized (team-scoped `tags` table). Parent and progress already had backend support; this phase adds the UI.
+
+**Schema (migration 017):**
+- [x] Create `tags` table: `id, team_id, name, color, created_by, created_at`; UNIQUE(team_id, name) — 2026-05-30
+- [x] Rebuild `activity_tags`: drop old text-junction table, create normalized FK junction — 2026-05-30
+
+**Go API:**
+- [x] `Tag` model added to `models.go` — 2026-05-30
+- [x] `Activity.TagIDs []string` field added (same `db:"-"` pattern as `AssignedMemberIDs`) — 2026-05-30
+- [x] `TagRepo`: `Create`, `GetByID`, `ListByTeam`, `Update`, `Delete` — 2026-05-30
+- [x] `ActivityRepo.SetTags` / `GetTags` — transaction pattern matching `SetAssignments` — 2026-05-30
+- [x] `ActivityRepo.ListByTimeline`: batch-populates `TagIDs` via `sqlx.In` (same as `AssignedMemberIDs`) — 2026-05-30
+- [x] `tag_handler.go`: `GET /teams/{id}/tags`, `POST /teams/{id}/tags`, `PATCH /tags/{id}`, `DELETE /tags/{id}` — 2026-05-30
+- [x] `activity_handler.go`: `handleCreateActivity` and `handleUpdateActivity` accept `tagIds`; `setActivityArchive` populates `TagIDs` on response — 2026-05-30
+- [x] `isUniqueConstraintError` helper added to `helpers.go` — 2026-05-30
+- [x] `server.go`: `tags *db.TagRepo` field; tag routes registered — 2026-05-30
+- [x] `main.go`: `db.NewTagRepo(database)` instantiated and passed to `NewServer` — 2026-05-30
+
+**OpenAPI + types:**
+- [x] `Tag` schema added to `openapi.yaml` — 2026-05-30
+- [x] `tagIds` added to `Activity` schema and create/update request bodies — 2026-05-30
+- [x] Regenerated TypeScript types — 2026-05-30
+
+**Frontend:**
+- [x] `useTags.ts`: `useTags`, `useCreateTag`, `useUpdateTag`, `useDeleteTag` hooks — 2026-05-30
+- [x] `TagInput.tsx`: combobox with colored pills, autocomplete, create-on-the-fly — 2026-05-30
+- [x] `ActivityDetailPanel`: Tags stub → `TagInput`; Parent stub → `<select>` from same-timeline activities; Progress stub → `<input type="range">`; tagIds/parentActivityId/percentComplete in state and save calls — 2026-05-30
+- [x] `ActivityCreatePanel`: `TagInput` added (below Assignees); `tagIds` in create mutation — 2026-05-30
+- [x] `GanttGrid`: progress fill overlay on bars (darker shade at `percentComplete%` width) — 2026-05-30
+- [x] `vite.config.ts`: `/tags` proxy added — 2026-05-30
+
+**Sample data:**
+- [x] `sample_data/10_tags.sql`: 8 tags for Product Marketing team + activity_tag associations — 2026-05-30
+
+**Tests:**
+- [x] `tag_repo_test.go`: CRUD, unique constraint, SetTags/GetTags, ListByTimeline TagIDs population — 2026-05-30
+- [x] `tag_handler_test.go`: create/list/update/delete happy paths, 409 duplicate, 404 not found, 403 non-member — 2026-05-30
+- [x] All existing test files updated to pass `db.NewTagRepo(database)` to `NewServer` — 2026-05-30
+
+**Testing & verification:**
+- [x] `golangci-lint run` clean — 2026-05-30
+- [x] `go test ./...` passes — 2026-05-30
+- [x] `pnpm --filter web lint` clean — 2026-05-30
+- [ ] Manual: create a tag in the activity detail panel; it appears in team tag list for future activities
+- [ ] Manual: tag autocomplete shows existing team tags; typing a new name offers "Create" option
+- [ ] Manual: tagged activity shows tag pills in the detail panel; pills persist across panel close/reopen
+- [ ] Manual: set parent activity; verify it persists across reload
+- [ ] Manual: drag the progress slider; Gantt bar shows progress fill; value persists
+- [ ] Manual: create activity with tags from the create panel; tags appear in detail panel
+
+---
+
+### Filter Implementation (Phase 10.4.6)
+Full filter system: filter definition language, client-side engine, all 6 presets wired, filter builder UI, team filter promotion, and management panel.
+
+**Schema (migration 018):**
+- [x] `ALTER TABLE saved_filters ADD COLUMN is_team_filter BOOLEAN NOT NULL DEFAULT 0` — 2026-05-30
+
+**Backend:**
+- [x] `SavedFilter` model: add `IsTeamFilter bool` — 2026-05-30
+- [x] `SavedFilterRepo.Create`: include `is_team_filter` in INSERT — 2026-05-30
+- [x] `SavedFilterRepo.Update`: include `is_team_filter` in UPDATE — 2026-05-30
+- [x] `SavedFilterRepo.ListByTeamUser`: return user's own filters + all team filters (`is_team_filter = 1`) — 2026-05-30
+- [x] `handleCreateSavedFilter`: accept `isTeamFilter` (admin-only to set true) — 2026-05-30
+- [x] `handleUpdateSavedFilter`: admin can promote/demote; admin can edit name/def of existing team filters — 2026-05-30
+- [x] `handleDeleteSavedFilter`: admin can delete team filters they don't own — 2026-05-30
+
+**OpenAPI + types:**
+- [x] Add `isTeamFilter` boolean to `SavedFilter` schema — 2026-05-30
+- [x] Add `isTeamFilter` to `CreateSavedFilterJSONBody` and `PatchSavedFilterJSONBody` — 2026-05-30
+- [x] Update `api_types.gen.go` manually with new fields — 2026-05-30
+- [x] Regenerate TypeScript types (`pnpm --filter shared generate`) — 2026-05-30
+
+**Frontend — filter engine:**
+- [x] `lib/filterTypes.ts` — FilterDefinition type system (logic, conditions, operators per field type) — 2026-05-30
+- [x] `lib/filterEngine.ts` — `matchesFilter(activity, filter, ctx)` pure function — 2026-05-30
+- [x] `lib/presetFilters.ts` — `applyActiveFilter(activities, activeFilter, memberIdsByUserId, ctx)` — all 6 presets + member + saved filter kinds — 2026-05-30
+
+**Frontend — GanttView wiring:**
+- [x] Replace `closedStatusIds` prop with `timelineStatuses`, `savedFilters`, `tags` props — 2026-05-30
+- [x] Derive `closedStatusIds`, `statusesByTimeline`, `memberIdsByUserId`, `currentUserMemberIds` inside GanttView — 2026-05-30
+- [x] Replace old open-only filter with `applyActiveFilter` — makes all 6 presets + member + saved filters work — 2026-05-30
+
+**Frontend — filter builder UI:**
+- [x] `components/filters/FilterConditionRow.tsx` — field/op/value row with multi-select, text, number, date inputs — 2026-05-30
+- [x] `components/filters/FilterEditor.tsx` — name input, AND/OR toggle, condition rows, Save/Delete/Cancel footer — 2026-05-30
+- [x] `components/filters/FilterManagePanel.tsx` — My Filters + Team Filters sections with edit/delete/promote/demote — 2026-05-30
+
+**Frontend — FilterDropdown updates:**
+- [x] Partition saved filters into `teamFilters` and `myFilters` — 2026-05-30
+- [x] Render "Team filters" section with real data (replacing stub) — 2026-05-30
+- [x] Add "Manage filters" link at bottom of dropdown — 2026-05-30
+- [x] Add `onOpenManager` prop — 2026-05-30
+
+**Frontend — DashboardPage wiring:**
+- [x] Add `useSavedFilters` and `useTags` hooks — 2026-05-30
+- [x] Add `filterManageOpen` and `editingFilter` state — 2026-05-30
+- [x] Wire `FilterEditor` and `FilterManagePanel` into `RightSidebar` — 2026-05-30
+- [x] Pass `timelineStatuses`, `savedFilters`, `tags` to GanttView — 2026-05-30
+- [x] Add `onOpenFilterManager` to `TopBar` — 2026-05-30
+- [x] Update `useSavedFilters.ts`: add `isTeamFilter` to `UpdateSavedFilterInput` — 2026-05-30
+
+**Tests:**
+- [x] `lib/filterEngine.test.ts` — 20+ unit tests: each field type, each operator, AND/OR, edge cases, case-insensitive — 2026-05-30
+- [x] `lib/presetFilters.test.ts` — 11 unit tests: each preset, member filter, saved filter delegation — 2026-05-30
+- [x] `saved_filter_handler_test.go`: 5 new tests — team filter list includes team filters, admin can promote, non-admin cannot promote, admin can delete team filter, non-admin cannot — 2026-05-30
+- [x] `migrations_test.go`: assert `is_team_filter` column exists after migration 018 — 2026-05-30
+- [x] `golangci-lint run` clean; `go test ./...` all pass; `pnpm --filter web lint` clean; `pnpm --filter web build` clean — 2026-05-30
+
+**Manual verification (Docker):**
+- [ ] All 6 preset filters actually filter activities (open, upcoming, my, overdue, noassign, all)
+- [ ] Member filter kind filters by assignee
+- [ ] Filter builder: add/remove conditions, pick field/op/value for all supported fields, AND/OR toggle
+- [ ] Save/load/edit/delete custom filters end-to-end
+- [ ] Status conditions match by name across timelines
+- [ ] Tag conditions match by tag name
+- [ ] Team filter flag: admin promotes user filter → visible to all team members
+- [ ] "Manage filters" panel accessible from dropdown
+- [ ] `docs/log.md` Phase 10.4.6 entry written — 2026-05-30
+
+---
+
+### Timeline Views — List / Spreadsheet (Web — Phase 11.1)
+Ships the view-switcher infrastructure plus the dense, sortable, inline-editable List view.
+
+**Infrastructure:**
+- [x] `ViewMode` already defined as `'gantt' | 'list' | 'calendar' | 'kanban'` in TopBar.tsx — 2026-05-31
+- [x] View switcher control in TopBar; per-timeline view mode persisted via preferences (key: `view_mode`) — 2026-05-31
+- [x] View-specific toolbar slots — GanttToolbar shown for gantt, ListToolbar shown for list — 2026-05-31
+
+**Dependencies installed:**
+- [x] `@tanstack/react-table@^8.21.3` — headless table (column visibility/order/sizing/pinning/sorting) — 2026-05-31
+- [x] `@dnd-kit/core`, `@dnd-kit/sortable`, `@dnd-kit/utilities` — column drag-reorder — 2026-05-31
+
+**ListToolbar (`components/list/ListToolbar.tsx`):**
+- [x] Columns menu (hide/show all columns via checkbox list) — 2026-05-31
+- [x] Density toggle (Comfortable / Compact) — 2026-05-31
+- [x] Group by (None / Member / Parent activity / Status) — 2026-05-31
+- [x] Sort by (Start date / End date / Title / Status / Progress) — 2026-05-31
+- [x] Color by (Activity / Member / Status) — 2026-05-31
+- [x] Export + Share stubs — 2026-05-31
+
+**ListView (`components/list/ListView.tsx`):**
+- [x] TanStack Table v8 with column visibility, order, sizing, pinning (Title always pinned left) — 2026-05-31
+- [x] Default columns: Title, Start, End, Duration, Status, Assignees, Tags (hidden: Progress, Parent, Description, Location, URL, Created, Updated) — 2026-05-31
+- [x] Column hide/show via toolbar Columns menu (pendingColumnToggle prop) — 2026-05-31
+- [x] Column drag-reorder via @dnd-kit (drag handles on column headers) — 2026-05-31
+- [x] Column resizing via TanStack's `columnResizeMode: 'onChange'` — 2026-05-31
+- [x] Column config (order/hidden/widths) persisted per-timeline via `list_columns` preference key — 2026-05-31
+- [x] Single-column sort by clicking column header (sort indicator arrow) — 2026-05-31
+- [x] Density toggle changes row height (comfortable: 40px, compact: 32px) and persists — 2026-05-31
+- [x] Keyboard navigation: Arrow keys move selection, Enter/F2 enters edit mode, Esc cancels, Tab/Shift+Tab commit+move horizontal, Enter in edit commits+moves down — 2026-05-31
+- [x] Inline editing: Title (text), Start (date), End (date), Description/Location/URL (text), Progress (number) — 2026-05-31
+- [x] Status cell: click to open StatusPicker popover with color pills — 2026-05-31
+- [x] Assignees cell: read-only display with member Badges (up to 4 + overflow count) — 2026-05-31
+- [x] Tags cell: read-only display with colored tag pills (up to 3 + overflow count) — 2026-05-31
+- [x] Progress cell: read-only mini progress bar + percentage — 2026-05-31
+- [x] Duration cell: computed from start/end dates (read-only) — 2026-05-31
+- [x] PATCH mutations via useUpdateActivity with optimistic updates — 2026-05-31
+- [x] Group-by: None / Member / Parent / Status with collapsible group header rows — 2026-05-31
+- [x] Color-by: left border stripe per row (activity color / primary member color / status color) — 2026-05-31
+- [x] Group-by/Color-by/Sort-by/Density persisted per-timeline in DashboardPage (keys: `list_group_by`, `list_color_by`, `list_sort_by`, `list_density`) — 2026-05-31
+- [x] Find bar highlights: matching rows amber outline, non-matching rows dimmed 30%, active match stronger outline — 2026-05-31
+- [x] Active filter applied (applyActiveFilter) — all 6 presets + member + saved filter kinds — 2026-05-31
+- [x] Row click opens ActivityDetailPanel; Space in selection mode opens detail panel — 2026-05-31
+- [x] Title column sticky left with box-shadow separator — 2026-05-31
+
+**DashboardPage wiring:**
+- [x] List toolbar state (listGroupBy, listSortBy, listColorBy, listDensity) in DashboardPage — 2026-05-31
+- [x] List toolbar state restored from per-timeline preferences on timeline switch — 2026-05-31
+- [x] List toolbar state saved to per-timeline preferences on change — 2026-05-31
+- [x] ListView rendered when view === 'list' with correct props — 2026-05-31
+
+**Testing & verification:**
+- [x] `golangci-lint run` clean — 2026-05-31
+- [x] `go test ./...` passes (135 tests) — 2026-05-31
+- [x] `pnpm --filter web lint` clean — 2026-05-31
+- [x] `pnpm --filter web build` clean — 2026-05-31
+- [ ] Manual: view switcher toggles Gantt ↔ List; choice persists per timeline
+- [ ] Manual: List shows activities with default columns, respects active filter
+- [ ] Manual: hide/show columns from Columns menu; persists across reload
+- [ ] Manual: drag column headers to reorder; persists across reload
+- [ ] Manual: resize column by dragging header right edge; persists
+- [ ] Manual: density toggle changes row height; persists
+- [ ] Manual: keyboard navigation (arrows, Enter/F2, Esc, Tab)
+- [ ] Manual: inline edit Title, Start, End → switches to Gantt → change reflected
+- [ ] Manual: click Status cell → picker opens → select → pill updates
+- [ ] Manual: Title column stays visible when scrolled horizontally
+- [ ] Manual: sort by column header (click once asc, twice desc, three times off)
+- [ ] Manual: group-by and color-by controls work
+- [ ] Manual: Find bar highlights matching rows in List view
+
+---
+
+### Timezone-Safe Activity Dates (Phase 11.1.1)
+Fixes midnight-UTC activity dates displaying one calendar day early in negative-UTC-offset timezones.
+
+- [x] `granularity.ts`: switch all internal date helpers to UTC (startOfDay/Week/Month/Quarter/Year, addDays/addMonths, isoWeekNumber, formatLabel, todayColumnPosition) — 2026-06-01
+- [x] `GanttView.tsx`: `todayMidnight()` → `setUTCHours(0,0,0,0)`; fallback viewStart/viewEnd use `setUTCDate`/`getUTCDate` — 2026-06-01
+- [x] `GanttGrid.tsx`: `formatDragDate` → adds `timeZone: 'UTC'` to `toLocaleDateString` — 2026-06-01
+- [x] `ListView.tsx`: add `formatActivityDate` (UTC, for Start/End cells); keep `formatDate` (local, for Created/Updated) — 2026-06-01
+- [x] `granularity.test.ts`: update existing tests to use `getUTCDay`/`getUTCDate` assertions; add timezone-safety suite with midnight-UTC positioning and label checks — 2026-06-01
+- [x] `golangci-lint run` clean — 2026-06-01
+- [x] `go test ./...` passes — 2026-06-01
+- [x] `pnpm --filter web lint` clean — 2026-06-01
+- [x] `pnpm --filter web build` clean — 2026-06-01
+- [x] `pnpm --filter web test` — 149 tests pass including new timezone-safety suite — 2026-06-01
+- [ ] Manual: List Start/End cells show correct calendar day in a negative-offset timezone
+- [ ] Manual: Gantt bars land on the correct day column in a negative-offset timezone
+- [ ] Manual: Gantt day/week/month labels match List dates for same activity
+- [ ] Manual: round-trip — open date picker, save unchanged, displayed date does not shift
+
+---
+
+### Group by Assignee Combination (Phase 11.1.2)
+Multi-assignee activities now appear under their exact assignee-set group in both Gantt and List.
+
+- [x] `lib/memberGroups.ts`: `memberComboKey`, `orderedComboIds`, `memberComboLabel`, `comboSortComparator`, `UNASSIGNED_KEY` — 2026-06-02
+- [x] `GanttGrid.tsx`: extend `GanttRow` group type with `memberColors?: string[]`; render stacked color dots in group headers — 2026-06-02
+- [x] `GanttView.tsx` `buildRows`: bucket by `memberComboKey(assignedMemberIds)`; sort groups via `comboSortComparator`; pass `memberColors` to group rows — 2026-06-02
+- [x] `ListView.tsx` `buildListRows`: same combo-key bucketing and sorting; `memberColors` on group rows; stacked dots in group header renderer — 2026-06-02
+- [x] `lib/memberGroups.test.ts`: full suite for key, label, ordering, comparator — 2026-06-02
+- [x] `GanttView.tree.test.ts`: updated member-grouping suite for combo-key behavior — 2026-06-02
+- [x] `ListView.tree.test.ts`: updated member-grouping suite for combo-key behavior — 2026-06-02
+- [x] `pnpm --filter web lint` clean — 2026-06-02
+- [x] `pnpm --filter web build` clean — 2026-06-02
+- [x] `pnpm --filter web test` — 187 tests pass — 2026-06-02
+- [ ] Manual: multi-assignee activity renders under its own combination group in both Gantt and List
+- [ ] Manual: combination group labels are in team order with Oxford/truncation formatting
+- [ ] Manual: group headers show stacked color dots
+- [ ] Manual: group ordering identical between Gantt and List; Unassigned last
+- [ ] Manual: collapse/expand works on combination groups; counts correct with no double-counting
+
+---
+
+### Timeline Views — Calendar (Web — Phase 11.2)
+**Month / Week** all-day-bar layouts sharing one skeleton. No Day view, no time grid (every activity is all-day). Detailed plan: `docs/plans/phase-11.2-calendar-view.md`.
+
+**Shared:**
+- [x] Layout switcher (Month / Week) in the view's toolbar slot — 2026-06-02
+- [x] Today / prev / next navigation — 2026-06-02
+- [x] Color-by (activity / member / status) carried over via shared `lib/activityColor.ts` — 2026-06-02
+- [x] Click empty cell → `ActivityCreatePanel` prefilled with that date — 2026-06-02
+- [x] Click bar → existing `ActivityDetailPanel` — 2026-06-02
+- [x] Drag bar body → move (duration-preserving, whole-day snap, week-wrap aware) → PATCH; drag edge → resize; live sidebar preview — 2026-06-02
+- [x] Respects active filter, Find highlight, `week_start` pref — 2026-06-02
+
+**Lane packing (`lib/calendarLanes.ts`, pure + unit-tested):**
+- [x] Per-week-row greedy lane assignment for concurrent multi-day bars — 2026-06-02
+- [x] Cross-week activities split into one segment per week row with "continues" edges — 2026-06-02
+
+**Month layout:**
+- [x] 6-week grid; multi-day activities render as continuous bars across cells — 2026-06-02
+
+**Week layout:**
+- [x] 7 day columns, taller cells (higher default visible-lane cap = 6) — 2026-06-02
+
+**Density / overflow:**
+- [x] Per-day "+N more" chip → day popover listing every activity that day → row click opens sidebar — 2026-06-02
+- [x] Manual per-week row-height drag handle raises/lowers visible-lane cap; persists per-timeline-per-user — 2026-06-02
+
+**Testing & verification:**
+- [x] `pnpm --filter web lint` clean — 2026-06-02
+- [x] `pnpm --filter web test` — 208 tests pass including new `calendarLanes.test.ts` (21 tests) — 2026-06-02
+- [x] `pnpm --filter web build` clean — 2026-06-02
+- [x] `golangci-lint run` clean; `go test ./...` passes — 2026-06-02
+- [ ] Manual: view switcher toggles Gantt ↔ List ↔ Calendar, persisting per timeline
+- [ ] Manual: Month and Week layouts render with correct day cells and today highlight
+- [ ] Manual: multi-day activity renders as a continuous bar with "continues" arrow on clipped edges
+- [ ] Manual: color-by recolors bars (activity / member / status)
+- [ ] Manual: "+N more" chip shows count; popover lists all activities for that day; row click opens sidebar
+- [ ] Manual: row-height resize handle raises/lowers visible lanes; persists after reload
+- [ ] Manual: bar click opens ActivityDetailPanel; empty-cell click opens ActivityCreatePanel prefilled
+- [ ] Manual: drag bar body moves it (duration preserved); drag edge resizes; sidebar shows live dates
+- [ ] Manual: Find highlights matching bars in both layouts
+- [ ] Manual: active filter applied (all 6 presets, saved filters)
+
+---
+
+### Timeline Views — Kanban (Web — Phase 11.3)
+Fully interactive board. Re-scoped 2026-06-03 from read-only to interactive (drag-to-recolumn, group-by-driven columns, card fields). Depends on Phase 10.2 (statuses API + UI).
+
+- [x] View switcher shows Kanban tab; switching persists per timeline — 2026-06-03
+- [x] `kanbanColumns.ts`: `buildColumns()` for Status/Member/Combination/Parent/None; sort comparators; sentinels — 2026-06-03
+- [x] `KanbanToolbar.tsx`: Group by / Sort by / Color by / Card fields multi-select — 2026-06-03
+- [x] `KanbanCard.tsx`: draggable card with accent border (colorBy), title, date range, status, tags, members, % complete, parent, description — 2026-06-03
+- [x] `KanbanColumn.tsx`: droppable column with header (accent dot + count + collapse), card list, empty state, "+ Add" — 2026-06-03
+- [x] `KanbanBoard.tsx`: DndContext host with drag overlay, drop semantics per groupBy, no-op drop guard — 2026-06-03
+- [x] `KanbanView.tsx`: data container (fetch, filter, Find, colorMap, buildColumns, drag commit, preference persistence) — 2026-06-03
+- [x] `KanbanView.test.ts`: 32 unit tests for `buildColumns` and `sortActivities` — 2026-06-03
+- [x] Columns collapse/expand; state persisted per timeline — 2026-06-03
+- [x] Card fields configurable; Group by axis field auto-suppressed from cards — 2026-06-03
+- [x] Filter parity: `applyActiveFilter` applied; column counts reflect filtered set — 2026-06-03
+- [x] Find parity: matching cards highlighted, non-matches dimmed; active match auto-expands collapsed columns — 2026-06-03
+- [x] Drag-to-recolumn commits status/reassign/reparent via `useUpdateActivity` (optimistic update) — 2026-06-03
+- [x] Combination/None columns non-droppable — 2026-06-03
+- [x] "+ Add" opens create panel pre-filled with column member (for member columns) — 2026-06-03
+- [x] All automated checks pass (`golangci-lint`, `go test ./...`, `pnpm lint`, `pnpm build`) — 2026-06-03
+- [ ] Manual: Drag card between status columns — status changes and card moves
+- [ ] Manual: Drag card between member columns — primary assignee changes
+- [ ] Manual: Drag card to parent column — parent changes
+- [ ] Manual: Card fields toggle shows/hides fields; Group by axis field auto-hides
+- [ ] Manual: Collapse/expand columns survive reload
+- [ ] Manual: Filter and Find work correctly on the board
+
+### Calendar Sync
+- [ ] Google Calendar OAuth connect flow
+- [ ] Outbound sync: push draba events to Google Calendar on create/update/delete
+- [ ] Inbound sync: Google webhook handler → upsert event in draba
+- [ ] Built-in CalDAV server (`internal/caldav/`)
+- [ ] CalDAV connect flow (user provides URL + credentials)
+- [ ] Outbound sync: push draba events to CalDAV on create/update/delete
+- [ ] Team iCal feed endpoint: `GET /timelines/:ical_token/feed.ics` (public, sanitized — no notes)
+
+### Shares — Multi-Share Views with Passwords (Phase 13)
+First-class Share entity. One timeline can host many shares, each frozen to a specific view + config.
+
+**Schema:**
+- [ ] Migration: `shares` table — id, timeline_id, view_type, view_config JSON, password_hash (nullable), expires_at (nullable), created_by, created_at, last_viewed_at, view_count, revoked_at
+- [ ] Migration: migrate existing `timelines.share_token` value into a first share row, then drop the column in a follow-up migration once UI references are gone
+
+**API:**
+- [ ] `POST /timelines/:id/shares` — create share with view_type + view_config snapshot + optional password + optional expiry
+- [ ] `GET /timelines/:id/shares` — list shares (creator + admins)
+- [ ] `PATCH /shares/:id` — rename / change password / extend expiry / revoke
+- [ ] `DELETE /shares/:id` — hard delete
+- [ ] `GET /shares/:token` — public lookup; password-protected returns 401 with `passwordRequired: true`
+- [ ] `POST /shares/:token/unlock` — exchange password for a short-lived view JWT scoped to that share
+- [ ] Rate-limit unlock attempts per IP
+
+**Web — creating shares:**
+- [ ] "Share this view" button in every view's toolbar slot (Gantt / List / Calendar / Kanban)
+- [ ] Share modal: snapshots current toolbar state into `view_config`, optional password + expiry toggles, returns URL with copy button
+
+**Web — viewing shares:**
+- [ ] Public viewer route `/s/:token` — no auth required
+- [ ] Password gate page for protected shares
+- [ ] Mount the appropriate view component in read-only mode with `view_config` applied
+- [ ] Branding strip: team name, "Shared view", last-updated timestamp
+
+**Web — managing shares:**
+- [ ] Manage-shares section on each timeline (list, view counts, revoke, edit)
+- [ ] Indicator chip on timeline tile showing active share count
+
+---
+
+### Export — Data, Textual & Visual (Phase 14)
+
+_Re-planned 2026-06-11 — see [docs/plans/phase-14-export.md](plans/phase-14-export.md). Visual exports are now client-side (no gofpdf, no Chromium); "PDF" is a printable route the user prints to vector PDF from their browser. Import bullets moved to [Phase 15 — Import](ROADMAP.md#phase-15--import--tabular)._
+
+**14.1 Foundation + data exports (server, API-first):**
+- [x] `POST /timelines/:id/export` — `{ format: csv|xlsx|ics, viewConfig? }`; frozen filter evaluated via the Phase 13 Go `matchesFilter` port; streams file, sync for v1
+- [x] `GET /timelines/:id/export.csv|.xlsx|.ics?filter=<savedFilterId>` — convenience GET for CLI/scripting (10.4.6 hook)
+- [x] CSV/xlsx columns match the Phase 15 import template (round-trip holds)
+- [x] Static `.ics` download — reuse the 13.4 feed generator, authenticated, `Content-Disposition: attachment`
+- [x] `ExportDialog` (single dialog, all views) + per-view capability descriptor (`lib/exportCapabilities.ts`) — per the [export-modal design handoff](design/handoffs/export-modal/design_handoff_export_modal/README.md)
+- [x] Wire into the Gantt toolbar Export stub + 11.1 / 11.2 / 11.3 toolbar slots, formats scoped per view
+
+**14.2 Textual exports (client):**
+- [ ] Markdown: GFM table (List), section-per-column (Kanban), agenda list (Calendar); header block with team / timeline / generated-at / filter description
+- [ ] Plain text variant (aligned monospace)
+- [ ] Copy to clipboard with dual `text/plain` + `text/html` flavors (rich paste into Slack / Word / Google Docs); `.md` file download
+
+**14.3 PNG snapshot (client):**
+- [ ] DOM rasterization via `html-to-image`: full scrollable extent, 2x density, light theme
+- [ ] Header strip composited above the capture
+
+**14.4 Printable views (client, vector PDF via browser print):**
+- [ ] Print routes per view (`/timelines/:id/print/:view`): non-interactive view components + print stylesheet, no app chrome, header strip per page
+- [ ] Gantt: landscape hint, date-range pagination, member-color legend
+- [ ] List: styled table with repeating column headers
+- [ ] Kanban: page breaks between column groups when too wide
+- [ ] Calendar: one page per week/month period
+- [ ] "Export → Printable view" opens the route in a new tab and triggers `window.print()`
+
+**Cut (2026-06-11):** Google Docs/Sheets integration, RTF, wall-calendar poster PDF, raster-PDF download, gofpdf/Chromium server rendering (optional Chromium *sidecar* deferred indefinitely).
+
+**SMTP & password reset (lands here because import errors / reset emails are first SMTP use):**
+- [ ] Password reset flow (email required — pick SMTP or transactional email provider)
+- [ ] SMTP configuration surface in `/settings/admin`
+
+---
+
+### External Connectors (Inbound Webhooks) — Phase 15
+Includes both the webhook backend and the per-timeline connector sidebar UI (previously a separate Up-Next block).
+
+**Backend:**
+- [ ] Create `team_inbound_webhooks` and `event_links` DB migrations
+- [ ] Add `is_external` boolean column to `events` table
+- [ ] `POST /teams/:id/webhooks` — generate an inbound webhook URL for a provider (e.g. Asana)
+- [ ] `GET /teams/:id/webhooks` — list active inbound webhooks
+- [ ] `POST /webhooks/:provider/:token` — generic inbound webhook handler to map payload to Draba events
+- [ ] Web UI: Render `is_external` events as read-only (disable drag-and-drop handles)
+- [ ] Web UI: Show external provider icon/link on the event detail card
+
+**Per-timeline connector model (was Up-Next "Web — Connectors"):**
+- [ ] Migration: `team_connectors (id, team_id, timeline_id, provider ENUM, display_name, config JSON, created_by, created_at)` — one row per connector instance
+- [ ] Provider values initially: `asana | aha | google_sheets | excel_online | webhook`
+- [ ] `GET /timelines/:id/connectors` — list connectors for a timeline
+- [ ] `POST /timelines/:id/connectors` — create connector (admin only); returns generated inbound token
+- [ ] `PATCH /connectors/:id` — update display name or config (admin only)
+- [ ] `DELETE /connectors/:id` — remove connector (admin only)
+- [ ] `POST /connectors/:token/ingest` — public inbound endpoint; validates token; maps payload via provider adapter
+
+**Sidebar CONNECTORS section (already stubbed):**
+- [ ] Wire `GET /timelines/:id/connectors` — list active connectors beneath the active timeline label
+- [ ] "Add connector" → connector setup sheet: provider picker → config fields → save → `POST /timelines/:id/connectors`
+- [ ] Connector row hover → gear icon → config drawer; delete with confirm
+- [ ] Provider icon set (Asana, Aha, Sheets, Excel, generic Plug)
+
+## Phase 13 — Shares (Public Read-Only View Links)
+
+**Next up.** Full design in [docs/plans/phase-13-shares.md](plans/phase-13-shares.md). Decision: live cached data + read-only SPA, server-side (Go) filter, view-driven field projection. No Chromium.
+
+**13.1 — Foundation, public gateway, Gantt viewer (MVP):** — ✅ 2026-06-04
+- [x] Migration: `shares` table (`id`, `timeline_id`, `token` UNIQUE, `view_type`, `view_config` JSON, `password_hash?`, `expires_at?`, `created_by`, `created_at`, `last_viewed_at`, `view_count`, `revoked_at`)
+- [x] Token migration: insert one `shares` row per existing timeline reusing `timelines.share_token` (keep the column for now; drop in a later migration)
+- [x] Go filter evaluator (`internal/filters`) mirroring `lib/filterEngine.ts` `matchesFilter`
+- [x] Shared golden-fixture suite (`packages/shared/testdata/filter-fixtures.json`) run by both `filterEngine.test.ts` and a Go test (drift guard)
+- [x] `GET /shares/{token}` gateway: scope-locked query (token → server-derived `timeline_id`, **no client selector**) → evaluate frozen filter in Go → fixed display projection → prune referenced members/statuses/tags → TTL cache (`DRABA_SHARE_CACHE_TTL`, default 60s)
+- [x] `POST /timelines/{id}/shares`, `GET /teams/{id}/timelines/{timelineId}/shares`, `PATCH /shares/{id}`, `DELETE /shares/{id}`
+- [x] OpenAPI: `Share`, `CreateShareInput`, `PatchShareInput`, `PublicActivity`, `PublicMember`, `PublicTimeline`, `ShareProjection`; regenerate TS types
+- [x] Gantt `interactive=false` mode (clicks inert in GanttGrid + GanttView; no drag/select)
+- [x] "Share this view" action in Gantt toolbar → snapshot live toolbar state incl. resolved `FilterDefinition` → create share → copy URL
+- [x] `/s/:token` public route (outside `ProtectedRoute`) + branding strip (timeline name · "Shared view" · activity count)
+- [x] Scope-isolation test: token reaches exactly its timeline's filtered records; tampering (other timeline/activity/team id, scope-widening params) cannot widen; no share-reachable by-id/list endpoint
+- [x] Verify payload: filtered-out activities + member email/`user_id`/role + access list + other timelines all absent (automated test)
+
+**13.2a — Password backend + view counts (Go, done 2026-06-05):**
+- [x] `password_hash` (bcrypt) on create/patch; `GET /shares/{token}` → `401 { passwordRequired: true }` when locked (no data); valid view token bypasses the gate
+- [x] `POST /shares/{token}/unlock` → short-lived view JWT (`share_view` type, share-scoped subject — not replayable across shares); rate-limit unlock attempts (10/IP/hour, in-memory limiter)
+- [x] Drop the `canManageShare = isAdmin || creator` gate on PATCH+DELETE — any timeline-team member may manage any share (shares can't mutate data)
+- [x] View counts: `viewCount` surfaced in the authenticated list response (per-row display backing)
+- [x] OpenAPI: `password` (writeOnly) on Create/Patch inputs, `passwordRequired` 401 body, `/shares/{token}/unlock` path; TS types regenerated
+
+**13.2b — Share module overhaul (frontend, done 2026-06-05):**
+- [x] Rebuilt `ShareModal.tsx` to the handoff design (header w/ link tile + timeline-name subtitle, "ACTIVE LINKS" section bar + count chip + New share, inline `AddShareForm` with title/description/password-toggle + show-hide, share rows, dashed empty state, footer + Done) using existing tokens/components
+- [x] Per-row meta: creator `Badge` + name (+ "· you"), created date, view count, lock/link type tile + "password" badge; copy w/ 1.6s success state; inline delete-confirm overlay
+- [x] Public unlock prompt at `/s/:token` (`UnlockPrompt` → `useUnlockShare` → store view token → `useShareProjection` resends GET with `Authorization: Bearer`); 401-`passwordRequired` mapped to `PASSWORD_REQUIRED`; 429 → "too many attempts" copy
+- [x] Backend support for the design: `description` column (migration 021) + derived `protected` flag on `Share` (never exposes the hash); plumbed through create/patch bodies, repo, OpenAPI; TS types regenerated
+- [x] `useShares`: `useUnlockShare`, view-token param on `useShareProjection`, `description`/`password` on create input; 6 new/updated hook tests
+
+**13.3 — List + Kanban read-only:**
+- [x] `interactive=false` + public mounting for List and Kanban (clicks inert)
+- [x] Projection: include `notes` only when a List share has the Notes column enabled in `view_config`
+- [x] Per-view read-only polish + "Share this view" (13.2 modal) in both toolbars
+
+**13.4 — Calendar — ICS feed sharing:** — ✅ 2026-06-10 (automated checks)
+- [x] `shares.kind` discriminator (`view` | `ics`) — migration 022; ICS rows carry `scope` (`timeline` | `member`) + nullable `member_id`, no `view_config`/filter/password (create/patch validation rejects passwords on feeds)
+- [x] `GET /shares/{token}.ics` (`text/calendar`, dispatched inside the `{token}` wildcard) + `webcal://` variant in the modal links; all-day VEVENTs (`DTSTART;VALUE=DATE`, exclusive `DTEND` = end+1d) via new `internal/ics` package (RFC 5545 escaping + 75-octet folding); live data, ICS TTL cache sharing `DRABA_SHARE_CACHE_TTL`
+- [x] Distinct Calendar share modal (`CalendarShareModal.tsx`): public On/Off toggle, scope selector (timeline vs. member), feed URL, Copy, Add-to-Google/Apple/Outlook, Regenerate link (`POST /shares/{id}/regenerate` rotates the token)
+- [x] Whole-timeline AND per-member feeds; payload carries no email/`user_id`/role/other-timelines; kinds isolated both directions (ICS token dead on the JSON gateway and vice versa)
+- [x] Manual: subscribe in a real calendar client → all-day events with fields (verified in Thunderbird, 2026-06-10; client-side fetch, works on LAN). Apple Calendar on LAN also testable.
+- [ ] Manual: Google Calendar / Outlook web subscription — **blocked until a test server is exposed to the internet** (their fetchers run server-side and cannot reach localhost/LAN). Feed URLs derive from `window.location.origin`, so no code change is needed once public.
+
+**13.5 — Lifecycle tail (re-scoped 2026-06-11):** — ✅ 2026-06-11 (automated checks + local live verification)
+- [x] Archived timeline kills its shares: JSON gateway, ICS feed, and unlock all `404` (not `410` — archive is reversible; unarchive resurrects the links); checked before the caches so archiving takes effect immediately
+- [x] Active-share-count chip on the sidebar timeline tile — `Timeline.shareCount` derived in the repo (non-revoked, non-expired shares of both kinds), added to OpenAPI + regenerated types
+- [x] Last-viewed rendered in the 13.2 modal row beside the view count; `useListShares` now refetches on modal open so the telemetry is current (app-wide 30s staleTime was masking updates)
+- [x] ~~Optional expiry write path~~ — cut from scope 2026-06-11 (read-side `410` enforcement stays as tested defensive code)
+
+## Done
+- [x] Initialize repo scaffold — 2026-04-27
+- [x] Define requirements, architecture, conventions — 2026-04-27
+
+## Parking Lot
+- **Commit/CI process — repomap.md vs. Graphify:** drop the automated `repomap.md` generation (the AI-context lookup step doesn't appear to depend on it day-to-day) and look into incorporating Graphify in its place. Not yet scoped — revisit once the Phase 13 sub-phases land.
+- MySQL/MariaDB and Postgres DB adapters (SQLite first, then add others)
+- CLI binary
+- MCP server for AI agent access
+- Mobile native apps (ship PWA first)
+- Microsoft/Outlook calendar sync (v2)
+- Multi-tenant cloud hosting
+- SSO / OAuth login (GitHub, Google)
+- Notifications (email, push)
+- Recurring event UI (RRULE editing)
+- Kanban drag-to-change-status (v2; v1 Kanban is read-only)
 ````
 
 ## File: packages/api/internal/api/share_handler.go
@@ -70293,1367 +71654,6 @@ paths:
           $ref: "#/components/responses/NotFound"
         "500":
           $ref: "#/components/responses/InternalError"
-````
-
-## File: docs/TASKS.md
-````markdown
-# Tasks
-
-## Current Sprint — Foundation
-
-### Repo & Tooling
-- [x] Initialize Go module (`packages/api/`) with basic project structure — 2026-04-29
-- [x] Initialize React + TypeScript + Vite project (`packages/web/`) — 2026-04-29
-- [x] Set up pnpm workspace (`pnpm-workspace.yaml`) — 2026-04-29
-- [x] Add `golangci-lint` config (`.golangci.yml`) — 2026-04-29
-- [x] Set up GitHub Actions CI: lint + test on PR — 2026-04-29
-- [x] Write `docker-compose.yml` for local development — 2026-04-29
-
-### API — Core
-- [x] DB abstraction layer with SQLite adapter (sqlx + modernc.org/sqlite) — 2026-04-30
-- [x] Migration runner (auto-runs on startup) — 2026-04-30
-- [x] Initial schema migrations: users, teams, team_members, invites, events, event_tags, event_assignments, timelines, timeline_access, calendar_connections, api_tokens — 2026-04-30
-- [x] Auth: JWT issue/validate, password hash/verify, invite token generate/validate — 2026-04-30
-- [x] `POST /auth/register` (invite token required) — 2026-04-30
-- [x] `POST /auth/login` — 2026-04-30
-- [x] `POST /auth/refresh` — 2026-04-30
-- [x] `POST /teams` — create team — 2026-05-03
-- [x] `POST /teams/:id/invites` — send invite — 2026-05-03
-- [x] `GET /teams/:id/members` — 2026-05-03
-- [x] `POST /teams/:id/events` — create event — 2026-05-03
-- [x] `GET /teams/:id/events` — list events (date range filter) — 2026-05-03
-- [x] `PATCH /events/:id` — update event — 2026-05-03
-- [x] `DELETE /events/:id` — delete event — 2026-05-03
-
-### API — Real-Time
-- [x] WebSocket hub (`internal/ws/`) — 2026-05-14
-- [x] Team-scoped subscription model — 2026-05-14
-- [x] Broadcast on `events.*` internal bus events — 2026-05-14
-
-### API — Timelines
-- [x] `POST /teams/:id/timelines` — create timeline — 2026-05-15
-- [x] `GET /timelines/:id` — fetch timeline (public or auth-gated) — 2026-05-15
-- [x] `GET /timelines/share/:token` — public share link handler — 2026-05-15
-- [x] Timeline access list enforcement — 2026-05-15
-
-### Web — Scaffold
-- [x] Initialize shadcn/ui: `pnpm dlx shadcn@latest init` — 2026-05-16
-- [x] Set color tokens in `src/index.css` once palette is decided — 2026-05-16
-- [x] Set up dark mode toggle (localStorage + `prefers-color-scheme`) — 2026-05-16
-- [x] Routing setup (React Router) — 2026-05-16
-- [x] Auth flow: login, register (via invite), token storage — 2026-05-16
-- [x] API client (TanStack Query + fetch wrapper using generated types) — 2026-05-16
-- [x] WebSocket client hook (`useWebSocket`) — 2026-05-16
-- [x] Embed React build in Go binary (`//go:embed`); API serves SPA at `GET /` — 2026-05-16
-
-### RBAC Refactor + First-Run Setup (Phase 8.0)
-- [x] Migration 003: `team_members` PK, nullable `user_id`, `display_name` — 2026-05-18
-- [x] Migration 003: `event_assignments` + `timeline_access` swap `user_id` FK for `team_member_id` — 2026-05-18
-- [x] Migration 003: `timeline_access` gains `role (admin|member)`; `visibility` dropped from `timelines` — 2026-05-18
-- [x] `User.IsSuperadmin`: first registered user auto-granted superadmin — 2026-05-18
-- [x] `GET /setup/status` — public endpoint (`{ needsSetup: bool }`) — 2026-05-18
-- [x] Timeline access: team admins bypass check; members require explicit `timeline_access` entry — 2026-05-18
-- [x] `SetupPage`: 3-step first-run wizard (account → team → timeline) — 2026-05-18
-- [x] `ProtectedRoute`: redirect to `/setup` when `needsSetup` is true — 2026-05-18
-- [x] Production Dockerfile: run as non-root `draba` user (uid 1000) — 2026-05-18
-
-### Web — Timeline View (Phase 8.1: Shell & Rendering — Gantt pivot)
-- [x] API: `GET /teams`, `GET /teams/:id/timelines`, `assignedMemberIds[]` on Event — 2026-05-18
-- [x] `TimelineView` + `TimelineGrid` (person-lane prototype, later pivoted) — 2026-05-18
-- [x] Pixel ↔ date math (map date range to X offset/width) — 2026-05-18
-- [x] Wire to `GET /teams/:id/events?start=&end=` and `GET /teams/:id/members` — 2026-05-18
-- [x] `TimelineGrid` rewrite: Gantt layout — one row per event, sticky label col, member avatars — 2026-05-18
-- [x] `TimelineToolbar` component: zoom in/out, group-by, sort-by, export stub — 2026-05-18
-- [x] `TimelineView` update: build `GanttRow[]` with grouping + sorting logic — 2026-05-18
-- [x] Group by Member: section headers per assignee, events under primary assignee — 2026-05-18
-- [x] Group by Parent: root events first, children indented below their parent — 2026-05-18
-- [x] Sort by: start date, end date, title A–Z — 2026-05-18
-- [x] Zoom: variable `colWidth` stepped through [40, 60, 80, 120, 160] px/day — 2026-05-18
-- [x] `DashboardPage`: render `TimelineToolbar`, pass group/sort/zoom state to `TimelineView` — 2026-05-18
-
-### Web — Timeline View (Phase 8.2: Interactions)
-- [x] Click event block → open `EventDetailPanel` (view mode) — 2026-05-19
-- [x] Edit form in panel (title, description, date range, status, assignees); save via `PATCH /events/:id` — 2026-05-19
-- [x] Delete event with confirm dialog; remove from timeline — 2026-05-19
-- [x] Drag on empty lane cell → open `EventCreateForm` pre-filled with date range + lane member — 2026-05-19
-- [x] Submit create form → `POST /teams/:id/events`, insert block into timeline — 2026-05-19
-
-### Web — Gantt Bar Drag (Phase 8.2.1: Resize & Move)
-- [x] Detect mousedown on left/right edge (8px zone) vs. bar body — 2026-05-19
-- [x] Edge drag: update start or end date live as user drags; snap to active granularity column — 2026-05-19
-- [x] Body drag: shift both start and end dates by the same column delta — 2026-05-19
-- [x] Show date tooltip during drag (start date for left edge, end date for right edge, both for body) — 2026-05-19
-- [x] PATCH `/events/:id` with new startAt/endAt on mouseup; optimistic update in cache — 2026-05-19
-- [x] Block drag on `is_external` events (read-only; Phase 14 flag) — 2026-05-19
-
-### Web — Timeline View (Phase 8.3: Real-Time Sync)
-- [x] Connect `useWebSocket` to subscribe to `events.*` for active team — 2026-05-19
-- [x] `events.created` delta: insert block into TanStack Query cache — 2026-05-19
-- [x] `events.updated` delta: update block in cache — 2026-05-19
-- [x] `events.deleted` delta: remove block from cache — 2026-05-19
-- [x] Handle optimistic update conflicts (in-flight local edit vs. arriving WS delta) — 2026-05-19
-
-### OpenAPI
-- [x] Write initial `openapi.yaml` in `packages/shared/` — 2026-05-04
-- [x] Set up TypeScript type generation from spec (openapi-typescript) — 2026-05-04
-- [x] Set up Go type generation from spec (`oapi-codegen`) — 2026-05-16
-- [x] Refactor existing Go handlers to use generated OpenAPI models — 2026-05-16
-
-### Web — Persistent View Settings (Phase 8.4)
-- [x] Migration 004: `user_preferences` table with empty-string sentinel for global scope — 2026-05-20
-- [x] `UserPreference` model (`models.go`) — 2026-05-20
-- [x] `UserPreferenceRepo`: `List` and `Upsert` methods — 2026-05-20
-- [x] `GET /users/me/preferences?timeline_id=` — returns scoped or global prefs — 2026-05-20
-- [x] `PUT /users/me/preferences` — upsert single key/value, validates JSON — 2026-05-20
-- [x] OpenAPI spec: `UserPreference` schema + two endpoints — 2026-05-20
-- [x] TypeScript types regenerated from spec — 2026-05-20
-- [x] `usePreferences` / `useUpsertPreference` / `usePreferenceMap` hooks — 2026-05-20
-- [x] `DashboardPage`: restore toolbar state from per-timeline prefs on timeline switch — 2026-05-20
-- [x] `DashboardPage`: save toolbar state (group_by, sort_by, zoom_granularity, color_by) on change — 2026-05-20
-- [x] `DashboardPage`: persist dark mode preference globally — 2026-05-20
-
-### Web — Find (Phase 8.5)
-In-view "find in page" with highlight + match navigation. Scoped to already-loaded events; respects active filters. Global cross-team search is deferred to Phase 15.
-
-**Find bar:**
-- [x] `FindBar` component in the TopBar (between FilterDropdown and ProfileMenu) — query input, match counter (`N / M`), prev/next chevrons, close (×) — 2026-05-20
-- [x] Open via `Ctrl/Cmd+F` global keybinding and via a search icon in the TopBar; close via `Esc` or × — 2026-05-20
-- [x] Debounced (~150ms) client-side matcher over already-fetched events — 2026-05-20
-
-**Match scope:**
-- [x] Case-insensitive match against: event title, description, assignee display names, parent event title — 2026-05-20
-- [x] Respect active filters — only events already visible in the current view are candidates — 2026-05-20
-
-**Visual treatment:**
-- [x] Matching events: amber outline / glow using existing design tokens — 2026-05-20
-- [x] Non-matching events: dimmed to ~0.3 opacity — 2026-05-20
-- [x] Active match (prev/next cursor position): stronger outline + subtle pulse to distinguish from other matches — 2026-05-20
-- [x] On hover, non-title matches show a "why matched" hint (e.g. `matched assignee Jane`) — 2026-05-20
-
-**Navigation:**
-- [x] `Enter` / `Shift+Enter` and ◀ ▶ chevrons walk forward/backward through matches — 2026-05-20
-- [x] Auto-scroll the Gantt on each step — horizontal pan to event's date range, vertical scroll to its row, centered in viewport — 2026-05-20
-
-**Empty / edge cases:**
-- [x] Zero matches, no filters active → bar shows `No matches` — 2026-05-20
-- [x] Zero matches in view, filters active → soft callout: *"No matches in current view. [Clear filters]"* — 2026-05-20
-- [x] Find query is ephemeral (not persisted across navigation/reload); bar open-state also ephemeral — 2026-05-20
-
-**Testing:**
-- [x] Unit: matcher returns correct hits across all match fields, case-insensitive — 2026-05-20
-- [ ] Integration: Find works at every granularity level and every group-by mode (requires live data — manual)
-- [ ] Keyboard: full prev/next cycle reachable with keyboard only (manual verification with live events)
-
-## Up Next
-
-> **Member management work is split across Phase 10.1.1 (Teams — CRUD) and Phase 10.1.2 (Members — Management & Editing)**. Team entity CRUD (create, edit, archive) is in 10.1.1; member lifecycle (add, edit, roles, invites, stubs, inactivation, admin actions) is in 10.1.2. The previously enumerated sidebar gear-icon + add-member-sheet tasks are absorbed into 10.1.2.
-
-### Web — Filter Scoping (FilterDropdown + API)
-Reorganizes the filter dropdown into four explicit sections. Filters are stored as personal by default; admins can promote any filter to team or timeline scope; members can nominate their filters for admin review.
-
-**Data model:**
-- Single `saved_filters` table: `(id, team_id, timeline_id nullable, created_by, name, definition JSON, scope ENUM(personal|nominated|team|timeline), status ENUM(active|pending_review))`
-- `scope=personal` — visible only to creator; `scope=team` — visible to all team members; `scope=timeline` — visible to all members of that timeline; `scope=nominated` — personal filter flagged by member for admin review (visible to admins)
-
-**API:**
-- [ ] Migration: replace current `saved_filters` shape with the unified schema above
-- [ ] `GET /teams/:id/filters` — returns filters scoped `team` or `timeline` (for the active timeline), plus the calling user's `personal` and `nominated` filters
-- [ ] `POST /teams/:id/filters` — create a new personal filter; `definition` is the filter JSON
-- [ ] `PATCH /filters/:id` — update name or definition (creator or admin)
-- [ ] `PATCH /filters/:id/scope` — promote/demote scope; admin-only for `team`/`timeline`; any member can set `nominated`
-- [ ] `DELETE /filters/:id` — creator or admin
-
-**Web — FilterDropdown layout:**
-- [ ] Reorganize dropdown into four labeled sections, each hidden when empty:
-  1. **Default** — All events / Upcoming / My events (hardcoded presets, always present)
-  2. **Team** — filters with `scope=team` from API
-  3. **Timeline** — filters with `scope=timeline` for the active timeline
-  4. **Mine** — caller's `personal` filters; nominated filters shown with a "Pending" badge
-- [ ] Filter names truncate with ellipsis at a max width; full name in tooltip on hover
-- [ ] "New filter…" opens filter editor (personal scope by default); "Share…" action on existing personal filters lets the member nominate it or (if admin) promote directly to team/timeline
-- [ ] Pass active timeline ID through context so the dropdown can fetch timeline-scoped filters
-- [ ] Admin-visible section at bottom of "Mine": nominated filters awaiting review, with Approve / Reject actions
-
----
-
-> **Connectors sidebar + per-timeline connector model is absorbed into the External Connectors (Inbound Webhooks) task block further down** — that section now carries both the webhook backend and the sidebar UI work.
-
-### API — Token Auth (Phase 9)
-- [x] `POST /tokens` — create API token (returns value once) — 2026-05-20
-- [x] `GET /tokens` — list tokens for current user — 2026-05-20
-- [x] `DELETE /tokens/:id` — revoke token (preserved row, sets revoked_at) — 2026-05-20
-- [x] Middleware: accept Bearer token (JWT or API token) on all authenticated routes — 2026-05-20
-- [x] Enforce token scope on writes (read-only tokens blocked from mutations) — 2026-05-20
-
-### API — Archive (Phase 9)
-- [x] `POST /events/:id/archive` and `POST /events/:id/unarchive` — 2026-05-20
-- [x] `POST /timelines/:id/archive` and `POST /timelines/:id/unarchive` (team-admin only) — 2026-05-20
-- [x] List endpoints exclude archived records by default; `?archived=true` to include — 2026-05-20
-
-### The Great Event → Activity Rename (Phase 9.5)
-Rename the domain entity `Event` → `Activity` everywhere. Runbook: [GreatEventToActivity.md](GreatEventToActivity.md). Roadmap: [Phase 9.5](ROADMAP.md#phase-95--rename-event--activity-the-great-rename).
-
-> **Historical note:** Phase 3 / 8.x / 9 task entries above use "event" because that was the entity's name when those phases shipped. Do not rewrite them. Phase 9.5 is the formal cutover; all later entries use "activity".
-
-**DB:**
-- [x] Write migration `005_rename_events_to_activities.sql` — 2026-05-21 (`ALTER TABLE ... RENAME`)
-- [x] Rename indexes containing `event` in their name — 2026-05-21
-- [x] Update `migrations_test.go` to assert new table + column names — 2026-05-21
-- [ ] Verify against a copy of the prod DB: row counts unchanged, `PRAGMA foreign_key_check` clean
-
-**Go API:**
-- [x] `models.Event` → `models.Activity` — 2026-05-21
-- [x] Rename file `internal/db/event_repo.go` → `activity_repo.go`; `EventRepo` → `ActivityRepo` — 2026-05-21
-- [x] Rename file `internal/api/event_handler.go` → `activity_handler.go`; all `handle*Event*` functions — 2026-05-21
-- [x] `server.go`: routes `/events*` → `/activities*` — 2026-05-21
-- [x] `internal/events/bus.go`: rename constants `EventCreated/Updated/Deleted` — 2026-05-21 → `ActivityCreated/Updated/Deleted` + wire strings (`event.*` → `activity.*`). **Keep** package name and `TimelineCreated/Updated`.
-- [x] Update `bus_test.go`, `hub_test.go` wire-string assertions — 2026-05-21
-- [x] `golangci-lint run` clean, `go test ./...` passes — 2026-05-21
-
-**OpenAPI + generated types:**
-- [x] `packages/shared/openapi.yaml`: schema, paths, operationIds — 2026-05-21, tags, body types. **Keep** `googleEventId` and `caldavUid` fields.
-- [x] Run `pnpm --filter shared generate`; verify `Activity` exports — 2026-05-21, zero `Event` exports
-
-**Web:**
-- [x] `src/types/index.ts`: `DrabaEvent`/`EventStatus`/`EVENT_COLORS` — 2026-05-21 → `DrabaActivity`/`ActivityStatus`/`ACTIVITY_COLORS`
-- [x] Rename `useTeamEvents.ts` → `useTeamActivities.ts`; hooks + query keys — 2026-05-21
-- [x] `useWebSocket.ts`: update message-type switch to `activity.*` — 2026-05-21
-- [x] Rename `EventDetailPanel`, `EventCreatePanel`, `EventPanel` → `Activity*` — 2026-05-21; fix imports
-- [x] UI copy sweep: sidebar label, panel titles, empty state, ARIA, button labels — 2026-05-21
-- [x] `pnpm --filter web lint` clean — 2026-05-21
-
-**Tests + seed:**
-- [x] Rename `event_handler_test.go` → `activity_handler_test.go` — 2026-05-21
-- [x] Rename `scripts/seed-find-test-events.sql` → `seed-find-test-activities.sql` — 2026-05-21; update INSERTs + cleanup
-
-**Docs:**
-- [x] Sweep ROADMAP.md, REQUIREMENTS.md, ARCHITECTURE.md, CONVENTIONS.md, TESTING.md, design/UX_PATTERNS.md — 2026-05-21
-- [x] Hand-review: ROADMAP Phase 3 title — 2026-05-21 → "Core API — Activities & Teams (originally Events; renamed in Phase 9.5)"
-- [x] Do **not** rewrite `docs/log.md` historical entries — 2026-05-21
-- [x] Add Phase 9.5 entry to `docs/log.md` — 2026-05-21
-
-**Verification (smoke against http://epcot.lan:8081):**
-- [ ] Create / edit / archive / unarchive / delete an Activity end-to-end
-- [ ] WebSocket frames arrive as `activity.created` / `.updated` / `.deleted`
-- [ ] Final sweep `rg "\bevent" packages/ docs/` returns only expected hits (bus package, calendar fields, log.md)
-
-### Identity System (Phase 9.6)
-Reusable Identity component system (color + icon) for all entities. Design spec: [IDENTITY_SYSTEM.md](design/IDENTITY_SYSTEM.md). Prototype: `docs/design/assets/identity-widget-prototype.html`.
-
-**Schema (migration 006):**
-- [x] Write migration `006_identity_fields.sql` — 2026-05-24
-- [x] Update `migrations_test.go` to assert new columns exist — 2026-05-24
-
-**Go API:**
-- [x] `models.go`: add `Icon *string` + `Color *string` to `Team`; add `Icon *string` + `Color *string` to `Timeline`; add `Icon *string` to `TeamMember` — 2026-05-24
-- [x] Update `TeamMemberWithUser` to surface the new `Icon` field (via embedding) — 2026-05-24
-- [x] Update OpenAPI spec: add `icon`/`color` to `Team`, `Timeline`, `TeamMember` schemas — 2026-05-24
-- [x] Regenerate TypeScript types (`pnpm --filter shared generate`) — 2026-05-24
-- [x] `golangci-lint run` clean; `go test ./...` passes — 2026-05-24
-
-**Web — component library (`src/components/identity/`):**
-- [x] `identity-constants.ts` — 2026-05-24
-- [x] `Badge.tsx` — 2026-05-24
-- [x] `IdentityTrigger.tsx` — 2026-05-24
-- [x] `IdentityPicker.tsx` — 2026-05-24
-- [x] `IdentityWidget.tsx` — 2026-05-24
-
-**Web — replace existing color/icon UI:**
-- [x] `ActivityDetailPanel`: `<IdentityWidget>` replacing icon stub + 8-color swatch — 2026-05-24
-- [x] `ActivityCreatePanel`: `<IdentityWidget>` replacing color swatch — 2026-05-24
-- [x] Gantt bar label column: `<Badge size={20} shape="square">` — 2026-05-24
-- [x] Sidebar timeline rows: `<Badge size={20} shape="square">` — 2026-05-24
-- [x] Sidebar member rows: `<Badge size={20} shape="circle">` — 2026-05-24
-
-**Web — MemberAvatar migration:**
-- [x] Refactor `MemberAvatar.tsx` to delegate to `<Badge>` — 2026-05-24
-- [ ] Verify all existing MemberAvatar call sites render correctly (manual)
-
-**Web — palette consolidation:**
-- [x] Update `types/index.ts`: re-export `ACTIVITY_COLORS` and `MEMBER_COLORS` from `identity-constants.ts` — 2026-05-24
-- [x] Update `index.css`: `--member-N-*` → 16 `--identity-<name>` custom properties — 2026-05-24
-- [x] Update `DESIGN_SYSTEM.md`: 8-color → 16-color identity palette reference — 2026-05-24
-
-**Testing & verification:**
-- [x] `pnpm --filter web lint` clean — 2026-05-24
-- [x] `golangci-lint run` clean — 2026-05-24
-- [x] `go test ./...` passes — 2026-05-24
-- [ ] Badge renders all four modes (Lucide icon, 1-letter, 2-letter, none) at sizes 20–40px, both shapes (manual)
-- [ ] IdentityWidget popover opens/closes; color, name option, and icon selection fire onChange (manual)
-- [ ] Legacy hex colors in existing activities display correctly via `hexToColorId()` mapping (manual — test on Docker)
-- [ ] Manual: ActivityDetailPanel uses IdentityWidget; changes persist as color IDs (manual — test on Docker)
-- [ ] Manual: sidebar member + timeline rows use Badge (manual)
-
-**Docs:**
-- [x] Add Phase 9.6 entry to `docs/log.md` — 2026-05-24
-
----
-
-### Phase 10 — Entity Management (data-cornerstone CRUD)
-
-Closes CRUD gaps for the three core data entities. Activities (renamed from Events in Phase 9.5) are already CRUD-complete (Phases 3 / 8.2 / 8.2.1 + Phase 9 archive); Teams and Timelines are not, so 10.x focuses on them.
-
-Design references:
-- Team Modal: `docs/design/handoffs/team-modal/` — Settings tab, Members tab, archive flow
-- Member Edit Modal: `docs/design/handoffs/member-modal/` — member profile, stats, admin actions
-
----
-
-### Teams — CRUD & Management (Phase 10.1.1)
-Closes the Teams data entity. Ships the Team Modal with Settings tab functional; Members tab scaffolded as locked/placeholder until 10.1.2.
-
-**Schema (migration 008):**
-- [x] Add `description TEXT` column to `teams` (nullable) — 2026-05-25
-- [x] Add `notes TEXT` column to `teams` (nullable) — 2026-05-25
-- [x] Add `archived_at DATETIME` column to `teams` (nullable) — 2026-05-25
-- [x] Update `migrations_test.go` to assert new columns — 2026-05-25
-
-**API — team-level:**
-- [x] `GET /teams/:id` — full team detail (name, description, notes, icon, color, archived_at) — 2026-05-25
-- [x] `PATCH /teams/:id` — update name, description, notes, icon, color (admin only) — 2026-05-25
-- [x] `POST /teams/:id/archive` and `POST /teams/:id/unarchive` — 2026-05-25
-- [x] Update `POST /teams` to accept `description`, `notes`, `icon`, `color` — 2026-05-25
-- [x] Update `GET /teams` — add `?archived=true` to include archived teams — 2026-05-25
-
-**OpenAPI + types:**
-- [x] Update `Team` schema: add `description`, `notes`, `archivedAt` — 2026-05-25
-- [x] Update `CreateTeamInput` and `PatchTeamInput` request bodies — 2026-05-25
-- [x] Regenerate TypeScript types (`pnpm --filter shared generate`) — 2026-05-25
-
-**Web — Team Modal (`<TeamModal>`):**
-- [x] Modal shell: portal, backdrop, panel (580px, dark theme), header, tab bar, scrollable content, footer — 2026-05-25
-- [x] Header: identity badge (36px square) + label ("NEW TEAM" / "EDIT TEAM") + team name + close button — 2026-05-25
-- [x] Tab bar: Settings (active) + Members (locked/placeholder in this phase) — 2026-05-25
-- [x] Members tab locked state: opacity 0.45, not-allowed cursor, tooltip "Save the team first to add members" — 2026-05-25
-- [x] Settings tab: `<IdentityPicker>` (square shape), name (required), description, notes (textarea) — 2026-05-25
-- [x] Footer: Archive team button (edit mode, left side), Cancel + Create team / Save changes (right side, team-color primary button) — 2026-05-25
-- [x] "Saved" banner: appears after new team creation, auto-dismisses after 3s — 2026-05-25
-- [x] New-team flow: Settings tab → Create team → banner → Members tab unlocks (placeholder content) — 2026-05-25
-- [x] Edit-team flow: pre-populated Settings tab, Members tab unlocked (placeholder) — 2026-05-25
-- [x] Archive confirmation dialog: replaces modal content, amber styling, icon, title, body, Cancel + Archive team buttons — 2026-05-25
-
-**Web — team picker + settings shell:**
-- [x] "New team" affordance in team picker dropdown → opens `<TeamModal mode="new">` — 2026-05-25
-- [x] Team edit affordance (gear icon or similar) → opens `<TeamModal mode="edit" team={...}>` — 2026-05-25
-- [x] `/settings` route shell with left-nav layout (foundation for 10.1.2–10.4.2) — 2026-05-25
-- [x] Archived teams in picker under collapsed "Archived" section with unarchive action — 2026-05-25
-- [x] `GET /teams` query includes archived teams for the picker's Archived section — 2026-05-25
-
-**Testing & verification:**
-- [x] `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean — 2026-05-25
-- [ ] Manual: create second team from picker, edit existing team, archive/unarchive
-- [ ] Manual: Team Modal opens in both modes with correct Settings tab behavior
-- [x] `docs/log.md` Phase 10.1.1 entry written — 2026-05-25
-
----
-
-### Members — Management & Editing (Phase 10.1.2)
-Fills in the Team Modal Members tab and adds the Member Edit Modal. Full member lifecycle: add, edit, roles, stubs, invites, reusable invite link, stats, inactivation, superadmin actions. Depends on 10.1.1 (Team Modal shell).
-
-**Terminology:** "Participant" = login-less team member (backend: `user_id = NULL`). Design handoffs use "stub" but we use "Participant" — established in Phase 8.0, more user-friendly. "Inactivate" = `archived_at`-based disabling. "Super Admin" = `is_superadmin`.
-
-**Schema (migration 009):**
-- [x] Add `archived_at DATETIME` column to `team_members` (nullable) — member inactivation — 2026-05-25
-- [x] Add `archived_at DATETIME` column to `users` (nullable) — account-level inactivation — 2026-05-25
-- [x] Add `invite_link_token TEXT UNIQUE` column to `teams` (nullable) — reusable invite link — 2026-05-25
-- [x] Update `migrations_test.go` to assert new columns — 2026-05-25
-
-**API — member CRUD:**
-- [x] `GET /teams/:id/members/:memberId` — full member detail with computed stats — 2026-05-25
-- [x] `POST /teams/:id/members` — add existing registered user by `userId` (admin only) — 2026-05-25
-- [x] `PATCH /teams/:id/members/:memberId` — update display name, color, icon, role (admin for role; self for own name/color/icon) — 2026-05-25
-- [x] `DELETE /teams/:id/members/:memberId` — remove from team; reject if last admin — 2026-05-25
-- [x] `POST /teams/:id/members/:memberId/archive` — inactivate member (set `archived_at`) — 2026-05-25
-- [x] `POST /teams/:id/members/:memberId/unarchive` — reactivate member (clear `archived_at`) — 2026-05-25
-
-**API — participant CRUD:**
-- [x] `POST /teams/:id/participants` — create login-less participant (admin only); name, icon, color, optional email — 2026-05-25
-- [x] Participants managed via same PATCH/DELETE member endpoints (role always `member`, `user_id` stays NULL) — 2026-05-25
-
-**API — invites:**
-- [x] `GET /teams/:id/invites` — list pending invites (email, sent date) — 2026-05-25
-- [x] `DELETE /teams/:id/invites/:inviteId` — revoke/cancel pending invite — 2026-05-25
-- [x] `POST /teams/:id/invite-link` — generate or regenerate reusable team invite link token — 2026-05-25
-- [x] `GET /teams/:id/invite-link` — get current invite link (or null) — 2026-05-25
-- [x] `DELETE /teams/:id/invite-link` — revoke current invite link — 2026-05-25
-- [x] Update `POST /auth/register` to accept reusable invite link tokens alongside existing one-time tokens — 2026-05-25
-
-**API — member stats (computed per request, not stored):**
-- [x] Timeline counts: active, archived (per member) — 2026-05-25
-- [x] Activity counts: past due, running, upcoming, unscheduled, archived (date-relative, not status-relative) — 2026-05-25
-
-**API — superadmin actions:**
-- [x] `POST /users/:id/promote` — set `is_superadmin = true` (superadmin only, not applicable to participants) — 2026-05-25
-- [x] `POST /users/:id/archive` — inactivate user account (superadmin only) — 2026-05-25
-- [x] `POST /users/:id/unarchive` — reactivate user account (superadmin only) — 2026-05-25
-- [x] `DELETE /users/:id` — hard delete user (superadmin only; zero active activities + single team only) — 2026-05-25
-- [x] Auth middleware: reject login from archived users with clear error — 2026-05-25
-
-**OpenAPI + types:**
-- [x] Add `MemberDetail` schema with stats, teams list, archived_at — 2026-05-25
-- [x] Add invite link endpoints to spec — 2026-05-25
-- [x] Add superadmin action endpoints to spec — 2026-05-25
-- [x] Update `TeamMember` schema with `archivedAt` — 2026-05-25
-- [x] Regenerate TypeScript types — 2026-05-25
-
-**Web — Team Modal Members tab:**
-- [x] Search/add input: search users by name/email, or type email to invite; clear button — 2026-05-25
-- [x] Search results dropdown: user matches with "Add" / "Already added" / "Invite pending"; email-only with "Invite" — 2026-05-25
-- [x] Participant creation: expandable inline form — identity picker (circle), name (required), optional email, "Create participant" button (amber) — 2026-05-25
-- [x] Member list: avatar (dashed border for stubs), name, "No login" pill (stubs, amber), email, `<RoleDropdown>`, remove (×) — 2026-05-25
-- [x] `<RoleDropdown>`: Admin (teal), Member (muted), Participant (amber) — with descriptions; portal-rendered; role changes save immediately — 2026-05-25
-- [x] Pending invitations section: rows with dashed-circle mail icon, email, sent date, "Revoke" button (red) — 2026-05-25
-- [x] Invite link section: URL display + "Copy link" button (teal transition to "Copied!"), explanatory note below — 2026-05-25
-- [x] Member count badge on Members tab label — 2026-05-25
-
-**Web — Member Edit Modal (`<MemberModal>`):**
-- [x] Modal shell: portal, backdrop, 560px panel, header / scrollable content / footer — 2026-05-25
-- [x] Header: `<IdentityPicker>` (40px circle), subline (participant/team member + viewer role label), name + badges ("No login" amber) — 2026-05-25
-- [x] Name + email row: 2-column grid; email read-only for participants ("No email — participant" placeholder) — 2026-05-25
-- [x] Timeline stats: 2 chips — Active (teal border), Archived (muted border) — 2026-05-25
-- [x] Activity stats: 5 chips — Past due (red if >0), Running (teal), Upcoming (blue), Unscheduled (muted), Archived (muted) — 2026-05-25
-- [x] Joined date: read-only pill with icon — 2026-05-25
-- [x] Teams list: each row with team badge (square, initials), team name, role pill — 2026-05-25
-- [x] Account section (team admin + non-participant): password reset button — shows "SMTP not configured" until Phase 14 — 2026-05-25
-- [x] Super Admin actions section (superadmin viewer only): Promote to Super Admin button (indigo), Inactivate (amber) / Delete (red) based on deletability — 2026-05-25
-- [x] Promote confirmation dialog: indigo icon, title, body, Cancel + Promote — 2026-05-25
-- [x] Inactivate confirmation dialog: amber icon, title, body, Cancel + Inactivate — 2026-05-25
-- [x] Delete confirmation dialog: red icon, title, body, Cancel + Delete — 2026-05-25
-- [x] Footer: Cancel + Save changes (member identity color) — 2026-05-25
-- [x] Deletable rule: zero active activities AND single team membership — 2026-05-25
-- [x] Role permission matrix enforcement: team admin vs superadmin capability differences — 2026-05-25
-
-**Web — sidebar integration:**
-- [x] Member rows: gear icon on hover → opens `<MemberModal>` for that member — 2026-05-25
-- [x] Inactivated members: reduced opacity — 2026-05-25
-
-**Testing & verification:**
-- [x] `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean — 2026-05-25
-- [ ] Manual: add user, invite email, create participant, change roles, remove member
-- [ ] Manual: generate invite link, copy, register new user via link
-- [ ] Manual: Member Modal shows correct stats, admin actions work with confirmations
-- [ ] Manual: inactivated user cannot log in; reactivation restores access
-- [x] `docs/log.md` Phase 10.1.2 entry written — 2026-05-25
-
----
-
-### Settings — Profile, Tokens & Admin (Phase 10.1.3)
-Builds out the `/settings` page into a working settings experience. Users get profile + identity management, security (password change), preferences, and API token management. Superadmins get SMTP config, instance defaults, and an orphaned-users view. Also ships forgot-password flow.
-
-**Design reference:** `docs/design/handoffs/settings-modal.zip` — directional prototype. Using the visual language (sidebar nav, field styling, token palette) but as a full page (existing `/settings` route), not a modal. Skipping Notifications panel (no infrastructure), Organization panel (multi-tenant concept doesn't apply), Billing panel (self-hosted), and Sessions section (JWTs are stateless). Security panel scoped to password change only.
-
-**Schema (migration 010):**
-- [x] Add `color TEXT` and `icon TEXT` columns to `users` table — user-level identity — 2026-05-26
-- [x] Create `instance_settings` table (`key TEXT PRIMARY KEY`, `value TEXT`, `updated_at DATETIME`) — 2026-05-26
-- [x] Create `password_reset_tokens` table (`id TEXT PK`, `user_id TEXT FK`, `token_hash TEXT`, `expires_at DATETIME`, `used_at DATETIME`, `created_at DATETIME`) — 2026-05-26
-- [x] Update `migrations_test.go` to assert new columns and tables — 2026-05-26
-
-**API — profile management:**
-- [x] `PATCH /users/me` — update `display_name`, `color`, `icon`; validate non-empty name; trim whitespace — 2026-05-26
-- [x] Identity propagation: when color/icon changes, update all `team_members` rows for the user where the member's value matches the user's old value or is NULL — 2026-05-26
-- [x] Add `UpdateProfile` repo method with propagation logic — 2026-05-26
-- [x] Test: happy path — name change persists; color change propagates to team_members — 2026-05-26
-- [x] Test: error path — empty name returns 400 — 2026-05-26
-
-**API — password change:**
-- [x] `PUT /users/me/password` — requires `{ currentPassword, newPassword }`; verify current hash; update; return 200 — 2026-05-26
-- [x] Return 401 `WRONG_PASSWORD` on mismatch; 400 `WEAK_PASSWORD` if < 8 chars — 2026-05-26
-- [x] Test: happy path — password changed — 2026-05-26
-- [x] Test: error path — wrong current password returns 401 — 2026-05-26
-
-**API — forgot password:**
-- [x] `POST /auth/forgot-password` — accepts `{ email }`; generate 1-hour reset token; store hash in `password_reset_tokens`; send email via mailer if configured; always return 200 — 2026-05-26
-- [x] `POST /auth/reset-password` — accepts `{ token, newPassword }`; validate token not expired/used; hash new password; update user; mark token used; return 200 — 2026-05-26
-- [x] Return 400 `TOKEN_INVALID` or `TOKEN_EXPIRED` on bad/expired token — 2026-05-26
-- [x] Test: invalid token returns TOKEN_INVALID — 2026-05-26
-- [x] Test: forgot-password always returns 200 (no enumeration) — 2026-05-26
-
-**API — SMTP configuration (superadmin only):**
-- [x] Internal `mailer` package (`internal/mailer/`): wraps `net/smtp`; reads config from `instance_settings` at send time; exposes `Send(to, subject, htmlBody) error` and `IsConfigured() bool` — 2026-05-26
-- [x] `GET /admin/smtp` — return current SMTP config with password masked; 403 if not superadmin — 2026-05-26
-- [x] `PUT /admin/smtp` — upsert config (host, port, username, password, from_name, from_email, encryption); validate by sending test email to caller; 403 if not superadmin — 2026-05-26
-- [x] `POST /admin/smtp/test` — send test email without saving; 403 if not superadmin — 2026-05-26
-- [x] `DELETE /admin/smtp` — clear SMTP config; 403 if not superadmin — 2026-05-26
-- [ ] SMTP password encrypted at rest (currently stored as JSON in instance_settings; encryption deferred)
-- [x] Test: 403 for non-superadmin on admin settings endpoints — 2026-05-26
-
-**API — instance settings (superadmin only):**
-- [x] `GET /admin/settings` — return all instance settings (registration_policy, default_timezone, default_date_format, default_week_start); 403 if not superadmin — 2026-05-26
-- [x] `PATCH /admin/settings` — update one or more settings; validate values; 403 if not superadmin — 2026-05-26
-- [ ] Test: set registration_policy to "open" → registration without invite succeeds (manual only)
-
-**API — orphaned users (superadmin only):**
-- [x] `GET /admin/users` — return all users with team membership count and status; support `?orphaned=true` filter; 403 if not superadmin — 2026-05-26
-- [x] Test: superadmin can list all users — 2026-05-26
-
-**OpenAPI + types:**
-- [x] Add `PATCH /users/me` to spec (UpdateProfile request/response) — 2026-05-26
-- [x] Add `PUT /users/me/password` to spec (ChangePassword request/response) — 2026-05-26
-- [x] Add `POST /auth/forgot-password` and `POST /auth/reset-password` to spec — 2026-05-26
-- [x] Add `GET/PUT/DELETE /admin/smtp` and `POST /admin/smtp/test` to spec — 2026-05-26
-- [x] Add `GET/PATCH /admin/settings` to spec — 2026-05-26
-- [x] Add `GET /admin/users` to spec — 2026-05-26
-- [x] Regenerate TypeScript types — 2026-05-26
-
-**Web — Settings page layout:**
-- [x] Rework `SettingsPage.tsx`: sidebar nav with grouped nav items, active state styling — 2026-05-26
-- [x] Route structure: `/settings/profile`, `/settings/security`, `/settings/preferences`, `/settings/tokens`, `/settings/admin` (superadmin only) — 2026-05-26
-- [x] Admin nav items hidden for non-superadmin users — 2026-05-26
-- [x] Sub-route content renders in right panel with title + subtitle header pattern — 2026-05-26
-
-**Web — Profile (`/settings/profile`):**
-- [x] Display name field with save button; calls `PATCH /users/me` — 2026-05-26
-- [x] Identity picker (reuse `IdentityWidget` from 9.6): color + icon selection; changes call `PATCH /users/me` with new color/icon — 2026-05-26
-- [x] Identity badge preview (avatar at current color/icon) — 2026-05-26
-- [x] Email shown read-only with explanatory note ("Email changes are not yet supported") — 2026-05-26
-- [x] Inline success/error feedback on save — 2026-05-26
-
-**Web — Security (`/settings/security`):**
-- [x] Change password form: current password, new password (min 8 chars), confirm new password — 2026-05-26
-- [x] Validation: new + confirm must match; save disabled until valid — 2026-05-26
-- [x] On success: show success message, clear form — 2026-05-26
-- [x] On 401 WRONG_PASSWORD: show "Current password is incorrect" error — 2026-05-26
-- [x] Calls `PUT /users/me/password` — 2026-05-26
-
-**Web — Preferences (`/settings/preferences`):**
-- [x] Regional section: timezone (IANA selector), date format dropdown, week starts on — 2026-05-26
-- [x] Appearance section: theme toggle (Light / Dark / System) — 2026-05-26
-- [x] All values read/written via existing `GET/PUT /users/me/preferences` endpoints — 2026-05-26
-- [x] Theme change applies immediately — 2026-05-26
-- [ ] Defaults section: default team/timeline dropdowns (deferred — requires loading teams/timelines)
-
-**Web — API Tokens (`/settings/tokens`):**
-- [x] Table: name, scope badge, last used (relative time or "Never"), created date, revoke button — 2026-05-26
-- [x] Create form: name input + scope picker with descriptions (read-only / add / edit-own / edit-all) — 2026-05-26
-- [x] On creation: one-time secret reveal with copy-to-clipboard button; close dismisses — 2026-05-26
-- [x] Revoke: inline confirmation → `DELETE /tokens/:id` → remove from list — 2026-05-26
-- [x] Empty state when no tokens exist — 2026-05-26
-
-**Web — Admin: Instance (`/settings/admin`):**
-- [x] Instance defaults form: default timezone, default week start — calls `PATCH /admin/settings` — 2026-05-26
-- [x] Registration policy toggle: invite-only vs open — calls `PATCH /admin/settings` — 2026-05-26
-- [x] Instance name field — 2026-05-26
-- [x] Save button with inline success feedback — 2026-05-26
-
-**Web — Admin: Email / SMTP (`/settings/admin`):**
-- [x] SMTP form: host, port (2-column), username, password (masked with eye toggle), from name, from email (2-column), encryption dropdown — 2026-05-26
-- [x] "Save SMTP settings" button → `PUT /admin/smtp` — 2026-05-26
-- [x] "Send test email" button → `POST /admin/smtp/test`; transitions through Sending → Sent/Failed — 2026-05-26
-- [x] Info note: "When SMTP is not configured, password resets and email invitations are unavailable" — 2026-05-26
-
-**Web — Admin: Users (`/settings/admin`):**
-- [x] Orphaned alert banner (when count > 0): warning-colored, count + "View" button — 2026-05-26
-- [x] Tabs: "All (N)" / "Orphaned (N)" — segmented control — 2026-05-26
-- [x] Search input: filter by name or email — 2026-05-26
-- [x] User rows: avatar, name, email, team count, status badge — 2026-05-26
-- [ ] Click user row → opens existing `MemberModal` (deferred — requires passing modal state up)
-- [ ] Orphaned users: "Assign team" action (deferred)
-
-**Web — Forgot password flow:**
-- [x] `/forgot-password` public page: email input → shows "If an account exists, a reset link has been sent" — 2026-05-26
-- [x] `/reset-password?token=...` public page: new password + confirm → success redirects to `/login` — 2026-05-26
-- [x] Login page: "Forgot password?" link below the password field — 2026-05-26
-- [ ] When SMTP not configured: `/forgot-password` shows "contact admin" (deferred — requires public SMTP status endpoint)
-
-**Testing & verification:**
-- [x] `golangci-lint run` clean — 2026-05-26
-- [x] `go test ./...` passes — 2026-05-26
-- [x] `pnpm --filter web lint` clean — 2026-05-26
-- [ ] Manual: change display name → visible in sidebar and team member lists after refresh
-- [ ] Manual: change identity color/icon → propagated to team memberships; visible on Gantt bars
-- [ ] Manual: change password → old password rejected, new password works
-- [ ] Manual: forgot-password → email received → click link → set new password → login works
-- [ ] Manual: create API token → secret shown once → copy → use in curl → works; revoke → rejected
-- [ ] Manual: configure SMTP → test email arrives → save persists across restart
-- [ ] Manual: set instance defaults → values persist
-- [ ] Manual: view all users; filter orphaned
-- [ ] Manual: toggle registration policy → test with/without invite
-- [ ] Manual: non-superadmin does not see admin sections
-- [x] `docs/log.md` Phase 10.1.3 entry written — 2026-05-26
-
----
-
-### Member Access & Data Lifecycle (Phase 10.1.4)
-Closes data-integrity and access-revocation gaps from 10.1.2. Protects historical activity data, defines the three membership lifecycle states, and gives superadmins a single "revoke all access" action.
-
-**Schema (migration 011):**
-- [x] Verify `activity_assignments.team_member_id` FK has `ON DELETE RESTRICT`; add explicit constraint in migration if missing — 2026-05-27
-- [x] Same check for `timeline_access.team_member_id` — 2026-05-27
-- [x] Enable `PRAGMA foreign_keys = ON` in DB initialization (`internal/db/`) — already set since early phases — 2026-05-27
-- [x] Update `migrations_test.go` to assert FK pragma is on and both FKs are RESTRICT — 2026-05-27
-
-**API — removal guard:**
-- [x] `DELETE /teams/:id/members/:memberId` — count `activity_assignments` before deleting; if count > 0, return 409 `MEMBER_HAS_ASSIGNMENTS` with `{ "assignmentCount": N }` — 2026-05-27
-- [x] Zero-assignment removal continues to hard-delete as before (deletes timeline_access first due to RESTRICT FK) — 2026-05-27
-- [x] Add `MemberHasAssignments` error handling to OpenAPI spec via `RevokeUserResult` and inline error response — 2026-05-27
-
-**API — full revoke (superadmin only):**
-- [x] `POST /users/:id/revoke` — new endpoint; superadmin only; atomically: set `users.archived_at`, set `archived_at` on all `team_members` for the user, hard-delete `team_members` rows where assignment count is 0; return `{ accountDeactivated: bool, membershipsInactivated: int, membershipsRemoved: int }` — 2026-05-27
-- [x] Add `RevokeUser` repo method: wraps the three steps in a transaction — 2026-05-27
-- [x] 403 if caller is not superadmin; 404 if user not found — 2026-05-27
-- [x] Add `POST /users/{id}/revoke` to OpenAPI spec; regenerate TypeScript types — 2026-05-27
-
-**Web — TeamModal Members tab:**
-- [x] On 409 `MEMBER_HAS_ASSIGNMENTS` from the remove (×) button, show inline error beneath the member row: "N assignment(s) — [Inactivate instead]" where the bracketed link calls `POST /teams/:id/members/:memberId/archive` — 2026-05-27
-- [x] On inactivate success from the inline error, dismiss the error and re-fetch the member list — 2026-05-27
-- [x] Clear the inline error before each new removal attempt for the same member — 2026-05-27
-
-**Web — MemberModal:**
-- [x] Add "Revoke all access" button to Super Admin Actions section (red, below Delete) — 2026-05-27
-- [x] Button hidden when user is already fully inactivated (`users.archived_at` set) — 2026-05-27
-- [x] Confirmation dialog: lists all three effects (account deactivated, memberships inactivated, zero-history memberships removed) — 2026-05-27
-- [x] On confirm: call `POST /users/:id/revoke`; on success show a summary chip for 2s, then close modal — 2026-05-27
-- [x] Invalidate `['teams']` query cache on success — 2026-05-27
-
-**Testing & verification:**
-- [ ] Manual: remove a member with assignments → 409; inline error appears; "Inactivate instead" button works
-- [ ] Manual: remove a member with zero assignments → success
-- [ ] Manual: superadmin uses "Revoke all access" → account deactivated; user can no longer log in; existing Gantt bars still show their avatar name
-- [ ] Manual: inactivated members' avatars still render on Gantt bars (data preserved)
-- [x] `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean — 2026-05-27
-- [x] `docs/log.md` Phase 10.1.4 entry written — 2026-05-27
-
----
-
-### Status Templates & Timeline Statuses (Phase 10.2)
-API + UI bundled. Required before Phase 11.3 (Kanban). Depends on 10.1.2 (Members).
-
-**Schema (migration 012):**
-- [x] Create `status_templates` (team-level), `status_template_items`, `statuses` (timeline-level) tables — 2026-05-27
-- [x] Rebuild `activities` table so `status_id` references `statuses` instead of `team_statuses`; drop `team_statuses` — 2026-05-27
-- [x] Update `migrations_test.go` — 2026-05-27
-
-**Go API:**
-- [x] `StatusTemplate`, `StatusTemplateItem`, `Status` models — 2026-05-27
-- [x] `StatusRepo`: list/get/create/update/delete templates; list/get/create/update/delete items; `SeedDefaultTemplate`; `CopyTemplateToTimeline` — 2026-05-27
-- [x] `handleCreateTeam` — seeds "Simple" template (Planned / In Progress / Done) on team creation — 2026-05-27
-- [x] `handleCreateTimeline` — copies first template's items into live statuses on timeline creation — 2026-05-27
-- [x] `GET /teams/:id/status-templates` — list templates with items — 2026-05-27
-- [x] `POST /teams/:id/status-templates` — create template — 2026-05-27
-- [x] `PATCH /status-templates/:id` — rename, reorder — 2026-05-27
-- [x] `DELETE /status-templates/:id` — blocked if last template on team — 2026-05-27
-- [x] `POST /status-templates/:id/items` — add item — 2026-05-27
-- [x] `PATCH /status-template-items/:id` — rename, recolor, reicon, toggle is_closed, reorder — 2026-05-27
-- [x] `DELETE /status-template-items/:id` — blocked if last item in template — 2026-05-27
-- [x] `GET /teams/:id/timelines/:timelineId/statuses` — list statuses for a timeline — 2026-05-27
-
-**OpenAPI + types:**
-- [x] `StatusTemplate`, `StatusTemplateItem`, `Status` schemas + input types — 2026-05-27
-- [x] All new endpoint paths — 2026-05-27
-- [x] Regenerate TypeScript types — 2026-05-27
-
-**Web:**
-- [x] `useStatusTemplates.ts` — hooks for all status template and statuses endpoints — 2026-05-27
-- [x] `StatusTemplatesTab.tsx` — template list with expandable item rows, inline editing, color picker, is_closed toggle, add/delete guards — 2026-05-27
-- [x] `TeamModal.tsx` — "Status Templates" tab added (locked until team saved) — 2026-05-27
-
-**Testing & verification:**
-- [x] `status_handler_test.go` — default seeding, admin-only create, last-template guard, item add/delete, statuses copied to timeline — 2026-05-27
-- [x] `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean — 2026-05-27
-- [ ] Manual: new team gets "Simple" template; open TeamModal → Status Templates tab shows Planned / In Progress / Done
-- [ ] Manual: create second template, add items, rename/recolor items
-- [ ] Manual: delete non-last template → success; delete last template → blocked with 409
-- [ ] Manual: create timeline → GET statuses returns 3 rows matching Simple template
-- [x] `docs/log.md` Phase 10.2 entry written — 2026-05-27
-
----
-
-### Timelines — Full CRUD (Phase 10.3)
-Closes the Timelines cornerstone. Today timelines can be created in the wizard and never managed afterward; access lists exist in schema but have no CRUD endpoints.
-
-**API — timeline-level:**
-- [x] `PATCH /timelines/:id` — rename, change start/end date, color, icon (team or timeline admin) — 2026-05-27
-- [x] `DELETE /timelines/:id` — hard delete; team admin only — 2026-05-27
-- [x] Archive endpoints already in Phase 9
-
-**API — timeline statuses (editing):**
-- [x] `POST /teams/:id/timelines/:timelineId/statuses` — add a status — 2026-05-27
-- [x] `PATCH /statuses/:id` — rename, recolor, reicon, toggle is_closed, reorder — 2026-05-27
-- [x] `DELETE /statuses/:id` — requires replacementStatusId if activities reference it; blocked if last status — 2026-05-27
-
-**API — access list:**
-- [x] `GET /teams/:id/timelines/:timelineId/access` — list current grants (team member + role) — 2026-05-27
-- [x] `PUT /teams/:id/timelines/:timelineId/access/:memberId` — grant or update role (admin / member) — 2026-05-27
-- [x] `DELETE /teams/:id/timelines/:timelineId/access/:memberId` — revoke grant — 2026-05-27
-
-**Web:**
-- [x] "New timeline" affordance in the sidebar timelines list → `TimelineModal` in create mode (name, date range, identity, template preview) — 2026-05-27
-- [x] Edit-timeline modal from the sidebar gear icon: rename, change date range, identity, archive, delete — 2026-05-27
-- [x] `TimelineModal` Statuses tab: add/edit/delete live statuses; delete-with-replacement dialog — 2026-05-27
-- [x] `TimelineModal` Access tab: search-pick team members, role toggle, remove — 2026-05-27
-- [x] Archived timelines under a collapsed "Archived" group in the sidebar; Restore button for unarchive — 2026-05-27
-- [x] Activity detail panel: status dropdown populated from live timeline statuses — 2026-05-27
-- [x] "Hide closed" toggle in GanttToolbar (shown when timeline has closed statuses) — 2026-05-27
-- [x] `TimelineAccessEntry` model + `TimelineStore` interface expanded; `canAdminTimeline` helper — 2026-05-27
-
-**Testing & verification:**
-- [x] `TestUpdateTimeline_AdminCanRename`, `TestUpdateTimeline_NonAdminForbidden` — 2026-05-27
-- [x] `TestDeleteTimeline_AdminCanDelete`, `TestDeleteTimeline_NonAdminForbidden` — 2026-05-27
-- [x] `TestTimelineAccessList_GrantAndRevoke` — 2026-05-27
-- [x] `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean — 2026-05-27
-- [ ] Manual: create second timeline from sidebar → modal opens → create → new timeline appears
-- [ ] Manual: edit timeline name, date range → save → sidebar reflects changes
-- [ ] Manual: add/edit/delete statuses via Statuses tab → activity detail panel shows updated list
-- [ ] Manual: grant/revoke member access via Access tab → member can/cannot access timeline
-- [ ] Manual: archive timeline → disappears from active list → appears in Archived → Restore restores it
-- [ ] Manual: delete timeline → confirm → gone from sidebar
-- [ ] Manual: hide-closed toggle hides activities with closed status; unchecking restores them
-- [x] `docs/log.md` Phase 10.3 entry written — 2026-05-27
-
----
-
-### Preference Consumption & Session Handling (Phase 10.4.1)
-Wires user and instance preferences (stored in 10.1.3) into views. Fixes the broken session lifecycle (access tokens expire after 15 min with no refresh interceptor). Adds cosmetic branding for admins.
-
-**Session lifecycle:**
-- [x] Add 401 interceptor to `apiFetch` (`packages/web/src/lib/api.ts`): on 401, attempt silent refresh via stored refresh token, retry original request; if refresh also fails, clear tokens and redirect to `/login`
-- [x] Mutex/queue so concurrent 401s don't fire multiple refresh calls
-- [x] Invisible to user — no toast, no banner (standard SPA pattern)
-
-**Preference consumption:**
-- [x] Create `useFormatDate()` hook — reads user's `date_format` preference, returns a formatter
-- [x] Gantt `granularity.ts` `formatLabel()`: replace hardcoded `en-US` with user's date format preference
-- [x] Gantt `granularity.ts` `startOfWeek()`: replace hardcoded Monday with user's `week_start` preference; Gantt columns align to user's chosen start day
-- [ ] `ActivityDetailPanel` and other date displays: consume date format preference (date inputs are native browser — no explicit text formatting needed until a read-only date display surface is added)
-- [ ] Public/shared timeline views: fall back to instance-level defaults when no user is logged in (deferred — shared views ship in Phase 13)
-- [x] Theme: sync server-side preference on login (`useDarkMode.ts` — added `applyTheme`; `ThemeSync` component applies server value on auth init)
-
-**Admin — branding (`/settings/admin`):**
-- [x] Instance name field (stored in `instance_settings`); shown in browser tab title and login page
-- [x] Accent color override (stored in `instance_settings`); applies globally via CSS custom property
-- [ ] Optional logo upload (stretch — deferred)
-
----
-
-### Activity Schema Normalization — Drop team_id (Phase 10.4.2)
-Removes `activities.team_id` (redundant now that `timeline_id` is stored). Hardens `timeline_id` to NOT NULL. Moves activity routes to `/teams/{id}/timelines/{timelineId}/activities` (team-scoped prefix avoids Go 1.22 mux conflict with `GET /timelines/share/{token}`).
-
-**Schema (migration 015):**
-- [x] Backfill NULL `timeline_id` rows (assign to team's oldest timeline) — 2026-05-28
-- [x] Rebuild `activities` table without `team_id`, with `timeline_id TEXT NOT NULL REFERENCES timelines(id) ON DELETE CASCADE` — 2026-05-28
-- [x] Recreate `idx_activities_timeline_id` on the new table — 2026-05-28
-
-**API — Go:**
-- [x] `models.Activity`: remove `TeamID` field; change `TimelineID` from `*string` to `string` — 2026-05-28
-- [x] `ActivityRepo.Create`: remove `team_id` from INSERT — 2026-05-28
-- [x] `ActivityRepo.ListByTeam` → `ListByTimeline(timelineID string, ...)`: query becomes `WHERE timeline_id = ?` — 2026-05-28
-- [x] `handleCreateActivity`, `handleListActivities`: path params are `teamId` + `timelineId`; look up timeline to verify ownership — 2026-05-28
-- [x] `handleUpdateActivity`, `handleDeleteActivity`, `handleArchive/Unarchive`: replace `activity.TeamID` with timeline lookup — 2026-05-28
-- [x] WebSocket broadcasts: derive `TeamID` from timeline lookup — 2026-05-28
-- [x] Move activity routes: `POST /teams/{id}/timelines/{timelineId}/activities`, `GET /teams/{id}/timelines/{timelineId}/activities` — 2026-05-28
-
-**OpenAPI + types:**
-- [x] Update `Activity` schema: replace `teamId` with `timelineId` (required, non-nullable) — 2026-05-28
-- [x] Update activity endpoints to new team-scoped path — 2026-05-28
-- [x] Regenerate TypeScript types — 2026-05-28
-
-**Frontend:**
-- [x] Rename `useTeamActivities` → `useTimelineActivities(teamId, timelineId, from, to)` — cache key `['timelines', timelineId, 'activities']` — 2026-05-28
-- [x] `useCreateActivity(teamId, timelineId)`: URL becomes `/teams/${teamId}/timelines/${timelineId}/activities`; no `timelineId` in request body — 2026-05-28
-- [x] `useUpdateActivity(timelineId)`, `useDeleteActivity(timelineId)`: cache key updated — 2026-05-28
-- [x] `useTeamActivitySync`: update cache key lookups to `['timelines', timelineId, 'activities']` — 2026-05-28
-- [x] `GanttView`: use `useTimelineActivities`; `timelineId` prop is now required (not optional) — 2026-05-28
-- [x] `ActivityCreatePanel`: `teamId` + `timelineId` passed to `useCreateActivity`; no `timelineId` in body — 2026-05-28
-- [x] `ActivityDetailPanel`: `timelineId` required; passed to `useUpdateActivity`/`useDeleteActivity` — 2026-05-28
-- [x] `DashboardPage`: updated GanttView/ActivityCreatePanel/ActivityDetailPanel prop signatures — 2026-05-28
-
-**Tests:**
-- [x] `activity_repo_test.go`: `makeActivity` uses `timelineID`; all `ListByTeam` calls → `ListByTimeline` — 2026-05-28
-- [x] Added `TestActivityRepo_ListByTimeline_Filter` — 2026-05-28
-- [x] `activity_handler_test.go`: `activityTestSetup` creates a timeline; all routes updated — 2026-05-28
-- [x] `archive_test.go`, `revoke_user_test.go`, `team_handler_test.go`: create timeline before activity; use new routes — 2026-05-28
-- [x] `user_repo_test.go`, `migrations_test.go`: activity INSERTs use `timeline_id` instead of `team_id` — 2026-05-28
-
-**Testing & verification:**
-- [x] `golangci-lint run` clean — 2026-05-28
-- [x] `go test ./...` passes — 2026-05-28
-- [x] `pnpm --filter web lint` clean — 2026-05-28
-- [ ] Manual: Gantt view loads activities for the active timeline
-- [ ] Manual: Creating an activity from the panel associates it with the correct timeline
-- [ ] Manual: `PRAGMA foreign_key_check` returns no rows after migration on Docker DB
-
----
-
-### UI Consistency — Modals, Sidebar & Toolbar (Phase 10.4.3) [was mislabeled 10.4.2]
-Standardizes visual patterns across TeamModal, MemberModal, TimelineModal, sidebar, and Gantt toolbar. Eliminates three different inline-editing patterns, three different archive button styles, three different confirmation dialog implementations, and mixed hardcoded hex colors vs CSS variables.
-
-**Inline name editing (3 → 1):**
-- [x] Extract shared `InlineEditableTitle` component: always-input with subtle bottom border on hover/focus — 2026-05-28
-- [x] Replace `MemberModal.tsx` name editing (focus underline pattern) with `InlineEditableTitle` — 2026-05-28
-- [x] Replace `TeamModal.tsx` name editing (toggle div/input state machine) with `InlineEditableTitle` — 2026-05-28
-- [x] Replace `TimelineModal.tsx` name editing (no visual cue) with `InlineEditableTitle` — 2026-05-28
-
-**Archive/restore buttons (3 → 1):**
-- [x] Standardize archive button: amber bg+border+icon (aligned with MemberModal prominence) — 2026-05-28
-- [x] Standardize restore button: teal bg+border+RotateCcw icon — 2026-05-28
-- [x] Fix `TeamModal.tsx` archive button (was neutral gray) — 2026-05-28
-- [x] Fix `TimelineModal.tsx` archive button (was border-only, no icon) — 2026-05-28
-
-**Confirmation dialogs (3 → 1):**
-- [x] Consolidate into shared `ConfirmDialog` component with color variants (red, amber, indigo, teal) — 2026-05-28
-- [x] Replace `MemberModal.tsx` custom ConfirmDialog — 2026-05-28
-- [x] Replace `TeamModal.tsx` ArchiveDialog — 2026-05-28
-- [x] Replace `TimelineModal.tsx` inline confirmation panels — 2026-05-28
-
-**Color system (mixed → CSS variables):**
-- [x] Migrate `TeamModal.tsx` hardcoded hex colors to CSS variables — 2026-05-28
-- [x] Migrate `MemberModal.tsx` hardcoded hex colors to CSS variables — 2026-05-28
-- [x] Verified `TimelineModal.tsx` CSS variable usage is consistent — 2026-05-28
-
-**Sidebar & toolbar audit:**
-- [x] Sidebar member/timeline rows: Badge usage, hover states, gear icon consistency verified — 2026-05-28
-- [x] Gantt toolbar controls: Tailwind + CSS vars, consistent with modal footer patterns — 2026-05-28
-- [x] No inconsistencies requiring fixes found — 2026-05-28
-
----
-
-### Gantt Interaction & Activity Edit Polish (Phase 10.4.4)
-
-**Schema (migration 016):**
-- [x] Add `notes TEXT` column to `activities` (nullable) — 2026-05-29
-
-**Go API:**
-- [x] `Activity` model: add `Notes *string` field — 2026-05-29
-- [x] `ActivityRepo.Update`: include `notes` in UPDATE SET — 2026-05-29
-- [x] `handleUpdateActivity`: parse `notes` from PATCH body — 2026-05-29
-
-**OpenAPI + types:**
-- [x] Add `notes` to `Activity` schema and PATCH body — 2026-05-29
-- [x] Regenerate TypeScript types — 2026-05-29
-- [x] Add `notes` to `UpdateActivityInput` patch type in `useTeamActivities.ts` — 2026-05-29
-
-**Gantt — resizable activity column:**
-- [x] Label column drag handle on right edge; min 140px, max 400px; live resize — 2026-05-29
-
-**Gantt — click-to-activate before drag:**
-- [x] Unselected bars show `cursor: pointer`; drag/resize only starts when bar is selected — 2026-05-29
-- [x] Resize handles (left/right edge) visible only on selected bars — 2026-05-29
-
-**Gantt — bar drag updates sidebar dates live:**
-- [x] `onBarDragProgress` callback fires during mousemove with current snapped dates — 2026-05-29
-- [x] `DashboardPage` stores `liveDragDates` and passes to `ActivityDetailPanel` — 2026-05-29
-- [x] `ActivityDetailPanel` shows live dates in date inputs without triggering saves — 2026-05-29
-- [x] `onBarDragEnd` callback clears live dates when drag completes — 2026-05-29
-
-**Gantt — finer-grained snap during drag:**
-- [x] `snapDivisorFor(granularity)`: day→1, week→7, month→4, quarter→3, year→4 — 2026-05-29
-- [x] `colFracToDate` interpolates fractional column positions for accurate date mapping — 2026-05-29
-- [x] Drag mousemove uses `Math.round(x / step) * step` with finer step — 2026-05-29
-- [x] `resolvedGranularity` prop passed from GanttView → GanttGrid — 2026-05-29
-
-**Gantt — "Hide closed" moves to filter preset:**
-- [x] Remove `hideClosed` checkbox and props from `GanttToolbar` — 2026-05-29
-- [x] Add `'open'` preset to `FilterDropdown` ("Open only — Hide activities with a closed status") — 2026-05-29
-- [x] Add `'open'` to `ActiveFilter` preset type in `FilterContext` — 2026-05-29
-- [x] `GanttView` reads `activeFilter.id === 'open'` to activate closed-status filtering — 2026-05-29
-- [x] Remove `hideClosed` state from `DashboardPage` — 2026-05-29
-
-**Activity Edit Sidebar — layout and field changes:**
-- [x] Remove "All day" checkbox — 2026-05-29
-- [x] Remove human-readable date summary line — 2026-05-29
-- [x] Move Description field directly below date pickers — 2026-05-29
-- [x] Restyle Assigned To with bordered card style matching create panel — 2026-05-29
-- [x] Status dropdown: replaced plain `<select>` with rich dropdown (color dot + name + CLOSED badge) — 2026-05-29
-- [x] Remove "Identity" line from Classify section — 2026-05-29
-- [x] Rename "Details" → "Advanced" — 2026-05-29
-- [x] Add Notes textarea (multi-line, resizable) backed by new `notes` column — 2026-05-29
-
-**Testing & verification:**
-- [x] `golangci-lint run` clean — 2026-05-29
-- [x] `go test ./...` passes — 2026-05-29
-- [x] `pnpm --filter web lint` clean — 2026-05-29
-- [ ] Manual: drag label column edge → width changes and persists during session
-- [ ] Manual: click bar (unselected) → selects it; second drag moves/resizes it
-- [ ] Manual: drag bar at week zoom → date tooltip shows day-level changes, not week-level
-- [ ] Manual: drag bar at month zoom → snaps to week boundaries
-- [ ] Manual: select "Open only" filter → closed-status activities hidden; clearing restores them
-- [ ] Manual: edit panel shows only date pickers (no allDay, no date summary)
-- [ ] Manual: description moves below dates; matches create panel layout
-- [ ] Manual: assignees use bordered card style (colored border + tint when selected)
-- [ ] Manual: status dropdown shows color dot + name; selection persists
-- [ ] Manual: notes textarea saves and loads correctly
-- [ ] Manual: bar drag → sidebar date inputs update live; stop drag → dates reset to server value
-
----
-
-### Activity Tags, Parent & Progress Fields (Phase 10.4.5)
-Replaces the three "coming soon" stubs in the activity edit panel with functional fields. Tags are normalized (team-scoped `tags` table). Parent and progress already had backend support; this phase adds the UI.
-
-**Schema (migration 017):**
-- [x] Create `tags` table: `id, team_id, name, color, created_by, created_at`; UNIQUE(team_id, name) — 2026-05-30
-- [x] Rebuild `activity_tags`: drop old text-junction table, create normalized FK junction — 2026-05-30
-
-**Go API:**
-- [x] `Tag` model added to `models.go` — 2026-05-30
-- [x] `Activity.TagIDs []string` field added (same `db:"-"` pattern as `AssignedMemberIDs`) — 2026-05-30
-- [x] `TagRepo`: `Create`, `GetByID`, `ListByTeam`, `Update`, `Delete` — 2026-05-30
-- [x] `ActivityRepo.SetTags` / `GetTags` — transaction pattern matching `SetAssignments` — 2026-05-30
-- [x] `ActivityRepo.ListByTimeline`: batch-populates `TagIDs` via `sqlx.In` (same as `AssignedMemberIDs`) — 2026-05-30
-- [x] `tag_handler.go`: `GET /teams/{id}/tags`, `POST /teams/{id}/tags`, `PATCH /tags/{id}`, `DELETE /tags/{id}` — 2026-05-30
-- [x] `activity_handler.go`: `handleCreateActivity` and `handleUpdateActivity` accept `tagIds`; `setActivityArchive` populates `TagIDs` on response — 2026-05-30
-- [x] `isUniqueConstraintError` helper added to `helpers.go` — 2026-05-30
-- [x] `server.go`: `tags *db.TagRepo` field; tag routes registered — 2026-05-30
-- [x] `main.go`: `db.NewTagRepo(database)` instantiated and passed to `NewServer` — 2026-05-30
-
-**OpenAPI + types:**
-- [x] `Tag` schema added to `openapi.yaml` — 2026-05-30
-- [x] `tagIds` added to `Activity` schema and create/update request bodies — 2026-05-30
-- [x] Regenerated TypeScript types — 2026-05-30
-
-**Frontend:**
-- [x] `useTags.ts`: `useTags`, `useCreateTag`, `useUpdateTag`, `useDeleteTag` hooks — 2026-05-30
-- [x] `TagInput.tsx`: combobox with colored pills, autocomplete, create-on-the-fly — 2026-05-30
-- [x] `ActivityDetailPanel`: Tags stub → `TagInput`; Parent stub → `<select>` from same-timeline activities; Progress stub → `<input type="range">`; tagIds/parentActivityId/percentComplete in state and save calls — 2026-05-30
-- [x] `ActivityCreatePanel`: `TagInput` added (below Assignees); `tagIds` in create mutation — 2026-05-30
-- [x] `GanttGrid`: progress fill overlay on bars (darker shade at `percentComplete%` width) — 2026-05-30
-- [x] `vite.config.ts`: `/tags` proxy added — 2026-05-30
-
-**Sample data:**
-- [x] `sample_data/10_tags.sql`: 8 tags for Product Marketing team + activity_tag associations — 2026-05-30
-
-**Tests:**
-- [x] `tag_repo_test.go`: CRUD, unique constraint, SetTags/GetTags, ListByTimeline TagIDs population — 2026-05-30
-- [x] `tag_handler_test.go`: create/list/update/delete happy paths, 409 duplicate, 404 not found, 403 non-member — 2026-05-30
-- [x] All existing test files updated to pass `db.NewTagRepo(database)` to `NewServer` — 2026-05-30
-
-**Testing & verification:**
-- [x] `golangci-lint run` clean — 2026-05-30
-- [x] `go test ./...` passes — 2026-05-30
-- [x] `pnpm --filter web lint` clean — 2026-05-30
-- [ ] Manual: create a tag in the activity detail panel; it appears in team tag list for future activities
-- [ ] Manual: tag autocomplete shows existing team tags; typing a new name offers "Create" option
-- [ ] Manual: tagged activity shows tag pills in the detail panel; pills persist across panel close/reopen
-- [ ] Manual: set parent activity; verify it persists across reload
-- [ ] Manual: drag the progress slider; Gantt bar shows progress fill; value persists
-- [ ] Manual: create activity with tags from the create panel; tags appear in detail panel
-
----
-
-### Filter Implementation (Phase 10.4.6)
-Full filter system: filter definition language, client-side engine, all 6 presets wired, filter builder UI, team filter promotion, and management panel.
-
-**Schema (migration 018):**
-- [x] `ALTER TABLE saved_filters ADD COLUMN is_team_filter BOOLEAN NOT NULL DEFAULT 0` — 2026-05-30
-
-**Backend:**
-- [x] `SavedFilter` model: add `IsTeamFilter bool` — 2026-05-30
-- [x] `SavedFilterRepo.Create`: include `is_team_filter` in INSERT — 2026-05-30
-- [x] `SavedFilterRepo.Update`: include `is_team_filter` in UPDATE — 2026-05-30
-- [x] `SavedFilterRepo.ListByTeamUser`: return user's own filters + all team filters (`is_team_filter = 1`) — 2026-05-30
-- [x] `handleCreateSavedFilter`: accept `isTeamFilter` (admin-only to set true) — 2026-05-30
-- [x] `handleUpdateSavedFilter`: admin can promote/demote; admin can edit name/def of existing team filters — 2026-05-30
-- [x] `handleDeleteSavedFilter`: admin can delete team filters they don't own — 2026-05-30
-
-**OpenAPI + types:**
-- [x] Add `isTeamFilter` boolean to `SavedFilter` schema — 2026-05-30
-- [x] Add `isTeamFilter` to `CreateSavedFilterJSONBody` and `PatchSavedFilterJSONBody` — 2026-05-30
-- [x] Update `api_types.gen.go` manually with new fields — 2026-05-30
-- [x] Regenerate TypeScript types (`pnpm --filter shared generate`) — 2026-05-30
-
-**Frontend — filter engine:**
-- [x] `lib/filterTypes.ts` — FilterDefinition type system (logic, conditions, operators per field type) — 2026-05-30
-- [x] `lib/filterEngine.ts` — `matchesFilter(activity, filter, ctx)` pure function — 2026-05-30
-- [x] `lib/presetFilters.ts` — `applyActiveFilter(activities, activeFilter, memberIdsByUserId, ctx)` — all 6 presets + member + saved filter kinds — 2026-05-30
-
-**Frontend — GanttView wiring:**
-- [x] Replace `closedStatusIds` prop with `timelineStatuses`, `savedFilters`, `tags` props — 2026-05-30
-- [x] Derive `closedStatusIds`, `statusesByTimeline`, `memberIdsByUserId`, `currentUserMemberIds` inside GanttView — 2026-05-30
-- [x] Replace old open-only filter with `applyActiveFilter` — makes all 6 presets + member + saved filters work — 2026-05-30
-
-**Frontend — filter builder UI:**
-- [x] `components/filters/FilterConditionRow.tsx` — field/op/value row with multi-select, text, number, date inputs — 2026-05-30
-- [x] `components/filters/FilterEditor.tsx` — name input, AND/OR toggle, condition rows, Save/Delete/Cancel footer — 2026-05-30
-- [x] `components/filters/FilterManagePanel.tsx` — My Filters + Team Filters sections with edit/delete/promote/demote — 2026-05-30
-
-**Frontend — FilterDropdown updates:**
-- [x] Partition saved filters into `teamFilters` and `myFilters` — 2026-05-30
-- [x] Render "Team filters" section with real data (replacing stub) — 2026-05-30
-- [x] Add "Manage filters" link at bottom of dropdown — 2026-05-30
-- [x] Add `onOpenManager` prop — 2026-05-30
-
-**Frontend — DashboardPage wiring:**
-- [x] Add `useSavedFilters` and `useTags` hooks — 2026-05-30
-- [x] Add `filterManageOpen` and `editingFilter` state — 2026-05-30
-- [x] Wire `FilterEditor` and `FilterManagePanel` into `RightSidebar` — 2026-05-30
-- [x] Pass `timelineStatuses`, `savedFilters`, `tags` to GanttView — 2026-05-30
-- [x] Add `onOpenFilterManager` to `TopBar` — 2026-05-30
-- [x] Update `useSavedFilters.ts`: add `isTeamFilter` to `UpdateSavedFilterInput` — 2026-05-30
-
-**Tests:**
-- [x] `lib/filterEngine.test.ts` — 20+ unit tests: each field type, each operator, AND/OR, edge cases, case-insensitive — 2026-05-30
-- [x] `lib/presetFilters.test.ts` — 11 unit tests: each preset, member filter, saved filter delegation — 2026-05-30
-- [x] `saved_filter_handler_test.go`: 5 new tests — team filter list includes team filters, admin can promote, non-admin cannot promote, admin can delete team filter, non-admin cannot — 2026-05-30
-- [x] `migrations_test.go`: assert `is_team_filter` column exists after migration 018 — 2026-05-30
-- [x] `golangci-lint run` clean; `go test ./...` all pass; `pnpm --filter web lint` clean; `pnpm --filter web build` clean — 2026-05-30
-
-**Manual verification (Docker):**
-- [ ] All 6 preset filters actually filter activities (open, upcoming, my, overdue, noassign, all)
-- [ ] Member filter kind filters by assignee
-- [ ] Filter builder: add/remove conditions, pick field/op/value for all supported fields, AND/OR toggle
-- [ ] Save/load/edit/delete custom filters end-to-end
-- [ ] Status conditions match by name across timelines
-- [ ] Tag conditions match by tag name
-- [ ] Team filter flag: admin promotes user filter → visible to all team members
-- [ ] "Manage filters" panel accessible from dropdown
-- [ ] `docs/log.md` Phase 10.4.6 entry written — 2026-05-30
-
----
-
-### Timeline Views — List / Spreadsheet (Web — Phase 11.1)
-Ships the view-switcher infrastructure plus the dense, sortable, inline-editable List view.
-
-**Infrastructure:**
-- [x] `ViewMode` already defined as `'gantt' | 'list' | 'calendar' | 'kanban'` in TopBar.tsx — 2026-05-31
-- [x] View switcher control in TopBar; per-timeline view mode persisted via preferences (key: `view_mode`) — 2026-05-31
-- [x] View-specific toolbar slots — GanttToolbar shown for gantt, ListToolbar shown for list — 2026-05-31
-
-**Dependencies installed:**
-- [x] `@tanstack/react-table@^8.21.3` — headless table (column visibility/order/sizing/pinning/sorting) — 2026-05-31
-- [x] `@dnd-kit/core`, `@dnd-kit/sortable`, `@dnd-kit/utilities` — column drag-reorder — 2026-05-31
-
-**ListToolbar (`components/list/ListToolbar.tsx`):**
-- [x] Columns menu (hide/show all columns via checkbox list) — 2026-05-31
-- [x] Density toggle (Comfortable / Compact) — 2026-05-31
-- [x] Group by (None / Member / Parent activity / Status) — 2026-05-31
-- [x] Sort by (Start date / End date / Title / Status / Progress) — 2026-05-31
-- [x] Color by (Activity / Member / Status) — 2026-05-31
-- [x] Export + Share stubs — 2026-05-31
-
-**ListView (`components/list/ListView.tsx`):**
-- [x] TanStack Table v8 with column visibility, order, sizing, pinning (Title always pinned left) — 2026-05-31
-- [x] Default columns: Title, Start, End, Duration, Status, Assignees, Tags (hidden: Progress, Parent, Description, Location, URL, Created, Updated) — 2026-05-31
-- [x] Column hide/show via toolbar Columns menu (pendingColumnToggle prop) — 2026-05-31
-- [x] Column drag-reorder via @dnd-kit (drag handles on column headers) — 2026-05-31
-- [x] Column resizing via TanStack's `columnResizeMode: 'onChange'` — 2026-05-31
-- [x] Column config (order/hidden/widths) persisted per-timeline via `list_columns` preference key — 2026-05-31
-- [x] Single-column sort by clicking column header (sort indicator arrow) — 2026-05-31
-- [x] Density toggle changes row height (comfortable: 40px, compact: 32px) and persists — 2026-05-31
-- [x] Keyboard navigation: Arrow keys move selection, Enter/F2 enters edit mode, Esc cancels, Tab/Shift+Tab commit+move horizontal, Enter in edit commits+moves down — 2026-05-31
-- [x] Inline editing: Title (text), Start (date), End (date), Description/Location/URL (text), Progress (number) — 2026-05-31
-- [x] Status cell: click to open StatusPicker popover with color pills — 2026-05-31
-- [x] Assignees cell: read-only display with member Badges (up to 4 + overflow count) — 2026-05-31
-- [x] Tags cell: read-only display with colored tag pills (up to 3 + overflow count) — 2026-05-31
-- [x] Progress cell: read-only mini progress bar + percentage — 2026-05-31
-- [x] Duration cell: computed from start/end dates (read-only) — 2026-05-31
-- [x] PATCH mutations via useUpdateActivity with optimistic updates — 2026-05-31
-- [x] Group-by: None / Member / Parent / Status with collapsible group header rows — 2026-05-31
-- [x] Color-by: left border stripe per row (activity color / primary member color / status color) — 2026-05-31
-- [x] Group-by/Color-by/Sort-by/Density persisted per-timeline in DashboardPage (keys: `list_group_by`, `list_color_by`, `list_sort_by`, `list_density`) — 2026-05-31
-- [x] Find bar highlights: matching rows amber outline, non-matching rows dimmed 30%, active match stronger outline — 2026-05-31
-- [x] Active filter applied (applyActiveFilter) — all 6 presets + member + saved filter kinds — 2026-05-31
-- [x] Row click opens ActivityDetailPanel; Space in selection mode opens detail panel — 2026-05-31
-- [x] Title column sticky left with box-shadow separator — 2026-05-31
-
-**DashboardPage wiring:**
-- [x] List toolbar state (listGroupBy, listSortBy, listColorBy, listDensity) in DashboardPage — 2026-05-31
-- [x] List toolbar state restored from per-timeline preferences on timeline switch — 2026-05-31
-- [x] List toolbar state saved to per-timeline preferences on change — 2026-05-31
-- [x] ListView rendered when view === 'list' with correct props — 2026-05-31
-
-**Testing & verification:**
-- [x] `golangci-lint run` clean — 2026-05-31
-- [x] `go test ./...` passes (135 tests) — 2026-05-31
-- [x] `pnpm --filter web lint` clean — 2026-05-31
-- [x] `pnpm --filter web build` clean — 2026-05-31
-- [ ] Manual: view switcher toggles Gantt ↔ List; choice persists per timeline
-- [ ] Manual: List shows activities with default columns, respects active filter
-- [ ] Manual: hide/show columns from Columns menu; persists across reload
-- [ ] Manual: drag column headers to reorder; persists across reload
-- [ ] Manual: resize column by dragging header right edge; persists
-- [ ] Manual: density toggle changes row height; persists
-- [ ] Manual: keyboard navigation (arrows, Enter/F2, Esc, Tab)
-- [ ] Manual: inline edit Title, Start, End → switches to Gantt → change reflected
-- [ ] Manual: click Status cell → picker opens → select → pill updates
-- [ ] Manual: Title column stays visible when scrolled horizontally
-- [ ] Manual: sort by column header (click once asc, twice desc, three times off)
-- [ ] Manual: group-by and color-by controls work
-- [ ] Manual: Find bar highlights matching rows in List view
-
----
-
-### Timezone-Safe Activity Dates (Phase 11.1.1)
-Fixes midnight-UTC activity dates displaying one calendar day early in negative-UTC-offset timezones.
-
-- [x] `granularity.ts`: switch all internal date helpers to UTC (startOfDay/Week/Month/Quarter/Year, addDays/addMonths, isoWeekNumber, formatLabel, todayColumnPosition) — 2026-06-01
-- [x] `GanttView.tsx`: `todayMidnight()` → `setUTCHours(0,0,0,0)`; fallback viewStart/viewEnd use `setUTCDate`/`getUTCDate` — 2026-06-01
-- [x] `GanttGrid.tsx`: `formatDragDate` → adds `timeZone: 'UTC'` to `toLocaleDateString` — 2026-06-01
-- [x] `ListView.tsx`: add `formatActivityDate` (UTC, for Start/End cells); keep `formatDate` (local, for Created/Updated) — 2026-06-01
-- [x] `granularity.test.ts`: update existing tests to use `getUTCDay`/`getUTCDate` assertions; add timezone-safety suite with midnight-UTC positioning and label checks — 2026-06-01
-- [x] `golangci-lint run` clean — 2026-06-01
-- [x] `go test ./...` passes — 2026-06-01
-- [x] `pnpm --filter web lint` clean — 2026-06-01
-- [x] `pnpm --filter web build` clean — 2026-06-01
-- [x] `pnpm --filter web test` — 149 tests pass including new timezone-safety suite — 2026-06-01
-- [ ] Manual: List Start/End cells show correct calendar day in a negative-offset timezone
-- [ ] Manual: Gantt bars land on the correct day column in a negative-offset timezone
-- [ ] Manual: Gantt day/week/month labels match List dates for same activity
-- [ ] Manual: round-trip — open date picker, save unchanged, displayed date does not shift
-
----
-
-### Group by Assignee Combination (Phase 11.1.2)
-Multi-assignee activities now appear under their exact assignee-set group in both Gantt and List.
-
-- [x] `lib/memberGroups.ts`: `memberComboKey`, `orderedComboIds`, `memberComboLabel`, `comboSortComparator`, `UNASSIGNED_KEY` — 2026-06-02
-- [x] `GanttGrid.tsx`: extend `GanttRow` group type with `memberColors?: string[]`; render stacked color dots in group headers — 2026-06-02
-- [x] `GanttView.tsx` `buildRows`: bucket by `memberComboKey(assignedMemberIds)`; sort groups via `comboSortComparator`; pass `memberColors` to group rows — 2026-06-02
-- [x] `ListView.tsx` `buildListRows`: same combo-key bucketing and sorting; `memberColors` on group rows; stacked dots in group header renderer — 2026-06-02
-- [x] `lib/memberGroups.test.ts`: full suite for key, label, ordering, comparator — 2026-06-02
-- [x] `GanttView.tree.test.ts`: updated member-grouping suite for combo-key behavior — 2026-06-02
-- [x] `ListView.tree.test.ts`: updated member-grouping suite for combo-key behavior — 2026-06-02
-- [x] `pnpm --filter web lint` clean — 2026-06-02
-- [x] `pnpm --filter web build` clean — 2026-06-02
-- [x] `pnpm --filter web test` — 187 tests pass — 2026-06-02
-- [ ] Manual: multi-assignee activity renders under its own combination group in both Gantt and List
-- [ ] Manual: combination group labels are in team order with Oxford/truncation formatting
-- [ ] Manual: group headers show stacked color dots
-- [ ] Manual: group ordering identical between Gantt and List; Unassigned last
-- [ ] Manual: collapse/expand works on combination groups; counts correct with no double-counting
-
----
-
-### Timeline Views — Calendar (Web — Phase 11.2)
-**Month / Week** all-day-bar layouts sharing one skeleton. No Day view, no time grid (every activity is all-day). Detailed plan: `docs/plans/phase-11.2-calendar-view.md`.
-
-**Shared:**
-- [x] Layout switcher (Month / Week) in the view's toolbar slot — 2026-06-02
-- [x] Today / prev / next navigation — 2026-06-02
-- [x] Color-by (activity / member / status) carried over via shared `lib/activityColor.ts` — 2026-06-02
-- [x] Click empty cell → `ActivityCreatePanel` prefilled with that date — 2026-06-02
-- [x] Click bar → existing `ActivityDetailPanel` — 2026-06-02
-- [x] Drag bar body → move (duration-preserving, whole-day snap, week-wrap aware) → PATCH; drag edge → resize; live sidebar preview — 2026-06-02
-- [x] Respects active filter, Find highlight, `week_start` pref — 2026-06-02
-
-**Lane packing (`lib/calendarLanes.ts`, pure + unit-tested):**
-- [x] Per-week-row greedy lane assignment for concurrent multi-day bars — 2026-06-02
-- [x] Cross-week activities split into one segment per week row with "continues" edges — 2026-06-02
-
-**Month layout:**
-- [x] 6-week grid; multi-day activities render as continuous bars across cells — 2026-06-02
-
-**Week layout:**
-- [x] 7 day columns, taller cells (higher default visible-lane cap = 6) — 2026-06-02
-
-**Density / overflow:**
-- [x] Per-day "+N more" chip → day popover listing every activity that day → row click opens sidebar — 2026-06-02
-- [x] Manual per-week row-height drag handle raises/lowers visible-lane cap; persists per-timeline-per-user — 2026-06-02
-
-**Testing & verification:**
-- [x] `pnpm --filter web lint` clean — 2026-06-02
-- [x] `pnpm --filter web test` — 208 tests pass including new `calendarLanes.test.ts` (21 tests) — 2026-06-02
-- [x] `pnpm --filter web build` clean — 2026-06-02
-- [x] `golangci-lint run` clean; `go test ./...` passes — 2026-06-02
-- [ ] Manual: view switcher toggles Gantt ↔ List ↔ Calendar, persisting per timeline
-- [ ] Manual: Month and Week layouts render with correct day cells and today highlight
-- [ ] Manual: multi-day activity renders as a continuous bar with "continues" arrow on clipped edges
-- [ ] Manual: color-by recolors bars (activity / member / status)
-- [ ] Manual: "+N more" chip shows count; popover lists all activities for that day; row click opens sidebar
-- [ ] Manual: row-height resize handle raises/lowers visible lanes; persists after reload
-- [ ] Manual: bar click opens ActivityDetailPanel; empty-cell click opens ActivityCreatePanel prefilled
-- [ ] Manual: drag bar body moves it (duration preserved); drag edge resizes; sidebar shows live dates
-- [ ] Manual: Find highlights matching bars in both layouts
-- [ ] Manual: active filter applied (all 6 presets, saved filters)
-
----
-
-### Timeline Views — Kanban (Web — Phase 11.3)
-Fully interactive board. Re-scoped 2026-06-03 from read-only to interactive (drag-to-recolumn, group-by-driven columns, card fields). Depends on Phase 10.2 (statuses API + UI).
-
-- [x] View switcher shows Kanban tab; switching persists per timeline — 2026-06-03
-- [x] `kanbanColumns.ts`: `buildColumns()` for Status/Member/Combination/Parent/None; sort comparators; sentinels — 2026-06-03
-- [x] `KanbanToolbar.tsx`: Group by / Sort by / Color by / Card fields multi-select — 2026-06-03
-- [x] `KanbanCard.tsx`: draggable card with accent border (colorBy), title, date range, status, tags, members, % complete, parent, description — 2026-06-03
-- [x] `KanbanColumn.tsx`: droppable column with header (accent dot + count + collapse), card list, empty state, "+ Add" — 2026-06-03
-- [x] `KanbanBoard.tsx`: DndContext host with drag overlay, drop semantics per groupBy, no-op drop guard — 2026-06-03
-- [x] `KanbanView.tsx`: data container (fetch, filter, Find, colorMap, buildColumns, drag commit, preference persistence) — 2026-06-03
-- [x] `KanbanView.test.ts`: 32 unit tests for `buildColumns` and `sortActivities` — 2026-06-03
-- [x] Columns collapse/expand; state persisted per timeline — 2026-06-03
-- [x] Card fields configurable; Group by axis field auto-suppressed from cards — 2026-06-03
-- [x] Filter parity: `applyActiveFilter` applied; column counts reflect filtered set — 2026-06-03
-- [x] Find parity: matching cards highlighted, non-matches dimmed; active match auto-expands collapsed columns — 2026-06-03
-- [x] Drag-to-recolumn commits status/reassign/reparent via `useUpdateActivity` (optimistic update) — 2026-06-03
-- [x] Combination/None columns non-droppable — 2026-06-03
-- [x] "+ Add" opens create panel pre-filled with column member (for member columns) — 2026-06-03
-- [x] All automated checks pass (`golangci-lint`, `go test ./...`, `pnpm lint`, `pnpm build`) — 2026-06-03
-- [ ] Manual: Drag card between status columns — status changes and card moves
-- [ ] Manual: Drag card between member columns — primary assignee changes
-- [ ] Manual: Drag card to parent column — parent changes
-- [ ] Manual: Card fields toggle shows/hides fields; Group by axis field auto-hides
-- [ ] Manual: Collapse/expand columns survive reload
-- [ ] Manual: Filter and Find work correctly on the board
-
-### Calendar Sync
-- [ ] Google Calendar OAuth connect flow
-- [ ] Outbound sync: push draba events to Google Calendar on create/update/delete
-- [ ] Inbound sync: Google webhook handler → upsert event in draba
-- [ ] Built-in CalDAV server (`internal/caldav/`)
-- [ ] CalDAV connect flow (user provides URL + credentials)
-- [ ] Outbound sync: push draba events to CalDAV on create/update/delete
-- [ ] Team iCal feed endpoint: `GET /timelines/:ical_token/feed.ics` (public, sanitized — no notes)
-
-### Shares — Multi-Share Views with Passwords (Phase 13)
-First-class Share entity. One timeline can host many shares, each frozen to a specific view + config.
-
-**Schema:**
-- [ ] Migration: `shares` table — id, timeline_id, view_type, view_config JSON, password_hash (nullable), expires_at (nullable), created_by, created_at, last_viewed_at, view_count, revoked_at
-- [ ] Migration: migrate existing `timelines.share_token` value into a first share row, then drop the column in a follow-up migration once UI references are gone
-
-**API:**
-- [ ] `POST /timelines/:id/shares` — create share with view_type + view_config snapshot + optional password + optional expiry
-- [ ] `GET /timelines/:id/shares` — list shares (creator + admins)
-- [ ] `PATCH /shares/:id` — rename / change password / extend expiry / revoke
-- [ ] `DELETE /shares/:id` — hard delete
-- [ ] `GET /shares/:token` — public lookup; password-protected returns 401 with `passwordRequired: true`
-- [ ] `POST /shares/:token/unlock` — exchange password for a short-lived view JWT scoped to that share
-- [ ] Rate-limit unlock attempts per IP
-
-**Web — creating shares:**
-- [ ] "Share this view" button in every view's toolbar slot (Gantt / List / Calendar / Kanban)
-- [ ] Share modal: snapshots current toolbar state into `view_config`, optional password + expiry toggles, returns URL with copy button
-
-**Web — viewing shares:**
-- [ ] Public viewer route `/s/:token` — no auth required
-- [ ] Password gate page for protected shares
-- [ ] Mount the appropriate view component in read-only mode with `view_config` applied
-- [ ] Branding strip: team name, "Shared view", last-updated timestamp
-
-**Web — managing shares:**
-- [ ] Manage-shares section on each timeline (list, view counts, revoke, edit)
-- [ ] Indicator chip on timeline tile showing active share count
-
----
-
-### Export — Data, Textual & Visual (Phase 14)
-
-_Re-planned 2026-06-11 — see [docs/plans/phase-14-export.md](plans/phase-14-export.md). Visual exports are now client-side (no gofpdf, no Chromium); "PDF" is a printable route the user prints to vector PDF from their browser. Import bullets moved to [Phase 15 — Import](ROADMAP.md#phase-15--import--tabular)._
-
-**14.1 Foundation + data exports (server, API-first):**
-- [x] `POST /timelines/:id/export` — `{ format: csv|xlsx|ics, viewConfig? }`; frozen filter evaluated via the Phase 13 Go `matchesFilter` port; streams file, sync for v1
-- [x] `GET /timelines/:id/export.csv|.xlsx|.ics?filter=<savedFilterId>` — convenience GET for CLI/scripting (10.4.6 hook)
-- [x] CSV/xlsx columns match the Phase 15 import template (round-trip holds)
-- [x] Static `.ics` download — reuse the 13.4 feed generator, authenticated, `Content-Disposition: attachment`
-- [x] `ExportDialog` (single dialog, all views) + per-view capability descriptor (`lib/exportCapabilities.ts`) — per the [export-modal design handoff](design/handoffs/export-modal/design_handoff_export_modal/README.md)
-- [x] Wire into the Gantt toolbar Export stub + 11.1 / 11.2 / 11.3 toolbar slots, formats scoped per view
-
-**14.2 Textual exports (client):**
-- [ ] Markdown: GFM table (List), section-per-column (Kanban), agenda list (Calendar); header block with team / timeline / generated-at / filter description
-- [ ] Plain text variant (aligned monospace)
-- [ ] Copy to clipboard with dual `text/plain` + `text/html` flavors (rich paste into Slack / Word / Google Docs); `.md` file download
-
-**14.3 PNG snapshot (client):**
-- [ ] DOM rasterization via `html-to-image`: full scrollable extent, 2x density, light theme
-- [ ] Header strip composited above the capture
-
-**14.4 Printable views (client, vector PDF via browser print):**
-- [ ] Print routes per view (`/timelines/:id/print/:view`): non-interactive view components + print stylesheet, no app chrome, header strip per page
-- [ ] Gantt: landscape hint, date-range pagination, member-color legend
-- [ ] List: styled table with repeating column headers
-- [ ] Kanban: page breaks between column groups when too wide
-- [ ] Calendar: one page per week/month period
-- [ ] "Export → Printable view" opens the route in a new tab and triggers `window.print()`
-
-**Cut (2026-06-11):** Google Docs/Sheets integration, RTF, wall-calendar poster PDF, raster-PDF download, gofpdf/Chromium server rendering (optional Chromium *sidecar* deferred indefinitely).
-
-**SMTP & password reset (lands here because import errors / reset emails are first SMTP use):**
-- [ ] Password reset flow (email required — pick SMTP or transactional email provider)
-- [ ] SMTP configuration surface in `/settings/admin`
-
----
-
-### External Connectors (Inbound Webhooks) — Phase 15
-Includes both the webhook backend and the per-timeline connector sidebar UI (previously a separate Up-Next block).
-
-**Backend:**
-- [ ] Create `team_inbound_webhooks` and `event_links` DB migrations
-- [ ] Add `is_external` boolean column to `events` table
-- [ ] `POST /teams/:id/webhooks` — generate an inbound webhook URL for a provider (e.g. Asana)
-- [ ] `GET /teams/:id/webhooks` — list active inbound webhooks
-- [ ] `POST /webhooks/:provider/:token` — generic inbound webhook handler to map payload to Draba events
-- [ ] Web UI: Render `is_external` events as read-only (disable drag-and-drop handles)
-- [ ] Web UI: Show external provider icon/link on the event detail card
-
-**Per-timeline connector model (was Up-Next "Web — Connectors"):**
-- [ ] Migration: `team_connectors (id, team_id, timeline_id, provider ENUM, display_name, config JSON, created_by, created_at)` — one row per connector instance
-- [ ] Provider values initially: `asana | aha | google_sheets | excel_online | webhook`
-- [ ] `GET /timelines/:id/connectors` — list connectors for a timeline
-- [ ] `POST /timelines/:id/connectors` — create connector (admin only); returns generated inbound token
-- [ ] `PATCH /connectors/:id` — update display name or config (admin only)
-- [ ] `DELETE /connectors/:id` — remove connector (admin only)
-- [ ] `POST /connectors/:token/ingest` — public inbound endpoint; validates token; maps payload via provider adapter
-
-**Sidebar CONNECTORS section (already stubbed):**
-- [ ] Wire `GET /timelines/:id/connectors` — list active connectors beneath the active timeline label
-- [ ] "Add connector" → connector setup sheet: provider picker → config fields → save → `POST /timelines/:id/connectors`
-- [ ] Connector row hover → gear icon → config drawer; delete with confirm
-- [ ] Provider icon set (Asana, Aha, Sheets, Excel, generic Plug)
-
-## Phase 13 — Shares (Public Read-Only View Links)
-
-**Next up.** Full design in [docs/plans/phase-13-shares.md](plans/phase-13-shares.md). Decision: live cached data + read-only SPA, server-side (Go) filter, view-driven field projection. No Chromium.
-
-**13.1 — Foundation, public gateway, Gantt viewer (MVP):** — ✅ 2026-06-04
-- [x] Migration: `shares` table (`id`, `timeline_id`, `token` UNIQUE, `view_type`, `view_config` JSON, `password_hash?`, `expires_at?`, `created_by`, `created_at`, `last_viewed_at`, `view_count`, `revoked_at`)
-- [x] Token migration: insert one `shares` row per existing timeline reusing `timelines.share_token` (keep the column for now; drop in a later migration)
-- [x] Go filter evaluator (`internal/filters`) mirroring `lib/filterEngine.ts` `matchesFilter`
-- [x] Shared golden-fixture suite (`packages/shared/testdata/filter-fixtures.json`) run by both `filterEngine.test.ts` and a Go test (drift guard)
-- [x] `GET /shares/{token}` gateway: scope-locked query (token → server-derived `timeline_id`, **no client selector**) → evaluate frozen filter in Go → fixed display projection → prune referenced members/statuses/tags → TTL cache (`DRABA_SHARE_CACHE_TTL`, default 60s)
-- [x] `POST /timelines/{id}/shares`, `GET /teams/{id}/timelines/{timelineId}/shares`, `PATCH /shares/{id}`, `DELETE /shares/{id}`
-- [x] OpenAPI: `Share`, `CreateShareInput`, `PatchShareInput`, `PublicActivity`, `PublicMember`, `PublicTimeline`, `ShareProjection`; regenerate TS types
-- [x] Gantt `interactive=false` mode (clicks inert in GanttGrid + GanttView; no drag/select)
-- [x] "Share this view" action in Gantt toolbar → snapshot live toolbar state incl. resolved `FilterDefinition` → create share → copy URL
-- [x] `/s/:token` public route (outside `ProtectedRoute`) + branding strip (timeline name · "Shared view" · activity count)
-- [x] Scope-isolation test: token reaches exactly its timeline's filtered records; tampering (other timeline/activity/team id, scope-widening params) cannot widen; no share-reachable by-id/list endpoint
-- [x] Verify payload: filtered-out activities + member email/`user_id`/role + access list + other timelines all absent (automated test)
-
-**13.2a — Password backend + view counts (Go, done 2026-06-05):**
-- [x] `password_hash` (bcrypt) on create/patch; `GET /shares/{token}` → `401 { passwordRequired: true }` when locked (no data); valid view token bypasses the gate
-- [x] `POST /shares/{token}/unlock` → short-lived view JWT (`share_view` type, share-scoped subject — not replayable across shares); rate-limit unlock attempts (10/IP/hour, in-memory limiter)
-- [x] Drop the `canManageShare = isAdmin || creator` gate on PATCH+DELETE — any timeline-team member may manage any share (shares can't mutate data)
-- [x] View counts: `viewCount` surfaced in the authenticated list response (per-row display backing)
-- [x] OpenAPI: `password` (writeOnly) on Create/Patch inputs, `passwordRequired` 401 body, `/shares/{token}/unlock` path; TS types regenerated
-
-**13.2b — Share module overhaul (frontend, done 2026-06-05):**
-- [x] Rebuilt `ShareModal.tsx` to the handoff design (header w/ link tile + timeline-name subtitle, "ACTIVE LINKS" section bar + count chip + New share, inline `AddShareForm` with title/description/password-toggle + show-hide, share rows, dashed empty state, footer + Done) using existing tokens/components
-- [x] Per-row meta: creator `Badge` + name (+ "· you"), created date, view count, lock/link type tile + "password" badge; copy w/ 1.6s success state; inline delete-confirm overlay
-- [x] Public unlock prompt at `/s/:token` (`UnlockPrompt` → `useUnlockShare` → store view token → `useShareProjection` resends GET with `Authorization: Bearer`); 401-`passwordRequired` mapped to `PASSWORD_REQUIRED`; 429 → "too many attempts" copy
-- [x] Backend support for the design: `description` column (migration 021) + derived `protected` flag on `Share` (never exposes the hash); plumbed through create/patch bodies, repo, OpenAPI; TS types regenerated
-- [x] `useShares`: `useUnlockShare`, view-token param on `useShareProjection`, `description`/`password` on create input; 6 new/updated hook tests
-
-**13.3 — List + Kanban read-only:**
-- [x] `interactive=false` + public mounting for List and Kanban (clicks inert)
-- [x] Projection: include `notes` only when a List share has the Notes column enabled in `view_config`
-- [x] Per-view read-only polish + "Share this view" (13.2 modal) in both toolbars
-
-**13.4 — Calendar — ICS feed sharing:** — ✅ 2026-06-10 (automated checks)
-- [x] `shares.kind` discriminator (`view` | `ics`) — migration 022; ICS rows carry `scope` (`timeline` | `member`) + nullable `member_id`, no `view_config`/filter/password (create/patch validation rejects passwords on feeds)
-- [x] `GET /shares/{token}.ics` (`text/calendar`, dispatched inside the `{token}` wildcard) + `webcal://` variant in the modal links; all-day VEVENTs (`DTSTART;VALUE=DATE`, exclusive `DTEND` = end+1d) via new `internal/ics` package (RFC 5545 escaping + 75-octet folding); live data, ICS TTL cache sharing `DRABA_SHARE_CACHE_TTL`
-- [x] Distinct Calendar share modal (`CalendarShareModal.tsx`): public On/Off toggle, scope selector (timeline vs. member), feed URL, Copy, Add-to-Google/Apple/Outlook, Regenerate link (`POST /shares/{id}/regenerate` rotates the token)
-- [x] Whole-timeline AND per-member feeds; payload carries no email/`user_id`/role/other-timelines; kinds isolated both directions (ICS token dead on the JSON gateway and vice versa)
-- [x] Manual: subscribe in a real calendar client → all-day events with fields (verified in Thunderbird, 2026-06-10; client-side fetch, works on LAN). Apple Calendar on LAN also testable.
-- [ ] Manual: Google Calendar / Outlook web subscription — **blocked until a test server is exposed to the internet** (their fetchers run server-side and cannot reach localhost/LAN). Feed URLs derive from `window.location.origin`, so no code change is needed once public.
-
-**13.5 — Lifecycle tail (re-scoped 2026-06-11):** — ✅ 2026-06-11 (automated checks + local live verification)
-- [x] Archived timeline kills its shares: JSON gateway, ICS feed, and unlock all `404` (not `410` — archive is reversible; unarchive resurrects the links); checked before the caches so archiving takes effect immediately
-- [x] Active-share-count chip on the sidebar timeline tile — `Timeline.shareCount` derived in the repo (non-revoked, non-expired shares of both kinds), added to OpenAPI + regenerated types
-- [x] Last-viewed rendered in the 13.2 modal row beside the view count; `useListShares` now refetches on modal open so the telemetry is current (app-wide 30s staleTime was masking updates)
-- [x] ~~Optional expiry write path~~ — cut from scope 2026-06-11 (read-side `410` enforcement stays as tested defensive code)
-
-## Done
-- [x] Initialize repo scaffold — 2026-04-27
-- [x] Define requirements, architecture, conventions — 2026-04-27
-
-## Parking Lot
-- **Commit/CI process — repomap.md vs. Graphify:** drop the automated `repomap.md` generation (the AI-context lookup step doesn't appear to depend on it day-to-day) and look into incorporating Graphify in its place. Not yet scoped — revisit once the Phase 13 sub-phases land.
-- MySQL/MariaDB and Postgres DB adapters (SQLite first, then add others)
-- CLI binary
-- MCP server for AI agent access
-- Mobile native apps (ship PWA first)
-- Microsoft/Outlook calendar sync (v2)
-- Multi-tenant cloud hosting
-- SSO / OAuth login (GitHub, Google)
-- Notifications (email, push)
-- Recurring event UI (RRULE editing)
-- Kanban drag-to-change-status (v2; v1 Kanban is read-only)
 ````
 
 ## File: docs/log.md
