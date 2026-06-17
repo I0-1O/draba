@@ -89,8 +89,9 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	user := &models.User{
 		ID:           newID(),
 		Email:        string(req.Email),
-		PasswordHash: hash,
+		PasswordHash: &hash,
 		DisplayName:  req.DisplayName,
+		AuthProvider: "local",
 		IsSuperadmin: count == 0,
 		CreatedAt:    now,
 		UpdatedAt:    now,
@@ -180,7 +181,16 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := auth.CheckPassword(user.PasswordHash, req.Password); err != nil {
+	// An OIDC (SSO) account has no password and must never authenticate via
+	// this endpoint — it can only log in through the OIDC flow. Same generic
+	// error as a bad password so the endpoint cannot reveal that an address
+	// belongs to an SSO account.
+	if user.PasswordHash == nil {
+		writeError(w, http.StatusUnauthorized, "INVALID_CREDENTIALS", "invalid email or password")
+		return
+	}
+
+	if err := auth.CheckPassword(*user.PasswordHash, req.Password); err != nil {
 		writeError(w, http.StatusUnauthorized, "INVALID_CREDENTIALS", "invalid email or password")
 		return
 	}
@@ -271,6 +281,12 @@ func (s *Server) handleForgotPassword(w http.ResponseWriter, r *http.Request) {
 	if user.ArchivedAt != nil {
 		return
 	}
+	// OIDC accounts have no local password to reset; issuing a reset token
+	// would let an SSO user install a password_hash and bypass SSO. Return the
+	// same silent 200 as the no-user case so enumeration is still impossible.
+	if user.AuthProvider == "oidc" {
+		return
+	}
 
 	rawToken := newToken()
 	expiresAt := time.Now().Add(time.Hour)
@@ -321,6 +337,15 @@ func (s *Server) handleResetPassword(w http.ResponseWriter, r *http.Request) {
 	resetToken, err := s.passwordTokens.GetValid(body.Token)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "TOKEN_INVALID", "reset token is invalid or expired")
+		return
+	}
+
+	// Defence in depth: even though handleForgotPassword won't issue a token for
+	// an OIDC account, reject resets here too so a token can never be used to
+	// install a local password on an SSO-managed account (which would bypass
+	// the OIDC-only login invariant).
+	if user, err := s.users.GetByID(resetToken.UserID); err == nil && user.AuthProvider == "oidc" {
+		writeError(w, http.StatusBadRequest, "OIDC_ACCOUNT", "this account signs in via SSO and has no password to reset")
 		return
 	}
 

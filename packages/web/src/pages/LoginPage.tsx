@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { useNavigate, useLocation, Link } from 'react-router-dom'
 import { Eye, EyeOff, Check, Loader2 } from 'lucide-react'
 import { useAuth } from '@/contexts/AuthContext'
-import { ApiError } from '@/lib/api'
+import { ApiError, API_BASE } from '@/lib/api'
 import DarkModeToggle from '@/components/DarkModeToggle'
 import { usePublicSettings } from '@/hooks/usePublicSettings'
 
@@ -126,6 +126,13 @@ function Spinner() {
       style={{ animation: 'spin 0.8s linear infinite' }}
     />
   )
+}
+
+// setSSOHighlight toggles the SSO button's hover/focus highlight. Shared by the
+// mouse and keyboard handlers so both input methods get the same affordance.
+function setSSOHighlight(el: HTMLButtonElement, on: boolean) {
+  el.style.borderColor = on ? '#288C9B' : 'hsl(210 15% 24%)'
+  el.style.background = on ? 'hsl(210 15% 19%)' : 'hsl(210 15% 17%)'
 }
 
 // ── Main page ────────────────────────────────────────────────────────────────
@@ -401,6 +408,44 @@ export default function LoginPage() {
                 {loading && <Spinner />}
                 {loading ? 'Signing in…' : 'Sign in'}
               </button>
+
+              {/* SSO — shown only when the instance has OIDC configured. A
+                  full-page navigation to the API begins the OIDC redirect flow;
+                  the browser returns to /auth/callback with tokens. */}
+              {branding?.ssoEnabled && (
+                <>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 12, margin: '20px 0' }}>
+                    <div style={{ flex: 1, height: 1, background: 'hsl(210 15% 24%)' }} />
+                    <span style={{ fontSize: 12, color: 'hsl(210 15% 52%)', fontWeight: 600 }}>OR</span>
+                    <div style={{ flex: 1, height: 1, background: 'hsl(210 15% 24%)' }} />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => { window.location.href = `${API_BASE}/auth/oidc/login` }}
+                    style={{
+                      width: '100%',
+                      padding: '13px',
+                      borderRadius: 8,
+                      border: '1px solid hsl(210 15% 24%)',
+                      background: 'hsl(210 15% 17%)',
+                      color: 'hsl(210 17% 93%)',
+                      fontSize: 14,
+                      fontWeight: 600,
+                      cursor: 'pointer',
+                      fontFamily: 'inherit',
+                      transition: 'border-color 160ms ease, background 160ms ease',
+                    }}
+                    // Hover AND focus both apply the highlight so keyboard users
+                    // get the same affordance as mouse users.
+                    onMouseEnter={e => setSSOHighlight(e.currentTarget, true)}
+                    onMouseLeave={e => setSSOHighlight(e.currentTarget, false)}
+                    onFocus={e => setSSOHighlight(e.currentTarget, true)}
+                    onBlur={e => setSSOHighlight(e.currentTarget, false)}
+                  >
+                    Sign in with SSO
+                  </button>
+                </>
+              )}
 
               {/* Register link */}
               <p style={{ marginTop: 24, fontSize: 13, textAlign: 'center', color: 'hsl(210 15% 52%)' }}>

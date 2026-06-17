@@ -1301,6 +1301,11 @@ export interface components {
             /** @description User-level identity icon ID. Propagates to team memberships. */
             icon?: string | null;
             isSuperadmin: boolean;
+            /**
+             * @description How this account authenticates. SSO-managed (oidc) accounts have no local password.
+             * @enum {string}
+             */
+            authProvider: "local" | "oidc";
             /** Format: date-time */
             createdAt: string;
             /** Format: date-time */

@@ -4,13 +4,29 @@
 
 import { useState } from 'react'
 import { useChangePassword } from '@/hooks/useSettings'
+import { useAuth } from '@/contexts/AuthContext'
 import { ApiError } from '@/lib/api'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Button } from '@/components/ui/button'
 
 export default function SecurityPage() {
+  const { user } = useAuth()
   const changePassword = useChangePassword()
+
+  // SSO-managed accounts have no local password; the API rejects a change with
+  // OIDC_ACCOUNT, so don't show a form that can never succeed.
+  if (user?.authProvider === 'oidc') {
+    return (
+      <div>
+        <h2 className="text-[17px] font-semibold text-foreground mb-1">Security</h2>
+        <p className="text-sm text-muted-foreground mb-6">
+          Your account signs in via single sign-on (SSO). Password management is handled by your
+          identity provider — there's no password to change here.
+        </p>
+      </div>
+    )
+  }
 
   const [current, setCurrent] = useState('')
   const [next, setNext] = useState('')
