@@ -1,5 +1,5 @@
 /**
- * ExportDialog — "Export this view" modal (Phase 14.1).
+ * ExportDialog — "Export this view" modal (Phase 14).
  *
  * Built to the export-modal design handoff (docs/design/handoffs/export-modal):
  * a format rail + options pane two-pane body, a filter context strip that
@@ -8,20 +8,32 @@
  * but — per the handoff — the overlay click does not close the dialog, only
  * Esc / the close button / Cancel do.
  *
- * 14.1 implements only the data/calendar formats (CSV, Excel, ICS), all with
- * verb "download"; copy/print formats (Markdown, plain text, PNG, printable
- * view) land in 14.2-14.4 and will appear automatically once added to
- * lib/exportCapabilities.ts.
+ * 14.1 implements the server-side data/calendar formats (CSV, Excel, ICS).
+ * 14.2 adds client-side textual formats (Markdown, Plain text, Copy to clipboard)
+ *      via the `textExportData` prop; these formats only appear for non-Gantt views.
  */
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, useCallback } from 'react'
 import { createPortal } from 'react-dom'
-import { FileOutput, Filter, AlertTriangle, Download, FileDown, Check, X } from 'lucide-react'
+import {
+  FileOutput, Filter, AlertTriangle, Download, FileDown, Check, X, Copy,
+} from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 import { useExport } from '@/hooks/useExport'
-import { getExportFormats, buildExportFilename, type ExportFormatId, type ExportViewType } from '@/lib/exportCapabilities'
+import {
+  getExportFormats, buildExportFilename,
+  type ExportFormatId, type ExportViewType,
+} from '@/lib/exportCapabilities'
+import {
+  buildListMarkdown, buildKanbanMarkdown, buildCalendarMarkdown,
+  buildListPlainText, buildKanbanPlainText, buildCalendarPlainText,
+  buildListHtml, buildKanbanHtml, buildCalendarHtml,
+  type TextExportData,
+} from '@/lib/textExport'
 import type { FilterDefinition } from '@/lib/filterTypes'
+
+export type { TextExportData }
 
 export interface ExportDialogProps {
   view: ExportViewType
@@ -47,6 +59,12 @@ export interface ExportDialogProps {
    * Null means all columns. Only meaningful for csv/xlsx formats.
    */
   listExportColumns: string[] | null
+  /**
+   * Pre-resolved in-memory data for client-side textual formats (14.2).
+   * Required for Markdown / plain text / clipboard options to be functional;
+   * if absent those formats still appear but will produce empty output.
+   */
+  textExportData?: TextExportData | null
   onClose: () => void
 }
 
@@ -59,6 +77,61 @@ const VIEW_LABELS: Record<ExportViewType, string> = {
 
 type Scope = 'view' | 'all'
 
+// ── Client-side text generation ────────────────────────────────────────────────
+
+function generateMarkdown(view: ExportViewType, data: TextExportData, timelineName: string, filterLabel: string | null): string {
+  if (view === 'list') return buildListMarkdown(data, timelineName, filterLabel)
+  if (view === 'kanban') return buildKanbanMarkdown(data, timelineName, filterLabel)
+  if (view === 'calendar') return buildCalendarMarkdown(data, timelineName, filterLabel)
+  return buildListMarkdown(data, timelineName, filterLabel) // fallback
+}
+
+function generatePlainText(view: ExportViewType, data: TextExportData, timelineName: string, filterLabel: string | null): string {
+  if (view === 'list') return buildListPlainText(data, timelineName, filterLabel)
+  if (view === 'kanban') return buildKanbanPlainText(data, timelineName, filterLabel)
+  if (view === 'calendar') return buildCalendarPlainText(data, timelineName, filterLabel)
+  return buildListPlainText(data, timelineName, filterLabel)
+}
+
+function generateHtml(view: ExportViewType, data: TextExportData, timelineName: string, filterLabel: string | null): string {
+  if (view === 'list') return buildListHtml(data, timelineName, filterLabel)
+  if (view === 'kanban') return buildKanbanHtml(data, timelineName, filterLabel)
+  if (view === 'calendar') return buildCalendarHtml(data, timelineName, filterLabel)
+  return buildListHtml(data, timelineName, filterLabel)
+}
+
+/** Triggers the browser to save a Blob with the given filename. */
+function saveBlob(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(url)
+}
+
+/**
+ * Writes `text/plain` + `text/html` flavors to the clipboard so the paste
+ * lands rich in Slack / Word / Google Docs and clean in code editors.
+ * Falls back to `writeText` if `ClipboardItem` is unavailable (HTTP contexts).
+ */
+async function copyToClipboard(plainText: string, htmlText: string): Promise<void> {
+  if (typeof ClipboardItem !== 'undefined' && navigator.clipboard.write) {
+    const item = new ClipboardItem({
+      'text/plain': new Blob([plainText], { type: 'text/plain' }),
+      'text/html': new Blob([htmlText], { type: 'text/html' }),
+    })
+    await navigator.clipboard.write([item])
+  } else {
+    // Fallback for HTTP (non-localhost) contexts where ClipboardItem is blocked.
+    await navigator.clipboard.writeText(plainText)
+  }
+}
+
+// ── Component ──────────────────────────────────────────────────────────────────
+
 export default function ExportDialog({
   view,
   timelineId,
@@ -69,17 +142,20 @@ export default function ExportDialog({
   totalCount,
   viewActivityIds,
   listExportColumns,
+  textExportData,
   onClose,
 }: ExportDialogProps) {
   const formats = getExportFormats(view)
   const [formatId, setFormatId] = useState<ExportFormatId>('csv')
   const [scope, setScope] = useState<Scope>('view')
   const [done, setDone] = useState(false)
-  const { download, isPending } = useExport(timelineId, timelineName)
+  const [clientPending, setClientPending] = useState(false)
+  const { download, isPending: serverPending } = useExport(timelineId, timelineName)
   const doneTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const format = formats.find(f => f.id === formatId) ?? formats[0]
   const Icon = format.icon
+  const isPending = serverPending || clientPending
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
@@ -94,22 +170,68 @@ export default function ExportDialog({
     setDone(false)
   }
 
-  const handleDownload = () => {
+  const flashDone = useCallback(() => {
+    setDone(true)
+    doneTimer.current = setTimeout(() => setDone(false), 1600)
+  }, [])
+
+  const handleAction = useCallback(() => {
+    if (format.clientSide) {
+      const data = textExportData ?? {
+        activities: [],
+        memberById: new Map(),
+        statusById: new Map(),
+        tagById: new Map(),
+        activityTitleById: new Map(),
+        kanbanColumns: null,
+        listDisplayRows: null,
+        listVisibleColumns: null,
+        kanbanShowHierarchy: false,
+        kanbanChildrenByParentId: new Map(),
+      }
+
+      if (format.id === 'clipboard') {
+        const plainText = generatePlainText(view, data, timelineName, filterLabel)
+        const htmlText = generateHtml(view, data, timelineName, filterLabel)
+        setClientPending(true)
+        copyToClipboard(plainText, htmlText)
+          .then(flashDone)
+          .catch(() => { /* clipboard may be denied */ })
+          .finally(() => setClientPending(false))
+        return
+      }
+
+      // markdown or plaintext — generate and download
+      const isMarkdown = format.id === 'markdown'
+      const content = isMarkdown
+        ? generateMarkdown(view, data, timelineName, filterLabel)
+        : generatePlainText(view, data, timelineName, filterLabel)
+      const mimeType = isMarkdown ? 'text/markdown;charset=utf-8' : 'text/plain;charset=utf-8'
+      const blob = new Blob([content], { type: mimeType })
+      saveBlob(blob, buildExportFilename(timelineName, format.ext))
+      flashDone()
+      return
+    }
+
+    // Server-side: CSV / xlsx / ICS
     const isDataFormat = format.id === 'csv' || format.id === 'xlsx'
     void download(format.id, format.ext, {
       activityIds: scope === 'view' ? viewActivityIds : null,
       filter: scope === 'view' && !viewActivityIds ? filterDefinition : null,
       columns: isDataFormat ? listExportColumns : null,
-    }).then(() => {
-      setDone(true)
-      doneTimer.current = setTimeout(() => setDone(false), 1600)
-    })
-  }
+    }).then(flashDone)
+  }, [format, view, timelineName, filterLabel, textExportData, scope, viewActivityIds, filterDefinition, listExportColumns, download, flashDone])
 
   const emptyView = filteredCount === 0
   const subWithFilter = filterLabel !== null
     ? `${filteredCount} of ${totalCount} activities · matches your filter`
     : `All ${totalCount} activities · nothing filtered out`
+
+  // Button label / icon for the primary action
+  const actionLabel = format.verb === 'copy'
+    ? done ? 'Copied!' : (isPending ? 'Copying…' : 'Copy to clipboard')
+    : done ? 'Downloaded' : (isPending ? 'Downloading…' : `Download ${format.ext}`)
+  const ActionIcon = format.verb === 'copy' ? Copy : Download
 
   return createPortal(
     <div className="fixed inset-0 z-[1000] flex items-center justify-center bg-[hsl(200_24%_11%/0.55)] p-6 backdrop-blur-[2px]">
@@ -168,6 +290,8 @@ export default function ExportDialog({
             {formats.map(f => {
               const FIcon = f.icon
               const selected = f.id === formatId
+              // Badge icon: copy for clipboard, download for everything else
+              const BadgeIcon = f.verb === 'copy' ? Copy : Download
               return (
                 <button
                   key={f.id}
@@ -181,8 +305,8 @@ export default function ExportDialog({
                 >
                   <FIcon size={15} strokeWidth={selected ? 2.2 : 1.8} className={selected ? 'shrink-0 text-primary' : 'shrink-0 text-muted-foreground'} />
                   <span className="flex-1 truncate">{f.name}</span>
-                  <span title="Download" className={cn('shrink-0 text-muted-foreground', selected ? 'opacity-90' : 'opacity-65')}>
-                    <Download size={11} strokeWidth={2} />
+                  <span title={f.verb === 'copy' ? 'Copy' : 'Download'} className={cn('shrink-0 text-muted-foreground', selected ? 'opacity-90' : 'opacity-65')}>
+                    <BadgeIcon size={11} strokeWidth={2} />
                   </span>
                 </button>
               )
@@ -199,7 +323,7 @@ export default function ExportDialog({
               </div>
             </div>
 
-            {/* Scope picker */}
+            {/* Scope picker — only for server-side data formats */}
             {format.scope && (
               <div>
                 <div className="mb-1.5 text-[11px] font-bold uppercase tracking-[0.06em] text-muted-foreground">Activities to export</div>
@@ -221,24 +345,33 @@ export default function ExportDialog({
               </div>
             )}
 
-            {/* Filename chip */}
-            <div>
-              <div className="mb-1.5 text-[11px] font-bold uppercase tracking-[0.06em] text-muted-foreground">File</div>
-              <div className="flex items-center gap-2 rounded-[var(--radius-md)] bg-muted px-[11px] py-[7px] font-mono text-[12px] text-foreground">
-                <FileDown size={13} strokeWidth={2} className="shrink-0 text-muted-foreground" />
-                <span className="truncate">{buildExportFilename(timelineName, format.ext)}</span>
+            {/* Filename chip — only for download formats */}
+            {format.verb === 'download' && format.ext && (
+              <div>
+                <div className="mb-1.5 text-[11px] font-bold uppercase tracking-[0.06em] text-muted-foreground">File</div>
+                <div className="flex items-center gap-2 rounded-[var(--radius-md)] bg-muted px-[11px] py-[7px] font-mono text-[12px] text-foreground">
+                  <FileDown size={13} strokeWidth={2} className="shrink-0 text-muted-foreground" />
+                  <span className="truncate">{buildExportFilename(timelineName, format.ext)}</span>
+                </div>
               </div>
-            </div>
+            )}
+
+            {/* Clipboard note */}
+            {format.id === 'clipboard' && (
+              <div className="rounded-[var(--radius-md)] bg-muted px-3 py-2.5 text-[12px] leading-[1.5] text-muted-foreground">
+                Copies <strong className="text-foreground">rich text</strong> (HTML) + plain text — paste into Slack, Google Docs, or Word to get a formatted table.
+              </div>
+            )}
           </div>
         </div>
 
         {/* Footer */}
         <div className="flex shrink-0 items-center justify-end gap-2.5 border-t border-border px-5 py-[13px]">
           <Button variant="outline" onClick={onClose}>Cancel</Button>
-          <Button onClick={handleDownload} disabled={isPending} className="min-w-[168px] justify-center">
+          <Button onClick={handleAction} disabled={isPending} className="min-w-[168px] justify-center">
             {done
-              ? <><Check size={14} strokeWidth={2.2} /> Downloaded</>
-              : <><Download size={14} strokeWidth={2.2} /> {isPending ? 'Downloading…' : `Download ${format.ext}`}</>}
+              ? <><Check size={14} strokeWidth={2.2} /> {format.verb === 'copy' ? 'Copied!' : 'Downloaded'}</>
+              : <><ActionIcon size={14} strokeWidth={2.2} /> {actionLabel}</>}
           </Button>
         </div>
       </div>

@@ -1606,7 +1606,7 @@ Re-scoped 2026-06-11 — most of the original tail was already built piecemeal d
 ---
 
 ### Phase 14 — Export — Data, Textual & Visual
-**Status:** 🔄 — 14.1 built and passing all automated checks (2026-06-15), awaiting Docker rebuild + live verification; 14.2–14.4 not started | **Effort:** L (6–9 days across four pausable sub-phases) | **Plan:** [docs/plans/phase-14-export.md](plans/phase-14-export.md)
+**Status:** 🔄 — 14.1 built and passing all automated checks (2026-06-15), awaiting Docker rebuild + live verification; 14.2 built and passing all automated checks (2026-06-17), awaiting Docker verification; 14.3–14.4 not started | **Effort:** L (6–9 days across four pausable sub-phases) | **Plan:** [docs/plans/phase-14-export.md](plans/phase-14-export.md)
 
 Get data *out* of draba in the four shapes people actually need: **data** (CSV / xlsx for another tool or the Phase 15 re-import round-trip), **text** (Markdown / plain text / rich clipboard for Slack and prep docs), **image** (PNG of the current view for slide decks), and **print** (a print-styled page the user prints to vector PDF from their own browser; plus a static `.ics` download). Every export reflects the active filter / sort / group / visible columns at time of export — the deliverable is "what's on the screen right now," not the raw activity list. Split from the former combined "Data Portability" phase so export ships ahead of [import](#phase-15--import--tabular).
 

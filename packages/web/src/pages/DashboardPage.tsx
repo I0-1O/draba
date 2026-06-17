@@ -12,12 +12,13 @@ import GanttView from '@/components/gantt/GanttView'
 import { DEFAULT_LABEL_COL_W } from '@/components/gantt/GanttGrid'
 import GanttToolbar, { type GroupBy, type SortBy, type TimeGranularity, type ColorBy } from '@/components/gantt/GanttToolbar'
 import ListToolbar, { type ListGroupBy, type ListSortBy, type ListColorBy, type ListDensity, type ColumnConfig } from '@/components/list/ListToolbar'
-import ListView from '@/components/list/ListView'
+import ListView, { buildListRows, type ListDisplayRow } from '@/components/list/ListView'
 import CalendarToolbar, { type CalendarLayout } from '@/components/calendar/CalendarToolbar'
 import CalendarView from '@/components/calendar/CalendarView'
 import KanbanToolbar, { type KanbanGroupBy, type KanbanSortBy, type KanbanCardField } from '@/components/kanban/KanbanToolbar'
 import KanbanView from '@/components/kanban/KanbanView'
-import { DEFAULT_CARD_FIELDS } from '@/components/kanban/kanbanColumns'
+import { DEFAULT_CARD_FIELDS, buildColumns, buildHierarchyMaps } from '@/components/kanban/kanbanColumns'
+import type { TextExportData } from '@/components/ExportDialog'
 import ActivityDetailPanel from '@/components/gantt/ActivityDetailPanel'
 import ActivityCreatePanel from '@/components/gantt/ActivityCreatePanel'
 import { FilterProvider, useFilter } from '@/contexts/FilterContext'
@@ -355,6 +356,79 @@ function DashboardShell() {
     if (cols.length === allExportCols.length) return null
     return cols
   }, [view, listColumns])
+
+  // Pre-resolved data for client-side textual exports (14.2).
+  // Only materialised for non-Gantt views (Gantt has no textual format).
+  const textExportData = useMemo<TextExportData | null>(() => {
+    if (view === 'gantt') return null
+
+    const memberById = new Map<string, string>(
+      teamMembers.map(m => [m.id, m.displayName || m.email || 'Unknown']),
+    )
+    const statusById = new Map<string, string>(
+      activeTimelineStatuses.map(s => [s.id, s.name]),
+    )
+    const tagById = new Map<string, string>(tags.map(t => [t.id, t.name]))
+    const activityTitleById = new Map<string, string>(allActivities.map(a => [a.id, a.title]))
+    const activities = exportFilterInfo.filteredActivities
+
+    // List view: pre-build sorted, grouped, hierarchy-aware display rows.
+    let listDisplayRows: ListDisplayRow[] | null = null
+    let listVisibleColumns: string[] | null = null
+    if (view === 'list') {
+      const sorted = [...activities].sort((a, b) => {
+        if (listSortBy === 'startDate') return (a.startAt ?? '').localeCompare(b.startAt ?? '')
+        if (listSortBy === 'endDate') return (a.endAt ?? '').localeCompare(b.endAt ?? '')
+        if (listSortBy === 'title') return a.title.localeCompare(b.title)
+        if (listSortBy === 'status') return (a.statusId ?? '').localeCompare(b.statusId ?? '')
+        if (listSortBy === 'progress') return (b.percentComplete ?? 0) - (a.percentComplete ?? 0)
+        return 0
+      })
+      const memberByIdObj = new Map(
+        teamMembers.map(m => [m.id, { displayName: m.displayName || m.email || 'Unknown', color: m.color }]),
+      )
+      const statusByIdObj = new Map(activeTimelineStatuses.map(s => [s.id, { name: s.name }]))
+      listDisplayRows = buildListRows(
+        sorted, listGroupBy, memberByIdObj, statusByIdObj,
+        activeTimelineStatuses, new Set(), teamMembers.map(m => m.id),
+      )
+      listVisibleColumns = listColumns.length > 0
+        ? listColumns.filter(c => c.visible && !['colorBar', 'identity'].includes(c.id)).map(c => c.id)
+        : null
+    }
+
+    // Kanban: build columns respecting the hierarchy toggle.
+    let kanbanColumns: Array<{ label: string; activities: ApiActivity[] }> | null = null
+    let kbHierarchy = false
+    let kbChildrenById = new Map<string, ApiActivity[]>()
+    if (view === 'kanban') {
+      kbHierarchy = kanbanShowHierarchy
+      const { childrenByParentId, childIds } = kbHierarchy
+        ? buildHierarchyMaps(activities)
+        : { childrenByParentId: new Map<string, ApiActivity[]>(), childIds: new Set<string>() }
+      kbChildrenById = childrenByParentId
+      const columnActivities = kbHierarchy ? activities.filter(a => !childIds.has(a.id)) : activities
+      kanbanColumns = buildColumns(kanbanGroupBy, columnActivities, teamMembers, activeTimelineStatuses, kanbanSortBy)
+        .map(col => ({ label: col.label, activities: col.items }))
+    }
+
+    return {
+      activities,
+      memberById,
+      statusById,
+      tagById,
+      activityTitleById,
+      kanbanColumns,
+      listDisplayRows,
+      listVisibleColumns,
+      kanbanShowHierarchy: kbHierarchy,
+      kanbanChildrenByParentId: kbChildrenById,
+    }
+  }, [
+    view, teamMembers, activeTimelineStatuses, tags, allActivities,
+    exportFilterInfo.filteredActivities, kanbanGroupBy, kanbanSortBy, kanbanShowHierarchy,
+    listGroupBy, listSortBy, listColumns,
+  ])
 
   // Close the activity detail panel whenever the active filter changes so the
   // filtered view is unobstructed by a stale selection.
@@ -998,6 +1072,7 @@ function DashboardShell() {
           totalCount={exportFilterInfo.totalCount}
           viewActivityIds={exportViewActivityIds}
           listExportColumns={exportListColumns}
+          textExportData={textExportData}
           onClose={() => setExportDialogOpen(false)}
         />
       )}
