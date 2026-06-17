@@ -15022,6 +15022,784 @@ import type { Activity, Team, Timeline } from '@draba/shared'
 }
 ````
 
+## File: packages/web/src/components/calendar/CalendarGrid.tsx
+````typescript
+/**
+ * CalendarGrid — presentational grid for the Calendar view.
+ *
+ * Month (6-week) and Week (1-week) all-day-bar layouts.
+ */
+
+import {
+  useRef,
+  useState,
+  useCallback,
+  useEffect,
+  useMemo,
+} from 'react';
+import type { CalendarLayout } from './CalendarToolbar';
+import type { WeekRow, CalendarSegment } from '@/lib/calendarLanes';
+import { overflowCountsForWeek, segmentsForDay, daysDiff } from '@/lib/calendarLanes';
+import type { components } from '@draba/shared';
+import type { Member } from '@/types';
+
+type ApiActivity = components['schemas']['Activity'];
+
+// ── Layout constants ──────────────────────────────────────────────────────────
+
+const MONTH_DAY_HEADER_H = 28;
+const WEEK_DAY_HEADER_H  = 60;
+const BAR_H           = 20;
+const LANE_SLOT_H     = 24;
+const WEEK_BAR_H      = 66;   // 3-line bar for week view
+const WEEK_LANE_SLOT_H = 70;  // WEEK_BAR_H + 4px gap
+const OVERFLOW_H   = 20;   // reserved for "+N more" chips (month)
+const EDGE_W       = 8;    // resize hit-zone on bar edges
+const ROW_RESIZE_H = 6;    // month row-height drag strip
+const COL_COUNT    = 7;
+
+// ── Drag state ────────────────────────────────────────────────────────────────
+
+type DragType = 'move' | 'resize-start' | 'resize-end';
+
+interface DragState {
+  activityId: string;
+  type: DragType;
+  originalStart: Date;
+  originalEnd: Date;
+  grabOffsetDays: number;
+  currentStart: Date;
+  currentEnd: Date;
+}
+
+/** Per-week position of the dragged bar during live drag. */
+interface LiveSegment {
+  startCol: number;
+  endCol: number;
+  continuesLeft: boolean;
+  continuesRight: boolean;
+  color: string;
+}
+
+// ── Style constants ───────────────────────────────────────────────────────────
+// Defining static React.CSSProperties objects at module level avoids creating
+// new object references on every render and keeps the JSX readable.
+
+/** Invisible pointer hit zone on each resizable bar edge. */
+const EDGE_STYLE: React.CSSProperties = {
+  position: 'absolute', top: 0, height: '100%',
+  width: EDGE_W, cursor: 'ew-resize', zIndex: 2,
+};
+
+/** Full-coverage absolutely-positioned wrapper for bar overlay layers. */
+const OVERLAY_WRAPPER: React.CSSProperties = {
+  position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, pointerEvents: 'none',
+};
+const OVERLAY_INNER: React.CSSProperties = {
+  position: 'relative', height: '100%', pointerEvents: 'none',
+};
+
+// Overflow popover
+const POPOVER_HEADER: React.CSSProperties = {
+  padding: '8px 12px', borderBottom: '1px solid var(--border)',
+  fontSize: 12, fontWeight: 600, color: 'var(--foreground)',
+};
+const POPOVER_BODY: React.CSSProperties = { maxHeight: 260, overflowY: 'auto' };
+const POPOVER_ITEM_BASE: React.CSSProperties = {
+  display: 'flex', alignItems: 'center', gap: 8, width: '100%', padding: '7px 12px',
+  background: 'none', border: 'none', textAlign: 'left', cursor: 'pointer',
+  fontSize: 12, color: 'var(--foreground)', borderBottom: '1px solid var(--border)',
+};
+const POPOVER_LABEL: React.CSSProperties = {
+  flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+};
+
+// Activity bar content
+const WEEK_BAR_CONTENT: React.CSSProperties = {
+  display: 'flex', flexDirection: 'column', justifyContent: 'center',
+  padding: '4px 6px', flex: 1, minWidth: 0, overflow: 'hidden',
+  gap: 3, pointerEvents: 'none',
+};
+const WEEK_TITLE_ROW: React.CSSProperties = {
+  display: 'flex', alignItems: 'center', gap: 4, overflow: 'hidden',
+};
+const BAR_TITLE_TEXT: React.CSSProperties = {
+  fontSize: 11, fontWeight: 500, color: '#fff',
+  overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis',
+  flex: 1, minWidth: 0,
+};
+const BAR_ASSIGNEE_TEXT: React.CSSProperties = {
+  fontSize: 10, color: 'rgba(255,255,255,0.85)',
+  whiteSpace: 'nowrap', flexShrink: 0,
+  maxWidth: '45%', overflow: 'hidden', textOverflow: 'ellipsis',
+};
+const STATUS_CHIP_ROW: React.CSSProperties = { overflow: 'hidden', lineHeight: '14px' };
+const TAGS_ROW: React.CSSProperties = { display: 'flex', gap: 3, overflow: 'hidden', lineHeight: '14px' };
+const CHIP_TEXT: React.CSSProperties = { overflow: 'hidden', textOverflow: 'ellipsis' };
+
+// Week-layout day-header cell
+const WEEK_CELL_HEADER: React.CSSProperties = {
+  display: 'flex', flexDirection: 'column', alignItems: 'center',
+  justifyContent: 'center', height: WEEK_DAY_HEADER_H, gap: 2,
+  borderBottom: '1px solid var(--border)', pointerEvents: 'none',
+};
+const WEEK_DOW_LABEL: React.CSSProperties = {
+  fontSize: 11, fontWeight: 500, color: 'var(--muted-foreground)',
+  textTransform: 'uppercase', letterSpacing: '0.05em',
+};
+
+// Month-layout day-header cell
+const MONTH_DOW_ROW: React.CSSProperties = {
+  fontSize: 10, color: 'var(--muted-foreground)',
+  textAlign: 'center', paddingTop: 4, pointerEvents: 'none',
+};
+
+const ROW_RESIZE_WRAPPER: React.CSSProperties = {
+  position: 'absolute', bottom: 0, left: 0, right: 0,
+};
+
+// ── Utility ───────────────────────────────────────────────────────────────────
+
+function utcMidnight(iso: string): Date {
+  return new Date(iso.slice(0, 10) + 'T00:00:00Z');
+}
+
+/**
+ * Find the calendar day under the cursor.
+ * Uses elementsFromPoint (plural) so the bar element (pointer-events: auto)
+ * doesn't occlude the day cell's data-date attribute beneath it.
+ */
+function dayAtPoint(x: number, y: number): Date | null {
+  const elements = document.elementsFromPoint(x, y);
+  for (const el of elements) {
+    const iso = (el as HTMLElement).dataset?.date;
+    if (iso) return new Date(iso + 'T00:00:00Z');
+  }
+  return null;
+}
+
+function monthRowH(cap: number): number {
+  return MONTH_DAY_HEADER_H + cap * LANE_SLOT_H + OVERFLOW_H + ROW_RESIZE_H;
+}
+
+// ── DayOverflowPopover ────────────────────────────────────────────────────────
+
+function DayOverflowPopover({ segments, activityById, dayDate, anchorRect, onSelect, onClose }: {
+  segments: CalendarSegment[];
+  activityById: Map<string, ApiActivity>;
+  dayDate: Date;
+  anchorRect: DOMRect;
+  onSelect: (act: ApiActivity) => void;
+  onClose: () => void;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  // Close on any mousedown outside the popover. Capture phase fires before bar
+  // click handlers, preventing a bar click from immediately re-opening the popover
+  // on the same event that dismissed it.
+  useEffect(() => {
+    function onDown(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
+    }
+    document.addEventListener('mousedown', onDown, true);
+    return () => document.removeEventListener('mousedown', onDown, true);
+  }, [onClose]);
+  const label = dayDate.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
+  return (
+    <div ref={ref} style={{ position: 'fixed', top: anchorRect.bottom + 4, left: Math.min(anchorRect.left, window.innerWidth - 280), width: 260, background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 8, boxShadow: '0 4px 20px rgba(0,0,0,0.2)', zIndex: 200, overflow: 'hidden' }}>
+      <div style={POPOVER_HEADER}>{label}</div>
+      <div style={POPOVER_BODY}>
+        {segments.map(seg => {
+          const act = activityById.get(seg.activityId);
+          if (!act) return null;
+          return (
+            <button key={seg.activityId} onClick={() => { onSelect(act); onClose(); }}
+              style={POPOVER_ITEM_BASE}
+              onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+              onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+            >
+              <span style={{ width: 10, height: 10, borderRadius: 3, background: seg.color, flexShrink: 0 }} />
+              <span style={POPOVER_LABEL}>{seg.title}</span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ── CalendarBar ───────────────────────────────────────────────────────────────
+
+interface BarProps {
+  // Always a full CalendarSegment — the live-drag overlay constructs displaySeg
+  // as CalendarSegment (populating all required fields) rather than passing a
+  // raw LiveSegment, so we can keep a single concrete type here.
+  seg: CalendarSegment;
+  topPx: number;
+  barH: number;
+  isSelected: boolean;
+  hasQuery: boolean;
+  isWeekLayout: boolean;
+  memberById: Record<string, Member>;
+  onPointerDown: (e: React.PointerEvent, activityId: string, type: DragType) => void;
+  onClick: (activityId: string, e: React.MouseEvent) => void;
+}
+
+function CalendarBar({ seg, topPx, barH, isSelected, hasQuery, isWeekLayout, memberById, onPointerDown, onClick }: BarProps) {
+  const isHighlighted = seg.isMatch || seg.isActiveMatch;
+  const isDimmed = hasQuery && !isHighlighted;
+
+  const assigneeNames = seg.assignedMemberIds
+    .slice(0, 3)
+    .map(id => memberById[id]?.name?.split(' ')[0])
+    .filter((n): n is string => Boolean(n));
+
+  const style: React.CSSProperties = {
+    position: 'absolute',
+    top: topPx + 2,
+    left: `calc(${(seg.startCol / COL_COUNT) * 100}% + 2px)`,
+    width: `calc(${((seg.endCol - seg.startCol + 1) / COL_COUNT) * 100}% - 4px)`,
+    height: barH,
+    background: seg.color,
+    borderRadius: `${seg.continuesLeft ? 0 : 4}px ${seg.continuesRight ? 0 : 4}px ${seg.continuesRight ? 0 : 4}px ${seg.continuesLeft ? 0 : 4}px`,
+    cursor: 'pointer',
+    display: 'flex',
+    alignItems: isWeekLayout ? 'stretch' : 'center',
+    overflow: 'hidden',
+    opacity: isDimmed ? 0.3 : 1,
+    outline: isSelected ? '2px solid var(--primary)' : seg.isActiveMatch ? '2px solid #f59e0b' : seg.isMatch ? '1px solid #f59e0b' : 'none',
+    outlineOffset: 1,
+    boxShadow: seg.isActiveMatch ? '0 0 0 3px rgba(245,158,11,0.3)' : 'none',
+    userSelect: 'none',
+    zIndex: isSelected ? 3 : 1,
+    pointerEvents: 'auto',
+  };
+
+  return (
+    <div style={style}
+      onClick={e => onClick(seg.activityId, e)}
+      onPointerDown={e => {
+        const rect = e.currentTarget.getBoundingClientRect();
+        const x = e.clientX - rect.left;
+        if (x < EDGE_W && !seg.continuesLeft) {
+          onPointerDown(e, seg.activityId, 'resize-start');
+        } else if (x > rect.width - EDGE_W && !seg.continuesRight) {
+          onPointerDown(e, seg.activityId, 'resize-end');
+        } else {
+          onPointerDown(e, seg.activityId, 'move');
+        }
+      }}
+    >
+      {!seg.continuesLeft  && <div style={{ ...EDGE_STYLE, left: 0 }} />}
+      {!seg.continuesRight && <div style={{ ...EDGE_STYLE, right: 0, left: 'auto' }} />}
+
+      {isWeekLayout ? (
+        /* Week view: 3-line layout — title+assignees / status / tags */
+        <div style={WEEK_BAR_CONTENT}>
+          {/* Row 1: title + assignees */}
+          <div style={WEEK_TITLE_ROW}>
+            {seg.continuesLeft && <span style={{ fontSize: 10, color: '#fff', flexShrink: 0 }}>◀</span>}
+            <span style={BAR_TITLE_TEXT}>{seg.title}</span>
+            {assigneeNames.length > 0 && (
+              <span style={BAR_ASSIGNEE_TEXT}>{assigneeNames.join(', ')}</span>
+            )}
+            {seg.continuesRight && <span style={{ fontSize: 10, color: '#fff', flexShrink: 0 }}>▶</span>}
+          </div>
+          {/* Row 2: status chip */}
+          <div style={STATUS_CHIP_ROW}>
+            {seg.statusName ? (
+              <span style={{
+                display: 'inline-flex', alignItems: 'center', gap: 3,
+                padding: '1px 5px', borderRadius: 3, fontSize: 10, fontWeight: 500,
+                background: seg.statusColor ? `color-mix(in srgb, ${seg.statusColor} 25%, rgba(255,255,255,0.15))` : 'rgba(255,255,255,0.15)',
+                color: '#fff',
+                border: `1px solid ${seg.statusColor ? `color-mix(in srgb, ${seg.statusColor} 50%, rgba(255,255,255,0.2))` : 'rgba(255,255,255,0.25)'}`,
+                whiteSpace: 'nowrap', maxWidth: '100%', overflow: 'hidden',
+              }}>
+                <span style={{ width: 6, height: 6, borderRadius: '50%', background: seg.statusColor ?? 'rgba(255,255,255,0.7)', flexShrink: 0 }} />
+                <span style={CHIP_TEXT}>{seg.statusName}</span>
+              </span>
+            ) : null}
+          </div>
+          {/* Row 3: tag chips */}
+          <div style={TAGS_ROW}>
+            {(seg.tags ?? []).slice(0, 3).map((t, i) => (
+              <span key={i} style={{
+                display: 'inline-block', padding: '1px 5px', borderRadius: 3, fontSize: 10,
+                background: t.color ? `color-mix(in srgb, ${t.color} 25%, rgba(255,255,255,0.15))` : 'rgba(255,255,255,0.15)',
+                color: '#fff',
+                border: `1px solid ${t.color ? `color-mix(in srgb, ${t.color} 50%, rgba(255,255,255,0.2))` : 'rgba(255,255,255,0.25)'}`,
+                whiteSpace: 'nowrap', flexShrink: 0,
+              }}>
+                {t.name}
+              </span>
+            ))}
+          </div>
+        </div>
+      ) : (
+        /* Month view: single-line layout */
+        <>
+          {seg.continuesLeft && <span style={{ fontSize: 10, color: '#fff', paddingLeft: 2, pointerEvents: 'none', flexShrink: 0 }}>◀</span>}
+          <span style={{ ...BAR_TITLE_TEXT, padding: '0 4px', pointerEvents: 'none' }}>{seg.title}</span>
+          {assigneeNames.length > 0 && (
+            <span style={{ ...BAR_ASSIGNEE_TEXT, paddingRight: 4, pointerEvents: 'none' }}>
+              {assigneeNames.join(', ')}
+            </span>
+          )}
+          {seg.continuesRight && <span style={{ fontSize: 10, color: '#fff', paddingRight: 2, pointerEvents: 'none', flexShrink: 0 }}>▶</span>}
+        </>
+      )}
+    </div>
+  );
+}
+
+// ── Month row-height resize handle ────────────────────────────────────────────
+
+function RowResizeHandle({ weekStart, currentCap, laneCount, onCapDraft, onCapCommit }: {
+  weekStart: Date;
+  currentCap: number;
+  laneCount: number;
+  onCapDraft: (weekStart: Date, newCap: number) => void;
+  onCapCommit: (weekStart: Date, newCap: number) => void;
+}) {
+  const isDragging = useRef(false);
+  const startY = useRef(0);
+  const startCap = useRef(0);
+  const lastCap = useRef(currentCap);
+
+  return (
+    <div
+      onPointerDown={e => {
+        e.preventDefault(); e.stopPropagation();
+        isDragging.current = true;
+        startY.current = e.clientY;
+        startCap.current = currentCap;
+        lastCap.current = currentCap;
+        e.currentTarget.setPointerCapture(e.pointerId);
+      }}
+      onPointerMove={e => {
+        if (!isDragging.current) return;
+        const dy = e.clientY - startY.current;
+        const newCap = Math.max(1, Math.min(laneCount || 6, startCap.current + Math.floor(dy / LANE_SLOT_H)));
+        if (newCap !== lastCap.current) { lastCap.current = newCap; onCapDraft(weekStart, newCap); }
+      }}
+      onPointerUp={e => {
+        if (isDragging.current) onCapCommit(weekStart, lastCap.current);
+        isDragging.current = false;
+        e.currentTarget.releasePointerCapture(e.pointerId);
+      }}
+      style={{ height: ROW_RESIZE_H, cursor: 'ns-resize', background: 'transparent', borderTop: '1px solid var(--border)', transition: 'background 0.15s' }}
+      onMouseEnter={e => { (e.currentTarget as HTMLElement).style.background = 'var(--muted)'; }}
+      onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = 'transparent'; }}
+      title="Drag to show more or fewer activities"
+    />
+  );
+}
+
+// ── WeekRowRenderer ───────────────────────────────────────────────────────────
+
+const DOW_LABELS_MON = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+const DOW_LABELS_SUN = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+function WeekRowRenderer({
+  row,
+  isFirst,
+  layout,
+  weekStartDay,
+  activityById,
+  memberById,
+  selectedActivityId,
+  hasQuery,
+  today,
+  /** The dragged bar's live position in this week row (or null if not overlapping). */
+  liveSeg,
+  /** Activity ID being dragged — to suppress the original static segment. */
+  dragActivityId,
+  onBarPointerDown,
+  onBarClick,
+  onCellClick,
+  onCapDraft,
+  onCapCommit,
+}: {
+  row: WeekRow;
+  isFirst: boolean;
+  layout: CalendarLayout;
+  weekStartDay: 0 | 1;
+  activityById: Map<string, ApiActivity>;
+  memberById: Record<string, Member>;
+  selectedActivityId: string | null;
+  hasQuery: boolean;
+  today: Date;
+  liveSeg: LiveSegment | null;
+  dragActivityId: string | null;
+  onBarPointerDown: (e: React.PointerEvent, activityId: string, type: DragType) => void;
+  onBarClick: (activityId: string, e: React.MouseEvent) => void;
+  onCellClick: (date: Date) => void;
+  onCapDraft: (weekStart: Date, newCap: number) => void;
+  onCapCommit: (weekStart: Date, newCap: number) => void;
+}) {
+  const [popover, setPopover] = useState<{ col: number; rect: DOMRect } | null>(null);
+  const overflows = useMemo(() => overflowCountsForWeek(row), [row]);
+  const dowLabels = weekStartDay === 0 ? DOW_LABELS_SUN : DOW_LABELS_MON;
+  const todayISO = today.toISOString().slice(0, 10);
+  const isWeek = layout === 'week';
+  const dayHeaderH  = isWeek ? WEEK_DAY_HEADER_H : MONTH_DAY_HEADER_H;
+  const barH        = isWeek ? WEEK_BAR_H      : BAR_H;
+  const laneSlotH   = isWeek ? WEEK_LANE_SLOT_H : LANE_SLOT_H;
+
+  // Month: cap-filtered. Week: all segments. Either way, suppress the dragged bar's
+  // static position so only the live overlay renders.
+  const staticSegments = (isWeek ? row.segments : row.segments.filter(s => s.lane < row.visibleLaneCap))
+    .filter(s => s.activityId !== dragActivityId);
+
+  // Week: min-height ensures all lanes are visible even if flex container is small.
+  const weekMinH = WEEK_DAY_HEADER_H + row.laneCount * WEEK_LANE_SLOT_H + 40;
+
+  const rowStyle: React.CSSProperties = isWeek
+    ? { position: 'relative', flex: 1, minHeight: weekMinH, borderBottom: '1px solid var(--border)' }
+    : { position: 'relative', height: monthRowH(row.visibleLaneCap), borderBottom: '1px solid var(--border)' };
+
+  return (
+    <div style={rowStyle}>
+      {/* Day cells — borders, date headers, click zones */}
+      <div style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: isWeek ? 0 : ROW_RESIZE_H, display: 'grid', gridTemplateColumns: `repeat(${COL_COUNT}, 1fr)` }}>
+        {row.days.map((day, col) => {
+          const dayISO = day.toISOString().slice(0, 10);
+          const isToday = dayISO === todayISO;
+          const overflowCount = isWeek ? 0 : overflows[col];
+          return (
+            <div key={col} data-date={dayISO}
+              style={{ borderRight: col < COL_COUNT - 1 ? '1px solid var(--border)' : 'none', background: isToday ? 'color-mix(in srgb, var(--primary) 6%, transparent)' : 'transparent', position: 'relative', cursor: 'default' }}
+              onClick={e => { if ((e.target as HTMLElement).closest('[data-bar]')) return; onCellClick(day); }}
+            >
+              {isWeek ? (
+                /* Week view: prominent centered header */
+                <div style={WEEK_CELL_HEADER}>
+                  <span style={WEEK_DOW_LABEL}>{dowLabels[col]}</span>
+                  <span style={{ fontSize: 22, fontWeight: isToday ? 700 : 400, color: isToday ? 'var(--primary)' : 'var(--foreground)', lineHeight: 1 }}>
+                    {day.getUTCDate()}
+                  </span>
+                </div>
+              ) : (
+                <>
+                  {isFirst && (
+                    <div style={MONTH_DOW_ROW}>{dowLabels[col]}</div>
+                  )}
+                  <div style={{ position: 'absolute', top: isFirst ? 13 : 6, right: 6, fontSize: 11, fontWeight: isToday ? 700 : 400, color: isToday ? 'var(--primary)' : 'var(--muted-foreground)', lineHeight: 1, pointerEvents: 'none' }}>
+                    {day.getUTCDate()}
+                  </div>
+                  {overflowCount > 0 && (
+                    <button style={{ position: 'absolute', bottom: OVERFLOW_H / 2 - 8, left: 2, right: 2, height: 16, fontSize: 10, color: 'var(--muted-foreground)', background: 'var(--muted)', border: 'none', borderRadius: 3, cursor: 'pointer', padding: 0 }}
+                      onClick={e => { e.stopPropagation(); const rect = e.currentTarget.getBoundingClientRect(); setPopover(p => p?.col === col ? null : { col, rect }); }}
+                    >
+                      +{overflowCount} more
+                    </button>
+                  )}
+                </>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Static activity bars (the dragged bar is suppressed here) */}
+      {staticSegments.map(seg => {
+        const act = activityById.get(seg.activityId);
+        if (!act) return null;
+        return (
+          <div key={seg.activityId} style={OVERLAY_WRAPPER}>
+            <div style={OVERLAY_INNER}>
+              <CalendarBar
+                seg={seg}
+                topPx={dayHeaderH + seg.lane * laneSlotH}
+                barH={barH}
+                isSelected={selectedActivityId === seg.activityId}
+                hasQuery={hasQuery}
+                isWeekLayout={isWeek}
+                memberById={memberById}
+                onPointerDown={onBarPointerDown}
+                onClick={onBarClick}
+              />
+            </div>
+          </div>
+        );
+      })}
+
+      {/* Live drag overlay: the dragged bar at its current position */}
+      {liveSeg && dragActivityId && (() => {
+        const origSeg = row.segments.find(s => s.activityId === dragActivityId) ?? row.segments[0];
+        const displaySeg: CalendarSegment = {
+          activityId: dragActivityId,
+          startCol: liveSeg.startCol,
+          endCol: liveSeg.endCol,
+          lane: origSeg?.lane ?? 0,
+          continuesLeft: liveSeg.continuesLeft,
+          continuesRight: liveSeg.continuesRight,
+          color: liveSeg.color,
+          title: activityById.get(dragActivityId)?.title ?? '',
+          icon: activityById.get(dragActivityId)?.icon ?? undefined,
+          assignedMemberIds: activityById.get(dragActivityId)?.assignedMemberIds ?? [],
+          isMatch: false,
+          isActiveMatch: false,
+        };
+        return (
+          <div style={OVERLAY_WRAPPER}>
+            <div style={OVERLAY_INNER}>
+              <CalendarBar
+                seg={displaySeg}
+                topPx={dayHeaderH + displaySeg.lane * laneSlotH}
+                barH={barH}
+                isSelected={selectedActivityId === dragActivityId}
+                hasQuery={false}
+                isWeekLayout={isWeek}
+                memberById={memberById}
+                onPointerDown={onBarPointerDown}
+                onClick={onBarClick}
+              />
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* Month resize handle */}
+      {!isWeek && (
+        <div style={ROW_RESIZE_WRAPPER}>
+          <RowResizeHandle weekStart={row.weekStart} currentCap={row.visibleLaneCap} laneCount={row.laneCount} onCapDraft={onCapDraft} onCapCommit={onCapCommit} />
+        </div>
+      )}
+
+      {/* Overflow popover */}
+      {popover && (
+        <DayOverflowPopover
+          segments={segmentsForDay(row, popover.col)}
+          activityById={activityById}
+          dayDate={row.days[popover.col]}
+          anchorRect={popover.rect}
+          onSelect={act => { onBarClick(act.id, new MouseEvent('click') as unknown as React.MouseEvent); }}
+          onClose={() => setPopover(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+// ── CalendarGrid ──────────────────────────────────────────────────────────────
+
+export interface CalendarGridProps {
+  weeks: WeekRow[];
+  layout: CalendarLayout;
+  weekStartDay: 0 | 1;
+  activityById: Map<string, ApiActivity>;
+  memberById: Record<string, Member>;
+  selectedActivityId: string | null;
+  hasQuery: boolean;
+  today: Date;
+  onSelectActivity: (act: ApiActivity | null) => void;
+  onCellClick: (date: Date) => void;
+  onBarDragProgress: (activityId: string, newStart: Date, newEnd: Date) => void;
+  onBarDragEnd: () => void;
+  onBarDragCommit: (activityId: string, newStart: Date, newEnd: Date) => void;
+  onCapDraft: (weekStart: Date, newCap: number) => void;
+  onCapCommit: (weekStart: Date, newCap: number) => void;
+}
+
+export default function CalendarGrid({
+  weeks,
+  layout,
+  weekStartDay,
+  activityById,
+  memberById,
+  selectedActivityId,
+  hasQuery,
+  today,
+  onSelectActivity,
+  onCellClick,
+  onBarDragProgress,
+  onBarDragEnd,
+  onBarDragCommit,
+  onCapDraft,
+  onCapCommit,
+}: CalendarGridProps) {
+  const [dragState, setDragState] = useState<DragState | null>(null);
+
+  // Ref for the latest drag position — prevents stale closure in the useEffect.
+  const liveDragRef = useRef<{ start: Date; end: Date } | null>(null);
+
+  // Refs for callbacks so the useEffect never captures stale props.
+  const onBarDragProgressRef = useRef(onBarDragProgress);
+  const onBarDragEndRef      = useRef(onBarDragEnd);
+  const onBarDragCommitRef   = useRef(onBarDragCommit);
+  const onSelectActivityRef  = useRef(onSelectActivity);
+  const activityByIdRef      = useRef(activityById);
+  useEffect(() => { onBarDragProgressRef.current = onBarDragProgress; }, [onBarDragProgress]);
+  useEffect(() => { onBarDragEndRef.current      = onBarDragEnd; },      [onBarDragEnd]);
+  useEffect(() => { onBarDragCommitRef.current   = onBarDragCommit; },   [onBarDragCommit]);
+  useEffect(() => { onSelectActivityRef.current  = onSelectActivity; },  [onSelectActivity]);
+  useEffect(() => { activityByIdRef.current      = activityById; },      [activityById]);
+
+  // ── Drag ────────────────────────────────────────────────────────────────────
+
+  const handleBarPointerDown = useCallback((
+    e: React.PointerEvent,
+    activityId: string,
+    type: DragType,
+  ) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const act = activityById.get(activityId);
+    if (!act) return;
+    const originalStart = utcMidnight(act.startAt);
+    const originalEnd   = utcMidnight(act.endAt);
+
+    // Use elementsFromPoint to find the day cell beneath the bar.
+    const clickedDay = dayAtPoint(e.clientX, e.clientY);
+    const grabOffsetDays = clickedDay ? daysDiff(originalStart, clickedDay) : 0;
+
+    liveDragRef.current = { start: originalStart, end: originalEnd };
+    setDragState({ activityId, type, originalStart, originalEnd, grabOffsetDays, currentStart: originalStart, currentEnd: originalEnd });
+  }, [activityById]);
+
+  useEffect(() => {
+    if (!dragState) return;
+    const ds = dragState;
+    const originalSpan = daysDiff(ds.originalStart, ds.originalEnd);
+
+    function onPointerMove(e: PointerEvent) {
+      const targetDay = dayAtPoint(e.clientX, e.clientY);
+      if (!targetDay) return;
+
+      let newStart: Date;
+      let newEnd: Date;
+
+      if (ds.type === 'move') {
+        newStart = new Date(targetDay);
+        newStart.setUTCDate(targetDay.getUTCDate() - ds.grabOffsetDays);
+        newEnd = new Date(newStart);
+        newEnd.setUTCDate(newStart.getUTCDate() + originalSpan);
+      } else if (ds.type === 'resize-start') {
+        newStart = targetDay < ds.originalEnd ? targetDay : ds.originalEnd;
+        newEnd   = ds.originalEnd;
+      } else {
+        newStart = ds.originalStart;
+        newEnd   = targetDay > ds.originalStart ? targetDay : ds.originalStart;
+      }
+
+      liveDragRef.current = { start: newStart, end: newEnd };
+      setDragState(prev => prev ? { ...prev, currentStart: newStart, currentEnd: newEnd } : null);
+      onBarDragProgressRef.current(ds.activityId, newStart, newEnd);
+    }
+
+    function onPointerUp() {
+      const live = liveDragRef.current;
+      liveDragRef.current = null;
+      if (live) {
+        const changed =
+          live.start.getTime() !== ds.originalStart.getTime() ||
+          live.end.getTime()   !== ds.originalEnd.getTime();
+        if (changed) {
+          onBarDragCommitRef.current(ds.activityId, live.start, live.end);
+        } else {
+          // No movement — treat as a click. The DOM click event is unreliable
+          // here because pointerdown removes the bar from staticSegments and
+          // re-adds it after pointerup, so the click event fires on a
+          // different DOM node. Drive selection from the pointer lifecycle.
+          onSelectActivityRef.current(activityByIdRef.current.get(ds.activityId) ?? null);
+        }
+      }
+      onBarDragEndRef.current();
+      setDragState(null);
+    }
+
+    document.addEventListener('pointermove', onPointerMove);
+    document.addEventListener('pointerup', onPointerUp);
+    return () => {
+      document.removeEventListener('pointermove', onPointerMove);
+      document.removeEventListener('pointerup', onPointerUp);
+    };
+  // Depend only on activityId + type, not the full dragState object — currentStart/currentEnd
+  // update on every pointermove frame, which would thrash listener registration if included.
+  // All callbacks are accessed via refs (onBarDragCommitRef etc.) so closures stay fresh
+  // without being listed as deps.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dragState?.activityId, dragState?.type]);
+
+  // ── Live drag overlay across all weeks ──────────────────────────────────────
+
+  // Compute where the dragged bar currently sits in EVERY week row.
+  // This drives real-time rendering across week boundaries, even in weeks
+  // that didn't originally contain the bar.
+  const liveSegs: (LiveSegment | null)[] = useMemo(() => {
+    if (!dragState) return weeks.map(() => null);
+    const { activityId, currentStart, currentEnd } = dragState;
+
+    // Find the bar's color from any original segment.
+    let color = '#6b7280';
+    for (const row of weeks) {
+      const s = row.segments.find(s => s.activityId === activityId);
+      if (s) { color = s.color; break; }
+    }
+
+    return weeks.map(row => {
+      const weekEnd = row.days[6];
+      if (currentEnd < row.weekStart || currentStart > weekEnd) return null;
+      const rawStart = daysDiff(row.weekStart, currentStart);
+      const rawEnd   = daysDiff(row.weekStart, currentEnd);
+      return {
+        startCol: Math.max(0, rawStart),
+        endCol:   Math.min(6, rawEnd),
+        continuesLeft:  rawStart < 0,
+        continuesRight: rawEnd > 6,
+        color,
+      };
+    });
+  }, [dragState, weeks]);
+
+  const handleBarClick = useCallback((activityId: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    onSelectActivity(activityById.get(activityId) ?? null);
+  }, [activityById, onSelectActivity]);
+
+  // ── Render ──────────────────────────────────────────────────────────────────
+
+  const isWeek = layout === 'week';
+
+  const outerStyle: React.CSSProperties = isWeek
+    ? { flex: 1, display: 'flex', flexDirection: 'column', overflowY: 'auto', background: 'var(--background)' }
+    : { flex: 1, overflow: 'auto', background: 'var(--background)' };
+
+  const innerStyle: React.CSSProperties = isWeek
+    ? { flex: 1, display: 'flex', flexDirection: 'column', minWidth: 420, cursor: dragState ? 'grabbing' : undefined }
+    : { minWidth: 420, cursor: dragState ? 'grabbing' : undefined };
+
+  return (
+    <div style={outerStyle}>
+      <div style={innerStyle}>
+        {weeks.map((row, wi) => (
+          <WeekRowRenderer
+            key={row.weekStart.toISOString()}
+            row={row}
+            isFirst={wi === 0}
+            layout={layout}
+            weekStartDay={weekStartDay}
+            activityById={activityById}
+            memberById={memberById}
+            selectedActivityId={selectedActivityId}
+            hasQuery={hasQuery}
+            today={today}
+            liveSeg={liveSegs[wi]}
+            dragActivityId={dragState?.activityId ?? null}
+            onBarPointerDown={handleBarPointerDown}
+            onBarClick={handleBarClick}
+            onCellClick={onCellClick}
+            onCapDraft={onCapDraft}
+            onCapCommit={onCapCommit}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+````
+
 ## File: packages/web/src/components/calendar/CalendarView.tsx
 ````typescript
 /**
@@ -24305,6 +25083,101 @@ export function useWebSocket({ token, teamIds = [], onMessage }: Options) {
 
   return { status, subscribe } as const
 }
+````
+
+## File: packages/web/src/lib/activityColor.test.ts
+````typescript
+/**
+ * Tests for resolveActivityColor — the shared color-by helper used by all
+ * three views (Gantt, List, Calendar).
+ */
+
+import { describe, it, expect } from 'vitest';
+import { resolveActivityColor } from './activityColor';
+import { ACTIVITY_COLORS } from '@/types';
+import type { components } from '@draba/shared';
+import type { Member } from '@/types';
+
+type ApiActivity = components['schemas']['Activity'];
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function makeActivity(overrides: Partial<ApiActivity> = {}): ApiActivity {
+  return {
+    id: 'act-1',
+    title: 'Test',
+    timelineId: 'tl-1',
+    startAt: '2026-05-01T00:00:00Z',
+    endAt: '2026-05-02T00:00:00Z',
+    color: '#ff0000',
+    assignedMemberIds: [],
+    createdBy: 'user-1',
+    createdAt: '2026-01-01T00:00:00Z',
+    updatedAt: '2026-01-01T00:00:00Z',
+    ...overrides,
+  } as ApiActivity;
+}
+
+function makeMember(id: string, color: string): Member {
+  return { id, name: 'Test User', initials: 'TU', color };
+}
+
+const NO_MEMBERS: Record<string, Member> = {};
+const NO_STATUS_COLORS = new Map<string, string>();
+
+// ── colorBy='activity' ────────────────────────────────────────────────────────
+
+describe('resolveActivityColor — colorBy=activity', () => {
+  it('returns activity.color when set', () => {
+    const act = makeActivity({ color: '#abcdef' });
+    expect(resolveActivityColor(act, 0, NO_MEMBERS, 'activity', NO_STATUS_COLORS)).toBe('#abcdef');
+  });
+
+  it('cycles through ACTIVITY_COLORS by index when activity.color is null', () => {
+    // reason: the API type allows null but the runtime value can be null
+    const act = makeActivity({ color: null as unknown as string });
+    const result = resolveActivityColor(act, 2, NO_MEMBERS, 'activity', NO_STATUS_COLORS);
+    expect(result).toBe(ACTIVITY_COLORS[2 % ACTIVITY_COLORS.length]);
+  });
+});
+
+// ── colorBy='member' ──────────────────────────────────────────────────────────
+
+describe('resolveActivityColor — colorBy=member', () => {
+  it('returns the primary member color', () => {
+    const member = makeMember('mem-1', '#00ff00');
+    const act = makeActivity({ assignedMemberIds: ['mem-1'] });
+    const result = resolveActivityColor(act, 0, { 'mem-1': member }, 'member', NO_STATUS_COLORS);
+    expect(result).toBe('#00ff00');
+  });
+
+  it('falls back to activity.color when primary member is not in memberById', () => {
+    const act = makeActivity({ assignedMemberIds: ['mem-missing'], color: '#123456' });
+    expect(resolveActivityColor(act, 0, NO_MEMBERS, 'member', NO_STATUS_COLORS)).toBe('#123456');
+  });
+
+  it('falls back to ACTIVITY_COLORS index when member and activity.color are both absent', () => {
+    const act = makeActivity({ assignedMemberIds: [], color: null as unknown as string });
+    const result = resolveActivityColor(act, 1, NO_MEMBERS, 'member', NO_STATUS_COLORS);
+    expect(result).toBe(ACTIVITY_COLORS[1 % ACTIVITY_COLORS.length]);
+  });
+});
+
+// ── colorBy='status' ──────────────────────────────────────────────────────────
+
+describe('resolveActivityColor — colorBy=status', () => {
+  it('returns the status color from the map', () => {
+    // reason: statusId is an optional field added by the API beyond the base type
+    const act = makeActivity({ statusId: 'st-1' } as Partial<ApiActivity>);
+    const statusColors = new Map([['st-1', '#9900ff']]);
+    expect(resolveActivityColor(act, 0, NO_MEMBERS, 'status', statusColors)).toBe('#9900ff');
+  });
+
+  it('falls back to #6b7280 when status is not in the map', () => {
+    const act = makeActivity();
+    expect(resolveActivityColor(act, 0, NO_MEMBERS, 'status', NO_STATUS_COLORS)).toBe('#6b7280');
+  });
+});
 ````
 
 ## File: packages/web/src/lib/activityColor.ts
@@ -36123,6 +36996,315 @@ CREATE INDEX idx_users_email ON users(email);
 PRAGMA foreign_keys=ON;
 ````
 
+## File: packages/api/internal/db/activity_repo.go
+````go
+package db
+
+import (
+	"fmt"
+	"time"
+
+	"github.com/jmoiron/sqlx"
+
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// ActivityRepo is the persistence layer for Activity records.
+type ActivityRepo struct {
+	db *sqlx.DB
+}
+
+// NewActivityRepo returns an ActivityRepo backed by db.
+func NewActivityRepo(db *sqlx.DB) *ActivityRepo {
+	return &ActivityRepo{db: db}
+}
+
+// Create inserts a new Activity row.
+func (r *ActivityRepo) Create(activity *models.Activity) error {
+	_, err := r.db.NamedExec(`
+		INSERT INTO activities (
+			id, timeline_id, title, description, notes, icon, color,
+			start_at, end_at, all_day, status_id, parent_activity_id,
+			percent_complete, location, url, rrule,
+			caldav_uid, google_event_id,
+			created_by, created_at, updated_at
+		) VALUES (
+			:id, :timeline_id, :title, :description, :notes, :icon, :color,
+			:start_at, :end_at, :all_day, :status_id, :parent_activity_id,
+			:percent_complete, :location, :url, :rrule,
+			:caldav_uid, :google_event_id,
+			:created_by, :created_at, :updated_at
+		)
+	`, activity)
+	if err != nil {
+		return fmt.Errorf("creating activity: %w", err)
+	}
+	return nil
+}
+
+// GetByID fetches an Activity by primary key. Returns sql.ErrNoRows (wrapped)
+// when no row matches.
+func (r *ActivityRepo) GetByID(id string) (*models.Activity, error) {
+	var a models.Activity
+	err := r.db.Get(&a, `SELECT * FROM activities WHERE id = ?`, id)
+	if err != nil {
+		return nil, fmt.Errorf("getting activity: %w", err)
+	}
+	return &a, nil
+}
+
+// Update replaces all mutable fields on an existing Activity row.
+func (r *ActivityRepo) Update(activity *models.Activity) error {
+	_, err := r.db.NamedExec(`
+		UPDATE activities SET
+			title              = :title,
+			description        = :description,
+			notes              = :notes,
+			icon               = :icon,
+			color              = :color,
+			start_at           = :start_at,
+			end_at             = :end_at,
+			all_day            = :all_day,
+			status_id          = :status_id,
+			parent_activity_id = :parent_activity_id,
+			percent_complete   = :percent_complete,
+			location           = :location,
+			url                = :url,
+			rrule              = :rrule,
+			updated_at         = :updated_at
+		WHERE id = :id
+	`, activity)
+	if err != nil {
+		return fmt.Errorf("updating activity: %w", err)
+	}
+	return nil
+}
+
+// Delete permanently removes an activity row.
+func (r *ActivityRepo) Delete(id string) error {
+	_, err := r.db.Exec(`DELETE FROM activities WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("deleting activity: %w", err)
+	}
+	return nil
+}
+
+// ClearParentRefs clears parent_activity_id on all activities that reference id
+// as their parent. Called before deleting or archiving the parent so children
+// do not retain a dangling reference.
+func (r *ActivityRepo) ClearParentRefs(id string) error {
+	_, err := r.db.Exec(
+		`UPDATE activities SET parent_activity_id = NULL, updated_at = ? WHERE parent_activity_id = ?`,
+		time.Now().UTC(), id,
+	)
+	if err != nil {
+		return fmt.Errorf("clearing parent refs for %s: %w", id, err)
+	}
+	return nil
+}
+
+// SetArchived sets or clears archived_at on an activity. Pass a non-nil time
+// to archive; pass nil to unarchive.
+func (r *ActivityRepo) SetArchived(id string, at *time.Time) error {
+	_, err := r.db.Exec(
+		`UPDATE activities SET archived_at = ?, updated_at = ? WHERE id = ?`,
+		at, time.Now().UTC(), id,
+	)
+	if err != nil {
+		return fmt.Errorf("setting activity archived_at: %w", err)
+	}
+	return nil
+}
+
+// SetAssignments replaces all activity_assignments for an activity with the
+// provided member IDs. An empty slice removes all assignments.
+func (r *ActivityRepo) SetAssignments(activityID string, memberIDs []string) error {
+	tx, err := r.db.Beginx()
+	if err != nil {
+		return fmt.Errorf("beginning assignment transaction: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	if _, err = tx.Exec(`DELETE FROM activity_assignments WHERE activity_id = ?`, activityID); err != nil {
+		return fmt.Errorf("clearing activity assignments: %w", err)
+	}
+
+	for _, memberID := range memberIDs {
+		if _, err = tx.Exec(
+			`INSERT INTO activity_assignments (activity_id, team_member_id) VALUES (?, ?)`,
+			activityID, memberID,
+		); err != nil {
+			return fmt.Errorf("inserting activity assignment: %w", err)
+		}
+	}
+
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("committing activity assignments: %w", err)
+	}
+	return nil
+}
+
+// GetAssignments returns the team_member_ids assigned to an activity.
+func (r *ActivityRepo) GetAssignments(activityID string) ([]string, error) {
+	var ids []string
+	err := r.db.Select(&ids,
+		`SELECT team_member_id FROM activity_assignments WHERE activity_id = ?`, activityID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("getting activity assignments: %w", err)
+	}
+	if ids == nil {
+		ids = []string{}
+	}
+	return ids, nil
+}
+
+// SetTags replaces all activity_tags for an activity with the provided tag
+// IDs. An empty slice removes all tag associations.
+func (r *ActivityRepo) SetTags(activityID string, tagIDs []string) error {
+	tx, err := r.db.Beginx()
+	if err != nil {
+		return fmt.Errorf("beginning tag transaction: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	if _, err = tx.Exec(`DELETE FROM activity_tags WHERE activity_id = ?`, activityID); err != nil {
+		return fmt.Errorf("clearing activity tags: %w", err)
+	}
+
+	for _, tagID := range tagIDs {
+		if _, err = tx.Exec(
+			`INSERT INTO activity_tags (activity_id, tag_id) VALUES (?, ?)`,
+			activityID, tagID,
+		); err != nil {
+			return fmt.Errorf("inserting activity tag: %w", err)
+		}
+	}
+
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("committing activity tags: %w", err)
+	}
+	return nil
+}
+
+// GetTags returns the tag IDs associated with an activity.
+func (r *ActivityRepo) GetTags(activityID string) ([]string, error) {
+	var ids []string
+	err := r.db.Select(&ids,
+		`SELECT tag_id FROM activity_tags WHERE activity_id = ?`, activityID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("getting activity tags: %w", err)
+	}
+	if ids == nil {
+		ids = []string{}
+	}
+	return ids, nil
+}
+
+// ListByTimeline returns activities for a specific timeline. When
+// includeArchived is false archived rows are excluded. The bounds use overlap
+// semantics: from filters on end_at >= from (so a multi-week activity that
+// starts before the window still appears if it crosses it), and to filters on
+// start_at <= to.
+// AssignedMemberIDs is populated via a second query.
+func (r *ActivityRepo) ListByTimeline(timelineID string, from, to *time.Time, includeArchived bool) ([]*models.Activity, error) {
+	query := `SELECT * FROM activities WHERE timeline_id = ?`
+	args := []any{timelineID}
+	if !includeArchived {
+		query += ` AND archived_at IS NULL`
+	}
+
+	if from != nil {
+		// Overlap semantics: include any activity whose end_at is at or after from.
+		// This catches multi-week/multi-month activities that START before the
+		// visible range but still cross it.
+		query += ` AND end_at >= ?`
+		args = append(args, from)
+	}
+	if to != nil {
+		query += ` AND start_at <= ?`
+		args = append(args, to)
+	}
+	query += ` ORDER BY start_at ASC`
+
+	acts := make([]*models.Activity, 0)
+	if err := r.db.Select(&acts, query, args...); err != nil {
+		return nil, fmt.Errorf("listing activities: %w", err)
+	}
+	if len(acts) == 0 {
+		return acts, nil
+	}
+
+	// Initialise AssignedMemberIDs and TagIDs to empty slices so JSON fields are
+	// always arrays (never null) even when an activity has no assignments or tags.
+	ids := make([]string, len(acts))
+	byID := make(map[string]*models.Activity, len(acts))
+	for i, a := range acts {
+		a.AssignedMemberIDs = []string{}
+		a.TagIDs = []string{}
+		ids[i] = a.ID
+		byID[a.ID] = a
+	}
+
+	asnQuery, asnArgs, err := sqlx.In(
+		`SELECT activity_id, team_member_id FROM activity_assignments WHERE activity_id IN (?)`,
+		ids,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("building assignments query: %w", err)
+	}
+	asnQuery = r.db.Rebind(asnQuery)
+
+	type assignment struct {
+		ActivityID   string `db:"activity_id"`
+		TeamMemberID string `db:"team_member_id"`
+	}
+	var assignments []assignment
+	if err := r.db.Select(&assignments, asnQuery, asnArgs...); err != nil {
+		return nil, fmt.Errorf("listing activity assignments: %w", err)
+	}
+	for _, a := range assignments {
+		if act, ok := byID[a.ActivityID]; ok {
+			act.AssignedMemberIDs = append(act.AssignedMemberIDs, a.TeamMemberID)
+		}
+	}
+
+	tagQuery, tagArgs, err := sqlx.In(
+		`SELECT activity_id, tag_id FROM activity_tags WHERE activity_id IN (?)`,
+		ids,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("building tags query: %w", err)
+	}
+	tagQuery = r.db.Rebind(tagQuery)
+
+	type activityTag struct {
+		ActivityID string `db:"activity_id"`
+		TagID      string `db:"tag_id"`
+	}
+	var actTags []activityTag
+	if err := r.db.Select(&actTags, tagQuery, tagArgs...); err != nil {
+		return nil, fmt.Errorf("listing activity tags: %w", err)
+	}
+	for _, at := range actTags {
+		if act, ok := byID[at.ActivityID]; ok {
+			act.TagIDs = append(act.TagIDs, at.TagID)
+		}
+	}
+
+	return acts, nil
+}
+````
+
 ## File: packages/api/internal/db/migrations.go
 ````go
 package db
@@ -37638,784 +38820,6 @@ CMD ["draba"]
       "expected": { "a1": false, "a2": true, "a3": false, "a4": false }
     }
   ]
-}
-````
-
-## File: packages/web/src/components/calendar/CalendarGrid.tsx
-````typescript
-/**
- * CalendarGrid — presentational grid for the Calendar view.
- *
- * Month (6-week) and Week (1-week) all-day-bar layouts.
- */
-
-import {
-  useRef,
-  useState,
-  useCallback,
-  useEffect,
-  useMemo,
-} from 'react';
-import type { CalendarLayout } from './CalendarToolbar';
-import type { WeekRow, CalendarSegment } from '@/lib/calendarLanes';
-import { overflowCountsForWeek, segmentsForDay, daysDiff } from '@/lib/calendarLanes';
-import type { components } from '@draba/shared';
-import type { Member } from '@/types';
-
-type ApiActivity = components['schemas']['Activity'];
-
-// ── Layout constants ──────────────────────────────────────────────────────────
-
-const MONTH_DAY_HEADER_H = 28;
-const WEEK_DAY_HEADER_H  = 60;
-const BAR_H           = 20;
-const LANE_SLOT_H     = 24;
-const WEEK_BAR_H      = 66;   // 3-line bar for week view
-const WEEK_LANE_SLOT_H = 70;  // WEEK_BAR_H + 4px gap
-const OVERFLOW_H   = 20;   // reserved for "+N more" chips (month)
-const EDGE_W       = 8;    // resize hit-zone on bar edges
-const ROW_RESIZE_H = 6;    // month row-height drag strip
-const COL_COUNT    = 7;
-
-// ── Drag state ────────────────────────────────────────────────────────────────
-
-type DragType = 'move' | 'resize-start' | 'resize-end';
-
-interface DragState {
-  activityId: string;
-  type: DragType;
-  originalStart: Date;
-  originalEnd: Date;
-  grabOffsetDays: number;
-  currentStart: Date;
-  currentEnd: Date;
-}
-
-/** Per-week position of the dragged bar during live drag. */
-interface LiveSegment {
-  startCol: number;
-  endCol: number;
-  continuesLeft: boolean;
-  continuesRight: boolean;
-  color: string;
-}
-
-// ── Style constants ───────────────────────────────────────────────────────────
-// Defining static React.CSSProperties objects at module level avoids creating
-// new object references on every render and keeps the JSX readable.
-
-/** Invisible pointer hit zone on each resizable bar edge. */
-const EDGE_STYLE: React.CSSProperties = {
-  position: 'absolute', top: 0, height: '100%',
-  width: EDGE_W, cursor: 'ew-resize', zIndex: 2,
-};
-
-/** Full-coverage absolutely-positioned wrapper for bar overlay layers. */
-const OVERLAY_WRAPPER: React.CSSProperties = {
-  position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, pointerEvents: 'none',
-};
-const OVERLAY_INNER: React.CSSProperties = {
-  position: 'relative', height: '100%', pointerEvents: 'none',
-};
-
-// Overflow popover
-const POPOVER_HEADER: React.CSSProperties = {
-  padding: '8px 12px', borderBottom: '1px solid var(--border)',
-  fontSize: 12, fontWeight: 600, color: 'var(--foreground)',
-};
-const POPOVER_BODY: React.CSSProperties = { maxHeight: 260, overflowY: 'auto' };
-const POPOVER_ITEM_BASE: React.CSSProperties = {
-  display: 'flex', alignItems: 'center', gap: 8, width: '100%', padding: '7px 12px',
-  background: 'none', border: 'none', textAlign: 'left', cursor: 'pointer',
-  fontSize: 12, color: 'var(--foreground)', borderBottom: '1px solid var(--border)',
-};
-const POPOVER_LABEL: React.CSSProperties = {
-  flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-};
-
-// Activity bar content
-const WEEK_BAR_CONTENT: React.CSSProperties = {
-  display: 'flex', flexDirection: 'column', justifyContent: 'center',
-  padding: '4px 6px', flex: 1, minWidth: 0, overflow: 'hidden',
-  gap: 3, pointerEvents: 'none',
-};
-const WEEK_TITLE_ROW: React.CSSProperties = {
-  display: 'flex', alignItems: 'center', gap: 4, overflow: 'hidden',
-};
-const BAR_TITLE_TEXT: React.CSSProperties = {
-  fontSize: 11, fontWeight: 500, color: '#fff',
-  overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis',
-  flex: 1, minWidth: 0,
-};
-const BAR_ASSIGNEE_TEXT: React.CSSProperties = {
-  fontSize: 10, color: 'rgba(255,255,255,0.85)',
-  whiteSpace: 'nowrap', flexShrink: 0,
-  maxWidth: '45%', overflow: 'hidden', textOverflow: 'ellipsis',
-};
-const STATUS_CHIP_ROW: React.CSSProperties = { overflow: 'hidden', lineHeight: '14px' };
-const TAGS_ROW: React.CSSProperties = { display: 'flex', gap: 3, overflow: 'hidden', lineHeight: '14px' };
-const CHIP_TEXT: React.CSSProperties = { overflow: 'hidden', textOverflow: 'ellipsis' };
-
-// Week-layout day-header cell
-const WEEK_CELL_HEADER: React.CSSProperties = {
-  display: 'flex', flexDirection: 'column', alignItems: 'center',
-  justifyContent: 'center', height: WEEK_DAY_HEADER_H, gap: 2,
-  borderBottom: '1px solid var(--border)', pointerEvents: 'none',
-};
-const WEEK_DOW_LABEL: React.CSSProperties = {
-  fontSize: 11, fontWeight: 500, color: 'var(--muted-foreground)',
-  textTransform: 'uppercase', letterSpacing: '0.05em',
-};
-
-// Month-layout day-header cell
-const MONTH_DOW_ROW: React.CSSProperties = {
-  fontSize: 10, color: 'var(--muted-foreground)',
-  textAlign: 'center', paddingTop: 4, pointerEvents: 'none',
-};
-
-const ROW_RESIZE_WRAPPER: React.CSSProperties = {
-  position: 'absolute', bottom: 0, left: 0, right: 0,
-};
-
-// ── Utility ───────────────────────────────────────────────────────────────────
-
-function utcMidnight(iso: string): Date {
-  return new Date(iso.slice(0, 10) + 'T00:00:00Z');
-}
-
-/**
- * Find the calendar day under the cursor.
- * Uses elementsFromPoint (plural) so the bar element (pointer-events: auto)
- * doesn't occlude the day cell's data-date attribute beneath it.
- */
-function dayAtPoint(x: number, y: number): Date | null {
-  const elements = document.elementsFromPoint(x, y);
-  for (const el of elements) {
-    const iso = (el as HTMLElement).dataset?.date;
-    if (iso) return new Date(iso + 'T00:00:00Z');
-  }
-  return null;
-}
-
-function monthRowH(cap: number): number {
-  return MONTH_DAY_HEADER_H + cap * LANE_SLOT_H + OVERFLOW_H + ROW_RESIZE_H;
-}
-
-// ── DayOverflowPopover ────────────────────────────────────────────────────────
-
-function DayOverflowPopover({ segments, activityById, dayDate, anchorRect, onSelect, onClose }: {
-  segments: CalendarSegment[];
-  activityById: Map<string, ApiActivity>;
-  dayDate: Date;
-  anchorRect: DOMRect;
-  onSelect: (act: ApiActivity) => void;
-  onClose: () => void;
-}) {
-  const ref = useRef<HTMLDivElement>(null);
-  // Close on any mousedown outside the popover. Capture phase fires before bar
-  // click handlers, preventing a bar click from immediately re-opening the popover
-  // on the same event that dismissed it.
-  useEffect(() => {
-    function onDown(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
-    }
-    document.addEventListener('mousedown', onDown, true);
-    return () => document.removeEventListener('mousedown', onDown, true);
-  }, [onClose]);
-  const label = dayDate.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
-  return (
-    <div ref={ref} style={{ position: 'fixed', top: anchorRect.bottom + 4, left: Math.min(anchorRect.left, window.innerWidth - 280), width: 260, background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 8, boxShadow: '0 4px 20px rgba(0,0,0,0.2)', zIndex: 200, overflow: 'hidden' }}>
-      <div style={POPOVER_HEADER}>{label}</div>
-      <div style={POPOVER_BODY}>
-        {segments.map(seg => {
-          const act = activityById.get(seg.activityId);
-          if (!act) return null;
-          return (
-            <button key={seg.activityId} onClick={() => { onSelect(act); onClose(); }}
-              style={POPOVER_ITEM_BASE}
-              onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-              onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-            >
-              <span style={{ width: 10, height: 10, borderRadius: 3, background: seg.color, flexShrink: 0 }} />
-              <span style={POPOVER_LABEL}>{seg.title}</span>
-            </button>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-// ── CalendarBar ───────────────────────────────────────────────────────────────
-
-interface BarProps {
-  // Always a full CalendarSegment — the live-drag overlay constructs displaySeg
-  // as CalendarSegment (populating all required fields) rather than passing a
-  // raw LiveSegment, so we can keep a single concrete type here.
-  seg: CalendarSegment;
-  topPx: number;
-  barH: number;
-  isSelected: boolean;
-  hasQuery: boolean;
-  isWeekLayout: boolean;
-  memberById: Record<string, Member>;
-  onPointerDown: (e: React.PointerEvent, activityId: string, type: DragType) => void;
-  onClick: (activityId: string, e: React.MouseEvent) => void;
-}
-
-function CalendarBar({ seg, topPx, barH, isSelected, hasQuery, isWeekLayout, memberById, onPointerDown, onClick }: BarProps) {
-  const isHighlighted = seg.isMatch || seg.isActiveMatch;
-  const isDimmed = hasQuery && !isHighlighted;
-
-  const assigneeNames = seg.assignedMemberIds
-    .slice(0, 3)
-    .map(id => memberById[id]?.name?.split(' ')[0])
-    .filter((n): n is string => Boolean(n));
-
-  const style: React.CSSProperties = {
-    position: 'absolute',
-    top: topPx + 2,
-    left: `calc(${(seg.startCol / COL_COUNT) * 100}% + 2px)`,
-    width: `calc(${((seg.endCol - seg.startCol + 1) / COL_COUNT) * 100}% - 4px)`,
-    height: barH,
-    background: seg.color,
-    borderRadius: `${seg.continuesLeft ? 0 : 4}px ${seg.continuesRight ? 0 : 4}px ${seg.continuesRight ? 0 : 4}px ${seg.continuesLeft ? 0 : 4}px`,
-    cursor: 'pointer',
-    display: 'flex',
-    alignItems: isWeekLayout ? 'stretch' : 'center',
-    overflow: 'hidden',
-    opacity: isDimmed ? 0.3 : 1,
-    outline: isSelected ? '2px solid var(--primary)' : seg.isActiveMatch ? '2px solid #f59e0b' : seg.isMatch ? '1px solid #f59e0b' : 'none',
-    outlineOffset: 1,
-    boxShadow: seg.isActiveMatch ? '0 0 0 3px rgba(245,158,11,0.3)' : 'none',
-    userSelect: 'none',
-    zIndex: isSelected ? 3 : 1,
-    pointerEvents: 'auto',
-  };
-
-  return (
-    <div style={style}
-      onClick={e => onClick(seg.activityId, e)}
-      onPointerDown={e => {
-        const rect = e.currentTarget.getBoundingClientRect();
-        const x = e.clientX - rect.left;
-        if (x < EDGE_W && !seg.continuesLeft) {
-          onPointerDown(e, seg.activityId, 'resize-start');
-        } else if (x > rect.width - EDGE_W && !seg.continuesRight) {
-          onPointerDown(e, seg.activityId, 'resize-end');
-        } else {
-          onPointerDown(e, seg.activityId, 'move');
-        }
-      }}
-    >
-      {!seg.continuesLeft  && <div style={{ ...EDGE_STYLE, left: 0 }} />}
-      {!seg.continuesRight && <div style={{ ...EDGE_STYLE, right: 0, left: 'auto' }} />}
-
-      {isWeekLayout ? (
-        /* Week view: 3-line layout — title+assignees / status / tags */
-        <div style={WEEK_BAR_CONTENT}>
-          {/* Row 1: title + assignees */}
-          <div style={WEEK_TITLE_ROW}>
-            {seg.continuesLeft && <span style={{ fontSize: 10, color: '#fff', flexShrink: 0 }}>◀</span>}
-            <span style={BAR_TITLE_TEXT}>{seg.title}</span>
-            {assigneeNames.length > 0 && (
-              <span style={BAR_ASSIGNEE_TEXT}>{assigneeNames.join(', ')}</span>
-            )}
-            {seg.continuesRight && <span style={{ fontSize: 10, color: '#fff', flexShrink: 0 }}>▶</span>}
-          </div>
-          {/* Row 2: status chip */}
-          <div style={STATUS_CHIP_ROW}>
-            {seg.statusName ? (
-              <span style={{
-                display: 'inline-flex', alignItems: 'center', gap: 3,
-                padding: '1px 5px', borderRadius: 3, fontSize: 10, fontWeight: 500,
-                background: seg.statusColor ? `color-mix(in srgb, ${seg.statusColor} 25%, rgba(255,255,255,0.15))` : 'rgba(255,255,255,0.15)',
-                color: '#fff',
-                border: `1px solid ${seg.statusColor ? `color-mix(in srgb, ${seg.statusColor} 50%, rgba(255,255,255,0.2))` : 'rgba(255,255,255,0.25)'}`,
-                whiteSpace: 'nowrap', maxWidth: '100%', overflow: 'hidden',
-              }}>
-                <span style={{ width: 6, height: 6, borderRadius: '50%', background: seg.statusColor ?? 'rgba(255,255,255,0.7)', flexShrink: 0 }} />
-                <span style={CHIP_TEXT}>{seg.statusName}</span>
-              </span>
-            ) : null}
-          </div>
-          {/* Row 3: tag chips */}
-          <div style={TAGS_ROW}>
-            {(seg.tags ?? []).slice(0, 3).map((t, i) => (
-              <span key={i} style={{
-                display: 'inline-block', padding: '1px 5px', borderRadius: 3, fontSize: 10,
-                background: t.color ? `color-mix(in srgb, ${t.color} 25%, rgba(255,255,255,0.15))` : 'rgba(255,255,255,0.15)',
-                color: '#fff',
-                border: `1px solid ${t.color ? `color-mix(in srgb, ${t.color} 50%, rgba(255,255,255,0.2))` : 'rgba(255,255,255,0.25)'}`,
-                whiteSpace: 'nowrap', flexShrink: 0,
-              }}>
-                {t.name}
-              </span>
-            ))}
-          </div>
-        </div>
-      ) : (
-        /* Month view: single-line layout */
-        <>
-          {seg.continuesLeft && <span style={{ fontSize: 10, color: '#fff', paddingLeft: 2, pointerEvents: 'none', flexShrink: 0 }}>◀</span>}
-          <span style={{ ...BAR_TITLE_TEXT, padding: '0 4px', pointerEvents: 'none' }}>{seg.title}</span>
-          {assigneeNames.length > 0 && (
-            <span style={{ ...BAR_ASSIGNEE_TEXT, paddingRight: 4, pointerEvents: 'none' }}>
-              {assigneeNames.join(', ')}
-            </span>
-          )}
-          {seg.continuesRight && <span style={{ fontSize: 10, color: '#fff', paddingRight: 2, pointerEvents: 'none', flexShrink: 0 }}>▶</span>}
-        </>
-      )}
-    </div>
-  );
-}
-
-// ── Month row-height resize handle ────────────────────────────────────────────
-
-function RowResizeHandle({ weekStart, currentCap, laneCount, onCapDraft, onCapCommit }: {
-  weekStart: Date;
-  currentCap: number;
-  laneCount: number;
-  onCapDraft: (weekStart: Date, newCap: number) => void;
-  onCapCommit: (weekStart: Date, newCap: number) => void;
-}) {
-  const isDragging = useRef(false);
-  const startY = useRef(0);
-  const startCap = useRef(0);
-  const lastCap = useRef(currentCap);
-
-  return (
-    <div
-      onPointerDown={e => {
-        e.preventDefault(); e.stopPropagation();
-        isDragging.current = true;
-        startY.current = e.clientY;
-        startCap.current = currentCap;
-        lastCap.current = currentCap;
-        e.currentTarget.setPointerCapture(e.pointerId);
-      }}
-      onPointerMove={e => {
-        if (!isDragging.current) return;
-        const dy = e.clientY - startY.current;
-        const newCap = Math.max(1, Math.min(laneCount || 6, startCap.current + Math.floor(dy / LANE_SLOT_H)));
-        if (newCap !== lastCap.current) { lastCap.current = newCap; onCapDraft(weekStart, newCap); }
-      }}
-      onPointerUp={e => {
-        if (isDragging.current) onCapCommit(weekStart, lastCap.current);
-        isDragging.current = false;
-        e.currentTarget.releasePointerCapture(e.pointerId);
-      }}
-      style={{ height: ROW_RESIZE_H, cursor: 'ns-resize', background: 'transparent', borderTop: '1px solid var(--border)', transition: 'background 0.15s' }}
-      onMouseEnter={e => { (e.currentTarget as HTMLElement).style.background = 'var(--muted)'; }}
-      onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = 'transparent'; }}
-      title="Drag to show more or fewer activities"
-    />
-  );
-}
-
-// ── WeekRowRenderer ───────────────────────────────────────────────────────────
-
-const DOW_LABELS_MON = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-const DOW_LABELS_SUN = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-
-function WeekRowRenderer({
-  row,
-  isFirst,
-  layout,
-  weekStartDay,
-  activityById,
-  memberById,
-  selectedActivityId,
-  hasQuery,
-  today,
-  /** The dragged bar's live position in this week row (or null if not overlapping). */
-  liveSeg,
-  /** Activity ID being dragged — to suppress the original static segment. */
-  dragActivityId,
-  onBarPointerDown,
-  onBarClick,
-  onCellClick,
-  onCapDraft,
-  onCapCommit,
-}: {
-  row: WeekRow;
-  isFirst: boolean;
-  layout: CalendarLayout;
-  weekStartDay: 0 | 1;
-  activityById: Map<string, ApiActivity>;
-  memberById: Record<string, Member>;
-  selectedActivityId: string | null;
-  hasQuery: boolean;
-  today: Date;
-  liveSeg: LiveSegment | null;
-  dragActivityId: string | null;
-  onBarPointerDown: (e: React.PointerEvent, activityId: string, type: DragType) => void;
-  onBarClick: (activityId: string, e: React.MouseEvent) => void;
-  onCellClick: (date: Date) => void;
-  onCapDraft: (weekStart: Date, newCap: number) => void;
-  onCapCommit: (weekStart: Date, newCap: number) => void;
-}) {
-  const [popover, setPopover] = useState<{ col: number; rect: DOMRect } | null>(null);
-  const overflows = useMemo(() => overflowCountsForWeek(row), [row]);
-  const dowLabels = weekStartDay === 0 ? DOW_LABELS_SUN : DOW_LABELS_MON;
-  const todayISO = today.toISOString().slice(0, 10);
-  const isWeek = layout === 'week';
-  const dayHeaderH  = isWeek ? WEEK_DAY_HEADER_H : MONTH_DAY_HEADER_H;
-  const barH        = isWeek ? WEEK_BAR_H      : BAR_H;
-  const laneSlotH   = isWeek ? WEEK_LANE_SLOT_H : LANE_SLOT_H;
-
-  // Month: cap-filtered. Week: all segments. Either way, suppress the dragged bar's
-  // static position so only the live overlay renders.
-  const staticSegments = (isWeek ? row.segments : row.segments.filter(s => s.lane < row.visibleLaneCap))
-    .filter(s => s.activityId !== dragActivityId);
-
-  // Week: min-height ensures all lanes are visible even if flex container is small.
-  const weekMinH = WEEK_DAY_HEADER_H + row.laneCount * WEEK_LANE_SLOT_H + 40;
-
-  const rowStyle: React.CSSProperties = isWeek
-    ? { position: 'relative', flex: 1, minHeight: weekMinH, borderBottom: '1px solid var(--border)' }
-    : { position: 'relative', height: monthRowH(row.visibleLaneCap), borderBottom: '1px solid var(--border)' };
-
-  return (
-    <div style={rowStyle}>
-      {/* Day cells — borders, date headers, click zones */}
-      <div style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: isWeek ? 0 : ROW_RESIZE_H, display: 'grid', gridTemplateColumns: `repeat(${COL_COUNT}, 1fr)` }}>
-        {row.days.map((day, col) => {
-          const dayISO = day.toISOString().slice(0, 10);
-          const isToday = dayISO === todayISO;
-          const overflowCount = isWeek ? 0 : overflows[col];
-          return (
-            <div key={col} data-date={dayISO}
-              style={{ borderRight: col < COL_COUNT - 1 ? '1px solid var(--border)' : 'none', background: isToday ? 'color-mix(in srgb, var(--primary) 6%, transparent)' : 'transparent', position: 'relative', cursor: 'default' }}
-              onClick={e => { if ((e.target as HTMLElement).closest('[data-bar]')) return; onCellClick(day); }}
-            >
-              {isWeek ? (
-                /* Week view: prominent centered header */
-                <div style={WEEK_CELL_HEADER}>
-                  <span style={WEEK_DOW_LABEL}>{dowLabels[col]}</span>
-                  <span style={{ fontSize: 22, fontWeight: isToday ? 700 : 400, color: isToday ? 'var(--primary)' : 'var(--foreground)', lineHeight: 1 }}>
-                    {day.getUTCDate()}
-                  </span>
-                </div>
-              ) : (
-                <>
-                  {isFirst && (
-                    <div style={MONTH_DOW_ROW}>{dowLabels[col]}</div>
-                  )}
-                  <div style={{ position: 'absolute', top: isFirst ? 13 : 6, right: 6, fontSize: 11, fontWeight: isToday ? 700 : 400, color: isToday ? 'var(--primary)' : 'var(--muted-foreground)', lineHeight: 1, pointerEvents: 'none' }}>
-                    {day.getUTCDate()}
-                  </div>
-                  {overflowCount > 0 && (
-                    <button style={{ position: 'absolute', bottom: OVERFLOW_H / 2 - 8, left: 2, right: 2, height: 16, fontSize: 10, color: 'var(--muted-foreground)', background: 'var(--muted)', border: 'none', borderRadius: 3, cursor: 'pointer', padding: 0 }}
-                      onClick={e => { e.stopPropagation(); const rect = e.currentTarget.getBoundingClientRect(); setPopover(p => p?.col === col ? null : { col, rect }); }}
-                    >
-                      +{overflowCount} more
-                    </button>
-                  )}
-                </>
-              )}
-            </div>
-          );
-        })}
-      </div>
-
-      {/* Static activity bars (the dragged bar is suppressed here) */}
-      {staticSegments.map(seg => {
-        const act = activityById.get(seg.activityId);
-        if (!act) return null;
-        return (
-          <div key={seg.activityId} style={OVERLAY_WRAPPER}>
-            <div style={OVERLAY_INNER}>
-              <CalendarBar
-                seg={seg}
-                topPx={dayHeaderH + seg.lane * laneSlotH}
-                barH={barH}
-                isSelected={selectedActivityId === seg.activityId}
-                hasQuery={hasQuery}
-                isWeekLayout={isWeek}
-                memberById={memberById}
-                onPointerDown={onBarPointerDown}
-                onClick={onBarClick}
-              />
-            </div>
-          </div>
-        );
-      })}
-
-      {/* Live drag overlay: the dragged bar at its current position */}
-      {liveSeg && dragActivityId && (() => {
-        const origSeg = row.segments.find(s => s.activityId === dragActivityId) ?? row.segments[0];
-        const displaySeg: CalendarSegment = {
-          activityId: dragActivityId,
-          startCol: liveSeg.startCol,
-          endCol: liveSeg.endCol,
-          lane: origSeg?.lane ?? 0,
-          continuesLeft: liveSeg.continuesLeft,
-          continuesRight: liveSeg.continuesRight,
-          color: liveSeg.color,
-          title: activityById.get(dragActivityId)?.title ?? '',
-          icon: activityById.get(dragActivityId)?.icon ?? undefined,
-          assignedMemberIds: activityById.get(dragActivityId)?.assignedMemberIds ?? [],
-          isMatch: false,
-          isActiveMatch: false,
-        };
-        return (
-          <div style={OVERLAY_WRAPPER}>
-            <div style={OVERLAY_INNER}>
-              <CalendarBar
-                seg={displaySeg}
-                topPx={dayHeaderH + displaySeg.lane * laneSlotH}
-                barH={barH}
-                isSelected={selectedActivityId === dragActivityId}
-                hasQuery={false}
-                isWeekLayout={isWeek}
-                memberById={memberById}
-                onPointerDown={onBarPointerDown}
-                onClick={onBarClick}
-              />
-            </div>
-          </div>
-        );
-      })()}
-
-      {/* Month resize handle */}
-      {!isWeek && (
-        <div style={ROW_RESIZE_WRAPPER}>
-          <RowResizeHandle weekStart={row.weekStart} currentCap={row.visibleLaneCap} laneCount={row.laneCount} onCapDraft={onCapDraft} onCapCommit={onCapCommit} />
-        </div>
-      )}
-
-      {/* Overflow popover */}
-      {popover && (
-        <DayOverflowPopover
-          segments={segmentsForDay(row, popover.col)}
-          activityById={activityById}
-          dayDate={row.days[popover.col]}
-          anchorRect={popover.rect}
-          onSelect={act => { onBarClick(act.id, new MouseEvent('click') as unknown as React.MouseEvent); }}
-          onClose={() => setPopover(null)}
-        />
-      )}
-    </div>
-  );
-}
-
-// ── CalendarGrid ──────────────────────────────────────────────────────────────
-
-export interface CalendarGridProps {
-  weeks: WeekRow[];
-  layout: CalendarLayout;
-  weekStartDay: 0 | 1;
-  activityById: Map<string, ApiActivity>;
-  memberById: Record<string, Member>;
-  selectedActivityId: string | null;
-  hasQuery: boolean;
-  today: Date;
-  onSelectActivity: (act: ApiActivity | null) => void;
-  onCellClick: (date: Date) => void;
-  onBarDragProgress: (activityId: string, newStart: Date, newEnd: Date) => void;
-  onBarDragEnd: () => void;
-  onBarDragCommit: (activityId: string, newStart: Date, newEnd: Date) => void;
-  onCapDraft: (weekStart: Date, newCap: number) => void;
-  onCapCommit: (weekStart: Date, newCap: number) => void;
-}
-
-export default function CalendarGrid({
-  weeks,
-  layout,
-  weekStartDay,
-  activityById,
-  memberById,
-  selectedActivityId,
-  hasQuery,
-  today,
-  onSelectActivity,
-  onCellClick,
-  onBarDragProgress,
-  onBarDragEnd,
-  onBarDragCommit,
-  onCapDraft,
-  onCapCommit,
-}: CalendarGridProps) {
-  const [dragState, setDragState] = useState<DragState | null>(null);
-
-  // Ref for the latest drag position — prevents stale closure in the useEffect.
-  const liveDragRef = useRef<{ start: Date; end: Date } | null>(null);
-
-  // Refs for callbacks so the useEffect never captures stale props.
-  const onBarDragProgressRef = useRef(onBarDragProgress);
-  const onBarDragEndRef      = useRef(onBarDragEnd);
-  const onBarDragCommitRef   = useRef(onBarDragCommit);
-  const onSelectActivityRef  = useRef(onSelectActivity);
-  const activityByIdRef      = useRef(activityById);
-  useEffect(() => { onBarDragProgressRef.current = onBarDragProgress; }, [onBarDragProgress]);
-  useEffect(() => { onBarDragEndRef.current      = onBarDragEnd; },      [onBarDragEnd]);
-  useEffect(() => { onBarDragCommitRef.current   = onBarDragCommit; },   [onBarDragCommit]);
-  useEffect(() => { onSelectActivityRef.current  = onSelectActivity; },  [onSelectActivity]);
-  useEffect(() => { activityByIdRef.current      = activityById; },      [activityById]);
-
-  // ── Drag ────────────────────────────────────────────────────────────────────
-
-  const handleBarPointerDown = useCallback((
-    e: React.PointerEvent,
-    activityId: string,
-    type: DragType,
-  ) => {
-    e.preventDefault();
-    e.stopPropagation();
-    const act = activityById.get(activityId);
-    if (!act) return;
-    const originalStart = utcMidnight(act.startAt);
-    const originalEnd   = utcMidnight(act.endAt);
-
-    // Use elementsFromPoint to find the day cell beneath the bar.
-    const clickedDay = dayAtPoint(e.clientX, e.clientY);
-    const grabOffsetDays = clickedDay ? daysDiff(originalStart, clickedDay) : 0;
-
-    liveDragRef.current = { start: originalStart, end: originalEnd };
-    setDragState({ activityId, type, originalStart, originalEnd, grabOffsetDays, currentStart: originalStart, currentEnd: originalEnd });
-  }, [activityById]);
-
-  useEffect(() => {
-    if (!dragState) return;
-    const ds = dragState;
-    const originalSpan = daysDiff(ds.originalStart, ds.originalEnd);
-
-    function onPointerMove(e: PointerEvent) {
-      const targetDay = dayAtPoint(e.clientX, e.clientY);
-      if (!targetDay) return;
-
-      let newStart: Date;
-      let newEnd: Date;
-
-      if (ds.type === 'move') {
-        newStart = new Date(targetDay);
-        newStart.setUTCDate(targetDay.getUTCDate() - ds.grabOffsetDays);
-        newEnd = new Date(newStart);
-        newEnd.setUTCDate(newStart.getUTCDate() + originalSpan);
-      } else if (ds.type === 'resize-start') {
-        newStart = targetDay < ds.originalEnd ? targetDay : ds.originalEnd;
-        newEnd   = ds.originalEnd;
-      } else {
-        newStart = ds.originalStart;
-        newEnd   = targetDay > ds.originalStart ? targetDay : ds.originalStart;
-      }
-
-      liveDragRef.current = { start: newStart, end: newEnd };
-      setDragState(prev => prev ? { ...prev, currentStart: newStart, currentEnd: newEnd } : null);
-      onBarDragProgressRef.current(ds.activityId, newStart, newEnd);
-    }
-
-    function onPointerUp() {
-      const live = liveDragRef.current;
-      liveDragRef.current = null;
-      if (live) {
-        const changed =
-          live.start.getTime() !== ds.originalStart.getTime() ||
-          live.end.getTime()   !== ds.originalEnd.getTime();
-        if (changed) {
-          onBarDragCommitRef.current(ds.activityId, live.start, live.end);
-        } else {
-          // No movement — treat as a click. The DOM click event is unreliable
-          // here because pointerdown removes the bar from staticSegments and
-          // re-adds it after pointerup, so the click event fires on a
-          // different DOM node. Drive selection from the pointer lifecycle.
-          onSelectActivityRef.current(activityByIdRef.current.get(ds.activityId) ?? null);
-        }
-      }
-      onBarDragEndRef.current();
-      setDragState(null);
-    }
-
-    document.addEventListener('pointermove', onPointerMove);
-    document.addEventListener('pointerup', onPointerUp);
-    return () => {
-      document.removeEventListener('pointermove', onPointerMove);
-      document.removeEventListener('pointerup', onPointerUp);
-    };
-  // Depend only on activityId + type, not the full dragState object — currentStart/currentEnd
-  // update on every pointermove frame, which would thrash listener registration if included.
-  // All callbacks are accessed via refs (onBarDragCommitRef etc.) so closures stay fresh
-  // without being listed as deps.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dragState?.activityId, dragState?.type]);
-
-  // ── Live drag overlay across all weeks ──────────────────────────────────────
-
-  // Compute where the dragged bar currently sits in EVERY week row.
-  // This drives real-time rendering across week boundaries, even in weeks
-  // that didn't originally contain the bar.
-  const liveSegs: (LiveSegment | null)[] = useMemo(() => {
-    if (!dragState) return weeks.map(() => null);
-    const { activityId, currentStart, currentEnd } = dragState;
-
-    // Find the bar's color from any original segment.
-    let color = '#6b7280';
-    for (const row of weeks) {
-      const s = row.segments.find(s => s.activityId === activityId);
-      if (s) { color = s.color; break; }
-    }
-
-    return weeks.map(row => {
-      const weekEnd = row.days[6];
-      if (currentEnd < row.weekStart || currentStart > weekEnd) return null;
-      const rawStart = daysDiff(row.weekStart, currentStart);
-      const rawEnd   = daysDiff(row.weekStart, currentEnd);
-      return {
-        startCol: Math.max(0, rawStart),
-        endCol:   Math.min(6, rawEnd),
-        continuesLeft:  rawStart < 0,
-        continuesRight: rawEnd > 6,
-        color,
-      };
-    });
-  }, [dragState, weeks]);
-
-  const handleBarClick = useCallback((activityId: string, e: React.MouseEvent) => {
-    e.stopPropagation();
-    onSelectActivity(activityById.get(activityId) ?? null);
-  }, [activityById, onSelectActivity]);
-
-  // ── Render ──────────────────────────────────────────────────────────────────
-
-  const isWeek = layout === 'week';
-
-  const outerStyle: React.CSSProperties = isWeek
-    ? { flex: 1, display: 'flex', flexDirection: 'column', overflowY: 'auto', background: 'var(--background)' }
-    : { flex: 1, overflow: 'auto', background: 'var(--background)' };
-
-  const innerStyle: React.CSSProperties = isWeek
-    ? { flex: 1, display: 'flex', flexDirection: 'column', minWidth: 420, cursor: dragState ? 'grabbing' : undefined }
-    : { minWidth: 420, cursor: dragState ? 'grabbing' : undefined };
-
-  return (
-    <div style={outerStyle}>
-      <div style={innerStyle}>
-        {weeks.map((row, wi) => (
-          <WeekRowRenderer
-            key={row.weekStart.toISOString()}
-            row={row}
-            isFirst={wi === 0}
-            layout={layout}
-            weekStartDay={weekStartDay}
-            activityById={activityById}
-            memberById={memberById}
-            selectedActivityId={selectedActivityId}
-            hasQuery={hasQuery}
-            today={today}
-            liveSeg={liveSegs[wi]}
-            dragActivityId={dragState?.activityId ?? null}
-            onBarPointerDown={handleBarPointerDown}
-            onBarClick={handleBarClick}
-            onCellClick={onCellClick}
-            onCapDraft={onCapDraft}
-            onCapCommit={onCapCommit}
-          />
-        ))}
-      </div>
-    </div>
-  );
 }
 ````
 
@@ -44599,101 +45003,6 @@ export function usePublicSettings() {
 }
 ````
 
-## File: packages/web/src/lib/activityColor.test.ts
-````typescript
-/**
- * Tests for resolveActivityColor — the shared color-by helper used by all
- * three views (Gantt, List, Calendar).
- */
-
-import { describe, it, expect } from 'vitest';
-import { resolveActivityColor } from './activityColor';
-import { ACTIVITY_COLORS } from '@/types';
-import type { components } from '@draba/shared';
-import type { Member } from '@/types';
-
-type ApiActivity = components['schemas']['Activity'];
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-function makeActivity(overrides: Partial<ApiActivity> = {}): ApiActivity {
-  return {
-    id: 'act-1',
-    title: 'Test',
-    timelineId: 'tl-1',
-    startAt: '2026-05-01T00:00:00Z',
-    endAt: '2026-05-02T00:00:00Z',
-    color: '#ff0000',
-    assignedMemberIds: [],
-    createdBy: 'user-1',
-    createdAt: '2026-01-01T00:00:00Z',
-    updatedAt: '2026-01-01T00:00:00Z',
-    ...overrides,
-  } as ApiActivity;
-}
-
-function makeMember(id: string, color: string): Member {
-  return { id, name: 'Test User', initials: 'TU', color };
-}
-
-const NO_MEMBERS: Record<string, Member> = {};
-const NO_STATUS_COLORS = new Map<string, string>();
-
-// ── colorBy='activity' ────────────────────────────────────────────────────────
-
-describe('resolveActivityColor — colorBy=activity', () => {
-  it('returns activity.color when set', () => {
-    const act = makeActivity({ color: '#abcdef' });
-    expect(resolveActivityColor(act, 0, NO_MEMBERS, 'activity', NO_STATUS_COLORS)).toBe('#abcdef');
-  });
-
-  it('cycles through ACTIVITY_COLORS by index when activity.color is null', () => {
-    // reason: the API type allows null but the runtime value can be null
-    const act = makeActivity({ color: null as unknown as string });
-    const result = resolveActivityColor(act, 2, NO_MEMBERS, 'activity', NO_STATUS_COLORS);
-    expect(result).toBe(ACTIVITY_COLORS[2 % ACTIVITY_COLORS.length]);
-  });
-});
-
-// ── colorBy='member' ──────────────────────────────────────────────────────────
-
-describe('resolveActivityColor — colorBy=member', () => {
-  it('returns the primary member color', () => {
-    const member = makeMember('mem-1', '#00ff00');
-    const act = makeActivity({ assignedMemberIds: ['mem-1'] });
-    const result = resolveActivityColor(act, 0, { 'mem-1': member }, 'member', NO_STATUS_COLORS);
-    expect(result).toBe('#00ff00');
-  });
-
-  it('falls back to activity.color when primary member is not in memberById', () => {
-    const act = makeActivity({ assignedMemberIds: ['mem-missing'], color: '#123456' });
-    expect(resolveActivityColor(act, 0, NO_MEMBERS, 'member', NO_STATUS_COLORS)).toBe('#123456');
-  });
-
-  it('falls back to ACTIVITY_COLORS index when member and activity.color are both absent', () => {
-    const act = makeActivity({ assignedMemberIds: [], color: null as unknown as string });
-    const result = resolveActivityColor(act, 1, NO_MEMBERS, 'member', NO_STATUS_COLORS);
-    expect(result).toBe(ACTIVITY_COLORS[1 % ACTIVITY_COLORS.length]);
-  });
-});
-
-// ── colorBy='status' ──────────────────────────────────────────────────────────
-
-describe('resolveActivityColor — colorBy=status', () => {
-  it('returns the status color from the map', () => {
-    // reason: statusId is an optional field added by the API beyond the base type
-    const act = makeActivity({ statusId: 'st-1' } as Partial<ApiActivity>);
-    const statusColors = new Map([['st-1', '#9900ff']]);
-    expect(resolveActivityColor(act, 0, NO_MEMBERS, 'status', statusColors)).toBe('#9900ff');
-  });
-
-  it('falls back to #6b7280 when status is not in the map', () => {
-    const act = makeActivity();
-    expect(resolveActivityColor(act, 0, NO_MEMBERS, 'status', NO_STATUS_COLORS)).toBe('#6b7280');
-  });
-});
-````
-
 ## File: packages/web/src/lib/api.ts
 ````typescript
 /**
@@ -45437,682 +45746,6 @@ export function matchesFilter(
   return filter.logic === 'and'
     ? results.every(Boolean)
     : results.some(Boolean)
-}
-````
-
-## File: packages/web/src/lib/textExport.ts
-````typescript
-/**
- * textExport — client-side Markdown, plain-text, and HTML generation for the
- * Export dialog's Phase 14.2 textual formats.
- *
- * All generators are pure functions: they accept pre-resolved lookup maps
- * (produced in DashboardPage) and return plain strings. No DOM access, no
- * network calls — identical output to what the user sees on screen.
- *
- * View-specific generators:
- *   buildList*    — GFM table (Markdown) / space-padded table (plain) / HTML <table>
- *   buildKanban*  — one section per column
- *   buildCalendar* — agenda-style date-grouped list
- */
-
-import type { components } from '@draba/shared'
-
-type ApiActivity = components['schemas']['Activity']
-
-// ── Public types ───────────────────────────────────────────────────────────────
-
-/**
- * A pre-built list display row for export.
- * Group rows produce section headers; activity rows produce content.
- * Mirrors the subset of ListDisplayRow used outside the component.
- */
-export type ListExportRow =
-  | { kind: 'group'; label: string; count: number }
-  | { kind: 'activity'; activity: ApiActivity; depth: number }
-
-/** All data the text generators need — supplied by DashboardPage at export time. */
-export interface TextExportData {
-  /**
-   * Filtered activities.
-   * Calendar generators iterate this directly. List generators use listDisplayRows instead.
-   */
-  activities: ApiActivity[]
-  /** Member ID → display name. */
-  memberById: Map<string, string>
-  /** Status ID → status name. */
-  statusById: Map<string, string>
-  /** Tag ID → tag name. */
-  tagById: Map<string, string>
-  /** Activity ID → title (for parent-activity name lookups). */
-  activityTitleById: Map<string, string>
-  /**
-   * Kanban-only: pre-built columns produced by `buildColumns`.
-   * Null for List and Calendar views.
-   * When kanbanShowHierarchy=true, column items contain only root activities.
-   */
-  kanbanColumns: Array<{ label: string; activities: ApiActivity[] }> | null
-  /**
-   * List-only: pre-built display rows in sorted, group-by order.
-   * Group rows emit section headers; activity rows carry a depth for hierarchy.
-   * Null for non-List views.
-   */
-  listDisplayRows: ListExportRow[] | null
-  /**
-   * List-only: ordered visible column IDs (excluding visual-only colorBar/identity).
-   * Null means use the default set of export columns.
-   */
-  listVisibleColumns: string[] | null
-  /** Kanban-only: true when hierarchy nesting is active in the view. */
-  kanbanShowHierarchy: boolean
-  /** Kanban-only: parent ID → child activities (populated when kanbanShowHierarchy=true). */
-  kanbanChildrenByParentId: Map<string, ApiActivity[]>
-}
-
-// ── Date formatting ────────────────────────────────────────────────────────────
-
-function fmtDate(iso: string | null | undefined): string {
-  if (!iso) return '—'
-  const d = new Date(iso)
-  if (isNaN(d.getTime())) return '—'
-  return d.toLocaleDateString('en-US', {
-    month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC',
-  })
-}
-
-function fmtDateRange(startAt: string | null | undefined, endAt: string | null | undefined): string {
-  const s = fmtDate(startAt)
-  const e = fmtDate(endAt)
-  if (s === '—' && e === '—') return '—'
-  if (s === e) return s
-  return `${s} – ${e}`
-}
-
-// ── Shared helpers ─────────────────────────────────────────────────────────────
-
-function resolveAssignees(activity: ApiActivity, memberById: Map<string, string>): string {
-  if (!activity.assignedMemberIds?.length) return '—'
-  return activity.assignedMemberIds.map(id => memberById.get(id) ?? id).join(', ')
-}
-
-function resolveTags(activity: ApiActivity, tagById: Map<string, string>): string {
-  if (!activity.tagIds?.length) return ''
-  return activity.tagIds.map(id => `#${tagById.get(id) ?? id}`).join(' ')
-}
-
-function buildHeader(timelineName: string, filterLabel: string | null): string {
-  const today = new Date().toLocaleDateString('en-US', {
-    month: 'long', day: 'numeric', year: 'numeric',
-  })
-  const parts = [`# ${timelineName} — ${today}`]
-  if (filterLabel) parts.push(`_Filter: ${filterLabel}_`)
-  parts.push('')
-  return parts.join('\n')
-}
-
-function buildPlainHeader(timelineName: string, filterLabel: string | null): string {
-  const today = new Date().toLocaleDateString('en-US', {
-    month: 'long', day: 'numeric', year: 'numeric',
-  })
-  const parts = [`${timelineName} — ${today}`]
-  if (filterLabel) parts.push(`Filter: ${filterLabel}`)
-  parts.push('')
-  return parts.join('\n')
-}
-
-function escMd(s: string): string {
-  return s.replace(/\|/g, '\\|')
-}
-
-function htmlEsc(s: string): string {
-  return s
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-}
-
-// ── List column helpers ────────────────────────────────────────────────────────
-
-const COLUMN_LABELS: Record<string, string> = {
-  title: 'Title',
-  startAt: 'Start',
-  endAt: 'End',
-  duration: 'Duration',
-  status: 'Status',
-  assignees: 'Assigned To',
-  tags: 'Tags',
-  progress: 'Progress',
-  parent: 'Parent',
-  description: 'Description',
-  location: 'Location',
-  url: 'URL',
-  notes: 'Notes',
-  createdAt: 'Created',
-  updatedAt: 'Updated',
-}
-
-const SKIP_EXPORT_COLS = new Set(['colorBar', 'identity'])
-
-/** Default columns emitted when listVisibleColumns is null. */
-const DEFAULT_EXPORT_COL_IDS = [
-  'title', 'startAt', 'endAt', 'status', 'assignees', 'tags', 'progress', 'parent',
-]
-
-function resolveListColumns(ids: string[] | null): Array<{ id: string; label: string }> {
-  const use = ids ?? DEFAULT_EXPORT_COL_IDS
-  return use
-    .filter(id => !SKIP_EXPORT_COLS.has(id) && id in COLUMN_LABELS)
-    .map(id => ({ id, label: COLUMN_LABELS[id] }))
-}
-
-function getColValue(
-  colId: string,
-  activity: ApiActivity,
-  memberById: Map<string, string>,
-  statusById: Map<string, string>,
-  tagById: Map<string, string>,
-  activityTitleById: Map<string, string>,
-): string {
-  switch (colId) {
-    case 'title': return activity.title
-    case 'startAt': return fmtDate(activity.startAt)
-    case 'endAt': return fmtDate(activity.endAt)
-    case 'duration': {
-      if (!activity.startAt || !activity.endAt) return '—'
-      const days = Math.round(
-        (new Date(activity.endAt).getTime() - new Date(activity.startAt).getTime()) / 86400000,
-      )
-      if (days < 0) return '—'
-      return `${days + 1} day${days + 1 !== 1 ? 's' : ''}`
-    }
-    case 'status': return activity.statusId ? (statusById.get(activity.statusId) ?? '—') : '—'
-    case 'assignees': return resolveAssignees(activity, memberById)
-    case 'tags': return resolveTags(activity, tagById) || '—'
-    case 'progress': return activity.percentComplete != null ? `${activity.percentComplete}%` : '—'
-    case 'parent': return activity.parentActivityId
-      ? (activityTitleById.get(activity.parentActivityId) ?? '—')
-      : '—'
-    case 'description': return activity.description ?? '—'
-    case 'location': return activity.location ?? '—'
-    case 'url': return activity.url ?? '—'
-    // notes is in the DB schema but may be absent from the strict generated TS type
-    case 'notes': return (activity as ApiActivity & { notes?: string | null }).notes ?? '—'
-    case 'createdAt': return fmtDate(activity.createdAt)
-    case 'updatedAt': return fmtDate(activity.updatedAt)
-    default: return '—'
-  }
-}
-
-/** Returns the depth-prefix for a title cell: '' at depth 0, '↳ ' at depth 1, '  ↳ ' at depth 2, etc. */
-function depthPrefix(depth: number): string {
-  if (depth === 0) return ''
-  return `${'  '.repeat(depth - 1)}↳ `
-}
-
-// ── Markdown generators ────────────────────────────────────────────────────────
-
-/** List view → GitHub-flavored Markdown table, respecting column visibility, sort, group-by, and hierarchy. */
-export function buildListMarkdown(
-  data: TextExportData,
-  timelineName: string,
-  filterLabel: string | null,
-): string {
-  const { listDisplayRows, listVisibleColumns, memberById, statusById, tagById, activityTitleById } = data
-  const lines: string[] = [buildHeader(timelineName, filterLabel)]
-
-  const cols = resolveListColumns(listVisibleColumns)
-  const thead = `| ${cols.map(c => c.label).join(' | ')} |`
-  const tsep = `| ${cols.map(() => '---').join(' | ')} |`
-
-  const getCells = (activity: ApiActivity, depth: number) =>
-    cols.map(c => {
-      const val = getColValue(c.id, activity, memberById, statusById, tagById, activityTitleById)
-      const pfx = c.id === 'title' ? depthPrefix(depth) : ''
-      return escMd(pfx + val)
-    })
-
-  if (!listDisplayRows || listDisplayRows.length === 0) {
-    lines.push(thead, tsep)
-    if (!listDisplayRows || listDisplayRows.length === 0) lines.push('_No activities._')
-    return lines.join('\n')
-  }
-
-  const hasGroups = listDisplayRows.some(r => r.kind === 'group')
-
-  if (hasGroups) {
-    // member or status group-by: one GFM table per section
-    let firstGroup = true
-    for (const row of listDisplayRows) {
-      if (row.kind === 'group') {
-        if (!firstGroup) lines.push('')
-        lines.push(`## ${row.label} (${row.count})`)
-        lines.push('')
-        lines.push(thead)
-        lines.push(tsep)
-        firstGroup = false
-      } else {
-        lines.push(`| ${getCells(row.activity, row.depth).join(' | ')} |`)
-      }
-    }
-  } else {
-    // flat (none) or parent-hierarchy mode: single table, depth prefix in title
-    lines.push(thead, tsep)
-    for (const row of listDisplayRows) {
-      if (row.kind === 'activity') {
-        lines.push(`| ${getCells(row.activity, row.depth).join(' | ')} |`)
-      }
-    }
-  }
-
-  return lines.join('\n')
-}
-
-/** Kanban view → one Markdown section per column, with optional hierarchy nesting. */
-export function buildKanbanMarkdown(
-  data: TextExportData,
-  timelineName: string,
-  filterLabel: string | null,
-): string {
-  const { kanbanColumns, activities, memberById, statusById, tagById, kanbanShowHierarchy, kanbanChildrenByParentId } = data
-  const lines: string[] = [buildHeader(timelineName, filterLabel)]
-  const cols = kanbanColumns ?? [{ label: 'Activities', activities }]
-
-  const fmtItem = (a: ApiActivity, indent: string): string => {
-    const parts: string[] = [a.title]
-    const assignees = resolveAssignees(a, memberById)
-    if (assignees !== '—') parts.push(assignees)
-    const range = fmtDateRange(a.startAt, a.endAt)
-    if (range !== '—') parts.push(range)
-    const status = a.statusId ? (statusById.get(a.statusId) ?? null) : null
-    if (status) parts.push(status)
-    const tags = resolveTags(a, tagById)
-    if (tags) parts.push(tags)
-    return `${indent}- ${parts.join(' · ')}`
-  }
-
-  for (const col of cols) {
-    if (col.activities.length === 0) continue
-    lines.push(`## ${col.label} (${col.activities.length})`)
-    for (const a of col.activities) {
-      lines.push(fmtItem(a, ''))
-      if (kanbanShowHierarchy) {
-        for (const child of kanbanChildrenByParentId.get(a.id) ?? []) {
-          lines.push(fmtItem(child, '  '))
-        }
-      }
-    }
-    lines.push('')
-  }
-
-  if (cols.every(c => c.activities.length === 0)) lines.push('_No activities._')
-  return lines.join('\n').trimEnd()
-}
-
-/** Calendar view → agenda-style date-grouped Markdown list. */
-export function buildCalendarMarkdown(
-  data: TextExportData,
-  timelineName: string,
-  filterLabel: string | null,
-): string {
-  const { activities, memberById, tagById } = data
-  const lines: string[] = [buildHeader(timelineName, filterLabel)]
-
-  if (activities.length === 0) {
-    lines.push('_No activities._')
-    return lines.join('\n')
-  }
-
-  const byDate = new Map<string, ApiActivity[]>()
-  for (const a of activities) {
-    const key = a.startAt?.slice(0, 10) ?? '__none__'
-    const bucket = byDate.get(key) ?? []
-    bucket.push(a)
-    byDate.set(key, bucket)
-  }
-
-  for (const key of [...byDate.keys()].sort()) {
-    const acts = byDate.get(key)!
-    const dateLabel = key === '__none__'
-      ? 'No date'
-      : new Date(`${key}T00:00:00Z`).toLocaleDateString('en-US', {
-          weekday: 'long', month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC',
-        })
-    lines.push(`## ${dateLabel}`)
-    for (const a of acts) {
-      const parts: string[] = [a.title]
-      if (a.endAt && a.endAt.slice(0, 10) !== key) parts.push(`→ ${fmtDate(a.endAt)}`)
-      const assignees = resolveAssignees(a, memberById)
-      if (assignees !== '—') parts.push(assignees)
-      const tags = resolveTags(a, tagById)
-      if (tags) parts.push(tags)
-      lines.push(`- ${parts.join(' · ')}`)
-    }
-    lines.push('')
-  }
-
-  return lines.join('\n').trimEnd()
-}
-
-// ── Plain-text generators ──────────────────────────────────────────────────────
-
-function pad(s: string, width: number): string {
-  return s.length >= width ? s : `${s}${' '.repeat(width - s.length)}`
-}
-
-/** List view → space-padded plain-text table, respecting column visibility, sort, group-by, and hierarchy. */
-export function buildListPlainText(
-  data: TextExportData,
-  timelineName: string,
-  filterLabel: string | null,
-): string {
-  const { listDisplayRows, listVisibleColumns, memberById, statusById, tagById, activityTitleById } = data
-  const lines: string[] = [buildPlainHeader(timelineName, filterLabel)]
-
-  const cols = resolveListColumns(listVisibleColumns)
-  const MAX_W: Record<string, number> = {
-    title: 40, startAt: 15, endAt: 15, duration: 10, status: 20,
-    assignees: 26, tags: 20, progress: 10, parent: 24, description: 30,
-    location: 20, url: 30, notes: 30, createdAt: 15, updatedAt: 15,
-  }
-
-  const getRenderedValue = (colId: string, activity: ApiActivity, depth: number): string => {
-    const val = getColValue(colId, activity, memberById, statusById, tagById, activityTitleById)
-    const pfx = colId === 'title' ? depthPrefix(depth) : ''
-    return pfx + val
-  }
-
-  const activityRows = (listDisplayRows ?? []).filter((r): r is { kind: 'activity'; activity: ApiActivity; depth: number } => r.kind === 'activity')
-  const fallbackActivities = activityRows.length > 0
-    ? activityRows.map(r => ({ activity: r.activity, depth: r.depth }))
-    : data.activities.map(a => ({ activity: a, depth: 0 }))
-
-  if (fallbackActivities.length === 0) {
-    lines.push('No activities.')
-    return lines.join('\n')
-  }
-
-  // Compute column widths from actual rendered content
-  const widths = cols.map(col => {
-    let w = col.label.length
-    for (const { activity, depth } of fallbackActivities) {
-      const rendered = getRenderedValue(col.id, activity, depth)
-      w = Math.max(w, Math.min(rendered.length, MAX_W[col.id] ?? 20))
-    }
-    return w
-  })
-
-  const emitTableHeader = () => {
-    lines.push(cols.map((c, i) => pad(c.label, widths[i])).join('  '))
-    lines.push(widths.map(w => '─'.repeat(w)).join('  '))
-  }
-
-  const emitRow = (activity: ApiActivity, depth: number) => {
-    lines.push(
-      cols.map((c, i) => {
-        const rendered = getRenderedValue(c.id, activity, depth)
-        return pad(rendered.slice(0, widths[i]), widths[i])
-      }).join('  '),
-    )
-  }
-
-  if (!listDisplayRows) {
-    emitTableHeader()
-    for (const { activity, depth } of fallbackActivities) emitRow(activity, depth)
-    return lines.join('\n')
-  }
-
-  const hasGroups = listDisplayRows.some(r => r.kind === 'group')
-
-  if (hasGroups) {
-    let firstGroup = true
-    for (const row of listDisplayRows) {
-      if (row.kind === 'group') {
-        if (!firstGroup) lines.push('')
-        const heading = `${row.label.toUpperCase()} (${row.count})`
-        lines.push(heading)
-        lines.push('─'.repeat(heading.length))
-        emitTableHeader()
-        firstGroup = false
-      } else {
-        emitRow(row.activity, row.depth)
-      }
-    }
-  } else {
-    emitTableHeader()
-    for (const row of listDisplayRows) {
-      if (row.kind === 'activity') emitRow(row.activity, row.depth)
-    }
-  }
-
-  return lines.join('\n')
-}
-
-/** Kanban view → plain-text sections with bullet lists. */
-export function buildKanbanPlainText(
-  data: TextExportData,
-  timelineName: string,
-  filterLabel: string | null,
-): string {
-  const { kanbanColumns, activities, memberById, statusById, tagById, kanbanShowHierarchy, kanbanChildrenByParentId } = data
-  const lines: string[] = [buildPlainHeader(timelineName, filterLabel)]
-  const cols = kanbanColumns ?? [{ label: 'Activities', activities }]
-
-  const fmtItem = (a: ApiActivity): string => {
-    const parts: string[] = [a.title]
-    const assignees = resolveAssignees(a, memberById)
-    if (assignees !== '—') parts.push(assignees)
-    const range = fmtDateRange(a.startAt, a.endAt)
-    if (range !== '—') parts.push(range)
-    const status = a.statusId ? (statusById.get(a.statusId) ?? null) : null
-    if (status) parts.push(status)
-    const tags = resolveTags(a, tagById)
-    if (tags) parts.push(tags)
-    return parts.join(' · ')
-  }
-
-  for (const col of cols) {
-    if (col.activities.length === 0) continue
-    const heading = `${col.label.toUpperCase()} (${col.activities.length})`
-    lines.push(heading)
-    lines.push('─'.repeat(heading.length))
-    for (const a of col.activities) {
-      lines.push(`  • ${fmtItem(a)}`)
-      if (kanbanShowHierarchy) {
-        for (const child of kanbanChildrenByParentId.get(a.id) ?? []) {
-          lines.push(`      ◦ ${fmtItem(child)}`)
-        }
-      }
-    }
-    lines.push('')
-  }
-
-  if (cols.every(c => c.activities.length === 0)) lines.push('No activities.')
-  return lines.join('\n').trimEnd()
-}
-
-/** Calendar view → plain-text agenda. */
-export function buildCalendarPlainText(
-  data: TextExportData,
-  timelineName: string,
-  filterLabel: string | null,
-): string {
-  const { activities, memberById, tagById } = data
-  const lines: string[] = [buildPlainHeader(timelineName, filterLabel)]
-
-  if (activities.length === 0) { lines.push('No activities.'); return lines.join('\n') }
-
-  const byDate = new Map<string, ApiActivity[]>()
-  for (const a of activities) {
-    const key = a.startAt?.slice(0, 10) ?? '__none__'
-    const bucket = byDate.get(key) ?? []
-    bucket.push(a)
-    byDate.set(key, bucket)
-  }
-
-  for (const key of [...byDate.keys()].sort()) {
-    const acts = byDate.get(key)!
-    const dateLabel = key === '__none__'
-      ? 'No date'
-      : new Date(`${key}T00:00:00Z`).toLocaleDateString('en-US', {
-          weekday: 'long', month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC',
-        })
-    lines.push(dateLabel)
-    lines.push('─'.repeat(dateLabel.length))
-    for (const a of acts) {
-      const parts: string[] = [a.title]
-      if (a.endAt && a.endAt.slice(0, 10) !== key) parts.push(`→ ${fmtDate(a.endAt)}`)
-      const assignees = resolveAssignees(a, memberById)
-      if (assignees !== '—') parts.push(assignees)
-      const tags = resolveTags(a, tagById)
-      if (tags) parts.push(tags)
-      lines.push(`  • ${parts.join(' · ')}`)
-    }
-    lines.push('')
-  }
-
-  return lines.join('\n').trimEnd()
-}
-
-// ── HTML generators (for clipboard text/html flavor) ──────────────────────────
-
-const TH = 'padding:6px 10px;border:1px solid #ccc;background:#f5f5f5;font-weight:600;text-align:left;white-space:nowrap;font-family:system-ui,sans-serif;font-size:13px'
-const TD = 'padding:5px 10px;border:1px solid #ddd;vertical-align:top;font-family:system-ui,sans-serif;font-size:13px'
-
-function htmlHeaderBlock(timelineName: string, filterLabel: string | null): string {
-  const today = new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })
-  const ctx = filterLabel ? ` · Filter: ${htmlEsc(filterLabel)}` : ''
-  return `<p style="font-family:system-ui,sans-serif;font-size:13px;margin:0 0 10px"><strong>${htmlEsc(timelineName)}</strong> — ${today}${ctx}</p>`
-}
-
-/** List view → HTML table for clipboard, respecting column visibility, sort, group-by, and hierarchy. */
-export function buildListHtml(
-  data: TextExportData,
-  timelineName: string,
-  filterLabel: string | null,
-): string {
-  const { listDisplayRows, listVisibleColumns, memberById, statusById, tagById, activityTitleById } = data
-  const cols = resolveListColumns(listVisibleColumns)
-
-  const thead = `<thead><tr>${cols.map(c => `<th style="${TH}">${htmlEsc(c.label)}</th>`).join('')}</tr></thead>`
-  const colspan = cols.length
-
-  const makeRow = (activity: ApiActivity, depth: number): string => {
-    const cells = cols.map(c => {
-      const val = getColValue(c.id, activity, memberById, statusById, tagById, activityTitleById)
-      const paddingLeft = c.id === 'title' && depth > 0 ? `padding-left:${6 + depth * 16}px;` : ''
-      const prefix = c.id === 'title' && depth > 0 ? '↳ ' : ''
-      return `<td style="${paddingLeft}${TD}">${htmlEsc(prefix + val)}</td>`
-    })
-    return `<tr>${cells.join('')}</tr>`
-  }
-
-  const makeSection = (label: string, count: number): string =>
-    `<tr><th colspan="${colspan}" style="${TH};background:#e8e8e8;font-size:12px">${htmlEsc(label)} (${count})</th></tr>`
-
-  const rows: string[] = []
-  const activityList = listDisplayRows ?? data.activities.map(a => ({ kind: 'activity' as const, activity: a, depth: 0 }))
-
-  if (activityList.length === 0) {
-    rows.push(`<tr><td colspan="${colspan}" style="${TD}"><em>No activities.</em></td></tr>`)
-  } else {
-    for (const row of activityList) {
-      if (row.kind === 'group') {
-        rows.push(makeSection(row.label, row.count))
-        rows.push(thead.replace('<thead>', '').replace('</thead>', '').replace('<tr>', '<tr>').replace('</tr>', '</tr>'))
-      } else {
-        rows.push(makeRow(row.activity, row.depth))
-      }
-    }
-  }
-
-  return `${htmlHeaderBlock(timelineName, filterLabel)}<table style="border-collapse:collapse">${thead}<tbody>${rows.join('')}</tbody></table>`
-}
-
-/** Kanban view → HTML sections with optional hierarchy nesting. */
-export function buildKanbanHtml(
-  data: TextExportData,
-  timelineName: string,
-  filterLabel: string | null,
-): string {
-  const { kanbanColumns, activities, memberById, statusById, tagById, kanbanShowHierarchy, kanbanChildrenByParentId } = data
-  const cols = kanbanColumns ?? [{ label: 'Activities', activities }]
-
-  const fmtLi = (a: ApiActivity, style: string): string => {
-    const parts: string[] = [htmlEsc(a.title)]
-    const assignees = resolveAssignees(a, memberById)
-    if (assignees !== '—') parts.push(htmlEsc(assignees))
-    const range = fmtDateRange(a.startAt, a.endAt)
-    if (range !== '—') parts.push(htmlEsc(range))
-    const status = a.statusId ? (statusById.get(a.statusId) ?? null) : null
-    if (status) parts.push(htmlEsc(status))
-    const tags = resolveTags(a, tagById)
-    if (tags) parts.push(htmlEsc(tags))
-    return `<li style="${style}">${parts.join(' · ')}</li>`
-  }
-
-  const LI = 'font-family:system-ui,sans-serif;font-size:13px;margin:2px 0'
-  const LI_CHILD = 'font-family:system-ui,sans-serif;font-size:12px;margin:2px 0;color:#555'
-
-  const sections = cols
-    .filter(c => c.activities.length > 0)
-    .map(col => {
-      const items: string[] = []
-      for (const a of col.activities) {
-        const children = kanbanShowHierarchy ? (kanbanChildrenByParentId.get(a.id) ?? []) : []
-        if (children.length > 0) {
-          const childList = children.map(c => fmtLi(c, LI_CHILD)).join('')
-          items.push(`<li style="${LI}">${[htmlEsc(a.title), ...([resolveAssignees(a, memberById)].filter(s => s !== '—'))].join(' · ')}<ul style="margin:2px 0;padding-left:16px">${childList}</ul></li>`)
-        } else {
-          items.push(fmtLi(a, LI))
-        }
-      }
-      return `<h3 style="font-family:system-ui,sans-serif;font-size:14px;margin:16px 0 4px">${htmlEsc(col.label)} (${col.activities.length})</h3><ul style="margin:0;padding-left:20px">${items.join('')}</ul>`
-    })
-
-  const body = sections.length > 0 ? sections.join('') : '<p style="font-family:system-ui,sans-serif;font-size:13px"><em>No activities.</em></p>'
-  return `${htmlHeaderBlock(timelineName, filterLabel)}${body}`
-}
-
-/** Calendar view → HTML agenda. */
-export function buildCalendarHtml(
-  data: TextExportData,
-  timelineName: string,
-  filterLabel: string | null,
-): string {
-  const { activities, memberById, tagById } = data
-  if (activities.length === 0) {
-    return `${htmlHeaderBlock(timelineName, filterLabel)}<p style="font-family:system-ui,sans-serif;font-size:13px"><em>No activities.</em></p>`
-  }
-
-  const byDate = new Map<string, ApiActivity[]>()
-  for (const a of activities) {
-    const key = a.startAt?.slice(0, 10) ?? '__none__'
-    const bucket = byDate.get(key) ?? []
-    bucket.push(a)
-    byDate.set(key, bucket)
-  }
-
-  const sections = [...byDate.keys()].sort().map(key => {
-    const acts = byDate.get(key)!
-    const dateLabel = key === '__none__'
-      ? 'No date'
-      : new Date(`${key}T00:00:00Z`).toLocaleDateString('en-US', {
-          weekday: 'long', month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC',
-        })
-    const items = acts.map(a => {
-      const parts: string[] = [htmlEsc(a.title)]
-      if (a.endAt && a.endAt.slice(0, 10) !== key) parts.push(`→ ${htmlEsc(fmtDate(a.endAt))}`)
-      const assignees = resolveAssignees(a, memberById)
-      if (assignees !== '—') parts.push(htmlEsc(assignees))
-      const tags = resolveTags(a, tagById)
-      if (tags) parts.push(htmlEsc(tags))
-      return `<li style="font-family:system-ui,sans-serif;font-size:13px;margin:2px 0">${parts.join(' · ')}</li>`
-    })
-    return `<h3 style="font-family:system-ui,sans-serif;font-size:14px;margin:16px 0 4px">${htmlEsc(dateLabel)}</h3><ul style="margin:0;padding-left:20px">${items.join('')}</ul>`
-  })
-
-  return `${htmlHeaderBlock(timelineName, filterLabel)}${sections.join('')}`
 }
 ````
 
@@ -47892,315 +47525,6 @@ func flatten[T any](s []*T) []T {
 		}
 	}
 	return out
-}
-````
-
-## File: packages/api/internal/db/activity_repo.go
-````go
-package db
-
-import (
-	"fmt"
-	"time"
-
-	"github.com/jmoiron/sqlx"
-
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// ActivityRepo is the persistence layer for Activity records.
-type ActivityRepo struct {
-	db *sqlx.DB
-}
-
-// NewActivityRepo returns an ActivityRepo backed by db.
-func NewActivityRepo(db *sqlx.DB) *ActivityRepo {
-	return &ActivityRepo{db: db}
-}
-
-// Create inserts a new Activity row.
-func (r *ActivityRepo) Create(activity *models.Activity) error {
-	_, err := r.db.NamedExec(`
-		INSERT INTO activities (
-			id, timeline_id, title, description, notes, icon, color,
-			start_at, end_at, all_day, status_id, parent_activity_id,
-			percent_complete, location, url, rrule,
-			caldav_uid, google_event_id,
-			created_by, created_at, updated_at
-		) VALUES (
-			:id, :timeline_id, :title, :description, :notes, :icon, :color,
-			:start_at, :end_at, :all_day, :status_id, :parent_activity_id,
-			:percent_complete, :location, :url, :rrule,
-			:caldav_uid, :google_event_id,
-			:created_by, :created_at, :updated_at
-		)
-	`, activity)
-	if err != nil {
-		return fmt.Errorf("creating activity: %w", err)
-	}
-	return nil
-}
-
-// GetByID fetches an Activity by primary key. Returns sql.ErrNoRows (wrapped)
-// when no row matches.
-func (r *ActivityRepo) GetByID(id string) (*models.Activity, error) {
-	var a models.Activity
-	err := r.db.Get(&a, `SELECT * FROM activities WHERE id = ?`, id)
-	if err != nil {
-		return nil, fmt.Errorf("getting activity: %w", err)
-	}
-	return &a, nil
-}
-
-// Update replaces all mutable fields on an existing Activity row.
-func (r *ActivityRepo) Update(activity *models.Activity) error {
-	_, err := r.db.NamedExec(`
-		UPDATE activities SET
-			title              = :title,
-			description        = :description,
-			notes              = :notes,
-			icon               = :icon,
-			color              = :color,
-			start_at           = :start_at,
-			end_at             = :end_at,
-			all_day            = :all_day,
-			status_id          = :status_id,
-			parent_activity_id = :parent_activity_id,
-			percent_complete   = :percent_complete,
-			location           = :location,
-			url                = :url,
-			rrule              = :rrule,
-			updated_at         = :updated_at
-		WHERE id = :id
-	`, activity)
-	if err != nil {
-		return fmt.Errorf("updating activity: %w", err)
-	}
-	return nil
-}
-
-// Delete permanently removes an activity row.
-func (r *ActivityRepo) Delete(id string) error {
-	_, err := r.db.Exec(`DELETE FROM activities WHERE id = ?`, id)
-	if err != nil {
-		return fmt.Errorf("deleting activity: %w", err)
-	}
-	return nil
-}
-
-// ClearParentRefs clears parent_activity_id on all activities that reference id
-// as their parent. Called before deleting or archiving the parent so children
-// do not retain a dangling reference.
-func (r *ActivityRepo) ClearParentRefs(id string) error {
-	_, err := r.db.Exec(
-		`UPDATE activities SET parent_activity_id = NULL, updated_at = ? WHERE parent_activity_id = ?`,
-		time.Now().UTC(), id,
-	)
-	if err != nil {
-		return fmt.Errorf("clearing parent refs for %s: %w", id, err)
-	}
-	return nil
-}
-
-// SetArchived sets or clears archived_at on an activity. Pass a non-nil time
-// to archive; pass nil to unarchive.
-func (r *ActivityRepo) SetArchived(id string, at *time.Time) error {
-	_, err := r.db.Exec(
-		`UPDATE activities SET archived_at = ?, updated_at = ? WHERE id = ?`,
-		at, time.Now().UTC(), id,
-	)
-	if err != nil {
-		return fmt.Errorf("setting activity archived_at: %w", err)
-	}
-	return nil
-}
-
-// SetAssignments replaces all activity_assignments for an activity with the
-// provided member IDs. An empty slice removes all assignments.
-func (r *ActivityRepo) SetAssignments(activityID string, memberIDs []string) error {
-	tx, err := r.db.Beginx()
-	if err != nil {
-		return fmt.Errorf("beginning assignment transaction: %w", err)
-	}
-	defer func() {
-		if err != nil {
-			_ = tx.Rollback()
-		}
-	}()
-
-	if _, err = tx.Exec(`DELETE FROM activity_assignments WHERE activity_id = ?`, activityID); err != nil {
-		return fmt.Errorf("clearing activity assignments: %w", err)
-	}
-
-	for _, memberID := range memberIDs {
-		if _, err = tx.Exec(
-			`INSERT INTO activity_assignments (activity_id, team_member_id) VALUES (?, ?)`,
-			activityID, memberID,
-		); err != nil {
-			return fmt.Errorf("inserting activity assignment: %w", err)
-		}
-	}
-
-	if err = tx.Commit(); err != nil {
-		return fmt.Errorf("committing activity assignments: %w", err)
-	}
-	return nil
-}
-
-// GetAssignments returns the team_member_ids assigned to an activity.
-func (r *ActivityRepo) GetAssignments(activityID string) ([]string, error) {
-	var ids []string
-	err := r.db.Select(&ids,
-		`SELECT team_member_id FROM activity_assignments WHERE activity_id = ?`, activityID,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("getting activity assignments: %w", err)
-	}
-	if ids == nil {
-		ids = []string{}
-	}
-	return ids, nil
-}
-
-// SetTags replaces all activity_tags for an activity with the provided tag
-// IDs. An empty slice removes all tag associations.
-func (r *ActivityRepo) SetTags(activityID string, tagIDs []string) error {
-	tx, err := r.db.Beginx()
-	if err != nil {
-		return fmt.Errorf("beginning tag transaction: %w", err)
-	}
-	defer func() {
-		if err != nil {
-			_ = tx.Rollback()
-		}
-	}()
-
-	if _, err = tx.Exec(`DELETE FROM activity_tags WHERE activity_id = ?`, activityID); err != nil {
-		return fmt.Errorf("clearing activity tags: %w", err)
-	}
-
-	for _, tagID := range tagIDs {
-		if _, err = tx.Exec(
-			`INSERT INTO activity_tags (activity_id, tag_id) VALUES (?, ?)`,
-			activityID, tagID,
-		); err != nil {
-			return fmt.Errorf("inserting activity tag: %w", err)
-		}
-	}
-
-	if err = tx.Commit(); err != nil {
-		return fmt.Errorf("committing activity tags: %w", err)
-	}
-	return nil
-}
-
-// GetTags returns the tag IDs associated with an activity.
-func (r *ActivityRepo) GetTags(activityID string) ([]string, error) {
-	var ids []string
-	err := r.db.Select(&ids,
-		`SELECT tag_id FROM activity_tags WHERE activity_id = ?`, activityID,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("getting activity tags: %w", err)
-	}
-	if ids == nil {
-		ids = []string{}
-	}
-	return ids, nil
-}
-
-// ListByTimeline returns activities for a specific timeline. When
-// includeArchived is false archived rows are excluded. The bounds use overlap
-// semantics: from filters on end_at >= from (so a multi-week activity that
-// starts before the window still appears if it crosses it), and to filters on
-// start_at <= to.
-// AssignedMemberIDs is populated via a second query.
-func (r *ActivityRepo) ListByTimeline(timelineID string, from, to *time.Time, includeArchived bool) ([]*models.Activity, error) {
-	query := `SELECT * FROM activities WHERE timeline_id = ?`
-	args := []any{timelineID}
-	if !includeArchived {
-		query += ` AND archived_at IS NULL`
-	}
-
-	if from != nil {
-		// Overlap semantics: include any activity whose end_at is at or after from.
-		// This catches multi-week/multi-month activities that START before the
-		// visible range but still cross it.
-		query += ` AND end_at >= ?`
-		args = append(args, from)
-	}
-	if to != nil {
-		query += ` AND start_at <= ?`
-		args = append(args, to)
-	}
-	query += ` ORDER BY start_at ASC`
-
-	acts := make([]*models.Activity, 0)
-	if err := r.db.Select(&acts, query, args...); err != nil {
-		return nil, fmt.Errorf("listing activities: %w", err)
-	}
-	if len(acts) == 0 {
-		return acts, nil
-	}
-
-	// Initialise AssignedMemberIDs and TagIDs to empty slices so JSON fields are
-	// always arrays (never null) even when an activity has no assignments or tags.
-	ids := make([]string, len(acts))
-	byID := make(map[string]*models.Activity, len(acts))
-	for i, a := range acts {
-		a.AssignedMemberIDs = []string{}
-		a.TagIDs = []string{}
-		ids[i] = a.ID
-		byID[a.ID] = a
-	}
-
-	asnQuery, asnArgs, err := sqlx.In(
-		`SELECT activity_id, team_member_id FROM activity_assignments WHERE activity_id IN (?)`,
-		ids,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("building assignments query: %w", err)
-	}
-	asnQuery = r.db.Rebind(asnQuery)
-
-	type assignment struct {
-		ActivityID   string `db:"activity_id"`
-		TeamMemberID string `db:"team_member_id"`
-	}
-	var assignments []assignment
-	if err := r.db.Select(&assignments, asnQuery, asnArgs...); err != nil {
-		return nil, fmt.Errorf("listing activity assignments: %w", err)
-	}
-	for _, a := range assignments {
-		if act, ok := byID[a.ActivityID]; ok {
-			act.AssignedMemberIDs = append(act.AssignedMemberIDs, a.TeamMemberID)
-		}
-	}
-
-	tagQuery, tagArgs, err := sqlx.In(
-		`SELECT activity_id, tag_id FROM activity_tags WHERE activity_id IN (?)`,
-		ids,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("building tags query: %w", err)
-	}
-	tagQuery = r.db.Rebind(tagQuery)
-
-	type activityTag struct {
-		ActivityID string `db:"activity_id"`
-		TagID      string `db:"tag_id"`
-	}
-	var actTags []activityTag
-	if err := r.db.Select(&actTags, tagQuery, tagArgs...); err != nil {
-		return nil, fmt.Errorf("listing activity tags: %w", err)
-	}
-	for _, at := range actTags {
-		if act, ok := byID[at.ActivityID]; ok {
-			act.TagIDs = append(act.TagIDs, at.TagID)
-		}
-	}
-
-	return acts, nil
 }
 ````
 
@@ -50904,6 +50228,897 @@ export function buildExportFilename(timelineName: string, ext: string): string {
     .replace(/^-+|-+$/g, '')
   const date = new Date().toISOString().slice(0, 10)
   return `${slug || 'timeline'}-${date}${ext}`
+}
+````
+
+## File: packages/web/src/lib/textExport.ts
+````typescript
+/**
+ * textExport — client-side Markdown, plain-text, and HTML generation for the
+ * Export dialog's Phase 14.2 textual formats.
+ *
+ * All generators are pure functions: they accept pre-resolved lookup maps
+ * (produced in DashboardPage) and return plain strings. No DOM access, no
+ * network calls — identical output to what the user sees on screen.
+ *
+ * View-specific generators:
+ *   buildList*    — GFM table (Markdown) / space-padded table (plain) / HTML <table>
+ *   buildKanban*  — one section per column
+ *   buildCalendar* — agenda-style date-grouped list
+ */
+
+import type { components } from '@draba/shared'
+
+type ApiActivity = components['schemas']['Activity']
+
+// ── Public types ───────────────────────────────────────────────────────────────
+
+/**
+ * A pre-built list display row for export.
+ * Group rows produce section headers; activity rows produce content.
+ * Mirrors the subset of ListDisplayRow used outside the component.
+ */
+export type ListExportRow =
+  | { kind: 'group'; label: string; count: number }
+  | { kind: 'activity'; activity: ApiActivity; depth: number }
+
+/** All data the text generators need — supplied by DashboardPage at export time. */
+export interface TextExportData {
+  /**
+   * Filtered activities.
+   * Calendar generators iterate this directly. List generators use listDisplayRows instead.
+   */
+  activities: ApiActivity[]
+  /** Member ID → display name. */
+  memberById: Map<string, string>
+  /** Status ID → status name. */
+  statusById: Map<string, string>
+  /** Tag ID → tag name. */
+  tagById: Map<string, string>
+  /** Activity ID → title (for parent-activity name lookups). */
+  activityTitleById: Map<string, string>
+  /**
+   * Kanban-only: pre-built columns produced by `buildColumns`.
+   * Null for List and Calendar views.
+   * When kanbanShowHierarchy=true, column items contain only root activities.
+   */
+  kanbanColumns: Array<{ label: string; activities: ApiActivity[] }> | null
+  /**
+   * List-only: pre-built display rows in sorted, group-by order.
+   * Group rows emit section headers; activity rows carry a depth for hierarchy.
+   * Null for non-List views.
+   */
+  listDisplayRows: ListExportRow[] | null
+  /**
+   * List-only: ordered visible column IDs (excluding visual-only colorBar/identity).
+   * Null means use the default set of export columns.
+   */
+  listVisibleColumns: string[] | null
+  /** Kanban-only: true when hierarchy nesting is active in the view. */
+  kanbanShowHierarchy: boolean
+  /** Kanban-only: parent ID → child activities (populated when kanbanShowHierarchy=true). */
+  kanbanChildrenByParentId: Map<string, ApiActivity[]>
+}
+
+// ── Date formatting ────────────────────────────────────────────────────────────
+
+function fmtDate(iso: string | null | undefined): string {
+  if (!iso) return '—'
+  const d = new Date(iso)
+  if (isNaN(d.getTime())) return '—'
+  return d.toLocaleDateString('en-US', {
+    month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC',
+  })
+}
+
+function fmtDateRange(startAt: string | null | undefined, endAt: string | null | undefined): string {
+  const s = fmtDate(startAt)
+  const e = fmtDate(endAt)
+  if (s === '—' && e === '—') return '—'
+  if (s === e) return s
+  return `${s} – ${e}`
+}
+
+// ── Shared helpers ─────────────────────────────────────────────────────────────
+
+function resolveAssignees(activity: ApiActivity, memberById: Map<string, string>): string {
+  if (!activity.assignedMemberIds?.length) return '—'
+  return activity.assignedMemberIds.map(id => memberById.get(id) ?? id).join(', ')
+}
+
+function resolveTags(activity: ApiActivity, tagById: Map<string, string>): string {
+  if (!activity.tagIds?.length) return ''
+  return activity.tagIds.map(id => `#${tagById.get(id) ?? id}`).join(' ')
+}
+
+function buildHeader(timelineName: string, filterLabel: string | null): string {
+  const today = new Date().toLocaleDateString('en-US', {
+    month: 'long', day: 'numeric', year: 'numeric',
+  })
+  const parts = [`# ${timelineName} — ${today}`]
+  if (filterLabel) parts.push(`_Filter: ${filterLabel}_`)
+  parts.push('')
+  return parts.join('\n')
+}
+
+function buildPlainHeader(timelineName: string, filterLabel: string | null): string {
+  const today = new Date().toLocaleDateString('en-US', {
+    month: 'long', day: 'numeric', year: 'numeric',
+  })
+  const parts = [`${timelineName} — ${today}`]
+  if (filterLabel) parts.push(`Filter: ${filterLabel}`)
+  parts.push('')
+  return parts.join('\n')
+}
+
+function escMd(s: string): string {
+  return s.replace(/\|/g, '\\|')
+}
+
+function htmlEsc(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+}
+
+// ── List column helpers ────────────────────────────────────────────────────────
+
+const COLUMN_LABELS: Record<string, string> = {
+  title: 'Title',
+  startAt: 'Start',
+  endAt: 'End',
+  duration: 'Duration',
+  status: 'Status',
+  assignees: 'Assigned To',
+  tags: 'Tags',
+  progress: 'Progress',
+  parent: 'Parent',
+  description: 'Description',
+  location: 'Location',
+  url: 'URL',
+  notes: 'Notes',
+  createdAt: 'Created',
+  updatedAt: 'Updated',
+}
+
+const SKIP_EXPORT_COLS = new Set(['colorBar', 'identity'])
+
+/** Default columns emitted when listVisibleColumns is null. */
+const DEFAULT_EXPORT_COL_IDS = [
+  'title', 'startAt', 'endAt', 'status', 'assignees', 'tags', 'progress', 'parent',
+]
+
+function resolveListColumns(ids: string[] | null): Array<{ id: string; label: string }> {
+  const use = ids ?? DEFAULT_EXPORT_COL_IDS
+  return use
+    .filter(id => !SKIP_EXPORT_COLS.has(id) && id in COLUMN_LABELS)
+    .map(id => ({ id, label: COLUMN_LABELS[id] }))
+}
+
+function getColValue(
+  colId: string,
+  activity: ApiActivity,
+  memberById: Map<string, string>,
+  statusById: Map<string, string>,
+  tagById: Map<string, string>,
+  activityTitleById: Map<string, string>,
+): string {
+  switch (colId) {
+    case 'title': return activity.title
+    case 'startAt': return fmtDate(activity.startAt)
+    case 'endAt': return fmtDate(activity.endAt)
+    case 'duration': {
+      if (!activity.startAt || !activity.endAt) return '—'
+      const days = Math.round(
+        (new Date(activity.endAt).getTime() - new Date(activity.startAt).getTime()) / 86400000,
+      )
+      if (days < 0) return '—'
+      return `${days + 1} day${days + 1 !== 1 ? 's' : ''}`
+    }
+    case 'status': return activity.statusId ? (statusById.get(activity.statusId) ?? '—') : '—'
+    case 'assignees': return resolveAssignees(activity, memberById)
+    case 'tags': return resolveTags(activity, tagById) || '—'
+    case 'progress': return activity.percentComplete != null ? `${activity.percentComplete}%` : '—'
+    case 'parent': return activity.parentActivityId
+      ? (activityTitleById.get(activity.parentActivityId) ?? '—')
+      : '—'
+    case 'description': return activity.description ?? '—'
+    case 'location': return activity.location ?? '—'
+    case 'url': return activity.url ?? '—'
+    // notes is in the DB schema but may be absent from the strict generated TS type
+    case 'notes': return (activity as ApiActivity & { notes?: string | null }).notes ?? '—'
+    case 'createdAt': return fmtDate(activity.createdAt)
+    case 'updatedAt': return fmtDate(activity.updatedAt)
+    default: return '—'
+  }
+}
+
+/** Returns the depth-prefix for a title cell: '' at depth 0, '↳ ' at depth 1, '  ↳ ' at depth 2, etc. */
+function depthPrefix(depth: number): string {
+  if (depth === 0) return ''
+  return `${'  '.repeat(depth - 1)}↳ `
+}
+
+// ── Markdown generators ────────────────────────────────────────────────────────
+
+/**
+ * List view → Markdown outline (bullet list).
+ * One bullet per activity; only non-empty fields are emitted as indented lines.
+ * Children are nested bullets (depth × 2 spaces of leading indent).
+ * Group-by produces ## sections.
+ */
+export function buildListMarkdownOutline(
+  data: TextExportData,
+  timelineName: string,
+  filterLabel: string | null,
+): string {
+  const { listDisplayRows, memberById, statusById, tagById, activityTitleById } = data
+  const lines: string[] = [buildHeader(timelineName, filterLabel)]
+
+  if (!listDisplayRows || listDisplayRows.length === 0) {
+    lines.push('_No activities._')
+    return lines.join('\n')
+  }
+
+  const fmtActivity = (activity: ApiActivity, bulletIndent: string): string[] => {
+    const result: string[] = []
+    const datePart = fmtDateRange(activity.startAt, activity.endAt)
+    const assignees = resolveAssignees(activity, memberById)
+    let firstLine = `${bulletIndent}- **${escMd(activity.title)}**`
+    if (datePart !== '—') firstLine += ` (${datePart})`
+    if (assignees !== '—') firstLine += ` — ${assignees}`
+    result.push(firstLine)
+
+    const fi = `${bulletIndent}  `
+    if (activity.description) result.push(`${fi}${escMd(activity.description)}`)
+    const status = activity.statusId ? statusById.get(activity.statusId) : null
+    if (status) result.push(`${fi}Status: ${escMd(status)}`)
+    if (activity.percentComplete != null) result.push(`${fi}Progress: ${activity.percentComplete}%`)
+    const parent = activity.parentActivityId ? activityTitleById.get(activity.parentActivityId) : null
+    if (parent) result.push(`${fi}Parent: ${escMd(parent)}`)
+    const tags = resolveTags(activity, tagById)
+    if (tags) result.push(`${fi}Tags: ${tags}`)
+    if (activity.location) result.push(`${fi}Location: ${escMd(activity.location)}`)
+    if (activity.url) result.push(`${fi}URL: ${activity.url}`)
+    return result
+  }
+
+  const hasGroups = listDisplayRows.some(r => r.kind === 'group')
+
+  if (hasGroups) {
+    let firstGroup = true
+    for (const row of listDisplayRows) {
+      if (row.kind === 'group') {
+        if (!firstGroup) lines.push('')
+        lines.push(`## ${row.label} (${row.count})`)
+        lines.push('')
+        firstGroup = false
+      } else {
+        lines.push(...fmtActivity(row.activity, '  '.repeat(row.depth)))
+        lines.push('')
+      }
+    }
+  } else {
+    for (const row of listDisplayRows) {
+      if (row.kind === 'activity') {
+        lines.push(...fmtActivity(row.activity, '  '.repeat(row.depth)))
+        lines.push('')
+      }
+    }
+  }
+
+  return lines.join('\n').trimEnd()
+}
+
+/** List view → GitHub-flavored Markdown table, respecting column visibility, sort, group-by, and hierarchy. */
+export function buildListMarkdown(
+  data: TextExportData,
+  timelineName: string,
+  filterLabel: string | null,
+): string {
+  const { listDisplayRows, listVisibleColumns, memberById, statusById, tagById, activityTitleById } = data
+  const lines: string[] = [buildHeader(timelineName, filterLabel)]
+
+  const cols = resolveListColumns(listVisibleColumns)
+  const thead = `| ${cols.map(c => c.label).join(' | ')} |`
+  const tsep = `| ${cols.map(() => '---').join(' | ')} |`
+
+  const getCells = (activity: ApiActivity, depth: number) =>
+    cols.map(c => {
+      const val = getColValue(c.id, activity, memberById, statusById, tagById, activityTitleById)
+      const pfx = c.id === 'title' ? depthPrefix(depth) : ''
+      return escMd(pfx + val)
+    })
+
+  if (!listDisplayRows || listDisplayRows.length === 0) {
+    lines.push(thead, tsep)
+    if (!listDisplayRows || listDisplayRows.length === 0) lines.push('_No activities._')
+    return lines.join('\n')
+  }
+
+  const hasGroups = listDisplayRows.some(r => r.kind === 'group')
+
+  if (hasGroups) {
+    // member or status group-by: one GFM table per section
+    let firstGroup = true
+    for (const row of listDisplayRows) {
+      if (row.kind === 'group') {
+        if (!firstGroup) lines.push('')
+        lines.push(`## ${row.label} (${row.count})`)
+        lines.push('')
+        lines.push(thead)
+        lines.push(tsep)
+        firstGroup = false
+      } else {
+        lines.push(`| ${getCells(row.activity, row.depth).join(' | ')} |`)
+      }
+    }
+  } else {
+    // flat (none) or parent-hierarchy mode: single table, depth prefix in title
+    lines.push(thead, tsep)
+    for (const row of listDisplayRows) {
+      if (row.kind === 'activity') {
+        lines.push(`| ${getCells(row.activity, row.depth).join(' | ')} |`)
+      }
+    }
+  }
+
+  return lines.join('\n')
+}
+
+/** Kanban view → one Markdown section per column, with optional hierarchy nesting. */
+export function buildKanbanMarkdown(
+  data: TextExportData,
+  timelineName: string,
+  filterLabel: string | null,
+): string {
+  const { kanbanColumns, activities, memberById, statusById, tagById, kanbanShowHierarchy, kanbanChildrenByParentId } = data
+  const lines: string[] = [buildHeader(timelineName, filterLabel)]
+  const cols = kanbanColumns ?? [{ label: 'Activities', activities }]
+
+  const fmtItem = (a: ApiActivity, indent: string): string => {
+    const parts: string[] = [a.title]
+    const assignees = resolveAssignees(a, memberById)
+    if (assignees !== '—') parts.push(assignees)
+    const range = fmtDateRange(a.startAt, a.endAt)
+    if (range !== '—') parts.push(range)
+    const status = a.statusId ? (statusById.get(a.statusId) ?? null) : null
+    if (status) parts.push(status)
+    const tags = resolveTags(a, tagById)
+    if (tags) parts.push(tags)
+    return `${indent}- ${parts.join(' · ')}`
+  }
+
+  for (const col of cols) {
+    if (col.activities.length === 0) continue
+    lines.push(`## ${col.label} (${col.activities.length})`)
+    for (const a of col.activities) {
+      lines.push(fmtItem(a, ''))
+      if (kanbanShowHierarchy) {
+        for (const child of kanbanChildrenByParentId.get(a.id) ?? []) {
+          lines.push(fmtItem(child, '  '))
+        }
+      }
+    }
+    lines.push('')
+  }
+
+  if (cols.every(c => c.activities.length === 0)) lines.push('_No activities._')
+  return lines.join('\n').trimEnd()
+}
+
+/** Calendar view → agenda-style date-grouped Markdown list. */
+export function buildCalendarMarkdown(
+  data: TextExportData,
+  timelineName: string,
+  filterLabel: string | null,
+): string {
+  const { activities, memberById, tagById } = data
+  const lines: string[] = [buildHeader(timelineName, filterLabel)]
+
+  if (activities.length === 0) {
+    lines.push('_No activities._')
+    return lines.join('\n')
+  }
+
+  const byDate = new Map<string, ApiActivity[]>()
+  for (const a of activities) {
+    const key = a.startAt?.slice(0, 10) ?? '__none__'
+    const bucket = byDate.get(key) ?? []
+    bucket.push(a)
+    byDate.set(key, bucket)
+  }
+
+  for (const key of [...byDate.keys()].sort()) {
+    const acts = byDate.get(key)!
+    const dateLabel = key === '__none__'
+      ? 'No date'
+      : new Date(`${key}T00:00:00Z`).toLocaleDateString('en-US', {
+          weekday: 'long', month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC',
+        })
+    lines.push(`## ${dateLabel}`)
+    for (const a of acts) {
+      const parts: string[] = [a.title]
+      if (a.endAt && a.endAt.slice(0, 10) !== key) parts.push(`→ ${fmtDate(a.endAt)}`)
+      const assignees = resolveAssignees(a, memberById)
+      if (assignees !== '—') parts.push(assignees)
+      const tags = resolveTags(a, tagById)
+      if (tags) parts.push(tags)
+      lines.push(`- ${parts.join(' · ')}`)
+    }
+    lines.push('')
+  }
+
+  return lines.join('\n').trimEnd()
+}
+
+// ── Plain-text generators ──────────────────────────────────────────────────────
+
+function pad(s: string, width: number): string {
+  return s.length >= width ? s : `${s}${' '.repeat(width - s.length)}`
+}
+
+/**
+ * List view → plain-text outline (bullet list).
+ * Mirrors buildListMarkdownOutline without Markdown syntax.
+ * Root activities use •, children use ◦ (depth 1+).
+ */
+export function buildListPlainTextOutline(
+  data: TextExportData,
+  timelineName: string,
+  filterLabel: string | null,
+): string {
+  const { listDisplayRows, memberById, statusById, tagById, activityTitleById } = data
+  const lines: string[] = [buildPlainHeader(timelineName, filterLabel)]
+
+  if (!listDisplayRows || listDisplayRows.length === 0) {
+    lines.push('No activities.')
+    return lines.join('\n')
+  }
+
+  const fmtActivity = (activity: ApiActivity, depth: number): string[] => {
+    const result: string[] = []
+    const bulletIndent = '  '.repeat(depth)
+    const bullet = depth === 0 ? '•' : '◦'
+    const datePart = fmtDateRange(activity.startAt, activity.endAt)
+    const assignees = resolveAssignees(activity, memberById)
+    let firstLine = `${bulletIndent}${bullet} ${activity.title}`
+    if (datePart !== '—') firstLine += ` (${datePart})`
+    if (assignees !== '—') firstLine += ` — ${assignees}`
+    result.push(firstLine)
+
+    const fi = `${bulletIndent}  `
+    if (activity.description) result.push(`${fi}${activity.description}`)
+    const status = activity.statusId ? statusById.get(activity.statusId) : null
+    if (status) result.push(`${fi}Status: ${status}`)
+    if (activity.percentComplete != null) result.push(`${fi}Progress: ${activity.percentComplete}%`)
+    const parent = activity.parentActivityId ? activityTitleById.get(activity.parentActivityId) : null
+    if (parent) result.push(`${fi}Parent: ${parent}`)
+    const tags = resolveTags(activity, tagById)
+    if (tags) result.push(`${fi}Tags: ${tags}`)
+    if (activity.location) result.push(`${fi}Location: ${activity.location}`)
+    if (activity.url) result.push(`${fi}URL: ${activity.url}`)
+    return result
+  }
+
+  const hasGroups = listDisplayRows.some(r => r.kind === 'group')
+
+  if (hasGroups) {
+    let firstGroup = true
+    for (const row of listDisplayRows) {
+      if (row.kind === 'group') {
+        if (!firstGroup) lines.push('')
+        const heading = `${row.label.toUpperCase()} (${row.count})`
+        lines.push(heading)
+        lines.push('─'.repeat(heading.length))
+        firstGroup = false
+      } else {
+        lines.push(...fmtActivity(row.activity, row.depth))
+        lines.push('')
+      }
+    }
+  } else {
+    for (const row of listDisplayRows) {
+      if (row.kind === 'activity') {
+        lines.push(...fmtActivity(row.activity, row.depth))
+        lines.push('')
+      }
+    }
+  }
+
+  return lines.join('\n').trimEnd()
+}
+
+/** List view → space-padded plain-text table, respecting column visibility, sort, group-by, and hierarchy. */
+export function buildListPlainText(
+  data: TextExportData,
+  timelineName: string,
+  filterLabel: string | null,
+): string {
+  const { listDisplayRows, listVisibleColumns, memberById, statusById, tagById, activityTitleById } = data
+  const lines: string[] = [buildPlainHeader(timelineName, filterLabel)]
+
+  const cols = resolveListColumns(listVisibleColumns)
+  const MAX_W: Record<string, number> = {
+    title: 40, startAt: 15, endAt: 15, duration: 10, status: 20,
+    assignees: 26, tags: 20, progress: 10, parent: 24, description: 30,
+    location: 20, url: 30, notes: 30, createdAt: 15, updatedAt: 15,
+  }
+
+  const getRenderedValue = (colId: string, activity: ApiActivity, depth: number): string => {
+    const val = getColValue(colId, activity, memberById, statusById, tagById, activityTitleById)
+    const pfx = colId === 'title' ? depthPrefix(depth) : ''
+    return pfx + val
+  }
+
+  const activityRows = (listDisplayRows ?? []).filter((r): r is { kind: 'activity'; activity: ApiActivity; depth: number } => r.kind === 'activity')
+  const fallbackActivities = activityRows.length > 0
+    ? activityRows.map(r => ({ activity: r.activity, depth: r.depth }))
+    : data.activities.map(a => ({ activity: a, depth: 0 }))
+
+  if (fallbackActivities.length === 0) {
+    lines.push('No activities.')
+    return lines.join('\n')
+  }
+
+  // Compute column widths from actual rendered content
+  const widths = cols.map(col => {
+    let w = col.label.length
+    for (const { activity, depth } of fallbackActivities) {
+      const rendered = getRenderedValue(col.id, activity, depth)
+      w = Math.max(w, Math.min(rendered.length, MAX_W[col.id] ?? 20))
+    }
+    return w
+  })
+
+  const emitTableHeader = () => {
+    lines.push(cols.map((c, i) => pad(c.label, widths[i])).join('  '))
+    lines.push(widths.map(w => '─'.repeat(w)).join('  '))
+  }
+
+  const emitRow = (activity: ApiActivity, depth: number) => {
+    lines.push(
+      cols.map((c, i) => {
+        const rendered = getRenderedValue(c.id, activity, depth)
+        return pad(rendered.slice(0, widths[i]), widths[i])
+      }).join('  '),
+    )
+  }
+
+  if (!listDisplayRows) {
+    emitTableHeader()
+    for (const { activity, depth } of fallbackActivities) emitRow(activity, depth)
+    return lines.join('\n')
+  }
+
+  const hasGroups = listDisplayRows.some(r => r.kind === 'group')
+
+  if (hasGroups) {
+    let firstGroup = true
+    for (const row of listDisplayRows) {
+      if (row.kind === 'group') {
+        if (!firstGroup) lines.push('')
+        const heading = `${row.label.toUpperCase()} (${row.count})`
+        lines.push(heading)
+        lines.push('─'.repeat(heading.length))
+        emitTableHeader()
+        firstGroup = false
+      } else {
+        emitRow(row.activity, row.depth)
+      }
+    }
+  } else {
+    emitTableHeader()
+    for (const row of listDisplayRows) {
+      if (row.kind === 'activity') emitRow(row.activity, row.depth)
+    }
+  }
+
+  return lines.join('\n')
+}
+
+/** Kanban view → plain-text sections with bullet lists. */
+export function buildKanbanPlainText(
+  data: TextExportData,
+  timelineName: string,
+  filterLabel: string | null,
+): string {
+  const { kanbanColumns, activities, memberById, statusById, tagById, kanbanShowHierarchy, kanbanChildrenByParentId } = data
+  const lines: string[] = [buildPlainHeader(timelineName, filterLabel)]
+  const cols = kanbanColumns ?? [{ label: 'Activities', activities }]
+
+  const fmtItem = (a: ApiActivity): string => {
+    const parts: string[] = [a.title]
+    const assignees = resolveAssignees(a, memberById)
+    if (assignees !== '—') parts.push(assignees)
+    const range = fmtDateRange(a.startAt, a.endAt)
+    if (range !== '—') parts.push(range)
+    const status = a.statusId ? (statusById.get(a.statusId) ?? null) : null
+    if (status) parts.push(status)
+    const tags = resolveTags(a, tagById)
+    if (tags) parts.push(tags)
+    return parts.join(' · ')
+  }
+
+  for (const col of cols) {
+    if (col.activities.length === 0) continue
+    const heading = `${col.label.toUpperCase()} (${col.activities.length})`
+    lines.push(heading)
+    lines.push('─'.repeat(heading.length))
+    for (const a of col.activities) {
+      lines.push(`  • ${fmtItem(a)}`)
+      if (kanbanShowHierarchy) {
+        for (const child of kanbanChildrenByParentId.get(a.id) ?? []) {
+          lines.push(`      ◦ ${fmtItem(child)}`)
+        }
+      }
+    }
+    lines.push('')
+  }
+
+  if (cols.every(c => c.activities.length === 0)) lines.push('No activities.')
+  return lines.join('\n').trimEnd()
+}
+
+/** Calendar view → plain-text agenda. */
+export function buildCalendarPlainText(
+  data: TextExportData,
+  timelineName: string,
+  filterLabel: string | null,
+): string {
+  const { activities, memberById, tagById } = data
+  const lines: string[] = [buildPlainHeader(timelineName, filterLabel)]
+
+  if (activities.length === 0) { lines.push('No activities.'); return lines.join('\n') }
+
+  const byDate = new Map<string, ApiActivity[]>()
+  for (const a of activities) {
+    const key = a.startAt?.slice(0, 10) ?? '__none__'
+    const bucket = byDate.get(key) ?? []
+    bucket.push(a)
+    byDate.set(key, bucket)
+  }
+
+  for (const key of [...byDate.keys()].sort()) {
+    const acts = byDate.get(key)!
+    const dateLabel = key === '__none__'
+      ? 'No date'
+      : new Date(`${key}T00:00:00Z`).toLocaleDateString('en-US', {
+          weekday: 'long', month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC',
+        })
+    lines.push(dateLabel)
+    lines.push('─'.repeat(dateLabel.length))
+    for (const a of acts) {
+      const parts: string[] = [a.title]
+      if (a.endAt && a.endAt.slice(0, 10) !== key) parts.push(`→ ${fmtDate(a.endAt)}`)
+      const assignees = resolveAssignees(a, memberById)
+      if (assignees !== '—') parts.push(assignees)
+      const tags = resolveTags(a, tagById)
+      if (tags) parts.push(tags)
+      lines.push(`  • ${parts.join(' · ')}`)
+    }
+    lines.push('')
+  }
+
+  return lines.join('\n').trimEnd()
+}
+
+// ── HTML generators (for clipboard text/html flavor) ──────────────────────────
+
+const TH = 'padding:6px 10px;border:1px solid #ccc;background:#f5f5f5;font-weight:600;text-align:left;white-space:nowrap;font-family:system-ui,sans-serif;font-size:13px'
+const TD = 'padding:5px 10px;border:1px solid #ddd;vertical-align:top;font-family:system-ui,sans-serif;font-size:13px'
+
+function htmlHeaderBlock(timelineName: string, filterLabel: string | null): string {
+  const today = new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })
+  const ctx = filterLabel ? ` · Filter: ${htmlEsc(filterLabel)}` : ''
+  return `<p style="font-family:system-ui,sans-serif;font-size:13px;margin:0 0 10px"><strong>${htmlEsc(timelineName)}</strong> — ${today}${ctx}</p>`
+}
+
+/** List view → HTML table for clipboard, respecting column visibility, sort, group-by, and hierarchy. */
+export function buildListHtml(
+  data: TextExportData,
+  timelineName: string,
+  filterLabel: string | null,
+): string {
+  const { listDisplayRows, listVisibleColumns, memberById, statusById, tagById, activityTitleById } = data
+  const cols = resolveListColumns(listVisibleColumns)
+
+  const thead = `<thead><tr>${cols.map(c => `<th style="${TH}">${htmlEsc(c.label)}</th>`).join('')}</tr></thead>`
+  const colspan = cols.length
+
+  const makeRow = (activity: ApiActivity, depth: number): string => {
+    const cells = cols.map(c => {
+      const val = getColValue(c.id, activity, memberById, statusById, tagById, activityTitleById)
+      const paddingLeft = c.id === 'title' && depth > 0 ? `padding-left:${6 + depth * 16}px;` : ''
+      const prefix = c.id === 'title' && depth > 0 ? '↳ ' : ''
+      return `<td style="${paddingLeft}${TD}">${htmlEsc(prefix + val)}</td>`
+    })
+    return `<tr>${cells.join('')}</tr>`
+  }
+
+  const makeSection = (label: string, count: number): string =>
+    `<tr><th colspan="${colspan}" style="${TH};background:#e8e8e8;font-size:12px">${htmlEsc(label)} (${count})</th></tr>`
+
+  const rows: string[] = []
+  const activityList = listDisplayRows ?? data.activities.map(a => ({ kind: 'activity' as const, activity: a, depth: 0 }))
+
+  if (activityList.length === 0) {
+    rows.push(`<tr><td colspan="${colspan}" style="${TD}"><em>No activities.</em></td></tr>`)
+  } else {
+    for (const row of activityList) {
+      if (row.kind === 'group') {
+        rows.push(makeSection(row.label, row.count))
+        rows.push(thead.replace('<thead>', '').replace('</thead>', '').replace('<tr>', '<tr>').replace('</tr>', '</tr>'))
+      } else {
+        rows.push(makeRow(row.activity, row.depth))
+      }
+    }
+  }
+
+  return `${htmlHeaderBlock(timelineName, filterLabel)}<table style="border-collapse:collapse">${thead}<tbody>${rows.join('')}</tbody></table>`
+}
+
+/** List view → HTML outline (bullet list) for clipboard. Mirrors buildListMarkdownOutline. */
+export function buildListHtmlOutline(
+  data: TextExportData,
+  timelineName: string,
+  filterLabel: string | null,
+): string {
+  const { listDisplayRows, memberById, statusById, tagById, activityTitleById } = data
+
+  const LI = 'font-family:system-ui,sans-serif;font-size:13px;margin:3px 0'
+  const FIELD = 'font-family:system-ui,sans-serif;font-size:12px;color:#555;margin:1px 0 1px 0'
+
+  const fmtActivity = (activity: ApiActivity, depth: number): string => {
+    const datePart = fmtDateRange(activity.startAt, activity.endAt)
+    const assignees = resolveAssignees(activity, memberById)
+    let firstLine = `<strong>${htmlEsc(activity.title)}</strong>`
+    if (datePart !== '—') firstLine += ` <span style="color:#777">(${htmlEsc(datePart)})</span>`
+    if (assignees !== '—') firstLine += ` — ${htmlEsc(assignees)}`
+
+    const fields: string[] = []
+    if (activity.description) fields.push(htmlEsc(activity.description))
+    const status = activity.statusId ? statusById.get(activity.statusId) : null
+    if (status) fields.push(`Status: ${htmlEsc(status)}`)
+    if (activity.percentComplete != null) fields.push(`Progress: ${activity.percentComplete}%`)
+    const parent = activity.parentActivityId ? activityTitleById.get(activity.parentActivityId) : null
+    if (parent) fields.push(`Parent: ${htmlEsc(parent)}`)
+    const tags = resolveTags(activity, tagById)
+    if (tags) fields.push(`Tags: ${htmlEsc(tags)}`)
+    if (activity.location) fields.push(`Location: ${htmlEsc(activity.location)}`)
+    if (activity.url) fields.push(`URL: ${htmlEsc(activity.url)}`)
+
+    const fieldHtml = fields.length > 0
+      ? `<div style="margin:2px 0 0 0">${fields.map(f => `<div style="${FIELD}">${f}</div>`).join('')}</div>`
+      : ''
+
+    const paddingLeft = depth > 0 ? `padding-left:${depth * 20}px;` : ''
+    return `<li style="${paddingLeft}${LI}">${firstLine}${fieldHtml}</li>`
+  }
+
+  const activityList = listDisplayRows ?? data.activities.map(a => ({ kind: 'activity' as const, activity: a, depth: 0 }))
+
+  if (activityList.length === 0) {
+    return `${htmlHeaderBlock(timelineName, filterLabel)}<p style="font-family:system-ui,sans-serif;font-size:13px"><em>No activities.</em></p>`
+  }
+
+  const hasGroups = activityList.some(r => r.kind === 'group')
+  const sections: string[] = []
+
+  if (hasGroups) {
+    let items: string[] = []
+    let groupLabel = ''
+    let groupCount = 0
+    const flush = () => {
+      if (groupLabel) sections.push(`<h3 style="font-family:system-ui,sans-serif;font-size:14px;margin:16px 0 4px">${htmlEsc(groupLabel)} (${groupCount})</h3><ul style="margin:0;padding-left:20px">${items.join('')}</ul>`)
+    }
+    for (const row of activityList) {
+      if (row.kind === 'group') {
+        flush()
+        groupLabel = row.label
+        groupCount = row.count
+        items = []
+      } else {
+        items.push(fmtActivity(row.activity, row.depth))
+      }
+    }
+    flush()
+  } else {
+    const items = activityList
+      .filter((r): r is { kind: 'activity'; activity: ApiActivity; depth: number } => r.kind === 'activity')
+      .map(r => fmtActivity(r.activity, r.depth))
+    sections.push(`<ul style="margin:0;padding-left:20px">${items.join('')}</ul>`)
+  }
+
+  return `${htmlHeaderBlock(timelineName, filterLabel)}${sections.join('')}`
+}
+
+/** Kanban view → HTML sections with optional hierarchy nesting. */
+export function buildKanbanHtml(
+  data: TextExportData,
+  timelineName: string,
+  filterLabel: string | null,
+): string {
+  const { kanbanColumns, activities, memberById, statusById, tagById, kanbanShowHierarchy, kanbanChildrenByParentId } = data
+  const cols = kanbanColumns ?? [{ label: 'Activities', activities }]
+
+  const fmtLi = (a: ApiActivity, style: string): string => {
+    const parts: string[] = [htmlEsc(a.title)]
+    const assignees = resolveAssignees(a, memberById)
+    if (assignees !== '—') parts.push(htmlEsc(assignees))
+    const range = fmtDateRange(a.startAt, a.endAt)
+    if (range !== '—') parts.push(htmlEsc(range))
+    const status = a.statusId ? (statusById.get(a.statusId) ?? null) : null
+    if (status) parts.push(htmlEsc(status))
+    const tags = resolveTags(a, tagById)
+    if (tags) parts.push(htmlEsc(tags))
+    return `<li style="${style}">${parts.join(' · ')}</li>`
+  }
+
+  const LI = 'font-family:system-ui,sans-serif;font-size:13px;margin:2px 0'
+  const LI_CHILD = 'font-family:system-ui,sans-serif;font-size:12px;margin:2px 0;color:#555'
+
+  const sections = cols
+    .filter(c => c.activities.length > 0)
+    .map(col => {
+      const items: string[] = []
+      for (const a of col.activities) {
+        const children = kanbanShowHierarchy ? (kanbanChildrenByParentId.get(a.id) ?? []) : []
+        if (children.length > 0) {
+          const childList = children.map(c => fmtLi(c, LI_CHILD)).join('')
+          items.push(`<li style="${LI}">${[htmlEsc(a.title), ...([resolveAssignees(a, memberById)].filter(s => s !== '—'))].join(' · ')}<ul style="margin:2px 0;padding-left:16px">${childList}</ul></li>`)
+        } else {
+          items.push(fmtLi(a, LI))
+        }
+      }
+      return `<h3 style="font-family:system-ui,sans-serif;font-size:14px;margin:16px 0 4px">${htmlEsc(col.label)} (${col.activities.length})</h3><ul style="margin:0;padding-left:20px">${items.join('')}</ul>`
+    })
+
+  const body = sections.length > 0 ? sections.join('') : '<p style="font-family:system-ui,sans-serif;font-size:13px"><em>No activities.</em></p>'
+  return `${htmlHeaderBlock(timelineName, filterLabel)}${body}`
+}
+
+/** Calendar view → HTML agenda. */
+export function buildCalendarHtml(
+  data: TextExportData,
+  timelineName: string,
+  filterLabel: string | null,
+): string {
+  const { activities, memberById, tagById } = data
+  if (activities.length === 0) {
+    return `${htmlHeaderBlock(timelineName, filterLabel)}<p style="font-family:system-ui,sans-serif;font-size:13px"><em>No activities.</em></p>`
+  }
+
+  const byDate = new Map<string, ApiActivity[]>()
+  for (const a of activities) {
+    const key = a.startAt?.slice(0, 10) ?? '__none__'
+    const bucket = byDate.get(key) ?? []
+    bucket.push(a)
+    byDate.set(key, bucket)
+  }
+
+  const sections = [...byDate.keys()].sort().map(key => {
+    const acts = byDate.get(key)!
+    const dateLabel = key === '__none__'
+      ? 'No date'
+      : new Date(`${key}T00:00:00Z`).toLocaleDateString('en-US', {
+          weekday: 'long', month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC',
+        })
+    const items = acts.map(a => {
+      const parts: string[] = [htmlEsc(a.title)]
+      if (a.endAt && a.endAt.slice(0, 10) !== key) parts.push(`→ ${htmlEsc(fmtDate(a.endAt))}`)
+      const assignees = resolveAssignees(a, memberById)
+      if (assignees !== '—') parts.push(htmlEsc(assignees))
+      const tags = resolveTags(a, tagById)
+      if (tags) parts.push(htmlEsc(tags))
+      return `<li style="font-family:system-ui,sans-serif;font-size:13px;margin:2px 0">${parts.join(' · ')}</li>`
+    })
+    return `<h3 style="font-family:system-ui,sans-serif;font-size:14px;margin:16px 0 4px">${htmlEsc(dateLabel)}</h3><ul style="margin:0;padding-left:20px">${items.join('')}</ul>`
+  })
+
+  return `${htmlHeaderBlock(timelineName, filterLabel)}${sections.join('')}`
 }
 ````
 
@@ -54244,412 +54459,6 @@ export default function CalendarShareModal({ teamId, timelineId, timelineName, o
 }
 ````
 
-## File: packages/web/src/components/ExportDialog.tsx
-````typescript
-/**
- * ExportDialog — "Export this view" modal (Phase 14).
- *
- * Built to the export-modal design handoff (docs/design/handoffs/export-modal):
- * a format rail + options pane two-pane body, a filter context strip that
- * makes "export what I'm seeing" visible, and a scope picker (current view vs
- * entire timeline) for the data formats. Modeled on ShareModal's portal shell,
- * but — per the handoff — the overlay click does not close the dialog, only
- * Esc / the close button / Cancel do.
- *
- * 14.1 implements the server-side data/calendar formats (CSV, Excel, ICS).
- * 14.2 adds client-side textual formats (Markdown, Plain text, Copy to clipboard)
- *      via the `textExportData` prop; these formats only appear for non-Gantt views.
- */
-
-import { useEffect, useRef, useState, useCallback } from 'react'
-import { createPortal } from 'react-dom'
-import {
-  FileOutput, Filter, AlertTriangle, Download, FileDown, Check, X, Copy,
-} from 'lucide-react'
-import { Button } from '@/components/ui/button'
-import { cn } from '@/lib/utils'
-import { useExport } from '@/hooks/useExport'
-import {
-  getExportFormats, buildExportFilename,
-  type ExportFormatId, type ExportViewType,
-} from '@/lib/exportCapabilities'
-import {
-  buildListMarkdown, buildKanbanMarkdown, buildCalendarMarkdown,
-  buildListPlainText, buildKanbanPlainText, buildCalendarPlainText,
-  buildListHtml, buildKanbanHtml, buildCalendarHtml,
-  type TextExportData,
-} from '@/lib/textExport'
-import type { FilterDefinition } from '@/lib/filterTypes'
-
-export type { TextExportData }
-
-export interface ExportDialogProps {
-  view: ExportViewType
-  teamId: string
-  timelineId: string
-  timelineName: string
-  /** Display label for the active filter (e.g. a saved filter's name), or null if no filter is active. */
-  filterLabel: string | null
-  /** The active filter's definition, sent to the server when scope is "view" and activityIds is absent. */
-  filterDefinition: FilterDefinition | null
-  /** Number of activities matching the active filter (or totalCount when no filter is active). */
-  filteredCount: number
-  /** Total number of activities in the timeline, regardless of filter. */
-  totalCount: number
-  /**
-   * Ordered activity IDs for the "current view" scope — covers preset/member
-   * filters (which can't be sent as a FilterDefinition) and list-view sort order.
-   * When non-null, takes precedence over filterDefinition in the request body.
-   */
-  viewActivityIds: string[] | null
-  /**
-   * Export column names to include in CSV/Excel (list view column visibility).
-   * Null means all columns. Only meaningful for csv/xlsx formats.
-   */
-  listExportColumns: string[] | null
-  /**
-   * Pre-resolved in-memory data for client-side textual formats (14.2).
-   * Required for Markdown / plain text / clipboard options to be functional;
-   * if absent those formats still appear but will produce empty output.
-   */
-  textExportData?: TextExportData | null
-  onClose: () => void
-}
-
-const VIEW_LABELS: Record<ExportViewType, string> = {
-  gantt: 'Gantt',
-  list: 'List',
-  kanban: 'Kanban',
-  calendar: 'Calendar',
-}
-
-type Scope = 'view' | 'all'
-
-// ── Client-side text generation ────────────────────────────────────────────────
-
-function generateMarkdown(view: ExportViewType, data: TextExportData, timelineName: string, filterLabel: string | null): string {
-  if (view === 'list') return buildListMarkdown(data, timelineName, filterLabel)
-  if (view === 'kanban') return buildKanbanMarkdown(data, timelineName, filterLabel)
-  if (view === 'calendar') return buildCalendarMarkdown(data, timelineName, filterLabel)
-  return buildListMarkdown(data, timelineName, filterLabel) // fallback
-}
-
-function generatePlainText(view: ExportViewType, data: TextExportData, timelineName: string, filterLabel: string | null): string {
-  if (view === 'list') return buildListPlainText(data, timelineName, filterLabel)
-  if (view === 'kanban') return buildKanbanPlainText(data, timelineName, filterLabel)
-  if (view === 'calendar') return buildCalendarPlainText(data, timelineName, filterLabel)
-  return buildListPlainText(data, timelineName, filterLabel)
-}
-
-function generateHtml(view: ExportViewType, data: TextExportData, timelineName: string, filterLabel: string | null): string {
-  if (view === 'list') return buildListHtml(data, timelineName, filterLabel)
-  if (view === 'kanban') return buildKanbanHtml(data, timelineName, filterLabel)
-  if (view === 'calendar') return buildCalendarHtml(data, timelineName, filterLabel)
-  return buildListHtml(data, timelineName, filterLabel)
-}
-
-/** Triggers the browser to save a Blob with the given filename. */
-function saveBlob(blob: Blob, filename: string): void {
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = filename
-  document.body.appendChild(a)
-  a.click()
-  a.remove()
-  URL.revokeObjectURL(url)
-}
-
-/**
- * Writes `text/plain` + `text/html` flavors to the clipboard so the paste
- * lands rich in Slack / Word / Google Docs and clean in code editors.
- * Falls back to `writeText` if `ClipboardItem` is unavailable (HTTP contexts).
- */
-async function copyToClipboard(plainText: string, htmlText: string): Promise<void> {
-  if (typeof ClipboardItem !== 'undefined' && navigator.clipboard.write) {
-    const item = new ClipboardItem({
-      'text/plain': new Blob([plainText], { type: 'text/plain' }),
-      'text/html': new Blob([htmlText], { type: 'text/html' }),
-    })
-    await navigator.clipboard.write([item])
-  } else {
-    // Fallback for HTTP (non-localhost) contexts where ClipboardItem is blocked.
-    await navigator.clipboard.writeText(plainText)
-  }
-}
-
-// ── Component ──────────────────────────────────────────────────────────────────
-
-export default function ExportDialog({
-  view,
-  timelineId,
-  timelineName,
-  filterLabel,
-  filterDefinition,
-  filteredCount,
-  totalCount,
-  viewActivityIds,
-  listExportColumns,
-  textExportData,
-  onClose,
-}: ExportDialogProps) {
-  const formats = getExportFormats(view)
-  const [formatId, setFormatId] = useState<ExportFormatId>('csv')
-  const [scope, setScope] = useState<Scope>('view')
-  const [done, setDone] = useState(false)
-  const [clientPending, setClientPending] = useState(false)
-  const { download, isPending: serverPending } = useExport(timelineId, timelineName)
-  const doneTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
-
-  const format = formats.find(f => f.id === formatId) ?? formats[0]
-  const Icon = format.icon
-  const isPending = serverPending || clientPending
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [onClose])
-
-  useEffect(() => () => { if (doneTimer.current) clearTimeout(doneTimer.current) }, [])
-
-  const selectFormat = (id: ExportFormatId) => {
-    setFormatId(id)
-    setDone(false)
-  }
-
-  const flashDone = useCallback(() => {
-    setDone(true)
-    doneTimer.current = setTimeout(() => setDone(false), 1600)
-  }, [])
-
-  const handleAction = useCallback(() => {
-    if (format.clientSide) {
-      const data = textExportData ?? {
-        activities: [],
-        memberById: new Map(),
-        statusById: new Map(),
-        tagById: new Map(),
-        activityTitleById: new Map(),
-        kanbanColumns: null,
-        listDisplayRows: null,
-        listVisibleColumns: null,
-        kanbanShowHierarchy: false,
-        kanbanChildrenByParentId: new Map(),
-      }
-
-      if (format.id === 'clipboard') {
-        const plainText = generatePlainText(view, data, timelineName, filterLabel)
-        const htmlText = generateHtml(view, data, timelineName, filterLabel)
-        setClientPending(true)
-        copyToClipboard(plainText, htmlText)
-          .then(flashDone)
-          .catch(() => { /* clipboard may be denied */ })
-          .finally(() => setClientPending(false))
-        return
-      }
-
-      // markdown or plaintext — generate and download
-      const isMarkdown = format.id === 'markdown'
-      const content = isMarkdown
-        ? generateMarkdown(view, data, timelineName, filterLabel)
-        : generatePlainText(view, data, timelineName, filterLabel)
-      const mimeType = isMarkdown ? 'text/markdown;charset=utf-8' : 'text/plain;charset=utf-8'
-      const blob = new Blob([content], { type: mimeType })
-      saveBlob(blob, buildExportFilename(timelineName, format.ext))
-      flashDone()
-      return
-    }
-
-    // Server-side: CSV / xlsx / ICS
-    const isDataFormat = format.id === 'csv' || format.id === 'xlsx'
-    void download(format.id, format.ext, {
-      activityIds: scope === 'view' ? viewActivityIds : null,
-      filter: scope === 'view' && !viewActivityIds ? filterDefinition : null,
-      columns: isDataFormat ? listExportColumns : null,
-    }).then(flashDone)
-  }, [format, view, timelineName, filterLabel, textExportData, scope, viewActivityIds, filterDefinition, listExportColumns, download, flashDone])
-
-  const emptyView = filteredCount === 0
-  const subWithFilter = filterLabel !== null
-    ? `${filteredCount} of ${totalCount} activities · matches your filter`
-    : `All ${totalCount} activities · nothing filtered out`
-
-  // Button label / icon for the primary action
-  const actionLabel = format.verb === 'copy'
-    ? done ? 'Copied!' : (isPending ? 'Copying…' : 'Copy to clipboard')
-    : done ? 'Downloaded' : (isPending ? 'Downloading…' : `Download ${format.ext}`)
-  const ActionIcon = format.verb === 'copy' ? Copy : Download
-
-  return createPortal(
-    <div className="fixed inset-0 z-[1000] flex items-center justify-center bg-[hsl(200_24%_11%/0.55)] p-6 backdrop-blur-[2px]">
-      <div className="flex max-h-[88vh] w-[min(620px,100%)] flex-col overflow-hidden rounded-[var(--radius-xl)] bg-card shadow-[var(--shadow-lg)]">
-        {/* Header */}
-        <div className="flex shrink-0 items-start gap-3 px-5 py-[18px]">
-          <div className="flex h-[38px] w-[38px] shrink-0 items-center justify-center rounded-[var(--radius-md)] bg-[hsl(188_59%_38%/0.12)] text-primary">
-            <FileOutput size={19} strokeWidth={2.2} />
-          </div>
-          <div className="min-w-0 flex-1">
-            <h2 className="m-0 text-[17px] font-bold leading-tight text-foreground">Export this view</h2>
-            <div className="mt-0.5 flex items-center gap-1.5 text-[12.5px] text-muted-foreground">
-              <span className="inline-block h-2 w-2 shrink-0 rounded-sm bg-secondary" />
-              {timelineName ? `${timelineName} · ` : ''}{VIEW_LABELS[view]} view
-            </div>
-          </div>
-          <button
-            onClick={onClose}
-            aria-label="Close"
-            className="flex h-[30px] w-[30px] shrink-0 cursor-pointer items-center justify-center rounded-[var(--radius-md)] border-none bg-muted text-muted-foreground"
-          >
-            <X size={16} strokeWidth={2.2} />
-          </button>
-        </div>
-
-        {/* Filter context strip */}
-        <div className="shrink-0 border-b border-border px-5 pb-[14px]">
-          <div className={cn(
-            'rounded-[var(--radius-lg)] px-3 py-[9px]',
-            emptyView ? 'bg-[color-mix(in_srgb,var(--warning)_13%,transparent)]' : 'bg-muted',
-          )}>
-            <div className="flex items-center gap-2 text-[12.5px]">
-              {emptyView
-                ? <AlertTriangle size={14} className="shrink-0 text-warning" strokeWidth={2} />
-                : <Filter size={14} className="shrink-0 text-muted-foreground" strokeWidth={2} />}
-              <span className="flex-1 text-foreground">
-                {filterLabel !== null
-                  ? <>Filtered: <span className="font-semibold">{filterLabel}</span></>
-                  : `Exporting the ${VIEW_LABELS[view]} view as you see it`}
-              </span>
-              <span className={cn('shrink-0 text-[11.5px] font-semibold', emptyView ? 'text-warning' : 'text-muted-foreground')}>
-                {filterLabel !== null ? `${filteredCount} of ${totalCount} activities` : `All ${totalCount} activities`}
-              </span>
-            </div>
-            {emptyView && (
-              <div className="ml-[22px] mt-1 text-[12px] text-muted-foreground">
-                This view has no activities — the export will be empty or headers-only.
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* Body — format rail + options pane */}
-        <div className="flex flex-1 overflow-hidden">
-          <div role="listbox" aria-label="Export format" className="flex w-[196px] shrink-0 flex-col gap-0.5 overflow-y-auto border-r border-border p-2.5">
-            {formats.map(f => {
-              const FIcon = f.icon
-              const selected = f.id === formatId
-              // Badge icon: copy for clipboard, download for everything else
-              const BadgeIcon = f.verb === 'copy' ? Copy : Download
-              return (
-                <button
-                  key={f.id}
-                  role="option"
-                  aria-selected={selected}
-                  onClick={() => selectFormat(f.id)}
-                  className={cn(
-                    'flex items-center gap-[9px] rounded-[var(--radius-md)] border-none px-[9px] py-2 text-left text-[13px] transition-colors',
-                    selected ? 'bg-[hsl(188_59%_38%/0.1)] text-foreground font-semibold' : 'bg-transparent text-foreground hover:bg-muted',
-                  )}
-                >
-                  <FIcon size={15} strokeWidth={selected ? 2.2 : 1.8} className={selected ? 'shrink-0 text-primary' : 'shrink-0 text-muted-foreground'} />
-                  <span className="flex-1 truncate">{f.name}</span>
-                  <span title={f.verb === 'copy' ? 'Copy' : 'Download'} className={cn('shrink-0 text-muted-foreground', selected ? 'opacity-90' : 'opacity-65')}>
-                    <BadgeIcon size={11} strokeWidth={2} />
-                  </span>
-                </button>
-              )
-            })}
-          </div>
-
-          <div className="flex flex-1 flex-col gap-3.5 overflow-y-auto p-4">
-            {/* Format heading */}
-            <div className="flex items-start gap-2.5">
-              <Icon size={16} strokeWidth={2} className="mt-0.5 shrink-0 text-muted-foreground" />
-              <div>
-                <div className="text-[14px] font-bold text-foreground">{format.name}</div>
-                <div className="mt-0.5 text-[12.5px] leading-[1.5] text-muted-foreground">{format.desc}</div>
-              </div>
-            </div>
-
-            {/* Scope picker — only for server-side data formats */}
-            {format.scope && (
-              <div>
-                <div className="mb-1.5 text-[11px] font-bold uppercase tracking-[0.06em] text-muted-foreground">Activities to export</div>
-                <div className="overflow-hidden rounded-[var(--radius-lg)] border border-border">
-                  <ScopeRow
-                    label="Current view"
-                    sub={subWithFilter}
-                    selected={scope === 'view'}
-                    onSelect={() => setScope('view')}
-                  />
-                  <div className="border-t border-border" />
-                  <ScopeRow
-                    label="Entire timeline"
-                    sub={`All ${totalCount} activities · ignores filters`}
-                    selected={scope === 'all'}
-                    onSelect={() => setScope('all')}
-                  />
-                </div>
-              </div>
-            )}
-
-            {/* Filename chip — only for download formats */}
-            {format.verb === 'download' && format.ext && (
-              <div>
-                <div className="mb-1.5 text-[11px] font-bold uppercase tracking-[0.06em] text-muted-foreground">File</div>
-                <div className="flex items-center gap-2 rounded-[var(--radius-md)] bg-muted px-[11px] py-[7px] font-mono text-[12px] text-foreground">
-                  <FileDown size={13} strokeWidth={2} className="shrink-0 text-muted-foreground" />
-                  <span className="truncate">{buildExportFilename(timelineName, format.ext)}</span>
-                </div>
-              </div>
-            )}
-
-            {/* Clipboard note */}
-            {format.id === 'clipboard' && (
-              <div className="rounded-[var(--radius-md)] bg-muted px-3 py-2.5 text-[12px] leading-[1.5] text-muted-foreground">
-                Copies <strong className="text-foreground">rich text</strong> (HTML) + plain text — paste into Slack, Google Docs, or Word to get a formatted table.
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* Footer */}
-        <div className="flex shrink-0 items-center justify-end gap-2.5 border-t border-border px-5 py-[13px]">
-          <Button variant="outline" onClick={onClose}>Cancel</Button>
-          <Button onClick={handleAction} disabled={isPending} className="min-w-[168px] justify-center">
-            {done
-              ? <><Check size={14} strokeWidth={2.2} /> {format.verb === 'copy' ? 'Copied!' : 'Downloaded'}</>
-              : <><ActionIcon size={14} strokeWidth={2.2} /> {actionLabel}</>}
-          </Button>
-        </div>
-      </div>
-    </div>,
-    document.body,
-  )
-}
-
-function ScopeRow({ label, sub, selected, onSelect }: { label: string; sub: string; selected: boolean; onSelect: () => void }) {
-  return (
-    <button
-      onClick={onSelect}
-      className={cn(
-        'flex w-full items-start gap-2.5 px-3 py-2.5 text-left transition-colors',
-        selected ? 'bg-[hsl(188_59%_38%/0.09)]' : 'bg-transparent hover:bg-muted',
-      )}
-    >
-      <span className={cn(
-        'mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border-[1.5px]',
-        selected ? 'border-[5px] border-primary' : 'border-input',
-      )} />
-      <span>
-        <div className="text-[13px] font-semibold text-foreground">{label}</div>
-        <div className="text-[11.5px] text-muted-foreground">{sub}</div>
-      </span>
-    </button>
-  )
-}
-````
-
 ## File: packages/web/src/pages/LoginPage.tsx
 ````typescript
 import { useState } from 'react'
@@ -55961,6 +55770,460 @@ export default function KanbanToolbar({
       </div>
     </div>
   );
+}
+````
+
+## File: packages/web/src/components/ExportDialog.tsx
+````typescript
+/**
+ * ExportDialog — "Export this view" modal (Phase 14).
+ *
+ * Built to the export-modal design handoff (docs/design/handoffs/export-modal):
+ * a format rail + options pane two-pane body, a filter context strip that
+ * makes "export what I'm seeing" visible, and a scope picker (current view vs
+ * entire timeline) for the data formats. Modeled on ShareModal's portal shell,
+ * but — per the handoff — the overlay click does not close the dialog, only
+ * Esc / the close button / Cancel do.
+ *
+ * 14.1 implements the server-side data/calendar formats (CSV, Excel, ICS).
+ * 14.2 adds client-side textual formats (Markdown, Plain text, Copy to clipboard)
+ *      via the `textExportData` prop; these formats only appear for non-Gantt views.
+ */
+
+import { useEffect, useRef, useState, useCallback } from 'react'
+import { createPortal } from 'react-dom'
+import {
+  FileOutput, Filter, AlertTriangle, Download, FileDown, Check, X, Copy,
+} from 'lucide-react'
+import { Button } from '@/components/ui/button'
+import { cn } from '@/lib/utils'
+import { useExport } from '@/hooks/useExport'
+import {
+  getExportFormats, buildExportFilename,
+  type ExportFormatId, type ExportViewType,
+} from '@/lib/exportCapabilities'
+import {
+  buildListMarkdown, buildListMarkdownOutline,
+  buildKanbanMarkdown, buildCalendarMarkdown,
+  buildListPlainText, buildListPlainTextOutline,
+  buildKanbanPlainText, buildCalendarPlainText,
+  buildListHtml, buildListHtmlOutline, buildKanbanHtml, buildCalendarHtml,
+  type TextExportData,
+} from '@/lib/textExport'
+import type { FilterDefinition } from '@/lib/filterTypes'
+
+export type { TextExportData }
+
+export interface ExportDialogProps {
+  view: ExportViewType
+  teamId: string
+  timelineId: string
+  timelineName: string
+  /** Display label for the active filter (e.g. a saved filter's name), or null if no filter is active. */
+  filterLabel: string | null
+  /** The active filter's definition, sent to the server when scope is "view" and activityIds is absent. */
+  filterDefinition: FilterDefinition | null
+  /** Number of activities matching the active filter (or totalCount when no filter is active). */
+  filteredCount: number
+  /** Total number of activities in the timeline, regardless of filter. */
+  totalCount: number
+  /**
+   * Ordered activity IDs for the "current view" scope — covers preset/member
+   * filters (which can't be sent as a FilterDefinition) and list-view sort order.
+   * When non-null, takes precedence over filterDefinition in the request body.
+   */
+  viewActivityIds: string[] | null
+  /**
+   * Export column names to include in CSV/Excel (list view column visibility).
+   * Null means all columns. Only meaningful for csv/xlsx formats.
+   */
+  listExportColumns: string[] | null
+  /**
+   * Pre-resolved in-memory data for client-side textual formats (14.2).
+   * Required for Markdown / plain text / clipboard options to be functional;
+   * if absent those formats still appear but will produce empty output.
+   */
+  textExportData?: TextExportData | null
+  onClose: () => void
+}
+
+const VIEW_LABELS: Record<ExportViewType, string> = {
+  gantt: 'Gantt',
+  list: 'List',
+  kanban: 'Kanban',
+  calendar: 'Calendar',
+}
+
+type Scope = 'view' | 'all'
+
+// ── Client-side text generation ────────────────────────────────────────────────
+
+type ListStyle = 'table' | 'outline'
+
+function generateMarkdown(view: ExportViewType, data: TextExportData, timelineName: string, filterLabel: string | null, listStyle: ListStyle): string {
+  if (view === 'list') return listStyle === 'outline'
+    ? buildListMarkdownOutline(data, timelineName, filterLabel)
+    : buildListMarkdown(data, timelineName, filterLabel)
+  if (view === 'kanban') return buildKanbanMarkdown(data, timelineName, filterLabel)
+  if (view === 'calendar') return buildCalendarMarkdown(data, timelineName, filterLabel)
+  return buildListMarkdown(data, timelineName, filterLabel)
+}
+
+function generatePlainText(view: ExportViewType, data: TextExportData, timelineName: string, filterLabel: string | null, listStyle: ListStyle): string {
+  if (view === 'list') return listStyle === 'outline'
+    ? buildListPlainTextOutline(data, timelineName, filterLabel)
+    : buildListPlainText(data, timelineName, filterLabel)
+  if (view === 'kanban') return buildKanbanPlainText(data, timelineName, filterLabel)
+  if (view === 'calendar') return buildCalendarPlainText(data, timelineName, filterLabel)
+  return buildListPlainText(data, timelineName, filterLabel)
+}
+
+function generateHtml(view: ExportViewType, data: TextExportData, timelineName: string, filterLabel: string | null, listStyle: ListStyle): string {
+  if (view === 'list') return listStyle === 'outline'
+    ? buildListHtmlOutline(data, timelineName, filterLabel)
+    : buildListHtml(data, timelineName, filterLabel)
+  if (view === 'kanban') return buildKanbanHtml(data, timelineName, filterLabel)
+  if (view === 'calendar') return buildCalendarHtml(data, timelineName, filterLabel)
+  return buildListHtml(data, timelineName, filterLabel)
+}
+
+/** Triggers the browser to save a Blob with the given filename. */
+function saveBlob(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(url)
+}
+
+/**
+ * Writes `text/plain` + `text/html` flavors to the clipboard so the paste
+ * lands rich in Slack / Word / Google Docs and clean in code editors.
+ * Falls back to `writeText` if `ClipboardItem` is unavailable (HTTP contexts).
+ */
+async function copyToClipboard(plainText: string, htmlText: string): Promise<void> {
+  if (typeof ClipboardItem !== 'undefined' && navigator.clipboard.write) {
+    const item = new ClipboardItem({
+      'text/plain': new Blob([plainText], { type: 'text/plain' }),
+      'text/html': new Blob([htmlText], { type: 'text/html' }),
+    })
+    await navigator.clipboard.write([item])
+  } else {
+    // Fallback for HTTP (non-localhost) contexts where ClipboardItem is blocked.
+    await navigator.clipboard.writeText(plainText)
+  }
+}
+
+// ── Component ──────────────────────────────────────────────────────────────────
+
+export default function ExportDialog({
+  view,
+  timelineId,
+  timelineName,
+  filterLabel,
+  filterDefinition,
+  filteredCount,
+  totalCount,
+  viewActivityIds,
+  listExportColumns,
+  textExportData,
+  onClose,
+}: ExportDialogProps) {
+  const formats = getExportFormats(view)
+  const [formatId, setFormatId] = useState<ExportFormatId>('csv')
+  const [scope, setScope] = useState<Scope>('view')
+  const [listStyle, setListStyle] = useState<ListStyle>('table')
+  const [done, setDone] = useState(false)
+  const [clientPending, setClientPending] = useState(false)
+  const { download, isPending: serverPending } = useExport(timelineId, timelineName)
+  const doneTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const format = formats.find(f => f.id === formatId) ?? formats[0]
+  const Icon = format.icon
+  const isPending = serverPending || clientPending
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  useEffect(() => () => { if (doneTimer.current) clearTimeout(doneTimer.current) }, [])
+
+  const selectFormat = (id: ExportFormatId) => {
+    setFormatId(id)
+    setDone(false)
+  }
+
+  const flashDone = useCallback(() => {
+    setDone(true)
+    doneTimer.current = setTimeout(() => setDone(false), 1600)
+  }, [])
+
+  const handleAction = useCallback(() => {
+    if (format.clientSide) {
+      const data = textExportData ?? {
+        activities: [],
+        memberById: new Map(),
+        statusById: new Map(),
+        tagById: new Map(),
+        activityTitleById: new Map(),
+        kanbanColumns: null,
+        listDisplayRows: null,
+        listVisibleColumns: null,
+        kanbanShowHierarchy: false,
+        kanbanChildrenByParentId: new Map(),
+      }
+
+      if (format.id === 'clipboard') {
+        const plainText = generatePlainText(view, data, timelineName, filterLabel, listStyle)
+        const htmlText = generateHtml(view, data, timelineName, filterLabel, listStyle)
+        setClientPending(true)
+        copyToClipboard(plainText, htmlText)
+          .then(flashDone)
+          .catch(() => { /* clipboard may be denied */ })
+          .finally(() => setClientPending(false))
+        return
+      }
+
+      // markdown or plaintext — generate and download
+      const isMarkdown = format.id === 'markdown'
+      const content = isMarkdown
+        ? generateMarkdown(view, data, timelineName, filterLabel, listStyle)
+        : generatePlainText(view, data, timelineName, filterLabel, listStyle)
+      const mimeType = isMarkdown ? 'text/markdown;charset=utf-8' : 'text/plain;charset=utf-8'
+      const blob = new Blob([content], { type: mimeType })
+      saveBlob(blob, buildExportFilename(timelineName, format.ext))
+      flashDone()
+      return
+    }
+
+    // Server-side: CSV / xlsx / ICS
+    const isDataFormat = format.id === 'csv' || format.id === 'xlsx'
+    void download(format.id, format.ext, {
+      activityIds: scope === 'view' ? viewActivityIds : null,
+      filter: scope === 'view' && !viewActivityIds ? filterDefinition : null,
+      columns: isDataFormat ? listExportColumns : null,
+    }).then(flashDone)
+  }, [format, view, timelineName, filterLabel, textExportData, scope, listStyle, viewActivityIds, filterDefinition, listExportColumns, download, flashDone])
+
+  const emptyView = filteredCount === 0
+  const subWithFilter = filterLabel !== null
+    ? `${filteredCount} of ${totalCount} activities · matches your filter`
+    : `All ${totalCount} activities · nothing filtered out`
+
+  // Button label / icon for the primary action
+  const actionLabel = format.verb === 'copy'
+    ? done ? 'Copied!' : (isPending ? 'Copying…' : 'Copy to clipboard')
+    : done ? 'Downloaded' : (isPending ? 'Downloading…' : `Download ${format.ext}`)
+  const ActionIcon = format.verb === 'copy' ? Copy : Download
+
+  return createPortal(
+    <div className="fixed inset-0 z-[1000] flex items-center justify-center bg-[hsl(200_24%_11%/0.55)] p-6 backdrop-blur-[2px]">
+      <div className="flex max-h-[88vh] w-[min(620px,100%)] flex-col overflow-hidden rounded-[var(--radius-xl)] bg-card shadow-[var(--shadow-lg)]">
+        {/* Header */}
+        <div className="flex shrink-0 items-start gap-3 px-5 py-[18px]">
+          <div className="flex h-[38px] w-[38px] shrink-0 items-center justify-center rounded-[var(--radius-md)] bg-[hsl(188_59%_38%/0.12)] text-primary">
+            <FileOutput size={19} strokeWidth={2.2} />
+          </div>
+          <div className="min-w-0 flex-1">
+            <h2 className="m-0 text-[17px] font-bold leading-tight text-foreground">Export this view</h2>
+            <div className="mt-0.5 flex items-center gap-1.5 text-[12.5px] text-muted-foreground">
+              <span className="inline-block h-2 w-2 shrink-0 rounded-sm bg-secondary" />
+              {timelineName ? `${timelineName} · ` : ''}{VIEW_LABELS[view]} view
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            aria-label="Close"
+            className="flex h-[30px] w-[30px] shrink-0 cursor-pointer items-center justify-center rounded-[var(--radius-md)] border-none bg-muted text-muted-foreground"
+          >
+            <X size={16} strokeWidth={2.2} />
+          </button>
+        </div>
+
+        {/* Filter context strip */}
+        <div className="shrink-0 border-b border-border px-5 pb-[14px]">
+          <div className={cn(
+            'rounded-[var(--radius-lg)] px-3 py-[9px]',
+            emptyView ? 'bg-[color-mix(in_srgb,var(--warning)_13%,transparent)]' : 'bg-muted',
+          )}>
+            <div className="flex items-center gap-2 text-[12.5px]">
+              {emptyView
+                ? <AlertTriangle size={14} className="shrink-0 text-warning" strokeWidth={2} />
+                : <Filter size={14} className="shrink-0 text-muted-foreground" strokeWidth={2} />}
+              <span className="flex-1 text-foreground">
+                {filterLabel !== null
+                  ? <>Filtered: <span className="font-semibold">{filterLabel}</span></>
+                  : `Exporting the ${VIEW_LABELS[view]} view as you see it`}
+              </span>
+              <span className={cn('shrink-0 text-[11.5px] font-semibold', emptyView ? 'text-warning' : 'text-muted-foreground')}>
+                {filterLabel !== null ? `${filteredCount} of ${totalCount} activities` : `All ${totalCount} activities`}
+              </span>
+            </div>
+            {emptyView && (
+              <div className="ml-[22px] mt-1 text-[12px] text-muted-foreground">
+                This view has no activities — the export will be empty or headers-only.
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Body — format rail + options pane */}
+        <div className="flex flex-1 overflow-hidden">
+          <div role="listbox" aria-label="Export format" className="flex w-[196px] shrink-0 flex-col gap-0.5 overflow-y-auto border-r border-border p-2.5">
+            {formats.map(f => {
+              const FIcon = f.icon
+              const selected = f.id === formatId
+              // Badge icon: copy for clipboard, download for everything else
+              const BadgeIcon = f.verb === 'copy' ? Copy : Download
+              return (
+                <button
+                  key={f.id}
+                  role="option"
+                  aria-selected={selected}
+                  onClick={() => selectFormat(f.id)}
+                  className={cn(
+                    'flex items-center gap-[9px] rounded-[var(--radius-md)] border-none px-[9px] py-2 text-left text-[13px] transition-colors',
+                    selected ? 'bg-[hsl(188_59%_38%/0.1)] text-foreground font-semibold' : 'bg-transparent text-foreground hover:bg-muted',
+                  )}
+                >
+                  <FIcon size={15} strokeWidth={selected ? 2.2 : 1.8} className={selected ? 'shrink-0 text-primary' : 'shrink-0 text-muted-foreground'} />
+                  <span className="flex-1 truncate">{f.name}</span>
+                  <span title={f.verb === 'copy' ? 'Copy' : 'Download'} className={cn('shrink-0 text-muted-foreground', selected ? 'opacity-90' : 'opacity-65')}>
+                    <BadgeIcon size={11} strokeWidth={2} />
+                  </span>
+                </button>
+              )
+            })}
+          </div>
+
+          <div className="flex flex-1 flex-col gap-3.5 overflow-y-auto p-4">
+            {/* Format heading */}
+            <div className="flex items-start gap-2.5">
+              <Icon size={16} strokeWidth={2} className="mt-0.5 shrink-0 text-muted-foreground" />
+              <div>
+                <div className="text-[14px] font-bold text-foreground">{format.name}</div>
+                <div className="mt-0.5 text-[12.5px] leading-[1.5] text-muted-foreground">{format.desc}</div>
+              </div>
+            </div>
+
+            {/* Style picker — table vs outline, only for list view text formats */}
+            {(format.id === 'markdown' || format.id === 'plaintext' || format.id === 'clipboard') && view === 'list' && (
+              <div>
+                <div className="mb-1.5 text-[11px] font-bold uppercase tracking-[0.06em] text-muted-foreground">Style</div>
+                <div className="flex overflow-hidden rounded-[var(--radius-lg)] border border-border">
+                  <StyleOption
+                    label="Table"
+                    desc="Aligned columns"
+                    selected={listStyle === 'table'}
+                    onSelect={() => setListStyle('table')}
+                  />
+                  <div className="w-px shrink-0 bg-border" />
+                  <StyleOption
+                    label="Outline"
+                    desc="Bullet list with fields"
+                    selected={listStyle === 'outline'}
+                    onSelect={() => setListStyle('outline')}
+                  />
+                </div>
+              </div>
+            )}
+
+            {/* Scope picker — only for server-side data formats */}
+            {format.scope && (
+              <div>
+                <div className="mb-1.5 text-[11px] font-bold uppercase tracking-[0.06em] text-muted-foreground">Activities to export</div>
+                <div className="overflow-hidden rounded-[var(--radius-lg)] border border-border">
+                  <ScopeRow
+                    label="Current view"
+                    sub={subWithFilter}
+                    selected={scope === 'view'}
+                    onSelect={() => setScope('view')}
+                  />
+                  <div className="border-t border-border" />
+                  <ScopeRow
+                    label="Entire timeline"
+                    sub={`All ${totalCount} activities · ignores filters`}
+                    selected={scope === 'all'}
+                    onSelect={() => setScope('all')}
+                  />
+                </div>
+              </div>
+            )}
+
+            {/* Filename chip — only for download formats */}
+            {format.verb === 'download' && format.ext && (
+              <div>
+                <div className="mb-1.5 text-[11px] font-bold uppercase tracking-[0.06em] text-muted-foreground">File</div>
+                <div className="flex items-center gap-2 rounded-[var(--radius-md)] bg-muted px-[11px] py-[7px] font-mono text-[12px] text-foreground">
+                  <FileDown size={13} strokeWidth={2} className="shrink-0 text-muted-foreground" />
+                  <span className="truncate">{buildExportFilename(timelineName, format.ext)}</span>
+                </div>
+              </div>
+            )}
+
+            {/* Clipboard note */}
+            {format.id === 'clipboard' && (
+              <div className="rounded-[var(--radius-md)] bg-muted px-3 py-2.5 text-[12px] leading-[1.5] text-muted-foreground">
+                Copies <strong className="text-foreground">rich text</strong> (HTML) + plain text — paste into Slack, Google Docs, or Word to get a formatted {view === 'list' && listStyle === 'outline' ? 'outline' : 'table'}.
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Footer */}
+        <div className="flex shrink-0 items-center justify-end gap-2.5 border-t border-border px-5 py-[13px]">
+          <Button variant="outline" onClick={onClose}>Cancel</Button>
+          <Button onClick={handleAction} disabled={isPending} className="min-w-[168px] justify-center">
+            {done
+              ? <><Check size={14} strokeWidth={2.2} /> {format.verb === 'copy' ? 'Copied!' : 'Downloaded'}</>
+              : <><ActionIcon size={14} strokeWidth={2.2} /> {actionLabel}</>}
+          </Button>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  )
+}
+
+function StyleOption({ label, desc, selected, onSelect }: { label: string; desc: string; selected: boolean; onSelect: () => void }) {
+  return (
+    <button
+      onClick={onSelect}
+      className={cn(
+        'flex flex-1 flex-col items-start px-3 py-2.5 text-left transition-colors',
+        selected ? 'bg-[hsl(188_59%_38%/0.09)]' : 'bg-transparent hover:bg-muted',
+      )}
+    >
+      <span className="text-[13px] font-semibold text-foreground">{label}</span>
+      <span className="text-[11.5px] text-muted-foreground">{desc}</span>
+    </button>
+  )
+}
+
+function ScopeRow({ label, sub, selected, onSelect }: { label: string; sub: string; selected: boolean; onSelect: () => void }) {
+  return (
+    <button
+      onClick={onSelect}
+      className={cn(
+        'flex w-full items-start gap-2.5 px-3 py-2.5 text-left transition-colors',
+        selected ? 'bg-[hsl(188_59%_38%/0.09)]' : 'bg-transparent hover:bg-muted',
+      )}
+    >
+      <span className={cn(
+        'mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border-[1.5px]',
+        selected ? 'border-[5px] border-primary' : 'border-input',
+      )} />
+      <span>
+        <div className="text-[13px] font-semibold text-foreground">{label}</div>
+        <div className="text-[11.5px] text-muted-foreground">{sub}</div>
+      </span>
+    </button>
+  )
 }
 ````
 
@@ -75365,7 +75628,7 @@ Visual exports render **client-side from the live DOM** — no gofpdf, no Chromi
 **Scope (sub-phases — detail in the [plan](plans/phase-14-export.md)):**
 
 - **14.1 Foundation + data exports:** `POST /timelines/:id/export` (`csv` / `xlsx` / `ics`, optional frozen `viewConfig`, filter evaluated in Go) + convenience `GET …/export.csv?filter=<savedFilterId>` (the 10.4.6 hook); columns match the Phase 15 import template; sync for v1. Single `ExportDialog` driven by a per-view capability descriptor, wired into the Gantt toolbar Export stub and the 11.1/11.2/11.3 toolbar slots.
-- **14.2 Textual:** Markdown (GFM table; Kanban = section per column; Calendar = agenda list), plain text, and copy-to-clipboard with dual `text/plain` + `text/html` flavors so paste lands rich in Slack / Word / Google Docs. Client-generated from the in-memory filtered rows.
+- **14.2 Textual:** Markdown and plain text each offer a **Table** style (GFM table / aligned columns) and an **Outline** style (bullet list — `**title** (date range) — assignees`, with indented `Status:` / `Progress:` / `Parent:` / `Tags:` / etc. lines for non-empty fields; children nest by depth; group-by produces `##` / heading sections). Copy-to-clipboard also exposes the Table/Outline choice; paste lands rich in Slack / Word / Google Docs via dual `text/plain` + `text/html` flavors. Kanban = section per column; Calendar = agenda list. Client-generated from in-memory filtered rows.
 - **14.3 PNG snapshot:** DOM rasterization (`html-to-image`) of the current view, full scrollable extent, 2x density, light theme, header strip (team, timeline, generated-at, filter description).
 - **14.4 Printable views:** print routes per view (non-interactive view components + print stylesheet): Gantt landscape with date-range pagination and member-color legend; List styled table; Kanban columns with page breaks; Calendar one page per period. "Export → Printable view" opens the route and triggers `window.print()`.
 
