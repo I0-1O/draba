@@ -115,3 +115,67 @@ func TestWriteXLSX_HeaderAndRows(t *testing.T) {
 	assert.Equal(t, export.Columns, header[0])
 	assert.Equal(t, "Kickoff", header[2][0])
 }
+
+// Blocker 3: SelectColumns, ValuesByColumns, and the column-subset writers.
+
+func TestSelectColumns_SubsetAndEdgeCases(t *testing.T) {
+	// nil and empty both return the full canonical column list.
+	assert.Equal(t, export.Columns, export.SelectColumns(nil))
+	assert.Equal(t, export.Columns, export.SelectColumns([]string{}))
+
+	// Subset is returned in canonical order regardless of input order.
+	got := export.SelectColumns([]string{"Start", "Title"})
+	assert.Equal(t, []string{"Title", "Start"}, got)
+
+	// Unknown names are silently dropped.
+	got2 := export.SelectColumns([]string{"Title", "Bogus", "End"})
+	assert.Equal(t, []string{"Title", "End"}, got2)
+}
+
+func TestValuesByColumns_KnownAndUnknown(t *testing.T) {
+	row := export.Row{Title: "Kickoff", Start: "2026-05-01", End: "2026-05-03"}
+
+	vals := row.ValuesByColumns([]string{"Title", "Start"})
+	assert.Equal(t, []string{"Kickoff", "2026-05-01"}, vals)
+
+	// Unknown column name produces an empty string without panicking.
+	vals2 := row.ValuesByColumns([]string{"Title", "Bogus"})
+	assert.Equal(t, []string{"Kickoff", ""}, vals2)
+}
+
+func TestWriteCSVColumns_SubsetColumns(t *testing.T) {
+	acts := sampleActivities()
+	statusNames, memberNames, tagNames, activityTitles := sampleNameMaps()
+	rows := export.BuildRows(acts, statusNames, memberNames, tagNames, activityTitles)
+
+	var buf bytes.Buffer
+	require.NoError(t, export.WriteCSVColumns(&buf, rows, []string{"Title", "Start"}))
+
+	records, err := csv.NewReader(&buf).ReadAll()
+	require.NoError(t, err)
+	require.Len(t, records, 3) // header + 2 rows
+	assert.Equal(t, []string{"Title", "Start"}, records[0])
+	assert.Equal(t, "Parent Project", records[1][0])
+	assert.Equal(t, "2026-01-01", records[1][1])
+	assert.Len(t, records[1], 2)
+}
+
+func TestWriteXLSXColumns_SubsetColumns(t *testing.T) {
+	acts := sampleActivities()
+	statusNames, memberNames, tagNames, activityTitles := sampleNameMaps()
+	rows := export.BuildRows(acts, statusNames, memberNames, tagNames, activityTitles)
+
+	var buf bytes.Buffer
+	require.NoError(t, export.WriteXLSXColumns(&buf, rows, []string{"Title", "Start"}))
+
+	f, err := excelize.OpenReader(&buf)
+	require.NoError(t, err)
+	defer func() { _ = f.Close() }()
+
+	grid, err := f.GetRows("Activities")
+	require.NoError(t, err)
+	require.Len(t, grid, 3) // header + 2 rows
+	assert.Equal(t, []string{"Title", "Start"}, grid[0])
+	assert.Equal(t, "Parent Project", grid[1][0])
+	assert.Len(t, grid[1], 2)
+}

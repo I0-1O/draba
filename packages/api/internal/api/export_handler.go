@@ -122,6 +122,12 @@ func (s *Server) handleGetTimelineExport(w http.ResponseWriter, r *http.Request,
 	teamID := r.PathValue("id")
 	timelineID := r.PathValue("timelineId")
 
+	// Auth check before timeline lookup so non-members cannot enumerate timeline
+	// IDs by observing a 404 vs. 401/403 distinction.
+	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
+		return
+	}
+
 	timeline, err := s.timelines.GetByID(timelineID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -133,9 +139,6 @@ func (s *Server) handleGetTimelineExport(w http.ResponseWriter, r *http.Request,
 	}
 	if timeline.ArchivedAt != nil || timeline.TeamID != teamID {
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
-		return
-	}
-	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
 		return
 	}
 
