@@ -2297,6 +2297,14 @@ Port 8080 was already in use on the host.
 - Fix: feed now sends `Cache-Control: no-store` — the token is the secret and rotate/delete is the only kill switch, so revocation must be client-immediate too. Server load still absorbed by the in-memory icsCache (DRABA_SHARE_CACHE_TTL).
 - Test: header asserted in share_ics_handler_test.go. `go test ./internal/api/` + `golangci-lint run` clean.
 
+## 2026-06-17 — Merge community PR #1: optional OIDC / SSO login
+
+- Squash-merged `danstoll:feat/oidc-sso` → `master` as commit `974b7fa`
+- Feature: optional OIDC/SSO login alongside local password auth; disabled by default, activated via `DRABA_OIDC_ISSUER`. Full auth-code + PKCE + JWKS verification via `coreos/go-oidc/v3`. Auto-provisioning respects tier user limit; `DRABA_OIDC_AUTO_CREATE=0` disables it.
+- Migration 024 rebuilds `users` table: `password_hash` nullable, new `oidc_issuer`/`oidc_subject` columns, `auth_provider` CHECK constraint, UNIQUE index on `(oidc_issuer, oidc_subject)`.
+- Security fixes applied during review: `handleForgotPassword` and `handleResetPassword` both guard against OIDC accounts (prevents SSO bypass via password-reset flow); `SecurityPage` hides change-password form for OIDC users; `authProvider` added to OpenAPI `User` schema; OIDC-provisioned users never auto-promoted to superadmin.
+- go.mod `go` directive reverted from `1.25.0` → `1.24.0` in the squash commit (accidental bump by PR author running Go 1.25 locally; no OIDC dependency requires 1.25).
+
 ## 2026-06-11 — /test-phase 13.5
 
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e

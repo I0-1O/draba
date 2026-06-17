@@ -1,6 +1,6 @@
 module github.com/I0-1O/draba/packages/api
 
-go 1.24.0
+go 1.25.0
 
 require (
 	github.com/coreos/go-oidc/v3 v3.18.0

@@ -2,7 +2,7 @@
 
 _Updated after each significant work session. Read this first to orient — it is intentionally short. Per-phase implementation detail lives in [docs/log.md](../log.md); this file is a current-state snapshot only._
 
-**Last updated:** 2026-06-15 (Phase 14.1 — Foundation + data exports — built and passing all automated checks; ExportDialog verified in browser. Live download round-trip needs Docker rebuild.)
+**Last updated:** 2026-06-17 (Phase 14.1 complete; OIDC/SSO community PR merged to master.)
 
 ---
 
@@ -36,7 +36,7 @@ Manual verification items for 10.4.6, 11.1, 11.1.1, 11.1.2, 11.2, 11.3, 12, and 
 - **Dev UI:** `localhost:5173` — set `VITE_API_TARGET=http://epcot.lan:8081` in `packages/web/.env.local` to point at Docker
 - **DB:** `\\epcot.lan\portainer-appdata\Config\draba\data\draba.db`
 - **Bootstrap admin:** `brian@rieb.cc` (full credentials in `.env.test.local`, gitignored)
-- **go.mod pinned at `go 1.22.0`** — golangci-lint v1.64.8 refuses newer targets; `go mod tidy` silently bumps it, so always re-check after running tidy.
+- **go.mod at `go 1.25.0`** — required by `go-oidc/v3 v3.18.0`. CI uses golangci-lint v2.12.2 (v1 refused Go 1.25 targets). If adding a dependency, `go mod tidy` may bump this further — check after running tidy.
 - **repomap.md:** Grep it for targeted symbol lookups; never Read it wholesale (1.3 MB, exceeds the Read tool limit).
 
 ---
