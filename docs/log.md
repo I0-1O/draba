@@ -2,6 +2,13 @@
 
 ---
 
+## 2026-06-16 — /test-phase 14.1
+- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
+- Result: all pass (static-check required `gofmt -w .` to fix line-ending drift in 18 Go files before passing)
+- Smoke target: http://epcot.lan:8081
+
+---
+
 ## 2026-06-15 — Phase 14.1: Foundation + data exports
 
 **Goal:** server-side CSV/xlsx/ICS export of timeline activities behind a single `ExportDialog`, reachable from all four view toolbars (Gantt/List/Kanban/Calendar). Frozen filter (saved filters only) evaluated server-side via the Phase 13 Go `matchesFilter` port; columns match the Phase 15 import template.
