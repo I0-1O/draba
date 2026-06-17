@@ -2,6 +2,45 @@
 
 ---
 
+## 2026-06-17 — Phase 14.2 fix: List/Kanban text export fidelity
+
+**Goal:** Fix four correctness defects in the Phase 14.2 textual export generators: column selection not respected, sort order not respected, group-by not represented, and parent-child indentation missing.
+
+**Root cause:** The original `buildListMarkdown`/`buildListPlainText`/`buildListHtml` always emitted all 8 hardcoded columns as a flat table, ignoring the view's column visibility, sort setting, group-by setting, and parent-child hierarchy. The Kanban generators also ignored the `showHierarchy` toggle.
+
+**Frontend (`packages/web`):**
+- `lib/textExport.ts` — added `ListExportRow` type (minimal subset of `ListDisplayRow` for export use); extended `TextExportData` with `listDisplayRows`, `listVisibleColumns`, `kanbanShowHierarchy`, `kanbanChildrenByParentId`. Added `COLUMN_LABELS`, `resolveListColumns`, `getColValue`, and `depthPrefix` helpers. Rewrote all three `buildList*` generators: grouped modes (member/status) emit one `## Section` + GFM table per group; parent-hierarchy mode emits a single flat table with `↳ ` depth prefix in the title cell; flat mode unchanged. Updated `buildKanban*` generators to render children as indented sub-items under their parent when `kanbanShowHierarchy` is true.
+- `pages/DashboardPage.tsx` — updated `textExportData` memo to: (a) sort filteredActivities by `listSortBy` before calling the new `buildListRows` (imported from `ListView.tsx`) to get pre-grouped display rows; (b) extract visible column IDs from `listColumns` for `listVisibleColumns`; (c) call `buildHierarchyMaps` (imported from `kanbanColumns.ts`) when `kanbanShowHierarchy` is true, filter column activities to exclude children, and pass `kanbanChildrenByParentId` through. Added `listGroupBy`, `listSortBy`, `listColumns`, `kanbanShowHierarchy` to memo deps.
+- `components/ExportDialog.tsx` — added the four new required fields to the fallback `data` object used when `textExportData` is null.
+
+**Checks:** `pnpm --filter web lint` passes, `pnpm --filter web build` passes, 352 tests pass.
+
+---
+
+## 2026-06-17 — Phase 14.2: Textual exports (client-side)
+
+**Goal:** Extend the Export dialog with Markdown, plain-text, and copy-to-clipboard formats, generated entirely client-side from in-memory filtered rows — no server round-trip for these formats.
+
+**Frontend (`packages/web`):**
+- `lib/textExport.ts` (new) — pure TypeScript text generators, no DOM access:
+  - `TextExportData` interface: `{ activities, memberById, statusById, tagById, activityTitleById, kanbanColumns }` — pre-resolved lookup maps supplied by DashboardPage.
+  - Six view-specific generators: `buildList*`, `buildKanban*`, `buildCalendar*` for each of Markdown, plain text, and HTML.
+  - **List → Markdown**: GFM table with columns Title / Start / End / Status / Assigned To / Tags / Progress / Parent; header block (timeline name, date, optional filter label).
+  - **Kanban → Markdown**: `## <column> (N)` section per column, bullet lines with activity · assignees · date range · status · tags.
+  - **Calendar → Markdown**: agenda-style date-grouped list (`## <weekday, Month D, YYYY>` heading per start date, bullets with multi-day span noted as `→ End`).
+  - Plain-text variants use the same grouping with space-padded monospace tables (list) and `•` bullet sections (kanban/calendar), no Markdown syntax.
+  - HTML variants produce `<table>` (list) and `<ul>`-section (kanban/calendar) fragments for the clipboard `text/html` flavor so paste lands rich in Slack/Word/Google Docs.
+- `lib/exportCapabilities.ts` — extended `ExportFormatId` to `'csv' | 'xlsx' | 'ics' | 'markdown' | 'plaintext' | 'clipboard'`; new `verb: 'download' | 'copy'` and `clientSide: boolean` fields on `ExportFormatDescriptor`; `getExportFormats` now returns all 6 formats for List/Kanban/Calendar and only the 3 data formats for Gantt (no sensible flat text shape for a Gantt bar chart).
+- `ExportDialog.tsx` — refactored primary action path: server-side formats (CSV/xlsx/ICS) go through `useExport` as before; client-side formats dispatch to `textExport` generators and either call `saveBlob` (markdown/plaintext) or `copyToClipboard` (clipboard). `copyToClipboard` uses `ClipboardItem` with dual `text/plain` + `text/html` flavors; falls back to `writeText` on HTTP contexts where `ClipboardItem` is unavailable. Footer button text / icon adapts: "Download .md" / "Download .txt" / "Copy to clipboard" / "Copied!". Format rail badge icon switches from `Download` to `Copy` for the clipboard entry. Filename chip hidden for clipboard (no file to name).
+- `lib/exportCapabilities.test.ts` — updated for new API: Gantt=3 formats, other views=6; new tests for `verb`, `clientSide`, `scope` invariants on each format group.
+- `pages/DashboardPage.tsx` — imports `buildColumns` from `kanbanColumns` and new `TextExportData` type; adds `textExportData` memo that builds all lookup maps from already-fetched `teamMembers`, `activeTimelineStatuses`, `tags`, `allActivities`, and `exportFilterInfo.filteredActivities`; for Kanban view it calls `buildColumns(kanbanGroupBy, filteredActivities, teamMembers, activeTimelineStatuses, kanbanSortBy)` and maps to `{ label, activities }` pairs. Passes `textExportData` to `ExportDialog`.
+
+**Checks:** `golangci-lint run` (no new issues in changed files — pre-existing OIDC lint notes unchanged), `go test ./...` all pass, `pnpm --filter web lint` passes (`tsc --noEmit`), `pnpm --filter web build` passes (352 web tests pass).
+
+**Still needs Docker verification:** the Markdown/plain-text/clipboard actions are purely client-side and don't depend on the server binary, but should be tested against a live data set to confirm member/status/tag resolution displays correctly.
+
+---
+
 ## 2026-06-16 — /test-phase 14.1
 - Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
 - Result: all pass (static-check required `gofmt -w .` to fix line-ending drift in 18 Go files before passing)

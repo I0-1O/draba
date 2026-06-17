@@ -2,7 +2,7 @@
 
 _Updated after each significant work session. Read this first to orient — it is intentionally short. Per-phase implementation detail lives in [docs/log.md](../log.md); this file is a current-state snapshot only._
 
-**Last updated:** 2026-06-17 (Phase 14.1 complete; OIDC/SSO community PR merged to master.)
+**Last updated:** 2026-06-17 (Phase 14.2 complete — textual exports.)
 
 ---
 
@@ -14,9 +14,11 @@ _Updated after each significant work session. Read this first to orient — it i
 
 **Phase 14.1 (Export — Foundation + data exports) is built and passes all automated checks.** `POST /timelines/:id/export` (CSV/xlsx/ICS, frozen-filter eval via `matchesFilter`) + convenience `GET .../export.csv|.xlsx|.ics?filter=`; `ExportDialog` wired into all four view toolbars. Browser-verified for dialog rendering/format switching; the actual download 405s against the current Docker test backend (pre-14.1 binary) — needs Docker rebuild to verify the live round-trip. Detail in [log.md](../log.md).
 
+**Phase 14.2 (Textual exports) is built and passes all automated checks.** `lib/textExport.ts` with pure generators for Markdown, plain text, and HTML (clipboard flavor) across all three text-capable views (List/Kanban/Calendar). `ExportDialog` extended with client-side format dispatch and dual-flavor clipboard copy. `exportCapabilities.ts` extended with `verb`/`clientSide` fields; Gantt view remains data-only. Post-ship bug fix applied 2026-06-17: list generators now respect column visibility, sort order, group-by (section headers), and parent-child hierarchy (↳ depth prefix); kanban generators now render children nested under parents when hierarchy is on. Awaiting Docker verification (client-side only — no server binary change required).
+
 | Next phase | Scope | Plan |
 |------------|-------|------|
-| **14.2** | Textual exports (client): Markdown (GFM table / Kanban section-per-column / Calendar agenda list), plain text, copy-to-clipboard with `text/plain` + `text/html` flavors | [docs/plans/phase-14-export.md](../plans/phase-14-export.md) |
+| **14.3** | PNG snapshot — DOM rasterization via `html-to-image`, 2x density, header strip, full scrollable extent | [docs/plans/phase-14-export.md](../plans/phase-14-export.md) |
 
 **Phase 13 back-half re-sequenced (2026-06-05):** 13.2 = share-modal overhaul + password (pulled forward); 13.3 = List + Kanban read-only; 13.4 = Calendar **ICS feed** sharing (whole-timeline or per-member, token-as-secret, no password/filter — a different model from view-shares); 13.5 = lifecycle tail (expiry, tile chip). The handoff design lives in [`docs/design/handoffs/share-modal/`](../design/handoffs/share-modal/design_handoff_share_modal/README.md). See [ROADMAP re-sequencing note](../ROADMAP.md#phase-13--shares--multi-share-views-with-passwords) and [plan §13.2 overhaul](../plans/phase-13-shares.md#the-share-module-overhaul-132).
 
@@ -24,7 +26,7 @@ _Updated after each significant work session. Read this first to orient — it i
 
 ## Open Issues
 
-Manual verification items for 10.4.6, 11.1, 11.1.1, 11.1.2, 11.2, 11.3, 12, and 13.1–13.5 tracked in TASKS.md — 13.4's headline item (subscribe from a real Google/Apple calendar) additionally needs the feed URL reachable by Google's fetcher, not just the LAN. 14.1's `POST /timelines/:id/export` 405s on the Docker test backend (stale pre-14.1 binary) — rebuild/redeploy the container, then re-test the download from `ExportDialog` (CSV/Excel/ICS, both scopes).
+Manual verification items for 10.4.6, 11.1, 11.1.1, 11.1.2, 11.2, 11.3, 12, and 13.1–13.5 tracked in TASKS.md — 13.4's headline item (subscribe from a real Google/Apple calendar) additionally needs the feed URL reachable by Google's fetcher, not just the LAN. 14.1's `POST /timelines/:id/export` 405s on the Docker test backend (stale pre-14.1 binary) — rebuild/redeploy the container, then re-test the download from `ExportDialog` (CSV/Excel/ICS, both scopes). 14.2's Markdown/plain-text/clipboard are client-side only (no server change) but should be tested against a live data set to confirm member/status/tag name resolution.
 
 (Process backlog — e.g. revisiting `repomap.md` generation vs. Graphify after Phase 13 lands — now lives in the [TASKS.md Parking Lot](../TASKS.md#parking-lot), where it stays visible across sessions instead of aging out of this snapshot.)
 
