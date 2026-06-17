@@ -15,11 +15,6 @@ linters:
     - misspell
     - nolintlint
 
-formatters:
-  enable:
-    - gofmt
-    - goimports
-
   settings:
     gocritic:
       enabled-tags:
@@ -39,3 +34,8 @@ formatters:
       - path: _test\.go
         linters:
           - errcheck
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
