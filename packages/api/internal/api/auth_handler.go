@@ -281,6 +281,12 @@ func (s *Server) handleForgotPassword(w http.ResponseWriter, r *http.Request) {
 	if user.ArchivedAt != nil {
 		return
 	}
+	// OIDC accounts have no local password to reset; issuing a reset token
+	// would let an SSO user install a password_hash and bypass SSO. Return the
+	// same silent 200 as the no-user case so enumeration is still impossible.
+	if user.AuthProvider == "oidc" {
+		return
+	}
 
 	rawToken := newToken()
 	expiresAt := time.Now().Add(time.Hour)
@@ -331,6 +337,15 @@ func (s *Server) handleResetPassword(w http.ResponseWriter, r *http.Request) {
 	resetToken, err := s.passwordTokens.GetValid(body.Token)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "TOKEN_INVALID", "reset token is invalid or expired")
+		return
+	}
+
+	// Defence in depth: even though handleForgotPassword won't issue a token for
+	// an OIDC account, reject resets here too so a token can never be used to
+	// install a local password on an SSO-managed account (which would bypass
+	// the OIDC-only login invariant).
+	if user, err := s.users.GetByID(resetToken.UserID); err == nil && user.AuthProvider == "oidc" {
+		writeError(w, http.StatusBadRequest, "OIDC_ACCOUNT", "this account signs in via SSO and has no password to reset")
 		return
 	}
 

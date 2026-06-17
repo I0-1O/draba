@@ -27,7 +27,7 @@ components:
 
     User:
       type: object
-      required: [id, email, displayName, isSuperadmin, createdAt, updatedAt]
+      required: [id, email, displayName, isSuperadmin, authProvider, createdAt, updatedAt]
       properties:
         id:
           type: string
@@ -49,6 +49,10 @@ components:
           description: User-level identity icon ID. Propagates to team memberships.
         isSuperadmin:
           type: boolean
+        authProvider:
+          type: string
+          enum: [local, oidc]
+          description: How this account authenticates. SSO-managed (oidc) accounts have no local password.
         createdAt:
           type: string
           format: date-time

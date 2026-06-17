@@ -214,10 +214,16 @@ func (s *Server) findOrProvisionOIDCUser(claims *auth.OIDCClaims) (*models.User,
 	now := time.Now()
 	issuerCopy, subjectCopy := issuer, claims.Subject
 	user := &models.User{
-		ID:           newID(),
-		Email:        email,
-		DisplayName:  displayNameFromClaims(claims),
-		IsSuperadmin: count == 0, // first user on a fresh install is the admin
+		ID:          newID(),
+		Email:       email,
+		DisplayName: displayNameFromClaims(claims),
+		// SSO users are never auto-promoted to superadmin. The first-user-admin
+		// bootstrap was designed for local registration (a deliberate operator
+		// act); OIDC provisioning is passive and automatic, so "first one in
+		// wins" is raceable — two different identities hitting /callback on an
+		// empty DB would both read count==0 and both become superadmin. Grant
+		// superadmin via the admin UI after first login instead.
+		IsSuperadmin: false,
 		AuthProvider: "oidc",
 		OIDCIssuer:   &issuerCopy,
 		OIDCSubject:  &subjectCopy,

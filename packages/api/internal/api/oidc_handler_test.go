@@ -55,6 +55,82 @@ func newTestServerNoOIDC(t *testing.T) (http.Handler, *db.UserRepo) {
 	return srv.Routes(), users
 }
 
+// newTestServerNoOIDCWithTokens is like newTestServerNoOIDC but also returns the
+// password-reset-token repo, for exercising the reset-flow OIDC guard.
+func newTestServerNoOIDCWithTokens(t *testing.T) (http.Handler, *db.UserRepo, *db.PasswordResetTokenRepo) {
+	t.Helper()
+	database, err := db.Open(":memory:")
+	require.NoError(t, err)
+	require.NoError(t, db.Migrate(database))
+
+	users := db.NewUserRepo(database)
+	resetTokens := db.NewPasswordResetTokenRepo(database)
+	tokens := auth.NewTokenService("oidc-test-secret")
+	bus := events.NewBus()
+	hub := ws.NewHub(bus, tokens, func(_, _ string) error { return nil })
+
+	srv := api.NewServer(
+		users,
+		db.NewInviteRepo(database),
+		db.NewTeamRepo(database),
+		db.NewActivityRepo(database),
+		db.NewTimelineRepo(database),
+		db.NewSavedFilterRepo(database),
+		db.NewUserPreferenceRepo(database),
+		db.NewAPITokenRepo(database),
+		db.NewInstanceSettingsRepo(database),
+		resetTokens,
+		db.NewStatusRepo(database),
+		db.NewTagRepo(database),
+		db.NewShareRepo(database),
+		nil, // mailer not needed: the OIDC guard returns before any send
+		tokens,
+		tier.Unlimited,
+		bus,
+		hub,
+	)
+	return srv.Routes(), users, resetTokens
+}
+
+// TestResetPassword_RejectsOIDCUser verifies the reset-flow OIDC guard: even
+// with a valid reset token, an OIDC account cannot have a local password
+// installed (which would bypass the SSO-only login invariant).
+func TestResetPassword_RejectsOIDCUser(t *testing.T) {
+	handler, users, resetTokens := newTestServerNoOIDCWithTokens(t)
+
+	issuer, subject := "https://idp.example.com", "sub-reset"
+	now := time.Now()
+	require.NoError(t, users.CreateOIDC(&models.User{
+		ID:          "oidc-reset-user",
+		Email:       "reset-sso@example.com",
+		DisplayName: "SSO Reset User",
+		OIDCIssuer:  &issuer,
+		OIDCSubject: &subject,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}))
+
+	// A valid, unused reset token pointing at the OIDC user (as if forged or
+	// pre-dating the account becoming OIDC).
+	rawToken := "raw-reset-token-123456"
+	_, err := resetTokens.Create("prt-oidc", "oidc-reset-user", rawToken, now.Add(time.Hour))
+	require.NoError(t, err)
+
+	body := `{"token":"` + rawToken + `","newPassword":"NewPassw0rd!"}`
+	req := httptest.NewRequest(http.MethodPost, "/auth/reset-password", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "OIDC_ACCOUNT")
+
+	// The account must still have no local password.
+	u, err := users.GetByOIDCSubject(issuer, subject)
+	require.NoError(t, err)
+	assert.Nil(t, u.PasswordHash, "OIDC user must not gain a password via reset")
+}
+
 // TestOIDC_DisabledReturns404 verifies that with SSO unconfigured, both OIDC
 // endpoints report disabled rather than panicking or leaking a redirect.
 func TestOIDC_DisabledReturns404(t *testing.T) {
