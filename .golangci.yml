@@ -18,9 +18,6 @@ linters:
     - nolintlint
 
   settings:
-    goimports:
-      local-prefixes:
-        - github.com/I0-1O/draba
     gocritic:
       enabled-tags:
         - diagnostic
