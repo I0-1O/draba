@@ -19,7 +19,8 @@ linters:
 
   settings:
     goimports:
-      local-prefixes: github.com/I0-1O/draba
+      local-prefixes:
+        - github.com/I0-1O/draba
     gocritic:
       enabled-tags:
         - diagnostic
@@ -33,7 +34,6 @@ linters:
       require-explanation: true
       require-specific: true
 
-issues:
   exclusions:
     rules:
       - path: _test\.go
