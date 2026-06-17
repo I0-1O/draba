@@ -2561,6 +2561,891 @@ Open in any browser to explore the interaction. The dropdown is **open by defaul
 - Long filter names are a real UX concern — the 284px dropdown width combined with ellipsis + `title` tooltip is the chosen approach; no wrapping
 ````
 
+## File: docs/design/handoffs/kanban-view/Kanban View.html
+````html
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Kanban View — Draba</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; background: #0d1117; font-family: 'Inter', system-ui, sans-serif; color: #e6edf3; overflow: hidden; }
+  button { font-family: inherit; cursor: pointer; }
+  ::-webkit-scrollbar { width: 5px; height: 5px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #30363d; border-radius: 99px; }
+  .card-dragging { opacity: 0.35; }
+</style>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useMemo, useRef, useCallback } = React;
+
+// ── Tokens ────────────────────────────────────────────────────────────────────
+const T = {
+  bg0:'#0d1117', bg1:'#161b22', bg2:'#21262d', bg3:'#2d333b', bg4:'#373e47',
+  border:'#30363d', border2:'#21262d',
+  text1:'#e6edf3', text2:'#8b949e', text3:'#484f58',
+  accent:'#288C9B',
+};
+
+// ── Mock data ─────────────────────────────────────────────────────────────────
+const MEMBERS = [
+  { id:'lk', initials:'LK', name:'Lindsay K.',     color:'#22C55E' },
+  { id:'jd', initials:'JD', name:'John Doe',       color:'#6366F1' },
+  { id:'sm', initials:'SM', name:'Sarah M.',       color:'#F97316' },
+  { id:'tb', initials:'TB', name:'Test Bootstrap', color:'#288C9B' },
+];
+
+const COLUMNS = [
+  { id:'not-started', label:'Not Started', color:'#64748B' },
+  { id:'in-progress', label:'In Progress', color:'#288C9B' },
+  { id:'at-risk',     label:'At Risk',     color:'#F97316' },
+  { id:'on-hold',     label:'On Hold',     color:'#8B5CF6' },
+  { id:'completed',   label:'Completed',   color:'#22C55E' },
+  { id:'canceled',    label:'Canceled',    color:'#484f58' },
+];
+
+const CARDS = [
+  { id:'c1',  col:'not-started', title:'Brand audit report',          assignees:['lk'],       start:'Jun 1',  end:'Jun 8',  color:'#288C9B', tags:['Research'],             priority:'high',   sort:10 },
+  { id:'c2',  col:'not-started', title:'Competitive analysis',        assignees:['jd','sm'],  start:'Jun 3',  end:'Jun 10', color:'#6366F1', tags:['Research','Strategy'],  priority:'medium', sort:11 },
+  { id:'c3',  col:'not-started', title:'Logo brief preparation',      assignees:['lk'],       start:'Jun 5',  end:'Jun 12', color:'#A855F7', tags:[],                       priority:'low',    sort:12 },
+  { id:'c4',  col:'in-progress', title:'Initial logo concepts',       assignees:['sm'],       start:'May 20', end:'Jun 3',  color:'#F97316', tags:['Design'],               priority:'high',   sort:4  },
+  { id:'c5',  col:'in-progress', title:'Color palette exploration',   assignees:['sm','lk'],  start:'May 22', end:'Jun 5',  color:'#22C55E', tags:['Design'],               priority:'high',   sort:5  },
+  { id:'c6',  col:'in-progress', title:'Typography selection',        assignees:['jd'],       start:'May 25', end:'Jun 8',  color:'#3B82F6', tags:['Design'],               priority:'medium', sort:6  },
+  { id:'c7',  col:'in-progress', title:'Stakeholder presentation',    assignees:['lk','jd'],  start:'May 28', end:'Jun 15', color:'#6366F1', tags:['Presentation'],         priority:'medium', sort:7  },
+  { id:'c8',  col:'at-risk',     title:'Legal trademark review',      assignees:['tb'],       start:'May 15', end:'May 30', color:'#EF4444', tags:['Legal'],                priority:'high',   sort:3  },
+  { id:'c9',  col:'at-risk',     title:'Agency contract finalization',assignees:['lk','tb'],  start:'May 18', end:'Jun 1',  color:'#F97316', tags:['Admin'],                priority:'high',   sort:3  },
+  { id:'c10', col:'on-hold',     title:'Print collateral templates',  assignees:['sm'],       start:'Jun 10', end:'Jun 25', color:'#8B5CF6', tags:['Print'],                priority:'low',    sort:13 },
+  { id:'c11', col:'on-hold',     title:'Social media kit',            assignees:['jd','sm'],  start:'Jun 12', end:'Jun 28', color:'#EC4899', tags:['Social'],               priority:'medium', sort:14 },
+  { id:'c12', col:'completed',   title:'Project kickoff meeting',     assignees:['lk','jd','sm'],start:'May 1',end:'May 3', color:'#22C55E', tags:[],                       priority:'high',   sort:1  },
+  { id:'c13', col:'completed',   title:'Project scope definition',    assignees:['lk'],       start:'May 3',  end:'May 8',  color:'#288C9B', tags:['Planning'],             priority:'medium', sort:2  },
+  { id:'c14', col:'completed',   title:'Timeline & milestone setup',  assignees:['jd'],       start:'May 8',  end:'May 12', color:'#06B6D4', tags:['Planning'],             priority:'medium', sort:2  },
+  { id:'c15', col:'canceled',    title:'External consultant review',  assignees:['tb'],       start:'May 20', end:'May 31', color:'#64748B', tags:[],                       priority:'low',    sort:9  },
+];
+
+// ── Minimal icon set ──────────────────────────────────────────────────────────
+const IC = {
+  'search':       [['circle',{cx:11,cy:11,r:8}],['line',{x1:21,y1:21,x2:16.65,y2:16.65}]],
+  'chevron-down': [['polyline',{points:'6 9 12 15 18 9'}]],
+  'chevron-right':[['polyline',{points:'9 18 15 12 9 6'}]],
+  'layers':       [['polygon',{points:'12 2 2 7 12 12 22 7 12 2'}],['polyline',{points:'2 17 12 22 22 17'}],['polyline',{points:'2 12 12 17 22 12'}]],
+  'download':     [['path',{d:'M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4'}],['polyline',{points:'7 10 12 15 17 10'}],['line',{x1:12,y1:15,x2:12,y2:3}]],
+  'share':        [['circle',{cx:18,cy:5,r:3}],['circle',{cx:6,cy:12,r:3}],['circle',{cx:18,cy:19,r:3}],['line',{x1:8.59,y1:13.51,x2:15.42,y2:17.49}],['line',{x1:15.41,y1:6.51,x2:8.59,y2:10.49}]],
+  'filter':       [['polygon',{points:'22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3'}]],
+  'arrow-up':     [['line',{x1:12,y1:19,x2:12,y2:5}],['polyline',{points:'5 12 12 5 19 12'}]],
+  'arrow-down':   [['line',{x1:12,y1:5,x2:12,y2:19}],['polyline',{points:'19 12 12 19 5 12'}]],
+  'minus':        [['line',{x1:5,y1:12,x2:19,y2:12}]],
+  'x':            [['line',{x1:18,y1:6,x2:6,y2:18}],['line',{x1:6,y1:6,x2:18,y2:18}]],
+  'calendar':     [['rect',{x:3,y:4,width:18,height:18,rx:2,ry:2}],['line',{x1:16,y1:2,x2:16,y2:6}],['line',{x1:8,y1:2,x2:8,y2:6}],['line',{x1:3,y1:10,x2:21,y2:10}]],
+  'edit':         [['path',{d:'M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7'}],['path',{d:'M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z'}]],
+  'more-h':        [['circle',{cx:12,cy:12,r:1}],['circle',{cx:19,cy:12,r:1}],['circle',{cx:5,cy:12,r:1}]],
+  'kanban':       [['rect',{x:3,y:3,width:5,height:11,rx:1}],['rect',{x:10,y:3,width:5,height:7,rx:1}],['rect',{x:17,y:3,width:4,height:14,rx:1}]],
+  'grid':         [['rect',{x:3,y:3,width:7,height:7}],['rect',{x:14,y:3,width:7,height:7}],['rect',{x:14,y:14,width:7,height:7}],['rect',{x:3,y:14,width:7,height:7}]],
+};
+function Icon({ id, size=16, color='currentColor', sw=1.75 }) {
+  const d=IC[id]; if(!d) return null;
+  return <svg viewBox="0 0 24 24" width={size} height={size} fill="none" stroke={color} strokeWidth={sw} strokeLinecap="round" strokeLinejoin="round">{d.map(([t,p],i)=>React.createElement(t,{key:i,...p}))}</svg>;
+}
+
+// ── Primitives ────────────────────────────────────────────────────────────────
+function Avatar({ id, size=22, border=false }) {
+  const m=MEMBERS.find(m=>m.id===id); if(!m) return null;
+  return (
+    <div style={{ width:size, height:size, borderRadius:'50%', background:m.color, flexShrink:0,
+      display:'flex', alignItems:'center', justifyContent:'center',
+      border: border ? `2px solid ${T.bg2}` : 'none',
+      marginLeft: border ? -6 : 0,
+    }}>
+      <span style={{fontSize:Math.round(size*0.38),fontWeight:700,color:'#fff',lineHeight:1}}>{m.initials}</span>
+    </div>
+  );
+}
+
+function PriorityDot({ priority }) {
+  if (priority === 'low') return null;
+  const color = priority === 'high' ? '#EF4444' : '#F59E0B';
+  const icon  = priority === 'high' ? 'arrow-up' : 'minus';
+  return <Icon id={icon} size={12} color={color} sw={2.5} />;
+}
+
+function Tag({ label }) {
+  return (
+    <span style={{ fontSize:10, padding:'2px 6px', borderRadius:4, background:T.bg4, color:T.text2, fontWeight:500, whiteSpace:'nowrap' }}>
+      {label}
+    </span>
+  );
+}
+
+// ── Toolbar dropdown ──────────────────────────────────────────────────────────
+function ToolbarDropdown({ label, value, options, onChange }) {
+  const [open,setOpen]=useState(false);
+  const [pos,setPos]=useState({top:0,left:0});
+  const btnRef=useRef(null);
+
+  const handleOpen=()=>{
+    if(btnRef.current){
+      const r=btnRef.current.getBoundingClientRect();
+      let left=r.left;
+      if(left+180>window.innerWidth-8) left=window.innerWidth-188;
+      setPos({top:r.bottom+4,left});
+    }
+    setOpen(o=>!o);
+  };
+
+  // Click outside
+  React.useEffect(()=>{
+    if(!open) return;
+    const fn=(e)=>{ if(!btnRef.current?.contains(e.target)) setOpen(false); };
+    document.addEventListener('mousedown',fn);
+    return()=>document.removeEventListener('mousedown',fn);
+  },[open]);
+
+  return (
+    <>
+      <button ref={btnRef} onClick={handleOpen}
+        style={{
+          display:'flex', alignItems:'center', gap:5, padding:'4px 10px',
+          background:open?T.bg3:T.bg2, border:`1px solid ${open?T.border:T.border2}`,
+          borderRadius:6, color:T.text2, fontSize:13, transition:'background 0.1s',
+        }}>
+        <span style={{color:T.text3,fontSize:12}}>{label}</span>
+        <span style={{color:T.text1,fontWeight:500}}>{options.find(o=>o.value===value)?.label||value}</span>
+        <Icon id="chevron-down" size={12} color={T.text3} sw={2}/>
+      </button>
+      {open && ReactDOM.createPortal(
+        <div style={{
+          position:'fixed', top:pos.top, left:pos.left, zIndex:9999,
+          background:T.bg2, border:`1px solid ${T.border}`, borderRadius:8,
+          boxShadow:'0 8px 24px rgba(0,0,0,.5)', padding:'4px 0', minWidth:168,
+        }}>
+          {options.map(o=>(
+            <button key={o.value} onClick={()=>{onChange(o.value);setOpen(false);}}
+              style={{
+                display:'block', width:'100%', padding:'8px 14px', textAlign:'left',
+                border:'none', background: o.value===value ? T.bg3 : 'transparent',
+                color: o.value===value ? T.text1 : T.text2,
+                fontSize:13, fontWeight: o.value===value ? 500 : 400,
+              }}>
+              {o.label}
+            </button>
+          ))}
+        </div>,
+        document.body
+      )}
+    </>
+  );
+}
+
+// ── Share modal ───────────────────────────────────────────────────────────────
+function ShareModal({ onClose }) {
+  return ReactDOM.createPortal(
+    <div style={{ position:'fixed', inset:0, background:'rgba(0,0,0,.6)', zIndex:9999, display:'flex', alignItems:'center', justifyContent:'center' }}
+      onClick={onClose}>
+      <div style={{ background:T.bg2, border:`1px solid ${T.border}`, borderRadius:12, padding:'28px 32px', width:420, boxShadow:'0 24px 64px rgba(0,0,0,.6)' }}
+        onClick={e=>e.stopPropagation()}>
+        <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:20 }}>
+          <span style={{ fontSize:16, fontWeight:600, color:T.text1 }}>Share · New Logo GTM</span>
+          <button onClick={onClose} style={{ background:'none', border:'none', color:T.text3, padding:4 }}><Icon id="x" size={16} color={T.text3}/></button>
+        </div>
+        <div style={{ padding:'24px 0', textAlign:'center', color:T.text3, fontSize:13, borderTop:`1px solid ${T.border}` }}>
+          Share modal — not yet designed
+        </div>
+      </div>
+    </div>,
+    document.body
+  );
+}
+
+// ── Kanban card ───────────────────────────────────────────────────────────────
+function KanbanCard({ card, colorBy, isDragging, onDragStart, onDragEnd }) {
+  const [hov,setHov]=useState(false);
+  const accentColor = colorBy==='assignee'
+    ? (MEMBERS.find(m=>m.id===card.assignees[0])?.color || T.accent)
+    : card.color;
+
+  return (
+    <div
+      draggable
+      onDragStart={onDragStart}
+      onDragEnd={onDragEnd}
+      onMouseEnter={()=>setHov(true)}
+      onMouseLeave={()=>setHov(false)}
+      className={isDragging?'card-dragging':''}
+      style={{
+        background: hov ? T.bg3 : T.bg2,
+        border: `1px solid ${hov ? T.border : T.border2}`,
+        borderRadius: 8,
+        borderLeft: `3px solid ${accentColor}`,
+        padding: '10px 12px',
+        cursor: 'grab',
+        transition: 'background 0.1s, border-color 0.1s',
+        userSelect: 'none',
+      }}>
+      {/* Title row */}
+      <div style={{ fontSize:13, fontWeight:500, color:T.text1, lineHeight:1.35, marginBottom:6 }}>
+        {card.title}
+      </div>
+      {/* Tags */}
+      {card.tags.length > 0 && (
+        <div style={{ display:'flex', gap:4, flexWrap:'wrap', marginBottom:6 }}>
+          {card.tags.map(t=><Tag key={t} label={t}/>)}
+        </div>
+      )}
+      {/* Footer row */}
+      <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:6 }}>
+        <div style={{ display:'flex', alignItems:'center', gap:4, color:T.text3, fontSize:11 }}>
+          <PriorityDot priority={card.priority}/>
+          <Icon id="calendar" size={11} color={T.text3} sw={1.75}/>
+          <span>{card.start}</span>
+          {card.end !== card.start && <><span style={{opacity:.5}}>–</span><span>{card.end}</span></>}
+        </div>
+        <div style={{ display:'flex', alignItems:'center' }}>
+          {card.assignees.map((id,i)=><Avatar key={id} id={id} size={20} border={i>0}/>)}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Kanban column ─────────────────────────────────────────────────────────────
+function KanbanColumn({ col, cards, colorBy, collapsed, onToggleCollapse, draggingId, dragOverCol, onDragOver, onDrop }) {
+  const isTarget = dragOverCol === col.id && draggingId && cards.every(c=>c.id!==draggingId);
+  const count = cards.length;
+
+  if (collapsed) {
+    return (
+      <div
+        onDragOver={(e)=>{e.preventDefault(); onDragOver(col.id);}}
+        onDrop={(e)=>{e.preventDefault(); onDrop(col.id);}}
+        style={{
+          width:40, flexShrink:0, borderRadius:10,
+          background: isTarget ? `${col.color}18` : T.bg1,
+          border: `1px solid ${isTarget ? col.color+'44' : T.border2}`,
+          display:'flex', flexDirection:'column', alignItems:'center',
+          padding:'12px 0', gap:8, cursor:'pointer', transition:'background 0.15s',
+        }}
+        onClick={onToggleCollapse}>
+        <div style={{ width:8, height:8, borderRadius:'50%', background:col.color, flexShrink:0 }}/>
+        <span style={{
+          fontSize:11, fontWeight:600, color:T.text2, writingMode:'vertical-rl',
+          textOrientation:'mixed', transform:'rotate(180deg)', letterSpacing:'.3px',
+        }}>{col.label}</span>
+        <span style={{
+          fontSize:10, fontWeight:700, color:T.text3, background:T.bg3,
+          borderRadius:99, padding:'2px 5px', lineHeight:1.2,
+        }}>{count}</span>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      onDragOver={(e)=>{e.preventDefault(); if(dragOverCol!==col.id) onDragOver(col.id);}}
+      onDrop={(e)=>{e.preventDefault(); onDrop(col.id);}}
+      style={{
+        width:248, flexShrink:0, borderRadius:10,
+        background: isTarget ? `${col.color}10` : T.bg1,
+        border: `1px solid ${isTarget ? col.color+'55' : T.border2}`,
+        display:'flex', flexDirection:'column',
+        transition:'background 0.15s, border-color 0.15s',
+        maxHeight:'100%',
+      }}>
+      {/* Header */}
+      <div style={{ padding:'10px 12px', display:'flex', alignItems:'center', gap:8, flexShrink:0 }}>
+        <div style={{ width:8, height:8, borderRadius:'50%', background:col.color, flexShrink:0 }}/>
+        <span style={{ fontSize:12, fontWeight:600, color:T.text1, flex:1 }}>{col.label}</span>
+        <span style={{ fontSize:11, fontWeight:600, color:T.text3, background:T.bg3, borderRadius:99, padding:'1px 7px', lineHeight:1.4 }}>{count}</span>
+        <button onClick={onToggleCollapse}
+          style={{ background:'none', border:'none', padding:2, opacity:.5, transition:'opacity 0.1s' }}
+          title="Collapse">
+          <Icon id="chevron-down" size={13} color={T.text2} sw={2}/>
+        </button>
+      </div>
+      {/* Cards */}
+      <div style={{ flex:1, overflowY:'auto', padding:'0 8px 8px', display:'flex', flexDirection:'column', gap:6 }}>
+        {cards.map(card=>(
+          <KanbanCard key={card.id} card={card} colorBy={colorBy}
+            isDragging={draggingId===card.id}
+            onDragStart={()=>{}}
+            onDragEnd={()=>{}}
+          />
+        ))}
+        {isTarget && draggingId && (
+          <div style={{ height:6, borderRadius:4, background:col.color, opacity:.4 }}/>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Kanban toolbar ────────────────────────────────────────────────────────────
+function KanbanToolbar({ sortBy, setSortBy, colorBy, setColorBy, onShare }) {
+  return (
+    <div style={{
+      height:42, flexShrink:0, display:'flex', alignItems:'center', gap:6,
+      padding:'0 16px', borderBottom:`1px solid ${T.border}`, background:T.bg1,
+    }}>
+      <div style={{ display:'flex', alignItems:'center', gap:6, flex:1 }}>
+        <ToolbarDropdown label="Group by" value="status"
+          options={[{value:'status',label:'Status'},{value:'assignee',label:'Assignee'},{value:'priority',label:'Priority'}]}
+          onChange={()=>{}}/>
+        <div style={{ width:1, height:20, background:T.border, margin:'0 4px' }}/>
+        <ToolbarDropdown label="Sort by" value={sortBy}
+          options={[{value:'startDate',label:'Start date'},{value:'assignee',label:'Assignee'},{value:'title',label:'Title'}]}
+          onChange={setSortBy}/>
+        <ToolbarDropdown label="Color by" value={colorBy}
+          options={[{value:'activity',label:'Activity'},{value:'assignee',label:'Assignee'}]}
+          onChange={setColorBy}/>
+      </div>
+      <div style={{ display:'flex', alignItems:'center', gap:6 }}>
+        <button onClick={onShare}
+          style={{
+            display:'flex', alignItems:'center', gap:6, padding:'5px 11px',
+            background:T.bg2, border:`1px solid ${T.border2}`, borderRadius:6,
+            color:T.text2, fontSize:13,
+          }}>
+          <Icon id="share" size={13} color={T.text2}/>
+          Share
+        </button>
+        <button style={{
+          display:'flex', alignItems:'center', gap:6, padding:'5px 11px',
+          background:T.bg2, border:`1px solid ${T.border2}`, borderRadius:6,
+          color:T.text2, fontSize:13,
+        }}>
+          <Icon id="download" size={13} color={T.text2}/>
+          Export
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ── Top nav ───────────────────────────────────────────────────────────────────
+const TABS = [{id:'list',label:'List',icon:'list'},{id:'calendar',label:'Calendar',icon:'grid'},{id:'gantt',label:'Gantt',icon:'minus'},{id:'kanban',label:'Kanban',icon:'kanban'}];
+
+function TopNav() {
+  return (
+    <div style={{
+      height:50, flexShrink:0, display:'flex', alignItems:'center',
+      padding:'0 16px', borderBottom:`1px solid ${T.border}`, background:T.bg1, gap:4,
+    }}>
+      <div style={{ display:'flex', alignItems:'center', gap:6, marginRight:8, paddingRight:12, borderRight:`1px solid ${T.border}` }}>
+        <div style={{ width:24, height:24, borderRadius:5, background:T.accent, display:'flex', alignItems:'center', justifyContent:'center' }}>
+          <Icon id="layers" size={13} color="#fff" sw={2}/>
+        </div>
+        <span style={{ fontSize:16, fontWeight:600, color:T.text1 }}>draba</span>
+      </div>
+      {TABS.map(tab=>(
+        <button key={tab.id}
+          style={{
+            display:'flex', alignItems:'center', gap:6, padding:'5px 11px',
+            borderRadius:6, border:'none', fontSize:13, fontWeight: tab.id==='kanban' ? 600 : 400,
+            background: tab.id==='kanban' ? T.bg3 : 'transparent',
+            color: tab.id==='kanban' ? T.text1 : T.text2,
+          }}>
+          <Icon id={tab.icon} size={13} color={tab.id==='kanban' ? T.text1 : T.text3} sw={tab.id==='kanban'?2:1.75}/>
+          {tab.label}
+        </button>
+      ))}
+      <div style={{ flex:1, textAlign:'center', fontSize:14, fontWeight:500, color:T.text2 }}>New Logo GTM</div>
+      <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+        <button style={{ background:'none', border:'none', padding:4 }}><Icon id="search" size={16} color={T.text3}/></button>
+        <button style={{
+          display:'flex', alignItems:'center', gap:6, padding:'5px 11px',
+          background:T.bg3, border:`1px solid ${T.border}`, borderRadius:6, color:T.text2, fontSize:13,
+        }}>
+          <Icon id="filter" size={13} color={T.text3}/>
+          All activities
+          <Icon id="chevron-down" size={12} color={T.text3} sw={2}/>
+        </button>
+        <div style={{ width:30, height:30, borderRadius:'50%', background:T.accent, display:'flex', alignItems:'center', justifyContent:'center' }}>
+          <span style={{ fontSize:12, fontWeight:700, color:'#fff' }}>U</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Sidebar ───────────────────────────────────────────────────────────────────
+const SB_TIMELINES = [
+  { name:'Q1 2027 Roadmap',  color:'#288C9B', icon:'zap'  },
+  { name:'New Logo GTM',     color:'#8B5CF6', active:true },
+  { name:'Q4 2026 Roadmap',  color:'#F97316', icon:'tup'  },
+  { name:'Project Pinky',    color:'#F43F5E', icon:'heart'},
+];
+
+function Sidebar() {
+  return (
+    <div style={{ width:220, flexShrink:0, background:T.bg1, borderRight:`1px solid ${T.border}`, overflowY:'auto' }}>
+      <div style={{ padding:'14px 12px 8px' }}>
+        <div style={{ fontSize:10, fontWeight:600, letterSpacing:'.7px', color:T.text3, textTransform:'uppercase', marginBottom:6, paddingLeft:4 }}>Team</div>
+        <div style={{ display:'flex', alignItems:'center', gap:8, padding:'5px 8px', borderRadius:6, marginBottom:12 }}>
+          <div style={{ width:22, height:22, borderRadius:'50%', background:'#A855F7', display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0 }}>
+            <span style={{ fontSize:11, fontWeight:700, color:'#fff' }}>P</span>
+          </div>
+          <span style={{ fontSize:13, fontWeight:500, color:T.text1 }}>Product Marketing</span>
+        </div>
+        <div style={{ fontSize:10, fontWeight:600, letterSpacing:'.7px', color:T.text3, textTransform:'uppercase', marginBottom:6, paddingLeft:4 }}>Members</div>
+        {MEMBERS.map(m=>(
+          <div key={m.id} style={{ display:'flex', alignItems:'center', gap:8, padding:'4px 8px', borderRadius:6 }}>
+            <Avatar id={m.id} size={22}/>
+            <span style={{ fontSize:13, color:T.text2 }}>{m.name}</span>
+          </div>
+        ))}
+        <div style={{ fontSize:10, fontWeight:600, letterSpacing:'.7px', color:T.text3, textTransform:'uppercase', marginBottom:6, marginTop:14, paddingLeft:4 }}>Timeline</div>
+        {SB_TIMELINES.map(tl=>(
+          <div key={tl.name} style={{ display:'flex', alignItems:'center', gap:8, padding:'5px 8px', borderRadius:6, background:tl.active?T.bg3:'transparent' }}>
+            <div style={{ width:22, height:22, borderRadius:'5px', background:tl.color, display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0 }}>
+              <Icon id={tl.active?'kanban':'list'} size={11} color="rgba(255,255,255,0.9)" sw={2}/>
+            </div>
+            <span style={{ fontSize:13, fontWeight:tl.active?500:400, color:tl.active?T.text1:T.text2, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{tl.name}</span>
+          </div>
+        ))}
+        <div style={{ marginTop:6, paddingLeft:8 }}>
+          <span style={{ fontSize:12, color:T.text3 }}>+ New timeline</span>
+        </div>
+        <div style={{ fontSize:10, fontWeight:600, letterSpacing:'.7px', color:T.text3, textTransform:'uppercase', marginBottom:6, marginTop:14, paddingLeft:4 }}>Activity</div>
+        <div style={{ paddingLeft:8, display:'flex', flexDirection:'column', gap:6 }}>
+          <span style={{ fontSize:12, color:T.text2 }}>+ New activity</span>
+          <span style={{ fontSize:12, color:T.text2 }}>↑ Import activities</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── App ───────────────────────────────────────────────────────────────────────
+function App() {
+  const [cards, setCards] = useState(CARDS);
+  const [sortBy, setSortBy] = useState('startDate');
+  const [colorBy, setColorBy] = useState('activity');
+  const [collapsed, setCollapsed] = useState({});
+  const [draggingId, setDraggingId] = useState(null);
+  const [dragOverCol, setDragOverCol] = useState(null);
+  const [shareOpen, setShareOpen] = useState(false);
+
+  const sortedCards = useMemo(()=>{
+    return [...cards].sort((a,b)=>{
+      if(sortBy==='title') return a.title.localeCompare(b.title);
+      if(sortBy==='assignee'){
+        const na=MEMBERS.find(m=>m.id===a.assignees[0])?.name||'';
+        const nb=MEMBERS.find(m=>m.id===b.assignees[0])?.name||'';
+        return na.localeCompare(nb);
+      }
+      return a.sort - b.sort;
+    });
+  },[cards, sortBy]);
+
+  const handleDrop = useCallback((colId)=>{
+    if(draggingId){
+      setCards(cs=>cs.map(c=>c.id===draggingId?{...c,col:colId}:c));
+    }
+    setDraggingId(null); setDragOverCol(null);
+  },[draggingId]);
+
+  return (
+    <div style={{ height:'100vh', display:'flex', flexDirection:'column', background:T.bg0, overflow:'hidden' }}>
+      <TopNav/>
+      <div style={{ flex:1, display:'flex', overflow:'hidden' }}>
+        <Sidebar/>
+        <div style={{ flex:1, display:'flex', flexDirection:'column', overflow:'hidden' }}>
+          <KanbanToolbar sortBy={sortBy} setSortBy={setSortBy} colorBy={colorBy} setColorBy={setColorBy} onShare={()=>setShareOpen(true)}/>
+          {/* Board */}
+          <div
+            style={{ flex:1, overflowX:'auto', overflowY:'hidden', padding:'16px', display:'flex', gap:10, alignItems:'flex-start' }}
+            onDragOver={e=>e.preventDefault()}
+            onMouseUp={()=>{ if(draggingId){setDraggingId(null); setDragOverCol(null);} }}>
+            {COLUMNS.map(col=>(
+              <KanbanColumn key={col.id} col={col}
+                cards={sortedCards.filter(c=>c.col===col.id)}
+                colorBy={colorBy}
+                collapsed={!!collapsed[col.id]}
+                onToggleCollapse={()=>setCollapsed(s=>({...s,[col.id]:!s[col.id]}))}
+                draggingId={draggingId}
+                dragOverCol={dragOverCol}
+                onDragOver={setDragOverCol}
+                onDrop={handleDrop}
+              />
+            ))}
+          </div>
+        </div>
+      </div>
+      {shareOpen && <ShareModal onClose={()=>setShareOpen(false)}/>}
+    </div>
+  );
+}
+
+// Wire up drag on cards (needs access to App state setters)
+// Patch: override KanbanCard onDragStart / onDragEnd via board wrapper
+function BoardWithDrag({ sortedCards, colorBy, collapsed, onToggleCollapse, onDragOver, onDrop, draggingId, setDraggingId, setDragOverCol, dragOverCol, onOpenCard }) {
+  const [hovCardId, setHovCardId] = useState(null);
+  return (
+    <div style={{ flex:1, overflowX:'auto', overflowY:'hidden', padding:'16px', display:'flex', gap:10, alignItems:'flex-start' }}>
+      {COLUMNS.map(col=>{
+        const cards = sortedCards.filter(c=>c.col===col.id);
+        const isTarget = dragOverCol===col.id && draggingId && cards.every(c=>c.id!==draggingId);
+        if(collapsed[col.id]) return (
+          <div key={col.id}
+            onDragOver={(e)=>{e.preventDefault(); if(dragOverCol!==col.id) onDragOver(col.id);}}
+            onDrop={(e)=>{e.preventDefault(); onDrop(col.id);}}
+            onClick={()=>onToggleCollapse(col.id)}
+            style={{
+              width:40, flexShrink:0, borderRadius:10, cursor:'pointer',
+              background: isTarget ? `${col.color}18` : T.bg1,
+              border:`1px solid ${isTarget ? col.color+'44' : T.border2}`,
+              display:'flex', flexDirection:'column', alignItems:'center',
+              padding:'12px 0', gap:8, transition:'background 0.15s',
+            }}>
+            <div style={{ width:8, height:8, borderRadius:'50%', background:col.color }}/>
+            <span style={{ fontSize:11, fontWeight:600, color:T.text2, writingMode:'vertical-rl', textOrientation:'mixed', transform:'rotate(180deg)', letterSpacing:'.3px' }}>{col.label}</span>
+            <span style={{ fontSize:10, fontWeight:700, color:T.text3, background:T.bg3, borderRadius:99, padding:'2px 5px' }}>{cards.length}</span>
+          </div>
+        );
+        return (
+          <div key={col.id}
+            onDragOver={(e)=>{e.preventDefault(); if(dragOverCol!==col.id) onDragOver(col.id);}}
+            onDrop={(e)=>{e.preventDefault(); onDrop(col.id);}}
+            style={{
+              width:248, flexShrink:0, borderRadius:10,
+              background: isTarget ? `${col.color}10` : T.bg1,
+              border:`1px solid ${isTarget ? col.color+'55' : T.border2}`,
+              display:'flex', flexDirection:'column', transition:'background 0.15s, border-color 0.15s',
+              maxHeight:'100%',
+            }}>
+            <div style={{ padding:'10px 12px', display:'flex', alignItems:'center', gap:8, flexShrink:0 }}>
+              <div style={{ width:8, height:8, borderRadius:'50%', background:col.color, flexShrink:0 }}/>
+              <span style={{ fontSize:12, fontWeight:600, color:T.text1, flex:1 }}>{col.label}</span>
+              <span style={{ fontSize:11, fontWeight:600, color:T.text3, background:T.bg3, borderRadius:99, padding:'1px 7px', lineHeight:1.4 }}>{cards.length}</span>
+              <button onClick={()=>onToggleCollapse(col.id)}
+                style={{ background:'none', border:'none', padding:2, opacity:.5 }}>
+                <Icon id="chevron-down" size={13} color={T.text2} sw={2}/>
+              </button>
+            </div>
+            <div style={{ flex:1, overflowY:'auto', padding:'0 8px 8px', display:'flex', flexDirection:'column', gap:6 }}>
+              {cards.map(card=>{
+                const accentColor = colorBy==='assignee'
+                  ? (MEMBERS.find(m=>m.id===card.assignees[0])?.color || T.accent)
+                  : card.color;
+                return (
+                  <div key={card.id}
+                    draggable
+                    onDragStart={()=>setDraggingId(card.id)}
+                    onDragEnd={()=>{ setDraggingId(null); setDragOverCol(null); }}
+                    onMouseEnter={()=>setHovCardId(card.id)}
+                    onMouseLeave={()=>setHovCardId(null)}
+                    className={draggingId===card.id?'card-dragging':''}
+                    style={{
+                      position:'relative',
+                      background:T.bg2, border:`1px solid ${T.border2}`,
+                      borderRadius:8, borderLeft:`3px solid ${accentColor}`,
+                      padding:'10px 12px', cursor:'grab', userSelect:'none',
+                    }}>
+                    {/* Configure button */}
+                    {hovCardId===card.id && (
+                      <button
+                        draggable={false}
+                        onDragStart={e=>e.stopPropagation()}
+                        onMouseDown={e=>e.stopPropagation()}
+                        onClick={e=>{e.stopPropagation(); onOpenCard(card.id);}}
+                        title="Edit activity"
+                        style={{
+                          position:'absolute', top:7, right:7,
+                          width:22, height:22, borderRadius:5,
+                          background:T.bg4, border:`1px solid ${T.border}`,
+                          display:'flex', alignItems:'center', justifyContent:'center',
+                          cursor:'pointer', zIndex:2,
+                          boxShadow:'0 1px 4px rgba(0,0,0,.3)',
+                        }}>
+                        <Icon id="edit" size={11} color={T.text2} sw={2}/>
+                      </button>
+                    )}
+                    <div style={{ fontSize:13, fontWeight:500, color:T.text1, lineHeight:1.35, marginBottom:6 }}>{card.title}</div>
+                    {card.tags.length>0 && (
+                      <div style={{ display:'flex', gap:4, flexWrap:'wrap', marginBottom:6 }}>
+                        {card.tags.map(t=><Tag key={t} label={t}/>)}
+                      </div>
+                    )}
+                    <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:6 }}>
+                      <div style={{ display:'flex', alignItems:'center', gap:4, color:T.text3, fontSize:11 }}>
+                        <PriorityDot priority={card.priority}/>
+                        <Icon id="calendar" size={11} color={T.text3} sw={1.75}/>
+                        <span>{card.start}</span>
+                      </div>
+                      <div style={{ display:'flex', alignItems:'center' }}>
+                        {card.assignees.map((id,i)=><Avatar key={id} id={id} size={20} border={i>0}/>)}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+              {isTarget && <div style={{ height:6, borderRadius:4, background:col.color, opacity:.4 }}/>}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function AppFinal() {
+  const [cards,setCards]=useState(CARDS);
+  const [sortBy,setSortBy]=useState('startDate');
+  const [colorBy,setColorBy]=useState('activity');
+  const [collapsed,setCollapsed]=useState({});
+  const [draggingId,setDraggingId]=useState(null);
+  const [dragOverCol,setDragOverCol]=useState(null);
+  const [shareOpen,setShareOpen]=useState(false);
+  const [openCardId,setOpenCardId]=useState(null);
+
+  const sortedCards=useMemo(()=>[...cards].sort((a,b)=>{
+    if(sortBy==='title') return a.title.localeCompare(b.title);
+    if(sortBy==='assignee'){
+      const na=MEMBERS.find(m=>m.id===a.assignees[0])?.name||'';
+      const nb=MEMBERS.find(m=>m.id===b.assignees[0])?.name||'';
+      return na.localeCompare(nb);
+    }
+    return a.sort-b.sort;
+  }),[cards,sortBy]);
+
+  const handleDrop=useCallback((colId)=>{
+    if(draggingId) setCards(cs=>cs.map(c=>c.id===draggingId?{...c,col:colId}:c));
+    setDraggingId(null); setDragOverCol(null);
+  },[draggingId]);
+
+  return (
+    <div style={{ height:'100vh', display:'flex', flexDirection:'column', background:T.bg0, overflow:'hidden' }}>
+      <TopNav/>
+      <div style={{ flex:1, display:'flex', overflow:'hidden' }}>
+        <Sidebar/>
+        <div style={{ flex:1, display:'flex', flexDirection:'column', overflow:'hidden' }}>
+          <KanbanToolbar sortBy={sortBy} setSortBy={setSortBy} colorBy={colorBy} setColorBy={setColorBy} onShare={()=>setShareOpen(true)}/>
+          <BoardWithDrag
+            sortedCards={sortedCards} colorBy={colorBy} collapsed={collapsed}
+            onToggleCollapse={(id)=>setCollapsed(s=>({...s,[id]:!s[id]}))}
+            draggingId={draggingId} setDraggingId={setDraggingId}
+            dragOverCol={dragOverCol} setDragOverCol={setDragOverCol}
+            onDragOver={setDragOverCol} onDrop={handleDrop}
+            onOpenCard={setOpenCardId}
+          />
+        </div>
+      </div>
+      {shareOpen && <ShareModal onClose={()=>setShareOpen(false)}/>}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<AppFinal/>);
+</script>
+</body>
+</html>
+````
+
+## File: docs/design/handoffs/kanban-view/README.md
+````markdown
+# Handoff: Kanban View — Draba
+
+## Overview
+
+The Kanban View is one of Draba's primary timeline views (alongside **List**, **Calendar**, and **Gantt**). It presents the activities of a single timeline as draggable cards arranged in vertical, status-based columns. Activities can be dragged between columns to change their status, columns can be collapsed to reclaim horizontal space, and the board can be re-grouped, re-sorted, and re-colored from a dedicated toolbar.
+
+The view is reached by selecting the **Kanban** tab in the top nav while a timeline is open. It renders inside the standard app shell (top nav + left sidebar) and owns the main content region.
+
+## About the Design Files
+
+The files in this bundle are **HTML/React-via-Babel design prototypes** — not production code. Your task is to **recreate this view inside the existing Draba codebase** (described as shadcn/ui + Tailwind CSS v4 + Next.js) using its established components, design tokens, and patterns. Prefer the codebase's real primitives (drag-and-drop library, DropdownMenu, Dialog, Avatar, Badge) over the hand-rolled versions in the prototype.
+
+## Fidelity
+
+**High-fidelity.** Final colors, spacing, typography, and interaction states are specified. The prototype hardcodes a **dark** theme; production should drive everything from the Draba Design System tokens (`--primary`, `--card`, `--border`, `--muted-foreground`, etc.) and support light + dark. Exact hexes are listed under **Design Tokens** so you can map them to the token set.
+
+---
+
+## Layout
+
+The view sits in the standard three-region app shell:
+
+```
+┌──────────────────────────────────────────────────────────┐
+│ Top nav (50px)  — logo · view tabs · title · filter · me  │
+├──────────┬───────────────────────────────────────────────┤
+│ Sidebar  │ Kanban toolbar (42px) — group/sort/color · CTA │
+│ (220px)  ├───────────────────────────────────────────────┤
+│          │ Board — horizontal scroll, columns left→right  │
+│          │                                                 │
+└──────────┴───────────────────────────────────────────────┘
+```
+
+- Root: `100vh`, column flex, `overflow: hidden`, background `#0d1117`.
+- The content region (right of sidebar) is a column flex: **toolbar** (fixed) over **board** (fills remaining height).
+- **Board**: `overflow-x: auto`, `overflow-y: hidden`, padding `16px`, flex row, gap `10px`, `align-items: flex-start`. Columns scroll horizontally as a group; each column scrolls its cards vertically.
+
+---
+
+## Components
+
+### Top nav (`<TopNav>`)
+Height `50px`, bg `#161b22`, bottom border `1px solid #30363d`, padding `0 16px`.
+- **Brand**: 24px teal rounded tile with a layers icon + wordmark "draba" (16px/600), followed by a vertical divider.
+- **View tabs**: List · Calendar · Gantt · **Kanban**. Each is an icon + label button, `5px 11px`, radius 6. Active tab (Kanban): bg `#2d333b`, text `#e6edf3`, 600w; inactive: transparent, `#8b949e`. *(In production, wire these to actually switch views — in the prototype only Kanban renders.)*
+- **Title**: centered, flex-1, the timeline name ("New Logo GTM"), 14px/500 `#8b949e`.
+- **Right cluster**: search icon button · a "All activities" filter pill (bg `#2d333b`, border, filter icon + chevron) · a 30px teal avatar circle.
+
+### Sidebar (`<Sidebar>`)
+Width `220px`, bg `#161b22`, right border, vertical scroll. Sectioned list with uppercase 10px/600 labels (`#484f58`, letter-spacing .7px):
+- **Team** — 22px team avatar + name.
+- **Members** — each member: 22px color avatar + name (`#8b949e`).
+- **Timeline** — list of timelines, each a colored 22px rounded tile + name; the active one ("New Logo GTM") has bg `#2d333b` and brighter text. Followed by a "+ New timeline" link.
+- **Activity** — "+ New activity" and "↑ Import activities" links.
+
+> This sidebar mirrors the app's existing navigation — in production, reuse the real `<Sidebar>` component rather than this copy.
+
+### Kanban toolbar (`<KanbanToolbar>`)
+Height `42px`, bg `#161b22`, bottom border, padding `0 16px`, flex row, gap 6.
+- **Left cluster**: three dropdowns —
+  - **Group by**: Status (default) · Assignee · Priority
+  - a thin vertical divider
+  - **Sort by**: Start date (default) · Assignee · Title
+  - **Color by**: Activity (default) · Assignee
+- **Right cluster**: **Share** button (share icon) and **Export** button (download icon). Both are secondary buttons: bg `#21262d`, border `#21262d`, `5px 11px`, radius 6, text `#8b949e`.
+
+**Toolbar dropdown (`<ToolbarDropdown>`)**: a button showing a muted `label` (`#484f58`) + the selected value (`#e6edf3`, 500w) + chevron-down. Opens a portal menu (`position: fixed`, flips left if it would overflow the viewport): bg `#21262d`, border `#30363d`, radius 8, shadow `0 8px 24px rgba(0,0,0,.5)`, min-width 168. Selected option row: bg `#2d333b`, text `#e6edf3`. Closes on outside-click.
+
+### Column (collapsed + expanded)
+Each status is a column. Radius 10, bg `#161b22`, border `1px solid #21262d`. Drop-target highlight while dragging: bg `{colColor}10`, border `{colColor}55` (expanded) / `{colColor}18` + `{colColor}44` (collapsed).
+
+**Expanded** (width `248px`):
+- **Header** (`10px 12px`): 8px color dot + label (12px/600 `#e6edf3`, flex-1) + count badge (11px/600 `#484f58`, bg `#2d333b`, pill `1px 7px`) + collapse button (chevron-down, 50% opacity).
+- **Cards area**: `flex: 1`, vertical scroll, padding `0 8px 8px`, column flex, gap 6. A 6px accent-colored placeholder bar (`{colColor}`, opacity .4) is appended while a card hovers over the column.
+
+**Collapsed** (width `40px`): clickable full-height rail — color dot + vertical (rotated) label + count badge. Clicking toggles back to expanded.
+
+**Columns** (id · label · color):
+| id | label | color |
+|---|---|---|
+| `not-started` | Not Started | `#64748B` |
+| `in-progress` | In Progress | `#288C9B` (teal) |
+| `at-risk` | At Risk | `#F97316` (amber) |
+| `on-hold` | On Hold | `#8B5CF6` (violet) |
+| `completed` | Completed | `#22C55E` (green) |
+| `canceled` | Canceled | `#484f58` (muted) |
+
+### Card
+Represents one activity. bg `#21262d`, border `1px solid #21262d`, radius 8, **left accent border `3px solid {accentColor}`**, padding `10px 12px`, `cursor: grab`, `user-select: none`. Hover: bg `#2d333b`, border `#30363d`. While being dragged: `opacity: .35` (`.card-dragging`).
+- **Title**: 13px/500 `#e6edf3`, line-height 1.35.
+- **Tags** (optional): small chips — 10px, `2px 6px`, radius 4, bg `#373e47`, text `#8b949e`.
+- **Footer row** (space-between):
+  - Left: **priority indicator** (`high` → red up-arrow `#EF4444`; `medium` → amber minus `#F59E0B`; `low` → none) + calendar icon + start date (and `– end` date where the card component shows it).
+  - Right: **assignee avatars** — 20px color circles, overlapping by -6px after the first (2px `#21262d` ring).
+- **Configure button** (hover-revealed): 22px tile top-right (bg `#373e47`, border, edit/pencil icon) that opens the activity for editing. It stops drag propagation so the click doesn't start a drag.
+
+**Accent color** depends on the **Color by** setting: `activity` → the card's own `color`; `assignee` → the first assignee's member color.
+
+### Share modal (`<ShareModal>`)
+A **stub** — portal overlay (`rgba(0,0,0,.6)`), 420px panel (bg `#21262d`, border, radius 12, shadow), header "Share · New Logo GTM" + close X, and a placeholder body reading *"Share modal — not yet designed."* **This is a known gap** — the real share flow is out of scope for this handoff and should be designed separately (or reuse the share pattern from the timeline view if one exists).
+
+---
+
+## Interactions & Behavior
+
+- **Drag to rechange status**: cards are HTML5-draggable. Dragging sets `draggingId`; hovering a column sets `dragOverCol` and shows the column highlight + a placeholder bar; dropping moves the card to that column (`col` changes). Drop/`onDragEnd`/`mouseUp` all clear the drag state.
+  - *Production note:* the prototype only reorders cards **between** columns by status; it does not persist an explicit intra-column index on drop (cards re-flow per the Sort by rule). If precise manual ordering within a column is required, add an order field and insertion-index logic — use the codebase's DnD library (e.g. dnd-kit) rather than raw HTML5 DnD for reliable reordering + keyboard a11y.
+- **Sort by**: reorders cards within every column — `Start date` (a stable `sort` rank in the mock), `Assignee` (first assignee name, A→Z), `Title` (A→Z).
+- **Color by**: switches the card left-border accent between the activity color and the assignee color (see Card).
+- **Group by**: the control is present with options Status / Assignee / Priority. In the prototype only **Status** is wired (columns = statuses). Production should regenerate columns from the chosen grouping (e.g. one column per member, or per priority bucket).
+- **Collapse column**: header chevron (or clicking the collapsed rail) toggles a per-column collapsed state.
+- **Configure card**: hover a card → pencil button → opens the activity editor (wire to the existing Event/Activity detail panel or Member/Activity edit modal).
+- **Share / Export**: Share opens the stub modal; Export is present but inert (wire to the Export Modal — see Related).
+- **Transitions**: background/border transitions ~100–150ms ease. No decorative motion, per the design system.
+
+## State Management
+
+Per-view state (prototype `AppFinal`):
+```ts
+cards:       Card[]                 // source of truth; col changes on drop
+sortBy:      'startDate'|'assignee'|'title'
+colorBy:     'activity'|'assignee'
+collapsed:   Record<columnId, boolean>
+draggingId:  string | null          // card being dragged
+dragOverCol: string | null          // current drop-target column
+shareOpen:   boolean
+openCardId:  string | null          // activity opened for editing
+```
+
+**Card model** (maps to a Draba activity):
+```ts
+type Card = {
+  id: string;
+  col: ColumnId;                    // status
+  title: string;
+  assignees: MemberId[];            // 0..n members
+  start: string; end: string;       // date labels
+  color: string;                    // activity color (Color by: activity)
+  tags: string[];
+  priority: 'high'|'medium'|'low';
+  sort: number;                     // stable rank for Start-date sort
+};
+```
+Production: fetch the timeline's activities, derive columns from the active **Group by**, and persist status changes (and order, if implemented) on drop.
+
+---
+
+## Design Tokens
+
+| Token | Value | Use |
+|---|---|---|
+| bg0 | `#0d1117` | app background |
+| bg1 | `#161b22` | nav, sidebar, toolbar, columns |
+| bg2 | `#21262d` | cards, dropdown/modal panels |
+| bg3 | `#2d333b` | hover surfaces, active tab, count badges |
+| bg4 | `#373e47` | tag chips, configure button |
+| border | `#30363d` | primary borders |
+| border2 | `#21262d` | subtle borders (cards, columns) |
+| text1 | `#e6edf3` | primary text |
+| text2 | `#8b949e` | secondary text |
+| text3 | `#484f58` | muted text / labels |
+| accent | `#288C9B` | Draba teal (primary) |
+
+**Column colors**: slate `#64748B` · teal `#288C9B` · amber `#F97316` · violet `#8B5CF6` · green `#22C55E` · muted `#484f58`.
+**Priority**: high `#EF4444` · medium `#F59E0B` · low (none).
+**Member colors** (avatars): green `#22C55E`, indigo `#6366F1`, amber `#F97316`, teal `#288C9B` (plus the wider activity palette `#A855F7`, `#3B82F6`, `#EC4899`, `#06B6D4`, `#EF4444`).
+
+**Typography**: Inter. 16/600 (brand, modal title) · 14/500 (timeline title) · 13/500 (card title, member names, buttons) · 12/600 (column label) · 11 (dates, count badges) · 10 (tags, sidebar section labels).
+
+**Radii**: columns 10 · cards/buttons/dropdowns 6–8 · modal 12 · badges/avatars 999.
+
+**Spacing**: 4px base. Board gap 10, card gap 6, board padding 16; column header `10px 12px`; toolbar `0 16px`.
+
+**Shadows**: dropdown `0 8px 24px rgba(0,0,0,.5)`; modal `0 24px 64px rgba(0,0,0,.6)`; configure button `0 1px 4px rgba(0,0,0,.3)`.
+
+## Assets
+
+No image assets. Icons are inline SVG (stroke-based, ~1.75px, round caps) — in production use **lucide-react** equivalents: `search`, `chevron-down`/`chevron-right`, `layers`, `download`, `share-2`, `filter`, `arrow-up`, `minus`, `x`, `calendar`, `edit`/`pencil`, `more-horizontal`, `kanban`/`trello`, `grid`/`layout-grid`. Avatars are initials on a colored circle.
+
+## Related Handoffs
+
+- **Export Modal** — the toolbar **Export** button should open it (see `Export Modal Wireframes.html` / its handoff if promoted).
+- **Filter Dropdown / Filters Modal** — the top-nav "All activities" filter pill drives the same filtering applied to the board.
+- **Member Edit Modal** / activity detail — the card **configure** button opens the activity editor.
+- **Share** — currently a stub here; design the real flow separately.
+
+## Files
+
+| File | Description |
+|---|---|
+| `Kanban View.html` | Full interactive prototype — app shell, toolbar, board, drag-and-drop between columns, collapsible columns, sort/color controls, hover configure button, and the share-modal stub. Open in any browser to explore. |
+
+> **Prototype structure note:** the single HTML file contains some superseded scaffolding (`App`, `KanbanCard`, `KanbanColumn`) left from iteration; the **rendered** path is `AppFinal` → `BoardWithDrag`, which is the source of truth for drag behavior and the card/column markup. Implement from `AppFinal`/`BoardWithDrag`; the standalone `KanbanCard`/`KanbanColumn` components are useful as a cleaner reference for the static card/column structure but their drag handlers are stubs.
+````
+
 ## File: docs/design/handoffs/member-modal/Member Edit Modal v2.html
 ````html
 <!doctype html>
@@ -6984,6 +7869,217 @@ Approach for v1:
 - `pnpm --filter web lint` clean; `pnpm --filter web test` passes.
 ````
 
+## File: docs/plans/phase-11.3-kanban-view.md
+````markdown
+# Phase 11.3 — Kanban View (Interactive)
+
+**UI name:** "Kanban" (view-switcher label, alongside Gantt / List / Calendar).
+
+**Status:** 🟢 Reviewed — scope settled. **Re-scoped 2026-06-03** from the original ROADMAP.md "Read-Only" plan. The original framing (static board, status-only columns, drag-to-change-status deferred to v2) is replaced with a **fully interactive board**: drag-to-recolumn, group-by-driven columns, color-by, configurable sorts, configurable card fields, and inline create/edit. This plan supersedes the ROADMAP §11.3 summary.
+
+**Design handoff:** `docs/design/handoffs/kanban-view/` (from Claude Design — `Kanban View.html` + `README.md`). The handoff is **directional**: it is a dark-hardcoded HTML/Babel prototype that models a single-timeline status board with HTML5 drag. We recreate it inside the draba codebase using real primitives (`@dnd-kit`, design tokens, `ActivityPanel`, `Badge`, the existing filter/Find/preference infrastructure) and **correct it against our actual data model** (see [Corrections to the handoff](#corrections-to-the-handoff)).
+
+---
+
+## What we're actually building
+
+A **board view** that answers *"what is in each bucket, and let me move things between buckets"* — the column-and-card complement to Gantt (time), List (table), and Calendar (dates). Activities render as cards arranged into vertical columns. The **column axis is whatever `Group by` is set to** (Status by default). Cards can be **dragged between columns to change that grouping dimension** (drag to a new status column → status changes; drag to a member column → reassignment; etc.), clicked to open the existing edit panel, and created inline per column.
+
+It reuses almost all of its machinery from the three shipped views — the only genuinely new pieces are the **board layout + column model**, the **`@dnd-kit` drag-to-recolumn commit path**, and the **per-group-by drag semantics**.
+
+### The five requested capabilities (from the rethink)
+
+1. **Color by** (activity / member / status) — reused verbatim from Gantt/List/Calendar via `lib/activityColor.ts`. Drives the card's **left accent border** (3px). Independent of Group by.
+2. **Group by defines the columns** — the column axis *is* the Group by selection. Status → one column per timeline status; Member → one column per team member; etc. (full matrix below).
+3. **Sorts** — within-column ordering. See [Sort model](#sort-model).
+4. **Terminology** — draba uses **"Member"** and **"Assigned to"**, never "Assignee." The handoff's `assignee` becomes **member** in code (`memberById`, `assignedMemberIds`) and **"Assigned to"** in user-facing column/group labels. (See [Corrections](#corrections-to-the-handoff).)
+5. **Card field toggles** — a **"Card fields"** multi-select in the toolbar controls what each card shows (dates, status, tags, members, % complete, parent, description). Persists per-timeline-per-user. See [Card field configuration](#card-field-configuration).
+
+---
+
+## Reused infrastructure (do not rebuild)
+
+Everything below already exists and Kanban consumes it as-is. This is most of why the phase is tractable (S–M, not L).
+
+| Concern | Existing asset | Notes |
+|---|---|---|
+| Activity + member fetch | `useTimelineActivities`, `useTeamMembers` (`hooks/useTeamActivities.ts`) | Same calls CalendarView makes. |
+| Status fetch | `useTimelineStatuses` (`hooks/useStatusTemplates.ts`) | Live per-timeline status rows (`id`, `name`, `color`, `icon`, `isClosed`, `position`). Already passed into views as `timelineStatuses`. |
+| Status / reassign / reparent mutation | `useUpdateActivity(timelineId)` | Already supports `{ statusId, assignedMemberIds, parentActivityId }` patches with optimistic cache update. **This is the entire drag-commit backend — no new endpoint.** |
+| Color resolution | `resolveActivityColor()` (`lib/activityColor.ts`) | activity / member / status; identical hues to other views. |
+| Member-combination grouping | `lib/memberGroups.ts` | `memberComboKey`, `memberComboLabel`, `comboSortComparator` — reused for "group by Assigned to (combination)". |
+| Filter engine | `applyActiveFilter` (`lib/presetFilters.ts`) + `FilterContext` | Board respects the active filter exactly like Calendar. |
+| Find | `matchEvents` (`lib/findMatcher.ts`) + `FindContext` | Dim non-matches, highlight matches, register ordered match IDs. |
+| Preferences | `usePreferenceMap` / `useUpsertPreference` (per-timeline) | Persists collapsed columns, card-field set, group/sort/color. |
+| Edit / create panels | `ActivityPanel.tsx` | Card click → detail/edit; column "+ Add" → create prefilled. |
+| Identity display | `Badge` + `resolveColorHex` (`components/identity/`) | Member avatars, status dots, tag chips. |
+| Drag library | `@dnd-kit/core` + `@dnd-kit/sortable` + `@dnd-kit/utilities` | Already a dependency (used by List). Use this, **not** HTML5 DnD from the prototype. |
+| Toolbar control idiom | `GanttToolbar` / `CalendarToolbar` | Copy the `select`/`btn`/`divider`/`label` className constants and layout. |
+| WebSocket sync | `useWebSocket` wiring in DashboardPage | Cards update live; no Kanban-specific work beyond consuming the shared cache. |
+
+---
+
+## Corrections to the handoff
+
+The prototype encodes assumptions that are wrong for draba. Implement the **draba** column, not the prototype's:
+
+| Handoff says | draba reality | Resolution |
+|---|---|---|
+| `assignee` / "Assignee" | We use **Member** / "Assigned to"; an activity has `assignedMemberIds[]` (0..n) | Rename everywhere: code → `member`, labels → "Assigned to". Multi-member is the norm, not the exception. |
+| `priority: high\|medium\|low` field + footer arrow indicators + "Group by: Priority" + "Sort by: Priority" | **There is no priority field** on `Activity` | **Drop priority entirely.** Replace its slots with real fields: Group by gains Member / Parent; the footer indicator slot is reused for **% complete** (optional card field). |
+| Hardcoded status column set (`not-started`, `in-progress`, …) with fixed hexes | Statuses are **per-timeline live rows** from a template; null status is valid | Columns come from `useTimelineStatuses` in `position` order, colored by each status's identity color. Add a leading **"No status"** column for `statusId == null`. |
+| Columns = statuses (only Status wired) | Columns = **Group by** (Status / Assigned to / Parent / …) | Generalize: a `buildColumns(groupBy, …)` function produces `{ id, label, color, accept }[]`. |
+| Color by: Activity / Assignee | Color by: **activity / member / status** | Reuse the shared `ColorBy` type and `resolveActivityColor`. |
+| HTML5 `draggable` + raw drag state | `@dnd-kit` is in the repo | Use `DndContext` + `useDraggable`/`useDroppable` (or `SortableContext`) for reliable reordering + keyboard a11y. |
+| Dark-only hardcoded hexes (`#161b22`, …) | Token-driven, light+dark | Drive everything from `--card`, `--border`, `--muted-foreground`, etc. Map the token table in the handoff to our CSS vars. |
+| Share modal stub | Share lands in Phase 16 | Keep the toolbar Share/Export **buttons as stubs** (matching Gantt/Calendar), wired to the same no-op handlers. |
+
+---
+
+## Column model (Group by → columns)
+
+`Group by` is the column axis. Each mode produces an ordered list of columns and defines what **dropping a card into a column** mutates.
+
+| Group by | Columns | Order | Drop mutates | Notes |
+|---|---|---|---|---|
+| **Status** (default) | one per timeline status + leading **"No status"** | status `position` | `statusId` → target status (or `null` for the No-status column) | The canonical kanban. Column header uses status color + name; count badge. |
+| **Assigned to (member)** | one per team member + leading **"Unassigned"** | team-member order | sets `assignedMemberIds` to `[targetMemberId]` (see [Reassign semantics](#reassign-semantics)) | Header uses member `Badge` + name. |
+| **Assigned to (combination)** | one per distinct member-combination present + **"Unassigned"** | `comboSortComparator` (from `memberGroups.ts`) | **drag disabled** (a combination is not a single settable value) | Mirrors the List/Gantt "combination" grouping. Read-only columns; cards still open/edit. |
+| **Parent activity** | one per parent that has children + **"No parent"** | parent title A–Z | `parentActivityId` → target parent (or `null`) | Useful for milestone/sub-task boards. |
+| **None** | single column ("All activities") | — | drag = reorder only | Fallback; mostly a degenerate case. Sort still applies. |
+
+- **Closed-status columns** (`isClosed`) render with the same muted treatment used elsewhere; they are normal drop targets.
+- A column whose grouping value is gone (e.g. a member removed) is dropped from the board; its cards reflow to Unassigned/No-status.
+- Columns can be **collapsed** to a 40px vertical rail (per-column, persisted). Matches the handoff.
+
+### Reassign semantics (Group by: Member)
+
+Activities are multi-member; a column is a single member. Decision: **dropping into member column X sets `assignedMemberIds = [X]`** (replace, not append) — the board treats member columns as "primary owner" buckets, which keeps drag deterministic and reversible. A card assigned to multiple members appears **only in its primary (first) member's column**; the extra members still show as avatars on the card. This is documented in a one-line helper tooltip on the Group-by control when Member is selected. (Append/multi-column membership is explicitly out of scope — revisit if users ask.)
+
+---
+
+## Sort model
+
+Sort orders cards **within** each column. Options (toolbar `Sort by`, persisted):
+
+| Sort | Comparator | Rationale |
+|---|---|---|
+| **Start date** (default) | `startAt` asc, nulls last | Matches Gantt/List/Calendar default; "what's coming up in this bucket." |
+| **End date** | `endAt` asc, nulls last | "What's due first in this bucket" — the most useful kanban sort. |
+| **Title** | `title` A–Z, locale-aware | Stable, predictable lookup. |
+| **% complete** | `percentComplete` desc, nulls last | Surfaces nearly-done vs. not-started within a column. |
+| **Recently updated** | `updatedAt` desc | "What changed lately" — pairs well with real-time sync. |
+| **Manual** | persisted per-column order | **See decision below.** |
+
+**Manual ordering decision:** `Activity` has **no `kanbanOrder`/`position` field today**, so true manual within-column ordering would require a schema migration + API field + per-card persistence on every drop. For this phase, **Manual is deferred** — within-column order always follows the chosen Sort. Cross-column drag (the headline interaction) needs no order field because it mutates the grouping value, and the card reflows by Sort. If users want hand-curated card order, it becomes a fast follow (`11.3.1`): add `kanban_order REAL` to `activities`, persist on `dnd-kit` reorder, expose "Manual" sort. Flagged in [Open decisions](#open-decisions).
+
+---
+
+## Card field configuration
+
+A **"Card fields"** dropdown (multi-select checkboxes) in the toolbar controls card content. Default-on marked ✓. Persisted per-timeline-per-user as a JSON string preference (`kanban_card_fields`).
+
+| Field | Default | Renders |
+|---|---|---|
+| Title | always on (not toggleable) | 13px/500, line-clamp 2 |
+| **Date range** | ✓ | calendar icon + `start – end` (respects `date_format` pref; honors timezone-safe formatting from 11.1.1) |
+| **Status** | ✓ (hidden automatically when Group by = Status, since the column already encodes it) | small status dot + name chip |
+| **Tags** | ✓ | tag chips (name + color), max ~3 then `+N` |
+| **Assigned to** | ✓ (hidden automatically when Group by = Member) | overlapping member `Badge` avatars (−6px), 2px card-bg ring |
+| **% complete** | ☐ | thin progress bar or `NN%` in the footer (reuses the slot the prototype gave priority) |
+| **Parent** | ☐ | parent-activity badge/pill (hidden when Group by = Parent) |
+| **Description** | ☐ | 1-line muted snippet under the title |
+
+- **Context-aware suppression:** the field that *is* the current Group by axis is auto-hidden (no point showing Status on a status-grouped card). Implemented as a derived "effective field set," the stored preference is unchanged.
+- The **color accent border** is always present (driven by Color by) — it is not a toggleable field.
+
+---
+
+## Interactions
+
+- **Drag to recolumn** (`@dnd-kit`): pick up a card, drop on a column → commit the grouping mutation via `useUpdateActivity` with optimistic cache update (same pattern as `CalendarView.handleBarDragCommit`). Drop target highlights (`{colColor}` tint + accent border) and shows a placeholder gap. Keyboard-draggable (dnd-kit a11y). Disabled for combination grouping and `None`.
+- **Card click → edit:** opens `ActivityPanel` (detail/edit), exactly as Calendar/Gantt bar-click. A hover **configure** affordance (pencil, top-right) is optional polish; primary path is full-card click. The configure click must `stopPropagation` so it doesn't initiate a drag.
+- **Inline create:** each column header (or footer) has a **"+ Add"** affordance → opens `ActivityPanel` create mode **prefilled with that column's grouping value** (status = column status, or member = column member, etc.). Mirrors Calendar's empty-cell create.
+- **Collapse column:** header chevron / clicking the collapsed rail toggles; persisted per-column.
+- **Filter parity:** board renders `applyActiveFilter(...)` output; column counts reflect filtered set.
+- **Find parity:** non-matching cards dim to ~0.3; matches get the amber outline; active match gets the stronger outline; register ordered match IDs (column order, then in-column Sort order) so prev/next walks the board. If the active match is in a collapsed column, auto-expand it (mirrors Gantt's collapsed-group expand).
+- **Real-time:** WebSocket deltas update the shared TanStack cache; cards appear/move/vanish without reload. A card whose status changes in another tab animates to its new column on the next render.
+- **Archived hiding:** archived activities excluded by default (filter engine handles it).
+- **Empty column:** muted "No activities" placeholder (token-driven), still a valid drop target.
+- **Horizontal scroll:** board scrolls columns left→right as a group; each column scrolls its cards vertically and independently when card count exceeds height.
+
+---
+
+## Component layout
+
+Mirrors the `components/calendar/` split (toolbar / grid / view-container):
+
+```
+components/kanban/
+  KanbanToolbar.tsx   # Group by · Sort by · Color by · Card fields · (Export/Share stubs)
+  KanbanBoard.tsx     # DndContext + columns row; renders KanbanColumn[]; owns drag overlay
+  KanbanColumn.tsx    # droppable column: header (dot/badge + label + count + collapse), card list, "+ Add"
+  KanbanCard.tsx      # draggable card: accent border, title, configurable fields, member avatars
+  KanbanView.tsx      # data container: fetch + filter + Find + colorBy + buildColumns + drag commit
+  kanbanColumns.ts    # pure: buildColumns(groupBy, activities, members, statuses) → Column[]; unit-tested
+  KanbanView.test.ts  # buildColumns + sort comparators (pure-fn tests, mirrors calendarLanes.test.ts)
+```
+
+`kanbanColumns.ts` is the pure, testable core (like `calendarLanes.ts`): given `groupBy` + the visible activities + members + statuses, produce ordered `{ id, label, color, icon?, accept, items }[]`. All grouping/labeling/ordering logic lives here so the React components stay thin.
+
+### Wiring into DashboardPage
+
+`ViewMode` already includes `'kanban'`. Add:
+- import `KanbanView`; add a `view === 'kanban'` branch in the content region (alongside the existing Gantt/List/Calendar branches), passing the same props CalendarView gets (`teamId`, `timelineId`, `colorBy`, `timelineStatuses={activeTimelineStatuses}`, `savedFilters`, `tags`, select/create callbacks, `onMembersLoaded`).
+- Kanban-specific toolbar state (`groupBy`, `sortBy`, `colorBy`, `cardFields`, `collapsedColumns`) lives in DashboardPage (like calendar state), persisted via per-timeline preferences (`kanban_group_by`, `kanban_sort_by`, `kanban_color_by`, `kanban_card_fields`, `kanban_collapsed`). Render `KanbanToolbar` in the sub-toolbar slot when `view === 'kanban'`.
+- Add the **Kanban** tab to the view switcher in `TopBar` (icon: lucide `kanban` / `trello`).
+
+---
+
+## Build order
+
+1. **Switcher + shell:** add Kanban tab to `TopBar`; add `KanbanView` branch + toolbar state in DashboardPage; render an empty `KanbanBoard` placeholder. Verify the tab switches and persists.
+2. **`kanbanColumns.ts` + tests:** `buildColumns` for Status/Member/Parent/None/combination; sort comparators; "No status"/"Unassigned"/"No parent" sentinels. Unit-test thoroughly before UI.
+3. **Static board:** `KanbanColumn` + `KanbanCard`, color-by accent, count badges, empty state, collapse rail. No drag yet. Wire colorBy. Verify against a sample timeline.
+4. **Card fields:** `Card fields` multi-select in toolbar; render fields conditionally; context-aware suppression; persist preference.
+5. **Group by / Sort by / Color by controls:** full toolbar; columns rebuild on group-by change; in-column sort.
+6. **Drag-to-recolumn:** `DndContext` + droppable columns + draggable cards + drag overlay; commit via `useUpdateActivity` (optimistic); per-group-by drop semantics; disable for combination/None.
+7. **Create / edit wiring:** card click → `ActivityPanel`; "+ Add" → create prefilled with column value.
+8. **Filter + Find parity:** `applyActiveFilter`, `matchEvents`, register ordered matches, collapsed-column auto-expand, dim/highlight.
+9. **Polish + a11y:** keyboard drag, focus rings, transitions (~100–150ms), real-time sanity check across two tabs.
+10. **Docs:** `docs/log.md` Phase 11.3 entry; update `session-state.md`.
+
+---
+
+## Exit criteria — safe to pause when
+
+- View switcher toggles Gantt ↔ List ↔ Calendar ↔ Kanban, persisting per timeline.
+- **Group by = Status** shows one column per timeline status (in `position` order) plus a "No status" column; renaming/recoloring a status in Settings updates the column header live (no reload).
+- Changing **Group by** to Member / Parent rebuilds the columns; combination + None render without errors.
+- **Color by** recolors the card accent border and matches Gantt/List/Calendar for the same activity.
+- **Sort by** reorders cards within every column; default is Start date.
+- **Card fields** toggles show/hide date range, status, tags, members, % complete, parent, description; selection persists across reload; the Group-by axis field is auto-suppressed.
+- **Dragging a card to another column commits the mutation** (status/reassign/reparent) via PATCH with optimistic update and no reload; dropping back reverts cleanly; combination/None columns are non-droppable without errors.
+- **Card click** opens the edit panel; **"+ Add"** opens create prefilled with the column's grouping value.
+- **Filter** scopes the board and column counts; **Find** dims non-matches, highlights matches across columns, walks prev/next, and auto-expands a collapsed column containing the active match.
+- A card mutated in a second tab moves to its new column within ~500ms (real-time).
+- Columns collapse/expand and survive reload; empty columns show a muted placeholder and remain valid drop targets.
+- `kanbanColumns` unit tests pass; `pnpm --filter web lint` + `pnpm --filter web test` pass.
+
+---
+
+## Decisions (resolved)
+
+1. ✅ **Member-column reassign = replace** — dropping a card into member column X sets `assignedMemberIds = [X]`. A multi-member card lives only in its primary member's column; extra members still render as avatars on the card. Append / multi-column membership is out of scope. _(Confirmed 2026-06-03.)_
+2. ✅ **Combination columns are non-droppable** — "Assigned to (combination)" and "None" render columns that are read-only drop-wise (a combination is not a single settable value); cards still open and edit normally. _(Confirmed 2026-06-03.)_
+
+## Open decisions (deferred, no action needed for v1)
+
+3. **Manual within-column order** — deferred (no `Activity` order field). If wanted later: `11.3.1` adds `kanban_order REAL` + persist-on-drop + a "Manual" sort. Cards order by the chosen Sort in v1.
+4. **Group by: Tag** — not included (tags are multi-valued, so a card would appear in N columns; dragging is ambiguous). Could be added as a **read-only** (non-droppable) grouping later if useful.
+5. **Configure pencil vs. full-card click** — v1 uses full-card click to open the edit panel; the hover pencil is optional polish, not required.
+````
+
 ## File: docs/ARCHITECTURE.md
 ````markdown
 # Architecture
@@ -7588,6 +8684,210 @@ ALTER TABLE activity_assignments RENAME TO event_assignments;
 ```
 
 **Take a DB backup before applying migration 005.** This is the one irreversible step if you don't have a backup.
+````
+
+## File: docs/REQUIREMENTS.md
+````markdown
+# Requirements
+
+## Product Summary
+draba is a lightweight team coordination and planning tool. It answers one question — **"Who is working on what, and when?"** — without the overhead of a full project management suite. The primary interface is a horizontal timeline grouped by person, where work appears as blocks across time. Teams adopt it in minutes, not weeks.
+
+**Target users:** Small teams of 5–20 people. Marketing, creative, and product teams who need visibility across people and time without tickets, sprints, or dependencies.
+
+**Positioning:** Not a calendar replacement. Not a project management tool. A shared team timeline.
+
+---
+
+## Functional Requirements
+
+### Users and Auth
+- [ ] Admins can invite users to a team via email invite link
+- [ ] Invited users register by following the invite link and setting up an account (email + password)
+- [ ] Users have: display name, email, optional avatar
+- [ ] Four levels of participation:
+  - **Team Admins:** Manage the team overall. Can invite new people to the team and can create multiple teams.
+  - **Timeline Admins:** Scoped to specific timelines. Can configure those timelines and add/remove people (from the team) to their timelines.
+  - **Users:** Have a login. Can participate in timelines assigned to them.
+  - **Participants:** Do not have a login. Managed as team members (e.g. contractors) so they can be scheduled on timelines and assigned colors without needing account access.
+- [ ] Users can belong to multiple teams simultaneously
+- [ ] Password reset via email
+
+### API Access Tokens
+Programmatic access (CLI, webhooks, MCP) uses scoped API tokens rather than user passwords.
+
+- [ ] Admins and members can generate named API tokens for their account
+- [ ] Tokens have a configurable permission scope: read-only | add | edit/delete own | edit/delete all
+- [ ] Tokens can be revoked at any time
+- [ ] Token values are shown once at creation and never stored in plaintext (hashed at rest)
+- [ ] CLI, webhook consumers, and MCP integrations authenticate using these tokens
+
+### Teams
+- [ ] Admins can create teams with a name, description, notes, and identity (icon + color)
+- [ ] Admins can edit team name, description, notes, and identity
+- [ ] Admins can invite users to a team by email (one-time invite)
+- [ ] Admins can generate a reusable invite link for a team; anyone with the link can register and join
+- [ ] Admins can revoke or regenerate the reusable invite link
+- [ ] Admins can add existing registered users to a team
+- [ ] Admins can remove members from a team (cannot remove the last admin)
+- [ ] Admins can promote a member to team admin or demote to member
+- [ ] Admins can create participants (login-less team members) who can be assigned to activities but don't have draba accounts
+- [ ] Teams can be archived (hidden from active views, data preserved, restorable)
+- [ ] Teams have a name, description, notes, identity, and a list of members
+
+### Members
+- [ ] Each team member has a display name, identity (icon + color), and a role (admin, member, or participant)
+- [ ] Admins can edit any member's display name, identity, and role
+- [ ] Members can edit their own display name and identity
+- [ ] Members can be inactivated (access disabled, data preserved, reversible) — uses the same archive pattern as other entities but displayed as "Inactivate" in the UI
+- [ ] Inactivated members cannot log in; their activity assignments are preserved
+- [ ] Super admins can promote any non-participant member to super admin status
+- [ ] Super admins can inactivate or delete user accounts (delete only when no active activities and single team)
+- [ ] Each member has computed stats: timeline counts (active/archived), activity counts (past due, running, upcoming, unscheduled, archived) — date-relative, not status-relative
+
+### Activities
+Activities are the core data object — a block of time assigned to one or more people.
+
+- [ ] Activities have: title, start date/time, end date/time, description/notes, status, percent complete, tags, icon, color, assigned people (one or more)
+- [ ] Activities can have a parent activity (another event within the same team), enabling simple nesting (e.g., "Launch Week" contains "Design Review")
+- [ ] Activities store all standard CalDAV VEVENT fields natively (UID, DTSTART, DTEND, SUMMARY, DESCRIPTION, LOCATION, URL, RRULE, etc.) so no information is lost in sync
+- [ ] Activities support recurrence rules (RRULE) from CalDAV/Google
+- [ ] Activities are scoped to a team
+- [ ] Activities can be archived (hidden from active views but not deleted; recoverable)
+
+### Timelines
+Timelines are named viewing windows — a name and a date range — scoped to a team. They are not data containers; they are views over the team's activities.
+
+- [ ] Teams can create multiple timelines, including overlapping ones
+- [ ] Each timeline has: name, start date, end date
+- [ ] Team membership controls who can view a timeline by default; team admins implicitly access all timelines, members require an explicit access grant (see RBAC in Phase 8.0)
+- [ ] Timelines can be archived (removed from active list but preserved; recoverable)
+- [ ] External / public visibility is handled via the **Shares** model (below) — a timeline is not inherently "public" or "restricted"; it becomes externally visible only via a share link the team explicitly creates
+
+### Timeline Views
+The primary view is a Gantt chart. Additional views display the same underlying activities in different formats.
+
+- [ ] **Timeline / Gantt view** (primary) — horizontal Gantt chart; one row per activity, bars span their date range; see `docs/design/UX_PATTERNS.md`
+  - A **timeline sub-toolbar** sits between the top bar and the grid. It provides:
+    - **Zoom** — variable column width (day granularity, zoom in/out)
+    - **Group by** — controls how activity rows are organized:
+      - _None_ — flat list, sorted by the active sort key
+      - _Member_ — one labeled section per assigned team member; events with multiple assignees appear under their primary assignee
+      - _Parent activity_ — root activities shown first; child events (those with `parentActivityId` set) indented beneath their parent
+    - **Sort by** — Start date (default), End date, Title A–Z
+    - **Export** — triggers CSV/Excel export of the visible date range (wires in Phase 13)
+- [ ] **Calendar view** — weekly, daily, and monthly grid layouts (standard calendar format)
+- [ ] **List view** (also referred to as the "spreadsheet" view) — dense, sortable, inline-editable table of activities; columns are show/hide-able and resizable; supports bulk selection for archive/delete/status-change. The "power user" surface for scanning and editing many activities at once.
+- [ ] **Kanban view** — interactive board; the **column axis is the active Group by** (Status by default; also Assigned-to / Parent / None). Cards = activities, with a left accent border driven by Color by (activity / member / status); multiple members shown as stacked avatars. **Dragging a card between columns mutates that grouping value** (status change / reassign / reparent). Configurable card fields (dates / status / tags / assigned-to / % complete / parent / description), within-column sort, inline create per column, and click-to-edit. See [docs/plans/phase-11.3-kanban-view.md](plans/phase-11.3-kanban-view.md).
+- [ ] View switcher in the timeline header to toggle between available views
+- [ ] Each view persists its own toolbar state per timeline (group / sort / zoom / column visibility / filter preset) via user preferences
+
+### Team Configuration
+Admins can customize team-level settings that apply to all members and views.
+
+**Statuses**
+- [ ] Each team has a configurable list of statuses (name + color)
+- [ ] Default statuses created when a team is created: `Planned`, `In Progress`, `Done`
+- [ ] Admins can add, rename, reorder, and delete statuses
+- [ ] Statuses have a display order that controls column order in Kanban view and sort order in dropdowns
+- [ ] At least one status must always exist (cannot delete the last one)
+- [ ] Deleting a status requires choosing a replacement status for any events currently using it
+- [ ] Status color is used as the column header color in Kanban view
+
+**Member Colors**
+- [ ] Each team member has a display color, used to color-code their events in Kanban view and any other person-first views
+- [ ] Admin can set member colors; members can also set their own
+- [ ] Default color is auto-assigned from a preset palette on invite acceptance
+
+### Real-Time Collaboration
+- [ ] Multiple users can view and edit the same timeline simultaneously
+- [ ] Changes (event create, update, delete) appear in real-time for all connected users
+- [ ] No last-write-wins data loss — changes are applied and broadcast immediately
+
+### Calendar Sync
+- [ ] Users can connect a personal Google Calendar account (OAuth 2.0) for two-way sync of their assigned events
+- [ ] Users can connect a personal CalDAV account (iOS/macOS Calendar, Fastmail, Thunderbird, etc.) for two-way sync
+- [ ] draba implements a built-in CalDAV endpoint — Apple Calendar users point their app directly at the draba server
+- [ ] Outbound sync: when an event is created/updated/deleted in draba, changes push to all connected personal calendars for assigned users
+- [ ] Inbound sync: changes made in Google Calendar trigger a webhook that updates draba
+- [ ] **Team read-only feed:** each timeline exposes a subscribable iCal/CalDAV URL that any calendar app can subscribe to for a read-only view of all team events in that timeline
+- [ ] Public iCal/Google Calendar feeds include only basic event info (title, date range, assigned people) — notes and internal fields are stripped
+- [ ] Microsoft/Outlook sync is explicitly out of scope for v1
+
+### External Connectors (e.g. Asana, Aha!)
+- [ ] Draba supports a one-way, read-only inbound feed from external systems of record.
+- [ ] Teams can generate unique inbound Webhook URLs to paste into Asana, Jira, etc.
+- [ ] External events appear alongside hand-crafted Draba events in the timeline and Gantt views.
+- [ ] Events generated via connectors are marked as "read-only" in Draba — users cannot change dates or properties via the Draba UI (they must change them in Asana).
+- [ ] The event card links back to the original source URL.
+
+### Sharing and Public Access
+Sharing in draba is a first-class entity, not a property of a timeline. A **Share** is a frozen pairing of `{ timeline + view type + view configuration + optional password + optional expiry }`. One timeline can have many shares, each tuned for a different audience.
+
+- [ ] A Share captures: the source timeline, the view type (Gantt / List / Calendar / Kanban), and a snapshot of the view's configuration at creation time (filter, sort, group, zoom, column visibility, etc.)
+- [ ] The view-config snapshot is **frozen** at creation — later edits to the live view do not retroactively change existing shares
+- [ ] A Share can optionally require a password to view (stored hashed; not retrievable)
+- [ ] A Share can optionally expire on a given date; expired shares return a clear "this link has expired" page
+- [ ] A Share can be revoked at any time by the creator or a team admin; revoked links are immediately unusable
+- [ ] A single timeline can host many independent shares simultaneously (e.g., a public Gantt for stakeholders + a password-protected List for contractors)
+- [ ] Share viewers see the chosen view in read-only mode — no drag, no inline edit, no create
+- [ ] Share URLs are unguessable (URL-safe random tokens); password-protected shares additionally rate-limit unlock attempts
+- [ ] Team admins can list, edit, and revoke any share for their team; members can only manage shares they created
+- [ ] Each timeline also exposes a public iCal feed URL (separate from the Share model) containing sanitized event data for calendar app subscription — see Calendar Sync
+
+### Data Portability
+Two flavors: **tabular** (data round-trips — CSV / xlsx in and out) and **visual** (one-way view exports for sharing offline — PDF / PNG / Markdown).
+
+**Tabular (round-trip):**
+- [ ] Events can be exported to CSV and Excel (.xlsx) from any timeline view
+- [ ] Events can be imported from a CSV or Excel file
+- [ ] A downloadable template file is provided showing the expected import format
+- [ ] Import shows a preview and validation errors before committing
+
+**Visual (view-shaped, one-way out):**
+- [ ] Gantt → PDF (landscape, paginated by date range) and PNG (single page)
+- [ ] Kanban → PDF (columns side-by-side, paginated when too wide for one page) and PNG
+- [ ] List → CSV, xlsx, Markdown table, and PDF
+- [ ] Calendar → PDF, one page per month / week depending on active layout
+- [ ] All visual exports include a header strip: team name, timeline name, generated-at timestamp, applied filter description
+- [ ] All visual exports respect the active filter / sort / group at time of export — the deliverable is "what's on the screen right now"
+
+---
+
+## Non-Functional Requirements
+- [ ] API response time < 200ms for standard reads under normal load
+- [ ] Real-time updates delivered within 500ms of a change
+- [ ] Self-hosted: runs as a single Docker container with no external service dependencies
+- [ ] Direct binary install is also supported (for users who don't use Docker)
+- [ ] Database: SQLite by default; MySQL/MariaDB and Postgres are supported configuration options
+- [ ] Same Docker artifact deploys to self-hosted and any future cloud offering
+- [ ] All API endpoints are authenticated (except public timeline share links and public iCal feeds)
+- [ ] All secrets, calendar credentials, and API tokens stored encrypted/hashed at rest
+
+---
+
+## Constraints
+- Must run as a single Docker container with zero required external services (SQLite path)
+- No paid third-party services required for self-hosting
+- Calendar sync credentials and API tokens must never be stored in plaintext
+- No server-side rendering required
+
+---
+
+## Out of Scope (v1)
+- Microsoft / Outlook / Exchange calendar sync
+- Kanban manual within-column card ordering (cards order by the chosen Sort in v1; hand-curated order needs an activity order field — possible Phase 11.3.1)
+- Gantt dependency arrows / critical-path visualization (parent–child grouping is in scope; visual dependency arrows are not)
+- Time tracking or billable hours
+- Task dependencies or critical path
+- Workload balancing or capacity planning
+- Billing or invoicing
+- Automation or rule-based triggers
+- Mobile native apps (web/PWA first)
+- Multi-tenant cloud hosting (self-hosted per-customer to start)
+- SSO / SAML / OAuth login (email + password only for v1)
+- MCP server integration (parking lot — token auth system is designed to support it when ready)
+- CLI binary (parking lot — token auth system is designed to support it when ready)
 ````
 
 ## File: docs/REVIEW.md
@@ -29917,47 +31217,6 @@ packages/api/ui/static/*
 GEMINI.md
 ````
 
-## File: .golangci.yml
-````yaml
-run:
-  timeout: 5m
-
-linters:
-  enable:
-    - errcheck
-    - govet
-    - staticcheck
-    - ineffassign
-    - gofmt
-    - goimports
-    - gocritic
-    - revive
-    - misspell
-    - nolintlint
-
-linters-settings:
-  goimports:
-    local-prefixes: github.com/I0-1O/draba
-  gocritic:
-    enabled-tags:
-      - diagnostic
-      - style
-      - performance
-  revive:
-    rules:
-      - name: exported
-        severity: warning
-  nolintlint:
-    require-explanation: true
-    require-specific: true
-
-issues:
-  exclude-rules:
-    - path: _test\.go
-      linters:
-        - errcheck
-````
-
 ## File: .repomixignore
 ````
 # Ignore dependency locks
@@ -32037,891 +33296,6 @@ Object.assign(window, {
 });
 ````
 
-## File: docs/design/handoffs/kanban-view/Kanban View.html
-````html
-<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8" />
-<title>Kanban View — Draba</title>
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<link rel="preconnect" href="https://fonts.googleapis.com" />
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
-<style>
-  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-  html, body { height: 100%; background: #0d1117; font-family: 'Inter', system-ui, sans-serif; color: #e6edf3; overflow: hidden; }
-  button { font-family: inherit; cursor: pointer; }
-  ::-webkit-scrollbar { width: 5px; height: 5px; }
-  ::-webkit-scrollbar-track { background: transparent; }
-  ::-webkit-scrollbar-thumb { background: #30363d; border-radius: 99px; }
-  .card-dragging { opacity: 0.35; }
-</style>
-<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
-<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
-<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
-</head>
-<body>
-<div id="root"></div>
-<script type="text/babel">
-const { useState, useMemo, useRef, useCallback } = React;
-
-// ── Tokens ────────────────────────────────────────────────────────────────────
-const T = {
-  bg0:'#0d1117', bg1:'#161b22', bg2:'#21262d', bg3:'#2d333b', bg4:'#373e47',
-  border:'#30363d', border2:'#21262d',
-  text1:'#e6edf3', text2:'#8b949e', text3:'#484f58',
-  accent:'#288C9B',
-};
-
-// ── Mock data ─────────────────────────────────────────────────────────────────
-const MEMBERS = [
-  { id:'lk', initials:'LK', name:'Lindsay K.',     color:'#22C55E' },
-  { id:'jd', initials:'JD', name:'John Doe',       color:'#6366F1' },
-  { id:'sm', initials:'SM', name:'Sarah M.',       color:'#F97316' },
-  { id:'tb', initials:'TB', name:'Test Bootstrap', color:'#288C9B' },
-];
-
-const COLUMNS = [
-  { id:'not-started', label:'Not Started', color:'#64748B' },
-  { id:'in-progress', label:'In Progress', color:'#288C9B' },
-  { id:'at-risk',     label:'At Risk',     color:'#F97316' },
-  { id:'on-hold',     label:'On Hold',     color:'#8B5CF6' },
-  { id:'completed',   label:'Completed',   color:'#22C55E' },
-  { id:'canceled',    label:'Canceled',    color:'#484f58' },
-];
-
-const CARDS = [
-  { id:'c1',  col:'not-started', title:'Brand audit report',          assignees:['lk'],       start:'Jun 1',  end:'Jun 8',  color:'#288C9B', tags:['Research'],             priority:'high',   sort:10 },
-  { id:'c2',  col:'not-started', title:'Competitive analysis',        assignees:['jd','sm'],  start:'Jun 3',  end:'Jun 10', color:'#6366F1', tags:['Research','Strategy'],  priority:'medium', sort:11 },
-  { id:'c3',  col:'not-started', title:'Logo brief preparation',      assignees:['lk'],       start:'Jun 5',  end:'Jun 12', color:'#A855F7', tags:[],                       priority:'low',    sort:12 },
-  { id:'c4',  col:'in-progress', title:'Initial logo concepts',       assignees:['sm'],       start:'May 20', end:'Jun 3',  color:'#F97316', tags:['Design'],               priority:'high',   sort:4  },
-  { id:'c5',  col:'in-progress', title:'Color palette exploration',   assignees:['sm','lk'],  start:'May 22', end:'Jun 5',  color:'#22C55E', tags:['Design'],               priority:'high',   sort:5  },
-  { id:'c6',  col:'in-progress', title:'Typography selection',        assignees:['jd'],       start:'May 25', end:'Jun 8',  color:'#3B82F6', tags:['Design'],               priority:'medium', sort:6  },
-  { id:'c7',  col:'in-progress', title:'Stakeholder presentation',    assignees:['lk','jd'],  start:'May 28', end:'Jun 15', color:'#6366F1', tags:['Presentation'],         priority:'medium', sort:7  },
-  { id:'c8',  col:'at-risk',     title:'Legal trademark review',      assignees:['tb'],       start:'May 15', end:'May 30', color:'#EF4444', tags:['Legal'],                priority:'high',   sort:3  },
-  { id:'c9',  col:'at-risk',     title:'Agency contract finalization',assignees:['lk','tb'],  start:'May 18', end:'Jun 1',  color:'#F97316', tags:['Admin'],                priority:'high',   sort:3  },
-  { id:'c10', col:'on-hold',     title:'Print collateral templates',  assignees:['sm'],       start:'Jun 10', end:'Jun 25', color:'#8B5CF6', tags:['Print'],                priority:'low',    sort:13 },
-  { id:'c11', col:'on-hold',     title:'Social media kit',            assignees:['jd','sm'],  start:'Jun 12', end:'Jun 28', color:'#EC4899', tags:['Social'],               priority:'medium', sort:14 },
-  { id:'c12', col:'completed',   title:'Project kickoff meeting',     assignees:['lk','jd','sm'],start:'May 1',end:'May 3', color:'#22C55E', tags:[],                       priority:'high',   sort:1  },
-  { id:'c13', col:'completed',   title:'Project scope definition',    assignees:['lk'],       start:'May 3',  end:'May 8',  color:'#288C9B', tags:['Planning'],             priority:'medium', sort:2  },
-  { id:'c14', col:'completed',   title:'Timeline & milestone setup',  assignees:['jd'],       start:'May 8',  end:'May 12', color:'#06B6D4', tags:['Planning'],             priority:'medium', sort:2  },
-  { id:'c15', col:'canceled',    title:'External consultant review',  assignees:['tb'],       start:'May 20', end:'May 31', color:'#64748B', tags:[],                       priority:'low',    sort:9  },
-];
-
-// ── Minimal icon set ──────────────────────────────────────────────────────────
-const IC = {
-  'search':       [['circle',{cx:11,cy:11,r:8}],['line',{x1:21,y1:21,x2:16.65,y2:16.65}]],
-  'chevron-down': [['polyline',{points:'6 9 12 15 18 9'}]],
-  'chevron-right':[['polyline',{points:'9 18 15 12 9 6'}]],
-  'layers':       [['polygon',{points:'12 2 2 7 12 12 22 7 12 2'}],['polyline',{points:'2 17 12 22 22 17'}],['polyline',{points:'2 12 12 17 22 12'}]],
-  'download':     [['path',{d:'M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4'}],['polyline',{points:'7 10 12 15 17 10'}],['line',{x1:12,y1:15,x2:12,y2:3}]],
-  'share':        [['circle',{cx:18,cy:5,r:3}],['circle',{cx:6,cy:12,r:3}],['circle',{cx:18,cy:19,r:3}],['line',{x1:8.59,y1:13.51,x2:15.42,y2:17.49}],['line',{x1:15.41,y1:6.51,x2:8.59,y2:10.49}]],
-  'filter':       [['polygon',{points:'22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3'}]],
-  'arrow-up':     [['line',{x1:12,y1:19,x2:12,y2:5}],['polyline',{points:'5 12 12 5 19 12'}]],
-  'arrow-down':   [['line',{x1:12,y1:5,x2:12,y2:19}],['polyline',{points:'19 12 12 19 5 12'}]],
-  'minus':        [['line',{x1:5,y1:12,x2:19,y2:12}]],
-  'x':            [['line',{x1:18,y1:6,x2:6,y2:18}],['line',{x1:6,y1:6,x2:18,y2:18}]],
-  'calendar':     [['rect',{x:3,y:4,width:18,height:18,rx:2,ry:2}],['line',{x1:16,y1:2,x2:16,y2:6}],['line',{x1:8,y1:2,x2:8,y2:6}],['line',{x1:3,y1:10,x2:21,y2:10}]],
-  'edit':         [['path',{d:'M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7'}],['path',{d:'M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z'}]],
-  'more-h':        [['circle',{cx:12,cy:12,r:1}],['circle',{cx:19,cy:12,r:1}],['circle',{cx:5,cy:12,r:1}]],
-  'kanban':       [['rect',{x:3,y:3,width:5,height:11,rx:1}],['rect',{x:10,y:3,width:5,height:7,rx:1}],['rect',{x:17,y:3,width:4,height:14,rx:1}]],
-  'grid':         [['rect',{x:3,y:3,width:7,height:7}],['rect',{x:14,y:3,width:7,height:7}],['rect',{x:14,y:14,width:7,height:7}],['rect',{x:3,y:14,width:7,height:7}]],
-};
-function Icon({ id, size=16, color='currentColor', sw=1.75 }) {
-  const d=IC[id]; if(!d) return null;
-  return <svg viewBox="0 0 24 24" width={size} height={size} fill="none" stroke={color} strokeWidth={sw} strokeLinecap="round" strokeLinejoin="round">{d.map(([t,p],i)=>React.createElement(t,{key:i,...p}))}</svg>;
-}
-
-// ── Primitives ────────────────────────────────────────────────────────────────
-function Avatar({ id, size=22, border=false }) {
-  const m=MEMBERS.find(m=>m.id===id); if(!m) return null;
-  return (
-    <div style={{ width:size, height:size, borderRadius:'50%', background:m.color, flexShrink:0,
-      display:'flex', alignItems:'center', justifyContent:'center',
-      border: border ? `2px solid ${T.bg2}` : 'none',
-      marginLeft: border ? -6 : 0,
-    }}>
-      <span style={{fontSize:Math.round(size*0.38),fontWeight:700,color:'#fff',lineHeight:1}}>{m.initials}</span>
-    </div>
-  );
-}
-
-function PriorityDot({ priority }) {
-  if (priority === 'low') return null;
-  const color = priority === 'high' ? '#EF4444' : '#F59E0B';
-  const icon  = priority === 'high' ? 'arrow-up' : 'minus';
-  return <Icon id={icon} size={12} color={color} sw={2.5} />;
-}
-
-function Tag({ label }) {
-  return (
-    <span style={{ fontSize:10, padding:'2px 6px', borderRadius:4, background:T.bg4, color:T.text2, fontWeight:500, whiteSpace:'nowrap' }}>
-      {label}
-    </span>
-  );
-}
-
-// ── Toolbar dropdown ──────────────────────────────────────────────────────────
-function ToolbarDropdown({ label, value, options, onChange }) {
-  const [open,setOpen]=useState(false);
-  const [pos,setPos]=useState({top:0,left:0});
-  const btnRef=useRef(null);
-
-  const handleOpen=()=>{
-    if(btnRef.current){
-      const r=btnRef.current.getBoundingClientRect();
-      let left=r.left;
-      if(left+180>window.innerWidth-8) left=window.innerWidth-188;
-      setPos({top:r.bottom+4,left});
-    }
-    setOpen(o=>!o);
-  };
-
-  // Click outside
-  React.useEffect(()=>{
-    if(!open) return;
-    const fn=(e)=>{ if(!btnRef.current?.contains(e.target)) setOpen(false); };
-    document.addEventListener('mousedown',fn);
-    return()=>document.removeEventListener('mousedown',fn);
-  },[open]);
-
-  return (
-    <>
-      <button ref={btnRef} onClick={handleOpen}
-        style={{
-          display:'flex', alignItems:'center', gap:5, padding:'4px 10px',
-          background:open?T.bg3:T.bg2, border:`1px solid ${open?T.border:T.border2}`,
-          borderRadius:6, color:T.text2, fontSize:13, transition:'background 0.1s',
-        }}>
-        <span style={{color:T.text3,fontSize:12}}>{label}</span>
-        <span style={{color:T.text1,fontWeight:500}}>{options.find(o=>o.value===value)?.label||value}</span>
-        <Icon id="chevron-down" size={12} color={T.text3} sw={2}/>
-      </button>
-      {open && ReactDOM.createPortal(
-        <div style={{
-          position:'fixed', top:pos.top, left:pos.left, zIndex:9999,
-          background:T.bg2, border:`1px solid ${T.border}`, borderRadius:8,
-          boxShadow:'0 8px 24px rgba(0,0,0,.5)', padding:'4px 0', minWidth:168,
-        }}>
-          {options.map(o=>(
-            <button key={o.value} onClick={()=>{onChange(o.value);setOpen(false);}}
-              style={{
-                display:'block', width:'100%', padding:'8px 14px', textAlign:'left',
-                border:'none', background: o.value===value ? T.bg3 : 'transparent',
-                color: o.value===value ? T.text1 : T.text2,
-                fontSize:13, fontWeight: o.value===value ? 500 : 400,
-              }}>
-              {o.label}
-            </button>
-          ))}
-        </div>,
-        document.body
-      )}
-    </>
-  );
-}
-
-// ── Share modal ───────────────────────────────────────────────────────────────
-function ShareModal({ onClose }) {
-  return ReactDOM.createPortal(
-    <div style={{ position:'fixed', inset:0, background:'rgba(0,0,0,.6)', zIndex:9999, display:'flex', alignItems:'center', justifyContent:'center' }}
-      onClick={onClose}>
-      <div style={{ background:T.bg2, border:`1px solid ${T.border}`, borderRadius:12, padding:'28px 32px', width:420, boxShadow:'0 24px 64px rgba(0,0,0,.6)' }}
-        onClick={e=>e.stopPropagation()}>
-        <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:20 }}>
-          <span style={{ fontSize:16, fontWeight:600, color:T.text1 }}>Share · New Logo GTM</span>
-          <button onClick={onClose} style={{ background:'none', border:'none', color:T.text3, padding:4 }}><Icon id="x" size={16} color={T.text3}/></button>
-        </div>
-        <div style={{ padding:'24px 0', textAlign:'center', color:T.text3, fontSize:13, borderTop:`1px solid ${T.border}` }}>
-          Share modal — not yet designed
-        </div>
-      </div>
-    </div>,
-    document.body
-  );
-}
-
-// ── Kanban card ───────────────────────────────────────────────────────────────
-function KanbanCard({ card, colorBy, isDragging, onDragStart, onDragEnd }) {
-  const [hov,setHov]=useState(false);
-  const accentColor = colorBy==='assignee'
-    ? (MEMBERS.find(m=>m.id===card.assignees[0])?.color || T.accent)
-    : card.color;
-
-  return (
-    <div
-      draggable
-      onDragStart={onDragStart}
-      onDragEnd={onDragEnd}
-      onMouseEnter={()=>setHov(true)}
-      onMouseLeave={()=>setHov(false)}
-      className={isDragging?'card-dragging':''}
-      style={{
-        background: hov ? T.bg3 : T.bg2,
-        border: `1px solid ${hov ? T.border : T.border2}`,
-        borderRadius: 8,
-        borderLeft: `3px solid ${accentColor}`,
-        padding: '10px 12px',
-        cursor: 'grab',
-        transition: 'background 0.1s, border-color 0.1s',
-        userSelect: 'none',
-      }}>
-      {/* Title row */}
-      <div style={{ fontSize:13, fontWeight:500, color:T.text1, lineHeight:1.35, marginBottom:6 }}>
-        {card.title}
-      </div>
-      {/* Tags */}
-      {card.tags.length > 0 && (
-        <div style={{ display:'flex', gap:4, flexWrap:'wrap', marginBottom:6 }}>
-          {card.tags.map(t=><Tag key={t} label={t}/>)}
-        </div>
-      )}
-      {/* Footer row */}
-      <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:6 }}>
-        <div style={{ display:'flex', alignItems:'center', gap:4, color:T.text3, fontSize:11 }}>
-          <PriorityDot priority={card.priority}/>
-          <Icon id="calendar" size={11} color={T.text3} sw={1.75}/>
-          <span>{card.start}</span>
-          {card.end !== card.start && <><span style={{opacity:.5}}>–</span><span>{card.end}</span></>}
-        </div>
-        <div style={{ display:'flex', alignItems:'center' }}>
-          {card.assignees.map((id,i)=><Avatar key={id} id={id} size={20} border={i>0}/>)}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ── Kanban column ─────────────────────────────────────────────────────────────
-function KanbanColumn({ col, cards, colorBy, collapsed, onToggleCollapse, draggingId, dragOverCol, onDragOver, onDrop }) {
-  const isTarget = dragOverCol === col.id && draggingId && cards.every(c=>c.id!==draggingId);
-  const count = cards.length;
-
-  if (collapsed) {
-    return (
-      <div
-        onDragOver={(e)=>{e.preventDefault(); onDragOver(col.id);}}
-        onDrop={(e)=>{e.preventDefault(); onDrop(col.id);}}
-        style={{
-          width:40, flexShrink:0, borderRadius:10,
-          background: isTarget ? `${col.color}18` : T.bg1,
-          border: `1px solid ${isTarget ? col.color+'44' : T.border2}`,
-          display:'flex', flexDirection:'column', alignItems:'center',
-          padding:'12px 0', gap:8, cursor:'pointer', transition:'background 0.15s',
-        }}
-        onClick={onToggleCollapse}>
-        <div style={{ width:8, height:8, borderRadius:'50%', background:col.color, flexShrink:0 }}/>
-        <span style={{
-          fontSize:11, fontWeight:600, color:T.text2, writingMode:'vertical-rl',
-          textOrientation:'mixed', transform:'rotate(180deg)', letterSpacing:'.3px',
-        }}>{col.label}</span>
-        <span style={{
-          fontSize:10, fontWeight:700, color:T.text3, background:T.bg3,
-          borderRadius:99, padding:'2px 5px', lineHeight:1.2,
-        }}>{count}</span>
-      </div>
-    );
-  }
-
-  return (
-    <div
-      onDragOver={(e)=>{e.preventDefault(); if(dragOverCol!==col.id) onDragOver(col.id);}}
-      onDrop={(e)=>{e.preventDefault(); onDrop(col.id);}}
-      style={{
-        width:248, flexShrink:0, borderRadius:10,
-        background: isTarget ? `${col.color}10` : T.bg1,
-        border: `1px solid ${isTarget ? col.color+'55' : T.border2}`,
-        display:'flex', flexDirection:'column',
-        transition:'background 0.15s, border-color 0.15s',
-        maxHeight:'100%',
-      }}>
-      {/* Header */}
-      <div style={{ padding:'10px 12px', display:'flex', alignItems:'center', gap:8, flexShrink:0 }}>
-        <div style={{ width:8, height:8, borderRadius:'50%', background:col.color, flexShrink:0 }}/>
-        <span style={{ fontSize:12, fontWeight:600, color:T.text1, flex:1 }}>{col.label}</span>
-        <span style={{ fontSize:11, fontWeight:600, color:T.text3, background:T.bg3, borderRadius:99, padding:'1px 7px', lineHeight:1.4 }}>{count}</span>
-        <button onClick={onToggleCollapse}
-          style={{ background:'none', border:'none', padding:2, opacity:.5, transition:'opacity 0.1s' }}
-          title="Collapse">
-          <Icon id="chevron-down" size={13} color={T.text2} sw={2}/>
-        </button>
-      </div>
-      {/* Cards */}
-      <div style={{ flex:1, overflowY:'auto', padding:'0 8px 8px', display:'flex', flexDirection:'column', gap:6 }}>
-        {cards.map(card=>(
-          <KanbanCard key={card.id} card={card} colorBy={colorBy}
-            isDragging={draggingId===card.id}
-            onDragStart={()=>{}}
-            onDragEnd={()=>{}}
-          />
-        ))}
-        {isTarget && draggingId && (
-          <div style={{ height:6, borderRadius:4, background:col.color, opacity:.4 }}/>
-        )}
-      </div>
-    </div>
-  );
-}
-
-// ── Kanban toolbar ────────────────────────────────────────────────────────────
-function KanbanToolbar({ sortBy, setSortBy, colorBy, setColorBy, onShare }) {
-  return (
-    <div style={{
-      height:42, flexShrink:0, display:'flex', alignItems:'center', gap:6,
-      padding:'0 16px', borderBottom:`1px solid ${T.border}`, background:T.bg1,
-    }}>
-      <div style={{ display:'flex', alignItems:'center', gap:6, flex:1 }}>
-        <ToolbarDropdown label="Group by" value="status"
-          options={[{value:'status',label:'Status'},{value:'assignee',label:'Assignee'},{value:'priority',label:'Priority'}]}
-          onChange={()=>{}}/>
-        <div style={{ width:1, height:20, background:T.border, margin:'0 4px' }}/>
-        <ToolbarDropdown label="Sort by" value={sortBy}
-          options={[{value:'startDate',label:'Start date'},{value:'assignee',label:'Assignee'},{value:'title',label:'Title'}]}
-          onChange={setSortBy}/>
-        <ToolbarDropdown label="Color by" value={colorBy}
-          options={[{value:'activity',label:'Activity'},{value:'assignee',label:'Assignee'}]}
-          onChange={setColorBy}/>
-      </div>
-      <div style={{ display:'flex', alignItems:'center', gap:6 }}>
-        <button onClick={onShare}
-          style={{
-            display:'flex', alignItems:'center', gap:6, padding:'5px 11px',
-            background:T.bg2, border:`1px solid ${T.border2}`, borderRadius:6,
-            color:T.text2, fontSize:13,
-          }}>
-          <Icon id="share" size={13} color={T.text2}/>
-          Share
-        </button>
-        <button style={{
-          display:'flex', alignItems:'center', gap:6, padding:'5px 11px',
-          background:T.bg2, border:`1px solid ${T.border2}`, borderRadius:6,
-          color:T.text2, fontSize:13,
-        }}>
-          <Icon id="download" size={13} color={T.text2}/>
-          Export
-        </button>
-      </div>
-    </div>
-  );
-}
-
-// ── Top nav ───────────────────────────────────────────────────────────────────
-const TABS = [{id:'list',label:'List',icon:'list'},{id:'calendar',label:'Calendar',icon:'grid'},{id:'gantt',label:'Gantt',icon:'minus'},{id:'kanban',label:'Kanban',icon:'kanban'}];
-
-function TopNav() {
-  return (
-    <div style={{
-      height:50, flexShrink:0, display:'flex', alignItems:'center',
-      padding:'0 16px', borderBottom:`1px solid ${T.border}`, background:T.bg1, gap:4,
-    }}>
-      <div style={{ display:'flex', alignItems:'center', gap:6, marginRight:8, paddingRight:12, borderRight:`1px solid ${T.border}` }}>
-        <div style={{ width:24, height:24, borderRadius:5, background:T.accent, display:'flex', alignItems:'center', justifyContent:'center' }}>
-          <Icon id="layers" size={13} color="#fff" sw={2}/>
-        </div>
-        <span style={{ fontSize:16, fontWeight:600, color:T.text1 }}>draba</span>
-      </div>
-      {TABS.map(tab=>(
-        <button key={tab.id}
-          style={{
-            display:'flex', alignItems:'center', gap:6, padding:'5px 11px',
-            borderRadius:6, border:'none', fontSize:13, fontWeight: tab.id==='kanban' ? 600 : 400,
-            background: tab.id==='kanban' ? T.bg3 : 'transparent',
-            color: tab.id==='kanban' ? T.text1 : T.text2,
-          }}>
-          <Icon id={tab.icon} size={13} color={tab.id==='kanban' ? T.text1 : T.text3} sw={tab.id==='kanban'?2:1.75}/>
-          {tab.label}
-        </button>
-      ))}
-      <div style={{ flex:1, textAlign:'center', fontSize:14, fontWeight:500, color:T.text2 }}>New Logo GTM</div>
-      <div style={{ display:'flex', alignItems:'center', gap:8 }}>
-        <button style={{ background:'none', border:'none', padding:4 }}><Icon id="search" size={16} color={T.text3}/></button>
-        <button style={{
-          display:'flex', alignItems:'center', gap:6, padding:'5px 11px',
-          background:T.bg3, border:`1px solid ${T.border}`, borderRadius:6, color:T.text2, fontSize:13,
-        }}>
-          <Icon id="filter" size={13} color={T.text3}/>
-          All activities
-          <Icon id="chevron-down" size={12} color={T.text3} sw={2}/>
-        </button>
-        <div style={{ width:30, height:30, borderRadius:'50%', background:T.accent, display:'flex', alignItems:'center', justifyContent:'center' }}>
-          <span style={{ fontSize:12, fontWeight:700, color:'#fff' }}>U</span>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ── Sidebar ───────────────────────────────────────────────────────────────────
-const SB_TIMELINES = [
-  { name:'Q1 2027 Roadmap',  color:'#288C9B', icon:'zap'  },
-  { name:'New Logo GTM',     color:'#8B5CF6', active:true },
-  { name:'Q4 2026 Roadmap',  color:'#F97316', icon:'tup'  },
-  { name:'Project Pinky',    color:'#F43F5E', icon:'heart'},
-];
-
-function Sidebar() {
-  return (
-    <div style={{ width:220, flexShrink:0, background:T.bg1, borderRight:`1px solid ${T.border}`, overflowY:'auto' }}>
-      <div style={{ padding:'14px 12px 8px' }}>
-        <div style={{ fontSize:10, fontWeight:600, letterSpacing:'.7px', color:T.text3, textTransform:'uppercase', marginBottom:6, paddingLeft:4 }}>Team</div>
-        <div style={{ display:'flex', alignItems:'center', gap:8, padding:'5px 8px', borderRadius:6, marginBottom:12 }}>
-          <div style={{ width:22, height:22, borderRadius:'50%', background:'#A855F7', display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0 }}>
-            <span style={{ fontSize:11, fontWeight:700, color:'#fff' }}>P</span>
-          </div>
-          <span style={{ fontSize:13, fontWeight:500, color:T.text1 }}>Product Marketing</span>
-        </div>
-        <div style={{ fontSize:10, fontWeight:600, letterSpacing:'.7px', color:T.text3, textTransform:'uppercase', marginBottom:6, paddingLeft:4 }}>Members</div>
-        {MEMBERS.map(m=>(
-          <div key={m.id} style={{ display:'flex', alignItems:'center', gap:8, padding:'4px 8px', borderRadius:6 }}>
-            <Avatar id={m.id} size={22}/>
-            <span style={{ fontSize:13, color:T.text2 }}>{m.name}</span>
-          </div>
-        ))}
-        <div style={{ fontSize:10, fontWeight:600, letterSpacing:'.7px', color:T.text3, textTransform:'uppercase', marginBottom:6, marginTop:14, paddingLeft:4 }}>Timeline</div>
-        {SB_TIMELINES.map(tl=>(
-          <div key={tl.name} style={{ display:'flex', alignItems:'center', gap:8, padding:'5px 8px', borderRadius:6, background:tl.active?T.bg3:'transparent' }}>
-            <div style={{ width:22, height:22, borderRadius:'5px', background:tl.color, display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0 }}>
-              <Icon id={tl.active?'kanban':'list'} size={11} color="rgba(255,255,255,0.9)" sw={2}/>
-            </div>
-            <span style={{ fontSize:13, fontWeight:tl.active?500:400, color:tl.active?T.text1:T.text2, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{tl.name}</span>
-          </div>
-        ))}
-        <div style={{ marginTop:6, paddingLeft:8 }}>
-          <span style={{ fontSize:12, color:T.text3 }}>+ New timeline</span>
-        </div>
-        <div style={{ fontSize:10, fontWeight:600, letterSpacing:'.7px', color:T.text3, textTransform:'uppercase', marginBottom:6, marginTop:14, paddingLeft:4 }}>Activity</div>
-        <div style={{ paddingLeft:8, display:'flex', flexDirection:'column', gap:6 }}>
-          <span style={{ fontSize:12, color:T.text2 }}>+ New activity</span>
-          <span style={{ fontSize:12, color:T.text2 }}>↑ Import activities</span>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ── App ───────────────────────────────────────────────────────────────────────
-function App() {
-  const [cards, setCards] = useState(CARDS);
-  const [sortBy, setSortBy] = useState('startDate');
-  const [colorBy, setColorBy] = useState('activity');
-  const [collapsed, setCollapsed] = useState({});
-  const [draggingId, setDraggingId] = useState(null);
-  const [dragOverCol, setDragOverCol] = useState(null);
-  const [shareOpen, setShareOpen] = useState(false);
-
-  const sortedCards = useMemo(()=>{
-    return [...cards].sort((a,b)=>{
-      if(sortBy==='title') return a.title.localeCompare(b.title);
-      if(sortBy==='assignee'){
-        const na=MEMBERS.find(m=>m.id===a.assignees[0])?.name||'';
-        const nb=MEMBERS.find(m=>m.id===b.assignees[0])?.name||'';
-        return na.localeCompare(nb);
-      }
-      return a.sort - b.sort;
-    });
-  },[cards, sortBy]);
-
-  const handleDrop = useCallback((colId)=>{
-    if(draggingId){
-      setCards(cs=>cs.map(c=>c.id===draggingId?{...c,col:colId}:c));
-    }
-    setDraggingId(null); setDragOverCol(null);
-  },[draggingId]);
-
-  return (
-    <div style={{ height:'100vh', display:'flex', flexDirection:'column', background:T.bg0, overflow:'hidden' }}>
-      <TopNav/>
-      <div style={{ flex:1, display:'flex', overflow:'hidden' }}>
-        <Sidebar/>
-        <div style={{ flex:1, display:'flex', flexDirection:'column', overflow:'hidden' }}>
-          <KanbanToolbar sortBy={sortBy} setSortBy={setSortBy} colorBy={colorBy} setColorBy={setColorBy} onShare={()=>setShareOpen(true)}/>
-          {/* Board */}
-          <div
-            style={{ flex:1, overflowX:'auto', overflowY:'hidden', padding:'16px', display:'flex', gap:10, alignItems:'flex-start' }}
-            onDragOver={e=>e.preventDefault()}
-            onMouseUp={()=>{ if(draggingId){setDraggingId(null); setDragOverCol(null);} }}>
-            {COLUMNS.map(col=>(
-              <KanbanColumn key={col.id} col={col}
-                cards={sortedCards.filter(c=>c.col===col.id)}
-                colorBy={colorBy}
-                collapsed={!!collapsed[col.id]}
-                onToggleCollapse={()=>setCollapsed(s=>({...s,[col.id]:!s[col.id]}))}
-                draggingId={draggingId}
-                dragOverCol={dragOverCol}
-                onDragOver={setDragOverCol}
-                onDrop={handleDrop}
-              />
-            ))}
-          </div>
-        </div>
-      </div>
-      {shareOpen && <ShareModal onClose={()=>setShareOpen(false)}/>}
-    </div>
-  );
-}
-
-// Wire up drag on cards (needs access to App state setters)
-// Patch: override KanbanCard onDragStart / onDragEnd via board wrapper
-function BoardWithDrag({ sortedCards, colorBy, collapsed, onToggleCollapse, onDragOver, onDrop, draggingId, setDraggingId, setDragOverCol, dragOverCol, onOpenCard }) {
-  const [hovCardId, setHovCardId] = useState(null);
-  return (
-    <div style={{ flex:1, overflowX:'auto', overflowY:'hidden', padding:'16px', display:'flex', gap:10, alignItems:'flex-start' }}>
-      {COLUMNS.map(col=>{
-        const cards = sortedCards.filter(c=>c.col===col.id);
-        const isTarget = dragOverCol===col.id && draggingId && cards.every(c=>c.id!==draggingId);
-        if(collapsed[col.id]) return (
-          <div key={col.id}
-            onDragOver={(e)=>{e.preventDefault(); if(dragOverCol!==col.id) onDragOver(col.id);}}
-            onDrop={(e)=>{e.preventDefault(); onDrop(col.id);}}
-            onClick={()=>onToggleCollapse(col.id)}
-            style={{
-              width:40, flexShrink:0, borderRadius:10, cursor:'pointer',
-              background: isTarget ? `${col.color}18` : T.bg1,
-              border:`1px solid ${isTarget ? col.color+'44' : T.border2}`,
-              display:'flex', flexDirection:'column', alignItems:'center',
-              padding:'12px 0', gap:8, transition:'background 0.15s',
-            }}>
-            <div style={{ width:8, height:8, borderRadius:'50%', background:col.color }}/>
-            <span style={{ fontSize:11, fontWeight:600, color:T.text2, writingMode:'vertical-rl', textOrientation:'mixed', transform:'rotate(180deg)', letterSpacing:'.3px' }}>{col.label}</span>
-            <span style={{ fontSize:10, fontWeight:700, color:T.text3, background:T.bg3, borderRadius:99, padding:'2px 5px' }}>{cards.length}</span>
-          </div>
-        );
-        return (
-          <div key={col.id}
-            onDragOver={(e)=>{e.preventDefault(); if(dragOverCol!==col.id) onDragOver(col.id);}}
-            onDrop={(e)=>{e.preventDefault(); onDrop(col.id);}}
-            style={{
-              width:248, flexShrink:0, borderRadius:10,
-              background: isTarget ? `${col.color}10` : T.bg1,
-              border:`1px solid ${isTarget ? col.color+'55' : T.border2}`,
-              display:'flex', flexDirection:'column', transition:'background 0.15s, border-color 0.15s',
-              maxHeight:'100%',
-            }}>
-            <div style={{ padding:'10px 12px', display:'flex', alignItems:'center', gap:8, flexShrink:0 }}>
-              <div style={{ width:8, height:8, borderRadius:'50%', background:col.color, flexShrink:0 }}/>
-              <span style={{ fontSize:12, fontWeight:600, color:T.text1, flex:1 }}>{col.label}</span>
-              <span style={{ fontSize:11, fontWeight:600, color:T.text3, background:T.bg3, borderRadius:99, padding:'1px 7px', lineHeight:1.4 }}>{cards.length}</span>
-              <button onClick={()=>onToggleCollapse(col.id)}
-                style={{ background:'none', border:'none', padding:2, opacity:.5 }}>
-                <Icon id="chevron-down" size={13} color={T.text2} sw={2}/>
-              </button>
-            </div>
-            <div style={{ flex:1, overflowY:'auto', padding:'0 8px 8px', display:'flex', flexDirection:'column', gap:6 }}>
-              {cards.map(card=>{
-                const accentColor = colorBy==='assignee'
-                  ? (MEMBERS.find(m=>m.id===card.assignees[0])?.color || T.accent)
-                  : card.color;
-                return (
-                  <div key={card.id}
-                    draggable
-                    onDragStart={()=>setDraggingId(card.id)}
-                    onDragEnd={()=>{ setDraggingId(null); setDragOverCol(null); }}
-                    onMouseEnter={()=>setHovCardId(card.id)}
-                    onMouseLeave={()=>setHovCardId(null)}
-                    className={draggingId===card.id?'card-dragging':''}
-                    style={{
-                      position:'relative',
-                      background:T.bg2, border:`1px solid ${T.border2}`,
-                      borderRadius:8, borderLeft:`3px solid ${accentColor}`,
-                      padding:'10px 12px', cursor:'grab', userSelect:'none',
-                    }}>
-                    {/* Configure button */}
-                    {hovCardId===card.id && (
-                      <button
-                        draggable={false}
-                        onDragStart={e=>e.stopPropagation()}
-                        onMouseDown={e=>e.stopPropagation()}
-                        onClick={e=>{e.stopPropagation(); onOpenCard(card.id);}}
-                        title="Edit activity"
-                        style={{
-                          position:'absolute', top:7, right:7,
-                          width:22, height:22, borderRadius:5,
-                          background:T.bg4, border:`1px solid ${T.border}`,
-                          display:'flex', alignItems:'center', justifyContent:'center',
-                          cursor:'pointer', zIndex:2,
-                          boxShadow:'0 1px 4px rgba(0,0,0,.3)',
-                        }}>
-                        <Icon id="edit" size={11} color={T.text2} sw={2}/>
-                      </button>
-                    )}
-                    <div style={{ fontSize:13, fontWeight:500, color:T.text1, lineHeight:1.35, marginBottom:6 }}>{card.title}</div>
-                    {card.tags.length>0 && (
-                      <div style={{ display:'flex', gap:4, flexWrap:'wrap', marginBottom:6 }}>
-                        {card.tags.map(t=><Tag key={t} label={t}/>)}
-                      </div>
-                    )}
-                    <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:6 }}>
-                      <div style={{ display:'flex', alignItems:'center', gap:4, color:T.text3, fontSize:11 }}>
-                        <PriorityDot priority={card.priority}/>
-                        <Icon id="calendar" size={11} color={T.text3} sw={1.75}/>
-                        <span>{card.start}</span>
-                      </div>
-                      <div style={{ display:'flex', alignItems:'center' }}>
-                        {card.assignees.map((id,i)=><Avatar key={id} id={id} size={20} border={i>0}/>)}
-                      </div>
-                    </div>
-                  </div>
-                );
-              })}
-              {isTarget && <div style={{ height:6, borderRadius:4, background:col.color, opacity:.4 }}/>}
-            </div>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-function AppFinal() {
-  const [cards,setCards]=useState(CARDS);
-  const [sortBy,setSortBy]=useState('startDate');
-  const [colorBy,setColorBy]=useState('activity');
-  const [collapsed,setCollapsed]=useState({});
-  const [draggingId,setDraggingId]=useState(null);
-  const [dragOverCol,setDragOverCol]=useState(null);
-  const [shareOpen,setShareOpen]=useState(false);
-  const [openCardId,setOpenCardId]=useState(null);
-
-  const sortedCards=useMemo(()=>[...cards].sort((a,b)=>{
-    if(sortBy==='title') return a.title.localeCompare(b.title);
-    if(sortBy==='assignee'){
-      const na=MEMBERS.find(m=>m.id===a.assignees[0])?.name||'';
-      const nb=MEMBERS.find(m=>m.id===b.assignees[0])?.name||'';
-      return na.localeCompare(nb);
-    }
-    return a.sort-b.sort;
-  }),[cards,sortBy]);
-
-  const handleDrop=useCallback((colId)=>{
-    if(draggingId) setCards(cs=>cs.map(c=>c.id===draggingId?{...c,col:colId}:c));
-    setDraggingId(null); setDragOverCol(null);
-  },[draggingId]);
-
-  return (
-    <div style={{ height:'100vh', display:'flex', flexDirection:'column', background:T.bg0, overflow:'hidden' }}>
-      <TopNav/>
-      <div style={{ flex:1, display:'flex', overflow:'hidden' }}>
-        <Sidebar/>
-        <div style={{ flex:1, display:'flex', flexDirection:'column', overflow:'hidden' }}>
-          <KanbanToolbar sortBy={sortBy} setSortBy={setSortBy} colorBy={colorBy} setColorBy={setColorBy} onShare={()=>setShareOpen(true)}/>
-          <BoardWithDrag
-            sortedCards={sortedCards} colorBy={colorBy} collapsed={collapsed}
-            onToggleCollapse={(id)=>setCollapsed(s=>({...s,[id]:!s[id]}))}
-            draggingId={draggingId} setDraggingId={setDraggingId}
-            dragOverCol={dragOverCol} setDragOverCol={setDragOverCol}
-            onDragOver={setDragOverCol} onDrop={handleDrop}
-            onOpenCard={setOpenCardId}
-          />
-        </div>
-      </div>
-      {shareOpen && <ShareModal onClose={()=>setShareOpen(false)}/>}
-    </div>
-  );
-}
-
-ReactDOM.createRoot(document.getElementById('root')).render(<AppFinal/>);
-</script>
-</body>
-</html>
-````
-
-## File: docs/design/handoffs/kanban-view/README.md
-````markdown
-# Handoff: Kanban View — Draba
-
-## Overview
-
-The Kanban View is one of Draba's primary timeline views (alongside **List**, **Calendar**, and **Gantt**). It presents the activities of a single timeline as draggable cards arranged in vertical, status-based columns. Activities can be dragged between columns to change their status, columns can be collapsed to reclaim horizontal space, and the board can be re-grouped, re-sorted, and re-colored from a dedicated toolbar.
-
-The view is reached by selecting the **Kanban** tab in the top nav while a timeline is open. It renders inside the standard app shell (top nav + left sidebar) and owns the main content region.
-
-## About the Design Files
-
-The files in this bundle are **HTML/React-via-Babel design prototypes** — not production code. Your task is to **recreate this view inside the existing Draba codebase** (described as shadcn/ui + Tailwind CSS v4 + Next.js) using its established components, design tokens, and patterns. Prefer the codebase's real primitives (drag-and-drop library, DropdownMenu, Dialog, Avatar, Badge) over the hand-rolled versions in the prototype.
-
-## Fidelity
-
-**High-fidelity.** Final colors, spacing, typography, and interaction states are specified. The prototype hardcodes a **dark** theme; production should drive everything from the Draba Design System tokens (`--primary`, `--card`, `--border`, `--muted-foreground`, etc.) and support light + dark. Exact hexes are listed under **Design Tokens** so you can map them to the token set.
-
----
-
-## Layout
-
-The view sits in the standard three-region app shell:
-
-```
-┌──────────────────────────────────────────────────────────┐
-│ Top nav (50px)  — logo · view tabs · title · filter · me  │
-├──────────┬───────────────────────────────────────────────┤
-│ Sidebar  │ Kanban toolbar (42px) — group/sort/color · CTA │
-│ (220px)  ├───────────────────────────────────────────────┤
-│          │ Board — horizontal scroll, columns left→right  │
-│          │                                                 │
-└──────────┴───────────────────────────────────────────────┘
-```
-
-- Root: `100vh`, column flex, `overflow: hidden`, background `#0d1117`.
-- The content region (right of sidebar) is a column flex: **toolbar** (fixed) over **board** (fills remaining height).
-- **Board**: `overflow-x: auto`, `overflow-y: hidden`, padding `16px`, flex row, gap `10px`, `align-items: flex-start`. Columns scroll horizontally as a group; each column scrolls its cards vertically.
-
----
-
-## Components
-
-### Top nav (`<TopNav>`)
-Height `50px`, bg `#161b22`, bottom border `1px solid #30363d`, padding `0 16px`.
-- **Brand**: 24px teal rounded tile with a layers icon + wordmark "draba" (16px/600), followed by a vertical divider.
-- **View tabs**: List · Calendar · Gantt · **Kanban**. Each is an icon + label button, `5px 11px`, radius 6. Active tab (Kanban): bg `#2d333b`, text `#e6edf3`, 600w; inactive: transparent, `#8b949e`. *(In production, wire these to actually switch views — in the prototype only Kanban renders.)*
-- **Title**: centered, flex-1, the timeline name ("New Logo GTM"), 14px/500 `#8b949e`.
-- **Right cluster**: search icon button · a "All activities" filter pill (bg `#2d333b`, border, filter icon + chevron) · a 30px teal avatar circle.
-
-### Sidebar (`<Sidebar>`)
-Width `220px`, bg `#161b22`, right border, vertical scroll. Sectioned list with uppercase 10px/600 labels (`#484f58`, letter-spacing .7px):
-- **Team** — 22px team avatar + name.
-- **Members** — each member: 22px color avatar + name (`#8b949e`).
-- **Timeline** — list of timelines, each a colored 22px rounded tile + name; the active one ("New Logo GTM") has bg `#2d333b` and brighter text. Followed by a "+ New timeline" link.
-- **Activity** — "+ New activity" and "↑ Import activities" links.
-
-> This sidebar mirrors the app's existing navigation — in production, reuse the real `<Sidebar>` component rather than this copy.
-
-### Kanban toolbar (`<KanbanToolbar>`)
-Height `42px`, bg `#161b22`, bottom border, padding `0 16px`, flex row, gap 6.
-- **Left cluster**: three dropdowns —
-  - **Group by**: Status (default) · Assignee · Priority
-  - a thin vertical divider
-  - **Sort by**: Start date (default) · Assignee · Title
-  - **Color by**: Activity (default) · Assignee
-- **Right cluster**: **Share** button (share icon) and **Export** button (download icon). Both are secondary buttons: bg `#21262d`, border `#21262d`, `5px 11px`, radius 6, text `#8b949e`.
-
-**Toolbar dropdown (`<ToolbarDropdown>`)**: a button showing a muted `label` (`#484f58`) + the selected value (`#e6edf3`, 500w) + chevron-down. Opens a portal menu (`position: fixed`, flips left if it would overflow the viewport): bg `#21262d`, border `#30363d`, radius 8, shadow `0 8px 24px rgba(0,0,0,.5)`, min-width 168. Selected option row: bg `#2d333b`, text `#e6edf3`. Closes on outside-click.
-
-### Column (collapsed + expanded)
-Each status is a column. Radius 10, bg `#161b22`, border `1px solid #21262d`. Drop-target highlight while dragging: bg `{colColor}10`, border `{colColor}55` (expanded) / `{colColor}18` + `{colColor}44` (collapsed).
-
-**Expanded** (width `248px`):
-- **Header** (`10px 12px`): 8px color dot + label (12px/600 `#e6edf3`, flex-1) + count badge (11px/600 `#484f58`, bg `#2d333b`, pill `1px 7px`) + collapse button (chevron-down, 50% opacity).
-- **Cards area**: `flex: 1`, vertical scroll, padding `0 8px 8px`, column flex, gap 6. A 6px accent-colored placeholder bar (`{colColor}`, opacity .4) is appended while a card hovers over the column.
-
-**Collapsed** (width `40px`): clickable full-height rail — color dot + vertical (rotated) label + count badge. Clicking toggles back to expanded.
-
-**Columns** (id · label · color):
-| id | label | color |
-|---|---|---|
-| `not-started` | Not Started | `#64748B` |
-| `in-progress` | In Progress | `#288C9B` (teal) |
-| `at-risk` | At Risk | `#F97316` (amber) |
-| `on-hold` | On Hold | `#8B5CF6` (violet) |
-| `completed` | Completed | `#22C55E` (green) |
-| `canceled` | Canceled | `#484f58` (muted) |
-
-### Card
-Represents one activity. bg `#21262d`, border `1px solid #21262d`, radius 8, **left accent border `3px solid {accentColor}`**, padding `10px 12px`, `cursor: grab`, `user-select: none`. Hover: bg `#2d333b`, border `#30363d`. While being dragged: `opacity: .35` (`.card-dragging`).
-- **Title**: 13px/500 `#e6edf3`, line-height 1.35.
-- **Tags** (optional): small chips — 10px, `2px 6px`, radius 4, bg `#373e47`, text `#8b949e`.
-- **Footer row** (space-between):
-  - Left: **priority indicator** (`high` → red up-arrow `#EF4444`; `medium` → amber minus `#F59E0B`; `low` → none) + calendar icon + start date (and `– end` date where the card component shows it).
-  - Right: **assignee avatars** — 20px color circles, overlapping by -6px after the first (2px `#21262d` ring).
-- **Configure button** (hover-revealed): 22px tile top-right (bg `#373e47`, border, edit/pencil icon) that opens the activity for editing. It stops drag propagation so the click doesn't start a drag.
-
-**Accent color** depends on the **Color by** setting: `activity` → the card's own `color`; `assignee` → the first assignee's member color.
-
-### Share modal (`<ShareModal>`)
-A **stub** — portal overlay (`rgba(0,0,0,.6)`), 420px panel (bg `#21262d`, border, radius 12, shadow), header "Share · New Logo GTM" + close X, and a placeholder body reading *"Share modal — not yet designed."* **This is a known gap** — the real share flow is out of scope for this handoff and should be designed separately (or reuse the share pattern from the timeline view if one exists).
-
----
-
-## Interactions & Behavior
-
-- **Drag to rechange status**: cards are HTML5-draggable. Dragging sets `draggingId`; hovering a column sets `dragOverCol` and shows the column highlight + a placeholder bar; dropping moves the card to that column (`col` changes). Drop/`onDragEnd`/`mouseUp` all clear the drag state.
-  - *Production note:* the prototype only reorders cards **between** columns by status; it does not persist an explicit intra-column index on drop (cards re-flow per the Sort by rule). If precise manual ordering within a column is required, add an order field and insertion-index logic — use the codebase's DnD library (e.g. dnd-kit) rather than raw HTML5 DnD for reliable reordering + keyboard a11y.
-- **Sort by**: reorders cards within every column — `Start date` (a stable `sort` rank in the mock), `Assignee` (first assignee name, A→Z), `Title` (A→Z).
-- **Color by**: switches the card left-border accent between the activity color and the assignee color (see Card).
-- **Group by**: the control is present with options Status / Assignee / Priority. In the prototype only **Status** is wired (columns = statuses). Production should regenerate columns from the chosen grouping (e.g. one column per member, or per priority bucket).
-- **Collapse column**: header chevron (or clicking the collapsed rail) toggles a per-column collapsed state.
-- **Configure card**: hover a card → pencil button → opens the activity editor (wire to the existing Event/Activity detail panel or Member/Activity edit modal).
-- **Share / Export**: Share opens the stub modal; Export is present but inert (wire to the Export Modal — see Related).
-- **Transitions**: background/border transitions ~100–150ms ease. No decorative motion, per the design system.
-
-## State Management
-
-Per-view state (prototype `AppFinal`):
-```ts
-cards:       Card[]                 // source of truth; col changes on drop
-sortBy:      'startDate'|'assignee'|'title'
-colorBy:     'activity'|'assignee'
-collapsed:   Record<columnId, boolean>
-draggingId:  string | null          // card being dragged
-dragOverCol: string | null          // current drop-target column
-shareOpen:   boolean
-openCardId:  string | null          // activity opened for editing
-```
-
-**Card model** (maps to a Draba activity):
-```ts
-type Card = {
-  id: string;
-  col: ColumnId;                    // status
-  title: string;
-  assignees: MemberId[];            // 0..n members
-  start: string; end: string;       // date labels
-  color: string;                    // activity color (Color by: activity)
-  tags: string[];
-  priority: 'high'|'medium'|'low';
-  sort: number;                     // stable rank for Start-date sort
-};
-```
-Production: fetch the timeline's activities, derive columns from the active **Group by**, and persist status changes (and order, if implemented) on drop.
-
----
-
-## Design Tokens
-
-| Token | Value | Use |
-|---|---|---|
-| bg0 | `#0d1117` | app background |
-| bg1 | `#161b22` | nav, sidebar, toolbar, columns |
-| bg2 | `#21262d` | cards, dropdown/modal panels |
-| bg3 | `#2d333b` | hover surfaces, active tab, count badges |
-| bg4 | `#373e47` | tag chips, configure button |
-| border | `#30363d` | primary borders |
-| border2 | `#21262d` | subtle borders (cards, columns) |
-| text1 | `#e6edf3` | primary text |
-| text2 | `#8b949e` | secondary text |
-| text3 | `#484f58` | muted text / labels |
-| accent | `#288C9B` | Draba teal (primary) |
-
-**Column colors**: slate `#64748B` · teal `#288C9B` · amber `#F97316` · violet `#8B5CF6` · green `#22C55E` · muted `#484f58`.
-**Priority**: high `#EF4444` · medium `#F59E0B` · low (none).
-**Member colors** (avatars): green `#22C55E`, indigo `#6366F1`, amber `#F97316`, teal `#288C9B` (plus the wider activity palette `#A855F7`, `#3B82F6`, `#EC4899`, `#06B6D4`, `#EF4444`).
-
-**Typography**: Inter. 16/600 (brand, modal title) · 14/500 (timeline title) · 13/500 (card title, member names, buttons) · 12/600 (column label) · 11 (dates, count badges) · 10 (tags, sidebar section labels).
-
-**Radii**: columns 10 · cards/buttons/dropdowns 6–8 · modal 12 · badges/avatars 999.
-
-**Spacing**: 4px base. Board gap 10, card gap 6, board padding 16; column header `10px 12px`; toolbar `0 16px`.
-
-**Shadows**: dropdown `0 8px 24px rgba(0,0,0,.5)`; modal `0 24px 64px rgba(0,0,0,.6)`; configure button `0 1px 4px rgba(0,0,0,.3)`.
-
-## Assets
-
-No image assets. Icons are inline SVG (stroke-based, ~1.75px, round caps) — in production use **lucide-react** equivalents: `search`, `chevron-down`/`chevron-right`, `layers`, `download`, `share-2`, `filter`, `arrow-up`, `minus`, `x`, `calendar`, `edit`/`pencil`, `more-horizontal`, `kanban`/`trello`, `grid`/`layout-grid`. Avatars are initials on a colored circle.
-
-## Related Handoffs
-
-- **Export Modal** — the toolbar **Export** button should open it (see `Export Modal Wireframes.html` / its handoff if promoted).
-- **Filter Dropdown / Filters Modal** — the top-nav "All activities" filter pill drives the same filtering applied to the board.
-- **Member Edit Modal** / activity detail — the card **configure** button opens the activity editor.
-- **Share** — currently a stub here; design the real flow separately.
-
-## Files
-
-| File | Description |
-|---|---|
-| `Kanban View.html` | Full interactive prototype — app shell, toolbar, board, drag-and-drop between columns, collapsible columns, sort/color controls, hover configure button, and the share-modal stub. Open in any browser to explore. |
-
-> **Prototype structure note:** the single HTML file contains some superseded scaffolding (`App`, `KanbanCard`, `KanbanColumn`) left from iteration; the **rendered** path is `AppFinal` → `BoardWithDrag`, which is the source of truth for drag behavior and the card/column markup. Implement from `AppFinal`/`BoardWithDrag`; the standalone `KanbanCard`/`KanbanColumn` components are useful as a cleaner reference for the static card/column structure but their drag handlers are stubs.
-````
-
 ## File: docs/design/handoffs/share-modal/design_handoff_share_modal/Backdrop.jsx
 ````javascript
 /* Backdrop.jsx — Simplified Draba timeline app chrome behind the share modal */
@@ -34469,421 +34843,6 @@ Object.assign(window, {
   TweakSlider, TweakToggle, TweakRadio, TweakSelect,
   TweakText, TweakNumber, TweakColor, TweakButton,
 });
-````
-
-## File: docs/plans/phase-11.3-kanban-view.md
-````markdown
-# Phase 11.3 — Kanban View (Interactive)
-
-**UI name:** "Kanban" (view-switcher label, alongside Gantt / List / Calendar).
-
-**Status:** 🟢 Reviewed — scope settled. **Re-scoped 2026-06-03** from the original ROADMAP.md "Read-Only" plan. The original framing (static board, status-only columns, drag-to-change-status deferred to v2) is replaced with a **fully interactive board**: drag-to-recolumn, group-by-driven columns, color-by, configurable sorts, configurable card fields, and inline create/edit. This plan supersedes the ROADMAP §11.3 summary.
-
-**Design handoff:** `docs/design/handoffs/kanban-view/` (from Claude Design — `Kanban View.html` + `README.md`). The handoff is **directional**: it is a dark-hardcoded HTML/Babel prototype that models a single-timeline status board with HTML5 drag. We recreate it inside the draba codebase using real primitives (`@dnd-kit`, design tokens, `ActivityPanel`, `Badge`, the existing filter/Find/preference infrastructure) and **correct it against our actual data model** (see [Corrections to the handoff](#corrections-to-the-handoff)).
-
----
-
-## What we're actually building
-
-A **board view** that answers *"what is in each bucket, and let me move things between buckets"* — the column-and-card complement to Gantt (time), List (table), and Calendar (dates). Activities render as cards arranged into vertical columns. The **column axis is whatever `Group by` is set to** (Status by default). Cards can be **dragged between columns to change that grouping dimension** (drag to a new status column → status changes; drag to a member column → reassignment; etc.), clicked to open the existing edit panel, and created inline per column.
-
-It reuses almost all of its machinery from the three shipped views — the only genuinely new pieces are the **board layout + column model**, the **`@dnd-kit` drag-to-recolumn commit path**, and the **per-group-by drag semantics**.
-
-### The five requested capabilities (from the rethink)
-
-1. **Color by** (activity / member / status) — reused verbatim from Gantt/List/Calendar via `lib/activityColor.ts`. Drives the card's **left accent border** (3px). Independent of Group by.
-2. **Group by defines the columns** — the column axis *is* the Group by selection. Status → one column per timeline status; Member → one column per team member; etc. (full matrix below).
-3. **Sorts** — within-column ordering. See [Sort model](#sort-model).
-4. **Terminology** — draba uses **"Member"** and **"Assigned to"**, never "Assignee." The handoff's `assignee` becomes **member** in code (`memberById`, `assignedMemberIds`) and **"Assigned to"** in user-facing column/group labels. (See [Corrections](#corrections-to-the-handoff).)
-5. **Card field toggles** — a **"Card fields"** multi-select in the toolbar controls what each card shows (dates, status, tags, members, % complete, parent, description). Persists per-timeline-per-user. See [Card field configuration](#card-field-configuration).
-
----
-
-## Reused infrastructure (do not rebuild)
-
-Everything below already exists and Kanban consumes it as-is. This is most of why the phase is tractable (S–M, not L).
-
-| Concern | Existing asset | Notes |
-|---|---|---|
-| Activity + member fetch | `useTimelineActivities`, `useTeamMembers` (`hooks/useTeamActivities.ts`) | Same calls CalendarView makes. |
-| Status fetch | `useTimelineStatuses` (`hooks/useStatusTemplates.ts`) | Live per-timeline status rows (`id`, `name`, `color`, `icon`, `isClosed`, `position`). Already passed into views as `timelineStatuses`. |
-| Status / reassign / reparent mutation | `useUpdateActivity(timelineId)` | Already supports `{ statusId, assignedMemberIds, parentActivityId }` patches with optimistic cache update. **This is the entire drag-commit backend — no new endpoint.** |
-| Color resolution | `resolveActivityColor()` (`lib/activityColor.ts`) | activity / member / status; identical hues to other views. |
-| Member-combination grouping | `lib/memberGroups.ts` | `memberComboKey`, `memberComboLabel`, `comboSortComparator` — reused for "group by Assigned to (combination)". |
-| Filter engine | `applyActiveFilter` (`lib/presetFilters.ts`) + `FilterContext` | Board respects the active filter exactly like Calendar. |
-| Find | `matchEvents` (`lib/findMatcher.ts`) + `FindContext` | Dim non-matches, highlight matches, register ordered match IDs. |
-| Preferences | `usePreferenceMap` / `useUpsertPreference` (per-timeline) | Persists collapsed columns, card-field set, group/sort/color. |
-| Edit / create panels | `ActivityPanel.tsx` | Card click → detail/edit; column "+ Add" → create prefilled. |
-| Identity display | `Badge` + `resolveColorHex` (`components/identity/`) | Member avatars, status dots, tag chips. |
-| Drag library | `@dnd-kit/core` + `@dnd-kit/sortable` + `@dnd-kit/utilities` | Already a dependency (used by List). Use this, **not** HTML5 DnD from the prototype. |
-| Toolbar control idiom | `GanttToolbar` / `CalendarToolbar` | Copy the `select`/`btn`/`divider`/`label` className constants and layout. |
-| WebSocket sync | `useWebSocket` wiring in DashboardPage | Cards update live; no Kanban-specific work beyond consuming the shared cache. |
-
----
-
-## Corrections to the handoff
-
-The prototype encodes assumptions that are wrong for draba. Implement the **draba** column, not the prototype's:
-
-| Handoff says | draba reality | Resolution |
-|---|---|---|
-| `assignee` / "Assignee" | We use **Member** / "Assigned to"; an activity has `assignedMemberIds[]` (0..n) | Rename everywhere: code → `member`, labels → "Assigned to". Multi-member is the norm, not the exception. |
-| `priority: high\|medium\|low` field + footer arrow indicators + "Group by: Priority" + "Sort by: Priority" | **There is no priority field** on `Activity` | **Drop priority entirely.** Replace its slots with real fields: Group by gains Member / Parent; the footer indicator slot is reused for **% complete** (optional card field). |
-| Hardcoded status column set (`not-started`, `in-progress`, …) with fixed hexes | Statuses are **per-timeline live rows** from a template; null status is valid | Columns come from `useTimelineStatuses` in `position` order, colored by each status's identity color. Add a leading **"No status"** column for `statusId == null`. |
-| Columns = statuses (only Status wired) | Columns = **Group by** (Status / Assigned to / Parent / …) | Generalize: a `buildColumns(groupBy, …)` function produces `{ id, label, color, accept }[]`. |
-| Color by: Activity / Assignee | Color by: **activity / member / status** | Reuse the shared `ColorBy` type and `resolveActivityColor`. |
-| HTML5 `draggable` + raw drag state | `@dnd-kit` is in the repo | Use `DndContext` + `useDraggable`/`useDroppable` (or `SortableContext`) for reliable reordering + keyboard a11y. |
-| Dark-only hardcoded hexes (`#161b22`, …) | Token-driven, light+dark | Drive everything from `--card`, `--border`, `--muted-foreground`, etc. Map the token table in the handoff to our CSS vars. |
-| Share modal stub | Share lands in Phase 16 | Keep the toolbar Share/Export **buttons as stubs** (matching Gantt/Calendar), wired to the same no-op handlers. |
-
----
-
-## Column model (Group by → columns)
-
-`Group by` is the column axis. Each mode produces an ordered list of columns and defines what **dropping a card into a column** mutates.
-
-| Group by | Columns | Order | Drop mutates | Notes |
-|---|---|---|---|---|
-| **Status** (default) | one per timeline status + leading **"No status"** | status `position` | `statusId` → target status (or `null` for the No-status column) | The canonical kanban. Column header uses status color + name; count badge. |
-| **Assigned to (member)** | one per team member + leading **"Unassigned"** | team-member order | sets `assignedMemberIds` to `[targetMemberId]` (see [Reassign semantics](#reassign-semantics)) | Header uses member `Badge` + name. |
-| **Assigned to (combination)** | one per distinct member-combination present + **"Unassigned"** | `comboSortComparator` (from `memberGroups.ts`) | **drag disabled** (a combination is not a single settable value) | Mirrors the List/Gantt "combination" grouping. Read-only columns; cards still open/edit. |
-| **Parent activity** | one per parent that has children + **"No parent"** | parent title A–Z | `parentActivityId` → target parent (or `null`) | Useful for milestone/sub-task boards. |
-| **None** | single column ("All activities") | — | drag = reorder only | Fallback; mostly a degenerate case. Sort still applies. |
-
-- **Closed-status columns** (`isClosed`) render with the same muted treatment used elsewhere; they are normal drop targets.
-- A column whose grouping value is gone (e.g. a member removed) is dropped from the board; its cards reflow to Unassigned/No-status.
-- Columns can be **collapsed** to a 40px vertical rail (per-column, persisted). Matches the handoff.
-
-### Reassign semantics (Group by: Member)
-
-Activities are multi-member; a column is a single member. Decision: **dropping into member column X sets `assignedMemberIds = [X]`** (replace, not append) — the board treats member columns as "primary owner" buckets, which keeps drag deterministic and reversible. A card assigned to multiple members appears **only in its primary (first) member's column**; the extra members still show as avatars on the card. This is documented in a one-line helper tooltip on the Group-by control when Member is selected. (Append/multi-column membership is explicitly out of scope — revisit if users ask.)
-
----
-
-## Sort model
-
-Sort orders cards **within** each column. Options (toolbar `Sort by`, persisted):
-
-| Sort | Comparator | Rationale |
-|---|---|---|
-| **Start date** (default) | `startAt` asc, nulls last | Matches Gantt/List/Calendar default; "what's coming up in this bucket." |
-| **End date** | `endAt` asc, nulls last | "What's due first in this bucket" — the most useful kanban sort. |
-| **Title** | `title` A–Z, locale-aware | Stable, predictable lookup. |
-| **% complete** | `percentComplete` desc, nulls last | Surfaces nearly-done vs. not-started within a column. |
-| **Recently updated** | `updatedAt` desc | "What changed lately" — pairs well with real-time sync. |
-| **Manual** | persisted per-column order | **See decision below.** |
-
-**Manual ordering decision:** `Activity` has **no `kanbanOrder`/`position` field today**, so true manual within-column ordering would require a schema migration + API field + per-card persistence on every drop. For this phase, **Manual is deferred** — within-column order always follows the chosen Sort. Cross-column drag (the headline interaction) needs no order field because it mutates the grouping value, and the card reflows by Sort. If users want hand-curated card order, it becomes a fast follow (`11.3.1`): add `kanban_order REAL` to `activities`, persist on `dnd-kit` reorder, expose "Manual" sort. Flagged in [Open decisions](#open-decisions).
-
----
-
-## Card field configuration
-
-A **"Card fields"** dropdown (multi-select checkboxes) in the toolbar controls card content. Default-on marked ✓. Persisted per-timeline-per-user as a JSON string preference (`kanban_card_fields`).
-
-| Field | Default | Renders |
-|---|---|---|
-| Title | always on (not toggleable) | 13px/500, line-clamp 2 |
-| **Date range** | ✓ | calendar icon + `start – end` (respects `date_format` pref; honors timezone-safe formatting from 11.1.1) |
-| **Status** | ✓ (hidden automatically when Group by = Status, since the column already encodes it) | small status dot + name chip |
-| **Tags** | ✓ | tag chips (name + color), max ~3 then `+N` |
-| **Assigned to** | ✓ (hidden automatically when Group by = Member) | overlapping member `Badge` avatars (−6px), 2px card-bg ring |
-| **% complete** | ☐ | thin progress bar or `NN%` in the footer (reuses the slot the prototype gave priority) |
-| **Parent** | ☐ | parent-activity badge/pill (hidden when Group by = Parent) |
-| **Description** | ☐ | 1-line muted snippet under the title |
-
-- **Context-aware suppression:** the field that *is* the current Group by axis is auto-hidden (no point showing Status on a status-grouped card). Implemented as a derived "effective field set," the stored preference is unchanged.
-- The **color accent border** is always present (driven by Color by) — it is not a toggleable field.
-
----
-
-## Interactions
-
-- **Drag to recolumn** (`@dnd-kit`): pick up a card, drop on a column → commit the grouping mutation via `useUpdateActivity` with optimistic cache update (same pattern as `CalendarView.handleBarDragCommit`). Drop target highlights (`{colColor}` tint + accent border) and shows a placeholder gap. Keyboard-draggable (dnd-kit a11y). Disabled for combination grouping and `None`.
-- **Card click → edit:** opens `ActivityPanel` (detail/edit), exactly as Calendar/Gantt bar-click. A hover **configure** affordance (pencil, top-right) is optional polish; primary path is full-card click. The configure click must `stopPropagation` so it doesn't initiate a drag.
-- **Inline create:** each column header (or footer) has a **"+ Add"** affordance → opens `ActivityPanel` create mode **prefilled with that column's grouping value** (status = column status, or member = column member, etc.). Mirrors Calendar's empty-cell create.
-- **Collapse column:** header chevron / clicking the collapsed rail toggles; persisted per-column.
-- **Filter parity:** board renders `applyActiveFilter(...)` output; column counts reflect filtered set.
-- **Find parity:** non-matching cards dim to ~0.3; matches get the amber outline; active match gets the stronger outline; register ordered match IDs (column order, then in-column Sort order) so prev/next walks the board. If the active match is in a collapsed column, auto-expand it (mirrors Gantt's collapsed-group expand).
-- **Real-time:** WebSocket deltas update the shared TanStack cache; cards appear/move/vanish without reload. A card whose status changes in another tab animates to its new column on the next render.
-- **Archived hiding:** archived activities excluded by default (filter engine handles it).
-- **Empty column:** muted "No activities" placeholder (token-driven), still a valid drop target.
-- **Horizontal scroll:** board scrolls columns left→right as a group; each column scrolls its cards vertically and independently when card count exceeds height.
-
----
-
-## Component layout
-
-Mirrors the `components/calendar/` split (toolbar / grid / view-container):
-
-```
-components/kanban/
-  KanbanToolbar.tsx   # Group by · Sort by · Color by · Card fields · (Export/Share stubs)
-  KanbanBoard.tsx     # DndContext + columns row; renders KanbanColumn[]; owns drag overlay
-  KanbanColumn.tsx    # droppable column: header (dot/badge + label + count + collapse), card list, "+ Add"
-  KanbanCard.tsx      # draggable card: accent border, title, configurable fields, member avatars
-  KanbanView.tsx      # data container: fetch + filter + Find + colorBy + buildColumns + drag commit
-  kanbanColumns.ts    # pure: buildColumns(groupBy, activities, members, statuses) → Column[]; unit-tested
-  KanbanView.test.ts  # buildColumns + sort comparators (pure-fn tests, mirrors calendarLanes.test.ts)
-```
-
-`kanbanColumns.ts` is the pure, testable core (like `calendarLanes.ts`): given `groupBy` + the visible activities + members + statuses, produce ordered `{ id, label, color, icon?, accept, items }[]`. All grouping/labeling/ordering logic lives here so the React components stay thin.
-
-### Wiring into DashboardPage
-
-`ViewMode` already includes `'kanban'`. Add:
-- import `KanbanView`; add a `view === 'kanban'` branch in the content region (alongside the existing Gantt/List/Calendar branches), passing the same props CalendarView gets (`teamId`, `timelineId`, `colorBy`, `timelineStatuses={activeTimelineStatuses}`, `savedFilters`, `tags`, select/create callbacks, `onMembersLoaded`).
-- Kanban-specific toolbar state (`groupBy`, `sortBy`, `colorBy`, `cardFields`, `collapsedColumns`) lives in DashboardPage (like calendar state), persisted via per-timeline preferences (`kanban_group_by`, `kanban_sort_by`, `kanban_color_by`, `kanban_card_fields`, `kanban_collapsed`). Render `KanbanToolbar` in the sub-toolbar slot when `view === 'kanban'`.
-- Add the **Kanban** tab to the view switcher in `TopBar` (icon: lucide `kanban` / `trello`).
-
----
-
-## Build order
-
-1. **Switcher + shell:** add Kanban tab to `TopBar`; add `KanbanView` branch + toolbar state in DashboardPage; render an empty `KanbanBoard` placeholder. Verify the tab switches and persists.
-2. **`kanbanColumns.ts` + tests:** `buildColumns` for Status/Member/Parent/None/combination; sort comparators; "No status"/"Unassigned"/"No parent" sentinels. Unit-test thoroughly before UI.
-3. **Static board:** `KanbanColumn` + `KanbanCard`, color-by accent, count badges, empty state, collapse rail. No drag yet. Wire colorBy. Verify against a sample timeline.
-4. **Card fields:** `Card fields` multi-select in toolbar; render fields conditionally; context-aware suppression; persist preference.
-5. **Group by / Sort by / Color by controls:** full toolbar; columns rebuild on group-by change; in-column sort.
-6. **Drag-to-recolumn:** `DndContext` + droppable columns + draggable cards + drag overlay; commit via `useUpdateActivity` (optimistic); per-group-by drop semantics; disable for combination/None.
-7. **Create / edit wiring:** card click → `ActivityPanel`; "+ Add" → create prefilled with column value.
-8. **Filter + Find parity:** `applyActiveFilter`, `matchEvents`, register ordered matches, collapsed-column auto-expand, dim/highlight.
-9. **Polish + a11y:** keyboard drag, focus rings, transitions (~100–150ms), real-time sanity check across two tabs.
-10. **Docs:** `docs/log.md` Phase 11.3 entry; update `session-state.md`.
-
----
-
-## Exit criteria — safe to pause when
-
-- View switcher toggles Gantt ↔ List ↔ Calendar ↔ Kanban, persisting per timeline.
-- **Group by = Status** shows one column per timeline status (in `position` order) plus a "No status" column; renaming/recoloring a status in Settings updates the column header live (no reload).
-- Changing **Group by** to Member / Parent rebuilds the columns; combination + None render without errors.
-- **Color by** recolors the card accent border and matches Gantt/List/Calendar for the same activity.
-- **Sort by** reorders cards within every column; default is Start date.
-- **Card fields** toggles show/hide date range, status, tags, members, % complete, parent, description; selection persists across reload; the Group-by axis field is auto-suppressed.
-- **Dragging a card to another column commits the mutation** (status/reassign/reparent) via PATCH with optimistic update and no reload; dropping back reverts cleanly; combination/None columns are non-droppable without errors.
-- **Card click** opens the edit panel; **"+ Add"** opens create prefilled with the column's grouping value.
-- **Filter** scopes the board and column counts; **Find** dims non-matches, highlights matches across columns, walks prev/next, and auto-expands a collapsed column containing the active match.
-- A card mutated in a second tab moves to its new column within ~500ms (real-time).
-- Columns collapse/expand and survive reload; empty columns show a muted placeholder and remain valid drop targets.
-- `kanbanColumns` unit tests pass; `pnpm --filter web lint` + `pnpm --filter web test` pass.
-
----
-
-## Decisions (resolved)
-
-1. ✅ **Member-column reassign = replace** — dropping a card into member column X sets `assignedMemberIds = [X]`. A multi-member card lives only in its primary member's column; extra members still render as avatars on the card. Append / multi-column membership is out of scope. _(Confirmed 2026-06-03.)_
-2. ✅ **Combination columns are non-droppable** — "Assigned to (combination)" and "None" render columns that are read-only drop-wise (a combination is not a single settable value); cards still open and edit normally. _(Confirmed 2026-06-03.)_
-
-## Open decisions (deferred, no action needed for v1)
-
-3. **Manual within-column order** — deferred (no `Activity` order field). If wanted later: `11.3.1` adds `kanban_order REAL` + persist-on-drop + a "Manual" sort. Cards order by the chosen Sort in v1.
-4. **Group by: Tag** — not included (tags are multi-valued, so a card would appear in N columns; dragging is ambiguous). Could be added as a **read-only** (non-droppable) grouping later if useful.
-5. **Configure pencil vs. full-card click** — v1 uses full-card click to open the edit panel; the hover pencil is optional polish, not required.
-````
-
-## File: docs/REQUIREMENTS.md
-````markdown
-# Requirements
-
-## Product Summary
-draba is a lightweight team coordination and planning tool. It answers one question — **"Who is working on what, and when?"** — without the overhead of a full project management suite. The primary interface is a horizontal timeline grouped by person, where work appears as blocks across time. Teams adopt it in minutes, not weeks.
-
-**Target users:** Small teams of 5–20 people. Marketing, creative, and product teams who need visibility across people and time without tickets, sprints, or dependencies.
-
-**Positioning:** Not a calendar replacement. Not a project management tool. A shared team timeline.
-
----
-
-## Functional Requirements
-
-### Users and Auth
-- [ ] Admins can invite users to a team via email invite link
-- [ ] Invited users register by following the invite link and setting up an account (email + password)
-- [ ] Users have: display name, email, optional avatar
-- [ ] Four levels of participation:
-  - **Team Admins:** Manage the team overall. Can invite new people to the team and can create multiple teams.
-  - **Timeline Admins:** Scoped to specific timelines. Can configure those timelines and add/remove people (from the team) to their timelines.
-  - **Users:** Have a login. Can participate in timelines assigned to them.
-  - **Participants:** Do not have a login. Managed as team members (e.g. contractors) so they can be scheduled on timelines and assigned colors without needing account access.
-- [ ] Users can belong to multiple teams simultaneously
-- [ ] Password reset via email
-
-### API Access Tokens
-Programmatic access (CLI, webhooks, MCP) uses scoped API tokens rather than user passwords.
-
-- [ ] Admins and members can generate named API tokens for their account
-- [ ] Tokens have a configurable permission scope: read-only | add | edit/delete own | edit/delete all
-- [ ] Tokens can be revoked at any time
-- [ ] Token values are shown once at creation and never stored in plaintext (hashed at rest)
-- [ ] CLI, webhook consumers, and MCP integrations authenticate using these tokens
-
-### Teams
-- [ ] Admins can create teams with a name, description, notes, and identity (icon + color)
-- [ ] Admins can edit team name, description, notes, and identity
-- [ ] Admins can invite users to a team by email (one-time invite)
-- [ ] Admins can generate a reusable invite link for a team; anyone with the link can register and join
-- [ ] Admins can revoke or regenerate the reusable invite link
-- [ ] Admins can add existing registered users to a team
-- [ ] Admins can remove members from a team (cannot remove the last admin)
-- [ ] Admins can promote a member to team admin or demote to member
-- [ ] Admins can create participants (login-less team members) who can be assigned to activities but don't have draba accounts
-- [ ] Teams can be archived (hidden from active views, data preserved, restorable)
-- [ ] Teams have a name, description, notes, identity, and a list of members
-
-### Members
-- [ ] Each team member has a display name, identity (icon + color), and a role (admin, member, or participant)
-- [ ] Admins can edit any member's display name, identity, and role
-- [ ] Members can edit their own display name and identity
-- [ ] Members can be inactivated (access disabled, data preserved, reversible) — uses the same archive pattern as other entities but displayed as "Inactivate" in the UI
-- [ ] Inactivated members cannot log in; their activity assignments are preserved
-- [ ] Super admins can promote any non-participant member to super admin status
-- [ ] Super admins can inactivate or delete user accounts (delete only when no active activities and single team)
-- [ ] Each member has computed stats: timeline counts (active/archived), activity counts (past due, running, upcoming, unscheduled, archived) — date-relative, not status-relative
-
-### Activities
-Activities are the core data object — a block of time assigned to one or more people.
-
-- [ ] Activities have: title, start date/time, end date/time, description/notes, status, percent complete, tags, icon, color, assigned people (one or more)
-- [ ] Activities can have a parent activity (another event within the same team), enabling simple nesting (e.g., "Launch Week" contains "Design Review")
-- [ ] Activities store all standard CalDAV VEVENT fields natively (UID, DTSTART, DTEND, SUMMARY, DESCRIPTION, LOCATION, URL, RRULE, etc.) so no information is lost in sync
-- [ ] Activities support recurrence rules (RRULE) from CalDAV/Google
-- [ ] Activities are scoped to a team
-- [ ] Activities can be archived (hidden from active views but not deleted; recoverable)
-
-### Timelines
-Timelines are named viewing windows — a name and a date range — scoped to a team. They are not data containers; they are views over the team's activities.
-
-- [ ] Teams can create multiple timelines, including overlapping ones
-- [ ] Each timeline has: name, start date, end date
-- [ ] Team membership controls who can view a timeline by default; team admins implicitly access all timelines, members require an explicit access grant (see RBAC in Phase 8.0)
-- [ ] Timelines can be archived (removed from active list but preserved; recoverable)
-- [ ] External / public visibility is handled via the **Shares** model (below) — a timeline is not inherently "public" or "restricted"; it becomes externally visible only via a share link the team explicitly creates
-
-### Timeline Views
-The primary view is a Gantt chart. Additional views display the same underlying activities in different formats.
-
-- [ ] **Timeline / Gantt view** (primary) — horizontal Gantt chart; one row per activity, bars span their date range; see `docs/design/UX_PATTERNS.md`
-  - A **timeline sub-toolbar** sits between the top bar and the grid. It provides:
-    - **Zoom** — variable column width (day granularity, zoom in/out)
-    - **Group by** — controls how activity rows are organized:
-      - _None_ — flat list, sorted by the active sort key
-      - _Member_ — one labeled section per assigned team member; events with multiple assignees appear under their primary assignee
-      - _Parent activity_ — root activities shown first; child events (those with `parentActivityId` set) indented beneath their parent
-    - **Sort by** — Start date (default), End date, Title A–Z
-    - **Export** — triggers CSV/Excel export of the visible date range (wires in Phase 13)
-- [ ] **Calendar view** — weekly, daily, and monthly grid layouts (standard calendar format)
-- [ ] **List view** (also referred to as the "spreadsheet" view) — dense, sortable, inline-editable table of activities; columns are show/hide-able and resizable; supports bulk selection for archive/delete/status-change. The "power user" surface for scanning and editing many activities at once.
-- [ ] **Kanban view** — interactive board; the **column axis is the active Group by** (Status by default; also Assigned-to / Parent / None). Cards = activities, with a left accent border driven by Color by (activity / member / status); multiple members shown as stacked avatars. **Dragging a card between columns mutates that grouping value** (status change / reassign / reparent). Configurable card fields (dates / status / tags / assigned-to / % complete / parent / description), within-column sort, inline create per column, and click-to-edit. See [docs/plans/phase-11.3-kanban-view.md](plans/phase-11.3-kanban-view.md).
-- [ ] View switcher in the timeline header to toggle between available views
-- [ ] Each view persists its own toolbar state per timeline (group / sort / zoom / column visibility / filter preset) via user preferences
-
-### Team Configuration
-Admins can customize team-level settings that apply to all members and views.
-
-**Statuses**
-- [ ] Each team has a configurable list of statuses (name + color)
-- [ ] Default statuses created when a team is created: `Planned`, `In Progress`, `Done`
-- [ ] Admins can add, rename, reorder, and delete statuses
-- [ ] Statuses have a display order that controls column order in Kanban view and sort order in dropdowns
-- [ ] At least one status must always exist (cannot delete the last one)
-- [ ] Deleting a status requires choosing a replacement status for any events currently using it
-- [ ] Status color is used as the column header color in Kanban view
-
-**Member Colors**
-- [ ] Each team member has a display color, used to color-code their events in Kanban view and any other person-first views
-- [ ] Admin can set member colors; members can also set their own
-- [ ] Default color is auto-assigned from a preset palette on invite acceptance
-
-### Real-Time Collaboration
-- [ ] Multiple users can view and edit the same timeline simultaneously
-- [ ] Changes (event create, update, delete) appear in real-time for all connected users
-- [ ] No last-write-wins data loss — changes are applied and broadcast immediately
-
-### Calendar Sync
-- [ ] Users can connect a personal Google Calendar account (OAuth 2.0) for two-way sync of their assigned events
-- [ ] Users can connect a personal CalDAV account (iOS/macOS Calendar, Fastmail, Thunderbird, etc.) for two-way sync
-- [ ] draba implements a built-in CalDAV endpoint — Apple Calendar users point their app directly at the draba server
-- [ ] Outbound sync: when an event is created/updated/deleted in draba, changes push to all connected personal calendars for assigned users
-- [ ] Inbound sync: changes made in Google Calendar trigger a webhook that updates draba
-- [ ] **Team read-only feed:** each timeline exposes a subscribable iCal/CalDAV URL that any calendar app can subscribe to for a read-only view of all team events in that timeline
-- [ ] Public iCal/Google Calendar feeds include only basic event info (title, date range, assigned people) — notes and internal fields are stripped
-- [ ] Microsoft/Outlook sync is explicitly out of scope for v1
-
-### External Connectors (e.g. Asana, Aha!)
-- [ ] Draba supports a one-way, read-only inbound feed from external systems of record.
-- [ ] Teams can generate unique inbound Webhook URLs to paste into Asana, Jira, etc.
-- [ ] External events appear alongside hand-crafted Draba events in the timeline and Gantt views.
-- [ ] Events generated via connectors are marked as "read-only" in Draba — users cannot change dates or properties via the Draba UI (they must change them in Asana).
-- [ ] The event card links back to the original source URL.
-
-### Sharing and Public Access
-Sharing in draba is a first-class entity, not a property of a timeline. A **Share** is a frozen pairing of `{ timeline + view type + view configuration + optional password + optional expiry }`. One timeline can have many shares, each tuned for a different audience.
-
-- [ ] A Share captures: the source timeline, the view type (Gantt / List / Calendar / Kanban), and a snapshot of the view's configuration at creation time (filter, sort, group, zoom, column visibility, etc.)
-- [ ] The view-config snapshot is **frozen** at creation — later edits to the live view do not retroactively change existing shares
-- [ ] A Share can optionally require a password to view (stored hashed; not retrievable)
-- [ ] A Share can optionally expire on a given date; expired shares return a clear "this link has expired" page
-- [ ] A Share can be revoked at any time by the creator or a team admin; revoked links are immediately unusable
-- [ ] A single timeline can host many independent shares simultaneously (e.g., a public Gantt for stakeholders + a password-protected List for contractors)
-- [ ] Share viewers see the chosen view in read-only mode — no drag, no inline edit, no create
-- [ ] Share URLs are unguessable (URL-safe random tokens); password-protected shares additionally rate-limit unlock attempts
-- [ ] Team admins can list, edit, and revoke any share for their team; members can only manage shares they created
-- [ ] Each timeline also exposes a public iCal feed URL (separate from the Share model) containing sanitized event data for calendar app subscription — see Calendar Sync
-
-### Data Portability
-Two flavors: **tabular** (data round-trips — CSV / xlsx in and out) and **visual** (one-way view exports for sharing offline — PDF / PNG / Markdown).
-
-**Tabular (round-trip):**
-- [ ] Events can be exported to CSV and Excel (.xlsx) from any timeline view
-- [ ] Events can be imported from a CSV or Excel file
-- [ ] A downloadable template file is provided showing the expected import format
-- [ ] Import shows a preview and validation errors before committing
-
-**Visual (view-shaped, one-way out):**
-- [ ] Gantt → PDF (landscape, paginated by date range) and PNG (single page)
-- [ ] Kanban → PDF (columns side-by-side, paginated when too wide for one page) and PNG
-- [ ] List → CSV, xlsx, Markdown table, and PDF
-- [ ] Calendar → PDF, one page per month / week depending on active layout
-- [ ] All visual exports include a header strip: team name, timeline name, generated-at timestamp, applied filter description
-- [ ] All visual exports respect the active filter / sort / group at time of export — the deliverable is "what's on the screen right now"
-
----
-
-## Non-Functional Requirements
-- [ ] API response time < 200ms for standard reads under normal load
-- [ ] Real-time updates delivered within 500ms of a change
-- [ ] Self-hosted: runs as a single Docker container with no external service dependencies
-- [ ] Direct binary install is also supported (for users who don't use Docker)
-- [ ] Database: SQLite by default; MySQL/MariaDB and Postgres are supported configuration options
-- [ ] Same Docker artifact deploys to self-hosted and any future cloud offering
-- [ ] All API endpoints are authenticated (except public timeline share links and public iCal feeds)
-- [ ] All secrets, calendar credentials, and API tokens stored encrypted/hashed at rest
-
----
-
-## Constraints
-- Must run as a single Docker container with zero required external services (SQLite path)
-- No paid third-party services required for self-hosting
-- Calendar sync credentials and API tokens must never be stored in plaintext
-- No server-side rendering required
-
----
-
-## Out of Scope (v1)
-- Microsoft / Outlook / Exchange calendar sync
-- Kanban manual within-column card ordering (cards order by the chosen Sort in v1; hand-curated order needs an activity order field — possible Phase 11.3.1)
-- Gantt dependency arrows / critical-path visualization (parent–child grouping is in scope; visual dependency arrows are not)
-- Time tracking or billable hours
-- Task dependencies or critical path
-- Workload balancing or capacity planning
-- Billing or invoicing
-- Automation or rule-based triggers
-- Mobile native apps (web/PWA first)
-- Multi-tenant cloud hosting (self-hosted per-customer to start)
-- SSO / SAML / OAuth login (email + password only for v1)
-- MCP server integration (parking lot — token auth system is designed to support it when ready)
-- CLI binary (parking lot — token auth system is designed to support it when ready)
 ````
 
 ## File: packages/api/internal/api/admin_handler.go
@@ -46039,6 +45998,51 @@ export default defineConfig(({ mode }) => {
     },
   }
 })
+````
+
+## File: .golangci.yml
+````yaml
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - staticcheck
+    - ineffassign
+    - gofmt
+    - goimports
+    - gocritic
+    - revive
+    - misspell
+    - nolintlint
+
+  settings:
+    goimports:
+      local-prefixes: github.com/I0-1O/draba
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - style
+        - performance
+    revive:
+      rules:
+        - name: exported
+          severity: warning
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+
+issues:
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - errcheck
 ````
 
 ## File: OIDC_PR.md
