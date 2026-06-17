@@ -10,12 +10,15 @@ linters:
     - govet
     - staticcheck
     - ineffassign
-    - gofmt
-    - goimports
     - gocritic
     - revive
     - misspell
     - nolintlint
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
 
   settings:
     gocritic:
