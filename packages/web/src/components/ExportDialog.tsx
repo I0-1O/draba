@@ -26,9 +26,11 @@ import {
   type ExportFormatId, type ExportViewType,
 } from '@/lib/exportCapabilities'
 import {
-  buildListMarkdown, buildKanbanMarkdown, buildCalendarMarkdown,
-  buildListPlainText, buildKanbanPlainText, buildCalendarPlainText,
-  buildListHtml, buildKanbanHtml, buildCalendarHtml,
+  buildListMarkdown, buildListMarkdownOutline,
+  buildKanbanMarkdown, buildCalendarMarkdown,
+  buildListPlainText, buildListPlainTextOutline,
+  buildKanbanPlainText, buildCalendarPlainText,
+  buildListHtml, buildListHtmlOutline, buildKanbanHtml, buildCalendarHtml,
   type TextExportData,
 } from '@/lib/textExport'
 import type { FilterDefinition } from '@/lib/filterTypes'
@@ -79,22 +81,30 @@ type Scope = 'view' | 'all'
 
 // ── Client-side text generation ────────────────────────────────────────────────
 
-function generateMarkdown(view: ExportViewType, data: TextExportData, timelineName: string, filterLabel: string | null): string {
-  if (view === 'list') return buildListMarkdown(data, timelineName, filterLabel)
+type ListStyle = 'table' | 'outline'
+
+function generateMarkdown(view: ExportViewType, data: TextExportData, timelineName: string, filterLabel: string | null, listStyle: ListStyle): string {
+  if (view === 'list') return listStyle === 'outline'
+    ? buildListMarkdownOutline(data, timelineName, filterLabel)
+    : buildListMarkdown(data, timelineName, filterLabel)
   if (view === 'kanban') return buildKanbanMarkdown(data, timelineName, filterLabel)
   if (view === 'calendar') return buildCalendarMarkdown(data, timelineName, filterLabel)
-  return buildListMarkdown(data, timelineName, filterLabel) // fallback
+  return buildListMarkdown(data, timelineName, filterLabel)
 }
 
-function generatePlainText(view: ExportViewType, data: TextExportData, timelineName: string, filterLabel: string | null): string {
-  if (view === 'list') return buildListPlainText(data, timelineName, filterLabel)
+function generatePlainText(view: ExportViewType, data: TextExportData, timelineName: string, filterLabel: string | null, listStyle: ListStyle): string {
+  if (view === 'list') return listStyle === 'outline'
+    ? buildListPlainTextOutline(data, timelineName, filterLabel)
+    : buildListPlainText(data, timelineName, filterLabel)
   if (view === 'kanban') return buildKanbanPlainText(data, timelineName, filterLabel)
   if (view === 'calendar') return buildCalendarPlainText(data, timelineName, filterLabel)
   return buildListPlainText(data, timelineName, filterLabel)
 }
 
-function generateHtml(view: ExportViewType, data: TextExportData, timelineName: string, filterLabel: string | null): string {
-  if (view === 'list') return buildListHtml(data, timelineName, filterLabel)
+function generateHtml(view: ExportViewType, data: TextExportData, timelineName: string, filterLabel: string | null, listStyle: ListStyle): string {
+  if (view === 'list') return listStyle === 'outline'
+    ? buildListHtmlOutline(data, timelineName, filterLabel)
+    : buildListHtml(data, timelineName, filterLabel)
   if (view === 'kanban') return buildKanbanHtml(data, timelineName, filterLabel)
   if (view === 'calendar') return buildCalendarHtml(data, timelineName, filterLabel)
   return buildListHtml(data, timelineName, filterLabel)
@@ -148,6 +158,7 @@ export default function ExportDialog({
   const formats = getExportFormats(view)
   const [formatId, setFormatId] = useState<ExportFormatId>('csv')
   const [scope, setScope] = useState<Scope>('view')
+  const [listStyle, setListStyle] = useState<ListStyle>('table')
   const [done, setDone] = useState(false)
   const [clientPending, setClientPending] = useState(false)
   const { download, isPending: serverPending } = useExport(timelineId, timelineName)
@@ -191,8 +202,8 @@ export default function ExportDialog({
       }
 
       if (format.id === 'clipboard') {
-        const plainText = generatePlainText(view, data, timelineName, filterLabel)
-        const htmlText = generateHtml(view, data, timelineName, filterLabel)
+        const plainText = generatePlainText(view, data, timelineName, filterLabel, listStyle)
+        const htmlText = generateHtml(view, data, timelineName, filterLabel, listStyle)
         setClientPending(true)
         copyToClipboard(plainText, htmlText)
           .then(flashDone)
@@ -204,8 +215,8 @@ export default function ExportDialog({
       // markdown or plaintext — generate and download
       const isMarkdown = format.id === 'markdown'
       const content = isMarkdown
-        ? generateMarkdown(view, data, timelineName, filterLabel)
-        : generatePlainText(view, data, timelineName, filterLabel)
+        ? generateMarkdown(view, data, timelineName, filterLabel, listStyle)
+        : generatePlainText(view, data, timelineName, filterLabel, listStyle)
       const mimeType = isMarkdown ? 'text/markdown;charset=utf-8' : 'text/plain;charset=utf-8'
       const blob = new Blob([content], { type: mimeType })
       saveBlob(blob, buildExportFilename(timelineName, format.ext))
@@ -220,7 +231,7 @@ export default function ExportDialog({
       filter: scope === 'view' && !viewActivityIds ? filterDefinition : null,
       columns: isDataFormat ? listExportColumns : null,
     }).then(flashDone)
-  }, [format, view, timelineName, filterLabel, textExportData, scope, viewActivityIds, filterDefinition, listExportColumns, download, flashDone])
+  }, [format, view, timelineName, filterLabel, textExportData, scope, listStyle, viewActivityIds, filterDefinition, listExportColumns, download, flashDone])
 
   const emptyView = filteredCount === 0
   const subWithFilter = filterLabel !== null
@@ -323,6 +334,28 @@ export default function ExportDialog({
               </div>
             </div>
 
+            {/* Style picker — table vs outline, only for list view text formats */}
+            {(format.id === 'markdown' || format.id === 'plaintext' || format.id === 'clipboard') && view === 'list' && (
+              <div>
+                <div className="mb-1.5 text-[11px] font-bold uppercase tracking-[0.06em] text-muted-foreground">Style</div>
+                <div className="flex overflow-hidden rounded-[var(--radius-lg)] border border-border">
+                  <StyleOption
+                    label="Table"
+                    desc="Aligned columns"
+                    selected={listStyle === 'table'}
+                    onSelect={() => setListStyle('table')}
+                  />
+                  <div className="w-px shrink-0 bg-border" />
+                  <StyleOption
+                    label="Outline"
+                    desc="Bullet list with fields"
+                    selected={listStyle === 'outline'}
+                    onSelect={() => setListStyle('outline')}
+                  />
+                </div>
+              </div>
+            )}
+
             {/* Scope picker — only for server-side data formats */}
             {format.scope && (
               <div>
@@ -359,7 +392,7 @@ export default function ExportDialog({
             {/* Clipboard note */}
             {format.id === 'clipboard' && (
               <div className="rounded-[var(--radius-md)] bg-muted px-3 py-2.5 text-[12px] leading-[1.5] text-muted-foreground">
-                Copies <strong className="text-foreground">rich text</strong> (HTML) + plain text — paste into Slack, Google Docs, or Word to get a formatted table.
+                Copies <strong className="text-foreground">rich text</strong> (HTML) + plain text — paste into Slack, Google Docs, or Word to get a formatted {view === 'list' && listStyle === 'outline' ? 'outline' : 'table'}.
               </div>
             )}
           </div>
@@ -377,6 +410,21 @@ export default function ExportDialog({
       </div>
     </div>,
     document.body,
+  )
+}
+
+function StyleOption({ label, desc, selected, onSelect }: { label: string; desc: string; selected: boolean; onSelect: () => void }) {
+  return (
+    <button
+      onClick={onSelect}
+      className={cn(
+        'flex flex-1 flex-col items-start px-3 py-2.5 text-left transition-colors',
+        selected ? 'bg-[hsl(188_59%_38%/0.09)]' : 'bg-transparent hover:bg-muted',
+      )}
+    >
+      <span className="text-[13px] font-semibold text-foreground">{label}</span>
+      <span className="text-[11.5px] text-muted-foreground">{desc}</span>
+    </button>
   )
 }
 

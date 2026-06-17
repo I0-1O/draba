@@ -208,6 +208,75 @@ function depthPrefix(depth: number): string {
 
 // ── Markdown generators ────────────────────────────────────────────────────────
 
+/**
+ * List view → Markdown outline (bullet list).
+ * One bullet per activity; only non-empty fields are emitted as indented lines.
+ * Children are nested bullets (depth × 2 spaces of leading indent).
+ * Group-by produces ## sections.
+ */
+export function buildListMarkdownOutline(
+  data: TextExportData,
+  timelineName: string,
+  filterLabel: string | null,
+): string {
+  const { listDisplayRows, memberById, statusById, tagById, activityTitleById } = data
+  const lines: string[] = [buildHeader(timelineName, filterLabel)]
+
+  if (!listDisplayRows || listDisplayRows.length === 0) {
+    lines.push('_No activities._')
+    return lines.join('\n')
+  }
+
+  const fmtActivity = (activity: ApiActivity, bulletIndent: string): string[] => {
+    const result: string[] = []
+    const datePart = fmtDateRange(activity.startAt, activity.endAt)
+    const assignees = resolveAssignees(activity, memberById)
+    let firstLine = `${bulletIndent}- **${escMd(activity.title)}**`
+    if (datePart !== '—') firstLine += ` (${datePart})`
+    if (assignees !== '—') firstLine += ` — ${assignees}`
+    result.push(firstLine)
+
+    const fi = `${bulletIndent}  `
+    if (activity.description) result.push(`${fi}${escMd(activity.description)}`)
+    const status = activity.statusId ? statusById.get(activity.statusId) : null
+    if (status) result.push(`${fi}Status: ${escMd(status)}`)
+    if (activity.percentComplete != null) result.push(`${fi}Progress: ${activity.percentComplete}%`)
+    const parent = activity.parentActivityId ? activityTitleById.get(activity.parentActivityId) : null
+    if (parent) result.push(`${fi}Parent: ${escMd(parent)}`)
+    const tags = resolveTags(activity, tagById)
+    if (tags) result.push(`${fi}Tags: ${tags}`)
+    if (activity.location) result.push(`${fi}Location: ${escMd(activity.location)}`)
+    if (activity.url) result.push(`${fi}URL: ${activity.url}`)
+    return result
+  }
+
+  const hasGroups = listDisplayRows.some(r => r.kind === 'group')
+
+  if (hasGroups) {
+    let firstGroup = true
+    for (const row of listDisplayRows) {
+      if (row.kind === 'group') {
+        if (!firstGroup) lines.push('')
+        lines.push(`## ${row.label} (${row.count})`)
+        lines.push('')
+        firstGroup = false
+      } else {
+        lines.push(...fmtActivity(row.activity, '  '.repeat(row.depth)))
+        lines.push('')
+      }
+    }
+  } else {
+    for (const row of listDisplayRows) {
+      if (row.kind === 'activity') {
+        lines.push(...fmtActivity(row.activity, '  '.repeat(row.depth)))
+        lines.push('')
+      }
+    }
+  }
+
+  return lines.join('\n').trimEnd()
+}
+
 /** List view → GitHub-flavored Markdown table, respecting column visibility, sort, group-by, and hierarchy. */
 export function buildListMarkdown(
   data: TextExportData,
@@ -354,6 +423,77 @@ export function buildCalendarMarkdown(
 
 function pad(s: string, width: number): string {
   return s.length >= width ? s : `${s}${' '.repeat(width - s.length)}`
+}
+
+/**
+ * List view → plain-text outline (bullet list).
+ * Mirrors buildListMarkdownOutline without Markdown syntax.
+ * Root activities use •, children use ◦ (depth 1+).
+ */
+export function buildListPlainTextOutline(
+  data: TextExportData,
+  timelineName: string,
+  filterLabel: string | null,
+): string {
+  const { listDisplayRows, memberById, statusById, tagById, activityTitleById } = data
+  const lines: string[] = [buildPlainHeader(timelineName, filterLabel)]
+
+  if (!listDisplayRows || listDisplayRows.length === 0) {
+    lines.push('No activities.')
+    return lines.join('\n')
+  }
+
+  const fmtActivity = (activity: ApiActivity, depth: number): string[] => {
+    const result: string[] = []
+    const bulletIndent = '  '.repeat(depth)
+    const bullet = depth === 0 ? '•' : '◦'
+    const datePart = fmtDateRange(activity.startAt, activity.endAt)
+    const assignees = resolveAssignees(activity, memberById)
+    let firstLine = `${bulletIndent}${bullet} ${activity.title}`
+    if (datePart !== '—') firstLine += ` (${datePart})`
+    if (assignees !== '—') firstLine += ` — ${assignees}`
+    result.push(firstLine)
+
+    const fi = `${bulletIndent}  `
+    if (activity.description) result.push(`${fi}${activity.description}`)
+    const status = activity.statusId ? statusById.get(activity.statusId) : null
+    if (status) result.push(`${fi}Status: ${status}`)
+    if (activity.percentComplete != null) result.push(`${fi}Progress: ${activity.percentComplete}%`)
+    const parent = activity.parentActivityId ? activityTitleById.get(activity.parentActivityId) : null
+    if (parent) result.push(`${fi}Parent: ${parent}`)
+    const tags = resolveTags(activity, tagById)
+    if (tags) result.push(`${fi}Tags: ${tags}`)
+    if (activity.location) result.push(`${fi}Location: ${activity.location}`)
+    if (activity.url) result.push(`${fi}URL: ${activity.url}`)
+    return result
+  }
+
+  const hasGroups = listDisplayRows.some(r => r.kind === 'group')
+
+  if (hasGroups) {
+    let firstGroup = true
+    for (const row of listDisplayRows) {
+      if (row.kind === 'group') {
+        if (!firstGroup) lines.push('')
+        const heading = `${row.label.toUpperCase()} (${row.count})`
+        lines.push(heading)
+        lines.push('─'.repeat(heading.length))
+        firstGroup = false
+      } else {
+        lines.push(...fmtActivity(row.activity, row.depth))
+        lines.push('')
+      }
+    }
+  } else {
+    for (const row of listDisplayRows) {
+      if (row.kind === 'activity') {
+        lines.push(...fmtActivity(row.activity, row.depth))
+        lines.push('')
+      }
+    }
+  }
+
+  return lines.join('\n').trimEnd()
 }
 
 /** List view → space-padded plain-text table, respecting column visibility, sort, group-by, and hierarchy. */
@@ -583,6 +723,81 @@ export function buildListHtml(
   }
 
   return `${htmlHeaderBlock(timelineName, filterLabel)}<table style="border-collapse:collapse">${thead}<tbody>${rows.join('')}</tbody></table>`
+}
+
+/** List view → HTML outline (bullet list) for clipboard. Mirrors buildListMarkdownOutline. */
+export function buildListHtmlOutline(
+  data: TextExportData,
+  timelineName: string,
+  filterLabel: string | null,
+): string {
+  const { listDisplayRows, memberById, statusById, tagById, activityTitleById } = data
+
+  const LI = 'font-family:system-ui,sans-serif;font-size:13px;margin:3px 0'
+  const FIELD = 'font-family:system-ui,sans-serif;font-size:12px;color:#555;margin:1px 0 1px 0'
+
+  const fmtActivity = (activity: ApiActivity, depth: number): string => {
+    const datePart = fmtDateRange(activity.startAt, activity.endAt)
+    const assignees = resolveAssignees(activity, memberById)
+    let firstLine = `<strong>${htmlEsc(activity.title)}</strong>`
+    if (datePart !== '—') firstLine += ` <span style="color:#777">(${htmlEsc(datePart)})</span>`
+    if (assignees !== '—') firstLine += ` — ${htmlEsc(assignees)}`
+
+    const fields: string[] = []
+    if (activity.description) fields.push(htmlEsc(activity.description))
+    const status = activity.statusId ? statusById.get(activity.statusId) : null
+    if (status) fields.push(`Status: ${htmlEsc(status)}`)
+    if (activity.percentComplete != null) fields.push(`Progress: ${activity.percentComplete}%`)
+    const parent = activity.parentActivityId ? activityTitleById.get(activity.parentActivityId) : null
+    if (parent) fields.push(`Parent: ${htmlEsc(parent)}`)
+    const tags = resolveTags(activity, tagById)
+    if (tags) fields.push(`Tags: ${htmlEsc(tags)}`)
+    if (activity.location) fields.push(`Location: ${htmlEsc(activity.location)}`)
+    if (activity.url) fields.push(`URL: ${htmlEsc(activity.url)}`)
+
+    const fieldHtml = fields.length > 0
+      ? `<div style="margin:2px 0 0 0">${fields.map(f => `<div style="${FIELD}">${f}</div>`).join('')}</div>`
+      : ''
+
+    const paddingLeft = depth > 0 ? `padding-left:${depth * 20}px;` : ''
+    return `<li style="${paddingLeft}${LI}">${firstLine}${fieldHtml}</li>`
+  }
+
+  const activityList = listDisplayRows ?? data.activities.map(a => ({ kind: 'activity' as const, activity: a, depth: 0 }))
+
+  if (activityList.length === 0) {
+    return `${htmlHeaderBlock(timelineName, filterLabel)}<p style="font-family:system-ui,sans-serif;font-size:13px"><em>No activities.</em></p>`
+  }
+
+  const hasGroups = activityList.some(r => r.kind === 'group')
+  const sections: string[] = []
+
+  if (hasGroups) {
+    let items: string[] = []
+    let groupLabel = ''
+    let groupCount = 0
+    const flush = () => {
+      if (groupLabel) sections.push(`<h3 style="font-family:system-ui,sans-serif;font-size:14px;margin:16px 0 4px">${htmlEsc(groupLabel)} (${groupCount})</h3><ul style="margin:0;padding-left:20px">${items.join('')}</ul>`)
+    }
+    for (const row of activityList) {
+      if (row.kind === 'group') {
+        flush()
+        groupLabel = row.label
+        groupCount = row.count
+        items = []
+      } else {
+        items.push(fmtActivity(row.activity, row.depth))
+      }
+    }
+    flush()
+  } else {
+    const items = activityList
+      .filter((r): r is { kind: 'activity'; activity: ApiActivity; depth: number } => r.kind === 'activity')
+      .map(r => fmtActivity(r.activity, r.depth))
+    sections.push(`<ul style="margin:0;padding-left:20px">${items.join('')}</ul>`)
+  }
+
+  return `${htmlHeaderBlock(timelineName, filterLabel)}${sections.join('')}`
 }
 
 /** Kanban view → HTML sections with optional hierarchy nesting. */
