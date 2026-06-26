@@ -2,7 +2,7 @@
 
 _Updated after each significant work session. Read this first to orient — it is intentionally short. Per-phase implementation detail lives in [docs/log.md](../log.md); this file is a current-state snapshot only._
 
-**Last updated:** 2026-06-17 (Phase 14.2 complete — textual exports.)
+**Last updated:** 2026-06-26 (/test-phase 14.2 — all subagents pass, 14.1/14.2 Docker-verified.)
 
 ---
 
@@ -12,9 +12,9 @@ _Updated after each significant work session. Read this first to orient — it i
 
 **Phase 13 (13.1–13.5) is fully built and passes all automated checks.** 13.1 Shares MVP, 13.2 modal overhaul + password, 13.3 List + Kanban read-only, 13.4 Calendar ICS feeds, and 13.5 lifecycle tail (archived timeline → shares/feeds `404`, reversible; `Timeline.shareCount` chip on the tile; last-viewed in the modal + `useListShares` refetch-on-open). 13.5 was additionally verified live against a local seeded API. Awaiting Docker verification as a batch. Detail in [log.md](../log.md).
 
-**Phase 14.1 (Export — Foundation + data exports) is built and passes all automated checks.** `POST /timelines/:id/export` (CSV/xlsx/ICS, frozen-filter eval via `matchesFilter`) + convenience `GET .../export.csv|.xlsx|.ics?filter=`; `ExportDialog` wired into all four view toolbars. Browser-verified for dialog rendering/format switching; the actual download 405s against the current Docker test backend (pre-14.1 binary) — needs Docker rebuild to verify the live round-trip. Detail in [log.md](../log.md).
+**Phase 14.1 (Export — Foundation + data exports) is built, passes all automated checks, and is now Docker-verified (2026-06-26).** `POST /timelines/:id/export` (CSV/xlsx/ICS, frozen-filter eval via `matchesFilter`) + convenience `GET /teams/:id/timelines/:timelineId/export.csv|.xlsx|.ics?filter=`; `ExportDialog` wired into all four view toolbars. The previous 405 (stale pre-14.1 binary) is resolved — live api-smoke and browser e2e both confirm CSV/xlsx/ics downloads succeed and match the filtered activity set. Detail in [log.md](../log.md).
 
-**Phase 14.2 (Textual exports) is built and passes all automated checks.** `lib/textExport.ts` with pure generators for Markdown, plain text, and HTML (clipboard flavor) across all three text-capable views (List/Kanban/Calendar). `ExportDialog` extended with client-side format dispatch and dual-flavor clipboard copy. `exportCapabilities.ts` extended with `verb`/`clientSide` fields; Gantt view remains data-only. Post-ship bug fix applied 2026-06-17: list generators now respect column visibility, sort order, group-by (section headers), and parent-child hierarchy (↳ depth prefix); kanban generators now render children nested under parents when hierarchy is on. Awaiting Docker verification (client-side only — no server binary change required).
+**Phase 14.2 (Textual exports) is built, passes all automated checks, and is now Docker-verified (2026-06-26 /test-phase run).** `lib/textExport.ts` with pure generators for Markdown, plain text, and HTML (clipboard flavor) across all three text-capable views (List/Kanban/Calendar). `ExportDialog` extended with client-side format dispatch and dual-flavor clipboard copy. `exportCapabilities.ts` extended with `verb`/`clientSide` fields; Gantt view remains data-only (confirmed live — dialog excludes textual formats). Post-ship bug fix applied 2026-06-17: list generators now respect column visibility, sort order, group-by (section headers), and parent-child hierarchy; kanban generators now render children nested under parents when hierarchy is on. Hierarchy marker is `↳` in flat-table title cells vs. `◦`/`•` bullets in outline/nested-card generators — two different, both-correct conventions (confirmed during live e2e review, not a bug).
 
 | Next phase | Scope | Plan |
 |------------|-------|------|
@@ -26,7 +26,9 @@ _Updated after each significant work session. Read this first to orient — it i
 
 ## Open Issues
 
-Manual verification items for 10.4.6, 11.1, 11.1.1, 11.1.2, 11.2, 11.3, 12, and 13.1–13.5 tracked in TASKS.md — 13.4's headline item (subscribe from a real Google/Apple calendar) additionally needs the feed URL reachable by Google's fetcher, not just the LAN. 14.1's `POST /timelines/:id/export` 405s on the Docker test backend (stale pre-14.1 binary) — rebuild/redeploy the container, then re-test the download from `ExportDialog` (CSV/Excel/ICS, both scopes). 14.2's Markdown/plain-text/clipboard are client-side only (no server change) but should be tested against a live data set to confirm member/status/tag name resolution.
+Manual verification items for 10.4.6, 11.1, 11.1.1, 11.1.2, 11.2, 11.3, 12, and 13.1–13.5 tracked in TASKS.md — 13.4's headline item (subscribe from a real Google/Apple calendar) additionally needs the feed URL reachable by Google's fetcher, not just the LAN. 14.1 and 14.2 are now Docker-verified (2026-06-26 /test-phase run) — no longer open.
+
+`docs/TESTING.md` has no Phase 9–14 section yet — backfill needed (Phase 14.1/14.2 assertions were sourced from ROADMAP.md exit criteria for the 2026-06-26 run as a stopgap). Its Phase 2/5/6 "tracked gap" unit-test notes are also stale (gaps are closed). Its Phase 14 convenience-export route example doesn't match the real path shape (`/teams/:id/timelines/:timelineId/export.csv`, not `/timelines/:id/export.csv`).
 
 (Process backlog — e.g. revisiting `repomap.md` generation vs. Graphify after Phase 13 lands — now lives in the [TASKS.md Parking Lot](../TASKS.md#parking-lot), where it stays visible across sessions instead of aging out of this snapshot.)
 

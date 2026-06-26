@@ -2,6 +2,19 @@
 
 ---
 
+## 2026-06-26 — /test-phase 14.2
+
+- Subagents run: static-check, unit-test, schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
+- Result: all pass (api-smoke: 1 skip — tier-limit enforcement, no easy trigger on default tier config)
+- Smoke target: http://epcot.lan:8081
+
+Notes:
+- `docs/TESTING.md` has no dedicated Phase 9–14 section; Phase 14.1/14.2 coverage was driven by ROADMAP.md exit criteria instead. Should be backfilled.
+- `docs/TESTING.md`'s Phase 2/5/6 "tracked gap" notes (auth, invite_repo, ws-heartbeat, timeline_repo unit tests) are stale — all four are covered now.
+- `docs/TESTING.md`'s Phase 14 convenience export route example doesn't match the real API shape (`/teams/{id}/timelines/{timelineId}/export.csv`, not `/timelines/{id}/export.csv`); the wrong path silently 200s via SPA fallback instead of 404ing.
+- `golangci-lint` on this dev box was v1.64.8 against a v2-only `.golangci.yml`; upgraded to v2.12.2 (matches CI). That surfaced 3 real gofmt findings, which turned out to be a CRLF/LF checkout artifact (`core.autocrlf=true` vs. committed LF) — fixed by adding `.gitattributes` (`eol=lf` for source files) and force-recheckout out the whole tree. No actual code formatting was wrong; this was a Windows-checkout-only issue.
+- Web-e2e flagged the textual-export parent-child marker (`↳` vs. bullet `◦`) as a discrepancy — confirmed intentional: `↳` is the flat-table title-cell prefix, `◦`/`•` are outline/nested-card bullets (different generators, both correct per `lib/textExport.ts`).
+
 ## 2026-06-17 — Phase 14.2 fix: List/Kanban text export fidelity
 
 **Goal:** Fix four correctness defects in the Phase 14.2 textual export generators: column selection not respected, sort order not respected, group-by not represented, and parent-child indentation missing.
