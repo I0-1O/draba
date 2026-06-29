@@ -372,6 +372,7 @@ packages/
         memberGroups.ts
         presetFilters.test.ts
         presetFilters.ts
+        textExport.test.ts
         textExport.ts
         utils.ts
       pages/
@@ -13803,6 +13804,56 @@ CREATE TABLE activity_tags (
 ALTER TABLE saved_filters ADD COLUMN is_team_filter BOOLEAN NOT NULL DEFAULT 0;
 ````
 
+## File: packages/api/internal/db/migrations/019_shares.sql
+````sql
+-- Migration 019: shares table + token migration.
+--
+-- Each timeline can have many shares (one per configured view). The existing
+-- timelines.share_token rows are migrated into shares rows so that any links
+-- already in circulation continue to work. The share_token column on timelines
+-- is left in place until all code references are removed (a follow-up migration
+-- will drop it once it is no longer used by the legacy handler).
+
+CREATE TABLE shares (
+  id             TEXT PRIMARY KEY,
+  timeline_id    TEXT NOT NULL REFERENCES timelines(id) ON DELETE CASCADE,
+  token          TEXT NOT NULL UNIQUE,
+  view_type      TEXT NOT NULL DEFAULT 'gantt',
+  view_config    TEXT NOT NULL DEFAULT '{}',
+  password_hash  TEXT,
+  expires_at     DATETIME,
+  created_by     TEXT NOT NULL REFERENCES team_members(id),
+  created_at     DATETIME NOT NULL,
+  last_viewed_at DATETIME,
+  view_count     INTEGER NOT NULL DEFAULT 0,
+  revoked_at     DATETIME
+);
+
+CREATE INDEX idx_shares_timeline_id ON shares(timeline_id);
+CREATE INDEX idx_shares_token       ON shares(token);
+
+-- Migrate every existing timeline's share_token into a shares row so that
+-- any existing share links keep working. We pick the first team_member row
+-- for the timeline's team as created_by (a stable stand-in for the original
+-- creator, which was not recorded).
+INSERT INTO shares (id, timeline_id, token, view_type, view_config, created_by, created_at)
+SELECT
+  lower(hex(randomblob(16))),
+  t.id,
+  t.share_token,
+  'gantt',
+  '{}',
+  (SELECT tm.id FROM team_members tm WHERE tm.team_id = t.team_id AND tm.archived_at IS NULL ORDER BY tm.joined_at LIMIT 1),
+  datetime('now')
+FROM timelines t
+WHERE t.share_token IS NOT NULL
+  AND t.share_token != ''
+  AND EXISTS (
+    SELECT 1 FROM team_members tm
+    WHERE tm.team_id = t.team_id AND tm.archived_at IS NULL
+  );
+````
+
 ## File: packages/api/internal/db/api_token_repo.go
 ````go
 package db
@@ -15798,6 +15849,317 @@ DRABA_BASE_URL=                 # public URL of the server (used for OAuth callb
 ## Conventions
 See `docs/CONVENTIONS.md` for Go patterns, error handling, and testing conventions.
 See `skills/go-comments.md` for comment conventions (package headers, exported doc comments, when to use inline comments). Apply these whenever writing or editing Go code.
+````
+
+## File: packages/shared/testdata/filter-fixtures.json
+````json
+{
+  "_comment": "Golden fixtures for the filter evaluator. Both the TypeScript filterEngine.test.ts and the Go filters/engine_test.go must pass every case here. Each fixture has a filter definition, a set of activities (with reference data), and the expected match result for each activity.",
+  "statuses": [
+    { "id": "s1", "name": "In Progress", "color": "#3b82f6", "isClosed": false, "position": 0, "timelineId": "tl1" },
+    { "id": "s2", "name": "Done",        "color": "#10b981", "isClosed": true,  "position": 1, "timelineId": "tl1" },
+    { "id": "s3", "name": "Blocked",     "color": "#ef4444", "isClosed": false, "position": 2, "timelineId": "tl1" }
+  ],
+  "tags": [
+    { "id": "t1", "name": "frontend", "teamId": "team1", "createdBy": "m1", "createdAt": "2026-01-01T00:00:00Z" },
+    { "id": "t2", "name": "backend",  "teamId": "team1", "createdBy": "m1", "createdAt": "2026-01-01T00:00:00Z" },
+    { "id": "t3", "name": "urgent",   "teamId": "team1", "createdBy": "m1", "createdAt": "2026-01-01T00:00:00Z" }
+  ],
+  "activities": [
+    {
+      "id": "a1",
+      "timelineId": "tl1",
+      "title": "Design new UI",
+      "description": "Revamp the dashboard",
+      "startAt": "2026-05-01T00:00:00Z",
+      "endAt":   "2026-05-15T00:00:00Z",
+      "allDay": true,
+      "statusId": "s1",
+      "parentActivityId": null,
+      "percentComplete": 40,
+      "assignedMemberIds": ["m1", "m2"],
+      "tagIds": ["t1"],
+      "createdBy": "m1",
+      "createdAt": "2026-01-01T00:00:00Z",
+      "updatedAt": "2026-01-01T00:00:00Z"
+    },
+    {
+      "id": "a2",
+      "timelineId": "tl1",
+      "title": "API refactor",
+      "description": null,
+      "startAt": "2026-05-10T00:00:00Z",
+      "endAt":   "2026-05-25T00:00:00Z",
+      "allDay": true,
+      "statusId": "s2",
+      "parentActivityId": "a1",
+      "percentComplete": 100,
+      "assignedMemberIds": ["m3"],
+      "tagIds": ["t2", "t3"],
+      "createdBy": "m1",
+      "createdAt": "2026-01-01T00:00:00Z",
+      "updatedAt": "2026-01-01T00:00:00Z"
+    },
+    {
+      "id": "a3",
+      "timelineId": "tl1",
+      "title": "Deploy hotfix",
+      "description": "Critical production fix",
+      "startAt": "2026-06-01T00:00:00Z",
+      "endAt":   "2026-06-02T00:00:00Z",
+      "allDay": true,
+      "statusId": "s3",
+      "parentActivityId": null,
+      "percentComplete": null,
+      "assignedMemberIds": [],
+      "tagIds": ["t3"],
+      "createdBy": "m1",
+      "createdAt": "2026-01-01T00:00:00Z",
+      "updatedAt": "2026-01-01T00:00:00Z"
+    },
+    {
+      "id": "a4",
+      "timelineId": "tl1",
+      "title": "Write docs",
+      "description": null,
+      "startAt": "2026-07-01T00:00:00Z",
+      "endAt":   "2026-07-10T00:00:00Z",
+      "allDay": true,
+      "statusId": null,
+      "parentActivityId": null,
+      "percentComplete": null,
+      "assignedMemberIds": ["m2"],
+      "tagIds": [],
+      "createdBy": "m1",
+      "createdAt": "2026-01-01T00:00:00Z",
+      "updatedAt": "2026-01-01T00:00:00Z"
+    }
+  ],
+  "fixtures": [
+    {
+      "name": "empty filter matches all",
+      "filter": { "logic": "and", "conditions": [] },
+      "expected": { "a1": true, "a2": true, "a3": true, "a4": true }
+    },
+    {
+      "name": "status in [In Progress]",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "status", "op": "in", "value": ["In Progress"] }]
+      },
+      "expected": { "a1": true, "a2": false, "a3": false, "a4": false }
+    },
+    {
+      "name": "status in [Done, Blocked]",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "status", "op": "in", "value": ["Done", "Blocked"] }]
+      },
+      "expected": { "a1": false, "a2": true, "a3": true, "a4": false }
+    },
+    {
+      "name": "status is_empty",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "status", "op": "is_empty" }]
+      },
+      "expected": { "a1": false, "a2": false, "a3": false, "a4": true }
+    },
+    {
+      "name": "status is_not_empty",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "status", "op": "is_not_empty" }]
+      },
+      "expected": { "a1": true, "a2": true, "a3": true, "a4": false }
+    },
+    {
+      "name": "status not_in [In Progress]",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "status", "op": "not_in", "value": ["In Progress"] }]
+      },
+      "expected": { "a1": false, "a2": true, "a3": true, "a4": true }
+    },
+    {
+      "name": "tag in [frontend]",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "tag", "op": "in", "value": ["frontend"] }]
+      },
+      "expected": { "a1": true, "a2": false, "a3": false, "a4": false }
+    },
+    {
+      "name": "tag in [urgent]",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "tag", "op": "in", "value": ["urgent"] }]
+      },
+      "expected": { "a1": false, "a2": true, "a3": true, "a4": false }
+    },
+    {
+      "name": "tag is_empty",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "tag", "op": "is_empty" }]
+      },
+      "expected": { "a1": false, "a2": false, "a3": false, "a4": true }
+    },
+    {
+      "name": "tag is_not_empty",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "tag", "op": "is_not_empty" }]
+      },
+      "expected": { "a1": true, "a2": true, "a3": true, "a4": false }
+    },
+    {
+      "name": "assignee in [m1]",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "assignee", "op": "in", "value": ["m1"] }]
+      },
+      "expected": { "a1": true, "a2": false, "a3": false, "a4": false }
+    },
+    {
+      "name": "assignee is_empty",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "assignee", "op": "is_empty" }]
+      },
+      "expected": { "a1": false, "a2": false, "a3": true, "a4": false }
+    },
+    {
+      "name": "title contains 'design'",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "title", "op": "contains", "value": "design" }]
+      },
+      "expected": { "a1": true, "a2": false, "a3": false, "a4": false }
+    },
+    {
+      "name": "title equals 'Write docs'",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "title", "op": "equals", "value": "Write docs" }]
+      },
+      "expected": { "a1": false, "a2": false, "a3": false, "a4": true }
+    },
+    {
+      "name": "title not_contains 'api'",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "title", "op": "not_contains", "value": "api" }]
+      },
+      "expected": { "a1": true, "a2": false, "a3": true, "a4": true }
+    },
+    {
+      "name": "progress gte 50",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "progress", "op": "gte", "value": 50 }]
+      },
+      "expected": { "a1": false, "a2": true, "a3": false, "a4": false }
+    },
+    {
+      "name": "progress is_empty",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "progress", "op": "is_empty" }]
+      },
+      "expected": { "a1": false, "a2": false, "a3": true, "a4": true }
+    },
+    {
+      "name": "progress is_not_empty",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "progress", "op": "is_not_empty" }]
+      },
+      "expected": { "a1": true, "a2": true, "a3": false, "a4": false }
+    },
+    {
+      "name": "hasParent is_true",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "hasParent", "op": "is_true" }]
+      },
+      "expected": { "a1": false, "a2": true, "a3": false, "a4": false }
+    },
+    {
+      "name": "hasParent is_false",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "hasParent", "op": "is_false" }]
+      },
+      "expected": { "a1": true, "a2": false, "a3": true, "a4": true }
+    },
+    {
+      "name": "startDate before 2026-05-05",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "startDate", "op": "before", "value": "2026-05-05" }]
+      },
+      "expected": { "a1": true, "a2": false, "a3": false, "a4": false }
+    },
+    {
+      "name": "startDate after 2026-05-15",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "startDate", "op": "after", "value": "2026-05-15" }]
+      },
+      "expected": { "a1": false, "a2": false, "a3": true, "a4": true }
+    },
+    {
+      "name": "startDate between 2026-05-01 and 2026-05-31",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "startDate", "op": "between", "value": ["2026-05-01", "2026-05-31"] }]
+      },
+      "expected": { "a1": true, "a2": true, "a3": false, "a4": false }
+    },
+    {
+      "name": "endDate before 2026-05-20",
+      "filter": {
+        "logic": "and",
+        "conditions": [{ "field": "endDate", "op": "before", "value": "2026-05-20" }]
+      },
+      "expected": { "a1": true, "a2": false, "a3": false, "a4": false }
+    },
+    {
+      "name": "OR: status Done OR tag frontend",
+      "filter": {
+        "logic": "or",
+        "conditions": [
+          { "field": "status", "op": "in", "value": ["Done"] },
+          { "field": "tag",    "op": "in", "value": ["frontend"] }
+        ]
+      },
+      "expected": { "a1": true, "a2": true, "a3": false, "a4": false }
+    },
+    {
+      "name": "AND: status In Progress AND assignee m1",
+      "filter": {
+        "logic": "and",
+        "conditions": [
+          { "field": "status",   "op": "in", "value": ["In Progress"] },
+          { "field": "assignee", "op": "in", "value": ["m1"] }
+        ]
+      },
+      "expected": { "a1": true, "a2": false, "a3": false, "a4": false }
+    },
+    {
+      "name": "AND: progress gt 0 AND hasParent is_true",
+      "filter": {
+        "logic": "and",
+        "conditions": [
+          { "field": "progress",  "op": "gt",      "value": 0 },
+          { "field": "hasParent", "op": "is_true"             }
+        ]
+      },
+      "expected": { "a1": false, "a2": true, "a3": false, "a4": false }
+    }
+  ]
+}
 ````
 
 ## File: packages/shared/CLAUDE.md
@@ -19633,6 +19995,1069 @@ describe('formatDragDate', () => {
     expect(formatDragDate(d)).toContain('2026')
   })
 })
+````
+
+## File: packages/web/src/components/gantt/GanttGrid.tsx
+````typescript
+/**
+ * GanttGrid — presentational Gantt chart.
+ *
+ * Renders a sticky header row of column labels, then one row per GanttRow
+ * entry. Rows are either group-header dividers or event bars. All data
+ * preparation (grouping, sorting, date math) lives in the parent GanttView.
+ *
+ * Drag on an empty lane cell to select a date range; onLaneDrag fires on
+ * mouseup with the resolved start/end dates and the lane's memberId.
+ *
+ * Drag on an event bar's left/right 8px edge to resize it, or on its body to
+ * move it. onBarDrag fires on mouseup with the resolved new dates.
+ *
+ * When findState is provided with a non-empty query, non-matching event rows
+ * are dimmed to 0.3 opacity; matching rows get an amber outline on their bar;
+ * the active (parked) match gets a stronger amber outline with a pulse
+ * animation. Stepping to a new active match auto-scrolls both axes to center
+ * the bar in the viewport.
+ */
+
+import { useRef, useState, useCallback, useEffect, useMemo } from 'react';
+import { ChevronDown, ChevronRight } from 'lucide-react';
+import MemberAvatar from '../MemberAvatar';
+import { Badge } from '../identity/Badge';
+import EmptyState from '../shared/EmptyState';
+import type { Member } from '../../types';
+import type { ColumnDef, TimeGranularity } from './granularity';
+import { addDays, snapDivisorFor } from './granularity';
+
+export const DEFAULT_LABEL_COL_W = 240;
+const MIN_LABEL_COL_W = 140;
+const MAX_LABEL_COL_W = 400;
+const HEADER_H = 36;
+const ROW_H = 44;
+const GROUP_H = 30;
+const COL_W = 80;
+const EDGE_W = 8; // px hit zone for resize handles
+
+/** A positioned activity bar ready for rendering. */
+export interface GanttActivity {
+  id: string;
+  title: string;
+  /** Fractional column start (0-based). */
+  startCol: number;
+  /** Fractional column span. */
+  span: number;
+  /** Hex color for bar background and badge. */
+  color: string;
+  /** Icon ID from the activity's identity, if set. */
+  icon?: string;
+  members: Member[];
+  isChild: boolean;
+  /** Nesting depth in the parent→child tree (0 = root). Drives left indent. */
+  depth?: number;
+  /** True when this activity has child activities nested beneath it. */
+  hasChildren?: boolean;
+  /** True when this activity's subtree is currently collapsed (children hidden). */
+  collapsed?: boolean;
+  percentComplete?: number | null;
+}
+
+export type GanttRow =
+  | { kind: 'group'; id: string; label: string; color: string; memberColors?: string[]; count: number; collapsed?: boolean }
+  | { kind: 'activity'; event: GanttActivity };
+
+/** Visual state for the in-view Find feature. Passed from GanttView. */
+export interface FindState {
+  hasQuery: boolean;
+  matchedIds: Set<string>;
+  activeMatchId: string | null;
+  /** Per-event match reasons for "why matched" tooltip (non-title reasons only). */
+  matchReasons: Map<string, string[]>;
+  filtersActive: boolean;
+  matchCount: number;
+}
+
+interface DragState {
+  rowIdx: number;
+  memberId: string | null;
+  startCol: number;
+  currentCol: number;
+}
+
+type BarDragZone = 'left' | 'right' | 'body';
+
+interface BarDragState {
+  eventId: string;
+  zone: BarDragZone;
+  /** Fractional column of the event's visual start when drag began. */
+  initStartCol: number;
+  /** Fractional column of the event's visual end (startCol + span) when drag began. */
+  initEndCol: number;
+  /** Lane-relative x of the mouse when drag began. */
+  initMouseX: number;
+  /** Page-relative left edge of the lane div. */
+  laneLeft: number;
+  /** Current snapped start column (integer). */
+  snapStartCol: number;
+  /** Current snapped end column (integer, exclusive — col after last occupied). */
+  snapEndCol: number;
+}
+
+interface TooltipState {
+  text: string;
+  /** Viewport-relative x for tooltip positioning. */
+  x: number;
+  /** Viewport-relative y for tooltip positioning. */
+  y: number;
+}
+
+/** Tooltip shown when hovering a matched event bar that matched on a non-title field. */
+interface MatchTooltipState {
+  reasons: string[];
+  x: number;
+  y: number;
+}
+
+interface Props {
+  rows: GanttRow[];
+  columns: ColumnDef[];
+  /** Fractional column index of today (-1 if outside range). */
+  todayIndex: number;
+  selectedActivityId: string | null;
+  onSelectActivity: (id: string | null) => void;
+  /** Called when the user drags on an empty lane cell to create an activity. */
+  onLaneDrag?: (startDate: Date, endDate: Date, memberId: string | null) => void;
+  /** Called when the user drags a bar edge or body to resize/move it. */
+  onBarDrag?: (activityId: string, newStartDate: Date, newEndDate: Date) => void;
+  /** Called during a bar drag with the current snapped dates — for live sidebar update. */
+  onBarDragProgress?: (activityId: string, newStartDate: Date, newEndDate: Date) => void;
+  /** Resolved granularity — used to compute the finer snap divisor during drag. */
+  resolvedGranularity?: TimeGranularity | 'auto';
+  /** Find state from GanttView; absent when the find bar is closed/idle. */
+  findState?: FindState;
+  /** Called when the user clicks "Clear filters" in the no-matches callout. */
+  onClearFilters?: () => void;
+  /** Current label column width in px — lifts state to the parent so it survives view switches. */
+  labelColW?: number;
+  /** Called when the user drags the column resize handle. */
+  onLabelColWChange?: (w: number) => void;
+  /** Toggles the collapsed state of an activity's child subtree (parent grouping). */
+  onToggleActivity?: (id: string) => void;
+  /** Toggles the collapsed state of a group header (member grouping). */
+  onToggleGroup?: (id: string) => void;
+  /**
+   * When false, all click and drag interactions are suppressed — bars, lane
+   * drags, and group toggles become inert. Used by the public share viewer.
+   * Default: true.
+   */
+  interactive?: boolean;
+}
+
+// ── Bar drag helpers ─────────────────────────────────────────────────────────
+
+function tooltipText(zone: BarDragZone, startDate: Date, endDate: Date): string {
+  if (zone === 'left') return `Start: ${formatDragDate(startDate)}`;
+  if (zone === 'right') return `End: ${formatDragDate(endDate)}`;
+  return `${formatDragDate(startDate)} → ${formatDragDate(endDate)}`;
+}
+
+// ── Date helpers (support fractional column positions) ───────────────────────
+
+// Maps a fractional column position to a calendar Date by interpolating within
+// the column's day range. Uses the full period length (start→end) rather than
+// the clamped `days` field so boundary columns still produce correct dates.
+function colFracToDate(colFrac: number, columns: ColumnDef[]): Date {
+  let remaining = Math.max(0, colFrac);
+  for (const col of columns) {
+    if (remaining < 1) {
+      const periodDays = Math.round((col.end.getTime() - col.start.getTime()) / 86_400_000);
+      return addDays(col.start, Math.round(remaining * periodDays));
+    }
+    remaining -= 1;
+  }
+  return columns[columns.length - 1].end;
+}
+
+function colToStartDate(colFrac: number, columns: ColumnDef[]): Date {
+  return colFracToDate(Math.max(0, colFrac), columns);
+}
+
+// endColFrac is exclusive (the fractional col just past the last occupied day).
+function colToEndDate(endColFrac: number, columns: ColumnDef[]): Date {
+  // The last included date is 1 day before the date at the exclusive end.
+  return addDays(colFracToDate(Math.max(0, endColFrac), columns), -1);
+}
+
+
+export function formatDragDate(d: Date): string {
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
+}
+
+export default function GanttGrid({
+  rows,
+  columns,
+  todayIndex,
+  selectedActivityId,
+  onSelectActivity,
+  onLaneDrag,
+  onBarDrag,
+  onBarDragProgress,
+  resolvedGranularity,
+  findState,
+  onClearFilters,
+  labelColW: labelColWProp,
+  onLabelColWChange,
+  onToggleActivity,
+  onToggleGroup,
+  interactive = true,
+}: Props) {
+  // ── Resizable label column ─────────────────────────────────────────────────
+  // When the parent passes labelColW + onLabelColWChange the column is
+  // controlled, so the width survives view switches (e.g. Gantt ↔ List).
+  // When neither is provided we fall back to internal state.
+  const [internalLabelColW, setInternalLabelColW] = useState(DEFAULT_LABEL_COL_W);
+  const labelColW = labelColWProp ?? internalLabelColW;
+  const setLabelColW = onLabelColWChange ?? setInternalLabelColW;
+
+  const totalW = useMemo(
+    () => labelColW + columns.length * COL_W,
+    [labelColW, columns.length],
+  );
+
+  const labelColWRef = useRef(labelColW);
+  useEffect(() => { labelColWRef.current = labelColW; }, [labelColW]);
+
+  const handleColumnResizeMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = labelColWRef.current;
+
+    function onMouseMove(mv: MouseEvent) {
+      const next = Math.max(MIN_LABEL_COL_W, Math.min(MAX_LABEL_COL_W, startW + (mv.clientX - startX)));
+      setLabelColW(next);
+    }
+    function onMouseUp() {
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+    }
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+  // setLabelColW is either a stable setter from useState or a stable callback from the parent.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Integer column index that contains today (for background highlight)
+  const todayCol = todayIndex >= 0 ? Math.floor(todayIndex) : -1;
+
+  // ── Scroll container ref (needed for find auto-scroll) ────────────────────
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+
+  // Always-current rows ref so the active-match scroll effect doesn't go stale
+  const rowsRef = useRef(rows);
+  useEffect(() => { rowsRef.current = rows; });
+
+  // ── Drag-to-create state ──────────────────────────────────────────────────
+  const [drag, setDrag] = useState<DragState | null>(null);
+  const dragRef = useRef<DragState | null>(null);
+
+  // ── Bar drag state ────────────────────────────────────────────────────────
+  const [barDrag, setBarDrag] = useState<BarDragState | null>(null);
+  const barDragRef = useRef<BarDragState | null>(null);
+  const [dragTooltip, setDragTooltip] = useState<TooltipState | null>(null);
+
+  // ── "Why matched" hover tooltip ───────────────────────────────────────────
+  const [matchTooltip, setMatchTooltip] = useState<MatchTooltipState | null>(null);
+
+  const colFromX = useCallback((laneX: number) => {
+    return Math.max(0, Math.min(columns.length - 1, Math.floor(laneX / COL_W)));
+  }, [columns.length]);
+
+  // ── Auto-scroll to active find match ─────────────────────────────────────
+  useEffect(() => {
+    const activeId = findState?.activeMatchId;
+    if (!activeId || !scrollContainerRef.current) return;
+    const container = scrollContainerRef.current;
+    const currentRows = rowsRef.current;
+
+    let y = HEADER_H;
+    let matchedActivity: GanttActivity | null = null;
+    for (const row of currentRows) {
+      if (row.kind === 'activity' && row.event.id === activeId) {
+        matchedActivity = row.event;
+        break;
+      }
+      y += row.kind === 'group' ? GROUP_H : ROW_H;
+    }
+    if (!matchedActivity) return;
+
+    const viewH = container.clientHeight;
+    const viewW = container.clientWidth;
+    const scrollTop = Math.max(0, y - viewH / 2 + ROW_H / 2);
+    const eventCenterX = labelColWRef.current + (matchedActivity.startCol + matchedActivity.span / 2) * COL_W;
+    const scrollLeft = Math.max(0, eventCenterX - viewW / 2);
+
+    container.scrollTo({ left: scrollLeft, top: scrollTop, behavior: 'smooth' });
+  // Only re-run when the active match changes, not when rows or columns change.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [findState?.activeMatchId]);
+
+  const handleLaneMouseDown = useCallback((
+    e: React.MouseEvent<HTMLDivElement>,
+    rowIdx: number,
+    memberId: string | null,
+  ) => {
+    if (!interactive || !onLaneDrag) return;
+    e.preventDefault();
+    const rect = e.currentTarget.getBoundingClientRect();
+    const col = colFromX(e.clientX - rect.left);
+    const state: DragState = { rowIdx, memberId, startCol: col, currentCol: col };
+    dragRef.current = state;
+    setDrag(state);
+
+    function onMouseMove(mv: MouseEvent) {
+      if (!dragRef.current) return;
+      const col2 = colFromX(mv.clientX - rect.left);
+      const next = { ...dragRef.current, currentCol: col2 };
+      dragRef.current = next;
+      setDrag({ ...next });
+    }
+
+    function onMouseUp() {
+      const s = dragRef.current;
+      if (s && onLaneDrag && columns.length > 0) {
+        const lo = Math.min(s.startCol, s.currentCol);
+        const hi = Math.max(s.startCol, s.currentCol);
+        const startDate = columns[lo]?.start ?? columns[0].start;
+        const endDate = columns[hi]?.start ?? columns[hi > 0 ? hi : 0].start;
+        onLaneDrag(startDate, endDate, s.memberId);
+      }
+      dragRef.current = null;
+      setDrag(null);
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+    }
+
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+  }, [colFromX, columns, onLaneDrag]);
+
+  // ── Bar drag handler ──────────────────────────────────────────────────────
+
+  const handleBarMouseDown = useCallback((
+    e: React.MouseEvent<HTMLDivElement>,
+    ev: GanttActivity,
+    zone: BarDragZone,
+  ) => {
+    if (!onBarDrag) return;
+    // Only allow drag/resize when the bar is already selected.
+    if (ev.id !== selectedActivityId) return;
+    e.preventDefault();
+    e.stopPropagation(); // prevent lane-drag from firing
+
+    // The bar's parent is the lane div (position: relative, flex: 1).
+    const laneEl = e.currentTarget.parentElement;
+    if (!laneEl) return;
+    const laneRect = laneEl.getBoundingClientRect();
+
+    const initStartCol = ev.startCol;
+    const initEndCol = ev.startCol + ev.span;
+    const initMouseX = e.clientX - laneRect.left;
+    const state: BarDragState = {
+      eventId: ev.id,
+      zone,
+      initStartCol,
+      initEndCol,
+      initMouseX,
+      laneLeft: laneRect.left,
+      snapStartCol: initStartCol,
+      snapEndCol: initEndCol,
+    };
+    barDragRef.current = state;
+    setBarDrag(state);
+
+    // Initial tooltip
+    const startDate = colToStartDate(state.snapStartCol, columns);
+    const endDate = colToEndDate(state.snapEndCol, columns);
+    setDragTooltip({
+      text: tooltipText(zone, startDate, endDate),
+      x: e.clientX,
+      y: e.clientY,
+    });
+
+    function onMouseMove(mv: MouseEvent) {
+      const s = barDragRef.current;
+      if (!s) return;
+
+      const deltaCol = (mv.clientX - (s.laneLeft + s.initMouseX)) / COL_W;
+      const n = columns.length;
+      // Finer snap: snap one granularity level below the active zoom.
+      const div = snapDivisorFor(resolvedGranularity ?? 'auto');
+      const step = 1 / div;
+      const snap = (x: number) => Math.round(x / step) * step;
+
+      let nextStart = s.snapStartCol;
+      let nextEnd = s.snapEndCol;
+
+      if (s.zone === 'left') {
+        nextStart = Math.max(0, Math.min(snap(s.initStartCol + deltaCol), s.initEndCol - step));
+        nextEnd = s.initEndCol;
+      } else if (s.zone === 'right') {
+        nextStart = s.initStartCol;
+        nextEnd = Math.max(s.initStartCol + step, Math.min(snap(s.initEndCol + deltaCol), n));
+      } else {
+        // body: preserve exact span, shift both by snapped delta
+        const span = s.initEndCol - s.initStartCol;
+        const shift = snap(deltaCol);
+        nextStart = Math.max(0, Math.min(s.initStartCol + shift, n - span));
+        nextEnd = nextStart + span;
+      }
+
+      const next: BarDragState = { ...s, snapStartCol: nextStart, snapEndCol: nextEnd };
+      barDragRef.current = next;
+      setBarDrag(next);
+
+      const sd = colToStartDate(nextStart, columns);
+      const ed = colToEndDate(nextEnd, columns);
+      setDragTooltip({ text: tooltipText(s.zone, sd, ed), x: mv.clientX, y: mv.clientY });
+      onBarDragProgress?.(s.eventId, sd, ed);
+    }
+
+    function onMouseUp() {
+      const s = barDragRef.current;
+      if (s && onBarDrag) {
+        const sd = colToStartDate(s.snapStartCol, columns);
+        const ed = colToEndDate(s.snapEndCol, columns);
+        onBarDrag(s.eventId, sd, ed); // eventId field preserved in BarDragState
+      }
+      barDragRef.current = null;
+      setBarDrag(null);
+      setDragTooltip(null);
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+    }
+
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+  }, [columns, onBarDrag]);
+
+  // Header cells are shared between the empty-state path and the unified scroll path.
+  const headerContent = (
+    <>
+      <div
+        style={{
+          width: labelColW,
+          flexShrink: 0,
+          padding: '0 16px',
+          display: 'flex',
+          alignItems: 'center',
+          borderRight: '1px solid var(--border)',
+          fontSize: 11,
+          fontWeight: 600,
+          color: 'var(--muted-foreground)',
+          textTransform: 'uppercase' as const,
+          letterSpacing: '0.06em',
+          position: 'sticky' as const,
+          left: 0,
+          zIndex: 6,
+          background: 'var(--card)',
+          userSelect: 'none',
+        }}
+      >
+        Activity
+        {/* Drag handle — resize the label column */}
+        <div
+          onMouseDown={handleColumnResizeMouseDown}
+          style={{
+            position: 'absolute',
+            right: 0,
+            top: 0,
+            bottom: 0,
+            width: 6,
+            cursor: 'col-resize',
+            zIndex: 10,
+          }}
+        />
+      </div>
+
+      {columns.map((col, i) => {
+        const isToday = i === todayCol;
+        return (
+          <div
+            key={i}
+            style={{
+              width: COL_W,
+              flexShrink: 0,
+              height: HEADER_H,
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              justifyContent: 'center',
+              padding: '0 4px 8px',
+              gap: 2,
+              borderRight: i < columns.length - 1 ? '1px solid var(--border)' : 'none',
+              position: 'relative',
+              overflow: 'hidden',
+            }}
+          >
+            <span style={{
+              fontSize: col.sublabel ? 10 : 11,
+              fontWeight: isToday ? 700 : 600,
+              color: isToday ? 'var(--primary)' : 'var(--muted-foreground)',
+              lineHeight: 1.2,
+              textAlign: 'center',
+            }}>
+              {col.label}
+            </span>
+            {col.sublabel && (
+              <span style={{
+                fontSize: 9,
+                fontWeight: 500,
+                color: 'var(--muted-foreground)',
+                lineHeight: 1,
+                opacity: isToday ? 1 : 0.75,
+              }}>
+                {col.sublabel}
+              </span>
+            )}
+            {isToday && (
+              <div
+                style={{
+                  position: 'absolute',
+                  bottom: 2,
+                  left: `${((todayIndex - todayCol) * 100)}%`,
+                  transform: 'translateX(-50%)',
+                  width: 6,
+                  height: 6,
+                  borderRadius: '50%',
+                  background: 'var(--secondary)',
+                }}
+              />
+            )}
+          </div>
+        );
+      })}
+    </>
+  );
+
+  // ── Find helpers ──────────────────────────────────────────────────────────
+
+  const { hasQuery = false, matchedIds: matchSet, activeMatchId, matchReasons: reasons } = findState ?? {};
+
+  function isMatch(id: string) { return matchSet?.has(id) ?? false; }
+  function isActive(id: string) { return activeMatchId === id; }
+
+  // Non-title reasons to surface in the "why matched" tooltip
+  function nonTitleReasons(id: string): string[] {
+    return (reasons?.get(id) ?? []).filter(r => r !== 'title');
+  }
+
+  // ── Empty state: header + centered placeholder ──────────────────────────────
+  if (rows.length === 0) {
+    const showNoMatchCallout = hasQuery && findState && findState.matchCount === 0;
+    return (
+      <div style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+        <div style={{ overflowX: 'auto', overflowY: 'hidden', flexShrink: 0 }}>
+          <div style={{ width: totalW, display: 'flex', height: HEADER_H, background: 'var(--card)', borderBottom: '1px solid var(--border)' }}>
+            {headerContent}
+          </div>
+        </div>
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12 }}>
+          <EmptyState message="No viewable activities" />
+          {showNoMatchCallout && findState.filtersActive && (
+            <p style={{ fontSize: 12, color: 'var(--muted-foreground)', textAlign: 'center' }}>
+              No matches in current view.{' '}
+              {onClearFilters && (
+                <button
+                  onClick={onClearFilters}
+                  style={{ color: 'var(--primary)', background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, padding: 0, fontFamily: 'inherit' }}
+                >
+                  Clear filters
+                </button>
+              )}
+            </p>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // ── Unified scroll: header sticky inside the single container ──────────────
+  return (
+    <div style={{ height: '100%', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+      <div ref={scrollContainerRef} style={{ flex: 1, overflow: 'auto' }}>
+        <div style={{ width: totalW }}>
+
+          {/* Sticky header row — scrolls horizontally with the grid, pins to top vertically */}
+          <div style={{ position: 'sticky', top: 0, zIndex: 5, display: 'flex', height: HEADER_H, background: 'var(--card)', borderBottom: '1px solid var(--border)' }}>
+            {headerContent}
+          </div>
+
+          {rows.map((row, rowIdx) => {
+            if (row.kind === 'group') {
+              return (
+                <div
+                  key={row.id}
+                  style={{
+                    display: 'flex',
+                    height: GROUP_H,
+                    background: 'var(--muted)',
+                    borderBottom: '1px solid var(--border)',
+                  }}
+                >
+                  <div
+                    onClick={onToggleGroup ? () => onToggleGroup(row.id) : undefined}
+                    style={{
+                      width: labelColW,
+                      flexShrink: 0,
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 6,
+                      padding: '0 14px',
+                      position: 'sticky',
+                      left: 0,
+                      background: 'var(--muted)',
+                      zIndex: 3,
+                      borderRight: '1px solid var(--border)',
+                      cursor: onToggleGroup ? 'pointer' : 'default',
+                      userSelect: 'none',
+                    }}
+                  >
+                    {onToggleGroup ? (
+                      row.collapsed
+                        ? <ChevronRight size={14} strokeWidth={2.5} style={{ flexShrink: 0, color: 'var(--muted-foreground)' }} />
+                        : <ChevronDown size={14} strokeWidth={2.5} style={{ flexShrink: 0, color: 'var(--muted-foreground)' }} />
+                    ) : null}
+                    {row.memberColors && row.memberColors.length > 0 ? (
+                      // Stacked color dots for member-combination groups
+                      <div style={{ display: 'flex', flexShrink: 0 }}>
+                        {row.memberColors.map((c, i) => (
+                          <div
+                            key={i}
+                            style={{
+                              width: 9,
+                              height: 9,
+                              borderRadius: '50%',
+                              background: c,
+                              marginLeft: i === 0 ? 0 : -3,
+                              outline: '1.5px solid var(--muted)',
+                            }}
+                          />
+                        ))}
+                      </div>
+                    ) : (
+                      <div
+                        style={{
+                          width: 9,
+                          height: 9,
+                          borderRadius: 2,
+                          background: row.color,
+                          flexShrink: 0,
+                        }}
+                      />
+                    )}
+                    <span
+                      style={{
+                        fontSize: 11,
+                        fontWeight: 700,
+                        color: 'var(--foreground)',
+                        textTransform: 'uppercase',
+                        letterSpacing: '0.05em',
+                        flex: 1,
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                        fontFamily: 'var(--font-sans)',
+                      }}
+                    >
+                      {row.label}
+                    </span>
+                    <span
+                      style={{
+                        fontSize: 10,
+                        color: 'var(--muted-foreground)',
+                        flexShrink: 0,
+                        fontFamily: 'var(--font-sans)',
+                      }}
+                    >
+                      {row.count}
+                    </span>
+                  </div>
+                  <div style={{ flex: 1 }} />
+                </div>
+              );
+            }
+
+            const ev = row.event;
+            const selected = selectedActivityId === ev.id;
+            const indent = (ev.depth ?? (ev.isChild ? 1 : 0)) * 18;
+            const evIsMatch = isMatch(ev.id);
+            const evIsActive = isActive(ev.id);
+            const dimmed = hasQuery && !evIsMatch;
+            const extraReasons = nonTitleReasons(ev.id);
+
+            return (
+              <div
+                key={`${ev.id}-${rowIdx}`}
+                style={{
+                  display: 'flex',
+                  height: ROW_H,
+                  borderBottom: '1px solid var(--border)',
+                  position: 'relative',
+                  background: selected ? 'hsl(188 59% 38% / .04)' : 'transparent',
+                  opacity: dimmed ? 0.3 : 1,
+                  transition: 'opacity 0.15s',
+                }}
+              >
+                {/* Sticky label cell */}
+                <div
+                  style={{
+                    width: labelColW,
+                    flexShrink: 0,
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 7,
+                    paddingLeft: 14 + indent,
+                    paddingRight: 10,
+                    position: 'sticky',
+                    left: 0,
+                    background: selected ? 'var(--muted)' : 'var(--card)',
+                    zIndex: 6,
+                    borderRight: '1px solid var(--border)',
+                    cursor: 'pointer',
+                    transition: 'background 0.1s',
+                  }}
+                  onClick={() => interactive && onSelectActivity(ev.id === selectedActivityId ? null : ev.id)}
+                  onMouseEnter={e => {
+                    e.currentTarget.style.background = 'var(--muted)';
+                  }}
+                  onMouseLeave={e => {
+                    e.currentTarget.style.background = selected ? 'var(--muted)' : 'var(--card)';
+                  }}
+                >
+                  {/* Expand/collapse chevron slot — reserved (empty for leaves) so
+                      sibling badges stay aligned within a tree level. */}
+                  {onToggleActivity && (
+                    <div style={{ width: 16, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                      {ev.hasChildren && (
+                        <button
+                          onClick={e => { e.stopPropagation(); onToggleActivity(ev.id); }}
+                          title={ev.collapsed ? 'Expand' : 'Collapse'}
+                          aria-label={ev.collapsed ? 'Expand children' : 'Collapse children'}
+                          style={{
+                            display: 'flex', alignItems: 'center', justifyContent: 'center',
+                            width: 16, height: 16, padding: 0, border: 'none', borderRadius: 3,
+                            background: 'none', cursor: 'pointer', color: 'var(--muted-foreground)',
+                          }}
+                          onMouseEnter={e => (e.currentTarget.style.background = 'var(--border)')}
+                          onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                        >
+                          {ev.collapsed
+                            ? <ChevronRight size={13} strokeWidth={2.5} />
+                            : <ChevronDown size={13} strokeWidth={2.5} />}
+                        </button>
+                      )}
+                    </div>
+                  )}
+                  <Badge
+                    identity={{ color: ev.color, icon: ev.icon ?? '__none__' }}
+                    name={ev.title}
+                    shape="square"
+                    size={20}
+                  />
+                  <span
+                    style={{
+                      fontSize: 12,
+                      fontWeight: 500,
+                      color: 'var(--foreground)',
+                      flex: 1,
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                      fontFamily: 'var(--font-sans)',
+                    }}
+                  >
+                    {ev.title}
+                  </span>
+                  {ev.members.length > 0 && (
+                    <div style={{ display: 'flex', flexShrink: 0 }}>
+                      {ev.members.slice(0, 3).map((m, i) => (
+                        <div
+                          key={m.id}
+                          style={{ marginLeft: i === 0 ? 0 : -5 }}
+                          title={m.name}
+                        >
+                          <MemberAvatar member={m} size={20} />
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* Lane — background columns + today line + event bar */}
+                <div
+                  style={{ position: 'relative', flex: 1, display: 'flex', cursor: (interactive && onLaneDrag) ? 'crosshair' : 'default' }}
+                  onMouseDown={e => handleLaneMouseDown(e, rowIdx, ev.members[0]?.id ?? null)}
+                >
+                  {columns.map((_, i) => (
+                    <div
+                      key={i}
+                      style={{
+                        width: COL_W,
+                        height: '100%',
+                        flexShrink: 0,
+                        borderRight: i < columns.length - 1 ? '1px solid var(--border)' : 'none',
+                        background:
+                          i === todayCol && !selected ? 'hsl(188 59% 38% / .04)' : 'transparent',
+                      }}
+                    />
+                  ))}
+
+                  {/* Drag selection highlight */}
+                  {drag && drag.rowIdx === rowIdx && (() => {
+                    const lo = Math.min(drag.startCol, drag.currentCol);
+                    const hi = Math.max(drag.startCol, drag.currentCol);
+                    return (
+                      <div
+                        style={{
+                          position: 'absolute',
+                          top: 4,
+                          bottom: 4,
+                          left: lo * COL_W,
+                          width: (hi - lo + 1) * COL_W,
+                          background: 'hsl(188 59% 38% / .18)',
+                          border: '1.5px dashed var(--primary)',
+                          borderRadius: 4,
+                          pointerEvents: 'none',
+                          zIndex: 3,
+                        }}
+                      />
+                    );
+                  })()}
+
+                  {/* Today vertical line */}
+                  {todayIndex >= 0 && (
+                    <div
+                      style={{
+                        position: 'absolute',
+                        top: 0,
+                        bottom: 0,
+                        left: todayIndex * COL_W,
+                        width: 2,
+                        background: 'var(--secondary)',
+                        opacity: 0.5,
+                        zIndex: 2,
+                        pointerEvents: 'none',
+                      }}
+                    />
+                  )}
+
+                  {/* Event bar — live position overridden while dragging */}
+                  {(() => {
+                    const isDragging = barDrag?.eventId === ev.id;
+                    const startCol = isDragging ? barDrag!.snapStartCol : ev.startCol;
+                    const endCol = isDragging ? barDrag!.snapEndCol : ev.startCol + ev.span;
+                    const left = startCol * COL_W + 2;
+                    const width = Math.max((endCol - startCol) * COL_W - 4, COL_W * 0.3);
+                    // Only selected bars show grab/move cursors; unselected bars show pointer
+                    // to prevent accidental date changes when the user just wants to inspect.
+                    const grabCursor = isDragging
+                      ? 'grabbing'
+                      : (selected && onBarDrag) ? 'grab' : 'pointer';
+
+                    // Box shadow: find states take precedence over selection ring.
+                    // CSS classes (.find-active-bar, .find-match-bar) provide the
+                    // amber outline; we only set inline boxShadow for the selected ring.
+                    const boxShadow = (evIsActive || evIsMatch)
+                      ? undefined
+                      : selected
+                        ? `0 0 0 2px white, 0 0 0 4px ${ev.color}`
+                        : 'var(--shadow-sm)';
+
+                    return (
+                      <div
+                        onClick={() => {
+                          // Bar click always selects — use the label cell to deselect.
+                          if (interactive && !isDragging) onSelectActivity(ev.id);
+                        }}
+                        onMouseDown={e => {
+                          if (!interactive || !onBarDrag) { e.stopPropagation(); return; }
+                          const barRect = e.currentTarget.getBoundingClientRect();
+                          const xInBar = e.clientX - barRect.left;
+                          let zone: BarDragZone;
+                          if (xInBar <= EDGE_W) zone = 'left';
+                          else if (xInBar >= barRect.width - EDGE_W) zone = 'right';
+                          else zone = 'body';
+                          handleBarMouseDown(e, ev, zone);
+                        }}
+                        onMouseEnter={e => {
+                          if (!isDragging) e.currentTarget.style.filter = 'brightness(1.08)';
+                          // Show "why matched" tooltip for non-title matches
+                          if (extraReasons.length > 0) {
+                            setMatchTooltip({ reasons: extraReasons, x: e.clientX, y: e.clientY });
+                          }
+                        }}
+                        onMouseMove={e => {
+                          if (matchTooltip) {
+                            setMatchTooltip(t => t ? { ...t, x: e.clientX, y: e.clientY } : null);
+                          }
+                        }}
+                        onMouseLeave={e => {
+                          e.currentTarget.style.filter = '';
+                          setMatchTooltip(null);
+                        }}
+                        className={evIsActive ? 'find-active-bar' : evIsMatch ? 'find-match-bar' : undefined}
+                        style={{
+                          position: 'absolute',
+                          top: 9,
+                          bottom: 9,
+                          left,
+                          width,
+                          background: ev.color,
+                          borderRadius: 5,
+                          display: 'flex',
+                          alignItems: 'center',
+                          padding: `0 ${EDGE_W + 2}px`,
+                          fontSize: 11,
+                          fontWeight: 600,
+                          color: 'white',
+                          overflow: 'hidden',
+                          whiteSpace: 'nowrap',
+                          textOverflow: 'ellipsis',
+                          cursor: grabCursor,
+                          zIndex: 4,
+                          boxShadow,
+                          opacity: isDragging ? 0.85 : 1,
+                          transition: isDragging ? 'none' : 'box-shadow 0.12s, opacity 0.1s',
+                          fontFamily: 'var(--font-sans)',
+                          userSelect: 'none',
+                        }}
+                      >
+                        {/* Progress fill overlay — subtle darker shade showing % complete */}
+                        {(ev.percentComplete ?? 0) > 0 && (
+                          <div
+                            style={{
+                              position: 'absolute',
+                              left: 0,
+                              top: 0,
+                              bottom: 0,
+                              width: `${ev.percentComplete}%`,
+                              background: 'rgba(0,0,0,0.18)',
+                              borderRadius: 5,
+                              pointerEvents: 'none',
+                            }}
+                          />
+                        )}
+                        {/* Left resize handle — only shown on selected bars */}
+                        {onBarDrag && selected && (
+                          <div
+                            style={{
+                              position: 'absolute',
+                              left: 0,
+                              top: 0,
+                              bottom: 0,
+                              width: EDGE_W,
+                              cursor: 'ew-resize',
+                              borderRadius: '5px 0 0 5px',
+                            }}
+                          />
+                        )}
+                        {ev.title}
+                        {/* Right resize handle — only shown on selected bars */}
+                        {onBarDrag && selected && (
+                          <div
+                            style={{
+                              position: 'absolute',
+                              right: 0,
+                              top: 0,
+                              bottom: 0,
+                              width: EDGE_W,
+                              cursor: 'ew-resize',
+                              borderRadius: '0 5px 5px 0',
+                            }}
+                          />
+                        )}
+                      </div>
+                    );
+                  })()}
+                </div>
+              </div>
+            );
+          })}
+
+          {/* No-matches-in-view callout — rendered inside the scroll container */}
+          {hasQuery && findState && findState.matchCount === 0 && rows.length > 0 && findState.filtersActive && (
+            <div style={{
+              padding: '12px 16px',
+              fontSize: 12,
+              color: 'var(--muted-foreground)',
+              borderTop: '1px solid var(--border)',
+            }}>
+              No matches in current view.{' '}
+              {onClearFilters && (
+                <button
+                  onClick={onClearFilters}
+                  style={{ color: 'var(--primary)', background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, padding: 0, fontFamily: 'inherit' }}
+                >
+                  Clear filters
+                </button>
+              )}
+            </div>
+          )}
+
+        </div>
+      </div>
+
+      {/* Drag tooltip — fixed position follows the mouse during bar drag */}
+      {dragTooltip && (
+        <div
+          style={{
+            position: 'fixed',
+            left: dragTooltip.x + 14,
+            top: dragTooltip.y - 28,
+            background: 'var(--popover)',
+            color: 'var(--popover-foreground)',
+            border: '1px solid var(--border)',
+            borderRadius: 6,
+            padding: '4px 10px',
+            fontSize: 11,
+            fontWeight: 600,
+            fontFamily: 'var(--font-sans)',
+            pointerEvents: 'none',
+            zIndex: 9999,
+            whiteSpace: 'nowrap',
+            boxShadow: 'var(--shadow-md)',
+          }}
+        >
+          {dragTooltip.text}
+        </div>
+      )}
+
+      {/* "Why matched" tooltip — shown on hover for non-title match reasons */}
+      {matchTooltip && (
+        <div
+          style={{
+            position: 'fixed',
+            left: matchTooltip.x + 12,
+            top: matchTooltip.y - 36,
+            background: 'var(--popover)',
+            color: 'var(--popover-foreground)',
+            border: '1px solid var(--border)',
+            borderRadius: 6,
+            padding: '4px 10px',
+            fontSize: 11,
+            fontFamily: 'var(--font-sans)',
+            pointerEvents: 'none',
+            zIndex: 9999,
+            whiteSpace: 'nowrap',
+            boxShadow: 'var(--shadow-md)',
+          }}
+        >
+          {matchTooltip.reasons.map(r => (
+            <div key={r} style={{ lineHeight: 1.6 }}>matched {r}</div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 ````
 
 ## File: packages/web/src/components/gantt/GanttView.filter.test.ts
@@ -29664,6 +31089,562 @@ export function filterColor(id: string): string {
 }
 ````
 
+## File: packages/web/src/lib/filterEngine.test.ts
+````typescript
+/**
+ * filterEngine.test.ts — unit tests for matchesFilter.
+ *
+ * Covers: each field type, each operator, AND/OR logic, edge cases
+ * (empty conditions, null/missing fields, case-insensitive status/tag matching),
+ * and the golden fixture suite shared with the Go filter engine.
+ */
+
+import { describe, it, expect } from 'vitest'
+import { matchesFilter, type FilterContext } from './filterEngine'
+import type { components } from '@draba/shared'
+import type { FilterDefinition } from './filterTypes'
+// Golden fixtures shared with the Go filter evaluator (packages/api/internal/filters).
+// Both implementations must produce the same result for every case here.
+import goldenFixtures from '../../../shared/testdata/filter-fixtures.json'
+
+type Activity = components['schemas']['Activity']
+type Status = components['schemas']['Status']
+type Tag = components['schemas']['Tag']
+
+// ── Fixtures ──────────────────────────────────────────────────────────────────
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function makeActivity(overrides: Record<string, any> = {}): Activity {
+  return {
+    id: 'act-1',
+    title: 'Test activity',
+    timelineId: 'tl-1',
+    startAt: '2026-01-10T00:00:00Z',
+    endAt: '2026-01-20T00:00:00Z',
+    allDay: false,
+    statusId: 'status-open',
+    tagIds: ['tag-1'],
+    assignedMemberIds: ['member-1'],
+    percentComplete: 50,
+    parentActivityId: null,
+    color: null,
+    icon: null,
+    description: null,
+    notes: null,
+    location: null,
+    url: null,
+    createdAt: '2026-01-01T00:00:00Z',
+    updatedAt: '2026-01-01T00:00:00Z',
+    archivedAt: null,
+    createdBy: 'user-1',
+    ...overrides,
+  } as Activity
+}
+
+function makeStatus(id: string, name: string, isClosed = false): Status {
+  return { id, name, color: '#3B82F6', icon: null, isClosed, position: 0, timelineId: 'tl-1', createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' }
+}
+
+function makeTag(id: string, name: string): Tag {
+  return { id, name, color: null, teamId: 'team-1', createdAt: '2026-01-01T00:00:00Z', createdBy: 'user-1' }
+}
+
+const statusOpen = makeStatus('status-open', 'In Progress')
+const statusClosed = makeStatus('status-closed', 'Done', true)
+
+const tagBug = makeTag('tag-1', 'bug')
+const tagFeat = makeTag('tag-2', 'feature')
+
+const ctx: FilterContext = {
+  statusesByTimeline: new Map([['tl-1', [statusOpen, statusClosed]]]),
+  tags: [tagBug, tagFeat],
+}
+
+// ── Empty conditions ──────────────────────────────────────────────────────────
+
+describe('empty conditions', () => {
+  it('matches all activities when conditions list is empty', () => {
+    const activity = makeActivity()
+    expect(matchesFilter(activity, { logic: 'and', conditions: [] }, ctx)).toBe(true)
+    expect(matchesFilter(activity, { logic: 'or', conditions: [] }, ctx)).toBe(true)
+  })
+})
+
+// ── AND / OR logic ────────────────────────────────────────────────────────────
+
+describe('AND / OR logic', () => {
+  it('AND requires all conditions to pass', () => {
+    const activity = makeActivity({ title: 'Hello world' })
+    expect(matchesFilter(activity, {
+      logic: 'and',
+      conditions: [
+        { field: 'title', op: 'contains', value: 'Hello' },
+        { field: 'title', op: 'contains', value: 'world' },
+      ],
+    }, ctx)).toBe(true)
+
+    expect(matchesFilter(activity, {
+      logic: 'and',
+      conditions: [
+        { field: 'title', op: 'contains', value: 'Hello' },
+        { field: 'title', op: 'contains', value: 'missing' },
+      ],
+    }, ctx)).toBe(false)
+  })
+
+  it('OR requires at least one condition to pass', () => {
+    const activity = makeActivity({ title: 'Hello world' })
+    expect(matchesFilter(activity, {
+      logic: 'or',
+      conditions: [
+        { field: 'title', op: 'contains', value: 'missing' },
+        { field: 'title', op: 'contains', value: 'world' },
+      ],
+    }, ctx)).toBe(true)
+
+    expect(matchesFilter(activity, {
+      logic: 'or',
+      conditions: [
+        { field: 'title', op: 'contains', value: 'nope' },
+        { field: 'title', op: 'contains', value: 'nada' },
+      ],
+    }, ctx)).toBe(false)
+  })
+})
+
+// ── Status field ──────────────────────────────────────────────────────────────
+
+describe('status field', () => {
+  it('in: matches when status name is in the set (case-insensitive)', () => {
+    const activity = makeActivity({ statusId: 'status-open' })
+    expect(matchesFilter(activity, {
+      logic: 'and',
+      conditions: [{ field: 'status', op: 'in', value: ['in progress'] }],
+    }, ctx)).toBe(true)
+  })
+
+  it('in: no match when status name not in set', () => {
+    const activity = makeActivity({ statusId: 'status-open' })
+    expect(matchesFilter(activity, {
+      logic: 'and',
+      conditions: [{ field: 'status', op: 'in', value: ['done'] }],
+    }, ctx)).toBe(false)
+  })
+
+  it('not_in: matches when status name is NOT in the set', () => {
+    const activity = makeActivity({ statusId: 'status-open' })
+    expect(matchesFilter(activity, {
+      logic: 'and',
+      conditions: [{ field: 'status', op: 'not_in', value: ['done'] }],
+    }, ctx)).toBe(true)
+  })
+
+  it('is_empty: matches when activity has no status', () => {
+    const activity = makeActivity({ statusId: null })
+    expect(matchesFilter(activity, {
+      logic: 'and',
+      conditions: [{ field: 'status', op: 'is_empty', value: [] }],
+    }, ctx)).toBe(true)
+  })
+
+  it('is_not_empty: matches when activity has a status', () => {
+    const activity = makeActivity({ statusId: 'status-open' })
+    expect(matchesFilter(activity, {
+      logic: 'and',
+      conditions: [{ field: 'status', op: 'is_not_empty', value: [] }],
+    }, ctx)).toBe(true)
+  })
+})
+
+// ── Tag field ─────────────────────────────────────────────────────────────────
+
+describe('tag field', () => {
+  it('in: matches by tag name (case-insensitive)', () => {
+    const activity = makeActivity({ tagIds: ['tag-1'] }) // tag-1 = 'bug'
+    expect(matchesFilter(activity, {
+      logic: 'and',
+      conditions: [{ field: 'tag', op: 'in', value: ['BUG'] }],
+    }, ctx)).toBe(true)
+  })
+
+  it('not_in: matches when none of the tag names match', () => {
+    const activity = makeActivity({ tagIds: ['tag-1'] }) // 'bug'
+    expect(matchesFilter(activity, {
+      logic: 'and',
+      conditions: [{ field: 'tag', op: 'not_in', value: ['feature'] }],
+    }, ctx)).toBe(true)
+  })
+
+  it('is_empty: matches when activity has no tags', () => {
+    const activity = makeActivity({ tagIds: [] })
+    expect(matchesFilter(activity, {
+      logic: 'and',
+      conditions: [{ field: 'tag', op: 'is_empty', value: [] }],
+    }, ctx)).toBe(true)
+  })
+})
+
+// ── Assignee field ────────────────────────────────────────────────────────────
+
+describe('assignee field', () => {
+  it('in: matches when member ID is assigned', () => {
+    const activity = makeActivity({ assignedMemberIds: ['member-1'] })
+    expect(matchesFilter(activity, {
+      logic: 'and',
+      conditions: [{ field: 'assignee', op: 'in', value: ['member-1'] }],
+    }, ctx)).toBe(true)
+  })
+
+  it('not_in: matches when member is not assigned', () => {
+    const activity = makeActivity({ assignedMemberIds: ['member-2'] })
+    expect(matchesFilter(activity, {
+      logic: 'and',
+      conditions: [{ field: 'assignee', op: 'not_in', value: ['member-1'] }],
+    }, ctx)).toBe(true)
+  })
+
+  it('is_empty: matches when no assignees', () => {
+    const activity = makeActivity({ assignedMemberIds: [] })
+    expect(matchesFilter(activity, {
+      logic: 'and',
+      conditions: [{ field: 'assignee', op: 'is_empty', value: [] }],
+    }, ctx)).toBe(true)
+  })
+})
+
+// ── Title field ───────────────────────────────────────────────────────────────
+
+describe('title field', () => {
+  it('contains: case-insensitive substring match', () => {
+    const activity = makeActivity({ title: 'Fix the login bug' })
+    expect(matchesFilter(activity, {
+      logic: 'and',
+      conditions: [{ field: 'title', op: 'contains', value: 'LOGIN' }],
+    }, ctx)).toBe(true)
+  })
+
+  it('not_contains: true when substring absent', () => {
+    const activity = makeActivity({ title: 'Fix the login bug' })
+    expect(matchesFilter(activity, {
+      logic: 'and',
+      conditions: [{ field: 'title', op: 'not_contains', value: 'dashboard' }],
+    }, ctx)).toBe(true)
+  })
+
+  it('equals: exact case-insensitive match', () => {
+    const activity = makeActivity({ title: 'Hello World' })
+    expect(matchesFilter(activity, {
+      logic: 'and',
+      conditions: [{ field: 'title', op: 'equals', value: 'hello world' }],
+    }, ctx)).toBe(true)
+  })
+
+  it('is_empty: matches when title is empty string', () => {
+    const activity = makeActivity({ title: '' })
+    expect(matchesFilter(activity, {
+      logic: 'and',
+      conditions: [{ field: 'title', op: 'is_empty', value: '' }],
+    }, ctx)).toBe(true)
+  })
+})
+
+// ── Progress field ────────────────────────────────────────────────────────────
+
+describe('progress field', () => {
+  it('gte: matches when progress is at or above threshold', () => {
+    const activity = makeActivity({ percentComplete: 75 })
+    expect(matchesFilter(activity, {
+      logic: 'and',
+      conditions: [{ field: 'progress', op: 'gte', value: 50 }],
+    }, ctx)).toBe(true)
+  })
+
+  it('lt: matches when progress is below threshold', () => {
+    const activity = makeActivity({ percentComplete: 25 })
+    expect(matchesFilter(activity, {
+      logic: 'and',
+      conditions: [{ field: 'progress', op: 'lt', value: 50 }],
+    }, ctx)).toBe(true)
+  })
+
+  it('is_empty: matches when percentComplete is null/undefined', () => {
+    const activity = makeActivity({ percentComplete: undefined })
+    expect(matchesFilter(activity, {
+      logic: 'and',
+      conditions: [{ field: 'progress', op: 'is_empty', value: 0 }],
+    }, ctx)).toBe(true)
+  })
+})
+
+// ── hasParent field ───────────────────────────────────────────────────────────
+
+describe('hasParent field', () => {
+  it('is_true: matches activities with a parent', () => {
+    const activity = makeActivity({ parentActivityId: 'parent-1' })
+    expect(matchesFilter(activity, {
+      logic: 'and',
+      conditions: [{ field: 'hasParent', op: 'is_true' }],
+    }, ctx)).toBe(true)
+  })
+
+  it('is_false: matches activities without a parent', () => {
+    const activity = makeActivity({ parentActivityId: null })
+    expect(matchesFilter(activity, {
+      logic: 'and',
+      conditions: [{ field: 'hasParent', op: 'is_false' }],
+    }, ctx)).toBe(true)
+  })
+})
+
+// ── Date fields ───────────────────────────────────────────────────────────────
+
+describe('date fields', () => {
+  it('startDate before: matches when start is before the given date', () => {
+    const activity = makeActivity({ startAt: '2026-01-05T00:00:00Z' })
+    expect(matchesFilter(activity, {
+      logic: 'and',
+      conditions: [{ field: 'startDate', op: 'before', value: '2026-01-10' }],
+    }, ctx)).toBe(true)
+  })
+
+  it('endDate after: matches when end is after the given date', () => {
+    const activity = makeActivity({ endAt: '2026-03-01T00:00:00Z' })
+    expect(matchesFilter(activity, {
+      logic: 'and',
+      conditions: [{ field: 'endDate', op: 'after', value: '2026-02-01' }],
+    }, ctx)).toBe(true)
+  })
+
+  it('startDate between: matches when start is within range', () => {
+    const activity = makeActivity({ startAt: '2026-06-15T00:00:00Z' })
+    expect(matchesFilter(activity, {
+      logic: 'and',
+      conditions: [{ field: 'startDate', op: 'between', value: ['2026-06-01', '2026-06-30'] }],
+    }, ctx)).toBe(true)
+  })
+
+  it('is_empty: matches when date is null/undefined', () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const activity = makeActivity({ startAt: null as any })
+    expect(matchesFilter(activity, {
+      logic: 'and',
+      conditions: [{ field: 'startDate', op: 'is_empty' }],
+    }, ctx)).toBe(true)
+  })
+})
+
+// ── Golden fixtures (parity with Go filter engine) ────────────────────────────
+
+describe('golden fixtures — parity with Go filter engine', () => {
+  // Build context from the shared fixture reference data.
+  const fixtureCtx: FilterContext = {
+    statusesByTimeline: new Map([
+      [
+        'tl1',
+        goldenFixtures.statuses.map(s => ({
+          id: s.id,
+          name: s.name,
+          color: s.color,
+          isClosed: s.isClosed,
+          position: s.position,
+          timelineId: s.timelineId,
+          createdAt: '2026-01-01T00:00:00Z',
+          updatedAt: '2026-01-01T00:00:00Z',
+        })),
+      ],
+    ]),
+    tags: goldenFixtures.tags.map(t => ({
+      id: t.id,
+      name: t.name,
+      color: null,
+      teamId: t.teamId,
+      createdAt: t.createdAt,
+      createdBy: t.createdBy,
+    })),
+  }
+
+  // Build activity lookup.
+  const actByID = Object.fromEntries(
+    goldenFixtures.activities.map(a => [
+      a.id,
+      {
+        ...a,
+        description: null,
+        notes: null,
+        icon: null,
+        color: null,
+        location: null,
+        url: null,
+        rrule: null,
+        caldavUid: null,
+        googleEventId: null,
+        archivedAt: null,
+        updatedAt: '2026-01-01T00:00:00Z',
+      } as Activity,
+    ])
+  )
+
+  for (const fix of goldenFixtures.fixtures) {
+    it(fix.name, () => {
+      for (const [actID, want] of Object.entries(fix.expected)) {
+        const act = actByID[actID]
+        expect(act, `activity ${actID} missing`).toBeDefined()
+        const got = matchesFilter(act, fix.filter as FilterDefinition, fixtureCtx)
+        expect(got, `activity ${actID}`).toBe(want)
+      }
+    })
+  }
+})
+````
+
+## File: packages/web/src/lib/filterEngine.ts
+````typescript
+/**
+ * Client-side filter evaluation engine.
+ *
+ * matchesFilter is a pure function that evaluates a FilterDefinition against
+ * a single activity. It resolves status names and tag names via context objects
+ * so callers supply the data; the engine does no fetching.
+ */
+
+import type { components } from '@draba/shared'
+import type { FilterDefinition, FilterCondition, SetOp, StringOp, NumberOp, BoolOp, DateOp } from './filterTypes'
+
+type Activity = components['schemas']['Activity']
+type Status = components['schemas']['Status']
+type Tag = components['schemas']['Tag']
+
+export interface FilterContext {
+  /** Maps timeline_id → that timeline's statuses (for resolving statusId → name). */
+  statusesByTimeline: Map<string, Status[]>
+  /** All tags for the team (for resolving tagIds → names). */
+  tags: Tag[]
+}
+
+// ── Operator helpers ──────────────────────────────────────────────────────────
+
+function evalSetOp(op: SetOp, haystack: string[], needles: string[]): boolean {
+  switch (op) {
+    case 'in':
+      return needles.some(n => haystack.includes(n))
+    case 'not_in':
+      return needles.every(n => !haystack.includes(n))
+    case 'is_empty':
+      return haystack.length === 0
+    case 'is_not_empty':
+      return haystack.length > 0
+  }
+}
+
+function evalStringOp(op: StringOp, value: string | null | undefined, target: string): boolean {
+  const v = (value ?? '').toLowerCase()
+  const t = target.toLowerCase()
+  switch (op) {
+    case 'equals':       return v === t
+    case 'not_equals':   return v !== t
+    case 'contains':     return v.includes(t)
+    case 'not_contains': return !v.includes(t)
+    case 'is_empty':     return v.trim() === ''
+    case 'is_not_empty': return v.trim() !== ''
+  }
+}
+
+function evalNumberOp(op: NumberOp, value: number | null | undefined, target: number): boolean {
+  if (op === 'is_empty')     return value == null
+  if (op === 'is_not_empty') return value != null
+  if (value == null) return false
+  switch (op) {
+    case 'equals':     return value === target
+    case 'not_equals': return value !== target
+    case 'gt':         return value > target
+    case 'gte':        return value >= target
+    case 'lt':         return value < target
+    case 'lte':        return value <= target
+  }
+}
+
+function evalBoolOp(op: BoolOp, value: boolean): boolean {
+  return op === 'is_true' ? value : !value
+}
+
+function evalDateOp(op: DateOp, dateStr: string | null | undefined, target: string | [string, string] | undefined): boolean {
+  if (op === 'is_empty')     return !dateStr
+  if (op === 'is_not_empty') return Boolean(dateStr)
+  if (!dateStr || !target) return false
+
+  const date = new Date(dateStr).getTime()
+  if (op === 'between') {
+    const [from, to] = target as [string, string]
+    return date >= new Date(from).getTime() && date <= new Date(to).getTime()
+  }
+  const targetDate = new Date(target as string).getTime()
+  if (op === 'before') return date < targetDate
+  if (op === 'after')  return date > targetDate
+  return false
+}
+
+// ── Condition evaluation ──────────────────────────────────────────────────────
+
+function evalCondition(condition: FilterCondition, activity: Activity, ctx: FilterContext): boolean {
+  switch (condition.field) {
+    case 'status': {
+      const statuses = ctx.statusesByTimeline.get(activity.timelineId) ?? []
+      const statusName = statuses.find(s => s.id === activity.statusId)?.name ?? null
+      const haystack = statusName ? [statusName.toLowerCase()] : []
+      // is_empty / is_not_empty don't use needles — guard before .map()
+      const needles = (condition.value ?? []).map(v => v.toLowerCase())
+      return evalSetOp(condition.op, haystack, needles)
+    }
+
+    case 'tag': {
+      const tagMap = new Map(ctx.tags.map(t => [t.id, t.name.toLowerCase()]))
+      const activityTagNames = (activity.tagIds ?? []).map(id => tagMap.get(id) ?? id)
+      const needles = (condition.value ?? []).map(v => v.toLowerCase())
+      return evalSetOp(condition.op, activityTagNames, needles)
+    }
+
+    case 'assignee': {
+      const haystack = activity.assignedMemberIds ?? []
+      return evalSetOp(condition.op, haystack, condition.value ?? [])
+    }
+
+    case 'title':
+      return evalStringOp(condition.op, activity.title, condition.value)
+
+    case 'progress':
+      return evalNumberOp(condition.op, activity.percentComplete ?? null, condition.value)
+
+    case 'hasParent':
+      return evalBoolOp(condition.op, Boolean(activity.parentActivityId))
+
+    case 'startDate':
+      return evalDateOp(condition.op, activity.startAt ?? null, condition.value)
+
+    case 'endDate':
+      return evalDateOp(condition.op, activity.endAt ?? null, condition.value)
+  }
+}
+
+// ── Main export ───────────────────────────────────────────────────────────────
+
+/**
+ * Returns true when activity matches the given FilterDefinition.
+ * An empty conditions array always matches (no filtering).
+ */
+export function matchesFilter(
+  activity: Activity,
+  filter: FilterDefinition,
+  ctx: FilterContext,
+): boolean {
+  if (filter.conditions.length === 0) return true
+
+  const results = filter.conditions.map(c => evalCondition(c, activity, ctx))
+  return filter.logic === 'and'
+    ? results.every(Boolean)
+    : results.some(Boolean)
+}
+````
+
 ## File: packages/web/src/lib/filterTypes.ts
 ````typescript
 /**
@@ -33359,6 +35340,39 @@ CMD ["pnpm", "dev", "--host"]
 }
 ````
 
+## File: packages/web/tsconfig.app.json
+````json
+{
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.app.tsbuildinfo",
+    "target": "ES2020",
+    "useDefineForClassFields": true,
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "jsx": "react-jsx",
+
+    "resolveJsonModule": true,
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedSideEffectImports": true,
+    "paths": {
+      "@draba/shared": ["../shared/src/index.ts"],
+      "@/*": ["./src/*"]
+    }
+  },
+  "include": ["src"]
+}
+````
+
 ## File: packages/web/tsconfig.json
 ````json
 {
@@ -33394,6 +35408,66 @@ CMD ["pnpm", "dev", "--host"]
   },
   "include": ["vite.config.ts"]
 }
+````
+
+## File: packages/web/vite.config.ts
+````typescript
+/// <reference types="vitest" />
+import path from 'path'
+import { defineConfig, loadEnv } from 'vite'
+import react from '@vitejs/plugin-react'
+import tailwindcss from '@tailwindcss/vite'
+
+export default defineConfig(({ mode }) => {
+  const env = loadEnv(mode, process.cwd(), '')
+  const apiTarget = env.VITE_API_TARGET ?? 'http://localhost:8080'
+
+  return {
+    plugins: [
+      react(),
+      tailwindcss(),
+    ],
+    resolve: {
+      alias: {
+        '@': path.resolve(__dirname, './src'),
+      },
+    },
+    test: {
+      environment: 'jsdom',
+      globals: true,
+      alias: {
+        '@': path.resolve(__dirname, './src'),
+      },
+    },
+    server: {
+      proxy: {
+        '/setup': { target: apiTarget, changeOrigin: true },
+        '/auth': { target: apiTarget, changeOrigin: true },
+        '/users': { target: apiTarget, changeOrigin: true },
+        '/admin': { target: apiTarget, changeOrigin: true },
+        '/settings': { target: apiTarget, changeOrigin: true },
+        '/tokens': { target: apiTarget, changeOrigin: true },
+        '/teams': { target: apiTarget, changeOrigin: true },
+        '/timelines': { target: apiTarget, changeOrigin: true },
+        '/status-templates': { target: apiTarget, changeOrigin: true },
+        '/status-template-items': { target: apiTarget, changeOrigin: true },
+        '/statuses': { target: apiTarget, changeOrigin: true },
+        '/activities': { target: apiTarget, changeOrigin: true },
+        '/tags': { target: apiTarget, changeOrigin: true },
+        '/saved_filters': { target: apiTarget, changeOrigin: true },
+        '/shares': { target: apiTarget, changeOrigin: true },
+        '/events': { target: apiTarget, changeOrigin: true },
+        '/health': { target: apiTarget, changeOrigin: true },
+        '/ws': {
+          target: apiTarget.replace(/^http/, 'ws'),
+          changeOrigin: true,
+          ws: true,
+          rewriteWsOrigin: true,
+        },
+      },
+    },
+  }
+})
 ````
 
 ## File: scripts/seed-find-test-activities.sql
@@ -39479,56 +41553,6 @@ func Short() string {
 }
 ````
 
-## File: packages/api/internal/db/migrations/019_shares.sql
-````sql
--- Migration 019: shares table + token migration.
---
--- Each timeline can have many shares (one per configured view). The existing
--- timelines.share_token rows are migrated into shares rows so that any links
--- already in circulation continue to work. The share_token column on timelines
--- is left in place until all code references are removed (a follow-up migration
--- will drop it once it is no longer used by the legacy handler).
-
-CREATE TABLE shares (
-  id             TEXT PRIMARY KEY,
-  timeline_id    TEXT NOT NULL REFERENCES timelines(id) ON DELETE CASCADE,
-  token          TEXT NOT NULL UNIQUE,
-  view_type      TEXT NOT NULL DEFAULT 'gantt',
-  view_config    TEXT NOT NULL DEFAULT '{}',
-  password_hash  TEXT,
-  expires_at     DATETIME,
-  created_by     TEXT NOT NULL REFERENCES team_members(id),
-  created_at     DATETIME NOT NULL,
-  last_viewed_at DATETIME,
-  view_count     INTEGER NOT NULL DEFAULT 0,
-  revoked_at     DATETIME
-);
-
-CREATE INDEX idx_shares_timeline_id ON shares(timeline_id);
-CREATE INDEX idx_shares_token       ON shares(token);
-
--- Migrate every existing timeline's share_token into a shares row so that
--- any existing share links keep working. We pick the first team_member row
--- for the timeline's team as created_by (a stable stand-in for the original
--- creator, which was not recorded).
-INSERT INTO shares (id, timeline_id, token, view_type, view_config, created_by, created_at)
-SELECT
-  lower(hex(randomblob(16))),
-  t.id,
-  t.share_token,
-  'gantt',
-  '{}',
-  (SELECT tm.id FROM team_members tm WHERE tm.team_id = t.team_id AND tm.archived_at IS NULL ORDER BY tm.joined_at LIMIT 1),
-  datetime('now')
-FROM timelines t
-WHERE t.share_token IS NOT NULL
-  AND t.share_token != ''
-  AND EXISTS (
-    SELECT 1 FROM team_members tm
-    WHERE tm.team_id = t.team_id AND tm.archived_at IS NULL
-  );
-````
-
 ## File: packages/api/internal/db/migrations/020_share_name.sql
 ````sql
 -- Migration 020: add name column to shares.
@@ -41198,6 +43222,357 @@ func ptrEqual(a, b *string) bool {
 }
 ````
 
+## File: packages/api/internal/filters/engine.go
+````go
+// Package filters provides the server-side activity filter evaluator.
+//
+// It is a Go port of the TypeScript matchesFilter function in
+// packages/web/src/lib/filterEngine.ts. Both implementations must agree on
+// every test case in packages/shared/testdata/filter-fixtures.json — that file
+// is the single source of truth for expected behaviour.
+package filters
+
+import (
+	"strings"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// FilterLogic controls how conditions in a FilterDefinition are combined.
+type FilterLogic string
+
+// LogicAnd and LogicOr are the two values for FilterLogic.
+const (
+	LogicAnd FilterLogic = "and"
+	LogicOr  FilterLogic = "or"
+)
+
+// FilterDefinition is the top-level filter object, matching the TypeScript type
+// of the same name. Conditions are evaluated with the specified Logic.
+type FilterDefinition struct {
+	Logic      FilterLogic `json:"logic"`
+	Conditions []Condition `json:"conditions"`
+}
+
+// Condition is a single filter rule. Field determines which activity field is
+// tested; Op and Value carry the operator and operand(s). The exact types mirror
+// the TypeScript FilterCondition union.
+type Condition struct {
+	Field string `json:"field"`
+	Op    string `json:"op"`
+	// Value is the raw JSON value for the condition's operand. Its concrete Go
+	// type depends on the field: string, []string, float64, or []string pair.
+	// We unmarshal as interface{} and interpret per-field below.
+	Value interface{} `json:"value,omitempty"`
+}
+
+// FilterContext carries the reference data needed to evaluate status-name and
+// tag-name conditions without performing additional DB lookups.
+type FilterContext struct {
+	// StatusesByTimelineID maps timeline_id → that timeline's live statuses.
+	StatusesByTimelineID map[string][]models.Status
+	// Tags holds all team tags (for resolving tagIds → names).
+	Tags []models.Tag
+}
+
+// MatchesFilter reports whether activity satisfies def given ctx.
+// An empty conditions slice always matches (no filtering applied).
+func MatchesFilter(activity *models.Activity, def *FilterDefinition, ctx *FilterContext) bool {
+	if len(def.Conditions) == 0 {
+		return true
+	}
+
+	results := make([]bool, len(def.Conditions))
+	for i, c := range def.Conditions {
+		results[i] = evalCondition(&c, activity, ctx)
+	}
+
+	if def.Logic == LogicOr {
+		for _, r := range results {
+			if r {
+				return true
+			}
+		}
+		return false
+	}
+	// default: "and"
+	for _, r := range results {
+		if !r {
+			return false
+		}
+	}
+	return true
+}
+
+// ── Condition evaluation ──────────────────────────────────────────────────────
+
+func evalCondition(c *Condition, a *models.Activity, ctx *FilterContext) bool {
+	switch c.Field {
+	case "status":
+		statuses := ctx.StatusesByTimelineID[a.TimelineID]
+		statusName := ""
+		if a.StatusID != nil {
+			for i := range statuses {
+				if statuses[i].ID == *a.StatusID {
+					statusName = strings.ToLower(statuses[i].Name)
+					break
+				}
+			}
+		}
+		var haystack []string
+		if statusName != "" {
+			haystack = []string{statusName}
+		}
+		needles := toLowerStrings(toStringSlice(c.Value))
+		return evalSetOp(c.Op, haystack, needles)
+
+	case "tag":
+		tagMap := make(map[string]string, len(ctx.Tags))
+		for _, t := range ctx.Tags {
+			tagMap[t.ID] = strings.ToLower(t.Name)
+		}
+		actTagNames := make([]string, 0, len(a.TagIDs))
+		for _, id := range a.TagIDs {
+			if name, ok := tagMap[id]; ok {
+				actTagNames = append(actTagNames, name)
+			} else {
+				actTagNames = append(actTagNames, strings.ToLower(id))
+			}
+		}
+		needles := toLowerStrings(toStringSlice(c.Value))
+		return evalSetOp(c.Op, actTagNames, needles)
+
+	case "assignee":
+		needles := toStringSlice(c.Value)
+		return evalSetOp(c.Op, a.AssignedMemberIDs, needles)
+
+	case "title":
+		return evalStringOp(c.Op, a.Title, toString(c.Value))
+
+	case "progress":
+		var v *float64
+		if a.PercentComplete != nil {
+			f := float64(*a.PercentComplete)
+			v = &f
+		}
+		return evalNumberOp(c.Op, v, toFloat(c.Value))
+
+	case "hasParent":
+		return evalBoolOp(c.Op, a.ParentActivityID != nil)
+
+	case "startDate":
+		return evalDateOp(c.Op, a.StartAt.Format(time.RFC3339), c.Value)
+
+	case "endDate":
+		return evalDateOp(c.Op, a.EndAt.Format(time.RFC3339), c.Value)
+	}
+	return false
+}
+
+// ── Operator helpers ──────────────────────────────────────────────────────────
+
+func evalSetOp(op string, haystack, needles []string) bool {
+	switch op {
+	case "in":
+		for _, n := range needles {
+			for _, h := range haystack {
+				if h == n {
+					return true
+				}
+			}
+		}
+		return false
+	case "not_in":
+		for _, n := range needles {
+			for _, h := range haystack {
+				if h == n {
+					return false
+				}
+			}
+		}
+		return true
+	case "is_empty":
+		return len(haystack) == 0
+	case "is_not_empty":
+		return len(haystack) > 0
+	}
+	return false
+}
+
+func evalStringOp(op, value, target string) bool {
+	v := strings.ToLower(strings.TrimSpace(value))
+	t := strings.ToLower(target)
+	switch op {
+	case "equals":
+		return v == t
+	case "not_equals":
+		return v != t
+	case "contains":
+		return strings.Contains(v, t)
+	case "not_contains":
+		return !strings.Contains(v, t)
+	case "is_empty":
+		return strings.TrimSpace(v) == ""
+	case "is_not_empty":
+		return strings.TrimSpace(v) != ""
+	}
+	return false
+}
+
+func evalNumberOp(op string, value *float64, target float64) bool {
+	if op == "is_empty" {
+		return value == nil
+	}
+	if op == "is_not_empty" {
+		return value != nil
+	}
+	if value == nil {
+		return false
+	}
+	v := *value
+	switch op {
+	case "equals":
+		return v == target
+	case "not_equals":
+		return v != target
+	case "gt":
+		return v > target
+	case "gte":
+		return v >= target
+	case "lt":
+		return v < target
+	case "lte":
+		return v <= target
+	}
+	return false
+}
+
+func evalBoolOp(op string, value bool) bool {
+	return (op == "is_true") == value
+}
+
+func evalDateOp(op, dateStr string, target interface{}) bool {
+	if op == "is_empty" {
+		return dateStr == ""
+	}
+	if op == "is_not_empty" {
+		return dateStr != ""
+	}
+	if dateStr == "" || target == nil {
+		return false
+	}
+
+	date, err := parseDate(dateStr)
+	if err != nil {
+		return false
+	}
+
+	if op == "between" {
+		pair, ok := toStringPair(target)
+		if !ok {
+			return false
+		}
+		from, err1 := parseDate(pair[0])
+		to, err2 := parseDate(pair[1])
+		if err1 != nil || err2 != nil {
+			return false
+		}
+		return !date.Before(from) && !date.After(to)
+	}
+
+	targetDate, err := parseDate(toString(target))
+	if err != nil {
+		return false
+	}
+	switch op {
+	case "before":
+		return date.Before(targetDate)
+	case "after":
+		return date.After(targetDate)
+	}
+	return false
+}
+
+// ── Type coercion helpers ─────────────────────────────────────────────────────
+
+func toString(v interface{}) string {
+	if v == nil {
+		return ""
+	}
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return ""
+}
+
+func toFloat(v interface{}) float64 {
+	if v == nil {
+		return 0
+	}
+	switch n := v.(type) {
+	case float64:
+		return n
+	case int:
+		return float64(n)
+	case int64:
+		return float64(n)
+	}
+	return 0
+}
+
+func toStringSlice(v interface{}) []string {
+	if v == nil {
+		return nil
+	}
+	if s, ok := v.(string); ok {
+		return []string{s}
+	}
+	if arr, ok := v.([]interface{}); ok {
+		out := make([]string, 0, len(arr))
+		for _, el := range arr {
+			if s, ok := el.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	if ss, ok := v.([]string); ok {
+		return ss
+	}
+	return nil
+}
+
+func toStringPair(v interface{}) ([2]string, bool) {
+	arr, ok := v.([]interface{})
+	if !ok || len(arr) != 2 {
+		return [2]string{}, false
+	}
+	a, ok1 := arr[0].(string)
+	b, ok2 := arr[1].(string)
+	if !ok1 || !ok2 {
+		return [2]string{}, false
+	}
+	return [2]string{a, b}, true
+}
+
+func toLowerStrings(ss []string) []string {
+	out := make([]string, len(ss))
+	for i, s := range ss {
+		out[i] = strings.ToLower(s)
+	}
+	return out
+}
+
+func parseDate(s string) (time.Time, error) {
+	// Try RFC3339 first (e.g. "2026-05-01T00:00:00Z"), then date-only.
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t, nil
+	}
+	return time.Parse("2006-01-02", s)
+}
+````
+
 ## File: packages/api/internal/mailer/mailer.go
 ````go
 // Package mailer sends email via SMTP. Configuration is read from
@@ -41968,1380 +44343,6 @@ EXPOSE 8080
 CMD ["draba"]
 ````
 
-## File: packages/shared/testdata/filter-fixtures.json
-````json
-{
-  "_comment": "Golden fixtures for the filter evaluator. Both the TypeScript filterEngine.test.ts and the Go filters/engine_test.go must pass every case here. Each fixture has a filter definition, a set of activities (with reference data), and the expected match result for each activity.",
-  "statuses": [
-    { "id": "s1", "name": "In Progress", "color": "#3b82f6", "isClosed": false, "position": 0, "timelineId": "tl1" },
-    { "id": "s2", "name": "Done",        "color": "#10b981", "isClosed": true,  "position": 1, "timelineId": "tl1" },
-    { "id": "s3", "name": "Blocked",     "color": "#ef4444", "isClosed": false, "position": 2, "timelineId": "tl1" }
-  ],
-  "tags": [
-    { "id": "t1", "name": "frontend", "teamId": "team1", "createdBy": "m1", "createdAt": "2026-01-01T00:00:00Z" },
-    { "id": "t2", "name": "backend",  "teamId": "team1", "createdBy": "m1", "createdAt": "2026-01-01T00:00:00Z" },
-    { "id": "t3", "name": "urgent",   "teamId": "team1", "createdBy": "m1", "createdAt": "2026-01-01T00:00:00Z" }
-  ],
-  "activities": [
-    {
-      "id": "a1",
-      "timelineId": "tl1",
-      "title": "Design new UI",
-      "description": "Revamp the dashboard",
-      "startAt": "2026-05-01T00:00:00Z",
-      "endAt":   "2026-05-15T00:00:00Z",
-      "allDay": true,
-      "statusId": "s1",
-      "parentActivityId": null,
-      "percentComplete": 40,
-      "assignedMemberIds": ["m1", "m2"],
-      "tagIds": ["t1"],
-      "createdBy": "m1",
-      "createdAt": "2026-01-01T00:00:00Z",
-      "updatedAt": "2026-01-01T00:00:00Z"
-    },
-    {
-      "id": "a2",
-      "timelineId": "tl1",
-      "title": "API refactor",
-      "description": null,
-      "startAt": "2026-05-10T00:00:00Z",
-      "endAt":   "2026-05-25T00:00:00Z",
-      "allDay": true,
-      "statusId": "s2",
-      "parentActivityId": "a1",
-      "percentComplete": 100,
-      "assignedMemberIds": ["m3"],
-      "tagIds": ["t2", "t3"],
-      "createdBy": "m1",
-      "createdAt": "2026-01-01T00:00:00Z",
-      "updatedAt": "2026-01-01T00:00:00Z"
-    },
-    {
-      "id": "a3",
-      "timelineId": "tl1",
-      "title": "Deploy hotfix",
-      "description": "Critical production fix",
-      "startAt": "2026-06-01T00:00:00Z",
-      "endAt":   "2026-06-02T00:00:00Z",
-      "allDay": true,
-      "statusId": "s3",
-      "parentActivityId": null,
-      "percentComplete": null,
-      "assignedMemberIds": [],
-      "tagIds": ["t3"],
-      "createdBy": "m1",
-      "createdAt": "2026-01-01T00:00:00Z",
-      "updatedAt": "2026-01-01T00:00:00Z"
-    },
-    {
-      "id": "a4",
-      "timelineId": "tl1",
-      "title": "Write docs",
-      "description": null,
-      "startAt": "2026-07-01T00:00:00Z",
-      "endAt":   "2026-07-10T00:00:00Z",
-      "allDay": true,
-      "statusId": null,
-      "parentActivityId": null,
-      "percentComplete": null,
-      "assignedMemberIds": ["m2"],
-      "tagIds": [],
-      "createdBy": "m1",
-      "createdAt": "2026-01-01T00:00:00Z",
-      "updatedAt": "2026-01-01T00:00:00Z"
-    }
-  ],
-  "fixtures": [
-    {
-      "name": "empty filter matches all",
-      "filter": { "logic": "and", "conditions": [] },
-      "expected": { "a1": true, "a2": true, "a3": true, "a4": true }
-    },
-    {
-      "name": "status in [In Progress]",
-      "filter": {
-        "logic": "and",
-        "conditions": [{ "field": "status", "op": "in", "value": ["In Progress"] }]
-      },
-      "expected": { "a1": true, "a2": false, "a3": false, "a4": false }
-    },
-    {
-      "name": "status in [Done, Blocked]",
-      "filter": {
-        "logic": "and",
-        "conditions": [{ "field": "status", "op": "in", "value": ["Done", "Blocked"] }]
-      },
-      "expected": { "a1": false, "a2": true, "a3": true, "a4": false }
-    },
-    {
-      "name": "status is_empty",
-      "filter": {
-        "logic": "and",
-        "conditions": [{ "field": "status", "op": "is_empty" }]
-      },
-      "expected": { "a1": false, "a2": false, "a3": false, "a4": true }
-    },
-    {
-      "name": "status is_not_empty",
-      "filter": {
-        "logic": "and",
-        "conditions": [{ "field": "status", "op": "is_not_empty" }]
-      },
-      "expected": { "a1": true, "a2": true, "a3": true, "a4": false }
-    },
-    {
-      "name": "status not_in [In Progress]",
-      "filter": {
-        "logic": "and",
-        "conditions": [{ "field": "status", "op": "not_in", "value": ["In Progress"] }]
-      },
-      "expected": { "a1": false, "a2": true, "a3": true, "a4": true }
-    },
-    {
-      "name": "tag in [frontend]",
-      "filter": {
-        "logic": "and",
-        "conditions": [{ "field": "tag", "op": "in", "value": ["frontend"] }]
-      },
-      "expected": { "a1": true, "a2": false, "a3": false, "a4": false }
-    },
-    {
-      "name": "tag in [urgent]",
-      "filter": {
-        "logic": "and",
-        "conditions": [{ "field": "tag", "op": "in", "value": ["urgent"] }]
-      },
-      "expected": { "a1": false, "a2": true, "a3": true, "a4": false }
-    },
-    {
-      "name": "tag is_empty",
-      "filter": {
-        "logic": "and",
-        "conditions": [{ "field": "tag", "op": "is_empty" }]
-      },
-      "expected": { "a1": false, "a2": false, "a3": false, "a4": true }
-    },
-    {
-      "name": "tag is_not_empty",
-      "filter": {
-        "logic": "and",
-        "conditions": [{ "field": "tag", "op": "is_not_empty" }]
-      },
-      "expected": { "a1": true, "a2": true, "a3": true, "a4": false }
-    },
-    {
-      "name": "assignee in [m1]",
-      "filter": {
-        "logic": "and",
-        "conditions": [{ "field": "assignee", "op": "in", "value": ["m1"] }]
-      },
-      "expected": { "a1": true, "a2": false, "a3": false, "a4": false }
-    },
-    {
-      "name": "assignee is_empty",
-      "filter": {
-        "logic": "and",
-        "conditions": [{ "field": "assignee", "op": "is_empty" }]
-      },
-      "expected": { "a1": false, "a2": false, "a3": true, "a4": false }
-    },
-    {
-      "name": "title contains 'design'",
-      "filter": {
-        "logic": "and",
-        "conditions": [{ "field": "title", "op": "contains", "value": "design" }]
-      },
-      "expected": { "a1": true, "a2": false, "a3": false, "a4": false }
-    },
-    {
-      "name": "title equals 'Write docs'",
-      "filter": {
-        "logic": "and",
-        "conditions": [{ "field": "title", "op": "equals", "value": "Write docs" }]
-      },
-      "expected": { "a1": false, "a2": false, "a3": false, "a4": true }
-    },
-    {
-      "name": "title not_contains 'api'",
-      "filter": {
-        "logic": "and",
-        "conditions": [{ "field": "title", "op": "not_contains", "value": "api" }]
-      },
-      "expected": { "a1": true, "a2": false, "a3": true, "a4": true }
-    },
-    {
-      "name": "progress gte 50",
-      "filter": {
-        "logic": "and",
-        "conditions": [{ "field": "progress", "op": "gte", "value": 50 }]
-      },
-      "expected": { "a1": false, "a2": true, "a3": false, "a4": false }
-    },
-    {
-      "name": "progress is_empty",
-      "filter": {
-        "logic": "and",
-        "conditions": [{ "field": "progress", "op": "is_empty" }]
-      },
-      "expected": { "a1": false, "a2": false, "a3": true, "a4": true }
-    },
-    {
-      "name": "progress is_not_empty",
-      "filter": {
-        "logic": "and",
-        "conditions": [{ "field": "progress", "op": "is_not_empty" }]
-      },
-      "expected": { "a1": true, "a2": true, "a3": false, "a4": false }
-    },
-    {
-      "name": "hasParent is_true",
-      "filter": {
-        "logic": "and",
-        "conditions": [{ "field": "hasParent", "op": "is_true" }]
-      },
-      "expected": { "a1": false, "a2": true, "a3": false, "a4": false }
-    },
-    {
-      "name": "hasParent is_false",
-      "filter": {
-        "logic": "and",
-        "conditions": [{ "field": "hasParent", "op": "is_false" }]
-      },
-      "expected": { "a1": true, "a2": false, "a3": true, "a4": true }
-    },
-    {
-      "name": "startDate before 2026-05-05",
-      "filter": {
-        "logic": "and",
-        "conditions": [{ "field": "startDate", "op": "before", "value": "2026-05-05" }]
-      },
-      "expected": { "a1": true, "a2": false, "a3": false, "a4": false }
-    },
-    {
-      "name": "startDate after 2026-05-15",
-      "filter": {
-        "logic": "and",
-        "conditions": [{ "field": "startDate", "op": "after", "value": "2026-05-15" }]
-      },
-      "expected": { "a1": false, "a2": false, "a3": true, "a4": true }
-    },
-    {
-      "name": "startDate between 2026-05-01 and 2026-05-31",
-      "filter": {
-        "logic": "and",
-        "conditions": [{ "field": "startDate", "op": "between", "value": ["2026-05-01", "2026-05-31"] }]
-      },
-      "expected": { "a1": true, "a2": true, "a3": false, "a4": false }
-    },
-    {
-      "name": "endDate before 2026-05-20",
-      "filter": {
-        "logic": "and",
-        "conditions": [{ "field": "endDate", "op": "before", "value": "2026-05-20" }]
-      },
-      "expected": { "a1": true, "a2": false, "a3": false, "a4": false }
-    },
-    {
-      "name": "OR: status Done OR tag frontend",
-      "filter": {
-        "logic": "or",
-        "conditions": [
-          { "field": "status", "op": "in", "value": ["Done"] },
-          { "field": "tag",    "op": "in", "value": ["frontend"] }
-        ]
-      },
-      "expected": { "a1": true, "a2": true, "a3": false, "a4": false }
-    },
-    {
-      "name": "AND: status In Progress AND assignee m1",
-      "filter": {
-        "logic": "and",
-        "conditions": [
-          { "field": "status",   "op": "in", "value": ["In Progress"] },
-          { "field": "assignee", "op": "in", "value": ["m1"] }
-        ]
-      },
-      "expected": { "a1": true, "a2": false, "a3": false, "a4": false }
-    },
-    {
-      "name": "AND: progress gt 0 AND hasParent is_true",
-      "filter": {
-        "logic": "and",
-        "conditions": [
-          { "field": "progress",  "op": "gt",      "value": 0 },
-          { "field": "hasParent", "op": "is_true"             }
-        ]
-      },
-      "expected": { "a1": false, "a2": true, "a3": false, "a4": false }
-    }
-  ]
-}
-````
-
-## File: packages/web/src/components/gantt/GanttGrid.tsx
-````typescript
-/**
- * GanttGrid — presentational Gantt chart.
- *
- * Renders a sticky header row of column labels, then one row per GanttRow
- * entry. Rows are either group-header dividers or event bars. All data
- * preparation (grouping, sorting, date math) lives in the parent GanttView.
- *
- * Drag on an empty lane cell to select a date range; onLaneDrag fires on
- * mouseup with the resolved start/end dates and the lane's memberId.
- *
- * Drag on an event bar's left/right 8px edge to resize it, or on its body to
- * move it. onBarDrag fires on mouseup with the resolved new dates.
- *
- * When findState is provided with a non-empty query, non-matching event rows
- * are dimmed to 0.3 opacity; matching rows get an amber outline on their bar;
- * the active (parked) match gets a stronger amber outline with a pulse
- * animation. Stepping to a new active match auto-scrolls both axes to center
- * the bar in the viewport.
- */
-
-import { useRef, useState, useCallback, useEffect, useMemo } from 'react';
-import { ChevronDown, ChevronRight } from 'lucide-react';
-import MemberAvatar from '../MemberAvatar';
-import { Badge } from '../identity/Badge';
-import EmptyState from '../shared/EmptyState';
-import type { Member } from '../../types';
-import type { ColumnDef, TimeGranularity } from './granularity';
-import { addDays, snapDivisorFor } from './granularity';
-
-export const DEFAULT_LABEL_COL_W = 240;
-const MIN_LABEL_COL_W = 140;
-const MAX_LABEL_COL_W = 400;
-const HEADER_H = 36;
-const ROW_H = 44;
-const GROUP_H = 30;
-const COL_W = 80;
-const EDGE_W = 8; // px hit zone for resize handles
-
-/** A positioned activity bar ready for rendering. */
-export interface GanttActivity {
-  id: string;
-  title: string;
-  /** Fractional column start (0-based). */
-  startCol: number;
-  /** Fractional column span. */
-  span: number;
-  /** Hex color for bar background and badge. */
-  color: string;
-  /** Icon ID from the activity's identity, if set. */
-  icon?: string;
-  members: Member[];
-  isChild: boolean;
-  /** Nesting depth in the parent→child tree (0 = root). Drives left indent. */
-  depth?: number;
-  /** True when this activity has child activities nested beneath it. */
-  hasChildren?: boolean;
-  /** True when this activity's subtree is currently collapsed (children hidden). */
-  collapsed?: boolean;
-  percentComplete?: number | null;
-}
-
-export type GanttRow =
-  | { kind: 'group'; id: string; label: string; color: string; memberColors?: string[]; count: number; collapsed?: boolean }
-  | { kind: 'activity'; event: GanttActivity };
-
-/** Visual state for the in-view Find feature. Passed from GanttView. */
-export interface FindState {
-  hasQuery: boolean;
-  matchedIds: Set<string>;
-  activeMatchId: string | null;
-  /** Per-event match reasons for "why matched" tooltip (non-title reasons only). */
-  matchReasons: Map<string, string[]>;
-  filtersActive: boolean;
-  matchCount: number;
-}
-
-interface DragState {
-  rowIdx: number;
-  memberId: string | null;
-  startCol: number;
-  currentCol: number;
-}
-
-type BarDragZone = 'left' | 'right' | 'body';
-
-interface BarDragState {
-  eventId: string;
-  zone: BarDragZone;
-  /** Fractional column of the event's visual start when drag began. */
-  initStartCol: number;
-  /** Fractional column of the event's visual end (startCol + span) when drag began. */
-  initEndCol: number;
-  /** Lane-relative x of the mouse when drag began. */
-  initMouseX: number;
-  /** Page-relative left edge of the lane div. */
-  laneLeft: number;
-  /** Current snapped start column (integer). */
-  snapStartCol: number;
-  /** Current snapped end column (integer, exclusive — col after last occupied). */
-  snapEndCol: number;
-}
-
-interface TooltipState {
-  text: string;
-  /** Viewport-relative x for tooltip positioning. */
-  x: number;
-  /** Viewport-relative y for tooltip positioning. */
-  y: number;
-}
-
-/** Tooltip shown when hovering a matched event bar that matched on a non-title field. */
-interface MatchTooltipState {
-  reasons: string[];
-  x: number;
-  y: number;
-}
-
-interface Props {
-  rows: GanttRow[];
-  columns: ColumnDef[];
-  /** Fractional column index of today (-1 if outside range). */
-  todayIndex: number;
-  selectedActivityId: string | null;
-  onSelectActivity: (id: string | null) => void;
-  /** Called when the user drags on an empty lane cell to create an activity. */
-  onLaneDrag?: (startDate: Date, endDate: Date, memberId: string | null) => void;
-  /** Called when the user drags a bar edge or body to resize/move it. */
-  onBarDrag?: (activityId: string, newStartDate: Date, newEndDate: Date) => void;
-  /** Called during a bar drag with the current snapped dates — for live sidebar update. */
-  onBarDragProgress?: (activityId: string, newStartDate: Date, newEndDate: Date) => void;
-  /** Resolved granularity — used to compute the finer snap divisor during drag. */
-  resolvedGranularity?: TimeGranularity | 'auto';
-  /** Find state from GanttView; absent when the find bar is closed/idle. */
-  findState?: FindState;
-  /** Called when the user clicks "Clear filters" in the no-matches callout. */
-  onClearFilters?: () => void;
-  /** Current label column width in px — lifts state to the parent so it survives view switches. */
-  labelColW?: number;
-  /** Called when the user drags the column resize handle. */
-  onLabelColWChange?: (w: number) => void;
-  /** Toggles the collapsed state of an activity's child subtree (parent grouping). */
-  onToggleActivity?: (id: string) => void;
-  /** Toggles the collapsed state of a group header (member grouping). */
-  onToggleGroup?: (id: string) => void;
-  /**
-   * When false, all click and drag interactions are suppressed — bars, lane
-   * drags, and group toggles become inert. Used by the public share viewer.
-   * Default: true.
-   */
-  interactive?: boolean;
-}
-
-// ── Bar drag helpers ─────────────────────────────────────────────────────────
-
-function tooltipText(zone: BarDragZone, startDate: Date, endDate: Date): string {
-  if (zone === 'left') return `Start: ${formatDragDate(startDate)}`;
-  if (zone === 'right') return `End: ${formatDragDate(endDate)}`;
-  return `${formatDragDate(startDate)} → ${formatDragDate(endDate)}`;
-}
-
-// ── Date helpers (support fractional column positions) ───────────────────────
-
-// Maps a fractional column position to a calendar Date by interpolating within
-// the column's day range. Uses the full period length (start→end) rather than
-// the clamped `days` field so boundary columns still produce correct dates.
-function colFracToDate(colFrac: number, columns: ColumnDef[]): Date {
-  let remaining = Math.max(0, colFrac);
-  for (const col of columns) {
-    if (remaining < 1) {
-      const periodDays = Math.round((col.end.getTime() - col.start.getTime()) / 86_400_000);
-      return addDays(col.start, Math.round(remaining * periodDays));
-    }
-    remaining -= 1;
-  }
-  return columns[columns.length - 1].end;
-}
-
-function colToStartDate(colFrac: number, columns: ColumnDef[]): Date {
-  return colFracToDate(Math.max(0, colFrac), columns);
-}
-
-// endColFrac is exclusive (the fractional col just past the last occupied day).
-function colToEndDate(endColFrac: number, columns: ColumnDef[]): Date {
-  // The last included date is 1 day before the date at the exclusive end.
-  return addDays(colFracToDate(Math.max(0, endColFrac), columns), -1);
-}
-
-
-export function formatDragDate(d: Date): string {
-  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
-}
-
-export default function GanttGrid({
-  rows,
-  columns,
-  todayIndex,
-  selectedActivityId,
-  onSelectActivity,
-  onLaneDrag,
-  onBarDrag,
-  onBarDragProgress,
-  resolvedGranularity,
-  findState,
-  onClearFilters,
-  labelColW: labelColWProp,
-  onLabelColWChange,
-  onToggleActivity,
-  onToggleGroup,
-  interactive = true,
-}: Props) {
-  // ── Resizable label column ─────────────────────────────────────────────────
-  // When the parent passes labelColW + onLabelColWChange the column is
-  // controlled, so the width survives view switches (e.g. Gantt ↔ List).
-  // When neither is provided we fall back to internal state.
-  const [internalLabelColW, setInternalLabelColW] = useState(DEFAULT_LABEL_COL_W);
-  const labelColW = labelColWProp ?? internalLabelColW;
-  const setLabelColW = onLabelColWChange ?? setInternalLabelColW;
-
-  const totalW = useMemo(
-    () => labelColW + columns.length * COL_W,
-    [labelColW, columns.length],
-  );
-
-  const labelColWRef = useRef(labelColW);
-  useEffect(() => { labelColWRef.current = labelColW; }, [labelColW]);
-
-  const handleColumnResizeMouseDown = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    const startX = e.clientX;
-    const startW = labelColWRef.current;
-
-    function onMouseMove(mv: MouseEvent) {
-      const next = Math.max(MIN_LABEL_COL_W, Math.min(MAX_LABEL_COL_W, startW + (mv.clientX - startX)));
-      setLabelColW(next);
-    }
-    function onMouseUp() {
-      window.removeEventListener('mousemove', onMouseMove);
-      window.removeEventListener('mouseup', onMouseUp);
-    }
-    window.addEventListener('mousemove', onMouseMove);
-    window.addEventListener('mouseup', onMouseUp);
-  // setLabelColW is either a stable setter from useState or a stable callback from the parent.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // Integer column index that contains today (for background highlight)
-  const todayCol = todayIndex >= 0 ? Math.floor(todayIndex) : -1;
-
-  // ── Scroll container ref (needed for find auto-scroll) ────────────────────
-  const scrollContainerRef = useRef<HTMLDivElement>(null);
-
-  // Always-current rows ref so the active-match scroll effect doesn't go stale
-  const rowsRef = useRef(rows);
-  useEffect(() => { rowsRef.current = rows; });
-
-  // ── Drag-to-create state ──────────────────────────────────────────────────
-  const [drag, setDrag] = useState<DragState | null>(null);
-  const dragRef = useRef<DragState | null>(null);
-
-  // ── Bar drag state ────────────────────────────────────────────────────────
-  const [barDrag, setBarDrag] = useState<BarDragState | null>(null);
-  const barDragRef = useRef<BarDragState | null>(null);
-  const [dragTooltip, setDragTooltip] = useState<TooltipState | null>(null);
-
-  // ── "Why matched" hover tooltip ───────────────────────────────────────────
-  const [matchTooltip, setMatchTooltip] = useState<MatchTooltipState | null>(null);
-
-  const colFromX = useCallback((laneX: number) => {
-    return Math.max(0, Math.min(columns.length - 1, Math.floor(laneX / COL_W)));
-  }, [columns.length]);
-
-  // ── Auto-scroll to active find match ─────────────────────────────────────
-  useEffect(() => {
-    const activeId = findState?.activeMatchId;
-    if (!activeId || !scrollContainerRef.current) return;
-    const container = scrollContainerRef.current;
-    const currentRows = rowsRef.current;
-
-    let y = HEADER_H;
-    let matchedActivity: GanttActivity | null = null;
-    for (const row of currentRows) {
-      if (row.kind === 'activity' && row.event.id === activeId) {
-        matchedActivity = row.event;
-        break;
-      }
-      y += row.kind === 'group' ? GROUP_H : ROW_H;
-    }
-    if (!matchedActivity) return;
-
-    const viewH = container.clientHeight;
-    const viewW = container.clientWidth;
-    const scrollTop = Math.max(0, y - viewH / 2 + ROW_H / 2);
-    const eventCenterX = labelColWRef.current + (matchedActivity.startCol + matchedActivity.span / 2) * COL_W;
-    const scrollLeft = Math.max(0, eventCenterX - viewW / 2);
-
-    container.scrollTo({ left: scrollLeft, top: scrollTop, behavior: 'smooth' });
-  // Only re-run when the active match changes, not when rows or columns change.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [findState?.activeMatchId]);
-
-  const handleLaneMouseDown = useCallback((
-    e: React.MouseEvent<HTMLDivElement>,
-    rowIdx: number,
-    memberId: string | null,
-  ) => {
-    if (!interactive || !onLaneDrag) return;
-    e.preventDefault();
-    const rect = e.currentTarget.getBoundingClientRect();
-    const col = colFromX(e.clientX - rect.left);
-    const state: DragState = { rowIdx, memberId, startCol: col, currentCol: col };
-    dragRef.current = state;
-    setDrag(state);
-
-    function onMouseMove(mv: MouseEvent) {
-      if (!dragRef.current) return;
-      const col2 = colFromX(mv.clientX - rect.left);
-      const next = { ...dragRef.current, currentCol: col2 };
-      dragRef.current = next;
-      setDrag({ ...next });
-    }
-
-    function onMouseUp() {
-      const s = dragRef.current;
-      if (s && onLaneDrag && columns.length > 0) {
-        const lo = Math.min(s.startCol, s.currentCol);
-        const hi = Math.max(s.startCol, s.currentCol);
-        const startDate = columns[lo]?.start ?? columns[0].start;
-        const endDate = columns[hi]?.start ?? columns[hi > 0 ? hi : 0].start;
-        onLaneDrag(startDate, endDate, s.memberId);
-      }
-      dragRef.current = null;
-      setDrag(null);
-      window.removeEventListener('mousemove', onMouseMove);
-      window.removeEventListener('mouseup', onMouseUp);
-    }
-
-    window.addEventListener('mousemove', onMouseMove);
-    window.addEventListener('mouseup', onMouseUp);
-  }, [colFromX, columns, onLaneDrag]);
-
-  // ── Bar drag handler ──────────────────────────────────────────────────────
-
-  const handleBarMouseDown = useCallback((
-    e: React.MouseEvent<HTMLDivElement>,
-    ev: GanttActivity,
-    zone: BarDragZone,
-  ) => {
-    if (!onBarDrag) return;
-    // Only allow drag/resize when the bar is already selected.
-    if (ev.id !== selectedActivityId) return;
-    e.preventDefault();
-    e.stopPropagation(); // prevent lane-drag from firing
-
-    // The bar's parent is the lane div (position: relative, flex: 1).
-    const laneEl = e.currentTarget.parentElement;
-    if (!laneEl) return;
-    const laneRect = laneEl.getBoundingClientRect();
-
-    const initStartCol = ev.startCol;
-    const initEndCol = ev.startCol + ev.span;
-    const initMouseX = e.clientX - laneRect.left;
-    const state: BarDragState = {
-      eventId: ev.id,
-      zone,
-      initStartCol,
-      initEndCol,
-      initMouseX,
-      laneLeft: laneRect.left,
-      snapStartCol: initStartCol,
-      snapEndCol: initEndCol,
-    };
-    barDragRef.current = state;
-    setBarDrag(state);
-
-    // Initial tooltip
-    const startDate = colToStartDate(state.snapStartCol, columns);
-    const endDate = colToEndDate(state.snapEndCol, columns);
-    setDragTooltip({
-      text: tooltipText(zone, startDate, endDate),
-      x: e.clientX,
-      y: e.clientY,
-    });
-
-    function onMouseMove(mv: MouseEvent) {
-      const s = barDragRef.current;
-      if (!s) return;
-
-      const deltaCol = (mv.clientX - (s.laneLeft + s.initMouseX)) / COL_W;
-      const n = columns.length;
-      // Finer snap: snap one granularity level below the active zoom.
-      const div = snapDivisorFor(resolvedGranularity ?? 'auto');
-      const step = 1 / div;
-      const snap = (x: number) => Math.round(x / step) * step;
-
-      let nextStart = s.snapStartCol;
-      let nextEnd = s.snapEndCol;
-
-      if (s.zone === 'left') {
-        nextStart = Math.max(0, Math.min(snap(s.initStartCol + deltaCol), s.initEndCol - step));
-        nextEnd = s.initEndCol;
-      } else if (s.zone === 'right') {
-        nextStart = s.initStartCol;
-        nextEnd = Math.max(s.initStartCol + step, Math.min(snap(s.initEndCol + deltaCol), n));
-      } else {
-        // body: preserve exact span, shift both by snapped delta
-        const span = s.initEndCol - s.initStartCol;
-        const shift = snap(deltaCol);
-        nextStart = Math.max(0, Math.min(s.initStartCol + shift, n - span));
-        nextEnd = nextStart + span;
-      }
-
-      const next: BarDragState = { ...s, snapStartCol: nextStart, snapEndCol: nextEnd };
-      barDragRef.current = next;
-      setBarDrag(next);
-
-      const sd = colToStartDate(nextStart, columns);
-      const ed = colToEndDate(nextEnd, columns);
-      setDragTooltip({ text: tooltipText(s.zone, sd, ed), x: mv.clientX, y: mv.clientY });
-      onBarDragProgress?.(s.eventId, sd, ed);
-    }
-
-    function onMouseUp() {
-      const s = barDragRef.current;
-      if (s && onBarDrag) {
-        const sd = colToStartDate(s.snapStartCol, columns);
-        const ed = colToEndDate(s.snapEndCol, columns);
-        onBarDrag(s.eventId, sd, ed); // eventId field preserved in BarDragState
-      }
-      barDragRef.current = null;
-      setBarDrag(null);
-      setDragTooltip(null);
-      window.removeEventListener('mousemove', onMouseMove);
-      window.removeEventListener('mouseup', onMouseUp);
-    }
-
-    window.addEventListener('mousemove', onMouseMove);
-    window.addEventListener('mouseup', onMouseUp);
-  }, [columns, onBarDrag]);
-
-  // Header cells are shared between the empty-state path and the unified scroll path.
-  const headerContent = (
-    <>
-      <div
-        style={{
-          width: labelColW,
-          flexShrink: 0,
-          padding: '0 16px',
-          display: 'flex',
-          alignItems: 'center',
-          borderRight: '1px solid var(--border)',
-          fontSize: 11,
-          fontWeight: 600,
-          color: 'var(--muted-foreground)',
-          textTransform: 'uppercase' as const,
-          letterSpacing: '0.06em',
-          position: 'sticky' as const,
-          left: 0,
-          zIndex: 6,
-          background: 'var(--card)',
-          userSelect: 'none',
-        }}
-      >
-        Activity
-        {/* Drag handle — resize the label column */}
-        <div
-          onMouseDown={handleColumnResizeMouseDown}
-          style={{
-            position: 'absolute',
-            right: 0,
-            top: 0,
-            bottom: 0,
-            width: 6,
-            cursor: 'col-resize',
-            zIndex: 10,
-          }}
-        />
-      </div>
-
-      {columns.map((col, i) => {
-        const isToday = i === todayCol;
-        return (
-          <div
-            key={i}
-            style={{
-              width: COL_W,
-              flexShrink: 0,
-              height: HEADER_H,
-              display: 'flex',
-              flexDirection: 'column',
-              alignItems: 'center',
-              justifyContent: 'center',
-              padding: '0 4px 8px',
-              gap: 2,
-              borderRight: i < columns.length - 1 ? '1px solid var(--border)' : 'none',
-              position: 'relative',
-              overflow: 'hidden',
-            }}
-          >
-            <span style={{
-              fontSize: col.sublabel ? 10 : 11,
-              fontWeight: isToday ? 700 : 600,
-              color: isToday ? 'var(--primary)' : 'var(--muted-foreground)',
-              lineHeight: 1.2,
-              textAlign: 'center',
-            }}>
-              {col.label}
-            </span>
-            {col.sublabel && (
-              <span style={{
-                fontSize: 9,
-                fontWeight: 500,
-                color: 'var(--muted-foreground)',
-                lineHeight: 1,
-                opacity: isToday ? 1 : 0.75,
-              }}>
-                {col.sublabel}
-              </span>
-            )}
-            {isToday && (
-              <div
-                style={{
-                  position: 'absolute',
-                  bottom: 2,
-                  left: `${((todayIndex - todayCol) * 100)}%`,
-                  transform: 'translateX(-50%)',
-                  width: 6,
-                  height: 6,
-                  borderRadius: '50%',
-                  background: 'var(--secondary)',
-                }}
-              />
-            )}
-          </div>
-        );
-      })}
-    </>
-  );
-
-  // ── Find helpers ──────────────────────────────────────────────────────────
-
-  const { hasQuery = false, matchedIds: matchSet, activeMatchId, matchReasons: reasons } = findState ?? {};
-
-  function isMatch(id: string) { return matchSet?.has(id) ?? false; }
-  function isActive(id: string) { return activeMatchId === id; }
-
-  // Non-title reasons to surface in the "why matched" tooltip
-  function nonTitleReasons(id: string): string[] {
-    return (reasons?.get(id) ?? []).filter(r => r !== 'title');
-  }
-
-  // ── Empty state: header + centered placeholder ──────────────────────────────
-  if (rows.length === 0) {
-    const showNoMatchCallout = hasQuery && findState && findState.matchCount === 0;
-    return (
-      <div style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-        <div style={{ overflowX: 'auto', overflowY: 'hidden', flexShrink: 0 }}>
-          <div style={{ width: totalW, display: 'flex', height: HEADER_H, background: 'var(--card)', borderBottom: '1px solid var(--border)' }}>
-            {headerContent}
-          </div>
-        </div>
-        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12 }}>
-          <EmptyState message="No viewable activities" />
-          {showNoMatchCallout && findState.filtersActive && (
-            <p style={{ fontSize: 12, color: 'var(--muted-foreground)', textAlign: 'center' }}>
-              No matches in current view.{' '}
-              {onClearFilters && (
-                <button
-                  onClick={onClearFilters}
-                  style={{ color: 'var(--primary)', background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, padding: 0, fontFamily: 'inherit' }}
-                >
-                  Clear filters
-                </button>
-              )}
-            </p>
-          )}
-        </div>
-      </div>
-    );
-  }
-
-  // ── Unified scroll: header sticky inside the single container ──────────────
-  return (
-    <div style={{ height: '100%', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-      <div ref={scrollContainerRef} style={{ flex: 1, overflow: 'auto' }}>
-        <div style={{ width: totalW }}>
-
-          {/* Sticky header row — scrolls horizontally with the grid, pins to top vertically */}
-          <div style={{ position: 'sticky', top: 0, zIndex: 5, display: 'flex', height: HEADER_H, background: 'var(--card)', borderBottom: '1px solid var(--border)' }}>
-            {headerContent}
-          </div>
-
-          {rows.map((row, rowIdx) => {
-            if (row.kind === 'group') {
-              return (
-                <div
-                  key={row.id}
-                  style={{
-                    display: 'flex',
-                    height: GROUP_H,
-                    background: 'var(--muted)',
-                    borderBottom: '1px solid var(--border)',
-                  }}
-                >
-                  <div
-                    onClick={onToggleGroup ? () => onToggleGroup(row.id) : undefined}
-                    style={{
-                      width: labelColW,
-                      flexShrink: 0,
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 6,
-                      padding: '0 14px',
-                      position: 'sticky',
-                      left: 0,
-                      background: 'var(--muted)',
-                      zIndex: 3,
-                      borderRight: '1px solid var(--border)',
-                      cursor: onToggleGroup ? 'pointer' : 'default',
-                      userSelect: 'none',
-                    }}
-                  >
-                    {onToggleGroup ? (
-                      row.collapsed
-                        ? <ChevronRight size={14} strokeWidth={2.5} style={{ flexShrink: 0, color: 'var(--muted-foreground)' }} />
-                        : <ChevronDown size={14} strokeWidth={2.5} style={{ flexShrink: 0, color: 'var(--muted-foreground)' }} />
-                    ) : null}
-                    {row.memberColors && row.memberColors.length > 0 ? (
-                      // Stacked color dots for member-combination groups
-                      <div style={{ display: 'flex', flexShrink: 0 }}>
-                        {row.memberColors.map((c, i) => (
-                          <div
-                            key={i}
-                            style={{
-                              width: 9,
-                              height: 9,
-                              borderRadius: '50%',
-                              background: c,
-                              marginLeft: i === 0 ? 0 : -3,
-                              outline: '1.5px solid var(--muted)',
-                            }}
-                          />
-                        ))}
-                      </div>
-                    ) : (
-                      <div
-                        style={{
-                          width: 9,
-                          height: 9,
-                          borderRadius: 2,
-                          background: row.color,
-                          flexShrink: 0,
-                        }}
-                      />
-                    )}
-                    <span
-                      style={{
-                        fontSize: 11,
-                        fontWeight: 700,
-                        color: 'var(--foreground)',
-                        textTransform: 'uppercase',
-                        letterSpacing: '0.05em',
-                        flex: 1,
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis',
-                        whiteSpace: 'nowrap',
-                        fontFamily: 'var(--font-sans)',
-                      }}
-                    >
-                      {row.label}
-                    </span>
-                    <span
-                      style={{
-                        fontSize: 10,
-                        color: 'var(--muted-foreground)',
-                        flexShrink: 0,
-                        fontFamily: 'var(--font-sans)',
-                      }}
-                    >
-                      {row.count}
-                    </span>
-                  </div>
-                  <div style={{ flex: 1 }} />
-                </div>
-              );
-            }
-
-            const ev = row.event;
-            const selected = selectedActivityId === ev.id;
-            const indent = (ev.depth ?? (ev.isChild ? 1 : 0)) * 18;
-            const evIsMatch = isMatch(ev.id);
-            const evIsActive = isActive(ev.id);
-            const dimmed = hasQuery && !evIsMatch;
-            const extraReasons = nonTitleReasons(ev.id);
-
-            return (
-              <div
-                key={`${ev.id}-${rowIdx}`}
-                style={{
-                  display: 'flex',
-                  height: ROW_H,
-                  borderBottom: '1px solid var(--border)',
-                  position: 'relative',
-                  background: selected ? 'hsl(188 59% 38% / .04)' : 'transparent',
-                  opacity: dimmed ? 0.3 : 1,
-                  transition: 'opacity 0.15s',
-                }}
-              >
-                {/* Sticky label cell */}
-                <div
-                  style={{
-                    width: labelColW,
-                    flexShrink: 0,
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 7,
-                    paddingLeft: 14 + indent,
-                    paddingRight: 10,
-                    position: 'sticky',
-                    left: 0,
-                    background: selected ? 'var(--muted)' : 'var(--card)',
-                    zIndex: 6,
-                    borderRight: '1px solid var(--border)',
-                    cursor: 'pointer',
-                    transition: 'background 0.1s',
-                  }}
-                  onClick={() => interactive && onSelectActivity(ev.id === selectedActivityId ? null : ev.id)}
-                  onMouseEnter={e => {
-                    e.currentTarget.style.background = 'var(--muted)';
-                  }}
-                  onMouseLeave={e => {
-                    e.currentTarget.style.background = selected ? 'var(--muted)' : 'var(--card)';
-                  }}
-                >
-                  {/* Expand/collapse chevron slot — reserved (empty for leaves) so
-                      sibling badges stay aligned within a tree level. */}
-                  {onToggleActivity && (
-                    <div style={{ width: 16, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                      {ev.hasChildren && (
-                        <button
-                          onClick={e => { e.stopPropagation(); onToggleActivity(ev.id); }}
-                          title={ev.collapsed ? 'Expand' : 'Collapse'}
-                          aria-label={ev.collapsed ? 'Expand children' : 'Collapse children'}
-                          style={{
-                            display: 'flex', alignItems: 'center', justifyContent: 'center',
-                            width: 16, height: 16, padding: 0, border: 'none', borderRadius: 3,
-                            background: 'none', cursor: 'pointer', color: 'var(--muted-foreground)',
-                          }}
-                          onMouseEnter={e => (e.currentTarget.style.background = 'var(--border)')}
-                          onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-                        >
-                          {ev.collapsed
-                            ? <ChevronRight size={13} strokeWidth={2.5} />
-                            : <ChevronDown size={13} strokeWidth={2.5} />}
-                        </button>
-                      )}
-                    </div>
-                  )}
-                  <Badge
-                    identity={{ color: ev.color, icon: ev.icon ?? '__none__' }}
-                    name={ev.title}
-                    shape="square"
-                    size={20}
-                  />
-                  <span
-                    style={{
-                      fontSize: 12,
-                      fontWeight: 500,
-                      color: 'var(--foreground)',
-                      flex: 1,
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                      whiteSpace: 'nowrap',
-                      fontFamily: 'var(--font-sans)',
-                    }}
-                  >
-                    {ev.title}
-                  </span>
-                  {ev.members.length > 0 && (
-                    <div style={{ display: 'flex', flexShrink: 0 }}>
-                      {ev.members.slice(0, 3).map((m, i) => (
-                        <div
-                          key={m.id}
-                          style={{ marginLeft: i === 0 ? 0 : -5 }}
-                          title={m.name}
-                        >
-                          <MemberAvatar member={m} size={20} />
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-
-                {/* Lane — background columns + today line + event bar */}
-                <div
-                  style={{ position: 'relative', flex: 1, display: 'flex', cursor: (interactive && onLaneDrag) ? 'crosshair' : 'default' }}
-                  onMouseDown={e => handleLaneMouseDown(e, rowIdx, ev.members[0]?.id ?? null)}
-                >
-                  {columns.map((_, i) => (
-                    <div
-                      key={i}
-                      style={{
-                        width: COL_W,
-                        height: '100%',
-                        flexShrink: 0,
-                        borderRight: i < columns.length - 1 ? '1px solid var(--border)' : 'none',
-                        background:
-                          i === todayCol && !selected ? 'hsl(188 59% 38% / .04)' : 'transparent',
-                      }}
-                    />
-                  ))}
-
-                  {/* Drag selection highlight */}
-                  {drag && drag.rowIdx === rowIdx && (() => {
-                    const lo = Math.min(drag.startCol, drag.currentCol);
-                    const hi = Math.max(drag.startCol, drag.currentCol);
-                    return (
-                      <div
-                        style={{
-                          position: 'absolute',
-                          top: 4,
-                          bottom: 4,
-                          left: lo * COL_W,
-                          width: (hi - lo + 1) * COL_W,
-                          background: 'hsl(188 59% 38% / .18)',
-                          border: '1.5px dashed var(--primary)',
-                          borderRadius: 4,
-                          pointerEvents: 'none',
-                          zIndex: 3,
-                        }}
-                      />
-                    );
-                  })()}
-
-                  {/* Today vertical line */}
-                  {todayIndex >= 0 && (
-                    <div
-                      style={{
-                        position: 'absolute',
-                        top: 0,
-                        bottom: 0,
-                        left: todayIndex * COL_W,
-                        width: 2,
-                        background: 'var(--secondary)',
-                        opacity: 0.5,
-                        zIndex: 2,
-                        pointerEvents: 'none',
-                      }}
-                    />
-                  )}
-
-                  {/* Event bar — live position overridden while dragging */}
-                  {(() => {
-                    const isDragging = barDrag?.eventId === ev.id;
-                    const startCol = isDragging ? barDrag!.snapStartCol : ev.startCol;
-                    const endCol = isDragging ? barDrag!.snapEndCol : ev.startCol + ev.span;
-                    const left = startCol * COL_W + 2;
-                    const width = Math.max((endCol - startCol) * COL_W - 4, COL_W * 0.3);
-                    // Only selected bars show grab/move cursors; unselected bars show pointer
-                    // to prevent accidental date changes when the user just wants to inspect.
-                    const grabCursor = isDragging
-                      ? 'grabbing'
-                      : (selected && onBarDrag) ? 'grab' : 'pointer';
-
-                    // Box shadow: find states take precedence over selection ring.
-                    // CSS classes (.find-active-bar, .find-match-bar) provide the
-                    // amber outline; we only set inline boxShadow for the selected ring.
-                    const boxShadow = (evIsActive || evIsMatch)
-                      ? undefined
-                      : selected
-                        ? `0 0 0 2px white, 0 0 0 4px ${ev.color}`
-                        : 'var(--shadow-sm)';
-
-                    return (
-                      <div
-                        onClick={() => {
-                          // Bar click always selects — use the label cell to deselect.
-                          if (interactive && !isDragging) onSelectActivity(ev.id);
-                        }}
-                        onMouseDown={e => {
-                          if (!interactive || !onBarDrag) { e.stopPropagation(); return; }
-                          const barRect = e.currentTarget.getBoundingClientRect();
-                          const xInBar = e.clientX - barRect.left;
-                          let zone: BarDragZone;
-                          if (xInBar <= EDGE_W) zone = 'left';
-                          else if (xInBar >= barRect.width - EDGE_W) zone = 'right';
-                          else zone = 'body';
-                          handleBarMouseDown(e, ev, zone);
-                        }}
-                        onMouseEnter={e => {
-                          if (!isDragging) e.currentTarget.style.filter = 'brightness(1.08)';
-                          // Show "why matched" tooltip for non-title matches
-                          if (extraReasons.length > 0) {
-                            setMatchTooltip({ reasons: extraReasons, x: e.clientX, y: e.clientY });
-                          }
-                        }}
-                        onMouseMove={e => {
-                          if (matchTooltip) {
-                            setMatchTooltip(t => t ? { ...t, x: e.clientX, y: e.clientY } : null);
-                          }
-                        }}
-                        onMouseLeave={e => {
-                          e.currentTarget.style.filter = '';
-                          setMatchTooltip(null);
-                        }}
-                        className={evIsActive ? 'find-active-bar' : evIsMatch ? 'find-match-bar' : undefined}
-                        style={{
-                          position: 'absolute',
-                          top: 9,
-                          bottom: 9,
-                          left,
-                          width,
-                          background: ev.color,
-                          borderRadius: 5,
-                          display: 'flex',
-                          alignItems: 'center',
-                          padding: `0 ${EDGE_W + 2}px`,
-                          fontSize: 11,
-                          fontWeight: 600,
-                          color: 'white',
-                          overflow: 'hidden',
-                          whiteSpace: 'nowrap',
-                          textOverflow: 'ellipsis',
-                          cursor: grabCursor,
-                          zIndex: 4,
-                          boxShadow,
-                          opacity: isDragging ? 0.85 : 1,
-                          transition: isDragging ? 'none' : 'box-shadow 0.12s, opacity 0.1s',
-                          fontFamily: 'var(--font-sans)',
-                          userSelect: 'none',
-                        }}
-                      >
-                        {/* Progress fill overlay — subtle darker shade showing % complete */}
-                        {(ev.percentComplete ?? 0) > 0 && (
-                          <div
-                            style={{
-                              position: 'absolute',
-                              left: 0,
-                              top: 0,
-                              bottom: 0,
-                              width: `${ev.percentComplete}%`,
-                              background: 'rgba(0,0,0,0.18)',
-                              borderRadius: 5,
-                              pointerEvents: 'none',
-                            }}
-                          />
-                        )}
-                        {/* Left resize handle — only shown on selected bars */}
-                        {onBarDrag && selected && (
-                          <div
-                            style={{
-                              position: 'absolute',
-                              left: 0,
-                              top: 0,
-                              bottom: 0,
-                              width: EDGE_W,
-                              cursor: 'ew-resize',
-                              borderRadius: '5px 0 0 5px',
-                            }}
-                          />
-                        )}
-                        {ev.title}
-                        {/* Right resize handle — only shown on selected bars */}
-                        {onBarDrag && selected && (
-                          <div
-                            style={{
-                              position: 'absolute',
-                              right: 0,
-                              top: 0,
-                              bottom: 0,
-                              width: EDGE_W,
-                              cursor: 'ew-resize',
-                              borderRadius: '0 5px 5px 0',
-                            }}
-                          />
-                        )}
-                      </div>
-                    );
-                  })()}
-                </div>
-              </div>
-            );
-          })}
-
-          {/* No-matches-in-view callout — rendered inside the scroll container */}
-          {hasQuery && findState && findState.matchCount === 0 && rows.length > 0 && findState.filtersActive && (
-            <div style={{
-              padding: '12px 16px',
-              fontSize: 12,
-              color: 'var(--muted-foreground)',
-              borderTop: '1px solid var(--border)',
-            }}>
-              No matches in current view.{' '}
-              {onClearFilters && (
-                <button
-                  onClick={onClearFilters}
-                  style={{ color: 'var(--primary)', background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, padding: 0, fontFamily: 'inherit' }}
-                >
-                  Clear filters
-                </button>
-              )}
-            </div>
-          )}
-
-        </div>
-      </div>
-
-      {/* Drag tooltip — fixed position follows the mouse during bar drag */}
-      {dragTooltip && (
-        <div
-          style={{
-            position: 'fixed',
-            left: dragTooltip.x + 14,
-            top: dragTooltip.y - 28,
-            background: 'var(--popover)',
-            color: 'var(--popover-foreground)',
-            border: '1px solid var(--border)',
-            borderRadius: 6,
-            padding: '4px 10px',
-            fontSize: 11,
-            fontWeight: 600,
-            fontFamily: 'var(--font-sans)',
-            pointerEvents: 'none',
-            zIndex: 9999,
-            whiteSpace: 'nowrap',
-            boxShadow: 'var(--shadow-md)',
-          }}
-        >
-          {dragTooltip.text}
-        </div>
-      )}
-
-      {/* "Why matched" tooltip — shown on hover for non-title match reasons */}
-      {matchTooltip && (
-        <div
-          style={{
-            position: 'fixed',
-            left: matchTooltip.x + 12,
-            top: matchTooltip.y - 36,
-            background: 'var(--popover)',
-            color: 'var(--popover-foreground)',
-            border: '1px solid var(--border)',
-            borderRadius: 6,
-            padding: '4px 10px',
-            fontSize: 11,
-            fontFamily: 'var(--font-sans)',
-            pointerEvents: 'none',
-            zIndex: 9999,
-            whiteSpace: 'nowrap',
-            boxShadow: 'var(--shadow-md)',
-          }}
-        >
-          {matchTooltip.reasons.map(r => (
-            <div key={r} style={{ lineHeight: 1.6 }}>matched {r}</div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-````
-
 ## File: packages/web/src/components/gantt/GanttToolbar.tsx
 ````typescript
 /**
@@ -43554,6 +44555,644 @@ export default function GanttToolbar({
         <Share2 size={13} strokeWidth={1.8} />
         Share
       </button>
+    </div>
+  );
+}
+````
+
+## File: packages/web/src/components/gantt/GanttView.tsx
+````typescript
+/**
+ * GanttView — data container for the Gantt grid.
+ *
+ * Fetches events and members, applies grouping and sorting, builds the
+ * GanttRow list, and passes everything to GanttGrid. The component owns
+ * no layout state — granularity, groupBy, and sortBy come from DashboardPage.
+ *
+ * Also owns the find-match computation: it reads the debounced query from
+ * FindContext, matches against the fetched API events, and registers the
+ * ordered match list back into FindContext so GanttGrid can apply visual
+ * treatment and auto-scroll.
+ */
+
+import { useMemo, useRef, useState, useLayoutEffect, useEffect, useCallback } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
+import GanttGrid, { type GanttActivity, type GanttRow, type FindState } from './GanttGrid';
+import { useTimelineActivities, useTeamMembers, useUpdateActivity } from '@/hooks/useTeamActivities';
+import type { components } from '@draba/shared';
+import { type Member, ACTIVITY_COLORS, MEMBER_COLORS } from '@/types';
+import { resolveColorHex } from '@/components/identity/identity-constants';
+import type { GroupBy, SortBy, TimeGranularity, ColorBy } from './GanttToolbar';
+import {
+  generateColumns,
+  positionInColumns,
+  todayColumnPosition,
+  autoFitGranularity,
+  type ColumnDef,
+} from './granularity';
+import { matchEvents } from '@/lib/findMatcher';
+import { memberComboKey, orderedComboIds, memberComboLabel, comboSortComparator, UNASSIGNED_KEY, SEP } from '@/lib/memberGroups';
+import { useFind } from '@/contexts/FindContext';
+import { useFilter } from '@/contexts/FilterContext';
+import { usePreferenceMap } from '@/hooks/usePreferences';
+import { applyActiveFilter } from '@/lib/presetFilters';
+
+type ApiActivity = components['schemas']['Activity'];
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
+type Status = components['schemas']['Status'];
+type SavedFilter = components['schemas']['SavedFilter'];
+type Tag = components['schemas']['Tag'];
+
+interface Props {
+  teamId: string;
+  /** Active timeline ID — activities are fetched scoped to this timeline. */
+  timelineId: string;
+  /** ISO date "YYYY-MM-DD" — defaults to 14 days before today. */
+  startDate?: string;
+  /** ISO date "YYYY-MM-DD" — defaults to 75 days after today. */
+  endDate?: string;
+  groupBy: GroupBy;
+  sortBy: SortBy;
+  granularity: TimeGranularity | 'auto';
+  colorBy: ColorBy;
+  /**
+   * Timeline statuses — used to derive closedStatusIds and resolve status names
+   * in the filter engine. Replaces the old closedStatusIds prop.
+   */
+  timelineStatuses?: Status[];
+  /** Saved filters for the active team — evaluated by the filter engine. */
+  savedFilters?: SavedFilter[];
+  /** Team tags — used to resolve tag names in the filter engine. */
+  tags?: Tag[];
+  selectedActivityId?: string | null;
+  onSelectActivity?: (id: string | null) => void;
+  /** Called when the user drags on an empty lane to create an activity. */
+  onLaneDrag?: (startDate: Date, endDate: Date, memberId: string | null) => void;
+  /** Called during a bar drag with live snapped dates — for sidebar preview. */
+  onBarDragProgress?: (activityId: string, newStart: Date, newEnd: Date) => void;
+  /** Called when a bar drag completes (before the PATCH fires). */
+  onBarDragEnd?: () => void;
+  /** Called once members are loaded, so the parent can access them for panels. */
+  onMembersLoaded?: (members: Member[]) => void;
+  /** Called when an activity is selected — passes the full API activity object. */
+  onSelectApiActivity?: (activity: ApiActivity | null) => void;
+  /** Label column width in px — passed through to GanttGrid for controlled persistence. */
+  labelColW?: number;
+  /** Called when the user drags the label column resize handle. */
+  onLabelColWChange?: (w: number) => void;
+  /**
+   * When false, all click and drag interactions are suppressed — bars, lane
+   * drags, and group toggles are inert. Used by the public share viewer.
+   * Default: true.
+   */
+  interactive?: boolean;
+}
+
+
+// ── Date helpers ────────────────────────────────────────────────────────────
+
+function toDateOnly(datetime: string): string {
+  return datetime.slice(0, 10);
+}
+
+function todayMidnight(): Date {
+  const d = new Date();
+  d.setUTCHours(0, 0, 0, 0); // UTC midnight so it aligns with UTC-stored activity dates
+  return d;
+}
+
+function initialsFrom(name: string): string {
+  return name
+    .split(/\s+/)
+    .map(w => w[0] ?? '')
+    .slice(0, 2)
+    .join('')
+    .toUpperCase();
+}
+
+// ── Type mapping ─────────────────────────────────────────────────────────────
+
+function toMember(m: TeamMemberWithUser, index: number): Member {
+  const name = m.displayName || m.email || 'Unknown';
+  const fallbackHex = MEMBER_COLORS[index % MEMBER_COLORS.length];
+  return {
+    id: m.id,
+    name,
+    initials: initialsFrom(name),
+    color: resolveColorHex(m.color) || fallbackHex,
+  };
+}
+
+/** Intermediate activity type that carries API fields alongside computed view-state. Exported for use by the public share viewer. */
+export interface RichActivity extends GanttActivity {
+  startAtMs: number;
+  endAtMs: number;
+  parentActivityId: string | null;
+  primaryMemberId: string | null;
+  assignedMemberIds: string[];
+  statusId: string | null;
+}
+
+function toRichActivity(
+  ev: ApiActivity,
+  index: number,
+  memberById: Record<string, Member>,
+  viewStart: Date,
+  viewEnd: Date,
+  columns: ColumnDef[],
+  colorBy: ColorBy,
+  statusColorById: Map<string, string>,
+): RichActivity | null {
+  const evStart = new Date(toDateOnly(ev.startAt));
+  const evEnd = new Date(toDateOnly(ev.endAt));
+
+  if (evEnd < viewStart || evStart > viewEnd) return null;
+
+  const clampedStart = evStart < viewStart ? viewStart : evStart;
+  const clampedEnd = evEnd > viewEnd ? viewEnd : evEnd;
+
+  const { startCol, span } = positionInColumns(clampedStart, clampedEnd, columns);
+  const assignedIds = ev.assignedMemberIds ?? [];
+  const members = assignedIds.map(id => memberById[id]).filter((m): m is Member => Boolean(m));
+
+  const color =
+    colorBy === 'member' ? (members[0]?.color ?? ev.color ?? ACTIVITY_COLORS[index % ACTIVITY_COLORS.length]) :
+    colorBy === 'status' ? (statusColorById.get((ev as ApiActivity & { statusId?: string | null }).statusId ?? '') ?? '#6b7280') :
+    /* activity */ (ev.color ?? ACTIVITY_COLORS[index % ACTIVITY_COLORS.length]);
+
+  return {
+    id: ev.id,
+    title: ev.title,
+    startCol,
+    span,
+    color,
+    icon: ev.icon ?? undefined,
+    members,
+    isChild: Boolean(ev.parentActivityId),
+    startAtMs: new Date(ev.startAt).getTime(),
+    endAtMs: new Date(ev.endAt).getTime(),
+    parentActivityId: ev.parentActivityId ?? null,
+    primaryMemberId: members[0]?.id ?? null,
+    assignedMemberIds: assignedIds,
+    statusId: (ev as ApiActivity & { statusId?: string | null }).statusId ?? null,
+  };
+}
+
+// ── Sorting ──────────────────────────────────────────────────────────────────
+
+function sortActivities(activities: RichActivity[], sortBy: SortBy): RichActivity[] {
+  return [...activities].sort((a, b) => {
+    if (sortBy === 'title') return a.title.localeCompare(b.title);
+    if (sortBy === 'endDate') return a.endAtMs - b.endAtMs;
+    return a.startAtMs - b.startAtMs;
+  });
+}
+
+// ── Grouping ─────────────────────────────────────────────────────────────────
+
+/**
+ * Builds the flat GanttRow list from positioned activities, applying grouping,
+ * sorting, parent→child nesting (arbitrary depth), and collapse state.
+ * Exported for unit testing of the tree/collapse logic.
+ */
+export function buildRows(
+  activities: RichActivity[],
+  members: Member[],
+  groupBy: GroupBy,
+  sortBy: SortBy,
+  collapsedParents: Set<string>,
+  collapsedGroups: Set<string>,
+  statuses?: Status[],
+): GanttRow[] {
+  const sorted = sortActivities(activities, sortBy);
+
+  if (groupBy === 'none') {
+    // Flat list — no parent nesting, so children are not indented.
+    return sorted.map(ev => ({ kind: 'activity' as const, event: { ...ev, isChild: false, depth: 0 } }));
+  }
+
+  if (groupBy === 'member') {
+    const memberOrder = members.map(m => m.id);
+    const nameById = new Map(members.map(m => [m.id, m.name]));
+    // Colors here are already resolved hex (from the Member type / toMember conversion).
+    // ListView applies resolveColorHex on the raw API color string instead — both
+    // produce hex, but the resolution step happens at different layers.
+    const colorById = new Map(members.map(m => [m.id, m.color]));
+
+    const buckets = new Map<string, RichActivity[]>();
+    for (const ev of sorted) {
+      const key = memberComboKey(ev.assignedMemberIds);
+      const list = buckets.get(key) ?? [];
+      list.push(ev);
+      buckets.set(key, list);
+    }
+
+    const comparator = comboSortComparator(memberOrder);
+    const sortedKeys = [...buckets.keys()].sort(comparator);
+
+    const rows: GanttRow[] = [];
+    for (const key of sortedKeys) {
+      const evs = buckets.get(key)!;
+      const rawIds = key === UNASSIGNED_KEY ? [] : key.split(SEP);
+      const orderedIds = orderedComboIds(rawIds, memberOrder);
+      const label = key === UNASSIGNED_KEY ? 'Unassigned' : memberComboLabel(orderedIds, nameById);
+      const memberColors = orderedIds.map(id => colorById.get(id) ?? 'var(--muted-foreground)');
+      const primaryColor = key === UNASSIGNED_KEY ? 'var(--muted-foreground)' : (memberColors[0] ?? 'var(--muted-foreground)');
+      const collapsed = collapsedGroups.has(key);
+      rows.push({ kind: 'group', id: key, label, color: primaryColor, memberColors, count: evs.length, collapsed });
+      if (collapsed) continue;
+      for (const ev of evs) rows.push({ kind: 'activity', event: { ...ev, isChild: false, depth: 0 } });
+    }
+    return rows;
+  }
+
+  if (groupBy === 'parent') {
+    // Build a parent→children index, then emit rows via depth-first traversal so
+    // grandchildren (and deeper) nest correctly. An activity is a "root" when it
+    // has no parent or its parent fell outside the current view.
+    const byId = new Map(sorted.map(a => [a.id, a]));
+    const childrenByParent = new Map<string, RichActivity[]>();
+    const roots: RichActivity[] = [];
+    for (const ev of sorted) {
+      const pid = ev.parentActivityId;
+      if (pid && byId.has(pid)) {
+        const list = childrenByParent.get(pid) ?? [];
+        list.push(ev);
+        childrenByParent.set(pid, list);
+      } else {
+        roots.push(ev);
+      }
+    }
+
+    const rows: GanttRow[] = [];
+    const seen = new Set<string>();   // emitted into rows (also guards cycles)
+    const hidden = new Set<string>(); // suppressed under a collapsed ancestor
+
+    // Recursively mark a collapsed node's descendants as hidden so the leftover
+    // sweep below doesn't resurrect them. The `hidden` guard also stops cycles.
+    const markHidden = (ev: RichActivity) => {
+      if (hidden.has(ev.id)) return;
+      hidden.add(ev.id);
+      for (const k of childrenByParent.get(ev.id) ?? []) markHidden(k);
+    };
+
+    const visit = (ev: RichActivity, depth: number) => {
+      if (seen.has(ev.id)) return;
+      seen.add(ev.id);
+      const kids = childrenByParent.get(ev.id) ?? [];
+      const hasChildren = kids.length > 0;
+      const collapsed = collapsedParents.has(ev.id);
+      rows.push({
+        kind: 'activity',
+        event: { ...ev, isChild: depth > 0, depth, hasChildren, collapsed },
+      });
+      if (!hasChildren) return;
+      if (collapsed) for (const k of kids) markHidden(k);
+      else for (const k of kids) visit(k, depth + 1);
+    };
+
+    for (const r of roots) visit(r, 0);
+    // Safety net: emit any activity unreachable from a root (e.g. a parent-
+    // pointer cycle where no node qualifies as a root) at depth 0, but never
+    // resurrect a node intentionally hidden under a collapsed ancestor.
+    for (const ev of sorted) {
+      if (!seen.has(ev.id) && !hidden.has(ev.id)) visit(ev, 0);
+    }
+    return rows;
+  }
+
+  if (groupBy === 'status') {
+    const buckets = new Map<string, RichActivity[]>();
+    for (const ev of sorted) {
+      const key = ev.statusId ?? '__no_status__';
+      const list = buckets.get(key) ?? [];
+      list.push(ev);
+      buckets.set(key, list);
+    }
+
+    const rows: GanttRow[] = [];
+    const pushStatusBucket = (id: string, label: string, color: string, evs: RichActivity[]) => {
+      const collapsed = collapsedGroups.has(id);
+      rows.push({ kind: 'group', id, label, color, count: evs.length, collapsed });
+      if (collapsed) return;
+      for (const ev of evs) rows.push({ kind: 'activity', event: { ...ev, isChild: false, depth: 0 } });
+    };
+
+    if (statuses) {
+      for (const s of statuses) {
+        const evs = buckets.get(s.id);
+        if (!evs?.length) continue;
+        pushStatusBucket(s.id, s.name, resolveColorHex(s.color ?? null) ?? 'var(--muted-foreground)', evs);
+      }
+    }
+    const noStatus = buckets.get('__no_status__');
+    if (noStatus?.length) {
+      pushStatusBucket('__no_status__', 'No status', 'var(--muted-foreground)', noStatus);
+    }
+    return rows;
+  }
+
+  return sorted.map(ev => ({ kind: 'activity' as const, event: ev }));
+}
+
+// ── Component ─────────────────────────────────────────────────────────────────
+
+/**
+ * Returns only the activities whose status is not in closedStatusIds.
+ * Extracted as a named export so the 'open' filter preset logic can be
+ * unit-tested without mounting the full component.
+ */
+export function filterOpenActivities<T extends { statusId?: string | null | undefined }>(
+  activities: T[],
+  closedStatusIds: Set<string>,
+): T[] {
+  return activities.filter(a => !a.statusId || !closedStatusIds.has(a.statusId))
+}
+
+export default function GanttView({
+  teamId,
+  timelineId,
+  startDate,
+  endDate,
+  groupBy,
+  sortBy,
+  granularity,
+  colorBy,
+  timelineStatuses,
+  savedFilters,
+  tags,
+  selectedActivityId = null,
+  onSelectActivity = () => {},
+  onLaneDrag,
+  onBarDragProgress,
+  onBarDragEnd,
+  onMembersLoaded,
+  onSelectApiActivity,
+  labelColW,
+  onLabelColWChange,
+  interactive = true,
+}: Props) {
+  const queryClient = useQueryClient();
+  const updateActivity = useUpdateActivity(timelineId);
+  const today = todayMidnight();
+
+  // Collapse state for the Gantt tree. `collapsedParents` hides an activity's
+  // child subtree (parent grouping); `collapsedGroups` hides a member bucket's
+  // activities (member grouping). Both persist across re-renders and view tweaks.
+  const [collapsedParents, setCollapsedParents] = useState<Set<string>>(new Set());
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
+
+  const toggleParent = useCallback((id: string) => {
+    setCollapsedParents(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }, []);
+
+  const toggleGroup = useCallback((id: string) => {
+    setCollapsedGroups(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }, []);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [containerWidth, setContainerWidth] = useState(800);
+
+  const { debouncedQuery, registerMatches, activeMatchId, matchedIds, matchReasons } = useFind();
+  const { activeFilter } = useFilter();
+
+  const globalPrefs = usePreferenceMap();
+  const prefWeekStart = (globalPrefs['week_start'] as string | undefined) === 'sunday' ? 'sunday' : 'monday';
+  // Map the stored date_format preference to a BCP 47 locale for Gantt column labels.
+  // DD/MM/YYYY users prefer day-first ordering (en-GB: "5 Jan"); all others get MM-first (en-US: "Jan 5").
+  const prefDateFormat = (globalPrefs['date_format'] as string | undefined) ?? 'MMM D, YYYY';
+  const prefLocale = prefDateFormat === 'DD/MM/YYYY' ? 'en-GB' : 'en-US';
+
+  useLayoutEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(entries => {
+      const w = entries[0]?.contentRect.width;
+      if (w && w > 0) setContainerWidth(w);
+    });
+    ro.observe(el);
+    setContainerWidth(el.clientWidth || 800);
+    return () => ro.disconnect();
+  }, []);
+
+  const viewStart = useMemo<Date>(() => {
+    if (startDate) return new Date(startDate);
+    const d = new Date(today);
+    d.setUTCDate(d.getUTCDate() - 14);
+    return d;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [startDate]);
+
+  const viewEnd = useMemo<Date>(() => {
+    if (endDate) return new Date(endDate);
+    const d = new Date(today);
+    d.setUTCDate(d.getUTCDate() + 75);
+    return d;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [endDate]);
+
+  const resolvedGranularity = useMemo<TimeGranularity>(() => {
+    if (granularity !== 'auto') return granularity;
+    return autoFitGranularity(viewStart, viewEnd, containerWidth);
+  }, [granularity, viewStart, viewEnd, containerWidth]);
+
+  const columns = useMemo(
+    () => generateColumns(viewStart, viewEnd, resolvedGranularity, { weekStart: prefWeekStart, locale: prefLocale }),
+    [viewStart, viewEnd, resolvedGranularity, prefWeekStart, prefLocale],
+  );
+
+  const todayIdx = useMemo(
+    () => todayColumnPosition(columns),
+    [columns],
+  );
+
+  const from = viewStart.toISOString();
+  const to = viewEnd.toISOString();
+
+  const { data: apiMembers = [] } = useTeamMembers(teamId);
+  const { data: apiActivities = [], isLoading } = useTimelineActivities(teamId, timelineId, from, to);
+
+  const members: Member[] = useMemo(
+    () => apiMembers.map((m, i) => toMember(m, i)),
+    [apiMembers],
+  );
+
+  const memberById = useMemo<Record<string, Member>>(() => {
+    const map: Record<string, Member> = {};
+    members.forEach(m => { map[m.id] = m; });
+    return map;
+  }, [members]);
+
+  // Notify parent once the member list resolves.
+  useEffect(() => {
+    if (onMembersLoaded && members.length > 0) {
+      onMembersLoaded(members);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [members]);
+
+  // Derive data needed by the unified filter engine from the passed-in statuses/tags/filters.
+  const closedStatusIds = useMemo(
+    () => new Set((timelineStatuses ?? []).filter(s => s.isClosed).map(s => s.id)),
+    [timelineStatuses],
+  );
+
+  const statusesByTimeline = useMemo(() => {
+    const m = new Map<string, Status[]>();
+    if (timelineStatuses?.length) m.set(timelineId, timelineStatuses);
+    return m;
+  }, [timelineId, timelineStatuses]);
+
+  // Map userId → team_member_id[] so the 'member' filter kind can resolve by userId.
+  const memberIdsByUserId = useMemo(() => {
+    const m = new Map<string, string[]>();
+    apiMembers.forEach(member => {
+      if (member.userId) {
+        const existing = m.get(member.userId) ?? [];
+        m.set(member.userId, [...existing, member.id]);
+      }
+    });
+    return m;
+  }, [apiMembers]);
+
+  const visibleActivities = useMemo(() => applyActiveFilter(
+    apiActivities,
+    activeFilter,
+    memberIdsByUserId,
+    {
+      closedStatusIds,
+      savedFilters: savedFilters ?? [],
+      statuses: statusesByTimeline,
+      tags: tags ?? [],
+    },
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  ), [apiActivities, activeFilter, memberIdsByUserId, closedStatusIds, savedFilters, statusesByTimeline, tags]);
+
+  const statusColorById = useMemo(
+    () => new Map((timelineStatuses ?? []).map(s => [s.id, s.color])),
+    [timelineStatuses],
+  );
+
+  const rows: GanttRow[] = useMemo(() => {
+    const richActivities = visibleActivities
+      .map((ev, i) => toRichActivity(ev, i, memberById, viewStart, viewEnd, columns, colorBy, statusColorById))
+      .filter((a): a is RichActivity => a !== null);
+    return buildRows(richActivities, members, groupBy, sortBy, collapsedParents, collapsedGroups, timelineStatuses);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visibleActivities, members, memberById, groupBy, sortBy, colorBy, statusColorById, viewStart, viewEnd, columns, collapsedParents, collapsedGroups, timelineStatuses]);
+
+  // ── Find: compute matches and register with context ───────────────────────
+
+  const matchResults = useMemo(
+    () => matchEvents(debouncedQuery, visibleActivities, members, visibleActivities),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [debouncedQuery, visibleActivities, members],
+  );
+
+  const matchedSet = useMemo(
+    () => new Set(matchResults.map(r => r.activityId)),
+    [matchResults],
+  );
+
+  const computedMatchReasons = useMemo(() => {
+    const map = new Map<string, string[]>();
+    matchResults.forEach(r => map.set(r.activityId, r.reasons));
+    return map;
+  }, [matchResults]);
+
+  // Ordered match IDs follow the current row order so prev/next walks the
+  // visual top-to-bottom sequence rather than the arbitrary API order.
+  const orderedMatchIds = useMemo(
+    () => rows
+      .filter(r => r.kind === 'activity' && matchedSet.has(r.event.id))
+      .map(r => (r as { kind: 'activity'; event: GanttActivity }).event.id),
+    [rows, matchedSet],
+  );
+
+  useEffect(() => {
+    registerMatches(orderedMatchIds, computedMatchReasons);
+  }, [orderedMatchIds, computedMatchReasons, registerMatches]);
+
+  // Build the FindState passed to GanttGrid
+  const hasQuery = debouncedQuery.trim().length > 0;
+  const filtersActive = activeFilter.kind !== 'preset' || activeFilter.id !== 'all';
+  const findState: FindState = useMemo(() => ({
+    hasQuery,
+    matchedIds: matchedSet,
+    activeMatchId,
+    matchReasons,
+    filtersActive,
+    matchCount: matchedIds.length,
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), [hasQuery, matchedSet, activeMatchId, matchReasons, filtersActive, matchedIds.length]);
+
+  // ── Bar drag ─────────────────────────────────────────────────────────────
+
+  const handleBarDrag = useCallback((activityId: string, newStartDate: Date, newEndDate: Date) => {
+    const patch = {
+      startAt: newStartDate.toISOString(),
+      endAt: newEndDate.toISOString(),
+    };
+
+    // Synchronously update the cache so the bar doesn't flash back to old
+    // position when GanttGrid clears its drag state in the same render cycle.
+    queryClient.setQueriesData<ApiActivity[]>(
+      { queryKey: ['timelines', timelineId, 'activities'] },
+      (old) => old?.map((a) => (a.id === activityId ? { ...a, ...patch } : a)),
+    );
+
+    // Push updated activity to the sidebar so it shows new dates immediately
+    // instead of the stale snapshot from when the activity was selected.
+    if (onSelectApiActivity) {
+      const updated = apiActivities.find(a => a.id === activityId);
+      if (updated) onSelectApiActivity({ ...updated, ...patch });
+    }
+
+    onBarDragEnd?.();
+    updateActivity.mutate({ activityId, patch });
+  }, [updateActivity, onBarDragEnd, queryClient, timelineId, apiActivities, onSelectApiActivity]);
+
+  if (isLoading) {
+    return (
+      <div ref={containerRef} className="flex items-center justify-center h-full text-muted-foreground text-[13px]">
+        Loading activities…
+      </div>
+    );
+  }
+
+  return (
+    <div ref={containerRef} style={{ flex: 1, minHeight: 0 }}>
+      <GanttGrid
+        rows={rows}
+        columns={columns}
+        todayIndex={todayIdx}
+        selectedActivityId={selectedActivityId}
+        findState={findState}
+        onSelectActivity={(id) => {
+          onSelectActivity(id);
+          if (onSelectApiActivity) {
+            const found = id ? (apiActivities.find(a => a.id === id) ?? null) : null;
+            onSelectApiActivity(found);
+          }
+        }}
+        onLaneDrag={interactive ? onLaneDrag : undefined}
+        onBarDrag={interactive ? handleBarDrag : undefined}
+        onBarDragProgress={interactive ? onBarDragProgress : undefined}
+        resolvedGranularity={resolvedGranularity}
+        onClearFilters={filtersActive ? () => {} : undefined}
+        labelColW={labelColW}
+        onLabelColWChange={onLabelColWChange}
+        onToggleActivity={groupBy === 'parent' ? toggleParent : undefined}
+        onToggleGroup={groupBy === 'member' || groupBy === 'status' ? toggleGroup : undefined}
+        interactive={interactive}
+      />
     </div>
   );
 }
@@ -48926,560 +50565,311 @@ export function createAuthFetchBlob(getToken: () => string | null) {
 }
 ````
 
-## File: packages/web/src/lib/filterEngine.test.ts
+## File: packages/web/src/lib/textExport.test.ts
 ````typescript
 /**
- * filterEngine.test.ts — unit tests for matchesFilter.
+ * textExport — generator-level tests for the Phase 14.2 textual export module.
  *
- * Covers: each field type, each operator, AND/OR logic, edge cases
- * (empty conditions, null/missing fields, case-insensitive status/tag matching),
- * and the golden fixture suite shared with the Go filter engine.
+ * Covers the four correctness defects fixed on 2026-06-17 (docs/log.md): column
+ * visibility, row order (sort happens upstream in DashboardPage; these generators
+ * must preserve whatever order listDisplayRows arrives in), group-by section
+ * rendering, and parent-child depth/indentation. Also covers Markdown/HTML
+ * escaping, since both are clipboard-paste-target strings and a missed escape
+ * is a real injection/corruption risk, not just cosmetic.
  */
 
 import { describe, it, expect } from 'vitest'
-import { matchesFilter, type FilterContext } from './filterEngine'
 import type { components } from '@draba/shared'
-import type { FilterDefinition } from './filterTypes'
-// Golden fixtures shared with the Go filter evaluator (packages/api/internal/filters).
-// Both implementations must produce the same result for every case here.
-import goldenFixtures from '../../../shared/testdata/filter-fixtures.json'
+import {
+  buildListMarkdown, buildListMarkdownOutline,
+  buildListPlainText,
+  buildListHtml, buildListHtmlOutline,
+  buildKanbanMarkdown, buildKanbanPlainText, buildKanbanHtml,
+  buildCalendarMarkdown, buildCalendarHtml,
+  type TextExportData, type ListExportRow,
+} from './textExport'
 
-type Activity = components['schemas']['Activity']
-type Status = components['schemas']['Status']
-type Tag = components['schemas']['Tag']
+type ApiActivity = components['schemas']['Activity']
 
-// ── Fixtures ──────────────────────────────────────────────────────────────────
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function makeActivity(overrides: Record<string, any> = {}): Activity {
+function act(id: string, opts: Partial<ApiActivity> = {}): ApiActivity {
   return {
-    id: 'act-1',
-    title: 'Test activity',
-    timelineId: 'tl-1',
-    startAt: '2026-01-10T00:00:00Z',
-    endAt: '2026-01-20T00:00:00Z',
+    id,
+    title: id,
+    timelineId: 'tl1',
+    startAt: '2026-01-01T00:00:00Z',
+    endAt: '2026-01-02T00:00:00Z',
     allDay: false,
-    statusId: 'status-open',
-    tagIds: ['tag-1'],
-    assignedMemberIds: ['member-1'],
-    percentComplete: 50,
-    parentActivityId: null,
-    color: null,
-    icon: null,
-    description: null,
-    notes: null,
-    location: null,
-    url: null,
+    createdBy: 'user1',
     createdAt: '2026-01-01T00:00:00Z',
     updatedAt: '2026-01-01T00:00:00Z',
+    description: null,
+    notes: null,
+    icon: null,
+    color: null,
+    percentComplete: null,
+    location: null,
+    url: null,
     archivedAt: null,
-    createdBy: 'user-1',
-    ...overrides,
-  } as Activity
-}
-
-function makeStatus(id: string, name: string, isClosed = false): Status {
-  return { id, name, color: '#3B82F6', icon: null, isClosed, position: 0, timelineId: 'tl-1', createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' }
-}
-
-function makeTag(id: string, name: string): Tag {
-  return { id, name, color: null, teamId: 'team-1', createdAt: '2026-01-01T00:00:00Z', createdBy: 'user-1' }
-}
-
-const statusOpen = makeStatus('status-open', 'In Progress')
-const statusClosed = makeStatus('status-closed', 'Done', true)
-
-const tagBug = makeTag('tag-1', 'bug')
-const tagFeat = makeTag('tag-2', 'feature')
-
-const ctx: FilterContext = {
-  statusesByTimeline: new Map([['tl-1', [statusOpen, statusClosed]]]),
-  tags: [tagBug, tagFeat],
-}
-
-// ── Empty conditions ──────────────────────────────────────────────────────────
-
-describe('empty conditions', () => {
-  it('matches all activities when conditions list is empty', () => {
-    const activity = makeActivity()
-    expect(matchesFilter(activity, { logic: 'and', conditions: [] }, ctx)).toBe(true)
-    expect(matchesFilter(activity, { logic: 'or', conditions: [] }, ctx)).toBe(true)
-  })
-})
-
-// ── AND / OR logic ────────────────────────────────────────────────────────────
-
-describe('AND / OR logic', () => {
-  it('AND requires all conditions to pass', () => {
-    const activity = makeActivity({ title: 'Hello world' })
-    expect(matchesFilter(activity, {
-      logic: 'and',
-      conditions: [
-        { field: 'title', op: 'contains', value: 'Hello' },
-        { field: 'title', op: 'contains', value: 'world' },
-      ],
-    }, ctx)).toBe(true)
-
-    expect(matchesFilter(activity, {
-      logic: 'and',
-      conditions: [
-        { field: 'title', op: 'contains', value: 'Hello' },
-        { field: 'title', op: 'contains', value: 'missing' },
-      ],
-    }, ctx)).toBe(false)
-  })
-
-  it('OR requires at least one condition to pass', () => {
-    const activity = makeActivity({ title: 'Hello world' })
-    expect(matchesFilter(activity, {
-      logic: 'or',
-      conditions: [
-        { field: 'title', op: 'contains', value: 'missing' },
-        { field: 'title', op: 'contains', value: 'world' },
-      ],
-    }, ctx)).toBe(true)
-
-    expect(matchesFilter(activity, {
-      logic: 'or',
-      conditions: [
-        { field: 'title', op: 'contains', value: 'nope' },
-        { field: 'title', op: 'contains', value: 'nada' },
-      ],
-    }, ctx)).toBe(false)
-  })
-})
-
-// ── Status field ──────────────────────────────────────────────────────────────
-
-describe('status field', () => {
-  it('in: matches when status name is in the set (case-insensitive)', () => {
-    const activity = makeActivity({ statusId: 'status-open' })
-    expect(matchesFilter(activity, {
-      logic: 'and',
-      conditions: [{ field: 'status', op: 'in', value: ['in progress'] }],
-    }, ctx)).toBe(true)
-  })
-
-  it('in: no match when status name not in set', () => {
-    const activity = makeActivity({ statusId: 'status-open' })
-    expect(matchesFilter(activity, {
-      logic: 'and',
-      conditions: [{ field: 'status', op: 'in', value: ['done'] }],
-    }, ctx)).toBe(false)
-  })
-
-  it('not_in: matches when status name is NOT in the set', () => {
-    const activity = makeActivity({ statusId: 'status-open' })
-    expect(matchesFilter(activity, {
-      logic: 'and',
-      conditions: [{ field: 'status', op: 'not_in', value: ['done'] }],
-    }, ctx)).toBe(true)
-  })
-
-  it('is_empty: matches when activity has no status', () => {
-    const activity = makeActivity({ statusId: null })
-    expect(matchesFilter(activity, {
-      logic: 'and',
-      conditions: [{ field: 'status', op: 'is_empty', value: [] }],
-    }, ctx)).toBe(true)
-  })
-
-  it('is_not_empty: matches when activity has a status', () => {
-    const activity = makeActivity({ statusId: 'status-open' })
-    expect(matchesFilter(activity, {
-      logic: 'and',
-      conditions: [{ field: 'status', op: 'is_not_empty', value: [] }],
-    }, ctx)).toBe(true)
-  })
-})
-
-// ── Tag field ─────────────────────────────────────────────────────────────────
-
-describe('tag field', () => {
-  it('in: matches by tag name (case-insensitive)', () => {
-    const activity = makeActivity({ tagIds: ['tag-1'] }) // tag-1 = 'bug'
-    expect(matchesFilter(activity, {
-      logic: 'and',
-      conditions: [{ field: 'tag', op: 'in', value: ['BUG'] }],
-    }, ctx)).toBe(true)
-  })
-
-  it('not_in: matches when none of the tag names match', () => {
-    const activity = makeActivity({ tagIds: ['tag-1'] }) // 'bug'
-    expect(matchesFilter(activity, {
-      logic: 'and',
-      conditions: [{ field: 'tag', op: 'not_in', value: ['feature'] }],
-    }, ctx)).toBe(true)
-  })
-
-  it('is_empty: matches when activity has no tags', () => {
-    const activity = makeActivity({ tagIds: [] })
-    expect(matchesFilter(activity, {
-      logic: 'and',
-      conditions: [{ field: 'tag', op: 'is_empty', value: [] }],
-    }, ctx)).toBe(true)
-  })
-})
-
-// ── Assignee field ────────────────────────────────────────────────────────────
-
-describe('assignee field', () => {
-  it('in: matches when member ID is assigned', () => {
-    const activity = makeActivity({ assignedMemberIds: ['member-1'] })
-    expect(matchesFilter(activity, {
-      logic: 'and',
-      conditions: [{ field: 'assignee', op: 'in', value: ['member-1'] }],
-    }, ctx)).toBe(true)
-  })
-
-  it('not_in: matches when member is not assigned', () => {
-    const activity = makeActivity({ assignedMemberIds: ['member-2'] })
-    expect(matchesFilter(activity, {
-      logic: 'and',
-      conditions: [{ field: 'assignee', op: 'not_in', value: ['member-1'] }],
-    }, ctx)).toBe(true)
-  })
-
-  it('is_empty: matches when no assignees', () => {
-    const activity = makeActivity({ assignedMemberIds: [] })
-    expect(matchesFilter(activity, {
-      logic: 'and',
-      conditions: [{ field: 'assignee', op: 'is_empty', value: [] }],
-    }, ctx)).toBe(true)
-  })
-})
-
-// ── Title field ───────────────────────────────────────────────────────────────
-
-describe('title field', () => {
-  it('contains: case-insensitive substring match', () => {
-    const activity = makeActivity({ title: 'Fix the login bug' })
-    expect(matchesFilter(activity, {
-      logic: 'and',
-      conditions: [{ field: 'title', op: 'contains', value: 'LOGIN' }],
-    }, ctx)).toBe(true)
-  })
-
-  it('not_contains: true when substring absent', () => {
-    const activity = makeActivity({ title: 'Fix the login bug' })
-    expect(matchesFilter(activity, {
-      logic: 'and',
-      conditions: [{ field: 'title', op: 'not_contains', value: 'dashboard' }],
-    }, ctx)).toBe(true)
-  })
-
-  it('equals: exact case-insensitive match', () => {
-    const activity = makeActivity({ title: 'Hello World' })
-    expect(matchesFilter(activity, {
-      logic: 'and',
-      conditions: [{ field: 'title', op: 'equals', value: 'hello world' }],
-    }, ctx)).toBe(true)
-  })
-
-  it('is_empty: matches when title is empty string', () => {
-    const activity = makeActivity({ title: '' })
-    expect(matchesFilter(activity, {
-      logic: 'and',
-      conditions: [{ field: 'title', op: 'is_empty', value: '' }],
-    }, ctx)).toBe(true)
-  })
-})
-
-// ── Progress field ────────────────────────────────────────────────────────────
-
-describe('progress field', () => {
-  it('gte: matches when progress is at or above threshold', () => {
-    const activity = makeActivity({ percentComplete: 75 })
-    expect(matchesFilter(activity, {
-      logic: 'and',
-      conditions: [{ field: 'progress', op: 'gte', value: 50 }],
-    }, ctx)).toBe(true)
-  })
-
-  it('lt: matches when progress is below threshold', () => {
-    const activity = makeActivity({ percentComplete: 25 })
-    expect(matchesFilter(activity, {
-      logic: 'and',
-      conditions: [{ field: 'progress', op: 'lt', value: 50 }],
-    }, ctx)).toBe(true)
-  })
-
-  it('is_empty: matches when percentComplete is null/undefined', () => {
-    const activity = makeActivity({ percentComplete: undefined })
-    expect(matchesFilter(activity, {
-      logic: 'and',
-      conditions: [{ field: 'progress', op: 'is_empty', value: 0 }],
-    }, ctx)).toBe(true)
-  })
-})
-
-// ── hasParent field ───────────────────────────────────────────────────────────
-
-describe('hasParent field', () => {
-  it('is_true: matches activities with a parent', () => {
-    const activity = makeActivity({ parentActivityId: 'parent-1' })
-    expect(matchesFilter(activity, {
-      logic: 'and',
-      conditions: [{ field: 'hasParent', op: 'is_true' }],
-    }, ctx)).toBe(true)
-  })
-
-  it('is_false: matches activities without a parent', () => {
-    const activity = makeActivity({ parentActivityId: null })
-    expect(matchesFilter(activity, {
-      logic: 'and',
-      conditions: [{ field: 'hasParent', op: 'is_false' }],
-    }, ctx)).toBe(true)
-  })
-})
-
-// ── Date fields ───────────────────────────────────────────────────────────────
-
-describe('date fields', () => {
-  it('startDate before: matches when start is before the given date', () => {
-    const activity = makeActivity({ startAt: '2026-01-05T00:00:00Z' })
-    expect(matchesFilter(activity, {
-      logic: 'and',
-      conditions: [{ field: 'startDate', op: 'before', value: '2026-01-10' }],
-    }, ctx)).toBe(true)
-  })
-
-  it('endDate after: matches when end is after the given date', () => {
-    const activity = makeActivity({ endAt: '2026-03-01T00:00:00Z' })
-    expect(matchesFilter(activity, {
-      logic: 'and',
-      conditions: [{ field: 'endDate', op: 'after', value: '2026-02-01' }],
-    }, ctx)).toBe(true)
-  })
-
-  it('startDate between: matches when start is within range', () => {
-    const activity = makeActivity({ startAt: '2026-06-15T00:00:00Z' })
-    expect(matchesFilter(activity, {
-      logic: 'and',
-      conditions: [{ field: 'startDate', op: 'between', value: ['2026-06-01', '2026-06-30'] }],
-    }, ctx)).toBe(true)
-  })
-
-  it('is_empty: matches when date is null/undefined', () => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const activity = makeActivity({ startAt: null as any })
-    expect(matchesFilter(activity, {
-      logic: 'and',
-      conditions: [{ field: 'startDate', op: 'is_empty' }],
-    }, ctx)).toBe(true)
-  })
-})
-
-// ── Golden fixtures (parity with Go filter engine) ────────────────────────────
-
-describe('golden fixtures — parity with Go filter engine', () => {
-  // Build context from the shared fixture reference data.
-  const fixtureCtx: FilterContext = {
-    statusesByTimeline: new Map([
-      [
-        'tl1',
-        goldenFixtures.statuses.map(s => ({
-          id: s.id,
-          name: s.name,
-          color: s.color,
-          isClosed: s.isClosed,
-          position: s.position,
-          timelineId: s.timelineId,
-          createdAt: '2026-01-01T00:00:00Z',
-          updatedAt: '2026-01-01T00:00:00Z',
-        })),
-      ],
-    ]),
-    tags: goldenFixtures.tags.map(t => ({
-      id: t.id,
-      name: t.name,
-      color: null,
-      teamId: t.teamId,
-      createdAt: t.createdAt,
-      createdBy: t.createdBy,
-    })),
+    parentActivityId: null,
+    assignedMemberIds: [],
+    tagIds: [],
+    statusId: null,
+    ...opts,
   }
+}
 
-  // Build activity lookup.
-  const actByID = Object.fromEntries(
-    goldenFixtures.activities.map(a => [
-      a.id,
-      {
-        ...a,
-        description: null,
-        notes: null,
-        icon: null,
-        color: null,
-        location: null,
-        url: null,
-        rrule: null,
-        caldavUid: null,
-        googleEventId: null,
-        archivedAt: null,
-        updatedAt: '2026-01-01T00:00:00Z',
-      } as Activity,
+const emptyData: TextExportData = {
+  activities: [],
+  memberById: new Map(),
+  statusById: new Map(),
+  tagById: new Map(),
+  activityTitleById: new Map(),
+  kanbanColumns: null,
+  listDisplayRows: null,
+  listVisibleColumns: null,
+  kanbanShowHierarchy: false,
+  kanbanChildrenByParentId: new Map(),
+}
+
+function listRows(rows: ListExportRow[], overrides: Partial<TextExportData> = {}): TextExportData {
+  return { ...emptyData, listDisplayRows: rows, ...overrides }
+}
+
+// ── Column visibility ──────────────────────────────────────────────────────────
+
+describe('buildListMarkdown — column visibility', () => {
+  it('emits only the requested columns, in the requested order', () => {
+    const data = listRows(
+      [{ kind: 'activity', activity: act('a1'), depth: 0 }],
+      { listVisibleColumns: ['title', 'status'] },
+    )
+    const out = buildListMarkdown(data, 'Timeline', null)
+    expect(out).toContain('| Title | Status |')
+    expect(out).not.toContain('Assigned To')
+    expect(out).not.toContain('Progress')
+  })
+
+  it('falls back to the default column set when listVisibleColumns is null', () => {
+    const data = listRows([{ kind: 'activity', activity: act('a1'), depth: 0 }])
+    const out = buildListMarkdown(data, 'Timeline', null)
+    expect(out).toContain('Assigned To')
+    expect(out).toContain('Progress')
+  })
+})
+
+describe('buildListPlainText — column visibility', () => {
+  it('renders only the requested columns', () => {
+    const data = listRows(
+      [{ kind: 'activity', activity: act('a1'), depth: 0 }],
+      { listVisibleColumns: ['title'] },
+    )
+    const out = buildListPlainText(data, 'Timeline', null)
+    const headerLine = out.split('\n').find(l => l.startsWith('Title'))
+    expect(headerLine).toBeDefined()
+    expect(headerLine).not.toContain('Status')
+  })
+})
+
+// ── Row order (sort happens upstream; generators must not reorder) ────────────
+
+describe('buildListMarkdown — row order', () => {
+  it('preserves the order of listDisplayRows verbatim', () => {
+    const data = listRows([
+      { kind: 'activity', activity: act('zebra'), depth: 0 },
+      { kind: 'activity', activity: act('apple'), depth: 0 },
     ])
-  )
-
-  for (const fix of goldenFixtures.fixtures) {
-    it(fix.name, () => {
-      for (const [actID, want] of Object.entries(fix.expected)) {
-        const act = actByID[actID]
-        expect(act, `activity ${actID} missing`).toBeDefined()
-        const got = matchesFilter(act, fix.filter as FilterDefinition, fixtureCtx)
-        expect(got, `activity ${actID}`).toBe(want)
-      }
-    })
-  }
+    const out = buildListMarkdown(data, 'Timeline', null)
+    const zebraIdx = out.indexOf('zebra')
+    const appleIdx = out.indexOf('apple')
+    expect(zebraIdx).toBeGreaterThan(-1)
+    expect(zebraIdx).toBeLessThan(appleIdx)
+  })
 })
-````
 
-## File: packages/web/src/lib/filterEngine.ts
-````typescript
-/**
- * Client-side filter evaluation engine.
- *
- * matchesFilter is a pure function that evaluates a FilterDefinition against
- * a single activity. It resolves status names and tag names via context objects
- * so callers supply the data; the engine does no fetching.
- */
+// ── Group-by sections ──────────────────────────────────────────────────────────
 
-import type { components } from '@draba/shared'
-import type { FilterDefinition, FilterCondition, SetOp, StringOp, NumberOp, BoolOp, DateOp } from './filterTypes'
+describe('buildListMarkdown — group-by', () => {
+  it('emits a ## heading + fresh table per group', () => {
+    const data = listRows([
+      { kind: 'group', label: 'Alice', count: 1 },
+      { kind: 'activity', activity: act('a1'), depth: 0 },
+      { kind: 'group', label: 'Bob', count: 1 },
+      { kind: 'activity', activity: act('a2'), depth: 0 },
+    ])
+    const out = buildListMarkdown(data, 'Timeline', null)
+    expect(out).toContain('## Alice (1)')
+    expect(out).toContain('## Bob (1)')
+    // Each group gets its own header row, not just one shared table.
+    expect(out.match(/\| Title \|/g)?.length).toBe(2)
+  })
+})
 
-type Activity = components['schemas']['Activity']
-type Status = components['schemas']['Status']
-type Tag = components['schemas']['Tag']
+describe('buildListMarkdownOutline — group-by', () => {
+  it('emits a ## heading per group with no shared table header', () => {
+    const data = listRows([
+      { kind: 'group', label: 'Alice', count: 1 },
+      { kind: 'activity', activity: act('a1'), depth: 0 },
+    ])
+    const out = buildListMarkdownOutline(data, 'Timeline', null)
+    expect(out).toContain('## Alice (1)')
+    expect(out).toContain('a1')
+  })
+})
 
-export interface FilterContext {
-  /** Maps timeline_id → that timeline's statuses (for resolving statusId → name). */
-  statusesByTimeline: Map<string, Status[]>
-  /** All tags for the team (for resolving tagIds → names). */
-  tags: Tag[]
-}
-
-// ── Operator helpers ──────────────────────────────────────────────────────────
-
-function evalSetOp(op: SetOp, haystack: string[], needles: string[]): boolean {
-  switch (op) {
-    case 'in':
-      return needles.some(n => haystack.includes(n))
-    case 'not_in':
-      return needles.every(n => !haystack.includes(n))
-    case 'is_empty':
-      return haystack.length === 0
-    case 'is_not_empty':
-      return haystack.length > 0
-  }
-}
-
-function evalStringOp(op: StringOp, value: string | null | undefined, target: string): boolean {
-  const v = (value ?? '').toLowerCase()
-  const t = target.toLowerCase()
-  switch (op) {
-    case 'equals':       return v === t
-    case 'not_equals':   return v !== t
-    case 'contains':     return v.includes(t)
-    case 'not_contains': return !v.includes(t)
-    case 'is_empty':     return v.trim() === ''
-    case 'is_not_empty': return v.trim() !== ''
-  }
-}
-
-function evalNumberOp(op: NumberOp, value: number | null | undefined, target: number): boolean {
-  if (op === 'is_empty')     return value == null
-  if (op === 'is_not_empty') return value != null
-  if (value == null) return false
-  switch (op) {
-    case 'equals':     return value === target
-    case 'not_equals': return value !== target
-    case 'gt':         return value > target
-    case 'gte':        return value >= target
-    case 'lt':         return value < target
-    case 'lte':        return value <= target
-  }
-}
-
-function evalBoolOp(op: BoolOp, value: boolean): boolean {
-  return op === 'is_true' ? value : !value
-}
-
-function evalDateOp(op: DateOp, dateStr: string | null | undefined, target: string | [string, string] | undefined): boolean {
-  if (op === 'is_empty')     return !dateStr
-  if (op === 'is_not_empty') return Boolean(dateStr)
-  if (!dateStr || !target) return false
-
-  const date = new Date(dateStr).getTime()
-  if (op === 'between') {
-    const [from, to] = target as [string, string]
-    return date >= new Date(from).getTime() && date <= new Date(to).getTime()
-  }
-  const targetDate = new Date(target as string).getTime()
-  if (op === 'before') return date < targetDate
-  if (op === 'after')  return date > targetDate
-  return false
-}
-
-// ── Condition evaluation ──────────────────────────────────────────────────────
-
-function evalCondition(condition: FilterCondition, activity: Activity, ctx: FilterContext): boolean {
-  switch (condition.field) {
-    case 'status': {
-      const statuses = ctx.statusesByTimeline.get(activity.timelineId) ?? []
-      const statusName = statuses.find(s => s.id === activity.statusId)?.name ?? null
-      const haystack = statusName ? [statusName.toLowerCase()] : []
-      // is_empty / is_not_empty don't use needles — guard before .map()
-      const needles = (condition.value ?? []).map(v => v.toLowerCase())
-      return evalSetOp(condition.op, haystack, needles)
+describe('buildKanbanMarkdown — section per column', () => {
+  it('emits one heading per non-empty column', () => {
+    const data: TextExportData = {
+      ...emptyData,
+      kanbanColumns: [
+        { label: 'To Do', activities: [act('a1')] },
+        { label: 'Done', activities: [] },
+        { label: 'In Progress', activities: [act('a2')] },
+      ],
     }
+    const out = buildKanbanMarkdown(data, 'Timeline', null)
+    expect(out).toContain('## To Do (1)')
+    expect(out).toContain('## In Progress (1)')
+    expect(out).not.toContain('## Done')
+  })
+})
 
-    case 'tag': {
-      const tagMap = new Map(ctx.tags.map(t => [t.id, t.name.toLowerCase()]))
-      const activityTagNames = (activity.tagIds ?? []).map(id => tagMap.get(id) ?? id)
-      const needles = (condition.value ?? []).map(v => v.toLowerCase())
-      return evalSetOp(condition.op, activityTagNames, needles)
+describe('buildCalendarMarkdown — agenda grouping', () => {
+  it('groups activities under a heading per start date, sorted chronologically', () => {
+    const data: TextExportData = {
+      ...emptyData,
+      activities: [
+        act('later', { startAt: '2026-02-01T00:00:00Z' }),
+        act('earlier', { startAt: '2026-01-01T00:00:00Z' }),
+      ],
     }
+    const out = buildCalendarMarkdown(data, 'Timeline', null)
+    expect(out.indexOf('earlier')).toBeLessThan(out.indexOf('later'))
+  })
+})
 
-    case 'assignee': {
-      const haystack = activity.assignedMemberIds ?? []
-      return evalSetOp(condition.op, haystack, condition.value ?? [])
+// ── Parent-child depth / indentation ───────────────────────────────────────────
+
+describe('buildListMarkdown — hierarchy depth', () => {
+  it('prefixes child titles with the depth marker in the title cell', () => {
+    const data = listRows([
+      { kind: 'activity', activity: act('parent'), depth: 0 },
+      { kind: 'activity', activity: act('child'), depth: 1 },
+    ])
+    const out = buildListMarkdown(data, 'Timeline', null)
+    expect(out).toContain('| parent |')
+    expect(out).toContain('↳ child')
+  })
+})
+
+describe('buildListMarkdownOutline — hierarchy depth', () => {
+  it('indents nested bullets by depth', () => {
+    const data = listRows([
+      { kind: 'activity', activity: act('parent'), depth: 0 },
+      { kind: 'activity', activity: act('child'), depth: 1 },
+    ])
+    const out = buildListMarkdownOutline(data, 'Timeline', null)
+    const lines = out.split('\n')
+    const childLine = lines.find(l => l.includes('child'))!
+    expect(childLine.startsWith('  -')).toBe(true)
+  })
+})
+
+describe('buildKanbanHtml — hierarchy nesting', () => {
+  it('nests children in a sub-<ul> under their parent <li> when kanbanShowHierarchy is true', () => {
+    const parent = act('parent')
+    const child = act('child')
+    const data: TextExportData = {
+      ...emptyData,
+      kanbanColumns: [{ label: 'To Do', activities: [parent] }],
+      kanbanShowHierarchy: true,
+      kanbanChildrenByParentId: new Map([['parent', [child]]]),
     }
+    const out = buildKanbanHtml(data, 'Timeline', null)
+    expect(out).toMatch(/<li[^>]*>parent.*<ul/s)
+    expect(out).toContain('child')
+  })
 
-    case 'title':
-      return evalStringOp(condition.op, activity.title, condition.value)
+  it('does not nest children when kanbanShowHierarchy is false', () => {
+    const parent = act('parent')
+    const child = act('child')
+    const data: TextExportData = {
+      ...emptyData,
+      kanbanColumns: [{ label: 'To Do', activities: [parent] }],
+      kanbanShowHierarchy: false,
+      kanbanChildrenByParentId: new Map([['parent', [child]]]),
+    }
+    const out = buildKanbanHtml(data, 'Timeline', null)
+    expect(out).not.toContain('child')
+  })
+})
 
-    case 'progress':
-      return evalNumberOp(condition.op, activity.percentComplete ?? null, condition.value)
+// ── Escaping ───────────────────────────────────────────────────────────────────
 
-    case 'hasParent':
-      return evalBoolOp(condition.op, Boolean(activity.parentActivityId))
+describe('Markdown escaping', () => {
+  it('escapes pipe characters in table cells so they cannot break GFM table syntax', () => {
+    const data = listRows([{ kind: 'activity', activity: act('a | b'), depth: 0 }])
+    const out = buildListMarkdown(data, 'Timeline', null)
+    expect(out).toContain('a \\| b')
+  })
 
-    case 'startDate':
-      return evalDateOp(condition.op, activity.startAt ?? null, condition.value)
+  it('escapes pipe characters in outline title and URL fields', () => {
+    const data = listRows([
+      { kind: 'activity', activity: act('a | b', { url: 'http://x?a=1|2' }), depth: 0 },
+    ])
+    const out = buildListMarkdownOutline(data, 'Timeline', null)
+    expect(out).toContain('a \\| b')
+    expect(out).toContain('URL: http://x?a=1\\|2')
+  })
+})
 
-    case 'endDate':
-      return evalDateOp(condition.op, activity.endAt ?? null, condition.value)
-  }
-}
+describe('HTML escaping (clipboard text/html flavor)', () => {
+  it('escapes HTML-significant characters in table cell values', () => {
+    const data = listRows([
+      { kind: 'activity', activity: act('<img src=x onerror=alert(1)>'), depth: 0 },
+    ])
+    const out = buildListHtml(data, 'Timeline', null)
+    expect(out).not.toContain('<img src=x onerror=alert(1)>')
+    expect(out).toContain('&lt;img src=x onerror=alert(1)&gt;')
+  })
 
-// ── Main export ───────────────────────────────────────────────────────────────
+  it('escapes HTML-significant characters in the outline URL field', () => {
+    const data = listRows([
+      { kind: 'activity', activity: act('a', { url: '<script>alert(1)</script>' }), depth: 0 },
+    ])
+    const out = buildListHtmlOutline(data, 'Timeline', null)
+    expect(out).not.toContain('<script>alert(1)</script>')
+    expect(out).toContain('&lt;script&gt;')
+  })
 
-/**
- * Returns true when activity matches the given FilterDefinition.
- * An empty conditions array always matches (no filtering).
- */
-export function matchesFilter(
-  activity: Activity,
-  filter: FilterDefinition,
-  ctx: FilterContext,
-): boolean {
-  if (filter.conditions.length === 0) return true
+  it('repeats an escaped header row (not a raw <thead>) for each group section', () => {
+    const data = listRows([
+      { kind: 'group', label: 'Alice', count: 1 },
+      { kind: 'activity', activity: act('a1'), depth: 0 },
+    ])
+    const out = buildListHtml(data, 'Timeline', null)
+    // One <thead> for the table itself, plus one bare repeated header <tr> for the group.
+    expect(out.match(/<thead>/g)?.length).toBe(1)
+    expect(out.match(/<th style/g)!.length).toBeGreaterThanOrEqual(2)
+  })
+})
 
-  const results = filter.conditions.map(c => evalCondition(c, activity, ctx))
-  return filter.logic === 'and'
-    ? results.every(Boolean)
-    : results.some(Boolean)
-}
+// ── Empty states ───────────────────────────────────────────────────────────────
+
+describe('empty states', () => {
+  it('buildListMarkdown renders a header-only table with a no-activities note', () => {
+    const out = buildListMarkdown(listRows([]), 'Timeline', null)
+    expect(out).toContain('_No activities._')
+  })
+
+  it('buildKanbanPlainText renders "No activities." when every column is empty', () => {
+    const data: TextExportData = { ...emptyData, kanbanColumns: [{ label: 'To Do', activities: [] }] }
+    expect(buildKanbanPlainText(data, 'Timeline', null)).toContain('No activities.')
+  })
+
+  it('buildCalendarHtml renders an empty-state paragraph when there are no activities', () => {
+    expect(buildCalendarHtml(emptyData, 'Timeline', null)).toContain('No activities.')
+  })
+})
 ````
 
 ## File: packages/web/src/pages/settings/SecurityPage.tsx
@@ -50156,97 +51546,69 @@ export default function OIDCCallbackPage() {
 }
 ````
 
-## File: packages/web/tsconfig.app.json
-````json
-{
-  "compilerOptions": {
-    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.app.tsbuildinfo",
-    "target": "ES2020",
-    "useDefineForClassFields": true,
-    "lib": ["ES2020", "DOM", "DOM.Iterable"],
-    "module": "ESNext",
-    "skipLibCheck": true,
-
-    "moduleResolution": "bundler",
-    "allowImportingTsExtensions": true,
-    "isolatedModules": true,
-    "moduleDetection": "force",
-    "noEmit": true,
-    "jsx": "react-jsx",
-
-    "resolveJsonModule": true,
-    "strict": true,
-    "noUnusedLocals": true,
-    "noUnusedParameters": true,
-    "noFallthroughCasesInSwitch": true,
-    "noUncheckedSideEffectImports": true,
-    "paths": {
-      "@draba/shared": ["../shared/src/index.ts"],
-      "@/*": ["./src/*"]
-    }
-  },
-  "include": ["src"]
-}
-````
-
-## File: packages/web/vite.config.ts
+## File: packages/web/src/App.tsx
 ````typescript
-/// <reference types="vitest" />
-import path from 'path'
-import { defineConfig, loadEnv } from 'vite'
-import react from '@vitejs/plugin-react'
-import tailwindcss from '@tailwindcss/vite'
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { AuthProvider } from '@/contexts/AuthContext'
+import ProtectedRoute from '@/components/ProtectedRoute'
+import ThemeSync from '@/components/ThemeSync'
+import BrandingSync from '@/components/BrandingSync'
+import LoginPage from '@/pages/LoginPage'
+import RegisterPage from '@/pages/RegisterPage'
+import DashboardPage from '@/pages/DashboardPage'
+import SetupPage from '@/pages/SetupPage'
+import SettingsPage from '@/pages/SettingsPage'
+import ForgotPasswordPage from '@/pages/ForgotPasswordPage'
+import ResetPasswordPage from '@/pages/ResetPasswordPage'
+import ShareViewPage from '@/pages/ShareViewPage'
+import OIDCCallbackPage from '@/pages/OIDCCallbackPage'
 
-export default defineConfig(({ mode }) => {
-  const env = loadEnv(mode, process.cwd(), '')
-  const apiTarget = env.VITE_API_TARGET ?? 'http://localhost:8080'
-
-  return {
-    plugins: [
-      react(),
-      tailwindcss(),
-    ],
-    resolve: {
-      alias: {
-        '@': path.resolve(__dirname, './src'),
-      },
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      staleTime: 30_000,
+      retry: 1,
     },
-    test: {
-      environment: 'jsdom',
-      globals: true,
-      alias: {
-        '@': path.resolve(__dirname, './src'),
-      },
-    },
-    server: {
-      proxy: {
-        '/setup': { target: apiTarget, changeOrigin: true },
-        '/auth': { target: apiTarget, changeOrigin: true },
-        '/users': { target: apiTarget, changeOrigin: true },
-        '/admin': { target: apiTarget, changeOrigin: true },
-        '/settings': { target: apiTarget, changeOrigin: true },
-        '/tokens': { target: apiTarget, changeOrigin: true },
-        '/teams': { target: apiTarget, changeOrigin: true },
-        '/timelines': { target: apiTarget, changeOrigin: true },
-        '/status-templates': { target: apiTarget, changeOrigin: true },
-        '/status-template-items': { target: apiTarget, changeOrigin: true },
-        '/statuses': { target: apiTarget, changeOrigin: true },
-        '/activities': { target: apiTarget, changeOrigin: true },
-        '/tags': { target: apiTarget, changeOrigin: true },
-        '/saved_filters': { target: apiTarget, changeOrigin: true },
-        '/shares': { target: apiTarget, changeOrigin: true },
-        '/events': { target: apiTarget, changeOrigin: true },
-        '/health': { target: apiTarget, changeOrigin: true },
-        '/ws': {
-          target: apiTarget.replace(/^http/, 'ws'),
-          changeOrigin: true,
-          ws: true,
-          rewriteWsOrigin: true,
-        },
-      },
-    },
-  }
+  },
 })
+
+export default function App() {
+  return (
+    <QueryClientProvider client={queryClient}>
+      <BrowserRouter>
+        <AuthProvider>
+          {/* Side-effect components — render nothing but apply global state. */}
+          <ThemeSync />
+          <BrandingSync />
+          <Routes>
+            {/* First-run setup — public, shown before any users exist */}
+            <Route path="/setup" element={<SetupPage />} />
+
+            {/* Public routes */}
+            <Route path="/login" element={<LoginPage />} />
+            <Route path="/register" element={<RegisterPage />} />
+            <Route path="/forgot-password" element={<ForgotPasswordPage />} />
+            <Route path="/reset-password" element={<ResetPasswordPage />} />
+            {/* SSO landing — receives tokens in the URL fragment after OIDC login */}
+            <Route path="/auth/callback" element={<OIDCCallbackPage />} />
+            {/* Public share viewer — no auth required */}
+            <Route path="/s/:token" element={<ShareViewPage />} />
+
+            {/* Protected routes */}
+            <Route element={<ProtectedRoute />}>
+              <Route path="/" element={<DashboardPage />} />
+              <Route path="/settings/*" element={<SettingsPage />} />
+            </Route>
+
+            {/* Fallback */}
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </AuthProvider>
+      </BrowserRouter>
+    </QueryClientProvider>
+  )
+}
 ````
 
 ## File: .gitattributes
@@ -50454,70 +51816,6 @@ Run the automated test suite for the phase specified in $ARGUMENTS (e.g. "2" or 
    ```
 
 7. Report the table back to the user. Do not modify any source code.
-````
-
-## File: .github/workflows/ci.yml
-````yaml
-name: CI
-
-on:
-  pull_request:
-    branches: [master]
-  push:
-    branches: [master]
-
-jobs:
-  api:
-    name: API (Go)
-    runs-on: ubuntu-latest
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-    defaults:
-      run:
-        working-directory: packages/api
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.25.0'
-
-      - name: Build
-        run: go build ./...
-
-      - name: Vet
-        run: go vet ./...
-
-      - name: Test
-        run: go test ./... -race -count=1 -timeout 20m
-
-      - name: Lint
-        uses: golangci/golangci-lint-action@v7
-        with:
-          version: v2.12.2
-          working-directory: packages/api
-          args: --config ../../.golangci.yml
-          skip-cache: true
-
-  web:
-    name: Web (React)
-    runs-on: ubuntu-latest
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-
-      - uses: pnpm/action-setup@v4
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Build
-        run: pnpm --filter @draba/web build
 ````
 
 ## File: docs/plans/phase-13-shares.md
@@ -51287,357 +52585,6 @@ func WriteXLSXColumns(w io.Writer, rows []Row, columns []string) error {
 }
 ````
 
-## File: packages/api/internal/filters/engine.go
-````go
-// Package filters provides the server-side activity filter evaluator.
-//
-// It is a Go port of the TypeScript matchesFilter function in
-// packages/web/src/lib/filterEngine.ts. Both implementations must agree on
-// every test case in packages/shared/testdata/filter-fixtures.json — that file
-// is the single source of truth for expected behaviour.
-package filters
-
-import (
-	"strings"
-	"time"
-
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// FilterLogic controls how conditions in a FilterDefinition are combined.
-type FilterLogic string
-
-// LogicAnd and LogicOr are the two values for FilterLogic.
-const (
-	LogicAnd FilterLogic = "and"
-	LogicOr  FilterLogic = "or"
-)
-
-// FilterDefinition is the top-level filter object, matching the TypeScript type
-// of the same name. Conditions are evaluated with the specified Logic.
-type FilterDefinition struct {
-	Logic      FilterLogic `json:"logic"`
-	Conditions []Condition `json:"conditions"`
-}
-
-// Condition is a single filter rule. Field determines which activity field is
-// tested; Op and Value carry the operator and operand(s). The exact types mirror
-// the TypeScript FilterCondition union.
-type Condition struct {
-	Field string `json:"field"`
-	Op    string `json:"op"`
-	// Value is the raw JSON value for the condition's operand. Its concrete Go
-	// type depends on the field: string, []string, float64, or []string pair.
-	// We unmarshal as interface{} and interpret per-field below.
-	Value interface{} `json:"value,omitempty"`
-}
-
-// FilterContext carries the reference data needed to evaluate status-name and
-// tag-name conditions without performing additional DB lookups.
-type FilterContext struct {
-	// StatusesByTimelineID maps timeline_id → that timeline's live statuses.
-	StatusesByTimelineID map[string][]models.Status
-	// Tags holds all team tags (for resolving tagIds → names).
-	Tags []models.Tag
-}
-
-// MatchesFilter reports whether activity satisfies def given ctx.
-// An empty conditions slice always matches (no filtering applied).
-func MatchesFilter(activity *models.Activity, def *FilterDefinition, ctx *FilterContext) bool {
-	if len(def.Conditions) == 0 {
-		return true
-	}
-
-	results := make([]bool, len(def.Conditions))
-	for i, c := range def.Conditions {
-		results[i] = evalCondition(&c, activity, ctx)
-	}
-
-	if def.Logic == LogicOr {
-		for _, r := range results {
-			if r {
-				return true
-			}
-		}
-		return false
-	}
-	// default: "and"
-	for _, r := range results {
-		if !r {
-			return false
-		}
-	}
-	return true
-}
-
-// ── Condition evaluation ──────────────────────────────────────────────────────
-
-func evalCondition(c *Condition, a *models.Activity, ctx *FilterContext) bool {
-	switch c.Field {
-	case "status":
-		statuses := ctx.StatusesByTimelineID[a.TimelineID]
-		statusName := ""
-		if a.StatusID != nil {
-			for i := range statuses {
-				if statuses[i].ID == *a.StatusID {
-					statusName = strings.ToLower(statuses[i].Name)
-					break
-				}
-			}
-		}
-		var haystack []string
-		if statusName != "" {
-			haystack = []string{statusName}
-		}
-		needles := toLowerStrings(toStringSlice(c.Value))
-		return evalSetOp(c.Op, haystack, needles)
-
-	case "tag":
-		tagMap := make(map[string]string, len(ctx.Tags))
-		for _, t := range ctx.Tags {
-			tagMap[t.ID] = strings.ToLower(t.Name)
-		}
-		actTagNames := make([]string, 0, len(a.TagIDs))
-		for _, id := range a.TagIDs {
-			if name, ok := tagMap[id]; ok {
-				actTagNames = append(actTagNames, name)
-			} else {
-				actTagNames = append(actTagNames, strings.ToLower(id))
-			}
-		}
-		needles := toLowerStrings(toStringSlice(c.Value))
-		return evalSetOp(c.Op, actTagNames, needles)
-
-	case "assignee":
-		needles := toStringSlice(c.Value)
-		return evalSetOp(c.Op, a.AssignedMemberIDs, needles)
-
-	case "title":
-		return evalStringOp(c.Op, a.Title, toString(c.Value))
-
-	case "progress":
-		var v *float64
-		if a.PercentComplete != nil {
-			f := float64(*a.PercentComplete)
-			v = &f
-		}
-		return evalNumberOp(c.Op, v, toFloat(c.Value))
-
-	case "hasParent":
-		return evalBoolOp(c.Op, a.ParentActivityID != nil)
-
-	case "startDate":
-		return evalDateOp(c.Op, a.StartAt.Format(time.RFC3339), c.Value)
-
-	case "endDate":
-		return evalDateOp(c.Op, a.EndAt.Format(time.RFC3339), c.Value)
-	}
-	return false
-}
-
-// ── Operator helpers ──────────────────────────────────────────────────────────
-
-func evalSetOp(op string, haystack, needles []string) bool {
-	switch op {
-	case "in":
-		for _, n := range needles {
-			for _, h := range haystack {
-				if h == n {
-					return true
-				}
-			}
-		}
-		return false
-	case "not_in":
-		for _, n := range needles {
-			for _, h := range haystack {
-				if h == n {
-					return false
-				}
-			}
-		}
-		return true
-	case "is_empty":
-		return len(haystack) == 0
-	case "is_not_empty":
-		return len(haystack) > 0
-	}
-	return false
-}
-
-func evalStringOp(op, value, target string) bool {
-	v := strings.ToLower(strings.TrimSpace(value))
-	t := strings.ToLower(target)
-	switch op {
-	case "equals":
-		return v == t
-	case "not_equals":
-		return v != t
-	case "contains":
-		return strings.Contains(v, t)
-	case "not_contains":
-		return !strings.Contains(v, t)
-	case "is_empty":
-		return strings.TrimSpace(v) == ""
-	case "is_not_empty":
-		return strings.TrimSpace(v) != ""
-	}
-	return false
-}
-
-func evalNumberOp(op string, value *float64, target float64) bool {
-	if op == "is_empty" {
-		return value == nil
-	}
-	if op == "is_not_empty" {
-		return value != nil
-	}
-	if value == nil {
-		return false
-	}
-	v := *value
-	switch op {
-	case "equals":
-		return v == target
-	case "not_equals":
-		return v != target
-	case "gt":
-		return v > target
-	case "gte":
-		return v >= target
-	case "lt":
-		return v < target
-	case "lte":
-		return v <= target
-	}
-	return false
-}
-
-func evalBoolOp(op string, value bool) bool {
-	return (op == "is_true") == value
-}
-
-func evalDateOp(op, dateStr string, target interface{}) bool {
-	if op == "is_empty" {
-		return dateStr == ""
-	}
-	if op == "is_not_empty" {
-		return dateStr != ""
-	}
-	if dateStr == "" || target == nil {
-		return false
-	}
-
-	date, err := parseDate(dateStr)
-	if err != nil {
-		return false
-	}
-
-	if op == "between" {
-		pair, ok := toStringPair(target)
-		if !ok {
-			return false
-		}
-		from, err1 := parseDate(pair[0])
-		to, err2 := parseDate(pair[1])
-		if err1 != nil || err2 != nil {
-			return false
-		}
-		return !date.Before(from) && !date.After(to)
-	}
-
-	targetDate, err := parseDate(toString(target))
-	if err != nil {
-		return false
-	}
-	switch op {
-	case "before":
-		return date.Before(targetDate)
-	case "after":
-		return date.After(targetDate)
-	}
-	return false
-}
-
-// ── Type coercion helpers ─────────────────────────────────────────────────────
-
-func toString(v interface{}) string {
-	if v == nil {
-		return ""
-	}
-	if s, ok := v.(string); ok {
-		return s
-	}
-	return ""
-}
-
-func toFloat(v interface{}) float64 {
-	if v == nil {
-		return 0
-	}
-	switch n := v.(type) {
-	case float64:
-		return n
-	case int:
-		return float64(n)
-	case int64:
-		return float64(n)
-	}
-	return 0
-}
-
-func toStringSlice(v interface{}) []string {
-	if v == nil {
-		return nil
-	}
-	if s, ok := v.(string); ok {
-		return []string{s}
-	}
-	if arr, ok := v.([]interface{}); ok {
-		out := make([]string, 0, len(arr))
-		for _, el := range arr {
-			if s, ok := el.(string); ok {
-				out = append(out, s)
-			}
-		}
-		return out
-	}
-	if ss, ok := v.([]string); ok {
-		return ss
-	}
-	return nil
-}
-
-func toStringPair(v interface{}) ([2]string, bool) {
-	arr, ok := v.([]interface{})
-	if !ok || len(arr) != 2 {
-		return [2]string{}, false
-	}
-	a, ok1 := arr[0].(string)
-	b, ok2 := arr[1].(string)
-	if !ok1 || !ok2 {
-		return [2]string{}, false
-	}
-	return [2]string{a, b}, true
-}
-
-func toLowerStrings(ss []string) []string {
-	out := make([]string, len(ss))
-	for i, s := range ss {
-		out[i] = strings.ToLower(s)
-	}
-	return out
-}
-
-func parseDate(s string) (time.Time, error) {
-	// Try RFC3339 first (e.g. "2026-05-01T00:00:00Z"), then date-only.
-	if t, err := time.Parse(time.RFC3339, s); err == nil {
-		return t, nil
-	}
-	return time.Parse("2006-01-02", s)
-}
-````
-
 ## File: packages/api/sample_data/README.md
 ````markdown
 # Sample Data
@@ -51825,644 +52772,6 @@ export default function CalendarToolbar({
           Share
         </button>
       </div>
-    </div>
-  );
-}
-````
-
-## File: packages/web/src/components/gantt/GanttView.tsx
-````typescript
-/**
- * GanttView — data container for the Gantt grid.
- *
- * Fetches events and members, applies grouping and sorting, builds the
- * GanttRow list, and passes everything to GanttGrid. The component owns
- * no layout state — granularity, groupBy, and sortBy come from DashboardPage.
- *
- * Also owns the find-match computation: it reads the debounced query from
- * FindContext, matches against the fetched API events, and registers the
- * ordered match list back into FindContext so GanttGrid can apply visual
- * treatment and auto-scroll.
- */
-
-import { useMemo, useRef, useState, useLayoutEffect, useEffect, useCallback } from 'react';
-import { useQueryClient } from '@tanstack/react-query';
-import GanttGrid, { type GanttActivity, type GanttRow, type FindState } from './GanttGrid';
-import { useTimelineActivities, useTeamMembers, useUpdateActivity } from '@/hooks/useTeamActivities';
-import type { components } from '@draba/shared';
-import { type Member, ACTIVITY_COLORS, MEMBER_COLORS } from '@/types';
-import { resolveColorHex } from '@/components/identity/identity-constants';
-import type { GroupBy, SortBy, TimeGranularity, ColorBy } from './GanttToolbar';
-import {
-  generateColumns,
-  positionInColumns,
-  todayColumnPosition,
-  autoFitGranularity,
-  type ColumnDef,
-} from './granularity';
-import { matchEvents } from '@/lib/findMatcher';
-import { memberComboKey, orderedComboIds, memberComboLabel, comboSortComparator, UNASSIGNED_KEY, SEP } from '@/lib/memberGroups';
-import { useFind } from '@/contexts/FindContext';
-import { useFilter } from '@/contexts/FilterContext';
-import { usePreferenceMap } from '@/hooks/usePreferences';
-import { applyActiveFilter } from '@/lib/presetFilters';
-
-type ApiActivity = components['schemas']['Activity'];
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser'];
-type Status = components['schemas']['Status'];
-type SavedFilter = components['schemas']['SavedFilter'];
-type Tag = components['schemas']['Tag'];
-
-interface Props {
-  teamId: string;
-  /** Active timeline ID — activities are fetched scoped to this timeline. */
-  timelineId: string;
-  /** ISO date "YYYY-MM-DD" — defaults to 14 days before today. */
-  startDate?: string;
-  /** ISO date "YYYY-MM-DD" — defaults to 75 days after today. */
-  endDate?: string;
-  groupBy: GroupBy;
-  sortBy: SortBy;
-  granularity: TimeGranularity | 'auto';
-  colorBy: ColorBy;
-  /**
-   * Timeline statuses — used to derive closedStatusIds and resolve status names
-   * in the filter engine. Replaces the old closedStatusIds prop.
-   */
-  timelineStatuses?: Status[];
-  /** Saved filters for the active team — evaluated by the filter engine. */
-  savedFilters?: SavedFilter[];
-  /** Team tags — used to resolve tag names in the filter engine. */
-  tags?: Tag[];
-  selectedActivityId?: string | null;
-  onSelectActivity?: (id: string | null) => void;
-  /** Called when the user drags on an empty lane to create an activity. */
-  onLaneDrag?: (startDate: Date, endDate: Date, memberId: string | null) => void;
-  /** Called during a bar drag with live snapped dates — for sidebar preview. */
-  onBarDragProgress?: (activityId: string, newStart: Date, newEnd: Date) => void;
-  /** Called when a bar drag completes (before the PATCH fires). */
-  onBarDragEnd?: () => void;
-  /** Called once members are loaded, so the parent can access them for panels. */
-  onMembersLoaded?: (members: Member[]) => void;
-  /** Called when an activity is selected — passes the full API activity object. */
-  onSelectApiActivity?: (activity: ApiActivity | null) => void;
-  /** Label column width in px — passed through to GanttGrid for controlled persistence. */
-  labelColW?: number;
-  /** Called when the user drags the label column resize handle. */
-  onLabelColWChange?: (w: number) => void;
-  /**
-   * When false, all click and drag interactions are suppressed — bars, lane
-   * drags, and group toggles are inert. Used by the public share viewer.
-   * Default: true.
-   */
-  interactive?: boolean;
-}
-
-
-// ── Date helpers ────────────────────────────────────────────────────────────
-
-function toDateOnly(datetime: string): string {
-  return datetime.slice(0, 10);
-}
-
-function todayMidnight(): Date {
-  const d = new Date();
-  d.setUTCHours(0, 0, 0, 0); // UTC midnight so it aligns with UTC-stored activity dates
-  return d;
-}
-
-function initialsFrom(name: string): string {
-  return name
-    .split(/\s+/)
-    .map(w => w[0] ?? '')
-    .slice(0, 2)
-    .join('')
-    .toUpperCase();
-}
-
-// ── Type mapping ─────────────────────────────────────────────────────────────
-
-function toMember(m: TeamMemberWithUser, index: number): Member {
-  const name = m.displayName || m.email || 'Unknown';
-  const fallbackHex = MEMBER_COLORS[index % MEMBER_COLORS.length];
-  return {
-    id: m.id,
-    name,
-    initials: initialsFrom(name),
-    color: resolveColorHex(m.color) || fallbackHex,
-  };
-}
-
-/** Intermediate activity type that carries API fields alongside computed view-state. Exported for use by the public share viewer. */
-export interface RichActivity extends GanttActivity {
-  startAtMs: number;
-  endAtMs: number;
-  parentActivityId: string | null;
-  primaryMemberId: string | null;
-  assignedMemberIds: string[];
-  statusId: string | null;
-}
-
-function toRichActivity(
-  ev: ApiActivity,
-  index: number,
-  memberById: Record<string, Member>,
-  viewStart: Date,
-  viewEnd: Date,
-  columns: ColumnDef[],
-  colorBy: ColorBy,
-  statusColorById: Map<string, string>,
-): RichActivity | null {
-  const evStart = new Date(toDateOnly(ev.startAt));
-  const evEnd = new Date(toDateOnly(ev.endAt));
-
-  if (evEnd < viewStart || evStart > viewEnd) return null;
-
-  const clampedStart = evStart < viewStart ? viewStart : evStart;
-  const clampedEnd = evEnd > viewEnd ? viewEnd : evEnd;
-
-  const { startCol, span } = positionInColumns(clampedStart, clampedEnd, columns);
-  const assignedIds = ev.assignedMemberIds ?? [];
-  const members = assignedIds.map(id => memberById[id]).filter((m): m is Member => Boolean(m));
-
-  const color =
-    colorBy === 'member' ? (members[0]?.color ?? ev.color ?? ACTIVITY_COLORS[index % ACTIVITY_COLORS.length]) :
-    colorBy === 'status' ? (statusColorById.get((ev as ApiActivity & { statusId?: string | null }).statusId ?? '') ?? '#6b7280') :
-    /* activity */ (ev.color ?? ACTIVITY_COLORS[index % ACTIVITY_COLORS.length]);
-
-  return {
-    id: ev.id,
-    title: ev.title,
-    startCol,
-    span,
-    color,
-    icon: ev.icon ?? undefined,
-    members,
-    isChild: Boolean(ev.parentActivityId),
-    startAtMs: new Date(ev.startAt).getTime(),
-    endAtMs: new Date(ev.endAt).getTime(),
-    parentActivityId: ev.parentActivityId ?? null,
-    primaryMemberId: members[0]?.id ?? null,
-    assignedMemberIds: assignedIds,
-    statusId: (ev as ApiActivity & { statusId?: string | null }).statusId ?? null,
-  };
-}
-
-// ── Sorting ──────────────────────────────────────────────────────────────────
-
-function sortActivities(activities: RichActivity[], sortBy: SortBy): RichActivity[] {
-  return [...activities].sort((a, b) => {
-    if (sortBy === 'title') return a.title.localeCompare(b.title);
-    if (sortBy === 'endDate') return a.endAtMs - b.endAtMs;
-    return a.startAtMs - b.startAtMs;
-  });
-}
-
-// ── Grouping ─────────────────────────────────────────────────────────────────
-
-/**
- * Builds the flat GanttRow list from positioned activities, applying grouping,
- * sorting, parent→child nesting (arbitrary depth), and collapse state.
- * Exported for unit testing of the tree/collapse logic.
- */
-export function buildRows(
-  activities: RichActivity[],
-  members: Member[],
-  groupBy: GroupBy,
-  sortBy: SortBy,
-  collapsedParents: Set<string>,
-  collapsedGroups: Set<string>,
-  statuses?: Status[],
-): GanttRow[] {
-  const sorted = sortActivities(activities, sortBy);
-
-  if (groupBy === 'none') {
-    // Flat list — no parent nesting, so children are not indented.
-    return sorted.map(ev => ({ kind: 'activity' as const, event: { ...ev, isChild: false, depth: 0 } }));
-  }
-
-  if (groupBy === 'member') {
-    const memberOrder = members.map(m => m.id);
-    const nameById = new Map(members.map(m => [m.id, m.name]));
-    // Colors here are already resolved hex (from the Member type / toMember conversion).
-    // ListView applies resolveColorHex on the raw API color string instead — both
-    // produce hex, but the resolution step happens at different layers.
-    const colorById = new Map(members.map(m => [m.id, m.color]));
-
-    const buckets = new Map<string, RichActivity[]>();
-    for (const ev of sorted) {
-      const key = memberComboKey(ev.assignedMemberIds);
-      const list = buckets.get(key) ?? [];
-      list.push(ev);
-      buckets.set(key, list);
-    }
-
-    const comparator = comboSortComparator(memberOrder);
-    const sortedKeys = [...buckets.keys()].sort(comparator);
-
-    const rows: GanttRow[] = [];
-    for (const key of sortedKeys) {
-      const evs = buckets.get(key)!;
-      const rawIds = key === UNASSIGNED_KEY ? [] : key.split(SEP);
-      const orderedIds = orderedComboIds(rawIds, memberOrder);
-      const label = key === UNASSIGNED_KEY ? 'Unassigned' : memberComboLabel(orderedIds, nameById);
-      const memberColors = orderedIds.map(id => colorById.get(id) ?? 'var(--muted-foreground)');
-      const primaryColor = key === UNASSIGNED_KEY ? 'var(--muted-foreground)' : (memberColors[0] ?? 'var(--muted-foreground)');
-      const collapsed = collapsedGroups.has(key);
-      rows.push({ kind: 'group', id: key, label, color: primaryColor, memberColors, count: evs.length, collapsed });
-      if (collapsed) continue;
-      for (const ev of evs) rows.push({ kind: 'activity', event: { ...ev, isChild: false, depth: 0 } });
-    }
-    return rows;
-  }
-
-  if (groupBy === 'parent') {
-    // Build a parent→children index, then emit rows via depth-first traversal so
-    // grandchildren (and deeper) nest correctly. An activity is a "root" when it
-    // has no parent or its parent fell outside the current view.
-    const byId = new Map(sorted.map(a => [a.id, a]));
-    const childrenByParent = new Map<string, RichActivity[]>();
-    const roots: RichActivity[] = [];
-    for (const ev of sorted) {
-      const pid = ev.parentActivityId;
-      if (pid && byId.has(pid)) {
-        const list = childrenByParent.get(pid) ?? [];
-        list.push(ev);
-        childrenByParent.set(pid, list);
-      } else {
-        roots.push(ev);
-      }
-    }
-
-    const rows: GanttRow[] = [];
-    const seen = new Set<string>();   // emitted into rows (also guards cycles)
-    const hidden = new Set<string>(); // suppressed under a collapsed ancestor
-
-    // Recursively mark a collapsed node's descendants as hidden so the leftover
-    // sweep below doesn't resurrect them. The `hidden` guard also stops cycles.
-    const markHidden = (ev: RichActivity) => {
-      if (hidden.has(ev.id)) return;
-      hidden.add(ev.id);
-      for (const k of childrenByParent.get(ev.id) ?? []) markHidden(k);
-    };
-
-    const visit = (ev: RichActivity, depth: number) => {
-      if (seen.has(ev.id)) return;
-      seen.add(ev.id);
-      const kids = childrenByParent.get(ev.id) ?? [];
-      const hasChildren = kids.length > 0;
-      const collapsed = collapsedParents.has(ev.id);
-      rows.push({
-        kind: 'activity',
-        event: { ...ev, isChild: depth > 0, depth, hasChildren, collapsed },
-      });
-      if (!hasChildren) return;
-      if (collapsed) for (const k of kids) markHidden(k);
-      else for (const k of kids) visit(k, depth + 1);
-    };
-
-    for (const r of roots) visit(r, 0);
-    // Safety net: emit any activity unreachable from a root (e.g. a parent-
-    // pointer cycle where no node qualifies as a root) at depth 0, but never
-    // resurrect a node intentionally hidden under a collapsed ancestor.
-    for (const ev of sorted) {
-      if (!seen.has(ev.id) && !hidden.has(ev.id)) visit(ev, 0);
-    }
-    return rows;
-  }
-
-  if (groupBy === 'status') {
-    const buckets = new Map<string, RichActivity[]>();
-    for (const ev of sorted) {
-      const key = ev.statusId ?? '__no_status__';
-      const list = buckets.get(key) ?? [];
-      list.push(ev);
-      buckets.set(key, list);
-    }
-
-    const rows: GanttRow[] = [];
-    const pushStatusBucket = (id: string, label: string, color: string, evs: RichActivity[]) => {
-      const collapsed = collapsedGroups.has(id);
-      rows.push({ kind: 'group', id, label, color, count: evs.length, collapsed });
-      if (collapsed) return;
-      for (const ev of evs) rows.push({ kind: 'activity', event: { ...ev, isChild: false, depth: 0 } });
-    };
-
-    if (statuses) {
-      for (const s of statuses) {
-        const evs = buckets.get(s.id);
-        if (!evs?.length) continue;
-        pushStatusBucket(s.id, s.name, resolveColorHex(s.color ?? null) ?? 'var(--muted-foreground)', evs);
-      }
-    }
-    const noStatus = buckets.get('__no_status__');
-    if (noStatus?.length) {
-      pushStatusBucket('__no_status__', 'No status', 'var(--muted-foreground)', noStatus);
-    }
-    return rows;
-  }
-
-  return sorted.map(ev => ({ kind: 'activity' as const, event: ev }));
-}
-
-// ── Component ─────────────────────────────────────────────────────────────────
-
-/**
- * Returns only the activities whose status is not in closedStatusIds.
- * Extracted as a named export so the 'open' filter preset logic can be
- * unit-tested without mounting the full component.
- */
-export function filterOpenActivities<T extends { statusId?: string | null | undefined }>(
-  activities: T[],
-  closedStatusIds: Set<string>,
-): T[] {
-  return activities.filter(a => !a.statusId || !closedStatusIds.has(a.statusId))
-}
-
-export default function GanttView({
-  teamId,
-  timelineId,
-  startDate,
-  endDate,
-  groupBy,
-  sortBy,
-  granularity,
-  colorBy,
-  timelineStatuses,
-  savedFilters,
-  tags,
-  selectedActivityId = null,
-  onSelectActivity = () => {},
-  onLaneDrag,
-  onBarDragProgress,
-  onBarDragEnd,
-  onMembersLoaded,
-  onSelectApiActivity,
-  labelColW,
-  onLabelColWChange,
-  interactive = true,
-}: Props) {
-  const queryClient = useQueryClient();
-  const updateActivity = useUpdateActivity(timelineId);
-  const today = todayMidnight();
-
-  // Collapse state for the Gantt tree. `collapsedParents` hides an activity's
-  // child subtree (parent grouping); `collapsedGroups` hides a member bucket's
-  // activities (member grouping). Both persist across re-renders and view tweaks.
-  const [collapsedParents, setCollapsedParents] = useState<Set<string>>(new Set());
-  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
-
-  const toggleParent = useCallback((id: string) => {
-    setCollapsedParents(prev => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id); else next.add(id);
-      return next;
-    });
-  }, []);
-
-  const toggleGroup = useCallback((id: string) => {
-    setCollapsedGroups(prev => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id); else next.add(id);
-      return next;
-    });
-  }, []);
-  const containerRef = useRef<HTMLDivElement>(null);
-  const [containerWidth, setContainerWidth] = useState(800);
-
-  const { debouncedQuery, registerMatches, activeMatchId, matchedIds, matchReasons } = useFind();
-  const { activeFilter } = useFilter();
-
-  const globalPrefs = usePreferenceMap();
-  const prefWeekStart = (globalPrefs['week_start'] as string | undefined) === 'sunday' ? 'sunday' : 'monday';
-  // Map the stored date_format preference to a BCP 47 locale for Gantt column labels.
-  // DD/MM/YYYY users prefer day-first ordering (en-GB: "5 Jan"); all others get MM-first (en-US: "Jan 5").
-  const prefDateFormat = (globalPrefs['date_format'] as string | undefined) ?? 'MMM D, YYYY';
-  const prefLocale = prefDateFormat === 'DD/MM/YYYY' ? 'en-GB' : 'en-US';
-
-  useLayoutEffect(() => {
-    const el = containerRef.current;
-    if (!el) return;
-    const ro = new ResizeObserver(entries => {
-      const w = entries[0]?.contentRect.width;
-      if (w && w > 0) setContainerWidth(w);
-    });
-    ro.observe(el);
-    setContainerWidth(el.clientWidth || 800);
-    return () => ro.disconnect();
-  }, []);
-
-  const viewStart = useMemo<Date>(() => {
-    if (startDate) return new Date(startDate);
-    const d = new Date(today);
-    d.setUTCDate(d.getUTCDate() - 14);
-    return d;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [startDate]);
-
-  const viewEnd = useMemo<Date>(() => {
-    if (endDate) return new Date(endDate);
-    const d = new Date(today);
-    d.setUTCDate(d.getUTCDate() + 75);
-    return d;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [endDate]);
-
-  const resolvedGranularity = useMemo<TimeGranularity>(() => {
-    if (granularity !== 'auto') return granularity;
-    return autoFitGranularity(viewStart, viewEnd, containerWidth);
-  }, [granularity, viewStart, viewEnd, containerWidth]);
-
-  const columns = useMemo(
-    () => generateColumns(viewStart, viewEnd, resolvedGranularity, { weekStart: prefWeekStart, locale: prefLocale }),
-    [viewStart, viewEnd, resolvedGranularity, prefWeekStart, prefLocale],
-  );
-
-  const todayIdx = useMemo(
-    () => todayColumnPosition(columns),
-    [columns],
-  );
-
-  const from = viewStart.toISOString();
-  const to = viewEnd.toISOString();
-
-  const { data: apiMembers = [] } = useTeamMembers(teamId);
-  const { data: apiActivities = [], isLoading } = useTimelineActivities(teamId, timelineId, from, to);
-
-  const members: Member[] = useMemo(
-    () => apiMembers.map((m, i) => toMember(m, i)),
-    [apiMembers],
-  );
-
-  const memberById = useMemo<Record<string, Member>>(() => {
-    const map: Record<string, Member> = {};
-    members.forEach(m => { map[m.id] = m; });
-    return map;
-  }, [members]);
-
-  // Notify parent once the member list resolves.
-  useEffect(() => {
-    if (onMembersLoaded && members.length > 0) {
-      onMembersLoaded(members);
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [members]);
-
-  // Derive data needed by the unified filter engine from the passed-in statuses/tags/filters.
-  const closedStatusIds = useMemo(
-    () => new Set((timelineStatuses ?? []).filter(s => s.isClosed).map(s => s.id)),
-    [timelineStatuses],
-  );
-
-  const statusesByTimeline = useMemo(() => {
-    const m = new Map<string, Status[]>();
-    if (timelineStatuses?.length) m.set(timelineId, timelineStatuses);
-    return m;
-  }, [timelineId, timelineStatuses]);
-
-  // Map userId → team_member_id[] so the 'member' filter kind can resolve by userId.
-  const memberIdsByUserId = useMemo(() => {
-    const m = new Map<string, string[]>();
-    apiMembers.forEach(member => {
-      if (member.userId) {
-        const existing = m.get(member.userId) ?? [];
-        m.set(member.userId, [...existing, member.id]);
-      }
-    });
-    return m;
-  }, [apiMembers]);
-
-  const visibleActivities = useMemo(() => applyActiveFilter(
-    apiActivities,
-    activeFilter,
-    memberIdsByUserId,
-    {
-      closedStatusIds,
-      savedFilters: savedFilters ?? [],
-      statuses: statusesByTimeline,
-      tags: tags ?? [],
-    },
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  ), [apiActivities, activeFilter, memberIdsByUserId, closedStatusIds, savedFilters, statusesByTimeline, tags]);
-
-  const statusColorById = useMemo(
-    () => new Map((timelineStatuses ?? []).map(s => [s.id, s.color])),
-    [timelineStatuses],
-  );
-
-  const rows: GanttRow[] = useMemo(() => {
-    const richActivities = visibleActivities
-      .map((ev, i) => toRichActivity(ev, i, memberById, viewStart, viewEnd, columns, colorBy, statusColorById))
-      .filter((a): a is RichActivity => a !== null);
-    return buildRows(richActivities, members, groupBy, sortBy, collapsedParents, collapsedGroups, timelineStatuses);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visibleActivities, members, memberById, groupBy, sortBy, colorBy, statusColorById, viewStart, viewEnd, columns, collapsedParents, collapsedGroups, timelineStatuses]);
-
-  // ── Find: compute matches and register with context ───────────────────────
-
-  const matchResults = useMemo(
-    () => matchEvents(debouncedQuery, visibleActivities, members, visibleActivities),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [debouncedQuery, visibleActivities, members],
-  );
-
-  const matchedSet = useMemo(
-    () => new Set(matchResults.map(r => r.activityId)),
-    [matchResults],
-  );
-
-  const computedMatchReasons = useMemo(() => {
-    const map = new Map<string, string[]>();
-    matchResults.forEach(r => map.set(r.activityId, r.reasons));
-    return map;
-  }, [matchResults]);
-
-  // Ordered match IDs follow the current row order so prev/next walks the
-  // visual top-to-bottom sequence rather than the arbitrary API order.
-  const orderedMatchIds = useMemo(
-    () => rows
-      .filter(r => r.kind === 'activity' && matchedSet.has(r.event.id))
-      .map(r => (r as { kind: 'activity'; event: GanttActivity }).event.id),
-    [rows, matchedSet],
-  );
-
-  useEffect(() => {
-    registerMatches(orderedMatchIds, computedMatchReasons);
-  }, [orderedMatchIds, computedMatchReasons, registerMatches]);
-
-  // Build the FindState passed to GanttGrid
-  const hasQuery = debouncedQuery.trim().length > 0;
-  const filtersActive = activeFilter.kind !== 'preset' || activeFilter.id !== 'all';
-  const findState: FindState = useMemo(() => ({
-    hasQuery,
-    matchedIds: matchedSet,
-    activeMatchId,
-    matchReasons,
-    filtersActive,
-    matchCount: matchedIds.length,
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [hasQuery, matchedSet, activeMatchId, matchReasons, filtersActive, matchedIds.length]);
-
-  // ── Bar drag ─────────────────────────────────────────────────────────────
-
-  const handleBarDrag = useCallback((activityId: string, newStartDate: Date, newEndDate: Date) => {
-    const patch = {
-      startAt: newStartDate.toISOString(),
-      endAt: newEndDate.toISOString(),
-    };
-
-    // Synchronously update the cache so the bar doesn't flash back to old
-    // position when GanttGrid clears its drag state in the same render cycle.
-    queryClient.setQueriesData<ApiActivity[]>(
-      { queryKey: ['timelines', timelineId, 'activities'] },
-      (old) => old?.map((a) => (a.id === activityId ? { ...a, ...patch } : a)),
-    );
-
-    // Push updated activity to the sidebar so it shows new dates immediately
-    // instead of the stale snapshot from when the activity was selected.
-    if (onSelectApiActivity) {
-      const updated = apiActivities.find(a => a.id === activityId);
-      if (updated) onSelectApiActivity({ ...updated, ...patch });
-    }
-
-    onBarDragEnd?.();
-    updateActivity.mutate({ activityId, patch });
-  }, [updateActivity, onBarDragEnd, queryClient, timelineId, apiActivities, onSelectApiActivity]);
-
-  if (isLoading) {
-    return (
-      <div ref={containerRef} className="flex items-center justify-center h-full text-muted-foreground text-[13px]">
-        Loading activities…
-      </div>
-    );
-  }
-
-  return (
-    <div ref={containerRef} style={{ flex: 1, minHeight: 0 }}>
-      <GanttGrid
-        rows={rows}
-        columns={columns}
-        todayIndex={todayIdx}
-        selectedActivityId={selectedActivityId}
-        findState={findState}
-        onSelectActivity={(id) => {
-          onSelectActivity(id);
-          if (onSelectApiActivity) {
-            const found = id ? (apiActivities.find(a => a.id === id) ?? null) : null;
-            onSelectApiActivity(found);
-          }
-        }}
-        onLaneDrag={interactive ? onLaneDrag : undefined}
-        onBarDrag={interactive ? handleBarDrag : undefined}
-        onBarDragProgress={interactive ? onBarDragProgress : undefined}
-        resolvedGranularity={resolvedGranularity}
-        onClearFilters={filtersActive ? () => {} : undefined}
-        labelColW={labelColW}
-        onLabelColWChange={onLabelColWChange}
-        onToggleActivity={groupBy === 'parent' ? toggleParent : undefined}
-        onToggleGroup={groupBy === 'member' || groupBy === 'status' ? toggleGroup : undefined}
-        interactive={interactive}
-      />
     </div>
   );
 }
@@ -53255,962 +53564,6 @@ export function buildExportFilename(timelineName: string, ext: string): string {
 }
 ````
 
-## File: packages/web/src/lib/textExport.ts
-````typescript
-/**
- * textExport — client-side Markdown, plain-text, and HTML generation for the
- * Export dialog's Phase 14.2 textual formats.
- *
- * All generators are pure functions: they accept pre-resolved lookup maps
- * (produced in DashboardPage) and return plain strings. No DOM access, no
- * network calls — identical output to what the user sees on screen.
- *
- * View-specific generators:
- *   buildList*    — GFM table (Markdown) / space-padded table (plain) / HTML <table>
- *   buildKanban*  — one section per column
- *   buildCalendar* — agenda-style date-grouped list
- */
-
-import type { components } from '@draba/shared'
-
-type ApiActivity = components['schemas']['Activity']
-
-// ── Public types ───────────────────────────────────────────────────────────────
-
-/**
- * A pre-built list display row for export.
- * Group rows produce section headers; activity rows produce content.
- * Mirrors the subset of ListDisplayRow used outside the component.
- */
-export type ListExportRow =
-  | { kind: 'group'; label: string; count: number }
-  | { kind: 'activity'; activity: ApiActivity; depth: number }
-
-/** All data the text generators need — supplied by DashboardPage at export time. */
-export interface TextExportData {
-  /**
-   * Filtered activities.
-   * Calendar generators iterate this directly. List generators use listDisplayRows instead.
-   */
-  activities: ApiActivity[]
-  /** Member ID → display name. */
-  memberById: Map<string, string>
-  /** Status ID → status name. */
-  statusById: Map<string, string>
-  /** Tag ID → tag name. */
-  tagById: Map<string, string>
-  /** Activity ID → title (for parent-activity name lookups). */
-  activityTitleById: Map<string, string>
-  /**
-   * Kanban-only: pre-built columns produced by `buildColumns`.
-   * Null for List and Calendar views.
-   * When kanbanShowHierarchy=true, column items contain only root activities.
-   */
-  kanbanColumns: Array<{ label: string; activities: ApiActivity[] }> | null
-  /**
-   * List-only: pre-built display rows in sorted, group-by order.
-   * Group rows emit section headers; activity rows carry a depth for hierarchy.
-   * Null for non-List views.
-   */
-  listDisplayRows: ListExportRow[] | null
-  /**
-   * List-only: ordered visible column IDs (excluding visual-only colorBar/identity).
-   * Null means use the default set of export columns.
-   */
-  listVisibleColumns: string[] | null
-  /** Kanban-only: true when hierarchy nesting is active in the view. */
-  kanbanShowHierarchy: boolean
-  /** Kanban-only: parent ID → child activities (populated when kanbanShowHierarchy=true). */
-  kanbanChildrenByParentId: Map<string, ApiActivity[]>
-}
-
-// ── Date formatting ────────────────────────────────────────────────────────────
-
-function fmtDate(iso: string | null | undefined): string {
-  if (!iso) return '—'
-  const d = new Date(iso)
-  if (isNaN(d.getTime())) return '—'
-  return d.toLocaleDateString('en-US', {
-    month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC',
-  })
-}
-
-function fmtDateRange(startAt: string | null | undefined, endAt: string | null | undefined): string {
-  const s = fmtDate(startAt)
-  const e = fmtDate(endAt)
-  if (s === '—' && e === '—') return '—'
-  if (s === e) return s
-  return `${s} – ${e}`
-}
-
-// ── Shared helpers ─────────────────────────────────────────────────────────────
-
-function resolveAssignees(activity: ApiActivity, memberById: Map<string, string>): string {
-  if (!activity.assignedMemberIds?.length) return '—'
-  return activity.assignedMemberIds.map(id => memberById.get(id) ?? id).join(', ')
-}
-
-function resolveTags(activity: ApiActivity, tagById: Map<string, string>): string {
-  if (!activity.tagIds?.length) return ''
-  return activity.tagIds.map(id => `#${tagById.get(id) ?? id}`).join(' ')
-}
-
-function buildHeader(timelineName: string, filterLabel: string | null): string {
-  const today = new Date().toLocaleDateString('en-US', {
-    month: 'long', day: 'numeric', year: 'numeric',
-  })
-  const parts = [`# ${timelineName} — ${today}`]
-  if (filterLabel) parts.push(`_Filter: ${filterLabel}_`)
-  parts.push('')
-  return parts.join('\n')
-}
-
-function buildPlainHeader(timelineName: string, filterLabel: string | null): string {
-  const today = new Date().toLocaleDateString('en-US', {
-    month: 'long', day: 'numeric', year: 'numeric',
-  })
-  const parts = [`${timelineName} — ${today}`]
-  if (filterLabel) parts.push(`Filter: ${filterLabel}`)
-  parts.push('')
-  return parts.join('\n')
-}
-
-function escMd(s: string): string {
-  return s.replace(/\|/g, '\\|')
-}
-
-function htmlEsc(s: string): string {
-  return s
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-}
-
-// ── List column helpers ────────────────────────────────────────────────────────
-
-const COLUMN_LABELS: Record<string, string> = {
-  title: 'Title',
-  startAt: 'Start',
-  endAt: 'End',
-  duration: 'Duration',
-  status: 'Status',
-  assignees: 'Assigned To',
-  tags: 'Tags',
-  progress: 'Progress',
-  parent: 'Parent',
-  description: 'Description',
-  location: 'Location',
-  url: 'URL',
-  notes: 'Notes',
-  createdAt: 'Created',
-  updatedAt: 'Updated',
-}
-
-const SKIP_EXPORT_COLS = new Set(['colorBar', 'identity'])
-
-/** Default columns emitted when listVisibleColumns is null. */
-const DEFAULT_EXPORT_COL_IDS = [
-  'title', 'startAt', 'endAt', 'status', 'assignees', 'tags', 'progress', 'parent',
-]
-
-function resolveListColumns(ids: string[] | null): Array<{ id: string; label: string }> {
-  const use = ids ?? DEFAULT_EXPORT_COL_IDS
-  return use
-    .filter(id => !SKIP_EXPORT_COLS.has(id) && id in COLUMN_LABELS)
-    .map(id => ({ id, label: COLUMN_LABELS[id] }))
-}
-
-function getColValue(
-  colId: string,
-  activity: ApiActivity,
-  memberById: Map<string, string>,
-  statusById: Map<string, string>,
-  tagById: Map<string, string>,
-  activityTitleById: Map<string, string>,
-): string {
-  switch (colId) {
-    case 'title': return activity.title
-    case 'startAt': return fmtDate(activity.startAt)
-    case 'endAt': return fmtDate(activity.endAt)
-    case 'duration': {
-      if (!activity.startAt || !activity.endAt) return '—'
-      const days = Math.round(
-        (new Date(activity.endAt).getTime() - new Date(activity.startAt).getTime()) / 86400000,
-      )
-      if (days < 0) return '—'
-      return `${days + 1} day${days + 1 !== 1 ? 's' : ''}`
-    }
-    case 'status': return activity.statusId ? (statusById.get(activity.statusId) ?? '—') : '—'
-    case 'assignees': return resolveAssignees(activity, memberById)
-    case 'tags': return resolveTags(activity, tagById) || '—'
-    case 'progress': return activity.percentComplete != null ? `${activity.percentComplete}%` : '—'
-    case 'parent': return activity.parentActivityId
-      ? (activityTitleById.get(activity.parentActivityId) ?? '—')
-      : '—'
-    case 'description': return activity.description ?? '—'
-    case 'location': return activity.location ?? '—'
-    case 'url': return activity.url ?? '—'
-    // notes is in the DB schema but may be absent from the strict generated TS type
-    case 'notes': return (activity as ApiActivity & { notes?: string | null }).notes ?? '—'
-    case 'createdAt': return fmtDate(activity.createdAt)
-    case 'updatedAt': return fmtDate(activity.updatedAt)
-    default: return '—'
-  }
-}
-
-/** Returns the depth-prefix for a title cell: '' at depth 0, '↳ ' at depth 1, '  ↳ ' at depth 2, etc. */
-function depthPrefix(depth: number): string {
-  if (depth === 0) return ''
-  return `${'  '.repeat(depth - 1)}↳ `
-}
-
-// ── Markdown generators ────────────────────────────────────────────────────────
-
-/**
- * List view → Markdown outline (bullet list).
- * One bullet per activity; only non-empty fields are emitted as indented lines.
- * Children are nested bullets (depth × 2 spaces of leading indent).
- * Group-by produces ## sections.
- */
-export function buildListMarkdownOutline(
-  data: TextExportData,
-  timelineName: string,
-  filterLabel: string | null,
-): string {
-  const { listDisplayRows, memberById, statusById, tagById, activityTitleById } = data
-  const lines: string[] = [buildHeader(timelineName, filterLabel)]
-
-  if (!listDisplayRows || listDisplayRows.length === 0) {
-    lines.push('_No activities._')
-    return lines.join('\n')
-  }
-
-  const fmtActivity = (activity: ApiActivity, bulletIndent: string): string[] => {
-    const result: string[] = []
-    const datePart = fmtDateRange(activity.startAt, activity.endAt)
-    const assignees = resolveAssignees(activity, memberById)
-    let firstLine = `${bulletIndent}- **${escMd(activity.title)}**`
-    if (datePart !== '—') firstLine += ` (${datePart})`
-    if (assignees !== '—') firstLine += ` — ${assignees}`
-    result.push(firstLine)
-
-    const fi = `${bulletIndent}  `
-    if (activity.description) result.push(`${fi}${escMd(activity.description)}`)
-    const status = activity.statusId ? statusById.get(activity.statusId) : null
-    if (status) result.push(`${fi}Status: ${escMd(status)}`)
-    if (activity.percentComplete != null) result.push(`${fi}Progress: ${activity.percentComplete}%`)
-    const parent = activity.parentActivityId ? activityTitleById.get(activity.parentActivityId) : null
-    if (parent) result.push(`${fi}Parent: ${escMd(parent)}`)
-    const tags = resolveTags(activity, tagById)
-    if (tags) result.push(`${fi}Tags: ${tags}`)
-    if (activity.location) result.push(`${fi}Location: ${escMd(activity.location)}`)
-    if (activity.url) result.push(`${fi}URL: ${activity.url}`)
-    return result
-  }
-
-  const hasGroups = listDisplayRows.some(r => r.kind === 'group')
-
-  if (hasGroups) {
-    let firstGroup = true
-    for (const row of listDisplayRows) {
-      if (row.kind === 'group') {
-        if (!firstGroup) lines.push('')
-        lines.push(`## ${row.label} (${row.count})`)
-        lines.push('')
-        firstGroup = false
-      } else {
-        lines.push(...fmtActivity(row.activity, '  '.repeat(row.depth)))
-        lines.push('')
-      }
-    }
-  } else {
-    for (const row of listDisplayRows) {
-      if (row.kind === 'activity') {
-        lines.push(...fmtActivity(row.activity, '  '.repeat(row.depth)))
-        lines.push('')
-      }
-    }
-  }
-
-  return lines.join('\n').trimEnd()
-}
-
-/** List view → GitHub-flavored Markdown table, respecting column visibility, sort, group-by, and hierarchy. */
-export function buildListMarkdown(
-  data: TextExportData,
-  timelineName: string,
-  filterLabel: string | null,
-): string {
-  const { listDisplayRows, listVisibleColumns, memberById, statusById, tagById, activityTitleById } = data
-  const lines: string[] = [buildHeader(timelineName, filterLabel)]
-
-  const cols = resolveListColumns(listVisibleColumns)
-  const thead = `| ${cols.map(c => c.label).join(' | ')} |`
-  const tsep = `| ${cols.map(() => '---').join(' | ')} |`
-
-  const getCells = (activity: ApiActivity, depth: number) =>
-    cols.map(c => {
-      const val = getColValue(c.id, activity, memberById, statusById, tagById, activityTitleById)
-      const pfx = c.id === 'title' ? depthPrefix(depth) : ''
-      return escMd(pfx + val)
-    })
-
-  if (!listDisplayRows || listDisplayRows.length === 0) {
-    lines.push(thead, tsep)
-    if (!listDisplayRows || listDisplayRows.length === 0) lines.push('_No activities._')
-    return lines.join('\n')
-  }
-
-  const hasGroups = listDisplayRows.some(r => r.kind === 'group')
-
-  if (hasGroups) {
-    // member or status group-by: one GFM table per section
-    let firstGroup = true
-    for (const row of listDisplayRows) {
-      if (row.kind === 'group') {
-        if (!firstGroup) lines.push('')
-        lines.push(`## ${row.label} (${row.count})`)
-        lines.push('')
-        lines.push(thead)
-        lines.push(tsep)
-        firstGroup = false
-      } else {
-        lines.push(`| ${getCells(row.activity, row.depth).join(' | ')} |`)
-      }
-    }
-  } else {
-    // flat (none) or parent-hierarchy mode: single table, depth prefix in title
-    lines.push(thead, tsep)
-    for (const row of listDisplayRows) {
-      if (row.kind === 'activity') {
-        lines.push(`| ${getCells(row.activity, row.depth).join(' | ')} |`)
-      }
-    }
-  }
-
-  return lines.join('\n')
-}
-
-/** Kanban view → one Markdown section per column, with optional hierarchy nesting. */
-export function buildKanbanMarkdown(
-  data: TextExportData,
-  timelineName: string,
-  filterLabel: string | null,
-): string {
-  const { kanbanColumns, activities, memberById, statusById, tagById, kanbanShowHierarchy, kanbanChildrenByParentId } = data
-  const lines: string[] = [buildHeader(timelineName, filterLabel)]
-  const cols = kanbanColumns ?? [{ label: 'Activities', activities }]
-
-  const fmtItem = (a: ApiActivity, indent: string): string => {
-    const parts: string[] = [a.title]
-    const assignees = resolveAssignees(a, memberById)
-    if (assignees !== '—') parts.push(assignees)
-    const range = fmtDateRange(a.startAt, a.endAt)
-    if (range !== '—') parts.push(range)
-    const status = a.statusId ? (statusById.get(a.statusId) ?? null) : null
-    if (status) parts.push(status)
-    const tags = resolveTags(a, tagById)
-    if (tags) parts.push(tags)
-    return `${indent}- ${parts.join(' · ')}`
-  }
-
-  for (const col of cols) {
-    if (col.activities.length === 0) continue
-    lines.push(`## ${col.label} (${col.activities.length})`)
-    for (const a of col.activities) {
-      lines.push(fmtItem(a, ''))
-      if (kanbanShowHierarchy) {
-        for (const child of kanbanChildrenByParentId.get(a.id) ?? []) {
-          lines.push(fmtItem(child, '  '))
-        }
-      }
-    }
-    lines.push('')
-  }
-
-  if (cols.every(c => c.activities.length === 0)) lines.push('_No activities._')
-  return lines.join('\n').trimEnd()
-}
-
-/** Calendar view → agenda-style date-grouped Markdown list. */
-export function buildCalendarMarkdown(
-  data: TextExportData,
-  timelineName: string,
-  filterLabel: string | null,
-): string {
-  const { activities, memberById, tagById } = data
-  const lines: string[] = [buildHeader(timelineName, filterLabel)]
-
-  if (activities.length === 0) {
-    lines.push('_No activities._')
-    return lines.join('\n')
-  }
-
-  const byDate = new Map<string, ApiActivity[]>()
-  for (const a of activities) {
-    const key = a.startAt?.slice(0, 10) ?? '__none__'
-    const bucket = byDate.get(key) ?? []
-    bucket.push(a)
-    byDate.set(key, bucket)
-  }
-
-  for (const key of [...byDate.keys()].sort()) {
-    const acts = byDate.get(key)!
-    const dateLabel = key === '__none__'
-      ? 'No date'
-      : new Date(`${key}T00:00:00Z`).toLocaleDateString('en-US', {
-          weekday: 'long', month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC',
-        })
-    lines.push(`## ${dateLabel}`)
-    for (const a of acts) {
-      const parts: string[] = [a.title]
-      if (a.endAt && a.endAt.slice(0, 10) !== key) parts.push(`→ ${fmtDate(a.endAt)}`)
-      const assignees = resolveAssignees(a, memberById)
-      if (assignees !== '—') parts.push(assignees)
-      const tags = resolveTags(a, tagById)
-      if (tags) parts.push(tags)
-      lines.push(`- ${parts.join(' · ')}`)
-    }
-    lines.push('')
-  }
-
-  return lines.join('\n').trimEnd()
-}
-
-// ── Plain-text generators ──────────────────────────────────────────────────────
-
-function pad(s: string, width: number): string {
-  return s.length >= width ? s : `${s}${' '.repeat(width - s.length)}`
-}
-
-/**
- * List view → plain-text outline (bullet list).
- * Mirrors buildListMarkdownOutline without Markdown syntax.
- * Root activities use •, children use ◦ (depth 1+).
- */
-export function buildListPlainTextOutline(
-  data: TextExportData,
-  timelineName: string,
-  filterLabel: string | null,
-): string {
-  const { listDisplayRows, memberById, statusById, tagById, activityTitleById } = data
-  const lines: string[] = [buildPlainHeader(timelineName, filterLabel)]
-
-  if (!listDisplayRows || listDisplayRows.length === 0) {
-    lines.push('No activities.')
-    return lines.join('\n')
-  }
-
-  const fmtActivity = (activity: ApiActivity, depth: number): string[] => {
-    const result: string[] = []
-    const bulletIndent = '  '.repeat(depth)
-    const bullet = depth === 0 ? '•' : '◦'
-    const datePart = fmtDateRange(activity.startAt, activity.endAt)
-    const assignees = resolveAssignees(activity, memberById)
-    let firstLine = `${bulletIndent}${bullet} ${activity.title}`
-    if (datePart !== '—') firstLine += ` (${datePart})`
-    if (assignees !== '—') firstLine += ` — ${assignees}`
-    result.push(firstLine)
-
-    const fi = `${bulletIndent}  `
-    if (activity.description) result.push(`${fi}${activity.description}`)
-    const status = activity.statusId ? statusById.get(activity.statusId) : null
-    if (status) result.push(`${fi}Status: ${status}`)
-    if (activity.percentComplete != null) result.push(`${fi}Progress: ${activity.percentComplete}%`)
-    const parent = activity.parentActivityId ? activityTitleById.get(activity.parentActivityId) : null
-    if (parent) result.push(`${fi}Parent: ${parent}`)
-    const tags = resolveTags(activity, tagById)
-    if (tags) result.push(`${fi}Tags: ${tags}`)
-    if (activity.location) result.push(`${fi}Location: ${activity.location}`)
-    if (activity.url) result.push(`${fi}URL: ${activity.url}`)
-    return result
-  }
-
-  const hasGroups = listDisplayRows.some(r => r.kind === 'group')
-
-  if (hasGroups) {
-    let firstGroup = true
-    for (const row of listDisplayRows) {
-      if (row.kind === 'group') {
-        if (!firstGroup) lines.push('')
-        const heading = `${row.label.toUpperCase()} (${row.count})`
-        lines.push(heading)
-        lines.push('─'.repeat(heading.length))
-        firstGroup = false
-      } else {
-        lines.push(...fmtActivity(row.activity, row.depth))
-        lines.push('')
-      }
-    }
-  } else {
-    for (const row of listDisplayRows) {
-      if (row.kind === 'activity') {
-        lines.push(...fmtActivity(row.activity, row.depth))
-        lines.push('')
-      }
-    }
-  }
-
-  return lines.join('\n').trimEnd()
-}
-
-/** List view → space-padded plain-text table, respecting column visibility, sort, group-by, and hierarchy. */
-export function buildListPlainText(
-  data: TextExportData,
-  timelineName: string,
-  filterLabel: string | null,
-): string {
-  const { listDisplayRows, listVisibleColumns, memberById, statusById, tagById, activityTitleById } = data
-  const lines: string[] = [buildPlainHeader(timelineName, filterLabel)]
-
-  const cols = resolveListColumns(listVisibleColumns)
-  const MAX_W: Record<string, number> = {
-    title: 40, startAt: 15, endAt: 15, duration: 10, status: 20,
-    assignees: 26, tags: 20, progress: 10, parent: 24, description: 30,
-    location: 20, url: 30, notes: 30, createdAt: 15, updatedAt: 15,
-  }
-
-  const getRenderedValue = (colId: string, activity: ApiActivity, depth: number): string => {
-    const val = getColValue(colId, activity, memberById, statusById, tagById, activityTitleById)
-    const pfx = colId === 'title' ? depthPrefix(depth) : ''
-    return pfx + val
-  }
-
-  const activityRows = (listDisplayRows ?? []).filter((r): r is { kind: 'activity'; activity: ApiActivity; depth: number } => r.kind === 'activity')
-  const fallbackActivities = activityRows.length > 0
-    ? activityRows.map(r => ({ activity: r.activity, depth: r.depth }))
-    : data.activities.map(a => ({ activity: a, depth: 0 }))
-
-  if (fallbackActivities.length === 0) {
-    lines.push('No activities.')
-    return lines.join('\n')
-  }
-
-  // Compute column widths from actual rendered content
-  const widths = cols.map(col => {
-    let w = col.label.length
-    for (const { activity, depth } of fallbackActivities) {
-      const rendered = getRenderedValue(col.id, activity, depth)
-      w = Math.max(w, Math.min(rendered.length, MAX_W[col.id] ?? 20))
-    }
-    return w
-  })
-
-  const emitTableHeader = () => {
-    lines.push(cols.map((c, i) => pad(c.label, widths[i])).join('  '))
-    lines.push(widths.map(w => '─'.repeat(w)).join('  '))
-  }
-
-  const emitRow = (activity: ApiActivity, depth: number) => {
-    lines.push(
-      cols.map((c, i) => {
-        const rendered = getRenderedValue(c.id, activity, depth)
-        return pad(rendered.slice(0, widths[i]), widths[i])
-      }).join('  '),
-    )
-  }
-
-  if (!listDisplayRows) {
-    emitTableHeader()
-    for (const { activity, depth } of fallbackActivities) emitRow(activity, depth)
-    return lines.join('\n')
-  }
-
-  const hasGroups = listDisplayRows.some(r => r.kind === 'group')
-
-  if (hasGroups) {
-    let firstGroup = true
-    for (const row of listDisplayRows) {
-      if (row.kind === 'group') {
-        if (!firstGroup) lines.push('')
-        const heading = `${row.label.toUpperCase()} (${row.count})`
-        lines.push(heading)
-        lines.push('─'.repeat(heading.length))
-        emitTableHeader()
-        firstGroup = false
-      } else {
-        emitRow(row.activity, row.depth)
-      }
-    }
-  } else {
-    emitTableHeader()
-    for (const row of listDisplayRows) {
-      if (row.kind === 'activity') emitRow(row.activity, row.depth)
-    }
-  }
-
-  return lines.join('\n')
-}
-
-/** Kanban view → plain-text sections with bullet lists. */
-export function buildKanbanPlainText(
-  data: TextExportData,
-  timelineName: string,
-  filterLabel: string | null,
-): string {
-  const { kanbanColumns, activities, memberById, statusById, tagById, kanbanShowHierarchy, kanbanChildrenByParentId } = data
-  const lines: string[] = [buildPlainHeader(timelineName, filterLabel)]
-  const cols = kanbanColumns ?? [{ label: 'Activities', activities }]
-
-  const fmtItem = (a: ApiActivity): string => {
-    const parts: string[] = [a.title]
-    const assignees = resolveAssignees(a, memberById)
-    if (assignees !== '—') parts.push(assignees)
-    const range = fmtDateRange(a.startAt, a.endAt)
-    if (range !== '—') parts.push(range)
-    const status = a.statusId ? (statusById.get(a.statusId) ?? null) : null
-    if (status) parts.push(status)
-    const tags = resolveTags(a, tagById)
-    if (tags) parts.push(tags)
-    return parts.join(' · ')
-  }
-
-  for (const col of cols) {
-    if (col.activities.length === 0) continue
-    const heading = `${col.label.toUpperCase()} (${col.activities.length})`
-    lines.push(heading)
-    lines.push('─'.repeat(heading.length))
-    for (const a of col.activities) {
-      lines.push(`  • ${fmtItem(a)}`)
-      if (kanbanShowHierarchy) {
-        for (const child of kanbanChildrenByParentId.get(a.id) ?? []) {
-          lines.push(`      ◦ ${fmtItem(child)}`)
-        }
-      }
-    }
-    lines.push('')
-  }
-
-  if (cols.every(c => c.activities.length === 0)) lines.push('No activities.')
-  return lines.join('\n').trimEnd()
-}
-
-/** Calendar view → plain-text agenda. */
-export function buildCalendarPlainText(
-  data: TextExportData,
-  timelineName: string,
-  filterLabel: string | null,
-): string {
-  const { activities, memberById, tagById } = data
-  const lines: string[] = [buildPlainHeader(timelineName, filterLabel)]
-
-  if (activities.length === 0) { lines.push('No activities.'); return lines.join('\n') }
-
-  const byDate = new Map<string, ApiActivity[]>()
-  for (const a of activities) {
-    const key = a.startAt?.slice(0, 10) ?? '__none__'
-    const bucket = byDate.get(key) ?? []
-    bucket.push(a)
-    byDate.set(key, bucket)
-  }
-
-  for (const key of [...byDate.keys()].sort()) {
-    const acts = byDate.get(key)!
-    const dateLabel = key === '__none__'
-      ? 'No date'
-      : new Date(`${key}T00:00:00Z`).toLocaleDateString('en-US', {
-          weekday: 'long', month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC',
-        })
-    lines.push(dateLabel)
-    lines.push('─'.repeat(dateLabel.length))
-    for (const a of acts) {
-      const parts: string[] = [a.title]
-      if (a.endAt && a.endAt.slice(0, 10) !== key) parts.push(`→ ${fmtDate(a.endAt)}`)
-      const assignees = resolveAssignees(a, memberById)
-      if (assignees !== '—') parts.push(assignees)
-      const tags = resolveTags(a, tagById)
-      if (tags) parts.push(tags)
-      lines.push(`  • ${parts.join(' · ')}`)
-    }
-    lines.push('')
-  }
-
-  return lines.join('\n').trimEnd()
-}
-
-// ── HTML generators (for clipboard text/html flavor) ──────────────────────────
-
-const TH = 'padding:6px 10px;border:1px solid #ccc;background:#f5f5f5;font-weight:600;text-align:left;white-space:nowrap;font-family:system-ui,sans-serif;font-size:13px'
-const TD = 'padding:5px 10px;border:1px solid #ddd;vertical-align:top;font-family:system-ui,sans-serif;font-size:13px'
-
-function htmlHeaderBlock(timelineName: string, filterLabel: string | null): string {
-  const today = new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })
-  const ctx = filterLabel ? ` · Filter: ${htmlEsc(filterLabel)}` : ''
-  return `<p style="font-family:system-ui,sans-serif;font-size:13px;margin:0 0 10px"><strong>${htmlEsc(timelineName)}</strong> — ${today}${ctx}</p>`
-}
-
-/** List view → HTML table for clipboard, respecting column visibility, sort, group-by, and hierarchy. */
-export function buildListHtml(
-  data: TextExportData,
-  timelineName: string,
-  filterLabel: string | null,
-): string {
-  const { listDisplayRows, listVisibleColumns, memberById, statusById, tagById, activityTitleById } = data
-  const cols = resolveListColumns(listVisibleColumns)
-
-  const thead = `<thead><tr>${cols.map(c => `<th style="${TH}">${htmlEsc(c.label)}</th>`).join('')}</tr></thead>`
-  const colspan = cols.length
-
-  const makeRow = (activity: ApiActivity, depth: number): string => {
-    const cells = cols.map(c => {
-      const val = getColValue(c.id, activity, memberById, statusById, tagById, activityTitleById)
-      const paddingLeft = c.id === 'title' && depth > 0 ? `padding-left:${6 + depth * 16}px;` : ''
-      const prefix = c.id === 'title' && depth > 0 ? '↳ ' : ''
-      return `<td style="${paddingLeft}${TD}">${htmlEsc(prefix + val)}</td>`
-    })
-    return `<tr>${cells.join('')}</tr>`
-  }
-
-  const makeSection = (label: string, count: number): string =>
-    `<tr><th colspan="${colspan}" style="${TH};background:#e8e8e8;font-size:12px">${htmlEsc(label)} (${count})</th></tr>`
-
-  const rows: string[] = []
-  const activityList = listDisplayRows ?? data.activities.map(a => ({ kind: 'activity' as const, activity: a, depth: 0 }))
-
-  if (activityList.length === 0) {
-    rows.push(`<tr><td colspan="${colspan}" style="${TD}"><em>No activities.</em></td></tr>`)
-  } else {
-    for (const row of activityList) {
-      if (row.kind === 'group') {
-        rows.push(makeSection(row.label, row.count))
-        rows.push(thead.replace('<thead>', '').replace('</thead>', '').replace('<tr>', '<tr>').replace('</tr>', '</tr>'))
-      } else {
-        rows.push(makeRow(row.activity, row.depth))
-      }
-    }
-  }
-
-  return `${htmlHeaderBlock(timelineName, filterLabel)}<table style="border-collapse:collapse">${thead}<tbody>${rows.join('')}</tbody></table>`
-}
-
-/** List view → HTML outline (bullet list) for clipboard. Mirrors buildListMarkdownOutline. */
-export function buildListHtmlOutline(
-  data: TextExportData,
-  timelineName: string,
-  filterLabel: string | null,
-): string {
-  const { listDisplayRows, memberById, statusById, tagById, activityTitleById } = data
-
-  const LI = 'font-family:system-ui,sans-serif;font-size:13px;margin:3px 0'
-  const FIELD = 'font-family:system-ui,sans-serif;font-size:12px;color:#555;margin:1px 0 1px 0'
-
-  const fmtActivity = (activity: ApiActivity, depth: number): string => {
-    const datePart = fmtDateRange(activity.startAt, activity.endAt)
-    const assignees = resolveAssignees(activity, memberById)
-    let firstLine = `<strong>${htmlEsc(activity.title)}</strong>`
-    if (datePart !== '—') firstLine += ` <span style="color:#777">(${htmlEsc(datePart)})</span>`
-    if (assignees !== '—') firstLine += ` — ${htmlEsc(assignees)}`
-
-    const fields: string[] = []
-    if (activity.description) fields.push(htmlEsc(activity.description))
-    const status = activity.statusId ? statusById.get(activity.statusId) : null
-    if (status) fields.push(`Status: ${htmlEsc(status)}`)
-    if (activity.percentComplete != null) fields.push(`Progress: ${activity.percentComplete}%`)
-    const parent = activity.parentActivityId ? activityTitleById.get(activity.parentActivityId) : null
-    if (parent) fields.push(`Parent: ${htmlEsc(parent)}`)
-    const tags = resolveTags(activity, tagById)
-    if (tags) fields.push(`Tags: ${htmlEsc(tags)}`)
-    if (activity.location) fields.push(`Location: ${htmlEsc(activity.location)}`)
-    if (activity.url) fields.push(`URL: ${htmlEsc(activity.url)}`)
-
-    const fieldHtml = fields.length > 0
-      ? `<div style="margin:2px 0 0 0">${fields.map(f => `<div style="${FIELD}">${f}</div>`).join('')}</div>`
-      : ''
-
-    const paddingLeft = depth > 0 ? `padding-left:${depth * 20}px;` : ''
-    return `<li style="${paddingLeft}${LI}">${firstLine}${fieldHtml}</li>`
-  }
-
-  const activityList = listDisplayRows ?? data.activities.map(a => ({ kind: 'activity' as const, activity: a, depth: 0 }))
-
-  if (activityList.length === 0) {
-    return `${htmlHeaderBlock(timelineName, filterLabel)}<p style="font-family:system-ui,sans-serif;font-size:13px"><em>No activities.</em></p>`
-  }
-
-  const hasGroups = activityList.some(r => r.kind === 'group')
-  const sections: string[] = []
-
-  if (hasGroups) {
-    let items: string[] = []
-    let groupLabel = ''
-    let groupCount = 0
-    const flush = () => {
-      if (groupLabel) sections.push(`<h3 style="font-family:system-ui,sans-serif;font-size:14px;margin:16px 0 4px">${htmlEsc(groupLabel)} (${groupCount})</h3><ul style="margin:0;padding-left:20px">${items.join('')}</ul>`)
-    }
-    for (const row of activityList) {
-      if (row.kind === 'group') {
-        flush()
-        groupLabel = row.label
-        groupCount = row.count
-        items = []
-      } else {
-        items.push(fmtActivity(row.activity, row.depth))
-      }
-    }
-    flush()
-  } else {
-    const items = activityList
-      .filter((r): r is { kind: 'activity'; activity: ApiActivity; depth: number } => r.kind === 'activity')
-      .map(r => fmtActivity(r.activity, r.depth))
-    sections.push(`<ul style="margin:0;padding-left:20px">${items.join('')}</ul>`)
-  }
-
-  return `${htmlHeaderBlock(timelineName, filterLabel)}${sections.join('')}`
-}
-
-/** Kanban view → HTML sections with optional hierarchy nesting. */
-export function buildKanbanHtml(
-  data: TextExportData,
-  timelineName: string,
-  filterLabel: string | null,
-): string {
-  const { kanbanColumns, activities, memberById, statusById, tagById, kanbanShowHierarchy, kanbanChildrenByParentId } = data
-  const cols = kanbanColumns ?? [{ label: 'Activities', activities }]
-
-  const fmtLi = (a: ApiActivity, style: string): string => {
-    const parts: string[] = [htmlEsc(a.title)]
-    const assignees = resolveAssignees(a, memberById)
-    if (assignees !== '—') parts.push(htmlEsc(assignees))
-    const range = fmtDateRange(a.startAt, a.endAt)
-    if (range !== '—') parts.push(htmlEsc(range))
-    const status = a.statusId ? (statusById.get(a.statusId) ?? null) : null
-    if (status) parts.push(htmlEsc(status))
-    const tags = resolveTags(a, tagById)
-    if (tags) parts.push(htmlEsc(tags))
-    return `<li style="${style}">${parts.join(' · ')}</li>`
-  }
-
-  const LI = 'font-family:system-ui,sans-serif;font-size:13px;margin:2px 0'
-  const LI_CHILD = 'font-family:system-ui,sans-serif;font-size:12px;margin:2px 0;color:#555'
-
-  const sections = cols
-    .filter(c => c.activities.length > 0)
-    .map(col => {
-      const items: string[] = []
-      for (const a of col.activities) {
-        const children = kanbanShowHierarchy ? (kanbanChildrenByParentId.get(a.id) ?? []) : []
-        if (children.length > 0) {
-          const childList = children.map(c => fmtLi(c, LI_CHILD)).join('')
-          items.push(`<li style="${LI}">${[htmlEsc(a.title), ...([resolveAssignees(a, memberById)].filter(s => s !== '—'))].join(' · ')}<ul style="margin:2px 0;padding-left:16px">${childList}</ul></li>`)
-        } else {
-          items.push(fmtLi(a, LI))
-        }
-      }
-      return `<h3 style="font-family:system-ui,sans-serif;font-size:14px;margin:16px 0 4px">${htmlEsc(col.label)} (${col.activities.length})</h3><ul style="margin:0;padding-left:20px">${items.join('')}</ul>`
-    })
-
-  const body = sections.length > 0 ? sections.join('') : '<p style="font-family:system-ui,sans-serif;font-size:13px"><em>No activities.</em></p>'
-  return `${htmlHeaderBlock(timelineName, filterLabel)}${body}`
-}
-
-/** Calendar view → HTML agenda. */
-export function buildCalendarHtml(
-  data: TextExportData,
-  timelineName: string,
-  filterLabel: string | null,
-): string {
-  const { activities, memberById, tagById } = data
-  if (activities.length === 0) {
-    return `${htmlHeaderBlock(timelineName, filterLabel)}<p style="font-family:system-ui,sans-serif;font-size:13px"><em>No activities.</em></p>`
-  }
-
-  const byDate = new Map<string, ApiActivity[]>()
-  for (const a of activities) {
-    const key = a.startAt?.slice(0, 10) ?? '__none__'
-    const bucket = byDate.get(key) ?? []
-    bucket.push(a)
-    byDate.set(key, bucket)
-  }
-
-  const sections = [...byDate.keys()].sort().map(key => {
-    const acts = byDate.get(key)!
-    const dateLabel = key === '__none__'
-      ? 'No date'
-      : new Date(`${key}T00:00:00Z`).toLocaleDateString('en-US', {
-          weekday: 'long', month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC',
-        })
-    const items = acts.map(a => {
-      const parts: string[] = [htmlEsc(a.title)]
-      if (a.endAt && a.endAt.slice(0, 10) !== key) parts.push(`→ ${htmlEsc(fmtDate(a.endAt))}`)
-      const assignees = resolveAssignees(a, memberById)
-      if (assignees !== '—') parts.push(htmlEsc(assignees))
-      const tags = resolveTags(a, tagById)
-      if (tags) parts.push(htmlEsc(tags))
-      return `<li style="font-family:system-ui,sans-serif;font-size:13px;margin:2px 0">${parts.join(' · ')}</li>`
-    })
-    return `<h3 style="font-family:system-ui,sans-serif;font-size:14px;margin:16px 0 4px">${htmlEsc(dateLabel)}</h3><ul style="margin:0;padding-left:20px">${items.join('')}</ul>`
-  })
-
-  return `${htmlHeaderBlock(timelineName, filterLabel)}${sections.join('')}`
-}
-````
-
-## File: packages/web/src/App.tsx
-````typescript
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { AuthProvider } from '@/contexts/AuthContext'
-import ProtectedRoute from '@/components/ProtectedRoute'
-import ThemeSync from '@/components/ThemeSync'
-import BrandingSync from '@/components/BrandingSync'
-import LoginPage from '@/pages/LoginPage'
-import RegisterPage from '@/pages/RegisterPage'
-import DashboardPage from '@/pages/DashboardPage'
-import SetupPage from '@/pages/SetupPage'
-import SettingsPage from '@/pages/SettingsPage'
-import ForgotPasswordPage from '@/pages/ForgotPasswordPage'
-import ResetPasswordPage from '@/pages/ResetPasswordPage'
-import ShareViewPage from '@/pages/ShareViewPage'
-import OIDCCallbackPage from '@/pages/OIDCCallbackPage'
-
-const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: {
-      staleTime: 30_000,
-      retry: 1,
-    },
-  },
-})
-
-export default function App() {
-  return (
-    <QueryClientProvider client={queryClient}>
-      <BrowserRouter>
-        <AuthProvider>
-          {/* Side-effect components — render nothing but apply global state. */}
-          <ThemeSync />
-          <BrandingSync />
-          <Routes>
-            {/* First-run setup — public, shown before any users exist */}
-            <Route path="/setup" element={<SetupPage />} />
-
-            {/* Public routes */}
-            <Route path="/login" element={<LoginPage />} />
-            <Route path="/register" element={<RegisterPage />} />
-            <Route path="/forgot-password" element={<ForgotPasswordPage />} />
-            <Route path="/reset-password" element={<ResetPasswordPage />} />
-            {/* SSO landing — receives tokens in the URL fragment after OIDC login */}
-            <Route path="/auth/callback" element={<OIDCCallbackPage />} />
-            {/* Public share viewer — no auth required */}
-            <Route path="/s/:token" element={<ShareViewPage />} />
-
-            {/* Protected routes */}
-            <Route element={<ProtectedRoute />}>
-              <Route path="/" element={<DashboardPage />} />
-              <Route path="/settings/*" element={<SettingsPage />} />
-            </Route>
-
-            {/* Fallback */}
-            <Route path="*" element={<Navigate to="/" replace />} />
-          </Routes>
-        </AuthProvider>
-      </BrowserRouter>
-    </QueryClientProvider>
-  )
-}
-````
-
 ## File: scripts/reset-test-env.sh
 ````bash
 #!/usr/bin/env bash
@@ -54334,6 +53687,73 @@ echo "[6/6] Restarting container..."
 docker start "$DRABA_CONTAINER" >/dev/null
 
 echo "Done. Test invite token is ready. The api-smoke subagent can now register against it."
+````
+
+## File: .github/workflows/ci.yml
+````yaml
+name: CI
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+
+jobs:
+  api:
+    name: API (Go)
+    runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    defaults:
+      run:
+        working-directory: packages/api
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.0'
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./... -race -count=1 -timeout 20m
+
+      - name: Lint
+        uses: golangci/golangci-lint-action@v7
+        with:
+          version: v2.12.2
+          working-directory: packages/api
+          args: --config ../../.golangci.yml
+          skip-cache: true
+
+  web:
+    name: Web (React)
+    runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: pnpm/action-setup@v4
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Test
+        run: pnpm --filter @draba/web test
+
+      - name: Build
+        run: pnpm --filter @draba/web build
 ````
 
 ## File: docs/TESTING.md
@@ -55655,6 +55075,132 @@ func buildTimelineExportICS(timeline *models.Timeline, acts []*models.Activity, 
 }
 ````
 
+## File: packages/api/internal/db/share_repo.go
+````go
+// Package db contains the persistence layer for draba.
+package db
+
+import (
+	"fmt"
+	"time"
+
+	"github.com/jmoiron/sqlx"
+
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// ShareRepo is the persistence layer for Share records.
+type ShareRepo struct {
+	db *sqlx.DB
+}
+
+// NewShareRepo returns a ShareRepo backed by db.
+func NewShareRepo(db *sqlx.DB) *ShareRepo {
+	return &ShareRepo{db: db}
+}
+
+// Create inserts a new Share row.
+func (r *ShareRepo) Create(s *models.Share) error {
+	_, err := r.db.NamedExec(`
+		INSERT INTO shares (
+			id, timeline_id, token, kind, scope, member_id, name, description,
+			view_type, view_config, password_hash, created_by, created_at, view_count
+		) VALUES (
+			:id, :timeline_id, :token, :kind, :scope, :member_id, :name, :description,
+			:view_type, :view_config, :password_hash, :created_by, :created_at, :view_count
+		)
+	`, s)
+	if err != nil {
+		return fmt.Errorf("creating share: %w", err)
+	}
+	return nil
+}
+
+// GetByID fetches a Share by primary key. Returns sql.ErrNoRows (wrapped) when
+// no row matches.
+func (r *ShareRepo) GetByID(id string) (*models.Share, error) {
+	var s models.Share
+	if err := r.db.Get(&s, `SELECT * FROM shares WHERE id = ?`, id); err != nil {
+		return nil, fmt.Errorf("getting share: %w", err)
+	}
+	s.Protected = s.PasswordHash != nil
+	return &s, nil
+}
+
+// GetByToken fetches a Share by its public token. Returns sql.ErrNoRows
+// (wrapped) when no row matches.
+func (r *ShareRepo) GetByToken(token string) (*models.Share, error) {
+	var s models.Share
+	if err := r.db.Get(&s, `SELECT * FROM shares WHERE token = ?`, token); err != nil {
+		return nil, fmt.Errorf("getting share by token: %w", err)
+	}
+	s.Protected = s.PasswordHash != nil
+	return &s, nil
+}
+
+// ListByTimeline returns all non-revoked shares for a timeline, ordered by
+// creation time ascending.
+func (r *ShareRepo) ListByTimeline(timelineID string) ([]*models.Share, error) {
+	out := make([]*models.Share, 0)
+	if err := r.db.Select(&out,
+		`SELECT * FROM shares WHERE timeline_id = ? ORDER BY created_at ASC`,
+		timelineID,
+	); err != nil {
+		return nil, fmt.Errorf("listing shares: %w", err)
+	}
+	for _, s := range out {
+		s.Protected = s.PasswordHash != nil
+	}
+	return out, nil
+}
+
+// Update writes mutable fields for an existing share.
+func (r *ShareRepo) Update(s *models.Share) error {
+	_, err := r.db.NamedExec(`
+		UPDATE shares SET
+			name          = :name,
+			description   = :description,
+			view_type     = :view_type,
+			view_config   = :view_config,
+			password_hash = :password_hash
+		WHERE id = :id
+	`, s)
+	if err != nil {
+		return fmt.Errorf("updating share: %w", err)
+	}
+	return nil
+}
+
+// RotateToken replaces a share's token, immediately invalidating the old URL.
+// This is the revocation story for ICS feeds, which have no password gate.
+func (r *ShareRepo) RotateToken(id, newToken string) error {
+	if _, err := r.db.Exec(`UPDATE shares SET token = ? WHERE id = ?`, newToken, id); err != nil {
+		return fmt.Errorf("rotating share token: %w", err)
+	}
+	return nil
+}
+
+// Delete permanently removes a share row.
+func (r *ShareRepo) Delete(id string) error {
+	if _, err := r.db.Exec(`DELETE FROM shares WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("deleting share: %w", err)
+	}
+	return nil
+}
+
+// RecordView increments view_count and sets last_viewed_at to now for a share.
+func (r *ShareRepo) RecordView(id string) error {
+	_, err := r.db.Exec(
+		`UPDATE shares SET view_count = view_count + 1, last_viewed_at = ? WHERE id = ?`,
+		time.Now().UTC(), id,
+	)
+	if err != nil {
+		return fmt.Errorf("recording share view: %w", err)
+	}
+	return nil
+}
+````
+
 ## File: packages/api/internal/ics/ics.go
 ````go
 // Package ics serializes activities into RFC 5545 iCalendar feeds for the
@@ -56201,129 +55747,1108 @@ export default function CalendarShareModal({ teamId, timelineId, timelineName, o
 }
 ````
 
-## File: packages/api/internal/db/share_repo.go
+## File: packages/web/src/lib/textExport.ts
+````typescript
+/**
+ * textExport — client-side Markdown, plain-text, and HTML generation for the
+ * Export dialog's Phase 14.2 textual formats.
+ *
+ * All generators are pure functions: they accept pre-resolved lookup maps
+ * (produced in DashboardPage) and return plain strings. No DOM access, no
+ * network calls — identical output to what the user sees on screen.
+ *
+ * View-specific generators:
+ *   buildList*    — GFM table (Markdown) / space-padded table (plain) / HTML <table>
+ *   buildKanban*  — one section per column
+ *   buildCalendar* — agenda-style date-grouped list
+ */
+
+import type { components } from '@draba/shared'
+
+type ApiActivity = components['schemas']['Activity']
+
+// ── Public types ───────────────────────────────────────────────────────────────
+
+/**
+ * A pre-built list display row for export.
+ * Group rows produce section headers; activity rows produce content.
+ * Mirrors the subset of ListDisplayRow used outside the component.
+ */
+export type ListExportRow =
+  | { kind: 'group'; label: string; count: number }
+  | { kind: 'activity'; activity: ApiActivity; depth: number }
+
+/** All data the text generators need — supplied by DashboardPage at export time. */
+export interface TextExportData {
+  /**
+   * Filtered activities.
+   * Calendar generators iterate this directly. List generators use listDisplayRows instead.
+   */
+  activities: ApiActivity[]
+  /** Member ID → display name. */
+  memberById: Map<string, string>
+  /** Status ID → status name. */
+  statusById: Map<string, string>
+  /** Tag ID → tag name. */
+  tagById: Map<string, string>
+  /** Activity ID → title (for parent-activity name lookups). */
+  activityTitleById: Map<string, string>
+  /**
+   * Kanban-only: pre-built columns produced by `buildColumns`.
+   * Null for List and Calendar views.
+   * When kanbanShowHierarchy=true, column items contain only root activities.
+   */
+  kanbanColumns: Array<{ label: string; activities: ApiActivity[] }> | null
+  /**
+   * List-only: pre-built display rows in sorted, group-by order.
+   * Group rows emit section headers; activity rows carry a depth for hierarchy.
+   * Null for non-List views.
+   */
+  listDisplayRows: ListExportRow[] | null
+  /**
+   * List-only: ordered visible column IDs (excluding visual-only colorBar/identity).
+   * Null means use the default set of export columns.
+   */
+  listVisibleColumns: string[] | null
+  /** Kanban-only: true when hierarchy nesting is active in the view. */
+  kanbanShowHierarchy: boolean
+  /** Kanban-only: parent ID → child activities (populated when kanbanShowHierarchy=true). */
+  kanbanChildrenByParentId: Map<string, ApiActivity[]>
+}
+
+// ── Date formatting ────────────────────────────────────────────────────────────
+
+function fmtDate(iso: string | null | undefined): string {
+  if (!iso) return '—'
+  const d = new Date(iso)
+  if (isNaN(d.getTime())) return '—'
+  return d.toLocaleDateString('en-US', {
+    month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC',
+  })
+}
+
+function fmtDateRange(startAt: string | null | undefined, endAt: string | null | undefined): string {
+  const s = fmtDate(startAt)
+  const e = fmtDate(endAt)
+  if (s === '—' && e === '—') return '—'
+  if (s === e) return s
+  return `${s} – ${e}`
+}
+
+// ── Shared helpers ─────────────────────────────────────────────────────────────
+
+function resolveAssignees(activity: ApiActivity, memberById: Map<string, string>): string {
+  if (!activity.assignedMemberIds?.length) return '—'
+  return activity.assignedMemberIds.map(id => memberById.get(id) ?? id).join(', ')
+}
+
+function resolveTags(activity: ApiActivity, tagById: Map<string, string>): string {
+  if (!activity.tagIds?.length) return ''
+  return activity.tagIds.map(id => `#${tagById.get(id) ?? id}`).join(' ')
+}
+
+function buildHeader(timelineName: string, filterLabel: string | null): string {
+  const today = new Date().toLocaleDateString('en-US', {
+    month: 'long', day: 'numeric', year: 'numeric',
+  })
+  const parts = [`# ${timelineName} — ${today}`]
+  if (filterLabel) parts.push(`_Filter: ${filterLabel}_`)
+  parts.push('')
+  return parts.join('\n')
+}
+
+function buildPlainHeader(timelineName: string, filterLabel: string | null): string {
+  const today = new Date().toLocaleDateString('en-US', {
+    month: 'long', day: 'numeric', year: 'numeric',
+  })
+  const parts = [`${timelineName} — ${today}`]
+  if (filterLabel) parts.push(`Filter: ${filterLabel}`)
+  parts.push('')
+  return parts.join('\n')
+}
+
+function escMd(s: string): string {
+  return s.replace(/\|/g, '\\|')
+}
+
+function htmlEsc(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+}
+
+// ── List column helpers ────────────────────────────────────────────────────────
+
+const COLUMN_LABELS: Record<string, string> = {
+  title: 'Title',
+  startAt: 'Start',
+  endAt: 'End',
+  duration: 'Duration',
+  status: 'Status',
+  assignees: 'Assigned To',
+  tags: 'Tags',
+  progress: 'Progress',
+  parent: 'Parent',
+  description: 'Description',
+  location: 'Location',
+  url: 'URL',
+  notes: 'Notes',
+  createdAt: 'Created',
+  updatedAt: 'Updated',
+}
+
+const SKIP_EXPORT_COLS = new Set(['colorBar', 'identity'])
+
+/** Default columns emitted when listVisibleColumns is null. */
+const DEFAULT_EXPORT_COL_IDS = [
+  'title', 'startAt', 'endAt', 'status', 'assignees', 'tags', 'progress', 'parent',
+]
+
+function resolveListColumns(ids: string[] | null): Array<{ id: string; label: string }> {
+  const use = ids ?? DEFAULT_EXPORT_COL_IDS
+  return use
+    .filter(id => !SKIP_EXPORT_COLS.has(id) && id in COLUMN_LABELS)
+    .map(id => ({ id, label: COLUMN_LABELS[id] }))
+}
+
+function getColValue(
+  colId: string,
+  activity: ApiActivity,
+  memberById: Map<string, string>,
+  statusById: Map<string, string>,
+  tagById: Map<string, string>,
+  activityTitleById: Map<string, string>,
+): string {
+  switch (colId) {
+    case 'title': return activity.title
+    case 'startAt': return fmtDate(activity.startAt)
+    case 'endAt': return fmtDate(activity.endAt)
+    case 'duration': {
+      if (!activity.startAt || !activity.endAt) return '—'
+      const days = Math.round(
+        (new Date(activity.endAt).getTime() - new Date(activity.startAt).getTime()) / 86400000,
+      )
+      if (days < 0) return '—'
+      return `${days + 1} day${days + 1 !== 1 ? 's' : ''}`
+    }
+    case 'status': return activity.statusId ? (statusById.get(activity.statusId) ?? '—') : '—'
+    case 'assignees': return resolveAssignees(activity, memberById)
+    case 'tags': return resolveTags(activity, tagById) || '—'
+    case 'progress': return activity.percentComplete != null ? `${activity.percentComplete}%` : '—'
+    case 'parent': return activity.parentActivityId
+      ? (activityTitleById.get(activity.parentActivityId) ?? '—')
+      : '—'
+    case 'description': return activity.description ?? '—'
+    case 'location': return activity.location ?? '—'
+    case 'url': return activity.url ?? '—'
+    // notes is in the DB schema but may be absent from the strict generated TS type
+    case 'notes': return (activity as ApiActivity & { notes?: string | null }).notes ?? '—'
+    case 'createdAt': return fmtDate(activity.createdAt)
+    case 'updatedAt': return fmtDate(activity.updatedAt)
+    default: return '—'
+  }
+}
+
+/** Returns the depth-prefix for a title cell: '' at depth 0, '↳ ' at depth 1, '  ↳ ' at depth 2, etc. */
+function depthPrefix(depth: number): string {
+  if (depth === 0) return ''
+  return `${'  '.repeat(depth - 1)}↳ `
+}
+
+// ── Markdown generators ────────────────────────────────────────────────────────
+
+/**
+ * List view → Markdown outline (bullet list).
+ * One bullet per activity; only non-empty fields are emitted as indented lines.
+ * Children are nested bullets (depth × 2 spaces of leading indent).
+ * Group-by produces ## sections.
+ */
+export function buildListMarkdownOutline(
+  data: TextExportData,
+  timelineName: string,
+  filterLabel: string | null,
+): string {
+  const { listDisplayRows, memberById, statusById, tagById, activityTitleById } = data
+  const lines: string[] = [buildHeader(timelineName, filterLabel)]
+
+  if (!listDisplayRows || listDisplayRows.length === 0) {
+    lines.push('_No activities._')
+    return lines.join('\n')
+  }
+
+  const fmtActivity = (activity: ApiActivity, bulletIndent: string): string[] => {
+    const result: string[] = []
+    const datePart = fmtDateRange(activity.startAt, activity.endAt)
+    const assignees = resolveAssignees(activity, memberById)
+    let firstLine = `${bulletIndent}- **${escMd(activity.title)}**`
+    if (datePart !== '—') firstLine += ` (${datePart})`
+    if (assignees !== '—') firstLine += ` — ${assignees}`
+    result.push(firstLine)
+
+    const fi = `${bulletIndent}  `
+    if (activity.description) result.push(`${fi}${escMd(activity.description)}`)
+    const status = activity.statusId ? statusById.get(activity.statusId) : null
+    if (status) result.push(`${fi}Status: ${escMd(status)}`)
+    if (activity.percentComplete != null) result.push(`${fi}Progress: ${activity.percentComplete}%`)
+    const parent = activity.parentActivityId ? activityTitleById.get(activity.parentActivityId) : null
+    if (parent) result.push(`${fi}Parent: ${escMd(parent)}`)
+    const tags = resolveTags(activity, tagById)
+    if (tags) result.push(`${fi}Tags: ${tags}`)
+    if (activity.location) result.push(`${fi}Location: ${escMd(activity.location)}`)
+    if (activity.url) result.push(`${fi}URL: ${escMd(activity.url)}`)
+    return result
+  }
+
+  const hasGroups = listDisplayRows.some(r => r.kind === 'group')
+
+  if (hasGroups) {
+    let firstGroup = true
+    for (const row of listDisplayRows) {
+      if (row.kind === 'group') {
+        if (!firstGroup) lines.push('')
+        lines.push(`## ${row.label} (${row.count})`)
+        lines.push('')
+        firstGroup = false
+      } else {
+        lines.push(...fmtActivity(row.activity, '  '.repeat(row.depth)))
+        lines.push('')
+      }
+    }
+  } else {
+    for (const row of listDisplayRows) {
+      if (row.kind === 'activity') {
+        lines.push(...fmtActivity(row.activity, '  '.repeat(row.depth)))
+        lines.push('')
+      }
+    }
+  }
+
+  return lines.join('\n').trimEnd()
+}
+
+/** List view → GitHub-flavored Markdown table, respecting column visibility, sort, group-by, and hierarchy. */
+export function buildListMarkdown(
+  data: TextExportData,
+  timelineName: string,
+  filterLabel: string | null,
+): string {
+  const { listDisplayRows, listVisibleColumns, memberById, statusById, tagById, activityTitleById } = data
+  const lines: string[] = [buildHeader(timelineName, filterLabel)]
+
+  const cols = resolveListColumns(listVisibleColumns)
+  const thead = `| ${cols.map(c => c.label).join(' | ')} |`
+  const tsep = `| ${cols.map(() => '---').join(' | ')} |`
+
+  const getCells = (activity: ApiActivity, depth: number) =>
+    cols.map(c => {
+      const val = getColValue(c.id, activity, memberById, statusById, tagById, activityTitleById)
+      const pfx = c.id === 'title' ? depthPrefix(depth) : ''
+      return escMd(pfx + val)
+    })
+
+  if (!listDisplayRows || listDisplayRows.length === 0) {
+    lines.push(thead, tsep)
+    if (!listDisplayRows || listDisplayRows.length === 0) lines.push('_No activities._')
+    return lines.join('\n')
+  }
+
+  const hasGroups = listDisplayRows.some(r => r.kind === 'group')
+
+  if (hasGroups) {
+    // member or status group-by: one GFM table per section
+    let firstGroup = true
+    for (const row of listDisplayRows) {
+      if (row.kind === 'group') {
+        if (!firstGroup) lines.push('')
+        lines.push(`## ${row.label} (${row.count})`)
+        lines.push('')
+        lines.push(thead)
+        lines.push(tsep)
+        firstGroup = false
+      } else {
+        lines.push(`| ${getCells(row.activity, row.depth).join(' | ')} |`)
+      }
+    }
+  } else {
+    // flat (none) or parent-hierarchy mode: single table, depth prefix in title
+    lines.push(thead, tsep)
+    for (const row of listDisplayRows) {
+      if (row.kind === 'activity') {
+        lines.push(`| ${getCells(row.activity, row.depth).join(' | ')} |`)
+      }
+    }
+  }
+
+  return lines.join('\n')
+}
+
+/** Kanban view → one Markdown section per column, with optional hierarchy nesting. */
+export function buildKanbanMarkdown(
+  data: TextExportData,
+  timelineName: string,
+  filterLabel: string | null,
+): string {
+  const { kanbanColumns, activities, memberById, statusById, tagById, kanbanShowHierarchy, kanbanChildrenByParentId } = data
+  const lines: string[] = [buildHeader(timelineName, filterLabel)]
+  const cols = kanbanColumns ?? [{ label: 'Activities', activities }]
+
+  const fmtItem = (a: ApiActivity, indent: string): string => {
+    const parts: string[] = [a.title]
+    const assignees = resolveAssignees(a, memberById)
+    if (assignees !== '—') parts.push(assignees)
+    const range = fmtDateRange(a.startAt, a.endAt)
+    if (range !== '—') parts.push(range)
+    const status = a.statusId ? (statusById.get(a.statusId) ?? null) : null
+    if (status) parts.push(status)
+    const tags = resolveTags(a, tagById)
+    if (tags) parts.push(tags)
+    return `${indent}- ${parts.join(' · ')}`
+  }
+
+  for (const col of cols) {
+    if (col.activities.length === 0) continue
+    lines.push(`## ${col.label} (${col.activities.length})`)
+    for (const a of col.activities) {
+      lines.push(fmtItem(a, ''))
+      if (kanbanShowHierarchy) {
+        for (const child of kanbanChildrenByParentId.get(a.id) ?? []) {
+          lines.push(fmtItem(child, '  '))
+        }
+      }
+    }
+    lines.push('')
+  }
+
+  if (cols.every(c => c.activities.length === 0)) lines.push('_No activities._')
+  return lines.join('\n').trimEnd()
+}
+
+/** Calendar view → agenda-style date-grouped Markdown list. */
+export function buildCalendarMarkdown(
+  data: TextExportData,
+  timelineName: string,
+  filterLabel: string | null,
+): string {
+  const { activities, memberById, tagById } = data
+  const lines: string[] = [buildHeader(timelineName, filterLabel)]
+
+  if (activities.length === 0) {
+    lines.push('_No activities._')
+    return lines.join('\n')
+  }
+
+  const byDate = new Map<string, ApiActivity[]>()
+  for (const a of activities) {
+    const key = a.startAt?.slice(0, 10) ?? '__none__'
+    const bucket = byDate.get(key) ?? []
+    bucket.push(a)
+    byDate.set(key, bucket)
+  }
+
+  for (const key of [...byDate.keys()].sort()) {
+    const acts = byDate.get(key)!
+    const dateLabel = key === '__none__'
+      ? 'No date'
+      : new Date(`${key}T00:00:00Z`).toLocaleDateString('en-US', {
+          weekday: 'long', month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC',
+        })
+    lines.push(`## ${dateLabel}`)
+    for (const a of acts) {
+      const parts: string[] = [a.title]
+      if (a.endAt && a.endAt.slice(0, 10) !== key) parts.push(`→ ${fmtDate(a.endAt)}`)
+      const assignees = resolveAssignees(a, memberById)
+      if (assignees !== '—') parts.push(assignees)
+      const tags = resolveTags(a, tagById)
+      if (tags) parts.push(tags)
+      lines.push(`- ${parts.join(' · ')}`)
+    }
+    lines.push('')
+  }
+
+  return lines.join('\n').trimEnd()
+}
+
+// ── Plain-text generators ──────────────────────────────────────────────────────
+
+function pad(s: string, width: number): string {
+  return s.length >= width ? s : `${s}${' '.repeat(width - s.length)}`
+}
+
+/**
+ * List view → plain-text outline (bullet list).
+ * Mirrors buildListMarkdownOutline without Markdown syntax — fields (incl. URL)
+ * are emitted raw since there's no Markdown table/pipe syntax to break here.
+ * Root activities use •, children use ◦ (depth 1+).
+ */
+export function buildListPlainTextOutline(
+  data: TextExportData,
+  timelineName: string,
+  filterLabel: string | null,
+): string {
+  const { listDisplayRows, memberById, statusById, tagById, activityTitleById } = data
+  const lines: string[] = [buildPlainHeader(timelineName, filterLabel)]
+
+  if (!listDisplayRows || listDisplayRows.length === 0) {
+    lines.push('No activities.')
+    return lines.join('\n')
+  }
+
+  const fmtActivity = (activity: ApiActivity, depth: number): string[] => {
+    const result: string[] = []
+    const bulletIndent = '  '.repeat(depth)
+    const bullet = depth === 0 ? '•' : '◦'
+    const datePart = fmtDateRange(activity.startAt, activity.endAt)
+    const assignees = resolveAssignees(activity, memberById)
+    let firstLine = `${bulletIndent}${bullet} ${activity.title}`
+    if (datePart !== '—') firstLine += ` (${datePart})`
+    if (assignees !== '—') firstLine += ` — ${assignees}`
+    result.push(firstLine)
+
+    const fi = `${bulletIndent}  `
+    if (activity.description) result.push(`${fi}${activity.description}`)
+    const status = activity.statusId ? statusById.get(activity.statusId) : null
+    if (status) result.push(`${fi}Status: ${status}`)
+    if (activity.percentComplete != null) result.push(`${fi}Progress: ${activity.percentComplete}%`)
+    const parent = activity.parentActivityId ? activityTitleById.get(activity.parentActivityId) : null
+    if (parent) result.push(`${fi}Parent: ${parent}`)
+    const tags = resolveTags(activity, tagById)
+    if (tags) result.push(`${fi}Tags: ${tags}`)
+    if (activity.location) result.push(`${fi}Location: ${activity.location}`)
+    if (activity.url) result.push(`${fi}URL: ${activity.url}`)
+    return result
+  }
+
+  const hasGroups = listDisplayRows.some(r => r.kind === 'group')
+
+  if (hasGroups) {
+    let firstGroup = true
+    for (const row of listDisplayRows) {
+      if (row.kind === 'group') {
+        if (!firstGroup) lines.push('')
+        const heading = `${row.label.toUpperCase()} (${row.count})`
+        lines.push(heading)
+        lines.push('─'.repeat(heading.length))
+        firstGroup = false
+      } else {
+        lines.push(...fmtActivity(row.activity, row.depth))
+        lines.push('')
+      }
+    }
+  } else {
+    for (const row of listDisplayRows) {
+      if (row.kind === 'activity') {
+        lines.push(...fmtActivity(row.activity, row.depth))
+        lines.push('')
+      }
+    }
+  }
+
+  return lines.join('\n').trimEnd()
+}
+
+/** List view → space-padded plain-text table, respecting column visibility, sort, group-by, and hierarchy. */
+export function buildListPlainText(
+  data: TextExportData,
+  timelineName: string,
+  filterLabel: string | null,
+): string {
+  const { listDisplayRows, listVisibleColumns, memberById, statusById, tagById, activityTitleById } = data
+  const lines: string[] = [buildPlainHeader(timelineName, filterLabel)]
+
+  const cols = resolveListColumns(listVisibleColumns)
+  const MAX_W: Record<string, number> = {
+    title: 40, startAt: 15, endAt: 15, duration: 10, status: 20,
+    assignees: 26, tags: 20, progress: 10, parent: 24, description: 30,
+    location: 20, url: 30, notes: 30, createdAt: 15, updatedAt: 15,
+  }
+
+  const getRenderedValue = (colId: string, activity: ApiActivity, depth: number): string => {
+    const val = getColValue(colId, activity, memberById, statusById, tagById, activityTitleById)
+    const pfx = colId === 'title' ? depthPrefix(depth) : ''
+    return pfx + val
+  }
+
+  const activityRows = (listDisplayRows ?? []).filter((r): r is { kind: 'activity'; activity: ApiActivity; depth: number } => r.kind === 'activity')
+  const fallbackActivities = activityRows.length > 0
+    ? activityRows.map(r => ({ activity: r.activity, depth: r.depth }))
+    : data.activities.map(a => ({ activity: a, depth: 0 }))
+
+  if (fallbackActivities.length === 0) {
+    lines.push('No activities.')
+    return lines.join('\n')
+  }
+
+  // Compute column widths from actual rendered content
+  const widths = cols.map(col => {
+    let w = col.label.length
+    for (const { activity, depth } of fallbackActivities) {
+      const rendered = getRenderedValue(col.id, activity, depth)
+      w = Math.max(w, Math.min(rendered.length, MAX_W[col.id] ?? 20))
+    }
+    return w
+  })
+
+  const emitTableHeader = () => {
+    lines.push(cols.map((c, i) => pad(c.label, widths[i])).join('  '))
+    lines.push(widths.map(w => '─'.repeat(w)).join('  '))
+  }
+
+  const emitRow = (activity: ApiActivity, depth: number) => {
+    lines.push(
+      cols.map((c, i) => {
+        const rendered = getRenderedValue(c.id, activity, depth)
+        return pad(rendered.slice(0, widths[i]), widths[i])
+      }).join('  '),
+    )
+  }
+
+  if (!listDisplayRows) {
+    emitTableHeader()
+    for (const { activity, depth } of fallbackActivities) emitRow(activity, depth)
+    return lines.join('\n')
+  }
+
+  const hasGroups = listDisplayRows.some(r => r.kind === 'group')
+
+  if (hasGroups) {
+    let firstGroup = true
+    for (const row of listDisplayRows) {
+      if (row.kind === 'group') {
+        if (!firstGroup) lines.push('')
+        const heading = `${row.label.toUpperCase()} (${row.count})`
+        lines.push(heading)
+        lines.push('─'.repeat(heading.length))
+        emitTableHeader()
+        firstGroup = false
+      } else {
+        emitRow(row.activity, row.depth)
+      }
+    }
+  } else {
+    emitTableHeader()
+    for (const row of listDisplayRows) {
+      if (row.kind === 'activity') emitRow(row.activity, row.depth)
+    }
+  }
+
+  return lines.join('\n')
+}
+
+/** Kanban view → plain-text sections with bullet lists. */
+export function buildKanbanPlainText(
+  data: TextExportData,
+  timelineName: string,
+  filterLabel: string | null,
+): string {
+  const { kanbanColumns, activities, memberById, statusById, tagById, kanbanShowHierarchy, kanbanChildrenByParentId } = data
+  const lines: string[] = [buildPlainHeader(timelineName, filterLabel)]
+  const cols = kanbanColumns ?? [{ label: 'Activities', activities }]
+
+  const fmtItem = (a: ApiActivity): string => {
+    const parts: string[] = [a.title]
+    const assignees = resolveAssignees(a, memberById)
+    if (assignees !== '—') parts.push(assignees)
+    const range = fmtDateRange(a.startAt, a.endAt)
+    if (range !== '—') parts.push(range)
+    const status = a.statusId ? (statusById.get(a.statusId) ?? null) : null
+    if (status) parts.push(status)
+    const tags = resolveTags(a, tagById)
+    if (tags) parts.push(tags)
+    return parts.join(' · ')
+  }
+
+  for (const col of cols) {
+    if (col.activities.length === 0) continue
+    const heading = `${col.label.toUpperCase()} (${col.activities.length})`
+    lines.push(heading)
+    lines.push('─'.repeat(heading.length))
+    for (const a of col.activities) {
+      lines.push(`  • ${fmtItem(a)}`)
+      if (kanbanShowHierarchy) {
+        for (const child of kanbanChildrenByParentId.get(a.id) ?? []) {
+          lines.push(`      ◦ ${fmtItem(child)}`)
+        }
+      }
+    }
+    lines.push('')
+  }
+
+  if (cols.every(c => c.activities.length === 0)) lines.push('No activities.')
+  return lines.join('\n').trimEnd()
+}
+
+/** Calendar view → plain-text agenda. */
+export function buildCalendarPlainText(
+  data: TextExportData,
+  timelineName: string,
+  filterLabel: string | null,
+): string {
+  const { activities, memberById, tagById } = data
+  const lines: string[] = [buildPlainHeader(timelineName, filterLabel)]
+
+  if (activities.length === 0) { lines.push('No activities.'); return lines.join('\n') }
+
+  const byDate = new Map<string, ApiActivity[]>()
+  for (const a of activities) {
+    const key = a.startAt?.slice(0, 10) ?? '__none__'
+    const bucket = byDate.get(key) ?? []
+    bucket.push(a)
+    byDate.set(key, bucket)
+  }
+
+  for (const key of [...byDate.keys()].sort()) {
+    const acts = byDate.get(key)!
+    const dateLabel = key === '__none__'
+      ? 'No date'
+      : new Date(`${key}T00:00:00Z`).toLocaleDateString('en-US', {
+          weekday: 'long', month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC',
+        })
+    lines.push(dateLabel)
+    lines.push('─'.repeat(dateLabel.length))
+    for (const a of acts) {
+      const parts: string[] = [a.title]
+      if (a.endAt && a.endAt.slice(0, 10) !== key) parts.push(`→ ${fmtDate(a.endAt)}`)
+      const assignees = resolveAssignees(a, memberById)
+      if (assignees !== '—') parts.push(assignees)
+      const tags = resolveTags(a, tagById)
+      if (tags) parts.push(tags)
+      lines.push(`  • ${parts.join(' · ')}`)
+    }
+    lines.push('')
+  }
+
+  return lines.join('\n').trimEnd()
+}
+
+// ── HTML generators (for clipboard text/html flavor) ──────────────────────────
+
+const TH = 'padding:6px 10px;border:1px solid #ccc;background:#f5f5f5;font-weight:600;text-align:left;white-space:nowrap;font-family:system-ui,sans-serif;font-size:13px'
+const TD = 'padding:5px 10px;border:1px solid #ddd;vertical-align:top;font-family:system-ui,sans-serif;font-size:13px'
+
+function htmlHeaderBlock(timelineName: string, filterLabel: string | null): string {
+  const today = new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })
+  const ctx = filterLabel ? ` · Filter: ${htmlEsc(filterLabel)}` : ''
+  return `<p style="font-family:system-ui,sans-serif;font-size:13px;margin:0 0 10px"><strong>${htmlEsc(timelineName)}</strong> — ${today}${ctx}</p>`
+}
+
+/** List view → HTML table for clipboard, respecting column visibility, sort, group-by, and hierarchy. */
+export function buildListHtml(
+  data: TextExportData,
+  timelineName: string,
+  filterLabel: string | null,
+): string {
+  const { listDisplayRows, listVisibleColumns, memberById, statusById, tagById, activityTitleById } = data
+  const cols = resolveListColumns(listVisibleColumns)
+
+  const theadRow = `<tr>${cols.map(c => `<th style="${TH}">${htmlEsc(c.label)}</th>`).join('')}</tr>`
+  const thead = `<thead>${theadRow}</thead>`
+  const colspan = cols.length
+
+  const makeRow = (activity: ApiActivity, depth: number): string => {
+    const cells = cols.map(c => {
+      const val = getColValue(c.id, activity, memberById, statusById, tagById, activityTitleById)
+      const paddingLeft = c.id === 'title' && depth > 0 ? `padding-left:${6 + depth * 16}px;` : ''
+      const prefix = c.id === 'title' && depth > 0 ? '↳ ' : ''
+      return `<td style="${paddingLeft}${TD}">${htmlEsc(prefix + val)}</td>`
+    })
+    return `<tr>${cells.join('')}</tr>`
+  }
+
+  const makeSection = (label: string, count: number): string =>
+    `<tr><th colspan="${colspan}" style="${TH};background:#e8e8e8;font-size:12px">${htmlEsc(label)} (${count})</th></tr>`
+
+  const rows: string[] = []
+  const activityList = listDisplayRows ?? data.activities.map(a => ({ kind: 'activity' as const, activity: a, depth: 0 }))
+
+  if (activityList.length === 0) {
+    rows.push(`<tr><td colspan="${colspan}" style="${TD}"><em>No activities.</em></td></tr>`)
+  } else {
+    for (const row of activityList) {
+      if (row.kind === 'group') {
+        rows.push(makeSection(row.label, row.count))
+        rows.push(theadRow)
+      } else {
+        rows.push(makeRow(row.activity, row.depth))
+      }
+    }
+  }
+
+  return `${htmlHeaderBlock(timelineName, filterLabel)}<table style="border-collapse:collapse">${thead}<tbody>${rows.join('')}</tbody></table>`
+}
+
+/** List view → HTML outline (bullet list) for clipboard. Mirrors buildListMarkdownOutline. */
+export function buildListHtmlOutline(
+  data: TextExportData,
+  timelineName: string,
+  filterLabel: string | null,
+): string {
+  const { listDisplayRows, memberById, statusById, tagById, activityTitleById } = data
+
+  const LI = 'font-family:system-ui,sans-serif;font-size:13px;margin:3px 0'
+  const FIELD = 'font-family:system-ui,sans-serif;font-size:12px;color:#555;margin:1px 0 1px 0'
+
+  const fmtActivity = (activity: ApiActivity, depth: number): string => {
+    const datePart = fmtDateRange(activity.startAt, activity.endAt)
+    const assignees = resolveAssignees(activity, memberById)
+    let firstLine = `<strong>${htmlEsc(activity.title)}</strong>`
+    if (datePart !== '—') firstLine += ` <span style="color:#777">(${htmlEsc(datePart)})</span>`
+    if (assignees !== '—') firstLine += ` — ${htmlEsc(assignees)}`
+
+    const fields: string[] = []
+    if (activity.description) fields.push(htmlEsc(activity.description))
+    const status = activity.statusId ? statusById.get(activity.statusId) : null
+    if (status) fields.push(`Status: ${htmlEsc(status)}`)
+    if (activity.percentComplete != null) fields.push(`Progress: ${activity.percentComplete}%`)
+    const parent = activity.parentActivityId ? activityTitleById.get(activity.parentActivityId) : null
+    if (parent) fields.push(`Parent: ${htmlEsc(parent)}`)
+    const tags = resolveTags(activity, tagById)
+    if (tags) fields.push(`Tags: ${htmlEsc(tags)}`)
+    if (activity.location) fields.push(`Location: ${htmlEsc(activity.location)}`)
+    if (activity.url) fields.push(`URL: ${htmlEsc(activity.url)}`)
+
+    const fieldHtml = fields.length > 0
+      ? `<div style="margin:2px 0 0 0">${fields.map(f => `<div style="${FIELD}">${f}</div>`).join('')}</div>`
+      : ''
+
+    const paddingLeft = depth > 0 ? `padding-left:${depth * 20}px;` : ''
+    return `<li style="${paddingLeft}${LI}">${firstLine}${fieldHtml}</li>`
+  }
+
+  const activityList = listDisplayRows ?? data.activities.map(a => ({ kind: 'activity' as const, activity: a, depth: 0 }))
+
+  if (activityList.length === 0) {
+    return `${htmlHeaderBlock(timelineName, filterLabel)}<p style="font-family:system-ui,sans-serif;font-size:13px"><em>No activities.</em></p>`
+  }
+
+  const hasGroups = activityList.some(r => r.kind === 'group')
+  const sections: string[] = []
+
+  if (hasGroups) {
+    let items: string[] = []
+    let groupLabel = ''
+    let groupCount = 0
+    const flush = () => {
+      if (groupLabel) sections.push(`<h3 style="font-family:system-ui,sans-serif;font-size:14px;margin:16px 0 4px">${htmlEsc(groupLabel)} (${groupCount})</h3><ul style="margin:0;padding-left:20px">${items.join('')}</ul>`)
+    }
+    for (const row of activityList) {
+      if (row.kind === 'group') {
+        flush()
+        groupLabel = row.label
+        groupCount = row.count
+        items = []
+      } else {
+        items.push(fmtActivity(row.activity, row.depth))
+      }
+    }
+    flush()
+  } else {
+    const items = activityList
+      .filter((r): r is { kind: 'activity'; activity: ApiActivity; depth: number } => r.kind === 'activity')
+      .map(r => fmtActivity(r.activity, r.depth))
+    sections.push(`<ul style="margin:0;padding-left:20px">${items.join('')}</ul>`)
+  }
+
+  return `${htmlHeaderBlock(timelineName, filterLabel)}${sections.join('')}`
+}
+
+/** Kanban view → HTML sections with optional hierarchy nesting. */
+export function buildKanbanHtml(
+  data: TextExportData,
+  timelineName: string,
+  filterLabel: string | null,
+): string {
+  const { kanbanColumns, activities, memberById, statusById, tagById, kanbanShowHierarchy, kanbanChildrenByParentId } = data
+  const cols = kanbanColumns ?? [{ label: 'Activities', activities }]
+
+  const fmtLi = (a: ApiActivity, style: string): string => {
+    const parts: string[] = [htmlEsc(a.title)]
+    const assignees = resolveAssignees(a, memberById)
+    if (assignees !== '—') parts.push(htmlEsc(assignees))
+    const range = fmtDateRange(a.startAt, a.endAt)
+    if (range !== '—') parts.push(htmlEsc(range))
+    const status = a.statusId ? (statusById.get(a.statusId) ?? null) : null
+    if (status) parts.push(htmlEsc(status))
+    const tags = resolveTags(a, tagById)
+    if (tags) parts.push(htmlEsc(tags))
+    return `<li style="${style}">${parts.join(' · ')}</li>`
+  }
+
+  const LI = 'font-family:system-ui,sans-serif;font-size:13px;margin:2px 0'
+  const LI_CHILD = 'font-family:system-ui,sans-serif;font-size:12px;margin:2px 0;color:#555'
+
+  const sections = cols
+    .filter(c => c.activities.length > 0)
+    .map(col => {
+      const items: string[] = []
+      for (const a of col.activities) {
+        const children = kanbanShowHierarchy ? (kanbanChildrenByParentId.get(a.id) ?? []) : []
+        if (children.length > 0) {
+          const childList = children.map(c => fmtLi(c, LI_CHILD)).join('')
+          items.push(`<li style="${LI}">${[htmlEsc(a.title), ...([resolveAssignees(a, memberById)].filter(s => s !== '—'))].join(' · ')}<ul style="margin:2px 0;padding-left:16px">${childList}</ul></li>`)
+        } else {
+          items.push(fmtLi(a, LI))
+        }
+      }
+      return `<h3 style="font-family:system-ui,sans-serif;font-size:14px;margin:16px 0 4px">${htmlEsc(col.label)} (${col.activities.length})</h3><ul style="margin:0;padding-left:20px">${items.join('')}</ul>`
+    })
+
+  const body = sections.length > 0 ? sections.join('') : '<p style="font-family:system-ui,sans-serif;font-size:13px"><em>No activities.</em></p>'
+  return `${htmlHeaderBlock(timelineName, filterLabel)}${body}`
+}
+
+/** Calendar view → HTML agenda. */
+export function buildCalendarHtml(
+  data: TextExportData,
+  timelineName: string,
+  filterLabel: string | null,
+): string {
+  const { activities, memberById, tagById } = data
+  if (activities.length === 0) {
+    return `${htmlHeaderBlock(timelineName, filterLabel)}<p style="font-family:system-ui,sans-serif;font-size:13px"><em>No activities.</em></p>`
+  }
+
+  const byDate = new Map<string, ApiActivity[]>()
+  for (const a of activities) {
+    const key = a.startAt?.slice(0, 10) ?? '__none__'
+    const bucket = byDate.get(key) ?? []
+    bucket.push(a)
+    byDate.set(key, bucket)
+  }
+
+  const sections = [...byDate.keys()].sort().map(key => {
+    const acts = byDate.get(key)!
+    const dateLabel = key === '__none__'
+      ? 'No date'
+      : new Date(`${key}T00:00:00Z`).toLocaleDateString('en-US', {
+          weekday: 'long', month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC',
+        })
+    const items = acts.map(a => {
+      const parts: string[] = [htmlEsc(a.title)]
+      if (a.endAt && a.endAt.slice(0, 10) !== key) parts.push(`→ ${htmlEsc(fmtDate(a.endAt))}`)
+      const assignees = resolveAssignees(a, memberById)
+      if (assignees !== '—') parts.push(htmlEsc(assignees))
+      const tags = resolveTags(a, tagById)
+      if (tags) parts.push(htmlEsc(tags))
+      return `<li style="font-family:system-ui,sans-serif;font-size:13px;margin:2px 0">${parts.join(' · ')}</li>`
+    })
+    return `<h3 style="font-family:system-ui,sans-serif;font-size:14px;margin:16px 0 4px">${htmlEsc(dateLabel)}</h3><ul style="margin:0;padding-left:20px">${items.join('')}</ul>`
+  })
+
+  return `${htmlHeaderBlock(timelineName, filterLabel)}${sections.join('')}`
+}
+````
+
+## File: packages/api/cmd/draba/main.go
 ````go
-// Package db contains the persistence layer for draba.
-package db
+// Command draba is the API server entry point. It wires repositories,
+// the auth token service, and tier configuration into the HTTP server,
+// then listens for requests until the process is killed.
+package main
 
 import (
+	"context"
 	"fmt"
-	"time"
+	"io/fs"
+	"log/slog"
+	"net/http"
+	"os"
+	"strings"
 
-	"github.com/jmoiron/sqlx"
-
-	"github.com/I0-1O/draba/packages/api/internal/models"
+	"github.com/I0-1O/draba/packages/api/internal/api"
+	"github.com/I0-1O/draba/packages/api/internal/auth"
+	"github.com/I0-1O/draba/packages/api/internal/buildinfo"
+	"github.com/I0-1O/draba/packages/api/internal/db"
+	"github.com/I0-1O/draba/packages/api/internal/events"
+	"github.com/I0-1O/draba/packages/api/internal/mailer"
+	"github.com/I0-1O/draba/packages/api/internal/tier"
+	"github.com/I0-1O/draba/packages/api/internal/ws"
+	sampledata "github.com/I0-1O/draba/packages/api/sample_data"
+	drabui "github.com/I0-1O/draba/packages/api/ui"
 )
 
-// ShareRepo is the persistence layer for Share records.
-type ShareRepo struct {
-	db *sqlx.DB
-}
+const banner = "\n" +
+	"      _           _\n" +
+	"     | |         | |\n" +
+	"   __| |_ __ __ _| |__   __ _\n" +
+	"  / _` | '__/ _` | '_ \\ / _` |\n" +
+	" | (_| | | | (_| | |_) | (_| |\n" +
+	"  \\__,_|_|  \\__,_|_.__/ \\__,_|\n" +
+	"\n" +
+	"  see who's doing what, when.\n\n"
 
-// NewShareRepo returns a ShareRepo backed by db.
-func NewShareRepo(db *sqlx.DB) *ShareRepo {
-	return &ShareRepo{db: db}
-}
+func main() {
+	if len(os.Args) > 1 && os.Args[1] == "reset-password" {
+		runResetPassword(os.Args[2:])
+		return
+	}
 
-// Create inserts a new Share row.
-func (r *ShareRepo) Create(s *models.Share) error {
-	_, err := r.db.NamedExec(`
-		INSERT INTO shares (
-			id, timeline_id, token, kind, scope, member_id, name, description,
-			view_type, view_config, password_hash, created_by, created_at, view_count
-		) VALUES (
-			:id, :timeline_id, :token, :kind, :scope, :member_id, :name, :description,
-			:view_type, :view_config, :password_hash, :created_by, :created_at, :view_count
-		)
-	`, s)
+	setupLogger()
+	fmt.Print(banner)
+	slog.Info("build", "commit", buildinfo.Short(), "built", buildinfo.Built)
+
+	port := getenv("DRABA_PORT", "8080")
+	dsn := getenv("DRABA_DB_DSN", "/data/draba.db")
+	jwtSecret := os.Getenv("DRABA_JWT_SECRET")
+	if jwtSecret == "" {
+		slog.Error("DRABA_JWT_SECRET must be set")
+		os.Exit(1)
+	}
+
+	t, err := tier.Load()
 	if err != nil {
-		return fmt.Errorf("creating share: %w", err)
+		slog.Error("tier load failed", "err", err)
+		os.Exit(1)
 	}
-	return nil
-}
+	l := t.Limits()
+	if l.MaxUsers == 0 {
+		slog.Info("tier", "tier", t)
+	} else {
+		slog.Info("tier", "tier", t, "maxUsers", l.MaxUsers, "maxTeams", l.MaxTeams)
+	}
 
-// GetByID fetches a Share by primary key. Returns sql.ErrNoRows (wrapped) when
-// no row matches.
-func (r *ShareRepo) GetByID(id string) (*models.Share, error) {
-	var s models.Share
-	if err := r.db.Get(&s, `SELECT * FROM shares WHERE id = ?`, id); err != nil {
-		return nil, fmt.Errorf("getting share: %w", err)
-	}
-	s.Protected = s.PasswordHash != nil
-	return &s, nil
-}
-
-// GetByToken fetches a Share by its public token. Returns sql.ErrNoRows
-// (wrapped) when no row matches.
-func (r *ShareRepo) GetByToken(token string) (*models.Share, error) {
-	var s models.Share
-	if err := r.db.Get(&s, `SELECT * FROM shares WHERE token = ?`, token); err != nil {
-		return nil, fmt.Errorf("getting share by token: %w", err)
-	}
-	s.Protected = s.PasswordHash != nil
-	return &s, nil
-}
-
-// ListByTimeline returns all non-revoked shares for a timeline, ordered by
-// creation time ascending.
-func (r *ShareRepo) ListByTimeline(timelineID string) ([]*models.Share, error) {
-	out := make([]*models.Share, 0)
-	if err := r.db.Select(&out,
-		`SELECT * FROM shares WHERE timeline_id = ? ORDER BY created_at ASC`,
-		timelineID,
-	); err != nil {
-		return nil, fmt.Errorf("listing shares: %w", err)
-	}
-	for _, s := range out {
-		s.Protected = s.PasswordHash != nil
-	}
-	return out, nil
-}
-
-// Update writes mutable fields for an existing share.
-func (r *ShareRepo) Update(s *models.Share) error {
-	_, err := r.db.NamedExec(`
-		UPDATE shares SET
-			name          = :name,
-			description   = :description,
-			view_type     = :view_type,
-			view_config   = :view_config,
-			password_hash = :password_hash
-		WHERE id = :id
-	`, s)
+	database, err := db.Open(dsn)
 	if err != nil {
-		return fmt.Errorf("updating share: %w", err)
+		slog.Error("db: open failed", "err", err)
+		os.Exit(1)
 	}
-	return nil
-}
+	slog.Info("db: opened", "dsn", dsn)
 
-// RotateToken replaces a share's token, immediately invalidating the old URL.
-// This is the revocation story for ICS feeds, which have no password gate.
-func (r *ShareRepo) RotateToken(id, newToken string) error {
-	if _, err := r.db.Exec(`UPDATE shares SET token = ? WHERE id = ?`, newToken, id); err != nil {
-		return fmt.Errorf("rotating share token: %w", err)
+	if err := db.Migrate(database); err != nil {
+		slog.Error("db: migrate failed", "err", err)
+		os.Exit(1)
 	}
-	return nil
-}
+	slog.Info("db: migrations applied")
 
-// Delete permanently removes a share row.
-func (r *ShareRepo) Delete(id string) error {
-	if _, err := r.db.Exec(`DELETE FROM shares WHERE id = ?`, id); err != nil {
-		return fmt.Errorf("deleting share: %w", err)
+	// Optional pre-launch convenience: seed the canonical sample dataset into an
+	// empty database so a freshly-wiped dev/test instance comes up populated.
+	// Gated by DRABA_SEED_SAMPLE_DATA and a no-op once the DB has any users — it
+	// must stay unset in any real deployment.
+	if os.Getenv("DRABA_SEED_SAMPLE_DATA") == "1" {
+		sql, err := sampledata.SQL()
+		if err != nil {
+			slog.Error("db: reading embedded sample data failed", "err", err)
+			os.Exit(1)
+		}
+		seeded, err := db.SeedSampleDataIfEmpty(database, sql)
+		if err != nil {
+			slog.Error("db: sample-data seed failed", "err", err)
+			os.Exit(1)
+		}
+		if seeded {
+			slog.Info("db: sample data seeded (database was empty)")
+		} else {
+			slog.Info("db: sample-data seed skipped (database already populated)")
+		}
 	}
-	return nil
-}
 
-// RecordView increments view_count and sets last_viewed_at to now for a share.
-func (r *ShareRepo) RecordView(id string) error {
-	_, err := r.db.Exec(
-		`UPDATE shares SET view_count = view_count + 1, last_viewed_at = ? WHERE id = ?`,
-		time.Now().UTC(), id,
-	)
+	users := db.NewUserRepo(database)
+	invites := db.NewInviteRepo(database)
+	teams := db.NewTeamRepo(database)
+	activityRepo := db.NewActivityRepo(database)
+	timelineRepo := db.NewTimelineRepo(database)
+	savedFilterRepo := db.NewSavedFilterRepo(database)
+	preferenceRepo := db.NewUserPreferenceRepo(database)
+	apiTokenRepo := db.NewAPITokenRepo(database)
+	instanceSetsRepo := db.NewInstanceSettingsRepo(database)
+	passwordTokensRepo := db.NewPasswordResetTokenRepo(database)
+	statusRepo := db.NewStatusRepo(database)
+	tagRepo := db.NewTagRepo(database)
+	shareRepo := db.NewShareRepo(database)
+	m := mailer.New(instanceSetsRepo, []byte(jwtSecret))
+	tokens := auth.NewTokenService(jwtSecret)
+
+	bus := events.NewBus()
+	hub := ws.NewHub(bus, tokens, func(teamID, userID string) error {
+		_, err := teams.GetMember(teamID, userID)
+		return err
+	})
+	go hub.Run()
+	slog.Info("ws: hub running")
+
+	if mods := tier.Registered(); len(mods) > 0 {
+		slog.Info("modules loaded", "count", len(mods))
+	}
+
+	srv := api.NewServer(users, invites, teams, activityRepo, timelineRepo, savedFilterRepo, preferenceRepo, apiTokenRepo, instanceSetsRepo, passwordTokensRepo, statusRepo, tagRepo, shareRepo, m, tokens, t, bus, hub)
+
+	// Wire up the embedded React SPA when a production build is present.
+	// In dev the static/ directory only has .gitkeep so this is a no-op.
+	if sub, err := fs.Sub(drabui.FS, "static"); err == nil {
+		if _, err := sub.Open("index.html"); err == nil {
+			srv.WithUI(sub)
+			slog.Info("ui: serving embedded SPA")
+		}
+	}
+
+	// Optional SSO. OIDC is disabled unless DRABA_OIDC_ISSUER is set. When it
+	// is, discovery runs against the issuer at startup; a failure here is fatal
+	// so a broken SSO setup is caught at boot rather than presenting users a
+	// dead login button. The client secret is read once and never leaves the
+	// process.
+	oidcSvc, err := auth.NewOIDCService(context.Background(), &auth.OIDCConfig{
+		Issuer:       os.Getenv("DRABA_OIDC_ISSUER"),
+		ClientID:     os.Getenv("DRABA_OIDC_CLIENT_ID"),
+		ClientSecret: os.Getenv("DRABA_OIDC_CLIENT_SECRET"),
+		RedirectURL:  oidcRedirectURL(),
+	})
 	if err != nil {
-		return fmt.Errorf("recording share view: %w", err)
+		slog.Error("oidc: configuration failed", "err", err)
+		os.Exit(1)
 	}
-	return nil
+	if oidcSvc != nil {
+		// Auto-provisioning defaults ON (first SSO login creates the account),
+		// matching the password-register bootstrap. Set DRABA_OIDC_AUTO_CREATE=0
+		// to require accounts be pre-created before SSO login is allowed.
+		autoCreate := os.Getenv("DRABA_OIDC_AUTO_CREATE") != "0"
+		srv.WithOIDC(oidcSvc, autoCreate)
+		slog.Info("oidc: SSO enabled", "issuer", os.Getenv("DRABA_OIDC_ISSUER"), "autoCreate", autoCreate)
+	}
+
+	slog.Info("listening", "port", port)
+	if err := http.ListenAndServe(":"+port, srv.Routes()); err != nil {
+		slog.Error("server error", "err", err)
+		os.Exit(1)
+	}
+}
+
+// oidcRedirectURL returns the OIDC callback URL the IdP must redirect back to.
+// It honours an explicit DRABA_OIDC_REDIRECT_URL override, otherwise derives it
+// from DRABA_BASE_URL so a single base-URL setting covers both the app and the
+// SSO callback.
+func oidcRedirectURL() string {
+	if v := os.Getenv("DRABA_OIDC_REDIRECT_URL"); v != "" {
+		return v
+	}
+	if os.Getenv("DRABA_OIDC_ISSUER") == "" {
+		return "" // SSO disabled; no redirect needed.
+	}
+	return strings.TrimRight(getenv("DRABA_BASE_URL", "http://localhost:8080"), "/") + "/auth/oidc/callback"
+}
+
+// setupLogger initialises the global slog logger. Level is controlled by
+// DRABA_LOG_LEVEL (debug | info | warn | error); default is info.
+// All output goes to stdout so Docker captures it in `docker logs`.
+func setupLogger() {
+	level := slog.LevelInfo
+	switch strings.ToLower(os.Getenv("DRABA_LOG_LEVEL")) {
+	case "debug":
+		level = slog.LevelDebug
+	case "warn":
+		level = slog.LevelWarn
+	case "error":
+		level = slog.LevelError
+	}
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level})))
+}
+
+// getenv returns the env var value or fallback when unset/empty.
+func getenv(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
 }
 ````
 
@@ -57150,215 +57675,154 @@ describe('useUnlockShare', () => {
 })
 ````
 
-## File: packages/api/cmd/draba/main.go
-````go
-// Command draba is the API server entry point. It wires repositories,
-// the auth token service, and tier configuration into the HTTP server,
-// then listens for requests until the process is killed.
-package main
+## File: packages/web/src/hooks/useShares.ts
+````typescript
+/**
+ * TanStack Query hooks for Share CRUD and the public share projection.
+ *
+ * Authenticated hooks (useCreateShare, useListShares, useDeleteShare) require
+ * an auth token. useShareProjection is public and uses a plain fetch.
+ */
 
-import (
-	"context"
-	"fmt"
-	"io/fs"
-	"log/slog"
-	"net/http"
-	"os"
-	"strings"
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import type { components } from '@draba/shared'
+import { createAuthFetch, API_BASE, ApiError } from '@/lib/api'
+import { useAuth } from '@/contexts/AuthContext'
 
-	"github.com/I0-1O/draba/packages/api/internal/api"
-	"github.com/I0-1O/draba/packages/api/internal/auth"
-	"github.com/I0-1O/draba/packages/api/internal/buildinfo"
-	"github.com/I0-1O/draba/packages/api/internal/db"
-	"github.com/I0-1O/draba/packages/api/internal/events"
-	"github.com/I0-1O/draba/packages/api/internal/mailer"
-	"github.com/I0-1O/draba/packages/api/internal/tier"
-	"github.com/I0-1O/draba/packages/api/internal/ws"
-	sampledata "github.com/I0-1O/draba/packages/api/sample_data"
-	drabui "github.com/I0-1O/draba/packages/api/ui"
-)
+type Share = components['schemas']['Share']
+type ShareProjection = components['schemas']['ShareProjection']
 
-const banner = "\n" +
-	"      _           _\n" +
-	"     | |         | |\n" +
-	"   __| |_ __ __ _| |__   __ _\n" +
-	"  / _` | '__/ _` | '_ \\ / _` |\n" +
-	" | (_| | | | (_| | |_) | (_| |\n" +
-	"  \\__,_|_|  \\__,_|_.__/ \\__,_|\n" +
-	"\n" +
-	"  see who's doing what, when.\n\n"
+const sharesKey = (teamId: string, timelineId: string) =>
+  ['teams', teamId, 'timelines', timelineId, 'shares'] as const
 
-func main() {
-	if len(os.Args) > 1 && os.Args[1] == "reset-password" {
-		runResetPassword(os.Args[2:])
-		return
-	}
+// ── Authenticated hooks ───────────────────────────────────────────────────────
 
-	setupLogger()
-	fmt.Print(banner)
-	slog.Info("build", "commit", buildinfo.Short(), "built", buildinfo.Built)
-
-	port := getenv("DRABA_PORT", "8080")
-	dsn := getenv("DRABA_DB_DSN", "/data/draba.db")
-	jwtSecret := os.Getenv("DRABA_JWT_SECRET")
-	if jwtSecret == "" {
-		slog.Error("DRABA_JWT_SECRET must be set")
-		os.Exit(1)
-	}
-
-	t, err := tier.Load()
-	if err != nil {
-		slog.Error("tier load failed", "err", err)
-		os.Exit(1)
-	}
-	l := t.Limits()
-	if l.MaxUsers == 0 {
-		slog.Info("tier", "tier", t)
-	} else {
-		slog.Info("tier", "tier", t, "maxUsers", l.MaxUsers, "maxTeams", l.MaxTeams)
-	}
-
-	database, err := db.Open(dsn)
-	if err != nil {
-		slog.Error("db: open failed", "err", err)
-		os.Exit(1)
-	}
-	slog.Info("db: opened", "dsn", dsn)
-
-	if err := db.Migrate(database); err != nil {
-		slog.Error("db: migrate failed", "err", err)
-		os.Exit(1)
-	}
-	slog.Info("db: migrations applied")
-
-	// Optional pre-launch convenience: seed the canonical sample dataset into an
-	// empty database so a freshly-wiped dev/test instance comes up populated.
-	// Gated by DRABA_SEED_SAMPLE_DATA and a no-op once the DB has any users — it
-	// must stay unset in any real deployment.
-	if os.Getenv("DRABA_SEED_SAMPLE_DATA") == "1" {
-		sql, err := sampledata.SQL()
-		if err != nil {
-			slog.Error("db: reading embedded sample data failed", "err", err)
-			os.Exit(1)
-		}
-		seeded, err := db.SeedSampleDataIfEmpty(database, sql)
-		if err != nil {
-			slog.Error("db: sample-data seed failed", "err", err)
-			os.Exit(1)
-		}
-		if seeded {
-			slog.Info("db: sample data seeded (database was empty)")
-		} else {
-			slog.Info("db: sample-data seed skipped (database already populated)")
-		}
-	}
-
-	users := db.NewUserRepo(database)
-	invites := db.NewInviteRepo(database)
-	teams := db.NewTeamRepo(database)
-	activityRepo := db.NewActivityRepo(database)
-	timelineRepo := db.NewTimelineRepo(database)
-	savedFilterRepo := db.NewSavedFilterRepo(database)
-	preferenceRepo := db.NewUserPreferenceRepo(database)
-	apiTokenRepo := db.NewAPITokenRepo(database)
-	instanceSetsRepo := db.NewInstanceSettingsRepo(database)
-	passwordTokensRepo := db.NewPasswordResetTokenRepo(database)
-	statusRepo := db.NewStatusRepo(database)
-	tagRepo := db.NewTagRepo(database)
-	shareRepo := db.NewShareRepo(database)
-	m := mailer.New(instanceSetsRepo, []byte(jwtSecret))
-	tokens := auth.NewTokenService(jwtSecret)
-
-	bus := events.NewBus()
-	hub := ws.NewHub(bus, tokens, func(teamID, userID string) error {
-		_, err := teams.GetMember(teamID, userID)
-		return err
-	})
-	go hub.Run()
-	slog.Info("ws: hub running")
-
-	if mods := tier.Registered(); len(mods) > 0 {
-		slog.Info("modules loaded", "count", len(mods))
-	}
-
-	srv := api.NewServer(users, invites, teams, activityRepo, timelineRepo, savedFilterRepo, preferenceRepo, apiTokenRepo, instanceSetsRepo, passwordTokensRepo, statusRepo, tagRepo, shareRepo, m, tokens, t, bus, hub)
-
-	// Wire up the embedded React SPA when a production build is present.
-	// In dev the static/ directory only has .gitkeep so this is a no-op.
-	if sub, err := fs.Sub(drabui.FS, "static"); err == nil {
-		if _, err := sub.Open("index.html"); err == nil {
-			srv.WithUI(sub)
-			slog.Info("ui: serving embedded SPA")
-		}
-	}
-
-	// Optional SSO. OIDC is disabled unless DRABA_OIDC_ISSUER is set. When it
-	// is, discovery runs against the issuer at startup; a failure here is fatal
-	// so a broken SSO setup is caught at boot rather than presenting users a
-	// dead login button. The client secret is read once and never leaves the
-	// process.
-	oidcSvc, err := auth.NewOIDCService(context.Background(), &auth.OIDCConfig{
-		Issuer:       os.Getenv("DRABA_OIDC_ISSUER"),
-		ClientID:     os.Getenv("DRABA_OIDC_CLIENT_ID"),
-		ClientSecret: os.Getenv("DRABA_OIDC_CLIENT_SECRET"),
-		RedirectURL:  oidcRedirectURL(),
-	})
-	if err != nil {
-		slog.Error("oidc: configuration failed", "err", err)
-		os.Exit(1)
-	}
-	if oidcSvc != nil {
-		// Auto-provisioning defaults ON (first SSO login creates the account),
-		// matching the password-register bootstrap. Set DRABA_OIDC_AUTO_CREATE=0
-		// to require accounts be pre-created before SSO login is allowed.
-		autoCreate := os.Getenv("DRABA_OIDC_AUTO_CREATE") != "0"
-		srv.WithOIDC(oidcSvc, autoCreate)
-		slog.Info("oidc: SSO enabled", "issuer", os.Getenv("DRABA_OIDC_ISSUER"), "autoCreate", autoCreate)
-	}
-
-	slog.Info("listening", "port", port)
-	if err := http.ListenAndServe(":"+port, srv.Routes()); err != nil {
-		slog.Error("server error", "err", err)
-		os.Exit(1)
-	}
+/** Lists all shares for a timeline. */
+export function useListShares(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  return useQuery({
+    queryKey: sharesKey(teamId, timelineId),
+    queryFn: () =>
+      authFetch<Share[]>(`/teams/${teamId}/timelines/${timelineId}/shares`),
+    enabled: Boolean(teamId) && Boolean(timelineId),
+    // The share modals are this query's only consumers and mount on demand —
+    // override the app-wide 30s staleTime so the view telemetry they render
+    // (viewCount / lastViewedAt) is current every time a modal opens.
+    staleTime: 0,
+    refetchOnMount: 'always',
+  })
 }
 
-// oidcRedirectURL returns the OIDC callback URL the IdP must redirect back to.
-// It honours an explicit DRABA_OIDC_REDIRECT_URL override, otherwise derives it
-// from DRABA_BASE_URL so a single base-URL setting covers both the app and the
-// SSO callback.
-func oidcRedirectURL() string {
-	if v := os.Getenv("DRABA_OIDC_REDIRECT_URL"); v != "" {
-		return v
-	}
-	if os.Getenv("DRABA_OIDC_ISSUER") == "" {
-		return "" // SSO disabled; no redirect needed.
-	}
-	return strings.TrimRight(getenv("DRABA_BASE_URL", "http://localhost:8080"), "/") + "/auth/oidc/callback"
+interface CreateShareInput {
+  /** "view" (default) or "ics" — ICS shares are live calendar feeds. */
+  kind?: 'view' | 'ics'
+  /** ICS shares only: "timeline" (every activity) or "member" (one member's). */
+  scope?: 'timeline' | 'member'
+  /** ICS shares with scope "member" only. */
+  memberId?: string
+  name?: string | null
+  description?: string | null
+  viewType?: string
+  viewConfig?: string
+  /** When set, the share is locked and requires unlocking to view. View shares only. */
+  password?: string
 }
 
-// setupLogger initialises the global slog logger. Level is controlled by
-// DRABA_LOG_LEVEL (debug | info | warn | error); default is info.
-// All output goes to stdout so Docker captures it in `docker logs`.
-func setupLogger() {
-	level := slog.LevelInfo
-	switch strings.ToLower(os.Getenv("DRABA_LOG_LEVEL")) {
-	case "debug":
-		level = slog.LevelDebug
-	case "warn":
-		level = slog.LevelWarn
-	case "error":
-		level = slog.LevelError
-	}
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level})))
+/** Creates a share and invalidates the list. */
+export function useCreateShare(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (input: CreateShareInput) =>
+      authFetch<Share>(`/timelines/${timelineId}/shares`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(input),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: sharesKey(teamId, timelineId) }),
+  })
 }
 
-// getenv returns the env var value or fallback when unset/empty.
-func getenv(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
+/**
+ * Rotates a share's token, immediately invalidating the old URL — the
+ * revocation story for ICS feeds, which have no password gate.
+ */
+export function useRegenerateShare(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (shareId: string) =>
+      authFetch<Share>(`/shares/${shareId}/regenerate`, { method: 'POST' }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: sharesKey(teamId, timelineId) }),
+  })
+}
+
+/** Deletes a share and invalidates the list. */
+export function useDeleteShare(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (shareId: string) =>
+      authFetch<void>(`/shares/${shareId}`, { method: 'DELETE' }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: sharesKey(teamId, timelineId) }),
+  })
+}
+
+// ── Public hooks (no auth) ────────────────────────────────────────────────────
+
+/**
+ * Fetches a public share projection. No authentication required.
+ *
+ * For password-protected shares, pass the `viewToken` obtained from
+ * {@link useUnlockShare}; it is sent as a Bearer credential. Without a valid
+ * token a locked share responds 401 — surfaced here as an ApiError with code
+ * `PASSWORD_REQUIRED` so the viewer can render an unlock prompt.
+ */
+export function useShareProjection(token: string | undefined, viewToken?: string | null) {
+  return useQuery({
+    queryKey: ['shares', token, viewToken ?? null] as const,
+    queryFn: async () => {
+      const headers: HeadersInit = viewToken ? { Authorization: `Bearer ${viewToken}` } : {}
+      const res = await fetch(`${API_BASE}/shares/${token}`, { headers })
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}))
+        // A locked share returns { passwordRequired: true } (no error envelope).
+        if (res.status === 401 && body?.passwordRequired) {
+          throw new ApiError(401, 'PASSWORD_REQUIRED', 'password required')
+        }
+        throw new ApiError(res.status, body?.error?.code ?? 'ERROR', body?.error?.message ?? res.statusText)
+      }
+      return res.json() as Promise<ShareProjection>
+    },
+    enabled: Boolean(token),
+    staleTime: 60_000,
+    retry: false,
+  })
+}
+
+/**
+ * Exchanges a share password for a short-lived view token. No authentication
+ * required. The returned token is scoped to this share and expires server-side.
+ */
+export function useUnlockShare(token: string | undefined) {
+  return useMutation({
+    mutationFn: async (password: string): Promise<string> => {
+      const res = await fetch(`${API_BASE}/shares/${token}/unlock`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password }),
+      })
+      const body = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        throw new ApiError(res.status, body?.error?.code ?? 'ERROR', body?.error?.message ?? res.statusText)
+      }
+      return (body as { token: string }).token
+    },
+  })
 }
 ````
 
@@ -57681,157 +58145,6 @@ func (s *Server) handleRegenerateShare(w http.ResponseWriter, r *http.Request) {
 	s.icsCache.invalidate(oldToken)
 
 	writeJSON(w, http.StatusOK, share)
-}
-````
-
-## File: packages/web/src/hooks/useShares.ts
-````typescript
-/**
- * TanStack Query hooks for Share CRUD and the public share projection.
- *
- * Authenticated hooks (useCreateShare, useListShares, useDeleteShare) require
- * an auth token. useShareProjection is public and uses a plain fetch.
- */
-
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import type { components } from '@draba/shared'
-import { createAuthFetch, API_BASE, ApiError } from '@/lib/api'
-import { useAuth } from '@/contexts/AuthContext'
-
-type Share = components['schemas']['Share']
-type ShareProjection = components['schemas']['ShareProjection']
-
-const sharesKey = (teamId: string, timelineId: string) =>
-  ['teams', teamId, 'timelines', timelineId, 'shares'] as const
-
-// ── Authenticated hooks ───────────────────────────────────────────────────────
-
-/** Lists all shares for a timeline. */
-export function useListShares(teamId: string, timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  return useQuery({
-    queryKey: sharesKey(teamId, timelineId),
-    queryFn: () =>
-      authFetch<Share[]>(`/teams/${teamId}/timelines/${timelineId}/shares`),
-    enabled: Boolean(teamId) && Boolean(timelineId),
-    // The share modals are this query's only consumers and mount on demand —
-    // override the app-wide 30s staleTime so the view telemetry they render
-    // (viewCount / lastViewedAt) is current every time a modal opens.
-    staleTime: 0,
-    refetchOnMount: 'always',
-  })
-}
-
-interface CreateShareInput {
-  /** "view" (default) or "ics" — ICS shares are live calendar feeds. */
-  kind?: 'view' | 'ics'
-  /** ICS shares only: "timeline" (every activity) or "member" (one member's). */
-  scope?: 'timeline' | 'member'
-  /** ICS shares with scope "member" only. */
-  memberId?: string
-  name?: string | null
-  description?: string | null
-  viewType?: string
-  viewConfig?: string
-  /** When set, the share is locked and requires unlocking to view. View shares only. */
-  password?: string
-}
-
-/** Creates a share and invalidates the list. */
-export function useCreateShare(teamId: string, timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: (input: CreateShareInput) =>
-      authFetch<Share>(`/timelines/${timelineId}/shares`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(input),
-      }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: sharesKey(teamId, timelineId) }),
-  })
-}
-
-/**
- * Rotates a share's token, immediately invalidating the old URL — the
- * revocation story for ICS feeds, which have no password gate.
- */
-export function useRegenerateShare(teamId: string, timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: (shareId: string) =>
-      authFetch<Share>(`/shares/${shareId}/regenerate`, { method: 'POST' }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: sharesKey(teamId, timelineId) }),
-  })
-}
-
-/** Deletes a share and invalidates the list. */
-export function useDeleteShare(teamId: string, timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: (shareId: string) =>
-      authFetch<void>(`/shares/${shareId}`, { method: 'DELETE' }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: sharesKey(teamId, timelineId) }),
-  })
-}
-
-// ── Public hooks (no auth) ────────────────────────────────────────────────────
-
-/**
- * Fetches a public share projection. No authentication required.
- *
- * For password-protected shares, pass the `viewToken` obtained from
- * {@link useUnlockShare}; it is sent as a Bearer credential. Without a valid
- * token a locked share responds 401 — surfaced here as an ApiError with code
- * `PASSWORD_REQUIRED` so the viewer can render an unlock prompt.
- */
-export function useShareProjection(token: string | undefined, viewToken?: string | null) {
-  return useQuery({
-    queryKey: ['shares', token, viewToken ?? null] as const,
-    queryFn: async () => {
-      const headers: HeadersInit = viewToken ? { Authorization: `Bearer ${viewToken}` } : {}
-      const res = await fetch(`${API_BASE}/shares/${token}`, { headers })
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}))
-        // A locked share returns { passwordRequired: true } (no error envelope).
-        if (res.status === 401 && body?.passwordRequired) {
-          throw new ApiError(401, 'PASSWORD_REQUIRED', 'password required')
-        }
-        throw new ApiError(res.status, body?.error?.code ?? 'ERROR', body?.error?.message ?? res.statusText)
-      }
-      return res.json() as Promise<ShareProjection>
-    },
-    enabled: Boolean(token),
-    staleTime: 60_000,
-    retry: false,
-  })
-}
-
-/**
- * Exchanges a share password for a short-lived view token. No authentication
- * required. The returned token is scoped to this share and expires server-side.
- */
-export function useUnlockShare(token: string | undefined) {
-  return useMutation({
-    mutationFn: async (password: string): Promise<string> => {
-      const res = await fetch(`${API_BASE}/shares/${token}/unlock`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ password }),
-      })
-      const body = await res.json().catch(() => ({}))
-      if (!res.ok) {
-        throw new ApiError(res.status, body?.error?.code ?? 'ERROR', body?.error?.message ?? res.statusText)
-      }
-      return (body as { token: string }).token
-    },
-  })
 }
 ````
 
@@ -58231,1124 +58544,6 @@ func spaHandler(uiFS fs.FS) http.Handler {
 		}
 		fserver.ServeHTTP(w, r)
 	})
-}
-````
-
-## File: packages/web/src/pages/DashboardPage.tsx
-````typescript
-/**
- * Main application shell: sidebar + top bar + content area.
- *
- * Fetches the authenticated user's first team and first timeline to seed the
- * initial view. Team-selection UI and full sidebar wiring come in a later phase.
- */
-
-import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
-import Sidebar from '@/components/layout/Sidebar'
-import TopBar, { type ViewMode } from '@/components/layout/TopBar'
-import GanttView from '@/components/gantt/GanttView'
-import { DEFAULT_LABEL_COL_W } from '@/components/gantt/GanttGrid'
-import GanttToolbar, { type GroupBy, type SortBy, type TimeGranularity, type ColorBy } from '@/components/gantt/GanttToolbar'
-import ListToolbar, { type ListGroupBy, type ListSortBy, type ListColorBy, type ListDensity, type ColumnConfig } from '@/components/list/ListToolbar'
-import ListView, { buildListRows, type ListDisplayRow } from '@/components/list/ListView'
-import CalendarToolbar, { type CalendarLayout } from '@/components/calendar/CalendarToolbar'
-import CalendarView from '@/components/calendar/CalendarView'
-import KanbanToolbar, { type KanbanGroupBy, type KanbanSortBy, type KanbanCardField } from '@/components/kanban/KanbanToolbar'
-import KanbanView from '@/components/kanban/KanbanView'
-import { DEFAULT_CARD_FIELDS, buildColumns, buildHierarchyMaps } from '@/components/kanban/kanbanColumns'
-import type { TextExportData } from '@/components/ExportDialog'
-import ActivityDetailPanel from '@/components/gantt/ActivityDetailPanel'
-import ActivityCreatePanel from '@/components/gantt/ActivityCreatePanel'
-import { FilterProvider, useFilter } from '@/contexts/FilterContext'
-import { FindProvider, useFind } from '@/contexts/FindContext'
-import { useAuth } from '@/contexts/AuthContext'
-import { useDarkMode } from '@/hooks/useDarkMode'
-import { usePreferences, usePreferenceMap, useUpsertPreference } from '@/hooks/usePreferences'
-import { Settings, Moon, Sun, LogOut } from 'lucide-react'
-import { Badge } from '@/components/identity/Badge'
-import type { Identity } from '@/components/identity/identity-constants'
-import { useMyTeams, useTeamTimelines, useTeamTimelinesWithArchived, useTeamActivitySync, useUnarchiveTeam, useUnarchiveTimeline, useTeamMembers, useTimelineActivities } from '@/hooks/useTeamActivities'
-import { useTimelineStatuses } from '@/hooks/useStatusTemplates'
-import { useSavedFilters } from '@/hooks/useSavedFilters'
-import { useTags } from '@/hooks/useTags'
-import TeamModal from '@/components/TeamModal'
-import MemberModal from '@/components/MemberModal'
-import TimelineModal from '@/components/TimelineModal'
-import FilterManageModal from '@/components/filters/FilterManageModal'
-import ShareModal from '@/components/ShareModal'
-import CalendarShareModal from '@/components/CalendarShareModal'
-import ExportDialog from '@/components/ExportDialog'
-import { matchesFilter } from '@/lib/filterEngine'
-import { applyActiveFilter } from '@/lib/presetFilters'
-import { useNavigate } from 'react-router-dom'
-import type { components } from '@draba/shared'
-import type { Member } from '@/types'
-
-type ApiActivity = components['schemas']['Activity']
-type ApiTeam = components['schemas']['Team']
-type ApiTimeline = components['schemas']['Timeline']
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
-
-const DROPDOWN_BTN: React.CSSProperties = {
-  display: 'flex',
-  alignItems: 'center',
-  gap: 8,
-  width: '100%',
-  padding: '10px 14px',
-  background: 'none',
-  border: 'none',
-  fontSize: 13,
-  color: 'var(--foreground)',
-  cursor: 'pointer',
-  fontFamily: 'var(--font-sans)',
-  textAlign: 'left',
-}
-
-function DashboardShell() {
-  const { logout, accessToken, user } = useAuth()
-  const { activeFilter, setActiveFilter } = useFilter()
-  const navigate = useNavigate()
-  const { isDark, toggle: toggleDark, theme } = useDarkMode()
-  const { setFindBarOpen } = useFind()
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
-  const [view, setView] = useState<ViewMode>('gantt')
-  // Gantt label-column width — held here so it survives switching to another
-  // view and back (GanttView unmounts on view change, which would reset it).
-  const [ganttLabelColW, setGanttLabelColW] = useState(DEFAULT_LABEL_COL_W)
-  // Close the detail sidebar when switching to list view (edits are inline there)
-  const prevView = useRef<ViewMode>('gantt')
-  const [profileOpen, setProfileOpen] = useState(false)
-  const [selectedActivityId, setSelectedActivityId] = useState<string | null>(null)
-  const [selectedApiActivity, setSelectedApiActivity] = useState<ApiActivity | null>(null)
-  const [ganttMembers, setGanttMembers] = useState<Member[]>([])
-  const [createDefaults, setCreateDefaults] = useState<{ start: string; end: string; memberId: string | null; statusId?: string | null } | null>(null)
-  const [filterModalOpen, setFilterModalOpen] = useState(false)
-  const [shareModalOpen, setShareModalOpen] = useState(false)
-  const [exportDialogOpen, setExportDialogOpen] = useState(false)
-  // Calendar gets its own share surface — an ICS feed configurator, not the
-  // active-links list (Phase 13.4).
-  const [calendarShareModalOpen, setCalendarShareModalOpen] = useState(false)
-  const [liveDragDates, setLiveDragDates] = useState<{ activityId: string; start: string; end: string } | null>(null)
-  // Gantt toolbar state
-  const [groupBy, setGroupBy] = useState<GroupBy>('none')
-  const [sortBy, setSortBy] = useState<SortBy>('startDate')
-  const [granularity, setGranularity] = useState<TimeGranularity | 'auto'>('auto')
-  const [colorBy, setColorBy] = useState<ColorBy>('activity')
-  // List toolbar state
-  const [listGroupBy, setListGroupBy] = useState<ListGroupBy>('none')
-  const [listSortBy, setListSortBy] = useState<ListSortBy>('startDate')
-  const [listColorBy, setListColorBy] = useState<ListColorBy>('activity')
-  const [listDensity, setListDensity] = useState<ListDensity>('comfortable')
-  const [listColumns, setListColumns] = useState<ColumnConfig[]>([])
-  // Incremented seq lets ListView know a new toggle has arrived
-  const [listColToggle, setListColToggle] = useState<{ colId: string; visible: boolean; seq: number } | null>(null)
-  const listColToggleSeq = useRef(0)
-  // Calendar toolbar state
-  const [calendarLayout, setCalendarLayout] = useState<CalendarLayout>('month')
-  // anchorDate = UTC midnight of the 1st of the displayed month (month) or weekStart (week).
-  const [calendarAnchorDate, setCalendarAnchorDate] = useState<Date>(() => {
-    const d = new Date()
-    d.setUTCHours(0, 0, 0, 0)
-    d.setUTCDate(1)
-    return d
-  })
-  // Kanban toolbar state
-  const [kanbanGroupBy, setKanbanGroupBy] = useState<KanbanGroupBy>('status')
-  const [kanbanSortBy, setKanbanSortBy] = useState<KanbanSortBy>('startDate')
-  const [kanbanColorBy, setKanbanColorBy] = useState<ColorBy>('activity')
-  const [kanbanCardFields, setKanbanCardFields] = useState<KanbanCardField[]>(DEFAULT_CARD_FIELDS)
-  const [kanbanCollapsedColumns, setKanbanCollapsedColumns] = useState<string[]>([])
-  const [kanbanShowHierarchy, setKanbanShowHierarchy] = useState(false)
-  // Incremented to trigger inline row creation in list view
-  const [listNewRowSeq, setListNewRowSeq] = useState(0)
-  const profileRef = useRef<HTMLDivElement>(null)
-  // Preference persistence
-  const upsert = useUpsertPreference()
-  // Track whether we've applied server prefs for the active timeline so we
-  // don't immediately write defaults back before the server data arrives.
-  const prefsAppliedForTimeline = useRef<string | null>(null)
-  // One-shot guard: init activeTimelineId from global prefs only on first load.
-  const timelineIdInitialized = useRef(false)
-
-
-  useEffect(() => {
-    function handleClickOutside(e: MouseEvent) {
-      if (profileRef.current && !profileRef.current.contains(e.target as Node)) {
-        setProfileOpen(false)
-      }
-    }
-    document.addEventListener('mousedown', handleClickOutside)
-    return () => document.removeEventListener('mousedown', handleClickOutside)
-  }, [])
-
-  // Close the detail sidebar when switching to list view (list edits are inline).
-  useEffect(() => {
-    if (view === 'list' && prevView.current !== 'list') {
-      setSelectedActivityId(null)
-      setSelectedApiActivity(null)
-      setCreateDefaults(null)
-    }
-    prevView.current = view
-  }, [view])
-
-  // Ctrl/Cmd+F opens the Find bar; browser default (page search) is suppressed.
-  useEffect(() => {
-    function handleKeyDown(e: KeyboardEvent) {
-      if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
-        e.preventDefault()
-        setFindBarOpen(true)
-      }
-    }
-    document.addEventListener('keydown', handleKeyDown)
-    return () => document.removeEventListener('keydown', handleKeyDown)
-  }, [setFindBarOpen])
-
-  const displayName = (user as { displayName?: string } | null)?.displayName ?? 'User'
-  const email = (user as { email?: string } | null)?.email ?? ''
-  const userIdentity: Identity = {
-    color: (user as { color?: string } | null)?.color ?? '#288C9B',
-    icon: (user as { icon?: string } | null)?.icon ?? '__name_2__',
-  }
-
-  // Global preferences — restored on login to seed team/timeline selection.
-  const { isSuccess: globalPrefsSettled } = usePreferences()
-  const globalPrefMap = usePreferenceMap()
-  const weekStartDay: 0 | 1 = (globalPrefMap['week_start'] as string | undefined) === 'sunday' ? 0 : 1
-
-  // Team modal state
-  const [teamModalMode, setTeamModalMode] = useState<'new' | 'edit' | null>(null)
-  const [editingTeam, setEditingTeam] = useState<ApiTeam | null>(null)
-  const unarchiveTeam = useUnarchiveTeam()
-
-  // Member modal state
-  const [editingMember, setEditingMember] = useState<TeamMemberWithUser | null>(null)
-
-  // Timeline modal state
-  const [timelineModalMode, setTimelineModalMode] = useState<'new' | 'edit' | null>(null)
-  const [editingTimeline, setEditingTimeline] = useState<ApiTimeline | null>(null)
-
-  // Fetch all teams including archived for the sidebar's archived section.
-  const { data: allTeams = [] } = useMyTeams(true)
-  const activeTeams = allTeams.filter(t => !t.archivedAt)
-  const archivedTeams = allTeams.filter(t => Boolean(t.archivedAt))
-
-  // Explicit team selection state — null until the global pref is applied so
-  // that timelines (and the timeline init effect) don't fire against the wrong
-  // fallback team before the saved team pref resolves.
-  const [activeTeamId, setActiveTeamId] = useState<string | null>(null)
-  const teamIdInitialized = useRef(false)
-  useEffect(() => {
-    if (!activeTeams.length || !globalPrefsSettled || teamIdInitialized.current) return
-    teamIdInitialized.current = true
-    const saved = typeof globalPrefMap['selected_team'] === 'string' ? globalPrefMap['selected_team'] : null
-    const exists = saved && activeTeams.some(t => t.id === saved)
-    setActiveTeamId(exists ? saved : activeTeams[0].id)
-  }, [activeTeams, globalPrefsSettled, globalPrefMap])
-
-  // Only derive an active team once the pref has been applied (activeTeamId !== null).
-  // The activeTeams[0] fallback here handles the edge case where the saved team
-  // was archived or deleted between sessions.
-  const activeTeam = activeTeamId !== null
-    ? (activeTeams.find(t => t.id === activeTeamId) ?? activeTeams[0] ?? undefined)
-    : undefined
-  const teamId = activeTeam?.id ?? ''
-
-  // Check whether the current user is an admin of the active team.
-  const { data: teamMembers = [] } = useTeamMembers(teamId)
-  const userId = (user as { id?: string } | null)?.id ?? ''
-  const isSuperadmin = Boolean((user as { isSuperadmin?: boolean } | null)?.isSuperadmin)
-  const canEditTeam = isSuperadmin || teamMembers.some(m => m.userId === userId && m.role === 'admin')
-
-  const handleSelectTeam = useCallback((id: string) => {
-    setActiveTeamId(id)
-    // Clear the stale timeline selection so the init effect re-fires with the
-    // new team's timeline list. Without this, the old timeline ID leaks into
-    // the new team's API requests and produces 404s.
-    setActiveTimelineId(undefined)
-    prefsAppliedForTimeline.current = null
-    timelineIdInitialized.current = false
-  }, [])
-
-  const unarchiveTimeline = useUnarchiveTimeline(teamId)
-
-  const { data: timelines = [] } = useTeamTimelines(teamId)
-  const { data: allTimelines = [] } = useTeamTimelinesWithArchived(teamId)
-  const archivedTimelines = allTimelines.filter(t => Boolean(t.archivedAt))
-  const [activeTimelineId, setActiveTimelineId] = useState<string | undefined>()
-  const { data: activeTimelineStatuses = [] } = useTimelineStatuses(teamId, activeTimelineId ?? '')
-  const { data: savedFilters = [] } = useSavedFilters(teamId)
-  const { data: tags = [] } = useTags(teamId)
-  // Initialize activeTimelineId from the saved global pref (selected_timeline),
-  // falling back to timelines[0] when no pref is stored or the saved timeline
-  // is no longer in the list. Waits for global prefs to settle so we don't
-  // immediately overwrite a restored value with the fallback.
-  useEffect(() => {
-    if (timelines.length === 0 || !globalPrefsSettled || timelineIdInitialized.current) return
-    timelineIdInitialized.current = true
-    const saved = typeof globalPrefMap['selected_timeline'] === 'string' ? globalPrefMap['selected_timeline'] : null
-    const exists = saved && timelines.some(t => t.id === saved)
-    setActiveTimelineId(exists ? saved : timelines[0].id)
-  }, [timelines, globalPrefsSettled, globalPrefMap])
-  const activeTimeline = timelines.find(t => t.id === activeTimelineId) ?? timelines[0]
-  // Derived so they stay in sync after edits without needing separate state.
-  const activeTimelineColor = activeTimeline?.color ?? '#1A97A2'
-  const activeTimelineName = activeTimeline?.name ?? ''
-  const activeTimelineIdentity: Identity = {
-    color: activeTimeline?.color ?? '#288C9B',
-    icon: activeTimeline?.icon ?? '__none__',
-  }
-
-  // The frozen filter snapshot captured into a share's view config — shared
-  // across Gantt/List/Kanban since `activeFilter` applies to the whole timeline.
-  const activeShareFilter = useMemo(() => {
-    if (activeFilter.kind !== 'saved') return null
-    const sf = savedFilters.find(f => f.id === activeFilter.id)
-    if (!sf) return null
-    try { return JSON.parse(sf.definition) as import('@/lib/filterTypes').FilterDefinition } catch { return null }
-  }, [activeFilter, savedFilters])
-
-  // Unbounded activity list for the active timeline — used by the export
-  // dialog's filter-context strip and "scope" counts. Cached separately from
-  // each view's (possibly date-bounded) activity query.
-  const { data: allActivities = [] } = useTimelineActivities(teamId, activeTimelineId ?? '')
-
-  // Export dialog: filter context, counts, and the filtered activity list.
-  // filteredActivities is exposed so exportViewActivityIds can sort it for list view.
-  const exportFilterInfo = useMemo(() => {
-    const totalCount = allActivities.length
-    const closedStatusIds = new Set(activeTimelineStatuses.filter(s => s.isClosed).map(s => s.id))
-    const memberIdsByUserId = new Map<string, string[]>()
-    for (const m of teamMembers) {
-      if (!m.userId) continue
-      const list = memberIdsByUserId.get(m.userId) ?? []
-      list.push(m.id)
-      memberIdsByUserId.set(m.userId, list)
-    }
-    const filterCtx = {
-      closedStatusIds,
-      savedFilters,
-      statuses: new Map(activeTimelineId ? [[activeTimelineId, activeTimelineStatuses]] as const : []),
-      tags,
-    }
-
-    if (activeFilter.kind === 'preset' && activeFilter.id !== 'all') {
-      const PRESET_LABELS: Record<string, string> = {
-        open: 'Open only', upcoming: 'Upcoming', overdue: 'Overdue', noassign: 'No one assigned',
-      }
-      const filterLabel = PRESET_LABELS[activeFilter.id] ?? activeFilter.id
-      const filteredActivities = applyActiveFilter(allActivities, activeFilter, memberIdsByUserId, filterCtx)
-      return { filterLabel, filterDefinition: null, filteredCount: filteredActivities.length, totalCount, filteredActivities }
-    }
-
-    if (activeFilter.kind === 'member') {
-      const member = teamMembers.find(m => m.userId === (activeFilter as { kind: 'member'; userId: string }).userId)
-      const filterLabel = member?.displayName ?? 'Team member'
-      const filteredActivities = applyActiveFilter(allActivities, activeFilter, memberIdsByUserId, filterCtx)
-      return { filterLabel, filterDefinition: null, filteredCount: filteredActivities.length, totalCount, filteredActivities }
-    }
-
-    if (activeFilter.kind === 'saved' && activeShareFilter) {
-      const saved = savedFilters.find(f => f.id === activeFilter.id)
-      const statusesByTimeline = new Map(activeTimelineId ? [[activeTimelineId, activeTimelineStatuses]] as const : [])
-      const filteredActivities = allActivities.filter(a => matchesFilter(a, activeShareFilter, { statusesByTimeline, tags }))
-      return { filterLabel: saved?.name ?? 'Saved filter', filterDefinition: activeShareFilter, filteredCount: filteredActivities.length, totalCount, filteredActivities }
-    }
-
-    return { filterLabel: null, filterDefinition: null, filteredCount: totalCount, totalCount, filteredActivities: allActivities }
-  }, [allActivities, activeFilter, activeShareFilter, savedFilters, activeTimelineId, activeTimelineStatuses, tags, teamMembers])
-
-  // Ordered activity IDs for the export "current view" scope.
-  // Sent as activityIds in the request when: a preset/member filter is active
-  // (can't be evaluated server-side), or we're in list view (to preserve sort order).
-  const exportViewActivityIds = useMemo<string[] | null>(() => {
-    const hasNonSavedFilter = activeFilter.kind === 'preset' ? activeFilter.id !== 'all' : activeFilter.kind === 'member'
-    const needsIds = hasNonSavedFilter || view === 'list'
-    if (!needsIds) return null
-
-    let acts = exportFilterInfo.filteredActivities
-    if (view === 'list') {
-      acts = [...acts].sort((a, b) => {
-        if (listSortBy === 'startDate') return (a.startAt ?? '').localeCompare(b.startAt ?? '')
-        if (listSortBy === 'endDate') return (a.endAt ?? '').localeCompare(b.endAt ?? '')
-        if (listSortBy === 'title') return a.title.localeCompare(b.title)
-        if (listSortBy === 'status') return (a.statusId ?? '').localeCompare(b.statusId ?? '')
-        if (listSortBy === 'progress') return (b.percentComplete ?? 0) - (a.percentComplete ?? 0)
-        return 0
-      })
-    }
-    return acts.map(a => a.id)
-  }, [exportFilterInfo.filteredActivities, activeFilter, view, listSortBy])
-
-  // List-view column visibility mapped to export column names.
-  // Null when not in list view or when all columns are visible (server defaults to all).
-  const exportListColumns = useMemo<string[] | null>(() => {
-    if (view !== 'list' || listColumns.length === 0) return null
-    const COL_MAP: Record<string, string> = {
-      title: 'Title', startAt: 'Start', endAt: 'End', description: 'Description',
-      status: 'Status', assignees: 'Assignees', tags: 'Tags', parent: 'Parent',
-      progress: 'Progress', location: 'Location', url: 'URL',
-    }
-    const cols = listColumns.filter(c => c.visible && COL_MAP[c.id]).map(c => COL_MAP[c.id])
-    // If all mappable columns are visible, skip sending — server defaults to all
-    const allExportCols = Object.values(COL_MAP)
-    if (cols.length === allExportCols.length) return null
-    return cols
-  }, [view, listColumns])
-
-  // Pre-resolved data for client-side textual exports (14.2).
-  // Only materialised for non-Gantt views (Gantt has no textual format).
-  const textExportData = useMemo<TextExportData | null>(() => {
-    if (view === 'gantt') return null
-
-    const memberById = new Map<string, string>(
-      teamMembers.map(m => [m.id, m.displayName || m.email || 'Unknown']),
-    )
-    const statusById = new Map<string, string>(
-      activeTimelineStatuses.map(s => [s.id, s.name]),
-    )
-    const tagById = new Map<string, string>(tags.map(t => [t.id, t.name]))
-    const activityTitleById = new Map<string, string>(allActivities.map(a => [a.id, a.title]))
-    const activities = exportFilterInfo.filteredActivities
-
-    // List view: pre-build sorted, grouped, hierarchy-aware display rows.
-    let listDisplayRows: ListDisplayRow[] | null = null
-    let listVisibleColumns: string[] | null = null
-    if (view === 'list') {
-      const sorted = [...activities].sort((a, b) => {
-        if (listSortBy === 'startDate') return (a.startAt ?? '').localeCompare(b.startAt ?? '')
-        if (listSortBy === 'endDate') return (a.endAt ?? '').localeCompare(b.endAt ?? '')
-        if (listSortBy === 'title') return a.title.localeCompare(b.title)
-        if (listSortBy === 'status') return (a.statusId ?? '').localeCompare(b.statusId ?? '')
-        if (listSortBy === 'progress') return (b.percentComplete ?? 0) - (a.percentComplete ?? 0)
-        return 0
-      })
-      const memberByIdObj = new Map(
-        teamMembers.map(m => [m.id, { displayName: m.displayName || m.email || 'Unknown', color: m.color }]),
-      )
-      const statusByIdObj = new Map(activeTimelineStatuses.map(s => [s.id, { name: s.name }]))
-      listDisplayRows = buildListRows(
-        sorted, listGroupBy, memberByIdObj, statusByIdObj,
-        activeTimelineStatuses, new Set(), teamMembers.map(m => m.id),
-      )
-      listVisibleColumns = listColumns.length > 0
-        ? listColumns.filter(c => c.visible && !['colorBar', 'identity'].includes(c.id)).map(c => c.id)
-        : null
-    }
-
-    // Kanban: build columns respecting the hierarchy toggle.
-    let kanbanColumns: Array<{ label: string; activities: ApiActivity[] }> | null = null
-    let kbHierarchy = false
-    let kbChildrenById = new Map<string, ApiActivity[]>()
-    if (view === 'kanban') {
-      kbHierarchy = kanbanShowHierarchy
-      const { childrenByParentId, childIds } = kbHierarchy
-        ? buildHierarchyMaps(activities)
-        : { childrenByParentId: new Map<string, ApiActivity[]>(), childIds: new Set<string>() }
-      kbChildrenById = childrenByParentId
-      const columnActivities = kbHierarchy ? activities.filter(a => !childIds.has(a.id)) : activities
-      kanbanColumns = buildColumns(kanbanGroupBy, columnActivities, teamMembers, activeTimelineStatuses, kanbanSortBy)
-        .map(col => ({ label: col.label, activities: col.items }))
-    }
-
-    return {
-      activities,
-      memberById,
-      statusById,
-      tagById,
-      activityTitleById,
-      kanbanColumns,
-      listDisplayRows,
-      listVisibleColumns,
-      kanbanShowHierarchy: kbHierarchy,
-      kanbanChildrenByParentId: kbChildrenById,
-    }
-  }, [
-    view, teamMembers, activeTimelineStatuses, tags, allActivities,
-    exportFilterInfo.filteredActivities, kanbanGroupBy, kanbanSortBy, kanbanShowHierarchy,
-    listGroupBy, listSortBy, listColumns,
-  ])
-
-  // Close the activity detail panel whenever the active filter changes so the
-  // filtered view is unobstructed by a stale selection.
-  useEffect(() => {
-    setSelectedActivityId(null)
-    setSelectedApiActivity(null)
-  }, [activeFilter]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  const handleTimelineChange = useCallback((id: string) => {
-    prefsAppliedForTimeline.current = null
-    setActiveTimelineId(id)
-    setActiveFilter({ kind: 'preset', id: 'all' })
-  }, [setActiveFilter])
-
-  // Calendar navigation helpers.
-  const calendarPrev = useCallback(() => {
-    setCalendarAnchorDate(prev => {
-      const d = new Date(prev)
-      if (calendarLayout === 'month') {
-        d.setUTCMonth(d.getUTCMonth() - 1)
-      } else {
-        d.setUTCDate(d.getUTCDate() - 7)
-      }
-      return d
-    })
-  }, [calendarLayout])
-
-  const calendarNext = useCallback(() => {
-    setCalendarAnchorDate(prev => {
-      const d = new Date(prev)
-      if (calendarLayout === 'month') {
-        d.setUTCMonth(d.getUTCMonth() + 1)
-      } else {
-        d.setUTCDate(d.getUTCDate() + 7)
-      }
-      return d
-    })
-  }, [calendarLayout])
-
-  const calendarToday = useCallback(() => {
-    const d = new Date()
-    d.setUTCHours(0, 0, 0, 0)
-    if (calendarLayout === 'month') {
-      d.setUTCDate(1)
-    } else {
-      // Snap to weekStart.
-      const dow = d.getUTCDay()
-      const daysBack = weekStartDay === 1 ? (dow === 0 ? 6 : dow - 1) : dow
-      d.setUTCDate(d.getUTCDate() - daysBack)
-    }
-    setCalendarAnchorDate(d)
-  }, [calendarLayout, weekStartDay])
-
-  // Switching layouts also snaps the anchor date to the correct boundary so
-  // the week-view always starts on the configured weekStart day.
-  const handleCalendarLayoutChange = useCallback((l: CalendarLayout) => {
-    setCalendarLayout(l)
-    setCalendarAnchorDate(prev => {
-      const d = new Date(prev)
-      d.setUTCHours(0, 0, 0, 0)
-      if (l === 'week') {
-        const dow = d.getUTCDay()
-        const daysBack = weekStartDay === 1 ? (dow === 0 ? 6 : dow - 1) : dow
-        d.setUTCDate(d.getUTCDate() - daysBack)
-      } else {
-        d.setUTCDate(1)
-      }
-      return d
-    })
-  }, [weekStartDay])
-
-  useTeamActivitySync(teamId, accessToken)
-
-  // Per-timeline preferences: restore toolbar state when the active timeline changes.
-  // isSuccess gate ensures we don't mark prefs applied before the query resolves.
-  const { isSuccess: prefsSettled } = usePreferences(activeTimelineId)
-  const timelinePrefs = usePreferenceMap(activeTimelineId)
-  useEffect(() => {
-    if (!activeTimelineId || !prefsSettled) return
-    if (prefsAppliedForTimeline.current === activeTimelineId) return
-    prefsAppliedForTimeline.current = activeTimelineId
-
-    if (typeof timelinePrefs['group_by'] === 'string') setGroupBy(timelinePrefs['group_by'] as GroupBy)
-    if (typeof timelinePrefs['sort_by'] === 'string') setSortBy(timelinePrefs['sort_by'] as SortBy)
-    if (typeof timelinePrefs['zoom_granularity'] === 'string') setGranularity(timelinePrefs['zoom_granularity'] as TimeGranularity | 'auto')
-    if (typeof timelinePrefs['color_by'] === 'string') setColorBy(timelinePrefs['color_by'] as ColorBy)
-    if (typeof timelinePrefs['list_group_by'] === 'string') setListGroupBy(timelinePrefs['list_group_by'] as ListGroupBy)
-    if (typeof timelinePrefs['list_sort_by'] === 'string') setListSortBy(timelinePrefs['list_sort_by'] as ListSortBy)
-    if (typeof timelinePrefs['list_color_by'] === 'string') setListColorBy(timelinePrefs['list_color_by'] as ListColorBy)
-    if (typeof timelinePrefs['list_density'] === 'string') setListDensity(timelinePrefs['list_density'] as ListDensity)
-    if (typeof timelinePrefs['view_mode'] === 'string') setView(timelinePrefs['view_mode'] as ViewMode)
-    if (typeof timelinePrefs['kanban_group_by'] === 'string') setKanbanGroupBy(timelinePrefs['kanban_group_by'] as KanbanGroupBy)
-    if (typeof timelinePrefs['kanban_sort_by'] === 'string') setKanbanSortBy(timelinePrefs['kanban_sort_by'] as KanbanSortBy)
-    if (typeof timelinePrefs['kanban_color_by'] === 'string') setKanbanColorBy(timelinePrefs['kanban_color_by'] as ColorBy)
-    if (typeof timelinePrefs['kanban_card_fields'] === 'string') {
-      try { setKanbanCardFields(JSON.parse(timelinePrefs['kanban_card_fields']) as KanbanCardField[]) } catch { /* ignore */ }
-    }
-    if (typeof timelinePrefs['kanban_collapsed'] === 'string') {
-      try { setKanbanCollapsedColumns(JSON.parse(timelinePrefs['kanban_collapsed']) as string[]) } catch { /* ignore */ }
-    }
-    if (typeof timelinePrefs['kanban_show_hierarchy'] === 'string') {
-      try { setKanbanShowHierarchy(JSON.parse(timelinePrefs['kanban_show_hierarchy']) as boolean) } catch { /* ignore */ }
-    }
-  }, [activeTimelineId, prefsSettled, timelinePrefs])
-
-  // Save toolbar state changes to per-timeline prefs.
-  const saveTimelinePref = useCallback((key: string, value: string) => {
-    if (!activeTimelineId) return
-    upsert.mutate({ key, value: JSON.stringify(value), timelineId: activeTimelineId })
-  }, [activeTimelineId, upsert.mutate]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('group_by', groupBy)
-  }, [groupBy, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('sort_by', sortBy)
-  }, [sortBy, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('zoom_granularity', granularity)
-  }, [granularity, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('color_by', colorBy)
-  }, [colorBy, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('view_mode', view)
-  }, [view, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('list_group_by', listGroupBy)
-  }, [listGroupBy, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('list_sort_by', listSortBy)
-  }, [listSortBy, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('list_color_by', listColorBy)
-  }, [listColorBy, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('list_density', listDensity)
-  }, [listDensity, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('kanban_group_by', kanbanGroupBy)
-  }, [kanbanGroupBy, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('kanban_sort_by', kanbanSortBy)
-  }, [kanbanSortBy, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('kanban_color_by', kanbanColorBy)
-  }, [kanbanColorBy, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('kanban_card_fields', JSON.stringify(kanbanCardFields))
-  }, [kanbanCardFields, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('kanban_show_hierarchy', JSON.stringify(kanbanShowHierarchy))
-  }, [kanbanShowHierarchy, saveTimelinePref])
-
-  // Global preferences: persist dark mode, active team, and active timeline.
-  useEffect(() => {
-    upsert.mutate({ key: 'theme', value: JSON.stringify(theme) })
-  }, [theme]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    if (!teamId) return
-    upsert.mutate({ key: 'selected_team', value: JSON.stringify(teamId) })
-  }, [teamId]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    if (!activeTimelineId) return
-    upsert.mutate({ key: 'selected_timeline', value: JSON.stringify(activeTimelineId) })
-  }, [activeTimelineId]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Reset label column width when the user switches timelines so each timeline
-  // starts fresh. Switching between views on the same timeline preserves width
-  // because the state lives here rather than inside the unmounting GanttView.
-  useEffect(() => {
-    setGanttLabelColW(DEFAULT_LABEL_COL_W)
-  }, [activeTimelineId])
-
-  return (
-    <div style={{ display: 'flex', height: '100vh', overflow: 'hidden', background: 'var(--background)' }}>
-      <Sidebar
-        collapsed={sidebarCollapsed}
-        onToggle={() => setSidebarCollapsed(c => !c)}
-        apiTimelines={timelines}
-        archivedTimelines={archivedTimelines}
-        activeTimelineId={activeTimelineId}
-        onActiveTimelineChange={handleTimelineChange}
-        onNewTimeline={() => { setEditingTimeline(null); setTimelineModalMode('new') }}
-        onEditTimeline={id => {
-          // timelines (active) is always loaded; allTimelines (?archived=true) may
-          // still be in-flight, so prefer the already-loaded list to avoid opening
-          // the modal with an undefined timeline and blank fields.
-          const tl = timelines.find(t => t.id === id) ?? allTimelines.find(t => t.id === id)
-          setEditingTimeline(tl ?? null)
-          setTimelineModalMode('edit')
-        }}
-        onNewActivity={() => {
-          const today = new Date().toISOString().slice(0, 10)
-          setSelectedActivityId(null)
-          setSelectedApiActivity(null)
-          if (view === 'list') {
-            setListNewRowSeq(s => s + 1)
-          } else {
-            setCreateDefaults({ start: today, end: today, memberId: null })
-          }
-        }}
-        activeTeam={activeTeam}
-        activeTeams={activeTeams}
-        archivedTeams={archivedTeams}
-        canEditTeam={canEditTeam}
-        onSelectTeam={handleSelectTeam}
-        onNewTeam={isSuperadmin ? () => { setEditingTeam(null); setTeamModalMode('new'); } : undefined}
-        onEditTeam={t => { setEditingTeam(t as ApiTeam); setTeamModalMode('edit'); }}
-        onUnarchiveTeam={id => unarchiveTeam.mutate(id)}
-        members={teamMembers.length > 0 ? teamMembers : undefined}
-        onEditMember={isSuperadmin ? m => setEditingMember(m) : undefined}
-      />
-
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0 }}>
-        <TopBar
-          view={view}
-          teamId={teamId}
-          timelineName={activeTimelineName}
-          timelineIdentity={activeTimelineIdentity}
-          onViewChange={setView}
-          onOpenFilterManager={() => setFilterModalOpen(true)}
-          rightSlot={
-            <div ref={profileRef} style={{ position: 'relative', marginLeft: 4, zIndex: 30 }}>
-              <button
-                onClick={() => setProfileOpen(o => !o)}
-                style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', display: 'flex' }}
-                title={displayName}
-              >
-                <Badge identity={userIdentity} name={displayName} shape="circle" size={28} />
-              </button>
-
-              {profileOpen && (
-                <div
-                  style={{
-                    position: 'absolute',
-                    top: 'calc(100% + 8px)',
-                    right: 0,
-                    width: 220,
-                    background: 'var(--card)',
-                    border: '1px solid var(--border)',
-                    borderRadius: 8,
-                    boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
-                    zIndex: 100,
-                    overflow: 'hidden',
-                  }}
-                >
-                  <div style={{ padding: '12px 14px', borderBottom: '1px solid var(--border)' }}>
-                    <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)' }}>{displayName}</div>
-                    <div style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 2 }}>{email}</div>
-                  </div>
-                  <button
-                    onClick={toggleDark}
-                    style={{ ...DROPDOWN_BTN, borderBottom: '1px solid var(--border)' }}
-                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-                  >
-                    {isDark ? <Moon size={14} strokeWidth={1.8} /> : <Sun size={14} strokeWidth={1.8} />}
-                    {isDark ? 'Dark mode' : 'Light mode'}
-                  </button>
-                  <button
-                    onClick={() => { setProfileOpen(false); navigate('/settings'); }}
-                    style={{ ...DROPDOWN_BTN, borderBottom: '1px solid var(--border)' }}
-                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-                  >
-                    <Settings size={14} strokeWidth={1.8} />
-                    Settings
-                  </button>
-                  <button
-                    onClick={logout}
-                    style={{ ...DROPDOWN_BTN, color: 'var(--muted-foreground)' }}
-                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-                  >
-                    <LogOut size={14} strokeWidth={1.8} />
-                    Sign out
-                  </button>
-                </div>
-              )}
-            </div>
-          }
-        />
-
-        {/* Active timeline color band */}
-        <div style={{ height: 3, background: activeTimelineColor, flexShrink: 0, transition: 'background 0.2s ease' }} />
-
-        {/* Gantt sub-toolbar — only shown in Gantt view */}
-        {view === 'gantt' && (
-          <GanttToolbar
-            groupBy={groupBy}
-            onGroupByChange={setGroupBy}
-            sortBy={sortBy}
-            onSortByChange={setSortBy}
-            granularity={granularity}
-            onGranularityChange={setGranularity}
-            colorBy={colorBy}
-            onColorByChange={setColorBy}
-            onExport={() => setExportDialogOpen(true)}
-            onShare={() => setShareModalOpen(true)}
-          />
-        )}
-
-        {/* List sub-toolbar — only shown in List view */}
-        {view === 'list' && (
-          <ListToolbar
-            columns={listColumns}
-            onColumnVisibilityChange={(colId, visible) => {
-              listColToggleSeq.current += 1
-              setListColToggle({ colId, visible, seq: listColToggleSeq.current })
-              setListColumns(prev => prev.map(c => c.id === colId ? { ...c, visible } : c))
-            }}
-            density={listDensity}
-            onDensityChange={setListDensity}
-            groupBy={listGroupBy}
-            onGroupByChange={setListGroupBy}
-            sortBy={listSortBy}
-            onSortByChange={setListSortBy}
-            colorBy={listColorBy}
-            onColorByChange={setListColorBy}
-            onExport={() => setExportDialogOpen(true)}
-            onShare={() => setShareModalOpen(true)}
-          />
-        )}
-
-        {/* Calendar sub-toolbar — only shown in Calendar view */}
-        {view === 'calendar' && (
-          <CalendarToolbar
-            layout={calendarLayout}
-            onLayoutChange={handleCalendarLayoutChange}
-            anchorDate={calendarAnchorDate}
-            onPrev={calendarPrev}
-            onNext={calendarNext}
-            onToday={calendarToday}
-            colorBy={colorBy}
-            onColorByChange={setColorBy}
-            onExport={() => setExportDialogOpen(true)}
-            onShare={() => setCalendarShareModalOpen(true)}
-          />
-        )}
-
-        {/* Kanban sub-toolbar — only shown in Kanban view */}
-        {view === 'kanban' && (
-          <KanbanToolbar
-            groupBy={kanbanGroupBy}
-            onGroupByChange={setKanbanGroupBy}
-            sortBy={kanbanSortBy}
-            onSortByChange={setKanbanSortBy}
-            colorBy={kanbanColorBy}
-            onColorByChange={setKanbanColorBy}
-            cardFields={kanbanCardFields}
-            onCardFieldsChange={setKanbanCardFields}
-            showHierarchy={kanbanShowHierarchy}
-            onShowHierarchyChange={setKanbanShowHierarchy}
-            onExport={() => setExportDialogOpen(true)}
-            onShare={() => setShareModalOpen(true)}
-          />
-        )}
-
-        {/* Content area */}
-        <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-          {view === 'gantt' && teamId && activeTimelineId ? (
-            <GanttView
-              teamId={teamId}
-              timelineId={activeTimelineId}
-              startDate={activeTimeline?.startDate}
-              endDate={activeTimeline?.endDate}
-              groupBy={groupBy}
-              sortBy={sortBy}
-              granularity={granularity}
-              colorBy={colorBy}
-              timelineStatuses={activeTimelineStatuses}
-              savedFilters={savedFilters}
-              tags={tags}
-              selectedActivityId={selectedActivityId}
-              onSelectActivity={(id) => {
-                setSelectedActivityId(id)
-                if (!id) { setSelectedApiActivity(null); setCreateDefaults(null) }
-              }}
-              onSelectApiActivity={(activity) => {
-                setSelectedApiActivity(activity)
-                setCreateDefaults(null)
-              }}
-              onBarDragProgress={(activityId, newStart, newEnd) => {
-                setLiveDragDates({
-                  activityId,
-                  start: newStart.toISOString().slice(0, 10),
-                  end: newEnd.toISOString().slice(0, 10),
-                })
-              }}
-              onBarDragEnd={() => setLiveDragDates(null)}
-              onMembersLoaded={setGanttMembers}
-              labelColW={ganttLabelColW}
-              onLabelColWChange={setGanttLabelColW}
-            />
-          ) : view === 'gantt' && (!teamId || !activeTimelineId) ? (
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
-              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>Loading your team…</p>
-            </div>
-          ) : view === 'list' && teamId && activeTimelineId ? (
-            <ListView
-              teamId={teamId}
-              timelineId={activeTimelineId}
-              groupBy={listGroupBy}
-              sortBy={listSortBy}
-              colorBy={listColorBy}
-              density={listDensity}
-              timelineStatuses={activeTimelineStatuses}
-              savedFilters={savedFilters}
-              tags={tags}
-              selectedActivityId={selectedActivityId}
-              pendingColumnToggle={listColToggle}
-              onSelectActivity={(id) => {
-                setSelectedActivityId(id)
-                if (!id) { setSelectedApiActivity(null); setCreateDefaults(null) }
-              }}
-              onSelectApiActivity={(activity) => {
-                setSelectedApiActivity(activity)
-                setCreateDefaults(null)
-              }}
-              onMembersLoaded={setGanttMembers}
-              onColumnsChange={setListColumns}
-              triggerNewRow={listNewRowSeq}
-            />
-          ) : view === 'list' && (!teamId || !activeTimelineId) ? (
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
-              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>Loading your team…</p>
-            </div>
-          ) : view === 'calendar' && teamId && activeTimelineId ? (
-            <CalendarView
-              teamId={teamId}
-              timelineId={activeTimelineId}
-              layout={calendarLayout}
-              anchorDate={calendarAnchorDate}
-              colorBy={colorBy}
-              timelineStatuses={activeTimelineStatuses}
-              savedFilters={savedFilters}
-              tags={tags}
-              selectedActivityId={selectedActivityId}
-              onSelectActivity={(id) => {
-                setSelectedActivityId(id)
-                if (!id) { setSelectedApiActivity(null); setCreateDefaults(null) }
-              }}
-              onSelectApiActivity={(activity) => {
-                setSelectedApiActivity(activity)
-                setCreateDefaults(null)
-              }}
-              onBarDragProgress={(activityId, newStart, newEnd) => {
-                setLiveDragDates({
-                  activityId,
-                  start: newStart.toISOString().slice(0, 10),
-                  end: newEnd.toISOString().slice(0, 10),
-                })
-              }}
-              onBarDragEnd={() => setLiveDragDates(null)}
-              onCellClick={(date) => {
-                const iso = date.toISOString().slice(0, 10)
-                setSelectedActivityId(null)
-                setSelectedApiActivity(null)
-                setCreateDefaults({ start: iso, end: iso, memberId: null })
-              }}
-              onMembersLoaded={setGanttMembers}
-            />
-          ) : view === 'calendar' && (!teamId || !activeTimelineId) ? (
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
-              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>Loading your team…</p>
-            </div>
-          ) : view === 'kanban' && teamId && activeTimelineId ? (
-            <KanbanView
-              teamId={teamId}
-              timelineId={activeTimelineId}
-              groupBy={kanbanGroupBy}
-              sortBy={kanbanSortBy}
-              colorBy={kanbanColorBy}
-              cardFields={kanbanCardFields}
-              collapsedColumnIds={kanbanCollapsedColumns}
-              onCollapsedColumnIdsChange={setKanbanCollapsedColumns}
-              showHierarchy={kanbanShowHierarchy}
-              timelineStatuses={activeTimelineStatuses}
-              savedFilters={savedFilters}
-              tags={tags}
-              selectedActivityId={selectedActivityId}
-              onSelectActivity={(id) => {
-                setSelectedActivityId(id)
-                if (!id) { setSelectedApiActivity(null); setCreateDefaults(null) }
-              }}
-              onSelectApiActivity={(activity) => {
-                setSelectedApiActivity(activity)
-                setCreateDefaults(null)
-              }}
-              onAddActivity={(defaults) => {
-                setSelectedActivityId(null)
-                setSelectedApiActivity(null)
-                setCreateDefaults(defaults)
-              }}
-              onMembersLoaded={setGanttMembers}
-            />
-          ) : view === 'kanban' && (!teamId || !activeTimelineId) ? (
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
-              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>Loading your team…</p>
-            </div>
-          ) : (
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
-              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>
-                {view.charAt(0).toUpperCase() + view.slice(1)} view coming soon.
-              </p>
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Activity detail panel — slides in from right when an activity is selected */}
-      <ActivityDetailPanel
-        open={Boolean(selectedApiActivity)}
-        event={selectedApiActivity}
-        members={ganttMembers}
-        teamId={teamId}
-        timelineId={activeTimelineId ?? ''}
-        onClose={() => { setSelectedActivityId(null); setSelectedApiActivity(null); setLiveDragDates(null) }}
-        liveDragStart={liveDragDates && liveDragDates.activityId === selectedApiActivity?.id ? liveDragDates.start : undefined}
-        liveDragEnd={liveDragDates && liveDragDates.activityId === selectedApiActivity?.id ? liveDragDates.end : undefined}
-      />
-
-      {/* Activity create panel — slides in from New Activity button or future drag */}
-      <ActivityCreatePanel
-        open={Boolean(createDefaults) && !selectedApiActivity}
-        teamId={teamId}
-        timelineId={activeTimelineId ?? ''}
-        members={ganttMembers}
-        timelineStatuses={activeTimelineStatuses}
-        defaultStart={createDefaults?.start ?? new Date().toISOString().slice(0, 10)}
-        defaultEnd={createDefaults?.end ?? new Date().toISOString().slice(0, 10)}
-        defaultMemberId={createDefaults?.memberId}
-        defaultStatusId={createDefaults?.statusId}
-        onClose={() => setCreateDefaults(null)}
-      />
-
-      <FilterManageModal
-        open={filterModalOpen}
-        onClose={() => setFilterModalOpen(false)}
-        teamId={teamId}
-        timelineId={activeTimelineId ?? ''}
-        isAdmin={canEditTeam}
-      />
-
-      {/* Team modal — create or edit */}
-      {teamModalMode && (
-        <TeamModal
-          mode={teamModalMode}
-          team={editingTeam ?? undefined}
-          isAdmin={canEditTeam}
-          onClose={() => { setTeamModalMode(null); setEditingTeam(null); }}
-          onTeamCreated={created => setActiveTeamId(created.id)}
-        />
-      )}
-
-      {/* Member modal — edit a team member */}
-      {editingMember && (
-        <MemberModal
-          teamId={teamId}
-          memberId={editingMember.id}
-          isAdmin={canEditTeam}
-          isSuperadmin={isSuperadmin}
-          onClose={() => setEditingMember(null)}
-        />
-      )}
-
-      {/* Share modal — create a share link for the active view */}
-      {shareModalOpen && activeTimelineId && teamId && (view === 'gantt' || view === 'list' || view === 'kanban') && (
-        <ShareModal
-          teamId={teamId}
-          timelineId={activeTimelineId}
-          viewType={view}
-          timelineName={activeTimelineName}
-          viewConfig={
-            view === 'gantt'
-              ? { groupBy, sortBy, colorBy, granularity: String(granularity), filter: activeShareFilter }
-              : view === 'list'
-              ? {
-                  groupBy: listGroupBy,
-                  sortBy: listSortBy,
-                  colorBy: listColorBy,
-                  granularity: '',
-                  filter: activeShareFilter,
-                  columns: listColumns.map(c => ({ id: c.id, visible: c.visible })),
-                }
-              : {
-                  groupBy: kanbanGroupBy,
-                  sortBy: kanbanSortBy,
-                  colorBy: kanbanColorBy,
-                  granularity: '',
-                  filter: activeShareFilter,
-                  cardFields: kanbanCardFields,
-                  showHierarchy: kanbanShowHierarchy,
-                  collapsedColumns: kanbanCollapsedColumns,
-                }
-          }
-          onClose={() => setShareModalOpen(false)}
-        />
-      )}
-
-      {/* Export dialog — download the active view as CSV/Excel/ICS */}
-      {exportDialogOpen && activeTimelineId && teamId && (
-        <ExportDialog
-          view={view}
-          teamId={teamId}
-          timelineId={activeTimelineId}
-          timelineName={activeTimelineName}
-          filterLabel={exportFilterInfo.filterLabel}
-          filterDefinition={exportFilterInfo.filterDefinition}
-          filteredCount={exportFilterInfo.filteredCount}
-          totalCount={exportFilterInfo.totalCount}
-          viewActivityIds={exportViewActivityIds}
-          listExportColumns={exportListColumns}
-          textExportData={textExportData}
-          onClose={() => setExportDialogOpen(false)}
-        />
-      )}
-
-      {/* Calendar share modal — ICS feed configurator (distinct from ShareModal) */}
-      {calendarShareModalOpen && activeTimelineId && teamId && (
-        <CalendarShareModal
-          teamId={teamId}
-          timelineId={activeTimelineId}
-          timelineName={activeTimelineName}
-          onClose={() => setCalendarShareModalOpen(false)}
-        />
-      )}
-
-      {/* Timeline modal — create or edit */}
-      {timelineModalMode && (
-        <TimelineModal
-          mode={timelineModalMode}
-          teamId={teamId}
-          timeline={editingTimeline ?? undefined}
-          canAdmin={canEditTeam}
-          onClose={() => { setTimelineModalMode(null); setEditingTimeline(null) }}
-          onCreated={created => setActiveTimelineId(created.id)}
-          onUnarchive={id => unarchiveTimeline.mutate(id, { onSuccess: () => { setTimelineModalMode(null); setEditingTimeline(null) } })}
-        />
-      )}
-    </div>
-  )
-}
-
-export default function DashboardPage() {
-  return (
-    <FindProvider>
-      <FilterProvider>
-        <DashboardShell />
-      </FilterProvider>
-    </FindProvider>
-  )
 }
 ````
 
@@ -60724,6 +59919,1120 @@ type Invite struct {
 	ExpiresAt  time.Time  `db:"expires_at"  json:"expiresAt"`
 	AcceptedAt *time.Time `db:"accepted_at" json:"acceptedAt,omitempty"`
 	CreatedAt  time.Time  `db:"created_at"  json:"createdAt"`
+}
+````
+
+## File: packages/web/src/pages/DashboardPage.tsx
+````typescript
+/**
+ * Main application shell: sidebar + top bar + content area.
+ *
+ * Fetches the authenticated user's first team and first timeline to seed the
+ * initial view. Team-selection UI and full sidebar wiring come in a later phase.
+ */
+
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
+import Sidebar from '@/components/layout/Sidebar'
+import TopBar, { type ViewMode } from '@/components/layout/TopBar'
+import GanttView from '@/components/gantt/GanttView'
+import { DEFAULT_LABEL_COL_W } from '@/components/gantt/GanttGrid'
+import GanttToolbar, { type GroupBy, type SortBy, type TimeGranularity, type ColorBy } from '@/components/gantt/GanttToolbar'
+import ListToolbar, { type ListGroupBy, type ListSortBy, type ListColorBy, type ListDensity, type ColumnConfig } from '@/components/list/ListToolbar'
+import ListView, { buildListRows, type ListDisplayRow } from '@/components/list/ListView'
+import CalendarToolbar, { type CalendarLayout } from '@/components/calendar/CalendarToolbar'
+import CalendarView from '@/components/calendar/CalendarView'
+import KanbanToolbar, { type KanbanGroupBy, type KanbanSortBy, type KanbanCardField } from '@/components/kanban/KanbanToolbar'
+import KanbanView from '@/components/kanban/KanbanView'
+import { DEFAULT_CARD_FIELDS, buildColumns, buildHierarchyMaps } from '@/components/kanban/kanbanColumns'
+import type { TextExportData } from '@/components/ExportDialog'
+import ActivityDetailPanel from '@/components/gantt/ActivityDetailPanel'
+import ActivityCreatePanel from '@/components/gantt/ActivityCreatePanel'
+import { FilterProvider, useFilter } from '@/contexts/FilterContext'
+import { FindProvider, useFind } from '@/contexts/FindContext'
+import { useAuth } from '@/contexts/AuthContext'
+import { useDarkMode } from '@/hooks/useDarkMode'
+import { usePreferences, usePreferenceMap, useUpsertPreference } from '@/hooks/usePreferences'
+import { Settings, Moon, Sun, LogOut } from 'lucide-react'
+import { Badge } from '@/components/identity/Badge'
+import type { Identity } from '@/components/identity/identity-constants'
+import { useMyTeams, useTeamTimelines, useTeamTimelinesWithArchived, useTeamActivitySync, useUnarchiveTeam, useUnarchiveTimeline, useTeamMembers, useTimelineActivities } from '@/hooks/useTeamActivities'
+import { useTimelineStatuses } from '@/hooks/useStatusTemplates'
+import { useSavedFilters } from '@/hooks/useSavedFilters'
+import { useTags } from '@/hooks/useTags'
+import TeamModal from '@/components/TeamModal'
+import MemberModal from '@/components/MemberModal'
+import TimelineModal from '@/components/TimelineModal'
+import FilterManageModal from '@/components/filters/FilterManageModal'
+import ShareModal from '@/components/ShareModal'
+import CalendarShareModal from '@/components/CalendarShareModal'
+import ExportDialog from '@/components/ExportDialog'
+import { matchesFilter } from '@/lib/filterEngine'
+import { applyActiveFilter } from '@/lib/presetFilters'
+import { useNavigate } from 'react-router-dom'
+import type { components } from '@draba/shared'
+import type { Member } from '@/types'
+
+type ApiActivity = components['schemas']['Activity']
+type ApiTeam = components['schemas']['Team']
+type ApiTimeline = components['schemas']['Timeline']
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
+
+/** Comparator for ListSortBy, shared by the export-scope ID ordering and the list-export display rows. */
+function compareByListSort(a: ApiActivity, b: ApiActivity, listSortBy: ListSortBy): number {
+  if (listSortBy === 'startDate') return (a.startAt ?? '').localeCompare(b.startAt ?? '')
+  if (listSortBy === 'endDate') return (a.endAt ?? '').localeCompare(b.endAt ?? '')
+  if (listSortBy === 'title') return a.title.localeCompare(b.title)
+  if (listSortBy === 'status') return (a.statusId ?? '').localeCompare(b.statusId ?? '')
+  if (listSortBy === 'progress') return (b.percentComplete ?? 0) - (a.percentComplete ?? 0)
+  return 0
+}
+
+const DROPDOWN_BTN: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 8,
+  width: '100%',
+  padding: '10px 14px',
+  background: 'none',
+  border: 'none',
+  fontSize: 13,
+  color: 'var(--foreground)',
+  cursor: 'pointer',
+  fontFamily: 'var(--font-sans)',
+  textAlign: 'left',
+}
+
+function DashboardShell() {
+  const { logout, accessToken, user } = useAuth()
+  const { activeFilter, setActiveFilter } = useFilter()
+  const navigate = useNavigate()
+  const { isDark, toggle: toggleDark, theme } = useDarkMode()
+  const { setFindBarOpen } = useFind()
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [view, setView] = useState<ViewMode>('gantt')
+  // Gantt label-column width — held here so it survives switching to another
+  // view and back (GanttView unmounts on view change, which would reset it).
+  const [ganttLabelColW, setGanttLabelColW] = useState(DEFAULT_LABEL_COL_W)
+  // Close the detail sidebar when switching to list view (edits are inline there)
+  const prevView = useRef<ViewMode>('gantt')
+  const [profileOpen, setProfileOpen] = useState(false)
+  const [selectedActivityId, setSelectedActivityId] = useState<string | null>(null)
+  const [selectedApiActivity, setSelectedApiActivity] = useState<ApiActivity | null>(null)
+  const [ganttMembers, setGanttMembers] = useState<Member[]>([])
+  const [createDefaults, setCreateDefaults] = useState<{ start: string; end: string; memberId: string | null; statusId?: string | null } | null>(null)
+  const [filterModalOpen, setFilterModalOpen] = useState(false)
+  const [shareModalOpen, setShareModalOpen] = useState(false)
+  const [exportDialogOpen, setExportDialogOpen] = useState(false)
+  // Calendar gets its own share surface — an ICS feed configurator, not the
+  // active-links list (Phase 13.4).
+  const [calendarShareModalOpen, setCalendarShareModalOpen] = useState(false)
+  const [liveDragDates, setLiveDragDates] = useState<{ activityId: string; start: string; end: string } | null>(null)
+  // Gantt toolbar state
+  const [groupBy, setGroupBy] = useState<GroupBy>('none')
+  const [sortBy, setSortBy] = useState<SortBy>('startDate')
+  const [granularity, setGranularity] = useState<TimeGranularity | 'auto'>('auto')
+  const [colorBy, setColorBy] = useState<ColorBy>('activity')
+  // List toolbar state
+  const [listGroupBy, setListGroupBy] = useState<ListGroupBy>('none')
+  const [listSortBy, setListSortBy] = useState<ListSortBy>('startDate')
+  const [listColorBy, setListColorBy] = useState<ListColorBy>('activity')
+  const [listDensity, setListDensity] = useState<ListDensity>('comfortable')
+  const [listColumns, setListColumns] = useState<ColumnConfig[]>([])
+  // Incremented seq lets ListView know a new toggle has arrived
+  const [listColToggle, setListColToggle] = useState<{ colId: string; visible: boolean; seq: number } | null>(null)
+  const listColToggleSeq = useRef(0)
+  // Calendar toolbar state
+  const [calendarLayout, setCalendarLayout] = useState<CalendarLayout>('month')
+  // anchorDate = UTC midnight of the 1st of the displayed month (month) or weekStart (week).
+  const [calendarAnchorDate, setCalendarAnchorDate] = useState<Date>(() => {
+    const d = new Date()
+    d.setUTCHours(0, 0, 0, 0)
+    d.setUTCDate(1)
+    return d
+  })
+  // Kanban toolbar state
+  const [kanbanGroupBy, setKanbanGroupBy] = useState<KanbanGroupBy>('status')
+  const [kanbanSortBy, setKanbanSortBy] = useState<KanbanSortBy>('startDate')
+  const [kanbanColorBy, setKanbanColorBy] = useState<ColorBy>('activity')
+  const [kanbanCardFields, setKanbanCardFields] = useState<KanbanCardField[]>(DEFAULT_CARD_FIELDS)
+  const [kanbanCollapsedColumns, setKanbanCollapsedColumns] = useState<string[]>([])
+  const [kanbanShowHierarchy, setKanbanShowHierarchy] = useState(false)
+  // Incremented to trigger inline row creation in list view
+  const [listNewRowSeq, setListNewRowSeq] = useState(0)
+  const profileRef = useRef<HTMLDivElement>(null)
+  // Preference persistence
+  const upsert = useUpsertPreference()
+  // Track whether we've applied server prefs for the active timeline so we
+  // don't immediately write defaults back before the server data arrives.
+  const prefsAppliedForTimeline = useRef<string | null>(null)
+  // One-shot guard: init activeTimelineId from global prefs only on first load.
+  const timelineIdInitialized = useRef(false)
+
+
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (profileRef.current && !profileRef.current.contains(e.target as Node)) {
+        setProfileOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [])
+
+  // Close the detail sidebar when switching to list view (list edits are inline).
+  useEffect(() => {
+    if (view === 'list' && prevView.current !== 'list') {
+      setSelectedActivityId(null)
+      setSelectedApiActivity(null)
+      setCreateDefaults(null)
+    }
+    prevView.current = view
+  }, [view])
+
+  // Ctrl/Cmd+F opens the Find bar; browser default (page search) is suppressed.
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
+        e.preventDefault()
+        setFindBarOpen(true)
+      }
+    }
+    document.addEventListener('keydown', handleKeyDown)
+    return () => document.removeEventListener('keydown', handleKeyDown)
+  }, [setFindBarOpen])
+
+  const displayName = (user as { displayName?: string } | null)?.displayName ?? 'User'
+  const email = (user as { email?: string } | null)?.email ?? ''
+  const userIdentity: Identity = {
+    color: (user as { color?: string } | null)?.color ?? '#288C9B',
+    icon: (user as { icon?: string } | null)?.icon ?? '__name_2__',
+  }
+
+  // Global preferences — restored on login to seed team/timeline selection.
+  const { isSuccess: globalPrefsSettled } = usePreferences()
+  const globalPrefMap = usePreferenceMap()
+  const weekStartDay: 0 | 1 = (globalPrefMap['week_start'] as string | undefined) === 'sunday' ? 0 : 1
+
+  // Team modal state
+  const [teamModalMode, setTeamModalMode] = useState<'new' | 'edit' | null>(null)
+  const [editingTeam, setEditingTeam] = useState<ApiTeam | null>(null)
+  const unarchiveTeam = useUnarchiveTeam()
+
+  // Member modal state
+  const [editingMember, setEditingMember] = useState<TeamMemberWithUser | null>(null)
+
+  // Timeline modal state
+  const [timelineModalMode, setTimelineModalMode] = useState<'new' | 'edit' | null>(null)
+  const [editingTimeline, setEditingTimeline] = useState<ApiTimeline | null>(null)
+
+  // Fetch all teams including archived for the sidebar's archived section.
+  const { data: allTeams = [] } = useMyTeams(true)
+  const activeTeams = allTeams.filter(t => !t.archivedAt)
+  const archivedTeams = allTeams.filter(t => Boolean(t.archivedAt))
+
+  // Explicit team selection state — null until the global pref is applied so
+  // that timelines (and the timeline init effect) don't fire against the wrong
+  // fallback team before the saved team pref resolves.
+  const [activeTeamId, setActiveTeamId] = useState<string | null>(null)
+  const teamIdInitialized = useRef(false)
+  useEffect(() => {
+    if (!activeTeams.length || !globalPrefsSettled || teamIdInitialized.current) return
+    teamIdInitialized.current = true
+    const saved = typeof globalPrefMap['selected_team'] === 'string' ? globalPrefMap['selected_team'] : null
+    const exists = saved && activeTeams.some(t => t.id === saved)
+    setActiveTeamId(exists ? saved : activeTeams[0].id)
+  }, [activeTeams, globalPrefsSettled, globalPrefMap])
+
+  // Only derive an active team once the pref has been applied (activeTeamId !== null).
+  // The activeTeams[0] fallback here handles the edge case where the saved team
+  // was archived or deleted between sessions.
+  const activeTeam = activeTeamId !== null
+    ? (activeTeams.find(t => t.id === activeTeamId) ?? activeTeams[0] ?? undefined)
+    : undefined
+  const teamId = activeTeam?.id ?? ''
+
+  // Check whether the current user is an admin of the active team.
+  const { data: teamMembers = [] } = useTeamMembers(teamId)
+  const userId = (user as { id?: string } | null)?.id ?? ''
+  const isSuperadmin = Boolean((user as { isSuperadmin?: boolean } | null)?.isSuperadmin)
+  const canEditTeam = isSuperadmin || teamMembers.some(m => m.userId === userId && m.role === 'admin')
+
+  const handleSelectTeam = useCallback((id: string) => {
+    setActiveTeamId(id)
+    // Clear the stale timeline selection so the init effect re-fires with the
+    // new team's timeline list. Without this, the old timeline ID leaks into
+    // the new team's API requests and produces 404s.
+    setActiveTimelineId(undefined)
+    prefsAppliedForTimeline.current = null
+    timelineIdInitialized.current = false
+  }, [])
+
+  const unarchiveTimeline = useUnarchiveTimeline(teamId)
+
+  const { data: timelines = [] } = useTeamTimelines(teamId)
+  const { data: allTimelines = [] } = useTeamTimelinesWithArchived(teamId)
+  const archivedTimelines = allTimelines.filter(t => Boolean(t.archivedAt))
+  const [activeTimelineId, setActiveTimelineId] = useState<string | undefined>()
+  const { data: activeTimelineStatuses = [] } = useTimelineStatuses(teamId, activeTimelineId ?? '')
+  const { data: savedFilters = [] } = useSavedFilters(teamId)
+  const { data: tags = [] } = useTags(teamId)
+  // Initialize activeTimelineId from the saved global pref (selected_timeline),
+  // falling back to timelines[0] when no pref is stored or the saved timeline
+  // is no longer in the list. Waits for global prefs to settle so we don't
+  // immediately overwrite a restored value with the fallback.
+  useEffect(() => {
+    if (timelines.length === 0 || !globalPrefsSettled || timelineIdInitialized.current) return
+    timelineIdInitialized.current = true
+    const saved = typeof globalPrefMap['selected_timeline'] === 'string' ? globalPrefMap['selected_timeline'] : null
+    const exists = saved && timelines.some(t => t.id === saved)
+    setActiveTimelineId(exists ? saved : timelines[0].id)
+  }, [timelines, globalPrefsSettled, globalPrefMap])
+  const activeTimeline = timelines.find(t => t.id === activeTimelineId) ?? timelines[0]
+  // Derived so they stay in sync after edits without needing separate state.
+  const activeTimelineColor = activeTimeline?.color ?? '#1A97A2'
+  const activeTimelineName = activeTimeline?.name ?? ''
+  const activeTimelineIdentity: Identity = {
+    color: activeTimeline?.color ?? '#288C9B',
+    icon: activeTimeline?.icon ?? '__none__',
+  }
+
+  // The frozen filter snapshot captured into a share's view config — shared
+  // across Gantt/List/Kanban since `activeFilter` applies to the whole timeline.
+  const activeShareFilter = useMemo(() => {
+    if (activeFilter.kind !== 'saved') return null
+    const sf = savedFilters.find(f => f.id === activeFilter.id)
+    if (!sf) return null
+    try { return JSON.parse(sf.definition) as import('@/lib/filterTypes').FilterDefinition } catch { return null }
+  }, [activeFilter, savedFilters])
+
+  // Unbounded activity list for the active timeline — used by the export
+  // dialog's filter-context strip and "scope" counts. Cached separately from
+  // each view's (possibly date-bounded) activity query.
+  const { data: allActivities = [] } = useTimelineActivities(teamId, activeTimelineId ?? '')
+
+  // Export dialog: filter context, counts, and the filtered activity list.
+  // filteredActivities is exposed so exportViewActivityIds can sort it for list view.
+  const exportFilterInfo = useMemo(() => {
+    const totalCount = allActivities.length
+    const closedStatusIds = new Set(activeTimelineStatuses.filter(s => s.isClosed).map(s => s.id))
+    const memberIdsByUserId = new Map<string, string[]>()
+    for (const m of teamMembers) {
+      if (!m.userId) continue
+      const list = memberIdsByUserId.get(m.userId) ?? []
+      list.push(m.id)
+      memberIdsByUserId.set(m.userId, list)
+    }
+    const filterCtx = {
+      closedStatusIds,
+      savedFilters,
+      statuses: new Map(activeTimelineId ? [[activeTimelineId, activeTimelineStatuses]] as const : []),
+      tags,
+    }
+
+    if (activeFilter.kind === 'preset' && activeFilter.id !== 'all') {
+      const PRESET_LABELS: Record<string, string> = {
+        open: 'Open only', upcoming: 'Upcoming', overdue: 'Overdue', noassign: 'No one assigned',
+      }
+      const filterLabel = PRESET_LABELS[activeFilter.id] ?? activeFilter.id
+      const filteredActivities = applyActiveFilter(allActivities, activeFilter, memberIdsByUserId, filterCtx)
+      return { filterLabel, filterDefinition: null, filteredCount: filteredActivities.length, totalCount, filteredActivities }
+    }
+
+    if (activeFilter.kind === 'member') {
+      const member = teamMembers.find(m => m.userId === (activeFilter as { kind: 'member'; userId: string }).userId)
+      const filterLabel = member?.displayName ?? 'Team member'
+      const filteredActivities = applyActiveFilter(allActivities, activeFilter, memberIdsByUserId, filterCtx)
+      return { filterLabel, filterDefinition: null, filteredCount: filteredActivities.length, totalCount, filteredActivities }
+    }
+
+    if (activeFilter.kind === 'saved' && activeShareFilter) {
+      const saved = savedFilters.find(f => f.id === activeFilter.id)
+      const statusesByTimeline = new Map(activeTimelineId ? [[activeTimelineId, activeTimelineStatuses]] as const : [])
+      const filteredActivities = allActivities.filter(a => matchesFilter(a, activeShareFilter, { statusesByTimeline, tags }))
+      return { filterLabel: saved?.name ?? 'Saved filter', filterDefinition: activeShareFilter, filteredCount: filteredActivities.length, totalCount, filteredActivities }
+    }
+
+    return { filterLabel: null, filterDefinition: null, filteredCount: totalCount, totalCount, filteredActivities: allActivities }
+  }, [allActivities, activeFilter, activeShareFilter, savedFilters, activeTimelineId, activeTimelineStatuses, tags, teamMembers])
+
+  // Ordered activity IDs for the export "current view" scope.
+  // Sent as activityIds in the request when: a preset/member filter is active
+  // (can't be evaluated server-side), or we're in list view (to preserve sort order).
+  const exportViewActivityIds = useMemo<string[] | null>(() => {
+    const hasNonSavedFilter = activeFilter.kind === 'preset' ? activeFilter.id !== 'all' : activeFilter.kind === 'member'
+    const needsIds = hasNonSavedFilter || view === 'list'
+    if (!needsIds) return null
+
+    let acts = exportFilterInfo.filteredActivities
+    if (view === 'list') {
+      acts = [...acts].sort((a, b) => compareByListSort(a, b, listSortBy))
+    }
+    return acts.map(a => a.id)
+  }, [exportFilterInfo.filteredActivities, activeFilter, view, listSortBy])
+
+  // List-view column visibility mapped to export column names.
+  // Null when not in list view or when all columns are visible (server defaults to all).
+  const exportListColumns = useMemo<string[] | null>(() => {
+    if (view !== 'list' || listColumns.length === 0) return null
+    const COL_MAP: Record<string, string> = {
+      title: 'Title', startAt: 'Start', endAt: 'End', description: 'Description',
+      status: 'Status', assignees: 'Assignees', tags: 'Tags', parent: 'Parent',
+      progress: 'Progress', location: 'Location', url: 'URL',
+    }
+    const cols = listColumns.filter(c => c.visible && COL_MAP[c.id]).map(c => COL_MAP[c.id])
+    // If all mappable columns are visible, skip sending — server defaults to all
+    const allExportCols = Object.values(COL_MAP)
+    if (cols.length === allExportCols.length) return null
+    return cols
+  }, [view, listColumns])
+
+  // Pre-resolved data for client-side textual exports (14.2).
+  // Only materialised for non-Gantt views (Gantt has no textual format).
+  const textExportData = useMemo<TextExportData | null>(() => {
+    if (view === 'gantt') return null
+
+    const memberById = new Map<string, string>(
+      teamMembers.map(m => [m.id, m.displayName || m.email || 'Unknown']),
+    )
+    const statusById = new Map<string, string>(
+      activeTimelineStatuses.map(s => [s.id, s.name]),
+    )
+    const tagById = new Map<string, string>(tags.map(t => [t.id, t.name]))
+    const activityTitleById = new Map<string, string>(allActivities.map(a => [a.id, a.title]))
+    const activities = exportFilterInfo.filteredActivities
+
+    // List view: pre-build sorted, grouped, hierarchy-aware display rows.
+    let listDisplayRows: ListDisplayRow[] | null = null
+    let listVisibleColumns: string[] | null = null
+    if (view === 'list') {
+      const sorted = [...activities].sort((a, b) => compareByListSort(a, b, listSortBy))
+      const memberByIdObj = new Map(
+        teamMembers.map(m => [m.id, { displayName: m.displayName || m.email || 'Unknown', color: m.color }]),
+      )
+      const statusByIdObj = new Map(activeTimelineStatuses.map(s => [s.id, { name: s.name }]))
+      listDisplayRows = buildListRows(
+        sorted, listGroupBy, memberByIdObj, statusByIdObj,
+        activeTimelineStatuses, new Set(), teamMembers.map(m => m.id),
+      )
+      listVisibleColumns = listColumns.length > 0
+        ? listColumns.filter(c => c.visible && !['colorBar', 'identity'].includes(c.id)).map(c => c.id)
+        : null
+    }
+
+    // Kanban: build columns respecting the hierarchy toggle.
+    let kanbanColumns: Array<{ label: string; activities: ApiActivity[] }> | null = null
+    let kbHierarchy = false
+    let kbChildrenById = new Map<string, ApiActivity[]>()
+    if (view === 'kanban') {
+      kbHierarchy = kanbanShowHierarchy
+      const { childrenByParentId, childIds } = kbHierarchy
+        ? buildHierarchyMaps(activities)
+        : { childrenByParentId: new Map<string, ApiActivity[]>(), childIds: new Set<string>() }
+      kbChildrenById = childrenByParentId
+      const columnActivities = kbHierarchy ? activities.filter(a => !childIds.has(a.id)) : activities
+      kanbanColumns = buildColumns(kanbanGroupBy, columnActivities, teamMembers, activeTimelineStatuses, kanbanSortBy)
+        .map(col => ({ label: col.label, activities: col.items }))
+    }
+
+    return {
+      activities,
+      memberById,
+      statusById,
+      tagById,
+      activityTitleById,
+      kanbanColumns,
+      listDisplayRows,
+      listVisibleColumns,
+      kanbanShowHierarchy: kbHierarchy,
+      kanbanChildrenByParentId: kbChildrenById,
+    }
+  }, [
+    view, teamMembers, activeTimelineStatuses, tags, allActivities,
+    exportFilterInfo.filteredActivities, kanbanGroupBy, kanbanSortBy, kanbanShowHierarchy,
+    listGroupBy, listSortBy, listColumns,
+  ])
+
+  // Close the activity detail panel whenever the active filter changes so the
+  // filtered view is unobstructed by a stale selection.
+  useEffect(() => {
+    setSelectedActivityId(null)
+    setSelectedApiActivity(null)
+  }, [activeFilter]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handleTimelineChange = useCallback((id: string) => {
+    prefsAppliedForTimeline.current = null
+    setActiveTimelineId(id)
+    setActiveFilter({ kind: 'preset', id: 'all' })
+  }, [setActiveFilter])
+
+  // Calendar navigation helpers.
+  const calendarPrev = useCallback(() => {
+    setCalendarAnchorDate(prev => {
+      const d = new Date(prev)
+      if (calendarLayout === 'month') {
+        d.setUTCMonth(d.getUTCMonth() - 1)
+      } else {
+        d.setUTCDate(d.getUTCDate() - 7)
+      }
+      return d
+    })
+  }, [calendarLayout])
+
+  const calendarNext = useCallback(() => {
+    setCalendarAnchorDate(prev => {
+      const d = new Date(prev)
+      if (calendarLayout === 'month') {
+        d.setUTCMonth(d.getUTCMonth() + 1)
+      } else {
+        d.setUTCDate(d.getUTCDate() + 7)
+      }
+      return d
+    })
+  }, [calendarLayout])
+
+  const calendarToday = useCallback(() => {
+    const d = new Date()
+    d.setUTCHours(0, 0, 0, 0)
+    if (calendarLayout === 'month') {
+      d.setUTCDate(1)
+    } else {
+      // Snap to weekStart.
+      const dow = d.getUTCDay()
+      const daysBack = weekStartDay === 1 ? (dow === 0 ? 6 : dow - 1) : dow
+      d.setUTCDate(d.getUTCDate() - daysBack)
+    }
+    setCalendarAnchorDate(d)
+  }, [calendarLayout, weekStartDay])
+
+  // Switching layouts also snaps the anchor date to the correct boundary so
+  // the week-view always starts on the configured weekStart day.
+  const handleCalendarLayoutChange = useCallback((l: CalendarLayout) => {
+    setCalendarLayout(l)
+    setCalendarAnchorDate(prev => {
+      const d = new Date(prev)
+      d.setUTCHours(0, 0, 0, 0)
+      if (l === 'week') {
+        const dow = d.getUTCDay()
+        const daysBack = weekStartDay === 1 ? (dow === 0 ? 6 : dow - 1) : dow
+        d.setUTCDate(d.getUTCDate() - daysBack)
+      } else {
+        d.setUTCDate(1)
+      }
+      return d
+    })
+  }, [weekStartDay])
+
+  useTeamActivitySync(teamId, accessToken)
+
+  // Per-timeline preferences: restore toolbar state when the active timeline changes.
+  // isSuccess gate ensures we don't mark prefs applied before the query resolves.
+  const { isSuccess: prefsSettled } = usePreferences(activeTimelineId)
+  const timelinePrefs = usePreferenceMap(activeTimelineId)
+  useEffect(() => {
+    if (!activeTimelineId || !prefsSettled) return
+    if (prefsAppliedForTimeline.current === activeTimelineId) return
+    prefsAppliedForTimeline.current = activeTimelineId
+
+    if (typeof timelinePrefs['group_by'] === 'string') setGroupBy(timelinePrefs['group_by'] as GroupBy)
+    if (typeof timelinePrefs['sort_by'] === 'string') setSortBy(timelinePrefs['sort_by'] as SortBy)
+    if (typeof timelinePrefs['zoom_granularity'] === 'string') setGranularity(timelinePrefs['zoom_granularity'] as TimeGranularity | 'auto')
+    if (typeof timelinePrefs['color_by'] === 'string') setColorBy(timelinePrefs['color_by'] as ColorBy)
+    if (typeof timelinePrefs['list_group_by'] === 'string') setListGroupBy(timelinePrefs['list_group_by'] as ListGroupBy)
+    if (typeof timelinePrefs['list_sort_by'] === 'string') setListSortBy(timelinePrefs['list_sort_by'] as ListSortBy)
+    if (typeof timelinePrefs['list_color_by'] === 'string') setListColorBy(timelinePrefs['list_color_by'] as ListColorBy)
+    if (typeof timelinePrefs['list_density'] === 'string') setListDensity(timelinePrefs['list_density'] as ListDensity)
+    if (typeof timelinePrefs['view_mode'] === 'string') setView(timelinePrefs['view_mode'] as ViewMode)
+    if (typeof timelinePrefs['kanban_group_by'] === 'string') setKanbanGroupBy(timelinePrefs['kanban_group_by'] as KanbanGroupBy)
+    if (typeof timelinePrefs['kanban_sort_by'] === 'string') setKanbanSortBy(timelinePrefs['kanban_sort_by'] as KanbanSortBy)
+    if (typeof timelinePrefs['kanban_color_by'] === 'string') setKanbanColorBy(timelinePrefs['kanban_color_by'] as ColorBy)
+    if (typeof timelinePrefs['kanban_card_fields'] === 'string') {
+      try { setKanbanCardFields(JSON.parse(timelinePrefs['kanban_card_fields']) as KanbanCardField[]) } catch { /* ignore */ }
+    }
+    if (typeof timelinePrefs['kanban_collapsed'] === 'string') {
+      try { setKanbanCollapsedColumns(JSON.parse(timelinePrefs['kanban_collapsed']) as string[]) } catch { /* ignore */ }
+    }
+    if (typeof timelinePrefs['kanban_show_hierarchy'] === 'string') {
+      try { setKanbanShowHierarchy(JSON.parse(timelinePrefs['kanban_show_hierarchy']) as boolean) } catch { /* ignore */ }
+    }
+  }, [activeTimelineId, prefsSettled, timelinePrefs])
+
+  // Save toolbar state changes to per-timeline prefs.
+  const saveTimelinePref = useCallback((key: string, value: string) => {
+    if (!activeTimelineId) return
+    upsert.mutate({ key, value: JSON.stringify(value), timelineId: activeTimelineId })
+  }, [activeTimelineId, upsert.mutate]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('group_by', groupBy)
+  }, [groupBy, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('sort_by', sortBy)
+  }, [sortBy, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('zoom_granularity', granularity)
+  }, [granularity, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('color_by', colorBy)
+  }, [colorBy, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('view_mode', view)
+  }, [view, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('list_group_by', listGroupBy)
+  }, [listGroupBy, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('list_sort_by', listSortBy)
+  }, [listSortBy, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('list_color_by', listColorBy)
+  }, [listColorBy, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('list_density', listDensity)
+  }, [listDensity, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('kanban_group_by', kanbanGroupBy)
+  }, [kanbanGroupBy, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('kanban_sort_by', kanbanSortBy)
+  }, [kanbanSortBy, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('kanban_color_by', kanbanColorBy)
+  }, [kanbanColorBy, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('kanban_card_fields', JSON.stringify(kanbanCardFields))
+  }, [kanbanCardFields, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('kanban_show_hierarchy', JSON.stringify(kanbanShowHierarchy))
+  }, [kanbanShowHierarchy, saveTimelinePref])
+
+  // Global preferences: persist dark mode, active team, and active timeline.
+  useEffect(() => {
+    upsert.mutate({ key: 'theme', value: JSON.stringify(theme) })
+  }, [theme]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!teamId) return
+    upsert.mutate({ key: 'selected_team', value: JSON.stringify(teamId) })
+  }, [teamId]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!activeTimelineId) return
+    upsert.mutate({ key: 'selected_timeline', value: JSON.stringify(activeTimelineId) })
+  }, [activeTimelineId]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Reset label column width when the user switches timelines so each timeline
+  // starts fresh. Switching between views on the same timeline preserves width
+  // because the state lives here rather than inside the unmounting GanttView.
+  useEffect(() => {
+    setGanttLabelColW(DEFAULT_LABEL_COL_W)
+  }, [activeTimelineId])
+
+  return (
+    <div style={{ display: 'flex', height: '100vh', overflow: 'hidden', background: 'var(--background)' }}>
+      <Sidebar
+        collapsed={sidebarCollapsed}
+        onToggle={() => setSidebarCollapsed(c => !c)}
+        apiTimelines={timelines}
+        archivedTimelines={archivedTimelines}
+        activeTimelineId={activeTimelineId}
+        onActiveTimelineChange={handleTimelineChange}
+        onNewTimeline={() => { setEditingTimeline(null); setTimelineModalMode('new') }}
+        onEditTimeline={id => {
+          // timelines (active) is always loaded; allTimelines (?archived=true) may
+          // still be in-flight, so prefer the already-loaded list to avoid opening
+          // the modal with an undefined timeline and blank fields.
+          const tl = timelines.find(t => t.id === id) ?? allTimelines.find(t => t.id === id)
+          setEditingTimeline(tl ?? null)
+          setTimelineModalMode('edit')
+        }}
+        onNewActivity={() => {
+          const today = new Date().toISOString().slice(0, 10)
+          setSelectedActivityId(null)
+          setSelectedApiActivity(null)
+          if (view === 'list') {
+            setListNewRowSeq(s => s + 1)
+          } else {
+            setCreateDefaults({ start: today, end: today, memberId: null })
+          }
+        }}
+        activeTeam={activeTeam}
+        activeTeams={activeTeams}
+        archivedTeams={archivedTeams}
+        canEditTeam={canEditTeam}
+        onSelectTeam={handleSelectTeam}
+        onNewTeam={isSuperadmin ? () => { setEditingTeam(null); setTeamModalMode('new'); } : undefined}
+        onEditTeam={t => { setEditingTeam(t as ApiTeam); setTeamModalMode('edit'); }}
+        onUnarchiveTeam={id => unarchiveTeam.mutate(id)}
+        members={teamMembers.length > 0 ? teamMembers : undefined}
+        onEditMember={isSuperadmin ? m => setEditingMember(m) : undefined}
+      />
+
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0 }}>
+        <TopBar
+          view={view}
+          teamId={teamId}
+          timelineName={activeTimelineName}
+          timelineIdentity={activeTimelineIdentity}
+          onViewChange={setView}
+          onOpenFilterManager={() => setFilterModalOpen(true)}
+          rightSlot={
+            <div ref={profileRef} style={{ position: 'relative', marginLeft: 4, zIndex: 30 }}>
+              <button
+                onClick={() => setProfileOpen(o => !o)}
+                style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', display: 'flex' }}
+                title={displayName}
+              >
+                <Badge identity={userIdentity} name={displayName} shape="circle" size={28} />
+              </button>
+
+              {profileOpen && (
+                <div
+                  style={{
+                    position: 'absolute',
+                    top: 'calc(100% + 8px)',
+                    right: 0,
+                    width: 220,
+                    background: 'var(--card)',
+                    border: '1px solid var(--border)',
+                    borderRadius: 8,
+                    boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
+                    zIndex: 100,
+                    overflow: 'hidden',
+                  }}
+                >
+                  <div style={{ padding: '12px 14px', borderBottom: '1px solid var(--border)' }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)' }}>{displayName}</div>
+                    <div style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 2 }}>{email}</div>
+                  </div>
+                  <button
+                    onClick={toggleDark}
+                    style={{ ...DROPDOWN_BTN, borderBottom: '1px solid var(--border)' }}
+                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                  >
+                    {isDark ? <Moon size={14} strokeWidth={1.8} /> : <Sun size={14} strokeWidth={1.8} />}
+                    {isDark ? 'Dark mode' : 'Light mode'}
+                  </button>
+                  <button
+                    onClick={() => { setProfileOpen(false); navigate('/settings'); }}
+                    style={{ ...DROPDOWN_BTN, borderBottom: '1px solid var(--border)' }}
+                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                  >
+                    <Settings size={14} strokeWidth={1.8} />
+                    Settings
+                  </button>
+                  <button
+                    onClick={logout}
+                    style={{ ...DROPDOWN_BTN, color: 'var(--muted-foreground)' }}
+                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                  >
+                    <LogOut size={14} strokeWidth={1.8} />
+                    Sign out
+                  </button>
+                </div>
+              )}
+            </div>
+          }
+        />
+
+        {/* Active timeline color band */}
+        <div style={{ height: 3, background: activeTimelineColor, flexShrink: 0, transition: 'background 0.2s ease' }} />
+
+        {/* Gantt sub-toolbar — only shown in Gantt view */}
+        {view === 'gantt' && (
+          <GanttToolbar
+            groupBy={groupBy}
+            onGroupByChange={setGroupBy}
+            sortBy={sortBy}
+            onSortByChange={setSortBy}
+            granularity={granularity}
+            onGranularityChange={setGranularity}
+            colorBy={colorBy}
+            onColorByChange={setColorBy}
+            onExport={() => setExportDialogOpen(true)}
+            onShare={() => setShareModalOpen(true)}
+          />
+        )}
+
+        {/* List sub-toolbar — only shown in List view */}
+        {view === 'list' && (
+          <ListToolbar
+            columns={listColumns}
+            onColumnVisibilityChange={(colId, visible) => {
+              listColToggleSeq.current += 1
+              setListColToggle({ colId, visible, seq: listColToggleSeq.current })
+              setListColumns(prev => prev.map(c => c.id === colId ? { ...c, visible } : c))
+            }}
+            density={listDensity}
+            onDensityChange={setListDensity}
+            groupBy={listGroupBy}
+            onGroupByChange={setListGroupBy}
+            sortBy={listSortBy}
+            onSortByChange={setListSortBy}
+            colorBy={listColorBy}
+            onColorByChange={setListColorBy}
+            onExport={() => setExportDialogOpen(true)}
+            onShare={() => setShareModalOpen(true)}
+          />
+        )}
+
+        {/* Calendar sub-toolbar — only shown in Calendar view */}
+        {view === 'calendar' && (
+          <CalendarToolbar
+            layout={calendarLayout}
+            onLayoutChange={handleCalendarLayoutChange}
+            anchorDate={calendarAnchorDate}
+            onPrev={calendarPrev}
+            onNext={calendarNext}
+            onToday={calendarToday}
+            colorBy={colorBy}
+            onColorByChange={setColorBy}
+            onExport={() => setExportDialogOpen(true)}
+            onShare={() => setCalendarShareModalOpen(true)}
+          />
+        )}
+
+        {/* Kanban sub-toolbar — only shown in Kanban view */}
+        {view === 'kanban' && (
+          <KanbanToolbar
+            groupBy={kanbanGroupBy}
+            onGroupByChange={setKanbanGroupBy}
+            sortBy={kanbanSortBy}
+            onSortByChange={setKanbanSortBy}
+            colorBy={kanbanColorBy}
+            onColorByChange={setKanbanColorBy}
+            cardFields={kanbanCardFields}
+            onCardFieldsChange={setKanbanCardFields}
+            showHierarchy={kanbanShowHierarchy}
+            onShowHierarchyChange={setKanbanShowHierarchy}
+            onExport={() => setExportDialogOpen(true)}
+            onShare={() => setShareModalOpen(true)}
+          />
+        )}
+
+        {/* Content area */}
+        <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+          {view === 'gantt' && teamId && activeTimelineId ? (
+            <GanttView
+              teamId={teamId}
+              timelineId={activeTimelineId}
+              startDate={activeTimeline?.startDate}
+              endDate={activeTimeline?.endDate}
+              groupBy={groupBy}
+              sortBy={sortBy}
+              granularity={granularity}
+              colorBy={colorBy}
+              timelineStatuses={activeTimelineStatuses}
+              savedFilters={savedFilters}
+              tags={tags}
+              selectedActivityId={selectedActivityId}
+              onSelectActivity={(id) => {
+                setSelectedActivityId(id)
+                if (!id) { setSelectedApiActivity(null); setCreateDefaults(null) }
+              }}
+              onSelectApiActivity={(activity) => {
+                setSelectedApiActivity(activity)
+                setCreateDefaults(null)
+              }}
+              onBarDragProgress={(activityId, newStart, newEnd) => {
+                setLiveDragDates({
+                  activityId,
+                  start: newStart.toISOString().slice(0, 10),
+                  end: newEnd.toISOString().slice(0, 10),
+                })
+              }}
+              onBarDragEnd={() => setLiveDragDates(null)}
+              onMembersLoaded={setGanttMembers}
+              labelColW={ganttLabelColW}
+              onLabelColWChange={setGanttLabelColW}
+            />
+          ) : view === 'gantt' && (!teamId || !activeTimelineId) ? (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>Loading your team…</p>
+            </div>
+          ) : view === 'list' && teamId && activeTimelineId ? (
+            <ListView
+              teamId={teamId}
+              timelineId={activeTimelineId}
+              groupBy={listGroupBy}
+              sortBy={listSortBy}
+              colorBy={listColorBy}
+              density={listDensity}
+              timelineStatuses={activeTimelineStatuses}
+              savedFilters={savedFilters}
+              tags={tags}
+              selectedActivityId={selectedActivityId}
+              pendingColumnToggle={listColToggle}
+              onSelectActivity={(id) => {
+                setSelectedActivityId(id)
+                if (!id) { setSelectedApiActivity(null); setCreateDefaults(null) }
+              }}
+              onSelectApiActivity={(activity) => {
+                setSelectedApiActivity(activity)
+                setCreateDefaults(null)
+              }}
+              onMembersLoaded={setGanttMembers}
+              onColumnsChange={setListColumns}
+              triggerNewRow={listNewRowSeq}
+            />
+          ) : view === 'list' && (!teamId || !activeTimelineId) ? (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>Loading your team…</p>
+            </div>
+          ) : view === 'calendar' && teamId && activeTimelineId ? (
+            <CalendarView
+              teamId={teamId}
+              timelineId={activeTimelineId}
+              layout={calendarLayout}
+              anchorDate={calendarAnchorDate}
+              colorBy={colorBy}
+              timelineStatuses={activeTimelineStatuses}
+              savedFilters={savedFilters}
+              tags={tags}
+              selectedActivityId={selectedActivityId}
+              onSelectActivity={(id) => {
+                setSelectedActivityId(id)
+                if (!id) { setSelectedApiActivity(null); setCreateDefaults(null) }
+              }}
+              onSelectApiActivity={(activity) => {
+                setSelectedApiActivity(activity)
+                setCreateDefaults(null)
+              }}
+              onBarDragProgress={(activityId, newStart, newEnd) => {
+                setLiveDragDates({
+                  activityId,
+                  start: newStart.toISOString().slice(0, 10),
+                  end: newEnd.toISOString().slice(0, 10),
+                })
+              }}
+              onBarDragEnd={() => setLiveDragDates(null)}
+              onCellClick={(date) => {
+                const iso = date.toISOString().slice(0, 10)
+                setSelectedActivityId(null)
+                setSelectedApiActivity(null)
+                setCreateDefaults({ start: iso, end: iso, memberId: null })
+              }}
+              onMembersLoaded={setGanttMembers}
+            />
+          ) : view === 'calendar' && (!teamId || !activeTimelineId) ? (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>Loading your team…</p>
+            </div>
+          ) : view === 'kanban' && teamId && activeTimelineId ? (
+            <KanbanView
+              teamId={teamId}
+              timelineId={activeTimelineId}
+              groupBy={kanbanGroupBy}
+              sortBy={kanbanSortBy}
+              colorBy={kanbanColorBy}
+              cardFields={kanbanCardFields}
+              collapsedColumnIds={kanbanCollapsedColumns}
+              onCollapsedColumnIdsChange={setKanbanCollapsedColumns}
+              showHierarchy={kanbanShowHierarchy}
+              timelineStatuses={activeTimelineStatuses}
+              savedFilters={savedFilters}
+              tags={tags}
+              selectedActivityId={selectedActivityId}
+              onSelectActivity={(id) => {
+                setSelectedActivityId(id)
+                if (!id) { setSelectedApiActivity(null); setCreateDefaults(null) }
+              }}
+              onSelectApiActivity={(activity) => {
+                setSelectedApiActivity(activity)
+                setCreateDefaults(null)
+              }}
+              onAddActivity={(defaults) => {
+                setSelectedActivityId(null)
+                setSelectedApiActivity(null)
+                setCreateDefaults(defaults)
+              }}
+              onMembersLoaded={setGanttMembers}
+            />
+          ) : view === 'kanban' && (!teamId || !activeTimelineId) ? (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>Loading your team…</p>
+            </div>
+          ) : (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>
+                {view.charAt(0).toUpperCase() + view.slice(1)} view coming soon.
+              </p>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Activity detail panel — slides in from right when an activity is selected */}
+      <ActivityDetailPanel
+        open={Boolean(selectedApiActivity)}
+        event={selectedApiActivity}
+        members={ganttMembers}
+        teamId={teamId}
+        timelineId={activeTimelineId ?? ''}
+        onClose={() => { setSelectedActivityId(null); setSelectedApiActivity(null); setLiveDragDates(null) }}
+        liveDragStart={liveDragDates && liveDragDates.activityId === selectedApiActivity?.id ? liveDragDates.start : undefined}
+        liveDragEnd={liveDragDates && liveDragDates.activityId === selectedApiActivity?.id ? liveDragDates.end : undefined}
+      />
+
+      {/* Activity create panel — slides in from New Activity button or future drag */}
+      <ActivityCreatePanel
+        open={Boolean(createDefaults) && !selectedApiActivity}
+        teamId={teamId}
+        timelineId={activeTimelineId ?? ''}
+        members={ganttMembers}
+        timelineStatuses={activeTimelineStatuses}
+        defaultStart={createDefaults?.start ?? new Date().toISOString().slice(0, 10)}
+        defaultEnd={createDefaults?.end ?? new Date().toISOString().slice(0, 10)}
+        defaultMemberId={createDefaults?.memberId}
+        defaultStatusId={createDefaults?.statusId}
+        onClose={() => setCreateDefaults(null)}
+      />
+
+      <FilterManageModal
+        open={filterModalOpen}
+        onClose={() => setFilterModalOpen(false)}
+        teamId={teamId}
+        timelineId={activeTimelineId ?? ''}
+        isAdmin={canEditTeam}
+      />
+
+      {/* Team modal — create or edit */}
+      {teamModalMode && (
+        <TeamModal
+          mode={teamModalMode}
+          team={editingTeam ?? undefined}
+          isAdmin={canEditTeam}
+          onClose={() => { setTeamModalMode(null); setEditingTeam(null); }}
+          onTeamCreated={created => setActiveTeamId(created.id)}
+        />
+      )}
+
+      {/* Member modal — edit a team member */}
+      {editingMember && (
+        <MemberModal
+          teamId={teamId}
+          memberId={editingMember.id}
+          isAdmin={canEditTeam}
+          isSuperadmin={isSuperadmin}
+          onClose={() => setEditingMember(null)}
+        />
+      )}
+
+      {/* Share modal — create a share link for the active view */}
+      {shareModalOpen && activeTimelineId && teamId && (view === 'gantt' || view === 'list' || view === 'kanban') && (
+        <ShareModal
+          teamId={teamId}
+          timelineId={activeTimelineId}
+          viewType={view}
+          timelineName={activeTimelineName}
+          viewConfig={
+            view === 'gantt'
+              ? { groupBy, sortBy, colorBy, granularity: String(granularity), filter: activeShareFilter }
+              : view === 'list'
+              ? {
+                  groupBy: listGroupBy,
+                  sortBy: listSortBy,
+                  colorBy: listColorBy,
+                  granularity: '',
+                  filter: activeShareFilter,
+                  columns: listColumns.map(c => ({ id: c.id, visible: c.visible })),
+                }
+              : {
+                  groupBy: kanbanGroupBy,
+                  sortBy: kanbanSortBy,
+                  colorBy: kanbanColorBy,
+                  granularity: '',
+                  filter: activeShareFilter,
+                  cardFields: kanbanCardFields,
+                  showHierarchy: kanbanShowHierarchy,
+                  collapsedColumns: kanbanCollapsedColumns,
+                }
+          }
+          onClose={() => setShareModalOpen(false)}
+        />
+      )}
+
+      {/* Export dialog — download the active view as CSV/Excel/ICS */}
+      {exportDialogOpen && activeTimelineId && teamId && (
+        <ExportDialog
+          view={view}
+          teamId={teamId}
+          timelineId={activeTimelineId}
+          timelineName={activeTimelineName}
+          filterLabel={exportFilterInfo.filterLabel}
+          filterDefinition={exportFilterInfo.filterDefinition}
+          filteredCount={exportFilterInfo.filteredCount}
+          totalCount={exportFilterInfo.totalCount}
+          viewActivityIds={exportViewActivityIds}
+          listExportColumns={exportListColumns}
+          textExportData={textExportData}
+          onClose={() => setExportDialogOpen(false)}
+        />
+      )}
+
+      {/* Calendar share modal — ICS feed configurator (distinct from ShareModal) */}
+      {calendarShareModalOpen && activeTimelineId && teamId && (
+        <CalendarShareModal
+          teamId={teamId}
+          timelineId={activeTimelineId}
+          timelineName={activeTimelineName}
+          onClose={() => setCalendarShareModalOpen(false)}
+        />
+      )}
+
+      {/* Timeline modal — create or edit */}
+      {timelineModalMode && (
+        <TimelineModal
+          mode={timelineModalMode}
+          teamId={teamId}
+          timeline={editingTimeline ?? undefined}
+          canAdmin={canEditTeam}
+          onClose={() => { setTimelineModalMode(null); setEditingTimeline(null) }}
+          onCreated={created => setActiveTimelineId(created.id)}
+          onUnarchive={id => unarchiveTimeline.mutate(id, { onSuccess: () => { setTimelineModalMode(null); setEditingTimeline(null) } })}
+        />
+      )}
+    </div>
+  )
+}
+
+export default function DashboardPage() {
+  return (
+    <FindProvider>
+      <FilterProvider>
+        <DashboardShell />
+      </FilterProvider>
+    </FindProvider>
+  )
 }
 ````
 
@@ -72525,7 +72834,11 @@ This document organizes development into discrete phases with effort estimates a
 | 13.3 | [List + Kanban Read-Only](#phase-133--list--kanban-read-only) | M | ✅ |
 | 13.4 | [Calendar — ICS Feed Sharing](#phase-134--calendar--ics-feed-sharing) | M | ✅ |
 | 13.5 | [Lifecycle Tail](#phase-135--lifecycle-tail) | S | ✅ |
-| 14 | [Export — Data, Textual & Visual](#phase-14--export--data-textual--visual) | L — 6–9 days (4 pausable sub-phases) | ⬜ |
+| 14 | [Export — Data, Textual & Visual](#phase-14--export--data-textual--visual) (sub-phased) | L — 6–9 days (4 pausable sub-phases) | 🔄 |
+| 14.1 | Foundation + data exports (CSV/xlsx/ICS) | M | ✅ |
+| 14.2 | Textual (Markdown / plain text / clipboard) | M | ✅ |
+| 14.3 | PNG snapshot | S–M | ⬜ |
+| 14.4 | Printable views | M | ⬜ |
 | 15 | [Import — Tabular](#phase-15--import--tabular) | M — 2–3 days | ⬜ |
 | 16 | [Backup & Restore](#phase-16--backup--restore) | M — 2–3 days | ⬜ |
 | 17 | [Global Search](#phase-17--global-search) | M — 2–3 days | ⬜ |
