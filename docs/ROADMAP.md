@@ -58,7 +58,11 @@ This document organizes development into discrete phases with effort estimates a
 | 13.3 | [List + Kanban Read-Only](#phase-133--list--kanban-read-only) | M | ✅ |
 | 13.4 | [Calendar — ICS Feed Sharing](#phase-134--calendar--ics-feed-sharing) | M | ✅ |
 | 13.5 | [Lifecycle Tail](#phase-135--lifecycle-tail) | S | ✅ |
-| 14 | [Export — Data, Textual & Visual](#phase-14--export--data-textual--visual) | L — 6–9 days (4 pausable sub-phases) | ⬜ |
+| 14 | [Export — Data, Textual & Visual](#phase-14--export--data-textual--visual) (sub-phased) | L — 6–9 days (4 pausable sub-phases) | 🔄 |
+| 14.1 | Foundation + data exports (CSV/xlsx/ICS) | M | ✅ |
+| 14.2 | Textual (Markdown / plain text / clipboard) | M | ✅ |
+| 14.3 | PNG snapshot | S–M | ⬜ |
+| 14.4 | Printable views | M | ⬜ |
 | 15 | [Import — Tabular](#phase-15--import--tabular) | M — 2–3 days | ⬜ |
 | 16 | [Backup & Restore](#phase-16--backup--restore) | M — 2–3 days | ⬜ |
 | 17 | [Global Search](#phase-17--global-search) | M — 2–3 days | ⬜ |

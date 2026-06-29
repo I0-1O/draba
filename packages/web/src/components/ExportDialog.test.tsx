@@ -5,9 +5,10 @@
  */
 
 import '@testing-library/jest-dom'
-import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent, within } from '@testing-library/react'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { render, screen, fireEvent, within, waitFor } from '@testing-library/react'
 import ExportDialog from './ExportDialog'
+import type { TextExportData } from './ExportDialog'
 
 // ── Module mocks ──────────────────────────────────────────────────────────────
 
@@ -38,6 +39,22 @@ function renderDialog(overrides: Partial<Props> = {}) {
   }
   render(<ExportDialog {...props} />)
   return { onClose }
+}
+
+function makeTextExportData(overrides: Partial<TextExportData> = {}): TextExportData {
+  return {
+    activities: [],
+    memberById: new Map(),
+    statusById: new Map(),
+    tagById: new Map(),
+    activityTitleById: new Map(),
+    kanbanColumns: null,
+    listDisplayRows: null,
+    listVisibleColumns: null,
+    kanbanShowHierarchy: false,
+    kanbanChildrenByParentId: new Map(),
+    ...overrides,
+  }
 }
 
 beforeEach(() => {
@@ -125,5 +142,131 @@ describe('ExportDialog', () => {
     fireEvent.click(screen.getByRole('button', { name: /Download/i }))
     const config = mockDownload.mock.calls[0][2] as { activityIds: null }
     expect(config.activityIds).toBeNull()
+  })
+})
+
+// ── 14.2: Table/Outline style picker ───────────────────────────────────────────
+
+describe('ExportDialog — style picker', () => {
+  it('shows the Table/Outline picker for List view text formats', () => {
+    renderDialog({ view: 'list' })
+    fireEvent.click(screen.getByText('Markdown'))
+    expect(screen.getByText('Table')).toBeInTheDocument()
+    expect(screen.getByText('Outline')).toBeInTheDocument()
+  })
+
+  it('does not show the style picker for CSV', () => {
+    renderDialog({ view: 'list' })
+    // CSV is selected by default.
+    expect(screen.queryByText('Outline')).not.toBeInTheDocument()
+  })
+
+  it('does not show the style picker for Kanban text formats (only List has a Table/Outline choice)', () => {
+    renderDialog({ view: 'kanban' })
+    fireEvent.click(screen.getByText('Markdown'))
+    expect(screen.queryByText('Outline')).not.toBeInTheDocument()
+  })
+
+  it('updates the clipboard note to mention "outline" once Outline is selected', () => {
+    renderDialog({ view: 'list' })
+    fireEvent.click(screen.getByText('Copy to clipboard'))
+    fireEvent.click(screen.getByText('Outline'))
+    expect(screen.getByText(/paste into Slack, Google Docs, or Word to get a formatted outline/i)).toBeInTheDocument()
+  })
+})
+
+// ── 14.2: client-side Markdown / plain-text download ───────────────────────────
+
+describe('ExportDialog — client-side text downloads', () => {
+  let createObjectURL: ReturnType<typeof vi.fn>
+  let revokeObjectURL: ReturnType<typeof vi.fn>
+
+  beforeEach(() => {
+    createObjectURL = vi.fn(() => 'blob:mock-url')
+    revokeObjectURL = vi.fn()
+    vi.stubGlobal('URL', { ...URL, createObjectURL, revokeObjectURL })
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('generates a Markdown blob client-side instead of calling the server download hook', () => {
+    const textExportData = makeTextExportData({ activities: [] })
+    renderDialog({ view: 'list', textExportData })
+    fireEvent.click(screen.getByText('Markdown'))
+    fireEvent.click(screen.getByRole('button', { name: /Download \.md/i }))
+    expect(createObjectURL).toHaveBeenCalledTimes(1)
+    expect(mockDownload).not.toHaveBeenCalled()
+  })
+
+  it('generates a plain-text blob client-side', () => {
+    const textExportData = makeTextExportData({ activities: [] })
+    renderDialog({ view: 'list', textExportData })
+    fireEvent.click(screen.getByText('Plain text'))
+    fireEvent.click(screen.getByRole('button', { name: /Download \.txt/i }))
+    expect(createObjectURL).toHaveBeenCalledTimes(1)
+    expect(mockDownload).not.toHaveBeenCalled()
+  })
+
+  it('falls back to an empty data object (and does not throw) when textExportData is undefined', () => {
+    renderDialog({ view: 'list', textExportData: undefined })
+    fireEvent.click(screen.getByText('Markdown'))
+    expect(() => fireEvent.click(screen.getByRole('button', { name: /Download \.md/i }))).not.toThrow()
+    expect(createObjectURL).toHaveBeenCalledTimes(1)
+  })
+})
+
+// ── 14.2: copy to clipboard ─────────────────────────────────────────────────────
+
+describe('ExportDialog — copy to clipboard', () => {
+  let writeMock: ReturnType<typeof vi.fn>
+  let writeTextMock: ReturnType<typeof vi.fn>
+
+  beforeEach(() => {
+    writeMock = vi.fn().mockResolvedValue(undefined)
+    writeTextMock = vi.fn().mockResolvedValue(undefined)
+    vi.stubGlobal('navigator', {
+      ...navigator,
+      clipboard: { write: writeMock, writeText: writeTextMock },
+    })
+    vi.stubGlobal('ClipboardItem', class {
+      constructor(public items: Record<string, Blob>) {}
+    })
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('writes both text/plain and text/html flavors via ClipboardItem', async () => {
+    const textExportData = makeTextExportData({ activities: [] })
+    renderDialog({ view: 'list', textExportData })
+    fireEvent.click(screen.getByText('Copy to clipboard'))
+    fireEvent.click(screen.getByRole('button', { name: /Copy to clipboard/i }))
+
+    await waitFor(() => expect(writeMock).toHaveBeenCalledTimes(1))
+    const item = writeMock.mock.calls[0][0][0] as { items: Record<string, Blob> }
+    expect(Object.keys(item.items)).toEqual(['text/plain', 'text/html'])
+    expect(writeTextMock).not.toHaveBeenCalled()
+  })
+
+  it('shows "Copied!" after the clipboard write resolves', async () => {
+    const textExportData = makeTextExportData({ activities: [] })
+    renderDialog({ view: 'list', textExportData })
+    fireEvent.click(screen.getByText('Copy to clipboard'))
+    fireEvent.click(screen.getByRole('button', { name: /Copy to clipboard/i }))
+    expect(await screen.findByText('Copied!')).toBeInTheDocument()
+  })
+
+  it('falls back to writeText when ClipboardItem is unavailable (HTTP context)', async () => {
+    vi.stubGlobal('ClipboardItem', undefined)
+    const textExportData = makeTextExportData({ activities: [] })
+    renderDialog({ view: 'list', textExportData })
+    fireEvent.click(screen.getByText('Copy to clipboard'))
+    fireEvent.click(screen.getByRole('button', { name: /Copy to clipboard/i }))
+
+    await waitFor(() => expect(writeTextMock).toHaveBeenCalledTimes(1))
+    expect(writeMock).not.toHaveBeenCalled()
   })
 })

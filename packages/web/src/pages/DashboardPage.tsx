@@ -51,6 +51,16 @@ type ApiTeam = components['schemas']['Team']
 type ApiTimeline = components['schemas']['Timeline']
 type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
 
+/** Comparator for ListSortBy, shared by the export-scope ID ordering and the list-export display rows. */
+function compareByListSort(a: ApiActivity, b: ApiActivity, listSortBy: ListSortBy): number {
+  if (listSortBy === 'startDate') return (a.startAt ?? '').localeCompare(b.startAt ?? '')
+  if (listSortBy === 'endDate') return (a.endAt ?? '').localeCompare(b.endAt ?? '')
+  if (listSortBy === 'title') return a.title.localeCompare(b.title)
+  if (listSortBy === 'status') return (a.statusId ?? '').localeCompare(b.statusId ?? '')
+  if (listSortBy === 'progress') return (b.percentComplete ?? 0) - (a.percentComplete ?? 0)
+  return 0
+}
+
 const DROPDOWN_BTN: React.CSSProperties = {
   display: 'flex',
   alignItems: 'center',
@@ -329,14 +339,7 @@ function DashboardShell() {
 
     let acts = exportFilterInfo.filteredActivities
     if (view === 'list') {
-      acts = [...acts].sort((a, b) => {
-        if (listSortBy === 'startDate') return (a.startAt ?? '').localeCompare(b.startAt ?? '')
-        if (listSortBy === 'endDate') return (a.endAt ?? '').localeCompare(b.endAt ?? '')
-        if (listSortBy === 'title') return a.title.localeCompare(b.title)
-        if (listSortBy === 'status') return (a.statusId ?? '').localeCompare(b.statusId ?? '')
-        if (listSortBy === 'progress') return (b.percentComplete ?? 0) - (a.percentComplete ?? 0)
-        return 0
-      })
+      acts = [...acts].sort((a, b) => compareByListSort(a, b, listSortBy))
     }
     return acts.map(a => a.id)
   }, [exportFilterInfo.filteredActivities, activeFilter, view, listSortBy])
@@ -376,14 +379,7 @@ function DashboardShell() {
     let listDisplayRows: ListDisplayRow[] | null = null
     let listVisibleColumns: string[] | null = null
     if (view === 'list') {
-      const sorted = [...activities].sort((a, b) => {
-        if (listSortBy === 'startDate') return (a.startAt ?? '').localeCompare(b.startAt ?? '')
-        if (listSortBy === 'endDate') return (a.endAt ?? '').localeCompare(b.endAt ?? '')
-        if (listSortBy === 'title') return a.title.localeCompare(b.title)
-        if (listSortBy === 'status') return (a.statusId ?? '').localeCompare(b.statusId ?? '')
-        if (listSortBy === 'progress') return (b.percentComplete ?? 0) - (a.percentComplete ?? 0)
-        return 0
-      })
+      const sorted = [...activities].sort((a, b) => compareByListSort(a, b, listSortBy))
       const memberByIdObj = new Map(
         teamMembers.map(m => [m.id, { displayName: m.displayName || m.email || 'Unknown', color: m.color }]),
       )

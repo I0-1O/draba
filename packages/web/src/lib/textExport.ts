@@ -246,7 +246,7 @@ export function buildListMarkdownOutline(
     const tags = resolveTags(activity, tagById)
     if (tags) result.push(`${fi}Tags: ${tags}`)
     if (activity.location) result.push(`${fi}Location: ${escMd(activity.location)}`)
-    if (activity.url) result.push(`${fi}URL: ${activity.url}`)
+    if (activity.url) result.push(`${fi}URL: ${escMd(activity.url)}`)
     return result
   }
 
@@ -427,7 +427,8 @@ function pad(s: string, width: number): string {
 
 /**
  * List view → plain-text outline (bullet list).
- * Mirrors buildListMarkdownOutline without Markdown syntax.
+ * Mirrors buildListMarkdownOutline without Markdown syntax — fields (incl. URL)
+ * are emitted raw since there's no Markdown table/pipe syntax to break here.
  * Root activities use •, children use ◦ (depth 1+).
  */
 export function buildListPlainTextOutline(
@@ -690,7 +691,8 @@ export function buildListHtml(
   const { listDisplayRows, listVisibleColumns, memberById, statusById, tagById, activityTitleById } = data
   const cols = resolveListColumns(listVisibleColumns)
 
-  const thead = `<thead><tr>${cols.map(c => `<th style="${TH}">${htmlEsc(c.label)}</th>`).join('')}</tr></thead>`
+  const theadRow = `<tr>${cols.map(c => `<th style="${TH}">${htmlEsc(c.label)}</th>`).join('')}</tr>`
+  const thead = `<thead>${theadRow}</thead>`
   const colspan = cols.length
 
   const makeRow = (activity: ApiActivity, depth: number): string => {
@@ -715,7 +717,7 @@ export function buildListHtml(
     for (const row of activityList) {
       if (row.kind === 'group') {
         rows.push(makeSection(row.label, row.count))
-        rows.push(thead.replace('<thead>', '').replace('</thead>', '').replace('<tr>', '<tr>').replace('</tr>', '</tr>'))
+        rows.push(theadRow)
       } else {
         rows.push(makeRow(row.activity, row.depth))
       }
