@@ -44538,129 +44538,6 @@ export function CleanKanbanSnapshot({
 }
 ````
 
-## File: packages/web/src/components/export/PresentationFrame.tsx
-````typescript
-/**
- * PresentationFrame — an isolated, always-light document used as the shared
- * render surface for the visual exports (Phase 14.3 PNG; Phase 14.4 HTML/print).
- *
- * The earlier 14.3 approach mounted the clean snapshot inside the live dashboard
- * and forced light mode by toggling the `dark` class on the page's own `<html>`.
- * That repainted the visible dashboard (the "flicker") and left some elements —
- * the ones that paint from inline `var(--muted)`/`var(--card)` (kanban column
- * boxes, the Gantt sticky left rail) — stuck on dark, because html-to-image
- * can't reliably resolve theme CSS variables that hang off a `.dark` class on
- * the document root.
- *
- * This component sidesteps both by rendering the snapshot into a same-origin
- * `<iframe>` that is its own document: the parent's stylesheets and fonts are
- * cloned into it (so Tailwind utilities, the `:root` design tokens, and Open
- * Sans all apply), and its `<html>` never receives the `.dark` class. The result
- * is structurally light — no class toggling on the live page (no flicker), and
- * every `var()` reference resolves against a `:root` with no dark override in
- * scope (no leftover dark boxes).
- *
- * Stylesheets are copied by cloning the `<style>`/`<link>` nodes rather than
- * reading `document.styleSheets[].cssRules`, which avoids the cross-origin
- * `SecurityError` the Google Fonts stylesheet otherwise triggers.
- *
- * The same frame is the surface Phase 14.4 reuses: `iframe.contentWindow.print()`
- * for the printable-PDF route and `iframe.contentDocument.documentElement.outerHTML`
- * (styles already inlined) for the HTML download — one render path, shared with
- * the Phase 13 share viewer's components, no second harness to drift.
- */
-
-import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { createPortal } from 'react-dom'
-
-export interface PresentationFrameProps {
-  /**
-   * Invoked once the frame's document is ready (styles copied, light theme
-   * applied, body available). Pass the body to the PNG capture / HTML serialize.
-   * Memoize this in the caller so it doesn't re-run the readiness effect.
-   */
-  onReady?: (body: HTMLElement, iframe: HTMLIFrameElement) => void
-  children: ReactNode
-}
-
-/**
- * Clones the parent document's style and stylesheet/font link nodes into the
- * frame's head. Node-cloning (not `cssRules` serialization) is deliberate — it
- * copies Vite's dev `<style>` blocks and prod `<link>`s alike without reading
- * cross-origin sheets, which would throw `SecurityError` on the fonts stylesheet.
- */
-function copyDocumentStyles(srcDoc: Document, destDoc: Document): void {
-  const selector = [
-    'style',
-    'link[rel="stylesheet"]',
-    'link[rel="preconnect"]',
-    'link[as="style"]',
-    'link[href*="fonts.googleapis"]',
-    'link[href*="fonts.gstatic"]',
-  ].join(',')
-  srcDoc.querySelectorAll(selector).forEach(node => {
-    destDoc.head.appendChild(node.cloneNode(true))
-  })
-}
-
-export default function PresentationFrame({ onReady, children }: PresentationFrameProps) {
-  const iframeRef = useRef<HTMLIFrameElement>(null)
-  const [body, setBody] = useState<HTMLElement | null>(null)
-
-  useEffect(() => {
-    const iframe = iframeRef.current
-    const doc = iframe?.contentDocument
-    if (!iframe || !doc) return
-
-    // Never dark: the snapshot must be light regardless of the user's theme,
-    // and we deliberately do not touch the parent <html> (that caused the flicker).
-    doc.documentElement.classList.remove('dark')
-    copyDocumentStyles(document, doc)
-    doc.body.style.margin = '0'
-    doc.body.style.padding = '0'
-    doc.body.style.background = '#ffffff'
-    // Shrink-wrap to the content so scrollWidth/scrollHeight at capture time is
-    // the view's full natural extent, not the iframe viewport.
-    doc.body.style.display = 'inline-block'
-    setBody(doc.body)
-  }, [])
-
-  useEffect(() => {
-    if (body && iframeRef.current) onReady?.(body, iframeRef.current)
-  }, [body, onReady])
-
-  return (
-    <>
-      {/*
-        Positioned at the viewport origin (not an extreme off-screen offset) so
-        the browser actually paints/lays out the content — Chrome culls layout
-        for nodes placed absurdly far outside any viewport, which left earlier
-        captures blank. z-index -1 tucks it behind the export dialog's backdrop
-        (z-1000), the only thing rendered alongside it, so it's never visible.
-        Sized generously so width-flexible content lays out fully; the capture
-        reads the body's own scroll extent regardless of this box.
-      */}
-      <iframe
-        ref={iframeRef}
-        title="Export presentation surface"
-        aria-hidden
-        style={{
-          position: 'fixed',
-          top: 0,
-          left: 0,
-          width: 1440,
-          height: 900,
-          border: 0,
-          zIndex: -1,
-          pointerEvents: 'none',
-        }}
-      />
-      {body && createPortal(children, body)}
-    </>
-  )
-}
-````
-
 ## File: packages/web/src/components/gantt/GanttToolbar.tsx
 ````typescript
 /**
@@ -49690,142 +49567,6 @@ export function createAuthFetchBlob(getToken: () => string | null) {
 }
 ````
 
-## File: packages/web/src/lib/pngExport.test.ts
-````typescript
-/**
- * pngExport — unit tests for capturePngSnapshot's surrounding logic.
- *
- * Since the 14.3 rework, the capture target is the body of an isolated,
- * always-light PresentationFrame iframe, so this module no longer toggles the
- * page theme or unclamps scroll containers — it simply rasterizes the element
- * at its full scroll extent and composites the header strip. `html-to-image`'s
- * toCanvas is module-mocked since jsdom has no real layout/canvas engine.
- */
-
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { capturePngSnapshot } from './pngExport'
-
-const mockToCanvas = vi.fn()
-vi.mock('html-to-image', () => ({
-  toCanvas: (...args: unknown[]) => mockToCanvas(...args),
-}))
-
-/** A minimal stand-in for an HTMLCanvasElement sufficient for compositeHeader + toBlob. */
-function makeFakeCanvas(width = 100, height = 100) {
-  const ctx = {
-    fillStyle: '',
-    font: '',
-    textBaseline: '',
-    strokeStyle: '',
-    lineWidth: 0,
-    fillRect: vi.fn(),
-    fillText: vi.fn(),
-    beginPath: vi.fn(),
-    moveTo: vi.fn(),
-    lineTo: vi.fn(),
-    stroke: vi.fn(),
-    drawImage: vi.fn(),
-  }
-  return {
-    width,
-    height,
-    getContext: vi.fn(() => ctx),
-    toBlob: vi.fn((cb: (b: Blob | null) => void) => cb(new Blob(['fake'], { type: 'image/png' }))),
-  } as unknown as HTMLCanvasElement
-}
-
-beforeEach(() => {
-  mockToCanvas.mockReset()
-  mockToCanvas.mockResolvedValue(makeFakeCanvas())
-  // document.createElement('canvas') is used internally for the header composite;
-  // intercept only that tag so the rest of jsdom's DOM behaves normally.
-  const realCreateElement = document.createElement.bind(document)
-  vi.spyOn(document, 'createElement').mockImplementation((tag: string) =>
-    tag === 'canvas' ? (makeFakeCanvas() as unknown as HTMLElement) : realCreateElement(tag))
-})
-
-afterEach(() => {
-  vi.restoreAllMocks()
-  document.documentElement.classList.remove('dark')
-})
-
-describe('capturePngSnapshot', () => {
-  it('resolves a Blob and calls toCanvas with the element, 2x pixel ratio, and white background', async () => {
-    const el = document.createElement('div')
-    const blob = await capturePngSnapshot(el, { timelineName: 'Q1 Plan', teamName: 'Acme', filterLabel: null })
-    expect(blob).toBeInstanceOf(Blob)
-    expect(mockToCanvas).toHaveBeenCalledWith(
-      el,
-      expect.objectContaining({ pixelRatio: 2, backgroundColor: '#ffffff' }),
-    )
-  })
-
-  it('captures the element at its full scroll extent', async () => {
-    const el = document.createElement('div')
-    Object.defineProperty(el, 'scrollWidth', { value: 1280, configurable: true })
-    Object.defineProperty(el, 'scrollHeight', { value: 720, configurable: true })
-
-    await capturePngSnapshot(el, { timelineName: 'Q1 Plan', teamName: null, filterLabel: null })
-
-    expect(mockToCanvas).toHaveBeenCalledWith(el, expect.objectContaining({ width: 1280, height: 720 }))
-  })
-
-  it('does not touch the page theme (the capture target is its own light document)', async () => {
-    document.documentElement.classList.add('dark')
-    const el = document.createElement('div')
-
-    let darkDuringCapture: boolean | undefined
-    mockToCanvas.mockImplementation(() => {
-      darkDuringCapture = document.documentElement.classList.contains('dark')
-      return Promise.resolve(makeFakeCanvas())
-    })
-
-    await capturePngSnapshot(el, { timelineName: 'Q1 Plan', teamName: null, filterLabel: null })
-
-    // The live page stays dark throughout — no flicker.
-    expect(darkDuringCapture).toBe(true)
-    expect(document.documentElement.classList.contains('dark')).toBe(true)
-  })
-
-  it('renders the period label into the header strip when given', async () => {
-    const el = document.createElement('div')
-    const headerCanvas = makeFakeCanvas()
-    const realCreateElement = document.createElement.bind(document)
-    vi.spyOn(document, 'createElement').mockImplementation((tag: string) =>
-      tag === 'canvas' ? (headerCanvas as unknown as HTMLElement) : realCreateElement(tag))
-
-    await capturePngSnapshot(el, { timelineName: 'Q1 Plan', teamName: null, filterLabel: null, periodLabel: 'June 2026' })
-
-    const ctx = (headerCanvas.getContext('2d') as unknown as { fillText: ReturnType<typeof vi.fn> })
-    const drawnText = ctx.fillText.mock.calls.map(c => c[0] as string)
-    expect(drawnText.some(t => t.includes('June 2026'))).toBe(true)
-  })
-
-  it('propagates a toCanvas rejection', async () => {
-    mockToCanvas.mockRejectedValueOnce(new Error('rasterization failed'))
-    const el = document.createElement('div')
-
-    await expect(capturePngSnapshot(el, { timelineName: 'Q1 Plan', teamName: null, filterLabel: null }))
-      .rejects.toThrow('rasterization failed')
-  })
-
-  it('rejects when canvas.toBlob yields null', async () => {
-    const el = document.createElement('div')
-    const nullBlobCanvas = makeFakeCanvas()
-    ;(nullBlobCanvas.toBlob as unknown as ReturnType<typeof vi.fn>).mockImplementation(
-      (cb: (b: Blob | null) => void) => cb(null),
-    )
-    // The header composite creates the final canvas via document.createElement('canvas').
-    const realCreateElement = document.createElement.bind(document)
-    vi.spyOn(document, 'createElement').mockImplementation((tag: string) =>
-      tag === 'canvas' ? (nullBlobCanvas as unknown as HTMLElement) : realCreateElement(tag))
-
-    await expect(capturePngSnapshot(el, { timelineName: 'Q1 Plan', teamName: null, filterLabel: null }))
-      .rejects.toThrow('canvas.toBlob returned null')
-  })
-})
-````
-
 ## File: packages/web/src/lib/pngExport.ts
 ````typescript
 /**
@@ -52093,6 +51834,133 @@ import "embed"
 var FS embed.FS
 ````
 
+## File: packages/web/src/components/export/PresentationFrame.tsx
+````typescript
+/**
+ * PresentationFrame — an isolated, always-light document used as the shared
+ * render surface for the visual exports (Phase 14.3 PNG; Phase 14.4 HTML/print).
+ *
+ * The earlier 14.3 approach mounted the clean snapshot inside the live dashboard
+ * and forced light mode by toggling the `dark` class on the page's own `<html>`.
+ * That repainted the visible dashboard (the "flicker") and left some elements —
+ * the ones that paint from inline `var(--muted)`/`var(--card)` (kanban column
+ * boxes, the Gantt sticky left rail) — stuck on dark, because html-to-image
+ * can't reliably resolve theme CSS variables that hang off a `.dark` class on
+ * the document root.
+ *
+ * This component sidesteps both by rendering the snapshot into a same-origin
+ * `<iframe>` that is its own document: the parent's stylesheets and fonts are
+ * cloned into it (so Tailwind utilities, the `:root` design tokens, and Open
+ * Sans all apply), and its `<html>` never receives the `.dark` class. The result
+ * is structurally light — no class toggling on the live page (no flicker), and
+ * every `var()` reference resolves against a `:root` with no dark override in
+ * scope (no leftover dark boxes).
+ *
+ * Stylesheets are copied by cloning the `<style>`/`<link>` nodes rather than
+ * reading `document.styleSheets[].cssRules`, which avoids the cross-origin
+ * `SecurityError` the Google Fonts stylesheet otherwise triggers.
+ *
+ * The same frame is the surface Phase 14.4 reuses: `iframe.contentWindow.print()`
+ * for the printable-PDF route and `iframe.contentDocument.documentElement.outerHTML`
+ * (styles already inlined) for the HTML download — one render path, shared with
+ * the Phase 13 share viewer's components, no second harness to drift.
+ */
+
+import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { createPortal } from 'react-dom'
+
+export interface PresentationFrameProps {
+  /**
+   * Invoked once the frame's document is ready (styles copied, light theme
+   * applied, body available). Pass the body to the PNG capture / HTML serialize.
+   * Memoize this in the caller so it doesn't re-run the readiness effect.
+   */
+  onReady?: (body: HTMLElement, iframe: HTMLIFrameElement) => void
+  children: ReactNode
+}
+
+/**
+ * Clones the parent document's style and stylesheet/font link nodes into the
+ * frame's head. Node-cloning (not `cssRules` serialization) is deliberate — it
+ * copies Vite's dev `<style>` blocks and prod `<link>`s alike without reading
+ * cross-origin sheets, which would throw `SecurityError` on the fonts stylesheet.
+ */
+function copyDocumentStyles(srcDoc: Document, destDoc: Document): void {
+  const selector = [
+    'style',
+    'link[rel="stylesheet"]',
+    'link[rel="preconnect"]',
+    'link[as="style"]',
+    'link[href*="fonts.googleapis"]',
+    'link[href*="fonts.gstatic"]',
+  ].join(',')
+  srcDoc.querySelectorAll(selector).forEach(node => {
+    destDoc.head.appendChild(node.cloneNode(true))
+  })
+}
+
+export default function PresentationFrame({ onReady, children }: PresentationFrameProps) {
+  const iframeRef = useRef<HTMLIFrameElement>(null)
+  const [body, setBody] = useState<HTMLElement | null>(null)
+
+  useEffect(() => {
+    const iframe = iframeRef.current
+    const doc = iframe?.contentDocument
+    if (!iframe || !doc) return
+
+    // Never dark: the snapshot must be light regardless of the user's theme,
+    // and we deliberately do not touch the parent <html> (that caused the flicker).
+    doc.documentElement.classList.remove('dark')
+    copyDocumentStyles(document, doc)
+    doc.body.style.margin = '0'
+    doc.body.style.padding = '0'
+    doc.body.style.background = '#ffffff'
+    // Shrink-wrap to the content so scrollWidth/scrollHeight at capture time is
+    // the view's full natural extent, not the iframe viewport.
+    doc.body.style.display = 'inline-block'
+    setBody(doc.body)
+  }, [])
+
+  useEffect(() => {
+    if (body && iframeRef.current) onReady?.(body, iframeRef.current)
+  }, [body, onReady])
+
+  return (
+    <>
+      {/*
+        Positioned at the viewport origin (not an extreme off-screen offset) so
+        the browser actually paints/lays out the content — Chrome culls layout
+        for nodes placed absurdly far outside any viewport, which left earlier
+        captures blank. z-index -1 tucks it behind the export dialog's backdrop
+        (z-1000), the only thing rendered alongside it, so it's never visible.
+        Sized generously so width-flexible content lays out fully; the capture
+        reads the body's own scroll extent regardless of this box.
+      */}
+      <iframe
+        ref={iframeRef}
+        title="Export presentation surface"
+        aria-hidden
+        // Defense-in-depth: nothing is ever given a src/srcdoc (stays
+        // about:blank), but scripts and top-level navigation are blocked
+        // outright in case that ever changes.
+        sandbox="allow-same-origin"
+        style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          width: 1440,
+          height: 900,
+          border: 0,
+          zIndex: -1,
+          pointerEvents: 'none',
+        }}
+      />
+      {body && createPortal(children, body)}
+    </>
+  )
+}
+````
+
 ## File: packages/web/src/components/kanban/KanbanToolbar.tsx
 ````typescript
 /**
@@ -53839,6 +53707,212 @@ export function useExport(timelineId: string, timelineName: string) {
 
   return { download, isPending, error }
 }
+````
+
+## File: packages/web/src/lib/pngExport.test.ts
+````typescript
+/**
+ * pngExport — unit tests for capturePngSnapshot's surrounding logic.
+ *
+ * Since the 14.3 rework, the capture target is the body of an isolated,
+ * always-light PresentationFrame iframe, so this module no longer toggles the
+ * page theme or unclamps scroll containers — it simply rasterizes the element
+ * at its full scroll extent and composites the header strip. `html-to-image`'s
+ * toCanvas is module-mocked since jsdom has no real layout/canvas engine.
+ */
+
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { capturePngSnapshot } from './pngExport'
+
+const mockToCanvas = vi.fn()
+vi.mock('html-to-image', () => ({
+  toCanvas: (...args: unknown[]) => mockToCanvas(...args),
+}))
+
+/** A minimal stand-in for an HTMLCanvasElement sufficient for compositeHeader + toBlob. */
+function makeFakeCanvas(width = 100, height = 100) {
+  const ctx = {
+    fillStyle: '',
+    font: '',
+    textBaseline: '',
+    strokeStyle: '',
+    lineWidth: 0,
+    fillRect: vi.fn(),
+    fillText: vi.fn(),
+    beginPath: vi.fn(),
+    moveTo: vi.fn(),
+    lineTo: vi.fn(),
+    stroke: vi.fn(),
+    drawImage: vi.fn(),
+  }
+  return {
+    width,
+    height,
+    getContext: vi.fn(() => ctx),
+    toBlob: vi.fn((cb: (b: Blob | null) => void) => cb(new Blob(['fake'], { type: 'image/png' }))),
+  } as unknown as HTMLCanvasElement
+}
+
+beforeEach(() => {
+  mockToCanvas.mockReset()
+  mockToCanvas.mockResolvedValue(makeFakeCanvas())
+  // document.createElement('canvas') is used internally for the header composite;
+  // intercept only that tag so the rest of jsdom's DOM behaves normally.
+  const realCreateElement = document.createElement.bind(document)
+  vi.spyOn(document, 'createElement').mockImplementation((tag: string) =>
+    tag === 'canvas' ? (makeFakeCanvas() as unknown as HTMLElement) : realCreateElement(tag))
+})
+
+afterEach(() => {
+  vi.restoreAllMocks()
+  document.documentElement.classList.remove('dark')
+})
+
+describe('capturePngSnapshot', () => {
+  it('resolves a Blob and calls toCanvas with the element, 2x pixel ratio, and white background', async () => {
+    const el = document.createElement('div')
+    const blob = await capturePngSnapshot(el, { timelineName: 'Q1 Plan', teamName: 'Acme', filterLabel: null })
+    expect(blob).toBeInstanceOf(Blob)
+    expect(mockToCanvas).toHaveBeenCalledWith(
+      el,
+      expect.objectContaining({ pixelRatio: 2, backgroundColor: '#ffffff' }),
+    )
+  })
+
+  it('captures the element at its full scroll extent', async () => {
+    const el = document.createElement('div')
+    Object.defineProperty(el, 'scrollWidth', { value: 1280, configurable: true })
+    Object.defineProperty(el, 'scrollHeight', { value: 720, configurable: true })
+
+    await capturePngSnapshot(el, { timelineName: 'Q1 Plan', teamName: null, filterLabel: null })
+
+    expect(mockToCanvas).toHaveBeenCalledWith(el, expect.objectContaining({ width: 1280, height: 720 }))
+  })
+
+  it('does not touch the page theme (the capture target is its own light document)', async () => {
+    document.documentElement.classList.add('dark')
+    const el = document.createElement('div')
+
+    let darkDuringCapture: boolean | undefined
+    mockToCanvas.mockImplementation(() => {
+      darkDuringCapture = document.documentElement.classList.contains('dark')
+      return Promise.resolve(makeFakeCanvas())
+    })
+
+    await capturePngSnapshot(el, { timelineName: 'Q1 Plan', teamName: null, filterLabel: null })
+
+    // The live page stays dark throughout — no flicker.
+    expect(darkDuringCapture).toBe(true)
+    expect(document.documentElement.classList.contains('dark')).toBe(true)
+  })
+
+  it('renders the period label into the header strip when given', async () => {
+    const el = document.createElement('div')
+    const headerCanvas = makeFakeCanvas()
+    const realCreateElement = document.createElement.bind(document)
+    vi.spyOn(document, 'createElement').mockImplementation((tag: string) =>
+      tag === 'canvas' ? (headerCanvas as unknown as HTMLElement) : realCreateElement(tag))
+
+    await capturePngSnapshot(el, { timelineName: 'Q1 Plan', teamName: null, filterLabel: null, periodLabel: 'June 2026' })
+
+    const ctx = (headerCanvas.getContext('2d') as unknown as { fillText: ReturnType<typeof vi.fn> })
+    const drawnText = ctx.fillText.mock.calls.map(c => c[0] as string)
+    expect(drawnText.some(t => t.includes('June 2026'))).toBe(true)
+  })
+
+  it('orders the subtitle as period, then generated-at, then filter, joined with " · "', async () => {
+    const el = document.createElement('div')
+    const headerCanvas = makeFakeCanvas()
+    const realCreateElement = document.createElement.bind(document)
+    vi.spyOn(document, 'createElement').mockImplementation((tag: string) =>
+      tag === 'canvas' ? (headerCanvas as unknown as HTMLElement) : realCreateElement(tag))
+
+    await capturePngSnapshot(el, {
+      timelineName: 'Q1 Plan', teamName: null, filterLabel: 'Open only', periodLabel: 'June 2026',
+    })
+
+    const ctx = (headerCanvas.getContext('2d') as unknown as { fillText: ReturnType<typeof vi.fn> })
+    const subtitle = ctx.fillText.mock.calls.map(c => c[0] as string).find(t => t.includes('Generated'))
+    expect(subtitle).toBeDefined()
+    const periodIdx = subtitle!.indexOf('June 2026')
+    const generatedIdx = subtitle!.indexOf('Generated')
+    const filterIdx = subtitle!.indexOf('Filter: Open only')
+    expect(periodIdx).toBeGreaterThanOrEqual(0)
+    expect(periodIdx).toBeLessThan(generatedIdx)
+    expect(generatedIdx).toBeLessThan(filterIdx)
+  })
+
+  it('omits the period and filter segments from the subtitle when absent', async () => {
+    const el = document.createElement('div')
+    const headerCanvas = makeFakeCanvas()
+    const realCreateElement = document.createElement.bind(document)
+    vi.spyOn(document, 'createElement').mockImplementation((tag: string) =>
+      tag === 'canvas' ? (headerCanvas as unknown as HTMLElement) : realCreateElement(tag))
+
+    await capturePngSnapshot(el, { timelineName: 'Q1 Plan', teamName: null, filterLabel: null })
+
+    const ctx = (headerCanvas.getContext('2d') as unknown as { fillText: ReturnType<typeof vi.fn> })
+    const subtitle = ctx.fillText.mock.calls.map(c => c[0] as string).find(t => t.includes('Generated'))
+    expect(subtitle).toBeDefined()
+    expect(subtitle).not.toContain('Filter:')
+    expect(subtitle!.startsWith('Generated')).toBe(true)
+  })
+
+  it('prefixes the title with the team name when given, and omits it when absent', async () => {
+    const el = document.createElement('div')
+    const headerCanvas = makeFakeCanvas()
+    const realCreateElement = document.createElement.bind(document)
+    vi.spyOn(document, 'createElement').mockImplementation((tag: string) =>
+      tag === 'canvas' ? (headerCanvas as unknown as HTMLElement) : realCreateElement(tag))
+
+    await capturePngSnapshot(el, { timelineName: 'Q1 Plan', teamName: 'Acme', filterLabel: null })
+
+    const ctx = (headerCanvas.getContext('2d') as unknown as { fillText: ReturnType<typeof vi.fn> })
+    const titles = ctx.fillText.mock.calls.map(c => c[0] as string)
+    expect(titles).toContain('Acme · Q1 Plan')
+  })
+
+  it('sizes the composited canvas to the header height plus the captured view height, at 2x density', async () => {
+    const el = document.createElement('div')
+    const viewCanvas = makeFakeCanvas(1280, 720)
+    mockToCanvas.mockResolvedValueOnce(viewCanvas)
+    const headerCanvas = makeFakeCanvas()
+    const realCreateElement = document.createElement.bind(document)
+    vi.spyOn(document, 'createElement').mockImplementation((tag: string) =>
+      tag === 'canvas' ? (headerCanvas as unknown as HTMLElement) : realCreateElement(tag))
+
+    await capturePngSnapshot(el, { timelineName: 'Q1 Plan', teamName: null, filterLabel: null })
+
+    // HEADER_HEIGHT (56) * PIXEL_RATIO (2) = 112px added above the view's own height.
+    expect(headerCanvas.width).toBe(1280)
+    expect(headerCanvas.height).toBe(720 + 112)
+    const ctx = (headerCanvas.getContext('2d') as unknown as { drawImage: ReturnType<typeof vi.fn> })
+    expect(ctx.drawImage).toHaveBeenCalledWith(viewCanvas, 0, 112)
+  })
+
+  it('propagates a toCanvas rejection', async () => {
+    mockToCanvas.mockRejectedValueOnce(new Error('rasterization failed'))
+    const el = document.createElement('div')
+
+    await expect(capturePngSnapshot(el, { timelineName: 'Q1 Plan', teamName: null, filterLabel: null }))
+      .rejects.toThrow('rasterization failed')
+  })
+
+  it('rejects when canvas.toBlob yields null', async () => {
+    const el = document.createElement('div')
+    const nullBlobCanvas = makeFakeCanvas()
+    ;(nullBlobCanvas.toBlob as unknown as ReturnType<typeof vi.fn>).mockImplementation(
+      (cb: (b: Blob | null) => void) => cb(null),
+    )
+    // The header composite creates the final canvas via document.createElement('canvas').
+    const realCreateElement = document.createElement.bind(document)
+    vi.spyOn(document, 'createElement').mockImplementation((tag: string) =>
+      tag === 'canvas' ? (nullBlobCanvas as unknown as HTMLElement) : realCreateElement(tag))
+
+    await expect(capturePngSnapshot(el, { timelineName: 'Q1 Plan', teamName: null, filterLabel: null }))
+      .rejects.toThrow('canvas.toBlob returned null')
+  })
+})
 ````
 
 ## File: scripts/reset-test-env.sh
@@ -75437,6 +75511,22 @@ Adds i18n infrastructure and ships the first non-English locale. The "Default la
 ## File: docs/log.md
 ````markdown
 # Development Log
+
+---
+
+## 2026-06-30 — /review-phase 14.3 follow-up: sidebar fix scope note, test coverage, iframe sandbox
+
+**Scope note:** commit `c836506` ("nest members under active team, clear stale activity on team switch") landed inside the 14.3 diff range but is unrelated to PNG export — it's an unrelated sidebar/right-panel bug fix (members now render directly under the active team row instead of after the whole switchable team list; switching teams now clears the previously-selected activity from the right sidebar instead of leaving it pinned). Side-quest fixes like this keep landing inside phase diff ranges; flagged here rather than re-litigated as a blocker, since splitting it out after the fact isn't worth the churn at this point.
+
+**Test coverage added** (per `/review-phase 14.3` blockers):
+- `components/export/CleanSnapshot.test.tsx` (new) — smoke-tests `CleanGanttSnapshot`/`CleanListSnapshot`/`CleanKanbanSnapshot` render the given activities correctly (titles, status columns, visible-column filtering, parent/child hierarchy nesting).
+- `components/export/PresentationFrame.test.tsx` (new) — covers the `onReady` contract, the frame document never carrying `.dark`, the body shrink-wrap styling, parent stylesheet/font-link cloning into the frame head, and that children portal into the frame body rather than the live document. Renders without unmounting between tests (`RTL_SKIP_AUTO_CLEANUP`) — jsdom destroys an `<iframe>`'s `contentDocument` as soon as it's detached, which races React's portal-unmount cleanup and throws a `NotFoundError` that has no real-browser equivalent.
+- `components/layout/Sidebar.test.tsx` — added coverage for the active-team member-nesting fix above (Members section renders between the active team row and the next team row; no duplicate Members section per switchable team; fallback path when `activeTeams` hasn't loaded yet).
+- `lib/pngExport.test.ts` — added `compositeHeader` coverage: subtitle segment ordering/omission (period → generated-at → filter), team-name title prefixing, and composited-canvas sizing (header height + view height at 2x density).
+
+**Hardening:** `components/export/PresentationFrame.tsx` iframe now sets `sandbox="allow-same-origin"` — defense-in-depth only, since the frame is never given a `src`/`srcdoc` and never renders attacker-controlled markup, but it costs nothing to block script execution and top-level navigation outright in case that ever changes.
+
+**Checks:** `pnpm --filter web test` — all 413 tests pass. `pnpm --filter web lint` clean.
 
 ---
 
