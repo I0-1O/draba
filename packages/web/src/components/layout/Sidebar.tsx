@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react';
+import { Fragment, useState, useRef, useEffect } from 'react';
 import {
   ChevronRight,
   ChevronLeft,
@@ -530,6 +530,57 @@ export default function Sidebar({ collapsed, onToggle, onNewActivity, onBulkImpo
     document.body.style.userSelect = 'none';
   }
 
+  // Members — rendered directly under the active team row, indented to read
+  // as nested under that team.
+  const membersSection = (
+    <div style={{ marginLeft: 16, borderLeft: '1px solid rgba(255,255,255,0.08)' }}>
+      <button
+        onClick={() => setMembersOpen(o => !o)}
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 5,
+          width: '100%',
+          padding: '6px 8px 4px 16px',
+          background: 'none',
+          border: 'none',
+          cursor: 'pointer',
+          color: 'rgba(255,255,255,0.35)',
+          fontFamily: 'var(--font-sans)',
+        }}
+      >
+        {membersOpen
+          ? <ChevronDown {...ICON_XS} />
+          : <ChevronRight {...ICON_XS} />}
+        <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+          Members
+        </span>
+      </button>
+
+      {membersOpen && (
+        <div style={{ paddingBottom: 8 }}>
+          {(apiMembers ?? []).map(m => {
+            const displayName = (m as TeamMemberWithUser).displayName || m.id;
+            const color = m.color ?? '#8b949e';
+            const icon = (m as TeamMemberWithUser).icon ?? null;
+            return (
+              <MemberSidebarRow
+                key={m.id}
+                displayName={displayName}
+                color={color}
+                icon={icon}
+                isInactive={Boolean((m as TeamMemberWithUser).archivedAt)}
+                onEdit={onEditMember && (m as TeamMemberWithUser).userId !== currentUserId
+                  ? () => onEditMember(m as TeamMemberWithUser)
+                  : undefined}
+              />
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+
   return (
     <div
       style={{
@@ -856,25 +907,34 @@ export default function Sidebar({ collapsed, onToggle, onNewActivity, onBulkImpo
                 : <ChevronRight width={12} height={12} strokeWidth={2} />}
             </button>
 
-            {/* Team rows — active team highlighted; others clickable to switch */}
-            {(teamOpen ? activeTeams : activeTeam ? [activeTeam] : []).map(t => (
-              <TeamRow
-                key={t.id}
-                team={t}
-                isActive={t.id === activeTeam?.id}
-                canEdit={canEditTeam}
-                onSelect={() => onSelectTeam?.(t.id)}
-                onEdit={() => onEditTeam?.(t)}
-              />
-            ))}
+            {/* Team rows — active team highlighted; others clickable to switch.
+                Members slot in directly under the active team row. */}
+            {(teamOpen ? activeTeams : activeTeam ? [activeTeam] : []).map(t => {
+              const isActiveTeam = t.id === activeTeam?.id;
+              return (
+                <Fragment key={t.id}>
+                  <TeamRow
+                    team={t}
+                    isActive={isActiveTeam}
+                    canEdit={canEditTeam}
+                    onSelect={() => onSelectTeam?.(t.id)}
+                    onEdit={() => onEditTeam?.(t)}
+                  />
+                  {isActiveTeam && teamOpen && membersSection}
+                </Fragment>
+              );
+            })}
             {/* Fallback when activeTeams not yet loaded but activeTeam is known */}
             {!activeTeams.length && activeTeam && (
-              <TeamRow
-                team={activeTeam}
-                isActive
-                canEdit={canEditTeam}
-                onEdit={() => onEditTeam?.(activeTeam)}
-              />
+              <>
+                <TeamRow
+                  team={activeTeam}
+                  isActive
+                  canEdit={canEditTeam}
+                  onEdit={() => onEditTeam?.(activeTeam)}
+                />
+                {teamOpen && membersSection}
+              </>
             )}
 
             {/* New team button — only superadmins get onNewTeam passed from the parent */}
@@ -928,55 +988,6 @@ export default function Sidebar({ collapsed, onToggle, onNewActivity, onBulkImpo
               </div>
             )}
 
-            {/* Members — only when team section is expanded */}
-            {teamOpen && (
-              <>
-                <button
-                  onClick={() => setMembersOpen(o => !o)}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 5,
-                    width: '100%',
-                    padding: '6px 8px 4px 16px',
-                    background: 'none',
-                    border: 'none',
-                    cursor: 'pointer',
-                    color: 'rgba(255,255,255,0.35)',
-                    fontFamily: 'var(--font-sans)',
-                  }}
-                >
-                  {membersOpen
-                    ? <ChevronDown {...ICON_XS} />
-                    : <ChevronRight {...ICON_XS} />}
-                  <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
-                    Members
-                  </span>
-                </button>
-
-                {membersOpen && (
-                  <div style={{ paddingBottom: 8 }}>
-                    {(apiMembers ?? []).map(m => {
-                      const displayName = (m as TeamMemberWithUser).displayName || m.id;
-                      const color = m.color ?? '#8b949e';
-                      const icon = (m as TeamMemberWithUser).icon ?? null;
-                      return (
-                        <MemberSidebarRow
-                          key={m.id}
-                          displayName={displayName}
-                          color={color}
-                          icon={icon}
-                          isInactive={Boolean((m as TeamMemberWithUser).archivedAt)}
-                          onEdit={onEditMember && (m as TeamMemberWithUser).userId !== currentUserId
-                            ? () => onEditMember(m as TeamMemberWithUser)
-                            : undefined}
-                        />
-                      );
-                    })}
-                  </div>
-                )}
-              </>
-            )}
           </div>
         )}
 

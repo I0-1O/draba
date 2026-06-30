@@ -256,6 +256,11 @@ function DashboardShell() {
     setActiveTimelineId(undefined)
     prefsAppliedForTimeline.current = null
     timelineIdInitialized.current = false
+    // Clear the selected activity too, otherwise the old team's activity
+    // stays pinned in the right sidebar after switching teams.
+    setSelectedActivityId(null)
+    setSelectedApiActivity(null)
+    setCreateDefaults(null)
   }, [])
 
   const unarchiveTimeline = useUnarchiveTimeline(teamId)
