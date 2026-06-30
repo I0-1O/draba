@@ -2,6 +2,13 @@
 
 ---
 
+## 2026-06-30 — /test-phase 14.3
+- Subagents run: static-check, unit-test (backend), unit-test (frontend), schema-check, api-smoke, security-review, type-sync, web-e2e
+- Result: all pass (web-e2e initially failed Phase 14.3's PNG-export click-through against a stale pre-`1ecb759` container binary; container redeployed mid-session, DB reset, and the PNG export check re-run clean for Kanban/Gantt/Calendar — no flicker, view-name filenames, correct Calendar period header)
+- Smoke target: http://epcot.lan:8081
+
+---
+
 ## 2026-06-30 — Phase 14.3 redesign: isolated PresentationFrame surface (shared with 14.4)
 
 **Goal:** Two reported bugs in the PNG export, both surfacing only in dark mode: (1) the live dashboard "flickered" to light and back when the Download PNG button was clicked; (2) the kanban column group boxes and the Gantt sticky left rail came out dark in an otherwise-light capture. Plus a nit: include the view name in the download filename. The user asked to reevaluate 14.3/14.4 rather than just patch — and chose a redesign that gives PNG, HTML-save (14.4), and printable-PDF (14.4) one shared render surface. A follow-up tweak: the Calendar export (which the user likes as-is — it rasterizes the live, theme-agnostic content area and preserves month-view row collapse state) lost its month/year/week indication because the toolbar carrying that label is excluded from the capture; surfaced it into the header strip.
