@@ -129,7 +129,8 @@ export interface RichActivity extends GanttActivity {
   statusId: string | null;
 }
 
-function toRichActivity(
+/** Positions and colors a single API activity for the grid. Exported for reuse by the PNG export's off-screen clean snapshot (CleanSnapshot.tsx). */
+export function toRichActivity(
   ev: ApiActivity,
   index: number,
   memberById: Record<string, Member>,

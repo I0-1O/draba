@@ -11,6 +11,8 @@
  * 14.1 implements the server-side data/calendar formats (CSV, Excel, ICS).
  * 14.2 adds client-side textual formats (Markdown, Plain text, Copy to clipboard)
  *      via the `textExportData` prop; these formats only appear for non-Gantt views.
+ * 14.3 adds the PNG snapshot format, rasterizing `captureElement` (the live
+ *      view container) via `lib/pngExport.ts`; available in every view.
  */
 
 import { useEffect, useRef, useState, useCallback } from 'react'
@@ -33,6 +35,7 @@ import {
   buildListHtml, buildListHtmlOutline, buildKanbanHtml, buildCalendarHtml,
   type TextExportData,
 } from '@/lib/textExport'
+import { capturePngSnapshot } from '@/lib/pngExport'
 import type { FilterDefinition } from '@/lib/filterTypes'
 
 export type { TextExportData }
@@ -42,6 +45,8 @@ export interface ExportDialogProps {
   teamId: string
   timelineId: string
   timelineName: string
+  /** Team display name, shown in the PNG header strip alongside the timeline name. */
+  teamName?: string | null
   /** Display label for the active filter (e.g. a saved filter's name), or null if no filter is active. */
   filterLabel: string | null
   /** The active filter's definition, sent to the server when scope is "view" and activityIds is absent. */
@@ -67,6 +72,18 @@ export interface ExportDialogProps {
    * if absent those formats still appear but will produce empty output.
    */
   textExportData?: TextExportData | null
+  /**
+   * The live view container to rasterize for the PNG format (14.3).
+   * Required for PNG to be functional; if absent the format still appears
+   * but the action is a no-op.
+   */
+  captureElement?: HTMLElement | null
+  /**
+   * Period label for the PNG header (Calendar only) — e.g. "June 2026" or
+   * "Jun 1 – 7, 2026". The on-screen toolbar carries this, but it's excluded
+   * from the capture, so it's surfaced into the header strip instead.
+   */
+  periodLabel?: string | null
   onClose: () => void
 }
 
@@ -146,6 +163,7 @@ export default function ExportDialog({
   view,
   timelineId,
   timelineName,
+  teamName,
   filterLabel,
   filterDefinition,
   filteredCount,
@@ -153,6 +171,8 @@ export default function ExportDialog({
   viewActivityIds,
   listExportColumns,
   textExportData,
+  captureElement,
+  periodLabel,
   onClose,
 }: ExportDialogProps) {
   const formats = getExportFormats(view)
@@ -167,6 +187,12 @@ export default function ExportDialog({
   const format = formats.find(f => f.id === formatId) ?? formats[0]
   const Icon = format.icon
   const isPending = serverPending || clientPending
+
+  // Client-side formats (PNG / Markdown / plain text) are inherently shaped by
+  // the active view, so their filename names it. Server data formats (CSV /
+  // xlsx / ICS) can be scoped to the whole timeline, where a view name would
+  // mislead — they keep the plain `<timeline>-<date>` name.
+  const filenameView = format.clientSide ? view : undefined
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
@@ -187,6 +213,16 @@ export default function ExportDialog({
   }, [])
 
   const handleAction = useCallback(() => {
+    if (format.id === 'png') {
+      if (!captureElement) return
+      setClientPending(true)
+      capturePngSnapshot(captureElement, { timelineName, teamName: teamName ?? null, filterLabel, periodLabel })
+        .then(blob => { saveBlob(blob, buildExportFilename(timelineName, format.ext, view)); flashDone() })
+        .catch(() => { /* capture may fail on unsupported browsers */ })
+        .finally(() => setClientPending(false))
+      return
+    }
+
     if (format.clientSide) {
       const data = textExportData ?? {
         activities: [],
@@ -219,7 +255,7 @@ export default function ExportDialog({
         : generatePlainText(view, data, timelineName, filterLabel, listStyle)
       const mimeType = isMarkdown ? 'text/markdown;charset=utf-8' : 'text/plain;charset=utf-8'
       const blob = new Blob([content], { type: mimeType })
-      saveBlob(blob, buildExportFilename(timelineName, format.ext))
+      saveBlob(blob, buildExportFilename(timelineName, format.ext, view))
       flashDone()
       return
     }
@@ -231,7 +267,7 @@ export default function ExportDialog({
       filter: scope === 'view' && !viewActivityIds ? filterDefinition : null,
       columns: isDataFormat ? listExportColumns : null,
     }).then(flashDone)
-  }, [format, view, timelineName, filterLabel, textExportData, scope, listStyle, viewActivityIds, filterDefinition, listExportColumns, download, flashDone])
+  }, [format, view, timelineName, teamName, filterLabel, periodLabel, textExportData, captureElement, scope, listStyle, viewActivityIds, filterDefinition, listExportColumns, download, flashDone])
 
   const emptyView = filteredCount === 0
   const subWithFilter = filterLabel !== null
@@ -384,7 +420,7 @@ export default function ExportDialog({
                 <div className="mb-1.5 text-[11px] font-bold uppercase tracking-[0.06em] text-muted-foreground">File</div>
                 <div className="flex items-center gap-2 rounded-[var(--radius-md)] bg-muted px-[11px] py-[7px] font-mono text-[12px] text-foreground">
                   <FileDown size={13} strokeWidth={2} className="shrink-0 text-muted-foreground" />
-                  <span className="truncate">{buildExportFilename(timelineName, format.ext)}</span>
+                  <span className="truncate">{buildExportFilename(timelineName, format.ext, filenameView)}</span>
                 </div>
               </div>
             )}

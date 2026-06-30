@@ -31,7 +31,13 @@ const divider = 'w-px h-4 bg-border shrink-0';
 const label   = 'text-[11px] text-muted-foreground shrink-0';
 const select  = 'h-[26px] px-1.5 border border-border rounded-md bg-card text-foreground text-xs cursor-pointer shrink-0';
 
-function formatAnchorLabel(date: Date, layout: CalendarLayout): string {
+/**
+ * Formats the in-view period as a human label: "June 2026" for month layout,
+ * "Jun 1 – 7, 2026" for week. Exported so the PNG export header can show the
+ * same period text the toolbar does (the toolbar itself is excluded from the
+ * capture, which otherwise leaves the image with no month/week indication).
+ */
+export function formatAnchorLabel(date: Date, layout: CalendarLayout): string {
   if (layout === 'month') {
     return date.toLocaleDateString(undefined, { month: 'long', year: 'numeric', timeZone: 'UTC' });
   }

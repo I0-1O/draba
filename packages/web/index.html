@@ -7,7 +7,8 @@
     <link rel="icon" type="image/svg+xml" href="/logo-teal.svg" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@300;400;600;700&display=swap" rel="stylesheet" />
+    <!-- crossorigin lets html-to-image (PNG export) read this stylesheet's cssRules to embed the real font — Google serves Access-Control-Allow-Origin: * on both the CSS and the font files, so this is free. -->
+    <link href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@300;400;600;700&display=swap" rel="stylesheet" crossorigin="anonymous" />
   </head>
   <body>
     <div id="root"></div>

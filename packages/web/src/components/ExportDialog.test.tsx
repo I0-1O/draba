@@ -17,6 +17,11 @@ vi.mock('@/hooks/useExport', () => ({
   useExport: () => ({ download: mockDownload, isPending: false, error: null }),
 }))
 
+const mockCapturePngSnapshot = vi.fn()
+vi.mock('@/lib/pngExport', () => ({
+  capturePngSnapshot: (...args: unknown[]) => mockCapturePngSnapshot(...args),
+}))
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 type Props = Parameters<typeof ExportDialog>[0]
@@ -60,6 +65,7 @@ function makeTextExportData(overrides: Partial<TextExportData> = {}): TextExport
 beforeEach(() => {
   vi.clearAllMocks()
   mockDownload.mockResolvedValue(undefined)
+  mockCapturePngSnapshot.mockResolvedValue(new Blob(['fake-png'], { type: 'image/png' }))
 })
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -268,5 +274,55 @@ describe('ExportDialog — copy to clipboard', () => {
 
     await waitFor(() => expect(writeTextMock).toHaveBeenCalledTimes(1))
     expect(writeMock).not.toHaveBeenCalled()
+  })
+})
+
+// ── 14.3: PNG snapshot ──────────────────────────────────────────────────────────
+
+describe('ExportDialog — PNG snapshot', () => {
+  let createObjectURL: ReturnType<typeof vi.fn>
+  let revokeObjectURL: ReturnType<typeof vi.fn>
+
+  beforeEach(() => {
+    createObjectURL = vi.fn(() => 'blob:mock-url')
+    revokeObjectURL = vi.fn()
+    vi.stubGlobal('URL', { ...URL, createObjectURL, revokeObjectURL })
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('shows PNG as a format option in every view, including Gantt', () => {
+    renderDialog({ view: 'gantt' })
+    const rail = screen.getByRole('listbox', { name: /Export format/i })
+    expect(within(rail).getByText('PNG image')).toBeInTheDocument()
+  })
+
+  it('captures and downloads a PNG via capturePngSnapshot when an element is provided', async () => {
+    const captureElement = document.createElement('div')
+    renderDialog({ view: 'list', captureElement, timelineName: 'My Timeline', teamName: 'Acme', filterLabel: 'Open only' })
+    fireEvent.click(screen.getByText('PNG image'))
+    fireEvent.click(screen.getByRole('button', { name: /Download \.png/i }))
+
+    await waitFor(() => expect(mockCapturePngSnapshot).toHaveBeenCalledTimes(1))
+    expect(mockCapturePngSnapshot).toHaveBeenCalledWith(captureElement, {
+      timelineName: 'My Timeline', teamName: 'Acme', filterLabel: 'Open only',
+    })
+    await waitFor(() => expect(createObjectURL).toHaveBeenCalledTimes(1))
+    expect(mockDownload).not.toHaveBeenCalled()
+  })
+
+  it('does nothing (no throw) when captureElement is absent', () => {
+    renderDialog({ view: 'list', captureElement: null })
+    fireEvent.click(screen.getByText('PNG image'))
+    expect(() => fireEvent.click(screen.getByRole('button', { name: /Download \.png/i }))).not.toThrow()
+    expect(mockCapturePngSnapshot).not.toHaveBeenCalled()
+  })
+
+  it('does not show the scope picker for PNG', () => {
+    renderDialog({ view: 'list' })
+    fireEvent.click(screen.getByText('PNG image'))
+    expect(screen.queryByText('Entire timeline')).not.toBeInTheDocument()
   })
 })

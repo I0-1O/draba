@@ -6,26 +6,28 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { getExportFormats, buildExportFilename } from './exportCapabilities'
 
 describe('getExportFormats', () => {
-  it('returns only data formats (3) for gantt', () => {
+  it('returns data formats + PNG (4) for gantt', () => {
     const formats = getExportFormats('gantt')
-    expect(formats).toHaveLength(3)
+    expect(formats).toHaveLength(4)
     const ids = formats.map(f => f.id)
     expect(ids).toContain('csv')
     expect(ids).toContain('xlsx')
     expect(ids).toContain('ics')
+    expect(ids).toContain('png')
     expect(ids).not.toContain('markdown')
     expect(ids).not.toContain('clipboard')
   })
 
-  it('returns data + text formats (6) for list, kanban, calendar', () => {
+  it('returns data + PNG + text formats (7) for list, kanban, calendar', () => {
     const views = ['list', 'kanban', 'calendar'] as const
     for (const view of views) {
       const formats = getExportFormats(view)
-      expect(formats).toHaveLength(6)
+      expect(formats).toHaveLength(7)
       const ids = formats.map(f => f.id)
       expect(ids).toContain('csv')
       expect(ids).toContain('xlsx')
       expect(ids).toContain('ics')
+      expect(ids).toContain('png')
       expect(ids).toContain('markdown')
       expect(ids).toContain('plaintext')
       expect(ids).toContain('clipboard')
@@ -58,9 +60,9 @@ describe('getExportFormats', () => {
 
   it('client-side formats have scope=false and clientSide=true', () => {
     const formats = getExportFormats('list')
-    const textFormats = formats.filter(f => f.clientSide)
-    expect(textFormats).toHaveLength(3)
-    for (const f of textFormats) {
+    const clientFormats = formats.filter(f => f.clientSide)
+    expect(clientFormats).toHaveLength(4) // png + markdown + plaintext + clipboard
+    for (const f of clientFormats) {
       expect(f.scope).toBe(false)
       expect(f.clientSide).toBe(true)
     }
@@ -102,5 +104,13 @@ describe('buildExportFilename', () => {
 
   it('preserves numbers and hyphens in the slug', () => {
     expect(buildExportFilename('Q1 2026', '.csv')).toBe('q1-2026-2026-06-16.csv')
+  })
+
+  it('inserts the view segment when a view is given', () => {
+    expect(buildExportFilename('Sales Kick-Off', '.png', 'kanban')).toBe('sales-kick-off-kanban-2026-06-16.png')
+  })
+
+  it('omits the view segment when no view is given', () => {
+    expect(buildExportFilename('Sales Kick-Off', '.png')).toBe('sales-kick-off-2026-06-16.png')
   })
 })

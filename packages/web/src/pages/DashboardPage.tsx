@@ -13,12 +13,14 @@ import { DEFAULT_LABEL_COL_W } from '@/components/gantt/GanttGrid'
 import GanttToolbar, { type GroupBy, type SortBy, type TimeGranularity, type ColorBy } from '@/components/gantt/GanttToolbar'
 import ListToolbar, { type ListGroupBy, type ListSortBy, type ListColorBy, type ListDensity, type ColumnConfig } from '@/components/list/ListToolbar'
 import ListView, { buildListRows, type ListDisplayRow } from '@/components/list/ListView'
-import CalendarToolbar, { type CalendarLayout } from '@/components/calendar/CalendarToolbar'
+import CalendarToolbar, { formatAnchorLabel, type CalendarLayout } from '@/components/calendar/CalendarToolbar'
 import CalendarView from '@/components/calendar/CalendarView'
 import KanbanToolbar, { type KanbanGroupBy, type KanbanSortBy, type KanbanCardField } from '@/components/kanban/KanbanToolbar'
 import KanbanView from '@/components/kanban/KanbanView'
 import { DEFAULT_CARD_FIELDS, buildColumns, buildHierarchyMaps } from '@/components/kanban/kanbanColumns'
 import type { TextExportData } from '@/components/ExportDialog'
+import { CleanGanttSnapshot, CleanListSnapshot, CleanKanbanSnapshot } from '@/components/export/CleanSnapshot'
+import PresentationFrame from '@/components/export/PresentationFrame'
 import ActivityDetailPanel from '@/components/gantt/ActivityDetailPanel'
 import ActivityCreatePanel from '@/components/gantt/ActivityCreatePanel'
 import { FilterProvider, useFilter } from '@/contexts/FilterContext'
@@ -97,6 +99,16 @@ function DashboardShell() {
   const [filterModalOpen, setFilterModalOpen] = useState(false)
   const [shareModalOpen, setShareModalOpen] = useState(false)
   const [exportDialogOpen, setExportDialogOpen] = useState(false)
+  // Content-area container — rasterized for the PNG export format (14.3) when
+  // viewing Calendar, which has no clean/interactive=false renderer yet.
+  const contentAreaRef = useRef<HTMLDivElement>(null)
+  // Body of the PresentationFrame iframe that hosts the PNG export's clean
+  // (interactive=false) snapshot — an isolated, always-light document reusing
+  // the Phase 13 share viewer's render path for Gantt/List/Kanban. Captured as
+  // the PNG target once the frame signals readiness. Calendar has no clean
+  // renderer yet and still rasterizes the live content area.
+  const [snapshotBody, setSnapshotBody] = useState<HTMLElement | null>(null)
+  const handleSnapshotReady = useCallback((body: HTMLElement) => setSnapshotBody(body), [])
   // Calendar gets its own share surface — an ICS feed configurator, not the
   // active-links list (Phase 13.4).
   const [calendarShareModalOpen, setCalendarShareModalOpen] = useState(false)
@@ -186,6 +198,11 @@ function DashboardShell() {
   const { isSuccess: globalPrefsSettled } = usePreferences()
   const globalPrefMap = usePreferenceMap()
   const weekStartDay: 0 | 1 = (globalPrefMap['week_start'] as string | undefined) === 'sunday' ? 0 : 1
+  // Mirrors GanttView's own pref-derived column locale — used by the PNG
+  // export's off-screen CleanGanttSnapshot, which builds its own columns.
+  const prefWeekStart: 'monday' | 'sunday' = (globalPrefMap['week_start'] as string | undefined) === 'sunday' ? 'sunday' : 'monday'
+  const prefDateFormat = (globalPrefMap['date_format'] as string | undefined) ?? 'MMM D, YYYY'
+  const prefLocale = prefDateFormat === 'DD/MM/YYYY' ? 'en-GB' : 'en-US'
 
   // Team modal state
   const [teamModalMode, setTeamModalMode] = useState<'new' | 'edit' | null>(null)
@@ -814,7 +831,7 @@ function DashboardShell() {
         )}
 
         {/* Content area */}
-        <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+        <div ref={contentAreaRef} style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
           {view === 'gantt' && teamId && activeTimelineId ? (
             <GanttView
               teamId={teamId}
@@ -1055,13 +1072,76 @@ function DashboardShell() {
         />
       )}
 
-      {/* Export dialog — download the active view as CSV/Excel/ICS */}
+      {/*
+        Off-screen PNG capture target — for Gantt/List/Kanban this renders the
+        same interactive=false components the public share viewer uses, fed
+        with live data, instead of rasterizing the live editable dashboard.
+        Calendar has no clean/interactive=false renderer yet (it's only
+        shared via ICS feeds, not view-shares — see Phase 13.4), so it falls
+        back to capturing the live content area; the PresentationFrame is only
+        mounted for the three clean-renderable views.
+
+        PresentationFrame hosts the snapshot in an isolated, always-light
+        iframe document (see components/export/PresentationFrame.tsx). That is
+        what fixes the dark-mode flicker (the live page's theme is never
+        toggled) and the half-dark capture (no `.dark` in scope for the
+        snapshot's `var()` colors to resolve against). Mounted only while the
+        export dialog is open; on close it unmounts and `snapshotBody` resets.
+      */}
+      {exportDialogOpen && view !== 'calendar' && (
+        <PresentationFrame onReady={handleSnapshotReady}>
+          {view === 'gantt' && (
+            <CleanGanttSnapshot
+              activities={exportFilterInfo.filteredActivities}
+              members={ganttMembers}
+              statuses={activeTimelineStatuses}
+              groupBy={groupBy}
+              sortBy={sortBy}
+              colorBy={colorBy}
+              granularity={granularity}
+              startDate={activeTimeline?.startDate}
+              endDate={activeTimeline?.endDate}
+              weekStart={prefWeekStart}
+              locale={prefLocale}
+            />
+          )}
+          {view === 'list' && (
+            <CleanListSnapshot
+              activities={exportFilterInfo.filteredActivities}
+              members={teamMembers}
+              statuses={activeTimelineStatuses}
+              tags={tags}
+              groupBy={listGroupBy}
+              sortBy={listSortBy}
+              columns={listColumns.map(c => ({ id: c.id, visible: c.visible }))}
+            />
+          )}
+          {view === 'kanban' && (
+            <CleanKanbanSnapshot
+              activities={exportFilterInfo.filteredActivities}
+              teamMembers={teamMembers}
+              members={ganttMembers}
+              statuses={activeTimelineStatuses}
+              tags={tags}
+              groupBy={kanbanGroupBy}
+              sortBy={kanbanSortBy}
+              colorBy={kanbanColorBy}
+              cardFields={kanbanCardFields}
+              showHierarchy={kanbanShowHierarchy}
+              collapsedColumnIds={kanbanCollapsedColumns}
+            />
+          )}
+        </PresentationFrame>
+      )}
+
+      {/* Export dialog — download the active view as CSV/Excel/ICS/PNG */}
       {exportDialogOpen && activeTimelineId && teamId && (
         <ExportDialog
           view={view}
           teamId={teamId}
           timelineId={activeTimelineId}
           timelineName={activeTimelineName}
+          teamName={activeTeam?.name ?? null}
           filterLabel={exportFilterInfo.filterLabel}
           filterDefinition={exportFilterInfo.filterDefinition}
           filteredCount={exportFilterInfo.filteredCount}
@@ -1069,7 +1149,9 @@ function DashboardShell() {
           viewActivityIds={exportViewActivityIds}
           listExportColumns={exportListColumns}
           textExportData={textExportData}
-          onClose={() => setExportDialogOpen(false)}
+          captureElement={view === 'calendar' ? contentAreaRef.current : snapshotBody}
+          periodLabel={view === 'calendar' ? formatAnchorLabel(calendarAnchorDate, calendarLayout) : null}
+          onClose={() => { setExportDialogOpen(false); setSnapshotBody(null) }}
         />
       )}
 

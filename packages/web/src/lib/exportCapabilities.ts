@@ -8,14 +8,15 @@
  *
  * 14.1: CSV, Excel, ICS (server-side, all views).
  * 14.2: Markdown, Plain text, Copy to clipboard (client-side, List/Kanban/Calendar only).
+ * 14.3: PNG snapshot (client-side DOM rasterization, all views).
  */
 
 import {
-  Table, FileSpreadsheet, CalendarPlus, FileText, AlignLeft, Copy,
+  Table, FileSpreadsheet, CalendarPlus, FileText, AlignLeft, Copy, Image,
   type LucideIcon,
 } from 'lucide-react'
 
-export type ExportFormatId = 'csv' | 'xlsx' | 'ics' | 'markdown' | 'plaintext' | 'clipboard'
+export type ExportFormatId = 'csv' | 'xlsx' | 'ics' | 'png' | 'markdown' | 'plaintext' | 'clipboard'
 export type ExportViewType = 'gantt' | 'list' | 'calendar' | 'kanban'
 
 export interface ExportFormatDescriptor {
@@ -72,6 +73,20 @@ const DATA_FORMATS: ExportFormatDescriptor[] = [
   },
 ]
 
+/** Image format — client-side DOM rasterization, available in every view. */
+const IMAGE_FORMATS: ExportFormatDescriptor[] = [
+  {
+    id: 'png',
+    name: 'PNG image',
+    icon: Image,
+    ext: '.png',
+    scope: false,
+    verb: 'download',
+    clientSide: true,
+    desc: 'A snapshot of this view, full scrollable extent, for a slide deck or doc.',
+  },
+]
+
 /** Textual formats — client-side, not available on Gantt (no sensible flat text shape). */
 const TEXT_FORMATS: ExportFormatDescriptor[] = [
   {
@@ -108,23 +123,27 @@ const TEXT_FORMATS: ExportFormatDescriptor[] = [
 
 /**
  * Returns the export formats available for a given view.
- * Gantt has no sensible flat text representation — only data/calendar formats.
- * List/Kanban/Calendar also expose the three textual formats (14.2).
+ * PNG is available everywhere (14.3). Gantt has no sensible flat text
+ * representation, so it skips the textual formats (14.2).
  */
 export function getExportFormats(view: ExportViewType): ExportFormatDescriptor[] {
-  if (view === 'gantt') return DATA_FORMATS
-  return [...DATA_FORMATS, ...TEXT_FORMATS]
+  if (view === 'gantt') return [...DATA_FORMATS, ...IMAGE_FORMATS]
+  return [...DATA_FORMATS, ...IMAGE_FORMATS, ...TEXT_FORMATS]
 }
 
 /**
- * Builds the download filename for a format: `<timeline-slug>-<yyyy-mm-dd><ext>`.
- * Matches the filename chip shown in the export dialog's options pane.
+ * Builds the download filename for a format:
+ * `<timeline-slug>[-<view>]-<yyyy-mm-dd><ext>`.
+ * Matches the filename chip shown in the export dialog's options pane. The view
+ * segment is included when given so a file names the view it came from (e.g.
+ * `sales-kick-off-kanban-2026-06-30.png`).
  */
-export function buildExportFilename(timelineName: string, ext: string): string {
+export function buildExportFilename(timelineName: string, ext: string, view?: ExportViewType): string {
   const slug = timelineName
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
   const date = new Date().toISOString().slice(0, 10)
-  return `${slug || 'timeline'}-${date}${ext}`
+  const viewSegment = view ? `-${view}` : ''
+  return `${slug || 'timeline'}${viewSegment}-${date}${ext}`
 }

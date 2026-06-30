@@ -84,7 +84,15 @@ Gantt has no sensible textual shape — its Markdown/text need is served by the 
 - Header strip (team, timeline, generated-at, filter description) composited above the capture.
 - Known constraints to handle: capture full scrollable extent (temporarily unclamp the container), inline self-hosted fonts, force light theme for the capture frame (consistent with shares).
 
-### 14.4 — Printable views (M, 2–3 days)
+### 14.4 — Printable views + HTML save (M, 2–3 days)
+
+**Reuse the 14.3 `PresentationFrame` as the shared presentation surface (decided 2026-06-30).** 14.3's redesign produced an isolated, always-light iframe (`components/export/PresentationFrame.tsx`) that renders the share viewer's `interactive=false` components into their own document. That same surface is the substrate for the other visual exports — there is no need for separate print routes or a second render harness:
+- **Printable PDF:** `iframe.contentWindow.print()` prints just the frame's document (vector output, selectable text) — the print stylesheet is scoped inside the frame.
+- **HTML save:** serialize `iframe.contentDocument.documentElement.outerHTML` (stylesheets are already inlined into the frame's head) to a standalone `.html` blob — literally "save the share as a file."
+- **Collapse the three "force light" notions into one** presentation-theme definition: ShareViewPage's `useLayoutEffect` dark-class toggle, the removed pngExport toggle, and PresentationFrame's structural light. One source of truth keeps the share viewer, PNG, HTML, and print in lockstep.
+- **Give Calendar a clean (`interactive=false`) renderer** so it joins the shared surface instead of live-DOM rasterization (the deferred 14.3 follow-up).
+
+If bookmarkable/shareable print URLs are ever wanted, a real `/timelines/:id/print/:view` route can wrap the same frame later — but it is not required for v1.
 
 - Dedicated print routes (e.g. `/timelines/:id/print/:view`) rendering the non-interactive view components with a print stylesheet: fixed printable width, page-break-aware pagination, no app chrome, light theme, header strip on each page.
 - Gantt: landscape hint, date-range pagination across pages, member-color legend strip.

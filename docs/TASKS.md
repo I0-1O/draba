@@ -1242,16 +1242,19 @@ _Re-planned 2026-06-11 — see [docs/plans/phase-14-export.md](plans/phase-14-ex
 - [ ] Copy to clipboard with dual `text/plain` + `text/html` flavors (rich paste into Slack / Word / Google Docs); `.md` file download
 
 **14.3 PNG snapshot (client):**
-- [ ] DOM rasterization via `html-to-image`: full scrollable extent, 2x density, light theme
-- [ ] Header strip composited above the capture
+- [x] Capture via `html-to-image`: full extent, 2x density, light theme
+- [x] Header strip composited above the capture
+- [x] Redesigned (2026-06-30) onto an isolated always-light `PresentationFrame` iframe (Gantt/List/Kanban) — fixes the dark-mode flicker + half-dark capture; calendar still rasterizes the live (theme-agnostic) content area
+- [x] Header strip shows the Calendar period (month/year or week range), since the toolbar carrying it is excluded from the capture
+- [x] Download filename includes the view name for the view-shaped client formats
+- [ ] **User-run check:** open Kanban + Gantt in dark mode, Download PNG, confirm no flicker / light boxes / view name in filename / full extent (sign-in needs a password the assistant can't enter)
 
-**14.4 Printable views (client, vector PDF via browser print):**
-- [ ] Print routes per view (`/timelines/:id/print/:view`): non-interactive view components + print stylesheet, no app chrome, header strip per page
-- [ ] Gantt: landscape hint, date-range pagination, member-color legend
-- [ ] List: styled table with repeating column headers
-- [ ] Kanban: page breaks between column groups when too wide
-- [ ] Calendar: one page per week/month period
-- [ ] "Export → Printable view" opens the route in a new tab and triggers `window.print()`
+**14.4 Printable views + HTML save (client, vector PDF via browser print):**
+- [ ] **Reuse the 14.3 `PresentationFrame` as the shared presentation surface** — `iframe.contentWindow.print()` → vector PDF; serialize `iframe.contentDocument.documentElement.outerHTML` (styles already inlined) → standalone `.html`. Avoid building a second render harness.
+- [ ] **Collapse the three "force light" implementations into one presentation-theme definition** — ShareViewPage's `useLayoutEffect` dark-class toggle, the old pngExport toggle (now removed), and PresentationFrame's structural light. One source of truth so the share viewer, PNG, HTML, and print stay in lockstep.
+- [ ] Print stylesheet per view: no app chrome, header strip per page; Gantt landscape + date-range pagination + member-color legend; List styled table with repeating headers; Kanban page breaks between column groups; Calendar one page per period
+- [ ] "Export → Printable view" / "Export → HTML" wired into the dialog
+- [ ] Give Calendar a clean (`interactive=false`) renderer so it joins the PresentationFrame surface instead of live-DOM rasterization (the 14.3 follow-up)
 
 **Cut (2026-06-11):** Google Docs/Sheets integration, RTF, wall-calendar poster PDF, raster-PDF download, gofpdf/Chromium server rendering (optional Chromium *sidecar* deferred indefinitely).
 

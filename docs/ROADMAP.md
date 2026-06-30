@@ -61,7 +61,7 @@ This document organizes development into discrete phases with effort estimates a
 | 14 | [Export — Data, Textual & Visual](#phase-14--export--data-textual--visual) (sub-phased) | L — 6–9 days (4 pausable sub-phases) | 🔄 |
 | 14.1 | Foundation + data exports (CSV/xlsx/ICS) | M | ✅ |
 | 14.2 | Textual (Markdown / plain text / clipboard) | M | ✅ |
-| 14.3 | PNG snapshot | S–M | ⬜ |
+| 14.3 | PNG snapshot | S–M | ✅ |
 | 14.4 | Printable views | M | ⬜ |
 | 15 | [Import — Tabular](#phase-15--import--tabular) | M — 2–3 days | ⬜ |
 | 16 | [Backup & Restore](#phase-16--backup--restore) | M — 2–3 days | ⬜ |
@@ -1610,7 +1610,7 @@ Re-scoped 2026-06-11 — most of the original tail was already built piecemeal d
 ---
 
 ### Phase 14 — Export — Data, Textual & Visual
-**Status:** 🔄 — 14.1 built and passing all automated checks (2026-06-15), awaiting Docker rebuild + live verification; 14.2 built and passing all automated checks (2026-06-17), awaiting Docker verification; 14.3–14.4 not started | **Effort:** L (6–9 days across four pausable sub-phases) | **Plan:** [docs/plans/phase-14-export.md](plans/phase-14-export.md)
+**Status:** 🔄 — 14.1 built, passing all automated checks, Docker-verified (2026-06-26 /test-phase); 14.2 built, passing all automated checks, Docker-verified (2026-06-26 /test-phase); 14.3 built, passing all automated checks, live-verified against the running Docker API (2026-06-29 — a real `html-to-image` font-embedding bug was found and fixed during that verification); 14.4 not started | **Effort:** L (6–9 days across four pausable sub-phases) | **Plan:** [docs/plans/phase-14-export.md](plans/phase-14-export.md)
 
 Get data *out* of draba in the four shapes people actually need: **data** (CSV / xlsx for another tool or the Phase 15 re-import round-trip), **text** (Markdown / plain text / rich clipboard for Slack and prep docs), **image** (PNG of the current view for slide decks), and **print** (a print-styled page the user prints to vector PDF from their own browser; plus a static `.ics` download). Every export reflects the active filter / sort / group / visible columns at time of export — the deliverable is "what's on the screen right now," not the raw activity list. Split from the former combined "Data Portability" phase so export ships ahead of [import](#phase-15--import--tabular).
 
@@ -1621,8 +1621,8 @@ Visual exports render **client-side from the live DOM** — no gofpdf, no Chromi
 
 - **14.1 Foundation + data exports:** `POST /timelines/:id/export` (`csv` / `xlsx` / `ics`, optional frozen `viewConfig`, filter evaluated in Go) + convenience `GET …/export.csv?filter=<savedFilterId>` (the 10.4.6 hook); columns match the Phase 15 import template; sync for v1. Single `ExportDialog` driven by a per-view capability descriptor, wired into the Gantt toolbar Export stub and the 11.1/11.2/11.3 toolbar slots.
 - **14.2 Textual:** Markdown and plain text each offer a **Table** style (GFM table / aligned columns) and an **Outline** style (bullet list — `**title** (date range) — assignees`, with indented `Status:` / `Progress:` / `Parent:` / `Tags:` / etc. lines for non-empty fields; children nest by depth; group-by produces `##` / heading sections). Copy-to-clipboard also exposes the Table/Outline choice; paste lands rich in Slack / Word / Google Docs via dual `text/plain` + `text/html` flavors. Kanban = section per column; Calendar = agenda list. Client-generated from in-memory filtered rows.
-- **14.3 PNG snapshot:** DOM rasterization (`html-to-image`) of the current view, full scrollable extent, 2x density, light theme, header strip (team, timeline, generated-at, filter description).
-- **14.4 Printable views:** print routes per view (non-interactive view components + print stylesheet): Gantt landscape with date-range pagination and member-color legend; List styled table; Kanban columns with page breaks; Calendar one page per period. "Export → Printable view" opens the route and triggers `window.print()`.
+- **14.3 PNG snapshot:** clean render (`html-to-image`) of the current view, full extent, 2x density, header strip (team, timeline, generated-at, filter, + Calendar period). Built on an isolated always-light `PresentationFrame` iframe (Gantt/List/Kanban) so the capture doesn't toggle the live page's theme (no flicker) and theme `var()` colors resolve correctly (no half-dark capture); Calendar rasterizes the live, theme-agnostic content area until it gets a clean renderer.
+- **14.4 Printable views + HTML save:** **reuse the 14.3 `PresentationFrame` as the shared presentation surface** — `iframe.contentWindow.print()` for vector PDF, `contentDocument` serialization for a standalone `.html` download — and **collapse the three "force light" implementations (ShareViewPage toggle, removed pngExport toggle, PresentationFrame) into one presentation-theme definition** shared with the Phase 13 share viewer. Print stylesheet per view: Gantt landscape with date-range pagination and member-color legend; List styled table; Kanban columns with page breaks; Calendar one page per period. Give Calendar a clean (`interactive=false`) renderer so it joins the shared surface.
 
 **Open questions:** resolved in the plan — sync exports for v1; filter only (Find is ephemeral); no draba-side PDF engine.
 
