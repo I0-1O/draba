@@ -107,6 +107,76 @@ describe('capturePngSnapshot', () => {
     expect(drawnText.some(t => t.includes('June 2026'))).toBe(true)
   })
 
+  it('orders the subtitle as period, then generated-at, then filter, joined with " · "', async () => {
+    const el = document.createElement('div')
+    const headerCanvas = makeFakeCanvas()
+    const realCreateElement = document.createElement.bind(document)
+    vi.spyOn(document, 'createElement').mockImplementation((tag: string) =>
+      tag === 'canvas' ? (headerCanvas as unknown as HTMLElement) : realCreateElement(tag))
+
+    await capturePngSnapshot(el, {
+      timelineName: 'Q1 Plan', teamName: null, filterLabel: 'Open only', periodLabel: 'June 2026',
+    })
+
+    const ctx = (headerCanvas.getContext('2d') as unknown as { fillText: ReturnType<typeof vi.fn> })
+    const subtitle = ctx.fillText.mock.calls.map(c => c[0] as string).find(t => t.includes('Generated'))
+    expect(subtitle).toBeDefined()
+    const periodIdx = subtitle!.indexOf('June 2026')
+    const generatedIdx = subtitle!.indexOf('Generated')
+    const filterIdx = subtitle!.indexOf('Filter: Open only')
+    expect(periodIdx).toBeGreaterThanOrEqual(0)
+    expect(periodIdx).toBeLessThan(generatedIdx)
+    expect(generatedIdx).toBeLessThan(filterIdx)
+  })
+
+  it('omits the period and filter segments from the subtitle when absent', async () => {
+    const el = document.createElement('div')
+    const headerCanvas = makeFakeCanvas()
+    const realCreateElement = document.createElement.bind(document)
+    vi.spyOn(document, 'createElement').mockImplementation((tag: string) =>
+      tag === 'canvas' ? (headerCanvas as unknown as HTMLElement) : realCreateElement(tag))
+
+    await capturePngSnapshot(el, { timelineName: 'Q1 Plan', teamName: null, filterLabel: null })
+
+    const ctx = (headerCanvas.getContext('2d') as unknown as { fillText: ReturnType<typeof vi.fn> })
+    const subtitle = ctx.fillText.mock.calls.map(c => c[0] as string).find(t => t.includes('Generated'))
+    expect(subtitle).toBeDefined()
+    expect(subtitle).not.toContain('Filter:')
+    expect(subtitle!.startsWith('Generated')).toBe(true)
+  })
+
+  it('prefixes the title with the team name when given, and omits it when absent', async () => {
+    const el = document.createElement('div')
+    const headerCanvas = makeFakeCanvas()
+    const realCreateElement = document.createElement.bind(document)
+    vi.spyOn(document, 'createElement').mockImplementation((tag: string) =>
+      tag === 'canvas' ? (headerCanvas as unknown as HTMLElement) : realCreateElement(tag))
+
+    await capturePngSnapshot(el, { timelineName: 'Q1 Plan', teamName: 'Acme', filterLabel: null })
+
+    const ctx = (headerCanvas.getContext('2d') as unknown as { fillText: ReturnType<typeof vi.fn> })
+    const titles = ctx.fillText.mock.calls.map(c => c[0] as string)
+    expect(titles).toContain('Acme · Q1 Plan')
+  })
+
+  it('sizes the composited canvas to the header height plus the captured view height, at 2x density', async () => {
+    const el = document.createElement('div')
+    const viewCanvas = makeFakeCanvas(1280, 720)
+    mockToCanvas.mockResolvedValueOnce(viewCanvas)
+    const headerCanvas = makeFakeCanvas()
+    const realCreateElement = document.createElement.bind(document)
+    vi.spyOn(document, 'createElement').mockImplementation((tag: string) =>
+      tag === 'canvas' ? (headerCanvas as unknown as HTMLElement) : realCreateElement(tag))
+
+    await capturePngSnapshot(el, { timelineName: 'Q1 Plan', teamName: null, filterLabel: null })
+
+    // HEADER_HEIGHT (56) * PIXEL_RATIO (2) = 112px added above the view's own height.
+    expect(headerCanvas.width).toBe(1280)
+    expect(headerCanvas.height).toBe(720 + 112)
+    const ctx = (headerCanvas.getContext('2d') as unknown as { drawImage: ReturnType<typeof vi.fn> })
+    expect(ctx.drawImage).toHaveBeenCalledWith(viewCanvas, 0, 112)
+  })
+
   it('propagates a toCanvas rejection', async () => {
     mockToCanvas.mockRejectedValueOnce(new Error('rasterization failed'))
     const el = document.createElement('div')

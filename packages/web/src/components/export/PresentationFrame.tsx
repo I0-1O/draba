@@ -102,6 +102,10 @@ export default function PresentationFrame({ onReady, children }: PresentationFra
         ref={iframeRef}
         title="Export presentation surface"
         aria-hidden
+        // Defense-in-depth: nothing is ever given a src/srcdoc (stays
+        // about:blank), but scripts and top-level navigation are blocked
+        // outright in case that ever changes.
+        sandbox="allow-same-origin"
         style={{
           position: 'fixed',
           top: 0,

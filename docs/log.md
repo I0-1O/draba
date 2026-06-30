@@ -2,6 +2,22 @@
 
 ---
 
+## 2026-06-30 — /review-phase 14.3 follow-up: sidebar fix scope note, test coverage, iframe sandbox
+
+**Scope note:** commit `c836506` ("nest members under active team, clear stale activity on team switch") landed inside the 14.3 diff range but is unrelated to PNG export — it's an unrelated sidebar/right-panel bug fix (members now render directly under the active team row instead of after the whole switchable team list; switching teams now clears the previously-selected activity from the right sidebar instead of leaving it pinned). Side-quest fixes like this keep landing inside phase diff ranges; flagged here rather than re-litigated as a blocker, since splitting it out after the fact isn't worth the churn at this point.
+
+**Test coverage added** (per `/review-phase 14.3` blockers):
+- `components/export/CleanSnapshot.test.tsx` (new) — smoke-tests `CleanGanttSnapshot`/`CleanListSnapshot`/`CleanKanbanSnapshot` render the given activities correctly (titles, status columns, visible-column filtering, parent/child hierarchy nesting).
+- `components/export/PresentationFrame.test.tsx` (new) — covers the `onReady` contract, the frame document never carrying `.dark`, the body shrink-wrap styling, parent stylesheet/font-link cloning into the frame head, and that children portal into the frame body rather than the live document. Renders without unmounting between tests (`RTL_SKIP_AUTO_CLEANUP`) — jsdom destroys an `<iframe>`'s `contentDocument` as soon as it's detached, which races React's portal-unmount cleanup and throws a `NotFoundError` that has no real-browser equivalent.
+- `components/layout/Sidebar.test.tsx` — added coverage for the active-team member-nesting fix above (Members section renders between the active team row and the next team row; no duplicate Members section per switchable team; fallback path when `activeTeams` hasn't loaded yet).
+- `lib/pngExport.test.ts` — added `compositeHeader` coverage: subtitle segment ordering/omission (period → generated-at → filter), team-name title prefixing, and composited-canvas sizing (header height + view height at 2x density).
+
+**Hardening:** `components/export/PresentationFrame.tsx` iframe now sets `sandbox="allow-same-origin"` — defense-in-depth only, since the frame is never given a `src`/`srcdoc` and never renders attacker-controlled markup, but it costs nothing to block script execution and top-level navigation outright in case that ever changes.
+
+**Checks:** `pnpm --filter web test` — all 413 tests pass. `pnpm --filter web lint` clean.
+
+---
+
 ## 2026-06-30 — /test-phase 14.3
 - Subagents run: static-check, unit-test (backend), unit-test (frontend), schema-check, api-smoke, security-review, type-sync, web-e2e
 - Result: all pass (web-e2e initially failed Phase 14.3's PNG-export click-through against a stale pre-`1ecb759` container binary; container redeployed mid-session, DB reset, and the PNG export check re-run clean for Kanban/Gantt/Calendar — no flicker, view-name filenames, correct Calendar period header)
