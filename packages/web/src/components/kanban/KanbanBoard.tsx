@@ -148,6 +148,7 @@ export default function KanbanBoard({
       onDragOver={handleDragOver}
     >
       <div
+        data-export-role="kanban-columns-row"
         style={{
           display: 'flex',
           flexDirection: 'row',

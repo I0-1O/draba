@@ -6,28 +6,32 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { getExportFormats, buildExportFilename } from './exportCapabilities'
 
 describe('getExportFormats', () => {
-  it('returns data formats + PNG (4) for gantt', () => {
+  it('returns data formats + PNG + printable/HTML (6) for gantt', () => {
     const formats = getExportFormats('gantt')
-    expect(formats).toHaveLength(4)
+    expect(formats).toHaveLength(6)
     const ids = formats.map(f => f.id)
     expect(ids).toContain('csv')
     expect(ids).toContain('xlsx')
     expect(ids).toContain('ics')
     expect(ids).toContain('png')
+    expect(ids).toContain('printable')
+    expect(ids).toContain('html')
     expect(ids).not.toContain('markdown')
     expect(ids).not.toContain('clipboard')
   })
 
-  it('returns data + PNG + text formats (7) for list, kanban, calendar', () => {
+  it('returns data + PNG + printable/HTML + text formats (9) for list, kanban, calendar', () => {
     const views = ['list', 'kanban', 'calendar'] as const
     for (const view of views) {
       const formats = getExportFormats(view)
-      expect(formats).toHaveLength(7)
+      expect(formats).toHaveLength(9)
       const ids = formats.map(f => f.id)
       expect(ids).toContain('csv')
       expect(ids).toContain('xlsx')
       expect(ids).toContain('ics')
       expect(ids).toContain('png')
+      expect(ids).toContain('printable')
+      expect(ids).toContain('html')
       expect(ids).toContain('markdown')
       expect(ids).toContain('plaintext')
       expect(ids).toContain('clipboard')
@@ -41,10 +45,10 @@ describe('getExportFormats', () => {
       expect(f.name).toBeTruthy()
       expect(f.desc).toBeTruthy()
       expect(typeof f.scope).toBe('boolean')
-      expect(f.verb === 'download' || f.verb === 'copy').toBe(true)
+      expect(['download', 'copy', 'print']).toContain(f.verb)
       expect(typeof f.clientSide).toBe('boolean')
-      // ext may be empty string for clipboard
-      if (f.id !== 'clipboard') {
+      // ext may be empty string for clipboard/printable
+      if (f.id !== 'clipboard' && f.id !== 'printable') {
         expect(f.ext).toMatch(/^\.[a-z]+$/)
       }
     }
@@ -61,19 +65,21 @@ describe('getExportFormats', () => {
   it('client-side formats have scope=false and clientSide=true', () => {
     const formats = getExportFormats('list')
     const clientFormats = formats.filter(f => f.clientSide)
-    expect(clientFormats).toHaveLength(4) // png + markdown + plaintext + clipboard
+    expect(clientFormats).toHaveLength(6) // png + printable + html + markdown + plaintext + clipboard
     for (const f of clientFormats) {
       expect(f.scope).toBe(false)
       expect(f.clientSide).toBe(true)
     }
   })
 
-  it('clipboard format has copy verb; others have download', () => {
+  it('clipboard has copy verb, printable has print verb, others have download', () => {
     const formats = getExportFormats('list')
     const clipboard = formats.find(f => f.id === 'clipboard')
     expect(clipboard?.verb).toBe('copy')
-    const nonClipboard = formats.filter(f => f.id !== 'clipboard')
-    for (const f of nonClipboard) {
+    const printable = formats.find(f => f.id === 'printable')
+    expect(printable?.verb).toBe('print')
+    const rest = formats.filter(f => f.id !== 'clipboard' && f.id !== 'printable')
+    for (const f of rest) {
       expect(f.verb).toBe('download')
     }
   })

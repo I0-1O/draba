@@ -280,6 +280,7 @@ export default function KanbanColumn({
   return (
     <div
       ref={setNodeRef}
+      data-export-role="kanban-column"
       style={{
         width: COLUMN_WIDTH,
         flexShrink: 0,

@@ -13,12 +13,15 @@
  *      via the `textExportData` prop; these formats only appear for non-Gantt views.
  * 14.3 adds the PNG snapshot format, rasterizing `captureElement` (the live
  *      view container) via `lib/pngExport.ts`; available in every view.
+ * 14.4 adds the printable-view and HTML-save formats, both driven off the
+ *      `presentationFrame` prop (the mounted PresentationFrame iframe) via
+ *      `lib/printExport.ts` / `lib/htmlExport.ts`; available in every view.
  */
 
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import {
-  FileOutput, Filter, AlertTriangle, Download, FileDown, Check, X, Copy,
+  FileOutput, Filter, AlertTriangle, Download, FileDown, Check, X, Copy, Printer,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
@@ -36,6 +39,8 @@ import {
   type TextExportData,
 } from '@/lib/textExport'
 import { capturePngSnapshot } from '@/lib/pngExport'
+import { printPresentationFrame } from '@/lib/printExport'
+import { saveFramePresentationHtml } from '@/lib/htmlExport'
 import type { FilterDefinition } from '@/lib/filterTypes'
 
 export type { TextExportData }
@@ -78,6 +83,12 @@ export interface ExportDialogProps {
    * but the action is a no-op.
    */
   captureElement?: HTMLElement | null
+  /**
+   * The mounted PresentationFrame's iframe — the shared render surface for
+   * the printable-view and HTML-save formats (14.4). Required for those
+   * formats to be functional; if absent the actions are a no-op.
+   */
+  presentationFrame?: HTMLIFrameElement | null
   /**
    * Period label for the PNG header (Calendar only) — e.g. "June 2026" or
    * "Jun 1 – 7, 2026". The on-screen toolbar carries this, but it's excluded
@@ -172,6 +183,7 @@ export default function ExportDialog({
   listExportColumns,
   textExportData,
   captureElement,
+  presentationFrame,
   periodLabel,
   onClose,
 }: ExportDialogProps) {
@@ -223,6 +235,24 @@ export default function ExportDialog({
       return
     }
 
+    if (format.id === 'printable') {
+      if (!presentationFrame) return
+      printPresentationFrame(presentationFrame, { timelineName, teamName: teamName ?? null, filterLabel, periodLabel })
+      flashDone()
+      return
+    }
+
+    if (format.id === 'html') {
+      if (!presentationFrame) return
+      saveFramePresentationHtml(
+        presentationFrame,
+        { timelineName, teamName: teamName ?? null, filterLabel, periodLabel },
+        buildExportFilename(timelineName, format.ext, view),
+      )
+      flashDone()
+      return
+    }
+
     if (format.clientSide) {
       const data = textExportData ?? {
         activities: [],
@@ -267,7 +297,7 @@ export default function ExportDialog({
       filter: scope === 'view' && !viewActivityIds ? filterDefinition : null,
       columns: isDataFormat ? listExportColumns : null,
     }).then(flashDone)
-  }, [format, view, timelineName, teamName, filterLabel, periodLabel, textExportData, captureElement, scope, listStyle, viewActivityIds, filterDefinition, listExportColumns, download, flashDone])
+  }, [format, view, timelineName, teamName, filterLabel, periodLabel, textExportData, captureElement, presentationFrame, scope, listStyle, viewActivityIds, filterDefinition, listExportColumns, download, flashDone])
 
   const emptyView = filteredCount === 0
   const subWithFilter = filterLabel !== null
@@ -277,8 +307,10 @@ export default function ExportDialog({
   // Button label / icon for the primary action
   const actionLabel = format.verb === 'copy'
     ? done ? 'Copied!' : (isPending ? 'Copying…' : 'Copy to clipboard')
+    : format.verb === 'print'
+    ? done ? 'Print dialog opened' : 'Print…'
     : done ? 'Downloaded' : (isPending ? 'Downloading…' : `Download ${format.ext}`)
-  const ActionIcon = format.verb === 'copy' ? Copy : Download
+  const ActionIcon = format.verb === 'copy' ? Copy : format.verb === 'print' ? Printer : Download
 
   return createPortal(
     <div className="fixed inset-0 z-[1000] flex items-center justify-center bg-[hsl(200_24%_11%/0.55)] p-6 backdrop-blur-[2px]">
@@ -337,8 +369,8 @@ export default function ExportDialog({
             {formats.map(f => {
               const FIcon = f.icon
               const selected = f.id === formatId
-              // Badge icon: copy for clipboard, download for everything else
-              const BadgeIcon = f.verb === 'copy' ? Copy : Download
+              // Badge icon: copy for clipboard, printer for printable view, download for everything else
+              const BadgeIcon = f.verb === 'copy' ? Copy : f.verb === 'print' ? Printer : Download
               return (
                 <button
                   key={f.id}
@@ -352,7 +384,7 @@ export default function ExportDialog({
                 >
                   <FIcon size={15} strokeWidth={selected ? 2.2 : 1.8} className={selected ? 'shrink-0 text-primary' : 'shrink-0 text-muted-foreground'} />
                   <span className="flex-1 truncate">{f.name}</span>
-                  <span title={f.verb === 'copy' ? 'Copy' : 'Download'} className={cn('shrink-0 text-muted-foreground', selected ? 'opacity-90' : 'opacity-65')}>
+                  <span title={f.verb === 'copy' ? 'Copy' : f.verb === 'print' ? 'Print' : 'Download'} className={cn('shrink-0 text-muted-foreground', selected ? 'opacity-90' : 'opacity-65')}>
                     <BadgeIcon size={11} strokeWidth={2} />
                   </span>
                 </button>
@@ -439,7 +471,7 @@ export default function ExportDialog({
           <Button variant="outline" onClick={onClose}>Cancel</Button>
           <Button onClick={handleAction} disabled={isPending} className="min-w-[168px] justify-center">
             {done
-              ? <><Check size={14} strokeWidth={2.2} /> {format.verb === 'copy' ? 'Copied!' : 'Downloaded'}</>
+              ? <><Check size={14} strokeWidth={2.2} /> {actionLabel}</>
               : <><ActionIcon size={14} strokeWidth={2.2} /> {actionLabel}</>}
           </Button>
         </div>

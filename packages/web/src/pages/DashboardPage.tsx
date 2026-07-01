@@ -19,7 +19,7 @@ import KanbanToolbar, { type KanbanGroupBy, type KanbanSortBy, type KanbanCardFi
 import KanbanView from '@/components/kanban/KanbanView'
 import { DEFAULT_CARD_FIELDS, buildColumns, buildHierarchyMaps } from '@/components/kanban/kanbanColumns'
 import type { TextExportData } from '@/components/ExportDialog'
-import { CleanGanttSnapshot, CleanListSnapshot, CleanKanbanSnapshot } from '@/components/export/CleanSnapshot'
+import { CleanGanttSnapshot, CleanListSnapshot, CleanKanbanSnapshot, CleanCalendarSnapshot } from '@/components/export/CleanSnapshot'
 import PresentationFrame from '@/components/export/PresentationFrame'
 import ActivityDetailPanel from '@/components/gantt/ActivityDetailPanel'
 import ActivityCreatePanel from '@/components/gantt/ActivityCreatePanel'
@@ -99,16 +99,19 @@ function DashboardShell() {
   const [filterModalOpen, setFilterModalOpen] = useState(false)
   const [shareModalOpen, setShareModalOpen] = useState(false)
   const [exportDialogOpen, setExportDialogOpen] = useState(false)
-  // Content-area container — rasterized for the PNG export format (14.3) when
-  // viewing Calendar, which has no clean/interactive=false renderer yet.
-  const contentAreaRef = useRef<HTMLDivElement>(null)
-  // Body of the PresentationFrame iframe that hosts the PNG export's clean
-  // (interactive=false) snapshot — an isolated, always-light document reusing
-  // the Phase 13 share viewer's render path for Gantt/List/Kanban. Captured as
-  // the PNG target once the frame signals readiness. Calendar has no clean
-  // renderer yet and still rasterizes the live content area.
+  // Body + iframe of the PresentationFrame that hosts the export dialog's
+  // clean (interactive=false) snapshot — an isolated, always-light document
+  // reusing the Phase 13 share viewer's render path for all four views
+  // (Calendar joined in 14.4). The body is the PNG capture target; the
+  // iframe itself is the shared surface for the 14.4 printable-view and
+  // HTML-save formats (`iframe.contentWindow.print()` / `contentDocument`
+  // serialization). Both are set once the frame signals readiness.
   const [snapshotBody, setSnapshotBody] = useState<HTMLElement | null>(null)
-  const handleSnapshotReady = useCallback((body: HTMLElement) => setSnapshotBody(body), [])
+  const [snapshotFrame, setSnapshotFrame] = useState<HTMLIFrameElement | null>(null)
+  const handleSnapshotReady = useCallback((body: HTMLElement, iframe: HTMLIFrameElement) => {
+    setSnapshotBody(body)
+    setSnapshotFrame(iframe)
+  }, [])
   // Calendar gets its own share surface — an ICS feed configurator, not the
   // active-links list (Phase 13.4).
   const [calendarShareModalOpen, setCalendarShareModalOpen] = useState(false)
@@ -836,7 +839,7 @@ function DashboardShell() {
         )}
 
         {/* Content area */}
-        <div ref={contentAreaRef} style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+        <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
           {view === 'gantt' && teamId && activeTimelineId ? (
             <GanttView
               teamId={teamId}
@@ -1078,22 +1081,21 @@ function DashboardShell() {
       )}
 
       {/*
-        Off-screen PNG capture target — for Gantt/List/Kanban this renders the
-        same interactive=false components the public share viewer uses, fed
-        with live data, instead of rasterizing the live editable dashboard.
-        Calendar has no clean/interactive=false renderer yet (it's only
-        shared via ICS feeds, not view-shares — see Phase 13.4), so it falls
-        back to capturing the live content area; the PresentationFrame is only
-        mounted for the three clean-renderable views.
+        Off-screen capture target for the export dialog's PNG, printable-view,
+        and HTML-save formats — renders the same interactive=false components
+        the public share viewer uses (Calendar joined in 14.4 via
+        CleanCalendarSnapshot), fed with live data, instead of rasterizing the
+        live editable dashboard.
 
         PresentationFrame hosts the snapshot in an isolated, always-light
         iframe document (see components/export/PresentationFrame.tsx). That is
         what fixes the dark-mode flicker (the live page's theme is never
         toggled) and the half-dark capture (no `.dark` in scope for the
         snapshot's `var()` colors to resolve against). Mounted only while the
-        export dialog is open; on close it unmounts and `snapshotBody` resets.
+        export dialog is open; on close it unmounts and `snapshotBody`/
+        `snapshotFrame` reset.
       */}
-      {exportDialogOpen && view !== 'calendar' && (
+      {exportDialogOpen && (
         <PresentationFrame onReady={handleSnapshotReady}>
           {view === 'gantt' && (
             <CleanGanttSnapshot
@@ -1136,10 +1138,22 @@ function DashboardShell() {
               collapsedColumnIds={kanbanCollapsedColumns}
             />
           )}
+          {view === 'calendar' && (
+            <CleanCalendarSnapshot
+              activities={exportFilterInfo.filteredActivities}
+              members={ganttMembers}
+              statuses={activeTimelineStatuses}
+              tags={tags}
+              layout={calendarLayout}
+              anchorDate={calendarAnchorDate}
+              colorBy={colorBy}
+              weekStartDay={weekStartDay}
+            />
+          )}
         </PresentationFrame>
       )}
 
-      {/* Export dialog — download the active view as CSV/Excel/ICS/PNG */}
+      {/* Export dialog — download the active view as CSV/Excel/ICS/PNG, or print/save as HTML */}
       {exportDialogOpen && activeTimelineId && teamId && (
         <ExportDialog
           view={view}
@@ -1154,9 +1168,10 @@ function DashboardShell() {
           viewActivityIds={exportViewActivityIds}
           listExportColumns={exportListColumns}
           textExportData={textExportData}
-          captureElement={view === 'calendar' ? contentAreaRef.current : snapshotBody}
+          captureElement={snapshotBody}
+          presentationFrame={snapshotFrame}
           periodLabel={view === 'calendar' ? formatAnchorLabel(calendarAnchorDate, calendarLayout) : null}
-          onClose={() => { setExportDialogOpen(false); setSnapshotBody(null) }}
+          onClose={() => { setExportDialogOpen(false); setSnapshotBody(null); setSnapshotFrame(null) }}
         />
       )}
 

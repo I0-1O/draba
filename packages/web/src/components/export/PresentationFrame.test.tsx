@@ -37,16 +37,15 @@ function getIframe(container: HTMLElement): HTMLIFrameElement {
 
 describe('PresentationFrame', () => {
   it('calls onReady with the frame body once the document is set up', async () => {
-    let readyBody: HTMLElement | null = null
-    let readyIframe: HTMLIFrameElement | null = null
+    const ready: { body: HTMLElement | null; iframe: HTMLIFrameElement | null } = { body: null, iframe: null }
     render(
-      <PresentationFrame onReady={(body, iframe) => { readyBody = body; readyIframe = iframe }}>
+      <PresentationFrame onReady={(body, iframe) => { ready.body = body; ready.iframe = iframe }}>
         <div>content</div>
       </PresentationFrame>,
     )
 
-    await waitFor(() => expect(readyBody).not.toBeNull())
-    expect(readyIframe?.contentDocument?.body).toBe(readyBody)
+    await waitFor(() => expect(ready.body).not.toBeNull())
+    expect(ready.iframe?.contentDocument?.body).toBe(ready.body)
   })
 
   it('never carries the dark class on the frame document, even when the live page is dark', async () => {

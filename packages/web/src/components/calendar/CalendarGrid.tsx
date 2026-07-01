@@ -393,6 +393,7 @@ function WeekRowRenderer({
   onCellClick,
   onCapDraft,
   onCapCommit,
+  interactive,
 }: {
   row: WeekRow;
   isFirst: boolean;
@@ -410,6 +411,7 @@ function WeekRowRenderer({
   onCellClick: (date: Date) => void;
   onCapDraft: (weekStart: Date, newCap: number) => void;
   onCapCommit: (weekStart: Date, newCap: number) => void;
+  interactive: boolean;
 }) {
   const [popover, setPopover] = useState<{ col: number; rect: DOMRect } | null>(null);
   const overflows = useMemo(() => overflowCountsForWeek(row), [row]);
@@ -443,7 +445,7 @@ function WeekRowRenderer({
           return (
             <div key={col} data-date={dayISO}
               style={{ borderRight: col < COL_COUNT - 1 ? '1px solid var(--border)' : 'none', background: isToday ? 'color-mix(in srgb, var(--primary) 6%, transparent)' : 'transparent', position: 'relative', cursor: 'default' }}
-              onClick={e => { if ((e.target as HTMLElement).closest('[data-bar]')) return; onCellClick(day); }}
+              onClick={e => { if (!interactive) return; if ((e.target as HTMLElement).closest('[data-bar]')) return; onCellClick(day); }}
             >
               {isWeek ? (
                 /* Week view: prominent centered header */
@@ -535,7 +537,7 @@ function WeekRowRenderer({
       })()}
 
       {/* Month resize handle */}
-      {!isWeek && (
+      {!isWeek && interactive && (
         <div style={ROW_RESIZE_WRAPPER}>
           <RowResizeHandle weekStart={row.weekStart} currentCap={row.visibleLaneCap} laneCount={row.laneCount} onCapDraft={onCapDraft} onCapCommit={onCapCommit} />
         </div>
@@ -574,6 +576,12 @@ export interface CalendarGridProps {
   onBarDragCommit: (activityId: string, newStart: Date, newEnd: Date) => void;
   onCapDraft: (weekStart: Date, newCap: number) => void;
   onCapCommit: (weekStart: Date, newCap: number) => void;
+  /**
+   * When false, all click and drag interactions are suppressed — bars, cell
+   * clicks, and the month row-height handle become inert. Used by the clean
+   * (off-screen) snapshot rendered for PNG/print/HTML export. Default: true.
+   */
+  interactive?: boolean;
 }
 
 export default function CalendarGrid({
@@ -592,6 +600,7 @@ export default function CalendarGrid({
   onBarDragCommit,
   onCapDraft,
   onCapCommit,
+  interactive = true,
 }: CalendarGridProps) {
   const [dragState, setDragState] = useState<DragState | null>(null);
 
@@ -617,6 +626,7 @@ export default function CalendarGrid({
     activityId: string,
     type: DragType,
   ) => {
+    if (!interactive) return;
     e.preventDefault();
     e.stopPropagation();
     const act = activityById.get(activityId);
@@ -630,7 +640,7 @@ export default function CalendarGrid({
 
     liveDragRef.current = { start: originalStart, end: originalEnd };
     setDragState({ activityId, type, originalStart, originalEnd, grabOffsetDays, currentStart: originalStart, currentEnd: originalEnd });
-  }, [activityById]);
+  }, [activityById, interactive]);
 
   useEffect(() => {
     if (!dragState) return;
@@ -728,9 +738,10 @@ export default function CalendarGrid({
   }, [dragState, weeks]);
 
   const handleBarClick = useCallback((activityId: string, e: React.MouseEvent) => {
+    if (!interactive) return;
     e.stopPropagation();
     onSelectActivity(activityById.get(activityId) ?? null);
-  }, [activityById, onSelectActivity]);
+  }, [activityById, onSelectActivity, interactive]);
 
   // ── Render ──────────────────────────────────────────────────────────────────
 
@@ -766,6 +777,7 @@ export default function CalendarGrid({
             onCellClick={onCellClick}
             onCapDraft={onCapDraft}
             onCapCommit={onCapCommit}
+            interactive={interactive}
           />
         ))}
       </div>

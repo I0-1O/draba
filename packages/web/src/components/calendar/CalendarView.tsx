@@ -31,10 +31,13 @@ type SavedFilter = components['schemas']['SavedFilter'];
 type Tag = components['schemas']['Tag'];
 
 // ── Constants ─────────────────────────────────────────────────────────────────
+// Exported for reuse by CleanCalendarSnapshot (Phase 14.4), which mirrors this
+// grid-building logic against the export dialog's already-filtered activity set
+// instead of a date-bounded fetch.
 
-const DEFAULT_MONTH_CAP = 3;
-const DEFAULT_WEEK_CAP  = 6;
-const MONTH_WEEKS = 6;
+export const DEFAULT_MONTH_CAP = 3;
+export const DEFAULT_WEEK_CAP  = 6;
+export const MONTH_WEEKS = 6;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -58,7 +61,7 @@ function toMember(m: TeamMemberWithUser, index: number): Member {
  * Month: the weekStart on or before the 1st of the anchor month.
  * Week:  the anchor date itself (expected to be a weekStart).
  */
-function computeGridStart(anchorDate: Date, layout: CalendarLayout, weekStartDay: 0 | 1): Date {
+export function computeGridStart(anchorDate: Date, layout: CalendarLayout, weekStartDay: 0 | 1): Date {
   if (layout === 'week') {
     const d = new Date(anchorDate);
     d.setUTCHours(0, 0, 0, 0);

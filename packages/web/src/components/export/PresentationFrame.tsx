@@ -30,6 +30,7 @@
 
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
+import { forceLightDocumentElement, PRESENTATION_BACKGROUND } from '@/lib/presentationTheme'
 
 export interface PresentationFrameProps {
   /**
@@ -72,11 +73,11 @@ export default function PresentationFrame({ onReady, children }: PresentationFra
 
     // Never dark: the snapshot must be light regardless of the user's theme,
     // and we deliberately do not touch the parent <html> (that caused the flicker).
-    doc.documentElement.classList.remove('dark')
+    forceLightDocumentElement(doc)
     copyDocumentStyles(document, doc)
     doc.body.style.margin = '0'
     doc.body.style.padding = '0'
-    doc.body.style.background = '#ffffff'
+    doc.body.style.background = PRESENTATION_BACKGROUND
     // Shrink-wrap to the content so scrollWidth/scrollHeight at capture time is
     // the view's full natural extent, not the iframe viewport.
     doc.body.style.display = 'inline-block'

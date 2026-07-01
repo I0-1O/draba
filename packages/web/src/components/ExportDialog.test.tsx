@@ -22,6 +22,16 @@ vi.mock('@/lib/pngExport', () => ({
   capturePngSnapshot: (...args: unknown[]) => mockCapturePngSnapshot(...args),
 }))
 
+const mockPrintPresentationFrame = vi.fn()
+vi.mock('@/lib/printExport', () => ({
+  printPresentationFrame: (...args: unknown[]) => mockPrintPresentationFrame(...args),
+}))
+
+const mockSaveFramePresentationHtml = vi.fn()
+vi.mock('@/lib/htmlExport', () => ({
+  saveFramePresentationHtml: (...args: unknown[]) => mockSaveFramePresentationHtml(...args),
+}))
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 type Props = Parameters<typeof ExportDialog>[0]
@@ -324,5 +334,62 @@ describe('ExportDialog — PNG snapshot', () => {
     renderDialog({ view: 'list' })
     fireEvent.click(screen.getByText('PNG image'))
     expect(screen.queryByText('Entire timeline')).not.toBeInTheDocument()
+  })
+})
+
+// ── 14.4: Printable view + HTML save ────────────────────────────────────────────
+
+describe('ExportDialog — printable view + HTML save (14.4)', () => {
+  it('shows Printable view and HTML file as format options in every view, including Gantt', () => {
+    renderDialog({ view: 'gantt' })
+    const rail = screen.getByRole('listbox', { name: /Export format/i })
+    expect(within(rail).getByText('Printable view')).toBeInTheDocument()
+    expect(within(rail).getByText('HTML file')).toBeInTheDocument()
+  })
+
+  it('calls printPresentationFrame with the frame and header info when Print… is clicked', () => {
+    const presentationFrame = document.createElement('iframe')
+    renderDialog({
+      view: 'list', presentationFrame, timelineName: 'My Timeline', teamName: 'Acme', filterLabel: 'Open only',
+    })
+    fireEvent.click(screen.getByText('Printable view'))
+    fireEvent.click(screen.getByRole('button', { name: /Print…/i }))
+
+    expect(mockPrintPresentationFrame).toHaveBeenCalledWith(presentationFrame, {
+      timelineName: 'My Timeline', teamName: 'Acme', filterLabel: 'Open only', periodLabel: undefined,
+    })
+  })
+
+  it('does nothing (no throw) when presentationFrame is absent for Printable view', () => {
+    renderDialog({ view: 'list', presentationFrame: null })
+    fireEvent.click(screen.getByText('Printable view'))
+    expect(() => fireEvent.click(screen.getByRole('button', { name: /Print…/i }))).not.toThrow()
+    expect(mockPrintPresentationFrame).not.toHaveBeenCalled()
+  })
+
+  it('does not show the scope picker or a filename chip for Printable view', () => {
+    renderDialog({ view: 'list' })
+    fireEvent.click(screen.getByText('Printable view'))
+    expect(screen.queryByText('Entire timeline')).not.toBeInTheDocument()
+  })
+
+  it('calls saveFramePresentationHtml with the frame, header info, and filename when Download .html is clicked', () => {
+    const presentationFrame = document.createElement('iframe')
+    renderDialog({ view: 'kanban', presentationFrame, timelineName: 'My Timeline' })
+    fireEvent.click(screen.getByText('HTML file'))
+    fireEvent.click(screen.getByRole('button', { name: /Download \.html/i }))
+
+    expect(mockSaveFramePresentationHtml).toHaveBeenCalledWith(
+      presentationFrame,
+      { timelineName: 'My Timeline', teamName: null, filterLabel: null, periodLabel: undefined },
+      expect.stringContaining('kanban'),
+    )
+  })
+
+  it('does nothing (no throw) when presentationFrame is absent for HTML save', () => {
+    renderDialog({ view: 'list', presentationFrame: null })
+    fireEvent.click(screen.getByText('HTML file'))
+    expect(() => fireEvent.click(screen.getByRole('button', { name: /Download \.html/i }))).not.toThrow()
+    expect(mockSaveFramePresentationHtml).not.toHaveBeenCalled()
   })
 })

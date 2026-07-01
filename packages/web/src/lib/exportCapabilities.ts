@@ -9,14 +9,15 @@
  * 14.1: CSV, Excel, ICS (server-side, all views).
  * 14.2: Markdown, Plain text, Copy to clipboard (client-side, List/Kanban/Calendar only).
  * 14.3: PNG snapshot (client-side DOM rasterization, all views).
+ * 14.4: Printable view (browser print → vector PDF), HTML save (client-side, all views).
  */
 
 import {
-  Table, FileSpreadsheet, CalendarPlus, FileText, AlignLeft, Copy, Image,
+  Table, FileSpreadsheet, CalendarPlus, FileText, AlignLeft, Copy, Image, Printer, FileCode,
   type LucideIcon,
 } from 'lucide-react'
 
-export type ExportFormatId = 'csv' | 'xlsx' | 'ics' | 'png' | 'markdown' | 'plaintext' | 'clipboard'
+export type ExportFormatId = 'csv' | 'xlsx' | 'ics' | 'png' | 'markdown' | 'plaintext' | 'clipboard' | 'printable' | 'html'
 export type ExportViewType = 'gantt' | 'list' | 'calendar' | 'kanban'
 
 export interface ExportFormatDescriptor {
@@ -33,8 +34,9 @@ export interface ExportFormatDescriptor {
    * Primary action verb.
    * 'download' → "Download <ext>" button.
    * 'copy'     → "Copy to clipboard" button with "Copied!" flash.
+   * 'print'    → "Print…" button that opens the browser's print dialog.
    */
-  verb: 'download' | 'copy'
+  verb: 'download' | 'copy' | 'print'
   /** True for formats generated client-side (no API call). */
   clientSide: boolean
 }
@@ -87,6 +89,33 @@ const IMAGE_FORMATS: ExportFormatDescriptor[] = [
   },
 ]
 
+/**
+ * Presentation formats — client-side, reuse the PresentationFrame surface
+ * (Phase 14.4), available in every view.
+ */
+const PRESENTATION_FORMATS: ExportFormatDescriptor[] = [
+  {
+    id: 'printable',
+    name: 'Printable view',
+    icon: Printer,
+    ext: '',
+    scope: false,
+    verb: 'print',
+    clientSide: true,
+    desc: 'Opens your browser’s print dialog on a clean, paginated version of this view — choose "Save as PDF" there for a vector file with selectable text.',
+  },
+  {
+    id: 'html',
+    name: 'HTML file',
+    icon: FileCode,
+    ext: '.html',
+    scope: false,
+    verb: 'download',
+    clientSide: true,
+    desc: 'A standalone HTML file with styles inlined — opens in any browser without draba.',
+  },
+]
+
 /** Textual formats — client-side, not available on Gantt (no sensible flat text shape). */
 const TEXT_FORMATS: ExportFormatDescriptor[] = [
   {
@@ -123,12 +152,13 @@ const TEXT_FORMATS: ExportFormatDescriptor[] = [
 
 /**
  * Returns the export formats available for a given view.
- * PNG is available everywhere (14.3). Gantt has no sensible flat text
- * representation, so it skips the textual formats (14.2).
+ * PNG and the presentation formats (printable view, HTML) are available
+ * everywhere (14.3/14.4). Gantt has no sensible flat text representation,
+ * so it skips the textual formats (14.2).
  */
 export function getExportFormats(view: ExportViewType): ExportFormatDescriptor[] {
-  if (view === 'gantt') return [...DATA_FORMATS, ...IMAGE_FORMATS]
-  return [...DATA_FORMATS, ...IMAGE_FORMATS, ...TEXT_FORMATS]
+  if (view === 'gantt') return [...DATA_FORMATS, ...IMAGE_FORMATS, ...PRESENTATION_FORMATS]
+  return [...DATA_FORMATS, ...IMAGE_FORMATS, ...PRESENTATION_FORMATS, ...TEXT_FORMATS]
 }
 
 /**

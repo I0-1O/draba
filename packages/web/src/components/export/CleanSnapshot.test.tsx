@@ -10,7 +10,7 @@
 import '@testing-library/jest-dom'
 import { describe, it, expect } from 'vitest'
 import { render, screen } from '@testing-library/react'
-import { CleanGanttSnapshot, CleanListSnapshot, CleanKanbanSnapshot } from './CleanSnapshot'
+import { CleanGanttSnapshot, CleanListSnapshot, CleanKanbanSnapshot, CleanCalendarSnapshot } from './CleanSnapshot'
 import type { Member } from '@/types'
 import type { components } from '@draba/shared'
 
@@ -198,5 +198,60 @@ describe('CleanKanbanSnapshot', () => {
     // the snapshot) but is excluded from the column's top-level activity list,
     // so it should appear exactly once rather than once per place.
     expect(screen.getAllByText('Child task')).toHaveLength(1)
+  })
+})
+
+describe('CleanCalendarSnapshot', () => {
+  it('renders an activity within the month grid at the given anchor date', () => {
+    const activities = [makeActivity({ id: 'a1', title: 'Team sync', startAt: '2026-01-05T00:00:00Z', endAt: '2026-01-05T00:00:00Z' })]
+    render(
+      <CleanCalendarSnapshot
+        activities={activities}
+        members={[makeMember('m1', 'Alice')]}
+        statuses={statuses}
+        tags={tags}
+        layout="month"
+        anchorDate={new Date('2026-01-01T00:00:00Z')}
+        colorBy="activity"
+        weekStartDay={1}
+      />,
+    )
+    expect(screen.getByText('Team sync')).toBeInTheDocument()
+  })
+
+  it('does not throw for week layout, and joins the shared PresentationFrame surface as interactive=false', () => {
+    const activities = [makeActivity({ id: 'a1', title: 'Standup', startAt: '2026-01-05T00:00:00Z', endAt: '2026-01-05T00:00:00Z' })]
+    expect(() =>
+      render(
+        <CleanCalendarSnapshot
+          activities={activities}
+          members={[]}
+          statuses={statuses}
+          tags={tags}
+          layout="week"
+          anchorDate={new Date('2026-01-05T00:00:00Z')}
+          colorBy="status"
+          weekStartDay={0}
+        />,
+      ),
+    ).not.toThrow()
+    expect(screen.getByText('Standup')).toBeInTheDocument()
+  })
+
+  it('omits activities outside the displayed month without throwing', () => {
+    const activities = [makeActivity({ id: 'a1', title: 'Out of range', startAt: '2020-03-01T00:00:00Z', endAt: '2020-03-01T00:00:00Z' })]
+    render(
+      <CleanCalendarSnapshot
+        activities={activities}
+        members={[]}
+        statuses={statuses}
+        tags={tags}
+        layout="month"
+        anchorDate={new Date('2026-01-01T00:00:00Z')}
+        colorBy="activity"
+        weekStartDay={1}
+      />,
+    )
+    expect(screen.queryByText('Out of range')).not.toBeInTheDocument()
   })
 })

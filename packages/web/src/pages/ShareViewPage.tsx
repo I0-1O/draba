@@ -42,6 +42,7 @@ import {
   autoFitGranularity,
 } from '@/components/gantt/granularity'
 import { ApiError } from '@/lib/api'
+import { forceLightDocumentElement } from '@/lib/presentationTheme'
 import type { components } from '@draba/shared'
 import type { GroupBy, SortBy, ColorBy, TimeGranularity } from '@/components/gantt/GanttToolbar'
 import type { Member } from '@/types'
@@ -299,7 +300,7 @@ export function PublicListTable({ rows, visibleColumns, memberById, statusById, 
   }
 
   return (
-    <div style={{ flex: 1, overflow: 'auto', background: '#ffffff' }}>
+    <div data-export-role="list-table-wrap" style={{ flex: 1, overflow: 'auto', background: '#ffffff' }}>
       <table style={{ width: '100%', borderCollapse: 'separate', borderSpacing: 0, tableLayout: 'fixed' }}>
         <colgroup>
           {visibleColumns.map(c => <col key={c.id} style={{ width: widths[c.id] ?? c.defaultWidth }} />)}
@@ -596,11 +597,9 @@ export default function ShareViewPage() {
   // useLayoutEffect runs before the browser paints, beating any dark class set
   // from localStorage by useDarkMode during the same render cycle.
   useLayoutEffect(() => {
-    const root = document.documentElement
-    const hadDark = root.classList.contains('dark')
-    root.classList.remove('dark')
+    const hadDark = forceLightDocumentElement(document)
     return () => {
-      if (hadDark) root.classList.add('dark')
+      if (hadDark) document.documentElement.classList.add('dark')
     }
   }, [])
 

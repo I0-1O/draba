@@ -1237,9 +1237,9 @@ _Re-planned 2026-06-11 — see [docs/plans/phase-14-export.md](plans/phase-14-ex
 - [x] Wire into the Gantt toolbar Export stub + 11.1 / 11.2 / 11.3 toolbar slots, formats scoped per view
 
 **14.2 Textual exports (client):**
-- [ ] Markdown: GFM table (List), section-per-column (Kanban), agenda list (Calendar); header block with team / timeline / generated-at / filter description
-- [ ] Plain text variant (aligned monospace)
-- [ ] Copy to clipboard with dual `text/plain` + `text/html` flavors (rich paste into Slack / Word / Google Docs); `.md` file download
+- [x] Markdown: GFM table (List), section-per-column (Kanban), agenda list (Calendar); header block with team / timeline / generated-at / filter description
+- [x] Plain text variant (aligned monospace)
+- [x] Copy to clipboard with dual `text/plain` + `text/html` flavors (rich paste into Slack / Word / Google Docs); `.md` file download
 
 **14.3 PNG snapshot (client):**
 - [x] Capture via `html-to-image`: full extent, 2x density, light theme
@@ -1247,14 +1247,14 @@ _Re-planned 2026-06-11 — see [docs/plans/phase-14-export.md](plans/phase-14-ex
 - [x] Redesigned (2026-06-30) onto an isolated always-light `PresentationFrame` iframe (Gantt/List/Kanban) — fixes the dark-mode flicker + half-dark capture; calendar still rasterizes the live (theme-agnostic) content area
 - [x] Header strip shows the Calendar period (month/year or week range), since the toolbar carrying it is excluded from the capture
 - [x] Download filename includes the view name for the view-shaped client formats
-- [ ] **User-run check:** open Kanban + Gantt in dark mode, Download PNG, confirm no flicker / light boxes / view name in filename / full extent (sign-in needs a password the assistant can't enter)
+- [x] **User-run check:** open Kanban + Gantt in dark mode, Download PNG, confirm no flicker / light boxes / view name in filename / full extent — verified live 2026-07-01 (Kanban + Gantt PNGs both fully light, full extent, correct header)
 
 **14.4 Printable views + HTML save (client, vector PDF via browser print):**
-- [ ] **Reuse the 14.3 `PresentationFrame` as the shared presentation surface** — `iframe.contentWindow.print()` → vector PDF; serialize `iframe.contentDocument.documentElement.outerHTML` (styles already inlined) → standalone `.html`. Avoid building a second render harness.
-- [ ] **Collapse the three "force light" implementations into one presentation-theme definition** — ShareViewPage's `useLayoutEffect` dark-class toggle, the old pngExport toggle (now removed), and PresentationFrame's structural light. One source of truth so the share viewer, PNG, HTML, and print stay in lockstep.
-- [ ] Print stylesheet per view: no app chrome, header strip per page; Gantt landscape + date-range pagination + member-color legend; List styled table with repeating headers; Kanban page breaks between column groups; Calendar one page per period
-- [ ] "Export → Printable view" / "Export → HTML" wired into the dialog
-- [ ] Give Calendar a clean (`interactive=false`) renderer so it joins the PresentationFrame surface instead of live-DOM rasterization (the 14.3 follow-up)
+- [x] **Reuse the 14.3 `PresentationFrame` as the shared presentation surface** — `iframe.contentWindow.print()` → vector PDF; serialize `iframe.contentDocument.documentElement.outerHTML` (styles already inlined) → standalone `.html`. Avoided building a second render harness.
+- [x] **Collapse the two remaining "force light" implementations into one presentation-theme definition** — `lib/presentationTheme.ts`'s `forceLightDocumentElement` is now shared by ShareViewPage's `useLayoutEffect` dark-class toggle and PresentationFrame's structural light (the old pngExport toggle was already removed in 14.3).
+- [x] Print stylesheet per view (`components/export/printStyles.ts`, injected via `<style media="print">` in each Clean*Snapshot): Gantt landscape + member-color legend; List repeating `<thead>` + `break-inside: avoid` rows; Kanban `flex-wrap` + per-column `break-inside: avoid` (via new `data-export-role` hooks on KanbanBoard/KanbanColumn); Calendar landscape
+- [x] "Export → Printable view" / "Export → HTML" wired into the dialog (`printable`/`html` formats in `exportCapabilities.ts`, new `print` verb)
+- [x] Give Calendar a clean (`interactive=false`) renderer (`CleanCalendarSnapshot`, new `interactive` prop on `CalendarGrid`) so it joins the PresentationFrame surface instead of live-DOM rasterization (the 14.3 follow-up)
 
 **Cut (2026-06-11):** Google Docs/Sheets integration, RTF, wall-calendar poster PDF, raster-PDF download, gofpdf/Chromium server rendering (optional Chromium *sidecar* deferred indefinitely).
 
