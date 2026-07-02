@@ -2,10 +2,28 @@
 
 ---
 
+## 2026-07-02 — /review-phase 14.4 follow-up: log scrub, gating tests, HTML export stylesheet fix, print-CSS tests
+
+Addressed the /review-phase 14.4 findings (two blockers, three suggestions accepted; the DashboardPage integration-test suggestion was declined as fine-as-is, and two nits were accepted as-is).
+
+**Blockers:**
+- **Host-specific value in the diff** — the 14.4 `/test-phase` log entry committed the local smoke-target URL; scrubbed to a generic description. Historical instances elsewhere in `log.md` remain — a one-time **pre-launch repo scrub** is now a TASKS.md parking-lot item (per-phase additions stay caught by REVIEW.md's security grep).
+- **`CalendarGrid` `interactive` prop untested** — new `CalendarGrid.test.tsx` (8 tests) mirrors the 13.3 KanbanCard/KanbanColumn `interactive=false` suites: bar click, bar drag (pointerdown→pointermove with `document.elementsFromPoint` stubbed), cell click, and the month row-resize handle are all inert at `interactive={false}`, with positive controls at the default.
+
+**Suggestions:**
+- **HTML export stylesheet handling** (`lib/htmlExport.ts`) — the serialized `.html` previously carried PresentationFrame's cloned `<link>` tags verbatim, so relative `/assets/*.css` hrefs broke the saved file offline. Now serialization clones the frame's root and resolves links: same-origin stylesheets are **fetched and inlined** as `<style>` blocks (falling back to an absolutized href on fetch failure); cross-origin links (the Google Fonts pair) are **absolutized** so fonts render whenever the file is opened with network access (system-font fallback offline; fully self-contained font embedding would mean data-URI'ing woff2 — not worth it). `saveFramePresentationHtml` is now async; `ExportDialog`'s html branch gained the same pending/then/finally treatment as PNG. 4 new tests cover inlining, absolutizing, fetch-failure fallback, and live-frame non-mutation.
+- **Print CSS untested** — new `printStyles.test.ts` (6 tests) pins the string content jsdom can verify (base print-only block, `@page` orientation/margins per view, List/Kanban break rules — behavioral print-preview checks stay manual per TESTING.md), and `CleanSnapshot.test.tsx` gained a 4-test injection describe: each snapshot mounts its `<style>` block and the DOM carries the `data-export-role` hooks the CSS selectors target (drift guard on both halves of the contract).
+- **`forceLightDocumentElement` page wiring untested** — extracted ShareViewPage's force-light-with-restore `useLayoutEffect` into `hooks/useForceLightDocument.ts` (2 renderHook tests: strip on mount, restore on unmount, no spurious dark when already light). ShareViewPage now mounts the hook. The larger idea — a real theme-mode classification (light / dark / print / "simplified") instead of a binary force-light — is parked in TASKS.md for future scoping.
+- **`data-export-role` widening note** — ROADMAP's 14.4 scope text now records that the hook contract extends to ShareViewPage's `PublicListTable` (`list-table-wrap`), not just KanbanBoard/KanbanColumn.
+
+**Checks:** `pnpm --filter web lint` clean, `pnpm --filter web build` clean, `pnpm --filter web test` all pass.
+
+---
+
 ## 2026-07-01 — /test-phase 14.4
 - Subagents run: static-check, unit-test (backend), unit-test (frontend), schema-check, api-smoke, security-review, type-sync, web-e2e
 - Result: all pass (8/8; no skips — live smoke target reachable, invite token resolved from memory)
-- Smoke target: http://epcot.lan:8081
+- Smoke target: the local Docker test instance (URL in local env config, not committed)
 
 ---
 

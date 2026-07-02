@@ -23,9 +23,11 @@
  * `SecurityError` the Google Fonts stylesheet otherwise triggers.
  *
  * The same frame is the surface Phase 14.4 reuses: `iframe.contentWindow.print()`
- * for the printable-PDF route and `iframe.contentDocument.documentElement.outerHTML`
- * (styles already inlined) for the HTML download — one render path, shared with
- * the Phase 13 share viewer's components, no second harness to drift.
+ * for the printable-PDF route and serialization of `contentDocument` for the
+ * HTML download (htmlExport inlines same-origin stylesheet links at serialize
+ * time, since cloned `<link>` hrefs don't survive a save-to-disk) — one render
+ * path, shared with the Phase 13 share viewer's components, no second harness
+ * to drift.
  */
 
 import { useEffect, useRef, useState, type ReactNode } from 'react'

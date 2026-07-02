@@ -2,7 +2,8 @@
  * presentationTheme — the single "force light" definition shared by every
  * read-only presentation surface (Phase 14.4 collapses two independent
  * implementations into this one module): ShareViewPage's live-document
- * `useLayoutEffect` toggle and PresentationFrame's structural iframe light.
+ * toggle (via `hooks/useForceLightDocument`) and PresentationFrame's
+ * structural iframe light.
  * Both need the same operation — strip `.dark` from a document's root — so
  * it lives here once instead of being reimplemented per call site.
  */

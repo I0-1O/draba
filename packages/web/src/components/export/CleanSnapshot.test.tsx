@@ -11,6 +11,7 @@ import '@testing-library/jest-dom'
 import { describe, it, expect } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import { CleanGanttSnapshot, CleanListSnapshot, CleanKanbanSnapshot, CleanCalendarSnapshot } from './CleanSnapshot'
+import { GANTT_PRINT_CSS, LIST_PRINT_CSS, KANBAN_PRINT_CSS, CALENDAR_PRINT_CSS } from './printStyles'
 import type { Member } from '@/types'
 import type { components } from '@draba/shared'
 
@@ -253,5 +254,75 @@ describe('CleanCalendarSnapshot', () => {
       />,
     )
     expect(screen.queryByText('Out of range')).not.toBeInTheDocument()
+  })
+})
+
+// ── Print stylesheet injection (Phase 14.4) ───────────────────────────────────
+// Each snapshot must mount its view's @media print block (inert during PNG
+// capture, active under iframe.contentWindow.print()), and the DOM must carry
+// the data-export-role hooks the CSS selectors target — the other half of the
+// contract pinned by printStyles.test.ts.
+
+describe('print stylesheet injection', () => {
+  const activities = [makeActivity({ id: 'a1', title: 'Hooked', statusId: 's1', startAt: '2026-01-05T00:00:00Z', endAt: '2026-01-09T00:00:00Z' })]
+
+  function styleTexts(container: HTMLElement): string[] {
+    return Array.from(container.querySelectorAll('style')).map(s => s.textContent ?? '')
+  }
+
+  it('CleanGanttSnapshot injects the Gantt print CSS and renders the member legend for print', () => {
+    const { container } = render(
+      <CleanGanttSnapshot
+        activities={activities}
+        members={[makeMember('m1', 'Alice')]}
+        statuses={statuses}
+        groupBy="none" sortBy="title" colorBy="member"
+        granularity="week"
+        startDate="2026-01-01T00:00:00Z" endDate="2026-02-01T00:00:00Z"
+        weekStart="monday" locale="en-US"
+      />,
+    )
+    expect(styleTexts(container)).toContain(GANTT_PRINT_CSS)
+    const legend = container.querySelector('.presentation-print-only.gantt-legend')
+    expect(legend).not.toBeNull()
+    expect(legend!.textContent).toContain('Alice')
+  })
+
+  it('CleanListSnapshot injects the List print CSS and renders the list-table-wrap hook', () => {
+    const { container } = render(
+      <CleanListSnapshot
+        activities={activities}
+        members={[]} statuses={statuses} tags={tags}
+        groupBy="none" sortBy="title" columns={null}
+      />,
+    )
+    expect(styleTexts(container)).toContain(LIST_PRINT_CSS)
+    expect(container.querySelector('[data-export-role="list-table-wrap"]')).not.toBeNull()
+  })
+
+  it('CleanKanbanSnapshot injects the Kanban print CSS and renders both kanban hooks', () => {
+    const { container } = render(
+      <CleanKanbanSnapshot
+        activities={activities}
+        teamMembers={[]} members={[]} statuses={statuses} tags={tags}
+        groupBy="status" sortBy="title" colorBy="status"
+        cardFields={[]} showHierarchy={false} collapsedColumnIds={[]}
+      />,
+    )
+    expect(styleTexts(container)).toContain(KANBAN_PRINT_CSS)
+    expect(container.querySelector('[data-export-role="kanban-columns-row"]')).not.toBeNull()
+    expect(container.querySelectorAll('[data-export-role="kanban-column"]').length).toBeGreaterThan(0)
+  })
+
+  it('CleanCalendarSnapshot injects the Calendar print CSS', () => {
+    const { container } = render(
+      <CleanCalendarSnapshot
+        activities={activities}
+        members={[]} statuses={statuses} tags={tags}
+        layout="month" anchorDate={new Date('2026-01-01T00:00:00Z')}
+        colorBy="activity" weekStartDay={1}
+      />,
+    )
+    expect(styleTexts(container)).toContain(CALENDAR_PRINT_CSS)
   })
 })

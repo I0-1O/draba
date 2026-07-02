@@ -4,11 +4,12 @@
  * Mounted at /s/:token outside ProtectedRoute. Fetches the ShareProjection
  * from the public gateway, then renders the Gantt in interactive=false mode
  * with the frozen view config (groupBy, sortBy, colorBy, granularity) applied.
- * Theme is forced to light — useLayoutEffect runs synchronously before paint so
- * it beats any dark-class applied from localStorage by useDarkMode.
+ * Theme is forced to light via useForceLightDocument — its useLayoutEffect runs
+ * synchronously before paint so it beats any dark-class applied from
+ * localStorage by useDarkMode.
  */
 
-import { useMemo, useLayoutEffect, useEffect, useState, useCallback, useRef } from 'react'
+import { useMemo, useEffect, useState, useCallback, useRef } from 'react'
 import { useParams } from 'react-router-dom'
 import { useShareProjection, useUnlockShare } from '@/hooks/useShares'
 import GanttGrid from '@/components/gantt/GanttGrid'
@@ -42,7 +43,7 @@ import {
   autoFitGranularity,
 } from '@/components/gantt/granularity'
 import { ApiError } from '@/lib/api'
-import { forceLightDocumentElement } from '@/lib/presentationTheme'
+import { useForceLightDocument } from '@/hooks/useForceLightDocument'
 import type { components } from '@draba/shared'
 import type { GroupBy, SortBy, ColorBy, TimeGranularity } from '@/components/gantt/GanttToolbar'
 import type { Member } from '@/types'
@@ -593,15 +594,9 @@ export default function ShareViewPage() {
   const [viewToken, setViewToken] = useState<string | null>(null)
   const { data: proj, isLoading, isError, error } = useShareProjection(token, viewToken)
 
-  // Force light mode synchronously before first paint.
-  // useLayoutEffect runs before the browser paints, beating any dark class set
-  // from localStorage by useDarkMode during the same render cycle.
-  useLayoutEffect(() => {
-    const hadDark = forceLightDocumentElement(document)
-    return () => {
-      if (hadDark) document.documentElement.classList.add('dark')
-    }
-  }, [])
+  // Force light mode synchronously before first paint, restoring the viewer's
+  // dark class on unmount.
+  useForceLightDocument()
 
   // Re-apply on mount in case ThemeSync fires after useLayoutEffect.
   useEffect(() => {

@@ -244,12 +244,15 @@ export default function ExportDialog({
 
     if (format.id === 'html') {
       if (!presentationFrame) return
+      setClientPending(true)
       saveFramePresentationHtml(
         presentationFrame,
         { timelineName, teamName: teamName ?? null, filterLabel, periodLabel },
         buildExportFilename(timelineName, format.ext, view),
       )
-      flashDone()
+        .then(() => flashDone())
+        .catch(() => { /* stylesheet fetch may fail offline; nothing was saved */ })
+        .finally(() => setClientPending(false))
       return
     }
 

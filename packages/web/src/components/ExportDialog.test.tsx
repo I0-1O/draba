@@ -27,7 +27,7 @@ vi.mock('@/lib/printExport', () => ({
   printPresentationFrame: (...args: unknown[]) => mockPrintPresentationFrame(...args),
 }))
 
-const mockSaveFramePresentationHtml = vi.fn()
+const mockSaveFramePresentationHtml = vi.fn((..._args: unknown[]) => Promise.resolve())
 vi.mock('@/lib/htmlExport', () => ({
   saveFramePresentationHtml: (...args: unknown[]) => mockSaveFramePresentationHtml(...args),
 }))

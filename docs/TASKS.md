@@ -1347,6 +1347,8 @@ Includes both the webhook backend and the per-timeline connector sidebar UI (pre
 - [x] Define requirements, architecture, conventions — 2026-04-27
 
 ## Parking Lot
+- **Pre-launch repo scrub for host-specific values** (added 2026-07-02, /review-phase 14.4): `docs/log.md` and possibly other docs contain historical `epcot.lan:8081` references (the local test Docker host). Before any public release, grep the whole repo for `epcot.lan`, `8081`, and similar LAN-specific values and scrub them. New additions are caught per-phase by the REVIEW.md security grep; this item is the one-time historical cleanup.
+- **Theme-mode refactor — light / dark / print / "simplified"** (added 2026-07-02, /review-phase 14.4): today "force light" (`lib/presentationTheme.ts#forceLightDocumentElement`) is a binary strip-the-dark-class toggle. The export work suggests a real classification system: *light*, *dark*, *print*, and possibly *simplified* (print-adjacent CSS for PNG/HTML exports and screen saves — reduced chrome, no interactive affordances). Worth scoping as its own phase once export/import settle; not a bolt-on.
 - **Commit/CI process — repomap.md vs. Graphify:** drop the automated `repomap.md` generation (the AI-context lookup step doesn't appear to depend on it day-to-day) and look into incorporating Graphify in its place. Not yet scoped — revisit once the Phase 13 sub-phases land.
 - MySQL/MariaDB and Postgres DB adapters (SQLite first, then add others)
 - CLI binary
