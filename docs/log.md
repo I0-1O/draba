@@ -2,6 +2,13 @@
 
 ---
 
+## 2026-07-01 — /test-phase 14.4
+- Subagents run: static-check, unit-test (backend), unit-test (frontend), schema-check, api-smoke, security-review, type-sync, web-e2e
+- Result: all pass (8/8; no skips — live smoke target reachable, invite token resolved from memory)
+- Smoke target: http://epcot.lan:8081
+
+---
+
 ## 2026-07-01 — Phase 14.4: Printable views + HTML save
 
 **Goal:** Close out Phase 14 export by adding the printable-view (vector PDF via browser print) and standalone-HTML formats, reusing the 14.3 `PresentationFrame` as the shared render surface rather than building a second harness — plus give Calendar the clean `interactive=false` renderer it was missing since 14.3, and collapse the app's remaining "force light" duplication into one definition.
