@@ -270,6 +270,7 @@ packages/
           CleanSnapshot.tsx
           PresentationFrame.tsx
           presentationHeader.ts
+          printStyles.test.ts
           printStyles.ts
         filters/
           FilterConditionRow.tsx
@@ -343,6 +344,8 @@ packages/
         useDarkMode.ts
         useExport.test.ts
         useExport.ts
+        useForceLightDocument.test.ts
+        useForceLightDocument.ts
         useFormatDate.test.ts
         useFormatDate.ts
         useMemberManagement.ts
@@ -12257,6 +12260,86 @@ func requestLogger(next http.Handler) http.Handler {
 }
 ````
 
+## File: packages/api/internal/api/ratelimit.go
+````go
+package api
+
+import (
+	"net"
+	"net/http"
+	"sync"
+	"time"
+)
+
+// rateLimiter is a fixed-window, in-memory request counter keyed by an
+// arbitrary string (here, client IP). It is deliberately dependency-free: the
+// product ships as a single self-hosted binary, so an in-process limiter is
+// preferred over an external store. State is lost on restart, which is
+// acceptable for an anti-brute-force guard.
+type rateLimiter struct {
+	mu      sync.Mutex
+	entries map[string]*rlEntry
+	limit   int
+	window  time.Duration
+}
+
+type rlEntry struct {
+	count   int
+	resetAt time.Time
+}
+
+// newRateLimiter returns a limiter that permits limit events per key within
+// each rolling window.
+func newRateLimiter(limit int, window time.Duration) *rateLimiter {
+	return &rateLimiter{
+		entries: make(map[string]*rlEntry),
+		limit:   limit,
+		window:  window,
+	}
+}
+
+// allow records an attempt for key and reports whether it is within the limit.
+// Expired entries are reset on access; the whole map is pruned opportunistically
+// when it grows large so distinct keys cannot leak memory unboundedly.
+func (l *rateLimiter) allow(key string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	now := time.Now()
+	if len(l.entries) > 10000 {
+		for k, e := range l.entries {
+			if now.After(e.resetAt) {
+				delete(l.entries, k)
+			}
+		}
+	}
+
+	e, ok := l.entries[key]
+	if !ok || now.After(e.resetAt) {
+		l.entries[key] = &rlEntry{count: 1, resetAt: now.Add(l.window)}
+		return true
+	}
+	if e.count >= l.limit {
+		return false
+	}
+	e.count++
+	return true
+}
+
+// clientIP extracts the caller's IP for rate-limiting purposes. It uses the
+// transport-level RemoteAddr rather than X-Forwarded-For: a self-hosted caller
+// can forge XFF to evade the limit, whereas RemoteAddr is set by the kernel.
+// Behind a reverse proxy every request shares the proxy's IP, which fails
+// closed (stricter) — the safe direction for an abuse guard.
+func clientIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
+````
+
 ## File: packages/api/internal/api/setup_handler.go
 ````go
 package api
@@ -14637,6 +14720,141 @@ func LooksLikeAPIToken(raw string) bool {
 }
 ````
 
+## File: packages/api/internal/auth/jwt.go
+````go
+package auth
+
+import (
+	"fmt"
+	"time"
+
+	"github.com/golang-jwt/jwt/v5"
+)
+
+// Token TTLs. Access tokens are short-lived so revocation latency is bounded;
+// refresh tokens are long enough to survive a typical work week.
+const (
+	accessTokenTTL  = 15 * time.Minute
+	refreshTokenTTL = 7 * 24 * time.Hour
+	// shareViewTTL bounds how long a single password unlock grants access to a
+	// share before the viewer must re-enter the password.
+	shareViewTTL = 30 * time.Minute
+)
+
+// Claims is the JWT payload used for both access and refresh tokens.
+// The Type field discriminates the two so a refresh token cannot be
+// presented in place of an access token (and vice versa).
+type Claims struct {
+	UserID string `json:"uid"`
+	Email  string `json:"email"`
+	Type   string `json:"type"` // "access" or "refresh"
+	jwt.RegisteredClaims
+}
+
+// TokenService signs and validates JWTs with a shared HMAC secret.
+type TokenService struct {
+	secret []byte
+}
+
+// NewTokenService returns a TokenService that signs with secret.
+// The secret must be kept private; rotating it invalidates every issued token.
+func NewTokenService(secret string) *TokenService {
+	return &TokenService{secret: []byte(secret)}
+}
+
+// IssueAccessToken returns a signed short-lived access token for the user.
+func (s *TokenService) IssueAccessToken(userID, email string) (string, error) {
+	return s.sign(userID, email, "access", accessTokenTTL)
+}
+
+// IssueRefreshToken returns a signed long-lived refresh token. Refresh tokens
+// are exchanged at /auth/refresh for new access tokens.
+func (s *TokenService) IssueRefreshToken(userID, email string) (string, error) {
+	return s.sign(userID, email, "refresh", refreshTokenTTL)
+}
+
+// IssueShareViewToken returns a signed short-lived token that grants read
+// access to a single password-protected share. The share ID is carried in the
+// JWT subject so the token cannot be replayed against a different share (see
+// ValidateShareViewToken). It carries no user identity — the public viewer is
+// anonymous.
+func (s *TokenService) IssueShareViewToken(shareID string) (string, error) {
+	claims := Claims{
+		Type: "share_view",
+		RegisteredClaims: jwt.RegisteredClaims{
+			Subject:   shareID,
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(shareViewTTL)),
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+		},
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	signed, err := token.SignedString(s.secret)
+	if err != nil {
+		return "", fmt.Errorf("signing share view token: %w", err)
+	}
+	return signed, nil
+}
+
+// ValidateShareViewToken verifies a share view token and that it was issued for
+// shareID specifically. A token minted for one share is rejected against any
+// other, preventing a valid unlock from being reused across shares.
+func (s *TokenService) ValidateShareViewToken(tokenStr, shareID string) error {
+	claims, err := s.Validate(tokenStr, "share_view")
+	if err != nil {
+		return err
+	}
+	if claims.Subject != shareID {
+		return fmt.Errorf("share view token issued for a different share")
+	}
+	return nil
+}
+
+// sign builds and serializes a Claims-bearing HS256 JWT.
+func (s *TokenService) sign(userID, email, tokenType string, ttl time.Duration) (string, error) {
+	claims := Claims{
+		UserID: userID,
+		Email:  email,
+		Type:   tokenType,
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(ttl)),
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+		},
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	signed, err := token.SignedString(s.secret)
+	if err != nil {
+		return "", fmt.Errorf("signing token: %w", err)
+	}
+	return signed, nil
+}
+
+// Validate parses and verifies tokenStr, returning its claims when the
+// signature is valid, the token has not expired, and its Type matches
+// expectedType ("access" or "refresh"). Any failure returns an error and
+// nil claims.
+func (s *TokenService) Validate(tokenStr, expectedType string) (*Claims, error) {
+	token, err := jwt.ParseWithClaims(tokenStr, &Claims{}, func(t *jwt.Token) (any, error) {
+		// Reject any token not signed with HMAC — guards against the
+		// classic "alg=none" / algorithm-confusion attack.
+		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
+		}
+		return s.secret, nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("parsing token: %w", err)
+	}
+	claims, ok := token.Claims.(*Claims)
+	if !ok || !token.Valid {
+		return nil, fmt.Errorf("invalid token")
+	}
+	if claims.Type != expectedType {
+		return nil, fmt.Errorf("wrong token type")
+	}
+	return claims, nil
+}
+````
+
 ## File: packages/api/internal/db/migrations/001_initial_schema.sql
 ````sql
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -15421,6 +15639,14 @@ WHERE t.share_token IS NOT NULL
 -- Migration 020: add name column to shares.
 -- Nullable — existing shares and shares created without a name stay unnamed.
 ALTER TABLE shares ADD COLUMN name TEXT;
+````
+
+## File: packages/api/internal/db/migrations/021_share_description.sql
+````sql
+-- Migration 021: add description column to shares.
+-- Optional free-text shown in the share-management modal (Phase 13.2b). Nullable;
+-- existing and description-less shares stay empty.
+ALTER TABLE shares ADD COLUMN description TEXT;
 ````
 
 ## File: packages/api/internal/db/api_token_repo.go
@@ -39621,86 +39847,6 @@ func displayNameFromClaims(c *auth.OIDCClaims) string {
 }
 ````
 
-## File: packages/api/internal/api/ratelimit.go
-````go
-package api
-
-import (
-	"net"
-	"net/http"
-	"sync"
-	"time"
-)
-
-// rateLimiter is a fixed-window, in-memory request counter keyed by an
-// arbitrary string (here, client IP). It is deliberately dependency-free: the
-// product ships as a single self-hosted binary, so an in-process limiter is
-// preferred over an external store. State is lost on restart, which is
-// acceptable for an anti-brute-force guard.
-type rateLimiter struct {
-	mu      sync.Mutex
-	entries map[string]*rlEntry
-	limit   int
-	window  time.Duration
-}
-
-type rlEntry struct {
-	count   int
-	resetAt time.Time
-}
-
-// newRateLimiter returns a limiter that permits limit events per key within
-// each rolling window.
-func newRateLimiter(limit int, window time.Duration) *rateLimiter {
-	return &rateLimiter{
-		entries: make(map[string]*rlEntry),
-		limit:   limit,
-		window:  window,
-	}
-}
-
-// allow records an attempt for key and reports whether it is within the limit.
-// Expired entries are reset on access; the whole map is pruned opportunistically
-// when it grows large so distinct keys cannot leak memory unboundedly.
-func (l *rateLimiter) allow(key string) bool {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	now := time.Now()
-	if len(l.entries) > 10000 {
-		for k, e := range l.entries {
-			if now.After(e.resetAt) {
-				delete(l.entries, k)
-			}
-		}
-	}
-
-	e, ok := l.entries[key]
-	if !ok || now.After(e.resetAt) {
-		l.entries[key] = &rlEntry{count: 1, resetAt: now.Add(l.window)}
-		return true
-	}
-	if e.count >= l.limit {
-		return false
-	}
-	e.count++
-	return true
-}
-
-// clientIP extracts the caller's IP for rate-limiting purposes. It uses the
-// transport-level RemoteAddr rather than X-Forwarded-For: a self-hosted caller
-// can forge XFF to evade the limit, whereas RemoteAddr is set by the kernel.
-// Behind a reverse proxy every request shares the proxy's IP, which fails
-// closed (stricter) — the safe direction for an abuse guard.
-func clientIP(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	return host
-}
-````
-
 ## File: packages/api/internal/api/saved_filter_handler.go
 ````go
 package api
@@ -40300,141 +40446,6 @@ func (s *Server) handleVersion(w http.ResponseWriter, _ *http.Request) {
 }
 ````
 
-## File: packages/api/internal/auth/jwt.go
-````go
-package auth
-
-import (
-	"fmt"
-	"time"
-
-	"github.com/golang-jwt/jwt/v5"
-)
-
-// Token TTLs. Access tokens are short-lived so revocation latency is bounded;
-// refresh tokens are long enough to survive a typical work week.
-const (
-	accessTokenTTL  = 15 * time.Minute
-	refreshTokenTTL = 7 * 24 * time.Hour
-	// shareViewTTL bounds how long a single password unlock grants access to a
-	// share before the viewer must re-enter the password.
-	shareViewTTL = 30 * time.Minute
-)
-
-// Claims is the JWT payload used for both access and refresh tokens.
-// The Type field discriminates the two so a refresh token cannot be
-// presented in place of an access token (and vice versa).
-type Claims struct {
-	UserID string `json:"uid"`
-	Email  string `json:"email"`
-	Type   string `json:"type"` // "access" or "refresh"
-	jwt.RegisteredClaims
-}
-
-// TokenService signs and validates JWTs with a shared HMAC secret.
-type TokenService struct {
-	secret []byte
-}
-
-// NewTokenService returns a TokenService that signs with secret.
-// The secret must be kept private; rotating it invalidates every issued token.
-func NewTokenService(secret string) *TokenService {
-	return &TokenService{secret: []byte(secret)}
-}
-
-// IssueAccessToken returns a signed short-lived access token for the user.
-func (s *TokenService) IssueAccessToken(userID, email string) (string, error) {
-	return s.sign(userID, email, "access", accessTokenTTL)
-}
-
-// IssueRefreshToken returns a signed long-lived refresh token. Refresh tokens
-// are exchanged at /auth/refresh for new access tokens.
-func (s *TokenService) IssueRefreshToken(userID, email string) (string, error) {
-	return s.sign(userID, email, "refresh", refreshTokenTTL)
-}
-
-// IssueShareViewToken returns a signed short-lived token that grants read
-// access to a single password-protected share. The share ID is carried in the
-// JWT subject so the token cannot be replayed against a different share (see
-// ValidateShareViewToken). It carries no user identity — the public viewer is
-// anonymous.
-func (s *TokenService) IssueShareViewToken(shareID string) (string, error) {
-	claims := Claims{
-		Type: "share_view",
-		RegisteredClaims: jwt.RegisteredClaims{
-			Subject:   shareID,
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(shareViewTTL)),
-			IssuedAt:  jwt.NewNumericDate(time.Now()),
-		},
-	}
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	signed, err := token.SignedString(s.secret)
-	if err != nil {
-		return "", fmt.Errorf("signing share view token: %w", err)
-	}
-	return signed, nil
-}
-
-// ValidateShareViewToken verifies a share view token and that it was issued for
-// shareID specifically. A token minted for one share is rejected against any
-// other, preventing a valid unlock from being reused across shares.
-func (s *TokenService) ValidateShareViewToken(tokenStr, shareID string) error {
-	claims, err := s.Validate(tokenStr, "share_view")
-	if err != nil {
-		return err
-	}
-	if claims.Subject != shareID {
-		return fmt.Errorf("share view token issued for a different share")
-	}
-	return nil
-}
-
-// sign builds and serializes a Claims-bearing HS256 JWT.
-func (s *TokenService) sign(userID, email, tokenType string, ttl time.Duration) (string, error) {
-	claims := Claims{
-		UserID: userID,
-		Email:  email,
-		Type:   tokenType,
-		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(ttl)),
-			IssuedAt:  jwt.NewNumericDate(time.Now()),
-		},
-	}
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	signed, err := token.SignedString(s.secret)
-	if err != nil {
-		return "", fmt.Errorf("signing token: %w", err)
-	}
-	return signed, nil
-}
-
-// Validate parses and verifies tokenStr, returning its claims when the
-// signature is valid, the token has not expired, and its Type matches
-// expectedType ("access" or "refresh"). Any failure returns an error and
-// nil claims.
-func (s *TokenService) Validate(tokenStr, expectedType string) (*Claims, error) {
-	token, err := jwt.ParseWithClaims(tokenStr, &Claims{}, func(t *jwt.Token) (any, error) {
-		// Reject any token not signed with HMAC — guards against the
-		// classic "alg=none" / algorithm-confusion attack.
-		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
-		}
-		return s.secret, nil
-	})
-	if err != nil {
-		return nil, fmt.Errorf("parsing token: %w", err)
-	}
-	claims, ok := token.Claims.(*Claims)
-	if !ok || !token.Valid {
-		return nil, fmt.Errorf("invalid token")
-	}
-	if claims.Type != expectedType {
-		return nil, fmt.Errorf("wrong token type")
-	}
-	return claims, nil
-}
-````
-
 ## File: packages/api/internal/auth/password.go
 ````go
 // Package auth provides password hashing and JWT issuance/validation
@@ -40539,14 +40550,6 @@ func Short() string {
 	}
 	return c
 }
-````
-
-## File: packages/api/internal/db/migrations/021_share_description.sql
-````sql
--- Migration 021: add description column to shares.
--- Optional free-text shown in the share-management modal (Phase 13.2b). Nullable;
--- existing and description-less shares stay empty.
-ALTER TABLE shares ADD COLUMN description TEXT;
 ````
 
 ## File: packages/api/internal/db/migrations/022_share_kind.sql
@@ -41155,6 +41158,132 @@ func SeedSampleDataIfEmpty(database *sqlx.DB, sql string) (bool, error) {
 		return false, fmt.Errorf("seeding sample data: %w", err)
 	}
 	return true, nil
+}
+````
+
+## File: packages/api/internal/db/share_repo.go
+````go
+// Package db contains the persistence layer for draba.
+package db
+
+import (
+	"fmt"
+	"time"
+
+	"github.com/jmoiron/sqlx"
+
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// ShareRepo is the persistence layer for Share records.
+type ShareRepo struct {
+	db *sqlx.DB
+}
+
+// NewShareRepo returns a ShareRepo backed by db.
+func NewShareRepo(db *sqlx.DB) *ShareRepo {
+	return &ShareRepo{db: db}
+}
+
+// Create inserts a new Share row.
+func (r *ShareRepo) Create(s *models.Share) error {
+	_, err := r.db.NamedExec(`
+		INSERT INTO shares (
+			id, timeline_id, token, kind, scope, member_id, name, description,
+			view_type, view_config, password_hash, created_by, created_at, view_count
+		) VALUES (
+			:id, :timeline_id, :token, :kind, :scope, :member_id, :name, :description,
+			:view_type, :view_config, :password_hash, :created_by, :created_at, :view_count
+		)
+	`, s)
+	if err != nil {
+		return fmt.Errorf("creating share: %w", err)
+	}
+	return nil
+}
+
+// GetByID fetches a Share by primary key. Returns sql.ErrNoRows (wrapped) when
+// no row matches.
+func (r *ShareRepo) GetByID(id string) (*models.Share, error) {
+	var s models.Share
+	if err := r.db.Get(&s, `SELECT * FROM shares WHERE id = ?`, id); err != nil {
+		return nil, fmt.Errorf("getting share: %w", err)
+	}
+	s.Protected = s.PasswordHash != nil
+	return &s, nil
+}
+
+// GetByToken fetches a Share by its public token. Returns sql.ErrNoRows
+// (wrapped) when no row matches.
+func (r *ShareRepo) GetByToken(token string) (*models.Share, error) {
+	var s models.Share
+	if err := r.db.Get(&s, `SELECT * FROM shares WHERE token = ?`, token); err != nil {
+		return nil, fmt.Errorf("getting share by token: %w", err)
+	}
+	s.Protected = s.PasswordHash != nil
+	return &s, nil
+}
+
+// ListByTimeline returns all non-revoked shares for a timeline, ordered by
+// creation time ascending.
+func (r *ShareRepo) ListByTimeline(timelineID string) ([]*models.Share, error) {
+	out := make([]*models.Share, 0)
+	if err := r.db.Select(&out,
+		`SELECT * FROM shares WHERE timeline_id = ? ORDER BY created_at ASC`,
+		timelineID,
+	); err != nil {
+		return nil, fmt.Errorf("listing shares: %w", err)
+	}
+	for _, s := range out {
+		s.Protected = s.PasswordHash != nil
+	}
+	return out, nil
+}
+
+// Update writes mutable fields for an existing share.
+func (r *ShareRepo) Update(s *models.Share) error {
+	_, err := r.db.NamedExec(`
+		UPDATE shares SET
+			name          = :name,
+			description   = :description,
+			view_type     = :view_type,
+			view_config   = :view_config,
+			password_hash = :password_hash
+		WHERE id = :id
+	`, s)
+	if err != nil {
+		return fmt.Errorf("updating share: %w", err)
+	}
+	return nil
+}
+
+// RotateToken replaces a share's token, immediately invalidating the old URL.
+// This is the revocation story for ICS feeds, which have no password gate.
+func (r *ShareRepo) RotateToken(id, newToken string) error {
+	if _, err := r.db.Exec(`UPDATE shares SET token = ? WHERE id = ?`, newToken, id); err != nil {
+		return fmt.Errorf("rotating share token: %w", err)
+	}
+	return nil
+}
+
+// Delete permanently removes a share row.
+func (r *ShareRepo) Delete(id string) error {
+	if _, err := r.db.Exec(`DELETE FROM shares WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("deleting share: %w", err)
+	}
+	return nil
+}
+
+// RecordView increments view_count and sets last_viewed_at to now for a share.
+func (r *ShareRepo) RecordView(id string) error {
+	_, err := r.db.Exec(
+		`UPDATE shares SET view_count = view_count + 1, last_viewed_at = ? WHERE id = ?`,
+		time.Now().UTC(), id,
+	)
+	if err != nil {
+		return fmt.Errorf("recording share view: %w", err)
+	}
+	return nil
 }
 ````
 
@@ -44575,6 +44704,63 @@ export function buildPresentationHeaderElement(doc: Document, info: Presentation
 
   return header
 }
+````
+
+## File: packages/web/src/components/export/printStyles.test.ts
+````typescript
+/**
+ * printStyles — assertions on the per-view `@media print` CSS strings
+ * (Phase 14.4).
+ *
+ * jsdom has no print engine (`@media print` never matches and `@page` isn't
+ * parsed), so these rules can't be exercised behaviorally here — browser
+ * print preview is the /test-phase manual check. What CAN regress silently is
+ * the content of the strings themselves: a lost `@page` orientation, a
+ * broken-off base block, or a `[data-export-role]` selector that drifts from
+ * the attribute the components actually render (the DOM side of that contract
+ * is asserted in CleanSnapshot.test.tsx). These tests pin that content.
+ */
+
+import { describe, it, expect } from 'vitest'
+import { GANTT_PRINT_CSS, LIST_PRINT_CSS, KANBAN_PRINT_CSS, CALENDAR_PRINT_CSS } from './printStyles'
+
+const ALL = { GANTT_PRINT_CSS, LIST_PRINT_CSS, KANBAN_PRINT_CSS, CALENDAR_PRINT_CSS }
+
+describe('printStyles', () => {
+  it.each(Object.entries(ALL))('%s carries the shared print-only base block', (_name, css) => {
+    // Hidden during normal layout / PNG rasterization…
+    expect(css).toContain('.presentation-print-only { display: none; }')
+    // …and revealed only under @media print.
+    expect(css).toMatch(/@media print \{\s*\.presentation-print-only \{ display: block; \}/)
+  })
+
+  it('sets landscape orientation for Gantt, Kanban, and Calendar', () => {
+    for (const css of [GANTT_PRINT_CSS, KANBAN_PRINT_CSS, CALENDAR_PRINT_CSS]) {
+      expect(css).toContain('@page { size: landscape; margin: 10mm; }')
+    }
+  })
+
+  it('keeps List portrait (no size override) with its own margin', () => {
+    expect(LIST_PRINT_CSS).not.toContain('size: landscape')
+    expect(LIST_PRINT_CSS).toContain('@page { margin: 14mm; }')
+  })
+
+  it('reveals the Gantt member-color legend as a flex row under print', () => {
+    expect(GANTT_PRINT_CSS).toContain('.presentation-print-only.gantt-legend { display: flex; }')
+  })
+
+  it('keeps List rows unclipped and unbroken across pages', () => {
+    expect(LIST_PRINT_CSS).toContain('[data-export-role="list-table-wrap"] { overflow: visible !important; }')
+    expect(LIST_PRINT_CSS).toContain('[data-export-role="list-table-wrap"] tr { break-inside: avoid; }')
+  })
+
+  it('reflows the Kanban columns row and keeps each column on one page', () => {
+    // Horizontal overflow doesn't paginate — the columns row must unclip and wrap.
+    expect(KANBAN_PRINT_CSS).toMatch(/\[data-export-role="kanban-columns-row"\] \{[^}]*overflow: visible !important;/)
+    expect(KANBAN_PRINT_CSS).toMatch(/\[data-export-role="kanban-columns-row"\] \{[^}]*flex-wrap: wrap !important;/)
+    expect(KANBAN_PRINT_CSS).toMatch(/\[data-export-role="kanban-column"\] \{[^}]*break-inside: avoid;/)
+  })
+})
 ````
 
 ## File: packages/web/src/components/export/printStyles.ts
@@ -48798,6 +48984,67 @@ describe('useExport', () => {
 })
 ````
 
+## File: packages/web/src/hooks/useForceLightDocument.test.ts
+````typescript
+/**
+ * useForceLightDocument — tests for the force-light-with-restore lifecycle
+ * used by ShareViewPage (Phase 14.4 review follow-up).
+ */
+
+import { describe, it, expect, afterEach } from 'vitest'
+import { renderHook } from '@testing-library/react'
+import { useForceLightDocument } from './useForceLightDocument'
+
+afterEach(() => {
+  document.documentElement.classList.remove('dark')
+})
+
+describe('useForceLightDocument', () => {
+  it('strips the dark class on mount and restores it on unmount', () => {
+    document.documentElement.classList.add('dark')
+    const { unmount } = renderHook(() => useForceLightDocument())
+    expect(document.documentElement.classList.contains('dark')).toBe(false)
+    unmount()
+    expect(document.documentElement.classList.contains('dark')).toBe(true)
+  })
+
+  it('does not add a dark class on unmount when the user was already light', () => {
+    const { unmount } = renderHook(() => useForceLightDocument())
+    expect(document.documentElement.classList.contains('dark')).toBe(false)
+    unmount()
+    expect(document.documentElement.classList.contains('dark')).toBe(false)
+  })
+})
+````
+
+## File: packages/web/src/hooks/useForceLightDocument.ts
+````typescript
+/**
+ * useForceLightDocument — forces the live document light for the lifetime of
+ * the mounting component, restoring the user's dark class on unmount.
+ *
+ * Extracted from ShareViewPage (Phase 14.4 review follow-up) so the
+ * remove-then-restore contract is testable on its own; any future read-only
+ * presentation route gets the same behavior by mounting this hook. See the
+ * TASKS.md parking-lot entry on a fuller theme-mode classification
+ * (light / dark / print / simplified) that would eventually subsume this.
+ */
+
+import { useLayoutEffect } from 'react'
+import { forceLightDocumentElement } from '@/lib/presentationTheme'
+
+export function useForceLightDocument(): void {
+  // useLayoutEffect runs before the browser paints, beating any dark class
+  // set from localStorage by useDarkMode during the same render cycle.
+  useLayoutEffect(() => {
+    const hadDark = forceLightDocumentElement(document)
+    return () => {
+      if (hadDark) document.documentElement.classList.add('dark')
+    }
+  }, [])
+}
+````
+
 ## File: packages/web/src/hooks/usePublicSettings.ts
 ````typescript
 /**
@@ -49017,106 +49264,6 @@ export function createAuthFetchBlob(getToken: () => string | null) {
 }
 ````
 
-## File: packages/web/src/lib/htmlExport.test.ts
-````typescript
-/**
- * htmlExport — unit tests for saveFramePresentationHtml (Phase 14.4).
- */
-
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { saveFramePresentationHtml } from './htmlExport'
-
-let iframe: HTMLIFrameElement
-let createObjectURL: ReturnType<typeof vi.fn>
-let revokeObjectURL: ReturnType<typeof vi.fn>
-
-beforeEach(() => {
-  iframe = document.createElement('iframe')
-  document.body.appendChild(iframe)
-  iframe.contentDocument!.body.innerHTML = '<div>content</div>'
-
-  createObjectURL = vi.fn(() => 'blob:mock-url')
-  revokeObjectURL = vi.fn()
-  vi.stubGlobal('URL', { ...URL, createObjectURL, revokeObjectURL })
-})
-
-afterEach(() => {
-  iframe.remove()
-  vi.unstubAllGlobals()
-})
-
-describe('saveFramePresentationHtml', () => {
-  it('downloads a Blob containing the frame document with a header, then removes the header', () => {
-    saveFramePresentationHtml(iframe, { timelineName: 'Q1 Plan', teamName: 'Acme', filterLabel: null }, 'q1-plan.html')
-
-    expect(createObjectURL).toHaveBeenCalledTimes(1)
-    const blob = createObjectURL.mock.calls[0][0] as Blob
-    expect(blob.type).toBe('text/html;charset=utf-8')
-
-    // The header is inserted only for the instant of serialization, then removed —
-    // it must not linger in the live frame document afterward.
-    expect(iframe.contentDocument!.body.querySelector('[data-export-role="presentation-header"]')).toBeNull()
-  })
-
-  it('includes the serialized content in the downloaded blob', async () => {
-    saveFramePresentationHtml(iframe, { timelineName: 'Q1 Plan', teamName: null, filterLabel: null }, 'q1-plan.html')
-    const blob = createObjectURL.mock.calls[0][0] as Blob
-    const text = await blob.text()
-    expect(text).toContain('<!DOCTYPE html>')
-    expect(text).toContain('Q1 Plan')
-    expect(text).toContain('content')
-  })
-
-  it('does nothing when the frame has no contentDocument', () => {
-    const detached = document.createElement('iframe')
-    Object.defineProperty(detached, 'contentDocument', { value: null })
-    expect(() =>
-      saveFramePresentationHtml(detached, { timelineName: 'Q1 Plan', teamName: null, filterLabel: null }, 'x.html'),
-    ).not.toThrow()
-    expect(createObjectURL).not.toHaveBeenCalled()
-  })
-})
-````
-
-## File: packages/web/src/lib/htmlExport.ts
-````typescript
-/**
- * htmlExport — serializes the PresentationFrame's document to a standalone
- * `.html` file (Phase 14.4). Stylesheets are already inlined into the
- * frame's head (PresentationFrame clones them from the parent document on
- * mount), so the saved file renders correctly opened directly from disk —
- * literally "save the share as a file."
- */
-
-import { buildPresentationHeaderElement, type PresentationHeaderInfo } from '@/components/export/presentationHeader'
-
-/** Triggers the browser to save a Blob with the given filename. */
-function saveBlob(blob: Blob, filename: string): void {
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = filename
-  document.body.appendChild(a)
-  a.click()
-  a.remove()
-  URL.revokeObjectURL(url)
-}
-
-/** Serializes the PresentationFrame's document (with a header inserted for the capture) and downloads it. */
-export function saveFramePresentationHtml(iframe: HTMLIFrameElement, info: PresentationHeaderInfo, filename: string): void {
-  const doc = iframe.contentDocument
-  if (!doc) return
-
-  const header = buildPresentationHeaderElement(doc, info)
-  doc.body.insertBefore(header, doc.body.firstChild)
-  const html = `<!DOCTYPE html>\n${doc.documentElement.outerHTML}`
-  header.remove()
-
-  const blob = new Blob([html], { type: 'text/html;charset=utf-8' })
-  saveBlob(blob, filename)
-}
-````
-
 ## File: packages/web/src/lib/pngExport.ts
 ````typescript
 /**
@@ -49257,37 +49404,6 @@ describe('forceLightDocumentElement', () => {
     iframe.remove()
   })
 })
-````
-
-## File: packages/web/src/lib/presentationTheme.ts
-````typescript
-/**
- * presentationTheme — the single "force light" definition shared by every
- * read-only presentation surface (Phase 14.4 collapses two independent
- * implementations into this one module): ShareViewPage's live-document
- * `useLayoutEffect` toggle and PresentationFrame's structural iframe light.
- * Both need the same operation — strip `.dark` from a document's root — so
- * it lives here once instead of being reimplemented per call site.
- */
-
-/** Background color every presentation surface (PNG header, print, HTML save) renders against. */
-export const PRESENTATION_BACKGROUND = '#ffffff'
-export const PRESENTATION_FOREGROUND = '#101828'
-export const PRESENTATION_MUTED = '#667085'
-export const PRESENTATION_BORDER = '#e5e7eb'
-
-/**
- * Removes the `dark` class from a document's root element.
- * Returns whether it was present, so a caller managing the *live* document
- * (as opposed to an isolated iframe that never had it) can restore it on
- * cleanup.
- */
-export function forceLightDocumentElement(doc: Document): boolean {
-  const root = doc.documentElement
-  const hadDark = root.classList.contains('dark')
-  root.classList.remove('dark')
-  return hadDark
-}
 ````
 
 ## File: packages/web/src/lib/printExport.test.ts
@@ -50909,132 +51025,6 @@ func randomURLToken() (string, error) {
 		return "", fmt.Errorf("oidc: reading random: %w", err)
 	}
 	return base64.RawURLEncoding.EncodeToString(b), nil
-}
-````
-
-## File: packages/api/internal/db/share_repo.go
-````go
-// Package db contains the persistence layer for draba.
-package db
-
-import (
-	"fmt"
-	"time"
-
-	"github.com/jmoiron/sqlx"
-
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// ShareRepo is the persistence layer for Share records.
-type ShareRepo struct {
-	db *sqlx.DB
-}
-
-// NewShareRepo returns a ShareRepo backed by db.
-func NewShareRepo(db *sqlx.DB) *ShareRepo {
-	return &ShareRepo{db: db}
-}
-
-// Create inserts a new Share row.
-func (r *ShareRepo) Create(s *models.Share) error {
-	_, err := r.db.NamedExec(`
-		INSERT INTO shares (
-			id, timeline_id, token, kind, scope, member_id, name, description,
-			view_type, view_config, password_hash, created_by, created_at, view_count
-		) VALUES (
-			:id, :timeline_id, :token, :kind, :scope, :member_id, :name, :description,
-			:view_type, :view_config, :password_hash, :created_by, :created_at, :view_count
-		)
-	`, s)
-	if err != nil {
-		return fmt.Errorf("creating share: %w", err)
-	}
-	return nil
-}
-
-// GetByID fetches a Share by primary key. Returns sql.ErrNoRows (wrapped) when
-// no row matches.
-func (r *ShareRepo) GetByID(id string) (*models.Share, error) {
-	var s models.Share
-	if err := r.db.Get(&s, `SELECT * FROM shares WHERE id = ?`, id); err != nil {
-		return nil, fmt.Errorf("getting share: %w", err)
-	}
-	s.Protected = s.PasswordHash != nil
-	return &s, nil
-}
-
-// GetByToken fetches a Share by its public token. Returns sql.ErrNoRows
-// (wrapped) when no row matches.
-func (r *ShareRepo) GetByToken(token string) (*models.Share, error) {
-	var s models.Share
-	if err := r.db.Get(&s, `SELECT * FROM shares WHERE token = ?`, token); err != nil {
-		return nil, fmt.Errorf("getting share by token: %w", err)
-	}
-	s.Protected = s.PasswordHash != nil
-	return &s, nil
-}
-
-// ListByTimeline returns all non-revoked shares for a timeline, ordered by
-// creation time ascending.
-func (r *ShareRepo) ListByTimeline(timelineID string) ([]*models.Share, error) {
-	out := make([]*models.Share, 0)
-	if err := r.db.Select(&out,
-		`SELECT * FROM shares WHERE timeline_id = ? ORDER BY created_at ASC`,
-		timelineID,
-	); err != nil {
-		return nil, fmt.Errorf("listing shares: %w", err)
-	}
-	for _, s := range out {
-		s.Protected = s.PasswordHash != nil
-	}
-	return out, nil
-}
-
-// Update writes mutable fields for an existing share.
-func (r *ShareRepo) Update(s *models.Share) error {
-	_, err := r.db.NamedExec(`
-		UPDATE shares SET
-			name          = :name,
-			description   = :description,
-			view_type     = :view_type,
-			view_config   = :view_config,
-			password_hash = :password_hash
-		WHERE id = :id
-	`, s)
-	if err != nil {
-		return fmt.Errorf("updating share: %w", err)
-	}
-	return nil
-}
-
-// RotateToken replaces a share's token, immediately invalidating the old URL.
-// This is the revocation story for ICS feeds, which have no password gate.
-func (r *ShareRepo) RotateToken(id, newToken string) error {
-	if _, err := r.db.Exec(`UPDATE shares SET token = ? WHERE id = ?`, newToken, id); err != nil {
-		return fmt.Errorf("rotating share token: %w", err)
-	}
-	return nil
-}
-
-// Delete permanently removes a share row.
-func (r *ShareRepo) Delete(id string) error {
-	if _, err := r.db.Exec(`DELETE FROM shares WHERE id = ?`, id); err != nil {
-		return fmt.Errorf("deleting share: %w", err)
-	}
-	return nil
-}
-
-// RecordView increments view_count and sets last_viewed_at to now for a share.
-func (r *ShareRepo) RecordView(id string) error {
-	_, err := r.db.Exec(
-		`UPDATE shares SET view_count = view_count + 1, last_viewed_at = ? WHERE id = ?`,
-		time.Now().UTC(), id,
-	)
-	if err != nil {
-		return fmt.Errorf("recording share view: %w", err)
-	}
-	return nil
 }
 ````
 
@@ -54127,6 +54117,721 @@ export function useExport(timelineId: string, timelineName: string) {
 }
 ````
 
+## File: packages/web/src/hooks/useShares.test.ts
+````typescript
+/**
+ * useShares hooks — unit tests verifying query keys, mutation endpoints,
+ * cache invalidation, and the public share projection fetch.
+ * Uses a real QueryClient with fetch mocked globally.
+ */
+
+import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { renderHook, waitFor } from '@testing-library/react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { createElement } from 'react'
+import {
+  useListShares,
+  useCreateShare,
+  useDeleteShare,
+  useRegenerateShare,
+  useShareProjection,
+  useUnlockShare,
+} from './useShares'
+
+// ── Auth mock ─────────────────────────────────────────────────────────────────
+
+vi.mock('@/contexts/AuthContext', () => ({
+  useAuth: () => ({ getAccessToken: async () => 'test-token' }),
+}))
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function makeWrapper() {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  return {
+    qc,
+    wrapper: ({ children }: { children: React.ReactNode }) =>
+      createElement(QueryClientProvider, { client: qc }, children),
+  }
+}
+
+const SHARE_FIXTURE = {
+  id: 'share-1',
+  timelineId: 'tl-1',
+  token: 'abc123',
+  viewType: 'gantt',
+  viewConfig: '{}',
+  createdBy: 'member-1',
+  createdAt: '2026-01-01T00:00:00Z',
+  viewCount: 0,
+}
+
+// ── useListShares ─────────────────────────────────────────────────────────────
+
+describe('useListShares', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn())
+  })
+
+  it('fetches shares from the correct URL', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify([SHARE_FIXTURE]), { status: 200 }),
+    )
+
+    const { wrapper } = makeWrapper()
+    const { result } = renderHook(() => useListShares('team-1', 'tl-1'), { wrapper })
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+
+    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+      expect.stringContaining('/teams/team-1/timelines/tl-1/shares'),
+      expect.any(Object),
+    )
+    expect(result.current.data).toHaveLength(1)
+  })
+
+  it('refetches on every mount despite a non-zero app-wide staleTime', async () => {
+    // Fresh Response per call — a Response body can only be consumed once.
+    vi.mocked(fetch).mockImplementation(() =>
+      Promise.resolve(new Response(JSON.stringify([SHARE_FIXTURE]), { status: 200 })),
+    )
+
+    // Mirror the app QueryClient's 30s default staleTime: the hook must
+    // override it (staleTime: 0 + refetchOnMount: 'always') so the view
+    // telemetry it renders (viewCount / lastViewedAt) is current every time
+    // a share modal opens.
+    const qc = new QueryClient({
+      defaultOptions: { queries: { retry: false, staleTime: 30_000 } },
+    })
+    const wrapper = ({ children }: { children: React.ReactNode }) =>
+      createElement(QueryClientProvider, { client: qc }, children)
+
+    const first = renderHook(() => useListShares('team-1', 'tl-1'), { wrapper })
+    await waitFor(() => expect(first.result.current.isSuccess).toBe(true))
+    first.unmount()
+
+    renderHook(() => useListShares('team-1', 'tl-1'), { wrapper })
+    await waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalledTimes(2))
+  })
+
+  it('does not fetch when teamId is empty', () => {
+    const { wrapper } = makeWrapper()
+    renderHook(() => useListShares('', 'tl-1'), { wrapper })
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled()
+  })
+
+  it('does not fetch when timelineId is empty', () => {
+    const { wrapper } = makeWrapper()
+    renderHook(() => useListShares('team-1', ''), { wrapper })
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled()
+  })
+})
+
+// ── useCreateShare ────────────────────────────────────────────────────────────
+
+describe('useCreateShare', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn())
+  })
+
+  it('POSTs to the correct URL and invalidates the share list', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify(SHARE_FIXTURE), { status: 201 }),
+    )
+
+    const { wrapper, qc } = makeWrapper()
+    const invalidate = vi.spyOn(qc, 'invalidateQueries')
+
+    const { result } = renderHook(() => useCreateShare('team-1', 'tl-1'), { wrapper })
+    result.current.mutate({ viewType: 'gantt', viewConfig: '{}' })
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+
+    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+      expect.stringContaining('/timelines/tl-1/shares'),
+      expect.objectContaining({ method: 'POST' }),
+    )
+    expect(invalidate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        queryKey: ['teams', 'team-1', 'timelines', 'tl-1', 'shares'],
+      }),
+    )
+  })
+})
+
+describe('useCreateShare (ICS feeds)', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn())
+  })
+
+  it('sends kind/scope/memberId for a member-scoped ICS feed', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ ...SHARE_FIXTURE, kind: 'ics', scope: 'member', memberId: 'm-1' }), { status: 201 }),
+    )
+
+    const { wrapper } = makeWrapper()
+    const { result } = renderHook(() => useCreateShare('team-1', 'tl-1'), { wrapper })
+    result.current.mutate({ kind: 'ics', scope: 'member', memberId: 'm-1', name: 'Feed' })
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+
+    const opts = vi.mocked(fetch).mock.calls[0][1] as RequestInit
+    expect(JSON.parse(String(opts.body))).toMatchObject({
+      kind: 'ics',
+      scope: 'member',
+      memberId: 'm-1',
+    })
+  })
+})
+
+// ── useRegenerateShare ────────────────────────────────────────────────────────
+
+describe('useRegenerateShare', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn())
+  })
+
+  it('POSTs to the regenerate endpoint and invalidates the share list', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ ...SHARE_FIXTURE, token: 'rotated' }), { status: 200 }),
+    )
+
+    const { wrapper, qc } = makeWrapper()
+    const invalidate = vi.spyOn(qc, 'invalidateQueries')
+
+    const { result } = renderHook(() => useRegenerateShare('team-1', 'tl-1'), { wrapper })
+    result.current.mutate('share-1')
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+
+    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+      expect.stringContaining('/shares/share-1/regenerate'),
+      expect.objectContaining({ method: 'POST' }),
+    )
+    expect(result.current.data?.token).toBe('rotated')
+    expect(invalidate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        queryKey: ['teams', 'team-1', 'timelines', 'tl-1', 'shares'],
+      }),
+    )
+  })
+})
+
+// ── useDeleteShare ────────────────────────────────────────────────────────────
+
+describe('useDeleteShare', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn())
+  })
+
+  it('DELETEs the correct URL and invalidates the share list', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(new Response(null, { status: 204 }))
+
+    const { wrapper, qc } = makeWrapper()
+    const invalidate = vi.spyOn(qc, 'invalidateQueries')
+
+    const { result } = renderHook(() => useDeleteShare('team-1', 'tl-1'), { wrapper })
+    result.current.mutate('share-1')
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+
+    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+      expect.stringContaining('/shares/share-1'),
+      expect.objectContaining({ method: 'DELETE' }),
+    )
+    expect(invalidate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        queryKey: ['teams', 'team-1', 'timelines', 'tl-1', 'shares'],
+      }),
+    )
+  })
+})
+
+// ── useShareProjection ────────────────────────────────────────────────────────
+
+const PROJECTION_FIXTURE = {
+  share: {
+    id: 'share-1',
+    timelineId: 'tl-1',
+    token: 'abc123',
+    viewType: 'gantt',
+    viewConfig: '{}',
+    createdAt: '2026-01-01T00:00:00Z',
+  },
+  teamName: 'Test Team',
+  timeline: { id: 'tl-1', name: 'Q1 Plan', startDate: '2026-01-01', endDate: '2026-12-31' },
+  members: [],
+  statuses: [],
+  tags: [],
+  activities: [],
+}
+
+describe('useShareProjection', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn())
+  })
+
+  it('fetches the public projection without an auth header', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify(PROJECTION_FIXTURE), { status: 200 }),
+    )
+
+    const { wrapper } = makeWrapper()
+    const { result } = renderHook(() => useShareProjection('abc123'), { wrapper })
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+
+    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+      expect.stringContaining('/shares/abc123'),
+      expect.anything(),
+    )
+    // No Authorization header — this is a public endpoint (no view token passed).
+    const callArgs = vi.mocked(fetch).mock.calls[0]
+    const opts = callArgs[1] as RequestInit | undefined
+    const headers = (opts?.headers ?? {}) as Record<string, string>
+    expect(headers.Authorization).toBeUndefined()
+    expect(result.current.data?.teamName).toBe('Test Team')
+  })
+
+  it('does not fetch when token is undefined', () => {
+    const { wrapper } = makeWrapper()
+    renderHook(() => useShareProjection(undefined), { wrapper })
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled()
+  })
+
+  it('throws an ApiError with the response status on non-200', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({ error: { code: 'NOT_FOUND', message: 'share not found' } }),
+        { status: 404 },
+      ),
+    )
+
+    const { wrapper } = makeWrapper()
+    const { result } = renderHook(() => useShareProjection('bad-token'), { wrapper })
+
+    await waitFor(() => expect(result.current.isError).toBe(true))
+
+    const err = result.current.error as { status?: number; code?: string }
+    expect(err.status).toBe(404)
+    expect(err.code).toBe('NOT_FOUND')
+  })
+
+  it('sends the view token as a Bearer header when provided', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify(PROJECTION_FIXTURE), { status: 200 }),
+    )
+
+    const { wrapper } = makeWrapper()
+    const { result } = renderHook(() => useShareProjection('abc123', 'view-jwt'), { wrapper })
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+
+    const opts = vi.mocked(fetch).mock.calls[0][1] as RequestInit | undefined
+    const headers = (opts?.headers ?? {}) as Record<string, string>
+    expect(headers.Authorization).toBe('Bearer view-jwt')
+  })
+
+  it('maps a 401 { passwordRequired } response to a PASSWORD_REQUIRED error', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ passwordRequired: true }), { status: 401 }),
+    )
+
+    const { wrapper } = makeWrapper()
+    const { result } = renderHook(() => useShareProjection('locked-token'), { wrapper })
+
+    await waitFor(() => expect(result.current.isError).toBe(true))
+
+    const err = result.current.error as { status?: number; code?: string }
+    expect(err.status).toBe(401)
+    expect(err.code).toBe('PASSWORD_REQUIRED')
+  })
+})
+
+// ── useUnlockShare ──────────────────────────────────────────────────────────────
+
+describe('useUnlockShare', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn())
+  })
+
+  it('POSTs the password to the unlock endpoint and returns the view token', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ token: 'view-jwt' }), { status: 200 }),
+    )
+
+    const { wrapper } = makeWrapper()
+    const { result } = renderHook(() => useUnlockShare('abc123'), { wrapper })
+
+    let token = ''
+    await waitFor(async () => { token = await result.current.mutateAsync('hunter2') })
+
+    expect(token).toBe('view-jwt')
+    const [url, opts] = vi.mocked(fetch).mock.calls[0]
+    expect(String(url)).toContain('/shares/abc123/unlock')
+    expect(opts?.method).toBe('POST')
+    expect(JSON.parse(String(opts?.body))).toEqual({ password: 'hunter2' })
+  })
+
+  it('throws an ApiError on a wrong password (401)', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: { code: 'INVALID_PASSWORD', message: 'incorrect password' } }), { status: 401 }),
+    )
+
+    const { wrapper } = makeWrapper()
+    const { result } = renderHook(() => useUnlockShare('abc123'), { wrapper })
+
+    await expect(result.current.mutateAsync('wrong')).rejects.toMatchObject({ status: 401 })
+  })
+})
+````
+
+## File: packages/web/src/hooks/useShares.ts
+````typescript
+/**
+ * TanStack Query hooks for Share CRUD and the public share projection.
+ *
+ * Authenticated hooks (useCreateShare, useListShares, useDeleteShare) require
+ * an auth token. useShareProjection is public and uses a plain fetch.
+ */
+
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import type { components } from '@draba/shared'
+import { createAuthFetch, API_BASE, ApiError } from '@/lib/api'
+import { useAuth } from '@/contexts/AuthContext'
+
+type Share = components['schemas']['Share']
+type ShareProjection = components['schemas']['ShareProjection']
+
+const sharesKey = (teamId: string, timelineId: string) =>
+  ['teams', teamId, 'timelines', timelineId, 'shares'] as const
+
+// ── Authenticated hooks ───────────────────────────────────────────────────────
+
+/** Lists all shares for a timeline. */
+export function useListShares(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  return useQuery({
+    queryKey: sharesKey(teamId, timelineId),
+    queryFn: () =>
+      authFetch<Share[]>(`/teams/${teamId}/timelines/${timelineId}/shares`),
+    enabled: Boolean(teamId) && Boolean(timelineId),
+    // The share modals are this query's only consumers and mount on demand —
+    // override the app-wide 30s staleTime so the view telemetry they render
+    // (viewCount / lastViewedAt) is current every time a modal opens.
+    staleTime: 0,
+    refetchOnMount: 'always',
+  })
+}
+
+interface CreateShareInput {
+  /** "view" (default) or "ics" — ICS shares are live calendar feeds. */
+  kind?: 'view' | 'ics'
+  /** ICS shares only: "timeline" (every activity) or "member" (one member's). */
+  scope?: 'timeline' | 'member'
+  /** ICS shares with scope "member" only. */
+  memberId?: string
+  name?: string | null
+  description?: string | null
+  viewType?: string
+  viewConfig?: string
+  /** When set, the share is locked and requires unlocking to view. View shares only. */
+  password?: string
+}
+
+/** Creates a share and invalidates the list. */
+export function useCreateShare(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (input: CreateShareInput) =>
+      authFetch<Share>(`/timelines/${timelineId}/shares`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(input),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: sharesKey(teamId, timelineId) }),
+  })
+}
+
+/**
+ * Rotates a share's token, immediately invalidating the old URL — the
+ * revocation story for ICS feeds, which have no password gate.
+ */
+export function useRegenerateShare(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (shareId: string) =>
+      authFetch<Share>(`/shares/${shareId}/regenerate`, { method: 'POST' }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: sharesKey(teamId, timelineId) }),
+  })
+}
+
+/** Deletes a share and invalidates the list. */
+export function useDeleteShare(teamId: string, timelineId: string) {
+  const { getAccessToken } = useAuth()
+  const authFetch = createAuthFetch(getAccessToken)
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (shareId: string) =>
+      authFetch<void>(`/shares/${shareId}`, { method: 'DELETE' }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: sharesKey(teamId, timelineId) }),
+  })
+}
+
+// ── Public hooks (no auth) ────────────────────────────────────────────────────
+
+/**
+ * Fetches a public share projection. No authentication required.
+ *
+ * For password-protected shares, pass the `viewToken` obtained from
+ * {@link useUnlockShare}; it is sent as a Bearer credential. Without a valid
+ * token a locked share responds 401 — surfaced here as an ApiError with code
+ * `PASSWORD_REQUIRED` so the viewer can render an unlock prompt.
+ */
+export function useShareProjection(token: string | undefined, viewToken?: string | null) {
+  return useQuery({
+    queryKey: ['shares', token, viewToken ?? null] as const,
+    queryFn: async () => {
+      const headers: HeadersInit = viewToken ? { Authorization: `Bearer ${viewToken}` } : {}
+      const res = await fetch(`${API_BASE}/shares/${token}`, { headers })
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}))
+        // A locked share returns { passwordRequired: true } (no error envelope).
+        if (res.status === 401 && body?.passwordRequired) {
+          throw new ApiError(401, 'PASSWORD_REQUIRED', 'password required')
+        }
+        throw new ApiError(res.status, body?.error?.code ?? 'ERROR', body?.error?.message ?? res.statusText)
+      }
+      return res.json() as Promise<ShareProjection>
+    },
+    enabled: Boolean(token),
+    staleTime: 60_000,
+    retry: false,
+  })
+}
+
+/**
+ * Exchanges a share password for a short-lived view token. No authentication
+ * required. The returned token is scoped to this share and expires server-side.
+ */
+export function useUnlockShare(token: string | undefined) {
+  return useMutation({
+    mutationFn: async (password: string): Promise<string> => {
+      const res = await fetch(`${API_BASE}/shares/${token}/unlock`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password }),
+      })
+      const body = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        throw new ApiError(res.status, body?.error?.code ?? 'ERROR', body?.error?.message ?? res.statusText)
+      }
+      return (body as { token: string }).token
+    },
+  })
+}
+````
+
+## File: packages/web/src/lib/htmlExport.test.ts
+````typescript
+/**
+ * htmlExport — unit tests for saveFramePresentationHtml (Phase 14.4).
+ */
+
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { saveFramePresentationHtml } from './htmlExport'
+
+let iframe: HTMLIFrameElement
+let createObjectURL: ReturnType<typeof vi.fn>
+let revokeObjectURL: ReturnType<typeof vi.fn>
+let fetchMock: ReturnType<typeof vi.fn>
+
+const info = { timelineName: 'Q1 Plan', teamName: 'Acme', filterLabel: null }
+
+async function savedHtml(): Promise<string> {
+  const blob = createObjectURL.mock.calls[0][0] as Blob
+  return blob.text()
+}
+
+beforeEach(() => {
+  iframe = document.createElement('iframe')
+  document.body.appendChild(iframe)
+  iframe.contentDocument!.body.innerHTML = '<div>content</div>'
+
+  createObjectURL = vi.fn(() => 'blob:mock-url')
+  revokeObjectURL = vi.fn()
+  // Subclass keeps `new URL(...)` (used for link resolution) constructible
+  // while adding the object-URL statics jsdom lacks — without mutating the
+  // real global the way Object.assign(URL, ...) would.
+  vi.stubGlobal('URL', Object.assign(class extends URL {}, { createObjectURL, revokeObjectURL }))
+  fetchMock = vi.fn(() => Promise.resolve({ ok: true, text: () => Promise.resolve('body{color:red}') }))
+  vi.stubGlobal('fetch', fetchMock)
+})
+
+afterEach(() => {
+  iframe.remove()
+  vi.unstubAllGlobals()
+})
+
+describe('saveFramePresentationHtml', () => {
+  it('downloads a Blob containing the frame document with a header, then removes the header', async () => {
+    await saveFramePresentationHtml(iframe, info, 'q1-plan.html')
+
+    expect(createObjectURL).toHaveBeenCalledTimes(1)
+    const blob = createObjectURL.mock.calls[0][0] as Blob
+    expect(blob.type).toBe('text/html;charset=utf-8')
+
+    // The header is inserted only for the instant of serialization, then removed —
+    // it must not linger in the live frame document afterward.
+    expect(iframe.contentDocument!.body.querySelector('[data-export-role="presentation-header"]')).toBeNull()
+  })
+
+  it('includes the serialized content in the downloaded blob', async () => {
+    await saveFramePresentationHtml(iframe, { ...info, teamName: null }, 'q1-plan.html')
+    const text = await savedHtml()
+    expect(text).toContain('<!DOCTYPE html>')
+    expect(text).toContain('Q1 Plan')
+    expect(text).toContain('content')
+  })
+
+  it('inlines same-origin stylesheet links as <style> blocks', async () => {
+    const link = iframe.contentDocument!.createElement('link')
+    link.rel = 'stylesheet'
+    link.setAttribute('href', '/assets/index.css')
+    iframe.contentDocument!.head.appendChild(link)
+
+    await saveFramePresentationHtml(iframe, info, 'q1-plan.html')
+
+    expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining('/assets/index.css'))
+    const text = await savedHtml()
+    expect(text).toContain('body{color:red}')
+    expect(text).not.toContain('/assets/index.css')
+    // The live frame document keeps its link — only the serialized clone is rewritten.
+    expect(iframe.contentDocument!.head.querySelector('link[rel="stylesheet"]')).not.toBeNull()
+  })
+
+  it('absolutizes cross-origin font links instead of fetching them', async () => {
+    const link = iframe.contentDocument!.createElement('link')
+    link.rel = 'stylesheet'
+    link.setAttribute('href', 'https://fonts.googleapis.com/css2?family=Open+Sans')
+    iframe.contentDocument!.head.appendChild(link)
+
+    await saveFramePresentationHtml(iframe, info, 'q1-plan.html')
+
+    expect(fetchMock).not.toHaveBeenCalled()
+    const text = await savedHtml()
+    expect(text).toContain('https://fonts.googleapis.com/css2?family=Open+Sans')
+  })
+
+  it('falls back to an absolute href when the same-origin stylesheet fetch fails', async () => {
+    fetchMock.mockResolvedValueOnce({ ok: false, status: 404, text: () => Promise.resolve('') })
+    const link = iframe.contentDocument!.createElement('link')
+    link.rel = 'stylesheet'
+    link.setAttribute('href', '/assets/index.css')
+    iframe.contentDocument!.head.appendChild(link)
+
+    await saveFramePresentationHtml(iframe, info, 'q1-plan.html')
+
+    const text = await savedHtml()
+    // Rewritten to a fully-qualified URL, so the export still styles when the app is reachable.
+    expect(text).toContain(`${window.location.origin}/assets/index.css`)
+  })
+
+  it('does nothing when the frame has no contentDocument', async () => {
+    const detached = document.createElement('iframe')
+    Object.defineProperty(detached, 'contentDocument', { value: null })
+    await expect(
+      saveFramePresentationHtml(detached, { ...info, teamName: null }, 'x.html'),
+    ).resolves.toBeUndefined()
+    expect(createObjectURL).not.toHaveBeenCalled()
+  })
+})
+````
+
+## File: packages/web/src/lib/htmlExport.ts
+````typescript
+/**
+ * htmlExport — serializes the PresentationFrame's document to a standalone
+ * `.html` file (Phase 14.4).
+ *
+ * PresentationFrame clones the parent document's `<style>`/`<link>` nodes into
+ * the frame's head. Vite's dev `<style>` blocks serialize as-is, but `<link>`
+ * hrefs don't survive a save-to-disk: same-origin `/assets/*.css` links stop
+ * resolving once the file leaves the server, and relative font links lose
+ * their base. So at serialize time the document is cloned and its links are
+ * resolved: same-origin stylesheets are fetched and inlined as `<style>`
+ * blocks; cross-origin links (the Google Fonts pair) are rewritten to
+ * absolute URLs so the fonts still load when the file is opened with network
+ * access (system-font fallback offline). The live frame document is never
+ * mutated beyond the transient header insert.
+ */
+
+import { buildPresentationHeaderElement, type PresentationHeaderInfo } from '@/components/export/presentationHeader'
+
+/** Triggers the browser to save a Blob with the given filename. */
+function saveBlob(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(url)
+}
+
+/**
+ * Resolves every `<link href>` in the cloned root against the parent page's
+ * URL: same-origin stylesheets become inline `<style>` blocks (fetch failure
+ * falls back to an absolute href); everything else is absolutized in place.
+ */
+async function inlineStylesheetLinks(root: HTMLElement): Promise<void> {
+  const links = Array.from(root.querySelectorAll<HTMLLinkElement>('link[href]'))
+  await Promise.all(links.map(async link => {
+    const href = link.getAttribute('href')
+    if (!href) return
+    const url = new URL(href, document.baseURI)
+    if (link.rel === 'stylesheet' && url.origin === window.location.origin) {
+      try {
+        const res = await fetch(url.href)
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+        const css = await res.text()
+        const style = root.ownerDocument.createElement('style')
+        style.textContent = css
+        link.replaceWith(style)
+        return
+      } catch {
+        // Fall through to absolutizing — the export still opens, styled,
+        // whenever the app origin is reachable.
+      }
+    }
+    link.setAttribute('href', url.href)
+  }))
+}
+
+/** Serializes the PresentationFrame's document (with a header inserted for the capture) and downloads it. */
+export async function saveFramePresentationHtml(iframe: HTMLIFrameElement, info: PresentationHeaderInfo, filename: string): Promise<void> {
+  const doc = iframe.contentDocument
+  if (!doc) return
+
+  const header = buildPresentationHeaderElement(doc, info)
+  doc.body.insertBefore(header, doc.body.firstChild)
+  const root = doc.documentElement.cloneNode(true) as HTMLElement
+  header.remove()
+
+  await inlineStylesheetLinks(root)
+  const html = `<!DOCTYPE html>\n${root.outerHTML}`
+
+  const blob = new Blob([html], { type: 'text/html;charset=utf-8' })
+  saveBlob(blob, filename)
+}
+````
+
 ## File: packages/web/src/lib/pngExport.test.ts
 ````typescript
 /**
@@ -54331,6 +55036,38 @@ describe('capturePngSnapshot', () => {
       .rejects.toThrow('canvas.toBlob returned null')
   })
 })
+````
+
+## File: packages/web/src/lib/presentationTheme.ts
+````typescript
+/**
+ * presentationTheme — the single "force light" definition shared by every
+ * read-only presentation surface (Phase 14.4 collapses two independent
+ * implementations into this one module): ShareViewPage's live-document
+ * toggle (via `hooks/useForceLightDocument`) and PresentationFrame's
+ * structural iframe light.
+ * Both need the same operation — strip `.dark` from a document's root — so
+ * it lives here once instead of being reimplemented per call site.
+ */
+
+/** Background color every presentation surface (PNG header, print, HTML save) renders against. */
+export const PRESENTATION_BACKGROUND = '#ffffff'
+export const PRESENTATION_FOREGROUND = '#101828'
+export const PRESENTATION_MUTED = '#667085'
+export const PRESENTATION_BORDER = '#e5e7eb'
+
+/**
+ * Removes the `dark` class from a document's root element.
+ * Returns whether it was present, so a caller managing the *live* document
+ * (as opposed to an isolated iframe that never had it) can restore it on
+ * cleanup.
+ */
+export function forceLightDocumentElement(doc: Document): boolean {
+  const root = doc.documentElement
+  const hadDark = root.classList.contains('dark')
+  root.classList.remove('dark')
+  return hadDark
+}
 ````
 
 ## File: scripts/reset-test-env.sh
@@ -56350,134 +57087,6 @@ export default function CalendarToolbar({
 }
 ````
 
-## File: packages/web/src/components/export/PresentationFrame.tsx
-````typescript
-/**
- * PresentationFrame — an isolated, always-light document used as the shared
- * render surface for the visual exports (Phase 14.3 PNG; Phase 14.4 HTML/print).
- *
- * The earlier 14.3 approach mounted the clean snapshot inside the live dashboard
- * and forced light mode by toggling the `dark` class on the page's own `<html>`.
- * That repainted the visible dashboard (the "flicker") and left some elements —
- * the ones that paint from inline `var(--muted)`/`var(--card)` (kanban column
- * boxes, the Gantt sticky left rail) — stuck on dark, because html-to-image
- * can't reliably resolve theme CSS variables that hang off a `.dark` class on
- * the document root.
- *
- * This component sidesteps both by rendering the snapshot into a same-origin
- * `<iframe>` that is its own document: the parent's stylesheets and fonts are
- * cloned into it (so Tailwind utilities, the `:root` design tokens, and Open
- * Sans all apply), and its `<html>` never receives the `.dark` class. The result
- * is structurally light — no class toggling on the live page (no flicker), and
- * every `var()` reference resolves against a `:root` with no dark override in
- * scope (no leftover dark boxes).
- *
- * Stylesheets are copied by cloning the `<style>`/`<link>` nodes rather than
- * reading `document.styleSheets[].cssRules`, which avoids the cross-origin
- * `SecurityError` the Google Fonts stylesheet otherwise triggers.
- *
- * The same frame is the surface Phase 14.4 reuses: `iframe.contentWindow.print()`
- * for the printable-PDF route and `iframe.contentDocument.documentElement.outerHTML`
- * (styles already inlined) for the HTML download — one render path, shared with
- * the Phase 13 share viewer's components, no second harness to drift.
- */
-
-import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { createPortal } from 'react-dom'
-import { forceLightDocumentElement, PRESENTATION_BACKGROUND } from '@/lib/presentationTheme'
-
-export interface PresentationFrameProps {
-  /**
-   * Invoked once the frame's document is ready (styles copied, light theme
-   * applied, body available). Pass the body to the PNG capture / HTML serialize.
-   * Memoize this in the caller so it doesn't re-run the readiness effect.
-   */
-  onReady?: (body: HTMLElement, iframe: HTMLIFrameElement) => void
-  children: ReactNode
-}
-
-/**
- * Clones the parent document's style and stylesheet/font link nodes into the
- * frame's head. Node-cloning (not `cssRules` serialization) is deliberate — it
- * copies Vite's dev `<style>` blocks and prod `<link>`s alike without reading
- * cross-origin sheets, which would throw `SecurityError` on the fonts stylesheet.
- */
-function copyDocumentStyles(srcDoc: Document, destDoc: Document): void {
-  const selector = [
-    'style',
-    'link[rel="stylesheet"]',
-    'link[rel="preconnect"]',
-    'link[as="style"]',
-    'link[href*="fonts.googleapis"]',
-    'link[href*="fonts.gstatic"]',
-  ].join(',')
-  srcDoc.querySelectorAll(selector).forEach(node => {
-    destDoc.head.appendChild(node.cloneNode(true))
-  })
-}
-
-export default function PresentationFrame({ onReady, children }: PresentationFrameProps) {
-  const iframeRef = useRef<HTMLIFrameElement>(null)
-  const [body, setBody] = useState<HTMLElement | null>(null)
-
-  useEffect(() => {
-    const iframe = iframeRef.current
-    const doc = iframe?.contentDocument
-    if (!iframe || !doc) return
-
-    // Never dark: the snapshot must be light regardless of the user's theme,
-    // and we deliberately do not touch the parent <html> (that caused the flicker).
-    forceLightDocumentElement(doc)
-    copyDocumentStyles(document, doc)
-    doc.body.style.margin = '0'
-    doc.body.style.padding = '0'
-    doc.body.style.background = PRESENTATION_BACKGROUND
-    // Shrink-wrap to the content so scrollWidth/scrollHeight at capture time is
-    // the view's full natural extent, not the iframe viewport.
-    doc.body.style.display = 'inline-block'
-    setBody(doc.body)
-  }, [])
-
-  useEffect(() => {
-    if (body && iframeRef.current) onReady?.(body, iframeRef.current)
-  }, [body, onReady])
-
-  return (
-    <>
-      {/*
-        Positioned at the viewport origin (not an extreme off-screen offset) so
-        the browser actually paints/lays out the content — Chrome culls layout
-        for nodes placed absurdly far outside any viewport, which left earlier
-        captures blank. z-index -1 tucks it behind the export dialog's backdrop
-        (z-1000), the only thing rendered alongside it, so it's never visible.
-        Sized generously so width-flexible content lays out fully; the capture
-        reads the body's own scroll extent regardless of this box.
-      */}
-      <iframe
-        ref={iframeRef}
-        title="Export presentation surface"
-        aria-hidden
-        // Defense-in-depth: nothing is ever given a src/srcdoc (stays
-        // about:blank), but scripts and top-level navigation are blocked
-        // outright in case that ever changes.
-        sandbox="allow-same-origin"
-        style={{
-          position: 'fixed',
-          top: 0,
-          left: 0,
-          width: 1440,
-          height: 900,
-          border: 0,
-          zIndex: -1,
-          pointerEvents: 'none',
-        }}
-      />
-      {body && createPortal(children, body)}
-    </>
-  )
-}
-````
-
 ## File: packages/web/src/components/CalendarShareModal.tsx
 ````typescript
 /**
@@ -56776,526 +57385,6 @@ export default function CalendarShareModal({ teamId, timelineId, timelineName, o
     </div>,
     document.body,
   )
-}
-````
-
-## File: packages/web/src/hooks/useShares.test.ts
-````typescript
-/**
- * useShares hooks — unit tests verifying query keys, mutation endpoints,
- * cache invalidation, and the public share projection fetch.
- * Uses a real QueryClient with fetch mocked globally.
- */
-
-import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { renderHook, waitFor } from '@testing-library/react'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { createElement } from 'react'
-import {
-  useListShares,
-  useCreateShare,
-  useDeleteShare,
-  useRegenerateShare,
-  useShareProjection,
-  useUnlockShare,
-} from './useShares'
-
-// ── Auth mock ─────────────────────────────────────────────────────────────────
-
-vi.mock('@/contexts/AuthContext', () => ({
-  useAuth: () => ({ getAccessToken: async () => 'test-token' }),
-}))
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-function makeWrapper() {
-  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-  return {
-    qc,
-    wrapper: ({ children }: { children: React.ReactNode }) =>
-      createElement(QueryClientProvider, { client: qc }, children),
-  }
-}
-
-const SHARE_FIXTURE = {
-  id: 'share-1',
-  timelineId: 'tl-1',
-  token: 'abc123',
-  viewType: 'gantt',
-  viewConfig: '{}',
-  createdBy: 'member-1',
-  createdAt: '2026-01-01T00:00:00Z',
-  viewCount: 0,
-}
-
-// ── useListShares ─────────────────────────────────────────────────────────────
-
-describe('useListShares', () => {
-  beforeEach(() => {
-    vi.stubGlobal('fetch', vi.fn())
-  })
-
-  it('fetches shares from the correct URL', async () => {
-    vi.mocked(fetch).mockResolvedValueOnce(
-      new Response(JSON.stringify([SHARE_FIXTURE]), { status: 200 }),
-    )
-
-    const { wrapper } = makeWrapper()
-    const { result } = renderHook(() => useListShares('team-1', 'tl-1'), { wrapper })
-
-    await waitFor(() => expect(result.current.isSuccess).toBe(true))
-
-    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
-      expect.stringContaining('/teams/team-1/timelines/tl-1/shares'),
-      expect.any(Object),
-    )
-    expect(result.current.data).toHaveLength(1)
-  })
-
-  it('refetches on every mount despite a non-zero app-wide staleTime', async () => {
-    // Fresh Response per call — a Response body can only be consumed once.
-    vi.mocked(fetch).mockImplementation(() =>
-      Promise.resolve(new Response(JSON.stringify([SHARE_FIXTURE]), { status: 200 })),
-    )
-
-    // Mirror the app QueryClient's 30s default staleTime: the hook must
-    // override it (staleTime: 0 + refetchOnMount: 'always') so the view
-    // telemetry it renders (viewCount / lastViewedAt) is current every time
-    // a share modal opens.
-    const qc = new QueryClient({
-      defaultOptions: { queries: { retry: false, staleTime: 30_000 } },
-    })
-    const wrapper = ({ children }: { children: React.ReactNode }) =>
-      createElement(QueryClientProvider, { client: qc }, children)
-
-    const first = renderHook(() => useListShares('team-1', 'tl-1'), { wrapper })
-    await waitFor(() => expect(first.result.current.isSuccess).toBe(true))
-    first.unmount()
-
-    renderHook(() => useListShares('team-1', 'tl-1'), { wrapper })
-    await waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalledTimes(2))
-  })
-
-  it('does not fetch when teamId is empty', () => {
-    const { wrapper } = makeWrapper()
-    renderHook(() => useListShares('', 'tl-1'), { wrapper })
-    expect(vi.mocked(fetch)).not.toHaveBeenCalled()
-  })
-
-  it('does not fetch when timelineId is empty', () => {
-    const { wrapper } = makeWrapper()
-    renderHook(() => useListShares('team-1', ''), { wrapper })
-    expect(vi.mocked(fetch)).not.toHaveBeenCalled()
-  })
-})
-
-// ── useCreateShare ────────────────────────────────────────────────────────────
-
-describe('useCreateShare', () => {
-  beforeEach(() => {
-    vi.stubGlobal('fetch', vi.fn())
-  })
-
-  it('POSTs to the correct URL and invalidates the share list', async () => {
-    vi.mocked(fetch).mockResolvedValueOnce(
-      new Response(JSON.stringify(SHARE_FIXTURE), { status: 201 }),
-    )
-
-    const { wrapper, qc } = makeWrapper()
-    const invalidate = vi.spyOn(qc, 'invalidateQueries')
-
-    const { result } = renderHook(() => useCreateShare('team-1', 'tl-1'), { wrapper })
-    result.current.mutate({ viewType: 'gantt', viewConfig: '{}' })
-
-    await waitFor(() => expect(result.current.isSuccess).toBe(true))
-
-    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
-      expect.stringContaining('/timelines/tl-1/shares'),
-      expect.objectContaining({ method: 'POST' }),
-    )
-    expect(invalidate).toHaveBeenCalledWith(
-      expect.objectContaining({
-        queryKey: ['teams', 'team-1', 'timelines', 'tl-1', 'shares'],
-      }),
-    )
-  })
-})
-
-describe('useCreateShare (ICS feeds)', () => {
-  beforeEach(() => {
-    vi.stubGlobal('fetch', vi.fn())
-  })
-
-  it('sends kind/scope/memberId for a member-scoped ICS feed', async () => {
-    vi.mocked(fetch).mockResolvedValueOnce(
-      new Response(JSON.stringify({ ...SHARE_FIXTURE, kind: 'ics', scope: 'member', memberId: 'm-1' }), { status: 201 }),
-    )
-
-    const { wrapper } = makeWrapper()
-    const { result } = renderHook(() => useCreateShare('team-1', 'tl-1'), { wrapper })
-    result.current.mutate({ kind: 'ics', scope: 'member', memberId: 'm-1', name: 'Feed' })
-
-    await waitFor(() => expect(result.current.isSuccess).toBe(true))
-
-    const opts = vi.mocked(fetch).mock.calls[0][1] as RequestInit
-    expect(JSON.parse(String(opts.body))).toMatchObject({
-      kind: 'ics',
-      scope: 'member',
-      memberId: 'm-1',
-    })
-  })
-})
-
-// ── useRegenerateShare ────────────────────────────────────────────────────────
-
-describe('useRegenerateShare', () => {
-  beforeEach(() => {
-    vi.stubGlobal('fetch', vi.fn())
-  })
-
-  it('POSTs to the regenerate endpoint and invalidates the share list', async () => {
-    vi.mocked(fetch).mockResolvedValueOnce(
-      new Response(JSON.stringify({ ...SHARE_FIXTURE, token: 'rotated' }), { status: 200 }),
-    )
-
-    const { wrapper, qc } = makeWrapper()
-    const invalidate = vi.spyOn(qc, 'invalidateQueries')
-
-    const { result } = renderHook(() => useRegenerateShare('team-1', 'tl-1'), { wrapper })
-    result.current.mutate('share-1')
-
-    await waitFor(() => expect(result.current.isSuccess).toBe(true))
-
-    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
-      expect.stringContaining('/shares/share-1/regenerate'),
-      expect.objectContaining({ method: 'POST' }),
-    )
-    expect(result.current.data?.token).toBe('rotated')
-    expect(invalidate).toHaveBeenCalledWith(
-      expect.objectContaining({
-        queryKey: ['teams', 'team-1', 'timelines', 'tl-1', 'shares'],
-      }),
-    )
-  })
-})
-
-// ── useDeleteShare ────────────────────────────────────────────────────────────
-
-describe('useDeleteShare', () => {
-  beforeEach(() => {
-    vi.stubGlobal('fetch', vi.fn())
-  })
-
-  it('DELETEs the correct URL and invalidates the share list', async () => {
-    vi.mocked(fetch).mockResolvedValueOnce(new Response(null, { status: 204 }))
-
-    const { wrapper, qc } = makeWrapper()
-    const invalidate = vi.spyOn(qc, 'invalidateQueries')
-
-    const { result } = renderHook(() => useDeleteShare('team-1', 'tl-1'), { wrapper })
-    result.current.mutate('share-1')
-
-    await waitFor(() => expect(result.current.isSuccess).toBe(true))
-
-    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
-      expect.stringContaining('/shares/share-1'),
-      expect.objectContaining({ method: 'DELETE' }),
-    )
-    expect(invalidate).toHaveBeenCalledWith(
-      expect.objectContaining({
-        queryKey: ['teams', 'team-1', 'timelines', 'tl-1', 'shares'],
-      }),
-    )
-  })
-})
-
-// ── useShareProjection ────────────────────────────────────────────────────────
-
-const PROJECTION_FIXTURE = {
-  share: {
-    id: 'share-1',
-    timelineId: 'tl-1',
-    token: 'abc123',
-    viewType: 'gantt',
-    viewConfig: '{}',
-    createdAt: '2026-01-01T00:00:00Z',
-  },
-  teamName: 'Test Team',
-  timeline: { id: 'tl-1', name: 'Q1 Plan', startDate: '2026-01-01', endDate: '2026-12-31' },
-  members: [],
-  statuses: [],
-  tags: [],
-  activities: [],
-}
-
-describe('useShareProjection', () => {
-  beforeEach(() => {
-    vi.stubGlobal('fetch', vi.fn())
-  })
-
-  it('fetches the public projection without an auth header', async () => {
-    vi.mocked(fetch).mockResolvedValueOnce(
-      new Response(JSON.stringify(PROJECTION_FIXTURE), { status: 200 }),
-    )
-
-    const { wrapper } = makeWrapper()
-    const { result } = renderHook(() => useShareProjection('abc123'), { wrapper })
-
-    await waitFor(() => expect(result.current.isSuccess).toBe(true))
-
-    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
-      expect.stringContaining('/shares/abc123'),
-      expect.anything(),
-    )
-    // No Authorization header — this is a public endpoint (no view token passed).
-    const callArgs = vi.mocked(fetch).mock.calls[0]
-    const opts = callArgs[1] as RequestInit | undefined
-    const headers = (opts?.headers ?? {}) as Record<string, string>
-    expect(headers.Authorization).toBeUndefined()
-    expect(result.current.data?.teamName).toBe('Test Team')
-  })
-
-  it('does not fetch when token is undefined', () => {
-    const { wrapper } = makeWrapper()
-    renderHook(() => useShareProjection(undefined), { wrapper })
-    expect(vi.mocked(fetch)).not.toHaveBeenCalled()
-  })
-
-  it('throws an ApiError with the response status on non-200', async () => {
-    vi.mocked(fetch).mockResolvedValueOnce(
-      new Response(
-        JSON.stringify({ error: { code: 'NOT_FOUND', message: 'share not found' } }),
-        { status: 404 },
-      ),
-    )
-
-    const { wrapper } = makeWrapper()
-    const { result } = renderHook(() => useShareProjection('bad-token'), { wrapper })
-
-    await waitFor(() => expect(result.current.isError).toBe(true))
-
-    const err = result.current.error as { status?: number; code?: string }
-    expect(err.status).toBe(404)
-    expect(err.code).toBe('NOT_FOUND')
-  })
-
-  it('sends the view token as a Bearer header when provided', async () => {
-    vi.mocked(fetch).mockResolvedValueOnce(
-      new Response(JSON.stringify(PROJECTION_FIXTURE), { status: 200 }),
-    )
-
-    const { wrapper } = makeWrapper()
-    const { result } = renderHook(() => useShareProjection('abc123', 'view-jwt'), { wrapper })
-
-    await waitFor(() => expect(result.current.isSuccess).toBe(true))
-
-    const opts = vi.mocked(fetch).mock.calls[0][1] as RequestInit | undefined
-    const headers = (opts?.headers ?? {}) as Record<string, string>
-    expect(headers.Authorization).toBe('Bearer view-jwt')
-  })
-
-  it('maps a 401 { passwordRequired } response to a PASSWORD_REQUIRED error', async () => {
-    vi.mocked(fetch).mockResolvedValueOnce(
-      new Response(JSON.stringify({ passwordRequired: true }), { status: 401 }),
-    )
-
-    const { wrapper } = makeWrapper()
-    const { result } = renderHook(() => useShareProjection('locked-token'), { wrapper })
-
-    await waitFor(() => expect(result.current.isError).toBe(true))
-
-    const err = result.current.error as { status?: number; code?: string }
-    expect(err.status).toBe(401)
-    expect(err.code).toBe('PASSWORD_REQUIRED')
-  })
-})
-
-// ── useUnlockShare ──────────────────────────────────────────────────────────────
-
-describe('useUnlockShare', () => {
-  beforeEach(() => {
-    vi.stubGlobal('fetch', vi.fn())
-  })
-
-  it('POSTs the password to the unlock endpoint and returns the view token', async () => {
-    vi.mocked(fetch).mockResolvedValueOnce(
-      new Response(JSON.stringify({ token: 'view-jwt' }), { status: 200 }),
-    )
-
-    const { wrapper } = makeWrapper()
-    const { result } = renderHook(() => useUnlockShare('abc123'), { wrapper })
-
-    let token = ''
-    await waitFor(async () => { token = await result.current.mutateAsync('hunter2') })
-
-    expect(token).toBe('view-jwt')
-    const [url, opts] = vi.mocked(fetch).mock.calls[0]
-    expect(String(url)).toContain('/shares/abc123/unlock')
-    expect(opts?.method).toBe('POST')
-    expect(JSON.parse(String(opts?.body))).toEqual({ password: 'hunter2' })
-  })
-
-  it('throws an ApiError on a wrong password (401)', async () => {
-    vi.mocked(fetch).mockResolvedValueOnce(
-      new Response(JSON.stringify({ error: { code: 'INVALID_PASSWORD', message: 'incorrect password' } }), { status: 401 }),
-    )
-
-    const { wrapper } = makeWrapper()
-    const { result } = renderHook(() => useUnlockShare('abc123'), { wrapper })
-
-    await expect(result.current.mutateAsync('wrong')).rejects.toMatchObject({ status: 401 })
-  })
-})
-````
-
-## File: packages/web/src/hooks/useShares.ts
-````typescript
-/**
- * TanStack Query hooks for Share CRUD and the public share projection.
- *
- * Authenticated hooks (useCreateShare, useListShares, useDeleteShare) require
- * an auth token. useShareProjection is public and uses a plain fetch.
- */
-
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import type { components } from '@draba/shared'
-import { createAuthFetch, API_BASE, ApiError } from '@/lib/api'
-import { useAuth } from '@/contexts/AuthContext'
-
-type Share = components['schemas']['Share']
-type ShareProjection = components['schemas']['ShareProjection']
-
-const sharesKey = (teamId: string, timelineId: string) =>
-  ['teams', teamId, 'timelines', timelineId, 'shares'] as const
-
-// ── Authenticated hooks ───────────────────────────────────────────────────────
-
-/** Lists all shares for a timeline. */
-export function useListShares(teamId: string, timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  return useQuery({
-    queryKey: sharesKey(teamId, timelineId),
-    queryFn: () =>
-      authFetch<Share[]>(`/teams/${teamId}/timelines/${timelineId}/shares`),
-    enabled: Boolean(teamId) && Boolean(timelineId),
-    // The share modals are this query's only consumers and mount on demand —
-    // override the app-wide 30s staleTime so the view telemetry they render
-    // (viewCount / lastViewedAt) is current every time a modal opens.
-    staleTime: 0,
-    refetchOnMount: 'always',
-  })
-}
-
-interface CreateShareInput {
-  /** "view" (default) or "ics" — ICS shares are live calendar feeds. */
-  kind?: 'view' | 'ics'
-  /** ICS shares only: "timeline" (every activity) or "member" (one member's). */
-  scope?: 'timeline' | 'member'
-  /** ICS shares with scope "member" only. */
-  memberId?: string
-  name?: string | null
-  description?: string | null
-  viewType?: string
-  viewConfig?: string
-  /** When set, the share is locked and requires unlocking to view. View shares only. */
-  password?: string
-}
-
-/** Creates a share and invalidates the list. */
-export function useCreateShare(teamId: string, timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: (input: CreateShareInput) =>
-      authFetch<Share>(`/timelines/${timelineId}/shares`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(input),
-      }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: sharesKey(teamId, timelineId) }),
-  })
-}
-
-/**
- * Rotates a share's token, immediately invalidating the old URL — the
- * revocation story for ICS feeds, which have no password gate.
- */
-export function useRegenerateShare(teamId: string, timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: (shareId: string) =>
-      authFetch<Share>(`/shares/${shareId}/regenerate`, { method: 'POST' }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: sharesKey(teamId, timelineId) }),
-  })
-}
-
-/** Deletes a share and invalidates the list. */
-export function useDeleteShare(teamId: string, timelineId: string) {
-  const { getAccessToken } = useAuth()
-  const authFetch = createAuthFetch(getAccessToken)
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: (shareId: string) =>
-      authFetch<void>(`/shares/${shareId}`, { method: 'DELETE' }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: sharesKey(teamId, timelineId) }),
-  })
-}
-
-// ── Public hooks (no auth) ────────────────────────────────────────────────────
-
-/**
- * Fetches a public share projection. No authentication required.
- *
- * For password-protected shares, pass the `viewToken` obtained from
- * {@link useUnlockShare}; it is sent as a Bearer credential. Without a valid
- * token a locked share responds 401 — surfaced here as an ApiError with code
- * `PASSWORD_REQUIRED` so the viewer can render an unlock prompt.
- */
-export function useShareProjection(token: string | undefined, viewToken?: string | null) {
-  return useQuery({
-    queryKey: ['shares', token, viewToken ?? null] as const,
-    queryFn: async () => {
-      const headers: HeadersInit = viewToken ? { Authorization: `Bearer ${viewToken}` } : {}
-      const res = await fetch(`${API_BASE}/shares/${token}`, { headers })
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}))
-        // A locked share returns { passwordRequired: true } (no error envelope).
-        if (res.status === 401 && body?.passwordRequired) {
-          throw new ApiError(401, 'PASSWORD_REQUIRED', 'password required')
-        }
-        throw new ApiError(res.status, body?.error?.code ?? 'ERROR', body?.error?.message ?? res.statusText)
-      }
-      return res.json() as Promise<ShareProjection>
-    },
-    enabled: Boolean(token),
-    staleTime: 60_000,
-    retry: false,
-  })
-}
-
-/**
- * Exchanges a share password for a short-lived view token. No authentication
- * required. The returned token is scoped to this share and expires server-side.
- */
-export function useUnlockShare(token: string | undefined) {
-  return useMutation({
-    mutationFn: async (password: string): Promise<string> => {
-      const res = await fetch(`${API_BASE}/shares/${token}/unlock`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ password }),
-      })
-      const body = await res.json().catch(() => ({}))
-      if (!res.ok) {
-        throw new ApiError(res.status, body?.error?.code ?? 'ERROR', body?.error?.message ?? res.statusText)
-      }
-      return (body as { token: string }).token
-    },
-  })
 }
 ````
 
@@ -58404,637 +58493,6 @@ func getenv(key, fallback string) string {
 }
 ````
 
-## File: packages/web/src/lib/exportCapabilities.test.ts
-````typescript
-/**
- * exportCapabilities — unit tests for getExportFormats and buildExportFilename.
- */
-
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { getExportFormats, buildExportFilename } from './exportCapabilities'
-
-describe('getExportFormats', () => {
-  it('returns data formats + PNG + printable/HTML (6) for gantt', () => {
-    const formats = getExportFormats('gantt')
-    expect(formats).toHaveLength(6)
-    const ids = formats.map(f => f.id)
-    expect(ids).toContain('csv')
-    expect(ids).toContain('xlsx')
-    expect(ids).toContain('ics')
-    expect(ids).toContain('png')
-    expect(ids).toContain('printable')
-    expect(ids).toContain('html')
-    expect(ids).not.toContain('markdown')
-    expect(ids).not.toContain('clipboard')
-  })
-
-  it('returns data + PNG + printable/HTML + text formats (9) for list, kanban, calendar', () => {
-    const views = ['list', 'kanban', 'calendar'] as const
-    for (const view of views) {
-      const formats = getExportFormats(view)
-      expect(formats).toHaveLength(9)
-      const ids = formats.map(f => f.id)
-      expect(ids).toContain('csv')
-      expect(ids).toContain('xlsx')
-      expect(ids).toContain('ics')
-      expect(ids).toContain('png')
-      expect(ids).toContain('printable')
-      expect(ids).toContain('html')
-      expect(ids).toContain('markdown')
-      expect(ids).toContain('plaintext')
-      expect(ids).toContain('clipboard')
-    }
-  })
-
-  it('each descriptor has required fields', () => {
-    const allFormats = getExportFormats('list') // superset — includes text formats
-    for (const f of allFormats) {
-      expect(f.id).toBeTruthy()
-      expect(f.name).toBeTruthy()
-      expect(f.desc).toBeTruthy()
-      expect(typeof f.scope).toBe('boolean')
-      expect(['download', 'copy', 'print']).toContain(f.verb)
-      expect(typeof f.clientSide).toBe('boolean')
-      // ext may be empty string for clipboard/printable
-      if (f.id !== 'clipboard' && f.id !== 'printable') {
-        expect(f.ext).toMatch(/^\.[a-z]+$/)
-      }
-    }
-  })
-
-  it('server-side formats have scope=true', () => {
-    const formats = getExportFormats('list')
-    const serverFormats = formats.filter(f => !f.clientSide)
-    for (const f of serverFormats) {
-      expect(f.scope).toBe(true)
-    }
-  })
-
-  it('client-side formats have scope=false and clientSide=true', () => {
-    const formats = getExportFormats('list')
-    const clientFormats = formats.filter(f => f.clientSide)
-    expect(clientFormats).toHaveLength(6) // png + printable + html + markdown + plaintext + clipboard
-    for (const f of clientFormats) {
-      expect(f.scope).toBe(false)
-      expect(f.clientSide).toBe(true)
-    }
-  })
-
-  it('clipboard has copy verb, printable has print verb, others have download', () => {
-    const formats = getExportFormats('list')
-    const clipboard = formats.find(f => f.id === 'clipboard')
-    expect(clipboard?.verb).toBe('copy')
-    const printable = formats.find(f => f.id === 'printable')
-    expect(printable?.verb).toBe('print')
-    const rest = formats.filter(f => f.id !== 'clipboard' && f.id !== 'printable')
-    for (const f of rest) {
-      expect(f.verb).toBe('download')
-    }
-  })
-})
-
-describe('buildExportFilename', () => {
-  beforeEach(() => {
-    vi.useFakeTimers()
-    vi.setSystemTime(new Date('2026-06-16T00:00:00Z'))
-  })
-
-  afterEach(() => {
-    vi.useRealTimers()
-  })
-
-  it('slugifies the name and appends the date and extension', () => {
-    expect(buildExportFilename('Sales Kick-Off 2026', '.csv')).toBe('sales-kick-off-2026-2026-06-16.csv')
-  })
-
-  it('strips uppercase and special characters', () => {
-    expect(buildExportFilename('My "Timeline"!', '.xlsx')).toBe('my-timeline-2026-06-16.xlsx')
-  })
-
-  it('falls back to "timeline" when the name is empty or all punctuation', () => {
-    expect(buildExportFilename('', '.csv')).toBe('timeline-2026-06-16.csv')
-    expect(buildExportFilename('---', '.ics')).toBe('timeline-2026-06-16.ics')
-  })
-
-  it('preserves numbers and hyphens in the slug', () => {
-    expect(buildExportFilename('Q1 2026', '.csv')).toBe('q1-2026-2026-06-16.csv')
-  })
-
-  it('inserts the view segment when a view is given', () => {
-    expect(buildExportFilename('Sales Kick-Off', '.png', 'kanban')).toBe('sales-kick-off-kanban-2026-06-16.png')
-  })
-
-  it('omits the view segment when no view is given', () => {
-    expect(buildExportFilename('Sales Kick-Off', '.png')).toBe('sales-kick-off-2026-06-16.png')
-  })
-})
-````
-
-## File: packages/web/src/lib/exportCapabilities.ts
-````typescript
-/**
- * Export format descriptors for the Export dialog (Phase 14).
- *
- * One dialog serves all views (Gantt/List/Kanban/Calendar); format
- * availability and per-format copy is driven by this descriptor array so a
- * future view or format is an addition here, not a dialog redesign
- * (docs/design/handoffs/export-modal).
- *
- * 14.1: CSV, Excel, ICS (server-side, all views).
- * 14.2: Markdown, Plain text, Copy to clipboard (client-side, List/Kanban/Calendar only).
- * 14.3: PNG snapshot (client-side DOM rasterization, all views).
- * 14.4: Printable view (browser print → vector PDF), HTML save (client-side, all views).
- */
-
-import {
-  Table, FileSpreadsheet, CalendarPlus, FileText, AlignLeft, Copy, Image, Printer, FileCode,
-  type LucideIcon,
-} from 'lucide-react'
-
-export type ExportFormatId = 'csv' | 'xlsx' | 'ics' | 'png' | 'markdown' | 'plaintext' | 'clipboard' | 'printable' | 'html'
-export type ExportViewType = 'gantt' | 'list' | 'calendar' | 'kanban'
-
-export interface ExportFormatDescriptor {
-  id: ExportFormatId
-  name: string
-  icon: LucideIcon
-  /** One-line description shown in the options pane. */
-  desc: string
-  /** File extension, including the leading dot. Used as the download filename suffix. */
-  ext: string
-  /** Data formats (CSV/Excel/ICS) show the "current view vs entire timeline" scope picker. */
-  scope: boolean
-  /**
-   * Primary action verb.
-   * 'download' → "Download <ext>" button.
-   * 'copy'     → "Copy to clipboard" button with "Copied!" flash.
-   * 'print'    → "Print…" button that opens the browser's print dialog.
-   */
-  verb: 'download' | 'copy' | 'print'
-  /** True for formats generated client-side (no API call). */
-  clientSide: boolean
-}
-
-/** Data/calendar formats — server-side, available in every view. */
-const DATA_FORMATS: ExportFormatDescriptor[] = [
-  {
-    id: 'csv',
-    name: 'CSV',
-    icon: Table,
-    ext: '.csv',
-    scope: true,
-    verb: 'download',
-    clientSide: false,
-    desc: 'A plain spreadsheet file — opens in Excel, Google Sheets, or Numbers.',
-  },
-  {
-    id: 'xlsx',
-    name: 'Excel',
-    icon: FileSpreadsheet,
-    ext: '.xlsx',
-    scope: true,
-    verb: 'download',
-    clientSide: false,
-    desc: 'A formatted workbook for Excel, Google Sheets, or Numbers.',
-  },
-  {
-    id: 'ics',
-    name: 'Calendar (.ics)',
-    icon: CalendarPlus,
-    ext: '.ics',
-    scope: true,
-    verb: 'download',
-    clientSide: false,
-    desc: 'An iCalendar file — import into Google Calendar, Outlook, or Apple Calendar.',
-  },
-]
-
-/** Image format — client-side DOM rasterization, available in every view. */
-const IMAGE_FORMATS: ExportFormatDescriptor[] = [
-  {
-    id: 'png',
-    name: 'PNG image',
-    icon: Image,
-    ext: '.png',
-    scope: false,
-    verb: 'download',
-    clientSide: true,
-    desc: 'A snapshot of this view, full scrollable extent, for a slide deck or doc.',
-  },
-]
-
-/**
- * Presentation formats — client-side, reuse the PresentationFrame surface
- * (Phase 14.4), available in every view.
- */
-const PRESENTATION_FORMATS: ExportFormatDescriptor[] = [
-  {
-    id: 'printable',
-    name: 'Printable view',
-    icon: Printer,
-    ext: '',
-    scope: false,
-    verb: 'print',
-    clientSide: true,
-    desc: 'Opens your browser’s print dialog on a clean, paginated version of this view — choose "Save as PDF" there for a vector file with selectable text.',
-  },
-  {
-    id: 'html',
-    name: 'HTML file',
-    icon: FileCode,
-    ext: '.html',
-    scope: false,
-    verb: 'download',
-    clientSide: true,
-    desc: 'A standalone HTML file with styles inlined — opens in any browser without draba.',
-  },
-]
-
-/** Textual formats — client-side, not available on Gantt (no sensible flat text shape). */
-const TEXT_FORMATS: ExportFormatDescriptor[] = [
-  {
-    id: 'markdown',
-    name: 'Markdown',
-    icon: FileText,
-    ext: '.md',
-    scope: false,
-    verb: 'download',
-    clientSide: true,
-    desc: 'GitHub-flavored Markdown — paste into a README, Notion, or any Markdown editor.',
-  },
-  {
-    id: 'plaintext',
-    name: 'Plain text',
-    icon: AlignLeft,
-    ext: '.txt',
-    scope: false,
-    verb: 'download',
-    clientSide: true,
-    desc: 'Space-aligned plain text — works in any text editor or monospace environment.',
-  },
-  {
-    id: 'clipboard',
-    name: 'Copy to clipboard',
-    icon: Copy,
-    ext: '',
-    scope: false,
-    verb: 'copy',
-    clientSide: true,
-    desc: 'Copies both rich (HTML) and plain text so paste lands formatted in Slack, Word, or Google Docs.',
-  },
-]
-
-/**
- * Returns the export formats available for a given view.
- * PNG and the presentation formats (printable view, HTML) are available
- * everywhere (14.3/14.4). Gantt has no sensible flat text representation,
- * so it skips the textual formats (14.2).
- */
-export function getExportFormats(view: ExportViewType): ExportFormatDescriptor[] {
-  if (view === 'gantt') return [...DATA_FORMATS, ...IMAGE_FORMATS, ...PRESENTATION_FORMATS]
-  return [...DATA_FORMATS, ...IMAGE_FORMATS, ...PRESENTATION_FORMATS, ...TEXT_FORMATS]
-}
-
-/**
- * Builds the download filename for a format:
- * `<timeline-slug>[-<view>]-<yyyy-mm-dd><ext>`.
- * Matches the filename chip shown in the export dialog's options pane. The view
- * segment is included when given so a file names the view it came from (e.g.
- * `sales-kick-off-kanban-2026-06-30.png`).
- */
-export function buildExportFilename(timelineName: string, ext: string, view?: ExportViewType): string {
-  const slug = timelineName
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-  const date = new Date().toISOString().slice(0, 10)
-  const viewSegment = view ? `-${view}` : ''
-  return `${slug || 'timeline'}${viewSegment}-${date}${ext}`
-}
-````
-
-## File: packages/api/internal/api/share_ics_handler.go
-````go
-package api
-
-import (
-	"database/sql"
-	"errors"
-	"fmt"
-	"net/http"
-	"strings"
-	"sync"
-	"time"
-
-	"github.com/I0-1O/draba/packages/api/internal/ics"
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// ── In-memory ICS feed cache ──────────────────────────────────────────────────
-//
-// Mirrors shareCache, but stores the rendered text/calendar payload. Calendar
-// clients poll on their own cadence (minutes to hours), so the same short TTL
-// keeps feeds near-live while absorbing aggressive pollers.
-
-type icsCacheEntry struct {
-	builtAt time.Time
-	payload string
-}
-
-type icsFeedCache struct {
-	mu      sync.RWMutex
-	entries map[string]*icsCacheEntry
-	ttl     time.Duration
-}
-
-func newICSFeedCache(ttl time.Duration) *icsFeedCache {
-	return &icsFeedCache{entries: make(map[string]*icsCacheEntry), ttl: ttl}
-}
-
-func (c *icsFeedCache) get(token string) (string, bool) {
-	c.mu.RLock()
-	e, ok := c.entries[token]
-	c.mu.RUnlock()
-	if !ok || time.Since(e.builtAt) > c.ttl {
-		return "", false
-	}
-	return e.payload, true
-}
-
-func (c *icsFeedCache) set(token, payload string) {
-	c.mu.Lock()
-	c.entries[token] = &icsCacheEntry{builtAt: time.Now(), payload: payload}
-	c.mu.Unlock()
-}
-
-func (c *icsFeedCache) invalidate(token string) {
-	c.mu.Lock()
-	delete(c.entries, token)
-	c.mu.Unlock()
-}
-
-// ── Handlers ──────────────────────────────────────────────────────────────────
-
-// serveICSFeed handles GET /shares/{token}.ics — the public, unauthenticated
-// calendar feed. It is dispatched from handleGetShareProjection when the token
-// path value carries the .ics suffix (Go 1.22 mux wildcards span the whole
-// segment, so the suffix arrives inside {token}).
-//
-// The feed serves live data scoped server-side to the share's timeline — or,
-// for member feeds, to one member's assigned activities. There is no password
-// gate: calendar clients cannot unlock interactively, so the unguessable token
-// is the secret and revocation is rotate-or-delete.
-func (s *Server) serveICSFeed(w http.ResponseWriter, r *http.Request, token string) {
-	share, err := s.shares.GetByToken(token)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load share")
-		return
-	}
-	// A view share is not a feed — 404 rather than leaking that the token
-	// exists in another mode.
-	if share.Kind != models.ShareKindICS {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
-		return
-	}
-	if share.RevokedAt != nil {
-		writeError(w, http.StatusGone, "GONE", "this share has been revoked")
-		return
-	}
-	if share.ExpiresAt != nil && time.Now().After(*share.ExpiresAt) {
-		writeError(w, http.StatusGone, "GONE", "this share has expired")
-		return
-	}
-
-	// Archived timeline → the feed stops serving (Phase 13.5). 404, not 410:
-	// unarchiving must resurrect the feed, and 410 makes calendar clients
-	// drop the subscription for good. Checked before the cache read so
-	// archiving takes effect immediately.
-	if !s.shareTimelineLive(w, share) {
-		return
-	}
-
-	body, ok := s.icsCache.get(token)
-	if !ok {
-		body, err = s.buildICSFeed(share)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to build calendar feed")
-			return
-		}
-		s.icsCache.set(token, body)
-	}
-
-	go func() { _ = s.shares.RecordView(share.ID) }()
-	w.Header().Set("Content-Type", "text/calendar; charset=utf-8")
-	// no-store: the token is the secret and rotate/delete is the only kill
-	// switch for a feed, so a revoked URL must not keep serving from browser
-	// or proxy caches. Server-side load is already absorbed by icsCache.
-	w.Header().Set("Cache-Control", "no-store")
-	_, _ = w.Write([]byte(body))
-}
-
-// buildICSFeed renders the iCalendar document for an ICS share. Scope is
-// hard-locked server-side: the timeline comes from the share row, and member
-// feeds drop every activity the member is not assigned to before
-// serialization.
-//
-// Each VEVENT projects the activity's display fields: status (+ percent
-// complete), assignee display names, and tag names go into DESCRIPTION (and
-// tags into CATEGORIES); whole-timeline feeds also append assignee names to
-// SUMMARY so the month grid shows who owns what. Member display names are the
-// only person-identifying field a feed may carry — never emails, user IDs, or
-// roles.
-func (s *Server) buildICSFeed(share *models.Share) (string, error) {
-	timeline, err := s.timelines.GetByID(share.TimelineID)
-	if err != nil {
-		return "", err
-	}
-
-	acts, err := s.activities.ListByTimeline(share.TimelineID, nil, nil, false)
-	if err != nil {
-		return "", err
-	}
-
-	// Display-name / tag / status lookups for the event field projection.
-	statuses, err := s.statuses.ListStatuses(share.TimelineID)
-	if err != nil {
-		return "", err
-	}
-	statusName := make(map[string]string, len(statuses))
-	for _, st := range statuses {
-		statusName[st.ID] = st.Name
-	}
-	members, err := s.teams.ListMembers(timeline.TeamID)
-	if err != nil {
-		return "", err
-	}
-	memberName := make(map[string]string, len(members))
-	for _, m := range members {
-		if m.DisplayName != "" {
-			memberName[m.ID] = m.DisplayName
-		}
-	}
-	tags, err := s.tags.ListByTeam(timeline.TeamID)
-	if err != nil {
-		return "", err
-	}
-	tagName := make(map[string]string, len(tags))
-	for _, tg := range tags {
-		tagName[tg.ID] = tg.Name
-	}
-
-	memberScoped := share.Scope != nil && *share.Scope == models.ShareScopeMember && share.MemberID != nil
-
-	name := timeline.Name
-	if memberScoped {
-		filtered := acts[:0]
-		for _, a := range acts {
-			for _, id := range a.AssignedMemberIDs {
-				if id == *share.MemberID {
-					filtered = append(filtered, a)
-					break
-				}
-			}
-		}
-		acts = filtered
-
-		if n, ok := memberName[*share.MemberID]; ok {
-			name = timeline.Name + " — " + n
-		}
-	}
-
-	// A member feed is one person's calendar — repeating their name on every
-	// event is noise. The whole-timeline feed is the team overview, where
-	// who-owns-what belongs in the month grid.
-	events := activitiesToICSEvents(acts, memberName, tagName, statusName, !memberScoped)
-	return ics.Calendar(name, events), nil
-}
-
-// activitiesToICSEvents projects activities into iCalendar VEVENTs. Each
-// event's DESCRIPTION carries structured field lines (status + percent
-// complete, assignee display names, tag names) followed by the free-text
-// activity description; CATEGORIES carries tag names. If
-// includeAssigneesInSummary is set, assignee names are appended to SUMMARY.
-func activitiesToICSEvents(acts []*models.Activity, memberName, tagName, statusName map[string]string, includeAssigneesInSummary bool) []ics.Event {
-	events := make([]ics.Event, 0, len(acts))
-	for _, a := range acts {
-		assignees := make([]string, 0, len(a.AssignedMemberIDs))
-		for _, id := range a.AssignedMemberIDs {
-			if n, ok := memberName[id]; ok {
-				assignees = append(assignees, n)
-			}
-		}
-		tagNames := make([]string, 0, len(a.TagIDs))
-		for _, id := range a.TagIDs {
-			if n, ok := tagName[id]; ok {
-				tagNames = append(tagNames, n)
-			}
-		}
-
-		summary := a.Title
-		if includeAssigneesInSummary && len(assignees) > 0 {
-			summary += " — " + strings.Join(assignees, ", ")
-		}
-
-		// Structured field lines first, then a blank line, then the
-		// free-text activity description.
-		meta := make([]string, 0, 3)
-		if a.StatusID != nil {
-			if n, ok := statusName[*a.StatusID]; ok {
-				line := "Status: " + n
-				if a.PercentComplete != nil {
-					line += fmt.Sprintf(" (%d%%)", *a.PercentComplete)
-				}
-				meta = append(meta, line)
-			}
-		} else if a.PercentComplete != nil {
-			meta = append(meta, fmt.Sprintf("Progress: %d%%", *a.PercentComplete))
-		}
-		if len(assignees) > 0 {
-			meta = append(meta, "Assigned: "+strings.Join(assignees, ", "))
-		}
-		if len(tagNames) > 0 {
-			meta = append(meta, "Tags: "+strings.Join(tagNames, ", "))
-		}
-		desc := strings.Join(meta, "\n")
-		if a.Description != nil && *a.Description != "" {
-			if desc != "" {
-				desc += "\n\n"
-			}
-			desc += *a.Description
-		}
-
-		events = append(events, ics.Event{
-			UID:         a.ID + "@draba",
-			Summary:     summary,
-			Description: desc,
-			Categories:  tagNames,
-			Start:       a.StartAt,
-			End:         a.EndAt,
-			Stamp:       a.UpdatedAt,
-		})
-	}
-	return events
-}
-
-// handleGetShareICSNamed handles GET /shares/{token}/{file}. The file segment
-// must end in .ics but is otherwise cosmetic: most calendar clients
-// (Thunderbird included) default the new calendar's name from the URL's
-// filename, so the modal links carry a readable slug (e.g. .../sales-kick-off.ics).
-// The token alone is authoritative.
-func (s *Server) handleGetShareICSNamed(w http.ResponseWriter, r *http.Request) {
-	if !strings.HasSuffix(r.PathValue("file"), ".ics") {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
-		return
-	}
-	s.serveICSFeed(w, r, r.PathValue("token"))
-}
-
-// handleRegenerateShare handles POST /shares/{id}/regenerate. It rotates the
-// share's token, immediately invalidating the old URL — the revocation story
-// for ICS feeds, which cannot carry a password. It works for view shares too
-// (rotating is strictly safer than nothing), and any member of the timeline's
-// team may do it, consistent with PATCH/DELETE.
-func (s *Server) handleRegenerateShare(w http.ResponseWriter, r *http.Request) {
-	shareID := r.PathValue("id")
-
-	share, err := s.shares.GetByID(shareID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
-		return
-	}
-
-	timeline, err := s.timelines.GetByID(share.TimelineID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
-		return
-	}
-	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
-		return
-	}
-
-	oldToken := share.Token
-	share.Token = newToken()
-	if err := s.shares.RotateToken(share.ID, share.Token); err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to regenerate share link")
-		return
-	}
-
-	// Kill both caches for the dead token so it stops serving immediately.
-	s.shareCache.invalidate(oldToken)
-	s.icsCache.invalidate(oldToken)
-
-	writeJSON(w, http.StatusOK, share)
-}
-````
-
 ## File: packages/api/internal/models/models.go
 ````go
 // Package models holds the domain types shared across the API, db,
@@ -59477,6 +58935,1121 @@ type Invite struct {
 }
 ````
 
+## File: packages/web/src/components/export/PresentationFrame.tsx
+````typescript
+/**
+ * PresentationFrame — an isolated, always-light document used as the shared
+ * render surface for the visual exports (Phase 14.3 PNG; Phase 14.4 HTML/print).
+ *
+ * The earlier 14.3 approach mounted the clean snapshot inside the live dashboard
+ * and forced light mode by toggling the `dark` class on the page's own `<html>`.
+ * That repainted the visible dashboard (the "flicker") and left some elements —
+ * the ones that paint from inline `var(--muted)`/`var(--card)` (kanban column
+ * boxes, the Gantt sticky left rail) — stuck on dark, because html-to-image
+ * can't reliably resolve theme CSS variables that hang off a `.dark` class on
+ * the document root.
+ *
+ * This component sidesteps both by rendering the snapshot into a same-origin
+ * `<iframe>` that is its own document: the parent's stylesheets and fonts are
+ * cloned into it (so Tailwind utilities, the `:root` design tokens, and Open
+ * Sans all apply), and its `<html>` never receives the `.dark` class. The result
+ * is structurally light — no class toggling on the live page (no flicker), and
+ * every `var()` reference resolves against a `:root` with no dark override in
+ * scope (no leftover dark boxes).
+ *
+ * Stylesheets are copied by cloning the `<style>`/`<link>` nodes rather than
+ * reading `document.styleSheets[].cssRules`, which avoids the cross-origin
+ * `SecurityError` the Google Fonts stylesheet otherwise triggers.
+ *
+ * The same frame is the surface Phase 14.4 reuses: `iframe.contentWindow.print()`
+ * for the printable-PDF route and serialization of `contentDocument` for the
+ * HTML download (htmlExport inlines same-origin stylesheet links at serialize
+ * time, since cloned `<link>` hrefs don't survive a save-to-disk) — one render
+ * path, shared with the Phase 13 share viewer's components, no second harness
+ * to drift.
+ */
+
+import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { createPortal } from 'react-dom'
+import { forceLightDocumentElement, PRESENTATION_BACKGROUND } from '@/lib/presentationTheme'
+
+export interface PresentationFrameProps {
+  /**
+   * Invoked once the frame's document is ready (styles copied, light theme
+   * applied, body available). Pass the body to the PNG capture / HTML serialize.
+   * Memoize this in the caller so it doesn't re-run the readiness effect.
+   */
+  onReady?: (body: HTMLElement, iframe: HTMLIFrameElement) => void
+  children: ReactNode
+}
+
+/**
+ * Clones the parent document's style and stylesheet/font link nodes into the
+ * frame's head. Node-cloning (not `cssRules` serialization) is deliberate — it
+ * copies Vite's dev `<style>` blocks and prod `<link>`s alike without reading
+ * cross-origin sheets, which would throw `SecurityError` on the fonts stylesheet.
+ */
+function copyDocumentStyles(srcDoc: Document, destDoc: Document): void {
+  const selector = [
+    'style',
+    'link[rel="stylesheet"]',
+    'link[rel="preconnect"]',
+    'link[as="style"]',
+    'link[href*="fonts.googleapis"]',
+    'link[href*="fonts.gstatic"]',
+  ].join(',')
+  srcDoc.querySelectorAll(selector).forEach(node => {
+    destDoc.head.appendChild(node.cloneNode(true))
+  })
+}
+
+export default function PresentationFrame({ onReady, children }: PresentationFrameProps) {
+  const iframeRef = useRef<HTMLIFrameElement>(null)
+  const [body, setBody] = useState<HTMLElement | null>(null)
+
+  useEffect(() => {
+    const iframe = iframeRef.current
+    const doc = iframe?.contentDocument
+    if (!iframe || !doc) return
+
+    // Never dark: the snapshot must be light regardless of the user's theme,
+    // and we deliberately do not touch the parent <html> (that caused the flicker).
+    forceLightDocumentElement(doc)
+    copyDocumentStyles(document, doc)
+    doc.body.style.margin = '0'
+    doc.body.style.padding = '0'
+    doc.body.style.background = PRESENTATION_BACKGROUND
+    // Shrink-wrap to the content so scrollWidth/scrollHeight at capture time is
+    // the view's full natural extent, not the iframe viewport.
+    doc.body.style.display = 'inline-block'
+    setBody(doc.body)
+  }, [])
+
+  useEffect(() => {
+    if (body && iframeRef.current) onReady?.(body, iframeRef.current)
+  }, [body, onReady])
+
+  return (
+    <>
+      {/*
+        Positioned at the viewport origin (not an extreme off-screen offset) so
+        the browser actually paints/lays out the content — Chrome culls layout
+        for nodes placed absurdly far outside any viewport, which left earlier
+        captures blank. z-index -1 tucks it behind the export dialog's backdrop
+        (z-1000), the only thing rendered alongside it, so it's never visible.
+        Sized generously so width-flexible content lays out fully; the capture
+        reads the body's own scroll extent regardless of this box.
+      */}
+      <iframe
+        ref={iframeRef}
+        title="Export presentation surface"
+        aria-hidden
+        // Defense-in-depth: nothing is ever given a src/srcdoc (stays
+        // about:blank), but scripts and top-level navigation are blocked
+        // outright in case that ever changes.
+        sandbox="allow-same-origin"
+        style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          width: 1440,
+          height: 900,
+          border: 0,
+          zIndex: -1,
+          pointerEvents: 'none',
+        }}
+      />
+      {body && createPortal(children, body)}
+    </>
+  )
+}
+````
+
+## File: packages/web/src/lib/exportCapabilities.test.ts
+````typescript
+/**
+ * exportCapabilities — unit tests for getExportFormats and buildExportFilename.
+ */
+
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { getExportFormats, buildExportFilename } from './exportCapabilities'
+
+describe('getExportFormats', () => {
+  it('returns data formats + PNG + printable/HTML (6) for gantt', () => {
+    const formats = getExportFormats('gantt')
+    expect(formats).toHaveLength(6)
+    const ids = formats.map(f => f.id)
+    expect(ids).toContain('csv')
+    expect(ids).toContain('xlsx')
+    expect(ids).toContain('ics')
+    expect(ids).toContain('png')
+    expect(ids).toContain('printable')
+    expect(ids).toContain('html')
+    expect(ids).not.toContain('markdown')
+    expect(ids).not.toContain('clipboard')
+  })
+
+  it('returns data + PNG + printable/HTML + text formats (9) for list, kanban, calendar', () => {
+    const views = ['list', 'kanban', 'calendar'] as const
+    for (const view of views) {
+      const formats = getExportFormats(view)
+      expect(formats).toHaveLength(9)
+      const ids = formats.map(f => f.id)
+      expect(ids).toContain('csv')
+      expect(ids).toContain('xlsx')
+      expect(ids).toContain('ics')
+      expect(ids).toContain('png')
+      expect(ids).toContain('printable')
+      expect(ids).toContain('html')
+      expect(ids).toContain('markdown')
+      expect(ids).toContain('plaintext')
+      expect(ids).toContain('clipboard')
+    }
+  })
+
+  it('each descriptor has required fields', () => {
+    const allFormats = getExportFormats('list') // superset — includes text formats
+    for (const f of allFormats) {
+      expect(f.id).toBeTruthy()
+      expect(f.name).toBeTruthy()
+      expect(f.desc).toBeTruthy()
+      expect(typeof f.scope).toBe('boolean')
+      expect(['download', 'copy', 'print']).toContain(f.verb)
+      expect(typeof f.clientSide).toBe('boolean')
+      // ext may be empty string for clipboard/printable
+      if (f.id !== 'clipboard' && f.id !== 'printable') {
+        expect(f.ext).toMatch(/^\.[a-z]+$/)
+      }
+    }
+  })
+
+  it('server-side formats have scope=true', () => {
+    const formats = getExportFormats('list')
+    const serverFormats = formats.filter(f => !f.clientSide)
+    for (const f of serverFormats) {
+      expect(f.scope).toBe(true)
+    }
+  })
+
+  it('client-side formats have scope=false and clientSide=true', () => {
+    const formats = getExportFormats('list')
+    const clientFormats = formats.filter(f => f.clientSide)
+    expect(clientFormats).toHaveLength(6) // png + printable + html + markdown + plaintext + clipboard
+    for (const f of clientFormats) {
+      expect(f.scope).toBe(false)
+      expect(f.clientSide).toBe(true)
+    }
+  })
+
+  it('clipboard has copy verb, printable has print verb, others have download', () => {
+    const formats = getExportFormats('list')
+    const clipboard = formats.find(f => f.id === 'clipboard')
+    expect(clipboard?.verb).toBe('copy')
+    const printable = formats.find(f => f.id === 'printable')
+    expect(printable?.verb).toBe('print')
+    const rest = formats.filter(f => f.id !== 'clipboard' && f.id !== 'printable')
+    for (const f of rest) {
+      expect(f.verb).toBe('download')
+    }
+  })
+})
+
+describe('buildExportFilename', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-06-16T00:00:00Z'))
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('slugifies the name and appends the date and extension', () => {
+    expect(buildExportFilename('Sales Kick-Off 2026', '.csv')).toBe('sales-kick-off-2026-2026-06-16.csv')
+  })
+
+  it('strips uppercase and special characters', () => {
+    expect(buildExportFilename('My "Timeline"!', '.xlsx')).toBe('my-timeline-2026-06-16.xlsx')
+  })
+
+  it('falls back to "timeline" when the name is empty or all punctuation', () => {
+    expect(buildExportFilename('', '.csv')).toBe('timeline-2026-06-16.csv')
+    expect(buildExportFilename('---', '.ics')).toBe('timeline-2026-06-16.ics')
+  })
+
+  it('preserves numbers and hyphens in the slug', () => {
+    expect(buildExportFilename('Q1 2026', '.csv')).toBe('q1-2026-2026-06-16.csv')
+  })
+
+  it('inserts the view segment when a view is given', () => {
+    expect(buildExportFilename('Sales Kick-Off', '.png', 'kanban')).toBe('sales-kick-off-kanban-2026-06-16.png')
+  })
+
+  it('omits the view segment when no view is given', () => {
+    expect(buildExportFilename('Sales Kick-Off', '.png')).toBe('sales-kick-off-2026-06-16.png')
+  })
+})
+````
+
+## File: packages/web/src/lib/exportCapabilities.ts
+````typescript
+/**
+ * Export format descriptors for the Export dialog (Phase 14).
+ *
+ * One dialog serves all views (Gantt/List/Kanban/Calendar); format
+ * availability and per-format copy is driven by this descriptor array so a
+ * future view or format is an addition here, not a dialog redesign
+ * (docs/design/handoffs/export-modal).
+ *
+ * 14.1: CSV, Excel, ICS (server-side, all views).
+ * 14.2: Markdown, Plain text, Copy to clipboard (client-side, List/Kanban/Calendar only).
+ * 14.3: PNG snapshot (client-side DOM rasterization, all views).
+ * 14.4: Printable view (browser print → vector PDF), HTML save (client-side, all views).
+ */
+
+import {
+  Table, FileSpreadsheet, CalendarPlus, FileText, AlignLeft, Copy, Image, Printer, FileCode,
+  type LucideIcon,
+} from 'lucide-react'
+
+export type ExportFormatId = 'csv' | 'xlsx' | 'ics' | 'png' | 'markdown' | 'plaintext' | 'clipboard' | 'printable' | 'html'
+export type ExportViewType = 'gantt' | 'list' | 'calendar' | 'kanban'
+
+export interface ExportFormatDescriptor {
+  id: ExportFormatId
+  name: string
+  icon: LucideIcon
+  /** One-line description shown in the options pane. */
+  desc: string
+  /** File extension, including the leading dot. Used as the download filename suffix. */
+  ext: string
+  /** Data formats (CSV/Excel/ICS) show the "current view vs entire timeline" scope picker. */
+  scope: boolean
+  /**
+   * Primary action verb.
+   * 'download' → "Download <ext>" button.
+   * 'copy'     → "Copy to clipboard" button with "Copied!" flash.
+   * 'print'    → "Print…" button that opens the browser's print dialog.
+   */
+  verb: 'download' | 'copy' | 'print'
+  /** True for formats generated client-side (no API call). */
+  clientSide: boolean
+}
+
+/** Data/calendar formats — server-side, available in every view. */
+const DATA_FORMATS: ExportFormatDescriptor[] = [
+  {
+    id: 'csv',
+    name: 'CSV',
+    icon: Table,
+    ext: '.csv',
+    scope: true,
+    verb: 'download',
+    clientSide: false,
+    desc: 'A plain spreadsheet file — opens in Excel, Google Sheets, or Numbers.',
+  },
+  {
+    id: 'xlsx',
+    name: 'Excel',
+    icon: FileSpreadsheet,
+    ext: '.xlsx',
+    scope: true,
+    verb: 'download',
+    clientSide: false,
+    desc: 'A formatted workbook for Excel, Google Sheets, or Numbers.',
+  },
+  {
+    id: 'ics',
+    name: 'Calendar (.ics)',
+    icon: CalendarPlus,
+    ext: '.ics',
+    scope: true,
+    verb: 'download',
+    clientSide: false,
+    desc: 'An iCalendar file — import into Google Calendar, Outlook, or Apple Calendar.',
+  },
+]
+
+/** Image format — client-side DOM rasterization, available in every view. */
+const IMAGE_FORMATS: ExportFormatDescriptor[] = [
+  {
+    id: 'png',
+    name: 'PNG image',
+    icon: Image,
+    ext: '.png',
+    scope: false,
+    verb: 'download',
+    clientSide: true,
+    desc: 'A snapshot of this view, full scrollable extent, for a slide deck or doc.',
+  },
+]
+
+/**
+ * Presentation formats — client-side, reuse the PresentationFrame surface
+ * (Phase 14.4), available in every view.
+ */
+const PRESENTATION_FORMATS: ExportFormatDescriptor[] = [
+  {
+    id: 'printable',
+    name: 'Printable view',
+    icon: Printer,
+    ext: '',
+    scope: false,
+    verb: 'print',
+    clientSide: true,
+    desc: 'Opens your browser’s print dialog on a clean, paginated version of this view — choose "Save as PDF" there for a vector file with selectable text.',
+  },
+  {
+    id: 'html',
+    name: 'HTML file',
+    icon: FileCode,
+    ext: '.html',
+    scope: false,
+    verb: 'download',
+    clientSide: true,
+    desc: 'A standalone HTML file with styles inlined — opens in any browser without draba.',
+  },
+]
+
+/** Textual formats — client-side, not available on Gantt (no sensible flat text shape). */
+const TEXT_FORMATS: ExportFormatDescriptor[] = [
+  {
+    id: 'markdown',
+    name: 'Markdown',
+    icon: FileText,
+    ext: '.md',
+    scope: false,
+    verb: 'download',
+    clientSide: true,
+    desc: 'GitHub-flavored Markdown — paste into a README, Notion, or any Markdown editor.',
+  },
+  {
+    id: 'plaintext',
+    name: 'Plain text',
+    icon: AlignLeft,
+    ext: '.txt',
+    scope: false,
+    verb: 'download',
+    clientSide: true,
+    desc: 'Space-aligned plain text — works in any text editor or monospace environment.',
+  },
+  {
+    id: 'clipboard',
+    name: 'Copy to clipboard',
+    icon: Copy,
+    ext: '',
+    scope: false,
+    verb: 'copy',
+    clientSide: true,
+    desc: 'Copies both rich (HTML) and plain text so paste lands formatted in Slack, Word, or Google Docs.',
+  },
+]
+
+/**
+ * Returns the export formats available for a given view.
+ * PNG and the presentation formats (printable view, HTML) are available
+ * everywhere (14.3/14.4). Gantt has no sensible flat text representation,
+ * so it skips the textual formats (14.2).
+ */
+export function getExportFormats(view: ExportViewType): ExportFormatDescriptor[] {
+  if (view === 'gantt') return [...DATA_FORMATS, ...IMAGE_FORMATS, ...PRESENTATION_FORMATS]
+  return [...DATA_FORMATS, ...IMAGE_FORMATS, ...PRESENTATION_FORMATS, ...TEXT_FORMATS]
+}
+
+/**
+ * Builds the download filename for a format:
+ * `<timeline-slug>[-<view>]-<yyyy-mm-dd><ext>`.
+ * Matches the filename chip shown in the export dialog's options pane. The view
+ * segment is included when given so a file names the view it came from (e.g.
+ * `sales-kick-off-kanban-2026-06-30.png`).
+ */
+export function buildExportFilename(timelineName: string, ext: string, view?: ExportViewType): string {
+  const slug = timelineName
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+  const date = new Date().toISOString().slice(0, 10)
+  const viewSegment = view ? `-${view}` : ''
+  return `${slug || 'timeline'}${viewSegment}-${date}${ext}`
+}
+````
+
+## File: packages/api/internal/api/server.go
+````go
+// Package api hosts the HTTP handlers, routing, and middleware for the
+// draba REST API. Handlers are intentionally thin: they decode requests,
+// delegate to repositories and services, and write responses. Business
+// logic belongs in the domain packages, not here.
+package api
+
+import (
+	"fmt"
+	"io/fs"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/auth"
+	"github.com/I0-1O/draba/packages/api/internal/db"
+	"github.com/I0-1O/draba/packages/api/internal/events"
+	"github.com/I0-1O/draba/packages/api/internal/mailer"
+	"github.com/I0-1O/draba/packages/api/internal/models"
+	"github.com/I0-1O/draba/packages/api/internal/tier"
+	"github.com/I0-1O/draba/packages/api/internal/ws"
+)
+
+// TimelineStore is the persistence interface required by timeline handlers.
+// The concrete implementation is *db.TimelineRepo; tests may substitute a fake.
+type TimelineStore interface {
+	Create(t *models.Timeline) error
+	GetByID(id string) (*models.Timeline, error)
+	GetByShareToken(token string) (*models.Timeline, error)
+	ListByTeam(teamID string, includeArchived bool) ([]*models.Timeline, error)
+	HasAccess(timelineID, teamMemberID string) (bool, error)
+	GrantAccess(timelineID, teamMemberID, role string) error
+	RevokeAccess(timelineID, teamMemberID string) error
+	GetAccessRole(timelineID, teamMemberID string) (string, error)
+	ListAccess(timelineID string) ([]*models.TimelineAccessEntry, error)
+	SetArchived(id string, at *time.Time) error
+	Update(t *models.Timeline) error
+	Delete(id string) error
+}
+
+// Server holds shared dependencies for all HTTP handlers.
+type Server struct {
+	users          *db.UserRepo
+	invites        *db.InviteRepo
+	teams          *db.TeamRepo
+	activities     *db.ActivityRepo
+	timelines      TimelineStore
+	savedFilters   *db.SavedFilterRepo
+	preferences    *db.UserPreferenceRepo
+	apiTokens      *db.APITokenRepo
+	instanceSets   *db.InstanceSettingsRepo
+	passwordTokens *db.PasswordResetTokenRepo
+	statuses       *db.StatusRepo
+	tags           *db.TagRepo
+	shares         *db.ShareRepo
+	shareCache     *shareCache
+	icsCache       *icsFeedCache
+	unlockLimiter  *rateLimiter
+	mailer         *mailer.Mailer
+	tokens         *auth.TokenService
+	tier           tier.Tier
+	bus            *events.Bus
+	hub            *ws.Hub
+	uiFS           fs.FS
+	// oidc is non-nil only when SSO is configured (DRABA_OIDC_ISSUER set).
+	// When nil, the /auth/oidc/* routes report SSO as disabled and no external
+	// identity provider is ever contacted. Set via WithOIDC.
+	oidc *auth.OIDCService
+	// oidcAutoCreateUsers controls whether an unknown external identity is
+	// auto-provisioned a local account on first SSO login.
+	oidcAutoCreateUsers bool
+}
+
+// NewServer constructs a Server with its required dependencies. It does not
+// touch the network; call Routes to obtain the http.Handler to serve.
+func NewServer(
+	users *db.UserRepo,
+	invites *db.InviteRepo,
+	teams *db.TeamRepo,
+	activitiesRepo *db.ActivityRepo,
+	timelinesRepo TimelineStore,
+	savedFiltersRepo *db.SavedFilterRepo,
+	preferencesRepo *db.UserPreferenceRepo,
+	apiTokensRepo *db.APITokenRepo,
+	instanceSetsRepo *db.InstanceSettingsRepo,
+	passwordTokensRepo *db.PasswordResetTokenRepo,
+	statusesRepo *db.StatusRepo,
+	tagsRepo *db.TagRepo,
+	sharesRepo *db.ShareRepo,
+	m *mailer.Mailer,
+	tokens *auth.TokenService,
+	t tier.Tier,
+	bus *events.Bus,
+	hub *ws.Hub,
+) *Server {
+	// Both public-share caches share the DRABA_SHARE_CACHE_TTL setting.
+	sc := newShareCache()
+	return &Server{
+		users:          users,
+		invites:        invites,
+		teams:          teams,
+		activities:     activitiesRepo,
+		timelines:      timelinesRepo,
+		savedFilters:   savedFiltersRepo,
+		preferences:    preferencesRepo,
+		apiTokens:      apiTokensRepo,
+		instanceSets:   instanceSetsRepo,
+		passwordTokens: passwordTokensRepo,
+		statuses:       statusesRepo,
+		tags:           tagsRepo,
+		shares:         sharesRepo,
+		shareCache:     sc,
+		icsCache:       newICSFeedCache(sc.ttl),
+		unlockLimiter:  newRateLimiter(unlockMaxAttempts, time.Hour),
+		mailer:         m,
+		tokens:         tokens,
+		tier:           t,
+		bus:            bus,
+		hub:            hub,
+	}
+}
+
+// WithUI registers an embedded React SPA to be served at GET /. The FS must
+// be rooted at the build output directory (i.e. contain index.html directly).
+// When called, all unmatched GET paths fall back to index.html so React Router
+// handles client-side navigation. Safe to skip in dev (no-op when not called).
+func (s *Server) WithUI(uiFS fs.FS) *Server {
+	s.uiFS = uiFS
+	return s
+}
+
+// WithOIDC enables SSO. Passing a nil service leaves SSO disabled (the zero
+// value), so callers can wire it unconditionally from a possibly-nil
+// constructor result. autoCreate controls first-login auto-provisioning.
+func (s *Server) WithOIDC(svc *auth.OIDCService, autoCreate bool) *Server {
+	s.oidc = svc
+	s.oidcAutoCreateUsers = autoCreate
+	return s
+}
+
+// oidcAutoCreate reports whether unknown external identities are provisioned a
+// local account on first SSO login.
+func (s *Server) oidcAutoCreate() bool { return s.oidcAutoCreateUsers }
+
+// Routes returns the fully-wired HTTP handler for the API, including all
+// core routes plus any routes added by registered tier modules.
+func (s *Server) Routes() http.Handler {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("GET /setup/status", s.handleSetupStatus)
+	mux.HandleFunc("GET /version", s.handleVersion)
+
+	mux.HandleFunc("POST /auth/register", s.handleRegister)
+	mux.HandleFunc("POST /auth/login", s.handleLogin)
+	mux.HandleFunc("POST /auth/refresh", s.handleRefresh)
+	mux.HandleFunc("GET /auth/me", chain(s.handleMe, s.authMiddleware))
+	mux.HandleFunc("POST /auth/forgot-password", s.handleForgotPassword)
+	mux.HandleFunc("POST /auth/reset-password", s.handleResetPassword)
+	// OIDC / SSO. Public (no auth): they start and complete the external login
+	// flow. Both report SSO disabled with 404 when DRABA_OIDC_ISSUER is unset.
+	mux.HandleFunc("GET /auth/oidc/login", s.handleOIDCLogin)
+	mux.HandleFunc("GET /auth/oidc/callback", s.handleOIDCCallback)
+
+	mux.HandleFunc("GET /users/me/preferences", chain(s.handleGetPreferences, s.authMiddleware))
+	mux.HandleFunc("PUT /users/me/preferences", chain(s.handleUpsertPreference, s.authMiddleware))
+	mux.HandleFunc("GET /users/me/stats", chain(s.handleGetMyStats, s.authMiddleware))
+	mux.HandleFunc("PATCH /users/me", chain(s.handleUpdateProfile, s.authMiddleware))
+	mux.HandleFunc("PUT /users/me/password", chain(s.handleChangePassword, s.authMiddleware))
+
+	mux.HandleFunc("GET /admin/smtp", chain(s.handleGetSMTP, s.authMiddleware))
+	mux.HandleFunc("PUT /admin/smtp", chain(s.handlePutSMTP, s.authMiddleware))
+	mux.HandleFunc("POST /admin/smtp/test", chain(s.handleTestSMTP, s.authMiddleware))
+	mux.HandleFunc("DELETE /admin/smtp", chain(s.handleDeleteSMTP, s.authMiddleware))
+	mux.HandleFunc("GET /admin/settings", chain(s.handleGetAdminSettings, s.authMiddleware))
+	mux.HandleFunc("PATCH /admin/settings", chain(s.handlePatchAdminSettings, s.authMiddleware))
+	mux.HandleFunc("GET /admin/users", chain(s.handleListAdminUsers, s.authMiddleware))
+
+	// Public — no auth required; used by the login page and shared views.
+	mux.HandleFunc("GET /settings/branding", s.handleGetPublicBranding)
+
+	mux.HandleFunc("POST /tokens", chain(s.handleCreateAPIToken, s.authMiddleware))
+	mux.HandleFunc("GET /tokens", chain(s.handleListAPITokens, s.authMiddleware))
+	mux.HandleFunc("DELETE /tokens/{id}", chain(s.handleDeleteAPIToken, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams", chain(s.handleListTeams, s.authMiddleware))
+	mux.HandleFunc("POST /teams", chain(s.handleCreateTeam, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}", chain(s.handleGetTeam, s.authMiddleware))
+	mux.HandleFunc("PATCH /teams/{id}", chain(s.handleUpdateTeam, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/archive", chain(s.handleArchiveTeam, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/unarchive", chain(s.handleUnarchiveTeam, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/invites", chain(s.handleCreateInvite, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/invites", chain(s.handleListInvites, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/invites/{inviteId}", chain(s.handleDeleteInvite, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/invite-link", chain(s.handleCreateInviteLink, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/invite-link/reset", chain(s.handleResetInviteLink, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/invite-link", chain(s.handleGetInviteLink, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/invite-link", chain(s.handleDeleteInviteLink, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/members", chain(s.handleListMembers, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/members/{memberId}", chain(s.handleGetMember, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/members/{memberId}/stats", chain(s.handleGetMemberStats, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/members", chain(s.handleAddMember, s.authMiddleware))
+	mux.HandleFunc("PATCH /teams/{id}/members/{memberId}", chain(s.handleUpdateMember, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/members/{memberId}", chain(s.handleDeleteMember, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/members/{memberId}/archive", chain(s.handleArchiveMember, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/members/{memberId}/unarchive", chain(s.handleUnarchiveMember, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/participants", chain(s.handleCreateParticipant, s.authMiddleware))
+	mux.HandleFunc("GET /users/search", chain(s.handleSearchUsers, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/promote", chain(s.handlePromoteUser, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/archive", chain(s.handleArchiveUser, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/unarchive", chain(s.handleUnarchiveUser, s.authMiddleware))
+	mux.HandleFunc("POST /users/{id}/revoke", chain(s.handleRevokeUser, s.authMiddleware))
+	mux.HandleFunc("DELETE /users/{id}", chain(s.handleDeleteUser, s.authMiddleware))
+	// Activity routes use the team-scoped prefix (GET /teams/{id}/timelines/{timelineId}/...)
+	// to avoid a Go 1.22 mux conflict with GET /timelines/share/{token}: both are
+	// 3-segment GET paths and neither is more specific when the third segment differs.
+	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/activities", chain(s.handleCreateActivity, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/activities", chain(s.handleListActivities, s.authMiddleware))
+	mux.HandleFunc("PATCH /activities/{id}", chain(s.handleUpdateActivity, s.authMiddleware))
+	mux.HandleFunc("DELETE /activities/{id}", chain(s.handleDeleteActivity, s.authMiddleware))
+	mux.HandleFunc("POST /activities/{id}/archive", chain(s.handleArchiveActivity, s.authMiddleware))
+	mux.HandleFunc("POST /activities/{id}/unarchive", chain(s.handleUnarchiveActivity, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/tags", chain(s.handleListTags, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/tags", chain(s.handleCreateTag, s.authMiddleware))
+	mux.HandleFunc("PATCH /tags/{id}", chain(s.handleUpdateTag, s.authMiddleware))
+	mux.HandleFunc("DELETE /tags/{id}", chain(s.handleDeleteTag, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/saved_filters/all", chain(s.handleListAllTeamSavedFilters, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/saved_filters", chain(s.handleListSavedFilters, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/saved_filters", chain(s.handleCreateSavedFilter, s.authMiddleware))
+	mux.HandleFunc("PATCH /saved_filters/{id}", chain(s.handleUpdateSavedFilter, s.authMiddleware))
+	mux.HandleFunc("DELETE /saved_filters/{id}", chain(s.handleDeleteSavedFilter, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/status-templates", chain(s.handleListStatusTemplates, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/status-templates", chain(s.handleCreateStatusTemplate, s.authMiddleware))
+	mux.HandleFunc("PATCH /status-templates/{id}", chain(s.handleUpdateStatusTemplate, s.authMiddleware))
+	mux.HandleFunc("DELETE /status-templates/{id}", chain(s.handleDeleteStatusTemplate, s.authMiddleware))
+	mux.HandleFunc("POST /status-templates/{id}/items", chain(s.handleCreateTemplateItem, s.authMiddleware))
+	mux.HandleFunc("PATCH /status-template-items/{id}", chain(s.handleUpdateTemplateItem, s.authMiddleware))
+	mux.HandleFunc("DELETE /status-template-items/{id}", chain(s.handleDeleteTemplateItem, s.authMiddleware))
+
+	mux.HandleFunc("GET /teams/{id}/timelines", chain(s.handleListTimelines, s.authMiddleware))
+	mux.HandleFunc("POST /teams/{id}/timelines", chain(s.handleCreateTimeline, s.authMiddleware))
+	// GET /timelines/share/{token} must be registered before GET /timelines/{id} so
+	// the more-specific literal "share" segment takes precedence.
+	mux.HandleFunc("GET /timelines/share/{token}", s.handleGetTimelineByShareToken)
+	mux.HandleFunc("GET /timelines/{id}", chain(s.handleGetTimeline, s.authMiddleware))
+	// Timeline statuses are placed under /teams/{id}/timelines/{timelineId}/statuses
+	// rather than /timelines/{id}/statuses to avoid a Go 1.22 mux pattern conflict
+	// with GET /timelines/share/{token} (both are 3-segment paths and conflict on
+	// paths like /timelines/share/statuses).
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleListTimelineStatuses, s.authMiddleware))
+	mux.HandleFunc("POST /timelines/{id}/archive", chain(s.handleArchiveTimeline, s.authMiddleware))
+	mux.HandleFunc("POST /timelines/{id}/unarchive", chain(s.handleUnarchiveTimeline, s.authMiddleware))
+
+	mux.HandleFunc("PATCH /timelines/{id}", chain(s.handleUpdateTimeline, s.authMiddleware))
+	mux.HandleFunc("DELETE /timelines/{id}", chain(s.handleDeleteTimeline, s.authMiddleware))
+	// Access list routes use the team-scoped prefix to avoid a Go 1.22 mux
+	// conflict with GET /timelines/share/{token} on 3-segment GET paths.
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/access", chain(s.handleListTimelineAccess, s.authMiddleware))
+	mux.HandleFunc("PUT /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleGrantTimelineAccess, s.authMiddleware))
+	mux.HandleFunc("DELETE /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleRevokeTimelineAccess, s.authMiddleware))
+	// Timeline status CRUD — POST shares the team-scoped prefix with GET statuses.
+	// PATCH and DELETE use a flat /statuses/{id} prefix (2 segments, no conflict).
+	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleCreateTimelineStatus, s.authMiddleware))
+	mux.HandleFunc("PATCH /statuses/{id}", chain(s.handleUpdateStatus, s.authMiddleware))
+	mux.HandleFunc("DELETE /statuses/{id}", chain(s.handleDeleteStatus, s.authMiddleware))
+
+	// Share routes.
+	// GET /shares/{token} is public — no auth. The token is the credential.
+	// POST /timelines/{id}/shares uses the same /timelines/{id}/... prefix
+	// as archive/unarchive so it avoids the Go 1.22 mux pattern conflict with
+	// GET /timelines/share/{token} (only GET-method paths conflict).
+	// GET /teams/{id}/timelines/{timelineId}/shares uses the team-scoped prefix
+	// to avoid the GET conflict described above.
+	mux.HandleFunc("GET /shares/{token}", s.handleGetShareProjection)
+	mux.HandleFunc("POST /shares/{token}/unlock", s.handleUnlockShare)
+	mux.HandleFunc("POST /timelines/{id}/shares", chain(s.handleCreateShare, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/shares", chain(s.handleListShares, s.authMiddleware))
+	mux.HandleFunc("PATCH /shares/{id}", chain(s.handleUpdateShare, s.authMiddleware))
+	mux.HandleFunc("DELETE /shares/{id}", chain(s.handleDeleteShare, s.authMiddleware))
+	// Token rotation — the revocation story for ICS feeds (no password gate).
+	// GET /shares/{token}.ics is served inside handleGetShareProjection: the
+	// {token} wildcard spans the whole segment, so the .ics suffix arrives in
+	// the path value and is dispatched there.
+	mux.HandleFunc("POST /shares/{id}/regenerate", chain(s.handleRegenerateShare, s.authMiddleware))
+	// Named feed variant: the {file} slug is cosmetic (calendar clients
+	// default the calendar name from the URL filename); the token is the key.
+	mux.HandleFunc("GET /shares/{token}/{file}", s.handleGetShareICSNamed)
+
+	// Export routes (Phase 14.1).
+	// POST /timelines/{id}/export shares the /timelines/{id}/... prefix with
+	// archive/unarchive/shares — fine, since only GET-method paths conflict
+	// with GET /timelines/share/{token}.
+	// The GET convenience endpoints use the team-scoped prefix (like
+	// activities/statuses/access above) to avoid that same GET conflict:
+	// /teams/{id}/timelines/{timelineId}/export.csv is 4 segments, so it
+	// can't collide with the 3-segment GET /timelines/share/{token}.
+	mux.HandleFunc("POST /timelines/{id}/export", chain(s.handlePostTimelineExport, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/export.csv", chain(s.handleGetTimelineExportCSV, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/export.xlsx", chain(s.handleGetTimelineExportXLSX, s.authMiddleware))
+	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/export.ics", chain(s.handleGetTimelineExportICS, s.authMiddleware))
+
+	// GET /ws is intentionally outside authMiddleware — ServeWS validates the
+	// JWT itself before upgrading, because WebSocket clients can't set headers.
+	mux.HandleFunc("GET /ws", s.hub.ServeWS)
+
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	})
+
+	if s.uiFS != nil {
+		mux.Handle("GET /", spaHandler(s.uiFS))
+	}
+
+	ctx := &tier.ModuleContext{Mux: mux, Tier: s.tier}
+	for _, m := range tier.Registered() {
+		if err := m.Register(ctx); err != nil {
+			// Module registration is a startup invariant — a failure here is a programming error.
+			panic(fmt.Sprintf("tier module %q failed to register: %v", m.Name(), err))
+		}
+	}
+
+	return requestLogger(mux)
+}
+
+// chain applies a single middleware to a handler function.
+func chain(h http.HandlerFunc, m func(http.Handler) http.Handler) http.HandlerFunc {
+	return m(h).ServeHTTP
+}
+
+// spaHandler serves the embedded React SPA. Known static assets are served
+// directly; any unrecognised path falls back to index.html so React Router
+// handles client-side navigation.
+func spaHandler(uiFS fs.FS) http.Handler {
+	fserver := http.FileServer(http.FS(uiFS))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := strings.TrimPrefix(r.URL.Path, "/")
+		if path == "" {
+			path = "index.html"
+		}
+		if _, err := uiFS.Open(path); err != nil {
+			// Unknown path — serve index.html and let React Router handle it.
+			r = r.Clone(r.Context())
+			r.URL.Path = "/"
+			fserver.ServeHTTP(w, r)
+			return
+		}
+		fserver.ServeHTTP(w, r)
+	})
+}
+````
+
+## File: packages/api/internal/api/share_ics_handler.go
+````go
+package api
+
+import (
+	"database/sql"
+	"errors"
+	"fmt"
+	"net/http"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/ics"
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// ── In-memory ICS feed cache ──────────────────────────────────────────────────
+//
+// Mirrors shareCache, but stores the rendered text/calendar payload. Calendar
+// clients poll on their own cadence (minutes to hours), so the same short TTL
+// keeps feeds near-live while absorbing aggressive pollers.
+
+type icsCacheEntry struct {
+	builtAt time.Time
+	payload string
+}
+
+type icsFeedCache struct {
+	mu      sync.RWMutex
+	entries map[string]*icsCacheEntry
+	ttl     time.Duration
+}
+
+func newICSFeedCache(ttl time.Duration) *icsFeedCache {
+	return &icsFeedCache{entries: make(map[string]*icsCacheEntry), ttl: ttl}
+}
+
+func (c *icsFeedCache) get(token string) (string, bool) {
+	c.mu.RLock()
+	e, ok := c.entries[token]
+	c.mu.RUnlock()
+	if !ok || time.Since(e.builtAt) > c.ttl {
+		return "", false
+	}
+	return e.payload, true
+}
+
+func (c *icsFeedCache) set(token, payload string) {
+	c.mu.Lock()
+	c.entries[token] = &icsCacheEntry{builtAt: time.Now(), payload: payload}
+	c.mu.Unlock()
+}
+
+func (c *icsFeedCache) invalidate(token string) {
+	c.mu.Lock()
+	delete(c.entries, token)
+	c.mu.Unlock()
+}
+
+// ── Handlers ──────────────────────────────────────────────────────────────────
+
+// serveICSFeed handles GET /shares/{token}.ics — the public, unauthenticated
+// calendar feed. It is dispatched from handleGetShareProjection when the token
+// path value carries the .ics suffix (Go 1.22 mux wildcards span the whole
+// segment, so the suffix arrives inside {token}).
+//
+// The feed serves live data scoped server-side to the share's timeline — or,
+// for member feeds, to one member's assigned activities. There is no password
+// gate: calendar clients cannot unlock interactively, so the unguessable token
+// is the secret and revocation is rotate-or-delete.
+func (s *Server) serveICSFeed(w http.ResponseWriter, r *http.Request, token string) {
+	share, err := s.shares.GetByToken(token)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load share")
+		return
+	}
+	// A view share is not a feed — 404 rather than leaking that the token
+	// exists in another mode.
+	if share.Kind != models.ShareKindICS {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+		return
+	}
+	if share.RevokedAt != nil {
+		writeError(w, http.StatusGone, "GONE", "this share has been revoked")
+		return
+	}
+	if share.ExpiresAt != nil && time.Now().After(*share.ExpiresAt) {
+		writeError(w, http.StatusGone, "GONE", "this share has expired")
+		return
+	}
+
+	// Archived timeline → the feed stops serving (Phase 13.5). 404, not 410:
+	// unarchiving must resurrect the feed, and 410 makes calendar clients
+	// drop the subscription for good. Checked before the cache read so
+	// archiving takes effect immediately.
+	if !s.shareTimelineLive(w, share) {
+		return
+	}
+
+	body, ok := s.icsCache.get(token)
+	if !ok {
+		body, err = s.buildICSFeed(share)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to build calendar feed")
+			return
+		}
+		s.icsCache.set(token, body)
+	}
+
+	go func() { _ = s.shares.RecordView(share.ID) }()
+	w.Header().Set("Content-Type", "text/calendar; charset=utf-8")
+	// no-store: the token is the secret and rotate/delete is the only kill
+	// switch for a feed, so a revoked URL must not keep serving from browser
+	// or proxy caches. Server-side load is already absorbed by icsCache.
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write([]byte(body))
+}
+
+// buildICSFeed renders the iCalendar document for an ICS share. Scope is
+// hard-locked server-side: the timeline comes from the share row, and member
+// feeds drop every activity the member is not assigned to before
+// serialization.
+//
+// Each VEVENT projects the activity's display fields: status (+ percent
+// complete), assignee display names, and tag names go into DESCRIPTION (and
+// tags into CATEGORIES); whole-timeline feeds also append assignee names to
+// SUMMARY so the month grid shows who owns what. Member display names are the
+// only person-identifying field a feed may carry — never emails, user IDs, or
+// roles.
+func (s *Server) buildICSFeed(share *models.Share) (string, error) {
+	timeline, err := s.timelines.GetByID(share.TimelineID)
+	if err != nil {
+		return "", err
+	}
+
+	acts, err := s.activities.ListByTimeline(share.TimelineID, nil, nil, false)
+	if err != nil {
+		return "", err
+	}
+
+	// Display-name / tag / status lookups for the event field projection.
+	statuses, err := s.statuses.ListStatuses(share.TimelineID)
+	if err != nil {
+		return "", err
+	}
+	statusName := make(map[string]string, len(statuses))
+	for _, st := range statuses {
+		statusName[st.ID] = st.Name
+	}
+	members, err := s.teams.ListMembers(timeline.TeamID)
+	if err != nil {
+		return "", err
+	}
+	memberName := make(map[string]string, len(members))
+	for _, m := range members {
+		if m.DisplayName != "" {
+			memberName[m.ID] = m.DisplayName
+		}
+	}
+	tags, err := s.tags.ListByTeam(timeline.TeamID)
+	if err != nil {
+		return "", err
+	}
+	tagName := make(map[string]string, len(tags))
+	for _, tg := range tags {
+		tagName[tg.ID] = tg.Name
+	}
+
+	memberScoped := share.Scope != nil && *share.Scope == models.ShareScopeMember && share.MemberID != nil
+
+	name := timeline.Name
+	if memberScoped {
+		filtered := acts[:0]
+		for _, a := range acts {
+			for _, id := range a.AssignedMemberIDs {
+				if id == *share.MemberID {
+					filtered = append(filtered, a)
+					break
+				}
+			}
+		}
+		acts = filtered
+
+		if n, ok := memberName[*share.MemberID]; ok {
+			name = timeline.Name + " — " + n
+		}
+	}
+
+	// A member feed is one person's calendar — repeating their name on every
+	// event is noise. The whole-timeline feed is the team overview, where
+	// who-owns-what belongs in the month grid.
+	events := activitiesToICSEvents(acts, memberName, tagName, statusName, !memberScoped)
+	return ics.Calendar(name, events), nil
+}
+
+// activitiesToICSEvents projects activities into iCalendar VEVENTs. Each
+// event's DESCRIPTION carries structured field lines (status + percent
+// complete, assignee display names, tag names) followed by the free-text
+// activity description; CATEGORIES carries tag names. If
+// includeAssigneesInSummary is set, assignee names are appended to SUMMARY.
+func activitiesToICSEvents(acts []*models.Activity, memberName, tagName, statusName map[string]string, includeAssigneesInSummary bool) []ics.Event {
+	events := make([]ics.Event, 0, len(acts))
+	for _, a := range acts {
+		assignees := make([]string, 0, len(a.AssignedMemberIDs))
+		for _, id := range a.AssignedMemberIDs {
+			if n, ok := memberName[id]; ok {
+				assignees = append(assignees, n)
+			}
+		}
+		tagNames := make([]string, 0, len(a.TagIDs))
+		for _, id := range a.TagIDs {
+			if n, ok := tagName[id]; ok {
+				tagNames = append(tagNames, n)
+			}
+		}
+
+		summary := a.Title
+		if includeAssigneesInSummary && len(assignees) > 0 {
+			summary += " — " + strings.Join(assignees, ", ")
+		}
+
+		// Structured field lines first, then a blank line, then the
+		// free-text activity description.
+		meta := make([]string, 0, 3)
+		if a.StatusID != nil {
+			if n, ok := statusName[*a.StatusID]; ok {
+				line := "Status: " + n
+				if a.PercentComplete != nil {
+					line += fmt.Sprintf(" (%d%%)", *a.PercentComplete)
+				}
+				meta = append(meta, line)
+			}
+		} else if a.PercentComplete != nil {
+			meta = append(meta, fmt.Sprintf("Progress: %d%%", *a.PercentComplete))
+		}
+		if len(assignees) > 0 {
+			meta = append(meta, "Assigned: "+strings.Join(assignees, ", "))
+		}
+		if len(tagNames) > 0 {
+			meta = append(meta, "Tags: "+strings.Join(tagNames, ", "))
+		}
+		desc := strings.Join(meta, "\n")
+		if a.Description != nil && *a.Description != "" {
+			if desc != "" {
+				desc += "\n\n"
+			}
+			desc += *a.Description
+		}
+
+		events = append(events, ics.Event{
+			UID:         a.ID + "@draba",
+			Summary:     summary,
+			Description: desc,
+			Categories:  tagNames,
+			Start:       a.StartAt,
+			End:         a.EndAt,
+			Stamp:       a.UpdatedAt,
+		})
+	}
+	return events
+}
+
+// handleGetShareICSNamed handles GET /shares/{token}/{file}. The file segment
+// must end in .ics but is otherwise cosmetic: most calendar clients
+// (Thunderbird included) default the new calendar's name from the URL's
+// filename, so the modal links carry a readable slug (e.g. .../sales-kick-off.ics).
+// The token alone is authoritative.
+func (s *Server) handleGetShareICSNamed(w http.ResponseWriter, r *http.Request) {
+	if !strings.HasSuffix(r.PathValue("file"), ".ics") {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+		return
+	}
+	s.serveICSFeed(w, r, r.PathValue("token"))
+}
+
+// handleRegenerateShare handles POST /shares/{id}/regenerate. It rotates the
+// share's token, immediately invalidating the old URL — the revocation story
+// for ICS feeds, which cannot carry a password. It works for view shares too
+// (rotating is strictly safer than nothing), and any member of the timeline's
+// team may do it, consistent with PATCH/DELETE.
+func (s *Server) handleRegenerateShare(w http.ResponseWriter, r *http.Request) {
+	shareID := r.PathValue("id")
+
+	share, err := s.shares.GetByID(shareID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "share not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
+		return
+	}
+
+	timeline, err := s.timelines.GetByID(share.TimelineID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get share")
+		return
+	}
+	if _, ok := s.requireTeamMember(w, r, timeline.TeamID); !ok {
+		return
+	}
+
+	oldToken := share.Token
+	share.Token = newToken()
+	if err := s.shares.RotateToken(share.ID, share.Token); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to regenerate share link")
+		return
+	}
+
+	// Kill both caches for the dead token so it stops serving immediately.
+	s.shareCache.invalidate(oldToken)
+	s.icsCache.invalidate(oldToken)
+
+	writeJSON(w, http.StatusOK, share)
+}
+````
+
 ## File: packages/web/src/pages/ShareViewPage.tsx
 ````typescript
 /**
@@ -59485,11 +60058,12 @@ type Invite struct {
  * Mounted at /s/:token outside ProtectedRoute. Fetches the ShareProjection
  * from the public gateway, then renders the Gantt in interactive=false mode
  * with the frozen view config (groupBy, sortBy, colorBy, granularity) applied.
- * Theme is forced to light — useLayoutEffect runs synchronously before paint so
- * it beats any dark-class applied from localStorage by useDarkMode.
+ * Theme is forced to light via useForceLightDocument — its useLayoutEffect runs
+ * synchronously before paint so it beats any dark-class applied from
+ * localStorage by useDarkMode.
  */
 
-import { useMemo, useLayoutEffect, useEffect, useState, useCallback, useRef } from 'react'
+import { useMemo, useEffect, useState, useCallback, useRef } from 'react'
 import { useParams } from 'react-router-dom'
 import { useShareProjection, useUnlockShare } from '@/hooks/useShares'
 import GanttGrid from '@/components/gantt/GanttGrid'
@@ -59523,7 +60097,7 @@ import {
   autoFitGranularity,
 } from '@/components/gantt/granularity'
 import { ApiError } from '@/lib/api'
-import { forceLightDocumentElement } from '@/lib/presentationTheme'
+import { useForceLightDocument } from '@/hooks/useForceLightDocument'
 import type { components } from '@draba/shared'
 import type { GroupBy, SortBy, ColorBy, TimeGranularity } from '@/components/gantt/GanttToolbar'
 import type { Member } from '@/types'
@@ -60074,15 +60648,9 @@ export default function ShareViewPage() {
   const [viewToken, setViewToken] = useState<string | null>(null)
   const { data: proj, isLoading, isError, error } = useShareProjection(token, viewToken)
 
-  // Force light mode synchronously before first paint.
-  // useLayoutEffect runs before the browser paints, beating any dark class set
-  // from localStorage by useDarkMode during the same render cycle.
-  useLayoutEffect(() => {
-    const hadDark = forceLightDocumentElement(document)
-    return () => {
-      if (hadDark) document.documentElement.classList.add('dark')
-    }
-  }, [])
+  // Force light mode synchronously before first paint, restoring the viewer's
+  // dark class on unmount.
+  useForceLightDocument()
 
   // Re-apply on mount in case ThemeSync fires after useLayoutEffect.
   useEffect(() => {
@@ -60452,882 +61020,6 @@ formatters:
   enable:
     - gofmt
     - goimports
-````
-
-## File: packages/api/internal/api/server.go
-````go
-// Package api hosts the HTTP handlers, routing, and middleware for the
-// draba REST API. Handlers are intentionally thin: they decode requests,
-// delegate to repositories and services, and write responses. Business
-// logic belongs in the domain packages, not here.
-package api
-
-import (
-	"fmt"
-	"io/fs"
-	"net/http"
-	"strings"
-	"time"
-
-	"github.com/I0-1O/draba/packages/api/internal/auth"
-	"github.com/I0-1O/draba/packages/api/internal/db"
-	"github.com/I0-1O/draba/packages/api/internal/events"
-	"github.com/I0-1O/draba/packages/api/internal/mailer"
-	"github.com/I0-1O/draba/packages/api/internal/models"
-	"github.com/I0-1O/draba/packages/api/internal/tier"
-	"github.com/I0-1O/draba/packages/api/internal/ws"
-)
-
-// TimelineStore is the persistence interface required by timeline handlers.
-// The concrete implementation is *db.TimelineRepo; tests may substitute a fake.
-type TimelineStore interface {
-	Create(t *models.Timeline) error
-	GetByID(id string) (*models.Timeline, error)
-	GetByShareToken(token string) (*models.Timeline, error)
-	ListByTeam(teamID string, includeArchived bool) ([]*models.Timeline, error)
-	HasAccess(timelineID, teamMemberID string) (bool, error)
-	GrantAccess(timelineID, teamMemberID, role string) error
-	RevokeAccess(timelineID, teamMemberID string) error
-	GetAccessRole(timelineID, teamMemberID string) (string, error)
-	ListAccess(timelineID string) ([]*models.TimelineAccessEntry, error)
-	SetArchived(id string, at *time.Time) error
-	Update(t *models.Timeline) error
-	Delete(id string) error
-}
-
-// Server holds shared dependencies for all HTTP handlers.
-type Server struct {
-	users          *db.UserRepo
-	invites        *db.InviteRepo
-	teams          *db.TeamRepo
-	activities     *db.ActivityRepo
-	timelines      TimelineStore
-	savedFilters   *db.SavedFilterRepo
-	preferences    *db.UserPreferenceRepo
-	apiTokens      *db.APITokenRepo
-	instanceSets   *db.InstanceSettingsRepo
-	passwordTokens *db.PasswordResetTokenRepo
-	statuses       *db.StatusRepo
-	tags           *db.TagRepo
-	shares         *db.ShareRepo
-	shareCache     *shareCache
-	icsCache       *icsFeedCache
-	unlockLimiter  *rateLimiter
-	mailer         *mailer.Mailer
-	tokens         *auth.TokenService
-	tier           tier.Tier
-	bus            *events.Bus
-	hub            *ws.Hub
-	uiFS           fs.FS
-	// oidc is non-nil only when SSO is configured (DRABA_OIDC_ISSUER set).
-	// When nil, the /auth/oidc/* routes report SSO as disabled and no external
-	// identity provider is ever contacted. Set via WithOIDC.
-	oidc *auth.OIDCService
-	// oidcAutoCreateUsers controls whether an unknown external identity is
-	// auto-provisioned a local account on first SSO login.
-	oidcAutoCreateUsers bool
-}
-
-// NewServer constructs a Server with its required dependencies. It does not
-// touch the network; call Routes to obtain the http.Handler to serve.
-func NewServer(
-	users *db.UserRepo,
-	invites *db.InviteRepo,
-	teams *db.TeamRepo,
-	activitiesRepo *db.ActivityRepo,
-	timelinesRepo TimelineStore,
-	savedFiltersRepo *db.SavedFilterRepo,
-	preferencesRepo *db.UserPreferenceRepo,
-	apiTokensRepo *db.APITokenRepo,
-	instanceSetsRepo *db.InstanceSettingsRepo,
-	passwordTokensRepo *db.PasswordResetTokenRepo,
-	statusesRepo *db.StatusRepo,
-	tagsRepo *db.TagRepo,
-	sharesRepo *db.ShareRepo,
-	m *mailer.Mailer,
-	tokens *auth.TokenService,
-	t tier.Tier,
-	bus *events.Bus,
-	hub *ws.Hub,
-) *Server {
-	// Both public-share caches share the DRABA_SHARE_CACHE_TTL setting.
-	sc := newShareCache()
-	return &Server{
-		users:          users,
-		invites:        invites,
-		teams:          teams,
-		activities:     activitiesRepo,
-		timelines:      timelinesRepo,
-		savedFilters:   savedFiltersRepo,
-		preferences:    preferencesRepo,
-		apiTokens:      apiTokensRepo,
-		instanceSets:   instanceSetsRepo,
-		passwordTokens: passwordTokensRepo,
-		statuses:       statusesRepo,
-		tags:           tagsRepo,
-		shares:         sharesRepo,
-		shareCache:     sc,
-		icsCache:       newICSFeedCache(sc.ttl),
-		unlockLimiter:  newRateLimiter(unlockMaxAttempts, time.Hour),
-		mailer:         m,
-		tokens:         tokens,
-		tier:           t,
-		bus:            bus,
-		hub:            hub,
-	}
-}
-
-// WithUI registers an embedded React SPA to be served at GET /. The FS must
-// be rooted at the build output directory (i.e. contain index.html directly).
-// When called, all unmatched GET paths fall back to index.html so React Router
-// handles client-side navigation. Safe to skip in dev (no-op when not called).
-func (s *Server) WithUI(uiFS fs.FS) *Server {
-	s.uiFS = uiFS
-	return s
-}
-
-// WithOIDC enables SSO. Passing a nil service leaves SSO disabled (the zero
-// value), so callers can wire it unconditionally from a possibly-nil
-// constructor result. autoCreate controls first-login auto-provisioning.
-func (s *Server) WithOIDC(svc *auth.OIDCService, autoCreate bool) *Server {
-	s.oidc = svc
-	s.oidcAutoCreateUsers = autoCreate
-	return s
-}
-
-// oidcAutoCreate reports whether unknown external identities are provisioned a
-// local account on first SSO login.
-func (s *Server) oidcAutoCreate() bool { return s.oidcAutoCreateUsers }
-
-// Routes returns the fully-wired HTTP handler for the API, including all
-// core routes plus any routes added by registered tier modules.
-func (s *Server) Routes() http.Handler {
-	mux := http.NewServeMux()
-
-	mux.HandleFunc("GET /setup/status", s.handleSetupStatus)
-	mux.HandleFunc("GET /version", s.handleVersion)
-
-	mux.HandleFunc("POST /auth/register", s.handleRegister)
-	mux.HandleFunc("POST /auth/login", s.handleLogin)
-	mux.HandleFunc("POST /auth/refresh", s.handleRefresh)
-	mux.HandleFunc("GET /auth/me", chain(s.handleMe, s.authMiddleware))
-	mux.HandleFunc("POST /auth/forgot-password", s.handleForgotPassword)
-	mux.HandleFunc("POST /auth/reset-password", s.handleResetPassword)
-	// OIDC / SSO. Public (no auth): they start and complete the external login
-	// flow. Both report SSO disabled with 404 when DRABA_OIDC_ISSUER is unset.
-	mux.HandleFunc("GET /auth/oidc/login", s.handleOIDCLogin)
-	mux.HandleFunc("GET /auth/oidc/callback", s.handleOIDCCallback)
-
-	mux.HandleFunc("GET /users/me/preferences", chain(s.handleGetPreferences, s.authMiddleware))
-	mux.HandleFunc("PUT /users/me/preferences", chain(s.handleUpsertPreference, s.authMiddleware))
-	mux.HandleFunc("GET /users/me/stats", chain(s.handleGetMyStats, s.authMiddleware))
-	mux.HandleFunc("PATCH /users/me", chain(s.handleUpdateProfile, s.authMiddleware))
-	mux.HandleFunc("PUT /users/me/password", chain(s.handleChangePassword, s.authMiddleware))
-
-	mux.HandleFunc("GET /admin/smtp", chain(s.handleGetSMTP, s.authMiddleware))
-	mux.HandleFunc("PUT /admin/smtp", chain(s.handlePutSMTP, s.authMiddleware))
-	mux.HandleFunc("POST /admin/smtp/test", chain(s.handleTestSMTP, s.authMiddleware))
-	mux.HandleFunc("DELETE /admin/smtp", chain(s.handleDeleteSMTP, s.authMiddleware))
-	mux.HandleFunc("GET /admin/settings", chain(s.handleGetAdminSettings, s.authMiddleware))
-	mux.HandleFunc("PATCH /admin/settings", chain(s.handlePatchAdminSettings, s.authMiddleware))
-	mux.HandleFunc("GET /admin/users", chain(s.handleListAdminUsers, s.authMiddleware))
-
-	// Public — no auth required; used by the login page and shared views.
-	mux.HandleFunc("GET /settings/branding", s.handleGetPublicBranding)
-
-	mux.HandleFunc("POST /tokens", chain(s.handleCreateAPIToken, s.authMiddleware))
-	mux.HandleFunc("GET /tokens", chain(s.handleListAPITokens, s.authMiddleware))
-	mux.HandleFunc("DELETE /tokens/{id}", chain(s.handleDeleteAPIToken, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams", chain(s.handleListTeams, s.authMiddleware))
-	mux.HandleFunc("POST /teams", chain(s.handleCreateTeam, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}", chain(s.handleGetTeam, s.authMiddleware))
-	mux.HandleFunc("PATCH /teams/{id}", chain(s.handleUpdateTeam, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/archive", chain(s.handleArchiveTeam, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/unarchive", chain(s.handleUnarchiveTeam, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/invites", chain(s.handleCreateInvite, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/invites", chain(s.handleListInvites, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/invites/{inviteId}", chain(s.handleDeleteInvite, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/invite-link", chain(s.handleCreateInviteLink, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/invite-link/reset", chain(s.handleResetInviteLink, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/invite-link", chain(s.handleGetInviteLink, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/invite-link", chain(s.handleDeleteInviteLink, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/members", chain(s.handleListMembers, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/members/{memberId}", chain(s.handleGetMember, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/members/{memberId}/stats", chain(s.handleGetMemberStats, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/members", chain(s.handleAddMember, s.authMiddleware))
-	mux.HandleFunc("PATCH /teams/{id}/members/{memberId}", chain(s.handleUpdateMember, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/members/{memberId}", chain(s.handleDeleteMember, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/members/{memberId}/archive", chain(s.handleArchiveMember, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/members/{memberId}/unarchive", chain(s.handleUnarchiveMember, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/participants", chain(s.handleCreateParticipant, s.authMiddleware))
-	mux.HandleFunc("GET /users/search", chain(s.handleSearchUsers, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/promote", chain(s.handlePromoteUser, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/archive", chain(s.handleArchiveUser, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/unarchive", chain(s.handleUnarchiveUser, s.authMiddleware))
-	mux.HandleFunc("POST /users/{id}/revoke", chain(s.handleRevokeUser, s.authMiddleware))
-	mux.HandleFunc("DELETE /users/{id}", chain(s.handleDeleteUser, s.authMiddleware))
-	// Activity routes use the team-scoped prefix (GET /teams/{id}/timelines/{timelineId}/...)
-	// to avoid a Go 1.22 mux conflict with GET /timelines/share/{token}: both are
-	// 3-segment GET paths and neither is more specific when the third segment differs.
-	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/activities", chain(s.handleCreateActivity, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/activities", chain(s.handleListActivities, s.authMiddleware))
-	mux.HandleFunc("PATCH /activities/{id}", chain(s.handleUpdateActivity, s.authMiddleware))
-	mux.HandleFunc("DELETE /activities/{id}", chain(s.handleDeleteActivity, s.authMiddleware))
-	mux.HandleFunc("POST /activities/{id}/archive", chain(s.handleArchiveActivity, s.authMiddleware))
-	mux.HandleFunc("POST /activities/{id}/unarchive", chain(s.handleUnarchiveActivity, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/tags", chain(s.handleListTags, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/tags", chain(s.handleCreateTag, s.authMiddleware))
-	mux.HandleFunc("PATCH /tags/{id}", chain(s.handleUpdateTag, s.authMiddleware))
-	mux.HandleFunc("DELETE /tags/{id}", chain(s.handleDeleteTag, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/saved_filters/all", chain(s.handleListAllTeamSavedFilters, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/saved_filters", chain(s.handleListSavedFilters, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/saved_filters", chain(s.handleCreateSavedFilter, s.authMiddleware))
-	mux.HandleFunc("PATCH /saved_filters/{id}", chain(s.handleUpdateSavedFilter, s.authMiddleware))
-	mux.HandleFunc("DELETE /saved_filters/{id}", chain(s.handleDeleteSavedFilter, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/status-templates", chain(s.handleListStatusTemplates, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/status-templates", chain(s.handleCreateStatusTemplate, s.authMiddleware))
-	mux.HandleFunc("PATCH /status-templates/{id}", chain(s.handleUpdateStatusTemplate, s.authMiddleware))
-	mux.HandleFunc("DELETE /status-templates/{id}", chain(s.handleDeleteStatusTemplate, s.authMiddleware))
-	mux.HandleFunc("POST /status-templates/{id}/items", chain(s.handleCreateTemplateItem, s.authMiddleware))
-	mux.HandleFunc("PATCH /status-template-items/{id}", chain(s.handleUpdateTemplateItem, s.authMiddleware))
-	mux.HandleFunc("DELETE /status-template-items/{id}", chain(s.handleDeleteTemplateItem, s.authMiddleware))
-
-	mux.HandleFunc("GET /teams/{id}/timelines", chain(s.handleListTimelines, s.authMiddleware))
-	mux.HandleFunc("POST /teams/{id}/timelines", chain(s.handleCreateTimeline, s.authMiddleware))
-	// GET /timelines/share/{token} must be registered before GET /timelines/{id} so
-	// the more-specific literal "share" segment takes precedence.
-	mux.HandleFunc("GET /timelines/share/{token}", s.handleGetTimelineByShareToken)
-	mux.HandleFunc("GET /timelines/{id}", chain(s.handleGetTimeline, s.authMiddleware))
-	// Timeline statuses are placed under /teams/{id}/timelines/{timelineId}/statuses
-	// rather than /timelines/{id}/statuses to avoid a Go 1.22 mux pattern conflict
-	// with GET /timelines/share/{token} (both are 3-segment paths and conflict on
-	// paths like /timelines/share/statuses).
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleListTimelineStatuses, s.authMiddleware))
-	mux.HandleFunc("POST /timelines/{id}/archive", chain(s.handleArchiveTimeline, s.authMiddleware))
-	mux.HandleFunc("POST /timelines/{id}/unarchive", chain(s.handleUnarchiveTimeline, s.authMiddleware))
-
-	mux.HandleFunc("PATCH /timelines/{id}", chain(s.handleUpdateTimeline, s.authMiddleware))
-	mux.HandleFunc("DELETE /timelines/{id}", chain(s.handleDeleteTimeline, s.authMiddleware))
-	// Access list routes use the team-scoped prefix to avoid a Go 1.22 mux
-	// conflict with GET /timelines/share/{token} on 3-segment GET paths.
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/access", chain(s.handleListTimelineAccess, s.authMiddleware))
-	mux.HandleFunc("PUT /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleGrantTimelineAccess, s.authMiddleware))
-	mux.HandleFunc("DELETE /teams/{id}/timelines/{timelineId}/access/{memberId}", chain(s.handleRevokeTimelineAccess, s.authMiddleware))
-	// Timeline status CRUD — POST shares the team-scoped prefix with GET statuses.
-	// PATCH and DELETE use a flat /statuses/{id} prefix (2 segments, no conflict).
-	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/statuses", chain(s.handleCreateTimelineStatus, s.authMiddleware))
-	mux.HandleFunc("PATCH /statuses/{id}", chain(s.handleUpdateStatus, s.authMiddleware))
-	mux.HandleFunc("DELETE /statuses/{id}", chain(s.handleDeleteStatus, s.authMiddleware))
-
-	// Share routes.
-	// GET /shares/{token} is public — no auth. The token is the credential.
-	// POST /timelines/{id}/shares uses the same /timelines/{id}/... prefix
-	// as archive/unarchive so it avoids the Go 1.22 mux pattern conflict with
-	// GET /timelines/share/{token} (only GET-method paths conflict).
-	// GET /teams/{id}/timelines/{timelineId}/shares uses the team-scoped prefix
-	// to avoid the GET conflict described above.
-	mux.HandleFunc("GET /shares/{token}", s.handleGetShareProjection)
-	mux.HandleFunc("POST /shares/{token}/unlock", s.handleUnlockShare)
-	mux.HandleFunc("POST /timelines/{id}/shares", chain(s.handleCreateShare, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/shares", chain(s.handleListShares, s.authMiddleware))
-	mux.HandleFunc("PATCH /shares/{id}", chain(s.handleUpdateShare, s.authMiddleware))
-	mux.HandleFunc("DELETE /shares/{id}", chain(s.handleDeleteShare, s.authMiddleware))
-	// Token rotation — the revocation story for ICS feeds (no password gate).
-	// GET /shares/{token}.ics is served inside handleGetShareProjection: the
-	// {token} wildcard spans the whole segment, so the .ics suffix arrives in
-	// the path value and is dispatched there.
-	mux.HandleFunc("POST /shares/{id}/regenerate", chain(s.handleRegenerateShare, s.authMiddleware))
-	// Named feed variant: the {file} slug is cosmetic (calendar clients
-	// default the calendar name from the URL filename); the token is the key.
-	mux.HandleFunc("GET /shares/{token}/{file}", s.handleGetShareICSNamed)
-
-	// Export routes (Phase 14.1).
-	// POST /timelines/{id}/export shares the /timelines/{id}/... prefix with
-	// archive/unarchive/shares — fine, since only GET-method paths conflict
-	// with GET /timelines/share/{token}.
-	// The GET convenience endpoints use the team-scoped prefix (like
-	// activities/statuses/access above) to avoid that same GET conflict:
-	// /teams/{id}/timelines/{timelineId}/export.csv is 4 segments, so it
-	// can't collide with the 3-segment GET /timelines/share/{token}.
-	mux.HandleFunc("POST /timelines/{id}/export", chain(s.handlePostTimelineExport, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/export.csv", chain(s.handleGetTimelineExportCSV, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/export.xlsx", chain(s.handleGetTimelineExportXLSX, s.authMiddleware))
-	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/export.ics", chain(s.handleGetTimelineExportICS, s.authMiddleware))
-
-	// GET /ws is intentionally outside authMiddleware — ServeWS validates the
-	// JWT itself before upgrading, because WebSocket clients can't set headers.
-	mux.HandleFunc("GET /ws", s.hub.ServeWS)
-
-	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-	})
-
-	if s.uiFS != nil {
-		mux.Handle("GET /", spaHandler(s.uiFS))
-	}
-
-	ctx := &tier.ModuleContext{Mux: mux, Tier: s.tier}
-	for _, m := range tier.Registered() {
-		if err := m.Register(ctx); err != nil {
-			// Module registration is a startup invariant — a failure here is a programming error.
-			panic(fmt.Sprintf("tier module %q failed to register: %v", m.Name(), err))
-		}
-	}
-
-	return requestLogger(mux)
-}
-
-// chain applies a single middleware to a handler function.
-func chain(h http.HandlerFunc, m func(http.Handler) http.Handler) http.HandlerFunc {
-	return m(h).ServeHTTP
-}
-
-// spaHandler serves the embedded React SPA. Known static assets are served
-// directly; any unrecognised path falls back to index.html so React Router
-// handles client-side navigation.
-func spaHandler(uiFS fs.FS) http.Handler {
-	fserver := http.FileServer(http.FS(uiFS))
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		path := strings.TrimPrefix(r.URL.Path, "/")
-		if path == "" {
-			path = "index.html"
-		}
-		if _, err := uiFS.Open(path); err != nil {
-			// Unknown path — serve index.html and let React Router handle it.
-			r = r.Clone(r.Context())
-			r.URL.Path = "/"
-			fserver.ServeHTTP(w, r)
-			return
-		}
-		fserver.ServeHTTP(w, r)
-	})
-}
-````
-
-## File: packages/web/src/components/ExportDialog.tsx
-````typescript
-/**
- * ExportDialog — "Export this view" modal (Phase 14).
- *
- * Built to the export-modal design handoff (docs/design/handoffs/export-modal):
- * a format rail + options pane two-pane body, a filter context strip that
- * makes "export what I'm seeing" visible, and a scope picker (current view vs
- * entire timeline) for the data formats. Modeled on ShareModal's portal shell,
- * but — per the handoff — the overlay click does not close the dialog, only
- * Esc / the close button / Cancel do.
- *
- * 14.1 implements the server-side data/calendar formats (CSV, Excel, ICS).
- * 14.2 adds client-side textual formats (Markdown, Plain text, Copy to clipboard)
- *      via the `textExportData` prop; these formats only appear for non-Gantt views.
- * 14.3 adds the PNG snapshot format, rasterizing `captureElement` (the live
- *      view container) via `lib/pngExport.ts`; available in every view.
- * 14.4 adds the printable-view and HTML-save formats, both driven off the
- *      `presentationFrame` prop (the mounted PresentationFrame iframe) via
- *      `lib/printExport.ts` / `lib/htmlExport.ts`; available in every view.
- */
-
-import { useEffect, useRef, useState, useCallback } from 'react'
-import { createPortal } from 'react-dom'
-import {
-  FileOutput, Filter, AlertTriangle, Download, FileDown, Check, X, Copy, Printer,
-} from 'lucide-react'
-import { Button } from '@/components/ui/button'
-import { cn } from '@/lib/utils'
-import { useExport } from '@/hooks/useExport'
-import {
-  getExportFormats, buildExportFilename,
-  type ExportFormatId, type ExportViewType,
-} from '@/lib/exportCapabilities'
-import {
-  buildListMarkdown, buildListMarkdownOutline,
-  buildKanbanMarkdown, buildCalendarMarkdown,
-  buildListPlainText, buildListPlainTextOutline,
-  buildKanbanPlainText, buildCalendarPlainText,
-  buildListHtml, buildListHtmlOutline, buildKanbanHtml, buildCalendarHtml,
-  type TextExportData,
-} from '@/lib/textExport'
-import { capturePngSnapshot } from '@/lib/pngExport'
-import { printPresentationFrame } from '@/lib/printExport'
-import { saveFramePresentationHtml } from '@/lib/htmlExport'
-import type { FilterDefinition } from '@/lib/filterTypes'
-
-export type { TextExportData }
-
-export interface ExportDialogProps {
-  view: ExportViewType
-  teamId: string
-  timelineId: string
-  timelineName: string
-  /** Team display name, shown in the PNG header strip alongside the timeline name. */
-  teamName?: string | null
-  /** Display label for the active filter (e.g. a saved filter's name), or null if no filter is active. */
-  filterLabel: string | null
-  /** The active filter's definition, sent to the server when scope is "view" and activityIds is absent. */
-  filterDefinition: FilterDefinition | null
-  /** Number of activities matching the active filter (or totalCount when no filter is active). */
-  filteredCount: number
-  /** Total number of activities in the timeline, regardless of filter. */
-  totalCount: number
-  /**
-   * Ordered activity IDs for the "current view" scope — covers preset/member
-   * filters (which can't be sent as a FilterDefinition) and list-view sort order.
-   * When non-null, takes precedence over filterDefinition in the request body.
-   */
-  viewActivityIds: string[] | null
-  /**
-   * Export column names to include in CSV/Excel (list view column visibility).
-   * Null means all columns. Only meaningful for csv/xlsx formats.
-   */
-  listExportColumns: string[] | null
-  /**
-   * Pre-resolved in-memory data for client-side textual formats (14.2).
-   * Required for Markdown / plain text / clipboard options to be functional;
-   * if absent those formats still appear but will produce empty output.
-   */
-  textExportData?: TextExportData | null
-  /**
-   * The live view container to rasterize for the PNG format (14.3).
-   * Required for PNG to be functional; if absent the format still appears
-   * but the action is a no-op.
-   */
-  captureElement?: HTMLElement | null
-  /**
-   * The mounted PresentationFrame's iframe — the shared render surface for
-   * the printable-view and HTML-save formats (14.4). Required for those
-   * formats to be functional; if absent the actions are a no-op.
-   */
-  presentationFrame?: HTMLIFrameElement | null
-  /**
-   * Period label for the PNG header (Calendar only) — e.g. "June 2026" or
-   * "Jun 1 – 7, 2026". The on-screen toolbar carries this, but it's excluded
-   * from the capture, so it's surfaced into the header strip instead.
-   */
-  periodLabel?: string | null
-  onClose: () => void
-}
-
-const VIEW_LABELS: Record<ExportViewType, string> = {
-  gantt: 'Gantt',
-  list: 'List',
-  kanban: 'Kanban',
-  calendar: 'Calendar',
-}
-
-type Scope = 'view' | 'all'
-
-// ── Client-side text generation ────────────────────────────────────────────────
-
-type ListStyle = 'table' | 'outline'
-
-function generateMarkdown(view: ExportViewType, data: TextExportData, timelineName: string, filterLabel: string | null, listStyle: ListStyle): string {
-  if (view === 'list') return listStyle === 'outline'
-    ? buildListMarkdownOutline(data, timelineName, filterLabel)
-    : buildListMarkdown(data, timelineName, filterLabel)
-  if (view === 'kanban') return buildKanbanMarkdown(data, timelineName, filterLabel)
-  if (view === 'calendar') return buildCalendarMarkdown(data, timelineName, filterLabel)
-  return buildListMarkdown(data, timelineName, filterLabel)
-}
-
-function generatePlainText(view: ExportViewType, data: TextExportData, timelineName: string, filterLabel: string | null, listStyle: ListStyle): string {
-  if (view === 'list') return listStyle === 'outline'
-    ? buildListPlainTextOutline(data, timelineName, filterLabel)
-    : buildListPlainText(data, timelineName, filterLabel)
-  if (view === 'kanban') return buildKanbanPlainText(data, timelineName, filterLabel)
-  if (view === 'calendar') return buildCalendarPlainText(data, timelineName, filterLabel)
-  return buildListPlainText(data, timelineName, filterLabel)
-}
-
-function generateHtml(view: ExportViewType, data: TextExportData, timelineName: string, filterLabel: string | null, listStyle: ListStyle): string {
-  if (view === 'list') return listStyle === 'outline'
-    ? buildListHtmlOutline(data, timelineName, filterLabel)
-    : buildListHtml(data, timelineName, filterLabel)
-  if (view === 'kanban') return buildKanbanHtml(data, timelineName, filterLabel)
-  if (view === 'calendar') return buildCalendarHtml(data, timelineName, filterLabel)
-  return buildListHtml(data, timelineName, filterLabel)
-}
-
-/** Triggers the browser to save a Blob with the given filename. */
-function saveBlob(blob: Blob, filename: string): void {
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = filename
-  document.body.appendChild(a)
-  a.click()
-  a.remove()
-  URL.revokeObjectURL(url)
-}
-
-/**
- * Writes `text/plain` + `text/html` flavors to the clipboard so the paste
- * lands rich in Slack / Word / Google Docs and clean in code editors.
- * Falls back to `writeText` if `ClipboardItem` is unavailable (HTTP contexts).
- */
-async function copyToClipboard(plainText: string, htmlText: string): Promise<void> {
-  if (typeof ClipboardItem !== 'undefined' && navigator.clipboard.write) {
-    const item = new ClipboardItem({
-      'text/plain': new Blob([plainText], { type: 'text/plain' }),
-      'text/html': new Blob([htmlText], { type: 'text/html' }),
-    })
-    await navigator.clipboard.write([item])
-  } else {
-    // Fallback for HTTP (non-localhost) contexts where ClipboardItem is blocked.
-    await navigator.clipboard.writeText(plainText)
-  }
-}
-
-// ── Component ──────────────────────────────────────────────────────────────────
-
-export default function ExportDialog({
-  view,
-  timelineId,
-  timelineName,
-  teamName,
-  filterLabel,
-  filterDefinition,
-  filteredCount,
-  totalCount,
-  viewActivityIds,
-  listExportColumns,
-  textExportData,
-  captureElement,
-  presentationFrame,
-  periodLabel,
-  onClose,
-}: ExportDialogProps) {
-  const formats = getExportFormats(view)
-  const [formatId, setFormatId] = useState<ExportFormatId>('csv')
-  const [scope, setScope] = useState<Scope>('view')
-  const [listStyle, setListStyle] = useState<ListStyle>('table')
-  const [done, setDone] = useState(false)
-  const [clientPending, setClientPending] = useState(false)
-  const { download, isPending: serverPending } = useExport(timelineId, timelineName)
-  const doneTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
-
-  const format = formats.find(f => f.id === formatId) ?? formats[0]
-  const Icon = format.icon
-  const isPending = serverPending || clientPending
-
-  // Client-side formats (PNG / Markdown / plain text) are inherently shaped by
-  // the active view, so their filename names it. Server data formats (CSV /
-  // xlsx / ICS) can be scoped to the whole timeline, where a view name would
-  // mislead — they keep the plain `<timeline>-<date>` name.
-  const filenameView = format.clientSide ? view : undefined
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [onClose])
-
-  useEffect(() => () => { if (doneTimer.current) clearTimeout(doneTimer.current) }, [])
-
-  const selectFormat = (id: ExportFormatId) => {
-    setFormatId(id)
-    setDone(false)
-  }
-
-  const flashDone = useCallback(() => {
-    setDone(true)
-    doneTimer.current = setTimeout(() => setDone(false), 1600)
-  }, [])
-
-  const handleAction = useCallback(() => {
-    if (format.id === 'png') {
-      if (!captureElement) return
-      setClientPending(true)
-      capturePngSnapshot(captureElement, { timelineName, teamName: teamName ?? null, filterLabel, periodLabel })
-        .then(blob => { saveBlob(blob, buildExportFilename(timelineName, format.ext, view)); flashDone() })
-        .catch(() => { /* capture may fail on unsupported browsers */ })
-        .finally(() => setClientPending(false))
-      return
-    }
-
-    if (format.id === 'printable') {
-      if (!presentationFrame) return
-      printPresentationFrame(presentationFrame, { timelineName, teamName: teamName ?? null, filterLabel, periodLabel })
-      flashDone()
-      return
-    }
-
-    if (format.id === 'html') {
-      if (!presentationFrame) return
-      saveFramePresentationHtml(
-        presentationFrame,
-        { timelineName, teamName: teamName ?? null, filterLabel, periodLabel },
-        buildExportFilename(timelineName, format.ext, view),
-      )
-      flashDone()
-      return
-    }
-
-    if (format.clientSide) {
-      const data = textExportData ?? {
-        activities: [],
-        memberById: new Map(),
-        statusById: new Map(),
-        tagById: new Map(),
-        activityTitleById: new Map(),
-        kanbanColumns: null,
-        listDisplayRows: null,
-        listVisibleColumns: null,
-        kanbanShowHierarchy: false,
-        kanbanChildrenByParentId: new Map(),
-      }
-
-      if (format.id === 'clipboard') {
-        const plainText = generatePlainText(view, data, timelineName, filterLabel, listStyle)
-        const htmlText = generateHtml(view, data, timelineName, filterLabel, listStyle)
-        setClientPending(true)
-        copyToClipboard(plainText, htmlText)
-          .then(flashDone)
-          .catch(() => { /* clipboard may be denied */ })
-          .finally(() => setClientPending(false))
-        return
-      }
-
-      // markdown or plaintext — generate and download
-      const isMarkdown = format.id === 'markdown'
-      const content = isMarkdown
-        ? generateMarkdown(view, data, timelineName, filterLabel, listStyle)
-        : generatePlainText(view, data, timelineName, filterLabel, listStyle)
-      const mimeType = isMarkdown ? 'text/markdown;charset=utf-8' : 'text/plain;charset=utf-8'
-      const blob = new Blob([content], { type: mimeType })
-      saveBlob(blob, buildExportFilename(timelineName, format.ext, view))
-      flashDone()
-      return
-    }
-
-    // Server-side: CSV / xlsx / ICS
-    const isDataFormat = format.id === 'csv' || format.id === 'xlsx'
-    void download(format.id, format.ext, {
-      activityIds: scope === 'view' ? viewActivityIds : null,
-      filter: scope === 'view' && !viewActivityIds ? filterDefinition : null,
-      columns: isDataFormat ? listExportColumns : null,
-    }).then(flashDone)
-  }, [format, view, timelineName, teamName, filterLabel, periodLabel, textExportData, captureElement, presentationFrame, scope, listStyle, viewActivityIds, filterDefinition, listExportColumns, download, flashDone])
-
-  const emptyView = filteredCount === 0
-  const subWithFilter = filterLabel !== null
-    ? `${filteredCount} of ${totalCount} activities · matches your filter`
-    : `All ${totalCount} activities · nothing filtered out`
-
-  // Button label / icon for the primary action
-  const actionLabel = format.verb === 'copy'
-    ? done ? 'Copied!' : (isPending ? 'Copying…' : 'Copy to clipboard')
-    : format.verb === 'print'
-    ? done ? 'Print dialog opened' : 'Print…'
-    : done ? 'Downloaded' : (isPending ? 'Downloading…' : `Download ${format.ext}`)
-  const ActionIcon = format.verb === 'copy' ? Copy : format.verb === 'print' ? Printer : Download
-
-  return createPortal(
-    <div className="fixed inset-0 z-[1000] flex items-center justify-center bg-[hsl(200_24%_11%/0.55)] p-6 backdrop-blur-[2px]">
-      <div className="flex max-h-[88vh] w-[min(620px,100%)] flex-col overflow-hidden rounded-[var(--radius-xl)] bg-card shadow-[var(--shadow-lg)]">
-        {/* Header */}
-        <div className="flex shrink-0 items-start gap-3 px-5 py-[18px]">
-          <div className="flex h-[38px] w-[38px] shrink-0 items-center justify-center rounded-[var(--radius-md)] bg-[hsl(188_59%_38%/0.12)] text-primary">
-            <FileOutput size={19} strokeWidth={2.2} />
-          </div>
-          <div className="min-w-0 flex-1">
-            <h2 className="m-0 text-[17px] font-bold leading-tight text-foreground">Export this view</h2>
-            <div className="mt-0.5 flex items-center gap-1.5 text-[12.5px] text-muted-foreground">
-              <span className="inline-block h-2 w-2 shrink-0 rounded-sm bg-secondary" />
-              {timelineName ? `${timelineName} · ` : ''}{VIEW_LABELS[view]} view
-            </div>
-          </div>
-          <button
-            onClick={onClose}
-            aria-label="Close"
-            className="flex h-[30px] w-[30px] shrink-0 cursor-pointer items-center justify-center rounded-[var(--radius-md)] border-none bg-muted text-muted-foreground"
-          >
-            <X size={16} strokeWidth={2.2} />
-          </button>
-        </div>
-
-        {/* Filter context strip */}
-        <div className="shrink-0 border-b border-border px-5 pb-[14px]">
-          <div className={cn(
-            'rounded-[var(--radius-lg)] px-3 py-[9px]',
-            emptyView ? 'bg-[color-mix(in_srgb,var(--warning)_13%,transparent)]' : 'bg-muted',
-          )}>
-            <div className="flex items-center gap-2 text-[12.5px]">
-              {emptyView
-                ? <AlertTriangle size={14} className="shrink-0 text-warning" strokeWidth={2} />
-                : <Filter size={14} className="shrink-0 text-muted-foreground" strokeWidth={2} />}
-              <span className="flex-1 text-foreground">
-                {filterLabel !== null
-                  ? <>Filtered: <span className="font-semibold">{filterLabel}</span></>
-                  : `Exporting the ${VIEW_LABELS[view]} view as you see it`}
-              </span>
-              <span className={cn('shrink-0 text-[11.5px] font-semibold', emptyView ? 'text-warning' : 'text-muted-foreground')}>
-                {filterLabel !== null ? `${filteredCount} of ${totalCount} activities` : `All ${totalCount} activities`}
-              </span>
-            </div>
-            {emptyView && (
-              <div className="ml-[22px] mt-1 text-[12px] text-muted-foreground">
-                This view has no activities — the export will be empty or headers-only.
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* Body — format rail + options pane */}
-        <div className="flex flex-1 overflow-hidden">
-          <div role="listbox" aria-label="Export format" className="flex w-[196px] shrink-0 flex-col gap-0.5 overflow-y-auto border-r border-border p-2.5">
-            {formats.map(f => {
-              const FIcon = f.icon
-              const selected = f.id === formatId
-              // Badge icon: copy for clipboard, printer for printable view, download for everything else
-              const BadgeIcon = f.verb === 'copy' ? Copy : f.verb === 'print' ? Printer : Download
-              return (
-                <button
-                  key={f.id}
-                  role="option"
-                  aria-selected={selected}
-                  onClick={() => selectFormat(f.id)}
-                  className={cn(
-                    'flex items-center gap-[9px] rounded-[var(--radius-md)] border-none px-[9px] py-2 text-left text-[13px] transition-colors',
-                    selected ? 'bg-[hsl(188_59%_38%/0.1)] text-foreground font-semibold' : 'bg-transparent text-foreground hover:bg-muted',
-                  )}
-                >
-                  <FIcon size={15} strokeWidth={selected ? 2.2 : 1.8} className={selected ? 'shrink-0 text-primary' : 'shrink-0 text-muted-foreground'} />
-                  <span className="flex-1 truncate">{f.name}</span>
-                  <span title={f.verb === 'copy' ? 'Copy' : f.verb === 'print' ? 'Print' : 'Download'} className={cn('shrink-0 text-muted-foreground', selected ? 'opacity-90' : 'opacity-65')}>
-                    <BadgeIcon size={11} strokeWidth={2} />
-                  </span>
-                </button>
-              )
-            })}
-          </div>
-
-          <div className="flex flex-1 flex-col gap-3.5 overflow-y-auto p-4">
-            {/* Format heading */}
-            <div className="flex items-start gap-2.5">
-              <Icon size={16} strokeWidth={2} className="mt-0.5 shrink-0 text-muted-foreground" />
-              <div>
-                <div className="text-[14px] font-bold text-foreground">{format.name}</div>
-                <div className="mt-0.5 text-[12.5px] leading-[1.5] text-muted-foreground">{format.desc}</div>
-              </div>
-            </div>
-
-            {/* Style picker — table vs outline, only for list view text formats */}
-            {(format.id === 'markdown' || format.id === 'plaintext' || format.id === 'clipboard') && view === 'list' && (
-              <div>
-                <div className="mb-1.5 text-[11px] font-bold uppercase tracking-[0.06em] text-muted-foreground">Style</div>
-                <div className="flex overflow-hidden rounded-[var(--radius-lg)] border border-border">
-                  <StyleOption
-                    label="Table"
-                    desc="Aligned columns"
-                    selected={listStyle === 'table'}
-                    onSelect={() => setListStyle('table')}
-                  />
-                  <div className="w-px shrink-0 bg-border" />
-                  <StyleOption
-                    label="Outline"
-                    desc="Bullet list with fields"
-                    selected={listStyle === 'outline'}
-                    onSelect={() => setListStyle('outline')}
-                  />
-                </div>
-              </div>
-            )}
-
-            {/* Scope picker — only for server-side data formats */}
-            {format.scope && (
-              <div>
-                <div className="mb-1.5 text-[11px] font-bold uppercase tracking-[0.06em] text-muted-foreground">Activities to export</div>
-                <div className="overflow-hidden rounded-[var(--radius-lg)] border border-border">
-                  <ScopeRow
-                    label="Current view"
-                    sub={subWithFilter}
-                    selected={scope === 'view'}
-                    onSelect={() => setScope('view')}
-                  />
-                  <div className="border-t border-border" />
-                  <ScopeRow
-                    label="Entire timeline"
-                    sub={`All ${totalCount} activities · ignores filters`}
-                    selected={scope === 'all'}
-                    onSelect={() => setScope('all')}
-                  />
-                </div>
-              </div>
-            )}
-
-            {/* Filename chip — only for download formats */}
-            {format.verb === 'download' && format.ext && (
-              <div>
-                <div className="mb-1.5 text-[11px] font-bold uppercase tracking-[0.06em] text-muted-foreground">File</div>
-                <div className="flex items-center gap-2 rounded-[var(--radius-md)] bg-muted px-[11px] py-[7px] font-mono text-[12px] text-foreground">
-                  <FileDown size={13} strokeWidth={2} className="shrink-0 text-muted-foreground" />
-                  <span className="truncate">{buildExportFilename(timelineName, format.ext, filenameView)}</span>
-                </div>
-              </div>
-            )}
-
-            {/* Clipboard note */}
-            {format.id === 'clipboard' && (
-              <div className="rounded-[var(--radius-md)] bg-muted px-3 py-2.5 text-[12px] leading-[1.5] text-muted-foreground">
-                Copies <strong className="text-foreground">rich text</strong> (HTML) + plain text — paste into Slack, Google Docs, or Word to get a formatted {view === 'list' && listStyle === 'outline' ? 'outline' : 'table'}.
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* Footer */}
-        <div className="flex shrink-0 items-center justify-end gap-2.5 border-t border-border px-5 py-[13px]">
-          <Button variant="outline" onClick={onClose}>Cancel</Button>
-          <Button onClick={handleAction} disabled={isPending} className="min-w-[168px] justify-center">
-            {done
-              ? <><Check size={14} strokeWidth={2.2} /> {actionLabel}</>
-              : <><ActionIcon size={14} strokeWidth={2.2} /> {actionLabel}</>}
-          </Button>
-        </div>
-      </div>
-    </div>,
-    document.body,
-  )
-}
-
-function StyleOption({ label, desc, selected, onSelect }: { label: string; desc: string; selected: boolean; onSelect: () => void }) {
-  return (
-    <button
-      onClick={onSelect}
-      className={cn(
-        'flex flex-1 flex-col items-start px-3 py-2.5 text-left transition-colors',
-        selected ? 'bg-[hsl(188_59%_38%/0.09)]' : 'bg-transparent hover:bg-muted',
-      )}
-    >
-      <span className="text-[13px] font-semibold text-foreground">{label}</span>
-      <span className="text-[11.5px] text-muted-foreground">{desc}</span>
-    </button>
-  )
-}
-
-function ScopeRow({ label, sub, selected, onSelect }: { label: string; sub: string; selected: boolean; onSelect: () => void }) {
-  return (
-    <button
-      onClick={onSelect}
-      className={cn(
-        'flex w-full items-start gap-2.5 px-3 py-2.5 text-left transition-colors',
-        selected ? 'bg-[hsl(188_59%_38%/0.09)]' : 'bg-transparent hover:bg-muted',
-      )}
-    >
-      <span className={cn(
-        'mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border-[1.5px]',
-        selected ? 'border-[5px] border-primary' : 'border-input',
-      )} />
-      <span>
-        <div className="text-[13px] font-semibold text-foreground">{label}</div>
-        <div className="text-[11.5px] text-muted-foreground">{sub}</div>
-      </span>
-    </button>
-  )
-}
 ````
 
 ## File: packages/api/internal/api/share_handler.go
@@ -71705,6 +71397,1747 @@ paths:
           $ref: "#/components/responses/InternalError"
 ````
 
+## File: packages/web/src/components/ExportDialog.tsx
+````typescript
+/**
+ * ExportDialog — "Export this view" modal (Phase 14).
+ *
+ * Built to the export-modal design handoff (docs/design/handoffs/export-modal):
+ * a format rail + options pane two-pane body, a filter context strip that
+ * makes "export what I'm seeing" visible, and a scope picker (current view vs
+ * entire timeline) for the data formats. Modeled on ShareModal's portal shell,
+ * but — per the handoff — the overlay click does not close the dialog, only
+ * Esc / the close button / Cancel do.
+ *
+ * 14.1 implements the server-side data/calendar formats (CSV, Excel, ICS).
+ * 14.2 adds client-side textual formats (Markdown, Plain text, Copy to clipboard)
+ *      via the `textExportData` prop; these formats only appear for non-Gantt views.
+ * 14.3 adds the PNG snapshot format, rasterizing `captureElement` (the live
+ *      view container) via `lib/pngExport.ts`; available in every view.
+ * 14.4 adds the printable-view and HTML-save formats, both driven off the
+ *      `presentationFrame` prop (the mounted PresentationFrame iframe) via
+ *      `lib/printExport.ts` / `lib/htmlExport.ts`; available in every view.
+ */
+
+import { useEffect, useRef, useState, useCallback } from 'react'
+import { createPortal } from 'react-dom'
+import {
+  FileOutput, Filter, AlertTriangle, Download, FileDown, Check, X, Copy, Printer,
+} from 'lucide-react'
+import { Button } from '@/components/ui/button'
+import { cn } from '@/lib/utils'
+import { useExport } from '@/hooks/useExport'
+import {
+  getExportFormats, buildExportFilename,
+  type ExportFormatId, type ExportViewType,
+} from '@/lib/exportCapabilities'
+import {
+  buildListMarkdown, buildListMarkdownOutline,
+  buildKanbanMarkdown, buildCalendarMarkdown,
+  buildListPlainText, buildListPlainTextOutline,
+  buildKanbanPlainText, buildCalendarPlainText,
+  buildListHtml, buildListHtmlOutline, buildKanbanHtml, buildCalendarHtml,
+  type TextExportData,
+} from '@/lib/textExport'
+import { capturePngSnapshot } from '@/lib/pngExport'
+import { printPresentationFrame } from '@/lib/printExport'
+import { saveFramePresentationHtml } from '@/lib/htmlExport'
+import type { FilterDefinition } from '@/lib/filterTypes'
+
+export type { TextExportData }
+
+export interface ExportDialogProps {
+  view: ExportViewType
+  teamId: string
+  timelineId: string
+  timelineName: string
+  /** Team display name, shown in the PNG header strip alongside the timeline name. */
+  teamName?: string | null
+  /** Display label for the active filter (e.g. a saved filter's name), or null if no filter is active. */
+  filterLabel: string | null
+  /** The active filter's definition, sent to the server when scope is "view" and activityIds is absent. */
+  filterDefinition: FilterDefinition | null
+  /** Number of activities matching the active filter (or totalCount when no filter is active). */
+  filteredCount: number
+  /** Total number of activities in the timeline, regardless of filter. */
+  totalCount: number
+  /**
+   * Ordered activity IDs for the "current view" scope — covers preset/member
+   * filters (which can't be sent as a FilterDefinition) and list-view sort order.
+   * When non-null, takes precedence over filterDefinition in the request body.
+   */
+  viewActivityIds: string[] | null
+  /**
+   * Export column names to include in CSV/Excel (list view column visibility).
+   * Null means all columns. Only meaningful for csv/xlsx formats.
+   */
+  listExportColumns: string[] | null
+  /**
+   * Pre-resolved in-memory data for client-side textual formats (14.2).
+   * Required for Markdown / plain text / clipboard options to be functional;
+   * if absent those formats still appear but will produce empty output.
+   */
+  textExportData?: TextExportData | null
+  /**
+   * The live view container to rasterize for the PNG format (14.3).
+   * Required for PNG to be functional; if absent the format still appears
+   * but the action is a no-op.
+   */
+  captureElement?: HTMLElement | null
+  /**
+   * The mounted PresentationFrame's iframe — the shared render surface for
+   * the printable-view and HTML-save formats (14.4). Required for those
+   * formats to be functional; if absent the actions are a no-op.
+   */
+  presentationFrame?: HTMLIFrameElement | null
+  /**
+   * Period label for the PNG header (Calendar only) — e.g. "June 2026" or
+   * "Jun 1 – 7, 2026". The on-screen toolbar carries this, but it's excluded
+   * from the capture, so it's surfaced into the header strip instead.
+   */
+  periodLabel?: string | null
+  onClose: () => void
+}
+
+const VIEW_LABELS: Record<ExportViewType, string> = {
+  gantt: 'Gantt',
+  list: 'List',
+  kanban: 'Kanban',
+  calendar: 'Calendar',
+}
+
+type Scope = 'view' | 'all'
+
+// ── Client-side text generation ────────────────────────────────────────────────
+
+type ListStyle = 'table' | 'outline'
+
+function generateMarkdown(view: ExportViewType, data: TextExportData, timelineName: string, filterLabel: string | null, listStyle: ListStyle): string {
+  if (view === 'list') return listStyle === 'outline'
+    ? buildListMarkdownOutline(data, timelineName, filterLabel)
+    : buildListMarkdown(data, timelineName, filterLabel)
+  if (view === 'kanban') return buildKanbanMarkdown(data, timelineName, filterLabel)
+  if (view === 'calendar') return buildCalendarMarkdown(data, timelineName, filterLabel)
+  return buildListMarkdown(data, timelineName, filterLabel)
+}
+
+function generatePlainText(view: ExportViewType, data: TextExportData, timelineName: string, filterLabel: string | null, listStyle: ListStyle): string {
+  if (view === 'list') return listStyle === 'outline'
+    ? buildListPlainTextOutline(data, timelineName, filterLabel)
+    : buildListPlainText(data, timelineName, filterLabel)
+  if (view === 'kanban') return buildKanbanPlainText(data, timelineName, filterLabel)
+  if (view === 'calendar') return buildCalendarPlainText(data, timelineName, filterLabel)
+  return buildListPlainText(data, timelineName, filterLabel)
+}
+
+function generateHtml(view: ExportViewType, data: TextExportData, timelineName: string, filterLabel: string | null, listStyle: ListStyle): string {
+  if (view === 'list') return listStyle === 'outline'
+    ? buildListHtmlOutline(data, timelineName, filterLabel)
+    : buildListHtml(data, timelineName, filterLabel)
+  if (view === 'kanban') return buildKanbanHtml(data, timelineName, filterLabel)
+  if (view === 'calendar') return buildCalendarHtml(data, timelineName, filterLabel)
+  return buildListHtml(data, timelineName, filterLabel)
+}
+
+/** Triggers the browser to save a Blob with the given filename. */
+function saveBlob(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(url)
+}
+
+/**
+ * Writes `text/plain` + `text/html` flavors to the clipboard so the paste
+ * lands rich in Slack / Word / Google Docs and clean in code editors.
+ * Falls back to `writeText` if `ClipboardItem` is unavailable (HTTP contexts).
+ */
+async function copyToClipboard(plainText: string, htmlText: string): Promise<void> {
+  if (typeof ClipboardItem !== 'undefined' && navigator.clipboard.write) {
+    const item = new ClipboardItem({
+      'text/plain': new Blob([plainText], { type: 'text/plain' }),
+      'text/html': new Blob([htmlText], { type: 'text/html' }),
+    })
+    await navigator.clipboard.write([item])
+  } else {
+    // Fallback for HTTP (non-localhost) contexts where ClipboardItem is blocked.
+    await navigator.clipboard.writeText(plainText)
+  }
+}
+
+// ── Component ──────────────────────────────────────────────────────────────────
+
+export default function ExportDialog({
+  view,
+  timelineId,
+  timelineName,
+  teamName,
+  filterLabel,
+  filterDefinition,
+  filteredCount,
+  totalCount,
+  viewActivityIds,
+  listExportColumns,
+  textExportData,
+  captureElement,
+  presentationFrame,
+  periodLabel,
+  onClose,
+}: ExportDialogProps) {
+  const formats = getExportFormats(view)
+  const [formatId, setFormatId] = useState<ExportFormatId>('csv')
+  const [scope, setScope] = useState<Scope>('view')
+  const [listStyle, setListStyle] = useState<ListStyle>('table')
+  const [done, setDone] = useState(false)
+  const [clientPending, setClientPending] = useState(false)
+  const { download, isPending: serverPending } = useExport(timelineId, timelineName)
+  const doneTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const format = formats.find(f => f.id === formatId) ?? formats[0]
+  const Icon = format.icon
+  const isPending = serverPending || clientPending
+
+  // Client-side formats (PNG / Markdown / plain text) are inherently shaped by
+  // the active view, so their filename names it. Server data formats (CSV /
+  // xlsx / ICS) can be scoped to the whole timeline, where a view name would
+  // mislead — they keep the plain `<timeline>-<date>` name.
+  const filenameView = format.clientSide ? view : undefined
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  useEffect(() => () => { if (doneTimer.current) clearTimeout(doneTimer.current) }, [])
+
+  const selectFormat = (id: ExportFormatId) => {
+    setFormatId(id)
+    setDone(false)
+  }
+
+  const flashDone = useCallback(() => {
+    setDone(true)
+    doneTimer.current = setTimeout(() => setDone(false), 1600)
+  }, [])
+
+  const handleAction = useCallback(() => {
+    if (format.id === 'png') {
+      if (!captureElement) return
+      setClientPending(true)
+      capturePngSnapshot(captureElement, { timelineName, teamName: teamName ?? null, filterLabel, periodLabel })
+        .then(blob => { saveBlob(blob, buildExportFilename(timelineName, format.ext, view)); flashDone() })
+        .catch(() => { /* capture may fail on unsupported browsers */ })
+        .finally(() => setClientPending(false))
+      return
+    }
+
+    if (format.id === 'printable') {
+      if (!presentationFrame) return
+      printPresentationFrame(presentationFrame, { timelineName, teamName: teamName ?? null, filterLabel, periodLabel })
+      flashDone()
+      return
+    }
+
+    if (format.id === 'html') {
+      if (!presentationFrame) return
+      setClientPending(true)
+      saveFramePresentationHtml(
+        presentationFrame,
+        { timelineName, teamName: teamName ?? null, filterLabel, periodLabel },
+        buildExportFilename(timelineName, format.ext, view),
+      )
+        .then(() => flashDone())
+        .catch(() => { /* stylesheet fetch may fail offline; nothing was saved */ })
+        .finally(() => setClientPending(false))
+      return
+    }
+
+    if (format.clientSide) {
+      const data = textExportData ?? {
+        activities: [],
+        memberById: new Map(),
+        statusById: new Map(),
+        tagById: new Map(),
+        activityTitleById: new Map(),
+        kanbanColumns: null,
+        listDisplayRows: null,
+        listVisibleColumns: null,
+        kanbanShowHierarchy: false,
+        kanbanChildrenByParentId: new Map(),
+      }
+
+      if (format.id === 'clipboard') {
+        const plainText = generatePlainText(view, data, timelineName, filterLabel, listStyle)
+        const htmlText = generateHtml(view, data, timelineName, filterLabel, listStyle)
+        setClientPending(true)
+        copyToClipboard(plainText, htmlText)
+          .then(flashDone)
+          .catch(() => { /* clipboard may be denied */ })
+          .finally(() => setClientPending(false))
+        return
+      }
+
+      // markdown or plaintext — generate and download
+      const isMarkdown = format.id === 'markdown'
+      const content = isMarkdown
+        ? generateMarkdown(view, data, timelineName, filterLabel, listStyle)
+        : generatePlainText(view, data, timelineName, filterLabel, listStyle)
+      const mimeType = isMarkdown ? 'text/markdown;charset=utf-8' : 'text/plain;charset=utf-8'
+      const blob = new Blob([content], { type: mimeType })
+      saveBlob(blob, buildExportFilename(timelineName, format.ext, view))
+      flashDone()
+      return
+    }
+
+    // Server-side: CSV / xlsx / ICS
+    const isDataFormat = format.id === 'csv' || format.id === 'xlsx'
+    void download(format.id, format.ext, {
+      activityIds: scope === 'view' ? viewActivityIds : null,
+      filter: scope === 'view' && !viewActivityIds ? filterDefinition : null,
+      columns: isDataFormat ? listExportColumns : null,
+    }).then(flashDone)
+  }, [format, view, timelineName, teamName, filterLabel, periodLabel, textExportData, captureElement, presentationFrame, scope, listStyle, viewActivityIds, filterDefinition, listExportColumns, download, flashDone])
+
+  const emptyView = filteredCount === 0
+  const subWithFilter = filterLabel !== null
+    ? `${filteredCount} of ${totalCount} activities · matches your filter`
+    : `All ${totalCount} activities · nothing filtered out`
+
+  // Button label / icon for the primary action
+  const actionLabel = format.verb === 'copy'
+    ? done ? 'Copied!' : (isPending ? 'Copying…' : 'Copy to clipboard')
+    : format.verb === 'print'
+    ? done ? 'Print dialog opened' : 'Print…'
+    : done ? 'Downloaded' : (isPending ? 'Downloading…' : `Download ${format.ext}`)
+  const ActionIcon = format.verb === 'copy' ? Copy : format.verb === 'print' ? Printer : Download
+
+  return createPortal(
+    <div className="fixed inset-0 z-[1000] flex items-center justify-center bg-[hsl(200_24%_11%/0.55)] p-6 backdrop-blur-[2px]">
+      <div className="flex max-h-[88vh] w-[min(620px,100%)] flex-col overflow-hidden rounded-[var(--radius-xl)] bg-card shadow-[var(--shadow-lg)]">
+        {/* Header */}
+        <div className="flex shrink-0 items-start gap-3 px-5 py-[18px]">
+          <div className="flex h-[38px] w-[38px] shrink-0 items-center justify-center rounded-[var(--radius-md)] bg-[hsl(188_59%_38%/0.12)] text-primary">
+            <FileOutput size={19} strokeWidth={2.2} />
+          </div>
+          <div className="min-w-0 flex-1">
+            <h2 className="m-0 text-[17px] font-bold leading-tight text-foreground">Export this view</h2>
+            <div className="mt-0.5 flex items-center gap-1.5 text-[12.5px] text-muted-foreground">
+              <span className="inline-block h-2 w-2 shrink-0 rounded-sm bg-secondary" />
+              {timelineName ? `${timelineName} · ` : ''}{VIEW_LABELS[view]} view
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            aria-label="Close"
+            className="flex h-[30px] w-[30px] shrink-0 cursor-pointer items-center justify-center rounded-[var(--radius-md)] border-none bg-muted text-muted-foreground"
+          >
+            <X size={16} strokeWidth={2.2} />
+          </button>
+        </div>
+
+        {/* Filter context strip */}
+        <div className="shrink-0 border-b border-border px-5 pb-[14px]">
+          <div className={cn(
+            'rounded-[var(--radius-lg)] px-3 py-[9px]',
+            emptyView ? 'bg-[color-mix(in_srgb,var(--warning)_13%,transparent)]' : 'bg-muted',
+          )}>
+            <div className="flex items-center gap-2 text-[12.5px]">
+              {emptyView
+                ? <AlertTriangle size={14} className="shrink-0 text-warning" strokeWidth={2} />
+                : <Filter size={14} className="shrink-0 text-muted-foreground" strokeWidth={2} />}
+              <span className="flex-1 text-foreground">
+                {filterLabel !== null
+                  ? <>Filtered: <span className="font-semibold">{filterLabel}</span></>
+                  : `Exporting the ${VIEW_LABELS[view]} view as you see it`}
+              </span>
+              <span className={cn('shrink-0 text-[11.5px] font-semibold', emptyView ? 'text-warning' : 'text-muted-foreground')}>
+                {filterLabel !== null ? `${filteredCount} of ${totalCount} activities` : `All ${totalCount} activities`}
+              </span>
+            </div>
+            {emptyView && (
+              <div className="ml-[22px] mt-1 text-[12px] text-muted-foreground">
+                This view has no activities — the export will be empty or headers-only.
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Body — format rail + options pane */}
+        <div className="flex flex-1 overflow-hidden">
+          <div role="listbox" aria-label="Export format" className="flex w-[196px] shrink-0 flex-col gap-0.5 overflow-y-auto border-r border-border p-2.5">
+            {formats.map(f => {
+              const FIcon = f.icon
+              const selected = f.id === formatId
+              // Badge icon: copy for clipboard, printer for printable view, download for everything else
+              const BadgeIcon = f.verb === 'copy' ? Copy : f.verb === 'print' ? Printer : Download
+              return (
+                <button
+                  key={f.id}
+                  role="option"
+                  aria-selected={selected}
+                  onClick={() => selectFormat(f.id)}
+                  className={cn(
+                    'flex items-center gap-[9px] rounded-[var(--radius-md)] border-none px-[9px] py-2 text-left text-[13px] transition-colors',
+                    selected ? 'bg-[hsl(188_59%_38%/0.1)] text-foreground font-semibold' : 'bg-transparent text-foreground hover:bg-muted',
+                  )}
+                >
+                  <FIcon size={15} strokeWidth={selected ? 2.2 : 1.8} className={selected ? 'shrink-0 text-primary' : 'shrink-0 text-muted-foreground'} />
+                  <span className="flex-1 truncate">{f.name}</span>
+                  <span title={f.verb === 'copy' ? 'Copy' : f.verb === 'print' ? 'Print' : 'Download'} className={cn('shrink-0 text-muted-foreground', selected ? 'opacity-90' : 'opacity-65')}>
+                    <BadgeIcon size={11} strokeWidth={2} />
+                  </span>
+                </button>
+              )
+            })}
+          </div>
+
+          <div className="flex flex-1 flex-col gap-3.5 overflow-y-auto p-4">
+            {/* Format heading */}
+            <div className="flex items-start gap-2.5">
+              <Icon size={16} strokeWidth={2} className="mt-0.5 shrink-0 text-muted-foreground" />
+              <div>
+                <div className="text-[14px] font-bold text-foreground">{format.name}</div>
+                <div className="mt-0.5 text-[12.5px] leading-[1.5] text-muted-foreground">{format.desc}</div>
+              </div>
+            </div>
+
+            {/* Style picker — table vs outline, only for list view text formats */}
+            {(format.id === 'markdown' || format.id === 'plaintext' || format.id === 'clipboard') && view === 'list' && (
+              <div>
+                <div className="mb-1.5 text-[11px] font-bold uppercase tracking-[0.06em] text-muted-foreground">Style</div>
+                <div className="flex overflow-hidden rounded-[var(--radius-lg)] border border-border">
+                  <StyleOption
+                    label="Table"
+                    desc="Aligned columns"
+                    selected={listStyle === 'table'}
+                    onSelect={() => setListStyle('table')}
+                  />
+                  <div className="w-px shrink-0 bg-border" />
+                  <StyleOption
+                    label="Outline"
+                    desc="Bullet list with fields"
+                    selected={listStyle === 'outline'}
+                    onSelect={() => setListStyle('outline')}
+                  />
+                </div>
+              </div>
+            )}
+
+            {/* Scope picker — only for server-side data formats */}
+            {format.scope && (
+              <div>
+                <div className="mb-1.5 text-[11px] font-bold uppercase tracking-[0.06em] text-muted-foreground">Activities to export</div>
+                <div className="overflow-hidden rounded-[var(--radius-lg)] border border-border">
+                  <ScopeRow
+                    label="Current view"
+                    sub={subWithFilter}
+                    selected={scope === 'view'}
+                    onSelect={() => setScope('view')}
+                  />
+                  <div className="border-t border-border" />
+                  <ScopeRow
+                    label="Entire timeline"
+                    sub={`All ${totalCount} activities · ignores filters`}
+                    selected={scope === 'all'}
+                    onSelect={() => setScope('all')}
+                  />
+                </div>
+              </div>
+            )}
+
+            {/* Filename chip — only for download formats */}
+            {format.verb === 'download' && format.ext && (
+              <div>
+                <div className="mb-1.5 text-[11px] font-bold uppercase tracking-[0.06em] text-muted-foreground">File</div>
+                <div className="flex items-center gap-2 rounded-[var(--radius-md)] bg-muted px-[11px] py-[7px] font-mono text-[12px] text-foreground">
+                  <FileDown size={13} strokeWidth={2} className="shrink-0 text-muted-foreground" />
+                  <span className="truncate">{buildExportFilename(timelineName, format.ext, filenameView)}</span>
+                </div>
+              </div>
+            )}
+
+            {/* Clipboard note */}
+            {format.id === 'clipboard' && (
+              <div className="rounded-[var(--radius-md)] bg-muted px-3 py-2.5 text-[12px] leading-[1.5] text-muted-foreground">
+                Copies <strong className="text-foreground">rich text</strong> (HTML) + plain text — paste into Slack, Google Docs, or Word to get a formatted {view === 'list' && listStyle === 'outline' ? 'outline' : 'table'}.
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Footer */}
+        <div className="flex shrink-0 items-center justify-end gap-2.5 border-t border-border px-5 py-[13px]">
+          <Button variant="outline" onClick={onClose}>Cancel</Button>
+          <Button onClick={handleAction} disabled={isPending} className="min-w-[168px] justify-center">
+            {done
+              ? <><Check size={14} strokeWidth={2.2} /> {actionLabel}</>
+              : <><ActionIcon size={14} strokeWidth={2.2} /> {actionLabel}</>}
+          </Button>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  )
+}
+
+function StyleOption({ label, desc, selected, onSelect }: { label: string; desc: string; selected: boolean; onSelect: () => void }) {
+  return (
+    <button
+      onClick={onSelect}
+      className={cn(
+        'flex flex-1 flex-col items-start px-3 py-2.5 text-left transition-colors',
+        selected ? 'bg-[hsl(188_59%_38%/0.09)]' : 'bg-transparent hover:bg-muted',
+      )}
+    >
+      <span className="text-[13px] font-semibold text-foreground">{label}</span>
+      <span className="text-[11.5px] text-muted-foreground">{desc}</span>
+    </button>
+  )
+}
+
+function ScopeRow({ label, sub, selected, onSelect }: { label: string; sub: string; selected: boolean; onSelect: () => void }) {
+  return (
+    <button
+      onClick={onSelect}
+      className={cn(
+        'flex w-full items-start gap-2.5 px-3 py-2.5 text-left transition-colors',
+        selected ? 'bg-[hsl(188_59%_38%/0.09)]' : 'bg-transparent hover:bg-muted',
+      )}
+    >
+      <span className={cn(
+        'mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border-[1.5px]',
+        selected ? 'border-[5px] border-primary' : 'border-input',
+      )} />
+      <span>
+        <div className="text-[13px] font-semibold text-foreground">{label}</div>
+        <div className="text-[11.5px] text-muted-foreground">{sub}</div>
+      </span>
+    </button>
+  )
+}
+````
+
+## File: packages/web/src/pages/DashboardPage.tsx
+````typescript
+/**
+ * Main application shell: sidebar + top bar + content area.
+ *
+ * Fetches the authenticated user's first team and first timeline to seed the
+ * initial view. Team-selection UI and full sidebar wiring come in a later phase.
+ */
+
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
+import Sidebar from '@/components/layout/Sidebar'
+import TopBar, { type ViewMode } from '@/components/layout/TopBar'
+import GanttView from '@/components/gantt/GanttView'
+import { DEFAULT_LABEL_COL_W } from '@/components/gantt/GanttGrid'
+import GanttToolbar, { type GroupBy, type SortBy, type TimeGranularity, type ColorBy } from '@/components/gantt/GanttToolbar'
+import ListToolbar, { type ListGroupBy, type ListSortBy, type ListColorBy, type ListDensity, type ColumnConfig } from '@/components/list/ListToolbar'
+import ListView, { buildListRows, type ListDisplayRow } from '@/components/list/ListView'
+import CalendarToolbar, { formatAnchorLabel, type CalendarLayout } from '@/components/calendar/CalendarToolbar'
+import CalendarView from '@/components/calendar/CalendarView'
+import KanbanToolbar, { type KanbanGroupBy, type KanbanSortBy, type KanbanCardField } from '@/components/kanban/KanbanToolbar'
+import KanbanView from '@/components/kanban/KanbanView'
+import { DEFAULT_CARD_FIELDS, buildColumns, buildHierarchyMaps } from '@/components/kanban/kanbanColumns'
+import type { TextExportData } from '@/components/ExportDialog'
+import { CleanGanttSnapshot, CleanListSnapshot, CleanKanbanSnapshot, CleanCalendarSnapshot } from '@/components/export/CleanSnapshot'
+import PresentationFrame from '@/components/export/PresentationFrame'
+import ActivityDetailPanel from '@/components/gantt/ActivityDetailPanel'
+import ActivityCreatePanel from '@/components/gantt/ActivityCreatePanel'
+import { FilterProvider, useFilter } from '@/contexts/FilterContext'
+import { FindProvider, useFind } from '@/contexts/FindContext'
+import { useAuth } from '@/contexts/AuthContext'
+import { useDarkMode } from '@/hooks/useDarkMode'
+import { usePreferences, usePreferenceMap, useUpsertPreference } from '@/hooks/usePreferences'
+import { Settings, Moon, Sun, LogOut } from 'lucide-react'
+import { Badge } from '@/components/identity/Badge'
+import type { Identity } from '@/components/identity/identity-constants'
+import { useMyTeams, useTeamTimelines, useTeamTimelinesWithArchived, useTeamActivitySync, useUnarchiveTeam, useUnarchiveTimeline, useTeamMembers, useTimelineActivities } from '@/hooks/useTeamActivities'
+import { useTimelineStatuses } from '@/hooks/useStatusTemplates'
+import { useSavedFilters } from '@/hooks/useSavedFilters'
+import { useTags } from '@/hooks/useTags'
+import TeamModal from '@/components/TeamModal'
+import MemberModal from '@/components/MemberModal'
+import TimelineModal from '@/components/TimelineModal'
+import FilterManageModal from '@/components/filters/FilterManageModal'
+import ShareModal from '@/components/ShareModal'
+import CalendarShareModal from '@/components/CalendarShareModal'
+import ExportDialog from '@/components/ExportDialog'
+import { matchesFilter } from '@/lib/filterEngine'
+import { applyActiveFilter } from '@/lib/presetFilters'
+import { useNavigate } from 'react-router-dom'
+import type { components } from '@draba/shared'
+import type { Member } from '@/types'
+
+type ApiActivity = components['schemas']['Activity']
+type ApiTeam = components['schemas']['Team']
+type ApiTimeline = components['schemas']['Timeline']
+type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
+
+/** Comparator for ListSortBy, shared by the export-scope ID ordering and the list-export display rows. */
+function compareByListSort(a: ApiActivity, b: ApiActivity, listSortBy: ListSortBy): number {
+  if (listSortBy === 'startDate') return (a.startAt ?? '').localeCompare(b.startAt ?? '')
+  if (listSortBy === 'endDate') return (a.endAt ?? '').localeCompare(b.endAt ?? '')
+  if (listSortBy === 'title') return a.title.localeCompare(b.title)
+  if (listSortBy === 'status') return (a.statusId ?? '').localeCompare(b.statusId ?? '')
+  if (listSortBy === 'progress') return (b.percentComplete ?? 0) - (a.percentComplete ?? 0)
+  return 0
+}
+
+const DROPDOWN_BTN: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 8,
+  width: '100%',
+  padding: '10px 14px',
+  background: 'none',
+  border: 'none',
+  fontSize: 13,
+  color: 'var(--foreground)',
+  cursor: 'pointer',
+  fontFamily: 'var(--font-sans)',
+  textAlign: 'left',
+}
+
+function DashboardShell() {
+  const { logout, accessToken, user } = useAuth()
+  const { activeFilter, setActiveFilter } = useFilter()
+  const navigate = useNavigate()
+  const { isDark, toggle: toggleDark, theme } = useDarkMode()
+  const { setFindBarOpen } = useFind()
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [view, setView] = useState<ViewMode>('gantt')
+  // Gantt label-column width — held here so it survives switching to another
+  // view and back (GanttView unmounts on view change, which would reset it).
+  const [ganttLabelColW, setGanttLabelColW] = useState(DEFAULT_LABEL_COL_W)
+  // Close the detail sidebar when switching to list view (edits are inline there)
+  const prevView = useRef<ViewMode>('gantt')
+  const [profileOpen, setProfileOpen] = useState(false)
+  const [selectedActivityId, setSelectedActivityId] = useState<string | null>(null)
+  const [selectedApiActivity, setSelectedApiActivity] = useState<ApiActivity | null>(null)
+  const [ganttMembers, setGanttMembers] = useState<Member[]>([])
+  const [createDefaults, setCreateDefaults] = useState<{ start: string; end: string; memberId: string | null; statusId?: string | null } | null>(null)
+  const [filterModalOpen, setFilterModalOpen] = useState(false)
+  const [shareModalOpen, setShareModalOpen] = useState(false)
+  const [exportDialogOpen, setExportDialogOpen] = useState(false)
+  // Body + iframe of the PresentationFrame that hosts the export dialog's
+  // clean (interactive=false) snapshot — an isolated, always-light document
+  // reusing the Phase 13 share viewer's render path for all four views
+  // (Calendar joined in 14.4). The body is the PNG capture target; the
+  // iframe itself is the shared surface for the 14.4 printable-view and
+  // HTML-save formats (`iframe.contentWindow.print()` / `contentDocument`
+  // serialization). Both are set once the frame signals readiness.
+  const [snapshotBody, setSnapshotBody] = useState<HTMLElement | null>(null)
+  const [snapshotFrame, setSnapshotFrame] = useState<HTMLIFrameElement | null>(null)
+  const handleSnapshotReady = useCallback((body: HTMLElement, iframe: HTMLIFrameElement) => {
+    setSnapshotBody(body)
+    setSnapshotFrame(iframe)
+  }, [])
+  // Calendar gets its own share surface — an ICS feed configurator, not the
+  // active-links list (Phase 13.4).
+  const [calendarShareModalOpen, setCalendarShareModalOpen] = useState(false)
+  const [liveDragDates, setLiveDragDates] = useState<{ activityId: string; start: string; end: string } | null>(null)
+  // Gantt toolbar state
+  const [groupBy, setGroupBy] = useState<GroupBy>('none')
+  const [sortBy, setSortBy] = useState<SortBy>('startDate')
+  const [granularity, setGranularity] = useState<TimeGranularity | 'auto'>('auto')
+  const [colorBy, setColorBy] = useState<ColorBy>('activity')
+  // List toolbar state
+  const [listGroupBy, setListGroupBy] = useState<ListGroupBy>('none')
+  const [listSortBy, setListSortBy] = useState<ListSortBy>('startDate')
+  const [listColorBy, setListColorBy] = useState<ListColorBy>('activity')
+  const [listDensity, setListDensity] = useState<ListDensity>('comfortable')
+  const [listColumns, setListColumns] = useState<ColumnConfig[]>([])
+  // Incremented seq lets ListView know a new toggle has arrived
+  const [listColToggle, setListColToggle] = useState<{ colId: string; visible: boolean; seq: number } | null>(null)
+  const listColToggleSeq = useRef(0)
+  // Calendar toolbar state
+  const [calendarLayout, setCalendarLayout] = useState<CalendarLayout>('month')
+  // anchorDate = UTC midnight of the 1st of the displayed month (month) or weekStart (week).
+  const [calendarAnchorDate, setCalendarAnchorDate] = useState<Date>(() => {
+    const d = new Date()
+    d.setUTCHours(0, 0, 0, 0)
+    d.setUTCDate(1)
+    return d
+  })
+  // Kanban toolbar state
+  const [kanbanGroupBy, setKanbanGroupBy] = useState<KanbanGroupBy>('status')
+  const [kanbanSortBy, setKanbanSortBy] = useState<KanbanSortBy>('startDate')
+  const [kanbanColorBy, setKanbanColorBy] = useState<ColorBy>('activity')
+  const [kanbanCardFields, setKanbanCardFields] = useState<KanbanCardField[]>(DEFAULT_CARD_FIELDS)
+  const [kanbanCollapsedColumns, setKanbanCollapsedColumns] = useState<string[]>([])
+  const [kanbanShowHierarchy, setKanbanShowHierarchy] = useState(false)
+  // Incremented to trigger inline row creation in list view
+  const [listNewRowSeq, setListNewRowSeq] = useState(0)
+  const profileRef = useRef<HTMLDivElement>(null)
+  // Preference persistence
+  const upsert = useUpsertPreference()
+  // Track whether we've applied server prefs for the active timeline so we
+  // don't immediately write defaults back before the server data arrives.
+  const prefsAppliedForTimeline = useRef<string | null>(null)
+  // One-shot guard: init activeTimelineId from global prefs only on first load.
+  const timelineIdInitialized = useRef(false)
+
+
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (profileRef.current && !profileRef.current.contains(e.target as Node)) {
+        setProfileOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [])
+
+  // Close the detail sidebar when switching to list view (list edits are inline).
+  useEffect(() => {
+    if (view === 'list' && prevView.current !== 'list') {
+      setSelectedActivityId(null)
+      setSelectedApiActivity(null)
+      setCreateDefaults(null)
+    }
+    prevView.current = view
+  }, [view])
+
+  // Ctrl/Cmd+F opens the Find bar; browser default (page search) is suppressed.
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
+        e.preventDefault()
+        setFindBarOpen(true)
+      }
+    }
+    document.addEventListener('keydown', handleKeyDown)
+    return () => document.removeEventListener('keydown', handleKeyDown)
+  }, [setFindBarOpen])
+
+  const displayName = (user as { displayName?: string } | null)?.displayName ?? 'User'
+  const email = (user as { email?: string } | null)?.email ?? ''
+  const userIdentity: Identity = {
+    color: (user as { color?: string } | null)?.color ?? '#288C9B',
+    icon: (user as { icon?: string } | null)?.icon ?? '__name_2__',
+  }
+
+  // Global preferences — restored on login to seed team/timeline selection.
+  const { isSuccess: globalPrefsSettled } = usePreferences()
+  const globalPrefMap = usePreferenceMap()
+  const weekStartDay: 0 | 1 = (globalPrefMap['week_start'] as string | undefined) === 'sunday' ? 0 : 1
+  // Mirrors GanttView's own pref-derived column locale — used by the PNG
+  // export's off-screen CleanGanttSnapshot, which builds its own columns.
+  const prefWeekStart: 'monday' | 'sunday' = (globalPrefMap['week_start'] as string | undefined) === 'sunday' ? 'sunday' : 'monday'
+  const prefDateFormat = (globalPrefMap['date_format'] as string | undefined) ?? 'MMM D, YYYY'
+  const prefLocale = prefDateFormat === 'DD/MM/YYYY' ? 'en-GB' : 'en-US'
+
+  // Team modal state
+  const [teamModalMode, setTeamModalMode] = useState<'new' | 'edit' | null>(null)
+  const [editingTeam, setEditingTeam] = useState<ApiTeam | null>(null)
+  const unarchiveTeam = useUnarchiveTeam()
+
+  // Member modal state
+  const [editingMember, setEditingMember] = useState<TeamMemberWithUser | null>(null)
+
+  // Timeline modal state
+  const [timelineModalMode, setTimelineModalMode] = useState<'new' | 'edit' | null>(null)
+  const [editingTimeline, setEditingTimeline] = useState<ApiTimeline | null>(null)
+
+  // Fetch all teams including archived for the sidebar's archived section.
+  const { data: allTeams = [] } = useMyTeams(true)
+  const activeTeams = allTeams.filter(t => !t.archivedAt)
+  const archivedTeams = allTeams.filter(t => Boolean(t.archivedAt))
+
+  // Explicit team selection state — null until the global pref is applied so
+  // that timelines (and the timeline init effect) don't fire against the wrong
+  // fallback team before the saved team pref resolves.
+  const [activeTeamId, setActiveTeamId] = useState<string | null>(null)
+  const teamIdInitialized = useRef(false)
+  useEffect(() => {
+    if (!activeTeams.length || !globalPrefsSettled || teamIdInitialized.current) return
+    teamIdInitialized.current = true
+    const saved = typeof globalPrefMap['selected_team'] === 'string' ? globalPrefMap['selected_team'] : null
+    const exists = saved && activeTeams.some(t => t.id === saved)
+    setActiveTeamId(exists ? saved : activeTeams[0].id)
+  }, [activeTeams, globalPrefsSettled, globalPrefMap])
+
+  // Only derive an active team once the pref has been applied (activeTeamId !== null).
+  // The activeTeams[0] fallback here handles the edge case where the saved team
+  // was archived or deleted between sessions.
+  const activeTeam = activeTeamId !== null
+    ? (activeTeams.find(t => t.id === activeTeamId) ?? activeTeams[0] ?? undefined)
+    : undefined
+  const teamId = activeTeam?.id ?? ''
+
+  // Check whether the current user is an admin of the active team.
+  const { data: teamMembers = [] } = useTeamMembers(teamId)
+  const userId = (user as { id?: string } | null)?.id ?? ''
+  const isSuperadmin = Boolean((user as { isSuperadmin?: boolean } | null)?.isSuperadmin)
+  const canEditTeam = isSuperadmin || teamMembers.some(m => m.userId === userId && m.role === 'admin')
+
+  const handleSelectTeam = useCallback((id: string) => {
+    setActiveTeamId(id)
+    // Clear the stale timeline selection so the init effect re-fires with the
+    // new team's timeline list. Without this, the old timeline ID leaks into
+    // the new team's API requests and produces 404s.
+    setActiveTimelineId(undefined)
+    prefsAppliedForTimeline.current = null
+    timelineIdInitialized.current = false
+    // Clear the selected activity too, otherwise the old team's activity
+    // stays pinned in the right sidebar after switching teams.
+    setSelectedActivityId(null)
+    setSelectedApiActivity(null)
+    setCreateDefaults(null)
+  }, [])
+
+  const unarchiveTimeline = useUnarchiveTimeline(teamId)
+
+  const { data: timelines = [] } = useTeamTimelines(teamId)
+  const { data: allTimelines = [] } = useTeamTimelinesWithArchived(teamId)
+  const archivedTimelines = allTimelines.filter(t => Boolean(t.archivedAt))
+  const [activeTimelineId, setActiveTimelineId] = useState<string | undefined>()
+  const { data: activeTimelineStatuses = [] } = useTimelineStatuses(teamId, activeTimelineId ?? '')
+  const { data: savedFilters = [] } = useSavedFilters(teamId)
+  const { data: tags = [] } = useTags(teamId)
+  // Initialize activeTimelineId from the saved global pref (selected_timeline),
+  // falling back to timelines[0] when no pref is stored or the saved timeline
+  // is no longer in the list. Waits for global prefs to settle so we don't
+  // immediately overwrite a restored value with the fallback.
+  useEffect(() => {
+    if (timelines.length === 0 || !globalPrefsSettled || timelineIdInitialized.current) return
+    timelineIdInitialized.current = true
+    const saved = typeof globalPrefMap['selected_timeline'] === 'string' ? globalPrefMap['selected_timeline'] : null
+    const exists = saved && timelines.some(t => t.id === saved)
+    setActiveTimelineId(exists ? saved : timelines[0].id)
+  }, [timelines, globalPrefsSettled, globalPrefMap])
+  const activeTimeline = timelines.find(t => t.id === activeTimelineId) ?? timelines[0]
+  // Derived so they stay in sync after edits without needing separate state.
+  const activeTimelineColor = activeTimeline?.color ?? '#1A97A2'
+  const activeTimelineName = activeTimeline?.name ?? ''
+  const activeTimelineIdentity: Identity = {
+    color: activeTimeline?.color ?? '#288C9B',
+    icon: activeTimeline?.icon ?? '__none__',
+  }
+
+  // The frozen filter snapshot captured into a share's view config — shared
+  // across Gantt/List/Kanban since `activeFilter` applies to the whole timeline.
+  const activeShareFilter = useMemo(() => {
+    if (activeFilter.kind !== 'saved') return null
+    const sf = savedFilters.find(f => f.id === activeFilter.id)
+    if (!sf) return null
+    try { return JSON.parse(sf.definition) as import('@/lib/filterTypes').FilterDefinition } catch { return null }
+  }, [activeFilter, savedFilters])
+
+  // Unbounded activity list for the active timeline — used by the export
+  // dialog's filter-context strip and "scope" counts. Cached separately from
+  // each view's (possibly date-bounded) activity query.
+  const { data: allActivities = [] } = useTimelineActivities(teamId, activeTimelineId ?? '')
+
+  // Export dialog: filter context, counts, and the filtered activity list.
+  // filteredActivities is exposed so exportViewActivityIds can sort it for list view.
+  const exportFilterInfo = useMemo(() => {
+    const totalCount = allActivities.length
+    const closedStatusIds = new Set(activeTimelineStatuses.filter(s => s.isClosed).map(s => s.id))
+    const memberIdsByUserId = new Map<string, string[]>()
+    for (const m of teamMembers) {
+      if (!m.userId) continue
+      const list = memberIdsByUserId.get(m.userId) ?? []
+      list.push(m.id)
+      memberIdsByUserId.set(m.userId, list)
+    }
+    const filterCtx = {
+      closedStatusIds,
+      savedFilters,
+      statuses: new Map(activeTimelineId ? [[activeTimelineId, activeTimelineStatuses]] as const : []),
+      tags,
+    }
+
+    if (activeFilter.kind === 'preset' && activeFilter.id !== 'all') {
+      const PRESET_LABELS: Record<string, string> = {
+        open: 'Open only', upcoming: 'Upcoming', overdue: 'Overdue', noassign: 'No one assigned',
+      }
+      const filterLabel = PRESET_LABELS[activeFilter.id] ?? activeFilter.id
+      const filteredActivities = applyActiveFilter(allActivities, activeFilter, memberIdsByUserId, filterCtx)
+      return { filterLabel, filterDefinition: null, filteredCount: filteredActivities.length, totalCount, filteredActivities }
+    }
+
+    if (activeFilter.kind === 'member') {
+      const member = teamMembers.find(m => m.userId === (activeFilter as { kind: 'member'; userId: string }).userId)
+      const filterLabel = member?.displayName ?? 'Team member'
+      const filteredActivities = applyActiveFilter(allActivities, activeFilter, memberIdsByUserId, filterCtx)
+      return { filterLabel, filterDefinition: null, filteredCount: filteredActivities.length, totalCount, filteredActivities }
+    }
+
+    if (activeFilter.kind === 'saved' && activeShareFilter) {
+      const saved = savedFilters.find(f => f.id === activeFilter.id)
+      const statusesByTimeline = new Map(activeTimelineId ? [[activeTimelineId, activeTimelineStatuses]] as const : [])
+      const filteredActivities = allActivities.filter(a => matchesFilter(a, activeShareFilter, { statusesByTimeline, tags }))
+      return { filterLabel: saved?.name ?? 'Saved filter', filterDefinition: activeShareFilter, filteredCount: filteredActivities.length, totalCount, filteredActivities }
+    }
+
+    return { filterLabel: null, filterDefinition: null, filteredCount: totalCount, totalCount, filteredActivities: allActivities }
+  }, [allActivities, activeFilter, activeShareFilter, savedFilters, activeTimelineId, activeTimelineStatuses, tags, teamMembers])
+
+  // Ordered activity IDs for the export "current view" scope.
+  // Sent as activityIds in the request when: a preset/member filter is active
+  // (can't be evaluated server-side), or we're in list view (to preserve sort order).
+  const exportViewActivityIds = useMemo<string[] | null>(() => {
+    const hasNonSavedFilter = activeFilter.kind === 'preset' ? activeFilter.id !== 'all' : activeFilter.kind === 'member'
+    const needsIds = hasNonSavedFilter || view === 'list'
+    if (!needsIds) return null
+
+    let acts = exportFilterInfo.filteredActivities
+    if (view === 'list') {
+      acts = [...acts].sort((a, b) => compareByListSort(a, b, listSortBy))
+    }
+    return acts.map(a => a.id)
+  }, [exportFilterInfo.filteredActivities, activeFilter, view, listSortBy])
+
+  // List-view column visibility mapped to export column names.
+  // Null when not in list view or when all columns are visible (server defaults to all).
+  const exportListColumns = useMemo<string[] | null>(() => {
+    if (view !== 'list' || listColumns.length === 0) return null
+    const COL_MAP: Record<string, string> = {
+      title: 'Title', startAt: 'Start', endAt: 'End', description: 'Description',
+      status: 'Status', assignees: 'Assignees', tags: 'Tags', parent: 'Parent',
+      progress: 'Progress', location: 'Location', url: 'URL',
+    }
+    const cols = listColumns.filter(c => c.visible && COL_MAP[c.id]).map(c => COL_MAP[c.id])
+    // If all mappable columns are visible, skip sending — server defaults to all
+    const allExportCols = Object.values(COL_MAP)
+    if (cols.length === allExportCols.length) return null
+    return cols
+  }, [view, listColumns])
+
+  // Pre-resolved data for client-side textual exports (14.2).
+  // Only materialised for non-Gantt views (Gantt has no textual format).
+  const textExportData = useMemo<TextExportData | null>(() => {
+    if (view === 'gantt') return null
+
+    const memberById = new Map<string, string>(
+      teamMembers.map(m => [m.id, m.displayName || m.email || 'Unknown']),
+    )
+    const statusById = new Map<string, string>(
+      activeTimelineStatuses.map(s => [s.id, s.name]),
+    )
+    const tagById = new Map<string, string>(tags.map(t => [t.id, t.name]))
+    const activityTitleById = new Map<string, string>(allActivities.map(a => [a.id, a.title]))
+    const activities = exportFilterInfo.filteredActivities
+
+    // List view: pre-build sorted, grouped, hierarchy-aware display rows.
+    let listDisplayRows: ListDisplayRow[] | null = null
+    let listVisibleColumns: string[] | null = null
+    if (view === 'list') {
+      const sorted = [...activities].sort((a, b) => compareByListSort(a, b, listSortBy))
+      const memberByIdObj = new Map(
+        teamMembers.map(m => [m.id, { displayName: m.displayName || m.email || 'Unknown', color: m.color }]),
+      )
+      const statusByIdObj = new Map(activeTimelineStatuses.map(s => [s.id, { name: s.name }]))
+      listDisplayRows = buildListRows(
+        sorted, listGroupBy, memberByIdObj, statusByIdObj,
+        activeTimelineStatuses, new Set(), teamMembers.map(m => m.id),
+      )
+      listVisibleColumns = listColumns.length > 0
+        ? listColumns.filter(c => c.visible && !['colorBar', 'identity'].includes(c.id)).map(c => c.id)
+        : null
+    }
+
+    // Kanban: build columns respecting the hierarchy toggle.
+    let kanbanColumns: Array<{ label: string; activities: ApiActivity[] }> | null = null
+    let kbHierarchy = false
+    let kbChildrenById = new Map<string, ApiActivity[]>()
+    if (view === 'kanban') {
+      kbHierarchy = kanbanShowHierarchy
+      const { childrenByParentId, childIds } = kbHierarchy
+        ? buildHierarchyMaps(activities)
+        : { childrenByParentId: new Map<string, ApiActivity[]>(), childIds: new Set<string>() }
+      kbChildrenById = childrenByParentId
+      const columnActivities = kbHierarchy ? activities.filter(a => !childIds.has(a.id)) : activities
+      kanbanColumns = buildColumns(kanbanGroupBy, columnActivities, teamMembers, activeTimelineStatuses, kanbanSortBy)
+        .map(col => ({ label: col.label, activities: col.items }))
+    }
+
+    return {
+      activities,
+      memberById,
+      statusById,
+      tagById,
+      activityTitleById,
+      kanbanColumns,
+      listDisplayRows,
+      listVisibleColumns,
+      kanbanShowHierarchy: kbHierarchy,
+      kanbanChildrenByParentId: kbChildrenById,
+    }
+  }, [
+    view, teamMembers, activeTimelineStatuses, tags, allActivities,
+    exportFilterInfo.filteredActivities, kanbanGroupBy, kanbanSortBy, kanbanShowHierarchy,
+    listGroupBy, listSortBy, listColumns,
+  ])
+
+  // Close the activity detail panel whenever the active filter changes so the
+  // filtered view is unobstructed by a stale selection.
+  useEffect(() => {
+    setSelectedActivityId(null)
+    setSelectedApiActivity(null)
+  }, [activeFilter]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handleTimelineChange = useCallback((id: string) => {
+    prefsAppliedForTimeline.current = null
+    setActiveTimelineId(id)
+    setActiveFilter({ kind: 'preset', id: 'all' })
+  }, [setActiveFilter])
+
+  // Calendar navigation helpers.
+  const calendarPrev = useCallback(() => {
+    setCalendarAnchorDate(prev => {
+      const d = new Date(prev)
+      if (calendarLayout === 'month') {
+        d.setUTCMonth(d.getUTCMonth() - 1)
+      } else {
+        d.setUTCDate(d.getUTCDate() - 7)
+      }
+      return d
+    })
+  }, [calendarLayout])
+
+  const calendarNext = useCallback(() => {
+    setCalendarAnchorDate(prev => {
+      const d = new Date(prev)
+      if (calendarLayout === 'month') {
+        d.setUTCMonth(d.getUTCMonth() + 1)
+      } else {
+        d.setUTCDate(d.getUTCDate() + 7)
+      }
+      return d
+    })
+  }, [calendarLayout])
+
+  const calendarToday = useCallback(() => {
+    const d = new Date()
+    d.setUTCHours(0, 0, 0, 0)
+    if (calendarLayout === 'month') {
+      d.setUTCDate(1)
+    } else {
+      // Snap to weekStart.
+      const dow = d.getUTCDay()
+      const daysBack = weekStartDay === 1 ? (dow === 0 ? 6 : dow - 1) : dow
+      d.setUTCDate(d.getUTCDate() - daysBack)
+    }
+    setCalendarAnchorDate(d)
+  }, [calendarLayout, weekStartDay])
+
+  // Switching layouts also snaps the anchor date to the correct boundary so
+  // the week-view always starts on the configured weekStart day.
+  const handleCalendarLayoutChange = useCallback((l: CalendarLayout) => {
+    setCalendarLayout(l)
+    setCalendarAnchorDate(prev => {
+      const d = new Date(prev)
+      d.setUTCHours(0, 0, 0, 0)
+      if (l === 'week') {
+        const dow = d.getUTCDay()
+        const daysBack = weekStartDay === 1 ? (dow === 0 ? 6 : dow - 1) : dow
+        d.setUTCDate(d.getUTCDate() - daysBack)
+      } else {
+        d.setUTCDate(1)
+      }
+      return d
+    })
+  }, [weekStartDay])
+
+  useTeamActivitySync(teamId, accessToken)
+
+  // Per-timeline preferences: restore toolbar state when the active timeline changes.
+  // isSuccess gate ensures we don't mark prefs applied before the query resolves.
+  const { isSuccess: prefsSettled } = usePreferences(activeTimelineId)
+  const timelinePrefs = usePreferenceMap(activeTimelineId)
+  useEffect(() => {
+    if (!activeTimelineId || !prefsSettled) return
+    if (prefsAppliedForTimeline.current === activeTimelineId) return
+    prefsAppliedForTimeline.current = activeTimelineId
+
+    if (typeof timelinePrefs['group_by'] === 'string') setGroupBy(timelinePrefs['group_by'] as GroupBy)
+    if (typeof timelinePrefs['sort_by'] === 'string') setSortBy(timelinePrefs['sort_by'] as SortBy)
+    if (typeof timelinePrefs['zoom_granularity'] === 'string') setGranularity(timelinePrefs['zoom_granularity'] as TimeGranularity | 'auto')
+    if (typeof timelinePrefs['color_by'] === 'string') setColorBy(timelinePrefs['color_by'] as ColorBy)
+    if (typeof timelinePrefs['list_group_by'] === 'string') setListGroupBy(timelinePrefs['list_group_by'] as ListGroupBy)
+    if (typeof timelinePrefs['list_sort_by'] === 'string') setListSortBy(timelinePrefs['list_sort_by'] as ListSortBy)
+    if (typeof timelinePrefs['list_color_by'] === 'string') setListColorBy(timelinePrefs['list_color_by'] as ListColorBy)
+    if (typeof timelinePrefs['list_density'] === 'string') setListDensity(timelinePrefs['list_density'] as ListDensity)
+    if (typeof timelinePrefs['view_mode'] === 'string') setView(timelinePrefs['view_mode'] as ViewMode)
+    if (typeof timelinePrefs['kanban_group_by'] === 'string') setKanbanGroupBy(timelinePrefs['kanban_group_by'] as KanbanGroupBy)
+    if (typeof timelinePrefs['kanban_sort_by'] === 'string') setKanbanSortBy(timelinePrefs['kanban_sort_by'] as KanbanSortBy)
+    if (typeof timelinePrefs['kanban_color_by'] === 'string') setKanbanColorBy(timelinePrefs['kanban_color_by'] as ColorBy)
+    if (typeof timelinePrefs['kanban_card_fields'] === 'string') {
+      try { setKanbanCardFields(JSON.parse(timelinePrefs['kanban_card_fields']) as KanbanCardField[]) } catch { /* ignore */ }
+    }
+    if (typeof timelinePrefs['kanban_collapsed'] === 'string') {
+      try { setKanbanCollapsedColumns(JSON.parse(timelinePrefs['kanban_collapsed']) as string[]) } catch { /* ignore */ }
+    }
+    if (typeof timelinePrefs['kanban_show_hierarchy'] === 'string') {
+      try { setKanbanShowHierarchy(JSON.parse(timelinePrefs['kanban_show_hierarchy']) as boolean) } catch { /* ignore */ }
+    }
+  }, [activeTimelineId, prefsSettled, timelinePrefs])
+
+  // Save toolbar state changes to per-timeline prefs.
+  const saveTimelinePref = useCallback((key: string, value: string) => {
+    if (!activeTimelineId) return
+    upsert.mutate({ key, value: JSON.stringify(value), timelineId: activeTimelineId })
+  }, [activeTimelineId, upsert.mutate]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('group_by', groupBy)
+  }, [groupBy, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('sort_by', sortBy)
+  }, [sortBy, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('zoom_granularity', granularity)
+  }, [granularity, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('color_by', colorBy)
+  }, [colorBy, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('view_mode', view)
+  }, [view, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('list_group_by', listGroupBy)
+  }, [listGroupBy, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('list_sort_by', listSortBy)
+  }, [listSortBy, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('list_color_by', listColorBy)
+  }, [listColorBy, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('list_density', listDensity)
+  }, [listDensity, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('kanban_group_by', kanbanGroupBy)
+  }, [kanbanGroupBy, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('kanban_sort_by', kanbanSortBy)
+  }, [kanbanSortBy, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('kanban_color_by', kanbanColorBy)
+  }, [kanbanColorBy, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('kanban_card_fields', JSON.stringify(kanbanCardFields))
+  }, [kanbanCardFields, saveTimelinePref])
+
+  useEffect(() => {
+    if (prefsAppliedForTimeline.current !== activeTimelineId) return
+    saveTimelinePref('kanban_show_hierarchy', JSON.stringify(kanbanShowHierarchy))
+  }, [kanbanShowHierarchy, saveTimelinePref])
+
+  // Global preferences: persist dark mode, active team, and active timeline.
+  useEffect(() => {
+    upsert.mutate({ key: 'theme', value: JSON.stringify(theme) })
+  }, [theme]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!teamId) return
+    upsert.mutate({ key: 'selected_team', value: JSON.stringify(teamId) })
+  }, [teamId]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!activeTimelineId) return
+    upsert.mutate({ key: 'selected_timeline', value: JSON.stringify(activeTimelineId) })
+  }, [activeTimelineId]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Reset label column width when the user switches timelines so each timeline
+  // starts fresh. Switching between views on the same timeline preserves width
+  // because the state lives here rather than inside the unmounting GanttView.
+  useEffect(() => {
+    setGanttLabelColW(DEFAULT_LABEL_COL_W)
+  }, [activeTimelineId])
+
+  return (
+    <div style={{ display: 'flex', height: '100vh', overflow: 'hidden', background: 'var(--background)' }}>
+      <Sidebar
+        collapsed={sidebarCollapsed}
+        onToggle={() => setSidebarCollapsed(c => !c)}
+        apiTimelines={timelines}
+        archivedTimelines={archivedTimelines}
+        activeTimelineId={activeTimelineId}
+        onActiveTimelineChange={handleTimelineChange}
+        onNewTimeline={() => { setEditingTimeline(null); setTimelineModalMode('new') }}
+        onEditTimeline={id => {
+          // timelines (active) is always loaded; allTimelines (?archived=true) may
+          // still be in-flight, so prefer the already-loaded list to avoid opening
+          // the modal with an undefined timeline and blank fields.
+          const tl = timelines.find(t => t.id === id) ?? allTimelines.find(t => t.id === id)
+          setEditingTimeline(tl ?? null)
+          setTimelineModalMode('edit')
+        }}
+        onNewActivity={() => {
+          const today = new Date().toISOString().slice(0, 10)
+          setSelectedActivityId(null)
+          setSelectedApiActivity(null)
+          if (view === 'list') {
+            setListNewRowSeq(s => s + 1)
+          } else {
+            setCreateDefaults({ start: today, end: today, memberId: null })
+          }
+        }}
+        activeTeam={activeTeam}
+        activeTeams={activeTeams}
+        archivedTeams={archivedTeams}
+        canEditTeam={canEditTeam}
+        onSelectTeam={handleSelectTeam}
+        onNewTeam={isSuperadmin ? () => { setEditingTeam(null); setTeamModalMode('new'); } : undefined}
+        onEditTeam={t => { setEditingTeam(t as ApiTeam); setTeamModalMode('edit'); }}
+        onUnarchiveTeam={id => unarchiveTeam.mutate(id)}
+        members={teamMembers.length > 0 ? teamMembers : undefined}
+        onEditMember={isSuperadmin ? m => setEditingMember(m) : undefined}
+      />
+
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0 }}>
+        <TopBar
+          view={view}
+          teamId={teamId}
+          timelineName={activeTimelineName}
+          timelineIdentity={activeTimelineIdentity}
+          onViewChange={setView}
+          onOpenFilterManager={() => setFilterModalOpen(true)}
+          rightSlot={
+            <div ref={profileRef} style={{ position: 'relative', marginLeft: 4, zIndex: 30 }}>
+              <button
+                onClick={() => setProfileOpen(o => !o)}
+                style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', display: 'flex' }}
+                title={displayName}
+              >
+                <Badge identity={userIdentity} name={displayName} shape="circle" size={28} />
+              </button>
+
+              {profileOpen && (
+                <div
+                  style={{
+                    position: 'absolute',
+                    top: 'calc(100% + 8px)',
+                    right: 0,
+                    width: 220,
+                    background: 'var(--card)',
+                    border: '1px solid var(--border)',
+                    borderRadius: 8,
+                    boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
+                    zIndex: 100,
+                    overflow: 'hidden',
+                  }}
+                >
+                  <div style={{ padding: '12px 14px', borderBottom: '1px solid var(--border)' }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)' }}>{displayName}</div>
+                    <div style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 2 }}>{email}</div>
+                  </div>
+                  <button
+                    onClick={toggleDark}
+                    style={{ ...DROPDOWN_BTN, borderBottom: '1px solid var(--border)' }}
+                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                  >
+                    {isDark ? <Moon size={14} strokeWidth={1.8} /> : <Sun size={14} strokeWidth={1.8} />}
+                    {isDark ? 'Dark mode' : 'Light mode'}
+                  </button>
+                  <button
+                    onClick={() => { setProfileOpen(false); navigate('/settings'); }}
+                    style={{ ...DROPDOWN_BTN, borderBottom: '1px solid var(--border)' }}
+                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                  >
+                    <Settings size={14} strokeWidth={1.8} />
+                    Settings
+                  </button>
+                  <button
+                    onClick={logout}
+                    style={{ ...DROPDOWN_BTN, color: 'var(--muted-foreground)' }}
+                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                  >
+                    <LogOut size={14} strokeWidth={1.8} />
+                    Sign out
+                  </button>
+                </div>
+              )}
+            </div>
+          }
+        />
+
+        {/* Active timeline color band */}
+        <div style={{ height: 3, background: activeTimelineColor, flexShrink: 0, transition: 'background 0.2s ease' }} />
+
+        {/* Gantt sub-toolbar — only shown in Gantt view */}
+        {view === 'gantt' && (
+          <GanttToolbar
+            groupBy={groupBy}
+            onGroupByChange={setGroupBy}
+            sortBy={sortBy}
+            onSortByChange={setSortBy}
+            granularity={granularity}
+            onGranularityChange={setGranularity}
+            colorBy={colorBy}
+            onColorByChange={setColorBy}
+            onExport={() => setExportDialogOpen(true)}
+            onShare={() => setShareModalOpen(true)}
+          />
+        )}
+
+        {/* List sub-toolbar — only shown in List view */}
+        {view === 'list' && (
+          <ListToolbar
+            columns={listColumns}
+            onColumnVisibilityChange={(colId, visible) => {
+              listColToggleSeq.current += 1
+              setListColToggle({ colId, visible, seq: listColToggleSeq.current })
+              setListColumns(prev => prev.map(c => c.id === colId ? { ...c, visible } : c))
+            }}
+            density={listDensity}
+            onDensityChange={setListDensity}
+            groupBy={listGroupBy}
+            onGroupByChange={setListGroupBy}
+            sortBy={listSortBy}
+            onSortByChange={setListSortBy}
+            colorBy={listColorBy}
+            onColorByChange={setListColorBy}
+            onExport={() => setExportDialogOpen(true)}
+            onShare={() => setShareModalOpen(true)}
+          />
+        )}
+
+        {/* Calendar sub-toolbar — only shown in Calendar view */}
+        {view === 'calendar' && (
+          <CalendarToolbar
+            layout={calendarLayout}
+            onLayoutChange={handleCalendarLayoutChange}
+            anchorDate={calendarAnchorDate}
+            onPrev={calendarPrev}
+            onNext={calendarNext}
+            onToday={calendarToday}
+            colorBy={colorBy}
+            onColorByChange={setColorBy}
+            onExport={() => setExportDialogOpen(true)}
+            onShare={() => setCalendarShareModalOpen(true)}
+          />
+        )}
+
+        {/* Kanban sub-toolbar — only shown in Kanban view */}
+        {view === 'kanban' && (
+          <KanbanToolbar
+            groupBy={kanbanGroupBy}
+            onGroupByChange={setKanbanGroupBy}
+            sortBy={kanbanSortBy}
+            onSortByChange={setKanbanSortBy}
+            colorBy={kanbanColorBy}
+            onColorByChange={setKanbanColorBy}
+            cardFields={kanbanCardFields}
+            onCardFieldsChange={setKanbanCardFields}
+            showHierarchy={kanbanShowHierarchy}
+            onShowHierarchyChange={setKanbanShowHierarchy}
+            onExport={() => setExportDialogOpen(true)}
+            onShare={() => setShareModalOpen(true)}
+          />
+        )}
+
+        {/* Content area */}
+        <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+          {view === 'gantt' && teamId && activeTimelineId ? (
+            <GanttView
+              teamId={teamId}
+              timelineId={activeTimelineId}
+              startDate={activeTimeline?.startDate}
+              endDate={activeTimeline?.endDate}
+              groupBy={groupBy}
+              sortBy={sortBy}
+              granularity={granularity}
+              colorBy={colorBy}
+              timelineStatuses={activeTimelineStatuses}
+              savedFilters={savedFilters}
+              tags={tags}
+              selectedActivityId={selectedActivityId}
+              onSelectActivity={(id) => {
+                setSelectedActivityId(id)
+                if (!id) { setSelectedApiActivity(null); setCreateDefaults(null) }
+              }}
+              onSelectApiActivity={(activity) => {
+                setSelectedApiActivity(activity)
+                setCreateDefaults(null)
+              }}
+              onBarDragProgress={(activityId, newStart, newEnd) => {
+                setLiveDragDates({
+                  activityId,
+                  start: newStart.toISOString().slice(0, 10),
+                  end: newEnd.toISOString().slice(0, 10),
+                })
+              }}
+              onBarDragEnd={() => setLiveDragDates(null)}
+              onMembersLoaded={setGanttMembers}
+              labelColW={ganttLabelColW}
+              onLabelColWChange={setGanttLabelColW}
+            />
+          ) : view === 'gantt' && (!teamId || !activeTimelineId) ? (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>Loading your team…</p>
+            </div>
+          ) : view === 'list' && teamId && activeTimelineId ? (
+            <ListView
+              teamId={teamId}
+              timelineId={activeTimelineId}
+              groupBy={listGroupBy}
+              sortBy={listSortBy}
+              colorBy={listColorBy}
+              density={listDensity}
+              timelineStatuses={activeTimelineStatuses}
+              savedFilters={savedFilters}
+              tags={tags}
+              selectedActivityId={selectedActivityId}
+              pendingColumnToggle={listColToggle}
+              onSelectActivity={(id) => {
+                setSelectedActivityId(id)
+                if (!id) { setSelectedApiActivity(null); setCreateDefaults(null) }
+              }}
+              onSelectApiActivity={(activity) => {
+                setSelectedApiActivity(activity)
+                setCreateDefaults(null)
+              }}
+              onMembersLoaded={setGanttMembers}
+              onColumnsChange={setListColumns}
+              triggerNewRow={listNewRowSeq}
+            />
+          ) : view === 'list' && (!teamId || !activeTimelineId) ? (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>Loading your team…</p>
+            </div>
+          ) : view === 'calendar' && teamId && activeTimelineId ? (
+            <CalendarView
+              teamId={teamId}
+              timelineId={activeTimelineId}
+              layout={calendarLayout}
+              anchorDate={calendarAnchorDate}
+              colorBy={colorBy}
+              timelineStatuses={activeTimelineStatuses}
+              savedFilters={savedFilters}
+              tags={tags}
+              selectedActivityId={selectedActivityId}
+              onSelectActivity={(id) => {
+                setSelectedActivityId(id)
+                if (!id) { setSelectedApiActivity(null); setCreateDefaults(null) }
+              }}
+              onSelectApiActivity={(activity) => {
+                setSelectedApiActivity(activity)
+                setCreateDefaults(null)
+              }}
+              onBarDragProgress={(activityId, newStart, newEnd) => {
+                setLiveDragDates({
+                  activityId,
+                  start: newStart.toISOString().slice(0, 10),
+                  end: newEnd.toISOString().slice(0, 10),
+                })
+              }}
+              onBarDragEnd={() => setLiveDragDates(null)}
+              onCellClick={(date) => {
+                const iso = date.toISOString().slice(0, 10)
+                setSelectedActivityId(null)
+                setSelectedApiActivity(null)
+                setCreateDefaults({ start: iso, end: iso, memberId: null })
+              }}
+              onMembersLoaded={setGanttMembers}
+            />
+          ) : view === 'calendar' && (!teamId || !activeTimelineId) ? (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>Loading your team…</p>
+            </div>
+          ) : view === 'kanban' && teamId && activeTimelineId ? (
+            <KanbanView
+              teamId={teamId}
+              timelineId={activeTimelineId}
+              groupBy={kanbanGroupBy}
+              sortBy={kanbanSortBy}
+              colorBy={kanbanColorBy}
+              cardFields={kanbanCardFields}
+              collapsedColumnIds={kanbanCollapsedColumns}
+              onCollapsedColumnIdsChange={setKanbanCollapsedColumns}
+              showHierarchy={kanbanShowHierarchy}
+              timelineStatuses={activeTimelineStatuses}
+              savedFilters={savedFilters}
+              tags={tags}
+              selectedActivityId={selectedActivityId}
+              onSelectActivity={(id) => {
+                setSelectedActivityId(id)
+                if (!id) { setSelectedApiActivity(null); setCreateDefaults(null) }
+              }}
+              onSelectApiActivity={(activity) => {
+                setSelectedApiActivity(activity)
+                setCreateDefaults(null)
+              }}
+              onAddActivity={(defaults) => {
+                setSelectedActivityId(null)
+                setSelectedApiActivity(null)
+                setCreateDefaults(defaults)
+              }}
+              onMembersLoaded={setGanttMembers}
+            />
+          ) : view === 'kanban' && (!teamId || !activeTimelineId) ? (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>Loading your team…</p>
+            </div>
+          ) : (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>
+                {view.charAt(0).toUpperCase() + view.slice(1)} view coming soon.
+              </p>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Activity detail panel — slides in from right when an activity is selected */}
+      <ActivityDetailPanel
+        open={Boolean(selectedApiActivity)}
+        event={selectedApiActivity}
+        members={ganttMembers}
+        teamId={teamId}
+        timelineId={activeTimelineId ?? ''}
+        onClose={() => { setSelectedActivityId(null); setSelectedApiActivity(null); setLiveDragDates(null) }}
+        liveDragStart={liveDragDates && liveDragDates.activityId === selectedApiActivity?.id ? liveDragDates.start : undefined}
+        liveDragEnd={liveDragDates && liveDragDates.activityId === selectedApiActivity?.id ? liveDragDates.end : undefined}
+      />
+
+      {/* Activity create panel — slides in from New Activity button or future drag */}
+      <ActivityCreatePanel
+        open={Boolean(createDefaults) && !selectedApiActivity}
+        teamId={teamId}
+        timelineId={activeTimelineId ?? ''}
+        members={ganttMembers}
+        timelineStatuses={activeTimelineStatuses}
+        defaultStart={createDefaults?.start ?? new Date().toISOString().slice(0, 10)}
+        defaultEnd={createDefaults?.end ?? new Date().toISOString().slice(0, 10)}
+        defaultMemberId={createDefaults?.memberId}
+        defaultStatusId={createDefaults?.statusId}
+        onClose={() => setCreateDefaults(null)}
+      />
+
+      <FilterManageModal
+        open={filterModalOpen}
+        onClose={() => setFilterModalOpen(false)}
+        teamId={teamId}
+        timelineId={activeTimelineId ?? ''}
+        isAdmin={canEditTeam}
+      />
+
+      {/* Team modal — create or edit */}
+      {teamModalMode && (
+        <TeamModal
+          mode={teamModalMode}
+          team={editingTeam ?? undefined}
+          isAdmin={canEditTeam}
+          onClose={() => { setTeamModalMode(null); setEditingTeam(null); }}
+          onTeamCreated={created => setActiveTeamId(created.id)}
+        />
+      )}
+
+      {/* Member modal — edit a team member */}
+      {editingMember && (
+        <MemberModal
+          teamId={teamId}
+          memberId={editingMember.id}
+          isAdmin={canEditTeam}
+          isSuperadmin={isSuperadmin}
+          onClose={() => setEditingMember(null)}
+        />
+      )}
+
+      {/* Share modal — create a share link for the active view */}
+      {shareModalOpen && activeTimelineId && teamId && (view === 'gantt' || view === 'list' || view === 'kanban') && (
+        <ShareModal
+          teamId={teamId}
+          timelineId={activeTimelineId}
+          viewType={view}
+          timelineName={activeTimelineName}
+          viewConfig={
+            view === 'gantt'
+              ? { groupBy, sortBy, colorBy, granularity: String(granularity), filter: activeShareFilter }
+              : view === 'list'
+              ? {
+                  groupBy: listGroupBy,
+                  sortBy: listSortBy,
+                  colorBy: listColorBy,
+                  granularity: '',
+                  filter: activeShareFilter,
+                  columns: listColumns.map(c => ({ id: c.id, visible: c.visible })),
+                }
+              : {
+                  groupBy: kanbanGroupBy,
+                  sortBy: kanbanSortBy,
+                  colorBy: kanbanColorBy,
+                  granularity: '',
+                  filter: activeShareFilter,
+                  cardFields: kanbanCardFields,
+                  showHierarchy: kanbanShowHierarchy,
+                  collapsedColumns: kanbanCollapsedColumns,
+                }
+          }
+          onClose={() => setShareModalOpen(false)}
+        />
+      )}
+
+      {/*
+        Off-screen capture target for the export dialog's PNG, printable-view,
+        and HTML-save formats — renders the same interactive=false components
+        the public share viewer uses (Calendar joined in 14.4 via
+        CleanCalendarSnapshot), fed with live data, instead of rasterizing the
+        live editable dashboard.
+
+        PresentationFrame hosts the snapshot in an isolated, always-light
+        iframe document (see components/export/PresentationFrame.tsx). That is
+        what fixes the dark-mode flicker (the live page's theme is never
+        toggled) and the half-dark capture (no `.dark` in scope for the
+        snapshot's `var()` colors to resolve against). Mounted only while the
+        export dialog is open; on close it unmounts and `snapshotBody`/
+        `snapshotFrame` reset.
+      */}
+      {exportDialogOpen && (
+        <PresentationFrame onReady={handleSnapshotReady}>
+          {view === 'gantt' && (
+            <CleanGanttSnapshot
+              activities={exportFilterInfo.filteredActivities}
+              members={ganttMembers}
+              statuses={activeTimelineStatuses}
+              groupBy={groupBy}
+              sortBy={sortBy}
+              colorBy={colorBy}
+              granularity={granularity}
+              startDate={activeTimeline?.startDate}
+              endDate={activeTimeline?.endDate}
+              weekStart={prefWeekStart}
+              locale={prefLocale}
+            />
+          )}
+          {view === 'list' && (
+            <CleanListSnapshot
+              activities={exportFilterInfo.filteredActivities}
+              members={teamMembers}
+              statuses={activeTimelineStatuses}
+              tags={tags}
+              groupBy={listGroupBy}
+              sortBy={listSortBy}
+              columns={listColumns.map(c => ({ id: c.id, visible: c.visible }))}
+            />
+          )}
+          {view === 'kanban' && (
+            <CleanKanbanSnapshot
+              activities={exportFilterInfo.filteredActivities}
+              teamMembers={teamMembers}
+              members={ganttMembers}
+              statuses={activeTimelineStatuses}
+              tags={tags}
+              groupBy={kanbanGroupBy}
+              sortBy={kanbanSortBy}
+              colorBy={kanbanColorBy}
+              cardFields={kanbanCardFields}
+              showHierarchy={kanbanShowHierarchy}
+              collapsedColumnIds={kanbanCollapsedColumns}
+            />
+          )}
+          {view === 'calendar' && (
+            <CleanCalendarSnapshot
+              activities={exportFilterInfo.filteredActivities}
+              members={ganttMembers}
+              statuses={activeTimelineStatuses}
+              tags={tags}
+              layout={calendarLayout}
+              anchorDate={calendarAnchorDate}
+              colorBy={colorBy}
+              weekStartDay={weekStartDay}
+            />
+          )}
+        </PresentationFrame>
+      )}
+
+      {/* Export dialog — download the active view as CSV/Excel/ICS/PNG, or print/save as HTML */}
+      {exportDialogOpen && activeTimelineId && teamId && (
+        <ExportDialog
+          view={view}
+          teamId={teamId}
+          timelineId={activeTimelineId}
+          timelineName={activeTimelineName}
+          teamName={activeTeam?.name ?? null}
+          filterLabel={exportFilterInfo.filterLabel}
+          filterDefinition={exportFilterInfo.filterDefinition}
+          filteredCount={exportFilterInfo.filteredCount}
+          totalCount={exportFilterInfo.totalCount}
+          viewActivityIds={exportViewActivityIds}
+          listExportColumns={exportListColumns}
+          textExportData={textExportData}
+          captureElement={snapshotBody}
+          presentationFrame={snapshotFrame}
+          periodLabel={view === 'calendar' ? formatAnchorLabel(calendarAnchorDate, calendarLayout) : null}
+          onClose={() => { setExportDialogOpen(false); setSnapshotBody(null); setSnapshotFrame(null) }}
+        />
+      )}
+
+      {/* Calendar share modal — ICS feed configurator (distinct from ShareModal) */}
+      {calendarShareModalOpen && activeTimelineId && teamId && (
+        <CalendarShareModal
+          teamId={teamId}
+          timelineId={activeTimelineId}
+          timelineName={activeTimelineName}
+          onClose={() => setCalendarShareModalOpen(false)}
+        />
+      )}
+
+      {/* Timeline modal — create or edit */}
+      {timelineModalMode && (
+        <TimelineModal
+          mode={timelineModalMode}
+          teamId={teamId}
+          timeline={editingTimeline ?? undefined}
+          canAdmin={canEditTeam}
+          onClose={() => { setTimelineModalMode(null); setEditingTimeline(null) }}
+          onCreated={created => setActiveTimelineId(created.id)}
+          onUnarchive={id => unarchiveTimeline.mutate(id, { onSuccess: () => { setTimelineModalMode(null); setEditingTimeline(null) } })}
+        />
+      )}
+    </div>
+  )
+}
+
+export default function DashboardPage() {
+  return (
+    <FindProvider>
+      <FilterProvider>
+        <DashboardShell />
+      </FilterProvider>
+    </FindProvider>
+  )
+}
+````
+
 ## File: docs/TASKS.md
 ````markdown
 # Tasks
@@ -73056,6 +74489,8 @@ Includes both the webhook backend and the per-timeline connector sidebar UI (pre
 - [x] Define requirements, architecture, conventions — 2026-04-27
 
 ## Parking Lot
+- **Pre-launch repo scrub for host-specific values** (added 2026-07-02, /review-phase 14.4): `docs/log.md` and possibly other docs contain historical `epcot.lan:8081` references (the local test Docker host). Before any public release, grep the whole repo for `epcot.lan`, `8081`, and similar LAN-specific values and scrub them. New additions are caught per-phase by the REVIEW.md security grep; this item is the one-time historical cleanup.
+- **Theme-mode refactor — light / dark / print / "simplified"** (added 2026-07-02, /review-phase 14.4): today "force light" (`lib/presentationTheme.ts#forceLightDocumentElement`) is a binary strip-the-dark-class toggle. The export work suggests a real classification system: *light*, *dark*, *print*, and possibly *simplified* (print-adjacent CSS for PNG/HTML exports and screen saves — reduced chrome, no interactive affordances). Worth scoping as its own phase once export/import settle; not a bolt-on.
 - **Commit/CI process — repomap.md vs. Graphify:** drop the automated `repomap.md` generation (the AI-context lookup step doesn't appear to depend on it day-to-day) and look into incorporating Graphify in its place. Not yet scoped — revisit once the Phase 13 sub-phases land.
 - MySQL/MariaDB and Postgres DB adapters (SQLite first, then add others)
 - CLI binary
@@ -73067,1222 +74502,6 @@ Includes both the webhook backend and the per-timeline connector sidebar UI (pre
 - Notifications (email, push)
 - Recurring event UI (RRULE editing)
 - Kanban drag-to-change-status (v2; v1 Kanban is read-only)
-````
-
-## File: packages/web/src/pages/DashboardPage.tsx
-````typescript
-/**
- * Main application shell: sidebar + top bar + content area.
- *
- * Fetches the authenticated user's first team and first timeline to seed the
- * initial view. Team-selection UI and full sidebar wiring come in a later phase.
- */
-
-import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
-import Sidebar from '@/components/layout/Sidebar'
-import TopBar, { type ViewMode } from '@/components/layout/TopBar'
-import GanttView from '@/components/gantt/GanttView'
-import { DEFAULT_LABEL_COL_W } from '@/components/gantt/GanttGrid'
-import GanttToolbar, { type GroupBy, type SortBy, type TimeGranularity, type ColorBy } from '@/components/gantt/GanttToolbar'
-import ListToolbar, { type ListGroupBy, type ListSortBy, type ListColorBy, type ListDensity, type ColumnConfig } from '@/components/list/ListToolbar'
-import ListView, { buildListRows, type ListDisplayRow } from '@/components/list/ListView'
-import CalendarToolbar, { formatAnchorLabel, type CalendarLayout } from '@/components/calendar/CalendarToolbar'
-import CalendarView from '@/components/calendar/CalendarView'
-import KanbanToolbar, { type KanbanGroupBy, type KanbanSortBy, type KanbanCardField } from '@/components/kanban/KanbanToolbar'
-import KanbanView from '@/components/kanban/KanbanView'
-import { DEFAULT_CARD_FIELDS, buildColumns, buildHierarchyMaps } from '@/components/kanban/kanbanColumns'
-import type { TextExportData } from '@/components/ExportDialog'
-import { CleanGanttSnapshot, CleanListSnapshot, CleanKanbanSnapshot, CleanCalendarSnapshot } from '@/components/export/CleanSnapshot'
-import PresentationFrame from '@/components/export/PresentationFrame'
-import ActivityDetailPanel from '@/components/gantt/ActivityDetailPanel'
-import ActivityCreatePanel from '@/components/gantt/ActivityCreatePanel'
-import { FilterProvider, useFilter } from '@/contexts/FilterContext'
-import { FindProvider, useFind } from '@/contexts/FindContext'
-import { useAuth } from '@/contexts/AuthContext'
-import { useDarkMode } from '@/hooks/useDarkMode'
-import { usePreferences, usePreferenceMap, useUpsertPreference } from '@/hooks/usePreferences'
-import { Settings, Moon, Sun, LogOut } from 'lucide-react'
-import { Badge } from '@/components/identity/Badge'
-import type { Identity } from '@/components/identity/identity-constants'
-import { useMyTeams, useTeamTimelines, useTeamTimelinesWithArchived, useTeamActivitySync, useUnarchiveTeam, useUnarchiveTimeline, useTeamMembers, useTimelineActivities } from '@/hooks/useTeamActivities'
-import { useTimelineStatuses } from '@/hooks/useStatusTemplates'
-import { useSavedFilters } from '@/hooks/useSavedFilters'
-import { useTags } from '@/hooks/useTags'
-import TeamModal from '@/components/TeamModal'
-import MemberModal from '@/components/MemberModal'
-import TimelineModal from '@/components/TimelineModal'
-import FilterManageModal from '@/components/filters/FilterManageModal'
-import ShareModal from '@/components/ShareModal'
-import CalendarShareModal from '@/components/CalendarShareModal'
-import ExportDialog from '@/components/ExportDialog'
-import { matchesFilter } from '@/lib/filterEngine'
-import { applyActiveFilter } from '@/lib/presetFilters'
-import { useNavigate } from 'react-router-dom'
-import type { components } from '@draba/shared'
-import type { Member } from '@/types'
-
-type ApiActivity = components['schemas']['Activity']
-type ApiTeam = components['schemas']['Team']
-type ApiTimeline = components['schemas']['Timeline']
-type TeamMemberWithUser = components['schemas']['TeamMemberWithUser']
-
-/** Comparator for ListSortBy, shared by the export-scope ID ordering and the list-export display rows. */
-function compareByListSort(a: ApiActivity, b: ApiActivity, listSortBy: ListSortBy): number {
-  if (listSortBy === 'startDate') return (a.startAt ?? '').localeCompare(b.startAt ?? '')
-  if (listSortBy === 'endDate') return (a.endAt ?? '').localeCompare(b.endAt ?? '')
-  if (listSortBy === 'title') return a.title.localeCompare(b.title)
-  if (listSortBy === 'status') return (a.statusId ?? '').localeCompare(b.statusId ?? '')
-  if (listSortBy === 'progress') return (b.percentComplete ?? 0) - (a.percentComplete ?? 0)
-  return 0
-}
-
-const DROPDOWN_BTN: React.CSSProperties = {
-  display: 'flex',
-  alignItems: 'center',
-  gap: 8,
-  width: '100%',
-  padding: '10px 14px',
-  background: 'none',
-  border: 'none',
-  fontSize: 13,
-  color: 'var(--foreground)',
-  cursor: 'pointer',
-  fontFamily: 'var(--font-sans)',
-  textAlign: 'left',
-}
-
-function DashboardShell() {
-  const { logout, accessToken, user } = useAuth()
-  const { activeFilter, setActiveFilter } = useFilter()
-  const navigate = useNavigate()
-  const { isDark, toggle: toggleDark, theme } = useDarkMode()
-  const { setFindBarOpen } = useFind()
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
-  const [view, setView] = useState<ViewMode>('gantt')
-  // Gantt label-column width — held here so it survives switching to another
-  // view and back (GanttView unmounts on view change, which would reset it).
-  const [ganttLabelColW, setGanttLabelColW] = useState(DEFAULT_LABEL_COL_W)
-  // Close the detail sidebar when switching to list view (edits are inline there)
-  const prevView = useRef<ViewMode>('gantt')
-  const [profileOpen, setProfileOpen] = useState(false)
-  const [selectedActivityId, setSelectedActivityId] = useState<string | null>(null)
-  const [selectedApiActivity, setSelectedApiActivity] = useState<ApiActivity | null>(null)
-  const [ganttMembers, setGanttMembers] = useState<Member[]>([])
-  const [createDefaults, setCreateDefaults] = useState<{ start: string; end: string; memberId: string | null; statusId?: string | null } | null>(null)
-  const [filterModalOpen, setFilterModalOpen] = useState(false)
-  const [shareModalOpen, setShareModalOpen] = useState(false)
-  const [exportDialogOpen, setExportDialogOpen] = useState(false)
-  // Body + iframe of the PresentationFrame that hosts the export dialog's
-  // clean (interactive=false) snapshot — an isolated, always-light document
-  // reusing the Phase 13 share viewer's render path for all four views
-  // (Calendar joined in 14.4). The body is the PNG capture target; the
-  // iframe itself is the shared surface for the 14.4 printable-view and
-  // HTML-save formats (`iframe.contentWindow.print()` / `contentDocument`
-  // serialization). Both are set once the frame signals readiness.
-  const [snapshotBody, setSnapshotBody] = useState<HTMLElement | null>(null)
-  const [snapshotFrame, setSnapshotFrame] = useState<HTMLIFrameElement | null>(null)
-  const handleSnapshotReady = useCallback((body: HTMLElement, iframe: HTMLIFrameElement) => {
-    setSnapshotBody(body)
-    setSnapshotFrame(iframe)
-  }, [])
-  // Calendar gets its own share surface — an ICS feed configurator, not the
-  // active-links list (Phase 13.4).
-  const [calendarShareModalOpen, setCalendarShareModalOpen] = useState(false)
-  const [liveDragDates, setLiveDragDates] = useState<{ activityId: string; start: string; end: string } | null>(null)
-  // Gantt toolbar state
-  const [groupBy, setGroupBy] = useState<GroupBy>('none')
-  const [sortBy, setSortBy] = useState<SortBy>('startDate')
-  const [granularity, setGranularity] = useState<TimeGranularity | 'auto'>('auto')
-  const [colorBy, setColorBy] = useState<ColorBy>('activity')
-  // List toolbar state
-  const [listGroupBy, setListGroupBy] = useState<ListGroupBy>('none')
-  const [listSortBy, setListSortBy] = useState<ListSortBy>('startDate')
-  const [listColorBy, setListColorBy] = useState<ListColorBy>('activity')
-  const [listDensity, setListDensity] = useState<ListDensity>('comfortable')
-  const [listColumns, setListColumns] = useState<ColumnConfig[]>([])
-  // Incremented seq lets ListView know a new toggle has arrived
-  const [listColToggle, setListColToggle] = useState<{ colId: string; visible: boolean; seq: number } | null>(null)
-  const listColToggleSeq = useRef(0)
-  // Calendar toolbar state
-  const [calendarLayout, setCalendarLayout] = useState<CalendarLayout>('month')
-  // anchorDate = UTC midnight of the 1st of the displayed month (month) or weekStart (week).
-  const [calendarAnchorDate, setCalendarAnchorDate] = useState<Date>(() => {
-    const d = new Date()
-    d.setUTCHours(0, 0, 0, 0)
-    d.setUTCDate(1)
-    return d
-  })
-  // Kanban toolbar state
-  const [kanbanGroupBy, setKanbanGroupBy] = useState<KanbanGroupBy>('status')
-  const [kanbanSortBy, setKanbanSortBy] = useState<KanbanSortBy>('startDate')
-  const [kanbanColorBy, setKanbanColorBy] = useState<ColorBy>('activity')
-  const [kanbanCardFields, setKanbanCardFields] = useState<KanbanCardField[]>(DEFAULT_CARD_FIELDS)
-  const [kanbanCollapsedColumns, setKanbanCollapsedColumns] = useState<string[]>([])
-  const [kanbanShowHierarchy, setKanbanShowHierarchy] = useState(false)
-  // Incremented to trigger inline row creation in list view
-  const [listNewRowSeq, setListNewRowSeq] = useState(0)
-  const profileRef = useRef<HTMLDivElement>(null)
-  // Preference persistence
-  const upsert = useUpsertPreference()
-  // Track whether we've applied server prefs for the active timeline so we
-  // don't immediately write defaults back before the server data arrives.
-  const prefsAppliedForTimeline = useRef<string | null>(null)
-  // One-shot guard: init activeTimelineId from global prefs only on first load.
-  const timelineIdInitialized = useRef(false)
-
-
-  useEffect(() => {
-    function handleClickOutside(e: MouseEvent) {
-      if (profileRef.current && !profileRef.current.contains(e.target as Node)) {
-        setProfileOpen(false)
-      }
-    }
-    document.addEventListener('mousedown', handleClickOutside)
-    return () => document.removeEventListener('mousedown', handleClickOutside)
-  }, [])
-
-  // Close the detail sidebar when switching to list view (list edits are inline).
-  useEffect(() => {
-    if (view === 'list' && prevView.current !== 'list') {
-      setSelectedActivityId(null)
-      setSelectedApiActivity(null)
-      setCreateDefaults(null)
-    }
-    prevView.current = view
-  }, [view])
-
-  // Ctrl/Cmd+F opens the Find bar; browser default (page search) is suppressed.
-  useEffect(() => {
-    function handleKeyDown(e: KeyboardEvent) {
-      if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
-        e.preventDefault()
-        setFindBarOpen(true)
-      }
-    }
-    document.addEventListener('keydown', handleKeyDown)
-    return () => document.removeEventListener('keydown', handleKeyDown)
-  }, [setFindBarOpen])
-
-  const displayName = (user as { displayName?: string } | null)?.displayName ?? 'User'
-  const email = (user as { email?: string } | null)?.email ?? ''
-  const userIdentity: Identity = {
-    color: (user as { color?: string } | null)?.color ?? '#288C9B',
-    icon: (user as { icon?: string } | null)?.icon ?? '__name_2__',
-  }
-
-  // Global preferences — restored on login to seed team/timeline selection.
-  const { isSuccess: globalPrefsSettled } = usePreferences()
-  const globalPrefMap = usePreferenceMap()
-  const weekStartDay: 0 | 1 = (globalPrefMap['week_start'] as string | undefined) === 'sunday' ? 0 : 1
-  // Mirrors GanttView's own pref-derived column locale — used by the PNG
-  // export's off-screen CleanGanttSnapshot, which builds its own columns.
-  const prefWeekStart: 'monday' | 'sunday' = (globalPrefMap['week_start'] as string | undefined) === 'sunday' ? 'sunday' : 'monday'
-  const prefDateFormat = (globalPrefMap['date_format'] as string | undefined) ?? 'MMM D, YYYY'
-  const prefLocale = prefDateFormat === 'DD/MM/YYYY' ? 'en-GB' : 'en-US'
-
-  // Team modal state
-  const [teamModalMode, setTeamModalMode] = useState<'new' | 'edit' | null>(null)
-  const [editingTeam, setEditingTeam] = useState<ApiTeam | null>(null)
-  const unarchiveTeam = useUnarchiveTeam()
-
-  // Member modal state
-  const [editingMember, setEditingMember] = useState<TeamMemberWithUser | null>(null)
-
-  // Timeline modal state
-  const [timelineModalMode, setTimelineModalMode] = useState<'new' | 'edit' | null>(null)
-  const [editingTimeline, setEditingTimeline] = useState<ApiTimeline | null>(null)
-
-  // Fetch all teams including archived for the sidebar's archived section.
-  const { data: allTeams = [] } = useMyTeams(true)
-  const activeTeams = allTeams.filter(t => !t.archivedAt)
-  const archivedTeams = allTeams.filter(t => Boolean(t.archivedAt))
-
-  // Explicit team selection state — null until the global pref is applied so
-  // that timelines (and the timeline init effect) don't fire against the wrong
-  // fallback team before the saved team pref resolves.
-  const [activeTeamId, setActiveTeamId] = useState<string | null>(null)
-  const teamIdInitialized = useRef(false)
-  useEffect(() => {
-    if (!activeTeams.length || !globalPrefsSettled || teamIdInitialized.current) return
-    teamIdInitialized.current = true
-    const saved = typeof globalPrefMap['selected_team'] === 'string' ? globalPrefMap['selected_team'] : null
-    const exists = saved && activeTeams.some(t => t.id === saved)
-    setActiveTeamId(exists ? saved : activeTeams[0].id)
-  }, [activeTeams, globalPrefsSettled, globalPrefMap])
-
-  // Only derive an active team once the pref has been applied (activeTeamId !== null).
-  // The activeTeams[0] fallback here handles the edge case where the saved team
-  // was archived or deleted between sessions.
-  const activeTeam = activeTeamId !== null
-    ? (activeTeams.find(t => t.id === activeTeamId) ?? activeTeams[0] ?? undefined)
-    : undefined
-  const teamId = activeTeam?.id ?? ''
-
-  // Check whether the current user is an admin of the active team.
-  const { data: teamMembers = [] } = useTeamMembers(teamId)
-  const userId = (user as { id?: string } | null)?.id ?? ''
-  const isSuperadmin = Boolean((user as { isSuperadmin?: boolean } | null)?.isSuperadmin)
-  const canEditTeam = isSuperadmin || teamMembers.some(m => m.userId === userId && m.role === 'admin')
-
-  const handleSelectTeam = useCallback((id: string) => {
-    setActiveTeamId(id)
-    // Clear the stale timeline selection so the init effect re-fires with the
-    // new team's timeline list. Without this, the old timeline ID leaks into
-    // the new team's API requests and produces 404s.
-    setActiveTimelineId(undefined)
-    prefsAppliedForTimeline.current = null
-    timelineIdInitialized.current = false
-    // Clear the selected activity too, otherwise the old team's activity
-    // stays pinned in the right sidebar after switching teams.
-    setSelectedActivityId(null)
-    setSelectedApiActivity(null)
-    setCreateDefaults(null)
-  }, [])
-
-  const unarchiveTimeline = useUnarchiveTimeline(teamId)
-
-  const { data: timelines = [] } = useTeamTimelines(teamId)
-  const { data: allTimelines = [] } = useTeamTimelinesWithArchived(teamId)
-  const archivedTimelines = allTimelines.filter(t => Boolean(t.archivedAt))
-  const [activeTimelineId, setActiveTimelineId] = useState<string | undefined>()
-  const { data: activeTimelineStatuses = [] } = useTimelineStatuses(teamId, activeTimelineId ?? '')
-  const { data: savedFilters = [] } = useSavedFilters(teamId)
-  const { data: tags = [] } = useTags(teamId)
-  // Initialize activeTimelineId from the saved global pref (selected_timeline),
-  // falling back to timelines[0] when no pref is stored or the saved timeline
-  // is no longer in the list. Waits for global prefs to settle so we don't
-  // immediately overwrite a restored value with the fallback.
-  useEffect(() => {
-    if (timelines.length === 0 || !globalPrefsSettled || timelineIdInitialized.current) return
-    timelineIdInitialized.current = true
-    const saved = typeof globalPrefMap['selected_timeline'] === 'string' ? globalPrefMap['selected_timeline'] : null
-    const exists = saved && timelines.some(t => t.id === saved)
-    setActiveTimelineId(exists ? saved : timelines[0].id)
-  }, [timelines, globalPrefsSettled, globalPrefMap])
-  const activeTimeline = timelines.find(t => t.id === activeTimelineId) ?? timelines[0]
-  // Derived so they stay in sync after edits without needing separate state.
-  const activeTimelineColor = activeTimeline?.color ?? '#1A97A2'
-  const activeTimelineName = activeTimeline?.name ?? ''
-  const activeTimelineIdentity: Identity = {
-    color: activeTimeline?.color ?? '#288C9B',
-    icon: activeTimeline?.icon ?? '__none__',
-  }
-
-  // The frozen filter snapshot captured into a share's view config — shared
-  // across Gantt/List/Kanban since `activeFilter` applies to the whole timeline.
-  const activeShareFilter = useMemo(() => {
-    if (activeFilter.kind !== 'saved') return null
-    const sf = savedFilters.find(f => f.id === activeFilter.id)
-    if (!sf) return null
-    try { return JSON.parse(sf.definition) as import('@/lib/filterTypes').FilterDefinition } catch { return null }
-  }, [activeFilter, savedFilters])
-
-  // Unbounded activity list for the active timeline — used by the export
-  // dialog's filter-context strip and "scope" counts. Cached separately from
-  // each view's (possibly date-bounded) activity query.
-  const { data: allActivities = [] } = useTimelineActivities(teamId, activeTimelineId ?? '')
-
-  // Export dialog: filter context, counts, and the filtered activity list.
-  // filteredActivities is exposed so exportViewActivityIds can sort it for list view.
-  const exportFilterInfo = useMemo(() => {
-    const totalCount = allActivities.length
-    const closedStatusIds = new Set(activeTimelineStatuses.filter(s => s.isClosed).map(s => s.id))
-    const memberIdsByUserId = new Map<string, string[]>()
-    for (const m of teamMembers) {
-      if (!m.userId) continue
-      const list = memberIdsByUserId.get(m.userId) ?? []
-      list.push(m.id)
-      memberIdsByUserId.set(m.userId, list)
-    }
-    const filterCtx = {
-      closedStatusIds,
-      savedFilters,
-      statuses: new Map(activeTimelineId ? [[activeTimelineId, activeTimelineStatuses]] as const : []),
-      tags,
-    }
-
-    if (activeFilter.kind === 'preset' && activeFilter.id !== 'all') {
-      const PRESET_LABELS: Record<string, string> = {
-        open: 'Open only', upcoming: 'Upcoming', overdue: 'Overdue', noassign: 'No one assigned',
-      }
-      const filterLabel = PRESET_LABELS[activeFilter.id] ?? activeFilter.id
-      const filteredActivities = applyActiveFilter(allActivities, activeFilter, memberIdsByUserId, filterCtx)
-      return { filterLabel, filterDefinition: null, filteredCount: filteredActivities.length, totalCount, filteredActivities }
-    }
-
-    if (activeFilter.kind === 'member') {
-      const member = teamMembers.find(m => m.userId === (activeFilter as { kind: 'member'; userId: string }).userId)
-      const filterLabel = member?.displayName ?? 'Team member'
-      const filteredActivities = applyActiveFilter(allActivities, activeFilter, memberIdsByUserId, filterCtx)
-      return { filterLabel, filterDefinition: null, filteredCount: filteredActivities.length, totalCount, filteredActivities }
-    }
-
-    if (activeFilter.kind === 'saved' && activeShareFilter) {
-      const saved = savedFilters.find(f => f.id === activeFilter.id)
-      const statusesByTimeline = new Map(activeTimelineId ? [[activeTimelineId, activeTimelineStatuses]] as const : [])
-      const filteredActivities = allActivities.filter(a => matchesFilter(a, activeShareFilter, { statusesByTimeline, tags }))
-      return { filterLabel: saved?.name ?? 'Saved filter', filterDefinition: activeShareFilter, filteredCount: filteredActivities.length, totalCount, filteredActivities }
-    }
-
-    return { filterLabel: null, filterDefinition: null, filteredCount: totalCount, totalCount, filteredActivities: allActivities }
-  }, [allActivities, activeFilter, activeShareFilter, savedFilters, activeTimelineId, activeTimelineStatuses, tags, teamMembers])
-
-  // Ordered activity IDs for the export "current view" scope.
-  // Sent as activityIds in the request when: a preset/member filter is active
-  // (can't be evaluated server-side), or we're in list view (to preserve sort order).
-  const exportViewActivityIds = useMemo<string[] | null>(() => {
-    const hasNonSavedFilter = activeFilter.kind === 'preset' ? activeFilter.id !== 'all' : activeFilter.kind === 'member'
-    const needsIds = hasNonSavedFilter || view === 'list'
-    if (!needsIds) return null
-
-    let acts = exportFilterInfo.filteredActivities
-    if (view === 'list') {
-      acts = [...acts].sort((a, b) => compareByListSort(a, b, listSortBy))
-    }
-    return acts.map(a => a.id)
-  }, [exportFilterInfo.filteredActivities, activeFilter, view, listSortBy])
-
-  // List-view column visibility mapped to export column names.
-  // Null when not in list view or when all columns are visible (server defaults to all).
-  const exportListColumns = useMemo<string[] | null>(() => {
-    if (view !== 'list' || listColumns.length === 0) return null
-    const COL_MAP: Record<string, string> = {
-      title: 'Title', startAt: 'Start', endAt: 'End', description: 'Description',
-      status: 'Status', assignees: 'Assignees', tags: 'Tags', parent: 'Parent',
-      progress: 'Progress', location: 'Location', url: 'URL',
-    }
-    const cols = listColumns.filter(c => c.visible && COL_MAP[c.id]).map(c => COL_MAP[c.id])
-    // If all mappable columns are visible, skip sending — server defaults to all
-    const allExportCols = Object.values(COL_MAP)
-    if (cols.length === allExportCols.length) return null
-    return cols
-  }, [view, listColumns])
-
-  // Pre-resolved data for client-side textual exports (14.2).
-  // Only materialised for non-Gantt views (Gantt has no textual format).
-  const textExportData = useMemo<TextExportData | null>(() => {
-    if (view === 'gantt') return null
-
-    const memberById = new Map<string, string>(
-      teamMembers.map(m => [m.id, m.displayName || m.email || 'Unknown']),
-    )
-    const statusById = new Map<string, string>(
-      activeTimelineStatuses.map(s => [s.id, s.name]),
-    )
-    const tagById = new Map<string, string>(tags.map(t => [t.id, t.name]))
-    const activityTitleById = new Map<string, string>(allActivities.map(a => [a.id, a.title]))
-    const activities = exportFilterInfo.filteredActivities
-
-    // List view: pre-build sorted, grouped, hierarchy-aware display rows.
-    let listDisplayRows: ListDisplayRow[] | null = null
-    let listVisibleColumns: string[] | null = null
-    if (view === 'list') {
-      const sorted = [...activities].sort((a, b) => compareByListSort(a, b, listSortBy))
-      const memberByIdObj = new Map(
-        teamMembers.map(m => [m.id, { displayName: m.displayName || m.email || 'Unknown', color: m.color }]),
-      )
-      const statusByIdObj = new Map(activeTimelineStatuses.map(s => [s.id, { name: s.name }]))
-      listDisplayRows = buildListRows(
-        sorted, listGroupBy, memberByIdObj, statusByIdObj,
-        activeTimelineStatuses, new Set(), teamMembers.map(m => m.id),
-      )
-      listVisibleColumns = listColumns.length > 0
-        ? listColumns.filter(c => c.visible && !['colorBar', 'identity'].includes(c.id)).map(c => c.id)
-        : null
-    }
-
-    // Kanban: build columns respecting the hierarchy toggle.
-    let kanbanColumns: Array<{ label: string; activities: ApiActivity[] }> | null = null
-    let kbHierarchy = false
-    let kbChildrenById = new Map<string, ApiActivity[]>()
-    if (view === 'kanban') {
-      kbHierarchy = kanbanShowHierarchy
-      const { childrenByParentId, childIds } = kbHierarchy
-        ? buildHierarchyMaps(activities)
-        : { childrenByParentId: new Map<string, ApiActivity[]>(), childIds: new Set<string>() }
-      kbChildrenById = childrenByParentId
-      const columnActivities = kbHierarchy ? activities.filter(a => !childIds.has(a.id)) : activities
-      kanbanColumns = buildColumns(kanbanGroupBy, columnActivities, teamMembers, activeTimelineStatuses, kanbanSortBy)
-        .map(col => ({ label: col.label, activities: col.items }))
-    }
-
-    return {
-      activities,
-      memberById,
-      statusById,
-      tagById,
-      activityTitleById,
-      kanbanColumns,
-      listDisplayRows,
-      listVisibleColumns,
-      kanbanShowHierarchy: kbHierarchy,
-      kanbanChildrenByParentId: kbChildrenById,
-    }
-  }, [
-    view, teamMembers, activeTimelineStatuses, tags, allActivities,
-    exportFilterInfo.filteredActivities, kanbanGroupBy, kanbanSortBy, kanbanShowHierarchy,
-    listGroupBy, listSortBy, listColumns,
-  ])
-
-  // Close the activity detail panel whenever the active filter changes so the
-  // filtered view is unobstructed by a stale selection.
-  useEffect(() => {
-    setSelectedActivityId(null)
-    setSelectedApiActivity(null)
-  }, [activeFilter]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  const handleTimelineChange = useCallback((id: string) => {
-    prefsAppliedForTimeline.current = null
-    setActiveTimelineId(id)
-    setActiveFilter({ kind: 'preset', id: 'all' })
-  }, [setActiveFilter])
-
-  // Calendar navigation helpers.
-  const calendarPrev = useCallback(() => {
-    setCalendarAnchorDate(prev => {
-      const d = new Date(prev)
-      if (calendarLayout === 'month') {
-        d.setUTCMonth(d.getUTCMonth() - 1)
-      } else {
-        d.setUTCDate(d.getUTCDate() - 7)
-      }
-      return d
-    })
-  }, [calendarLayout])
-
-  const calendarNext = useCallback(() => {
-    setCalendarAnchorDate(prev => {
-      const d = new Date(prev)
-      if (calendarLayout === 'month') {
-        d.setUTCMonth(d.getUTCMonth() + 1)
-      } else {
-        d.setUTCDate(d.getUTCDate() + 7)
-      }
-      return d
-    })
-  }, [calendarLayout])
-
-  const calendarToday = useCallback(() => {
-    const d = new Date()
-    d.setUTCHours(0, 0, 0, 0)
-    if (calendarLayout === 'month') {
-      d.setUTCDate(1)
-    } else {
-      // Snap to weekStart.
-      const dow = d.getUTCDay()
-      const daysBack = weekStartDay === 1 ? (dow === 0 ? 6 : dow - 1) : dow
-      d.setUTCDate(d.getUTCDate() - daysBack)
-    }
-    setCalendarAnchorDate(d)
-  }, [calendarLayout, weekStartDay])
-
-  // Switching layouts also snaps the anchor date to the correct boundary so
-  // the week-view always starts on the configured weekStart day.
-  const handleCalendarLayoutChange = useCallback((l: CalendarLayout) => {
-    setCalendarLayout(l)
-    setCalendarAnchorDate(prev => {
-      const d = new Date(prev)
-      d.setUTCHours(0, 0, 0, 0)
-      if (l === 'week') {
-        const dow = d.getUTCDay()
-        const daysBack = weekStartDay === 1 ? (dow === 0 ? 6 : dow - 1) : dow
-        d.setUTCDate(d.getUTCDate() - daysBack)
-      } else {
-        d.setUTCDate(1)
-      }
-      return d
-    })
-  }, [weekStartDay])
-
-  useTeamActivitySync(teamId, accessToken)
-
-  // Per-timeline preferences: restore toolbar state when the active timeline changes.
-  // isSuccess gate ensures we don't mark prefs applied before the query resolves.
-  const { isSuccess: prefsSettled } = usePreferences(activeTimelineId)
-  const timelinePrefs = usePreferenceMap(activeTimelineId)
-  useEffect(() => {
-    if (!activeTimelineId || !prefsSettled) return
-    if (prefsAppliedForTimeline.current === activeTimelineId) return
-    prefsAppliedForTimeline.current = activeTimelineId
-
-    if (typeof timelinePrefs['group_by'] === 'string') setGroupBy(timelinePrefs['group_by'] as GroupBy)
-    if (typeof timelinePrefs['sort_by'] === 'string') setSortBy(timelinePrefs['sort_by'] as SortBy)
-    if (typeof timelinePrefs['zoom_granularity'] === 'string') setGranularity(timelinePrefs['zoom_granularity'] as TimeGranularity | 'auto')
-    if (typeof timelinePrefs['color_by'] === 'string') setColorBy(timelinePrefs['color_by'] as ColorBy)
-    if (typeof timelinePrefs['list_group_by'] === 'string') setListGroupBy(timelinePrefs['list_group_by'] as ListGroupBy)
-    if (typeof timelinePrefs['list_sort_by'] === 'string') setListSortBy(timelinePrefs['list_sort_by'] as ListSortBy)
-    if (typeof timelinePrefs['list_color_by'] === 'string') setListColorBy(timelinePrefs['list_color_by'] as ListColorBy)
-    if (typeof timelinePrefs['list_density'] === 'string') setListDensity(timelinePrefs['list_density'] as ListDensity)
-    if (typeof timelinePrefs['view_mode'] === 'string') setView(timelinePrefs['view_mode'] as ViewMode)
-    if (typeof timelinePrefs['kanban_group_by'] === 'string') setKanbanGroupBy(timelinePrefs['kanban_group_by'] as KanbanGroupBy)
-    if (typeof timelinePrefs['kanban_sort_by'] === 'string') setKanbanSortBy(timelinePrefs['kanban_sort_by'] as KanbanSortBy)
-    if (typeof timelinePrefs['kanban_color_by'] === 'string') setKanbanColorBy(timelinePrefs['kanban_color_by'] as ColorBy)
-    if (typeof timelinePrefs['kanban_card_fields'] === 'string') {
-      try { setKanbanCardFields(JSON.parse(timelinePrefs['kanban_card_fields']) as KanbanCardField[]) } catch { /* ignore */ }
-    }
-    if (typeof timelinePrefs['kanban_collapsed'] === 'string') {
-      try { setKanbanCollapsedColumns(JSON.parse(timelinePrefs['kanban_collapsed']) as string[]) } catch { /* ignore */ }
-    }
-    if (typeof timelinePrefs['kanban_show_hierarchy'] === 'string') {
-      try { setKanbanShowHierarchy(JSON.parse(timelinePrefs['kanban_show_hierarchy']) as boolean) } catch { /* ignore */ }
-    }
-  }, [activeTimelineId, prefsSettled, timelinePrefs])
-
-  // Save toolbar state changes to per-timeline prefs.
-  const saveTimelinePref = useCallback((key: string, value: string) => {
-    if (!activeTimelineId) return
-    upsert.mutate({ key, value: JSON.stringify(value), timelineId: activeTimelineId })
-  }, [activeTimelineId, upsert.mutate]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('group_by', groupBy)
-  }, [groupBy, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('sort_by', sortBy)
-  }, [sortBy, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('zoom_granularity', granularity)
-  }, [granularity, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('color_by', colorBy)
-  }, [colorBy, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('view_mode', view)
-  }, [view, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('list_group_by', listGroupBy)
-  }, [listGroupBy, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('list_sort_by', listSortBy)
-  }, [listSortBy, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('list_color_by', listColorBy)
-  }, [listColorBy, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('list_density', listDensity)
-  }, [listDensity, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('kanban_group_by', kanbanGroupBy)
-  }, [kanbanGroupBy, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('kanban_sort_by', kanbanSortBy)
-  }, [kanbanSortBy, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('kanban_color_by', kanbanColorBy)
-  }, [kanbanColorBy, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('kanban_card_fields', JSON.stringify(kanbanCardFields))
-  }, [kanbanCardFields, saveTimelinePref])
-
-  useEffect(() => {
-    if (prefsAppliedForTimeline.current !== activeTimelineId) return
-    saveTimelinePref('kanban_show_hierarchy', JSON.stringify(kanbanShowHierarchy))
-  }, [kanbanShowHierarchy, saveTimelinePref])
-
-  // Global preferences: persist dark mode, active team, and active timeline.
-  useEffect(() => {
-    upsert.mutate({ key: 'theme', value: JSON.stringify(theme) })
-  }, [theme]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    if (!teamId) return
-    upsert.mutate({ key: 'selected_team', value: JSON.stringify(teamId) })
-  }, [teamId]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    if (!activeTimelineId) return
-    upsert.mutate({ key: 'selected_timeline', value: JSON.stringify(activeTimelineId) })
-  }, [activeTimelineId]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Reset label column width when the user switches timelines so each timeline
-  // starts fresh. Switching between views on the same timeline preserves width
-  // because the state lives here rather than inside the unmounting GanttView.
-  useEffect(() => {
-    setGanttLabelColW(DEFAULT_LABEL_COL_W)
-  }, [activeTimelineId])
-
-  return (
-    <div style={{ display: 'flex', height: '100vh', overflow: 'hidden', background: 'var(--background)' }}>
-      <Sidebar
-        collapsed={sidebarCollapsed}
-        onToggle={() => setSidebarCollapsed(c => !c)}
-        apiTimelines={timelines}
-        archivedTimelines={archivedTimelines}
-        activeTimelineId={activeTimelineId}
-        onActiveTimelineChange={handleTimelineChange}
-        onNewTimeline={() => { setEditingTimeline(null); setTimelineModalMode('new') }}
-        onEditTimeline={id => {
-          // timelines (active) is always loaded; allTimelines (?archived=true) may
-          // still be in-flight, so prefer the already-loaded list to avoid opening
-          // the modal with an undefined timeline and blank fields.
-          const tl = timelines.find(t => t.id === id) ?? allTimelines.find(t => t.id === id)
-          setEditingTimeline(tl ?? null)
-          setTimelineModalMode('edit')
-        }}
-        onNewActivity={() => {
-          const today = new Date().toISOString().slice(0, 10)
-          setSelectedActivityId(null)
-          setSelectedApiActivity(null)
-          if (view === 'list') {
-            setListNewRowSeq(s => s + 1)
-          } else {
-            setCreateDefaults({ start: today, end: today, memberId: null })
-          }
-        }}
-        activeTeam={activeTeam}
-        activeTeams={activeTeams}
-        archivedTeams={archivedTeams}
-        canEditTeam={canEditTeam}
-        onSelectTeam={handleSelectTeam}
-        onNewTeam={isSuperadmin ? () => { setEditingTeam(null); setTeamModalMode('new'); } : undefined}
-        onEditTeam={t => { setEditingTeam(t as ApiTeam); setTeamModalMode('edit'); }}
-        onUnarchiveTeam={id => unarchiveTeam.mutate(id)}
-        members={teamMembers.length > 0 ? teamMembers : undefined}
-        onEditMember={isSuperadmin ? m => setEditingMember(m) : undefined}
-      />
-
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0 }}>
-        <TopBar
-          view={view}
-          teamId={teamId}
-          timelineName={activeTimelineName}
-          timelineIdentity={activeTimelineIdentity}
-          onViewChange={setView}
-          onOpenFilterManager={() => setFilterModalOpen(true)}
-          rightSlot={
-            <div ref={profileRef} style={{ position: 'relative', marginLeft: 4, zIndex: 30 }}>
-              <button
-                onClick={() => setProfileOpen(o => !o)}
-                style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', display: 'flex' }}
-                title={displayName}
-              >
-                <Badge identity={userIdentity} name={displayName} shape="circle" size={28} />
-              </button>
-
-              {profileOpen && (
-                <div
-                  style={{
-                    position: 'absolute',
-                    top: 'calc(100% + 8px)',
-                    right: 0,
-                    width: 220,
-                    background: 'var(--card)',
-                    border: '1px solid var(--border)',
-                    borderRadius: 8,
-                    boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
-                    zIndex: 100,
-                    overflow: 'hidden',
-                  }}
-                >
-                  <div style={{ padding: '12px 14px', borderBottom: '1px solid var(--border)' }}>
-                    <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)' }}>{displayName}</div>
-                    <div style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 2 }}>{email}</div>
-                  </div>
-                  <button
-                    onClick={toggleDark}
-                    style={{ ...DROPDOWN_BTN, borderBottom: '1px solid var(--border)' }}
-                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-                  >
-                    {isDark ? <Moon size={14} strokeWidth={1.8} /> : <Sun size={14} strokeWidth={1.8} />}
-                    {isDark ? 'Dark mode' : 'Light mode'}
-                  </button>
-                  <button
-                    onClick={() => { setProfileOpen(false); navigate('/settings'); }}
-                    style={{ ...DROPDOWN_BTN, borderBottom: '1px solid var(--border)' }}
-                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-                  >
-                    <Settings size={14} strokeWidth={1.8} />
-                    Settings
-                  </button>
-                  <button
-                    onClick={logout}
-                    style={{ ...DROPDOWN_BTN, color: 'var(--muted-foreground)' }}
-                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--muted)')}
-                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-                  >
-                    <LogOut size={14} strokeWidth={1.8} />
-                    Sign out
-                  </button>
-                </div>
-              )}
-            </div>
-          }
-        />
-
-        {/* Active timeline color band */}
-        <div style={{ height: 3, background: activeTimelineColor, flexShrink: 0, transition: 'background 0.2s ease' }} />
-
-        {/* Gantt sub-toolbar — only shown in Gantt view */}
-        {view === 'gantt' && (
-          <GanttToolbar
-            groupBy={groupBy}
-            onGroupByChange={setGroupBy}
-            sortBy={sortBy}
-            onSortByChange={setSortBy}
-            granularity={granularity}
-            onGranularityChange={setGranularity}
-            colorBy={colorBy}
-            onColorByChange={setColorBy}
-            onExport={() => setExportDialogOpen(true)}
-            onShare={() => setShareModalOpen(true)}
-          />
-        )}
-
-        {/* List sub-toolbar — only shown in List view */}
-        {view === 'list' && (
-          <ListToolbar
-            columns={listColumns}
-            onColumnVisibilityChange={(colId, visible) => {
-              listColToggleSeq.current += 1
-              setListColToggle({ colId, visible, seq: listColToggleSeq.current })
-              setListColumns(prev => prev.map(c => c.id === colId ? { ...c, visible } : c))
-            }}
-            density={listDensity}
-            onDensityChange={setListDensity}
-            groupBy={listGroupBy}
-            onGroupByChange={setListGroupBy}
-            sortBy={listSortBy}
-            onSortByChange={setListSortBy}
-            colorBy={listColorBy}
-            onColorByChange={setListColorBy}
-            onExport={() => setExportDialogOpen(true)}
-            onShare={() => setShareModalOpen(true)}
-          />
-        )}
-
-        {/* Calendar sub-toolbar — only shown in Calendar view */}
-        {view === 'calendar' && (
-          <CalendarToolbar
-            layout={calendarLayout}
-            onLayoutChange={handleCalendarLayoutChange}
-            anchorDate={calendarAnchorDate}
-            onPrev={calendarPrev}
-            onNext={calendarNext}
-            onToday={calendarToday}
-            colorBy={colorBy}
-            onColorByChange={setColorBy}
-            onExport={() => setExportDialogOpen(true)}
-            onShare={() => setCalendarShareModalOpen(true)}
-          />
-        )}
-
-        {/* Kanban sub-toolbar — only shown in Kanban view */}
-        {view === 'kanban' && (
-          <KanbanToolbar
-            groupBy={kanbanGroupBy}
-            onGroupByChange={setKanbanGroupBy}
-            sortBy={kanbanSortBy}
-            onSortByChange={setKanbanSortBy}
-            colorBy={kanbanColorBy}
-            onColorByChange={setKanbanColorBy}
-            cardFields={kanbanCardFields}
-            onCardFieldsChange={setKanbanCardFields}
-            showHierarchy={kanbanShowHierarchy}
-            onShowHierarchyChange={setKanbanShowHierarchy}
-            onExport={() => setExportDialogOpen(true)}
-            onShare={() => setShareModalOpen(true)}
-          />
-        )}
-
-        {/* Content area */}
-        <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-          {view === 'gantt' && teamId && activeTimelineId ? (
-            <GanttView
-              teamId={teamId}
-              timelineId={activeTimelineId}
-              startDate={activeTimeline?.startDate}
-              endDate={activeTimeline?.endDate}
-              groupBy={groupBy}
-              sortBy={sortBy}
-              granularity={granularity}
-              colorBy={colorBy}
-              timelineStatuses={activeTimelineStatuses}
-              savedFilters={savedFilters}
-              tags={tags}
-              selectedActivityId={selectedActivityId}
-              onSelectActivity={(id) => {
-                setSelectedActivityId(id)
-                if (!id) { setSelectedApiActivity(null); setCreateDefaults(null) }
-              }}
-              onSelectApiActivity={(activity) => {
-                setSelectedApiActivity(activity)
-                setCreateDefaults(null)
-              }}
-              onBarDragProgress={(activityId, newStart, newEnd) => {
-                setLiveDragDates({
-                  activityId,
-                  start: newStart.toISOString().slice(0, 10),
-                  end: newEnd.toISOString().slice(0, 10),
-                })
-              }}
-              onBarDragEnd={() => setLiveDragDates(null)}
-              onMembersLoaded={setGanttMembers}
-              labelColW={ganttLabelColW}
-              onLabelColWChange={setGanttLabelColW}
-            />
-          ) : view === 'gantt' && (!teamId || !activeTimelineId) ? (
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
-              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>Loading your team…</p>
-            </div>
-          ) : view === 'list' && teamId && activeTimelineId ? (
-            <ListView
-              teamId={teamId}
-              timelineId={activeTimelineId}
-              groupBy={listGroupBy}
-              sortBy={listSortBy}
-              colorBy={listColorBy}
-              density={listDensity}
-              timelineStatuses={activeTimelineStatuses}
-              savedFilters={savedFilters}
-              tags={tags}
-              selectedActivityId={selectedActivityId}
-              pendingColumnToggle={listColToggle}
-              onSelectActivity={(id) => {
-                setSelectedActivityId(id)
-                if (!id) { setSelectedApiActivity(null); setCreateDefaults(null) }
-              }}
-              onSelectApiActivity={(activity) => {
-                setSelectedApiActivity(activity)
-                setCreateDefaults(null)
-              }}
-              onMembersLoaded={setGanttMembers}
-              onColumnsChange={setListColumns}
-              triggerNewRow={listNewRowSeq}
-            />
-          ) : view === 'list' && (!teamId || !activeTimelineId) ? (
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
-              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>Loading your team…</p>
-            </div>
-          ) : view === 'calendar' && teamId && activeTimelineId ? (
-            <CalendarView
-              teamId={teamId}
-              timelineId={activeTimelineId}
-              layout={calendarLayout}
-              anchorDate={calendarAnchorDate}
-              colorBy={colorBy}
-              timelineStatuses={activeTimelineStatuses}
-              savedFilters={savedFilters}
-              tags={tags}
-              selectedActivityId={selectedActivityId}
-              onSelectActivity={(id) => {
-                setSelectedActivityId(id)
-                if (!id) { setSelectedApiActivity(null); setCreateDefaults(null) }
-              }}
-              onSelectApiActivity={(activity) => {
-                setSelectedApiActivity(activity)
-                setCreateDefaults(null)
-              }}
-              onBarDragProgress={(activityId, newStart, newEnd) => {
-                setLiveDragDates({
-                  activityId,
-                  start: newStart.toISOString().slice(0, 10),
-                  end: newEnd.toISOString().slice(0, 10),
-                })
-              }}
-              onBarDragEnd={() => setLiveDragDates(null)}
-              onCellClick={(date) => {
-                const iso = date.toISOString().slice(0, 10)
-                setSelectedActivityId(null)
-                setSelectedApiActivity(null)
-                setCreateDefaults({ start: iso, end: iso, memberId: null })
-              }}
-              onMembersLoaded={setGanttMembers}
-            />
-          ) : view === 'calendar' && (!teamId || !activeTimelineId) ? (
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
-              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>Loading your team…</p>
-            </div>
-          ) : view === 'kanban' && teamId && activeTimelineId ? (
-            <KanbanView
-              teamId={teamId}
-              timelineId={activeTimelineId}
-              groupBy={kanbanGroupBy}
-              sortBy={kanbanSortBy}
-              colorBy={kanbanColorBy}
-              cardFields={kanbanCardFields}
-              collapsedColumnIds={kanbanCollapsedColumns}
-              onCollapsedColumnIdsChange={setKanbanCollapsedColumns}
-              showHierarchy={kanbanShowHierarchy}
-              timelineStatuses={activeTimelineStatuses}
-              savedFilters={savedFilters}
-              tags={tags}
-              selectedActivityId={selectedActivityId}
-              onSelectActivity={(id) => {
-                setSelectedActivityId(id)
-                if (!id) { setSelectedApiActivity(null); setCreateDefaults(null) }
-              }}
-              onSelectApiActivity={(activity) => {
-                setSelectedApiActivity(activity)
-                setCreateDefaults(null)
-              }}
-              onAddActivity={(defaults) => {
-                setSelectedActivityId(null)
-                setSelectedApiActivity(null)
-                setCreateDefaults(defaults)
-              }}
-              onMembersLoaded={setGanttMembers}
-            />
-          ) : view === 'kanban' && (!teamId || !activeTimelineId) ? (
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
-              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>Loading your team…</p>
-            </div>
-          ) : (
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
-              <p style={{ color: 'var(--muted-foreground)', fontSize: 14 }}>
-                {view.charAt(0).toUpperCase() + view.slice(1)} view coming soon.
-              </p>
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Activity detail panel — slides in from right when an activity is selected */}
-      <ActivityDetailPanel
-        open={Boolean(selectedApiActivity)}
-        event={selectedApiActivity}
-        members={ganttMembers}
-        teamId={teamId}
-        timelineId={activeTimelineId ?? ''}
-        onClose={() => { setSelectedActivityId(null); setSelectedApiActivity(null); setLiveDragDates(null) }}
-        liveDragStart={liveDragDates && liveDragDates.activityId === selectedApiActivity?.id ? liveDragDates.start : undefined}
-        liveDragEnd={liveDragDates && liveDragDates.activityId === selectedApiActivity?.id ? liveDragDates.end : undefined}
-      />
-
-      {/* Activity create panel — slides in from New Activity button or future drag */}
-      <ActivityCreatePanel
-        open={Boolean(createDefaults) && !selectedApiActivity}
-        teamId={teamId}
-        timelineId={activeTimelineId ?? ''}
-        members={ganttMembers}
-        timelineStatuses={activeTimelineStatuses}
-        defaultStart={createDefaults?.start ?? new Date().toISOString().slice(0, 10)}
-        defaultEnd={createDefaults?.end ?? new Date().toISOString().slice(0, 10)}
-        defaultMemberId={createDefaults?.memberId}
-        defaultStatusId={createDefaults?.statusId}
-        onClose={() => setCreateDefaults(null)}
-      />
-
-      <FilterManageModal
-        open={filterModalOpen}
-        onClose={() => setFilterModalOpen(false)}
-        teamId={teamId}
-        timelineId={activeTimelineId ?? ''}
-        isAdmin={canEditTeam}
-      />
-
-      {/* Team modal — create or edit */}
-      {teamModalMode && (
-        <TeamModal
-          mode={teamModalMode}
-          team={editingTeam ?? undefined}
-          isAdmin={canEditTeam}
-          onClose={() => { setTeamModalMode(null); setEditingTeam(null); }}
-          onTeamCreated={created => setActiveTeamId(created.id)}
-        />
-      )}
-
-      {/* Member modal — edit a team member */}
-      {editingMember && (
-        <MemberModal
-          teamId={teamId}
-          memberId={editingMember.id}
-          isAdmin={canEditTeam}
-          isSuperadmin={isSuperadmin}
-          onClose={() => setEditingMember(null)}
-        />
-      )}
-
-      {/* Share modal — create a share link for the active view */}
-      {shareModalOpen && activeTimelineId && teamId && (view === 'gantt' || view === 'list' || view === 'kanban') && (
-        <ShareModal
-          teamId={teamId}
-          timelineId={activeTimelineId}
-          viewType={view}
-          timelineName={activeTimelineName}
-          viewConfig={
-            view === 'gantt'
-              ? { groupBy, sortBy, colorBy, granularity: String(granularity), filter: activeShareFilter }
-              : view === 'list'
-              ? {
-                  groupBy: listGroupBy,
-                  sortBy: listSortBy,
-                  colorBy: listColorBy,
-                  granularity: '',
-                  filter: activeShareFilter,
-                  columns: listColumns.map(c => ({ id: c.id, visible: c.visible })),
-                }
-              : {
-                  groupBy: kanbanGroupBy,
-                  sortBy: kanbanSortBy,
-                  colorBy: kanbanColorBy,
-                  granularity: '',
-                  filter: activeShareFilter,
-                  cardFields: kanbanCardFields,
-                  showHierarchy: kanbanShowHierarchy,
-                  collapsedColumns: kanbanCollapsedColumns,
-                }
-          }
-          onClose={() => setShareModalOpen(false)}
-        />
-      )}
-
-      {/*
-        Off-screen capture target for the export dialog's PNG, printable-view,
-        and HTML-save formats — renders the same interactive=false components
-        the public share viewer uses (Calendar joined in 14.4 via
-        CleanCalendarSnapshot), fed with live data, instead of rasterizing the
-        live editable dashboard.
-
-        PresentationFrame hosts the snapshot in an isolated, always-light
-        iframe document (see components/export/PresentationFrame.tsx). That is
-        what fixes the dark-mode flicker (the live page's theme is never
-        toggled) and the half-dark capture (no `.dark` in scope for the
-        snapshot's `var()` colors to resolve against). Mounted only while the
-        export dialog is open; on close it unmounts and `snapshotBody`/
-        `snapshotFrame` reset.
-      */}
-      {exportDialogOpen && (
-        <PresentationFrame onReady={handleSnapshotReady}>
-          {view === 'gantt' && (
-            <CleanGanttSnapshot
-              activities={exportFilterInfo.filteredActivities}
-              members={ganttMembers}
-              statuses={activeTimelineStatuses}
-              groupBy={groupBy}
-              sortBy={sortBy}
-              colorBy={colorBy}
-              granularity={granularity}
-              startDate={activeTimeline?.startDate}
-              endDate={activeTimeline?.endDate}
-              weekStart={prefWeekStart}
-              locale={prefLocale}
-            />
-          )}
-          {view === 'list' && (
-            <CleanListSnapshot
-              activities={exportFilterInfo.filteredActivities}
-              members={teamMembers}
-              statuses={activeTimelineStatuses}
-              tags={tags}
-              groupBy={listGroupBy}
-              sortBy={listSortBy}
-              columns={listColumns.map(c => ({ id: c.id, visible: c.visible }))}
-            />
-          )}
-          {view === 'kanban' && (
-            <CleanKanbanSnapshot
-              activities={exportFilterInfo.filteredActivities}
-              teamMembers={teamMembers}
-              members={ganttMembers}
-              statuses={activeTimelineStatuses}
-              tags={tags}
-              groupBy={kanbanGroupBy}
-              sortBy={kanbanSortBy}
-              colorBy={kanbanColorBy}
-              cardFields={kanbanCardFields}
-              showHierarchy={kanbanShowHierarchy}
-              collapsedColumnIds={kanbanCollapsedColumns}
-            />
-          )}
-          {view === 'calendar' && (
-            <CleanCalendarSnapshot
-              activities={exportFilterInfo.filteredActivities}
-              members={ganttMembers}
-              statuses={activeTimelineStatuses}
-              tags={tags}
-              layout={calendarLayout}
-              anchorDate={calendarAnchorDate}
-              colorBy={colorBy}
-              weekStartDay={weekStartDay}
-            />
-          )}
-        </PresentationFrame>
-      )}
-
-      {/* Export dialog — download the active view as CSV/Excel/ICS/PNG, or print/save as HTML */}
-      {exportDialogOpen && activeTimelineId && teamId && (
-        <ExportDialog
-          view={view}
-          teamId={teamId}
-          timelineId={activeTimelineId}
-          timelineName={activeTimelineName}
-          teamName={activeTeam?.name ?? null}
-          filterLabel={exportFilterInfo.filterLabel}
-          filterDefinition={exportFilterInfo.filterDefinition}
-          filteredCount={exportFilterInfo.filteredCount}
-          totalCount={exportFilterInfo.totalCount}
-          viewActivityIds={exportViewActivityIds}
-          listExportColumns={exportListColumns}
-          textExportData={textExportData}
-          captureElement={snapshotBody}
-          presentationFrame={snapshotFrame}
-          periodLabel={view === 'calendar' ? formatAnchorLabel(calendarAnchorDate, calendarLayout) : null}
-          onClose={() => { setExportDialogOpen(false); setSnapshotBody(null); setSnapshotFrame(null) }}
-        />
-      )}
-
-      {/* Calendar share modal — ICS feed configurator (distinct from ShareModal) */}
-      {calendarShareModalOpen && activeTimelineId && teamId && (
-        <CalendarShareModal
-          teamId={teamId}
-          timelineId={activeTimelineId}
-          timelineName={activeTimelineName}
-          onClose={() => setCalendarShareModalOpen(false)}
-        />
-      )}
-
-      {/* Timeline modal — create or edit */}
-      {timelineModalMode && (
-        <TimelineModal
-          mode={timelineModalMode}
-          teamId={teamId}
-          timeline={editingTimeline ?? undefined}
-          canAdmin={canEditTeam}
-          onClose={() => { setTimelineModalMode(null); setEditingTimeline(null) }}
-          onCreated={created => setActiveTimelineId(created.id)}
-          onUnarchive={id => unarchiveTimeline.mutate(id, { onSuccess: () => { setTimelineModalMode(null); setEditingTimeline(null) } })}
-        />
-      )}
-    </div>
-  )
-}
-
-export default function DashboardPage() {
-  return (
-    <FindProvider>
-      <FilterProvider>
-        <DashboardShell />
-      </FilterProvider>
-    </FindProvider>
-  )
-}
 ````
 
 ## File: docs/ROADMAP.md
@@ -75911,7 +76130,7 @@ Visual exports render **client-side from the live DOM** — no gofpdf, no Chromi
 - **14.1 Foundation + data exports:** `POST /timelines/:id/export` (`csv` / `xlsx` / `ics`, optional frozen `viewConfig`, filter evaluated in Go) + convenience `GET …/export.csv?filter=<savedFilterId>` (the 10.4.6 hook); columns match the Phase 15 import template; sync for v1. Single `ExportDialog` driven by a per-view capability descriptor, wired into the Gantt toolbar Export stub and the 11.1/11.2/11.3 toolbar slots.
 - **14.2 Textual:** Markdown and plain text each offer a **Table** style (GFM table / aligned columns) and an **Outline** style (bullet list — `**title** (date range) — assignees`, with indented `Status:` / `Progress:` / `Parent:` / `Tags:` / etc. lines for non-empty fields; children nest by depth; group-by produces `##` / heading sections). Copy-to-clipboard also exposes the Table/Outline choice; paste lands rich in Slack / Word / Google Docs via dual `text/plain` + `text/html` flavors. Kanban = section per column; Calendar = agenda list. Client-generated from in-memory filtered rows.
 - **14.3 PNG snapshot:** clean render (`html-to-image`) of the current view, full extent, 2x density, header strip (team, timeline, generated-at, filter, + Calendar period). Built on an isolated always-light `PresentationFrame` iframe (Gantt/List/Kanban) so the capture doesn't toggle the live page's theme (no flicker) and theme `var()` colors resolve correctly (no half-dark capture); Calendar rasterizes the live, theme-agnostic content area until it gets a clean renderer.
-- **14.4 Printable views + HTML save:** reuses the 14.3 `PresentationFrame` as the shared presentation surface — `iframe.contentWindow.print()` for vector PDF, `contentDocument` serialization for a standalone `.html` download — via new `lib/printExport.ts` / `lib/htmlExport.ts` and a `components/export/presentationHeader.ts` header built for the instant of the print/serialize call (never baked into the mounted snapshot, so it can't double up with PNG's canvas-composited header). Collapses the two remaining "force light" implementations (ShareViewPage's toggle, PresentationFrame's structural light — the pngExport toggle was already removed in 14.3) into one `lib/presentationTheme.ts#forceLightDocumentElement`. Print stylesheet per view (`components/export/printStyles.ts`, injected as an always-inert `<style media="print">` block per Clean*Snapshot): Gantt landscape + member-color legend; List repeating `<thead>` + row `break-inside: avoid`; Kanban `flex-wrap` + per-column `break-inside: avoid` via new `data-export-role` hooks on `KanbanBoard`/`KanbanColumn`; Calendar landscape. Calendar gained a clean (`interactive=false`) renderer (`CleanCalendarSnapshot`, plus a new `interactive` prop on `CalendarGrid`) so it joins the shared surface instead of live-DOM rasterization.
+- **14.4 Printable views + HTML save:** reuses the 14.3 `PresentationFrame` as the shared presentation surface — `iframe.contentWindow.print()` for vector PDF, `contentDocument` serialization for a standalone `.html` download — via new `lib/printExport.ts` / `lib/htmlExport.ts` and a `components/export/presentationHeader.ts` header built for the instant of the print/serialize call (never baked into the mounted snapshot, so it can't double up with PNG's canvas-composited header). Collapses the two remaining "force light" implementations (ShareViewPage's toggle, PresentationFrame's structural light — the pngExport toggle was already removed in 14.3) into one `lib/presentationTheme.ts#forceLightDocumentElement`. Print stylesheet per view (`components/export/printStyles.ts`, injected as an always-inert `<style media="print">` block per Clean*Snapshot): Gantt landscape + member-color legend; List repeating `<thead>` + row `break-inside: avoid`; Kanban `flex-wrap` + per-column `break-inside: avoid` via new `data-export-role` hooks on `KanbanBoard`/`KanbanColumn` (plus `list-table-wrap` on ShareViewPage's `PublicListTable` — the List print rules needed the same kind of hook, so the `data-export-role` contract extends into the share-viewer component); Calendar landscape. Calendar gained a clean (`interactive=false`) renderer (`CleanCalendarSnapshot`, plus a new `interactive` prop on `CalendarGrid`) so it joins the shared surface instead of live-DOM rasterization.
 
 **Open questions:** resolved in the plan — sync exports for v1; filter only (Find is ephemeral); no draba-side PDF engine.
 
@@ -76142,10 +76361,28 @@ Adds i18n infrastructure and ships the first non-English locale. The "Default la
 
 ---
 
+## 2026-07-02 — /review-phase 14.4 follow-up: log scrub, gating tests, HTML export stylesheet fix, print-CSS tests
+
+Addressed the /review-phase 14.4 findings (two blockers, three suggestions accepted; the DashboardPage integration-test suggestion was declined as fine-as-is, and two nits were accepted as-is).
+
+**Blockers:**
+- **Host-specific value in the diff** — the 14.4 `/test-phase` log entry committed the local smoke-target URL; scrubbed to a generic description. Historical instances elsewhere in `log.md` remain — a one-time **pre-launch repo scrub** is now a TASKS.md parking-lot item (per-phase additions stay caught by REVIEW.md's security grep).
+- **`CalendarGrid` `interactive` prop untested** — new `CalendarGrid.test.tsx` (8 tests) mirrors the 13.3 KanbanCard/KanbanColumn `interactive=false` suites: bar click, bar drag (pointerdown→pointermove with `document.elementsFromPoint` stubbed), cell click, and the month row-resize handle are all inert at `interactive={false}`, with positive controls at the default.
+
+**Suggestions:**
+- **HTML export stylesheet handling** (`lib/htmlExport.ts`) — the serialized `.html` previously carried PresentationFrame's cloned `<link>` tags verbatim, so relative `/assets/*.css` hrefs broke the saved file offline. Now serialization clones the frame's root and resolves links: same-origin stylesheets are **fetched and inlined** as `<style>` blocks (falling back to an absolutized href on fetch failure); cross-origin links (the Google Fonts pair) are **absolutized** so fonts render whenever the file is opened with network access (system-font fallback offline; fully self-contained font embedding would mean data-URI'ing woff2 — not worth it). `saveFramePresentationHtml` is now async; `ExportDialog`'s html branch gained the same pending/then/finally treatment as PNG. 4 new tests cover inlining, absolutizing, fetch-failure fallback, and live-frame non-mutation.
+- **Print CSS untested** — new `printStyles.test.ts` (6 tests) pins the string content jsdom can verify (base print-only block, `@page` orientation/margins per view, List/Kanban break rules — behavioral print-preview checks stay manual per TESTING.md), and `CleanSnapshot.test.tsx` gained a 4-test injection describe: each snapshot mounts its `<style>` block and the DOM carries the `data-export-role` hooks the CSS selectors target (drift guard on both halves of the contract).
+- **`forceLightDocumentElement` page wiring untested** — extracted ShareViewPage's force-light-with-restore `useLayoutEffect` into `hooks/useForceLightDocument.ts` (2 renderHook tests: strip on mount, restore on unmount, no spurious dark when already light). ShareViewPage now mounts the hook. The larger idea — a real theme-mode classification (light / dark / print / "simplified") instead of a binary force-light — is parked in TASKS.md for future scoping.
+- **`data-export-role` widening note** — ROADMAP's 14.4 scope text now records that the hook contract extends to ShareViewPage's `PublicListTable` (`list-table-wrap`), not just KanbanBoard/KanbanColumn.
+
+**Checks:** `pnpm --filter web lint` clean, `pnpm --filter web build` clean, `pnpm --filter web test` all pass.
+
+---
+
 ## 2026-07-01 — /test-phase 14.4
 - Subagents run: static-check, unit-test (backend), unit-test (frontend), schema-check, api-smoke, security-review, type-sync, web-e2e
 - Result: all pass (8/8; no skips — live smoke target reachable, invite token resolved from memory)
-- Smoke target: http://epcot.lan:8081
+- Smoke target: the local Docker test instance (URL in local env config, not committed)
 
 ---
 
