@@ -1258,13 +1258,44 @@ _Re-planned 2026-06-11 — see [docs/plans/phase-14-export.md](plans/phase-14-ex
 
 **Cut (2026-06-11):** Google Docs/Sheets integration, RTF, wall-calendar poster PDF, raster-PDF download, gofpdf/Chromium server rendering (optional Chromium *sidecar* deferred indefinitely).
 
-**SMTP & password reset (lands here because import errors / reset emails are first SMTP use):**
+**SMTP & password reset (decoupled from import 2026-07-03 — the Phase 15 design surfaces errors in the interactive preview, not email; password reset is now the first SMTP use, schedule on its own merits):**
 - [ ] Password reset flow (email required — pick SMTP or transactional email provider)
 - [ ] SMTP configuration surface in `/settings/admin`
 
 ---
 
-### External Connectors (Inbound Webhooks) — Phase 15
+### Import — Tabular (Phase 15)
+
+_Planned 2026-07-03 — see [docs/plans/phase-15-import.md](plans/phase-15-import.md). Design thesis: liberal parse, strict write, every interpretation visible in the mandatory preview. Decisions locked: warn+skip for unknown status/assignee (never auto-create), opt-in checkbox for creating missing tags, additive-only (no upsert until Phase 18 external IDs), stateless two-pass (same endpoint, `dryRun` flag)._
+
+**15.1 Server — parse, validate, preview, commit, template:**
+- [ ] `internal/importer` package: CSV (delimiter sniffing, BOM/cp1252 tolerance) + xlsx (excelize, typed date cells) parsing into a common row model
+- [ ] Header auto-mapping: template headers + synonym table, case/whitespace-insensitive; explicit `mapping` override in options; unmapped columns ignored with warnings
+- [ ] Date parsing: ISO, numeric (column-wide ambiguity resolution + `dateOrder` option), written months, Excel serials; missing End → = Start (warning); end-before-start → error
+- [ ] Name resolution against target timeline/team: status (exact normalized), assignees (name or email, `,`/`;` split), tags (+ `createMissingTags`), parent (in-file rows first, then existing activities; ambiguity/cycle → warn + skip link)
+- [ ] Per-cell ok/warning/error results rolled up per row; errors row-scoped, never file-scoped (except structural 400s: type, 2 MB / 2,000-row cap, no Title column)
+- [ ] `POST /teams/:id/timelines/:timelineId/import` — multipart, `dryRun` preview (provably read-only) / commit (one transaction, parents before children, writes ok+warning rows, skips error rows)
+- [ ] Duplicate detection: normalized title+start+end match against existing activities → "possible duplicate" warning (additive semantics kept)
+- [ ] `GET /import/template.csv|.xlsx` — export header row + minimal/full example rows, served from `internal/export` column definitions
+- [ ] OpenAPI: `ImportOptions`, `ImportResult`, `ImportRowResult`, `ImportIssue`; regenerate TS types
+- [ ] Table-driven tolerance-rule tests (every parser-contract rule in the plan gets a fixture); round-trip test (14.1 export → import → same activities modulo IDs); dry-run leaves DB byte-identical
+
+**15.2 Web — import wizard:**
+- [ ] Stepped dialog off the sidebar "Bulk import" split-button stub (`onBulkImport`): upload (timeline picker + template links) → map columns (only when auto-mapping incomplete; date-order question only when ambiguous) → preview → commit + result
+- [ ] Preview table: source line numbers, status icons, resolved fields, expandable per-cell messages, All/Warnings/Errors filter chips, summary strip, "Create N missing tags" checkbox (re-runs dry-run)
+- [ ] `useImportPreview` / `useCommitImport` hooks (same endpoint, `dryRun` toggled); invalidate activity queries on commit
+- [ ] Component tests: step flow, mapping override re-runs preview, error rows excluded from commit count, tag-checkbox re-run
+- [ ] Incremental live testing against the real API with a deliberately messy CSV (per working agreement — don't batch testing to the end)
+
+**15.3 Hardening + e2e:**
+- [ ] Messy-file corpus e2e: European semicolon CSV, native Excel dates, mixed date formats, duplicate second run, unknown names, 1,000-row file
+- [ ] Docker verification (`/test-phase 15`)
+- [ ] TESTING.md Phase 15 assertions (start paying down the missing Phase 9–14 sections debt rather than adding to it)
+- [ ] log.md + session-state.md updates
+
+---
+
+### External Connectors (Inbound Webhooks) — Phase 18 (was mislabeled "Phase 15"; re-numbered 2026-07-03 to match [ROADMAP Phase 18](ROADMAP.md#phase-18--external-connectors-webhooks))
 Includes both the webhook backend and the per-timeline connector sidebar UI (previously a separate Up-Next block).
 
 **Backend:**

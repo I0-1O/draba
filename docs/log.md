@@ -2,6 +2,16 @@
 
 ---
 
+## 2026-07-03 — Phase 15 planning: import design settled
+
+Wrote [docs/plans/phase-15-import.md](plans/phase-15-import.md) resolving the strict-vs-loose import question with one principle: **liberal parse, strict write, every liberty visible.** The parser tolerates messy-but-unambiguous input (header synonyms + an explicit column-mapping step, multi-format date parsing with *column-wide* ambiguity resolution, case-insensitive name/email matching, delimiter/encoding sniffing); nothing coerced is written unseen — every interpretation is a per-cell ok/warning/error in the mandatory dry-run preview, and errors are row-scoped so 3 bad rows never block 197 good ones. The preview is the disclosure mechanism that makes tolerance safe: the machine guesses, the human ratifies.
+
+**Decisions locked:** unknown status/assignee → warn + skip, never auto-create (members are accounts, statuses carry template semantics); tags get an opt-in "Create N missing tags" checkbox (default off); additive-only v1 with "possible duplicate" warnings (upsert waits for Phase 18 external IDs); stateless two-pass (same multipart endpoint, `dryRun` flag — no upload staging; commit re-runs the identical parse in one transaction); no server-side abort-on-error flag (the client decides by looking at the preview); end-before-start stays an error (no silent date swapping); 2 MB / 2,000-row caps keep the sync path bounded. Template endpoints serve the `internal/export` header row, so export/import/template can't drift and the round-trip holds by construction.
+
+**Doc housekeeping:** ROADMAP §15 rewritten (status 🟢 Planned, effort M 3–4 days across sub-phases 15.1 server / 15.2 wizard / 15.3 hardening); TASKS.md gained the full Phase 15 checklist; the stale TASKS.md "External Connectors — Phase 15" heading re-numbered to Phase 18 (matches ROADMAP); the SMTP block is decoupled from import (errors surface in the interactive preview, not email — password reset is now the first SMTP use).
+
+---
+
 ## 2026-07-02 — /review-phase 14.4 follow-up: log scrub, gating tests, HTML export stylesheet fix, print-CSS tests
 
 Addressed the /review-phase 14.4 findings (two blockers, three suggestions accepted; the DashboardPage integration-test suggestion was declined as fine-as-is, and two nits were accepted as-is).

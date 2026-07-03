@@ -63,7 +63,7 @@ This document organizes development into discrete phases with effort estimates a
 | 14.2 | Textual (Markdown / plain text / clipboard) | M | ✅ |
 | 14.3 | PNG snapshot | S–M | ✅ |
 | 14.4 | Printable views | M | ✅ |
-| 15 | [Import — Tabular](#phase-15--import--tabular) | M — 2–3 days | ⬜ |
+| 15 | [Import — Tabular](#phase-15--import--tabular) (sub-phased) | M — 3–4 days (3 pausable sub-phases) | 🟢 |
 | 16 | [Backup & Restore](#phase-16--backup--restore) | M — 2–3 days | ⬜ |
 | 17 | [Global Search](#phase-17--global-search) | M — 2–3 days | ⬜ |
 | 18 | [External Connectors (Webhooks)](#phase-18--external-connectors-webhooks) | M — 3–5 days | ⬜ |
@@ -1635,35 +1635,26 @@ Visual exports render **client-side from the live DOM** — no gofpdf, no Chromi
 ---
 
 ### Phase 15 — Import — Tabular
-**Status:** ⬜ | **Effort:** M (2–3 days)
+**Status:** 🟢 Planned (2026-07-03) | **Effort:** M (3–4 days across three pausable sub-phases) | **Plan:** [docs/plans/phase-15-import.md](plans/phase-15-import.md)
 
 Get data *into* draba from a spreadsheet — CSV / Excel import with a mandatory preview + validation step before any rows are written. The natural companion to [Phase 14 export](#phase-14--export--data-textual--visual) (round-trip: export → edit in a spreadsheet → re-import), and the seam through which teams migrate off whatever they're planning in today. Sequenced after export because the preview/validation/conflict surface is meaningfully more complex than a one-way dump.
 
-**Scope:**
+**Design thesis (detail in the plan):** *liberal parse, strict write, everything visible.* The parser accepts messy-but-unambiguous input (header synonyms + a column-mapping step, many date formats with column-wide ambiguity resolution, case-insensitive name/email matching, delimiter sniffing); nothing coerced reaches the database unseen — every interpretation surfaces as a per-cell ok/warning/error in the mandatory preview, errors are row-scoped (3 bad rows out of 200 never block the 197), and the commit writes exactly what the preview displayed.
 
-*API:*
-- `POST /teams/:id/activities/import` — accepts a CSV/Excel upload; runs in two passes:
-  - **Preview pass** (`?dryRun=true`): parses + validates every row, returns a per-row result (ok / warning / error) with messages, *without* writing anything
-  - **Commit pass:** writes the validated rows, skipping or rejecting invalid ones per the caller's choice
-- `GET /import-template.csv` and `.xlsx` — downloadable template with the expected column headers and an example row
-- Column mapping: required (title, start, end) + optional (description, status name, assignee names/emails, tags, parent title, progress, location, url); status/assignee/tag resolved by name against the target team (unknown names surface as warnings, not hard errors)
+**Scope (sub-phases — detail in the [plan](plans/phase-15-import.md)):**
 
-*Web — import flow:*
-- "Import" affordance in the activity-create split button (stub already present from Phase 11.1.1) → opens an import wizard
-- Step 1: pick target timeline + upload file (or download the template)
-- Step 2: preview table — each parsed row with its validation status, inline messages, and a count summary (N ready, M warnings, K errors)
-- Step 3: confirm → commit; show a result toast/summary (created count, skipped count)
-- Date parsing tolerant of common formats; all dates treated as all-day / calendar dates (consistent with Phase 11.1.1)
+- **15.1 Server:** `internal/importer` + `POST /teams/:id/timelines/:timelineId/import` (multipart; stateless two-pass — `dryRun: true` preview / commit re-runs the identical parse and writes in one transaction) + `GET /import/template.csv|.xlsx` served from the `internal/export` column definitions (template = export header row, round-trip by construction). Table-driven tolerance-rule tests are the bulk of the work.
+- **15.2 Web:** stepped import wizard off the sidebar "Bulk import" stub — upload → map columns (shown only when auto-mapping is incomplete) → preview table with per-cell messages and All/Warnings/Errors filter chips → commit + result summary.
+- **15.3 Hardening:** messy-file corpus e2e (European semicolon CSV, native Excel dates, mixed formats, duplicates, 1,000-row file), Docker verification, TESTING.md Phase 15 assertions.
 
-**Open questions (resolve before starting):**
-- On a name that doesn't resolve (status / assignee / tag), do we auto-create it or just warn and skip the association? (Lean: warn + skip for v1; auto-create is a later toggle.)
-- Is import idempotent / re-runnable, or always additive? (Lean: additive for v1 — no upsert-by-external-id until Phase 18 webhooks introduce stable external IDs.)
+**Open questions:** resolved in the plan (2026-07-03) — unknown status/assignee names **warn + skip, never auto-create**; unknown **tags** get an explicit opt-in "Create N missing tags" checkbox (default off); import is **additive-only** for v1 (duplicate rows warn but import; upsert waits for Phase 18 external IDs); no server-side "abort on error" flag (the client is the choice mechanism); SMTP is decoupled from this phase (errors surface in the interactive preview, not email).
 
-**Exit criteria — safe to pause when:**
+**Exit criteria — safe to pause when** *(full list in the plan)*:
 - Downloading the template and re-uploading it (filled in) creates the expected activities on the target timeline
-- The preview step reports per-row ok/warning/error without writing any data, and a dry-run leaves the DB unchanged
-- Round-trip holds: a Phase 14 CSV export re-imported reproduces the same activities (modulo server-assigned IDs)
-- Invalid rows (missing title, end-before-start, unparseable date) are flagged in preview and excluded from the commit
+- The preview step reports per-row ok/warning/error without writing any data, and a dry-run leaves the DB byte-identical
+- Round-trip holds: a Phase 14 CSV or xlsx export re-imported reproduces the same activities (modulo server-assigned IDs), with duplicate warnings on a second run
+- A file with `Task`/`Begin`/`Finish` headers auto-maps; unmapped columns can be assigned in the wizard; ignored columns are disclosed; `3/5/26` / `05.03.2026` / `March 5, 2026` / native Excel date cells all parse, ambiguity disclosed as warnings
+- Invalid rows (missing title, end-before-start, unparseable date) are flagged in preview and excluded from the commit; valid rows in the same file still import
 - Status / assignee / tag names resolve against the target team; unknown names warn rather than abort the whole import
 - `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean
 

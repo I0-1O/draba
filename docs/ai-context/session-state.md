@@ -2,7 +2,7 @@
 
 _Updated after each significant work session. Read this first to orient — it is intentionally short. Per-phase implementation detail lives in [docs/log.md](../log.md); this file is a current-state snapshot only._
 
-**Last updated:** 2026-07-02 (/review-phase 14.4 follow-up — CalendarGrid `interactive=false` gating tests, print-CSS content + injection tests, HTML export now inlines same-origin stylesheets / absolutizes font links at serialize time (`saveFramePresentationHtml` is async), ShareViewPage's force-light effect extracted to tested `hooks/useForceLightDocument.ts`. Two new parking-lot items: pre-launch host-value repo scrub; theme-mode classification refactor. Phase 14 remains fully done.)
+**Last updated:** 2026-07-03 (Phase 15 planned — new [docs/plans/phase-15-import.md](../plans/phase-15-import.md); ROADMAP §15 revised, TASKS.md Phase 15 checklist added, stale "Connectors — Phase 15" TASKS heading re-numbered to Phase 18, SMTP decoupled from import. Previous update 2026-07-02: /review-phase 14.4 follow-up — CalendarGrid `interactive=false` gating tests, print-CSS content + injection tests, HTML export now inlines same-origin stylesheets / absolutizes font links at serialize time (`saveFramePresentationHtml` is async), ShareViewPage's force-light effect extracted to tested `hooks/useForceLightDocument.ts`. Two new parking-lot items: pre-launch host-value repo scrub; theme-mode classification refactor. Phase 14 remains fully done.)
 
 ---
 
@@ -22,7 +22,7 @@ _Updated after each significant work session. Read this first to orient — it i
 
 | Next phase | Scope | Plan |
 |------------|-------|------|
-| **15** | Import — Tabular. CSV/Excel import with a mandatory preview + validation pass before any rows are written; the round-trip companion to Phase 14 export. No plan doc yet — start from the ROADMAP scope. | [docs/ROADMAP.md#phase-15--import--tabular](../ROADMAP.md#phase-15--import--tabular) |
+| **15** | Import — Tabular. CSV/Excel import, planned 2026-07-03 as three pausable sub-phases (15.1 server parse/validate/preview/commit + template; 15.2 wizard; 15.3 hardening). Design thesis: *liberal parse, strict write, everything visible* — per-cell ok/warning/error in a mandatory dry-run preview; warn+skip for unknown status/assignee, opt-in create for tags, additive-only, stateless two-pass. Start with 15.1. | [docs/plans/phase-15-import.md](../plans/phase-15-import.md) |
 
 **Phase 13 back-half re-sequenced (2026-06-05):** 13.2 = share-modal overhaul + password (pulled forward); 13.3 = List + Kanban read-only; 13.4 = Calendar **ICS feed** sharing (whole-timeline or per-member, token-as-secret, no password/filter — a different model from view-shares); 13.5 = lifecycle tail (expiry, tile chip). The handoff design lives in [`docs/design/handoffs/share-modal/`](../design/handoffs/share-modal/design_handoff_share_modal/README.md). See [ROADMAP re-sequencing note](../ROADMAP.md#phase-13--shares--multi-share-views-with-passwords) and [plan §13.2 overhaul](../plans/phase-13-shares.md#the-share-module-overhaul-132).
 
