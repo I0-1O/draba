@@ -140,6 +140,7 @@ packages/
         authz.go
         export_handler.go
         helpers.go
+        import_handler.go
         middleware.go
         oidc_handler.go
         ratelimit.go
@@ -216,6 +217,14 @@ packages/
         engine.go
       ics/
         ics.go
+      importer/
+        dates.go
+        importer.go
+        lookups.go
+        mapping.go
+        parse.go
+        resolve.go
+        template.go
       mailer/
         mailer.go
       models/
@@ -516,6 +525,52 @@ Run the diff review for the phase specified in $ARGUMENTS (e.g. "2" or "Phase 2"
 Review the current git diff.
 Check for: convention violations (see docs/CONVENTIONS.md), missing tests, type safety issues, and error handling gaps.
 Summarize findings and suggest fixes.
+````
+
+## File: .github/workflows/docker-publish.yml
+````yaml
+name: Publish Docker Image
+
+on:
+  push:
+    branches: [master]
+
+jobs:
+  publish:
+    name: Build & Push to Docker Hub
+    runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Compute build time
+        run: echo "BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: packages/api/Dockerfile
+          target: prod
+          push: true
+          tags: |
+            mewcus/draba:latest
+            mewcus/draba:${{ github.sha }}
+          build-args: |
+            GIT_COMMIT=${{ github.sha }}
+            BUILD_TIME=${{ env.BUILD_TIME }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 ````
 
 ## File: .github/workflows/repomap.yml
@@ -14673,6 +14728,27 @@ func (s *Server) handleUpsertPreference(w http.ResponseWriter, r *http.Request) 
 }
 ````
 
+## File: packages/api/internal/api/version_handler.go
+````go
+package api
+
+import (
+	"net/http"
+
+	"github.com/I0-1O/draba/packages/api/internal/buildinfo"
+)
+
+// handleVersion reports the running build's git commit and build time. It is
+// public (no auth) so a deploy can be identified with a single curl — e.g.
+// confirming which commit a "latest" image actually contains.
+func (s *Server) handleVersion(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{
+		"commit": buildinfo.Short(),
+		"built":  buildinfo.Built,
+	})
+}
+````
+
 ## File: packages/api/internal/auth/api_token.go
 ````go
 package auth
@@ -14853,6 +14929,67 @@ func (s *TokenService) Validate(tokenStr, expectedType string) (*Claims, error) 
 		return nil, fmt.Errorf("wrong token type")
 	}
 	return claims, nil
+}
+````
+
+## File: packages/api/internal/buildinfo/buildinfo.go
+````go
+// Package buildinfo exposes the build's git commit and timestamp so they can be
+// logged at startup and served at GET /version. Values are injected at link time
+// via -ldflags "-X .../buildinfo.Commit=<sha> -X .../buildinfo.Built=<ts>"; when
+// not injected (e.g. a local `go build`/`go run` from a checkout) they fall back
+// to Go's embedded VCS stamp.
+package buildinfo
+
+import "runtime/debug"
+
+// Injected via -ldflags. Leave as the zero value to fall back to the VCS stamp.
+var (
+	Commit string
+	Built  string
+)
+
+var dirty bool
+
+func init() {
+	if Commit != "" && Built != "" {
+		return
+	}
+	bi, ok := debug.ReadBuildInfo()
+	if !ok {
+		return
+	}
+	for _, s := range bi.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			if Commit == "" {
+				Commit = s.Value
+			}
+		case "vcs.time":
+			if Built == "" {
+				Built = s.Value
+			}
+		case "vcs.modified":
+			dirty = s.Value == "true"
+		}
+	}
+}
+
+// Short returns the commit shortened to 12 chars, suffixed with "-dirty" when
+// the working tree had uncommitted changes at build time. Returns "unknown"
+// when no commit is available.
+func Short() string {
+	c := Commit
+	if c == "" {
+		return "unknown"
+	}
+	if len(c) > 12 {
+		c = c[:12]
+	}
+	if dirty {
+		c += "-dirty"
+	}
+	return c
 }
 ````
 
@@ -17746,6 +17883,66 @@ DRABA_BASE_URL=                 # public URL of the server (used for OAuth callb
 ## Conventions
 See `docs/CONVENTIONS.md` for Go patterns, error handling, and testing conventions.
 See `skills/go-comments.md` for comment conventions (package headers, exported doc comments, when to use inline comments). Apply these whenever writing or editing Go code.
+````
+
+## File: packages/api/Dockerfile
+````
+# ── Web builder ──
+FROM node:22-alpine AS web-builder
+RUN corepack enable && corepack prepare pnpm@latest --activate
+WORKDIR /workspace
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
+COPY packages/web/package.json packages/web/
+COPY packages/shared/package.json packages/shared/
+RUN pnpm install --frozen-lockfile
+COPY packages/web packages/web
+COPY packages/shared packages/shared
+RUN pnpm --filter @draba/web build
+
+# ── Go dependency cache ──
+FROM golang:1.25-alpine AS go-deps
+WORKDIR /app
+COPY packages/api/go.mod packages/api/go.sum ./
+RUN go mod download
+
+# ── Production builder — embeds web dist into the Go binary ──
+FROM go-deps AS builder
+# Build metadata, injected by CI (docker-publish.yml). Defaults keep a local
+# `docker build` working; when left empty the binary falls back to Go's VCS stamp.
+ARG GIT_COMMIT=""
+ARG BUILD_TIME=""
+COPY packages/api/ .
+COPY --from=web-builder /workspace/packages/web/dist ./ui/static
+RUN CGO_ENABLED=0 go build \
+    -ldflags "-X github.com/I0-1O/draba/packages/api/internal/buildinfo.Commit=${GIT_COMMIT} -X github.com/I0-1O/draba/packages/api/internal/buildinfo.Built=${BUILD_TIME}" \
+    -o /draba ./cmd/draba
+
+# ── Dev stage (used by docker-compose for hot reload) ──
+# Source is provided by the docker-compose volume mount, not baked in here —
+# baking it in caused Air to see a spurious "change" on first mount and restart.
+FROM golang:1.25-alpine AS dev
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8
+RUN go install github.com/air-verse/air@latest
+WORKDIR /app
+COPY packages/api/go.mod packages/api/go.sum ./
+RUN go mod download
+CMD ["air", "-c", ".air.toml"]
+
+# ── Production stage ──
+FROM alpine:3.21 AS prod
+RUN apk add --no-cache ca-certificates musl-locales \
+    && addgroup -g 1000 draba \
+    && adduser -u 1000 -G draba -s /bin/sh -D draba \
+    && mkdir -p /data \
+    && chown draba:draba /data
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8
+COPY --from=builder /draba /usr/local/bin/draba
+WORKDIR /data
+USER draba
+EXPOSE 8080
+CMD ["draba"]
 ````
 
 ## File: packages/shared/testdata/filter-fixtures.json
@@ -36120,6 +36317,131 @@ export default defineConfig(({ mode }) => {
 })
 ````
 
+## File: scripts/reset-test-env.sh
+````bash
+#!/usr/bin/env bash
+#
+# Reset the draba test environment to a known clean state.
+# Run on the docker host (epcot.lan) as the `draba-test` user
+# (which must be in the `docker` group). No sudo required.
+#
+# What it does:
+#   1. Stops the `draba` container
+#   2. Wipes the SQLite DB files via a one-off `alpine` container
+#      (so file permissions inside the bind mount don't matter)
+#   3. Starts `draba` — its boot-time migration runner creates the
+#      fresh schema, then (with DRABA_SEED_SAMPLE_DATA=1 on the container)
+#      auto-seeds the canonical sample dataset incl. shares into the empty DB
+#   4. Waits up to 30s for the sample data to load (users table populated)
+#   5. Stops `draba` again, layers a bootstrap team + a known invite
+#      token on top via a one-off `sqlite3` container, then restarts
+#
+# The bootstrap rows (test-admin@local, bootstrap-team, the invite) do NOT
+# collide with the sample dataset, so api-smoke's register/login flow keeps
+# working against a DB that now also holds the rich sample data. Requires
+# DRABA_SEED_SAMPLE_DATA=1 on the container; without it the wait in step 4
+# times out (nothing populates the users table).
+#
+# Required env (sourced from $HOME/.draba-test.env at the top):
+#   DRABA_TEST_INVITE_TOKEN  — known token the api-smoke subagent uses
+#   DRABA_TEST_ADMIN_EMAIL   — bootstrap admin (invite issuer) email
+#   DRABA_TEST_INVITE_EMAIL  — email the invite is issued to; the
+#                              smoke test registers as this user
+#                              (default: invitee@local)
+#   DRABA_DB_DIR             — host bind-mount dir holding draba.db
+#   DRABA_CONTAINER          — container name (default: draba)
+#   DRABA_DB_FILENAME        — DB filename inside DRABA_DB_DIR
+#                              (default: draba.db)
+
+set -euo pipefail
+
+ENV_FILE="${HOME}/.draba-test.env"
+if [[ -f "$ENV_FILE" ]]; then
+    set -a
+    # shellcheck disable=SC1090
+    source "$ENV_FILE"
+    set +a
+fi
+
+: "${DRABA_TEST_INVITE_TOKEN:?must be set in ~/.draba-test.env}"
+: "${DRABA_TEST_ADMIN_EMAIL:?must be set in ~/.draba-test.env}"
+: "${DRABA_DB_DIR:?must be set in ~/.draba-test.env}"
+DRABA_CONTAINER="${DRABA_CONTAINER:-draba}"
+DRABA_DB_FILENAME="${DRABA_DB_FILENAME:-draba.db}"
+DRABA_TEST_INVITE_EMAIL="${DRABA_TEST_INVITE_EMAIL:-invitee@local}"
+
+SQLITE_IMG="keinos/sqlite3:latest"
+ALPINE_IMG="alpine:latest"
+
+echo "[1/6] Stopping container '$DRABA_CONTAINER'..."
+docker stop "$DRABA_CONTAINER" >/dev/null
+
+echo "[2/6] Wiping DB files in $DRABA_DB_DIR..."
+docker run --rm -v "$DRABA_DB_DIR:/data" "$ALPINE_IMG" sh -c \
+    "rm -f /data/${DRABA_DB_FILENAME} /data/${DRABA_DB_FILENAME}-shm /data/${DRABA_DB_FILENAME}-wal"
+
+echo "[3/6] Starting container (migrations run on boot)..."
+docker start "$DRABA_CONTAINER" >/dev/null
+
+echo "[4/6] Waiting for migrations + sample-data seed to complete..."
+for i in $(seq 1 30); do
+    # Wait until the seed has populated the users table — not just until the
+    # schema exists — so the bootstrap-seed step below cannot race the seed.
+    if docker run --rm -v "$DRABA_DB_DIR:/data:ro" "$SQLITE_IMG" \
+         sqlite3 "/data/${DRABA_DB_FILENAME}" \
+         "SELECT 1 FROM users LIMIT 1;" 2>/dev/null | grep -q 1; then
+        break
+    fi
+    sleep 1
+    if [[ "$i" -eq 30 ]]; then
+        echo "ERROR: sample data did not load within 30s" >&2
+        echo "       (is DRABA_SEED_SAMPLE_DATA=1 set on the '$DRABA_CONTAINER' container?)" >&2
+        exit 1
+    fi
+done
+
+echo "[5/6] Stopping container to layer bootstrap admin + invite on top of the sample data..."
+docker stop "$DRABA_CONTAINER" >/dev/null
+
+ADMIN_ID="bootstrap-admin"
+TEAM_ID="bootstrap-team"
+INVITE_ID="bootstrap-invite"
+EXPIRES=$(date -u -d '+7 days' '+%Y-%m-%d %H:%M:%S')
+
+# DRABA_TEST_ADMIN_PASSWORD_HASH — bcrypt hash of the admin's login password.
+# If not set in ~/.draba-test.env, the admin row is seeded as non-loginable
+# (suitable for CI-only runs where only the invite flow is tested).
+DRABA_TEST_ADMIN_PASSWORD_HASH="${DRABA_TEST_ADMIN_PASSWORD_HASH:-x-not-loginable}"
+
+# Layer the bootstrap rows idempotently. With sample data loaded, the admin
+# email may already belong to a sample user (e.g. brian@rieb.cc) — so use
+# INSERT OR IGNORE for the admin/team/membership and resolve the admin's *actual*
+# id by email for the FK references. This works whether DRABA_TEST_ADMIN_EMAIL is
+# a sample user (reuses it; its existing password is kept) or a fresh address
+# (creates a dedicated bootstrap admin). The known invite token is always seeded.
+docker run --rm -i --user 0:0 -v "$DRABA_DB_DIR:/data" "$SQLITE_IMG" \
+    sqlite3 "/data/${DRABA_DB_FILENAME}" <<SQL
+INSERT OR IGNORE INTO users (id, email, password_hash, display_name, is_superadmin)
+VALUES ('${ADMIN_ID}', '${DRABA_TEST_ADMIN_EMAIL}', '${DRABA_TEST_ADMIN_PASSWORD_HASH}', 'Test Bootstrap', 1);
+
+INSERT OR IGNORE INTO teams (id, name, slug)
+VALUES ('${TEAM_ID}', 'Test Team', 'test-team');
+
+INSERT OR IGNORE INTO team_members (id, team_id, user_id, role)
+SELECT 'bootstrap-admin-member', '${TEAM_ID}', u.id, 'admin'
+FROM users u WHERE u.email = '${DRABA_TEST_ADMIN_EMAIL}';
+
+INSERT INTO invites (id, team_id, email, token, role, invited_by, expires_at)
+SELECT '${INVITE_ID}', '${TEAM_ID}', '${DRABA_TEST_INVITE_EMAIL}', '${DRABA_TEST_INVITE_TOKEN}', 'member', u.id, '${EXPIRES}'
+FROM users u WHERE u.email = '${DRABA_TEST_ADMIN_EMAIL}';
+SQL
+
+echo "[6/6] Restarting container..."
+docker start "$DRABA_CONTAINER" >/dev/null
+
+echo "Done. Test invite token is ready. The api-smoke subagent can now register against it."
+````
+
 ## File: scripts/seed-find-test-activities.sql
 ````sql
 -- seed-find-test-activities.sql
@@ -37067,52 +37389,6 @@ Run the automated test suite for the phase specified in $ARGUMENTS (e.g. "2" or 
    ```
 
 7. Report the table back to the user. Do not modify any source code.
-````
-
-## File: .github/workflows/docker-publish.yml
-````yaml
-name: Publish Docker Image
-
-on:
-  push:
-    branches: [master]
-
-jobs:
-  publish:
-    name: Build & Push to Docker Hub
-    runs-on: ubuntu-latest
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Compute build time
-        run: echo "BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
-
-      - name: Build and push
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: packages/api/Dockerfile
-          target: prod
-          push: true
-          tags: |
-            mewcus/draba:latest
-            mewcus/draba:${{ github.sha }}
-          build-args: |
-            GIT_COMMIT=${{ github.sha }}
-            BUILD_TIME=${{ env.BUILD_TIME }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
 ````
 
 ## File: docs/design/briefs/export-dialog-brief.md
@@ -39888,6 +40164,264 @@ func isValidPassword(p string) bool {
 }
 ````
 
+## File: packages/api/internal/api/import_handler.go
+````go
+package api
+
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"time"
+
+	"github.com/I0-1O/draba/packages/api/internal/db"
+	"github.com/I0-1O/draba/packages/api/internal/events"
+	"github.com/I0-1O/draba/packages/api/internal/importer"
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// importFormOverhead is the multipart framing + options-JSON allowance on top
+// of the file cap when bounding the request body.
+const importFormOverhead = 64 << 10
+
+// handlePostTimelineImport handles POST /teams/{id}/timelines/{timelineId}/import.
+// Stateless two-pass: the dry-run previews (provably read-only — no write
+// transaction is ever opened) and the commit re-runs the identical parse on
+// the re-uploaded bytes, then writes the accepted rows in one transaction.
+func (s *Server) handlePostTimelineImport(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("id")
+	timelineID := r.PathValue("timelineId")
+
+	// Auth check before timeline lookup so non-members cannot enumerate
+	// timeline IDs by observing a 404 vs. 401/403 distinction.
+	if _, ok := s.requireTeamMember(w, r, teamID); !ok {
+		return
+	}
+
+	timeline, err := s.timelines.GetByID(timelineID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get timeline")
+		return
+	}
+	if timeline.ArchivedAt != nil || timeline.TeamID != teamID {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "timeline not found")
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, importer.MaxFileBytes+importFormOverhead)
+	if err := r.ParseMultipartForm(importer.MaxFileBytes + importFormOverhead); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "expected multipart form data with a 'file' part under 2 MB")
+		return
+	}
+
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "missing 'file' part")
+		return
+	}
+	defer func() { _ = file.Close() }()
+	data, err := io.ReadAll(io.LimitReader(file, importer.MaxFileBytes+1))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "failed to read uploaded file")
+		return
+	}
+	if len(data) > importer.MaxFileBytes {
+		writeError(w, http.StatusBadRequest, "IMPORT_FILE_INVALID", "file exceeds the 2 MB limit")
+		return
+	}
+
+	// The options part is mandatory so a commit is always an explicit
+	// dryRun:false — an accidental empty form can never write data.
+	optsJSON := r.FormValue("options")
+	if optsJSON == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "missing 'options' part")
+		return
+	}
+	var opts importer.Options
+	if err := json.Unmarshal([]byte(optsJSON), &opts); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid 'options' JSON")
+		return
+	}
+	if opts.DateOrder != "" && opts.DateOrder != "mdy" && opts.DateOrder != "dmy" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "dateOrder must be 'mdy' or 'dmy'")
+		return
+	}
+
+	lookups, ok := s.buildImportLookups(w, timeline)
+	if !ok {
+		return
+	}
+
+	result, err := importer.Run(data, header.Filename, opts, lookups)
+	if err != nil {
+		if importer.IsFileError(err) {
+			writeError(w, http.StatusBadRequest, "IMPORT_FILE_INVALID", err.Error())
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "import failed")
+		return
+	}
+
+	if opts.DryRun {
+		writeJSON(w, http.StatusOK, result)
+		return
+	}
+
+	s.commitImport(w, r, timeline, opts, result)
+}
+
+// buildImportLookups loads the timeline/team records the resolver matches
+// names against. Returns ok=false after writing an error response.
+func (s *Server) buildImportLookups(w http.ResponseWriter, timeline *models.Timeline) (importer.Lookups, bool) {
+	statuses, err := s.statuses.ListStatuses(timeline.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load statuses")
+		return importer.Lookups{}, false
+	}
+	members, err := s.teams.ListMembers(timeline.TeamID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load members")
+		return importer.Lookups{}, false
+	}
+	tags, err := s.tags.ListByTeam(timeline.TeamID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load tags")
+		return importer.Lookups{}, false
+	}
+	acts, err := s.activities.ListByTimeline(timeline.ID, nil, nil, false)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load activities")
+		return importer.Lookups{}, false
+	}
+	return importer.BuildLookups(statuses, members, tags, acts), true
+}
+
+// commitImport writes the accepted rows of a validated Result in one
+// transaction and publishes an ActivityCreated event per created activity.
+func (s *Server) commitImport(w http.ResponseWriter, r *http.Request, timeline *models.Timeline, opts importer.Options, result *importer.Result) {
+	claims := claimsFromContext(r.Context())
+	now := time.Now()
+	order := importer.AcceptedOrder(result.Rows)
+
+	// Missing tags are created once per distinct name, before the activities
+	// that reference them.
+	var newTags []*models.Tag
+	tagIDByName := make(map[string]string)
+	if opts.CreateMissingTags {
+		for _, i := range order {
+			for _, name := range result.Rows[i].Resolved.MissingTags {
+				norm := importer.NormalizeName(name)
+				if _, exists := tagIDByName[norm]; exists {
+					continue
+				}
+				tag := &models.Tag{
+					ID: newID(), TeamID: timeline.TeamID, Name: name,
+					CreatedBy: claims.UserID, CreatedAt: now,
+				}
+				tagIDByName[norm] = tag.ID
+				newTags = append(newTags, tag)
+			}
+		}
+	}
+
+	// IDs are assigned up front so in-file parent references can be resolved
+	// to real IDs before anything is written.
+	ids := make([]string, len(result.Rows))
+	for _, i := range order {
+		ids[i] = newID()
+	}
+
+	items := make([]db.ImportItem, 0, len(order))
+	created := make([]*models.Activity, 0, len(order))
+	for _, i := range order {
+		row := &result.Rows[i]
+		rz := row.Resolved
+
+		act := &models.Activity{
+			ID:              ids[i],
+			TimelineID:      timeline.ID,
+			Title:           rz.Title,
+			Description:     rz.Description,
+			StartAt:         rz.Start,
+			EndAt:           rz.End,
+			AllDay:          true,
+			StatusID:        rz.StatusID,
+			PercentComplete: rz.Progress,
+			Location:        rz.Location,
+			URL:             rz.URL,
+			CreatedBy:       claims.UserID,
+			CreatedAt:       now,
+			UpdatedAt:       now,
+		}
+		if rz.ParentRowIndex >= 0 {
+			parentID := ids[rz.ParentRowIndex]
+			act.ParentActivityID = &parentID
+		} else {
+			act.ParentActivityID = rz.ParentActivityID
+		}
+
+		tagIDs := append([]string{}, rz.TagIDs...)
+		for _, name := range rz.MissingTags {
+			if id, ok := tagIDByName[importer.NormalizeName(name)]; ok {
+				tagIDs = append(tagIDs, id)
+			}
+		}
+		assigneeIDs := rz.AssigneeIDs
+		if assigneeIDs == nil {
+			assigneeIDs = []string{}
+		}
+		act.AssignedMemberIDs = assigneeIDs
+		act.TagIDs = tagIDs
+
+		items = append(items, db.ImportItem{Activity: act, AssigneeIDs: assigneeIDs, TagIDs: tagIDs})
+		created = append(created, act)
+		row.CreatedID = act.ID
+	}
+
+	if err := s.activities.CreateImportBatch(newTags, items); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "import failed — no rows were written")
+		return
+	}
+
+	for _, act := range created {
+		s.bus.Publish(events.Message{Type: events.ActivityCreated, TeamID: timeline.TeamID, Payload: act})
+	}
+
+	result.Summary.Created = len(created)
+	writeJSON(w, http.StatusOK, result)
+}
+
+// handleGetImportTemplateCSV handles GET /import/template.csv.
+func (s *Server) handleGetImportTemplateCSV(w http.ResponseWriter, _ *http.Request) {
+	data, err := importer.TemplateCSV()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to build template")
+		return
+	}
+	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	w.Header().Set("Content-Disposition", `attachment; filename="draba-import-template.csv"`)
+	_, _ = w.Write(data)
+}
+
+// handleGetImportTemplateXLSX handles GET /import/template.xlsx.
+func (s *Server) handleGetImportTemplateXLSX(w http.ResponseWriter, _ *http.Request) {
+	data, err := importer.TemplateXLSX()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to build template")
+		return
+	}
+	w.Header().Set("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+	w.Header().Set("Content-Disposition", `attachment; filename="draba-import-template.xlsx"`)
+	_, _ = w.Write(data)
+}
+````
+
 ## File: packages/api/internal/api/oidc_handler.go
 ````go
 package api
@@ -40809,27 +41343,6 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 }
 ````
 
-## File: packages/api/internal/api/version_handler.go
-````go
-package api
-
-import (
-	"net/http"
-
-	"github.com/I0-1O/draba/packages/api/internal/buildinfo"
-)
-
-// handleVersion reports the running build's git commit and build time. It is
-// public (no auth) so a deploy can be identified with a single curl — e.g.
-// confirming which commit a "latest" image actually contains.
-func (s *Server) handleVersion(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{
-		"commit": buildinfo.Short(),
-		"built":  buildinfo.Built,
-	})
-}
-````
-
 ## File: packages/api/internal/auth/password.go
 ````go
 // Package auth provides password hashing and JWT issuance/validation
@@ -40872,67 +41385,6 @@ func HashPassword(password string) (string, error) {
 // which case occurred.
 func CheckPassword(hash, password string) error {
 	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
-}
-````
-
-## File: packages/api/internal/buildinfo/buildinfo.go
-````go
-// Package buildinfo exposes the build's git commit and timestamp so they can be
-// logged at startup and served at GET /version. Values are injected at link time
-// via -ldflags "-X .../buildinfo.Commit=<sha> -X .../buildinfo.Built=<ts>"; when
-// not injected (e.g. a local `go build`/`go run` from a checkout) they fall back
-// to Go's embedded VCS stamp.
-package buildinfo
-
-import "runtime/debug"
-
-// Injected via -ldflags. Leave as the zero value to fall back to the VCS stamp.
-var (
-	Commit string
-	Built  string
-)
-
-var dirty bool
-
-func init() {
-	if Commit != "" && Built != "" {
-		return
-	}
-	bi, ok := debug.ReadBuildInfo()
-	if !ok {
-		return
-	}
-	for _, s := range bi.Settings {
-		switch s.Key {
-		case "vcs.revision":
-			if Commit == "" {
-				Commit = s.Value
-			}
-		case "vcs.time":
-			if Built == "" {
-				Built = s.Value
-			}
-		case "vcs.modified":
-			dirty = s.Value == "true"
-		}
-	}
-}
-
-// Short returns the commit shortened to 12 chars, suffixed with "-dirty" when
-// the working tree had uncommitted changes at build time. Returns "unknown"
-// when no commit is available.
-func Short() string {
-	c := Commit
-	if c == "" {
-		return "unknown"
-	}
-	if len(c) > 12 {
-		c = c[:12]
-	}
-	if dirty {
-		c += "-dirty"
-	}
-	return c
 }
 ````
 
@@ -41096,315 +41548,6 @@ CREATE INDEX idx_users_email ON users(email);
 -- orphaned FK from a bad rebuild fails the migration rather than leaving a
 -- corrupt schema. This rebuild intends zero violations.
 PRAGMA foreign_keys=ON;
-````
-
-## File: packages/api/internal/db/activity_repo.go
-````go
-package db
-
-import (
-	"fmt"
-	"time"
-
-	"github.com/jmoiron/sqlx"
-
-	"github.com/I0-1O/draba/packages/api/internal/models"
-)
-
-// ActivityRepo is the persistence layer for Activity records.
-type ActivityRepo struct {
-	db *sqlx.DB
-}
-
-// NewActivityRepo returns an ActivityRepo backed by db.
-func NewActivityRepo(db *sqlx.DB) *ActivityRepo {
-	return &ActivityRepo{db: db}
-}
-
-// Create inserts a new Activity row.
-func (r *ActivityRepo) Create(activity *models.Activity) error {
-	_, err := r.db.NamedExec(`
-		INSERT INTO activities (
-			id, timeline_id, title, description, notes, icon, color,
-			start_at, end_at, all_day, status_id, parent_activity_id,
-			percent_complete, location, url, rrule,
-			caldav_uid, google_event_id,
-			created_by, created_at, updated_at
-		) VALUES (
-			:id, :timeline_id, :title, :description, :notes, :icon, :color,
-			:start_at, :end_at, :all_day, :status_id, :parent_activity_id,
-			:percent_complete, :location, :url, :rrule,
-			:caldav_uid, :google_event_id,
-			:created_by, :created_at, :updated_at
-		)
-	`, activity)
-	if err != nil {
-		return fmt.Errorf("creating activity: %w", err)
-	}
-	return nil
-}
-
-// GetByID fetches an Activity by primary key. Returns sql.ErrNoRows (wrapped)
-// when no row matches.
-func (r *ActivityRepo) GetByID(id string) (*models.Activity, error) {
-	var a models.Activity
-	err := r.db.Get(&a, `SELECT * FROM activities WHERE id = ?`, id)
-	if err != nil {
-		return nil, fmt.Errorf("getting activity: %w", err)
-	}
-	return &a, nil
-}
-
-// Update replaces all mutable fields on an existing Activity row.
-func (r *ActivityRepo) Update(activity *models.Activity) error {
-	_, err := r.db.NamedExec(`
-		UPDATE activities SET
-			title              = :title,
-			description        = :description,
-			notes              = :notes,
-			icon               = :icon,
-			color              = :color,
-			start_at           = :start_at,
-			end_at             = :end_at,
-			all_day            = :all_day,
-			status_id          = :status_id,
-			parent_activity_id = :parent_activity_id,
-			percent_complete   = :percent_complete,
-			location           = :location,
-			url                = :url,
-			rrule              = :rrule,
-			updated_at         = :updated_at
-		WHERE id = :id
-	`, activity)
-	if err != nil {
-		return fmt.Errorf("updating activity: %w", err)
-	}
-	return nil
-}
-
-// Delete permanently removes an activity row.
-func (r *ActivityRepo) Delete(id string) error {
-	_, err := r.db.Exec(`DELETE FROM activities WHERE id = ?`, id)
-	if err != nil {
-		return fmt.Errorf("deleting activity: %w", err)
-	}
-	return nil
-}
-
-// ClearParentRefs clears parent_activity_id on all activities that reference id
-// as their parent. Called before deleting or archiving the parent so children
-// do not retain a dangling reference.
-func (r *ActivityRepo) ClearParentRefs(id string) error {
-	_, err := r.db.Exec(
-		`UPDATE activities SET parent_activity_id = NULL, updated_at = ? WHERE parent_activity_id = ?`,
-		time.Now().UTC(), id,
-	)
-	if err != nil {
-		return fmt.Errorf("clearing parent refs for %s: %w", id, err)
-	}
-	return nil
-}
-
-// SetArchived sets or clears archived_at on an activity. Pass a non-nil time
-// to archive; pass nil to unarchive.
-func (r *ActivityRepo) SetArchived(id string, at *time.Time) error {
-	_, err := r.db.Exec(
-		`UPDATE activities SET archived_at = ?, updated_at = ? WHERE id = ?`,
-		at, time.Now().UTC(), id,
-	)
-	if err != nil {
-		return fmt.Errorf("setting activity archived_at: %w", err)
-	}
-	return nil
-}
-
-// SetAssignments replaces all activity_assignments for an activity with the
-// provided member IDs. An empty slice removes all assignments.
-func (r *ActivityRepo) SetAssignments(activityID string, memberIDs []string) error {
-	tx, err := r.db.Beginx()
-	if err != nil {
-		return fmt.Errorf("beginning assignment transaction: %w", err)
-	}
-	defer func() {
-		if err != nil {
-			_ = tx.Rollback()
-		}
-	}()
-
-	if _, err = tx.Exec(`DELETE FROM activity_assignments WHERE activity_id = ?`, activityID); err != nil {
-		return fmt.Errorf("clearing activity assignments: %w", err)
-	}
-
-	for _, memberID := range memberIDs {
-		if _, err = tx.Exec(
-			`INSERT INTO activity_assignments (activity_id, team_member_id) VALUES (?, ?)`,
-			activityID, memberID,
-		); err != nil {
-			return fmt.Errorf("inserting activity assignment: %w", err)
-		}
-	}
-
-	if err = tx.Commit(); err != nil {
-		return fmt.Errorf("committing activity assignments: %w", err)
-	}
-	return nil
-}
-
-// GetAssignments returns the team_member_ids assigned to an activity.
-func (r *ActivityRepo) GetAssignments(activityID string) ([]string, error) {
-	var ids []string
-	err := r.db.Select(&ids,
-		`SELECT team_member_id FROM activity_assignments WHERE activity_id = ?`, activityID,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("getting activity assignments: %w", err)
-	}
-	if ids == nil {
-		ids = []string{}
-	}
-	return ids, nil
-}
-
-// SetTags replaces all activity_tags for an activity with the provided tag
-// IDs. An empty slice removes all tag associations.
-func (r *ActivityRepo) SetTags(activityID string, tagIDs []string) error {
-	tx, err := r.db.Beginx()
-	if err != nil {
-		return fmt.Errorf("beginning tag transaction: %w", err)
-	}
-	defer func() {
-		if err != nil {
-			_ = tx.Rollback()
-		}
-	}()
-
-	if _, err = tx.Exec(`DELETE FROM activity_tags WHERE activity_id = ?`, activityID); err != nil {
-		return fmt.Errorf("clearing activity tags: %w", err)
-	}
-
-	for _, tagID := range tagIDs {
-		if _, err = tx.Exec(
-			`INSERT INTO activity_tags (activity_id, tag_id) VALUES (?, ?)`,
-			activityID, tagID,
-		); err != nil {
-			return fmt.Errorf("inserting activity tag: %w", err)
-		}
-	}
-
-	if err = tx.Commit(); err != nil {
-		return fmt.Errorf("committing activity tags: %w", err)
-	}
-	return nil
-}
-
-// GetTags returns the tag IDs associated with an activity.
-func (r *ActivityRepo) GetTags(activityID string) ([]string, error) {
-	var ids []string
-	err := r.db.Select(&ids,
-		`SELECT tag_id FROM activity_tags WHERE activity_id = ?`, activityID,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("getting activity tags: %w", err)
-	}
-	if ids == nil {
-		ids = []string{}
-	}
-	return ids, nil
-}
-
-// ListByTimeline returns activities for a specific timeline. When
-// includeArchived is false archived rows are excluded. The bounds use overlap
-// semantics: from filters on end_at >= from (so a multi-week activity that
-// starts before the window still appears if it crosses it), and to filters on
-// start_at <= to.
-// AssignedMemberIDs is populated via a second query.
-func (r *ActivityRepo) ListByTimeline(timelineID string, from, to *time.Time, includeArchived bool) ([]*models.Activity, error) {
-	query := `SELECT * FROM activities WHERE timeline_id = ?`
-	args := []any{timelineID}
-	if !includeArchived {
-		query += ` AND archived_at IS NULL`
-	}
-
-	if from != nil {
-		// Overlap semantics: include any activity whose end_at is at or after from.
-		// This catches multi-week/multi-month activities that START before the
-		// visible range but still cross it.
-		query += ` AND end_at >= ?`
-		args = append(args, from)
-	}
-	if to != nil {
-		query += ` AND start_at <= ?`
-		args = append(args, to)
-	}
-	query += ` ORDER BY start_at ASC`
-
-	acts := make([]*models.Activity, 0)
-	if err := r.db.Select(&acts, query, args...); err != nil {
-		return nil, fmt.Errorf("listing activities: %w", err)
-	}
-	if len(acts) == 0 {
-		return acts, nil
-	}
-
-	// Initialise AssignedMemberIDs and TagIDs to empty slices so JSON fields are
-	// always arrays (never null) even when an activity has no assignments or tags.
-	ids := make([]string, len(acts))
-	byID := make(map[string]*models.Activity, len(acts))
-	for i, a := range acts {
-		a.AssignedMemberIDs = []string{}
-		a.TagIDs = []string{}
-		ids[i] = a.ID
-		byID[a.ID] = a
-	}
-
-	asnQuery, asnArgs, err := sqlx.In(
-		`SELECT activity_id, team_member_id FROM activity_assignments WHERE activity_id IN (?)`,
-		ids,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("building assignments query: %w", err)
-	}
-	asnQuery = r.db.Rebind(asnQuery)
-
-	type assignment struct {
-		ActivityID   string `db:"activity_id"`
-		TeamMemberID string `db:"team_member_id"`
-	}
-	var assignments []assignment
-	if err := r.db.Select(&assignments, asnQuery, asnArgs...); err != nil {
-		return nil, fmt.Errorf("listing activity assignments: %w", err)
-	}
-	for _, a := range assignments {
-		if act, ok := byID[a.ActivityID]; ok {
-			act.AssignedMemberIDs = append(act.AssignedMemberIDs, a.TeamMemberID)
-		}
-	}
-
-	tagQuery, tagArgs, err := sqlx.In(
-		`SELECT activity_id, tag_id FROM activity_tags WHERE activity_id IN (?)`,
-		ids,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("building tags query: %w", err)
-	}
-	tagQuery = r.db.Rebind(tagQuery)
-
-	type activityTag struct {
-		ActivityID string `db:"activity_id"`
-		TagID      string `db:"tag_id"`
-	}
-	var actTags []activityTag
-	if err := r.db.Select(&actTags, tagQuery, tagArgs...); err != nil {
-		return nil, fmt.Errorf("listing activity tags: %w", err)
-	}
-	for _, at := range actTags {
-		if act, ok := byID[at.ActivityID]; ok {
-			act.TagIDs = append(act.TagIDs, at.TagID)
-		}
-	}
-
-	return acts, nil
-}
 ````
 
 ## File: packages/api/internal/db/migrations.go
@@ -43035,6 +43178,1504 @@ func parseDate(s string) (time.Time, error) {
 }
 ````
 
+## File: packages/api/internal/importer/dates.go
+````go
+package importer
+
+import (
+	"fmt"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/xuri/excelize/v2"
+)
+
+// isoDate is the calendar-date format all parsed dates normalize to.
+const isoDate = "2006-01-02"
+
+// numericDateRe matches numeric dates with /, -, or . separators.
+var numericDateRe = regexp.MustCompile(`^(\d{1,4})([/.\-])(\d{1,2})([/.\-])(\d{1,4})$`)
+
+// trailingTimeRe matches a time-of-day suffix ("2026-03-05 14:00",
+// "3/5/26 2:30 PM", ISO "T" separator). All dates are calendar dates, so a
+// matched suffix is stripped with a warning.
+var trailingTimeRe = regexp.MustCompile(`(?i)[T ]\d{1,2}:\d{2}(:\d{2})?(\.\d+)?\s*(AM|PM)?\s*(Z|[+-]\d{2}:?\d{2})?$`)
+
+// ordinalRe strips English ordinal suffixes ("March 5th" → "March 5").
+var ordinalRe = regexp.MustCompile(`(?i)(\d{1,2})(st|nd|rd|th)`)
+
+// writtenMonthLayouts are tried, in order, for dates with spelled-out months
+// after commas are removed and words are title-cased.
+var writtenMonthLayouts = []string{
+	"January 2 2006", "Jan 2 2006", "2 January 2006", "2 Jan 2006",
+	"January 2 06", "Jan 2 06", "2 January 06", "2 Jan 06",
+}
+
+// dateContext carries the column-wide day/month order decision for one file.
+// order is "mdy" or "dmy"; fromFile is true when the file's own values proved
+// the order (no per-cell warning needed), false when it came from the
+// caller's DateOrder option (ambiguous cells are disclosed).
+type dateContext struct {
+	order    string
+	fromFile bool
+}
+
+// resolveDateOrder makes the column-wide ambiguity decision: scan every
+// numeric date cell in the mapped date columns — any first number over 12
+// proves day-first, any second number over 12 proves month-first. Conflicting
+// or absent evidence falls back to the caller's DateOrder (default mdy).
+func resolveDateOrder(rows []parsedRow, m *columnMapping, optOrder string) dateContext {
+	dayFirst, monthFirst := false, false
+	for _, col := range []int{m.col(FieldStart), m.col(FieldEnd)} {
+		if col < 0 {
+			continue
+		}
+		for _, row := range rows {
+			if col >= len(row.cells) || row.cells[col].serial != nil {
+				continue
+			}
+			v := trailingTimeRe.ReplaceAllString(row.cells[col].display, "")
+			g := numericDateRe.FindStringSubmatch(v)
+			if len(g) == 0 {
+				continue // not a numeric date
+			}
+			if len(g[1]) == 4 {
+				continue // year-first ISO-style, never ambiguous
+			}
+			first, _ := strconv.Atoi(g[1])
+			second, _ := strconv.Atoi(g[3])
+			if first > 12 && second <= 12 {
+				dayFirst = true
+			}
+			if second > 12 && first <= 12 {
+				monthFirst = true
+			}
+		}
+	}
+
+	switch {
+	case dayFirst && !monthFirst:
+		return dateContext{order: "dmy", fromFile: true}
+	case monthFirst && !dayFirst:
+		return dateContext{order: "mdy", fromFile: true}
+	}
+	if optOrder == "dmy" {
+		return dateContext{order: "dmy"}
+	}
+	return dateContext{order: "mdy"}
+}
+
+// parseDate parses one date cell into a calendar date. Returned issues carry
+// no Field — the caller scopes them to start or end. ok is false only for
+// errors; warnings accompany a valid date.
+func parseDate(c cell, ctx dateContext) (time.Time, []Issue, bool) {
+	if c.serial != nil {
+		// Native Excel date cell — the serial is unambiguous, no warning.
+		t, err := excelize.ExcelDateToTime(*c.serial, false)
+		if err != nil || t.Year() < 1900 || t.Year() > 2200 {
+			return time.Time{}, []Issue{{
+				Level:   LevelError,
+				Message: fmt.Sprintf("%q is not a recognizable date", c.display),
+			}}, false
+		}
+		return dateOnly(t), nil, true
+	}
+
+	raw := strings.TrimSpace(c.display)
+	var issues []Issue
+
+	v := trailingTimeRe.ReplaceAllString(raw, "")
+	if v != raw {
+		issues = append(issues, Issue{
+			Level:   LevelWarning,
+			Message: fmt.Sprintf("time of day in %q ignored — all dates are calendar dates", raw),
+		})
+		v = strings.TrimSpace(v)
+	}
+
+	if t, err := time.Parse(isoDate, v); err == nil {
+		return t, issues, true
+	}
+
+	if g := numericDateRe.FindStringSubmatch(v); g != nil {
+		t, iss, ok := parseNumericDate(g, v, ctx)
+		return t, append(issues, iss...), ok
+	}
+
+	if t, ok := parseWrittenDate(v); ok {
+		return t, issues, true
+	}
+
+	return time.Time{}, append(issues, Issue{
+		Level:   LevelError,
+		Message: fmt.Sprintf("%q is not a recognizable date", raw),
+	}), false
+}
+
+// parseNumericDate handles a/b/c dates (any of / - . separators). A 4-digit
+// first number is year-month-day; otherwise the day/month order comes from
+// the cell itself when one number exceeds 12, else from the file-wide
+// decision (disclosed when that decision came from the DateOrder option).
+func parseNumericDate(g []string, raw string, ctx dateContext) (time.Time, []Issue, bool) {
+	first, _ := strconv.Atoi(g[1])
+	second, _ := strconv.Atoi(g[3])
+	third, _ := strconv.Atoi(g[5])
+
+	badDate := func() (time.Time, []Issue, bool) {
+		return time.Time{}, []Issue{{
+			Level:   LevelError,
+			Message: fmt.Sprintf("%q is not a recognizable date", raw),
+		}}, false
+	}
+
+	if len(g[1]) == 4 {
+		if t, valid := makeDate(first, second, third); valid {
+			return t, nil, true
+		}
+		return badDate()
+	}
+
+	year := third
+	if len(g[5]) <= 2 {
+		year += 2000
+	}
+
+	var month, day int
+	var issues []Issue
+	switch {
+	case first > 12 && second <= 12:
+		day, month = first, second
+	case second > 12 && first <= 12:
+		month, day = first, second
+	case ctx.order == "dmy":
+		day, month = first, second
+		if !ctx.fromFile && first != second {
+			issues = append(issues, Issue{
+				Level:   LevelWarning,
+				Message: fmt.Sprintf("%q read as day-month-year", raw),
+			})
+		}
+	default:
+		month, day = first, second
+		if !ctx.fromFile && first != second {
+			issues = append(issues, Issue{
+				Level:   LevelWarning,
+				Message: fmt.Sprintf("%q read as month-day-year", raw),
+			})
+		}
+	}
+
+	t, valid := makeDate(year, month, day)
+	if !valid {
+		return badDate()
+	}
+	return t, issues, true
+}
+
+// parseWrittenDate handles spelled-out months in either order.
+func parseWrittenDate(v string) (time.Time, bool) {
+	cleaned := ordinalRe.ReplaceAllString(v, "$1")
+	cleaned = strings.ReplaceAll(cleaned, ",", " ")
+	words := strings.Fields(cleaned)
+	for i, w := range words {
+		// Title-case month words so "march"/"MARCH" match Go's layout names.
+		if w != "" && ((w[0] >= 'a' && w[0] <= 'z') || (w[0] >= 'A' && w[0] <= 'Z')) {
+			words[i] = strings.ToUpper(w[:1]) + strings.ToLower(w[1:])
+		}
+	}
+	cleaned = strings.Join(words, " ")
+	for _, layout := range writtenMonthLayouts {
+		if t, err := time.Parse(layout, cleaned); err == nil {
+			return dateOnly(t), true
+		}
+	}
+	return time.Time{}, false
+}
+
+// makeDate builds a UTC calendar date, rejecting values time.Date would
+// silently normalize (month 13 → January).
+func makeDate(year, month, day int) (time.Time, bool) {
+	if month < 1 || month > 12 || day < 1 || day > 31 || year < 1900 || year > 2200 {
+		return time.Time{}, false
+	}
+	t := time.Date(year, time.Month(month), day, 0, 0, 0, 0, time.UTC)
+	if t.Day() != day || int(t.Month()) != month {
+		return time.Time{}, false
+	}
+	return t, true
+}
+
+func dateOnly(t time.Time) time.Time {
+	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
+}
+````
+
+## File: packages/api/internal/importer/importer.go
+````go
+// Package importer parses CSV/xlsx uploads into validated, resolved activity
+// rows for the Phase 15 tabular import. The contract is "liberal parse, strict
+// write, everything visible": messy-but-unambiguous input is accepted, every
+// interpretation the parser makes surfaces as a per-cell warning, and rows
+// that cannot be made valid are excluded (row-scoped errors, never
+// file-scoped). The package is pure — it never touches the database; callers
+// supply name-to-ID Lookups and write the Resolved payloads themselves.
+package importer
+
+import (
+	"errors"
+	"sort"
+	"strings"
+	"time"
+)
+
+// Size caps for uploaded files. Generous for the target market (small/medium
+// teams); they exist to protect the synchronous request path.
+const (
+	MaxFileBytes = 2 << 20 // 2 MB
+	MaxRows      = 2000    // data rows, excluding the header
+)
+
+// Issue levels. A cell parses ok (no issue recorded), with interpretation
+// (warning — written as stated), or not at all (error — row excluded).
+const (
+	LevelWarning = "warning"
+	LevelError   = "error"
+)
+
+// Row statuses, the roll-up of a row's issue levels.
+const (
+	RowOK      = "ok"
+	RowWarning = "warning"
+	RowError   = "error"
+)
+
+// Field names for the import mapping, matching the camelCase JSON field names
+// used across the API.
+const (
+	FieldTitle       = "title"
+	FieldStart       = "start"
+	FieldEnd         = "end"
+	FieldDescription = "description"
+	FieldStatus      = "status"
+	FieldAssignees   = "assignees"
+	FieldTags        = "tags"
+	FieldParent      = "parent"
+	FieldProgress    = "progress"
+	FieldLocation    = "location"
+	FieldURL         = "url"
+)
+
+// validFields is the set of assignable mapping targets.
+var validFields = map[string]bool{
+	FieldTitle: true, FieldStart: true, FieldEnd: true, FieldDescription: true,
+	FieldStatus: true, FieldAssignees: true, FieldTags: true, FieldParent: true,
+	FieldProgress: true, FieldLocation: true, FieldURL: true,
+}
+
+// FileError is a structural, file-scoped failure (unsupported type, over the
+// caps, no mappable Title column, …). Handlers translate it to a 400; row
+// content problems never produce a FileError.
+type FileError struct {
+	Message string
+}
+
+func (e *FileError) Error() string { return e.Message }
+
+// IsFileError reports whether err is a file-scoped import error.
+func IsFileError(err error) bool {
+	var fe *FileError
+	return errors.As(err, &fe)
+}
+
+// Options are the caller's import settings, decoded from the request's
+// `options` multipart part.
+type Options struct {
+	// DryRun selects the preview pass; false commits.
+	DryRun bool `json:"dryRun"`
+	// Mapping maps file column headers to field names. When nil the server
+	// auto-maps; when set it is authoritative (columns absent from it are
+	// ignored with a warning).
+	Mapping map[string]string `json:"mapping,omitempty"`
+	// DateOrder ("mdy" | "dmy") disambiguates numeric dates only when the
+	// file itself stays ambiguous column-wide. Defaults to "mdy".
+	DateOrder string `json:"dateOrder,omitempty"`
+	// CreateMissingTags opts in to creating unknown tag names instead of
+	// warn-and-skip.
+	CreateMissingTags bool `json:"createMissingTags,omitempty"`
+}
+
+// Lookups carries the target timeline/team's name-to-ID resolution data.
+// All keys are normalized with NormalizeName.
+type Lookups struct {
+	// Statuses maps a normalized status name to its ID on the target timeline.
+	Statuses map[string]string
+	// MembersByName maps a normalized display name to member IDs; more than
+	// one ID means the name is ambiguous ("use email").
+	MembersByName map[string][]string
+	// MembersByEmail maps a normalized email to a member ID.
+	MembersByEmail map[string]string
+	// Tags maps a normalized tag name to its ID.
+	Tags map[string]string
+	// ActivitiesByTitle maps a normalized title to existing activity IDs on
+	// the target timeline, for Parent resolution.
+	ActivitiesByTitle map[string][]string
+	// ExistingKeys holds DuplicateKey values for every existing activity, for
+	// "possible duplicate" warnings.
+	ExistingKeys map[string]bool
+}
+
+// NormalizeName canonicalizes a name for matching: trim, collapse internal
+// whitespace, casefold.
+func NormalizeName(s string) string {
+	return strings.ToLower(strings.Join(strings.Fields(s), " "))
+}
+
+// DuplicateKey builds the identity key used for possible-duplicate detection:
+// normalized title + start + end (ISO dates).
+func DuplicateKey(title, startISO, endISO string) string {
+	return NormalizeName(title) + "\x00" + startISO + "\x00" + endISO
+}
+
+// Issue is one disclosed parser decision or failure, scoped to a field when
+// Field is non-empty.
+type Issue struct {
+	Level   string `json:"level"`
+	Field   string `json:"field,omitempty"`
+	Message string `json:"message"`
+}
+
+// PreviewActivity is the resolved, display-oriented projection of a row for
+// the preview table. Names are shown (not IDs) because the preview's job is
+// to let a human ratify the parser's interpretations.
+type PreviewActivity struct {
+	Title       string   `json:"title"`
+	Start       string   `json:"start,omitempty"`
+	End         string   `json:"end,omitempty"`
+	Description string   `json:"description,omitempty"`
+	Status      string   `json:"status,omitempty"`
+	Assignees   []string `json:"assignees,omitempty"`
+	Tags        []string `json:"tags,omitempty"`
+	Parent      string   `json:"parent,omitempty"`
+	Progress    *int     `json:"progress,omitempty"`
+	Location    string   `json:"location,omitempty"`
+	URL         string   `json:"url,omitempty"`
+}
+
+// Resolved is the validated write payload for one accepted row. It is never
+// serialized; the commit pass in the handler turns it into repository writes.
+type Resolved struct {
+	Title            string
+	Start            time.Time
+	End              time.Time
+	Description      *string
+	StatusID         *string
+	AssigneeIDs      []string
+	TagIDs           []string
+	MissingTags      []string // tag names to create when CreateMissingTags
+	ParentRowIndex   int      // index into Result.Rows; -1 = none or existing
+	ParentActivityID *string  // existing activity, when ParentRowIndex is -1
+	ParentRaw        string   // the Parent cell text, for the resolution pass
+	Progress         *int
+	Location         *string
+	URL              *string
+}
+
+// RowResult is the outcome for one source row.
+type RowResult struct {
+	// Line is the 1-based source line / sheet row, for spreadsheet
+	// cross-reference.
+	Line     int              `json:"line"`
+	Status   string           `json:"status"`
+	Activity *PreviewActivity `json:"activity,omitempty"`
+	Issues   []Issue          `json:"issues"`
+	// CreatedID is filled on the commit pass for written rows.
+	CreatedID string    `json:"createdId,omitempty"`
+	Resolved  *Resolved `json:"-"`
+}
+
+// Summary is the roll-up shown in the preview strip. Created is zero on the
+// dry-run pass.
+type Summary struct {
+	Total    int `json:"total"`
+	OK       int `json:"ok"`
+	Warnings int `json:"warnings"`
+	Errors   int `json:"errors"`
+	Created  int `json:"created"`
+}
+
+// UnknownNames lists the distinct unresolvable names encountered, in first-seen
+// spelling. Tags drives the "Create N missing tags" checkbox label.
+type UnknownNames struct {
+	Statuses  []string `json:"statuses"`
+	Assignees []string `json:"assignees"`
+	Tags      []string `json:"tags"`
+}
+
+// Result is the full outcome of one parse+validate pass — the response body
+// for both the dry-run and (with CreatedID/Created filled) the commit pass.
+type Result struct {
+	// Mapping is the mapping actually used: every file column header mapped
+	// to a field name, or "" when the column was ignored.
+	Mapping      map[string]string `json:"mapping"`
+	Summary      Summary           `json:"summary"`
+	UnknownNames UnknownNames      `json:"unknownNames"`
+	// FileIssues are file-level warnings (encoding fallback, ignored sheets,
+	// ignored columns) that belong to no single row.
+	FileIssues []Issue     `json:"fileIssues"`
+	Rows       []RowResult `json:"rows"`
+}
+
+// Run parses, maps, and validates an uploaded file against the target
+// timeline's lookups. It returns a *FileError for structural failures and a
+// complete Result otherwise. Run never writes anything — the commit pass
+// re-runs it on byte-identical input and writes the Resolved payloads.
+func Run(data []byte, filename string, opts Options, lk Lookups) (*Result, error) {
+	if len(data) == 0 {
+		return nil, &FileError{Message: "file is empty"}
+	}
+	if len(data) > MaxFileBytes {
+		return nil, &FileError{Message: "file exceeds the 2 MB limit"}
+	}
+
+	pf, err := parseFile(data, filename)
+	if err != nil {
+		return nil, err
+	}
+	if len(pf.rows) > MaxRows {
+		return nil, &FileError{Message: "file exceeds the 2,000 row limit"}
+	}
+
+	mapping, fileIssues, err := buildMapping(pf.headers, opts.Mapping)
+	if err != nil {
+		return nil, err
+	}
+	fileIssues = append(pf.issues, fileIssues...)
+
+	res := resolveRows(pf, mapping, opts, lk)
+	res.Mapping = mappingByHeader(pf.headers, mapping)
+	res.FileIssues = fileIssues
+	return res, nil
+}
+
+// AcceptedOrder returns the indices of importable rows (ok and warning —
+// error rows are excluded) ordered so every in-file parent precedes its
+// children, satisfying the parent_activity_id foreign key during the commit
+// transaction. Cycles were already broken by the resolver, so the walk
+// terminates.
+func AcceptedOrder(rows []RowResult) []int {
+	order := make([]int, 0, len(rows))
+	visited := make(map[int]bool, len(rows))
+	var visit func(i int)
+	visit = func(i int) {
+		if visited[i] || rows[i].Resolved == nil || rows[i].Status == RowError {
+			return
+		}
+		visited[i] = true
+		if p := rows[i].Resolved.ParentRowIndex; p >= 0 {
+			visit(p)
+		}
+		order = append(order, i)
+	}
+	for i := range rows {
+		visit(i)
+	}
+	return order
+}
+
+// sortedUnique returns the distinct values in sorted order, so preview
+// output is deterministic across runs.
+func sortedUnique(values []string) []string {
+	seen := make(map[string]bool, len(values))
+	out := make([]string, 0, len(values))
+	for _, v := range values {
+		if !seen[v] {
+			seen[v] = true
+			out = append(out, v)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+````
+
+## File: packages/api/internal/importer/lookups.go
+````go
+package importer
+
+import (
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// BuildLookups inverts the target timeline/team's records into the normalized
+// name-to-ID maps the resolver matches against — the mirror image of export's
+// ID-to-name maps. Archived members are excluded: they cannot be assigned
+// through the UI, so import must not resurrect them either.
+func BuildLookups(statuses []*models.Status, members []*models.TeamMemberWithUser, tags []*models.Tag, activities []*models.Activity) Lookups {
+	lk := Lookups{
+		Statuses:          make(map[string]string, len(statuses)),
+		MembersByName:     make(map[string][]string, len(members)),
+		MembersByEmail:    make(map[string]string, len(members)),
+		Tags:              make(map[string]string, len(tags)),
+		ActivitiesByTitle: make(map[string][]string, len(activities)),
+		ExistingKeys:      make(map[string]bool, len(activities)),
+	}
+	for _, st := range statuses {
+		lk.Statuses[NormalizeName(st.Name)] = st.ID
+	}
+	for _, m := range members {
+		if m.ArchivedAt != nil {
+			continue
+		}
+		if n := NormalizeName(m.DisplayName); n != "" {
+			lk.MembersByName[n] = append(lk.MembersByName[n], m.ID)
+		}
+		if e := NormalizeName(m.Email); e != "" {
+			lk.MembersByEmail[e] = m.ID
+		}
+	}
+	for _, t := range tags {
+		lk.Tags[NormalizeName(t.Name)] = t.ID
+	}
+	for _, a := range activities {
+		n := NormalizeName(a.Title)
+		lk.ActivitiesByTitle[n] = append(lk.ActivitiesByTitle[n], a.ID)
+		lk.ExistingKeys[DuplicateKey(a.Title, a.StartAt.Format(isoDate), a.EndAt.Format(isoDate))] = true
+	}
+	return lk
+}
+````
+
+## File: packages/api/internal/importer/mapping.go
+````go
+package importer
+
+import (
+	"fmt"
+	"strings"
+)
+
+// canonicalHeaders maps the normalized template headers (the export column
+// names) to their fields. Exact template matches take precedence over the
+// synonym table.
+var canonicalHeaders = map[string]string{
+	"title": FieldTitle, "start": FieldStart, "end": FieldEnd,
+	"description": FieldDescription, "status": FieldStatus,
+	"assignees": FieldAssignees, "tags": FieldTags, "parent": FieldParent,
+	"progress": FieldProgress, "location": FieldLocation, "url": FieldURL,
+}
+
+// headerSynonyms is the tolerance table for headers from other tools'
+// spreadsheets, keyed by normalized header text. A bare "date" column maps
+// to Start (End then defaults per the date rules).
+var headerSynonyms = map[string]string{
+	// Title
+	"name": FieldTitle, "task": FieldTitle, "activity": FieldTitle,
+	"event": FieldTitle, "summary": FieldTitle, "what": FieldTitle,
+	// Start
+	"startdate": FieldStart, "begin": FieldStart, "from": FieldStart,
+	"date": FieldStart, "begindate": FieldStart,
+	// End
+	"enddate": FieldEnd, "finish": FieldEnd, "to": FieldEnd,
+	"due": FieldEnd, "duedate": FieldEnd, "until": FieldEnd,
+	"finishdate": FieldEnd,
+	// Description
+	"notes": FieldDescription, "details": FieldDescription, "desc": FieldDescription,
+	// Status
+	"state": FieldStatus, "stage": FieldStatus, "column": FieldStatus,
+	// Assignees
+	"assignee": FieldAssignees, "assignedto": FieldAssignees,
+	"owner": FieldAssignees, "who": FieldAssignees,
+	"members": FieldAssignees, "people": FieldAssignees,
+	// Tags
+	"labels": FieldTags, "categories": FieldTags, "label": FieldTags,
+	"category": FieldTags,
+	// Parent
+	"parenttask": FieldParent, "parentactivity": FieldParent,
+	// Progress
+	"complete": FieldProgress, "percent": FieldProgress,
+	"completion": FieldProgress, "percentcomplete": FieldProgress,
+	// Location
+	"where": FieldLocation, "place": FieldLocation,
+	// URL
+	"link": FieldURL, "website": FieldURL,
+}
+
+// normalizeHeader strips everything but letters and digits and casefolds, so
+// "End Date", "end_date", and "% Complete" all match their tables.
+func normalizeHeader(h string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(h) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// columnMapping is the resolved mapping: fields[i] is the field for column i,
+// or "" when the column is ignored.
+type columnMapping struct {
+	fields  []string
+	byField map[string]int // field → column index
+}
+
+func (m *columnMapping) col(field string) int {
+	if i, ok := m.byField[field]; ok {
+		return i
+	}
+	return -1
+}
+
+// buildMapping resolves file headers to fields, either from the caller's
+// explicit mapping or by auto-mapping (template headers, then synonyms).
+// Unmapped columns are disclosed as file-level warnings; a missing Title
+// target or two columns claiming the same field is a file-scoped error.
+func buildMapping(headers []string, explicit map[string]string) (*columnMapping, []Issue, error) {
+	m := &columnMapping{
+		fields:  make([]string, len(headers)),
+		byField: make(map[string]int),
+	}
+	var issues []Issue
+
+	if explicit != nil {
+		matched := make(map[string]bool, len(explicit))
+		for i, h := range headers {
+			field, ok := explicit[h]
+			if !ok || field == "" {
+				continue
+			}
+			if !validFields[field] {
+				return nil, nil, &FileError{Message: fmt.Sprintf("unknown field %q in mapping", field)}
+			}
+			if prev, dup := m.byField[field]; dup {
+				return nil, nil, &FileError{Message: fmt.Sprintf(
+					"columns %q and %q are both mapped to %s — map one of them elsewhere", headers[prev], h, field)}
+			}
+			m.fields[i] = field
+			m.byField[field] = i
+			matched[h] = true
+		}
+		for col := range explicit {
+			if explicit[col] != "" && !matched[col] {
+				return nil, nil, &FileError{Message: fmt.Sprintf("mapping refers to column %q, which is not in the file", col)}
+			}
+		}
+	} else {
+		for i, h := range headers {
+			norm := normalizeHeader(h)
+			if norm == "" {
+				continue
+			}
+			field, ok := canonicalHeaders[norm]
+			if !ok {
+				field, ok = headerSynonyms[norm]
+			}
+			if !ok {
+				continue
+			}
+			if prev, dup := m.byField[field]; dup {
+				return nil, nil, &FileError{Message: fmt.Sprintf(
+					"columns %q and %q both map to %s — upload again with an explicit mapping", headers[prev], h, field)}
+			}
+			m.fields[i] = field
+			m.byField[field] = i
+		}
+	}
+
+	if m.col(FieldTitle) < 0 {
+		return nil, nil, &FileError{Message: "no column maps to Title — a title column is required"}
+	}
+
+	for i, h := range headers {
+		if m.fields[i] != "" {
+			continue
+		}
+		name := h
+		if strings.TrimSpace(name) == "" {
+			name = fmt.Sprintf("(column %d)", i+1)
+		}
+		issues = append(issues, Issue{
+			Level:   LevelWarning,
+			Message: fmt.Sprintf("column %q not imported", name),
+		})
+	}
+	return m, issues, nil
+}
+
+// mappingByHeader projects the resolved mapping back into the response shape:
+// every header mapped to its field, "" for ignored columns.
+func mappingByHeader(headers []string, m *columnMapping) map[string]string {
+	out := make(map[string]string, len(headers))
+	for i, h := range headers {
+		name := h
+		if strings.TrimSpace(name) == "" {
+			name = fmt.Sprintf("(column %d)", i+1)
+		}
+		out[name] = m.fields[i]
+	}
+	return out
+}
+````
+
+## File: packages/api/internal/importer/parse.go
+````go
+package importer
+
+import (
+	"bytes"
+	"encoding/csv"
+	"errors"
+	"fmt"
+	"io"
+	"strconv"
+	"strings"
+	"unicode/utf8"
+
+	"github.com/xuri/excelize/v2"
+)
+
+// cell is one parsed cell. display is the user-visible value; serial is set
+// for typed numeric xlsx cells carrying a number format (the raw value differs
+// from the formatted one), which is how native Excel dates arrive.
+type cell struct {
+	display string
+	serial  *float64
+}
+
+// parsedRow is one non-blank data row with its 1-based source line / sheet
+// row number and any structural issues (e.g. extra cells).
+type parsedRow struct {
+	line   int
+	cells  []cell
+	issues []Issue
+}
+
+// parsedFile is the format-independent row model both parsers produce.
+type parsedFile struct {
+	headers []string
+	rows    []parsedRow
+	issues  []Issue // file-level warnings
+}
+
+// parseFile dispatches on the filename extension, falling back to content
+// sniffing (xlsx files are zip archives, magic "PK").
+func parseFile(data []byte, filename string) (*parsedFile, error) {
+	lower := strings.ToLower(filename)
+	switch {
+	case strings.HasSuffix(lower, ".xlsx"):
+		return parseXLSX(data)
+	case strings.HasSuffix(lower, ".csv"), strings.HasSuffix(lower, ".txt"):
+		return parseCSV(data)
+	case bytes.HasPrefix(data, []byte("PK")):
+		return parseXLSX(data)
+	default:
+		return nil, &FileError{Message: "unsupported file type — upload a .csv or .xlsx file"}
+	}
+}
+
+// parseCSV reads a delimited text file: UTF-8 (BOM tolerated) with a cp1252
+// fallback, delimiter sniffed from the header line (comma, semicolon, tab).
+func parseCSV(data []byte) (*parsedFile, error) {
+	pf := &parsedFile{}
+
+	data = bytes.TrimPrefix(data, []byte{0xEF, 0xBB, 0xBF})
+	if !utf8.Valid(data) {
+		data = decodeCP1252(data)
+		pf.issues = append(pf.issues, Issue{
+			Level:   LevelWarning,
+			Message: "file is not UTF-8 — read as Windows-1252",
+		})
+	}
+
+	firstLine := data
+	if i := bytes.IndexByte(data, '\n'); i >= 0 {
+		firstLine = data[:i]
+	}
+	delim := sniffDelimiter(string(firstLine))
+
+	r := csv.NewReader(bytes.NewReader(data))
+	r.Comma = delim
+	r.FieldsPerRecord = -1
+	r.LazyQuotes = true
+
+	first := true
+	for {
+		record, err := r.Read()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, &FileError{Message: fmt.Sprintf("could not parse CSV: %v", err)}
+		}
+		line, _ := r.FieldPos(0)
+
+		if first {
+			for _, h := range record {
+				pf.headers = append(pf.headers, strings.TrimSpace(h))
+			}
+			first = false
+			continue
+		}
+		if row, ok := buildRow(line, record, len(pf.headers)); ok {
+			pf.rows = append(pf.rows, row)
+		}
+	}
+	if first {
+		return nil, &FileError{Message: "file is empty"}
+	}
+	return pf, nil
+}
+
+// sniffDelimiter picks the delimiter with the highest raw count on the header
+// line; comma wins ties (it is checked first).
+func sniffDelimiter(header string) rune {
+	best, bestCount := ',', strings.Count(header, ",")
+	for _, cand := range []rune{';', '\t'} {
+		if c := strings.Count(header, string(cand)); c > bestCount {
+			best, bestCount = cand, c
+		}
+	}
+	return best
+}
+
+// buildRow normalizes one record against the header width: fully blank rows
+// are dropped (ok=false), short rows are padded with empties, extra non-empty
+// cells produce a row warning.
+func buildRow(line int, record []string, width int) (parsedRow, bool) {
+	row := parsedRow{line: line}
+	blank := true
+	for _, v := range record {
+		if strings.TrimSpace(v) != "" {
+			blank = false
+			break
+		}
+	}
+	if blank {
+		return row, false
+	}
+
+	for i := 0; i < width; i++ {
+		v := ""
+		if i < len(record) {
+			v = strings.TrimSpace(record[i])
+		}
+		row.cells = append(row.cells, cell{display: v})
+	}
+	extra := 0
+	for i := width; i < len(record); i++ {
+		if strings.TrimSpace(record[i]) != "" {
+			extra++
+		}
+	}
+	if extra > 0 {
+		row.issues = append(row.issues, Issue{
+			Level:   LevelWarning,
+			Message: fmt.Sprintf("row has %d more cells than there are headers — extras ignored", extra),
+		})
+	}
+	return row, true
+}
+
+// parseXLSX reads the first non-empty sheet of a workbook. Cells are read
+// twice — raw and formatted — so typed numeric cells (where the two differ)
+// can be recognized; that is how native Excel date serials are detected
+// without any string guessing.
+func parseXLSX(data []byte) (*parsedFile, error) {
+	f, err := excelize.OpenReader(bytes.NewReader(data))
+	if err != nil {
+		return nil, &FileError{Message: "could not open xlsx file"}
+	}
+	defer func() { _ = f.Close() }()
+
+	pf := &parsedFile{}
+	var sheet string
+	var formatted, raw [][]string
+	var skipped []string
+	for _, name := range f.GetSheetList() {
+		if sheet != "" {
+			skipped = append(skipped, name)
+			continue
+		}
+		rows, err := f.GetRows(name)
+		if err != nil {
+			return nil, &FileError{Message: fmt.Sprintf("could not read sheet %q", name)}
+		}
+		if !sheetHasContent(rows) {
+			continue
+		}
+		rawRows, err := f.GetRows(name, excelize.Options{RawCellValue: true})
+		if err != nil {
+			return nil, &FileError{Message: fmt.Sprintf("could not read sheet %q", name)}
+		}
+		sheet, formatted, raw = name, rows, rawRows
+	}
+	if sheet == "" {
+		return nil, &FileError{Message: "workbook has no non-empty sheet"}
+	}
+	if len(skipped) > 0 {
+		pf.issues = append(pf.issues, Issue{
+			Level:   LevelWarning,
+			Message: fmt.Sprintf("only sheet %q was imported — ignored: %s", sheet, strings.Join(skipped, ", ")),
+		})
+	}
+
+	for _, h := range formatted[0] {
+		pf.headers = append(pf.headers, strings.TrimSpace(h))
+	}
+	for i := 1; i < len(formatted); i++ {
+		row, ok := buildRow(i+1, formatted[i], len(pf.headers))
+		if !ok {
+			continue
+		}
+		// Mark typed numeric cells: raw parses as a number and differs from
+		// the formatted value, meaning the cell carries a number format
+		// (dates, percentages) rather than literal text.
+		for c := range row.cells {
+			rawVal := ""
+			if i < len(raw) && c < len(raw[i]) {
+				rawVal = strings.TrimSpace(raw[i][c])
+			}
+			if rawVal == "" || rawVal == row.cells[c].display {
+				continue
+			}
+			if n, err := strconv.ParseFloat(rawVal, 64); err == nil {
+				v := n
+				row.cells[c].serial = &v
+			}
+		}
+		pf.rows = append(pf.rows, row)
+	}
+	return pf, nil
+}
+
+func sheetHasContent(rows [][]string) bool {
+	for _, r := range rows {
+		for _, v := range r {
+			if strings.TrimSpace(v) != "" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// cp1252High maps bytes 0x80–0x9F, the only range where Windows-1252 differs
+// from Latin-1. Unmapped control bytes fall back to U+FFFD.
+var cp1252High = [32]rune{
+	0x20AC, 0xFFFD, 0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021,
+	0x02C6, 0x2030, 0x0160, 0x2039, 0x0152, 0xFFFD, 0x017D, 0xFFFD,
+	0xFFFD, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2013, 0x2014,
+	0x02DC, 0x2122, 0x0161, 0x203A, 0x0153, 0xFFFD, 0x017E, 0x0178,
+}
+
+// decodeCP1252 transcodes Windows-1252 bytes to UTF-8. Every byte maps, so
+// this never fails — the caller has already attached the encoding warning.
+func decodeCP1252(data []byte) []byte {
+	var b strings.Builder
+	b.Grow(len(data) * 2)
+	for _, c := range data {
+		switch {
+		case c < 0x80:
+			b.WriteByte(c)
+		case c < 0xA0:
+			b.WriteRune(cp1252High[c-0x80])
+		default:
+			b.WriteRune(rune(c))
+		}
+	}
+	return []byte(b.String())
+}
+````
+
+## File: packages/api/internal/importer/resolve.go
+````go
+package importer
+
+import (
+	"fmt"
+	"math"
+	"strconv"
+	"strings"
+)
+
+// resolveRows turns parsed rows into validated RowResults: field parsing,
+// name-to-ID resolution, parent linking, duplicate disclosure, and the
+// per-row status roll-up.
+func resolveRows(pf *parsedFile, m *columnMapping, opts Options, lk Lookups) *Result {
+	res := &Result{Rows: make([]RowResult, 0, len(pf.rows))}
+	unknown := &unknownAcc{}
+	ctx := resolveDateOrder(pf.rows, m, opts.DateOrder)
+
+	for _, row := range pf.rows {
+		rr := resolveRow(row, m, opts, ctx, lk, unknown)
+		res.Rows = append(res.Rows, rr)
+	}
+
+	resolveParents(res.Rows, m, lk)
+
+	for i := range res.Rows {
+		rr := &res.Rows[i]
+		rr.Status = rollup(rr.Issues)
+		if rr.Status == RowError {
+			rr.Resolved = nil
+		}
+		switch rr.Status {
+		case RowOK:
+			res.Summary.OK++
+		case RowWarning:
+			res.Summary.Warnings++
+		case RowError:
+			res.Summary.Errors++
+		}
+	}
+	res.Summary.Total = len(res.Rows)
+
+	res.UnknownNames = UnknownNames{
+		Statuses:  sortedUnique(unknown.statuses),
+		Assignees: sortedUnique(unknown.assignees),
+		Tags:      sortedUnique(unknown.tags),
+	}
+	return res
+}
+
+// unknownAcc accumulates unresolvable names across all rows.
+type unknownAcc struct {
+	statuses, assignees, tags []string
+}
+
+// resolveRow parses and resolves every mapped cell of one row. Parent linking
+// happens in a later pass (resolveParents) because it needs all rows.
+func resolveRow(row parsedRow, m *columnMapping, opts Options, ctx dateContext, lk Lookups, unknown *unknownAcc) RowResult {
+	rr := RowResult{Line: row.line, Issues: append([]Issue{}, row.issues...)}
+	get := func(field string) cell {
+		if i := m.col(field); i >= 0 && i < len(row.cells) {
+			return row.cells[i]
+		}
+		return cell{}
+	}
+	addIssue := func(field, level, msg string) {
+		rr.Issues = append(rr.Issues, Issue{Level: level, Field: field, Message: msg})
+	}
+
+	preview := &PreviewActivity{}
+	resolved := &Resolved{ParentRowIndex: -1}
+	rr.Activity = preview
+	rr.Resolved = resolved
+
+	// Title — the one hard-required field.
+	title := get(FieldTitle).display
+	preview.Title = title
+	resolved.Title = title
+	if title == "" {
+		addIssue(FieldTitle, LevelError, "title is required")
+	}
+
+	resolved.ParentRaw = get(FieldParent).display
+
+	startCell, endCell := get(FieldStart), get(FieldEnd)
+
+	startOK := false
+	if startCell.display == "" && startCell.serial == nil {
+		addIssue(FieldStart, LevelError, "a start date is required")
+	} else if t, issues, ok := parseDate(startCell, ctx); ok {
+		resolved.Start = t
+		preview.Start = t.Format(isoDate)
+		startOK = true
+		scopeIssues(&rr, FieldStart, issues)
+	} else {
+		scopeIssues(&rr, FieldStart, issues)
+	}
+
+	switch {
+	case endCell.display == "" && endCell.serial == nil:
+		if startOK {
+			resolved.End = resolved.Start
+			preview.End = preview.Start
+			addIssue(FieldEnd, LevelWarning, "no end date — set to the start date (single day)")
+		}
+	default:
+		if t, issues, ok := parseDate(endCell, ctx); ok {
+			scopeIssues(&rr, FieldEnd, issues)
+			if startOK && t.Before(resolved.Start) {
+				addIssue(FieldEnd, LevelError, fmt.Sprintf(
+					"end date %s is before start date %s", t.Format(isoDate), resolved.Start.Format(isoDate)))
+			} else {
+				resolved.End = t
+				preview.End = t.Format(isoDate)
+			}
+		} else {
+			scopeIssues(&rr, FieldEnd, issues)
+		}
+	}
+
+	if v := get(FieldDescription).display; v != "" {
+		preview.Description = v
+		resolved.Description = &v
+	}
+	if v := get(FieldLocation).display; v != "" {
+		preview.Location = v
+		resolved.Location = &v
+	}
+	if v := get(FieldURL).display; v != "" {
+		preview.URL = v
+		resolved.URL = &v
+	}
+
+	// Status: normalized exact match; unknown → warning, no status.
+	if v := get(FieldStatus).display; v != "" {
+		if id, ok := lk.Statuses[NormalizeName(v)]; ok {
+			resolved.StatusID = &id
+			preview.Status = v
+		} else {
+			addIssue(FieldStatus, LevelWarning, fmt.Sprintf(
+				"%q doesn't match a status on this timeline — skipped", v))
+			unknown.statuses = append(unknown.statuses, v)
+		}
+	}
+
+	// Assignees: each token matched by display name or email; unknown or
+	// ambiguous tokens are skipped individually, the rest are kept. seenIDs
+	// dedupes repeated tokens (or name + email of the same member) so the
+	// commit never inserts a duplicate assignment row.
+	seenIDs := make(map[string]bool)
+	addAssignee := func(id, token string) {
+		if !seenIDs[id] {
+			seenIDs[id] = true
+			resolved.AssigneeIDs = append(resolved.AssigneeIDs, id)
+			preview.Assignees = append(preview.Assignees, token)
+		}
+	}
+	for _, token := range splitMulti(get(FieldAssignees).display) {
+		norm := NormalizeName(token)
+		if id, ok := lk.MembersByEmail[norm]; ok {
+			addAssignee(id, token)
+			continue
+		}
+		ids := lk.MembersByName[norm]
+		switch len(ids) {
+		case 1:
+			addAssignee(ids[0], token)
+		case 0:
+			addIssue(FieldAssignees, LevelWarning, fmt.Sprintf(
+				"%q doesn't match a team member — skipped", token))
+			unknown.assignees = append(unknown.assignees, token)
+		default:
+			addIssue(FieldAssignees, LevelWarning, fmt.Sprintf(
+				"%q matches more than one team member — skipped (use their email instead)", token))
+		}
+	}
+
+	// Tags: unknown names are skipped, or queued for creation when opted in.
+	// Repeated tokens are deduped for the same reason as assignees.
+	seenTags := make(map[string]bool)
+	for _, token := range splitMulti(get(FieldTags).display) {
+		norm := NormalizeName(token)
+		if seenTags[norm] {
+			continue
+		}
+		seenTags[norm] = true
+		if id, ok := lk.Tags[norm]; ok {
+			resolved.TagIDs = append(resolved.TagIDs, id)
+			preview.Tags = append(preview.Tags, token)
+			continue
+		}
+		unknown.tags = append(unknown.tags, token)
+		if opts.CreateMissingTags {
+			resolved.MissingTags = append(resolved.MissingTags, token)
+			preview.Tags = append(preview.Tags, token)
+			addIssue(FieldTags, LevelWarning, fmt.Sprintf("tag %q will be created", token))
+		} else {
+			addIssue(FieldTags, LevelWarning, fmt.Sprintf(
+				"tag %q doesn't exist — skipped (enable \"create missing tags\" to add it)", token))
+		}
+	}
+
+	// Progress: integer 0–100, optional % suffix, decimals rounded.
+	if c := get(FieldProgress); c.display != "" {
+		v := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(c.display), "%"))
+		if n, err := strconv.ParseFloat(v, 64); err == nil {
+			// A typed percentage cell in Excel stores 50% as 0.5.
+			if c.serial != nil && n > 0 && n < 1 {
+				n *= 100
+			}
+			p := int(math.Round(n))
+			if p >= 0 && p <= 100 {
+				if n != float64(p) {
+					addIssue(FieldProgress, LevelWarning, fmt.Sprintf("%q rounded to %d", c.display, p))
+				}
+				resolved.Progress = &p
+				preview.Progress = &p
+			} else {
+				addIssue(FieldProgress, LevelWarning, fmt.Sprintf(
+					"%q is outside 0–100 — skipped", c.display))
+			}
+		} else {
+			addIssue(FieldProgress, LevelWarning, fmt.Sprintf(
+				"%q is not a number — progress skipped", c.display))
+		}
+	}
+
+	// Possible-duplicate disclosure (import stays additive).
+	if title != "" && startOK && preview.End != "" {
+		if lk.ExistingKeys[DuplicateKey(title, preview.Start, preview.End)] {
+			rr.Issues = append(rr.Issues, Issue{Level: LevelWarning, Message: fmt.Sprintf(
+				"possible duplicate — %q with the same dates already exists on this timeline", title)})
+		}
+	}
+
+	return rr
+}
+
+// scopeIssues attaches parseDate's unscoped issues to a date field.
+func scopeIssues(rr *RowResult, field string, issues []Issue) {
+	for _, is := range issues {
+		is.Field = field
+		rr.Issues = append(rr.Issues, is)
+	}
+}
+
+// resolveParents links Parent cells: rows in this file first (by normalized
+// title), then existing activities on the target timeline. Ambiguity, errored
+// parents, and in-file cycles all warn and skip the link — never error.
+func resolveParents(rows []RowResult, m *columnMapping, lk Lookups) {
+	parentCol := m.col(FieldParent)
+	if parentCol < 0 {
+		return
+	}
+
+	titleIndex := make(map[string][]int, len(rows))
+	for i := range rows {
+		if rows[i].Resolved != nil && rows[i].Resolved.Title != "" {
+			titleIndex[NormalizeName(rows[i].Resolved.Title)] = append(
+				titleIndex[NormalizeName(rows[i].Resolved.Title)], i)
+		}
+	}
+
+	for i := range rows {
+		rr := &rows[i]
+		if rr.Resolved == nil {
+			continue
+		}
+		v := rr.Resolved.ParentRaw
+		if v == "" {
+			continue
+		}
+		norm := NormalizeName(v)
+
+		matches := make([]int, 0, 2)
+		for _, j := range titleIndex[norm] {
+			if j != i {
+				matches = append(matches, j)
+			}
+		}
+		switch {
+		case len(matches) == 1:
+			rr.Resolved.ParentRowIndex = matches[0]
+		case len(matches) > 1:
+			rr.warn(FieldParent, fmt.Sprintf(
+				"%q matches more than one row in this file — parent link skipped", v))
+		default:
+			ids := lk.ActivitiesByTitle[norm]
+			switch len(ids) {
+			case 1:
+				id := ids[0]
+				rr.Resolved.ParentActivityID = &id
+				rr.Activity.Parent = v
+			case 0:
+				rr.warn(FieldParent, fmt.Sprintf(
+					"%q doesn't match a row in this file or an existing activity — parent link skipped", v))
+			default:
+				rr.warn(FieldParent, fmt.Sprintf(
+					"%q matches more than one existing activity — parent link skipped", v))
+			}
+		}
+	}
+
+	// Break in-file cycles and drop links to rows that errored out.
+	for i := range rows {
+		rr := &rows[i]
+		if rr.Resolved == nil || rr.Resolved.ParentRowIndex < 0 {
+			continue
+		}
+		p := rr.Resolved.ParentRowIndex
+		if rollup(rows[p].Issues) == RowError {
+			rr.Resolved.ParentRowIndex = -1
+			rr.warn(FieldParent, fmt.Sprintf(
+				"parent row %d has errors and won't be imported — parent link skipped", rows[p].Line))
+			continue
+		}
+		if hasParentCycle(rows, i) {
+			rr.Resolved.ParentRowIndex = -1
+			rr.warn(FieldParent, fmt.Sprintf(
+				"%q creates a circular parent reference — parent link skipped", rr.Resolved.ParentRaw))
+			continue
+		}
+		rr.Activity.Parent = rr.Resolved.ParentRaw
+	}
+}
+
+// hasParentCycle walks the in-file parent chain from row i looking for a loop.
+func hasParentCycle(rows []RowResult, i int) bool {
+	seen := map[int]bool{i: true}
+	for cur := rows[i].Resolved.ParentRowIndex; cur >= 0; {
+		if seen[cur] {
+			return true
+		}
+		seen[cur] = true
+		if rows[cur].Resolved == nil {
+			return false
+		}
+		cur = rows[cur].Resolved.ParentRowIndex
+	}
+	return false
+}
+
+// warn appends a field-scoped warning to the row.
+func (rr *RowResult) warn(field, msg string) {
+	rr.Issues = append(rr.Issues, Issue{Level: LevelWarning, Field: field, Message: msg})
+}
+
+// rollup collapses a row's issue levels into its status.
+func rollup(issues []Issue) string {
+	status := RowOK
+	for _, is := range issues {
+		if is.Level == LevelError {
+			return RowError
+		}
+		status = RowWarning
+	}
+	return status
+}
+
+// splitMulti splits a multi-value cell on commas or semicolons, trimming and
+// dropping empties.
+func splitMulti(v string) []string {
+	if strings.TrimSpace(v) == "" {
+		return nil
+	}
+	parts := strings.FieldsFunc(v, func(r rune) bool { return r == ',' || r == ';' })
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+````
+
+## File: packages/api/internal/importer/template.go
+````go
+package importer
+
+import (
+	"bytes"
+	"encoding/csv"
+	"fmt"
+	"time"
+
+	"github.com/xuri/excelize/v2"
+
+	"github.com/I0-1O/draba/packages/api/internal/export"
+)
+
+// Template example rows: one minimal (title/start/end only) and one full
+// (every column, including a multi-assignee cell with an email and a Parent
+// reference to the first row). Column order comes from export.Columns so the
+// template is the export header row by construction.
+var templateRows = [][]string{
+	{"Kickoff meeting", "2026-03-02", "2026-03-02", "", "", "", "", "", "", "", ""},
+	{
+		"Launch website", "2026-03-09", "2026-03-20",
+		"Ship the new marketing site", "In Progress",
+		"Alex Chen, sam@example.com", "launch, q3", "Kickoff meeting",
+		"50", "HQ", "https://example.com",
+	},
+}
+
+// TemplateCSV renders the downloadable CSV import template.
+func TemplateCSV() ([]byte, error) {
+	var buf bytes.Buffer
+	w := csv.NewWriter(&buf)
+	if err := w.Write(export.Columns); err != nil {
+		return nil, err
+	}
+	for _, row := range templateRows {
+		if err := w.Write(row); err != nil {
+			return nil, err
+		}
+	}
+	w.Flush()
+	if err := w.Error(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// TemplateXLSX renders the downloadable xlsx import template. Start/End are
+// written as native date cells so Excel users stay in typed dates.
+func TemplateXLSX() ([]byte, error) {
+	f := excelize.NewFile()
+	defer func() { _ = f.Close() }()
+
+	const sheet = "Activities"
+	if err := f.SetSheetName("Sheet1", sheet); err != nil {
+		return nil, err
+	}
+
+	dateStyle, err := f.NewStyle(&excelize.Style{CustomNumFmt: strPtr("yyyy-mm-dd")})
+	if err != nil {
+		return nil, err
+	}
+
+	for col, name := range export.Columns {
+		cell, err := excelize.CoordinatesToCellName(col+1, 1)
+		if err != nil {
+			return nil, err
+		}
+		if err := f.SetCellStr(sheet, cell, name); err != nil {
+			return nil, err
+		}
+	}
+
+	dateCols := map[int]bool{1: true, 2: true} // Start, End (0-based)
+	for r, row := range templateRows {
+		for c, val := range row {
+			cell, err := excelize.CoordinatesToCellName(c+1, r+2)
+			if err != nil {
+				return nil, err
+			}
+			if dateCols[c] && val != "" {
+				t, err := time.Parse(isoDate, val)
+				if err != nil {
+					return nil, fmt.Errorf("template date %q: %w", val, err)
+				}
+				if err := f.SetCellValue(sheet, cell, t); err != nil {
+					return nil, err
+				}
+				if err := f.SetCellStyle(sheet, cell, cell, dateStyle); err != nil {
+					return nil, err
+				}
+				continue
+			}
+			if err := f.SetCellStr(sheet, cell, val); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	var buf bytes.Buffer
+	if err := f.Write(&buf); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func strPtr(s string) *string { return &s }
+````
+
 ## File: packages/api/internal/mailer/mailer.go
 ````go
 // Package mailer sends email via SMTP. Configuration is read from
@@ -43719,66 +45360,6 @@ See `docs/SAMPLE_DATA.md` for the full dataset specification and identity rules.
 ## Credentials
 
 All user passwords: `password`
-````
-
-## File: packages/api/Dockerfile
-````
-# ── Web builder ──
-FROM node:22-alpine AS web-builder
-RUN corepack enable && corepack prepare pnpm@latest --activate
-WORKDIR /workspace
-COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
-COPY packages/web/package.json packages/web/
-COPY packages/shared/package.json packages/shared/
-RUN pnpm install --frozen-lockfile
-COPY packages/web packages/web
-COPY packages/shared packages/shared
-RUN pnpm --filter @draba/web build
-
-# ── Go dependency cache ──
-FROM golang:1.25-alpine AS go-deps
-WORKDIR /app
-COPY packages/api/go.mod packages/api/go.sum ./
-RUN go mod download
-
-# ── Production builder — embeds web dist into the Go binary ──
-FROM go-deps AS builder
-# Build metadata, injected by CI (docker-publish.yml). Defaults keep a local
-# `docker build` working; when left empty the binary falls back to Go's VCS stamp.
-ARG GIT_COMMIT=""
-ARG BUILD_TIME=""
-COPY packages/api/ .
-COPY --from=web-builder /workspace/packages/web/dist ./ui/static
-RUN CGO_ENABLED=0 go build \
-    -ldflags "-X github.com/I0-1O/draba/packages/api/internal/buildinfo.Commit=${GIT_COMMIT} -X github.com/I0-1O/draba/packages/api/internal/buildinfo.Built=${BUILD_TIME}" \
-    -o /draba ./cmd/draba
-
-# ── Dev stage (used by docker-compose for hot reload) ──
-# Source is provided by the docker-compose volume mount, not baked in here —
-# baking it in caused Air to see a spurious "change" on first mount and restart.
-FROM golang:1.25-alpine AS dev
-ENV LANG=C.UTF-8
-ENV LC_ALL=C.UTF-8
-RUN go install github.com/air-verse/air@latest
-WORKDIR /app
-COPY packages/api/go.mod packages/api/go.sum ./
-RUN go mod download
-CMD ["air", "-c", ".air.toml"]
-
-# ── Production stage ──
-FROM alpine:3.21 AS prod
-RUN apk add --no-cache ca-certificates musl-locales \
-    && addgroup -g 1000 draba \
-    && adduser -u 1000 -G draba -s /bin/sh -D draba \
-    && mkdir -p /data \
-    && chown draba:draba /data
-ENV LANG=C.UTF-8
-ENV LC_ALL=C.UTF-8
-COPY --from=builder /draba /usr/local/bin/draba
-WORKDIR /data
-USER draba
-EXPOSE 8080
-CMD ["draba"]
 ````
 
 ## File: packages/web/src/components/calendar/CalendarGrid.tsx
@@ -50948,131 +52529,6 @@ export default function App() {
 }
 ````
 
-## File: scripts/reset-test-env.sh
-````bash
-#!/usr/bin/env bash
-#
-# Reset the draba test environment to a known clean state.
-# Run on the docker host (epcot.lan) as the `draba-test` user
-# (which must be in the `docker` group). No sudo required.
-#
-# What it does:
-#   1. Stops the `draba` container
-#   2. Wipes the SQLite DB files via a one-off `alpine` container
-#      (so file permissions inside the bind mount don't matter)
-#   3. Starts `draba` — its boot-time migration runner creates the
-#      fresh schema, then (with DRABA_SEED_SAMPLE_DATA=1 on the container)
-#      auto-seeds the canonical sample dataset incl. shares into the empty DB
-#   4. Waits up to 30s for the sample data to load (users table populated)
-#   5. Stops `draba` again, layers a bootstrap team + a known invite
-#      token on top via a one-off `sqlite3` container, then restarts
-#
-# The bootstrap rows (test-admin@local, bootstrap-team, the invite) do NOT
-# collide with the sample dataset, so api-smoke's register/login flow keeps
-# working against a DB that now also holds the rich sample data. Requires
-# DRABA_SEED_SAMPLE_DATA=1 on the container; without it the wait in step 4
-# times out (nothing populates the users table).
-#
-# Required env (sourced from $HOME/.draba-test.env at the top):
-#   DRABA_TEST_INVITE_TOKEN  — known token the api-smoke subagent uses
-#   DRABA_TEST_ADMIN_EMAIL   — bootstrap admin (invite issuer) email
-#   DRABA_TEST_INVITE_EMAIL  — email the invite is issued to; the
-#                              smoke test registers as this user
-#                              (default: invitee@local)
-#   DRABA_DB_DIR             — host bind-mount dir holding draba.db
-#   DRABA_CONTAINER          — container name (default: draba)
-#   DRABA_DB_FILENAME        — DB filename inside DRABA_DB_DIR
-#                              (default: draba.db)
-
-set -euo pipefail
-
-ENV_FILE="${HOME}/.draba-test.env"
-if [[ -f "$ENV_FILE" ]]; then
-    set -a
-    # shellcheck disable=SC1090
-    source "$ENV_FILE"
-    set +a
-fi
-
-: "${DRABA_TEST_INVITE_TOKEN:?must be set in ~/.draba-test.env}"
-: "${DRABA_TEST_ADMIN_EMAIL:?must be set in ~/.draba-test.env}"
-: "${DRABA_DB_DIR:?must be set in ~/.draba-test.env}"
-DRABA_CONTAINER="${DRABA_CONTAINER:-draba}"
-DRABA_DB_FILENAME="${DRABA_DB_FILENAME:-draba.db}"
-DRABA_TEST_INVITE_EMAIL="${DRABA_TEST_INVITE_EMAIL:-invitee@local}"
-
-SQLITE_IMG="keinos/sqlite3:latest"
-ALPINE_IMG="alpine:latest"
-
-echo "[1/6] Stopping container '$DRABA_CONTAINER'..."
-docker stop "$DRABA_CONTAINER" >/dev/null
-
-echo "[2/6] Wiping DB files in $DRABA_DB_DIR..."
-docker run --rm -v "$DRABA_DB_DIR:/data" "$ALPINE_IMG" sh -c \
-    "rm -f /data/${DRABA_DB_FILENAME} /data/${DRABA_DB_FILENAME}-shm /data/${DRABA_DB_FILENAME}-wal"
-
-echo "[3/6] Starting container (migrations run on boot)..."
-docker start "$DRABA_CONTAINER" >/dev/null
-
-echo "[4/6] Waiting for migrations + sample-data seed to complete..."
-for i in $(seq 1 30); do
-    # Wait until the seed has populated the users table — not just until the
-    # schema exists — so the bootstrap-seed step below cannot race the seed.
-    if docker run --rm -v "$DRABA_DB_DIR:/data:ro" "$SQLITE_IMG" \
-         sqlite3 "/data/${DRABA_DB_FILENAME}" \
-         "SELECT 1 FROM users LIMIT 1;" 2>/dev/null | grep -q 1; then
-        break
-    fi
-    sleep 1
-    if [[ "$i" -eq 30 ]]; then
-        echo "ERROR: sample data did not load within 30s" >&2
-        echo "       (is DRABA_SEED_SAMPLE_DATA=1 set on the '$DRABA_CONTAINER' container?)" >&2
-        exit 1
-    fi
-done
-
-echo "[5/6] Stopping container to layer bootstrap admin + invite on top of the sample data..."
-docker stop "$DRABA_CONTAINER" >/dev/null
-
-ADMIN_ID="bootstrap-admin"
-TEAM_ID="bootstrap-team"
-INVITE_ID="bootstrap-invite"
-EXPIRES=$(date -u -d '+7 days' '+%Y-%m-%d %H:%M:%S')
-
-# DRABA_TEST_ADMIN_PASSWORD_HASH — bcrypt hash of the admin's login password.
-# If not set in ~/.draba-test.env, the admin row is seeded as non-loginable
-# (suitable for CI-only runs where only the invite flow is tested).
-DRABA_TEST_ADMIN_PASSWORD_HASH="${DRABA_TEST_ADMIN_PASSWORD_HASH:-x-not-loginable}"
-
-# Layer the bootstrap rows idempotently. With sample data loaded, the admin
-# email may already belong to a sample user (e.g. brian@rieb.cc) — so use
-# INSERT OR IGNORE for the admin/team/membership and resolve the admin's *actual*
-# id by email for the FK references. This works whether DRABA_TEST_ADMIN_EMAIL is
-# a sample user (reuses it; its existing password is kept) or a fresh address
-# (creates a dedicated bootstrap admin). The known invite token is always seeded.
-docker run --rm -i --user 0:0 -v "$DRABA_DB_DIR:/data" "$SQLITE_IMG" \
-    sqlite3 "/data/${DRABA_DB_FILENAME}" <<SQL
-INSERT OR IGNORE INTO users (id, email, password_hash, display_name, is_superadmin)
-VALUES ('${ADMIN_ID}', '${DRABA_TEST_ADMIN_EMAIL}', '${DRABA_TEST_ADMIN_PASSWORD_HASH}', 'Test Bootstrap', 1);
-
-INSERT OR IGNORE INTO teams (id, name, slug)
-VALUES ('${TEAM_ID}', 'Test Team', 'test-team');
-
-INSERT OR IGNORE INTO team_members (id, team_id, user_id, role)
-SELECT 'bootstrap-admin-member', '${TEAM_ID}', u.id, 'admin'
-FROM users u WHERE u.email = '${DRABA_TEST_ADMIN_EMAIL}';
-
-INSERT INTO invites (id, team_id, email, token, role, invited_by, expires_at)
-SELECT '${INVITE_ID}', '${TEAM_ID}', '${DRABA_TEST_INVITE_EMAIL}', '${DRABA_TEST_INVITE_TOKEN}', 'member', u.id, '${EXPIRES}'
-FROM users u WHERE u.email = '${DRABA_TEST_ADMIN_EMAIL}';
-SQL
-
-echo "[6/6] Restarting container..."
-docker start "$DRABA_CONTAINER" >/dev/null
-
-echo "Done. Test invite token is ready. The api-smoke subagent can now register against it."
-````
-
 ## File: .gitattributes
 ````
 * text=auto eol=lf
@@ -52207,6 +53663,218 @@ No Vitest coverage for `StatusTemplatesTab.tsx` or `useStatusTemplates.ts` — w
 4. That's it — `/test-phase` will pick it up on the next run.
 ````
 
+## File: packages/api/cmd/draba/main.go
+````go
+// Command draba is the API server entry point. It wires repositories,
+// the auth token service, and tier configuration into the HTTP server,
+// then listens for requests until the process is killed.
+package main
+
+import (
+	"context"
+	"fmt"
+	"io/fs"
+	"log/slog"
+	"net/http"
+	"os"
+	"strings"
+
+	"github.com/I0-1O/draba/packages/api/internal/api"
+	"github.com/I0-1O/draba/packages/api/internal/auth"
+	"github.com/I0-1O/draba/packages/api/internal/buildinfo"
+	"github.com/I0-1O/draba/packages/api/internal/db"
+	"github.com/I0-1O/draba/packages/api/internal/events"
+	"github.com/I0-1O/draba/packages/api/internal/mailer"
+	"github.com/I0-1O/draba/packages/api/internal/tier"
+	"github.com/I0-1O/draba/packages/api/internal/ws"
+	sampledata "github.com/I0-1O/draba/packages/api/sample_data"
+	drabui "github.com/I0-1O/draba/packages/api/ui"
+)
+
+const banner = "\n" +
+	"      _           _\n" +
+	"     | |         | |\n" +
+	"   __| |_ __ __ _| |__   __ _\n" +
+	"  / _` | '__/ _` | '_ \\ / _` |\n" +
+	" | (_| | | | (_| | |_) | (_| |\n" +
+	"  \\__,_|_|  \\__,_|_.__/ \\__,_|\n" +
+	"\n" +
+	"  see who's doing what, when.\n\n"
+
+func main() {
+	if len(os.Args) > 1 && os.Args[1] == "reset-password" {
+		runResetPassword(os.Args[2:])
+		return
+	}
+
+	setupLogger()
+	fmt.Print(banner)
+	slog.Info("build", "commit", buildinfo.Short(), "built", buildinfo.Built)
+
+	port := getenv("DRABA_PORT", "8080")
+	dsn := getenv("DRABA_DB_DSN", "/data/draba.db")
+	jwtSecret := os.Getenv("DRABA_JWT_SECRET")
+	if jwtSecret == "" {
+		slog.Error("DRABA_JWT_SECRET must be set")
+		os.Exit(1)
+	}
+
+	t, err := tier.Load()
+	if err != nil {
+		slog.Error("tier load failed", "err", err)
+		os.Exit(1)
+	}
+	l := t.Limits()
+	if l.MaxUsers == 0 {
+		slog.Info("tier", "tier", t)
+	} else {
+		slog.Info("tier", "tier", t, "maxUsers", l.MaxUsers, "maxTeams", l.MaxTeams)
+	}
+
+	database, err := db.Open(dsn)
+	if err != nil {
+		slog.Error("db: open failed", "err", err)
+		os.Exit(1)
+	}
+	slog.Info("db: opened", "dsn", dsn)
+
+	if err := db.Migrate(database); err != nil {
+		slog.Error("db: migrate failed", "err", err)
+		os.Exit(1)
+	}
+	slog.Info("db: migrations applied")
+
+	// Optional pre-launch convenience: seed the canonical sample dataset into an
+	// empty database so a freshly-wiped dev/test instance comes up populated.
+	// Gated by DRABA_SEED_SAMPLE_DATA and a no-op once the DB has any users — it
+	// must stay unset in any real deployment.
+	if os.Getenv("DRABA_SEED_SAMPLE_DATA") == "1" {
+		sql, err := sampledata.SQL()
+		if err != nil {
+			slog.Error("db: reading embedded sample data failed", "err", err)
+			os.Exit(1)
+		}
+		seeded, err := db.SeedSampleDataIfEmpty(database, sql)
+		if err != nil {
+			slog.Error("db: sample-data seed failed", "err", err)
+			os.Exit(1)
+		}
+		if seeded {
+			slog.Info("db: sample data seeded (database was empty)")
+		} else {
+			slog.Info("db: sample-data seed skipped (database already populated)")
+		}
+	}
+
+	users := db.NewUserRepo(database)
+	invites := db.NewInviteRepo(database)
+	teams := db.NewTeamRepo(database)
+	activityRepo := db.NewActivityRepo(database)
+	timelineRepo := db.NewTimelineRepo(database)
+	savedFilterRepo := db.NewSavedFilterRepo(database)
+	preferenceRepo := db.NewUserPreferenceRepo(database)
+	apiTokenRepo := db.NewAPITokenRepo(database)
+	instanceSetsRepo := db.NewInstanceSettingsRepo(database)
+	passwordTokensRepo := db.NewPasswordResetTokenRepo(database)
+	statusRepo := db.NewStatusRepo(database)
+	tagRepo := db.NewTagRepo(database)
+	shareRepo := db.NewShareRepo(database)
+	m := mailer.New(instanceSetsRepo, []byte(jwtSecret))
+	tokens := auth.NewTokenService(jwtSecret)
+
+	bus := events.NewBus()
+	hub := ws.NewHub(bus, tokens, func(teamID, userID string) error {
+		_, err := teams.GetMember(teamID, userID)
+		return err
+	})
+	go hub.Run()
+	slog.Info("ws: hub running")
+
+	if mods := tier.Registered(); len(mods) > 0 {
+		slog.Info("modules loaded", "count", len(mods))
+	}
+
+	srv := api.NewServer(users, invites, teams, activityRepo, timelineRepo, savedFilterRepo, preferenceRepo, apiTokenRepo, instanceSetsRepo, passwordTokensRepo, statusRepo, tagRepo, shareRepo, m, tokens, t, bus, hub)
+
+	// Wire up the embedded React SPA when a production build is present.
+	// In dev the static/ directory only has .gitkeep so this is a no-op.
+	if sub, err := fs.Sub(drabui.FS, "static"); err == nil {
+		if _, err := sub.Open("index.html"); err == nil {
+			srv.WithUI(sub)
+			slog.Info("ui: serving embedded SPA")
+		}
+	}
+
+	// Optional SSO. OIDC is disabled unless DRABA_OIDC_ISSUER is set. When it
+	// is, discovery runs against the issuer at startup; a failure here is fatal
+	// so a broken SSO setup is caught at boot rather than presenting users a
+	// dead login button. The client secret is read once and never leaves the
+	// process.
+	oidcSvc, err := auth.NewOIDCService(context.Background(), &auth.OIDCConfig{
+		Issuer:       os.Getenv("DRABA_OIDC_ISSUER"),
+		ClientID:     os.Getenv("DRABA_OIDC_CLIENT_ID"),
+		ClientSecret: os.Getenv("DRABA_OIDC_CLIENT_SECRET"),
+		RedirectURL:  oidcRedirectURL(),
+	})
+	if err != nil {
+		slog.Error("oidc: configuration failed", "err", err)
+		os.Exit(1)
+	}
+	if oidcSvc != nil {
+		// Auto-provisioning defaults ON (first SSO login creates the account),
+		// matching the password-register bootstrap. Set DRABA_OIDC_AUTO_CREATE=0
+		// to require accounts be pre-created before SSO login is allowed.
+		autoCreate := os.Getenv("DRABA_OIDC_AUTO_CREATE") != "0"
+		srv.WithOIDC(oidcSvc, autoCreate)
+		slog.Info("oidc: SSO enabled", "issuer", os.Getenv("DRABA_OIDC_ISSUER"), "autoCreate", autoCreate)
+	}
+
+	slog.Info("listening", "port", port)
+	if err := http.ListenAndServe(":"+port, srv.Routes()); err != nil {
+		slog.Error("server error", "err", err)
+		os.Exit(1)
+	}
+}
+
+// oidcRedirectURL returns the OIDC callback URL the IdP must redirect back to.
+// It honours an explicit DRABA_OIDC_REDIRECT_URL override, otherwise derives it
+// from DRABA_BASE_URL so a single base-URL setting covers both the app and the
+// SSO callback.
+func oidcRedirectURL() string {
+	if v := os.Getenv("DRABA_OIDC_REDIRECT_URL"); v != "" {
+		return v
+	}
+	if os.Getenv("DRABA_OIDC_ISSUER") == "" {
+		return "" // SSO disabled; no redirect needed.
+	}
+	return strings.TrimRight(getenv("DRABA_BASE_URL", "http://localhost:8080"), "/") + "/auth/oidc/callback"
+}
+
+// setupLogger initialises the global slog logger. Level is controlled by
+// DRABA_LOG_LEVEL (debug | info | warn | error); default is info.
+// All output goes to stdout so Docker captures it in `docker logs`.
+func setupLogger() {
+	level := slog.LevelInfo
+	switch strings.ToLower(os.Getenv("DRABA_LOG_LEVEL")) {
+	case "debug":
+		level = slog.LevelDebug
+	case "warn":
+		level = slog.LevelWarn
+	case "error":
+		level = slog.LevelError
+	}
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level})))
+}
+
+// getenv returns the env var value or fallback when unset/empty.
+func getenv(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+````
+
 ## File: packages/api/internal/auth/oidc.go
 ````go
 // OIDC / SSO support. This file is the ONLY place draba talks to an external
@@ -52405,6 +54073,391 @@ func randomURLToken() (string, error) {
 		return "", fmt.Errorf("oidc: reading random: %w", err)
 	}
 	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+````
+
+## File: packages/api/internal/db/activity_repo.go
+````go
+package db
+
+import (
+	"fmt"
+	"time"
+
+	"github.com/jmoiron/sqlx"
+
+	"github.com/I0-1O/draba/packages/api/internal/models"
+)
+
+// ActivityRepo is the persistence layer for Activity records.
+type ActivityRepo struct {
+	db *sqlx.DB
+}
+
+// NewActivityRepo returns an ActivityRepo backed by db.
+func NewActivityRepo(db *sqlx.DB) *ActivityRepo {
+	return &ActivityRepo{db: db}
+}
+
+// Create inserts a new Activity row.
+func (r *ActivityRepo) Create(activity *models.Activity) error {
+	_, err := r.db.NamedExec(`
+		INSERT INTO activities (
+			id, timeline_id, title, description, notes, icon, color,
+			start_at, end_at, all_day, status_id, parent_activity_id,
+			percent_complete, location, url, rrule,
+			caldav_uid, google_event_id,
+			created_by, created_at, updated_at
+		) VALUES (
+			:id, :timeline_id, :title, :description, :notes, :icon, :color,
+			:start_at, :end_at, :all_day, :status_id, :parent_activity_id,
+			:percent_complete, :location, :url, :rrule,
+			:caldav_uid, :google_event_id,
+			:created_by, :created_at, :updated_at
+		)
+	`, activity)
+	if err != nil {
+		return fmt.Errorf("creating activity: %w", err)
+	}
+	return nil
+}
+
+// GetByID fetches an Activity by primary key. Returns sql.ErrNoRows (wrapped)
+// when no row matches.
+func (r *ActivityRepo) GetByID(id string) (*models.Activity, error) {
+	var a models.Activity
+	err := r.db.Get(&a, `SELECT * FROM activities WHERE id = ?`, id)
+	if err != nil {
+		return nil, fmt.Errorf("getting activity: %w", err)
+	}
+	return &a, nil
+}
+
+// Update replaces all mutable fields on an existing Activity row.
+func (r *ActivityRepo) Update(activity *models.Activity) error {
+	_, err := r.db.NamedExec(`
+		UPDATE activities SET
+			title              = :title,
+			description        = :description,
+			notes              = :notes,
+			icon               = :icon,
+			color              = :color,
+			start_at           = :start_at,
+			end_at             = :end_at,
+			all_day            = :all_day,
+			status_id          = :status_id,
+			parent_activity_id = :parent_activity_id,
+			percent_complete   = :percent_complete,
+			location           = :location,
+			url                = :url,
+			rrule              = :rrule,
+			updated_at         = :updated_at
+		WHERE id = :id
+	`, activity)
+	if err != nil {
+		return fmt.Errorf("updating activity: %w", err)
+	}
+	return nil
+}
+
+// Delete permanently removes an activity row.
+func (r *ActivityRepo) Delete(id string) error {
+	_, err := r.db.Exec(`DELETE FROM activities WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("deleting activity: %w", err)
+	}
+	return nil
+}
+
+// ClearParentRefs clears parent_activity_id on all activities that reference id
+// as their parent. Called before deleting or archiving the parent so children
+// do not retain a dangling reference.
+func (r *ActivityRepo) ClearParentRefs(id string) error {
+	_, err := r.db.Exec(
+		`UPDATE activities SET parent_activity_id = NULL, updated_at = ? WHERE parent_activity_id = ?`,
+		time.Now().UTC(), id,
+	)
+	if err != nil {
+		return fmt.Errorf("clearing parent refs for %s: %w", id, err)
+	}
+	return nil
+}
+
+// SetArchived sets or clears archived_at on an activity. Pass a non-nil time
+// to archive; pass nil to unarchive.
+func (r *ActivityRepo) SetArchived(id string, at *time.Time) error {
+	_, err := r.db.Exec(
+		`UPDATE activities SET archived_at = ?, updated_at = ? WHERE id = ?`,
+		at, time.Now().UTC(), id,
+	)
+	if err != nil {
+		return fmt.Errorf("setting activity archived_at: %w", err)
+	}
+	return nil
+}
+
+// SetAssignments replaces all activity_assignments for an activity with the
+// provided member IDs. An empty slice removes all assignments.
+func (r *ActivityRepo) SetAssignments(activityID string, memberIDs []string) error {
+	tx, err := r.db.Beginx()
+	if err != nil {
+		return fmt.Errorf("beginning assignment transaction: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	if _, err = tx.Exec(`DELETE FROM activity_assignments WHERE activity_id = ?`, activityID); err != nil {
+		return fmt.Errorf("clearing activity assignments: %w", err)
+	}
+
+	for _, memberID := range memberIDs {
+		if _, err = tx.Exec(
+			`INSERT INTO activity_assignments (activity_id, team_member_id) VALUES (?, ?)`,
+			activityID, memberID,
+		); err != nil {
+			return fmt.Errorf("inserting activity assignment: %w", err)
+		}
+	}
+
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("committing activity assignments: %w", err)
+	}
+	return nil
+}
+
+// GetAssignments returns the team_member_ids assigned to an activity.
+func (r *ActivityRepo) GetAssignments(activityID string) ([]string, error) {
+	var ids []string
+	err := r.db.Select(&ids,
+		`SELECT team_member_id FROM activity_assignments WHERE activity_id = ?`, activityID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("getting activity assignments: %w", err)
+	}
+	if ids == nil {
+		ids = []string{}
+	}
+	return ids, nil
+}
+
+// SetTags replaces all activity_tags for an activity with the provided tag
+// IDs. An empty slice removes all tag associations.
+func (r *ActivityRepo) SetTags(activityID string, tagIDs []string) error {
+	tx, err := r.db.Beginx()
+	if err != nil {
+		return fmt.Errorf("beginning tag transaction: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	if _, err = tx.Exec(`DELETE FROM activity_tags WHERE activity_id = ?`, activityID); err != nil {
+		return fmt.Errorf("clearing activity tags: %w", err)
+	}
+
+	for _, tagID := range tagIDs {
+		if _, err = tx.Exec(
+			`INSERT INTO activity_tags (activity_id, tag_id) VALUES (?, ?)`,
+			activityID, tagID,
+		); err != nil {
+			return fmt.Errorf("inserting activity tag: %w", err)
+		}
+	}
+
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("committing activity tags: %w", err)
+	}
+	return nil
+}
+
+// GetTags returns the tag IDs associated with an activity.
+func (r *ActivityRepo) GetTags(activityID string) ([]string, error) {
+	var ids []string
+	err := r.db.Select(&ids,
+		`SELECT tag_id FROM activity_tags WHERE activity_id = ?`, activityID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("getting activity tags: %w", err)
+	}
+	if ids == nil {
+		ids = []string{}
+	}
+	return ids, nil
+}
+
+// ImportItem is one activity to create in an import batch, with its
+// association rows. Activity IDs (including in-batch ParentActivityID
+// references) are assigned by the caller before the batch runs.
+type ImportItem struct {
+	Activity    *models.Activity
+	AssigneeIDs []string
+	TagIDs      []string
+}
+
+// CreateImportBatch writes an import commit in a single transaction: new tags
+// first, then activities in the given order (callers order parents before
+// children so the parent_activity_id FK holds), then assignments and tag
+// links. Any failure rolls back the whole batch — an import is all-or-nothing
+// within its accepted rows.
+func (r *ActivityRepo) CreateImportBatch(newTags []*models.Tag, items []ImportItem) error {
+	tx, err := r.db.Beginx()
+	if err != nil {
+		return fmt.Errorf("beginning import transaction: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	for _, tag := range newTags {
+		if _, err = tx.NamedExec(`
+			INSERT INTO tags (id, team_id, name, color, created_by, created_at)
+			VALUES (:id, :team_id, :name, :color, :created_by, :created_at)
+		`, tag); err != nil {
+			return fmt.Errorf("creating imported tag %q: %w", tag.Name, err)
+		}
+	}
+
+	for _, item := range items {
+		if _, err = tx.NamedExec(`
+			INSERT INTO activities (
+				id, timeline_id, title, description, notes, icon, color,
+				start_at, end_at, all_day, status_id, parent_activity_id,
+				percent_complete, location, url, rrule,
+				caldav_uid, google_event_id,
+				created_by, created_at, updated_at
+			) VALUES (
+				:id, :timeline_id, :title, :description, :notes, :icon, :color,
+				:start_at, :end_at, :all_day, :status_id, :parent_activity_id,
+				:percent_complete, :location, :url, :rrule,
+				:caldav_uid, :google_event_id,
+				:created_by, :created_at, :updated_at
+			)
+		`, item.Activity); err != nil {
+			return fmt.Errorf("creating imported activity %q: %w", item.Activity.Title, err)
+		}
+		for _, memberID := range item.AssigneeIDs {
+			if _, err = tx.Exec(
+				`INSERT INTO activity_assignments (activity_id, team_member_id) VALUES (?, ?)`,
+				item.Activity.ID, memberID,
+			); err != nil {
+				return fmt.Errorf("assigning imported activity %q: %w", item.Activity.Title, err)
+			}
+		}
+		for _, tagID := range item.TagIDs {
+			if _, err = tx.Exec(
+				`INSERT INTO activity_tags (activity_id, tag_id) VALUES (?, ?)`,
+				item.Activity.ID, tagID,
+			); err != nil {
+				return fmt.Errorf("tagging imported activity %q: %w", item.Activity.Title, err)
+			}
+		}
+	}
+
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("committing import batch: %w", err)
+	}
+	return nil
+}
+
+// ListByTimeline returns activities for a specific timeline. When
+// includeArchived is false archived rows are excluded. The bounds use overlap
+// semantics: from filters on end_at >= from (so a multi-week activity that
+// starts before the window still appears if it crosses it), and to filters on
+// start_at <= to.
+// AssignedMemberIDs is populated via a second query.
+func (r *ActivityRepo) ListByTimeline(timelineID string, from, to *time.Time, includeArchived bool) ([]*models.Activity, error) {
+	query := `SELECT * FROM activities WHERE timeline_id = ?`
+	args := []any{timelineID}
+	if !includeArchived {
+		query += ` AND archived_at IS NULL`
+	}
+
+	if from != nil {
+		// Overlap semantics: include any activity whose end_at is at or after from.
+		// This catches multi-week/multi-month activities that START before the
+		// visible range but still cross it.
+		query += ` AND end_at >= ?`
+		args = append(args, from)
+	}
+	if to != nil {
+		query += ` AND start_at <= ?`
+		args = append(args, to)
+	}
+	query += ` ORDER BY start_at ASC`
+
+	acts := make([]*models.Activity, 0)
+	if err := r.db.Select(&acts, query, args...); err != nil {
+		return nil, fmt.Errorf("listing activities: %w", err)
+	}
+	if len(acts) == 0 {
+		return acts, nil
+	}
+
+	// Initialise AssignedMemberIDs and TagIDs to empty slices so JSON fields are
+	// always arrays (never null) even when an activity has no assignments or tags.
+	ids := make([]string, len(acts))
+	byID := make(map[string]*models.Activity, len(acts))
+	for i, a := range acts {
+		a.AssignedMemberIDs = []string{}
+		a.TagIDs = []string{}
+		ids[i] = a.ID
+		byID[a.ID] = a
+	}
+
+	asnQuery, asnArgs, err := sqlx.In(
+		`SELECT activity_id, team_member_id FROM activity_assignments WHERE activity_id IN (?)`,
+		ids,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("building assignments query: %w", err)
+	}
+	asnQuery = r.db.Rebind(asnQuery)
+
+	type assignment struct {
+		ActivityID   string `db:"activity_id"`
+		TeamMemberID string `db:"team_member_id"`
+	}
+	var assignments []assignment
+	if err := r.db.Select(&assignments, asnQuery, asnArgs...); err != nil {
+		return nil, fmt.Errorf("listing activity assignments: %w", err)
+	}
+	for _, a := range assignments {
+		if act, ok := byID[a.ActivityID]; ok {
+			act.AssignedMemberIDs = append(act.AssignedMemberIDs, a.TeamMemberID)
+		}
+	}
+
+	tagQuery, tagArgs, err := sqlx.In(
+		`SELECT activity_id, tag_id FROM activity_tags WHERE activity_id IN (?)`,
+		ids,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("building tags query: %w", err)
+	}
+	tagQuery = r.db.Rebind(tagQuery)
+
+	type activityTag struct {
+		ActivityID string `db:"activity_id"`
+		TagID      string `db:"tag_id"`
+	}
+	var actTags []activityTag
+	if err := r.db.Select(&actTags, tagQuery, tagArgs...); err != nil {
+		return nil, fmt.Errorf("listing activity tags: %w", err)
+	}
+	for _, at := range actTags {
+		if act, ok := byID[at.ActivityID]; ok {
+			act.TagIDs = append(act.TagIDs, at.TagID)
+		}
+	}
+
+	return acts, nil
 }
 ````
 
@@ -56674,218 +58727,6 @@ If bookmarkable/shareable print URLs are ever wanted, a real `/timelines/:id/pri
 - `golangci-lint run` clean; `go test ./...` passes; `pnpm --filter web lint` clean.
 ````
 
-## File: packages/api/cmd/draba/main.go
-````go
-// Command draba is the API server entry point. It wires repositories,
-// the auth token service, and tier configuration into the HTTP server,
-// then listens for requests until the process is killed.
-package main
-
-import (
-	"context"
-	"fmt"
-	"io/fs"
-	"log/slog"
-	"net/http"
-	"os"
-	"strings"
-
-	"github.com/I0-1O/draba/packages/api/internal/api"
-	"github.com/I0-1O/draba/packages/api/internal/auth"
-	"github.com/I0-1O/draba/packages/api/internal/buildinfo"
-	"github.com/I0-1O/draba/packages/api/internal/db"
-	"github.com/I0-1O/draba/packages/api/internal/events"
-	"github.com/I0-1O/draba/packages/api/internal/mailer"
-	"github.com/I0-1O/draba/packages/api/internal/tier"
-	"github.com/I0-1O/draba/packages/api/internal/ws"
-	sampledata "github.com/I0-1O/draba/packages/api/sample_data"
-	drabui "github.com/I0-1O/draba/packages/api/ui"
-)
-
-const banner = "\n" +
-	"      _           _\n" +
-	"     | |         | |\n" +
-	"   __| |_ __ __ _| |__   __ _\n" +
-	"  / _` | '__/ _` | '_ \\ / _` |\n" +
-	" | (_| | | | (_| | |_) | (_| |\n" +
-	"  \\__,_|_|  \\__,_|_.__/ \\__,_|\n" +
-	"\n" +
-	"  see who's doing what, when.\n\n"
-
-func main() {
-	if len(os.Args) > 1 && os.Args[1] == "reset-password" {
-		runResetPassword(os.Args[2:])
-		return
-	}
-
-	setupLogger()
-	fmt.Print(banner)
-	slog.Info("build", "commit", buildinfo.Short(), "built", buildinfo.Built)
-
-	port := getenv("DRABA_PORT", "8080")
-	dsn := getenv("DRABA_DB_DSN", "/data/draba.db")
-	jwtSecret := os.Getenv("DRABA_JWT_SECRET")
-	if jwtSecret == "" {
-		slog.Error("DRABA_JWT_SECRET must be set")
-		os.Exit(1)
-	}
-
-	t, err := tier.Load()
-	if err != nil {
-		slog.Error("tier load failed", "err", err)
-		os.Exit(1)
-	}
-	l := t.Limits()
-	if l.MaxUsers == 0 {
-		slog.Info("tier", "tier", t)
-	} else {
-		slog.Info("tier", "tier", t, "maxUsers", l.MaxUsers, "maxTeams", l.MaxTeams)
-	}
-
-	database, err := db.Open(dsn)
-	if err != nil {
-		slog.Error("db: open failed", "err", err)
-		os.Exit(1)
-	}
-	slog.Info("db: opened", "dsn", dsn)
-
-	if err := db.Migrate(database); err != nil {
-		slog.Error("db: migrate failed", "err", err)
-		os.Exit(1)
-	}
-	slog.Info("db: migrations applied")
-
-	// Optional pre-launch convenience: seed the canonical sample dataset into an
-	// empty database so a freshly-wiped dev/test instance comes up populated.
-	// Gated by DRABA_SEED_SAMPLE_DATA and a no-op once the DB has any users — it
-	// must stay unset in any real deployment.
-	if os.Getenv("DRABA_SEED_SAMPLE_DATA") == "1" {
-		sql, err := sampledata.SQL()
-		if err != nil {
-			slog.Error("db: reading embedded sample data failed", "err", err)
-			os.Exit(1)
-		}
-		seeded, err := db.SeedSampleDataIfEmpty(database, sql)
-		if err != nil {
-			slog.Error("db: sample-data seed failed", "err", err)
-			os.Exit(1)
-		}
-		if seeded {
-			slog.Info("db: sample data seeded (database was empty)")
-		} else {
-			slog.Info("db: sample-data seed skipped (database already populated)")
-		}
-	}
-
-	users := db.NewUserRepo(database)
-	invites := db.NewInviteRepo(database)
-	teams := db.NewTeamRepo(database)
-	activityRepo := db.NewActivityRepo(database)
-	timelineRepo := db.NewTimelineRepo(database)
-	savedFilterRepo := db.NewSavedFilterRepo(database)
-	preferenceRepo := db.NewUserPreferenceRepo(database)
-	apiTokenRepo := db.NewAPITokenRepo(database)
-	instanceSetsRepo := db.NewInstanceSettingsRepo(database)
-	passwordTokensRepo := db.NewPasswordResetTokenRepo(database)
-	statusRepo := db.NewStatusRepo(database)
-	tagRepo := db.NewTagRepo(database)
-	shareRepo := db.NewShareRepo(database)
-	m := mailer.New(instanceSetsRepo, []byte(jwtSecret))
-	tokens := auth.NewTokenService(jwtSecret)
-
-	bus := events.NewBus()
-	hub := ws.NewHub(bus, tokens, func(teamID, userID string) error {
-		_, err := teams.GetMember(teamID, userID)
-		return err
-	})
-	go hub.Run()
-	slog.Info("ws: hub running")
-
-	if mods := tier.Registered(); len(mods) > 0 {
-		slog.Info("modules loaded", "count", len(mods))
-	}
-
-	srv := api.NewServer(users, invites, teams, activityRepo, timelineRepo, savedFilterRepo, preferenceRepo, apiTokenRepo, instanceSetsRepo, passwordTokensRepo, statusRepo, tagRepo, shareRepo, m, tokens, t, bus, hub)
-
-	// Wire up the embedded React SPA when a production build is present.
-	// In dev the static/ directory only has .gitkeep so this is a no-op.
-	if sub, err := fs.Sub(drabui.FS, "static"); err == nil {
-		if _, err := sub.Open("index.html"); err == nil {
-			srv.WithUI(sub)
-			slog.Info("ui: serving embedded SPA")
-		}
-	}
-
-	// Optional SSO. OIDC is disabled unless DRABA_OIDC_ISSUER is set. When it
-	// is, discovery runs against the issuer at startup; a failure here is fatal
-	// so a broken SSO setup is caught at boot rather than presenting users a
-	// dead login button. The client secret is read once and never leaves the
-	// process.
-	oidcSvc, err := auth.NewOIDCService(context.Background(), &auth.OIDCConfig{
-		Issuer:       os.Getenv("DRABA_OIDC_ISSUER"),
-		ClientID:     os.Getenv("DRABA_OIDC_CLIENT_ID"),
-		ClientSecret: os.Getenv("DRABA_OIDC_CLIENT_SECRET"),
-		RedirectURL:  oidcRedirectURL(),
-	})
-	if err != nil {
-		slog.Error("oidc: configuration failed", "err", err)
-		os.Exit(1)
-	}
-	if oidcSvc != nil {
-		// Auto-provisioning defaults ON (first SSO login creates the account),
-		// matching the password-register bootstrap. Set DRABA_OIDC_AUTO_CREATE=0
-		// to require accounts be pre-created before SSO login is allowed.
-		autoCreate := os.Getenv("DRABA_OIDC_AUTO_CREATE") != "0"
-		srv.WithOIDC(oidcSvc, autoCreate)
-		slog.Info("oidc: SSO enabled", "issuer", os.Getenv("DRABA_OIDC_ISSUER"), "autoCreate", autoCreate)
-	}
-
-	slog.Info("listening", "port", port)
-	if err := http.ListenAndServe(":"+port, srv.Routes()); err != nil {
-		slog.Error("server error", "err", err)
-		os.Exit(1)
-	}
-}
-
-// oidcRedirectURL returns the OIDC callback URL the IdP must redirect back to.
-// It honours an explicit DRABA_OIDC_REDIRECT_URL override, otherwise derives it
-// from DRABA_BASE_URL so a single base-URL setting covers both the app and the
-// SSO callback.
-func oidcRedirectURL() string {
-	if v := os.Getenv("DRABA_OIDC_REDIRECT_URL"); v != "" {
-		return v
-	}
-	if os.Getenv("DRABA_OIDC_ISSUER") == "" {
-		return "" // SSO disabled; no redirect needed.
-	}
-	return strings.TrimRight(getenv("DRABA_BASE_URL", "http://localhost:8080"), "/") + "/auth/oidc/callback"
-}
-
-// setupLogger initialises the global slog logger. Level is controlled by
-// DRABA_LOG_LEVEL (debug | info | warn | error); default is info.
-// All output goes to stdout so Docker captures it in `docker logs`.
-func setupLogger() {
-	level := slog.LevelInfo
-	switch strings.ToLower(os.Getenv("DRABA_LOG_LEVEL")) {
-	case "debug":
-		level = slog.LevelDebug
-	case "warn":
-		level = slog.LevelWarn
-	case "error":
-		level = slog.LevelError
-	}
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level})))
-}
-
-// getenv returns the env var value or fallback when unset/empty.
-func getenv(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
-}
-````
-
 ## File: packages/api/internal/api/export_handler.go
 ````go
 package api
@@ -59877,6 +61718,14 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/export.xlsx", chain(s.handleGetTimelineExportXLSX, s.authMiddleware))
 	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/export.ics", chain(s.handleGetTimelineExportICS, s.authMiddleware))
 
+	// Import routes (Phase 15.1). The POST uses the same team-scoped route
+	// family as the activity/status routes. The templates are static content
+	// (example data only) but stay behind auth like every other non-share
+	// endpoint.
+	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/import", chain(s.handlePostTimelineImport, s.authMiddleware))
+	mux.HandleFunc("GET /import/template.csv", chain(s.handleGetImportTemplateCSV, s.authMiddleware))
+	mux.HandleFunc("GET /import/template.xlsx", chain(s.handleGetImportTemplateXLSX, s.authMiddleware))
+
 	// GET /ws is intentionally outside authMiddleware — ServeWS validates the
 	// JWT itself before upgrading, because WebSocket clients can't set headers.
 	mux.HandleFunc("GET /ws", s.hub.ServeWS)
@@ -62514,6 +64363,531 @@ export default function ShareModal({ teamId, timelineId, viewType, viewConfig, t
 }
 ````
 
+## File: packages/web/src/components/ExportDialog.tsx
+````typescript
+/**
+ * ExportDialog — "Export this view" modal (Phase 14).
+ *
+ * Built to the export-modal design handoff (docs/design/handoffs/export-modal):
+ * a format rail + options pane two-pane body, a filter context strip that
+ * makes "export what I'm seeing" visible, and a scope picker (current view vs
+ * entire timeline) for the data formats. Modeled on ShareModal's portal shell,
+ * but — per the handoff — the overlay click does not close the dialog, only
+ * Esc / the close button / Cancel do.
+ *
+ * 14.1 implements the server-side data/calendar formats (CSV, Excel, ICS).
+ * 14.2 adds client-side textual formats (Markdown, Plain text, Copy to clipboard)
+ *      via the `textExportData` prop; these formats only appear for non-Gantt views.
+ * 14.3 adds the PNG snapshot format, rasterizing `captureElement` (the live
+ *      view container) via `lib/pngExport.ts`; available in every view.
+ * 14.4 adds the printable-view and HTML-save formats, both driven off the
+ *      `presentationFrame` prop (the mounted PresentationFrame iframe) via
+ *      `lib/printExport.ts` / `lib/htmlExport.ts`; available in every view.
+ */
+
+import { useEffect, useRef, useState, useCallback } from 'react'
+import { createPortal } from 'react-dom'
+import {
+  FileOutput, Filter, AlertTriangle, Download, FileDown, Check, X, Copy, Printer,
+} from 'lucide-react'
+import { Button } from '@/components/ui/button'
+import { cn } from '@/lib/utils'
+import { useExport } from '@/hooks/useExport'
+import {
+  getExportFormats, buildExportFilename,
+  type ExportFormatId, type ExportViewType,
+} from '@/lib/exportCapabilities'
+import {
+  buildListMarkdown, buildListMarkdownOutline,
+  buildKanbanMarkdown, buildCalendarMarkdown,
+  buildListPlainText, buildListPlainTextOutline,
+  buildKanbanPlainText, buildCalendarPlainText,
+  buildListHtml, buildListHtmlOutline, buildKanbanHtml, buildCalendarHtml,
+  type TextExportData,
+} from '@/lib/textExport'
+import { capturePngSnapshot } from '@/lib/pngExport'
+import { printPresentationFrame } from '@/lib/printExport'
+import { saveFramePresentationHtml } from '@/lib/htmlExport'
+import type { FilterDefinition } from '@/lib/filterTypes'
+
+export type { TextExportData }
+
+export interface ExportDialogProps {
+  view: ExportViewType
+  teamId: string
+  timelineId: string
+  timelineName: string
+  /** Team display name, shown in the PNG header strip alongside the timeline name. */
+  teamName?: string | null
+  /** Display label for the active filter (e.g. a saved filter's name), or null if no filter is active. */
+  filterLabel: string | null
+  /** The active filter's definition, sent to the server when scope is "view" and activityIds is absent. */
+  filterDefinition: FilterDefinition | null
+  /** Number of activities matching the active filter (or totalCount when no filter is active). */
+  filteredCount: number
+  /** Total number of activities in the timeline, regardless of filter. */
+  totalCount: number
+  /**
+   * Ordered activity IDs for the "current view" scope — covers preset/member
+   * filters (which can't be sent as a FilterDefinition) and list-view sort order.
+   * When non-null, takes precedence over filterDefinition in the request body.
+   */
+  viewActivityIds: string[] | null
+  /**
+   * Export column names to include in CSV/Excel (list view column visibility).
+   * Null means all columns. Only meaningful for csv/xlsx formats.
+   */
+  listExportColumns: string[] | null
+  /**
+   * Pre-resolved in-memory data for client-side textual formats (14.2).
+   * Required for Markdown / plain text / clipboard options to be functional;
+   * if absent those formats still appear but will produce empty output.
+   */
+  textExportData?: TextExportData | null
+  /**
+   * The live view container to rasterize for the PNG format (14.3).
+   * Required for PNG to be functional; if absent the format still appears
+   * but the action is a no-op.
+   */
+  captureElement?: HTMLElement | null
+  /**
+   * The mounted PresentationFrame's iframe — the shared render surface for
+   * the printable-view and HTML-save formats (14.4). Required for those
+   * formats to be functional; if absent the actions are a no-op.
+   */
+  presentationFrame?: HTMLIFrameElement | null
+  /**
+   * Period label for the PNG header (Calendar only) — e.g. "June 2026" or
+   * "Jun 1 – 7, 2026". The on-screen toolbar carries this, but it's excluded
+   * from the capture, so it's surfaced into the header strip instead.
+   */
+  periodLabel?: string | null
+  onClose: () => void
+}
+
+const VIEW_LABELS: Record<ExportViewType, string> = {
+  gantt: 'Gantt',
+  list: 'List',
+  kanban: 'Kanban',
+  calendar: 'Calendar',
+}
+
+type Scope = 'view' | 'all'
+
+// ── Client-side text generation ────────────────────────────────────────────────
+
+type ListStyle = 'table' | 'outline'
+
+function generateMarkdown(view: ExportViewType, data: TextExportData, timelineName: string, filterLabel: string | null, listStyle: ListStyle): string {
+  if (view === 'list') return listStyle === 'outline'
+    ? buildListMarkdownOutline(data, timelineName, filterLabel)
+    : buildListMarkdown(data, timelineName, filterLabel)
+  if (view === 'kanban') return buildKanbanMarkdown(data, timelineName, filterLabel)
+  if (view === 'calendar') return buildCalendarMarkdown(data, timelineName, filterLabel)
+  return buildListMarkdown(data, timelineName, filterLabel)
+}
+
+function generatePlainText(view: ExportViewType, data: TextExportData, timelineName: string, filterLabel: string | null, listStyle: ListStyle): string {
+  if (view === 'list') return listStyle === 'outline'
+    ? buildListPlainTextOutline(data, timelineName, filterLabel)
+    : buildListPlainText(data, timelineName, filterLabel)
+  if (view === 'kanban') return buildKanbanPlainText(data, timelineName, filterLabel)
+  if (view === 'calendar') return buildCalendarPlainText(data, timelineName, filterLabel)
+  return buildListPlainText(data, timelineName, filterLabel)
+}
+
+function generateHtml(view: ExportViewType, data: TextExportData, timelineName: string, filterLabel: string | null, listStyle: ListStyle): string {
+  if (view === 'list') return listStyle === 'outline'
+    ? buildListHtmlOutline(data, timelineName, filterLabel)
+    : buildListHtml(data, timelineName, filterLabel)
+  if (view === 'kanban') return buildKanbanHtml(data, timelineName, filterLabel)
+  if (view === 'calendar') return buildCalendarHtml(data, timelineName, filterLabel)
+  return buildListHtml(data, timelineName, filterLabel)
+}
+
+/** Triggers the browser to save a Blob with the given filename. */
+function saveBlob(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(url)
+}
+
+/**
+ * Writes `text/plain` + `text/html` flavors to the clipboard so the paste
+ * lands rich in Slack / Word / Google Docs and clean in code editors.
+ * Falls back to `writeText` if `ClipboardItem` is unavailable (HTTP contexts).
+ */
+async function copyToClipboard(plainText: string, htmlText: string): Promise<void> {
+  if (typeof ClipboardItem !== 'undefined' && navigator.clipboard.write) {
+    const item = new ClipboardItem({
+      'text/plain': new Blob([plainText], { type: 'text/plain' }),
+      'text/html': new Blob([htmlText], { type: 'text/html' }),
+    })
+    await navigator.clipboard.write([item])
+  } else {
+    // Fallback for HTTP (non-localhost) contexts where ClipboardItem is blocked.
+    await navigator.clipboard.writeText(plainText)
+  }
+}
+
+// ── Component ──────────────────────────────────────────────────────────────────
+
+export default function ExportDialog({
+  view,
+  timelineId,
+  timelineName,
+  teamName,
+  filterLabel,
+  filterDefinition,
+  filteredCount,
+  totalCount,
+  viewActivityIds,
+  listExportColumns,
+  textExportData,
+  captureElement,
+  presentationFrame,
+  periodLabel,
+  onClose,
+}: ExportDialogProps) {
+  const formats = getExportFormats(view)
+  const [formatId, setFormatId] = useState<ExportFormatId>('csv')
+  const [scope, setScope] = useState<Scope>('view')
+  const [listStyle, setListStyle] = useState<ListStyle>('table')
+  const [done, setDone] = useState(false)
+  const [clientPending, setClientPending] = useState(false)
+  const { download, isPending: serverPending } = useExport(timelineId, timelineName)
+  const doneTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const format = formats.find(f => f.id === formatId) ?? formats[0]
+  const Icon = format.icon
+  const isPending = serverPending || clientPending
+
+  // Client-side formats (PNG / Markdown / plain text) are inherently shaped by
+  // the active view, so their filename names it. Server data formats (CSV /
+  // xlsx / ICS) can be scoped to the whole timeline, where a view name would
+  // mislead — they keep the plain `<timeline>-<date>` name.
+  const filenameView = format.clientSide ? view : undefined
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  useEffect(() => () => { if (doneTimer.current) clearTimeout(doneTimer.current) }, [])
+
+  const selectFormat = (id: ExportFormatId) => {
+    setFormatId(id)
+    setDone(false)
+  }
+
+  const flashDone = useCallback(() => {
+    setDone(true)
+    doneTimer.current = setTimeout(() => setDone(false), 1600)
+  }, [])
+
+  const handleAction = useCallback(() => {
+    if (format.id === 'png') {
+      if (!captureElement) return
+      setClientPending(true)
+      capturePngSnapshot(captureElement, { timelineName, teamName: teamName ?? null, filterLabel, periodLabel })
+        .then(blob => { saveBlob(blob, buildExportFilename(timelineName, format.ext, view)); flashDone() })
+        .catch(() => { /* capture may fail on unsupported browsers */ })
+        .finally(() => setClientPending(false))
+      return
+    }
+
+    if (format.id === 'printable') {
+      if (!presentationFrame) return
+      printPresentationFrame(presentationFrame, { timelineName, teamName: teamName ?? null, filterLabel, periodLabel })
+      flashDone()
+      return
+    }
+
+    if (format.id === 'html') {
+      if (!presentationFrame) return
+      setClientPending(true)
+      saveFramePresentationHtml(
+        presentationFrame,
+        { timelineName, teamName: teamName ?? null, filterLabel, periodLabel },
+        buildExportFilename(timelineName, format.ext, view),
+      )
+        .then(() => flashDone())
+        .catch(() => { /* stylesheet fetch may fail offline; nothing was saved */ })
+        .finally(() => setClientPending(false))
+      return
+    }
+
+    if (format.clientSide) {
+      const data = textExportData ?? {
+        activities: [],
+        memberById: new Map(),
+        statusById: new Map(),
+        tagById: new Map(),
+        activityTitleById: new Map(),
+        kanbanColumns: null,
+        listDisplayRows: null,
+        listVisibleColumns: null,
+        kanbanShowHierarchy: false,
+        kanbanChildrenByParentId: new Map(),
+      }
+
+      if (format.id === 'clipboard') {
+        const plainText = generatePlainText(view, data, timelineName, filterLabel, listStyle)
+        const htmlText = generateHtml(view, data, timelineName, filterLabel, listStyle)
+        setClientPending(true)
+        copyToClipboard(plainText, htmlText)
+          .then(flashDone)
+          .catch(() => { /* clipboard may be denied */ })
+          .finally(() => setClientPending(false))
+        return
+      }
+
+      // markdown or plaintext — generate and download
+      const isMarkdown = format.id === 'markdown'
+      const content = isMarkdown
+        ? generateMarkdown(view, data, timelineName, filterLabel, listStyle)
+        : generatePlainText(view, data, timelineName, filterLabel, listStyle)
+      const mimeType = isMarkdown ? 'text/markdown;charset=utf-8' : 'text/plain;charset=utf-8'
+      const blob = new Blob([content], { type: mimeType })
+      saveBlob(blob, buildExportFilename(timelineName, format.ext, view))
+      flashDone()
+      return
+    }
+
+    // Server-side: CSV / xlsx / ICS
+    const isDataFormat = format.id === 'csv' || format.id === 'xlsx'
+    void download(format.id, format.ext, {
+      activityIds: scope === 'view' ? viewActivityIds : null,
+      filter: scope === 'view' && !viewActivityIds ? filterDefinition : null,
+      columns: isDataFormat ? listExportColumns : null,
+    }).then(flashDone)
+  }, [format, view, timelineName, teamName, filterLabel, periodLabel, textExportData, captureElement, presentationFrame, scope, listStyle, viewActivityIds, filterDefinition, listExportColumns, download, flashDone])
+
+  const emptyView = filteredCount === 0
+  const subWithFilter = filterLabel !== null
+    ? `${filteredCount} of ${totalCount} activities · matches your filter`
+    : `All ${totalCount} activities · nothing filtered out`
+
+  // Button label / icon for the primary action
+  const actionLabel = format.verb === 'copy'
+    ? done ? 'Copied!' : (isPending ? 'Copying…' : 'Copy to clipboard')
+    : format.verb === 'print'
+    ? done ? 'Print dialog opened' : 'Print…'
+    : done ? 'Downloaded' : (isPending ? 'Downloading…' : `Download ${format.ext}`)
+  const ActionIcon = format.verb === 'copy' ? Copy : format.verb === 'print' ? Printer : Download
+
+  return createPortal(
+    <div className="fixed inset-0 z-[1000] flex items-center justify-center bg-[hsl(200_24%_11%/0.55)] p-6 backdrop-blur-[2px]">
+      <div className="flex max-h-[88vh] w-[min(620px,100%)] flex-col overflow-hidden rounded-[var(--radius-xl)] bg-card shadow-[var(--shadow-lg)]">
+        {/* Header */}
+        <div className="flex shrink-0 items-start gap-3 px-5 py-[18px]">
+          <div className="flex h-[38px] w-[38px] shrink-0 items-center justify-center rounded-[var(--radius-md)] bg-[hsl(188_59%_38%/0.12)] text-primary">
+            <FileOutput size={19} strokeWidth={2.2} />
+          </div>
+          <div className="min-w-0 flex-1">
+            <h2 className="m-0 text-[17px] font-bold leading-tight text-foreground">Export this view</h2>
+            <div className="mt-0.5 flex items-center gap-1.5 text-[12.5px] text-muted-foreground">
+              <span className="inline-block h-2 w-2 shrink-0 rounded-sm bg-secondary" />
+              {timelineName ? `${timelineName} · ` : ''}{VIEW_LABELS[view]} view
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            aria-label="Close"
+            className="flex h-[30px] w-[30px] shrink-0 cursor-pointer items-center justify-center rounded-[var(--radius-md)] border-none bg-muted text-muted-foreground"
+          >
+            <X size={16} strokeWidth={2.2} />
+          </button>
+        </div>
+
+        {/* Filter context strip */}
+        <div className="shrink-0 border-b border-border px-5 pb-[14px]">
+          <div className={cn(
+            'rounded-[var(--radius-lg)] px-3 py-[9px]',
+            emptyView ? 'bg-[color-mix(in_srgb,var(--warning)_13%,transparent)]' : 'bg-muted',
+          )}>
+            <div className="flex items-center gap-2 text-[12.5px]">
+              {emptyView
+                ? <AlertTriangle size={14} className="shrink-0 text-warning" strokeWidth={2} />
+                : <Filter size={14} className="shrink-0 text-muted-foreground" strokeWidth={2} />}
+              <span className="flex-1 text-foreground">
+                {filterLabel !== null
+                  ? <>Filtered: <span className="font-semibold">{filterLabel}</span></>
+                  : `Exporting the ${VIEW_LABELS[view]} view as you see it`}
+              </span>
+              <span className={cn('shrink-0 text-[11.5px] font-semibold', emptyView ? 'text-warning' : 'text-muted-foreground')}>
+                {filterLabel !== null ? `${filteredCount} of ${totalCount} activities` : `All ${totalCount} activities`}
+              </span>
+            </div>
+            {emptyView && (
+              <div className="ml-[22px] mt-1 text-[12px] text-muted-foreground">
+                This view has no activities — the export will be empty or headers-only.
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Body — format rail + options pane */}
+        <div className="flex flex-1 overflow-hidden">
+          <div role="listbox" aria-label="Export format" className="flex w-[196px] shrink-0 flex-col gap-0.5 overflow-y-auto border-r border-border p-2.5">
+            {formats.map(f => {
+              const FIcon = f.icon
+              const selected = f.id === formatId
+              // Badge icon: copy for clipboard, printer for printable view, download for everything else
+              const BadgeIcon = f.verb === 'copy' ? Copy : f.verb === 'print' ? Printer : Download
+              return (
+                <button
+                  key={f.id}
+                  role="option"
+                  aria-selected={selected}
+                  onClick={() => selectFormat(f.id)}
+                  className={cn(
+                    'flex items-center gap-[9px] rounded-[var(--radius-md)] border-none px-[9px] py-2 text-left text-[13px] transition-colors',
+                    selected ? 'bg-[hsl(188_59%_38%/0.1)] text-foreground font-semibold' : 'bg-transparent text-foreground hover:bg-muted',
+                  )}
+                >
+                  <FIcon size={15} strokeWidth={selected ? 2.2 : 1.8} className={selected ? 'shrink-0 text-primary' : 'shrink-0 text-muted-foreground'} />
+                  <span className="flex-1 truncate">{f.name}</span>
+                  <span title={f.verb === 'copy' ? 'Copy' : f.verb === 'print' ? 'Print' : 'Download'} className={cn('shrink-0 text-muted-foreground', selected ? 'opacity-90' : 'opacity-65')}>
+                    <BadgeIcon size={11} strokeWidth={2} />
+                  </span>
+                </button>
+              )
+            })}
+          </div>
+
+          <div className="flex flex-1 flex-col gap-3.5 overflow-y-auto p-4">
+            {/* Format heading */}
+            <div className="flex items-start gap-2.5">
+              <Icon size={16} strokeWidth={2} className="mt-0.5 shrink-0 text-muted-foreground" />
+              <div>
+                <div className="text-[14px] font-bold text-foreground">{format.name}</div>
+                <div className="mt-0.5 text-[12.5px] leading-[1.5] text-muted-foreground">{format.desc}</div>
+              </div>
+            </div>
+
+            {/* Style picker — table vs outline, only for list view text formats */}
+            {(format.id === 'markdown' || format.id === 'plaintext' || format.id === 'clipboard') && view === 'list' && (
+              <div>
+                <div className="mb-1.5 text-[11px] font-bold uppercase tracking-[0.06em] text-muted-foreground">Style</div>
+                <div className="flex overflow-hidden rounded-[var(--radius-lg)] border border-border">
+                  <StyleOption
+                    label="Table"
+                    desc="Aligned columns"
+                    selected={listStyle === 'table'}
+                    onSelect={() => setListStyle('table')}
+                  />
+                  <div className="w-px shrink-0 bg-border" />
+                  <StyleOption
+                    label="Outline"
+                    desc="Bullet list with fields"
+                    selected={listStyle === 'outline'}
+                    onSelect={() => setListStyle('outline')}
+                  />
+                </div>
+              </div>
+            )}
+
+            {/* Scope picker — only for server-side data formats */}
+            {format.scope && (
+              <div>
+                <div className="mb-1.5 text-[11px] font-bold uppercase tracking-[0.06em] text-muted-foreground">Activities to export</div>
+                <div className="overflow-hidden rounded-[var(--radius-lg)] border border-border">
+                  <ScopeRow
+                    label="Current view"
+                    sub={subWithFilter}
+                    selected={scope === 'view'}
+                    onSelect={() => setScope('view')}
+                  />
+                  <div className="border-t border-border" />
+                  <ScopeRow
+                    label="Entire timeline"
+                    sub={`All ${totalCount} activities · ignores filters`}
+                    selected={scope === 'all'}
+                    onSelect={() => setScope('all')}
+                  />
+                </div>
+              </div>
+            )}
+
+            {/* Filename chip — only for download formats */}
+            {format.verb === 'download' && format.ext && (
+              <div>
+                <div className="mb-1.5 text-[11px] font-bold uppercase tracking-[0.06em] text-muted-foreground">File</div>
+                <div className="flex items-center gap-2 rounded-[var(--radius-md)] bg-muted px-[11px] py-[7px] font-mono text-[12px] text-foreground">
+                  <FileDown size={13} strokeWidth={2} className="shrink-0 text-muted-foreground" />
+                  <span className="truncate">{buildExportFilename(timelineName, format.ext, filenameView)}</span>
+                </div>
+              </div>
+            )}
+
+            {/* Clipboard note */}
+            {format.id === 'clipboard' && (
+              <div className="rounded-[var(--radius-md)] bg-muted px-3 py-2.5 text-[12px] leading-[1.5] text-muted-foreground">
+                Copies <strong className="text-foreground">rich text</strong> (HTML) + plain text — paste into Slack, Google Docs, or Word to get a formatted {view === 'list' && listStyle === 'outline' ? 'outline' : 'table'}.
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Footer */}
+        <div className="flex shrink-0 items-center justify-end gap-2.5 border-t border-border px-5 py-[13px]">
+          <Button variant="outline" onClick={onClose}>Cancel</Button>
+          <Button onClick={handleAction} disabled={isPending} className="min-w-[168px] justify-center">
+            {done
+              ? <><Check size={14} strokeWidth={2.2} /> {actionLabel}</>
+              : <><ActionIcon size={14} strokeWidth={2.2} /> {actionLabel}</>}
+          </Button>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  )
+}
+
+function StyleOption({ label, desc, selected, onSelect }: { label: string; desc: string; selected: boolean; onSelect: () => void }) {
+  return (
+    <button
+      onClick={onSelect}
+      className={cn(
+        'flex flex-1 flex-col items-start px-3 py-2.5 text-left transition-colors',
+        selected ? 'bg-[hsl(188_59%_38%/0.09)]' : 'bg-transparent hover:bg-muted',
+      )}
+    >
+      <span className="text-[13px] font-semibold text-foreground">{label}</span>
+      <span className="text-[11.5px] text-muted-foreground">{desc}</span>
+    </button>
+  )
+}
+
+function ScopeRow({ label, sub, selected, onSelect }: { label: string; sub: string; selected: boolean; onSelect: () => void }) {
+  return (
+    <button
+      onClick={onSelect}
+      className={cn(
+        'flex w-full items-start gap-2.5 px-3 py-2.5 text-left transition-colors',
+        selected ? 'bg-[hsl(188_59%_38%/0.09)]' : 'bg-transparent hover:bg-muted',
+      )}
+    >
+      <span className={cn(
+        'mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border-[1.5px]',
+        selected ? 'border-[5px] border-primary' : 'border-input',
+      )} />
+      <span>
+        <div className="text-[13px] font-semibold text-foreground">{label}</div>
+        <div className="text-[11.5px] text-muted-foreground">{sub}</div>
+      </span>
+    </button>
+  )
+}
+````
+
 ## File: packages/shared/src/index.ts
 ````typescript
 /**
@@ -63632,6 +66006,66 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/teams/{id}/timelines/{timelineId}/import": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Import activities into a timeline from a CSV or xlsx upload
+         * @description Stateless two-pass import. With `options.dryRun: true` the upload is parsed and validated but nothing is written (the preview); with `dryRun: false` the identical parse runs again and the accepted (ok + warning) rows are written in one transaction — error rows are always excluded. Errors are row-scoped; only structural problems (unsupported type, over the 2 MB / 2,000-row caps, no mappable Title column) produce a 400.
+         */
+        post: operations["importTimeline"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/import/template.csv": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Download the CSV import template
+         * @description The export header row plus two example rows (one minimal, one full). Served from the same column definitions as export, so template and export cannot drift.
+         */
+        get: operations["importTemplateCSV"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/import/template.xlsx": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Download the xlsx import template
+         * @description Same content as the CSV template, with Start/End as native Excel date cells.
+         */
+        get: operations["importTemplateXLSX"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/timelines/{id}/shares": {
         parameters: {
             query?: never;
@@ -64278,6 +66712,76 @@ export interface components {
                     [key: string]: unknown;
                 } | null;
             } | null;
+        };
+        ImportOptions: {
+            /** @description true = preview pass (parse + validate, write nothing); false = commit pass (re-parse the identical upload and write the accepted rows in one transaction). */
+            dryRun: boolean;
+            /** @description File column header → field name (title, start, end, description, status, assignees, tags, parent, progress, location, url). Omitted = server auto-mapping; when present it is authoritative and columns absent from it are ignored with a warning. */
+            mapping?: {
+                [key: string]: string;
+            } | null;
+            /**
+             * @description Disambiguates numeric dates only when the file itself stays ambiguous column-wide. Defaults to mdy.
+             * @enum {string}
+             */
+            dateOrder?: "mdy" | "dmy";
+            /** @description Opt in to creating unknown tag names instead of warn-and-skip. Default false. */
+            createMissingTags?: boolean;
+        };
+        ImportIssue: {
+            /** @enum {string} */
+            level: "warning" | "error";
+            /** @description The field the issue is scoped to (e.g. start, assignees); absent for row- or file-scoped issues. */
+            field?: string;
+            message: string;
+        };
+        ImportRowResult: {
+            /** @description 1-based source line / sheet row, for spreadsheet cross-reference. */
+            line: number;
+            /** @enum {string} */
+            status: "ok" | "warning" | "error";
+            /** @description The resolved preview of the row — display names, not IDs, since the preview's job is human ratification of the parser's interpretations. */
+            activity?: {
+                title?: string;
+                /** @description ISO calendar date. */
+                start?: string;
+                /** @description ISO calendar date. */
+                end?: string;
+                description?: string;
+                status?: string;
+                assignees?: string[];
+                tags?: string[];
+                parent?: string;
+                progress?: number | null;
+                location?: string;
+                url?: string;
+            } | null;
+            issues: components["schemas"]["ImportIssue"][];
+            /** @description Filled on the commit pass for written rows. */
+            createdId?: string;
+        };
+        ImportResult: {
+            /** @description The mapping actually used — every file column header mapped to a field name, or "" when the column was ignored. */
+            mapping: {
+                [key: string]: string;
+            };
+            summary: {
+                total: number;
+                ok: number;
+                warnings: number;
+                errors: number;
+                /** @description Zero on the dry-run pass. */
+                created: number;
+            };
+            /** @description Distinct unresolvable names, first-seen spelling, sorted. The tags list drives the "Create N missing tags" checkbox label. */
+            unknownNames: {
+                statuses: string[];
+                assignees: string[];
+                tags: string[];
+            };
+            /** @description File-level warnings (encoding fallback, ignored sheets, ignored columns) that belong to no single row. */
+            fileIssues: components["schemas"]["ImportIssue"][];
+            rows: components["schemas"]["ImportRowResult"][];
         };
         PatchShareInput: {
             name?: string | null;
@@ -67041,6 +69545,91 @@ export interface operations {
             500: components["responses"]["InternalError"];
         };
     };
+    importTimeline: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Team ID. */
+                id: components["parameters"]["teamId"];
+                /** @description Timeline ID (nested under team). */
+                timelineId: components["parameters"]["timelineIdNested"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "multipart/form-data": {
+                    /**
+                     * Format: binary
+                     * @description The CSV or xlsx upload (max 2 MB / 2,000 rows).
+                     */
+                    file: string;
+                    options: components["schemas"]["ImportOptions"];
+                };
+            };
+        };
+        responses: {
+            /** @description The validation result (both passes). The commit pass additionally fills `summary.created` and per-row `createdId`. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ImportResult"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    importTemplateCSV: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The template file. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/csv": string;
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    importTemplateXLSX: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The template file. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": string;
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
     createShare: {
         parameters: {
             query?: never;
@@ -68361,6 +70950,165 @@ components:
               description: >
                 A FilterDefinition (`{ logic, conditions }`), matching the
                 shape used by saved filters and share view configs.
+
+    ImportOptions:
+      type: object
+      required: [dryRun]
+      properties:
+        dryRun:
+          type: boolean
+          description: >
+            true = preview pass (parse + validate, write nothing); false =
+            commit pass (re-parse the identical upload and write the accepted
+            rows in one transaction).
+        mapping:
+          type: object
+          nullable: true
+          additionalProperties:
+            type: string
+          description: >
+            File column header → field name (title, start, end, description,
+            status, assignees, tags, parent, progress, location, url).
+            Omitted = server auto-mapping; when present it is authoritative
+            and columns absent from it are ignored with a warning.
+        dateOrder:
+          type: string
+          enum: [mdy, dmy]
+          description: >
+            Disambiguates numeric dates only when the file itself stays
+            ambiguous column-wide. Defaults to mdy.
+        createMissingTags:
+          type: boolean
+          description: >
+            Opt in to creating unknown tag names instead of warn-and-skip.
+            Default false.
+
+    ImportIssue:
+      type: object
+      required: [level, message]
+      properties:
+        level:
+          type: string
+          enum: [warning, error]
+        field:
+          type: string
+          description: >
+            The field the issue is scoped to (e.g. start, assignees); absent
+            for row- or file-scoped issues.
+        message:
+          type: string
+
+    ImportRowResult:
+      type: object
+      required: [line, status, issues]
+      properties:
+        line:
+          type: integer
+          description: 1-based source line / sheet row, for spreadsheet cross-reference.
+        status:
+          type: string
+          enum: [ok, warning, error]
+        activity:
+          type: object
+          nullable: true
+          description: >
+            The resolved preview of the row — display names, not IDs, since
+            the preview's job is human ratification of the parser's
+            interpretations.
+          properties:
+            title:
+              type: string
+            start:
+              type: string
+              description: ISO calendar date.
+            end:
+              type: string
+              description: ISO calendar date.
+            description:
+              type: string
+            status:
+              type: string
+            assignees:
+              type: array
+              items:
+                type: string
+            tags:
+              type: array
+              items:
+                type: string
+            parent:
+              type: string
+            progress:
+              type: integer
+              nullable: true
+            location:
+              type: string
+            url:
+              type: string
+        issues:
+          type: array
+          items:
+            $ref: "#/components/schemas/ImportIssue"
+        createdId:
+          type: string
+          description: Filled on the commit pass for written rows.
+
+    ImportResult:
+      type: object
+      required: [mapping, summary, unknownNames, fileIssues, rows]
+      properties:
+        mapping:
+          type: object
+          additionalProperties:
+            type: string
+          description: >
+            The mapping actually used — every file column header mapped to a
+            field name, or "" when the column was ignored.
+        summary:
+          type: object
+          required: [total, ok, warnings, errors, created]
+          properties:
+            total:
+              type: integer
+            ok:
+              type: integer
+            warnings:
+              type: integer
+            errors:
+              type: integer
+            created:
+              type: integer
+              description: Zero on the dry-run pass.
+        unknownNames:
+          type: object
+          required: [statuses, assignees, tags]
+          description: >
+            Distinct unresolvable names, first-seen spelling, sorted. The
+            tags list drives the "Create N missing tags" checkbox label.
+          properties:
+            statuses:
+              type: array
+              items:
+                type: string
+            assignees:
+              type: array
+              items:
+                type: string
+            tags:
+              type: array
+              items:
+                type: string
+        fileIssues:
+          type: array
+          items:
+            $ref: "#/components/schemas/ImportIssue"
+          description: >
+            File-level warnings (encoding fallback, ignored sheets, ignored
+            columns) that belong to no single row.
+        rows:
+          type: array
+          items:
+            $ref: "#/components/schemas/ImportRowResult"
 
     PatchShareInput:
       type: object
@@ -71250,6 +73998,101 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  # ── Import ──────────────────────────────────────────────────────────────────
+
+  /teams/{id}/timelines/{timelineId}/import:
+    post:
+      operationId: importTimeline
+      summary: Import activities into a timeline from a CSV or xlsx upload
+      description: >
+        Stateless two-pass import. With `options.dryRun: true` the upload is
+        parsed and validated but nothing is written (the preview); with
+        `dryRun: false` the identical parse runs again and the accepted (ok +
+        warning) rows are written in one transaction — error rows are always
+        excluded. Errors are row-scoped; only structural problems
+        (unsupported type, over the 2 MB / 2,000-row caps, no mappable Title
+        column) produce a 400.
+      tags: [import]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+        - $ref: "#/components/parameters/timelineIdNested"
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file, options]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: The CSV or xlsx upload (max 2 MB / 2,000 rows).
+                options:
+                  $ref: "#/components/schemas/ImportOptions"
+      responses:
+        "200":
+          description: >
+            The validation result (both passes). The commit pass additionally
+            fills `summary.created` and per-row `createdId`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImportResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /import/template.csv:
+    get:
+      operationId: importTemplateCSV
+      summary: Download the CSV import template
+      description: >
+        The export header row plus two example rows (one minimal, one full).
+        Served from the same column definitions as export, so template and
+        export cannot drift.
+      tags: [import]
+      responses:
+        "200":
+          description: The template file.
+          content:
+            text/csv:
+              schema:
+                type: string
+                format: binary
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /import/template.xlsx:
+    get:
+      operationId: importTemplateXLSX
+      summary: Download the xlsx import template
+      description: >
+        Same content as the CSV template, with Start/End as native Excel date
+        cells.
+      tags: [import]
+      responses:
+        "200":
+          description: The template file.
+          content:
+            application/vnd.openxmlformats-officedocument.spreadsheetml.sheet:
+              schema:
+                type: string
+                format: binary
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
   # ── Shares ──────────────────────────────────────────────────────────────────
 
   /timelines/{id}/shares:
@@ -71594,531 +74437,6 @@ paths:
           $ref: "#/components/responses/NotFound"
         "500":
           $ref: "#/components/responses/InternalError"
-````
-
-## File: packages/web/src/components/ExportDialog.tsx
-````typescript
-/**
- * ExportDialog — "Export this view" modal (Phase 14).
- *
- * Built to the export-modal design handoff (docs/design/handoffs/export-modal):
- * a format rail + options pane two-pane body, a filter context strip that
- * makes "export what I'm seeing" visible, and a scope picker (current view vs
- * entire timeline) for the data formats. Modeled on ShareModal's portal shell,
- * but — per the handoff — the overlay click does not close the dialog, only
- * Esc / the close button / Cancel do.
- *
- * 14.1 implements the server-side data/calendar formats (CSV, Excel, ICS).
- * 14.2 adds client-side textual formats (Markdown, Plain text, Copy to clipboard)
- *      via the `textExportData` prop; these formats only appear for non-Gantt views.
- * 14.3 adds the PNG snapshot format, rasterizing `captureElement` (the live
- *      view container) via `lib/pngExport.ts`; available in every view.
- * 14.4 adds the printable-view and HTML-save formats, both driven off the
- *      `presentationFrame` prop (the mounted PresentationFrame iframe) via
- *      `lib/printExport.ts` / `lib/htmlExport.ts`; available in every view.
- */
-
-import { useEffect, useRef, useState, useCallback } from 'react'
-import { createPortal } from 'react-dom'
-import {
-  FileOutput, Filter, AlertTriangle, Download, FileDown, Check, X, Copy, Printer,
-} from 'lucide-react'
-import { Button } from '@/components/ui/button'
-import { cn } from '@/lib/utils'
-import { useExport } from '@/hooks/useExport'
-import {
-  getExportFormats, buildExportFilename,
-  type ExportFormatId, type ExportViewType,
-} from '@/lib/exportCapabilities'
-import {
-  buildListMarkdown, buildListMarkdownOutline,
-  buildKanbanMarkdown, buildCalendarMarkdown,
-  buildListPlainText, buildListPlainTextOutline,
-  buildKanbanPlainText, buildCalendarPlainText,
-  buildListHtml, buildListHtmlOutline, buildKanbanHtml, buildCalendarHtml,
-  type TextExportData,
-} from '@/lib/textExport'
-import { capturePngSnapshot } from '@/lib/pngExport'
-import { printPresentationFrame } from '@/lib/printExport'
-import { saveFramePresentationHtml } from '@/lib/htmlExport'
-import type { FilterDefinition } from '@/lib/filterTypes'
-
-export type { TextExportData }
-
-export interface ExportDialogProps {
-  view: ExportViewType
-  teamId: string
-  timelineId: string
-  timelineName: string
-  /** Team display name, shown in the PNG header strip alongside the timeline name. */
-  teamName?: string | null
-  /** Display label for the active filter (e.g. a saved filter's name), or null if no filter is active. */
-  filterLabel: string | null
-  /** The active filter's definition, sent to the server when scope is "view" and activityIds is absent. */
-  filterDefinition: FilterDefinition | null
-  /** Number of activities matching the active filter (or totalCount when no filter is active). */
-  filteredCount: number
-  /** Total number of activities in the timeline, regardless of filter. */
-  totalCount: number
-  /**
-   * Ordered activity IDs for the "current view" scope — covers preset/member
-   * filters (which can't be sent as a FilterDefinition) and list-view sort order.
-   * When non-null, takes precedence over filterDefinition in the request body.
-   */
-  viewActivityIds: string[] | null
-  /**
-   * Export column names to include in CSV/Excel (list view column visibility).
-   * Null means all columns. Only meaningful for csv/xlsx formats.
-   */
-  listExportColumns: string[] | null
-  /**
-   * Pre-resolved in-memory data for client-side textual formats (14.2).
-   * Required for Markdown / plain text / clipboard options to be functional;
-   * if absent those formats still appear but will produce empty output.
-   */
-  textExportData?: TextExportData | null
-  /**
-   * The live view container to rasterize for the PNG format (14.3).
-   * Required for PNG to be functional; if absent the format still appears
-   * but the action is a no-op.
-   */
-  captureElement?: HTMLElement | null
-  /**
-   * The mounted PresentationFrame's iframe — the shared render surface for
-   * the printable-view and HTML-save formats (14.4). Required for those
-   * formats to be functional; if absent the actions are a no-op.
-   */
-  presentationFrame?: HTMLIFrameElement | null
-  /**
-   * Period label for the PNG header (Calendar only) — e.g. "June 2026" or
-   * "Jun 1 – 7, 2026". The on-screen toolbar carries this, but it's excluded
-   * from the capture, so it's surfaced into the header strip instead.
-   */
-  periodLabel?: string | null
-  onClose: () => void
-}
-
-const VIEW_LABELS: Record<ExportViewType, string> = {
-  gantt: 'Gantt',
-  list: 'List',
-  kanban: 'Kanban',
-  calendar: 'Calendar',
-}
-
-type Scope = 'view' | 'all'
-
-// ── Client-side text generation ────────────────────────────────────────────────
-
-type ListStyle = 'table' | 'outline'
-
-function generateMarkdown(view: ExportViewType, data: TextExportData, timelineName: string, filterLabel: string | null, listStyle: ListStyle): string {
-  if (view === 'list') return listStyle === 'outline'
-    ? buildListMarkdownOutline(data, timelineName, filterLabel)
-    : buildListMarkdown(data, timelineName, filterLabel)
-  if (view === 'kanban') return buildKanbanMarkdown(data, timelineName, filterLabel)
-  if (view === 'calendar') return buildCalendarMarkdown(data, timelineName, filterLabel)
-  return buildListMarkdown(data, timelineName, filterLabel)
-}
-
-function generatePlainText(view: ExportViewType, data: TextExportData, timelineName: string, filterLabel: string | null, listStyle: ListStyle): string {
-  if (view === 'list') return listStyle === 'outline'
-    ? buildListPlainTextOutline(data, timelineName, filterLabel)
-    : buildListPlainText(data, timelineName, filterLabel)
-  if (view === 'kanban') return buildKanbanPlainText(data, timelineName, filterLabel)
-  if (view === 'calendar') return buildCalendarPlainText(data, timelineName, filterLabel)
-  return buildListPlainText(data, timelineName, filterLabel)
-}
-
-function generateHtml(view: ExportViewType, data: TextExportData, timelineName: string, filterLabel: string | null, listStyle: ListStyle): string {
-  if (view === 'list') return listStyle === 'outline'
-    ? buildListHtmlOutline(data, timelineName, filterLabel)
-    : buildListHtml(data, timelineName, filterLabel)
-  if (view === 'kanban') return buildKanbanHtml(data, timelineName, filterLabel)
-  if (view === 'calendar') return buildCalendarHtml(data, timelineName, filterLabel)
-  return buildListHtml(data, timelineName, filterLabel)
-}
-
-/** Triggers the browser to save a Blob with the given filename. */
-function saveBlob(blob: Blob, filename: string): void {
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = filename
-  document.body.appendChild(a)
-  a.click()
-  a.remove()
-  URL.revokeObjectURL(url)
-}
-
-/**
- * Writes `text/plain` + `text/html` flavors to the clipboard so the paste
- * lands rich in Slack / Word / Google Docs and clean in code editors.
- * Falls back to `writeText` if `ClipboardItem` is unavailable (HTTP contexts).
- */
-async function copyToClipboard(plainText: string, htmlText: string): Promise<void> {
-  if (typeof ClipboardItem !== 'undefined' && navigator.clipboard.write) {
-    const item = new ClipboardItem({
-      'text/plain': new Blob([plainText], { type: 'text/plain' }),
-      'text/html': new Blob([htmlText], { type: 'text/html' }),
-    })
-    await navigator.clipboard.write([item])
-  } else {
-    // Fallback for HTTP (non-localhost) contexts where ClipboardItem is blocked.
-    await navigator.clipboard.writeText(plainText)
-  }
-}
-
-// ── Component ──────────────────────────────────────────────────────────────────
-
-export default function ExportDialog({
-  view,
-  timelineId,
-  timelineName,
-  teamName,
-  filterLabel,
-  filterDefinition,
-  filteredCount,
-  totalCount,
-  viewActivityIds,
-  listExportColumns,
-  textExportData,
-  captureElement,
-  presentationFrame,
-  periodLabel,
-  onClose,
-}: ExportDialogProps) {
-  const formats = getExportFormats(view)
-  const [formatId, setFormatId] = useState<ExportFormatId>('csv')
-  const [scope, setScope] = useState<Scope>('view')
-  const [listStyle, setListStyle] = useState<ListStyle>('table')
-  const [done, setDone] = useState(false)
-  const [clientPending, setClientPending] = useState(false)
-  const { download, isPending: serverPending } = useExport(timelineId, timelineName)
-  const doneTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
-
-  const format = formats.find(f => f.id === formatId) ?? formats[0]
-  const Icon = format.icon
-  const isPending = serverPending || clientPending
-
-  // Client-side formats (PNG / Markdown / plain text) are inherently shaped by
-  // the active view, so their filename names it. Server data formats (CSV /
-  // xlsx / ICS) can be scoped to the whole timeline, where a view name would
-  // mislead — they keep the plain `<timeline>-<date>` name.
-  const filenameView = format.clientSide ? view : undefined
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [onClose])
-
-  useEffect(() => () => { if (doneTimer.current) clearTimeout(doneTimer.current) }, [])
-
-  const selectFormat = (id: ExportFormatId) => {
-    setFormatId(id)
-    setDone(false)
-  }
-
-  const flashDone = useCallback(() => {
-    setDone(true)
-    doneTimer.current = setTimeout(() => setDone(false), 1600)
-  }, [])
-
-  const handleAction = useCallback(() => {
-    if (format.id === 'png') {
-      if (!captureElement) return
-      setClientPending(true)
-      capturePngSnapshot(captureElement, { timelineName, teamName: teamName ?? null, filterLabel, periodLabel })
-        .then(blob => { saveBlob(blob, buildExportFilename(timelineName, format.ext, view)); flashDone() })
-        .catch(() => { /* capture may fail on unsupported browsers */ })
-        .finally(() => setClientPending(false))
-      return
-    }
-
-    if (format.id === 'printable') {
-      if (!presentationFrame) return
-      printPresentationFrame(presentationFrame, { timelineName, teamName: teamName ?? null, filterLabel, periodLabel })
-      flashDone()
-      return
-    }
-
-    if (format.id === 'html') {
-      if (!presentationFrame) return
-      setClientPending(true)
-      saveFramePresentationHtml(
-        presentationFrame,
-        { timelineName, teamName: teamName ?? null, filterLabel, periodLabel },
-        buildExportFilename(timelineName, format.ext, view),
-      )
-        .then(() => flashDone())
-        .catch(() => { /* stylesheet fetch may fail offline; nothing was saved */ })
-        .finally(() => setClientPending(false))
-      return
-    }
-
-    if (format.clientSide) {
-      const data = textExportData ?? {
-        activities: [],
-        memberById: new Map(),
-        statusById: new Map(),
-        tagById: new Map(),
-        activityTitleById: new Map(),
-        kanbanColumns: null,
-        listDisplayRows: null,
-        listVisibleColumns: null,
-        kanbanShowHierarchy: false,
-        kanbanChildrenByParentId: new Map(),
-      }
-
-      if (format.id === 'clipboard') {
-        const plainText = generatePlainText(view, data, timelineName, filterLabel, listStyle)
-        const htmlText = generateHtml(view, data, timelineName, filterLabel, listStyle)
-        setClientPending(true)
-        copyToClipboard(plainText, htmlText)
-          .then(flashDone)
-          .catch(() => { /* clipboard may be denied */ })
-          .finally(() => setClientPending(false))
-        return
-      }
-
-      // markdown or plaintext — generate and download
-      const isMarkdown = format.id === 'markdown'
-      const content = isMarkdown
-        ? generateMarkdown(view, data, timelineName, filterLabel, listStyle)
-        : generatePlainText(view, data, timelineName, filterLabel, listStyle)
-      const mimeType = isMarkdown ? 'text/markdown;charset=utf-8' : 'text/plain;charset=utf-8'
-      const blob = new Blob([content], { type: mimeType })
-      saveBlob(blob, buildExportFilename(timelineName, format.ext, view))
-      flashDone()
-      return
-    }
-
-    // Server-side: CSV / xlsx / ICS
-    const isDataFormat = format.id === 'csv' || format.id === 'xlsx'
-    void download(format.id, format.ext, {
-      activityIds: scope === 'view' ? viewActivityIds : null,
-      filter: scope === 'view' && !viewActivityIds ? filterDefinition : null,
-      columns: isDataFormat ? listExportColumns : null,
-    }).then(flashDone)
-  }, [format, view, timelineName, teamName, filterLabel, periodLabel, textExportData, captureElement, presentationFrame, scope, listStyle, viewActivityIds, filterDefinition, listExportColumns, download, flashDone])
-
-  const emptyView = filteredCount === 0
-  const subWithFilter = filterLabel !== null
-    ? `${filteredCount} of ${totalCount} activities · matches your filter`
-    : `All ${totalCount} activities · nothing filtered out`
-
-  // Button label / icon for the primary action
-  const actionLabel = format.verb === 'copy'
-    ? done ? 'Copied!' : (isPending ? 'Copying…' : 'Copy to clipboard')
-    : format.verb === 'print'
-    ? done ? 'Print dialog opened' : 'Print…'
-    : done ? 'Downloaded' : (isPending ? 'Downloading…' : `Download ${format.ext}`)
-  const ActionIcon = format.verb === 'copy' ? Copy : format.verb === 'print' ? Printer : Download
-
-  return createPortal(
-    <div className="fixed inset-0 z-[1000] flex items-center justify-center bg-[hsl(200_24%_11%/0.55)] p-6 backdrop-blur-[2px]">
-      <div className="flex max-h-[88vh] w-[min(620px,100%)] flex-col overflow-hidden rounded-[var(--radius-xl)] bg-card shadow-[var(--shadow-lg)]">
-        {/* Header */}
-        <div className="flex shrink-0 items-start gap-3 px-5 py-[18px]">
-          <div className="flex h-[38px] w-[38px] shrink-0 items-center justify-center rounded-[var(--radius-md)] bg-[hsl(188_59%_38%/0.12)] text-primary">
-            <FileOutput size={19} strokeWidth={2.2} />
-          </div>
-          <div className="min-w-0 flex-1">
-            <h2 className="m-0 text-[17px] font-bold leading-tight text-foreground">Export this view</h2>
-            <div className="mt-0.5 flex items-center gap-1.5 text-[12.5px] text-muted-foreground">
-              <span className="inline-block h-2 w-2 shrink-0 rounded-sm bg-secondary" />
-              {timelineName ? `${timelineName} · ` : ''}{VIEW_LABELS[view]} view
-            </div>
-          </div>
-          <button
-            onClick={onClose}
-            aria-label="Close"
-            className="flex h-[30px] w-[30px] shrink-0 cursor-pointer items-center justify-center rounded-[var(--radius-md)] border-none bg-muted text-muted-foreground"
-          >
-            <X size={16} strokeWidth={2.2} />
-          </button>
-        </div>
-
-        {/* Filter context strip */}
-        <div className="shrink-0 border-b border-border px-5 pb-[14px]">
-          <div className={cn(
-            'rounded-[var(--radius-lg)] px-3 py-[9px]',
-            emptyView ? 'bg-[color-mix(in_srgb,var(--warning)_13%,transparent)]' : 'bg-muted',
-          )}>
-            <div className="flex items-center gap-2 text-[12.5px]">
-              {emptyView
-                ? <AlertTriangle size={14} className="shrink-0 text-warning" strokeWidth={2} />
-                : <Filter size={14} className="shrink-0 text-muted-foreground" strokeWidth={2} />}
-              <span className="flex-1 text-foreground">
-                {filterLabel !== null
-                  ? <>Filtered: <span className="font-semibold">{filterLabel}</span></>
-                  : `Exporting the ${VIEW_LABELS[view]} view as you see it`}
-              </span>
-              <span className={cn('shrink-0 text-[11.5px] font-semibold', emptyView ? 'text-warning' : 'text-muted-foreground')}>
-                {filterLabel !== null ? `${filteredCount} of ${totalCount} activities` : `All ${totalCount} activities`}
-              </span>
-            </div>
-            {emptyView && (
-              <div className="ml-[22px] mt-1 text-[12px] text-muted-foreground">
-                This view has no activities — the export will be empty or headers-only.
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* Body — format rail + options pane */}
-        <div className="flex flex-1 overflow-hidden">
-          <div role="listbox" aria-label="Export format" className="flex w-[196px] shrink-0 flex-col gap-0.5 overflow-y-auto border-r border-border p-2.5">
-            {formats.map(f => {
-              const FIcon = f.icon
-              const selected = f.id === formatId
-              // Badge icon: copy for clipboard, printer for printable view, download for everything else
-              const BadgeIcon = f.verb === 'copy' ? Copy : f.verb === 'print' ? Printer : Download
-              return (
-                <button
-                  key={f.id}
-                  role="option"
-                  aria-selected={selected}
-                  onClick={() => selectFormat(f.id)}
-                  className={cn(
-                    'flex items-center gap-[9px] rounded-[var(--radius-md)] border-none px-[9px] py-2 text-left text-[13px] transition-colors',
-                    selected ? 'bg-[hsl(188_59%_38%/0.1)] text-foreground font-semibold' : 'bg-transparent text-foreground hover:bg-muted',
-                  )}
-                >
-                  <FIcon size={15} strokeWidth={selected ? 2.2 : 1.8} className={selected ? 'shrink-0 text-primary' : 'shrink-0 text-muted-foreground'} />
-                  <span className="flex-1 truncate">{f.name}</span>
-                  <span title={f.verb === 'copy' ? 'Copy' : f.verb === 'print' ? 'Print' : 'Download'} className={cn('shrink-0 text-muted-foreground', selected ? 'opacity-90' : 'opacity-65')}>
-                    <BadgeIcon size={11} strokeWidth={2} />
-                  </span>
-                </button>
-              )
-            })}
-          </div>
-
-          <div className="flex flex-1 flex-col gap-3.5 overflow-y-auto p-4">
-            {/* Format heading */}
-            <div className="flex items-start gap-2.5">
-              <Icon size={16} strokeWidth={2} className="mt-0.5 shrink-0 text-muted-foreground" />
-              <div>
-                <div className="text-[14px] font-bold text-foreground">{format.name}</div>
-                <div className="mt-0.5 text-[12.5px] leading-[1.5] text-muted-foreground">{format.desc}</div>
-              </div>
-            </div>
-
-            {/* Style picker — table vs outline, only for list view text formats */}
-            {(format.id === 'markdown' || format.id === 'plaintext' || format.id === 'clipboard') && view === 'list' && (
-              <div>
-                <div className="mb-1.5 text-[11px] font-bold uppercase tracking-[0.06em] text-muted-foreground">Style</div>
-                <div className="flex overflow-hidden rounded-[var(--radius-lg)] border border-border">
-                  <StyleOption
-                    label="Table"
-                    desc="Aligned columns"
-                    selected={listStyle === 'table'}
-                    onSelect={() => setListStyle('table')}
-                  />
-                  <div className="w-px shrink-0 bg-border" />
-                  <StyleOption
-                    label="Outline"
-                    desc="Bullet list with fields"
-                    selected={listStyle === 'outline'}
-                    onSelect={() => setListStyle('outline')}
-                  />
-                </div>
-              </div>
-            )}
-
-            {/* Scope picker — only for server-side data formats */}
-            {format.scope && (
-              <div>
-                <div className="mb-1.5 text-[11px] font-bold uppercase tracking-[0.06em] text-muted-foreground">Activities to export</div>
-                <div className="overflow-hidden rounded-[var(--radius-lg)] border border-border">
-                  <ScopeRow
-                    label="Current view"
-                    sub={subWithFilter}
-                    selected={scope === 'view'}
-                    onSelect={() => setScope('view')}
-                  />
-                  <div className="border-t border-border" />
-                  <ScopeRow
-                    label="Entire timeline"
-                    sub={`All ${totalCount} activities · ignores filters`}
-                    selected={scope === 'all'}
-                    onSelect={() => setScope('all')}
-                  />
-                </div>
-              </div>
-            )}
-
-            {/* Filename chip — only for download formats */}
-            {format.verb === 'download' && format.ext && (
-              <div>
-                <div className="mb-1.5 text-[11px] font-bold uppercase tracking-[0.06em] text-muted-foreground">File</div>
-                <div className="flex items-center gap-2 rounded-[var(--radius-md)] bg-muted px-[11px] py-[7px] font-mono text-[12px] text-foreground">
-                  <FileDown size={13} strokeWidth={2} className="shrink-0 text-muted-foreground" />
-                  <span className="truncate">{buildExportFilename(timelineName, format.ext, filenameView)}</span>
-                </div>
-              </div>
-            )}
-
-            {/* Clipboard note */}
-            {format.id === 'clipboard' && (
-              <div className="rounded-[var(--radius-md)] bg-muted px-3 py-2.5 text-[12px] leading-[1.5] text-muted-foreground">
-                Copies <strong className="text-foreground">rich text</strong> (HTML) + plain text — paste into Slack, Google Docs, or Word to get a formatted {view === 'list' && listStyle === 'outline' ? 'outline' : 'table'}.
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* Footer */}
-        <div className="flex shrink-0 items-center justify-end gap-2.5 border-t border-border px-5 py-[13px]">
-          <Button variant="outline" onClick={onClose}>Cancel</Button>
-          <Button onClick={handleAction} disabled={isPending} className="min-w-[168px] justify-center">
-            {done
-              ? <><Check size={14} strokeWidth={2.2} /> {actionLabel}</>
-              : <><ActionIcon size={14} strokeWidth={2.2} /> {actionLabel}</>}
-          </Button>
-        </div>
-      </div>
-    </div>,
-    document.body,
-  )
-}
-
-function StyleOption({ label, desc, selected, onSelect }: { label: string; desc: string; selected: boolean; onSelect: () => void }) {
-  return (
-    <button
-      onClick={onSelect}
-      className={cn(
-        'flex flex-1 flex-col items-start px-3 py-2.5 text-left transition-colors',
-        selected ? 'bg-[hsl(188_59%_38%/0.09)]' : 'bg-transparent hover:bg-muted',
-      )}
-    >
-      <span className="text-[13px] font-semibold text-foreground">{label}</span>
-      <span className="text-[11.5px] text-muted-foreground">{desc}</span>
-    </button>
-  )
-}
-
-function ScopeRow({ label, sub, selected, onSelect }: { label: string; sub: string; selected: boolean; onSelect: () => void }) {
-  return (
-    <button
-      onClick={onSelect}
-      className={cn(
-        'flex w-full items-start gap-2.5 px-3 py-2.5 text-left transition-colors',
-        selected ? 'bg-[hsl(188_59%_38%/0.09)]' : 'bg-transparent hover:bg-muted',
-      )}
-    >
-      <span className={cn(
-        'mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border-[1.5px]',
-        selected ? 'border-[5px] border-primary' : 'border-input',
-      )} />
-      <span>
-        <div className="text-[13px] font-semibold text-foreground">{label}</div>
-        <div className="text-[11.5px] text-muted-foreground">{sub}</div>
-      </span>
-    </button>
-  )
-}
 ````
 
 ## File: packages/web/src/pages/DashboardPage.tsx
@@ -74610,16 +76928,16 @@ _Re-planned 2026-06-11 — see [docs/plans/phase-14-export.md](plans/phase-14-ex
 _Planned 2026-07-03 — see [docs/plans/phase-15-import.md](plans/phase-15-import.md). Design thesis: liberal parse, strict write, every interpretation visible in the mandatory preview. Decisions locked: warn+skip for unknown status/assignee (never auto-create), opt-in checkbox for creating missing tags, additive-only (no upsert until Phase 18 external IDs), stateless two-pass (same endpoint, `dryRun` flag)._
 
 **15.1 Server — parse, validate, preview, commit, template:**
-- [ ] `internal/importer` package: CSV (delimiter sniffing, BOM/cp1252 tolerance) + xlsx (excelize, typed date cells) parsing into a common row model
-- [ ] Header auto-mapping: template headers + synonym table, case/whitespace-insensitive; explicit `mapping` override in options; unmapped columns ignored with warnings
-- [ ] Date parsing: ISO, numeric (column-wide ambiguity resolution + `dateOrder` option), written months, Excel serials; missing End → = Start (warning); end-before-start → error
-- [ ] Name resolution against target timeline/team: status (exact normalized), assignees (name or email, `,`/`;` split), tags (+ `createMissingTags`), parent (in-file rows first, then existing activities; ambiguity/cycle → warn + skip link)
-- [ ] Per-cell ok/warning/error results rolled up per row; errors row-scoped, never file-scoped (except structural 400s: type, 2 MB / 2,000-row cap, no Title column)
-- [ ] `POST /teams/:id/timelines/:timelineId/import` — multipart, `dryRun` preview (provably read-only) / commit (one transaction, parents before children, writes ok+warning rows, skips error rows)
-- [ ] Duplicate detection: normalized title+start+end match against existing activities → "possible duplicate" warning (additive semantics kept)
-- [ ] `GET /import/template.csv|.xlsx` — export header row + minimal/full example rows, served from `internal/export` column definitions
-- [ ] OpenAPI: `ImportOptions`, `ImportResult`, `ImportRowResult`, `ImportIssue`; regenerate TS types
-- [ ] Table-driven tolerance-rule tests (every parser-contract rule in the plan gets a fixture); round-trip test (14.1 export → import → same activities modulo IDs); dry-run leaves DB byte-identical
+- [x] `internal/importer` package: CSV (delimiter sniffing, BOM/cp1252 tolerance) + xlsx (excelize, typed date cells) parsing into a common row model — 2026-07-03
+- [x] Header auto-mapping: template headers + synonym table, case/whitespace-insensitive; explicit `mapping` override in options; unmapped columns ignored with warnings — 2026-07-03
+- [x] Date parsing: ISO, numeric (column-wide ambiguity resolution + `dateOrder` option), written months, Excel serials; missing End → = Start (warning); end-before-start → error — 2026-07-03
+- [x] Name resolution against target timeline/team: status (exact normalized), assignees (name or email, `,`/`;` split), tags (+ `createMissingTags`), parent (in-file rows first, then existing activities; ambiguity/cycle → warn + skip link) — 2026-07-03
+- [x] Per-cell ok/warning/error results rolled up per row; errors row-scoped, never file-scoped (except structural 400s: type, 2 MB / 2,000-row cap, no Title column) — 2026-07-03
+- [x] `POST /teams/:id/timelines/:timelineId/import` — multipart, `dryRun` preview (provably read-only) / commit (one transaction, parents before children, writes ok+warning rows, skips error rows) — 2026-07-03
+- [x] Duplicate detection: normalized title+start+end match against existing activities → "possible duplicate" warning (additive semantics kept) — 2026-07-03
+- [x] `GET /import/template.csv|.xlsx` — export header row + minimal/full example rows, served from `internal/export` column definitions — 2026-07-03
+- [x] OpenAPI: `ImportOptions`, `ImportResult`, `ImportRowResult`, `ImportIssue`; regenerate TS types — 2026-07-03
+- [x] Table-driven tolerance-rule tests (every parser-contract rule in the plan gets a fixture); round-trip test (14.1 export → import → same activities modulo IDs); dry-run leaves DB byte-identical (unit-verified via table row counts; true byte-identical check lands with 15.3's Docker e2e) — 2026-07-03
 
 **15.2 Web — import wizard:**
 - [ ] Stepped dialog off the sidebar "Bulk import" split-button stub (`onBulkImport`): upload (timeline picker + template links) → map columns (only when auto-mapping incomplete; date-order question only when ambiguous) → preview → commit + result
@@ -76373,7 +78691,7 @@ Visual exports render **client-side from the live DOM** — no gofpdf, no Chromi
 ---
 
 ### Phase 15 — Import — Tabular
-**Status:** 🟢 Planned (2026-07-03) | **Effort:** M (3–4 days across three pausable sub-phases) | **Plan:** [docs/plans/phase-15-import.md](plans/phase-15-import.md)
+**Status:** 🔄 In Progress (15.1 server built + all automated checks pass 2026-07-03; 15.2 wizard next, 15.3 hardening after) | **Effort:** M (3–4 days across three pausable sub-phases) | **Plan:** [docs/plans/phase-15-import.md](plans/phase-15-import.md)
 
 Get data *into* draba from a spreadsheet — CSV / Excel import with a mandatory preview + validation step before any rows are written. The natural companion to [Phase 14 export](#phase-14--export--data-textual--visual) (round-trip: export → edit in a spreadsheet → re-import), and the seam through which teams migrate off whatever they're planning in today. Sequenced after export because the preview/validation/conflict surface is meaningfully more complex than a one-way dump.
 
@@ -76579,6 +78897,34 @@ Adds i18n infrastructure and ships the first non-English locale. The "Default la
 ## File: docs/log.md
 ````markdown
 # Development Log
+
+---
+
+## 2026-07-03 — Phase 15.1: Import server — parse, validate, preview, commit, template
+
+**Goal:** The server half of tabular import per [the plan](plans/phase-15-import.md): a pure `internal/importer` package implementing the full tolerance-rule contract, the stateless two-pass endpoint, and the template downloads — all pinned by table-driven tests.
+
+**Backend (`packages/api`):**
+- `internal/importer/` (new package, pure — never touches the DB; callers supply name→ID `Lookups` and write the `Resolved` payloads):
+  - `importer.go` — core types (`Options`, `Lookups`, `Issue`, `PreviewActivity` (names, for the wizard), `Resolved` (IDs, for the commit — `json:"-"`), `RowResult`, `Result`), `FileError` (structural → 400; row problems are never file-scoped), 2 MB / 2,000-row caps, `Run()` orchestration, `AcceptedOrder()` (topological: in-file parents before children, satisfying the parent FK inside the commit tx).
+  - `parse.go` — CSV (delimiter sniffed from the header line: comma/semicolon/tab; BOM tolerated; non-UTF-8 falls back to a hand-rolled cp1252 decode with a file-level warning; blank rows skipped silently; short rows padded; extra cells warn) and xlsx (first non-empty sheet, others ignored with a warning naming them; cells read twice — raw + formatted — so typed numeric cells are recognized and native Excel date serials never go through string parsing).
+  - `mapping.go` — auto-mapping (normalized template headers, then a synonym table: Task/Name→Title, Begin/From/Date→Start, Finish/Due→End, etc.); explicit `options.mapping` is authoritative when present; unmapped columns ignored with warnings; duplicate field targets / no Title column → `FileError`. Response `mapping` echoes every header → field ("" = ignored).
+  - `dates.go` — ISO, numeric (`/`,`-`,`.` separators; 2-digit years → 20xx; **column-wide ambiguity resolution**: any first-number>12 in the file proves day-first and suppresses per-cell warnings, otherwise `options.dateOrder` decides and each ambiguous cell discloses its interpretation), written months (`March 5th, 2026`, `5 Mar 2026`, case-insensitive), Excel serials (no warning — unambiguous), time-of-day stripped with a warning, `makeDate` rejects normalized-away values (no Feb 30).
+  - `resolve.go` — per-row field resolution: title+start required (errors), missing End→Start (warning), end-before-start error; status exact-normalized match (unknown → warn+skip); assignees split on `,`/`;`, matched by display name or email, ambiguous names skipped with "use email" hint, deduped by member ID; tags warn+skip or queue for creation under `createMissingTags`; parent matched in-file first (any row, forward refs fine) then existing activities, ambiguity/errored-parent/cycles all warn+skip-link; progress 0–100 with `%`/rounding tolerance (warnings, never errors); "possible duplicate" warning on normalized title+start+end match against existing activities. `unknownNames` accumulated for the wizard's checkbox label.
+  - `lookups.go` — `BuildLookups()` inverts export's ID→name maps (archived members excluded); `template.go` — `TemplateCSV()`/`TemplateXLSX()` from `export.Columns` (minimal + full example rows; xlsx Start/End are native date cells).
+- `internal/db/activity_repo.go` — `CreateImportBatch(newTags, items)`: one transaction (tags → activities in caller's order → assignments → tag links), all-or-nothing within the accepted set.
+- `internal/api/import_handler.go` — `POST /teams/{id}/timelines/{timelineId}/import` (multipart `file` + mandatory `options` JSON part — dryRun must be explicit so an empty form can never write; auth-before-lookup ordering copied from the export GET routes; dry-run never opens a write tx). Commit pre-assigns IDs so in-file parent refs resolve before anything is written, creates missing tags once per distinct name, publishes `ActivityCreated` per row post-commit (WebSocket consumers update live), fills `createdId`/`summary.created`. `GET /import/template.csv|.xlsx` (authenticated, like all non-share routes).
+- `internal/api/server.go` — three new routes in the team-scoped family (no mux conflicts).
+
+**API contract:** `openapi.yaml` gained `ImportOptions`/`ImportIssue`/`ImportRowResult`/`ImportResult` schemas + the three paths; `packages/shared/src/index.ts` regenerated. (One additive extension over the plan's response sketch: a `fileIssues` array for file-level warnings — encoding fallback, ignored sheets/columns — which belong to no single row.)
+
+**Tests (table-driven, the bulk of the phase):**
+- `importer` package (~60 assertions across `dates_test.go` / `importer_test.go` / `resolve_test.go`): every tolerance rule above has a fixture — date format matrix, column-wide order resolution incl. conflicting evidence, structure (delimiters/BOM/cp1252/blank/short/extra), file-scoped errors, caps, xlsx native dates + skipped sheets, unknown/ambiguous names, tag opt-in + dedupe, parents (forward ref, existing, ambiguous, errored, cycle), duplicates, template round-trip through the parser.
+- `import_handler_test.go`: dry-run writes nothing (activity/tag row counts unchanged, even with `createMissingTags`), commit writes ok+warning rows and skips error rows, in-file parent forward reference resolves to the created parent ID, missing-tag creation, second-run duplicate warnings, structural 400s (missing options / bad type / no Title / bad dateOrder), non-member 403, template downloads, and the headline **round-trip test: Phase 14 CSV and xlsx exports re-imported into a fresh timeline reproduce the same activities** (dates, description, progress, location, assignee, tag, status-by-name, parent link).
+
+**Checks:** `golangci-lint run` 0 issues; `go test ./...` all pass; `pnpm --filter web lint` clean; `pnpm --filter web build` clean.
+
+Next: 15.2 (wizard UI off the sidebar "Bulk import" stub), then 15.3 (messy-file corpus e2e + Docker verification).
 
 ---
 
