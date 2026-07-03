@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/xuri/excelize/v2"
 
+	"github.com/I0-1O/draba/packages/api/internal/importer"
 	"github.com/I0-1O/draba/packages/api/internal/tier"
 )
 
@@ -277,6 +278,75 @@ func TestImport_StructuralErrors(t *testing.T) {
 		code, _ := doImport(t, srv, importReq(t, teamID, timelineID, "a.csv",
 			[]byte("Title,Start\nA,2026-01-01\n"), map[string]any{"dryRun": true, "dateOrder": "ymd"}, token))
 		assert.Equal(t, http.StatusBadRequest, code)
+	})
+	t.Run("TimelineNotFound", func(t *testing.T) {
+		code, body := doImport(t, srv, importReq(t, teamID, "no-such-timeline", "a.csv",
+			[]byte("Title,Start\nA,2026-01-01\n"), map[string]any{"dryRun": true}, token))
+		assert.Equal(t, http.StatusNotFound, code)
+		assert.Equal(t, "NOT_FOUND", body["error"].(map[string]any)["code"])
+	})
+	t.Run("TimelineOnOtherTeam", func(t *testing.T) {
+		// A real timeline addressed under the wrong team must 404, not leak.
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, authReq(http.MethodPost, "/teams", map[string]string{"name": "Other Team"}, token))
+		require.Equal(t, http.StatusCreated, w.Code)
+		var other map[string]any
+		require.NoError(t, json.NewDecoder(w.Body).Decode(&other))
+
+		code, body := doImport(t, srv, importReq(t, other["id"].(string), timelineID, "a.csv",
+			[]byte("Title,Start\nA,2026-01-01\n"), map[string]any{"dryRun": true}, token))
+		assert.Equal(t, http.StatusNotFound, code)
+		assert.Equal(t, "NOT_FOUND", body["error"].(map[string]any)["code"])
+	})
+	t.Run("MissingFilePart", func(t *testing.T) {
+		var buf bytes.Buffer
+		mw := multipart.NewWriter(&buf)
+		require.NoError(t, mw.WriteField("options", `{"dryRun":true}`))
+		require.NoError(t, mw.Close())
+		req := httptest.NewRequest(http.MethodPost,
+			fmt.Sprintf("/teams/%s/timelines/%s/import", teamID, timelineID), &buf)
+		req.Header.Set("Content-Type", mw.FormDataContentType())
+		req.Header.Set("Authorization", "Bearer "+token)
+
+		code, body := doImport(t, srv, req)
+		assert.Equal(t, http.StatusBadRequest, code)
+		assert.Contains(t, body["error"].(map[string]any)["message"], "file")
+	})
+	t.Run("InvalidOptionsJSON", func(t *testing.T) {
+		var buf bytes.Buffer
+		mw := multipart.NewWriter(&buf)
+		fw, err := mw.CreateFormFile("file", "a.csv")
+		require.NoError(t, err)
+		_, err = fw.Write([]byte("Title,Start\nA,2026-01-01\n"))
+		require.NoError(t, err)
+		require.NoError(t, mw.WriteField("options", "{not json"))
+		require.NoError(t, mw.Close())
+		req := httptest.NewRequest(http.MethodPost,
+			fmt.Sprintf("/teams/%s/timelines/%s/import", teamID, timelineID), &buf)
+		req.Header.Set("Content-Type", mw.FormDataContentType())
+		req.Header.Set("Authorization", "Bearer "+token)
+
+		code, body := doImport(t, srv, req)
+		assert.Equal(t, http.StatusBadRequest, code)
+		assert.Contains(t, body["error"].(map[string]any)["message"], "options")
+	})
+	t.Run("FileJustOverCap", func(t *testing.T) {
+		// One byte over MaxFileBytes but under the multipart body bound:
+		// exercises the explicit size check rather than MaxBytesReader.
+		big := bytes.Repeat([]byte("a"), importer.MaxFileBytes+1)
+		code, body := doImport(t, srv, importReq(t, teamID, timelineID, "big.csv",
+			big, map[string]any{"dryRun": true}, token))
+		assert.Equal(t, http.StatusBadRequest, code)
+		assert.Equal(t, "IMPORT_FILE_INVALID", body["error"].(map[string]any)["code"])
+		assert.Contains(t, body["error"].(map[string]any)["message"], "2 MB")
+	})
+	t.Run("BodyFarOverCap", func(t *testing.T) {
+		// Far past the cap the MaxBytesReader trips inside ParseMultipartForm.
+		big := bytes.Repeat([]byte("a"), importer.MaxFileBytes+(256<<10))
+		code, body := doImport(t, srv, importReq(t, teamID, timelineID, "big.csv",
+			big, map[string]any{"dryRun": true}, token))
+		assert.Equal(t, http.StatusBadRequest, code)
+		assert.Contains(t, body["error"].(map[string]any)["message"], "2 MB")
 	})
 	t.Run("NonMemberDenied", func(t *testing.T) {
 		otherToken := seedNonMember(t, srv, token, "mallory@import.com", "Mallory")

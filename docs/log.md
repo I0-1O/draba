@@ -5,7 +5,7 @@
 ## 2026-07-03 — /test-phase 15.1
 - Subagents run: static-check, unit-test (Go + Vitest), schema-check, api-smoke, security-review, type-sync, ws-smoke, web-e2e
 - Result: all pass (8/8; docs/TESTING.md has no Phase 15 section yet, so target-phase assertions were sourced from ROADMAP.md's 15.1 exit criteria + the 2026-07-03 log entry as a stopgap, same approach used for 14.1/14.2 — Phase 15 should be backfilled into TESTING.md, tracked as 15.3 hardening scope)
-- Smoke target: http://epcot.lan:8081 (reset via SSH before the run)
+- Smoke target: the test Docker host (reset via SSH before the run)
 - Notes: web-e2e had two browser-automation tooling quirks (Bulk-import stub click, Export dialog modal) that didn't confirm visually but produced zero console errors and were cross-checked via source/API instead (Export CSV headers == `/import/template.csv` headers, confirming the 1:1 template/export contract). ws-smoke skipped the full 30s-interval/3-cycle heartbeat check (known slow manual check, covered by fast unit tests) but confirmed live activity.created delivery <500ms and cross-team isolation during an actual import. A leftover "Import Smoke Outsiders" test team from api-smoke is visible in the reset sample data — harmless, will be cleared by the next reset.
 
 ---

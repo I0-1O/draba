@@ -166,7 +166,7 @@ State via a `useImportPreview` / `useCommitImport` hook pair (TanStack mutation 
 Wizard dialog (4 steps, conditional mapping step), hooks, wiring the sidebar stub. Component tests: step flow, mapping override re-runs preview, error rows excluded from the commit count, tag-checkbox re-run. Incremental live testing against the real API per working agreement (upload a deliberately messy CSV early, not at the end).
 
 ### 15.3 — Hardening + e2e (S, 0.5 day)
-Messy-file corpus e2e (European CSV, Excel dates, mixed formats, dupes, unknown names, 1,000-row file), `/test-phase`-style verification against Docker, TESTING.md assertions for Phase 15 (start paying down the missing-sections debt with this phase rather than adding to it), log + session-state updates.
+Messy-file corpus e2e (European CSV, Excel dates, mixed formats, dupes, unknown names, 1,000-row file), `/test-phase`-style verification against Docker, TESTING.md assertions for Phase 15 (start paying down the missing-sections debt with this phase rather than adding to it), dedicated `mapping.go` test fixtures (duplicate targets, unknown columns — indirect-only coverage flagged by /review-phase 15.1), log + session-state updates.
 
 ---
 

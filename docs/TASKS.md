@@ -1291,6 +1291,7 @@ _Planned 2026-07-03 — see [docs/plans/phase-15-import.md](plans/phase-15-impor
 - [ ] Messy-file corpus e2e: European semicolon CSV, native Excel dates, mixed date formats, duplicate second run, unknown names, 1,000-row file
 - [ ] Docker verification (`/test-phase 15`)
 - [ ] TESTING.md Phase 15 assertions (start paying down the missing Phase 9–14 sections debt rather than adding to it)
+- [ ] Dedicated `mapping.go` tests (added 2026-07-03, /review-phase 15.1): auto-mapping is only covered indirectly via `importer_test.go`; add explicit fixtures for duplicate mapping targets and unknown-column handling
 - [ ] log.md + session-state.md updates
 
 ---

@@ -13,6 +13,10 @@ import (
 	"github.com/xuri/excelize/v2"
 )
 
+// maxXLSXDecompressedBytes bounds what an uploaded workbook may decompress
+// to — MaxFileBytes only caps the compressed zip.
+const maxXLSXDecompressedBytes = 32 << 20 // 32 MB
+
 // cell is one parsed cell. display is the user-visible value; serial is set
 // for typed numeric xlsx cells carrying a number format (the raw value differs
 // from the formatted one), which is how native Excel dates arrive.
@@ -160,7 +164,13 @@ func buildRow(line int, record []string, width int) (parsedRow, bool) {
 // can be recognized; that is how native Excel date serials are detected
 // without any string guessing.
 func parseXLSX(data []byte) (*parsedFile, error) {
-	f, err := excelize.OpenReader(bytes.NewReader(data))
+	// The 2 MB cap bounds the compressed zip only; these bound what it may
+	// decompress to, so a crafted workbook (zip bomb) cannot exhaust memory
+	// in GetRows. 32 MB is far above any legitimate 2,000-row sheet.
+	f, err := excelize.OpenReader(bytes.NewReader(data), excelize.Options{
+		UnzipSizeLimit:    maxXLSXDecompressedBytes,
+		UnzipXMLSizeLimit: maxXLSXDecompressedBytes,
+	})
 	if err != nil {
 		return nil, &FileError{Message: "could not open xlsx file"}
 	}
