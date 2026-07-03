@@ -300,6 +300,14 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/export.xlsx", chain(s.handleGetTimelineExportXLSX, s.authMiddleware))
 	mux.HandleFunc("GET /teams/{id}/timelines/{timelineId}/export.ics", chain(s.handleGetTimelineExportICS, s.authMiddleware))
 
+	// Import routes (Phase 15.1). The POST uses the same team-scoped route
+	// family as the activity/status routes. The templates are static content
+	// (example data only) but stay behind auth like every other non-share
+	// endpoint.
+	mux.HandleFunc("POST /teams/{id}/timelines/{timelineId}/import", chain(s.handlePostTimelineImport, s.authMiddleware))
+	mux.HandleFunc("GET /import/template.csv", chain(s.handleGetImportTemplateCSV, s.authMiddleware))
+	mux.HandleFunc("GET /import/template.xlsx", chain(s.handleGetImportTemplateXLSX, s.authMiddleware))
+
 	// GET /ws is intentionally outside authMiddleware — ServeWS validates the
 	// JWT itself before upgrading, because WebSocket clients can't set headers.
 	mux.HandleFunc("GET /ws", s.hub.ServeWS)

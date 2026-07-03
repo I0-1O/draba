@@ -210,6 +210,82 @@ func (r *ActivityRepo) GetTags(activityID string) ([]string, error) {
 	return ids, nil
 }
 
+// ImportItem is one activity to create in an import batch, with its
+// association rows. Activity IDs (including in-batch ParentActivityID
+// references) are assigned by the caller before the batch runs.
+type ImportItem struct {
+	Activity    *models.Activity
+	AssigneeIDs []string
+	TagIDs      []string
+}
+
+// CreateImportBatch writes an import commit in a single transaction: new tags
+// first, then activities in the given order (callers order parents before
+// children so the parent_activity_id FK holds), then assignments and tag
+// links. Any failure rolls back the whole batch — an import is all-or-nothing
+// within its accepted rows.
+func (r *ActivityRepo) CreateImportBatch(newTags []*models.Tag, items []ImportItem) error {
+	tx, err := r.db.Beginx()
+	if err != nil {
+		return fmt.Errorf("beginning import transaction: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	for _, tag := range newTags {
+		if _, err = tx.NamedExec(`
+			INSERT INTO tags (id, team_id, name, color, created_by, created_at)
+			VALUES (:id, :team_id, :name, :color, :created_by, :created_at)
+		`, tag); err != nil {
+			return fmt.Errorf("creating imported tag %q: %w", tag.Name, err)
+		}
+	}
+
+	for _, item := range items {
+		if _, err = tx.NamedExec(`
+			INSERT INTO activities (
+				id, timeline_id, title, description, notes, icon, color,
+				start_at, end_at, all_day, status_id, parent_activity_id,
+				percent_complete, location, url, rrule,
+				caldav_uid, google_event_id,
+				created_by, created_at, updated_at
+			) VALUES (
+				:id, :timeline_id, :title, :description, :notes, :icon, :color,
+				:start_at, :end_at, :all_day, :status_id, :parent_activity_id,
+				:percent_complete, :location, :url, :rrule,
+				:caldav_uid, :google_event_id,
+				:created_by, :created_at, :updated_at
+			)
+		`, item.Activity); err != nil {
+			return fmt.Errorf("creating imported activity %q: %w", item.Activity.Title, err)
+		}
+		for _, memberID := range item.AssigneeIDs {
+			if _, err = tx.Exec(
+				`INSERT INTO activity_assignments (activity_id, team_member_id) VALUES (?, ?)`,
+				item.Activity.ID, memberID,
+			); err != nil {
+				return fmt.Errorf("assigning imported activity %q: %w", item.Activity.Title, err)
+			}
+		}
+		for _, tagID := range item.TagIDs {
+			if _, err = tx.Exec(
+				`INSERT INTO activity_tags (activity_id, tag_id) VALUES (?, ?)`,
+				item.Activity.ID, tagID,
+			); err != nil {
+				return fmt.Errorf("tagging imported activity %q: %w", item.Activity.Title, err)
+			}
+		}
+	}
+
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("committing import batch: %w", err)
+	}
+	return nil
+}
+
 // ListByTimeline returns activities for a specific timeline. When
 // includeArchived is false archived rows are excluded. The bounds use overlap
 // semantics: from filters on end_at >= from (so a multi-week activity that

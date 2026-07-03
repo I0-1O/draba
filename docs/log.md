@@ -2,6 +2,34 @@
 
 ---
 
+## 2026-07-03 — Phase 15.1: Import server — parse, validate, preview, commit, template
+
+**Goal:** The server half of tabular import per [the plan](plans/phase-15-import.md): a pure `internal/importer` package implementing the full tolerance-rule contract, the stateless two-pass endpoint, and the template downloads — all pinned by table-driven tests.
+
+**Backend (`packages/api`):**
+- `internal/importer/` (new package, pure — never touches the DB; callers supply name→ID `Lookups` and write the `Resolved` payloads):
+  - `importer.go` — core types (`Options`, `Lookups`, `Issue`, `PreviewActivity` (names, for the wizard), `Resolved` (IDs, for the commit — `json:"-"`), `RowResult`, `Result`), `FileError` (structural → 400; row problems are never file-scoped), 2 MB / 2,000-row caps, `Run()` orchestration, `AcceptedOrder()` (topological: in-file parents before children, satisfying the parent FK inside the commit tx).
+  - `parse.go` — CSV (delimiter sniffed from the header line: comma/semicolon/tab; BOM tolerated; non-UTF-8 falls back to a hand-rolled cp1252 decode with a file-level warning; blank rows skipped silently; short rows padded; extra cells warn) and xlsx (first non-empty sheet, others ignored with a warning naming them; cells read twice — raw + formatted — so typed numeric cells are recognized and native Excel date serials never go through string parsing).
+  - `mapping.go` — auto-mapping (normalized template headers, then a synonym table: Task/Name→Title, Begin/From/Date→Start, Finish/Due→End, etc.); explicit `options.mapping` is authoritative when present; unmapped columns ignored with warnings; duplicate field targets / no Title column → `FileError`. Response `mapping` echoes every header → field ("" = ignored).
+  - `dates.go` — ISO, numeric (`/`,`-`,`.` separators; 2-digit years → 20xx; **column-wide ambiguity resolution**: any first-number>12 in the file proves day-first and suppresses per-cell warnings, otherwise `options.dateOrder` decides and each ambiguous cell discloses its interpretation), written months (`March 5th, 2026`, `5 Mar 2026`, case-insensitive), Excel serials (no warning — unambiguous), time-of-day stripped with a warning, `makeDate` rejects normalized-away values (no Feb 30).
+  - `resolve.go` — per-row field resolution: title+start required (errors), missing End→Start (warning), end-before-start error; status exact-normalized match (unknown → warn+skip); assignees split on `,`/`;`, matched by display name or email, ambiguous names skipped with "use email" hint, deduped by member ID; tags warn+skip or queue for creation under `createMissingTags`; parent matched in-file first (any row, forward refs fine) then existing activities, ambiguity/errored-parent/cycles all warn+skip-link; progress 0–100 with `%`/rounding tolerance (warnings, never errors); "possible duplicate" warning on normalized title+start+end match against existing activities. `unknownNames` accumulated for the wizard's checkbox label.
+  - `lookups.go` — `BuildLookups()` inverts export's ID→name maps (archived members excluded); `template.go` — `TemplateCSV()`/`TemplateXLSX()` from `export.Columns` (minimal + full example rows; xlsx Start/End are native date cells).
+- `internal/db/activity_repo.go` — `CreateImportBatch(newTags, items)`: one transaction (tags → activities in caller's order → assignments → tag links), all-or-nothing within the accepted set.
+- `internal/api/import_handler.go` — `POST /teams/{id}/timelines/{timelineId}/import` (multipart `file` + mandatory `options` JSON part — dryRun must be explicit so an empty form can never write; auth-before-lookup ordering copied from the export GET routes; dry-run never opens a write tx). Commit pre-assigns IDs so in-file parent refs resolve before anything is written, creates missing tags once per distinct name, publishes `ActivityCreated` per row post-commit (WebSocket consumers update live), fills `createdId`/`summary.created`. `GET /import/template.csv|.xlsx` (authenticated, like all non-share routes).
+- `internal/api/server.go` — three new routes in the team-scoped family (no mux conflicts).
+
+**API contract:** `openapi.yaml` gained `ImportOptions`/`ImportIssue`/`ImportRowResult`/`ImportResult` schemas + the three paths; `packages/shared/src/index.ts` regenerated. (One additive extension over the plan's response sketch: a `fileIssues` array for file-level warnings — encoding fallback, ignored sheets/columns — which belong to no single row.)
+
+**Tests (table-driven, the bulk of the phase):**
+- `importer` package (~60 assertions across `dates_test.go` / `importer_test.go` / `resolve_test.go`): every tolerance rule above has a fixture — date format matrix, column-wide order resolution incl. conflicting evidence, structure (delimiters/BOM/cp1252/blank/short/extra), file-scoped errors, caps, xlsx native dates + skipped sheets, unknown/ambiguous names, tag opt-in + dedupe, parents (forward ref, existing, ambiguous, errored, cycle), duplicates, template round-trip through the parser.
+- `import_handler_test.go`: dry-run writes nothing (activity/tag row counts unchanged, even with `createMissingTags`), commit writes ok+warning rows and skips error rows, in-file parent forward reference resolves to the created parent ID, missing-tag creation, second-run duplicate warnings, structural 400s (missing options / bad type / no Title / bad dateOrder), non-member 403, template downloads, and the headline **round-trip test: Phase 14 CSV and xlsx exports re-imported into a fresh timeline reproduce the same activities** (dates, description, progress, location, assignee, tag, status-by-name, parent link).
+
+**Checks:** `golangci-lint run` 0 issues; `go test ./...` all pass; `pnpm --filter web lint` clean; `pnpm --filter web build` clean.
+
+Next: 15.2 (wizard UI off the sidebar "Bulk import" stub), then 15.3 (messy-file corpus e2e + Docker verification).
+
+---
+
 ## 2026-07-03 — Phase 15 planning: import design settled
 
 Wrote [docs/plans/phase-15-import.md](plans/phase-15-import.md) resolving the strict-vs-loose import question with one principle: **liberal parse, strict write, every liberty visible.** The parser tolerates messy-but-unambiguous input (header synonyms + an explicit column-mapping step, multi-format date parsing with *column-wide* ambiguity resolution, case-insensitive name/email matching, delimiter/encoding sniffing); nothing coerced is written unseen — every interpretation is a per-cell ok/warning/error in the mandatory dry-run preview, and errors are row-scoped so 3 bad rows never block 197 good ones. The preview is the disclosure mechanism that makes tolerance safe: the machine guesses, the human ratifies.

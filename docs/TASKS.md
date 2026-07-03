@@ -1269,16 +1269,16 @@ _Re-planned 2026-06-11 — see [docs/plans/phase-14-export.md](plans/phase-14-ex
 _Planned 2026-07-03 — see [docs/plans/phase-15-import.md](plans/phase-15-import.md). Design thesis: liberal parse, strict write, every interpretation visible in the mandatory preview. Decisions locked: warn+skip for unknown status/assignee (never auto-create), opt-in checkbox for creating missing tags, additive-only (no upsert until Phase 18 external IDs), stateless two-pass (same endpoint, `dryRun` flag)._
 
 **15.1 Server — parse, validate, preview, commit, template:**
-- [ ] `internal/importer` package: CSV (delimiter sniffing, BOM/cp1252 tolerance) + xlsx (excelize, typed date cells) parsing into a common row model
-- [ ] Header auto-mapping: template headers + synonym table, case/whitespace-insensitive; explicit `mapping` override in options; unmapped columns ignored with warnings
-- [ ] Date parsing: ISO, numeric (column-wide ambiguity resolution + `dateOrder` option), written months, Excel serials; missing End → = Start (warning); end-before-start → error
-- [ ] Name resolution against target timeline/team: status (exact normalized), assignees (name or email, `,`/`;` split), tags (+ `createMissingTags`), parent (in-file rows first, then existing activities; ambiguity/cycle → warn + skip link)
-- [ ] Per-cell ok/warning/error results rolled up per row; errors row-scoped, never file-scoped (except structural 400s: type, 2 MB / 2,000-row cap, no Title column)
-- [ ] `POST /teams/:id/timelines/:timelineId/import` — multipart, `dryRun` preview (provably read-only) / commit (one transaction, parents before children, writes ok+warning rows, skips error rows)
-- [ ] Duplicate detection: normalized title+start+end match against existing activities → "possible duplicate" warning (additive semantics kept)
-- [ ] `GET /import/template.csv|.xlsx` — export header row + minimal/full example rows, served from `internal/export` column definitions
-- [ ] OpenAPI: `ImportOptions`, `ImportResult`, `ImportRowResult`, `ImportIssue`; regenerate TS types
-- [ ] Table-driven tolerance-rule tests (every parser-contract rule in the plan gets a fixture); round-trip test (14.1 export → import → same activities modulo IDs); dry-run leaves DB byte-identical
+- [x] `internal/importer` package: CSV (delimiter sniffing, BOM/cp1252 tolerance) + xlsx (excelize, typed date cells) parsing into a common row model — 2026-07-03
+- [x] Header auto-mapping: template headers + synonym table, case/whitespace-insensitive; explicit `mapping` override in options; unmapped columns ignored with warnings — 2026-07-03
+- [x] Date parsing: ISO, numeric (column-wide ambiguity resolution + `dateOrder` option), written months, Excel serials; missing End → = Start (warning); end-before-start → error — 2026-07-03
+- [x] Name resolution against target timeline/team: status (exact normalized), assignees (name or email, `,`/`;` split), tags (+ `createMissingTags`), parent (in-file rows first, then existing activities; ambiguity/cycle → warn + skip link) — 2026-07-03
+- [x] Per-cell ok/warning/error results rolled up per row; errors row-scoped, never file-scoped (except structural 400s: type, 2 MB / 2,000-row cap, no Title column) — 2026-07-03
+- [x] `POST /teams/:id/timelines/:timelineId/import` — multipart, `dryRun` preview (provably read-only) / commit (one transaction, parents before children, writes ok+warning rows, skips error rows) — 2026-07-03
+- [x] Duplicate detection: normalized title+start+end match against existing activities → "possible duplicate" warning (additive semantics kept) — 2026-07-03
+- [x] `GET /import/template.csv|.xlsx` — export header row + minimal/full example rows, served from `internal/export` column definitions — 2026-07-03
+- [x] OpenAPI: `ImportOptions`, `ImportResult`, `ImportRowResult`, `ImportIssue`; regenerate TS types — 2026-07-03
+- [x] Table-driven tolerance-rule tests (every parser-contract rule in the plan gets a fixture); round-trip test (14.1 export → import → same activities modulo IDs); dry-run leaves DB byte-identical (unit-verified via table row counts; true byte-identical check lands with 15.3's Docker e2e) — 2026-07-03
 
 **15.2 Web — import wizard:**
 - [ ] Stepped dialog off the sidebar "Bulk import" split-button stub (`onBulkImport`): upload (timeline picker + template links) → map columns (only when auto-mapping incomplete; date-order question only when ambiguous) → preview → commit + result

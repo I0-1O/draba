@@ -1114,6 +1114,66 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/teams/{id}/timelines/{timelineId}/import": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Import activities into a timeline from a CSV or xlsx upload
+         * @description Stateless two-pass import. With `options.dryRun: true` the upload is parsed and validated but nothing is written (the preview); with `dryRun: false` the identical parse runs again and the accepted (ok + warning) rows are written in one transaction — error rows are always excluded. Errors are row-scoped; only structural problems (unsupported type, over the 2 MB / 2,000-row caps, no mappable Title column) produce a 400.
+         */
+        post: operations["importTimeline"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/import/template.csv": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Download the CSV import template
+         * @description The export header row plus two example rows (one minimal, one full). Served from the same column definitions as export, so template and export cannot drift.
+         */
+        get: operations["importTemplateCSV"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/import/template.xlsx": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Download the xlsx import template
+         * @description Same content as the CSV template, with Start/End as native Excel date cells.
+         */
+        get: operations["importTemplateXLSX"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/timelines/{id}/shares": {
         parameters: {
             query?: never;
@@ -1760,6 +1820,76 @@ export interface components {
                     [key: string]: unknown;
                 } | null;
             } | null;
+        };
+        ImportOptions: {
+            /** @description true = preview pass (parse + validate, write nothing); false = commit pass (re-parse the identical upload and write the accepted rows in one transaction). */
+            dryRun: boolean;
+            /** @description File column header → field name (title, start, end, description, status, assignees, tags, parent, progress, location, url). Omitted = server auto-mapping; when present it is authoritative and columns absent from it are ignored with a warning. */
+            mapping?: {
+                [key: string]: string;
+            } | null;
+            /**
+             * @description Disambiguates numeric dates only when the file itself stays ambiguous column-wide. Defaults to mdy.
+             * @enum {string}
+             */
+            dateOrder?: "mdy" | "dmy";
+            /** @description Opt in to creating unknown tag names instead of warn-and-skip. Default false. */
+            createMissingTags?: boolean;
+        };
+        ImportIssue: {
+            /** @enum {string} */
+            level: "warning" | "error";
+            /** @description The field the issue is scoped to (e.g. start, assignees); absent for row- or file-scoped issues. */
+            field?: string;
+            message: string;
+        };
+        ImportRowResult: {
+            /** @description 1-based source line / sheet row, for spreadsheet cross-reference. */
+            line: number;
+            /** @enum {string} */
+            status: "ok" | "warning" | "error";
+            /** @description The resolved preview of the row — display names, not IDs, since the preview's job is human ratification of the parser's interpretations. */
+            activity?: {
+                title?: string;
+                /** @description ISO calendar date. */
+                start?: string;
+                /** @description ISO calendar date. */
+                end?: string;
+                description?: string;
+                status?: string;
+                assignees?: string[];
+                tags?: string[];
+                parent?: string;
+                progress?: number | null;
+                location?: string;
+                url?: string;
+            } | null;
+            issues: components["schemas"]["ImportIssue"][];
+            /** @description Filled on the commit pass for written rows. */
+            createdId?: string;
+        };
+        ImportResult: {
+            /** @description The mapping actually used — every file column header mapped to a field name, or "" when the column was ignored. */
+            mapping: {
+                [key: string]: string;
+            };
+            summary: {
+                total: number;
+                ok: number;
+                warnings: number;
+                errors: number;
+                /** @description Zero on the dry-run pass. */
+                created: number;
+            };
+            /** @description Distinct unresolvable names, first-seen spelling, sorted. The tags list drives the "Create N missing tags" checkbox label. */
+            unknownNames: {
+                statuses: string[];
+                assignees: string[];
+                tags: string[];
+            };
+            /** @description File-level warnings (encoding fallback, ignored sheets, ignored columns) that belong to no single row. */
+            fileIssues: components["schemas"]["ImportIssue"][];
+            rows: components["schemas"]["ImportRowResult"][];
         };
         PatchShareInput: {
             name?: string | null;
@@ -4520,6 +4650,91 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    importTimeline: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Team ID. */
+                id: components["parameters"]["teamId"];
+                /** @description Timeline ID (nested under team). */
+                timelineId: components["parameters"]["timelineIdNested"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "multipart/form-data": {
+                    /**
+                     * Format: binary
+                     * @description The CSV or xlsx upload (max 2 MB / 2,000 rows).
+                     */
+                    file: string;
+                    options: components["schemas"]["ImportOptions"];
+                };
+            };
+        };
+        responses: {
+            /** @description The validation result (both passes). The commit pass additionally fills `summary.created` and per-row `createdId`. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ImportResult"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    importTemplateCSV: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The template file. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/csv": string;
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    importTemplateXLSX: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The template file. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": string;
+                };
+            };
+            401: components["responses"]["Unauthorized"];
             500: components["responses"]["InternalError"];
         };
     };

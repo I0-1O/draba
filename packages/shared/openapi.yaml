@@ -965,6 +965,165 @@ components:
                 A FilterDefinition (`{ logic, conditions }`), matching the
                 shape used by saved filters and share view configs.
 
+    ImportOptions:
+      type: object
+      required: [dryRun]
+      properties:
+        dryRun:
+          type: boolean
+          description: >
+            true = preview pass (parse + validate, write nothing); false =
+            commit pass (re-parse the identical upload and write the accepted
+            rows in one transaction).
+        mapping:
+          type: object
+          nullable: true
+          additionalProperties:
+            type: string
+          description: >
+            File column header → field name (title, start, end, description,
+            status, assignees, tags, parent, progress, location, url).
+            Omitted = server auto-mapping; when present it is authoritative
+            and columns absent from it are ignored with a warning.
+        dateOrder:
+          type: string
+          enum: [mdy, dmy]
+          description: >
+            Disambiguates numeric dates only when the file itself stays
+            ambiguous column-wide. Defaults to mdy.
+        createMissingTags:
+          type: boolean
+          description: >
+            Opt in to creating unknown tag names instead of warn-and-skip.
+            Default false.
+
+    ImportIssue:
+      type: object
+      required: [level, message]
+      properties:
+        level:
+          type: string
+          enum: [warning, error]
+        field:
+          type: string
+          description: >
+            The field the issue is scoped to (e.g. start, assignees); absent
+            for row- or file-scoped issues.
+        message:
+          type: string
+
+    ImportRowResult:
+      type: object
+      required: [line, status, issues]
+      properties:
+        line:
+          type: integer
+          description: 1-based source line / sheet row, for spreadsheet cross-reference.
+        status:
+          type: string
+          enum: [ok, warning, error]
+        activity:
+          type: object
+          nullable: true
+          description: >
+            The resolved preview of the row — display names, not IDs, since
+            the preview's job is human ratification of the parser's
+            interpretations.
+          properties:
+            title:
+              type: string
+            start:
+              type: string
+              description: ISO calendar date.
+            end:
+              type: string
+              description: ISO calendar date.
+            description:
+              type: string
+            status:
+              type: string
+            assignees:
+              type: array
+              items:
+                type: string
+            tags:
+              type: array
+              items:
+                type: string
+            parent:
+              type: string
+            progress:
+              type: integer
+              nullable: true
+            location:
+              type: string
+            url:
+              type: string
+        issues:
+          type: array
+          items:
+            $ref: "#/components/schemas/ImportIssue"
+        createdId:
+          type: string
+          description: Filled on the commit pass for written rows.
+
+    ImportResult:
+      type: object
+      required: [mapping, summary, unknownNames, fileIssues, rows]
+      properties:
+        mapping:
+          type: object
+          additionalProperties:
+            type: string
+          description: >
+            The mapping actually used — every file column header mapped to a
+            field name, or "" when the column was ignored.
+        summary:
+          type: object
+          required: [total, ok, warnings, errors, created]
+          properties:
+            total:
+              type: integer
+            ok:
+              type: integer
+            warnings:
+              type: integer
+            errors:
+              type: integer
+            created:
+              type: integer
+              description: Zero on the dry-run pass.
+        unknownNames:
+          type: object
+          required: [statuses, assignees, tags]
+          description: >
+            Distinct unresolvable names, first-seen spelling, sorted. The
+            tags list drives the "Create N missing tags" checkbox label.
+          properties:
+            statuses:
+              type: array
+              items:
+                type: string
+            assignees:
+              type: array
+              items:
+                type: string
+            tags:
+              type: array
+              items:
+                type: string
+        fileIssues:
+          type: array
+          items:
+            $ref: "#/components/schemas/ImportIssue"
+          description: >
+            File-level warnings (encoding fallback, ignored sheets, ignored
+            columns) that belong to no single row.
+        rows:
+          type: array
+          items:
+            $ref: "#/components/schemas/ImportRowResult"
+
     PatchShareInput:
       type: object
       properties:
@@ -3850,6 +4009,101 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ── Import ──────────────────────────────────────────────────────────────────
+
+  /teams/{id}/timelines/{timelineId}/import:
+    post:
+      operationId: importTimeline
+      summary: Import activities into a timeline from a CSV or xlsx upload
+      description: >
+        Stateless two-pass import. With `options.dryRun: true` the upload is
+        parsed and validated but nothing is written (the preview); with
+        `dryRun: false` the identical parse runs again and the accepted (ok +
+        warning) rows are written in one transaction — error rows are always
+        excluded. Errors are row-scoped; only structural problems
+        (unsupported type, over the 2 MB / 2,000-row caps, no mappable Title
+        column) produce a 400.
+      tags: [import]
+      parameters:
+        - $ref: "#/components/parameters/teamId"
+        - $ref: "#/components/parameters/timelineIdNested"
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file, options]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: The CSV or xlsx upload (max 2 MB / 2,000 rows).
+                options:
+                  $ref: "#/components/schemas/ImportOptions"
+      responses:
+        "200":
+          description: >
+            The validation result (both passes). The commit pass additionally
+            fills `summary.created` and per-row `createdId`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImportResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /import/template.csv:
+    get:
+      operationId: importTemplateCSV
+      summary: Download the CSV import template
+      description: >
+        The export header row plus two example rows (one minimal, one full).
+        Served from the same column definitions as export, so template and
+        export cannot drift.
+      tags: [import]
+      responses:
+        "200":
+          description: The template file.
+          content:
+            text/csv:
+              schema:
+                type: string
+                format: binary
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /import/template.xlsx:
+    get:
+      operationId: importTemplateXLSX
+      summary: Download the xlsx import template
+      description: >
+        Same content as the CSV template, with Start/End as native Excel date
+        cells.
+      tags: [import]
+      responses:
+        "200":
+          description: The template file.
+          content:
+            application/vnd.openxmlformats-officedocument.spreadsheetml.sheet:
+              schema:
+                type: string
+                format: binary
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "500":
           $ref: "#/components/responses/InternalError"
 
